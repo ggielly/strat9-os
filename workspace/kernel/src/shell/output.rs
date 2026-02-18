@@ -2,7 +2,6 @@
 //!
 //! Provides utilities for formatted shell output.
 
-
 /// Print to both serial and VGA
 #[macro_export]
 macro_rules! shell_print {

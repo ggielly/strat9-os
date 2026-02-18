@@ -2,8 +2,10 @@
 //!
 //! Minimal parser for shell commands.
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 /// Parsed command structure
 #[derive(Debug)]
