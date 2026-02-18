@@ -32,6 +32,7 @@ pub mod memory;
 pub mod namespace;
 pub mod panic;
 pub mod process;
+pub mod shell;
 pub mod silo;
 pub mod sync;
 pub mod syscall;
@@ -403,6 +404,21 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         serial_println!("[init] IPC test tasks created.");
         vga_println!("[OK] IPC test tasks ready");
     }
+
+    // =============================================
+    // Phase 8e: Create Chevron shell task
+    // =============================================
+    serial_println!("[init] Creating Chevron shell task...");
+    vga_println!("[..] Creating interactive shell...");
+    let shell_task = process::Task::new_kernel_task(
+        shell::shell_main,
+        "chevron-shell",
+        process::TaskPriority::Normal,
+    )
+    .expect("Failed to create shell task");
+    process::add_task(shell_task);
+    serial_println!("[init] Chevron shell task created.");
+    vga_println!("[OK] Chevron shell ready");
 
     // =============================================
     // Phase 9: enable interrupts

@@ -297,3 +297,47 @@ pub fn init_buddy_allocator(memory_regions: &[MemoryRegion]) {
 pub fn get_allocator() -> &'static SpinLock<Option<BuddyAllocator>> {
     &BUDDY_ALLOCATOR
 }
+
+/// Statistics for a single memory zone
+#[derive(Debug, Clone, Copy)]
+pub struct ZoneStats {
+    pub zone_type: ZoneType,
+    pub base: u64,
+    pub page_count: usize,
+    pub allocated: usize,
+}
+
+/// Overall memory statistics
+#[derive(Debug, Clone)]
+pub struct MemoryStats {
+    pub total_pages: usize,
+    pub allocated_pages: usize,
+    pub zones: alloc::vec::Vec<ZoneStats>,
+}
+
+impl BuddyAllocator {
+    /// Get memory statistics
+    pub fn get_stats(&self) -> MemoryStats {
+        let mut total_pages = 0;
+        let mut allocated_pages = 0;
+        let mut zone_stats = alloc::vec::Vec::new();
+
+        for zone in &self.zones {
+            total_pages += zone.page_count;
+            allocated_pages += zone.allocated;
+
+            zone_stats.push(ZoneStats {
+                zone_type: zone.zone_type,
+                base: zone.base.as_u64(),
+                page_count: zone.page_count,
+                allocated: zone.allocated,
+            });
+        }
+
+        MemoryStats {
+            total_pages,
+            allocated_pages,
+            zones: zone_stats,
+        }
+    }
+}
