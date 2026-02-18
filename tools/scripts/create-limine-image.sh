@@ -7,7 +7,9 @@ set -e
 BUILD_DIR="build"
 LIMINE_DIR="$BUILD_DIR/limine"
 ISO_ROOT="$BUILD_DIR/iso_root"
-IMAGE_FILE="$BUILD_DIR/strat9-os.img"
+IMAGE_BASENAME="${STRAT9_IMAGE_BASENAME:-strat9-os}"
+IMAGE_FILE="$BUILD_DIR/${IMAGE_BASENAME}.img"
+ISO_FILE="$BUILD_DIR/${IMAGE_BASENAME}.iso"
 KERNEL_ELF="target/x86_64-unknown-none/release/kernel"
 FS_EXT4_ELF="target/x86_64-unknown-none/release/fs-ext4-strate"
 
@@ -80,11 +82,11 @@ if command -v xorriso >/dev/null 2>&1; then
         --efi-boot-image \
         --protective-msdos-label \
         "$ISO_ROOT" \
-        -o "$BUILD_DIR/strat9-os.iso"
+        -o "$ISO_FILE"
     
     # Check if the ISO was created successfully
-    if [ -f "$BUILD_DIR/strat9-os.iso" ]; then
-        iso_size=$(stat -c%s "$BUILD_DIR/strat9-os.iso")
+    if [ -f "$ISO_FILE" ]; then
+        iso_size=$(stat -c%s "$ISO_FILE")
         iso_size_mb=$((iso_size / 1024 / 1024))
         if [ $iso_size -gt 1048576 ]; then  # Check if ISO has reasonable size (>1MB)
             echo "  [OK] ISO created ($iso_size_mb MB)"
@@ -94,7 +96,7 @@ if command -v xorriso >/dev/null 2>&1; then
                 # Prefer native 'limine' binary when present
                 if [ -f "$LIMINE_DIR/limine" ]; then
                     limine_cmd="$LIMINE_DIR/limine"
-                    if "$limine_cmd" bios-install "$BUILD_DIR/strat9-os.iso"; then
+                    if "$limine_cmd" bios-install "$ISO_FILE"; then
                         echo "  [OK] Limine installed to ISO"
                     else
                         echo "  [INFO] Limine install failed (limine returned non-zero), but ISO is bootable"
@@ -106,7 +108,7 @@ if command -v xorriso >/dev/null 2>&1; then
                     file_out=$(file -b "$LIMINE_DIR/limine.exe" 2>/dev/null || true)
                     # Only attempt to run it if 'ELF' (native Linux binary) is reported
                     if echo "$file_out" | grep -qi 'ELF'; then
-                        if "$LIMINE_DIR/limine.exe" bios-install "$BUILD_DIR/strat9-os.iso"; then
+                        if "$LIMINE_DIR/limine.exe" bios-install "$ISO_FILE"; then
                             echo "  [OK] Limine installed to ISO (limine.exe executed)"
                         else
                             echo "  [INFO] Limine install failed (limine.exe), but ISO is bootable"
@@ -166,8 +168,8 @@ echo "============================================"
 echo "  Bootable image created!"
 echo "============================================"
 echo ""
-echo "  ISO file  : build/strat9-os.iso"
-echo "  Disk image: build/strat9-os.img"
+echo "  ISO file  : $ISO_FILE"
+echo "  Disk image: $IMAGE_FILE"
 echo ""
 echo "--------------------------------------------"
 echo "  Launch with: cargo make run"

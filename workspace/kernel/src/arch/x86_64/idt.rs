@@ -243,10 +243,13 @@ extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     // Read scancode and convert to character using the selected layout
+    // Store in keyboard buffer for userspace/shell to read
+    // Do NOT echo here - let the shell handle display to avoid double-echo
     if let Some(ch) = super::keyboard_layout::handle_scancode() {
-        // Write to VGA console
-        crate::vga_print!("{}", ch as char);
-        // Also echo to serial for debugging
+        // Store character in keyboard buffer (for future shell input)
+        crate::arch::x86_64::keyboard::add_to_buffer(ch);
+        
+        // Echo to serial only for debugging (not VGA to avoid double-echo)
         crate::serial_print!("{}", ch as char);
     }
 

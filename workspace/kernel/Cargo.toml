@@ -9,6 +9,10 @@ authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 name = "kernel"
 path = "src/main.rs"
 
+[features]
+default = []
+selftest = []
+
 [dependencies]
 spin = { workspace = true }
 bitflags = { workspace = true }

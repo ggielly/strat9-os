@@ -173,7 +173,7 @@ echo ""
 
 # Legacy bootloader (kept for reference, not used with Limine)
 [tasks.assemble-bootloader]
-description = "Assemble le bootloader (NASM stage1.asm qui inclut stage2.asm) - LEGACY"
+description = "Assemble the bootloader (NASM stage1.asm which includes stage2.asm) - LEGACY"
 command = "powershell"
 args = [
     "-ExecutionPolicy",
@@ -191,6 +191,19 @@ description = "Build the Strat9 kernel (release)"
 cwd = "workspace/kernel"
 command = "cargo"
 args = ["build", "--release", "--target", "${KERNEL_TARGET}"]
+
+[tasks.kernel-test]
+description = "Build the Strat9 kernel (release) with runtime self-tests"
+cwd = "workspace/kernel"
+command = "cargo"
+args = [
+    "build",
+    "--release",
+    "--target",
+    "${KERNEL_TARGET}",
+    "--features",
+    "selftest",
+]
 
 [tasks.kernel-debug]
 description = "Build the Strat9 kernel (debug)"
@@ -220,7 +233,7 @@ args = ["fmt", "--all"]
 # =============================================================================
 
 [tasks.strate-ext4]
-description = "Compiler la strate EXT4 (userspace filesystem)"
+description = "Build the EXT4 userspace filesystem component (LEGACY)"
 cwd = "workspace/components/strate-fs-ext4"
 command = "cargo"
 args = [
@@ -237,6 +250,16 @@ args = [
 [tasks.limine-image]
 description = "Create bootable ISO/IMG with Limine + kernel"
 dependencies = ["setup-limine", "kernel", "strate-ext4"]
+env = { STRAT9_IMAGE_BASENAME = "strat9-os" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-limine-image.sh
+''']
+
+[tasks.limine-image-test]
+description = "Create bootable ISO/IMG with Limine + kernel (self-tests enabled)"
+dependencies = ["setup-limine", "kernel-test", "strate-ext4"]
+env = { STRAT9_IMAGE_BASENAME = "strat9-os-test" }
 script_runner = "@shell"
 script = ['''
 bash tools/scripts/create-limine-image.sh
@@ -244,7 +267,7 @@ bash tools/scripts/create-limine-image.sh
 
 # Legacy disk image (kept for reference)
 [tasks.disk-image]
-description = "Creer l'image disque bootable (.img) avec bootloader + kernel - LEGACY"
+description = "Create bootable disk image (.img) with bootloader + kernel - LEGACY"
 dependencies = ["assemble-bootloader", "kernel"]
 command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "tools/scripts/create-image.ps1"]
@@ -258,7 +281,7 @@ dependencies = ["limine-image"]
 # =============================================================================
 
 [tasks.run-gui]
-description = "Lancer QEMU avec l'ISO Limine (interface graphique) + disque EXT4"
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk"
 dependencies = ["limine-image"]
 command = "${QEMU}"
 args = [
@@ -284,8 +307,37 @@ args = [
     "guest_errors",
 ]
 
+[tasks.run-gui-smp]
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-smp",
+    "2",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu.log",
+    "-d",
+    "guest_errors",
+]
+
 [tasks.run]
-description = "Lancer QEMU avec l'ISO Limine (mode texte) + disque EXT4"
+description = "Load QEMU with the Limine ISO (text mode) + EXT4 disk"
 dependencies = ["limine-image"]
 command = "${QEMU}"
 args = [
@@ -310,8 +362,34 @@ args = [
     "build/qemu.log",
 ]
 
+[tasks.run-test]
+description = "Load QEMU with the Limine ISO test build (text mode) + EXT4 disk"
+dependencies = ["limine-image-test"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os-test.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-nographic",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu-test.log",
+]
+
 [tasks.run-debug]
-description = "Lancer QEMU en mode debug (GDB server sur :1234) + disque EXT4"
+description = "Load QEMU in debug mode (GDB server on :1234) + EXT4 disk"
 dependencies = ["limine-image"]
 command = "${QEMU}"
 args = [
@@ -340,7 +418,7 @@ args = [
 ]
 
 [tasks.test-boot]
-description = "Test rapide du boot (10 secondes puis stop)"
+description = "Quick boot test (10 seconds then stop)"
 dependencies = ["limine-image"]
 script_runner = "@shell"
 script = ['''
@@ -352,7 +430,7 @@ bash tools/scripts/test-boot.sh
 # =============================================================================
 
 [tasks.clean]
-description = "Nettoyer tous les artefacts de build"
+description = "Clean all build artifacts"
 script_runner = "@shell"
 script = ['''
 cargo clean
@@ -362,17 +440,17 @@ echo "Clean terminé."
 ''']
 
 # =============================================================================
-# Development Tasks
+# Development tasks
 # =============================================================================
 
 [tasks.doc]
-description = "Generer et ouvrir la documentation"
+description = "Generate and open the documentation"
 cwd = "workspace/kernel"
 command = "cargo"
 args = ["doc", "--target", "${KERNEL_TARGET}", "--no-deps", "--open"]
 
 [tasks.size]
-description = "Afficher la taille du kernel et des sections"
+description = "Display the size of the kernel and its sections"
 dependencies = ["kernel"]
 script_runner = "@shell"
 script = ['''

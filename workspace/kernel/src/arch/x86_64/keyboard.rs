@@ -6,6 +6,77 @@
 use super::io::inb;
 use spin::Mutex;
 
+/// Keyboard input buffer size
+const KEYBOARD_BUFFER_SIZE: usize = 256;
+
+/// Global keyboard input buffer (circular buffer)
+static KEYBOARD_BUFFER: KeyboardBuffer = KeyboardBuffer::new();
+
+/// Circular buffer for keyboard input
+struct KeyboardBuffer {
+    buffer: Mutex<[u8; KEYBOARD_BUFFER_SIZE]>,
+    head: Mutex<usize>,
+    tail: Mutex<usize>,
+}
+
+impl KeyboardBuffer {
+    const fn new() -> Self {
+        Self {
+            buffer: Mutex::new([0u8; KEYBOARD_BUFFER_SIZE]),
+            head: Mutex::new(0),
+            tail: Mutex::new(0),
+        }
+    }
+
+    /// Add a character to the buffer
+    pub fn push(&self, ch: u8) {
+        let mut tail = self.tail.lock();
+        let mut buffer = self.buffer.lock();
+        buffer[*tail] = ch;
+        *tail = (*tail + 1) % KEYBOARD_BUFFER_SIZE;
+        
+        // If buffer is full, advance head to drop oldest character
+        let mut head = self.head.lock();
+        if *head == *tail {
+            *head = (*head + 1) % KEYBOARD_BUFFER_SIZE;
+        }
+    }
+
+    /// Get a character from the buffer (blocking)
+    pub fn pop(&self) -> Option<u8> {
+        let mut head = self.head.lock();
+        let tail = *self.tail.lock();
+        
+        if *head == tail {
+            return None; // Buffer empty
+        }
+        
+        let ch = self.buffer.lock()[*head];
+        *head = (*head + 1) % KEYBOARD_BUFFER_SIZE;
+        Some(ch)
+    }
+
+    /// Check if buffer has data
+    pub fn has_data(&self) -> bool {
+        *self.head.lock() != *self.tail.lock()
+    }
+}
+
+/// Add a character to the keyboard buffer
+pub fn add_to_buffer(ch: u8) {
+    KEYBOARD_BUFFER.push(ch);
+}
+
+/// Get a character from the keyboard buffer (non-blocking)
+pub fn read_char() -> Option<u8> {
+    KEYBOARD_BUFFER.pop()
+}
+
+/// Check if keyboard buffer has data
+pub fn has_input() -> bool {
+    KEYBOARD_BUFFER.has_data()
+}
+
 /// PS/2 keyboard data port
 const KEYBOARD_DATA_PORT: u16 = 0x60;
 

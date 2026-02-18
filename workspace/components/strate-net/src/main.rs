@@ -82,13 +82,26 @@ use smoltcp::{
 };
 
 const MAX_FRAME_SIZE: usize = 1514;
-const TICK_MICROS: u64 = 10_000; // 100Hz tick -> 10ms
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+const NANOS_PER_MICRO: u64 = 1_000;
 
 fn now_instant() -> Instant {
-    match clock_gettime_ticks() {
-        Ok(ticks) => Instant::from_micros(ticks.saturating_mul(TICK_MICROS)),
+    match clock_gettime_ns() {
+        Ok(ns) => Instant::from_micros(ns / NANOS_PER_MICRO),
         Err(_) => Instant::from_micros(0),
     }
+}
+
+fn sleep_micros(micros: u64) {
+    if micros == 0 {
+        return;
+    }
+    let nanos = micros.saturating_mul(NANOS_PER_MICRO);
+    let req = TimeSpec {
+        tv_sec: (nanos / NANOS_PER_SEC) as i64,
+        tv_nsec: (nanos % NANOS_PER_SEC) as i64,
+    };
+    let _ = nanosleep(&req);
 }
 
 struct Strat9NetDevice;
@@ -245,7 +258,10 @@ impl NetworkStrate {
 
             if !got_ipc && poll_result == smoltcp::iface::PollResult::None {
                 if let Some(delay) = self.interface.poll_delay(now, &self.sockets) {
-                    if delay.total_micros() > 0 {
+                    let micros = delay.total_micros();
+                    if micros > 0 {
+                        sleep_micros(micros);
+                    } else {
                         let _ = proc_yield();
                     }
                 } else {

@@ -232,6 +232,7 @@ pub fn tick_all_timers(current_time_ns: u64) {
     use crate::process::{get_all_tasks, send_signal, signal::Signal};
 
     // Get all tasks and check their timers
+    // Use get_all_tasks which now uses try_lock internally
     if let Some(tasks) = get_all_tasks() {
         for task in tasks {
             let expired = task.itimers.check_all(current_time_ns);

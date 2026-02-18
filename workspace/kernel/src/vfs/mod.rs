@@ -28,6 +28,8 @@ pub mod fd;
 pub mod file;
 pub mod mount;
 pub mod scheme;
+pub mod scheme_router;
+pub mod procfs;
 
 use crate::{process::current_task_clone, syscall::error::SyscallError};
 use alloc::{string::String, sync::Arc};
@@ -36,6 +38,8 @@ pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
 pub use mount::{mount, resolve, unmount, Namespace};
 pub use scheme::{DynScheme, FileFlags, IpcScheme, KernelScheme, OpenFlags, Scheme};
+pub use scheme_router::{register_scheme, mount_scheme, init_builtin_schemes, list_schemes};
+pub use procfs::ProcScheme;
 
 use crate::memory::{UserSliceRead, UserSliceWrite};
 
@@ -267,20 +271,42 @@ pub fn sys_close(fd: u32) -> Result<u64, SyscallError> {
 pub fn init() {
     log::info!("[VFS] Initializing virtual file system");
 
+    // Initialize scheme router
+    if let Err(e) = scheme_router::init_builtin_schemes() {
+        log::error!("[VFS] Failed to init builtin schemes: {:?}", e);
+    }
+
     // Create and mount kernel scheme for /sys
     let mut kernel_scheme = KernelScheme::new();
 
     // Register some basic kernel files
-    static VERSION: &[u8] = b"Strat9-OS v0.1.0\n";
+    static VERSION: &[u8] = b"Strat9-OS v0.1.0 (Bedrock)\n";
     kernel_scheme.register("version", VERSION.as_ptr(), VERSION.len());
 
     static CMDLINE: &[u8] = b"quiet loglevel=debug\n";
     kernel_scheme.register("cmdline", CMDLINE.as_ptr(), CMDLINE.len());
 
-    if let Err(e) = mount::mount("/sys", Arc::new(kernel_scheme)) {
+    let kernel_scheme = Arc::new(kernel_scheme);
+    
+    // Mount /sys
+    if let Err(e) = mount::mount("/sys", kernel_scheme.clone()) {
         log::error!("[VFS] Failed to mount /sys: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /sys (kernel scheme)");
+    }
+
+    // Register and mount procfs
+    let proc_scheme = Arc::new(ProcScheme::new());
+    if let Err(e) = register_scheme("proc", proc_scheme.clone()) {
+        log::error!("[VFS] Failed to register proc scheme: {:?}", e);
+    } else {
+        log::info!("[VFS] Registered proc scheme");
+    }
+    
+    if let Err(e) = mount::mount("/proc", proc_scheme) {
+        log::error!("[VFS] Failed to mount /proc: {:?}", e);
+    } else {
+        log::info!("[VFS] Mounted /proc (procfs)");
     }
 
     log::info!("[VFS] VFS ready");
