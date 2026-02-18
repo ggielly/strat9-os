@@ -173,7 +173,7 @@ echo ""
 
 # Legacy bootloader (kept for reference, not used with Limine)
 [tasks.assemble-bootloader]
-description = "Assemble le bootloader (NASM stage1.asm qui inclut stage2.asm) - LEGACY"
+description = "Assemble the bootloader (NASM stage1.asm which includes stage2.asm) - LEGACY"
 command = "powershell"
 args = [
     "-ExecutionPolicy",
@@ -220,7 +220,7 @@ args = ["fmt", "--all"]
 # =============================================================================
 
 [tasks.strate-ext4]
-description = "Compiler la strate EXT4 (userspace filesystem)"
+description = "Build the EXT4 userspace filesystem component (LEGACY)"
 cwd = "workspace/components/strate-fs-ext4"
 command = "cargo"
 args = [
@@ -244,7 +244,7 @@ bash tools/scripts/create-limine-image.sh
 
 # Legacy disk image (kept for reference)
 [tasks.disk-image]
-description = "Creer l'image disque bootable (.img) avec bootloader + kernel - LEGACY"
+description = "Create bootable disk image (.img) with bootloader + kernel - LEGACY"
 dependencies = ["assemble-bootloader", "kernel"]
 command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "tools/scripts/create-image.ps1"]
@@ -258,9 +258,6 @@ dependencies = ["limine-image"]
 # =============================================================================
 
 [tasks.run-gui]
-description = "Lancer QEMU avec l'ISO Limine (interface graphique) + disque EXT4"
-dependencies = ["limine-image"]
-command = "${QEMU}"
 args = [
     "-cdrom",
     "build/strat9-os.iso",
@@ -281,11 +278,42 @@ args = [
     "-D",
     "build/qemu.log",
     "-d",
+    "guest_errors",Implémenter la fonction de refilement pour les futex et simplifier 
+]description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+
+[tasks.run-gui-smp]
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-smp",
+    "2",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu.log",
+    "-d",
     "guest_errors",
 ]
 
 [tasks.run]
-description = "Lancer QEMU avec l'ISO Limine (mode texte) + disque EXT4"
+description = "Load QEMU with the Limine ISO (text mode) + EXT4 disk"
 dependencies = ["limine-image"]
 command = "${QEMU}"
 args = [
@@ -311,7 +339,7 @@ args = [
 ]
 
 [tasks.run-debug]
-description = "Lancer QEMU en mode debug (GDB server sur :1234) + disque EXT4"
+description = "Load QEMU in debug mode (GDB server on :1234) + EXT4 disk"
 dependencies = ["limine-image"]
 command = "${QEMU}"
 args = [
@@ -340,7 +368,7 @@ args = [
 ]
 
 [tasks.test-boot]
-description = "Test rapide du boot (10 secondes puis stop)"
+description = "Quick boot test (10 seconds then stop)"
 dependencies = ["limine-image"]
 script_runner = "@shell"
 script = ['''
@@ -352,7 +380,7 @@ bash tools/scripts/test-boot.sh
 # =============================================================================
 
 [tasks.clean]
-description = "Nettoyer tous les artefacts de build"
+description = "Clean all build artifacts"
 script_runner = "@shell"
 script = ['''
 cargo clean
@@ -362,17 +390,17 @@ echo "Clean terminé."
 ''']
 
 # =============================================================================
-# Development Tasks
+# Development tasks
 # =============================================================================
 
 [tasks.doc]
-description = "Generer et ouvrir la documentation"
+description = "Generate and open the documentation"
 cwd = "workspace/kernel"
 command = "cargo"
 args = ["doc", "--target", "${KERNEL_TARGET}", "--no-deps", "--open"]
 
 [tasks.size]
-description = "Afficher la taille du kernel et des sections"
+description = "Display the size of the kernel and its sections"
 dependencies = ["kernel"]
 script_runner = "@shell"
 script = ['''
