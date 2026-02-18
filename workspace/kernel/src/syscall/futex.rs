@@ -100,6 +100,60 @@ fn wake_from_queue(queue: &FutexQueue, max_wake: u32) -> u64 {
     woke
 }
 
+fn do_requeue(addr1: u64, max_wake: u32, max_requeue: u32, addr2: u64) -> Result<u64, SyscallError> {
+    if addr1 == addr2 {
+        return sys_futex_wake(addr1, max_wake);
+    }
+
+    let queue1 = {
+        let map = FUTEX_QUEUES.lock();
+        map.get(&addr1).cloned()
+    };
+    let Some(queue1) = queue1 else {
+        return Ok(0);
+    };
+
+    let queue2 = get_queue(addr2);
+
+    let mut woke = 0u64;
+    let mut requeued = 0u64;
+
+    {
+        let (mut w1, mut w2) = lock_two_queues(addr1, &queue1, addr2, &queue2);
+
+        while woke < max_wake as u64 {
+            if let Some(id) = w1.pop_front() {
+                if wake_task(id) {
+                    woke += 1;
+                }
+            } else {
+                break;
+            }
+        }
+
+        while requeued < max_requeue as u64 {
+            if let Some(id) = w1.pop_front() {
+                w2.push_back(id);
+                requeued += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    if queue1.is_empty() {
+        let mut map = FUTEX_QUEUES.lock();
+        map.remove(&addr1);
+    }
+
+    if queue2.is_empty() {
+        let mut map = FUTEX_QUEUES.lock();
+        map.remove(&addr2);
+    }
+
+    Ok(woke + requeued)
+}
+
 struct FutexWakeOpEncode {
     op: u32,
     is_oparg_shift: bool,
@@ -244,62 +298,7 @@ pub fn sys_futex_requeue(
     _max_requeue: u32,
     _addr2: u64,
 ) -> Result<u64, SyscallError> {
-    let addr1 = _addr1;
-    let addr2 = _addr2;
-    let max_wake = _max_wake;
-    let max_requeue = _max_requeue;
-
-    if addr1 == addr2 {
-        return sys_futex_wake(addr1, max_wake);
-    }
-
-    let queue1 = {
-        let map = FUTEX_QUEUES.lock();
-        map.get(&addr1).cloned()
-    };
-    let Some(queue1) = queue1 else {
-        return Ok(0);
-    };
-
-    let queue2 = get_queue(addr2);
-
-    let mut woke = 0u64;
-    let mut requeued = 0u64;
-
-    {
-        let (mut w1, mut w2) = lock_two_queues(addr1, &queue1, addr2, &queue2);
-
-        while woke < max_wake as u64 {
-            if let Some(id) = w1.pop_front() {
-                if wake_task(id) {
-                    woke += 1;
-                }
-            } else {
-                break;
-            }
-        }
-
-        while requeued < max_requeue as u64 {
-            if let Some(id) = w1.pop_front() {
-                w2.push_back(id);
-                requeued += 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    if queue1.is_empty() {
-        let mut map = FUTEX_QUEUES.lock();
-        map.remove(&addr1);
-    }
-
-    if queue2.is_empty() {
-        let mut map = FUTEX_QUEUES.lock();
-        map.remove(&addr2);
-    }
-
-    Ok(woke + requeued)
+    do_requeue(_addr1, _max_wake, _max_requeue, _addr2)
 }
 
 /// SYS_FUTEX_CMP_REQUEUE: Conditional requeue
@@ -310,7 +309,13 @@ pub fn sys_futex_cmp_requeue(
     _addr2: u64,
     _expected_val: u32,
 ) -> Result<u64, SyscallError> {
-    Err(SyscallError::NotImplemented)
+    // Linux/Asterinas model: validate current value first, then perform the same
+    // wake+requeue operation as FUTEX_REQUEUE.
+    let cur = read_u32(_addr1)?;
+    if cur != _expected_val {
+        return Err(SyscallError::Again); // EAGAIN
+    }
+    do_requeue(_addr1, _max_wake, _max_requeue, _addr2)
 }
 
 /// SYS_FUTEX_WAKE_OP: Wake with atomic operation
