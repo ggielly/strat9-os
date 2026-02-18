@@ -1,5 +1,6 @@
-//! IPC ping-pong test.
+//! IPC ping-pong test (Port-based) + MPMC SyncChannel test (IPC-02).
 //!
+//! ## Port test (Task A / Task B)
 //! Creates two kernel tasks that communicate via an IPC port:
 //! - Task A (sender): creates a port, stores its ID in a shared static,
 //!   then sends a message with msg_type=42.
@@ -7,17 +8,23 @@
 //!   `recv()` (which blocks if the message hasn't arrived yet), logs the
 //!   result, and verifies correctness.
 //!
-//! This exercises:
-//! - Port creation / global registry
-//! - Blocking recv (Task B may block waiting for Task A's message)
-//! - WaitQueue integration with the scheduler
-//! - Message delivery with kernel-filled `sender` field
+//! ## Channel test (IPC-02)
+//! Three kernel tasks share a `channel::<u64>(4)`:
+//! - Producer-1: sends 1, 2, 3 then drops its Sender endpoint.
+//! - Producer-2: yields once (so the consumer may block), then sends 4, 5.
+//! - Consumer: blocks on `recv()` until both producers disconnect,
+//!   verifies it received exactly 5 messages.
 
 use crate::{
-    ipc::{self, IpcMessage, PortId},
+    ipc::{self, channel, IpcMessage, PortId},
     process::{add_task, Task, TaskPriority},
+    sync::SpinLock,
 };
 use core::sync::atomic::{AtomicU64, Ordering};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Port ping-pong test
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Shared port ID between the two test tasks.
 /// 0 = not yet created.
@@ -106,3 +113,110 @@ extern "C" fn ipc_receiver_main() -> ! {
 
 // The PortId(u64) constructor is pub(crate) via the struct definition,
 // so this test module in the same crate can use it directly.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IPC-02: typed MPMC SyncChannel test
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Exercises:
+//   - channel() constructor (Sender<u64> + Receiver<u64> cloning → MPMC)
+//   - Blocking recv  (consumer blocks; producer-2 yields first to force it)
+//   - Disconnect detection (last Sender drop → Receiver sees Disconnected)
+//   - wait_until round-trip through the scheduler
+
+/// Endpoint slots: each task takes its endpoint out (Option::take) once.
+/// SpinLock<Option<T>>: Sync when T: Send — no private-field access needed.
+static CHAN_TX1: SpinLock<Option<channel::Sender<u64>>> = SpinLock::new(None);
+static CHAN_TX2: SpinLock<Option<channel::Sender<u64>>> = SpinLock::new(None);
+static CHAN_RX: SpinLock<Option<channel::Receiver<u64>>> = SpinLock::new(None);
+
+/// Schedule the three channel test tasks.
+pub fn create_channel_test_tasks() {
+    let (tx, rx) = channel::channel::<u64>(4);
+    let tx2 = tx.clone(); // MPMC: second producer on the same channel
+
+    *CHAN_TX1.lock() = Some(tx);
+    *CHAN_TX2.lock() = Some(tx2);
+    *CHAN_RX.lock() = Some(rx);
+
+    let producer1 =
+        Task::new_kernel_task(chan_producer1_main, "chan-prod-1", TaskPriority::Normal)
+            .expect("chan-prod-1 alloc failed");
+    let producer2 =
+        Task::new_kernel_task(chan_producer2_main, "chan-prod-2", TaskPriority::Normal)
+            .expect("chan-prod-2 alloc failed");
+    let consumer =
+        Task::new_kernel_task(chan_consumer_main, "chan-consumer", TaskPriority::Normal)
+            .expect("chan-consumer alloc failed");
+
+    add_task(producer1);
+    add_task(producer2);
+    add_task(consumer);
+}
+
+/// Producer-1: sends 1, 2, 3 then drops Sender (decrements sender_count).
+extern "C" fn chan_producer1_main() -> ! {
+    crate::serial_println!("[chan-test] Producer-1: starting");
+    let tx = CHAN_TX1.lock().take().expect("CHAN_TX1 empty");
+
+    for v in [1u64, 2, 3] {
+        crate::serial_println!("[chan-test] Producer-1: sending {}", v);
+        tx.send(v).expect("prod1 send failed");
+    }
+
+    crate::serial_println!("[chan-test] Producer-1: done");
+    drop(tx); // explicit: sender_count--
+    crate::process::scheduler::exit_current_task();
+}
+
+/// Producer-2: yields first so the consumer blocks, then sends 4, 5.
+extern "C" fn chan_producer2_main() -> ! {
+    crate::serial_println!("[chan-test] Producer-2: starting");
+    let tx = CHAN_TX2.lock().take().expect("CHAN_TX2 empty");
+
+    crate::process::yield_task(); // ensure consumer reaches recv() first
+
+    for v in [4u64, 5] {
+        crate::serial_println!("[chan-test] Producer-2: sending {}", v);
+        tx.send(v).expect("prod2 send failed");
+    }
+
+    crate::serial_println!("[chan-test] Producer-2: done");
+    drop(tx); // last Sender → receiver wakes with Disconnected next call
+    crate::process::scheduler::exit_current_task();
+}
+
+/// Consumer: drains all messages; expects exactly 5, then Disconnected.
+extern "C" fn chan_consumer_main() -> ! {
+    crate::serial_println!("[chan-test] Consumer: starting");
+    let rx = CHAN_RX.lock().take().expect("CHAN_RX empty");
+
+    let mut received: u64 = 0;
+    loop {
+        match rx.recv() {
+            Ok(v) => {
+                crate::serial_println!("[chan-test] Consumer: got {}", v);
+                received += 1;
+            }
+            Err(channel::ChannelError::Disconnected) => {
+                crate::serial_println!("[chan-test] Consumer: disconnected after {} msgs", received);
+                break;
+            }
+            Err(e) => {
+                crate::serial_println!("[chan-test] Consumer: unexpected error {:?}", e);
+                break;
+            }
+        }
+    }
+
+    if received == 5 {
+        crate::serial_println!("[chan-test] SyncChannel MPMC test PASSED ({} msgs)", received);
+    } else {
+        crate::serial_println!(
+            "[chan-test] SyncChannel MPMC test FAILED (expected 5, got {})",
+            received
+        );
+    }
+
+    crate::process::scheduler::exit_current_task();
+}

@@ -16,6 +16,9 @@
 
 extern crate alloc;
 
+// OSTD-like abstraction layer (minimal unsafe TCB)
+pub mod ostd;
+
 pub mod acpi;
 pub mod arch;
 pub mod boot;

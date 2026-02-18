@@ -3,6 +3,7 @@
 //! Routes syscall numbers to handler functions and converts results to RAX values.
 //! Called from the naked `syscall_entry` assembly with a pointer to `SyscallFrame`.
 use super::{error::SyscallError, numbers::*, SyscallFrame};
+use super::{sys_clock_gettime, sys_nanosleep};
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
     drivers::virtio::{
@@ -10,6 +11,7 @@ use crate::{
         net::NetworkDevice,
     },
     ipc::{
+        channel::{self, ChanId},
         message::IpcMessage,
         port::{self, PortId},
         reply,
@@ -81,6 +83,13 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_IPC_UNBIND_PORT => sys_ipc_unbind_port(arg1, arg2),
         SYS_IPC_RING_CREATE => sys_ipc_ring_create(arg1),
         SYS_IPC_RING_MAP => sys_ipc_ring_map(arg1, arg2),
+
+        // Typed MPMC sync-channel (IPC-02)
+        SYS_CHAN_CREATE => sys_chan_create(arg1),
+        SYS_CHAN_SEND => sys_chan_send(arg1, arg2),
+        SYS_CHAN_RECV => sys_chan_recv(arg1, arg2),
+        SYS_CHAN_TRY_RECV => sys_chan_try_recv(arg1, arg2),
+        SYS_CHAN_CLOSE => sys_chan_close(arg1),
         SYS_MODULE_LOAD => silo::sys_module_load(arg1, arg2),
         SYS_MODULE_UNLOAD => silo::sys_module_unload(arg1),
         SYS_MODULE_GET_SYMBOL => silo::sys_module_get_symbol(arg1, arg2),
@@ -99,6 +108,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_VOLUME_WRITE => sys_volume_write(arg1, arg2, arg3, arg4),
         SYS_VOLUME_INFO => sys_volume_info(arg1),
         SYS_CLOCK_GETTIME => sys_clock_gettime(),
+        SYS_NANOSLEEP => sys_nanosleep(arg1, arg2),
         SYS_DEBUG_LOG => sys_debug_log(arg1, arg2),
         SYS_SILO_CREATE => silo::sys_silo_create(arg1),
         SYS_SILO_CONFIG => silo::sys_silo_config(arg1, arg2),
@@ -401,11 +411,6 @@ fn sys_volume_info(handle: u64) -> Result<u64, SyscallError> {
     };
     let device = resolve_volume_device(handle, required)?;
     Ok(BlockDevice::sector_count(device))
-}
-
-/// SYS_CLOCK_GETTIME (500): Get current monotonic tick count.
-fn sys_clock_gettime() -> Result<u64, SyscallError> {
-    Ok(crate::process::scheduler::ticks())
 }
 
 /// SYS_DEBUG_LOG (600): Write a debug message to serial output.
@@ -799,4 +804,163 @@ fn sys_ipc_ring_create(_size: u64) -> Result<u64, SyscallError> {
 fn sys_ipc_ring_map(ring: u64, _out_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(ring)?;
     Err(SyscallError::NotImplemented)
+}
+
+// ── Typed MPMC sync-channel syscall handlers (IPC-02) ─────────────────────────
+
+/// SYS_CHAN_CREATE (220): create a bounded sync-channel.
+///
+/// arg1 = capacity (clamped to [1, 1024]).
+/// Returns a capability handle whose `resource` field encodes the `ChanId`.
+fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
+    let cap = capacity.clamp(1, 1024) as usize;
+    let chan_id = channel::create_channel(cap);
+
+    // Register a Channel capability in the current task's capability table.
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &mut *task.capabilities.get() };
+    let cap_id = caps.insert(crate::capability::Capability {
+        id: crate::capability::CapId::new(),
+        permissions: crate::capability::CapPermissions {
+            read: true,
+            write: true,
+            execute: false,
+            grant: true,
+            revoke: false,
+        },
+        resource_type: ResourceType::Channel,
+        resource: chan_id.as_u64() as usize,
+    });
+
+    log::debug!(
+        "syscall: CHAN_CREATE(cap={}) → chan={} handle={}",
+        cap,
+        chan_id,
+        cap_id.as_u64()
+    );
+    Ok(cap_id.as_u64())
+}
+
+/// SYS_CHAN_SEND (221): send one `IpcMessage` to a channel, blocking if full.
+///
+/// arg1 = channel handle (CapId), arg2 = user pointer to 64-byte IpcMessage.
+fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+
+    // Validate and copy the message from userspace.
+    let user_slice = UserSliceRead::new(msg_ptr, 64).map_err(SyscallError::from)?;
+    let mut msg = IpcMessage::new(0);
+    // SAFETY: IpcMessage is repr(C), 64 bytes, fully initialised above.
+    let n = user_slice.copy_to(unsafe {
+        core::slice::from_raw_parts_mut(&mut msg as *mut IpcMessage as *mut u8, 64)
+    });
+    if n != 64 {
+        return Err(SyscallError::Fault);
+    }
+
+    // Fill in the sender task ID.
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    msg.sender = task.id.as_u64();
+
+    // Look up the channel capability.
+    let caps = unsafe { &*task.capabilities.get() };
+    let cap = caps
+        .get(crate::capability::CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
+    if cap.resource_type != ResourceType::Channel || !cap.permissions.write {
+        return Err(SyscallError::PermissionDenied);
+    }
+    let chan_id = ChanId::from_u64(cap.resource as u64);
+
+    let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
+    chan.send(msg).map_err(|_| SyscallError::BadHandle)?;
+
+    Ok(0)
+}
+
+/// SYS_CHAN_RECV (222): receive one `IpcMessage` from a channel, blocking if empty.
+///
+/// arg1 = channel handle (CapId), arg2 = user pointer to 64-byte output buffer.
+fn sys_chan_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &*task.capabilities.get() };
+    let cap = caps
+        .get(crate::capability::CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
+    if cap.resource_type != ResourceType::Channel || !cap.permissions.read {
+        return Err(SyscallError::PermissionDenied);
+    }
+    let chan_id = ChanId::from_u64(cap.resource as u64);
+
+    let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
+    let msg = chan.recv().map_err(|_| SyscallError::BadHandle)?;
+
+    // Write the received message to userspace.
+    let user_slice = UserSliceWrite::new(msg_ptr, 64).map_err(SyscallError::from)?;
+    // SAFETY: IpcMessage is repr(C), 64 bytes.
+    let n = user_slice.copy_from(unsafe {
+        core::slice::from_raw_parts(&msg as *const IpcMessage as *const u8, 64)
+    });
+    if n != 64 {
+        return Err(SyscallError::Fault);
+    }
+
+    Ok(0)
+}
+
+/// SYS_CHAN_TRY_RECV (223): non-blocking receive.
+///
+/// Returns 0 if a message was delivered, -EWOULDBLOCK if the channel is empty.
+fn sys_chan_try_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &*task.capabilities.get() };
+    let cap = caps
+        .get(crate::capability::CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
+    if cap.resource_type != ResourceType::Channel || !cap.permissions.read {
+        return Err(SyscallError::PermissionDenied);
+    }
+    let chan_id = ChanId::from_u64(cap.resource as u64);
+
+    let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
+    match chan.try_recv() {
+        Ok(msg) => {
+            let user_slice = UserSliceWrite::new(msg_ptr, 64).map_err(SyscallError::from)?;
+            // SAFETY: IpcMessage is repr(C), 64 bytes.
+            let n = user_slice.copy_from(unsafe {
+                core::slice::from_raw_parts(&msg as *const IpcMessage as *const u8, 64)
+            });
+            if n != 64 {
+                return Err(SyscallError::Fault);
+            }
+            Ok(0)
+        }
+        Err(channel::ChannelError::WouldBlock) => Err(SyscallError::Again),
+        Err(_) => Err(SyscallError::BadHandle),
+    }
+}
+
+/// SYS_CHAN_CLOSE (224): destroy a channel and remove it from the registry.
+///
+/// Wakes all tasks blocked on this channel with `Disconnected`.
+fn sys_chan_close(handle: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &mut *task.capabilities.get() };
+    let cap = caps
+        .remove(crate::capability::CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
+    if cap.resource_type != ResourceType::Channel {
+        return Err(SyscallError::BadHandle);
+    }
+    let chan_id = ChanId::from_u64(cap.resource as u64);
+    channel::destroy_channel(chan_id).map_err(|_| SyscallError::BadHandle)?;
+
+    log::debug!("syscall: CHAN_CLOSE(handle={}) → chan={}", handle, chan_id);
+    Ok(0)
 }

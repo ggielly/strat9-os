@@ -4,7 +4,7 @@
 
 use crate::{capability::CapabilityTable, memory::AddressSpace, vfs::FileDescriptorTable};
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use x86_64::{PhysAddr, VirtAddr};
 
 /// Unique identifier for a task
@@ -111,6 +111,14 @@ pub struct Task {
     pub signal_stack: SyncUnsafeCell<Option<super::signal::SigStack>>,
     /// Interval timers (ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF)
     pub itimers: super::timer::ITimers,
+    /// Pending wakeup flag: set by `wake_task()` when the task is not yet
+    /// in `blocked_tasks` (it is still transitioning to Blocked state).
+    /// Checked by `block_current_task()` — if set, the task skips blocking
+    /// and continues execution, preventing a lost-wakeup race.
+    pub wake_pending: AtomicBool,
+    /// Sleep deadline in nanoseconds (monotonic). If non-zero, the task
+    /// is sleeping until this time. Checked by the scheduler to auto-wake.
+    pub wake_deadline_ns: AtomicU64,
 }
 
 /// CPU context saved/restored during context switches.
@@ -283,6 +291,8 @@ impl Task {
             signal_actions: SyncUnsafeCell::new([super::signal::SigAction::Default; 64]),
             signal_stack: SyncUnsafeCell::new(None),
             itimers: super::timer::ITimers::new(),
+            wake_pending: AtomicBool::new(false),
+            wake_deadline_ns: AtomicU64::new(0),
         }))
     }
 
@@ -320,6 +330,8 @@ impl Task {
             signal_actions: SyncUnsafeCell::new([super::signal::SigAction::Default; 64]),
             signal_stack: SyncUnsafeCell::new(None),
             itimers: super::timer::ITimers::new(),
+            wake_pending: AtomicBool::new(false),
+            wake_deadline_ns: AtomicU64::new(0),
         }))
     }
 }

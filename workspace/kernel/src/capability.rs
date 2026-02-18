@@ -36,6 +36,8 @@ pub enum ResourceType {
     IoPortRange,
     InterruptLine,
     IpcPort,
+    /// A typed MPMC sync-channel (SyncChan), accessed via SYS_CHAN_* syscalls.
+    Channel,
     Device,
     AddressSpace,
     Silo,

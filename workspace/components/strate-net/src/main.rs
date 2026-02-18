@@ -11,6 +11,7 @@ use core::{
 };
 use strate_net::{syscalls::*, IpcMessage, OPCODE_CLOSE, OPCODE_OPEN, OPCODE_READ, OPCODE_WRITE};
 
+// TODO - implement a proper userspace heap and remove the bump allocator
 // ---------------------------------------------------------------------------
 // Minimal bump allocator (shared with other silos until userspace heap is ready)
 // ---------------------------------------------------------------------------
@@ -80,6 +81,16 @@ use smoltcp::{
     time::Instant,
 };
 
+const MAX_FRAME_SIZE: usize = 1514;
+const TICK_MICROS: u64 = 10_000; // 100Hz tick -> 10ms
+
+fn now_instant() -> Instant {
+    match clock_gettime_ticks() {
+        Ok(ticks) => Instant::from_micros(ticks.saturating_mul(TICK_MICROS)),
+        Err(_) => Instant::from_micros(0),
+    }
+}
+
 struct Strat9NetDevice;
 
 impl Device for Strat9NetDevice {
@@ -87,12 +98,11 @@ impl Device for Strat9NetDevice {
     type TxToken<'a> = Strat9TxToken;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let mut buf = [0u8; 1514];
+        let mut buf = [0u8; MAX_FRAME_SIZE];
         match net_recv(&mut buf) {
             Ok(n) if n > 0 => {
-                let mut packet = alloc::vec![0u8; n];
-                packet.copy_from_slice(&buf[..n]);
-                Some((Strat9RxToken { buf: packet }, Strat9TxToken))
+                let len = core::cmp::min(n, MAX_FRAME_SIZE);
+                Some((Strat9RxToken { buf, len }, Strat9TxToken))
             }
             _ => None,
         }
@@ -104,22 +114,23 @@ impl Device for Strat9NetDevice {
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
-        caps.max_transmission_unit = 1514;
+        caps.max_transmission_unit = MAX_FRAME_SIZE;
         caps.medium = Medium::Ethernet;
         caps
     }
 }
 
 struct Strat9RxToken {
-    buf: alloc::vec::Vec<u8>,
+    buf: [u8; MAX_FRAME_SIZE],
+    len: usize,
 }
 
 impl phy::RxToken for Strat9RxToken {
-    fn consume<R, F>(mut self, f: F) -> R
+    fn consume<R, F>(self, f: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
     {
-        f(&self.buf)
+        f(&self.buf[..self.len])
     }
 }
 
@@ -130,9 +141,13 @@ impl phy::TxToken for Strat9TxToken {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut buf = alloc::vec![0u8; len];
-        let ret = f(&mut buf);
-        let _ = net_send(&buf);
+        if len > MAX_FRAME_SIZE {
+            debug_log("[strate-net] TX frame too large\n");
+            return f(&mut []);
+        }
+        let mut buf = [0u8; MAX_FRAME_SIZE];
+        let ret = f(&mut buf[..len]);
+        let _ = net_send(&buf[..len]);
         ret
     }
 }
@@ -184,14 +199,16 @@ impl NetworkStrate {
     fn serve(&mut self, port: u64) -> ! {
         loop {
             // 1. Process network packets
-            // TODO: Get actual monotonic time from kernel via SYS_CLOCK_GETTIME
-            let now = Instant::from_micros(0);
-            self.interface
+            let now = now_instant();
+            let poll_result = self
+                .interface
                 .poll(now, &mut self.device, &mut self.sockets);
 
             // 2. Check for IPC messages (non-blocking)
             let mut msg = IpcMessage::new(0);
+            let mut got_ipc = false;
             if ipc_try_recv(port, &mut msg).is_ok() {
+                got_ipc = true;
                 match msg.msg_type {
                     OPCODE_OPEN => {
                         let reply = self.handle_open(&msg);
@@ -226,8 +243,15 @@ impl NetworkStrate {
                 }
             }
 
-            // Limit polling frequency slightly to avoid 100% CPU in idle
-            core::hint::spin_loop();
+            if !got_ipc && poll_result == smoltcp::iface::PollResult::None {
+                if let Some(delay) = self.interface.poll_delay(now, &self.sockets) {
+                    if delay.total_micros() > 0 {
+                        let _ = proc_yield();
+                    }
+                } else {
+                    let _ = proc_yield();
+                }
+            }
         }
     }
 }

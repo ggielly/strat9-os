@@ -527,6 +527,13 @@ pub fn get_task_by_id(id: TaskId) -> Option<Arc<Task>> {
 /// in the `blocked_tasks` map. It will not be re-scheduled until
 /// `wake_task(id)` is called.
 ///
+/// ## Lost-wakeup prevention
+///
+/// Before actually blocking, this function checks the task's `wake_pending`
+/// flag. If a concurrent `wake_task()` fired between the moment the task
+/// added itself to a `WaitQueue` and this call, the flag will be set and
+/// the function returns immediately without blocking.
+///
 /// Must NOT be called with interrupts disabled or while holding the
 /// scheduler lock (this function acquires both).
 pub fn block_current_task() {
@@ -536,8 +543,19 @@ pub fn block_current_task() {
     let switch_target = {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
-            // Take the current task and mark it Blocked
             if let Some(ref current) = sched.cpus[cpu_index].current_task {
+                // Check for a pending wakeup that raced with us before we
+                // entered the scheduler lock.  If set, clear it and skip
+                // blocking — the task carries on as if it was woken normally.
+                // SAFETY: AtomicBool::swap is safe to call from any context.
+                if current
+                    .wake_pending
+                    .swap(false, core::sync::atomic::Ordering::AcqRel)
+                {
+                    // Pending wakeup consumed — do not block.
+                    return;
+                }
+
                 // SAFETY: We hold the scheduler lock and interrupts are disabled.
                 unsafe {
                     *current.state.get() = TaskState::Blocked;
@@ -568,6 +586,13 @@ pub fn block_current_task() {
 ///
 /// Moves the task from `blocked_tasks` to the ready queue and sets its
 /// state to Ready. Returns `true` if the task was found and woken.
+///
+/// ## Lost-wakeup prevention
+///
+/// If the task is not yet in `blocked_tasks` (it is still transitioning
+/// from Ready → Blocked inside `block_current_task()`), this function sets
+/// the task's `wake_pending` flag so that `block_current_task()` will see
+/// the pending wakeup and return immediately without actually blocking.
 pub fn wake_task(id: TaskId) -> bool {
     let saved_flags = save_flags_and_cli();
     let woken = {
@@ -584,7 +609,16 @@ pub fn wake_task(id: TaskId) -> bool {
                 }
                 true
             } else {
-                false
+                // Task is not blocked yet (race: it is between adding itself
+                // to the WaitQueue waiter list and calling block_current_task).
+                // Set wake_pending so block_current_task() will abort the block.
+                if let Some(task) = sched.all_tasks.get(&id) {
+                    task.wake_pending
+                        .store(true, core::sync::atomic::Ordering::Release);
+                    true
+                } else {
+                    false
+                }
             }
         } else {
             false
@@ -821,7 +855,7 @@ fn cleanup_task_resources(task: &Arc<Task>) {
 ///
 /// Increments the global tick counter. Preemption is handled separately
 /// by `maybe_preempt()` which is called after EOI in the timer handler.
-/// Also checks interval timers for expiration.
+/// Also checks interval timers for expiration and wake deadlines for sleep.
 pub fn timer_tick() {
     let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -831,6 +865,50 @@ pub fn timer_tick() {
 
     // Check interval timers for all tasks
     super::timer::tick_all_timers(current_time_ns);
+
+    // Check wake deadlines for sleeping tasks
+    check_wake_deadlines(current_time_ns);
+}
+
+/// Check wake deadlines for all tasks and wake up those whose sleep has expired.
+///
+/// Called from timer_tick() with interrupts disabled.
+fn check_wake_deadlines(current_time_ns: u64) {
+    let saved_flags = save_flags_and_cli();
+    let mut scheduler = SCHEDULER.lock();
+    if let Some(ref mut sched) = *scheduler {
+        // Collect IDs of tasks to wake (to avoid borrow issues)
+        let mut to_wake = alloc::vec::Vec::new();
+        
+        for (id, task) in sched.all_tasks.iter() {
+            let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
+            if deadline != 0 && current_time_ns >= deadline {
+                to_wake.push(*id);
+            }
+        }
+        
+        // Wake up tasks whose deadline has passed
+        for id in to_wake {
+            if let Some(task) = sched.all_tasks.get(&id) {
+                // Clear the deadline
+                task.wake_deadline_ns.store(0, Ordering::Relaxed);
+                
+                // If task is blocked on sleep, wake it up
+                if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
+                    // SAFETY: scheduler lock held
+                    unsafe {
+                        *blocked_task.state.get() = TaskState::Ready;
+                    }
+                    let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
+                    if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
+                        cpu_sched.ready_queue.push_back(blocked_task);
+                    }
+                }
+            }
+        }
+    }
+    drop(scheduler);
+    restore_flags(saved_flags);
 }
 
 /// Get the current tick count
