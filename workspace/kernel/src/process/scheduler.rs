@@ -19,6 +19,7 @@ use super::task::{restore_first_task, switch_context, Task, TaskId, TaskPriority
 use crate::{
     arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer},
     capability::get_capability_manager,
+    serial_println, vga_println,
     sync::SpinLock,
 };
 use alloc::{
@@ -428,6 +429,40 @@ pub fn maybe_preempt() {
 
 /// The main function for the idle task
 extern "C" fn idle_task_main() -> ! {
+    // Display boot completion message and prompt ONCE (on BSP only)
+    static PROMPT_SHOWN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    
+    if !PROMPT_SHOWN.load(core::sync::atomic::Ordering::Relaxed) {
+        if PROMPT_SHOWN.compare_exchange(
+            false,
+            true,
+            core::sync::atomic::Ordering::SeqCst,
+            core::sync::atomic::Ordering::Relaxed
+        ).is_ok() {
+            // We're the first to show the prompt
+            serial_println!("");
+            serial_println!("Kernel initialization complete.");
+            serial_println!("Waiting for keyboard input...");
+            serial_println!("");
+            
+            if crate::arch::x86_64::vga::is_available() {
+                use core::fmt::Write;
+                let mut writer = crate::arch::x86_64::vga::VGA_WRITER.lock();
+                writer.set_color(
+                    crate::arch::x86_64::vga::Color::LightGreen,
+                    crate::arch::x86_64::vga::Color::Black,
+                );
+                let _ = write!(writer, "strat9>>> ");
+                writer.set_color(
+                    crate::arch::x86_64::vga::Color::White,
+                    crate::arch::x86_64::vga::Color::Black,
+                );
+            } else {
+                serial_println!("strat9>>> ");
+            }
+        }
+    }
+    
     log::info!("Idle task started");
     loop {
         // Halt until next interrupt (saves power, timer will wake us)

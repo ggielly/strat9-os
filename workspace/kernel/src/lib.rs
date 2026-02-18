@@ -294,14 +294,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     serial_println!("[init] Kthread components initialized.");
     vga_println!("[OK] Kthread components ready");
 
-    // =============================================
-    // Phase 8: create test tasks
-    // =============================================
-    serial_println!("[init] Creating test tasks...");
-    vga_println!("[..] Adding test tasks to scheduler...");
-    process::test::create_test_tasks();
-    serial_println!("[init] Test tasks created.");
-    vga_println!("[OK] Test tasks added to scheduler");
+    #[cfg(feature = "selftest")]
+    {
+        // =============================================
+        // Phase 8: create scheduler stress test tasks
+        // =============================================
+        serial_println!("[init] Creating scheduler test tasks...");
+        vga_println!("[..] Adding scheduler test tasks...");
+        process::test::create_test_tasks();
+        serial_println!("[init] Scheduler test tasks created.");
+        vga_println!("[OK] Scheduler test tasks added");
+    }
 
     #[cfg(feature = "selftest")]
     {
@@ -315,14 +318,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         vga_println!("[OK] Self-test tasks added");
     }
 
-    // =============================================
-    // Phase 8b: create Ring 3 test task
-    // =============================================
-    serial_println!("[init] Creating Ring 3 test task...");
-    vga_println!("[..] Creating Ring 3 user test task...");
-    process::usertest::create_user_test_task();
-    serial_println!("[init] Ring 3 test task created.");
-    vga_println!("[OK] Ring 3 test task ready");
+    #[cfg(feature = "selftest")]
+    {
+        // =============================================
+        // Phase 8b: create Ring 3 test task
+        // =============================================
+        serial_println!("[init] Creating Ring 3 test task...");
+        vga_println!("[..] Creating Ring 3 user test task...");
+        process::usertest::create_user_test_task();
+        serial_println!("[init] Ring 3 test task created.");
+        vga_println!("[OK] Ring 3 test task ready");
+    }
 
     // =============================================
     // Phase 8c: ELF loader — load initfs module if present
@@ -481,35 +487,6 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     }
 
     // =============================================
-    // Boot complete
-    // =============================================
-    serial_println!("");
-    serial_println!("Kernel initialization complete.");
-    serial_println!("Waiting for keyboard input...");
-    serial_println!("");
-
-    vga_println!("");
-
-    // Initialize keyboard layout to French by default
-    crate::arch::x86_64::keyboard_layout::set_french_layout();
-
-    if arch::x86_64::vga::is_available() {
-        let mut writer = arch::x86_64::vga::VGA_WRITER.lock();
-        writer.set_color(
-            arch::x86_64::vga::Color::LightGreen,
-            arch::x86_64::vga::Color::Black,
-        );
-        let _ = write!(writer, "strat9>>> ");
-        writer.set_color(
-            arch::x86_64::vga::Color::White,
-            arch::x86_64::vga::Color::Black,
-        );
-    } else {
-        // CHEVRON PROMPT
-        serial_println!("strat9>>> ");
-    }
-
-    // =============================================
     // Boot complete — start preemptive multitasking
     // =============================================
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
@@ -519,8 +496,12 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // For now, skip it to test multitasking first
     serial_println!("[init] (Storage verification skipped - needs VirtIO IRQ handler)");
 
+    // Initialize keyboard layout to French by default
+    crate::arch::x86_64::keyboard_layout::set_french_layout();
+
     // Start the scheduler - this will never return
     // The scheduler will alternate between idle task and test task(s)
+    // Note: The prompt will be displayed by the idle task or a dedicated shell task
     process::schedule();
 }
 
