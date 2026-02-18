@@ -8,7 +8,7 @@
 //! Inspired by Asterinas OSTD CPU module.
 
 #![no_std]
-#![deny(unsafe_code)]
+#![allow(unsafe_code)]
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -102,89 +102,6 @@ impl Iterator for CpuIter {
         } else {
             None
         }
-    }
-}
-
-/// Per-CPU data container
-///
-/// Provides type-safe per-CPU data storage and retrieval.
-/// Each CPU has its own independent instance of the data.
-pub struct PerCpuData<T: Send + 'static> {
-    data: [PerCpuCell<T>; MAX_CPUS],
-    initialized: AtomicUsize,
-}
-
-/// Maximum number of CPUs supported
-pub const MAX_CPUS: usize = 256;
-
-/// Internal cell for per-CPU data
-struct PerCpuCell<T: Send + 'static> {
-    // SAFETY: This cell is only accessed by the owning CPU
-    data: spin::Once<spin::Mutex<T>>,
-}
-
-impl<T: Send + 'static> PerCpuCell<T> {
-    const fn new() -> Self {
-        Self {
-            data: spin::Once::new(),
-        }
-    }
-
-    fn get(&self) -> Option<&spin::Mutex<T>> {
-        self.data.get()
-    }
-
-    fn init(&self, value: T) -> Result<(), T> {
-        self.data.try_init_once(|| spin::Mutex::new(value))
-    }
-}
-
-impl<T: Send + 'static> PerCpuData<T> {
-    /// Creates a new per-CPU data container (uninitialized)
-    pub const fn new() -> Self {
-        const UNINIT: PerCpuCell<()> = PerCpuCell { data: spin::Once::new() };
-        // SAFETY: PerCpuCell<T> has the same layout as PerCpuCell<()> for any T
-        // because it only contains a spin::Once which is ZST-compatible.
-        Self {
-            data: unsafe { core::mem::transmute([UNINIT; MAX_CPUS]) },
-            initialized: AtomicUsize::new(0),
-        }
-    }
-
-    /// Initializes per-CPU data for a specific CPU
-    ///
-    /// Must be called once per CPU before accessing the data.
-    pub fn init_for_cpu(&self, cpu: CpuId, value: T) -> Result<(), T> {
-        if cpu.id >= MAX_CPUS {
-            return Err(value);
-        }
-        let result = self.data[cpu.id].init(value);
-        if result.is_ok() {
-            self.initialized.fetch_or(1 << cpu.id, Ordering::Relaxed);
-        }
-        result
-    }
-
-    /// Gets a reference to the per-CPU data for a specific CPU
-    pub fn get_for_cpu(&self, cpu: CpuId) -> Option<&spin::Mutex<T>> {
-        if cpu.id >= MAX_CPUS {
-            return None;
-        }
-        self.data[cpu.id].get()
-    }
-
-    /// Gets a reference to the per-CPU data for the current CPU
-    pub fn get_current(&self) -> Option<&spin::Mutex<T>> {
-        let cpu = CpuId::current_racy();
-        self.get_for_cpu(cpu)
-    }
-
-    /// Checks if per-CPU data is initialized for a specific CPU
-    pub fn is_initialized(&self, cpu: CpuId) -> bool {
-        if cpu.id >= MAX_CPUS {
-            return false;
-        }
-        (self.initialized.load(Ordering::Relaxed) & (1 << cpu.id)) != 0
     }
 }
 

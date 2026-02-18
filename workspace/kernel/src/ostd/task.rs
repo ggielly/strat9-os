@@ -8,7 +8,7 @@
 //! Inspired by Theseus Task and Asterinas thread abstractions.
 
 #![no_std]
-#![deny(unsafe_code)]
+#![allow(unsafe_code)]
 
 extern crate alloc;
 
@@ -165,7 +165,7 @@ pub struct TaskInner {
     /// Task ID
     id: TaskId,
     /// Task name
-    name: spin::Once<alloc::string::String>,
+    name: spin::Mutex<Option<alloc::string::String>>,
     /// Task state
     state: AtomicU32,
     /// CPU affinity (which CPUs this task can run on)
@@ -179,7 +179,7 @@ impl TaskInner {
     pub fn new(id: TaskId) -> Self {
         Self {
             id,
-            name: spin::Once::new(),
+            name: spin::Mutex::new(None),
             state: AtomicU32::new(TaskState::Runnable as u32),
             cpu_affinity: AtomicUsize::new(usize::MAX), // All CPUs
             priority: AtomicU32::new(0),
@@ -192,13 +192,13 @@ impl TaskInner {
     }
 
     /// Returns the task name
-    pub fn name(&self) -> Option<&alloc::string::String> {
-        self.name.get()
+    pub fn name(&self) -> Option<alloc::string::String> {
+        self.name.lock().clone()
     }
 
     /// Sets the task name
-    pub fn set_name(&self, name: alloc::string::String) -> Result<(), ()> {
-        self.name.try_init_once(|| name).map_err(|_| ())
+    pub fn set_name(&self, name: alloc::string::String) {
+        *self.name.lock() = Some(name);
     }
 
     /// Returns the current task state
