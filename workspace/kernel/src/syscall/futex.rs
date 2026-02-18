@@ -1,5 +1,5 @@
 //! Futex (Fast Userspace Mutex) syscall handlers (stub implementation)
-
+// TODO: implement futex syscalls
 use super::error::SyscallError;
 
 /// SYS_FUTEX_WAIT: Wait on a futex

@@ -7,6 +7,19 @@ pub fn net_recv(buf: &mut [u8]) -> Result<usize> {
     unsafe { syscall2(number::SYS_NET_RECV, buf.as_mut_ptr() as usize, buf.len()) }
 }
 
+/// Get current monotonic tick count (kernel ticks).
+pub fn clock_gettime_ticks() -> Result<u64> {
+    unsafe { syscall0(number::SYS_CLOCK_GETTIME).map(|v| v as u64) }
+}
+
+/// Yield the current process.
+pub fn proc_yield() -> Result<()> {
+    unsafe {
+        syscall0(number::SYS_PROC_YIELD)?;
+        Ok(())
+    }
+}
+
 /// Try to receive an IPC message without blocking.
 pub fn ipc_try_recv(port: u64, msg: &mut crate::IpcMessage) -> Result<()> {
     unsafe {
@@ -52,6 +65,7 @@ pub mod number {
     pub const SYS_NET_RECV: usize = 410;
     pub const SYS_NET_SEND: usize = 411;
     pub const SYS_NET_INFO: usize = 412;
+    pub const SYS_CLOCK_GETTIME: usize = 500;
     pub const SYS_DEBUG_LOG: usize = 600;
 }
 

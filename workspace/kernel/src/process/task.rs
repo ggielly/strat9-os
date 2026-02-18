@@ -116,6 +116,9 @@ pub struct Task {
     /// Checked by `block_current_task()` — if set, the task skips blocking
     /// and continues execution, preventing a lost-wakeup race.
     pub wake_pending: AtomicBool,
+    /// Sleep deadline in nanoseconds (monotonic). If non-zero, the task
+    /// is sleeping until this time. Checked by the scheduler to auto-wake.
+    pub wake_deadline_ns: AtomicU64,
 }
 
 /// CPU context saved/restored during context switches.
@@ -289,6 +292,7 @@ impl Task {
             signal_stack: SyncUnsafeCell::new(None),
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),
+            wake_deadline_ns: AtomicU64::new(0),
         }))
     }
 
@@ -327,6 +331,7 @@ impl Task {
             signal_stack: SyncUnsafeCell::new(None),
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),
+            wake_deadline_ns: AtomicU64::new(0),
         }))
     }
 }

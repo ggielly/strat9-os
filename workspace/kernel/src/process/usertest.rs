@@ -124,6 +124,7 @@ pub fn create_user_test_task() {
         signal_stack: SyncUnsafeCell::new(None),
         itimers: super::timer::ITimers::new(),
         wake_pending: core::sync::atomic::AtomicBool::new(false),
+        wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
     });
 
     crate::process::add_task(task);

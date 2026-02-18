@@ -62,6 +62,26 @@ pub const SYS_IPC_RING_CREATE: u64 = 210;
 /// Map a ring buffer. arg1 = ring handle, arg2 = out_ptr
 pub const SYS_IPC_RING_MAP: u64 = 211;
 
+/// create a typed sync-channel.
+/// arg1 = capacity (number of IpcMessages). Returns channel handle.
+pub const SYS_CHAN_CREATE: u64 = 220;
+
+/// Send a message to a channel, blocking if full.
+/// arg1 = channel handle, arg2 = msg_ptr (64 bytes).
+pub const SYS_CHAN_SEND: u64 = 221;
+
+/// Receive a message from a channel, blocking if empty.
+/// arg1 = channel handle, arg2 = msg_ptr (64 bytes out).
+pub const SYS_CHAN_RECV: u64 = 222;
+
+/// Try to receive without blocking.
+/// arg1 = channel handle, arg2 = msg_ptr. Returns 0 ok, -EWOULDBLOCK if empty.
+pub const SYS_CHAN_TRY_RECV: u64 = 223;
+
+/// Close / destroy a channel handle.
+/// arg1 = channel handle.
+pub const SYS_CHAN_CLOSE: u64 = 224;
+
 // ============================================================
 // Block 300-399: process / thread
 // ============================================================
@@ -171,6 +191,10 @@ pub const SYS_VOLUME_INFO: u64 = 422;
 
 /// Get current monotonic tick count. Returns tick count in rax.
 pub const SYS_CLOCK_GETTIME: u64 = 500;
+
+/// Sleep for a specified duration. arg1=timespec_ptr (request), arg2=timespec_ptr (remain, optional)
+/// Returns 0 on success, -EINTR if interrupted by signal.
+pub const SYS_NANOSLEEP: u64 = 501;
 
 // ============================================================
 // Block 600-699: debug / profiling

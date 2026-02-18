@@ -55,6 +55,8 @@ pub enum UserSliceError {
     NotMapped,
     /// The mapping lacks the required permission (e.g. not writable).
     PermissionDenied,
+    /// The slice is too small for the requested operation.
+    InvalidSize,
 }
 
 impl From<UserSliceError> for SyscallError {
@@ -66,6 +68,7 @@ impl From<UserSliceError> for SyscallError {
             UserSliceError::TooLong => SyscallError::InvalidArgument,
             UserSliceError::NotMapped => SyscallError::Fault,
             UserSliceError::PermissionDenied => SyscallError::Fault,
+            UserSliceError::InvalidSize => SyscallError::InvalidArgument,
         }
     }
 }
@@ -251,6 +254,22 @@ impl UserSliceRead {
         n
     }
 
+    /// Read a value of type T from the user slice.
+    ///
+    /// # Safety
+    /// The caller must ensure that T is Pod (plain old data) and that the
+    /// slice is at least size_of::<T>() bytes.
+    pub fn read_val<T: Copy>(&self) -> Result<T, UserSliceError> {
+        if self.len < core::mem::size_of::<T>() {
+            return Err(UserSliceError::InvalidSize);
+        }
+        // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
+        // T is Copy, so we can safely read it.
+        unsafe {
+            Ok(core::ptr::read_unaligned(self.ptr as *const T))
+        }
+    }
+
     /// Get the raw pointer (for logging/debugging only).
     pub fn as_ptr(&self) -> u64 {
         self.ptr
@@ -381,6 +400,23 @@ impl UserSliceReadWrite {
             core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr as *mut u8, n);
         }
         n
+    }
+
+    /// Write a value of type T to the user slice.
+    ///
+    /// # Safety
+    /// The caller must ensure that T is Pod (plain old data) and that the
+    /// slice is at least size_of::<T>() bytes.
+    pub fn write_val<T: Copy>(&self, val: &T) -> Result<(), UserSliceError> {
+        if self.len < core::mem::size_of::<T>() {
+            return Err(UserSliceError::InvalidSize);
+        }
+        // SAFETY: We validated that [ptr, ptr+len) is mapped and user-writable.
+        // T is Copy, so we can safely write it.
+        unsafe {
+            core::ptr::write_unaligned(self.ptr as *mut T, *val);
+        }
+        Ok(())
     }
 
     /// Get the raw pointer (for logging/debugging only).

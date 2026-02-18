@@ -855,7 +855,7 @@ fn cleanup_task_resources(task: &Arc<Task>) {
 ///
 /// Increments the global tick counter. Preemption is handled separately
 /// by `maybe_preempt()` which is called after EOI in the timer handler.
-/// Also checks interval timers for expiration.
+/// Also checks interval timers for expiration and wake deadlines for sleep.
 pub fn timer_tick() {
     let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -865,6 +865,50 @@ pub fn timer_tick() {
 
     // Check interval timers for all tasks
     super::timer::tick_all_timers(current_time_ns);
+
+    // Check wake deadlines for sleeping tasks
+    check_wake_deadlines(current_time_ns);
+}
+
+/// Check wake deadlines for all tasks and wake up those whose sleep has expired.
+///
+/// Called from timer_tick() with interrupts disabled.
+fn check_wake_deadlines(current_time_ns: u64) {
+    let saved_flags = save_flags_and_cli();
+    let mut scheduler = SCHEDULER.lock();
+    if let Some(ref mut sched) = *scheduler {
+        // Collect IDs of tasks to wake (to avoid borrow issues)
+        let mut to_wake = alloc::vec::Vec::new();
+        
+        for (id, task) in sched.all_tasks.iter() {
+            let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
+            if deadline != 0 && current_time_ns >= deadline {
+                to_wake.push(*id);
+            }
+        }
+        
+        // Wake up tasks whose deadline has passed
+        for id in to_wake {
+            if let Some(task) = sched.all_tasks.get(&id) {
+                // Clear the deadline
+                task.wake_deadline_ns.store(0, Ordering::Relaxed);
+                
+                // If task is blocked on sleep, wake it up
+                if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
+                    // SAFETY: scheduler lock held
+                    unsafe {
+                        *blocked_task.state.get() = TaskState::Ready;
+                    }
+                    let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
+                    if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
+                        cpu_sched.ready_queue.push_back(blocked_task);
+                    }
+                }
+            }
+        }
+    }
+    drop(scheduler);
+    restore_flags(saved_flags);
 }
 
 /// Get the current tick count

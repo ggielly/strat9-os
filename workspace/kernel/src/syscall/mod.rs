@@ -1,9 +1,11 @@
 //! Strat9-OS Syscall Interface
 //!
 //! Implements the kernel-side syscall dispatcher and handlers for the
-//! Strat9-OS native ABI. Syscall numbers are organized in blocks of 100:
+//! Strat9-OS native ABI.
 //!
-//! - 0-99: Capabilities (handle management)
+//! Syscall numbers are organized in blocks of 100:
+//!
+//! - 000-099 : Capabilities (handle management)
 //! - 100-199: memory
 //! - 200-299: IPC
 //! - 300-399: process/thread
@@ -16,8 +18,10 @@ pub mod error;
 pub mod futex;
 pub mod numbers;
 pub mod signal;
+pub mod time;
 
 pub use dispatcher::dispatch;
+pub use time::{sys_clock_gettime, sys_nanosleep};
 
 /// Stack frame passed to the Rust syscall dispatcher.
 ///
