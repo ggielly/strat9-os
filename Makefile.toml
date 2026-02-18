@@ -1,0 +1,404 @@
+[config]
+default_to_workspace = false
+skip_core_tasks = true
+
+[env]
+CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
+KERNEL_TARGET = "x86_64-unknown-none"
+BUILD_DIR = "build"
+QEMU = "qemu-system-x86_64"
+
+# =============================================================================
+# Build Tasks - limine bootloader
+# =============================================================================
+
+[tasks.setup-limine]
+description = "Download and setup Limine bootloader"
+command = "bash"
+args = ["tools/scripts/setup-limine.sh"]
+
+
+[tasks.patch-relibc]
+description = "Patch relibc with Strat9-OS PAL (Idempotent)"
+script_runner = "@shell"
+script_extension = "sh"
+script = [
+    '''
+    relibc_dir="sdk/relibc"
+    strat9_libc_dir="sdk/strat9-libc"
+    platform_mod="$relibc_dir/src/platform/mod.rs"
+    target_dir="$relibc_dir/src/platform/strat9"
+
+    if [ ! -d "$relibc_dir" ]; then
+        echo "relibc directory not found. Cloning first..."
+        exit 0
+    fi
+
+    # 1. Ensure target directory exists
+    mkdir -p "$target_dir"
+
+    # 2. Copy Strat9 PAL files
+    cp "$strat9_libc_dir"/*.rs "$target_dir/"
+
+    # 3. Patch src/platform/mod.rs (Idempotent with markers)
+    echo "Patching $platform_mod..."
+    
+    # Remove any existing Strat9 blocks (idempotent removal)
+    sed -i '/\/\/ STRAT9-OS-START/,/\/\/ STRAT9-OS-END/d' "$platform_mod"
+    
+    # Define the blocks to insert
+    sys_block="// STRAT9-OS-START
+#[cfg(all(not(feature = \"no_std\"), target_os = \"strat9\"))]
+#[path = \"strat9/mod.rs\"]
+pub(crate) mod sys;
+// STRAT9-OS-END
+"
+    auxv_block="// STRAT9-OS-START
+#[cfg(target_os = \"strat9\")]
+pub use self::sys::auxv_defs;
+// STRAT9-OS-END"
+
+    modified=false
+    # Insert sys block after redox sys
+    if grep -q 'redox/mod.rs.*pub(crate) mod sys' "$platform_mod"; then
+        sed -i "/redox\/mod\.rs.*pub(crate) mod sys/a $sys_block" "$platform_mod"
+        modified=true
+    fi
+    
+    # Insert auxv block after redox auxv
+    if grep -q 'redox_rt::auxv_defs' "$platform_mod"; then
+        sed -i "/redox_rt::auxv_defs/a $auxv_block" "$platform_mod"
+        modified=true
+    fi
+    
+    if [ "$modified" = true ]; then
+        echo "Successfully patched $platform_mod with markers."
+    else
+        echo "Could not find insertion points in $platform_mod"
+    fi
+    ''',
+]
+
+[tasks.setup-relibc]
+description = "Clone and setup relibc source for Strat9"
+script_runner = "@shell"
+script = [
+    '''
+    if [ ! -d "sdk/relibc" ]; then
+        mkdir -p sdk/relibc
+        git clone https://github.com/ggielly/relibc sdk/relibc
+        cd sdk/relibc
+        git checkout strat9-os
+        git submodule update --init --recursive
+    else
+        cd sdk/relibc
+        git fetch origin
+        git checkout strat9-os
+        git pull origin strat9-os
+    fi
+
+    relibc_dir="sdk/relibc"
+    strat9_libc_dir="sdk/strat9-libc"
+    platform_mod="$relibc_dir/src/platform/mod.rs"
+    target_dir="$relibc_dir/src/platform/strat9"
+
+    # 1. Ensure target directory exists
+    mkdir -p "$target_dir"
+
+    # 2. Optionally copy Strat9 PAL files if present (not required when fork already contains them)
+    if [ -d "$strat9_libc_dir" ]; then
+        cp "$strat9_libc_dir"/*.rs "$target_dir/"
+    fi
+
+    # 3. Patch src/platform/mod.rs (Idempotent with markers)
+    echo "Verifying $platform_mod has Strat9 markers..."
+
+    # Verify the markers exist (they should already be in the fork).
+    # Check for STRAT9-OS markers in relibc fork.
+    if ! grep -q '// STRAT9-OS-START' "$platform_mod"; then
+        echo "ERROR: Strat9 markers not found in $platform_mod. Please update your fork."
+        exit 1
+    fi
+
+    echo "Successfully verified $platform_mod with Strat9 markers."
+    ''',
+]
+
+# =============================================================================
+# Build tasks - Relibc 
+# =============================================================================
+
+[tasks.check-relibc]
+description = "Check relibc compilation for Strat9 target"
+script_runner = "@shell"
+script = ['''
+echo "Checking relibc for x86_64-strat9 target..."
+cd sdk/relibc
+cargo check \
+    --target ../../targets/x86_64-unknown-strat9.json \
+    -Z build-std=core,alloc \
+    -Z json-target-spec \
+    --no-default-features
+echo "Relibc check completed."
+''']
+
+[tasks.build-relibc]
+description = "Build relibc static library for Strat9"
+dependencies = ["setup-relibc"]
+script_runner = "@shell"
+script = ['''
+echo "Building relibc for x86_64-strat9 target..."
+cd sdk/relibc
+cargo build \
+    --target ../../targets/x86_64-unknown-strat9.json \
+    --release \
+    -Z build-std=core,alloc \
+    -Z json-target-spec \
+    --no-default-features
+
+echo ""
+echo "=== Relibc Build Complete ==="
+echo ""
+librelibc="../../target/x86_64-strat9/release/librelibc.a"
+if [ -f "$librelibc" ]; then
+    size=$(stat -c%s "$librelibc" 2>/dev/null || stat -f%z "$librelibc")
+    size_kb=$((size / 1024))
+    echo "  librelibc.a: $size bytes ($size_kb KB)"
+    echo "  Location: target/x86_64-strat9/release/librelibc.a"
+else
+    echo "  Warning: librelibc.a not found"
+fi
+echo ""
+''']
+
+# Legacy bootloader (kept for reference, not used with Limine)
+[tasks.assemble-bootloader]
+description = "Assemble le bootloader (NASM stage1.asm qui inclut stage2.asm) - LEGACY"
+command = "powershell"
+args = [
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    "tools/scripts/assemble-bootloader.ps1",
+]
+
+# =============================================================================
+# Build tasks - Kernel 
+# =============================================================================
+
+[tasks.kernel]
+description = "Build the Strat9 kernel (release)"
+cwd = "workspace/kernel"
+command = "cargo"
+args = ["build", "--release", "--target", "${KERNEL_TARGET}"]
+
+[tasks.kernel-debug]
+description = "Build the Strat9 kernel (debug)"
+cwd = "workspace/kernel"
+command = "cargo"
+args = ["build", "--target", "${KERNEL_TARGET}"]
+
+[tasks.check]
+description = "Check kernel code without building"
+cwd = "workspace/kernel"
+command = "cargo"
+args = ["check", "--target", "${KERNEL_TARGET}"]
+
+[tasks.clippy]
+description = "Run clippy on kernel code"
+cwd = "workspace/kernel"
+command = "cargo"
+args = ["clippy", "--target", "${KERNEL_TARGET}"]
+
+[tasks.fmt]
+description = "Format all code"
+command = "cargo"
+args = ["fmt", "--all"]
+
+# =============================================================================
+# Image generation - Bootable disk image
+# =============================================================================
+
+[tasks.strate-ext4]
+description = "Compiler la strate EXT4 (userspace filesystem)"
+cwd = "workspace/components/strate-fs-ext4"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.limine-image]
+description = "Create bootable ISO/IMG with Limine + kernel"
+dependencies = ["setup-limine", "kernel", "strate-ext4"]
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-limine-image.sh
+''']
+
+# Legacy disk image (kept for reference)
+[tasks.disk-image]
+description = "Creer l'image disque bootable (.img) avec bootloader + kernel - LEGACY"
+dependencies = ["assemble-bootloader", "kernel"]
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "tools/scripts/create-image.ps1"]
+
+[tasks.build-all]
+description = "Compilation complete : Limine + kernel Rust + image disque/ISO"
+dependencies = ["limine-image"]
+
+# =============================================================================
+# QEMU run tasks
+# =============================================================================
+
+[tasks.run-gui]
+description = "Lancer QEMU avec l'ISO Limine (interface graphique) + disque EXT4"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu.log",
+    "-d",
+    "guest_errors",
+]
+
+[tasks.run]
+description = "Lancer QEMU avec l'ISO Limine (mode texte) + disque EXT4"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-nographic",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu.log",
+]
+
+[tasks.run-debug]
+description = "Lancer QEMU en mode debug (GDB server sur :1234) + disque EXT4"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-s",
+    "-S",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu-debug.log",
+    "-d",
+    "int,cpu_reset,guest_errors",
+]
+
+[tasks.test-boot]
+description = "Test rapide du boot (10 secondes puis stop)"
+dependencies = ["limine-image"]
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/test-boot.sh
+''']
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+
+[tasks.clean]
+description = "Nettoyer tous les artefacts de build"
+script_runner = "@shell"
+script = ['''
+cargo clean
+if [ -d "build" ]; then rm -rf "build"; fi
+if [ -f "qemu.log" ]; then rm -f "qemu.log"; fi
+echo "Clean terminé."
+''']
+
+# =============================================================================
+# Development Tasks
+# =============================================================================
+
+[tasks.doc]
+description = "Generer et ouvrir la documentation"
+cwd = "workspace/kernel"
+command = "cargo"
+args = ["doc", "--target", "${KERNEL_TARGET}", "--no-deps", "--open"]
+
+[tasks.size]
+description = "Afficher la taille du kernel et des sections"
+dependencies = ["kernel"]
+script_runner = "@shell"
+script = ['''
+kernel="target/x86_64-unknown-none/release/kernel"
+if [ -f "$kernel" ]; then
+    echo ""
+    echo "=== Size of the kernel ==="
+    echo ""
+    size=$(stat -c%s "$kernel")
+    size_kb=$((size / 1024))
+    echo "  Taille totale : $size bytes ($size_kb KB)"
+    echo ""
+    echo "=== Sections ELF ==="
+    echo ""
+    size "$kernel"
+    echo ""
+fi
+''']
+
+# =============================================================================
+# Default Task
+# =============================================================================
+
+[tasks.default]
+description = "Build complet (bootloader + kernel + image)"
+dependencies = ["build-all"]
+
+[tasks.all]
+alias = "default"

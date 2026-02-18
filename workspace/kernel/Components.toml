@@ -1,0 +1,51 @@
+# Strat9-OS Kernel Components Configuration
+#
+# This file defines all kernel components and their initialization order.
+# Components are initialized in dependency order - components with dependencies
+# are initialized after their dependencies.
+#
+# Format:
+# [components.<category>]
+# <component_name> = { path = "<relative_path>", deps = ["<dep1>", "<dep2>"] }
+
+[components.core]
+# Memory management - MUST BE FIRST !%#@##
+memory = { path = "memory", deps = [] }
+##########################################
+
+
+# Logging - early for debug output
+logger = { path = "logger", deps = ["memory"] }
+
+# Architecture primitives (GDT, IDT, TSS)
+arch = { path = "arch", deps = ["memory"] }
+
+# VFS - virtual file system
+vfs = { path = "vfs", deps = ["memory"] }
+
+# IPC - inter-process communication
+ipc = { path = "ipc", deps = ["memory"] }
+
+# Process and task management
+process = { path = "process", deps = ["memory", "arch"] }
+
+# Driver framework
+drivers = { path = "drivers", deps = ["memory", "arch"] }
+
+# Capability-based security
+capability = { path = "capability", deps = ["memory"] }
+
+# Namespace management
+namespace = { path = "namespace", deps = ["vfs"] }
+
+# Silo management
+silo = { path = "silo", deps = ["process", "capability"] }
+
+# Syscall interface
+syscall = { path = "syscall", deps = ["process", "arch"] }
+
+# ACPI and power management
+acpi = { path = "acpi", deps = ["arch", "memory"] }
+
+# Synchronization primitives
+sync = { path = "sync", deps = ["memory"] }

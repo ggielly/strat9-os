@@ -1,0 +1,28 @@
+[package]
+name = "strat9-fs-xfs"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "XFS filesystem support for strat9-os. Based on the crisscrofs project."
+
+# ============================================================================
+# NOTE: XFS support is currently DISABLED and reserved for future use.
+# strat9-os uses EXT4 as its primary filesystem (see components/fs-ext4).
+# To enable XFS support in the future:
+# 1. Uncomment the workspace member in root Cargo.toml
+# 2. Enable the "xfs" feature in this crate
+# ============================================================================
+
+[dependencies]
+strat9-kernel = { path = "../../kernel" }
+strat9-components-api = { path = "../api" }
+xfs-rs = { path = "xfs-rs" }
+fs-abstraction = { path = "fs-abstraction" }
+spin = "0.10.0"
+log = "0.4"
+
+[features]
+default = []                     # XFS disabled by default
+alloc = ["fs-abstraction/alloc"]
+xfs = ["alloc"]                  # Enable this feature to activate XFS support

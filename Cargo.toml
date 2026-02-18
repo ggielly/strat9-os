@@ -1,0 +1,66 @@
+[workspace]
+members = [
+    "workspace/kernel",
+    "workspace/bootloader",
+    "workspace/components/api",
+    "workspace/components/strate-fs-abstraction",
+    "workspace/components/strate-fs-ext4",
+    "workspace/components/syscall",
+    "workspace/components/strate-silo-test",
+    "workspace/components/strate-net",
+]
+exclude = [
+    "workspace/components/relibc",        # External dependency, built separately
+    "workspace/components/libc-strat9",   # Placeholder, not yet implemented
+    "workspace/components/strate-fs-xfs", # Missing fs-abstraction dependency
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+repository = "https://github.com/ggielly/strat9-os"
+
+[workspace.dependencies]
+spin = "0.10.0"
+bitflags = "2.11.0"
+log = "0.4"
+
+[workspace.lints.rust]
+dangling_pointers_from_temporaries = "deny"
+irrefutable_let_patterns = "deny"
+mismatched_lifetime_syntaxes = "deny"
+non_camel_case_types = "allow"
+non_snake_case = "allow" # TODO review occuurences
+non_upper_case_globals = "allow" # TODO review occuurences
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_os, values("strat9"))',
+] }
+unpredictable_function_pointer_comparisons = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unused_imports = "deny"
+unused_must_use = "deny"
+unused_mut = "deny"
+unused_unsafe = "deny"
+unused_variables = "allow" # TODO review occurrences (too many for now)
+
+[profile.release]
+opt-level = "z"   # Optimize for size
+lto = true        # Link-Time Optimization
+codegen-units = 1 # Single codegen unit for max LTO
+panic = "abort"   # No unwinding in kernel
+strip = true      # Strip debug symbols from release
+
+[profile.dev]
+opt-level = 0      # No optimization for faster compilation
+debug = 2          # Full debug information (maximum)
+strip = false      # Keep all symbols
+panic = "unwind"   # Full stack traces for debugging
+incremental = true # Faster recompilation
+lto = false        # Faster compilation
+
+# Temporarily commented out due to relibc Cargo.toml issues
+# [patch."https://github.com/redox-os/relibc"]
+# relibc = { path = "workspace/components/relibc" }

@@ -1,0 +1,7 @@
+use spin::Mutex;
+use uart_16550::SerialPort;
+
+pub static COM1: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(0x3F8) });
+pub static COM2: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(0x2F8) });
+pub static COM3: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(0x3E8) });
+pub static COM4: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(0x2E8) });

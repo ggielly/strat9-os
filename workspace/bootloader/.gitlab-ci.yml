@@ -1,0 +1,23 @@
+image: "rust:latest"
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+
+cache:
+  paths:
+    - .cargo/
+    - target/
+
+before_script:
+  - apt-get update -yq
+  - apt-get install -yq nasm make
+
+stages:
+  - build
+  - test
+
+compilation:
+  stage: build
+  script:
+    - cargo build --verbose
+    - cd asm && make

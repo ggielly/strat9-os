@@ -1,0 +1,24 @@
+[package]
+name = "strate-net"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[lib]
+name = "strate_net"
+path = "src/lib.rs"
+
+[[bin]]
+name = "strate-net-silo"
+path = "src/main.rs"
+
+[dependencies]
+smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-icmp", "socket-dhcpv4"] }
+spin = { workspace = true }
+log = { workspace = true }
+bitflags = { workspace = true }
+
+[profile.release]
+panic = "abort"
+strip = true

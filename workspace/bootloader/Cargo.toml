@@ -1,0 +1,34 @@
+[package]
+name = "strat9-bootloader"
+version = "0.1.0"
+edition = "2021"
+
+# BIOS uses lib target
+[lib]
+name = "bootloader"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+# Binary target removed to avoid conflicts - bootloader is library-only
+
+[dependencies]
+bitflags = "1.3.2"
+linked_list_allocator = "0.10.5"
+log = { workspace = true }
+spin = { workspace = true }
+
+# EXT4 filesystem (primary filesystem)
+# Note: ext4_rs doesn't have an 'alloc' feature, using without features
+# For now, we'll implement our own EXT4 wrapper without external dependencies
+# ext4_rs = { git = "https://github.com/yuoo655/ext4_rs.git", default-features = false }
+
+# Serial port for debugging
+serial_16550 = { package = "uart_16550", version = "0.3" }
+
+[build-dependencies]
+# For building assembly stages
+nasm-rs = "0.2"
+
+[features]
+default = []
+serial_debug = []

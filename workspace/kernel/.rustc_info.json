@@ -1,0 +1,2 @@
+[unstable]
+no_link_self_contained = true

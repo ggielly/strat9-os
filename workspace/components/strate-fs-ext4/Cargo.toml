@@ -1,0 +1,31 @@
+[package]
+name = "strate-fs-ext4"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[lib]
+name = "fs_ext4"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fs-ext4-strate"
+path = "src/main.rs"
+
+[dependencies]
+# EXT4 filesystem implementation
+# Note: Using yuoo655's fork which is compatible with no_std
+ext4_rs = { git = "https://github.com/yuoo655/ext4_rs", default-features = false }
+
+# Basic no_std dependencies
+spin = { workspace = true }
+bitflags = { workspace = true }
+log = { workspace = true }
+
+# NOTE: Not using the syscall crate because it has different syscall numbers (Redox-style)
+# We implement our own syscall wrappers with CascadeOS numbering
+
+[features]
+default = []
+std = []

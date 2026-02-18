@@ -1,0 +1,409 @@
+# Makefile.toml (for builder meta-repository)
+# Orchestrates the complete build of strat9-os from multiple repositories
+# This file lives in the builder repository and coordinates workspace builds
+
+[config]
+default_to_workspace = false
+skip_core_tasks = true
+
+[env]
+KERNEL_TARGET = "x86_64-unknown-none"
+STRAT9_TARGET = "x86_64-strat9"
+BUILD_DIR = "build"
+WORKSPACE_DIR = "workspace"
+QEMU = "qemu-system-x86_64"
+
+# =============================================================================
+# Workspace setup verification
+# =============================================================================
+
+[tasks.verify-workspace]
+description = "Verify all repositories are cloned"
+script_runner = "@shell"
+script = ['''
+echo "verifying workspace structure..."
+
+required_dirs=(
+    "workspace/kernel"
+    "workspace/bootloader"
+    "workspace/components/strate-fs-ext4"
+    "workspace/components/strate-fs-abstraction"
+    "workspace/components/strate-silo"
+    "workspace/components/strate-silo-test"
+    "workspace/components/syscall"
+    "workspace/components/api"
+    "workspace/sdk/relibc"
+)
+
+missing=0
+for dir in "${required_dirs[@]}"; do
+    if [ ! -d "$dir" ]; then
+        echo "  ✗ missing: $dir"
+        missing=1
+    else
+        echo "  ✓ found: $dir"
+    fi
+done
+
+if [ $missing -eq 1 ]; then
+    echo ""
+    echo "error: some repositories are missing"
+    echo "run: ./builder.sh clone"
+    exit 1
+fi
+
+echo ""
+echo "workspace verification: OK"
+''']
+
+# =============================================================================
+# Limine bootloader setup
+# =============================================================================
+
+[tasks.setup-limine]
+description = "Download and setup Limine bootloader"
+script_runner = "@shell"
+script = ['''
+if [ -d "/opt/limine" ]; then
+    echo "limine already installed in /opt/limine"
+    exit 0
+fi
+
+echo "limine should be installed in container"
+echo "if missing, rebuild container with: ./builder.sh build-container"
+''']
+
+# =============================================================================
+# relibc build
+# =============================================================================
+
+[tasks.build-relibc]
+description = "Build relibc static library for strat9"
+dependencies = ["verify-workspace"]
+script_runner = "@shell"
+script = ['''
+echo "building relibc for ${STRAT9_TARGET}..."
+cd workspace/sdk/relibc
+
+cargo build \
+    --target ../../targets/x86_64-strat9.json \
+    --release \
+    -Z build-std=core,alloc \
+    -Z json-target-spec \
+    --no-default-features
+
+librelibc="../../target/x86_64-strat9/release/librelibc.a"
+if [ -f "$librelibc" ]; then
+    size=$(stat -c%s "$librelibc" 2>/dev/null || stat -f%z "$librelibc")
+    size_kb=$((size / 1024))
+    echo ""
+    echo "relibc build complete: $size_kb KB"
+else
+    echo "error: librelibc.a not found"
+    exit 1
+fi
+''']
+
+# =============================================================================
+# Component strates build
+# =============================================================================
+
+[tasks.build-strate-syscall]
+description = "Build syscall strate"
+dependencies = ["verify-workspace"]
+cwd = "workspace/components/syscall"
+command = "cargo"
+args = ["build", "--release", "--target", "${KERNEL_TARGET}"]
+
+[tasks.build-strate-api]
+description = "Build api strate"
+dependencies = ["verify-workspace"]
+cwd = "workspace/components/api"
+command = "cargo"
+args = ["build", "--release", "--target", "${KERNEL_TARGET}"]
+
+[tasks.build-strate-fs-ext4]
+description = "Build ext4 filesystem strate"
+dependencies = ["verify-workspace", "build-strate-api"]
+cwd = "workspace/components/fs-ext4"
+command = "cargo"
+args = [
+    "build",
+    "--release",
+    "--target",
+    "${KERNEL_TARGET}",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.build-strate-silo]
+description = "Build silo strate"
+dependencies = ["verify-workspace"]
+cwd = "workspace/components/silo"
+command = "cargo"
+args = ["build", "--release", "--target", "${KERNEL_TARGET}"]
+
+[tasks.build-strates]
+description = "Build all userspace strates"
+dependencies = [
+    "build-strate-syscall",
+    "build-strate-api",
+    "build-strate-fs-ext4",
+    "build-strate-silo",
+]
+
+# =============================================================================
+# Kernel build
+# =============================================================================
+
+[tasks.build-kernel]
+description = "Build bedrock kernel (release)"
+dependencies = ["verify-workspace", "build-relibc"]
+cwd = "workspace/kernel"
+command = "cargo"
+args = ["build", "--release", "--target", "${KERNEL_TARGET}"]
+
+[tasks.build-kernel-debug]
+description = "Build bedrock kernel (debug)"
+dependencies = ["verify-workspace"]
+cwd = "workspace/kernel"
+command = "cargo"
+args = ["build", "--target", "${KERNEL_TARGET}"]
+
+# =============================================================================
+# Bootloader build
+# =============================================================================
+
+[tasks.build-bootloader]
+cwd = "workspace/bootloader"fs-ext4
+description = "Build bootloader"
+dependencies = ["verify-workspace"]
+command = "cargo"
+args = ["build", "--release"]
+
+# =============================================================================
+# ISO image generation
+# =============================================================================
+
+[tasks.create-iso]
+description = "Create bootable ISO with Limine + kernel + strates"
+dependencies = ["setup-limine", "build-kernel", "build-strates"]
+script_runner = "@shell"
+script = [
+    '''
+#!/bin/bash
+set -e
+
+echo "creating bootable ISO image..."
+
+# Create build directories
+mkdir -p build/iso_root/boot/limine
+mkdir -p build/iso_root/strates
+
+# Copy kernel
+echo "  copying kernel..."
+cp workspace/target/x86_64-unknown-none/release/kernel build/iso_root/boot/kernel.elf
+
+# Copy strates
+echo "  copying strates..."
+[ -f workspace/target/x86_64-unknown-none/release/fs-ext4 ] && \
+    cp workspace/target/x86_64-unknown-none/release/fs-ext4 build/iso_root/strates/
+
+# Copy Limine files
+echo "  copying Limine bootloader..."
+cp /opt/limine/limine-bios.sys build/iso_root/boot/limine/
+cp /opt/limine/limine-bios-cd.bin build/iso_root/boot/limine/
+cp /opt/limine/limine-uefi-cd.bin build/iso_root/boot/limine/
+
+# Copy Limine config
+echo "  copying Limine configuration..."
+cp limine.conf build/iso_root/boot/limine/
+
+# Create ISO
+echo "  creating ISO image..."
+xorriso -as mkisofs \
+    -b boot/limine/limine-bios-cd.bin \
+    -no-emul-boot \
+    -boot-load-size 4 \
+    -boot-info-table \
+    --efi-boot boot/limine/limine-uefi-cd.bin \
+    -efi-boot-part --efi-boot-image \
+    --protective-msdos-label \
+    build/iso_root \
+    -o build/strat9-os.iso \
+    2>/dev/null
+
+# Install Limine to ISO
+/opt/limine/limine bios-install build/strat9-os.iso 2>/dev/null
+
+iso_size=$(stat -c%s "build/strat9-os.iso" 2>/dev/null || stat -f%z "build/strat9-os.iso")
+iso_size_mb=$((iso_size / 1024 / 1024))
+
+echo ""
+echo "=== Build complete ==="
+echo "  ISO image: build/strat9-os.iso ($iso_size_mb MB)"
+echo ""
+''',
+]
+
+# =============================================================================
+# Complete build orchestration
+# =============================================================================
+
+[tasks.build-all]
+description = "Complete build: relibc + strates + kernel + ISO"
+dependencies = ["create-iso"]
+
+# =============================================================================
+# QEMU execution
+# =============================================================================
+
+[tasks.run]
+description = "Run strat9-os in QEMU (text mode)"
+dependencies = ["build-all"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-nographic",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu.log",
+]
+
+[tasks.run-gui]
+description = "Run strat9-os in QEMU (GUI mode)"
+dependencies = ["build-all"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu.log",
+]
+
+[tasks.run-debug]
+description = "Run strat9-os in QEMU with GDB server (:1234)"
+dependencies = ["build-all"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-s",
+    "-S",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu-debug.log",
+    "-d",
+    "int,cpu_reset,guest_errors",
+]
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+
+[tasks.clean]
+description = "Clean all build artifacts"
+script_runner = "@shell"
+script = ['''
+echo "cleaning build artifacts..."
+rm -rf build/*
+rm -rf workspace/target
+echo "clean complete"
+''']
+
+# =============================================================================
+# Development utilities
+# =============================================================================
+
+[tasks.check]
+description = "Check all components without building"
+dependencies = ["verify-workspace"]
+script_runner = "@shell"
+script = ['''
+echo "checking kernel..."
+cd workspace/kernel && cargo check --target ${KERNEL_TARGET}
+
+echo "checking strates..."
+cd workspace/components/fs-ext4 && cargo check --target ${KERNEL_TARGET}
+cd workspace/components/syscall && cargo check --target ${KERNEL_TARGET}
+
+echo "all checks passed"
+''']
+
+[tasks.fmt]
+description = "Format all code in workspace"
+script_runner = "@shell"
+script = ['''
+echo "formatting code..."
+find workspace -name "Cargo.toml" -type f | while read -r cargo_file; do
+    dir=$(dirname "$cargo_file")
+    echo "  formatting: $dir"
+    (cd "$dir" && cargo fmt)
+done
+echo "formatting complete"
+''']
+
+[tasks.clippy]
+description = "Run clippy on all components"
+dependencies = ["verify-workspace"]
+script_runner = "@shell"
+script = ['''
+echo "running clippy on kernel..."
+cd workspace/kernel && cargo clippy --target ${KERNEL_TARGET}
+
+echo "running clippy on strates..."
+cd workspace/components/fs-ext4 && cargo clippy --target ${KERNEL_TARGET}
+
+echo "clippy checks complete"
+''']
+
+# =============================================================================
+# Default task
+# =============================================================================
+
+[tasks.default]
+description = "Complete build (ISO image)"
+dependencies = ["build-all"]

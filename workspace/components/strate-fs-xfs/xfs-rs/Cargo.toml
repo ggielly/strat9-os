@@ -1,0 +1,26 @@
+[package]
+name = "xfs-rs"
+description = "Pure Rust XFS filesystem parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fs-abstraction = { path = "../fs-abstraction", default-features = false } #TODO HERE ! FIX ME
+
+[dev-dependencies]
+proptest = "1.4"
+criterion = "0.5"
+
+[features]
+default = []
+nightly = []
+# Enable alloc for dynamic memory (Vec, Box)
+alloc = ["fs-abstraction/alloc"]
+# Enable std library - for user mode (WinFsp)
+std = ["alloc", "fs-abstraction/std"]
+
+[[bench]]
+name = "crc_bench"
+harness = false

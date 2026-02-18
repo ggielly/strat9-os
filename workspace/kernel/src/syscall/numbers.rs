@@ -1,0 +1,227 @@
+//! Strat9-OS ABI syscall number constants.
+//!
+//! Organized in blocks of 100 per the ABI spec in `docs/ABI_STRAT9-OS_DESIGN.md`.
+
+// ============================================================
+// Block 0-99: capabilities / handle management
+// ============================================================
+
+/// Null syscall — ping/test. Returns magic 0x57A79 ("STRAT9").
+pub const SYS_NULL: u64 = 0;
+
+/// Duplicate a handle (grant permission required).
+pub const SYS_HANDLE_DUPLICATE: u64 = 1;
+
+/// Close a handle.
+pub const SYS_HANDLE_CLOSE: u64 = 2;
+
+/// Wait on a handle for an event.
+pub const SYS_HANDLE_WAIT: u64 = 3;
+
+// ============================================================
+// Block 100-199: memory management
+// ============================================================
+
+// (stubs — not yet implemented)
+
+// ============================================================
+// Block 200-299: IPC
+// ============================================================
+
+/// Create an IPC port. arg1 = flags. Returns port handle.
+pub const SYS_IPC_CREATE_PORT: u64 = 200;
+
+/// Send a message to port. arg1 = port handle, arg2 = msg_ptr (64 bytes).
+/// Blocks if the port queue is full.
+pub const SYS_IPC_SEND: u64 = 201;
+
+/// Receive a message from port. arg1 = port handle, arg2 = msg_ptr (64 bytes out).
+/// Blocks if the port queue is empty.
+pub const SYS_IPC_RECV: u64 = 202;
+
+/// Call (send+recv). arg1 = port handle, arg2 = msg_ptr
+pub const SYS_IPC_CALL: u64 = 203;
+
+/// Reply to an IPC call. arg1 = msg_ptr
+pub const SYS_IPC_REPLY: u64 = 204;
+
+/// Bind a port to namespace. arg1 = port handle, arg2 = path_ptr, arg3 = path_len
+pub const SYS_IPC_BIND_PORT: u64 = 205;
+
+/// Unbind a namespace path. arg1 = path_ptr, arg2 = path_len
+pub const SYS_IPC_UNBIND_PORT: u64 = 206;
+
+/// Try to receive a message from port without blocking.
+/// arg1 = port handle, arg2 = msg_ptr (64 bytes out).
+/// Returns 0 on success, negative error if empty or invalid.
+pub const SYS_IPC_TRY_RECV: u64 = 207;
+
+/// Create a shared ring buffer. arg1 = size
+pub const SYS_IPC_RING_CREATE: u64 = 210;
+
+/// Map a ring buffer. arg1 = ring handle, arg2 = out_ptr
+pub const SYS_IPC_RING_MAP: u64 = 211;
+
+// ============================================================
+// Block 300-399: process / thread
+// ============================================================
+
+/// Exit the current task. arg1 = exit code.
+pub const SYS_PROC_EXIT: u64 = 300;
+
+/// Yield the current time slice.
+pub const SYS_PROC_YIELD: u64 = 301;
+
+// Futex wait. arg1=uaddr (*u32), arg2=expected_val, arg3=timeout_ns
+pub const SYS_FUTEX_WAIT: u64 = 302;
+
+// Futex wake. arg1=uaddr (*u32), arg2=max_wakers
+pub const SYS_FUTEX_WAKE: u64 = 303;
+
+// Futex requeue. arg1=uaddr1, arg2=max_wake, arg3=max_requeue, arg4=uaddr2
+pub const SYS_FUTEX_REQUEUE: u64 = 304;
+
+// Futex cmp_requeue. arg1=uaddr1, arg2=max_wake, arg3=max_requeue, arg4=uaddr2, arg5=expected_val
+pub const SYS_FUTEX_CMP_REQUEUE: u64 = 305;
+
+// Futex wake_op. arg1=uaddr1, arg2=max_wake1, arg3=max_wake2, arg4=uaddr2, arg5=op
+pub const SYS_FUTEX_WAKE_OP: u64 = 306;
+
+// ============================================================
+// Block 320-329: signal handling
+// ============================================================
+
+/// Send a signal to a task. arg1=task_id, arg2=signal_number
+pub const SYS_KILL: u64 = 320;
+
+/// Examine and change blocked signals. arg1=how, arg2=set_ptr, arg3=oldset_ptr
+pub const SYS_SIGPROCMASK: u64 = 321;
+
+/// Set up a signal handler. arg1=signum, arg2=act_ptr, arg3=oact_ptr
+pub const SYS_SIGACTION: u64 = 322;
+
+/// Set/get signal alternate stack. arg1=ss_ptr, arg2=old_ss_ptr
+pub const SYS_SIGALTSTACK: u64 = 323;
+
+/// Check for pending signals. arg1=set_ptr
+pub const SYS_SIGPENDING: u64 = 324;
+
+/// Wait for signals. arg1=mask_ptr
+pub const SYS_SIGSUSPEND: u64 = 325;
+
+/// Wait for signals with timeout. arg1=set_ptr, arg2=siginfo_ptr, arg3=timeout_ptr
+pub const SYS_SIGTIMEDWAIT: u64 = 326;
+
+/// Send signal with value. arg1=task_id, arg2=signum, arg3=sigval_ptr
+pub const SYS_SIGQUEUE: u64 = 327;
+
+/// Send signal to process group. arg1=pgrp, arg2=signum
+pub const SYS_KILLPG: u64 = 328;
+
+/// Get interval timer value. arg1=which, arg2=value_ptr
+pub const SYS_GETITIMER: u64 = 329;
+
+/// Set interval timer value. arg1=which, arg2=new_value_ptr, arg3=old_value_ptr
+pub const SYS_SETITIMER: u64 = 330;
+
+// ============================================================
+// Block 400-499: filesystem / VFS
+// ============================================================
+
+/// Open a path. arg1=path_ptr, arg2=path_len, arg3=flags
+pub const SYS_OPEN: u64 = 403;
+
+/// Read bytes from a handle (fd). arg1=fd, arg2=buf_ptr, arg3=buf_len.
+pub const SYS_READ: u64 = 405;
+
+/// Write bytes to a handle (fd). arg1=fd, arg2=buf_ptr, arg3=buf_len.
+/// For now, fd=1 (stdout) and fd=2 (stderr) write to serial.
+pub const SYS_WRITE: u64 = 404;
+
+/// Close a handle (fd). arg1=fd.
+pub const SYS_CLOSE: u64 = 406;
+
+// ============================================================
+// Block 410-419: network
+// ============================================================
+
+/// Receive a network packet. arg1=buf_ptr, arg2=buf_len.
+pub const SYS_NET_RECV: u64 = 410;
+
+/// Send a network packet. arg1=buf_ptr, arg2=buf_len.
+pub const SYS_NET_SEND: u64 = 411;
+pub const SYS_NET_INFO: u64 = 412;
+
+// ============================================================
+// Block 420-429: volumes / block devices
+// ============================================================
+
+/// Read sectors from a volume. arg1=handle, arg2=sector, arg3=buf_ptr, arg4=sector_count
+pub const SYS_VOLUME_READ: u64 = 420;
+
+/// Write sectors to a volume. arg1=handle, arg2=sector, arg3=buf_ptr, arg4=sector_count
+pub const SYS_VOLUME_WRITE: u64 = 421;
+
+/// Query volume size (sector count). arg1=handle
+pub const SYS_VOLUME_INFO: u64 = 422;
+
+// ============================================================
+// Block 500-599: time / alarms
+// ============================================================
+
+/// Get current monotonic tick count. Returns tick count in rax.
+pub const SYS_CLOCK_GETTIME: u64 = 500;
+
+// ============================================================
+// Block 600-699: debug / profiling
+// ============================================================
+
+/// Debug log: write bytes to serial. arg1=buf_ptr, arg2=buf_len.
+pub const SYS_DEBUG_LOG: u64 = 600;
+
+// ============================================================
+// Block 700-799: module management (.cmod)
+// ============================================================
+
+/// Load a module (.cmod). arg1 = fd (open file handle)
+pub const SYS_MODULE_LOAD: u64 = 700;
+
+/// Unload a module. arg1 = module handle
+pub const SYS_MODULE_UNLOAD: u64 = 701;
+
+/// Resolve a module export. arg1 = module handle, arg2 = ordinal
+pub const SYS_MODULE_GET_SYMBOL: u64 = 702;
+
+/// Query module info. arg1 = module handle, arg2 = *ModuleInfo
+pub const SYS_MODULE_QUERY: u64 = 703;
+
+// ============================================================
+// Block 800-899:  silo manager
+// ============================================================
+
+/// Create a new silo. arg1 = flags
+pub const SYS_SILO_CREATE: u64 = 800;
+
+/// Configure resources. arg1 = silo handle, arg2 = *SiloConfig
+pub const SYS_SILO_CONFIG: u64 = 801;
+
+/// Attach module as entry point. arg1 = silo handle, arg2 = module handle
+pub const SYS_SILO_ATTACH_MODULE: u64 = 802;
+
+/// Start a silo. arg1 = silo handle
+pub const SYS_SILO_START: u64 = 803;
+
+/// Stop a silo. arg1 = silo handle
+pub const SYS_SILO_STOP: u64 = 804;
+
+/// Kill a silo. arg1 = silo handle
+pub const SYS_SILO_KILL: u64 = 805;
+
+/// Read next silo event. arg1 = *SiloEvent
+pub const SYS_SILO_EVENT_NEXT: u64 = 806;
+
+/// Suspend a silo. arg1 = silo handle
+pub const SYS_SILO_SUSPEND: u64 = 807;
+
+/// Resume a silo. arg1 = silo handle
+pub const SYS_SILO_RESUME: u64 = 808;

@@ -1,0 +1,17 @@
+[package]
+name = "strate-fs-abstraction"
+description = "Filesystem abstraction layer with safe math, error handling, and Unicode support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[features]
+default = []
+nightly = []
+# Enable alloc for Vec and String support (kernel mode)
+alloc = []
+# Enable full standard library (user mode / WinFsp)
+std = ["alloc"]

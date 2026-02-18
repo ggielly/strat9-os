@@ -1,0 +1,18 @@
+# Rust
+/target/
+Cargo.lock
+
+# NASM / Assembly build outputs
+asm/build/
+*.bin
+*.o
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db

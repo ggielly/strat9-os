@@ -1,0 +1,15 @@
+[package]
+name = "strat9-syscall"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[dependencies]
+# No kernel dependency — syscall crate is a userspace library that invokes
+# kernel services via the syscall instruction, not direct Rust linking.
+bitflags = "2.4"
+
+[features]
+default = ["userspace"]
+userspace = []
