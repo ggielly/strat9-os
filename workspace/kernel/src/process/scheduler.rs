@@ -527,6 +527,13 @@ pub fn get_task_by_id(id: TaskId) -> Option<Arc<Task>> {
 /// in the `blocked_tasks` map. It will not be re-scheduled until
 /// `wake_task(id)` is called.
 ///
+/// ## Lost-wakeup prevention
+///
+/// Before actually blocking, this function checks the task's `wake_pending`
+/// flag. If a concurrent `wake_task()` fired between the moment the task
+/// added itself to a `WaitQueue` and this call, the flag will be set and
+/// the function returns immediately without blocking.
+///
 /// Must NOT be called with interrupts disabled or while holding the
 /// scheduler lock (this function acquires both).
 pub fn block_current_task() {
@@ -536,8 +543,19 @@ pub fn block_current_task() {
     let switch_target = {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
-            // Take the current task and mark it Blocked
             if let Some(ref current) = sched.cpus[cpu_index].current_task {
+                // Check for a pending wakeup that raced with us before we
+                // entered the scheduler lock.  If set, clear it and skip
+                // blocking — the task carries on as if it was woken normally.
+                // SAFETY: AtomicBool::swap is safe to call from any context.
+                if current
+                    .wake_pending
+                    .swap(false, core::sync::atomic::Ordering::AcqRel)
+                {
+                    // Pending wakeup consumed — do not block.
+                    return;
+                }
+
                 // SAFETY: We hold the scheduler lock and interrupts are disabled.
                 unsafe {
                     *current.state.get() = TaskState::Blocked;
@@ -568,6 +586,13 @@ pub fn block_current_task() {
 ///
 /// Moves the task from `blocked_tasks` to the ready queue and sets its
 /// state to Ready. Returns `true` if the task was found and woken.
+///
+/// ## Lost-wakeup prevention
+///
+/// If the task is not yet in `blocked_tasks` (it is still transitioning
+/// from Ready → Blocked inside `block_current_task()`), this function sets
+/// the task's `wake_pending` flag so that `block_current_task()` will see
+/// the pending wakeup and return immediately without actually blocking.
 pub fn wake_task(id: TaskId) -> bool {
     let saved_flags = save_flags_and_cli();
     let woken = {
@@ -584,7 +609,16 @@ pub fn wake_task(id: TaskId) -> bool {
                 }
                 true
             } else {
-                false
+                // Task is not blocked yet (race: it is between adding itself
+                // to the WaitQueue waiter list and calling block_current_task).
+                // Set wake_pending so block_current_task() will abort the block.
+                if let Some(task) = sched.all_tasks.get(&id) {
+                    task.wake_pending
+                        .store(true, core::sync::atomic::Ordering::Release);
+                    true
+                } else {
+                    false
+                }
             }
         } else {
             false

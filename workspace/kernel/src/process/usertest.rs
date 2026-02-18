@@ -123,6 +123,7 @@ pub fn create_user_test_task() {
         signal_actions: SyncUnsafeCell::new([super::signal::SigAction::Default; 64]),
         signal_stack: SyncUnsafeCell::new(None),
         itimers: super::timer::ITimers::new(),
+        wake_pending: core::sync::atomic::AtomicBool::new(false),
     });
 
     crate::process::add_task(task);

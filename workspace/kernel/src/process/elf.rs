@@ -429,6 +429,7 @@ pub fn load_and_run_elf_with_caps(
         signal_actions: SyncUnsafeCell::new([super::signal::SigAction::Default; 64]),
         signal_stack: SyncUnsafeCell::new(None),
         itimers: super::timer::ITimers::new(),
+        wake_pending: core::sync::atomic::AtomicBool::new(false),
     });
 
     // Seed capabilities into the new task (before scheduling).
