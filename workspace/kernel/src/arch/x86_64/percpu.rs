@@ -149,6 +149,11 @@ pub fn cpu_count() -> usize {
     CPU_COUNT.load(Ordering::Acquire)
 }
 
+/// Get the total number of CPUs (public alias for OSTD compatibility).
+pub fn get_cpu_count() -> usize {
+    cpu_count()
+}
+
 // ─── Preemption helpers ───────────────────────────────────────────────────────
 
 /// Increment the preemption-disable depth for the current CPU.
