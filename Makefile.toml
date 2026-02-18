@@ -258,6 +258,9 @@ dependencies = ["limine-image"]
 # =============================================================================
 
 [tasks.run-gui]
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk"
+dependencies = ["limine-image"]
+command = "${QEMU}"
 args = [
     "-cdrom",
     "build/strat9-os.iso",
@@ -278,10 +281,8 @@ args = [
     "-D",
     "build/qemu.log",
     "-d",
-    "guest_errors",Implémenter la fonction de refilement pour les futex et simplifier 
-]description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk"
-dependencies = ["limine-image"]
-command = "${QEMU}"
+    "guest_errors",
+]
 
 [tasks.run-gui-smp]
 description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs"
