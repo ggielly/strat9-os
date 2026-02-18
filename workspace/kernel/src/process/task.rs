@@ -2,9 +2,7 @@
 //!
 //! Defines the Task structure and related types for the Strat9-OS scheduler.
 
-use crate::capability::CapabilityTable;
-use crate::memory::AddressSpace;
-use crate::vfs::FileDescriptorTable;
+use crate::{capability::CapabilityTable, memory::AddressSpace, vfs::FileDescriptorTable};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::{PhysAddr, VirtAddr};
@@ -188,9 +186,9 @@ impl CpuContext {
 #[unsafe(naked)]
 unsafe extern "C" fn task_entry_trampoline() {
     core::arch::naked_asm!(
-        "sti",     // Enable interrupts for the new task
+        "sti",          // Enable interrupts for the new task
         "mov rdi, r13", // Bootstrap arg (seeded cap handle)
-        "jmp r12", // Jump to real entry point (loaded from initial stack frame)
+        "jmp r12",      // Jump to real entry point (loaded from initial stack frame)
     );
 }
 

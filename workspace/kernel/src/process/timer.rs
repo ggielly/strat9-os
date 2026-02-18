@@ -229,8 +229,7 @@ impl ITimers {
 /// # Safety
 /// Should only be called from the timer interrupt handler with interrupts disabled.
 pub fn tick_all_timers(current_time_ns: u64) {
-    use crate::process::{get_all_tasks, send_signal};
-    use crate::process::signal::Signal;
+    use crate::process::{get_all_tasks, send_signal, signal::Signal};
 
     // Get all tasks and check their timers
     if let Some(tasks) = get_all_tasks() {

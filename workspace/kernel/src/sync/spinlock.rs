@@ -1,8 +1,10 @@
 // Spinlock implementation for kernel synchronization
 
-use core::cell::UnsafeCell;
-use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    cell::UnsafeCell,
+    ops::{Deref, DerefMut},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 /// A simple spinlock
 pub struct SpinLock<T> {

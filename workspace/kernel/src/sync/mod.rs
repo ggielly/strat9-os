@@ -1,7 +1,7 @@
 // Synchronization primitives module
 
-mod spinlock;
 pub mod preempt;
+mod spinlock;
 pub mod waitqueue;
 
 pub use preempt::PreemptGuard;

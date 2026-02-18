@@ -7,8 +7,10 @@
 //! 0xB8000 not mapped). When unavailable, all output falls back to serial.
 
 use super::io::{inb, outb};
-use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use spin::Mutex;
 
 /// VGA text mode character type (char byte + attribute byte)

@@ -5,16 +5,17 @@
 //!
 //! Reference: VirtIO spec v1.2, Section 5.1 (Network Device)
 
-use super::common::{VirtioDevice, Virtqueue};
-use super::status;
-use crate::arch::x86_64::pci::{self, PciDevice};
-use crate::memory::{get_allocator, FrameAllocator, PhysFrame};
-use crate::sync::SpinLock;
-use alloc::boxed::Box;
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
-use core::mem;
-use core::ptr;
+use super::{
+    common::{VirtioDevice, Virtqueue},
+    status,
+};
+use crate::{
+    arch::x86_64::pci::{self, PciDevice},
+    memory::{get_allocator, FrameAllocator, PhysFrame},
+    sync::SpinLock,
+};
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use core::{mem, ptr};
 
 /// Maximum transmission unit
 pub const MTU: usize = 1514; // Ethernet MTU
@@ -367,7 +368,7 @@ impl NetworkDevice for VirtioNetDevice {
 
         let buf_addr = buf_frame.start_address.as_u64();
         let virt_addr = crate::memory::phys_to_virt(buf_addr);
-        
+
         let header_ptr = virt_addr as *mut VirtioNetHeader;
         let data_ptr = (virt_addr + NET_HDR_SIZE as u64) as *mut u8;
 

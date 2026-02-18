@@ -9,10 +9,14 @@
 use alloc::sync::Arc;
 use x86_64::VirtAddr;
 
-use crate::capability::{Capability, CapabilityTable};
-use crate::memory::address_space::{AddressSpace, VmaFlags, VmaType};
-use crate::process::task::{CpuContext, KernelStack, SyncUnsafeCell, Task};
-use crate::process::{TaskId, TaskPriority, TaskState};
+use crate::{
+    capability::{Capability, CapabilityTable},
+    memory::address_space::{AddressSpace, VmaFlags, VmaType},
+    process::{
+        task::{CpuContext, KernelStack, SyncUnsafeCell, Task},
+        TaskId, TaskPriority, TaskState,
+    },
+};
 
 // ---------------------------------------------------------------------------
 // ELF64 constants

@@ -180,11 +180,7 @@ pub fn volume_info(handle: u64) -> Result<u64> {
 /// Debug log to kernel serial
 pub fn debug_log(msg: &str) {
     unsafe {
-        let _ = syscall2(
-            number::SYS_DEBUG_LOG,
-            msg.as_ptr() as usize,
-            msg.len(),
-        );
+        let _ = syscall2(number::SYS_DEBUG_LOG, msg.as_ptr() as usize, msg.len());
     }
 }
 

@@ -4,19 +4,24 @@
 //! and parks them in an idle loop. Per-CPU data is initialized but no
 //! per-CPU scheduler is active yet.
 
-use core::arch::global_asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    arch::global_asm,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
-use alloc::vec::Vec;
-use alloc::vec;
-use x86_64::{PhysAddr, VirtAddr};
-use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
+use alloc::{vec, vec::Vec};
+use x86_64::{
+    structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB},
+    PhysAddr, VirtAddr,
+};
 
-use crate::acpi::madt;
-use crate::arch::x86_64::{apic, idt, io::io_wait, percpu, timer};
-use crate::memory;
-use crate::process::task::KernelStack;
-use crate::sync::SpinLock;
+use crate::{
+    acpi::madt,
+    arch::x86_64::{apic, idt, io::io_wait, percpu, timer},
+    memory,
+    process::task::KernelStack,
+    sync::SpinLock,
+};
 
 /// Physical address where the SMP trampoline is copied.
 pub const TRAMPOLINE_PHYS_ADDR: u64 = 0x8000;
@@ -259,8 +264,8 @@ pub fn init() -> Result<usize, &'static str> {
 
         stacks[apic_id as usize] = stack_top;
 
-        let cpu_index = percpu::register_cpu(apic_id)
-            .ok_or("SMP: exceeded MAX_CPUS for per-CPU data")?;
+        let cpu_index =
+            percpu::register_cpu(apic_id).ok_or("SMP: exceeded MAX_CPUS for per-CPU data")?;
         percpu::set_kernel_stack_top(cpu_index, stack_top);
 
         AP_KERNEL_STACKS.lock().push(kernel_stack);
@@ -301,10 +306,7 @@ pub extern "C" fn smp_main() -> ! {
     crate::arch::x86_64::syscall::init();
 
     if let Some(stack_top) = percpu::kernel_stack_top(cpu_index) {
-        crate::arch::x86_64::tss::set_kernel_stack_for(
-            cpu_index,
-            x86_64::VirtAddr::new(stack_top),
-        );
+        crate::arch::x86_64::tss::set_kernel_stack_for(cpu_index, x86_64::VirtAddr::new(stack_top));
     }
 
     let _ = percpu::mark_online_by_apic(apic_id);

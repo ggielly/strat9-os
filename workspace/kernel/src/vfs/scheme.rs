@@ -3,11 +3,11 @@
 //! Schemes provide the actual implementation for file operations.
 //! Examples: IPC-based schemes (ext4, network), kernel schemes (devfs, procfs).
 
-use crate::ipc::message::IpcMessage;
-use crate::ipc::port::PortId;
-use crate::syscall::error::SyscallError;
-use alloc::string::String;
-use alloc::sync::Arc;
+use crate::{
+    ipc::{message::IpcMessage, port::PortId},
+    syscall::error::SyscallError,
+};
+use alloc::{string::String, sync::Arc};
 
 /// Result of an open operation.
 #[derive(Debug, Clone)]
@@ -314,10 +314,8 @@ impl KernelScheme {
     pub fn register(&mut self, path: &str, base: *const u8, len: usize) {
         static NEXT_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
         let id = NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-        self.files.insert(
-            String::from(path),
-            KernelFile { id, base, len },
-        );
+        self.files
+            .insert(String::from(path), KernelFile { id, base, len });
     }
 }
 

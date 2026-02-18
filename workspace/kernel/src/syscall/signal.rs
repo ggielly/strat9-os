@@ -4,8 +4,9 @@ use super::error::SyscallError;
 use crate::{
     memory::{UserSliceRead, UserSliceWrite},
     process::{
-        TaskId, current_task_clone,
+        current_task_clone,
         signal::{SigAction, SigStack, Signal, SignalSet},
+        TaskId,
     },
 };
 

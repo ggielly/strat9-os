@@ -3,10 +3,11 @@
 //! Handles CPU exceptions and hardware IRQs.
 //! Inspired by MaestroOS `idt.rs` and RedoxOS kernel.
 
-use super::pic;
-use super::tss;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use x86_64::VirtAddr;
+use super::{pic, tss};
+use x86_64::{
+    structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
+    VirtAddr,
+};
 
 /// IRQ interrupt vector numbers (PIC1_OFFSET + IRQ number)
 #[allow(dead_code)]
@@ -114,39 +115,71 @@ extern "x86-interrupt" fn page_fault_handler(
         let (cr3_frame, _) = Cr3::read();
         let cr3_phys = cr3_frame.start_address().as_u64();
         let hhdm = crate::memory::hhdm_offset();
-        log::error!("=== Page table walk for {:#x} (CR3={:#x}) ===", addr, cr3_phys);
+        log::error!(
+            "=== Page table walk for {:#x} (CR3={:#x}) ===",
+            addr,
+            cr3_phys
+        );
 
         // SAFETY: Read-only access to page tables via HHDM for diagnostics.
         unsafe {
             let l4_ptr = (cr3_phys + hhdm) as *const u64;
             let l4_idx = ((addr >> 39) & 0x1FF) as usize;
             let l4_entry = *l4_ptr.add(l4_idx);
-            log::error!("  PML4[{}] = {:#x} (present={})", l4_idx, l4_entry, l4_entry & 1);
-            if l4_entry & 1 == 0 { log::error!("  -> WALK STOPS: PML4 entry not present"); }
-            else {
+            log::error!(
+                "  PML4[{}] = {:#x} (present={})",
+                l4_idx,
+                l4_entry,
+                l4_entry & 1
+            );
+            if l4_entry & 1 == 0 {
+                log::error!("  -> WALK STOPS: PML4 entry not present");
+            } else {
                 let l3_phys = l4_entry & 0x000F_FFFF_FFFF_F000;
                 let l3_ptr = (l3_phys + hhdm) as *const u64;
                 let l3_idx = ((addr >> 30) & 0x1FF) as usize;
                 let l3_entry = *l3_ptr.add(l3_idx);
-                log::error!("  PDPT[{}] = {:#x} (present={})", l3_idx, l3_entry, l3_entry & 1);
-                if l3_entry & 1 == 0 { log::error!("  -> WALK STOPS: PDPT entry not present"); }
-                else if l3_entry & 0x80 != 0 { log::error!("  -> 1GiB huge page"); }
-                else {
+                log::error!(
+                    "  PDPT[{}] = {:#x} (present={})",
+                    l3_idx,
+                    l3_entry,
+                    l3_entry & 1
+                );
+                if l3_entry & 1 == 0 {
+                    log::error!("  -> WALK STOPS: PDPT entry not present");
+                } else if l3_entry & 0x80 != 0 {
+                    log::error!("  -> 1GiB huge page");
+                } else {
                     let l2_phys = l3_entry & 0x000F_FFFF_FFFF_F000;
                     let l2_ptr = (l2_phys + hhdm) as *const u64;
                     let l2_idx = ((addr >> 21) & 0x1FF) as usize;
                     let l2_entry = *l2_ptr.add(l2_idx);
-                    log::error!("  PD[{}] = {:#x} (present={})", l2_idx, l2_entry, l2_entry & 1);
-                    if l2_entry & 1 == 0 { log::error!("  -> WALK STOPS: PD entry not present"); }
-                    else if l2_entry & 0x80 != 0 { log::error!("  -> 2MiB huge page"); }
-                    else {
+                    log::error!(
+                        "  PD[{}] = {:#x} (present={})",
+                        l2_idx,
+                        l2_entry,
+                        l2_entry & 1
+                    );
+                    if l2_entry & 1 == 0 {
+                        log::error!("  -> WALK STOPS: PD entry not present");
+                    } else if l2_entry & 0x80 != 0 {
+                        log::error!("  -> 2MiB huge page");
+                    } else {
                         let l1_phys = l2_entry & 0x000F_FFFF_FFFF_F000;
                         let l1_ptr = (l1_phys + hhdm) as *const u64;
                         let l1_idx = ((addr >> 12) & 0x1FF) as usize;
                         let l1_entry = *l1_ptr.add(l1_idx);
-                        log::error!("  PT[{}] = {:#x} (present={})", l1_idx, l1_entry, l1_entry & 1);
-                        if l1_entry & 1 == 0 { log::error!("  -> WALK STOPS: PT entry not present"); }
-                        else { log::error!("  -> page present (flags issue?)"); }
+                        log::error!(
+                            "  PT[{}] = {:#x} (present={})",
+                            l1_idx,
+                            l1_entry,
+                            l1_entry & 1
+                        );
+                        if l1_entry & 1 == 0 {
+                            log::error!("  -> WALK STOPS: PT entry not present");
+                        } else {
+                            log::error!("  -> page present (flags issue?)");
+                        }
                     }
                 }
             }

@@ -4,8 +4,7 @@
 //! - PIT (Programmable Interval Timer) for legacy fallback
 //! - APIC Timer for modern systems (calibrated via PIT channel 2)
 
-use core::sync::atomic::{AtomicBool, Ordering};
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use x86_64::instructions::port::Port;
 
 /// Programmable Interval Timer (PIT) constants
@@ -48,8 +47,10 @@ pub fn is_apic_timer_active() -> bool {
 ///
 /// Returns the number of APIC timer ticks per 10ms, or 0 on failure.
 pub fn calibrate_apic_timer() -> u32 {
-    use super::apic;
-    use super::io::{inb, outb};
+    use super::{
+        apic,
+        io::{inb, outb},
+    };
 
     // PIT channel 2 count for ~10ms: 1193182 / 100 = 11932
     const PIT_10MS_COUNT: u16 = 11932;

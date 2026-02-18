@@ -4,9 +4,11 @@
 
 extern crate alloc;
 
-use core::alloc::Layout;
-use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    alloc::Layout,
+    panic::PanicInfo,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use strate_net::{syscalls::*, IpcMessage, OPCODE_CLOSE, OPCODE_OPEN, OPCODE_READ, OPCODE_WRITE};
 
 // ---------------------------------------------------------------------------
@@ -73,8 +75,10 @@ fn panic(info: &PanicInfo) -> ! {
 // Network strate logic
 // ---------------------------------------------------------------------------
 
-use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::time::Instant;
+use smoltcp::{
+    phy::{self, Device, DeviceCapabilities, Medium},
+    time::Instant,
+};
 
 struct Strat9NetDevice;
 
@@ -133,8 +137,10 @@ impl phy::TxToken for Strat9TxToken {
     }
 }
 
-use smoltcp::iface::{Config, Interface, SocketSet};
-use smoltcp::wire::{EthernetAddress, IpCidr};
+use smoltcp::{
+    iface::{Config, Interface, SocketSet},
+    wire::{EthernetAddress, IpCidr},
+};
 
 struct NetworkStrate {
     device: Strat9NetDevice,
@@ -146,7 +152,7 @@ impl NetworkStrate {
     fn new(mac: [u8; 6]) -> Self {
         let mut device = Strat9NetDevice;
         let config = Config::new(EthernetAddress(mac).into());
-        
+
         let interface = Interface::new(config, &mut device, Instant::from_micros(0));
         let sockets = SocketSet::new(alloc::vec![]);
 
@@ -179,8 +185,9 @@ impl NetworkStrate {
         loop {
             // 1. Process network packets
             // TODO: Get actual monotonic time from kernel via SYS_CLOCK_GETTIME
-            let now = Instant::from_micros(0); 
-            self.interface.poll(now, &mut self.device, &mut self.sockets);
+            let now = Instant::from_micros(0);
+            self.interface
+                .poll(now, &mut self.device, &mut self.sockets);
 
             // 2. Check for IPC messages (non-blocking)
             let mut msg = IpcMessage::new(0);
@@ -218,7 +225,7 @@ impl NetworkStrate {
                     }
                 }
             }
-            
+
             // Limit polling frequency slightly to avoid 100% CPU in idle
             core::hint::spin_loop();
         }

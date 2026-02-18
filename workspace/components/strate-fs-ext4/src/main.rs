@@ -11,12 +11,12 @@ extern crate alloc;
 
 mod syscalls;
 
-use alloc::collections::BTreeMap;
-use alloc::vec;
-use alloc::vec::Vec;
-use core::alloc::Layout;
-use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use alloc::{collections::BTreeMap, vec, vec::Vec};
+use core::{
+    alloc::Layout,
+    panic::PanicInfo,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use fs_ext4::{BlockDevice, BlockDeviceError, Ext4FileSystem};
 use syscalls::*;
 
@@ -52,7 +52,7 @@ unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
             ) {
                 Ok(_) => {
                     let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-                    return unsafe { heap_ptr.add(aligned) }
+                    return unsafe { heap_ptr.add(aligned) };
                 }
                 Err(prev) => offset = prev,
             }
@@ -234,8 +234,13 @@ impl Ext4Strate {
         loop {
             // Receive message
             let mut msg = IpcMessage::new(0);
-            let result =
-                unsafe { syscall2(number::SYS_IPC_RECV, port_handle as usize, &mut msg as *mut IpcMessage as usize) };
+            let result = unsafe {
+                syscall2(
+                    number::SYS_IPC_RECV,
+                    port_handle as usize,
+                    &mut msg as *mut IpcMessage as usize,
+                )
+            };
 
             if result.is_err() {
                 continue; // Ignore errors, keep serving
@@ -296,7 +301,10 @@ struct VolumeBlockDevice {
 impl VolumeBlockDevice {
     fn new(handle: u64) -> core::result::Result<Self, BlockDeviceError> {
         let sector_count = volume_info(handle).map_err(map_sys_err)?;
-        Ok(Self { handle, sector_count })
+        Ok(Self {
+            handle,
+            sector_count,
+        })
     }
 }
 
@@ -324,7 +332,11 @@ impl BlockDevice for VolumeBlockDevice {
         Ok(buf)
     }
 
-    fn write_offset(&mut self, offset: usize, data: &[u8]) -> core::result::Result<(), BlockDeviceError> {
+    fn write_offset(
+        &mut self,
+        offset: usize,
+        data: &[u8],
+    ) -> core::result::Result<(), BlockDeviceError> {
         if offset % SECTOR_SIZE != 0 || data.len() % SECTOR_SIZE != 0 {
             return Err(BlockDeviceError::InvalidOffset);
         }
@@ -346,8 +358,13 @@ fn wait_for_bootstrap(port_handle: u64) -> u64 {
     debug_log("[fs-ext4] Waiting for volume bootstrap...\n");
     loop {
         let mut msg = IpcMessage::new(0);
-        let result =
-            unsafe { syscall2(number::SYS_IPC_RECV, port_handle as usize, &mut msg as *mut IpcMessage as usize) };
+        let result = unsafe {
+            syscall2(
+                number::SYS_IPC_RECV,
+                port_handle as usize,
+                &mut msg as *mut IpcMessage as usize,
+            )
+        };
         if result.is_err() {
             continue;
         }
@@ -355,7 +372,8 @@ fn wait_for_bootstrap(port_handle: u64) -> u64 {
         if msg.msg_type == OPCODE_BOOTSTRAP && msg.flags != 0 {
             let mut reply = IpcMessage::new(0);
             reply.sender = msg.sender;
-            let _ = unsafe { syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize) };
+            let _ =
+                unsafe { syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize) };
             return msg.flags as u64;
         }
 
@@ -386,7 +404,14 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
 
     // Bind port to root path "/"
     let path = b"/";
-    let bind_result = unsafe { syscall3(number::SYS_IPC_BIND_PORT, port_handle as usize, path.as_ptr() as usize, path.len()) };
+    let bind_result = unsafe {
+        syscall3(
+            number::SYS_IPC_BIND_PORT,
+            port_handle as usize,
+            path.as_ptr() as usize,
+            path.len(),
+        )
+    };
 
     if bind_result.is_err() {
         debug_log("[fs-ext4] Failed to bind port to /\n");

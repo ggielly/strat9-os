@@ -22,8 +22,10 @@
 
 use crate::syscall::error::SyscallError;
 use alloc::vec::Vec;
-use x86_64::structures::paging::{PageTableFlags, Translate};
-use x86_64::VirtAddr;
+use x86_64::{
+    structures::paging::{PageTableFlags, Translate},
+    VirtAddr,
+};
 
 /// End of user-accessible virtual address space.
 ///
@@ -121,8 +123,10 @@ fn check_pages_mapped(
     len: usize,
     required_flags: PageTableFlags,
 ) -> Result<(), UserSliceError> {
-    use x86_64::registers::control::Cr3;
-    use x86_64::structures::paging::{OffsetPageTable, PageTable};
+    use x86_64::{
+        registers::control::Cr3,
+        structures::paging::{OffsetPageTable, PageTable},
+    };
 
     let hhdm = crate::memory::hhdm_offset();
     let phys_offset = VirtAddr::new(hhdm);

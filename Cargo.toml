@@ -60,7 +60,3 @@ strip = false      # Keep all symbols
 panic = "unwind"   # Full stack traces for debugging
 incremental = true # Faster recompilation
 lto = false        # Faster compilation
-
-# Temporarily commented out due to relibc Cargo.toml issues
-# [patch."https://github.com/redox-os/relibc"]
-# relibc = { path = "workspace/components/relibc" }

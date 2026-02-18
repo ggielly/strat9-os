@@ -16,13 +16,15 @@
 //! pushed/popped by `switch_context()`. `CpuContext` only stores `saved_rsp`.
 
 use super::task::{restore_first_task, switch_context, Task, TaskId, TaskPriority, TaskState};
-use crate::arch::x86_64::timer;
-use crate::arch::x86_64::{restore_flags, save_flags_and_cli};
-use crate::arch::x86_64::{apic, percpu};
-use crate::capability::get_capability_manager;
-use crate::sync::SpinLock;
-use alloc::collections::{BTreeMap, VecDeque};
-use alloc::sync::Arc;
+use crate::{
+    arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer},
+    capability::get_capability_manager,
+    sync::SpinLock,
+};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ─── Cross-CPU IPI helpers ────────────────────────────────────────────────────
@@ -149,7 +151,9 @@ impl Scheduler {
             // SAFETY: scheduler lock held; we have exclusive access to state.
             let task_state = unsafe { *task.state.get() };
             if task_state == TaskState::Running {
-                unsafe { *task.state.get() = TaskState::Ready; }
+                unsafe {
+                    *task.state.get() = TaskState::Ready;
+                }
                 self.cpus[cpu_index].ready_queue.push_back(task);
             }
         }
@@ -164,7 +168,9 @@ impl Scheduler {
         };
 
         // SAFETY: scheduler lock held.
-        unsafe { *next_task.state.get() = TaskState::Running; }
+        unsafe {
+            *next_task.state.get() = TaskState::Running;
+        }
         self.cpus[cpu_index].current_task = Some(next_task.clone());
         next_task
     }
@@ -288,7 +294,11 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     let first_task = {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
-            let idx = if cpu_index < sched.cpus.len() { cpu_index } else { 0 };
+            let idx = if cpu_index < sched.cpus.len() {
+                cpu_index
+            } else {
+                0
+            };
             sched.pick_next_task(idx)
         } else {
             // If scheduler isn't initialized, just loop
@@ -387,7 +397,12 @@ pub fn maybe_preempt() {
 
         if let Some(ref mut sched) = *scheduler {
             // Skip if no task is running yet (during early boot)
-            if sched.cpus.get(cpu_index).and_then(|c| c.current_task.as_ref()).is_none() {
+            if sched
+                .cpus
+                .get(cpu_index)
+                .and_then(|c| c.current_task.as_ref())
+                .is_none()
+            {
                 return;
             }
             sched.yield_cpu(cpu_index)
@@ -603,7 +618,9 @@ pub fn suspend_task(id: TaskId) -> bool {
             for (ci, cpu) in sched.cpus.iter_mut().enumerate() {
                 if let Some(ref current) = cpu.current_task {
                     if current.id == id {
-                        unsafe { *current.state.get() = TaskState::Blocked; }
+                        unsafe {
+                            *current.state.get() = TaskState::Blocked;
+                        }
                         sched.blocked_tasks.insert(current.id, current.clone());
                         suspended = true;
                         if ci == my_cpu {
@@ -623,7 +640,9 @@ pub fn suspend_task(id: TaskId) -> bool {
                     let mut new_queue = VecDeque::new();
                     while let Some(task) = cpu.ready_queue.pop_front() {
                         if task.id == id {
-                            unsafe { *task.state.get() = TaskState::Blocked; }
+                            unsafe {
+                                *task.state.get() = TaskState::Blocked;
+                            }
                             sched.blocked_tasks.insert(task.id, task.clone());
                             suspended = true;
                         } else {
@@ -643,7 +662,9 @@ pub fn suspend_task(id: TaskId) -> bool {
 
     if let Some(target) = switch_target {
         // SAFETY: pointers valid. Interrupts disabled.
-        unsafe { switch_context(target.old_rsp_ptr, target.new_rsp_ptr); }
+        unsafe {
+            switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
+        }
     }
 
     // Send IPI after releasing the lock to avoid lock inversion.
@@ -710,7 +731,9 @@ pub fn kill_task(id: TaskId) -> bool {
             for (ci, cpu) in sched.cpus.iter_mut().enumerate() {
                 if let Some(ref current) = cpu.current_task {
                     if current.id == id {
-                        unsafe { *current.state.get() = TaskState::Dead; }
+                        unsafe {
+                            *current.state.get() = TaskState::Dead;
+                        }
                         cleanup_task_resources(current);
                         sched.all_tasks.remove(&id);
                         sched.task_cpu.remove(&id);
@@ -732,7 +755,9 @@ pub fn kill_task(id: TaskId) -> bool {
                     let mut new_queue = VecDeque::new();
                     while let Some(task) = cpu.ready_queue.pop_front() {
                         if task.id == id {
-                            unsafe { *task.state.get() = TaskState::Dead; }
+                            unsafe {
+                                *task.state.get() = TaskState::Dead;
+                            }
                             cleanup_task_resources(&task);
                             sched.all_tasks.remove(&id);
                             sched.task_cpu.remove(&id);
@@ -749,7 +774,9 @@ pub fn kill_task(id: TaskId) -> bool {
             if !killed {
                 if let Some(task) = sched.blocked_tasks.remove(&id) {
                     // SAFETY: scheduler lock held.
-                    unsafe { *task.state.get() = TaskState::Dead; }
+                    unsafe {
+                        *task.state.get() = TaskState::Dead;
+                    }
                     cleanup_task_resources(&task);
                     sched.all_tasks.remove(&id);
                     sched.task_cpu.remove(&id);
@@ -761,7 +788,9 @@ pub fn kill_task(id: TaskId) -> bool {
 
     if let Some(target) = switch_target {
         // SAFETY: pointers valid. Interrupts disabled.
-        unsafe { switch_context(target.old_rsp_ptr, target.new_rsp_ptr); }
+        unsafe {
+            switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
+        }
     }
 
     // Send IPI after releasing the lock to avoid lock inversion.

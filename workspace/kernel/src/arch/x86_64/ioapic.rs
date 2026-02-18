@@ -4,8 +4,7 @@
 //! Local APICs. It uses indirect MMIO: write register index to IOREGSEL,
 //! then read/write IOWIN.
 
-use crate::acpi::madt::InterruptSourceOverride;
-use crate::memory;
+use crate::{acpi::madt::InterruptSourceOverride, memory};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Whether the I/O APIC has been initialized

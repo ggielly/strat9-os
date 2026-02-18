@@ -8,8 +8,7 @@
 
 extern crate alloc;
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 
 // Re-export the ext4_rs types

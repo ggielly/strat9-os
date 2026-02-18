@@ -4,13 +4,7 @@
 
 /// Receive a network packet.
 pub fn net_recv(buf: &mut [u8]) -> Result<usize> {
-    unsafe {
-        syscall2(
-            number::SYS_NET_RECV,
-            buf.as_mut_ptr() as usize,
-            buf.len(),
-        )
-    }
+    unsafe { syscall2(number::SYS_NET_RECV, buf.as_mut_ptr() as usize, buf.len()) }
 }
 
 /// Try to receive an IPC message without blocking.
@@ -27,13 +21,7 @@ pub fn ipc_try_recv(port: u64, msg: &mut crate::IpcMessage) -> Result<()> {
 
 /// Send a network packet.
 pub fn net_send(buf: &[u8]) -> Result<usize> {
-    unsafe {
-        syscall2(
-            number::SYS_NET_SEND,
-            buf.as_ptr() as usize,
-            buf.len(),
-        )
-    }
+    unsafe { syscall2(number::SYS_NET_SEND, buf.as_ptr() as usize, buf.len()) }
 }
 
 /// Get network device information.
@@ -159,11 +147,7 @@ pub unsafe fn syscall3(n: usize, arg1: usize, arg2: usize, arg3: usize) -> Resul
 /// Debug log to kernel serial
 pub fn debug_log(msg: &str) {
     unsafe {
-        let _ = syscall2(
-            number::SYS_DEBUG_LOG,
-            msg.as_ptr() as usize,
-            msg.len(),
-        );
+        let _ = syscall2(number::SYS_DEBUG_LOG, msg.as_ptr() as usize, msg.len());
     }
 }
 

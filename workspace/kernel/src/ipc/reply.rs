@@ -1,10 +1,11 @@
 //! IPC synchronous call/reply support.
 
 use super::message::IpcMessage;
-use crate::process::TaskId;
-use crate::sync::{SpinLock, WaitQueue};
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use crate::{
+    process::TaskId,
+    sync::{SpinLock, WaitQueue},
+};
+use alloc::{collections::BTreeMap, sync::Arc};
 
 struct ReplySlot {
     msg: Option<IpcMessage>,

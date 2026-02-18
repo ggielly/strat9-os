@@ -1,9 +1,7 @@
 // Build script for Strat9-OS Bootloader
 // Assembles the bootloader stages using NASM
 
-use std::env;
-use std::path::PathBuf;
-use std::process::Command;
+use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());

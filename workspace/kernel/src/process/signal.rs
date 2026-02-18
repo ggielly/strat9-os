@@ -271,8 +271,7 @@ pub fn send_signal(
     target: crate::process::TaskId,
     signal: Signal,
 ) -> Result<(), crate::syscall::error::SyscallError> {
-    use crate::process::get_task_by_id;
-    use crate::syscall::error::SyscallError;
+    use crate::{process::get_task_by_id, syscall::error::SyscallError};
 
     // SIGKILL and SIGSTOP cannot be ignored
     if signal.is_uncatchable() {

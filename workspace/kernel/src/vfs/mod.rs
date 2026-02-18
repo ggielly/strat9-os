@@ -29,10 +29,8 @@ pub mod file;
 pub mod mount;
 pub mod scheme;
 
-use crate::process::current_task_clone;
-use crate::syscall::error::SyscallError;
-use alloc::string::String;
-use alloc::sync::Arc;
+use crate::{process::current_task_clone, syscall::error::SyscallError};
+use alloc::{string::String, sync::Arc};
 
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
@@ -223,7 +221,7 @@ pub fn sys_write(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallErro
         while total_written < len {
             let to_write = core::cmp::min(kbuf.len(), len - total_written);
             let n = user_buf.copy_to(&mut kbuf[..to_write]);
-            
+
             for &byte in &kbuf[..n] {
                 crate::serial_print!("{}", byte as char);
             }
@@ -356,9 +354,7 @@ pub fn register_static_file(path: &str, base: *const u8, len: usize) -> Result<u
 mod old_vfs {
     use super::*;
     use crate::sync::SpinLock;
-    use alloc::collections::BTreeMap;
-    use alloc::string::ToString;
-    use alloc::vec::Vec;
+    use alloc::{collections::BTreeMap, string::ToString, vec::Vec};
     use core::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Clone, Copy)]
@@ -399,7 +395,11 @@ mod old_vfs {
     static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
     static NEXT_OPEN_ID: AtomicU64 = AtomicU64::new(1000); // Start at 1000 to avoid FD collision
 
-    pub fn register_static_file(path: &str, base: *const u8, len: usize) -> Result<u64, SyscallError> {
+    pub fn register_static_file(
+        path: &str,
+        base: *const u8,
+        len: usize,
+    ) -> Result<u64, SyscallError> {
         if path.is_empty() {
             return Err(SyscallError::InvalidArgument);
         }
@@ -417,11 +417,7 @@ mod old_vfs {
 
     pub fn open_path(path: &str) -> Result<u64, SyscallError> {
         let mut vfs = VFS.lock();
-        let file = vfs
-            .files
-            .get(path)
-            .ok_or(SyscallError::BadHandle)?
-            .clone();
+        let file = vfs.files.get(path).ok_or(SyscallError::BadHandle)?.clone();
         let open_id = NEXT_OPEN_ID.fetch_add(1, Ordering::SeqCst);
         vfs.open_files.insert(
             open_id,

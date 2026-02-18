@@ -9,11 +9,14 @@
 use alloc::sync::Arc;
 use x86_64::VirtAddr;
 
-use crate::capability::CapabilityTable;
-use crate::memory::address_space::{AddressSpace, VmaFlags, VmaType};
-use crate::process::task::SyncUnsafeCell;
-use crate::process::task::{CpuContext, KernelStack, Task, TaskPriority};
-use crate::process::TaskState;
+use crate::{
+    capability::CapabilityTable,
+    memory::address_space::{AddressSpace, VmaFlags, VmaType},
+    process::{
+        task::{CpuContext, KernelStack, SyncUnsafeCell, Task, TaskPriority},
+        TaskState,
+    },
+};
 
 /// User code virtual address (must be in lower half, page-aligned).
 const USER_CODE_ADDR: u64 = 0x40_0000;
@@ -189,7 +192,11 @@ extern "C" fn ring3_trampoline() -> ! {
 
     crate::serial_println!(
         "[ring3-tramp] IRETQ: CS={:#x} RIP={:#x} SS={:#x} RSP={:#x} RFLAGS={:#x}",
-        user_cs, user_rip, user_ss, user_rsp, user_rflags,
+        user_cs,
+        user_rip,
+        user_ss,
+        user_rsp,
+        user_rflags,
     );
 
     // SAFETY: We've set up valid user mappings. IRETQ will switch to Ring 3.

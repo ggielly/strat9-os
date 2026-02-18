@@ -16,4 +16,3 @@ pub extern "C" fn _start() -> ! {
         core::hint::spin_loop();
     }
 }
-

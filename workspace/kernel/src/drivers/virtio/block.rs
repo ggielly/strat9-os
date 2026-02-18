@@ -5,15 +5,17 @@
 //!
 //! Reference: VirtIO spec v1.2, Section 5.2 (Block Device)
 
-use super::common::{VirtioDevice, Virtqueue};
-use super::status;
-use crate::arch::x86_64::pci::{self, PciDevice};
-use crate::memory::{get_allocator, FrameAllocator, PhysFrame};
-use crate::sync::SpinLock;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use core::mem;
-use core::ptr;
+use super::{
+    common::{VirtioDevice, Virtqueue},
+    status,
+};
+use crate::{
+    arch::x86_64::pci::{self, PciDevice},
+    memory::{get_allocator, FrameAllocator, PhysFrame},
+    sync::SpinLock,
+};
+use alloc::{boxed::Box, vec::Vec};
+use core::{mem, ptr};
 
 /// Block device sector size
 pub const SECTOR_SIZE: usize = 512;

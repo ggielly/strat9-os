@@ -4,8 +4,7 @@
 
 use super::file::OpenFile;
 use crate::syscall::error::SyscallError;
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use alloc::{collections::BTreeMap, sync::Arc};
 
 /// Standard file descriptor numbers.
 pub const STDIN: u32 = 0;
@@ -45,10 +44,7 @@ impl FileDescriptorTable {
 
     /// Get an open file by FD.
     pub fn get(&self, fd: u32) -> Result<Arc<OpenFile>, SyscallError> {
-        self.fds
-            .get(&fd)
-            .cloned()
-            .ok_or(SyscallError::BadHandle)
+        self.fds.get(&fd).cloned().ok_or(SyscallError::BadHandle)
     }
 
     /// Remove an FD and return the file.

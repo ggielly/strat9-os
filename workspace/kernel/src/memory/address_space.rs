@@ -8,20 +8,22 @@
 //! - PML4[0..256]   → User space (per-process, zeroed for new AS)
 //! - PML4[256..512] → Kernel space (shared, cloned from kernel L4)
 
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use alloc::{collections::BTreeMap, sync::Arc};
 
 use spin::Once;
-use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::structures::paging::{
-    FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
-    PhysFrame as X86PhysFrame, Size4KiB, Translate,
+use x86_64::{
+    registers::control::{Cr3, Cr3Flags},
+    structures::paging::{
+        FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
+        PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB, Translate,
+    },
+    PhysAddr, VirtAddr,
 };
-use x86_64::{PhysAddr, VirtAddr};
 
-use crate::memory::paging::BuddyFrameAllocator;
-use crate::memory::FrameAllocator;
-use crate::sync::SpinLock;
+use crate::{
+    memory::{paging::BuddyFrameAllocator, FrameAllocator},
+    sync::SpinLock,
+};
 
 /// Flags describing permissions for a virtual memory region.
 #[derive(Debug, Clone, Copy)]

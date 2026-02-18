@@ -154,7 +154,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
     unsafe {
         let start = &__start_component_entries as *const ComponentEntry;
         let stop = &__stop_component_entries as *const ComponentEntry;
-        
+
         let mut current = start;
         while current < stop {
             let entry = &*current;
@@ -178,7 +178,10 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
         }
     }
 
-    log::info!("All components initialization in {:?} stage completed", stage);
+    log::info!(
+        "All components initialization in {:?} stage completed",
+        stage
+    );
     Ok(())
 }
 

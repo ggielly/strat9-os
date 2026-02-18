@@ -4,9 +4,11 @@
 extern crate alloc;
 
 // Main bootloader logic module
-use crate::arch::{paging_create, paging_framebuffer};
-use crate::ext4;
-use crate::os::{Os, OsHwDesc, OsKey, OsMemoryEntry, OsMemoryKind, OsVideoMode};
+use crate::{
+    arch::{paging_create, paging_framebuffer},
+    ext4,
+    os::{Os, OsHwDesc, OsKey, OsMemoryEntry, OsMemoryKind, OsVideoMode},
+};
 
 use alloc::{format, string::String, vec::Vec};
 use core::{

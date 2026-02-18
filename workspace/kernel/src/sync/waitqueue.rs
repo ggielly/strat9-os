@@ -6,8 +6,10 @@
 //! calls `wake_one()` or `wake_all()`, the blocked tasks are moved back to
 //! the ready queue.
 
-use crate::process::{block_current_task, current_task_id, wake_task, TaskId};
-use crate::sync::SpinLock;
+use crate::{
+    process::{block_current_task, current_task_id, wake_task, TaskId},
+    sync::SpinLock,
+};
 use alloc::collections::VecDeque;
 
 /// A queue of tasks waiting for an event.

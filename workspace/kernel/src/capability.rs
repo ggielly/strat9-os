@@ -4,8 +4,7 @@
 //! All kernel resources are accessed through unforgeable tokens (capabilities).
 
 use crate::sync::SpinLock;
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Unique identifier for a capability
@@ -143,7 +142,10 @@ impl CapabilityTable {
 
     /// Drain all capabilities from this table.
     pub fn take_all(&mut self) -> Vec<Capability> {
-        core::mem::take(&mut self.capabilities).into_iter().map(|(_, cap)| cap).collect()
+        core::mem::take(&mut self.capabilities)
+            .into_iter()
+            .map(|(_, cap)| cap)
+            .collect()
     }
 
     /// Check whether any capability of the given resource type has required permissions.

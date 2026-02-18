@@ -4,10 +4,11 @@
 //! - Interrupt Stack Table (IST) entries for safe exception handling
 //! - Ring 3 -> Ring 0 stack switching (privilege_stack_table[0] = rsp0)
 
-use x86_64::structures::tss::TaskStateSegment;
-use x86_64::VirtAddr;
-use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    mem::MaybeUninit,
+    sync::atomic::{AtomicBool, Ordering},
+};
+use x86_64::{structures::tss::TaskStateSegment, VirtAddr};
 
 /// IST index used for the double fault handler
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;

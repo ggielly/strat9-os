@@ -1,5 +1,3 @@
-
-
 #[derive(Debug)]
 pub struct IoReader {
     pub fd: usize,

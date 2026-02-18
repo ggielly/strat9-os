@@ -175,9 +175,8 @@ pub fn parse_madt() -> Option<MadtInfo> {
                     // SAFETY: type 0 entry is at least 8 bytes, within bounds
                     let acpi_processor_id = unsafe { (*entry).acpi_processor_id };
                     let apic_id = unsafe { (*entry).apic_id };
-                    let flags = unsafe {
-                        core::ptr::read_unaligned(core::ptr::addr_of!((*entry).flags))
-                    };
+                    let flags =
+                        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*entry).flags)) };
 
                     let local = LocalApicEntry {
                         acpi_processor_id,

@@ -14,7 +14,15 @@ name = "strate-net-silo"
 path = "src/main.rs"
 
 [dependencies]
-smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-icmp", "socket-dhcpv4"] }
+smoltcp = { version = "0.12", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+    "socket-icmp",
+    "socket-dhcpv4",
+] }
 spin = { workspace = true }
 log = { workspace = true }
 bitflags = { workspace = true }

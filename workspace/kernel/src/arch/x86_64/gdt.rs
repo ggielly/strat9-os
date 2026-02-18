@@ -18,11 +18,17 @@
 //! STAR MSR: `[47:32]=0x08` (kernel CS), `[63:48]=0x18` (index 3).
 //! SYSRETQ: CS = 0x18+16 = 0x28 | RPL3 = 0x2B, SS = 0x18+8 = 0x20 | RPL3 = 0x23.
 
-use x86_64::instructions::segmentation::{Segment, CS, DS, SS};
-use x86_64::instructions::tables::load_tss;
-use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
-use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    mem::MaybeUninit,
+    sync::atomic::{AtomicBool, Ordering},
+};
+use x86_64::{
+    instructions::{
+        segmentation::{Segment, CS, DS, SS},
+        tables::load_tss,
+    },
+    structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector},
+};
 
 /// GDT storage — per CPU
 static mut GDT: [MaybeUninit<GlobalDescriptorTable>; crate::arch::x86_64::percpu::MAX_CPUS] =

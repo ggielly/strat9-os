@@ -3,10 +3,8 @@
 //! Maps path prefixes to schemes (like Plan 9 namespaces).
 
 use super::scheme::DynScheme;
-use crate::sync::SpinLock;
-use crate::syscall::error::SyscallError;
-use alloc::string::String;
-use alloc::vec::Vec;
+use crate::{sync::SpinLock, syscall::error::SyscallError};
+use alloc::{string::String, vec::Vec};
 
 /// A mount point binding a path prefix to a scheme.
 #[derive(Clone)]
@@ -24,9 +22,7 @@ pub struct MountTable {
 
 impl MountTable {
     pub const fn new() -> Self {
-        MountTable {
-            mounts: Vec::new(),
-        }
+        MountTable { mounts: Vec::new() }
     }
 
     /// Mount a scheme at a path prefix.

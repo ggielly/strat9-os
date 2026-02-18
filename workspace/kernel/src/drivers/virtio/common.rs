@@ -6,11 +6,15 @@
 //! Reference: VirtIO spec v1.2, Section 2 (Basic Facilities of a Virtio Device)
 
 use super::{vring_flags, VirtqDesc};
-use crate::arch::x86_64::pci::{Bar, PciDevice};
-use crate::memory::{get_allocator, FrameAllocator, PhysFrame};
+use crate::{
+    arch::x86_64::pci::{Bar, PciDevice},
+    memory::{get_allocator, FrameAllocator, PhysFrame},
+};
 use alloc::vec::Vec;
-use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, AtomicU16, Ordering};
+use core::{
+    ptr::{read_volatile, write_volatile},
+    sync::atomic::{fence, AtomicU16, Ordering},
+};
 
 /// VirtIO device features
 pub mod features {

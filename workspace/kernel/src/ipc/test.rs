@@ -13,8 +13,10 @@
 //! - WaitQueue integration with the scheduler
 //! - Message delivery with kernel-filled `sender` field
 
-use crate::ipc::{self, IpcMessage, PortId};
-use crate::process::{Task, TaskPriority, add_task};
+use crate::{
+    ipc::{self, IpcMessage, PortId},
+    process::{add_task, Task, TaskPriority},
+};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Shared port ID between the two test tasks.
@@ -92,7 +94,8 @@ extern "C" fn ipc_receiver_main() -> ! {
     );
 
     // Verify correctness
-    if msg_type == 42 && msg.payload[0] == b'H' && msg.payload[1] == b'i' && msg.payload[2] == b'!' {
+    if msg_type == 42 && msg.payload[0] == b'H' && msg.payload[1] == b'i' && msg.payload[2] == b'!'
+    {
         crate::serial_println!("[ipc-test] IPC ping-pong test PASSED");
     } else {
         crate::serial_println!("[ipc-test] IPC ping-pong test FAILED (unexpected data)");

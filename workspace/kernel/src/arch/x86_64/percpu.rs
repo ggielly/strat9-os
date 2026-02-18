@@ -107,7 +107,8 @@ pub fn set_kernel_stack_top(index: usize, rsp: u64) {
 
 /// Get the per-CPU kernel stack top for the given CPU index.
 pub fn kernel_stack_top(index: usize) -> Option<u64> {
-    PERCPU.get(index)
+    PERCPU
+        .get(index)
         .map(|cpu| cpu.kernel_stack_top.load(Ordering::Acquire))
 }
 

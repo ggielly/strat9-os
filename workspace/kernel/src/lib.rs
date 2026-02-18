@@ -63,8 +63,6 @@ pub fn init_components(stage: component::InitStage) -> Result<(), component::Com
 
 use core::panic::PanicInfo;
 
-//use crate::arch::x86_64::serial;
-
 /// Kernel panic handler
 #[panic_handler]
 fn panic_handler(info: &PanicInfo) -> ! {
@@ -76,11 +74,12 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     use core::fmt::Write;
 
     // =============================================
-    // Phase 1: Serial output (earliest debug output)
+    // Phase 1: serial output (earliest debug output)
     // =============================================
     init_serial();
     init_logger();
 
+    // Nice logo :D
     serial_println!(r"          __                 __   ________                         ");
     serial_println!(r"  _______/  |_____________ _/  |_/   __   \           ____  ______ ");
     serial_println!(r" /  ___/\   __\_  __ \__  \\   __\____    /  ______  /  _ \/  ___/ ");

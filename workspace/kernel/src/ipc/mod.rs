@@ -19,4 +19,4 @@ pub mod reply;
 pub mod test;
 
 pub use message::IpcMessage;
-pub use port::{Port, PortId, IpcError, create_port, get_port, destroy_port};
+pub use port::{create_port, destroy_port, get_port, IpcError, Port, PortId};

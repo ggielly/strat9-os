@@ -3,9 +3,7 @@
 //! This module handles the kernel entry from the Limine bootloader.
 //! Limine loads us directly in 64-bit long mode with paging enabled.
 
-use limine::modules::InternalModule;
-use limine::request::*;
-use limine::BaseRevision;
+use limine::{modules::InternalModule, request::*, BaseRevision};
 
 /// Sets the base revision to the latest revision supported by the crate.
 #[used]
@@ -134,23 +132,23 @@ pub unsafe extern "C" fn kmain() -> ! {
     // Check for loaded modules (init ELF binary + fs-ext4)
     let (initfs_base, initfs_size, ext4_base, ext4_size) =
         if let Some(module_response) = MODULES.get_response() {
-        let modules = module_response.modules();
-        let (init_base, init_size) = if !modules.is_empty() {
-            let module = modules[0];
-            (module.addr() as u64, module.size())
+            let modules = module_response.modules();
+            let (init_base, init_size) = if !modules.is_empty() {
+                let module = modules[0];
+                (module.addr() as u64, module.size())
+            } else {
+                (0u64, 0u64)
+            };
+            let (ext4_base, ext4_size) = if modules.len() > 1 {
+                let module = modules[1];
+                (module.addr() as u64, module.size())
+            } else {
+                (0u64, 0u64)
+            };
+            (init_base, init_size, ext4_base, ext4_size)
         } else {
-            (0u64, 0u64)
+            (0u64, 0u64, 0u64, 0u64)
         };
-        let (ext4_base, ext4_size) = if modules.len() > 1 {
-            let module = modules[1];
-            (module.addr() as u64, module.size())
-        } else {
-            (0u64, 0u64)
-        };
-        (init_base, init_size, ext4_base, ext4_size)
-    } else {
-        (0u64, 0u64, 0u64, 0u64)
-    };
 
     if ext4_base != 0 && ext4_size != 0 {
         // SAFETY: set once during early boot.

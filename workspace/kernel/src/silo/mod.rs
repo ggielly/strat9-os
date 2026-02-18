@@ -3,17 +3,19 @@
 //! This module provides the core kernel structures and syscalls
 //! to create and manage silos. Policy lives in userspace (Silo Admin).
 
-use crate::capability::{get_capability_manager, CapId, CapPermissions, ResourceType};
-use crate::ipc::port::{self, PortId};
-use crate::memory::{UserSliceRead, UserSliceWrite};
-use crate::process::task::Task;
-use crate::process::{current_task_clone, TaskId};
-use crate::sync::SpinLock;
-use crate::syscall::error::SyscallError;
-use alloc::collections::BTreeMap;
-use alloc::collections::VecDeque;
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
+use crate::{
+    capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
+    ipc::port::{self, PortId},
+    memory::{UserSliceRead, UserSliceWrite},
+    process::{current_task_clone, task::Task, TaskId},
+    sync::SpinLock,
+    syscall::error::SyscallError,
+};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -302,7 +304,9 @@ fn read_caps_list(ptr: u64, len: u64) -> Result<Vec<u64>, SyscallError> {
     Ok(out)
 }
 
-fn read_module_stream_from_port(port: &alloc::sync::Arc<port::Port>) -> Result<Vec<u8>, SyscallError> {
+fn read_module_stream_from_port(
+    port: &alloc::sync::Arc<port::Port>,
+) -> Result<Vec<u8>, SyscallError> {
     let mut out = Vec::new();
     loop {
         let msg = port.recv().map_err(|_| SyscallError::BadHandle)?;
@@ -317,8 +321,7 @@ fn read_module_stream_from_port(port: &alloc::sync::Arc<port::Port>) -> Result<V
             return Err(SyscallError::InvalidArgument);
         }
 
-        let chunk_len =
-            u16::from_le_bytes([msg.payload[0], msg.payload[1]]) as usize;
+        let chunk_len = u16::from_le_bytes([msg.payload[0], msg.payload[1]]) as usize;
         if chunk_len == 0 {
             break;
         }
@@ -432,9 +435,7 @@ fn read_u64_le(data: &[u8], offset: usize) -> Result<u64, SyscallError> {
 }
 
 fn resolve_export_offset(module: &ModuleImage, ordinal: u64) -> Result<u64, SyscallError> {
-    let header = module
-        .header
-        .ok_or(SyscallError::NotImplemented)?;
+    let header = module.header.ok_or(SyscallError::NotImplemented)?;
     if header.export_table_offset == 0 {
         return Err(SyscallError::NotImplemented);
     }
@@ -733,9 +734,8 @@ pub fn sys_module_query(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> 
 
     const INFO_SIZE: usize = core::mem::size_of::<ModuleInfo>();
     let user = UserSliceWrite::new(out_ptr, INFO_SIZE)?;
-    let src = unsafe {
-        core::slice::from_raw_parts(&info as *const ModuleInfo as *const u8, INFO_SIZE)
-    };
+    let src =
+        unsafe { core::slice::from_raw_parts(&info as *const ModuleInfo as *const u8, INFO_SIZE) };
     user.copy_from(src);
     Ok(0)
 }

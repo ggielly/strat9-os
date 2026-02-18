@@ -1,10 +1,14 @@
 // Buddy allocator implementation
 
-use crate::entry::{MemoryKind, MemoryRegion};
-use crate::memory::frame::{AllocError, FrameAllocator, PhysFrame};
-use crate::memory::zone::{FreeBlock, Zone, ZoneType, MAX_ORDER};
-use crate::serial_println;
-use crate::sync::SpinLock;
+use crate::{
+    entry::{MemoryKind, MemoryRegion},
+    memory::{
+        frame::{AllocError, FrameAllocator, PhysFrame},
+        zone::{FreeBlock, Zone, ZoneType, MAX_ORDER},
+    },
+    serial_println,
+    sync::SpinLock,
+};
 use x86_64::PhysAddr;
 
 const MAX_FREE_BLOCKS: usize = 65536;

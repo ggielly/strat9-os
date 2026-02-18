@@ -5,10 +5,14 @@
 //! block/wake API (via `WaitQueue`) provides the blocking mechanism.
 
 use super::message::IpcMessage;
-use crate::process::TaskId;
-use crate::sync::{SpinLock, WaitQueue};
-use alloc::collections::{BTreeMap, VecDeque};
-use alloc::sync::Arc;
+use crate::{
+    process::TaskId,
+    sync::{SpinLock, WaitQueue},
+};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum number of messages buffered in a single port.

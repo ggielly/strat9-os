@@ -1,9 +1,13 @@
 // Heap allocator implementation using buddy allocator
 
-use crate::memory::buddy::get_allocator;
-use crate::memory::frame::{FrameAllocator, PhysFrame};
-use core::alloc::{GlobalAlloc, Layout};
-use core::ptr;
+use crate::memory::{
+    buddy::get_allocator,
+    frame::{FrameAllocator, PhysFrame},
+};
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    ptr,
+};
 use x86_64::PhysAddr;
 
 /// Locked heap wrapper for GlobalAlloc

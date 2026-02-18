@@ -3,8 +3,7 @@
 //! Represents an open file with its associated scheme and current offset.
 
 use super::scheme::{DynScheme, FileFlags, OpenFlags};
-use crate::sync::SpinLock;
-use crate::syscall::error::SyscallError;
+use crate::{sync::SpinLock, syscall::error::SyscallError};
 use alloc::string::String;
 
 /// An open file handle.
