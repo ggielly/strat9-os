@@ -1,6 +1,7 @@
 //! Futex (Fast Userspace Mutex) syscall handlers
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
+use core::arch::asm;
 use core::sync::atomic::Ordering;
 
 use super::error::SyscallError;
@@ -17,11 +18,6 @@ impl FutexQueue {
         FutexQueue {
             waiters: SpinLock::new(VecDeque::new()),
         }
-    }
-
-    fn push_waiter(&self, id: crate::process::TaskId) {
-        let mut waiters = self.waiters.lock();
-        waiters.push_back(id);
     }
 
     fn pop_waiter(&self) -> Option<crate::process::TaskId> {
@@ -57,13 +53,40 @@ fn read_u32(addr: u64) -> Result<u32, SyscallError> {
     slice.read_val::<u32>().map_err(|_| SyscallError::Fault)
 }
 
-fn write_u32(addr: u64, value: u32) -> Result<(), SyscallError> {
-    let slice = UserSliceReadWrite::new(addr, core::mem::size_of::<u32>())
-        .map_err(|_| SyscallError::Fault)?;
-    slice
-        .write_val(&value)
-        .map_err(|_| SyscallError::Fault)?;
-    Ok(())
+#[inline]
+unsafe fn atomic_cmpxchg_u32(ptr: *mut u32, expected: u32, desired: u32) -> u32 {
+    let mut old = expected;
+    unsafe {
+        asm!(
+            "lock cmpxchgl {desired:e}, [{ptr}]",
+            ptr = in(reg) ptr,
+            desired = in(reg) desired,
+            inout("eax") old,
+            options(nostack, preserves_flags),
+        );
+    }
+    old
+}
+
+fn atomic_fetch_update_u32<F>(addr: u64, update: F) -> Result<u32, SyscallError>
+where
+    F: Fn(u32) -> u32,
+{
+    if (addr & 0x3) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let _slice =
+        UserSliceReadWrite::new(addr, core::mem::size_of::<u32>()).map_err(|_| SyscallError::Fault)?;
+    let ptr = addr as *mut u32;
+    let mut cur = unsafe { core::ptr::read_volatile(ptr) };
+    loop {
+        let new = update(cur);
+        let observed = unsafe { atomic_cmpxchg_u32(ptr, cur, new) };
+        if observed == cur {
+            return Ok(cur);
+        }
+        cur = observed;
+    }
 }
 
 fn lock_two_queues<'a>(
@@ -90,6 +113,20 @@ fn wake_from_queue(queue: &FutexQueue, max_wake: u32) -> u64 {
     let mut woke = 0u64;
     while woke < max_wake as u64 {
         if let Some(id) = queue.pop_waiter() {
+            if wake_task(id) {
+                woke += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    woke
+}
+
+fn wake_from_waiters(waiters: &mut VecDeque<crate::process::TaskId>, max_wake: u32) -> u64 {
+    let mut woke = 0u64;
+    while woke < max_wake as u64 {
+        if let Some(id) = waiters.pop_front() {
             if wake_task(id) {
                 woke += 1;
             }
@@ -221,13 +258,6 @@ pub fn sys_futex_wait(_addr: u64, _val: u32, _timeout_ns: u64) -> Result<u64, Sy
     let addr = _addr;
     let val = _val;
     let timeout_ns = _timeout_ns;
-
-    // Validate value at addr matches expected val.
-    let cur = read_u32(addr)?;
-    if cur != val {
-        return Err(SyscallError::Again); // EAGAIN
-    }
-
     let id = current_task_id().ok_or(SyscallError::PermissionDenied)?;
     let queue = get_queue(addr);
 
@@ -238,8 +268,18 @@ pub fn sys_futex_wait(_addr: u64, _val: u32, _timeout_ns: u64) -> Result<u64, Sy
         }
     }
 
-    // Enqueue ourselves before blocking to avoid lost wakeups.
-    queue.push_waiter(id);
+    // Lost-wakeup hardening:
+    // Hold the futex queue lock while validating the futex word and enqueuing.
+    // This closes the race window between `check value` and `enqueue`.
+    {
+        let mut waiters = queue.waiters.lock();
+        let cur = read_u32(addr)?;
+        if cur != val {
+            return Err(SyscallError::Again); // EAGAIN
+        }
+        waiters.push_back(id);
+    }
+
     block_current_task();
 
     // Remove ourselves if still queued (timeout or spurious wake).
@@ -332,36 +372,34 @@ pub fn sys_futex_wake_op(
     let max_wake2 = _max_wake2;
     let wake_op = FutexWakeOpEncode::decode(_op)?;
 
-    let old = read_u32(addr2)?;
-    let new = wake_op.calculate_new_val(old);
-    write_u32(addr2, new)?;
+    // Materialize queues so wake and wait operations serialize on queue locks.
+    let q1 = get_queue(addr1);
+    let q2 = get_queue(addr2);
 
-    let cmp_true = wake_op.should_wake(old);
-
-    let mut woke = 0u64;
-    if let Some(q1) = {
-        let map = FUTEX_QUEUES.lock();
-        map.get(&addr1).cloned()
-    } {
-        woke += wake_from_queue(&q1, max_wake1);
-        if q1.is_empty() {
-            let mut map = FUTEX_QUEUES.lock();
-            map.remove(&addr1);
+    let woke = if addr1 == addr2 {
+        let mut waiters = q1.waiters.lock();
+        let old = atomic_fetch_update_u32(addr2, |v| wake_op.calculate_new_val(v))?;
+        let mut woke = wake_from_waiters(&mut waiters, max_wake1);
+        if wake_op.should_wake(old) {
+            woke += wake_from_waiters(&mut waiters, max_wake2);
         }
-    }
-
-    if cmp_true {
-        if let Some(q2) = {
-            let map = FUTEX_QUEUES.lock();
-            map.get(&addr2).cloned()
-        } {
-            woke += wake_from_queue(&q2, max_wake2);
-            if q2.is_empty() {
-                let mut map = FUTEX_QUEUES.lock();
-                map.remove(&addr2);
-            }
+        woke
+    } else {
+        let (mut w1, mut w2) = lock_two_queues(addr1, &q1, addr2, &q2);
+        let old = atomic_fetch_update_u32(addr2, |v| wake_op.calculate_new_val(v))?;
+        let mut woke = wake_from_waiters(&mut w1, max_wake1);
+        if wake_op.should_wake(old) {
+            woke += wake_from_waiters(&mut w2, max_wake2);
         }
+        woke
+    };
+    if q1.is_empty() {
+        let mut map = FUTEX_QUEUES.lock();
+        map.remove(&addr1);
     }
-
+    if q2.is_empty() {
+        let mut map = FUTEX_QUEUES.lock();
+        map.remove(&addr2);
+    }
     Ok(woke)
 }
