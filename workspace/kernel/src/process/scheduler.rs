@@ -291,7 +291,10 @@ pub fn schedule() -> ! {
 }
 
 pub fn schedule_on_cpu(cpu_index: usize) -> ! {
-    let first_task = {
+    // APs may arrive here before the BSP has called init_scheduler().
+    // Spin-wait (releasing the lock each iteration) until the scheduler
+    // is initialized, then pick the first task.
+    let first_task = loop {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
             let idx = if cpu_index < sched.cpus.len() {
@@ -299,13 +302,11 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             } else {
                 0
             };
-            sched.pick_next_task(idx)
-        } else {
-            // If scheduler isn't initialized, just loop
-            loop {
-                crate::arch::x86_64::hlt();
-            }
+            break sched.pick_next_task(idx);
         }
+        // Drop lock before spinning so the BSP can initialize the scheduler.
+        drop(scheduler);
+        core::hint::spin_loop();
     }; // Lock is released here before jumping to first task
 
     // Set TSS.rsp0 and SYSCALL kernel RSP for the first task
@@ -857,6 +858,15 @@ fn cleanup_task_resources(task: &Arc<Task>) {
 /// by `maybe_preempt()` which is called after EOI in the timer handler.
 /// Also checks interval timers for expiration and wake deadlines for sleep.
 pub fn timer_tick() {
+    // Early return if scheduler is not initialized yet
+    // This can happen during AP boot before schedule() is called
+    let scheduler_check = SCHEDULER.try_lock();
+    if scheduler_check.is_none() {
+        // Scheduler is locked (being initialized or in use), skip this tick
+        return;
+    }
+    drop(scheduler_check); // Release immediately, just checking
+
     let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // Assume 100Hz timer (10ms per tick)
@@ -873,26 +883,33 @@ pub fn timer_tick() {
 /// Check wake deadlines for all tasks and wake up those whose sleep has expired.
 ///
 /// Called from timer_tick() with interrupts disabled.
+///
+/// Uses try_lock() to avoid deadlock if called while scheduler lock is held.
 fn check_wake_deadlines(current_time_ns: u64) {
-    let saved_flags = save_flags_and_cli();
-    let mut scheduler = SCHEDULER.lock();
+    // Use try_lock to avoid deadlock - if scheduler is already locked,
+    // we'll check wake deadlines on the next timer tick.
+    let mut scheduler = match SCHEDULER.try_lock() {
+        Some(guard) => guard,
+        None => return, // Scheduler locked, skip this tick
+    };
+
     if let Some(ref mut sched) = *scheduler {
         // Collect IDs of tasks to wake (to avoid borrow issues)
         let mut to_wake = alloc::vec::Vec::new();
-        
+
         for (id, task) in sched.all_tasks.iter() {
             let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
             if deadline != 0 && current_time_ns >= deadline {
                 to_wake.push(*id);
             }
         }
-        
+
         // Wake up tasks whose deadline has passed
         for id in to_wake {
             if let Some(task) = sched.all_tasks.get(&id) {
                 // Clear the deadline
                 task.wake_deadline_ns.store(0, Ordering::Relaxed);
-                
+
                 // If task is blocked on sleep, wake it up
                 if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
                     // SAFETY: scheduler lock held
@@ -907,8 +924,7 @@ fn check_wake_deadlines(current_time_ns: u64) {
             }
         }
     }
-    drop(scheduler);
-    restore_flags(saved_flags);
+    // Lock released when scheduler goes out of scope
 }
 
 /// Get the current tick count
@@ -917,10 +933,11 @@ pub fn ticks() -> u64 {
 }
 
 /// Get a list of all tasks in the system (for timer checking).
-/// Returns None if scheduler is not initialized.
+/// Returns None if scheduler is not initialized or currently locked.
 pub fn get_all_tasks() -> Option<alloc::vec::Vec<Arc<Task>>> {
     use alloc::vec::Vec;
-    let scheduler = SCHEDULER.lock();
+    // Use try_lock to avoid deadlock in interrupt context
+    let scheduler = SCHEDULER.try_lock()?;
     if let Some(ref sched) = *scheduler {
         let mut tasks = Vec::new();
         for (_, task) in sched.all_tasks.iter() {
