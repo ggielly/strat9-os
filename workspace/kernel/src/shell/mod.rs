@@ -37,10 +37,10 @@ pub extern "C" fn shell_main() -> ! {
 
     // Display welcome message
     shell_println!("");
-    shell_println!("╔══════════════════════════════════════════════════════════════╗");
-    shell_println!("║         Strat9-OS chevron shell v0.1.0 (Bedrock)             ║");
-    shell_println!("║         Type 'help' for available commands                   ║");
-    shell_println!("╚══════════════════════════════════════════════════════════════╝");
+    shell_println!("+--------------------------------------------------------------+");
+    shell_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)             |");
+    shell_println!("|         Type 'help' for available commands                   |");
+    shell_println!("+--------------------------------------------------------------+");
     shell_println!("");
 
     print_prompt();
@@ -98,9 +98,10 @@ pub extern "C" fn shell_main() -> ! {
                 }
                 _ => {}
             }
+        } else {
+            // No keyboard input - yield CPU to other tasks
+            // This prevents deadlock when commands need locks held by other tasks
+            crate::process::yield_task();
         }
-
-        // Yield CPU to other tasks
-        crate::process::yield_task();
     }
 }

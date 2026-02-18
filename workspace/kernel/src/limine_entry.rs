@@ -103,15 +103,39 @@ pub unsafe extern "C" fn kmain() -> ! {
         None => hlt_loop(),
     };
 
-    // Get framebuffer info (for VGA)
-    let fb_addr = if let Some(fb_response) = FRAMEBUFFER.get_response() {
+    // Get framebuffer info (graphics mode provided by Limine)
+    let (
+        fb_addr,
+        fb_width,
+        fb_height,
+        fb_stride,
+        fb_bpp,
+        fb_red_mask_size,
+        fb_red_mask_shift,
+        fb_green_mask_size,
+        fb_green_mask_shift,
+        fb_blue_mask_size,
+        fb_blue_mask_shift,
+    ) = if let Some(fb_response) = FRAMEBUFFER.get_response() {
         if let Some(fb) = fb_response.framebuffers().next() {
-            fb.addr() as u64
+            (
+                fb.addr() as u64,
+                fb.width() as u32,
+                fb.height() as u32,
+                fb.pitch() as u32,
+                fb.bpp(),
+                fb.red_mask_size(),
+                fb.red_mask_shift(),
+                fb.green_mask_size(),
+                fb.green_mask_shift(),
+                fb.blue_mask_size(),
+                fb.blue_mask_shift(),
+            )
         } else {
-            0xB8000 // Fallback to VGA text mode
+            (0, 0, 0, 0, 0, 8, 16, 8, 8, 8, 0)
         }
     } else {
-        0xB8000 // Fallback to VGA text mode
+        (0, 0, 0, 0, 0, 8, 16, 8, 8, 8, 0)
     };
 
     // Get RSDP for ACPI
@@ -177,9 +201,16 @@ pub unsafe extern "C" fn kmain() -> ! {
         initfs_base,
         initfs_size,
         framebuffer_addr: fb_addr,
-        framebuffer_width: 80,
-        framebuffer_height: 25,
-        framebuffer_stride: 80,
+        framebuffer_width: fb_width,
+        framebuffer_height: fb_height,
+        framebuffer_stride: fb_stride,
+        framebuffer_bpp: fb_bpp,
+        framebuffer_red_mask_size: fb_red_mask_size,
+        framebuffer_red_mask_shift: fb_red_mask_shift,
+        framebuffer_green_mask_size: fb_green_mask_size,
+        framebuffer_green_mask_shift: fb_green_mask_shift,
+        framebuffer_blue_mask_size: fb_blue_mask_size,
+        framebuffer_blue_mask_shift: fb_blue_mask_shift,
         hhdm_offset,
     };
 

@@ -18,7 +18,14 @@ pub struct KernelArgs {
     pub framebuffer_addr: u64,
     pub framebuffer_width: u32,
     pub framebuffer_height: u32,
-    pub framebuffer_stride: u32,
+    pub framebuffer_stride: u32, // bytes per scanline (pitch)
+    pub framebuffer_bpp: u16,
+    pub framebuffer_red_mask_size: u8,
+    pub framebuffer_red_mask_shift: u8,
+    pub framebuffer_green_mask_size: u8,
+    pub framebuffer_green_mask_shift: u8,
+    pub framebuffer_blue_mask_size: u8,
+    pub framebuffer_blue_mask_shift: u8,
     /// Higher Half Direct Map offset (0 for identity-mapped / BIOS boot)
     pub hhdm_offset: u64,
 }

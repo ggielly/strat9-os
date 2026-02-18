@@ -145,7 +145,19 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // Phase 3: console output (VGA or serial fallback)
     // =============================================
     serial_println!("[init] Console...");
-    arch::x86_64::vga::init();
+    arch::x86_64::vga::init(
+        args.framebuffer_addr,
+        args.framebuffer_width,
+        args.framebuffer_height,
+        args.framebuffer_stride,
+        args.framebuffer_bpp,
+        args.framebuffer_red_mask_size,
+        args.framebuffer_red_mask_shift,
+        args.framebuffer_green_mask_size,
+        args.framebuffer_green_mask_shift,
+        args.framebuffer_blue_mask_size,
+        args.framebuffer_blue_mask_shift,
+    );
     vga_println!("[OK] Serial port initialized");
     vga_println!("[OK] Memory manager active");
 

@@ -362,6 +362,14 @@ args = [
     "build/qemu.log",
 ]
 
+[tasks.run-qemu]
+description = "Alias: run QEMU with graphical window"
+alias = "run-gui"
+
+[tasks.run-qemu-headless]
+description = "Alias: run QEMU in headless/text mode"
+alias = "run"
+
 [tasks.run-test]
 description = "Load QEMU with the Limine ISO test build (text mode) + EXT4 disk"
 dependencies = ["limine-image-test"]
