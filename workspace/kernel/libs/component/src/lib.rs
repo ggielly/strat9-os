@@ -11,9 +11,25 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! # Advanced Usage
+//!
+//! ```rust,no_run
+//! // With priority - lower number = earlier init
+//! #[init_component(bootstrap, priority = 1)]
+//! fn logger_init() -> Result<(), ComponentInitError> {
+//!     Ok(())
+//! }
+//!
+//! // Kthread stage
+//! #[init_component(kthread, priority = 2)]
+//! fn scheduler_init() -> Result<(), ComponentInitError> {
+//!     Ok(())
+//! }
+//! ```
 
 #![no_std]
-#![deny(unsafe_code)]
+#![allow(unsafe_code)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
@@ -28,7 +44,7 @@ pub use component_macro::init_component;
 /// - `Bootstrap`: Early kernel initialization, before SMP
 /// - `Kthread`: After SMP enabled, in kernel thread context
 /// - `Process`: After first user process created
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum InitStage {
     Bootstrap = 0,
@@ -136,7 +152,7 @@ extern "C" {
 /// Initialize all components for a given stage
 ///
 /// Iterates over all component entries in the linker section and invokes
-/// them in priority order.
+/// them in priority order (lower priority number = earlier init).
 ///
 /// # Example
 ///
@@ -166,23 +182,81 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
     }
 
     // Sort by priority (lower priority number = earlier init)
-    components.sort_by_key(|e| e.priority);
+    // Components with the same priority are sorted by path for determinism
+    components.sort_by(|a, b| {
+        a.priority.cmp(&b.priority).then_with(|| a.path.cmp(b.path))
+    });
 
     log::info!("Components initializing in {:?} stage...", stage);
+    log::info!("Found {} component(s) for {:?} stage", components.len(), stage);
+
+    let mut initialized = Vec::new();
+    let mut failed = Vec::new();
 
     for entry in components {
-        log::info!("Component initializing: {}", entry.path);
+        // Extract component name from path (e.g., "vfs/mod.rs:vfs_init" -> "vfs_init")
+        let name = entry.path.split(':').last().unwrap_or(entry.path);
+        
+        log::info!(
+            "[{:?}] Initializing: {} (priority={}, path={})",
+            stage,
+            name,
+            entry.priority,
+            entry.path
+        );
+        
         match (entry.init_fn)() {
-            Ok(()) => log::info!("Component initialize complete: {}", entry.path),
-            Err(e) => log::error!("Component initialize error ({}): {:?}", entry.path, e),
+            Ok(()) => {
+                log::info!("[{:?}] ✓ Component initialized: {}", stage, name);
+                initialized.push(name);
+            }
+            Err(e) => {
+                log::error!("[{:?}] ✗ Component init error ({}): {:?}", stage, name, e);
+                failed.push((name, e));
+            }
         }
     }
 
     log::info!(
-        "All components initialization in {:?} stage completed",
-        stage
+        "All components initialization in {:?} stage completed: {} succeeded, {} failed",
+        stage,
+        initialized.len(),
+        failed.len()
     );
+
+    // Report failures but don't fail the entire init
+    if !failed.is_empty() {
+        log::warn!("Some components failed to initialize in {:?} stage", stage);
+        for (name, err) in &failed {
+            log::warn!("  - {}: {:?}", name, err);
+        }
+    }
+
     Ok(())
+}
+
+/// Get list of all registered components (for debugging)
+pub fn list_components() -> Vec<&'static ComponentEntry> {
+    let mut components: Vec<&ComponentEntry> = Vec::new();
+
+    unsafe {
+        let start = &__start_component_entries as *const ComponentEntry;
+        let stop = &__stop_component_entries as *const ComponentEntry;
+
+        let mut current = start;
+        while current < stop {
+            components.push(&*current);
+            current = current.add(1);
+        }
+    }
+
+    components.sort_by(|a, b| {
+        a.stage.cmp(&b.stage)
+            .then_with(|| a.priority.cmp(&b.priority))
+            .then_with(|| a.path.cmp(b.path))
+    });
+
+    components
 }
 
 /// Parse component metadata at compile time (stub for now)

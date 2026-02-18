@@ -6,6 +6,10 @@
 //! - Basic scheduler functionality
 
 pub mod elf;
+#[cfg(feature = "selftest")]
+pub mod futex_test;
+#[cfg(feature = "selftest")]
+pub mod selftest;
 pub mod scheduler;
 pub mod signal;
 pub mod task;

@@ -92,7 +92,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     //serial_println!();
 
     serial_println!("");
-    serial_println!("==================================================================================================");
+    serial_println!("=======================================================================================================");
     serial_println!("  strat9-OS kernel v0.1.0 (Bedrock)");
     serial_println!("  Copyright (c) 2026 Guillaume Gielly - GPLv3 License");
     serial_println!("");
@@ -103,7 +103,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         "  even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
     );
     serial_println!("  See the GNU General Public License for more details.");
-    serial_println!("==================================================================================================");
+    serial_println!("=======================================================================================================");
 
     // Validate arguments
     if args.is_null() {
@@ -174,6 +174,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     arch::x86_64::syscall::init();
     serial_println!("[init] SYSCALL/SYSRET initialized.");
     vga_println!("[OK] SYSCALL/SYSRET configured");
+
+    // =============================================
+    // Phase 4d: component system - Bootstrap stage
+    // =============================================
+    serial_println!("[init] Components (bootstrap)...");
+    vga_println!("[..] Initializing bootstrap components...");
+    if let Err(e) = component::init_all(component::InitStage::Bootstrap) {
+        serial_println!("[WARN] Some bootstrap components failed: {:?}", e);
+    }
+    serial_println!("[init] Bootstrap components initialized.");
+    vga_println!("[OK] Bootstrap components ready");
 
     // =============================================
     // Phase 5: IDT (Interrupt Descriptor Table)
@@ -273,6 +284,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     vga_println!("[OK] Multitasking enabled");
 
     // =============================================
+    // Phase 7b: component system - Kthread stage
+    // =============================================
+    serial_println!("[init] Components (kthread)...");
+    vga_println!("[..] Initializing kthread components...");
+    if let Err(e) = component::init_all(component::InitStage::Kthread) {
+        serial_println!("[WARN] Some kthread components failed: {:?}", e);
+    }
+    serial_println!("[init] Kthread components initialized.");
+    vga_println!("[OK] Kthread components ready");
+
+    // =============================================
     // Phase 8: create test tasks
     // =============================================
     serial_println!("[init] Creating test tasks...");
@@ -280,6 +302,18 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     process::test::create_test_tasks();
     serial_println!("[init] Test tasks created.");
     vga_println!("[OK] Test tasks added to scheduler");
+
+    #[cfg(feature = "selftest")]
+    {
+        // =============================================
+        // Phase 8a: runtime self-tests
+        // =============================================
+        serial_println!("[init] Creating self-test tasks...");
+        vga_println!("[..] Adding self-test tasks...");
+        process::selftest::create_selftest_tasks();
+        serial_println!("[init] Self-test tasks created.");
+        vga_println!("[OK] Self-test tasks added");
+    }
 
     // =============================================
     // Phase 8b: create Ring 3 test task
@@ -340,6 +374,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
             }
         }
     }
+
+    // =============================================
+    // Phase 8c: component system - process stage
+    // =============================================
+    serial_println!("[init] Components (process)...");
+    vga_println!("[..] Initializing process components...");
+    if let Err(e) = component::init_all(component::InitStage::Process) {
+        serial_println!("[WARN] Some process components failed: {:?}", e);
+    }
+    serial_println!("[init] Process components initialized.");
+    vga_println!("[OK] Process components ready");
 
     // =============================================
     // Phase 8d: IPC ping-pong test

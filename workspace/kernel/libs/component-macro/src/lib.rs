@@ -6,27 +6,68 @@ use syn::{parse_macro_input, ItemFn};
 
 /// Register a function to be called when the component system is initialized.
 ///
-/// You can specify the initialization stage by:
-/// - `#[init_component]` or `#[init_component(bootstrap)]` - the **Bootstrap** stage
-/// - `#[init_component(kthread)]` - the **Kthread** stage  
-/// - `#[init_component(process)]` - the **Process** stage
+/// You can specify the initialization stage and options:
+/// - `#[init_component]` or `#[init_component(bootstrap)]` - Bootstrap stage (default)
+/// - `#[init_component(kthread)]` - Kthread stage
+/// - `#[init_component(process)]` - Process stage
+/// - `#[init_component(bootstrap, priority = 1)]` - With custom priority
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust,no_run
+/// // Basic usage - default priority 0
 /// #[init_component]
-/// fn init() -> Result<(), component::ComponentInitError> {
+/// fn memory_init() -> Result<(), component::ComponentInitError> {
+///     Ok(())
+/// }
+///
+/// // With priority - lower number = earlier init
+/// #[init_component(bootstrap, priority = 1)]
+/// fn logger_init() -> Result<(), component::ComponentInitError> {
+///     Ok(())
+/// }
+///
+/// // Kthread stage
+/// #[init_component(kthread, priority = 2)]
+/// fn scheduler_init() -> Result<(), component::ComponentInitError> {
 ///     Ok(())
 /// }
 /// ```
 #[proc_macro_attribute]
 pub fn init_component(args: TokenStream, input: TokenStream) -> TokenStream {
-    let stage = match args.to_string().as_str() {
-        "" | "bootstrap" => quote! { Bootstrap },
-        "kthread" => quote! { Kthread },
-        "process" => quote! { Process },
-        _ => panic!("Invalid argument for init_component. Use: bootstrap, kthread, or process"),
-    };
+    // Parse arguments: stage, priority = N
+    let mut stage = quote! { Bootstrap };
+    let mut priority: u32 = 0;
+
+    let args_str = args.to_string();
+    
+    // Parse stage
+    if !args_str.is_empty() {
+        stage = match args_str.split(',').next().unwrap_or("").trim() {
+            "" | "bootstrap" => quote! { Bootstrap },
+            "kthread" => quote! { Kthread },
+            "process" => quote! { Process },
+            other => panic!("Invalid stage '{}'. Use: bootstrap, kthread, or process", other),
+        };
+    }
+
+    // Parse priority if present
+    if let Some(pos) = args_str.find("priority") {
+        if let Some(eq_pos) = args_str[pos..].find('=') {
+            let start = pos + eq_pos + 1;
+            if let Some(end) = args_str[start..].find(|c: char| !c.is_numeric() && c != ' ') {
+                let priority_str = args_str[start..start + end].trim();
+                if let Ok(p) = priority_str.parse::<u32>() {
+                    priority = p;
+                }
+            } else {
+                let priority_str = args_str[start..].trim();
+                if let Ok(p) = priority_str.parse::<u32>() {
+                    priority = p;
+                }
+            }
+        }
+    }
 
     let function = parse_macro_input!(input as ItemFn);
     let function_name = &function.sig.ident;
@@ -48,8 +89,8 @@ pub fn init_component(args: TokenStream, input: TokenStream) -> TokenStream {
             component::ComponentEntry::new(
                 component::InitStage::#stage,
                 #function_name,
-                file!(),
-                0, // Default priority, can be customized later
+                ::core::concat!(file!(), ":", ::core::stringify!(#function_name)),
+                #priority,
             );
     };
 
