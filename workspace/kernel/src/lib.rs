@@ -392,14 +392,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     serial_println!("[init] Process components initialized.");
     vga_println!("[OK] Process components ready");
 
-    // =============================================
-    // Phase 8d: IPC ping-pong test
-    // =============================================
-    serial_println!("[init] Creating IPC test tasks...");
-    vga_println!("[..] Creating IPC test tasks...");
-    ipc::test::create_ipc_test_tasks();
-    serial_println!("[init] IPC test tasks created.");
-    vga_println!("[OK] IPC test tasks ready");
+    #[cfg(feature = "selftest")]
+    {
+        // =============================================
+        // Phase 8d: IPC ping-pong test
+        // =============================================
+        serial_println!("[init] Creating IPC test tasks...");
+        vga_println!("[..] Creating IPC test tasks...");
+        ipc::test::create_ipc_test_tasks();
+        serial_println!("[init] IPC test tasks created.");
+        vga_println!("[OK] IPC test tasks ready");
+    }
 
     // =============================================
     // Phase 9: enable interrupts
