@@ -1,20 +1,33 @@
-use core::arch::asm;
-use core::ptr;
-use crate::platform::types::*;
-use crate::platform::pal::{Pal, PalSignal};
-use crate::error::{Errno, Result};
-use crate::c_str::CStr;
-use crate::header::time::timespec;
-use crate::header::sys_stat::stat;
-use crate::header::sys_statvfs::statvfs;
-use crate::header::sys_resource::{rlimit, rusage};
-use crate::header::sys_time::timeval;
-use crate::header::sys_utsname::utsname;
-use crate::header::time::itimerspec;
-use crate::header::signal::sigevent;
-use crate::out::Out;
+use crate::{
+    c_str::CStr,
+    error::{Errno, Result},
+    header::{
+        signal::sigevent,
+        sys_resource::{rlimit, rusage},
+        sys_stat::stat,
+        sys_statvfs::statvfs,
+        sys_time::timeval,
+        sys_utsname::utsname,
+        time::{itimerspec, timespec},
+    },
+    out::Out,
+    platform::{
+        pal::{Pal, PalSignal},
+        types::*,
+    },
+};
+use core::{arch::asm, ptr};
 
 pub mod auxv_defs;
+
+// time conversion constants
+const NANOSECONDS_PER_SECOND: usize = 1_000_000_000;
+const MILLISECONDS_PER_SECOND: usize = 1_000;
+const MICROSECONDS_PER_MILLISECOND: usize = 1_000;
+
+// syscall numbers (time-related)
+const SYS_TIME_TICKS: usize = 500;
+const SYS_NANOSLEEP: usize = 501;
 
 pub struct Sys;
 
@@ -24,7 +37,9 @@ impl Pal for Sys {
         if (ret as isize) < 0 {
             Err(Errno(-(ret as i32)))
         } else {
-            unsafe { let _ = syscall1(406, ret); }
+            unsafe {
+                let _ = syscall1(406, ret);
+            }
             Ok(())
         }
     }
@@ -61,9 +76,9 @@ impl Pal for Sys {
     }
 
     fn clock_gettime(_clk_id: clockid_t, mut tp: Out<timespec>) -> Result<()> {
-        let ticks = unsafe { syscall0(500) };
-        tp.tv_sec = (ticks / 1000) as i64;
-        tp.tv_nsec = ((ticks % 1000) * 1_000_000) as i64;
+        let ns = unsafe { syscall0(SYS_TIME_TICKS) };
+        tp.tv_sec = (ns / NANOSECONDS_PER_SECOND) as i64;
+        tp.tv_nsec = (ns % NANOSECONDS_PER_SECOND) as i64;
         Ok(())
     }
 
@@ -93,11 +108,19 @@ impl Pal for Sys {
         Err(Errno(crate::error::ENOSYS))
     }
 
-    unsafe fn execve(_path: CStr, _argv: *const *mut c_char, _envp: *const *mut c_char) -> Result<()> {
+    unsafe fn execve(
+        _path: CStr,
+        _argv: *const *mut c_char,
+        _envp: *const *mut c_char,
+    ) -> Result<()> {
         Err(Errno(crate::error::ENOSYS))
     }
 
-    unsafe fn fexecve(_fildes: c_int, _argv: *const *mut c_char, _envp: *const *mut c_char) -> Result<()> {
+    unsafe fn fexecve(
+        _fildes: c_int,
+        _argv: *const *mut c_char,
+        _envp: *const *mut c_char,
+    ) -> Result<()> {
         Err(Errno(crate::error::ENOSYS))
     }
 
@@ -173,12 +196,30 @@ impl Pal for Sys {
         Err(Errno(crate::error::ENOSYS))
     }
 
-    unsafe fn futex_wait(_addr: *mut u32, _val: u32, _deadline: Option<&timespec>) -> Result<()> {
-        Err(Errno(crate::error::ENOSYS))
+    unsafe fn futex_wait(addr: *mut u32, val: u32, deadline: Option<&timespec>) -> Result<()> {
+        let timeout_ns = if let Some(ts) = deadline {
+            let secs = ts.tv_sec.max(0) as u64;
+            let nsec = ts.tv_nsec.max(0) as u64;
+            secs.saturating_mul(NANOSECONDS_PER_SECOND as u64)
+                .saturating_add(nsec)
+        } else {
+            0
+        };
+        let ret = unsafe { syscall3(302, addr as usize, val as usize, timeout_ns as usize) };
+        if (ret as isize) < 0 {
+            Err(Errno(-(ret as i32)))
+        } else {
+            Ok(())
+        }
     }
 
-    unsafe fn futex_wake(_addr: *mut u32, _num: u32) -> Result<u32> {
-        Err(Errno(crate::error::ENOSYS))
+    unsafe fn futex_wake(addr: *mut u32, num: u32) -> Result<u32> {
+        let ret = unsafe { syscall2(303, addr as usize, num as usize) };
+        if (ret as isize) < 0 {
+            Err(Errno(-(ret as i32)))
+        } else {
+            Ok(ret as u32)
+        }
     }
 
     unsafe fn futimens(_fildes: c_int, _times: *const timespec) -> Result<()> {
@@ -205,30 +246,77 @@ impl Pal for Sys {
         None
     }
 
-    fn getegid() -> gid_t { 0 }
-    fn geteuid() -> uid_t { 0 }
-    fn getgid() -> gid_t { 0 }
-    fn getgroups(_list: Out<[gid_t]>) -> Result<c_int> { Ok(0) }
-    fn getpagesize() -> usize { 4096 }
-    fn getpgid(_pid: pid_t) -> Result<pid_t> { Ok(0) }
-    fn getpid() -> pid_t { 1 }
-    fn getppid() -> pid_t { 0 }
-    fn getpriority(_which: c_int, _who: id_t) -> Result<c_int> { Ok(0) }
-    fn getrandom(_buf: &mut [u8], _flags: c_uint) -> Result<usize> { Ok(0) }
-    fn getresgid(_rgid: Option<Out<gid_t>>, _egid: Option<Out<gid_t>>, _sgid: Option<Out<gid_t>>) -> Result<()> { Ok(()) }
-    fn getresuid(_ruid: Option<Out<uid_t>>, _euid: Option<Out<uid_t>>, _suid: Option<Out<uid_t>>) -> Result<()> { Ok(()) }
-    fn getrlimit(_resource: c_int, _rlim: Out<rlimit>) -> Result<()> { Ok(()) }
-    unsafe fn setrlimit(_resource: c_int, _rlim: *const rlimit) -> Result<()> { Ok(()) }
-    fn getrusage(_who: c_int, _r_usage: Out<rusage>) -> Result<()> { Ok(()) }
-    fn getsid(_pid: pid_t) -> Result<pid_t> { Ok(0) }
-    fn gettid() -> pid_t { 1 }
-    fn gettimeofday(mut tp: Out<timeval>, _tzp: Option<Out<crate::header::sys_time::timezone>>) -> Result<()> {
-        let ticks = unsafe { syscall0(500) };
-        tp.tv_sec = (ticks / 1000) as i64;
-        tp.tv_usec = ((ticks % 1000) * 1000) as i64;
+    fn getegid() -> gid_t {
+        0
+    }
+    fn geteuid() -> uid_t {
+        0
+    }
+    fn getgid() -> gid_t {
+        0
+    }
+    fn getgroups(_list: Out<[gid_t]>) -> Result<c_int> {
+        Ok(0)
+    }
+    fn getpagesize() -> usize {
+        4096
+    }
+    fn getpgid(_pid: pid_t) -> Result<pid_t> {
+        Ok(0)
+    }
+    fn getpid() -> pid_t {
+        1
+    }
+    fn getppid() -> pid_t {
+        0
+    }
+    fn getpriority(_which: c_int, _who: id_t) -> Result<c_int> {
+        Ok(0)
+    }
+    fn getrandom(_buf: &mut [u8], _flags: c_uint) -> Result<usize> {
+        Ok(0)
+    }
+    fn getresgid(
+        _rgid: Option<Out<gid_t>>,
+        _egid: Option<Out<gid_t>>,
+        _sgid: Option<Out<gid_t>>,
+    ) -> Result<()> {
         Ok(())
     }
-    fn getuid() -> uid_t { 0 }
+    fn getresuid(
+        _ruid: Option<Out<uid_t>>,
+        _euid: Option<Out<uid_t>>,
+        _suid: Option<Out<uid_t>>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn getrlimit(_resource: c_int, _rlim: Out<rlimit>) -> Result<()> {
+        Ok(())
+    }
+    unsafe fn setrlimit(_resource: c_int, _rlim: *const rlimit) -> Result<()> {
+        Ok(())
+    }
+    fn getrusage(_who: c_int, _r_usage: Out<rusage>) -> Result<()> {
+        Ok(())
+    }
+    fn getsid(_pid: pid_t) -> Result<pid_t> {
+        Ok(0)
+    }
+    fn gettid() -> pid_t {
+        1
+    }
+    fn gettimeofday(
+        mut tp: Out<timeval>,
+        _tzp: Option<Out<crate::header::sys_time::timezone>>,
+    ) -> Result<()> {
+        let ticks = unsafe { syscall0(SYS_TIME_TICKS) };
+        tp.tv_sec = (ticks / MILLISECONDS_PER_SECOND) as i64;
+        tp.tv_usec = ((ticks % MILLISECONDS_PER_SECOND) * MICROSECONDS_PER_MILLISECOND) as i64;
+        Ok(())
+    }
+    fn getuid() -> uid_t {
+        0
+    }
 
     fn lchown(_path: CStr, _owner: uid_t, _group: gid_t) -> Result<()> {
         Err(Errno(crate::error::ENOSYS))
@@ -274,7 +362,14 @@ impl Pal for Sys {
         Ok(())
     }
 
-    unsafe fn mmap(addr: *mut c_void, len: usize, prot: c_int, _flags: c_int, _fildes: c_int, _off: off_t) -> Result<*mut c_void> {
+    unsafe fn mmap(
+        addr: *mut c_void,
+        len: usize,
+        prot: c_int,
+        _flags: c_int,
+        _fildes: c_int,
+        _off: off_t,
+    ) -> Result<*mut c_void> {
         let ret = unsafe { syscall3(100, addr as usize, len, prot as usize) };
         if (ret as isize) < 0 {
             Err(Errno(-(ret as i32)))
@@ -283,7 +378,13 @@ impl Pal for Sys {
         }
     }
 
-    unsafe fn mremap(_addr: *mut c_void, _len: usize, _new_len: usize, _flags: c_int, _args: *mut c_void) -> Result<*mut c_void> {
+    unsafe fn mremap(
+        _addr: *mut c_void,
+        _len: usize,
+        _new_len: usize,
+        _flags: c_int,
+        _args: *mut c_void,
+    ) -> Result<*mut c_void> {
         Err(Errno(crate::error::ENOSYS))
     }
 
@@ -316,12 +417,24 @@ impl Pal for Sys {
         }
     }
 
-    unsafe fn nanosleep(_rqtp: *const timespec, _rmtp: *mut timespec) -> Result<()> {
-        Ok(())
+    unsafe fn nanosleep(rqtp: *const timespec, rmtp: *mut timespec) -> Result<()> {
+        let ret = unsafe { syscall2(SYS_NANOSLEEP, rqtp as usize, rmtp as usize) };
+        if (ret as isize) < 0 {
+            Err(Errno(-(ret as i32)))
+        } else {
+            Ok(())
+        }
     }
 
     fn open(path: CStr, oflag: c_int, _mode: mode_t) -> Result<c_int> {
-        let ret = unsafe { syscall3(403, path.as_ptr() as usize, path.to_bytes().len(), oflag as usize) };
+        let ret = unsafe {
+            syscall3(
+                403,
+                path.as_ptr() as usize,
+                path.to_bytes().len(),
+                oflag as usize,
+            )
+        };
         if (ret as isize) < 0 {
             Err(Errno(-(ret as i32)))
         } else {
@@ -341,7 +454,10 @@ impl Pal for Sys {
         Err(Errno(crate::error::ENOSYS))
     }
 
-    unsafe fn rlct_clone(_stack: *mut usize, _os_specific: &mut crate::ld_so::tcb::OsSpecific) -> Result<crate::pthread::OsTid, Errno> {
+    unsafe fn rlct_clone(
+        _stack: *mut usize,
+        _os_specific: &mut crate::ld_so::tcb::OsSpecific,
+    ) -> Result<crate::pthread::OsTid, Errno> {
         Err(Errno(crate::error::ENOSYS))
     }
 
@@ -349,7 +465,9 @@ impl Pal for Sys {
         Err(Errno(crate::error::ENOSYS))
     }
 
-    fn current_os_tid() -> crate::pthread::OsTid { 1 }
+    fn current_os_tid() -> crate::pthread::OsTid {
+        1
+    }
 
     fn read(fildes: c_int, buf: &mut [u8]) -> Result<usize> {
         let ret = unsafe { syscall3(405, fildes as usize, buf.as_mut_ptr() as usize, buf.len()) };
@@ -380,7 +498,13 @@ impl Pal for Sys {
         Err(Errno(crate::error::ENOSYS))
     }
 
-    fn renameat2(_old_dir: c_int, _old_path: CStr, _new_dir: c_int, _new_path: CStr, _flags: c_uint) -> Result<()> {
+    fn renameat2(
+        _old_dir: c_int,
+        _old_path: CStr,
+        _new_dir: c_int,
+        _new_path: CStr,
+        _flags: c_uint,
+    ) -> Result<()> {
         Err(Errno(crate::error::ENOSYS))
     }
 
@@ -389,7 +513,9 @@ impl Pal for Sys {
     }
 
     fn sched_yield() -> Result<()> {
-        unsafe { let _ = syscall0(301); }
+        unsafe {
+            let _ = syscall0(301);
+        }
         Ok(())
     }
 
@@ -437,11 +563,18 @@ impl Pal for Sys {
         Err(Errno(crate::error::ENOSYS))
     }
 
-    fn timer_settime(_timerid: timer_t, _flags: c_int, _value: &itimerspec, _ovalue: Option<Out<itimerspec>>) -> Result<()> {
+    fn timer_settime(
+        _timerid: timer_t,
+        _flags: c_int,
+        _value: &itimerspec,
+        _ovalue: Option<Out<itimerspec>>,
+    ) -> Result<()> {
         Err(Errno(crate::error::ENOSYS))
     }
 
-    fn umask(_mask: mode_t) -> mode_t { 0o022 }
+    fn umask(_mask: mode_t) -> mode_t {
+        0o022
+    }
 
     fn uname(_utsname: Out<utsname>) -> Result<()> {
         Err(Errno(crate::error::ENOSYS))
@@ -468,7 +601,9 @@ impl Pal for Sys {
         Err(Errno(crate::error::ENOSYS))
     }
 
-    fn verify() -> bool { true }
+    fn verify() -> bool {
+        true
+    }
 }
 
 impl PalSignal for Sys {}

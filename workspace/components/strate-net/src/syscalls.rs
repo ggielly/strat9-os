@@ -7,9 +7,29 @@ pub fn net_recv(buf: &mut [u8]) -> Result<usize> {
     unsafe { syscall2(number::SYS_NET_RECV, buf.as_mut_ptr() as usize, buf.len()) }
 }
 
-/// Get current monotonic tick count (kernel ticks).
-pub fn clock_gettime_ticks() -> Result<u64> {
+/// Time specification structure (matches kernel timespec)
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TimeSpec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+/// Get current monotonic time in nanoseconds since boot.
+pub fn clock_gettime_ns() -> Result<u64> {
     unsafe { syscall0(number::SYS_CLOCK_GETTIME).map(|v| v as u64) }
+}
+
+/// Sleep for a specified duration.
+pub fn nanosleep(req: &TimeSpec) -> Result<()> {
+    unsafe {
+        syscall2(
+            number::SYS_NANOSLEEP,
+            req as *const TimeSpec as usize,
+            0,
+        )?;
+        Ok(())
+    }
 }
 
 /// Yield the current process.
@@ -66,6 +86,7 @@ pub mod number {
     pub const SYS_NET_SEND: usize = 411;
     pub const SYS_NET_INFO: usize = 412;
     pub const SYS_CLOCK_GETTIME: usize = 500;
+    pub const SYS_NANOSLEEP: usize = 501;
     pub const SYS_DEBUG_LOG: usize = 600;
 }
 
