@@ -2,6 +2,8 @@
 
 Strat9-OS is a modular microkernel written in Rust and assembly. The kernel provides scheduling, IPC, memory primitives, and interrupt routing. Everything else (filesystems, networking, drivers) runs as isolated userspace components called Silos, also written in Rust.
 
+The goal is to run silos (a kind of containers with ELF/WASM etc) directly on the kernel.
+
 ## Architecture
 
 - Kernel (Bedrock) in Ring 0 : minimal, `#![no_std]`.
