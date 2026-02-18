@@ -1,13 +1,16 @@
 //! Futex (Fast Userspace Mutex) syscall handlers
-use alloc::collections::{BTreeMap, VecDeque};
-use alloc::sync::Arc;
-use core::arch::asm;
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 use core::sync::atomic::Ordering;
 
 use super::error::SyscallError;
-use crate::memory::userslice::{UserSliceRead, UserSliceReadWrite};
-use crate::process::{block_current_task, current_task_id, wake_task};
-use crate::sync::{SpinLock, SpinLockGuard};
+use crate::{
+    memory::userslice::{UserSliceRead, UserSliceReadWrite},
+    process::{block_current_task, current_task_id, wake_task},
+    sync::{SpinLock, SpinLockGuard},
+};
 
 struct FutexQueue {
     waiters: SpinLock<VecDeque<crate::process::TaskId>>,
@@ -37,8 +40,7 @@ impl FutexQueue {
     }
 }
 
-static FUTEX_QUEUES: SpinLock<BTreeMap<u64, Arc<FutexQueue>>> =
-    SpinLock::new(BTreeMap::new());
+static FUTEX_QUEUES: SpinLock<BTreeMap<u64, Arc<FutexQueue>>> = SpinLock::new(BTreeMap::new());
 
 fn get_queue(addr: u64) -> Arc<FutexQueue> {
     let mut map = FUTEX_QUEUES.lock();
@@ -48,24 +50,19 @@ fn get_queue(addr: u64) -> Arc<FutexQueue> {
 }
 
 fn read_u32(addr: u64) -> Result<u32, SyscallError> {
-    let slice = UserSliceRead::new(addr, core::mem::size_of::<u32>())
-        .map_err(|_| SyscallError::Fault)?;
+    let slice =
+        UserSliceRead::new(addr, core::mem::size_of::<u32>()).map_err(|_| SyscallError::Fault)?;
     slice.read_val::<u32>().map_err(|_| SyscallError::Fault)
 }
 
 #[inline]
-unsafe fn atomic_cmpxchg_u32(ptr: *mut u32, expected: u32, desired: u32) -> u32 {
-    let mut old = expected;
-    unsafe {
-        asm!(
-            "lock cmpxchgl {desired:e}, [{ptr}]",
-            ptr = in(reg) ptr,
-            desired = in(reg) desired,
-            inout("eax") old,
-            options(nostack, preserves_flags),
-        );
-    }
-    old
+fn atomic_cmpxchg_u32(ptr: *mut u32, expected: u32, desired: u32) -> u32 {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    let atomic = unsafe { &*ptr.cast::<AtomicU32>() };
+    atomic
+        .compare_exchange_weak(expected, desired, Ordering::SeqCst, Ordering::SeqCst)
+        .unwrap_or_else(|x| x)
 }
 
 fn atomic_fetch_update_u32<F>(addr: u64, update: F) -> Result<u32, SyscallError>
@@ -75,13 +72,13 @@ where
     if (addr & 0x3) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let _slice =
-        UserSliceReadWrite::new(addr, core::mem::size_of::<u32>()).map_err(|_| SyscallError::Fault)?;
+    let _slice = UserSliceReadWrite::new(addr, core::mem::size_of::<u32>())
+        .map_err(|_| SyscallError::Fault)?;
     let ptr = addr as *mut u32;
     let mut cur = unsafe { core::ptr::read_volatile(ptr) };
     loop {
         let new = update(cur);
-        let observed = unsafe { atomic_cmpxchg_u32(ptr, cur, new) };
+        let observed = atomic_cmpxchg_u32(ptr, cur, new);
         if observed == cur {
             return Ok(cur);
         }
@@ -137,7 +134,12 @@ fn wake_from_waiters(waiters: &mut VecDeque<crate::process::TaskId>, max_wake: u
     woke
 }
 
-fn do_requeue(addr1: u64, max_wake: u32, max_requeue: u32, addr2: u64) -> Result<u64, SyscallError> {
+fn do_requeue(
+    addr1: u64,
+    max_wake: u32,
+    max_requeue: u32,
+    addr2: u64,
+) -> Result<u64, SyscallError> {
     if addr1 == addr2 {
         return sys_futex_wake(addr1, max_wake);
     }
