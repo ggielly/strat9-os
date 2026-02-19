@@ -454,6 +454,26 @@ struct PixelFormat {
     blue_shift: u8,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct FramebufferInfo {
+    pub available: bool,
+    pub width: usize,
+    pub height: usize,
+    pub pitch: usize,
+    pub bpp: u16,
+    pub red_size: u8,
+    pub red_shift: u8,
+    pub green_size: u8,
+    pub green_shift: u8,
+    pub blue_size: u8,
+    pub blue_shift: u8,
+    pub text_cols: usize,
+    pub text_rows: usize,
+    pub glyph_w: usize,
+    pub glyph_h: usize,
+    pub double_buffer_enabled: bool,
+}
+
 impl PixelFormat {
     fn pack_rgb(&self, r: u8, g: u8, b: u8) -> u32 {
         fn scale(v: u8, bits: u8) -> u32 {
@@ -813,6 +833,27 @@ impl VgaWriter {
 
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub fn framebuffer_info(&self) -> FramebufferInfo {
+        FramebufferInfo {
+            available: self.enabled,
+            width: self.fb_width,
+            height: self.fb_height,
+            pitch: self.pitch,
+            bpp: self.fmt.bpp,
+            red_size: self.fmt.red_size,
+            red_shift: self.fmt.red_shift,
+            green_size: self.fmt.green_size,
+            green_shift: self.fmt.green_shift,
+            blue_size: self.fmt.blue_size,
+            blue_shift: self.fmt.blue_shift,
+            text_cols: self.cols,
+            text_rows: self.rows,
+            glyph_w: self.font_info.glyph_w,
+            glyph_h: self.font_info.glyph_h,
+            double_buffer_enabled: self.draw_to_back && self.back_buffer.is_some(),
+        }
     }
 
     #[inline]
@@ -2015,6 +2056,30 @@ pub fn set_text_cursor(col: usize, row: usize) {
         return;
     }
     VGA_WRITER.lock().set_cursor_cell(col, row);
+}
+
+pub fn framebuffer_info() -> FramebufferInfo {
+    if !is_available() {
+        return FramebufferInfo {
+            available: false,
+            width: 0,
+            height: 0,
+            pitch: 0,
+            bpp: 0,
+            red_size: 0,
+            red_shift: 0,
+            green_size: 0,
+            green_shift: 0,
+            blue_size: 0,
+            blue_shift: 0,
+            text_cols: 0,
+            text_rows: 0,
+            glyph_w: 0,
+            glyph_h: 0,
+            double_buffer_enabled: false,
+        };
+    }
+    VGA_WRITER.lock().framebuffer_info()
 }
 
 pub fn set_text_color(fg: RgbColor, bg: RgbColor) {

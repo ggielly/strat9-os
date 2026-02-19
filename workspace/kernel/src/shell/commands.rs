@@ -30,6 +30,7 @@ impl CommandRegistry {
         reg.register("scheme", cmd_scheme);
         reg.register("cpuinfo", cmd_cpuinfo);
         reg.register("reboot", cmd_reboot);
+        reg.register("gfx", cmd_gfx);
         reg.register("gfx-demo", cmd_gfx_demo);
 
         reg

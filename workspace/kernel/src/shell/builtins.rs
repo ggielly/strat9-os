@@ -22,6 +22,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  scheme ls         - List mounted schemes");
     shell_println!("  cpuinfo           - Display CPU information");
     shell_println!("  reboot            - Reboot the system");
+    shell_println!("  gfx info          - Display framebuffer/console info");
     shell_println!("  gfx-demo          - Draw a graphics console UI demo");
     shell_println!("");
     Ok(())
@@ -244,6 +245,54 @@ pub fn cmd_reboot(_args: &[String]) -> Result<(), ShellError> {
             crate::arch::x86_64::hlt();
         }
     }
+}
+
+/// Graphics console commands
+pub fn cmd_gfx(args: &[String]) -> Result<(), ShellError> {
+    if args.is_empty() || args[0] != "info" {
+        shell_println!("Usage: gfx info");
+        return Ok(());
+    }
+
+    let info = crate::arch::x86_64::vga::framebuffer_info();
+    if !info.available {
+        shell_println!("Graphics console: unavailable");
+        return Ok(());
+    }
+
+    shell_println!("Graphics console:");
+    shell_println!(
+        "  Framebuffer: {}x{} {}bpp pitch={}",
+        info.width,
+        info.height,
+        info.bpp,
+        info.pitch
+    );
+    shell_println!(
+        "  RGB masks: R({}:{}) G({}:{}) B({}:{})",
+        info.red_size,
+        info.red_shift,
+        info.green_size,
+        info.green_shift,
+        info.blue_size,
+        info.blue_shift
+    );
+    shell_println!(
+        "  Text grid: {}x{} (glyph={}x{})",
+        info.text_cols,
+        info.text_rows,
+        info.glyph_w,
+        info.glyph_h
+    );
+    shell_println!(
+        "  Double buffer: {}",
+        if info.double_buffer_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    Ok(())
 }
 
 /// Silo management commands
