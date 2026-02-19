@@ -155,3 +155,21 @@ pub fn ensure_identity_map(phys_addr: u64) {
         }
     }
 }
+
+/// Ensure a physical range is mapped in the HHDM region.
+pub fn ensure_identity_map_range(phys_base: u64, size: u64) {
+    if size == 0 {
+        return;
+    }
+    let page_size = 4096u64;
+    let start = phys_base & !(page_size - 1);
+    let end = phys_base
+        .saturating_add(size.saturating_sub(1))
+        .saturating_add(page_size)
+        & !(page_size - 1);
+    let mut p = start;
+    while p < end {
+        ensure_identity_map(p);
+        p = p.saturating_add(page_size);
+    }
+}

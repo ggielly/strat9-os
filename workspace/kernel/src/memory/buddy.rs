@@ -390,6 +390,21 @@ impl BuddyAllocator {
         (total_pages, allocated_pages)
     }
 
+    /// Snapshot zones without heap allocation.
+    /// Returns the number of entries written to `out`.
+    pub fn zone_snapshot(&self, out: &mut [(u8, u64, usize, usize)]) -> usize {
+        let n = core::cmp::min(out.len(), self.zones.len());
+        for (i, zone) in self.zones.iter().take(n).enumerate() {
+            out[i] = (
+                zone.zone_type as u8,
+                zone.base.as_u64(),
+                zone.page_count,
+                zone.allocated,
+            );
+        }
+        n
+    }
+
     /// Get memory statistics
     pub fn get_stats(&self) -> MemoryStats {
         let mut total_pages = 0;

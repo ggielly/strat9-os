@@ -214,6 +214,22 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     serial_println!("[init] Paging...");
     vga_println!("[..] Initializing page mapper...");
     memory::paging::init(hhdm);
+    // Framebuffer is often backed by MMIO memory outside RAM (e.g. around 0xFDxxxxxx),
+    // so explicitly map its full range in HHDM for all later graphics access.
+    if args.framebuffer_addr != 0 && args.framebuffer_stride != 0 && args.framebuffer_height != 0 {
+        let fb_phys = if args.framebuffer_addr >= hhdm {
+            args.framebuffer_addr - hhdm
+        } else {
+            args.framebuffer_addr
+        };
+        let fb_size = (args.framebuffer_stride as u64).saturating_mul(args.framebuffer_height as u64);
+        memory::paging::ensure_identity_map_range(fb_phys, fb_size);
+        serial_println!(
+            "[init] Framebuffer mapped: phys=0x{:x} size={} bytes",
+            fb_phys,
+            fb_size
+        );
+    }
     serial_println!("[init] Paging initialized.");
     vga_println!("[OK] Paging initialized");
 

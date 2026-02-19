@@ -4,7 +4,7 @@
 //! Keeps the existing `vga_print!` / `vga_println!` API but renders text into
 //! the graphical framebuffer when available. Falls back to serial otherwise.
 
-use alloc::{format, string::String, vec::Vec};
+use alloc::{collections::VecDeque, format, string::String, vec::Vec};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -156,6 +156,263 @@ struct StatusLineInfo {
 }
 
 static STATUS_LINE_INFO: Mutex<Option<StatusLineInfo>> = Mutex::new(None);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UiRect {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+impl UiRect {
+    pub const fn new(x: usize, y: usize, w: usize, h: usize) -> Self {
+        Self { x, y, w, h }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DockEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UiDockLayout {
+    remaining: UiRect,
+}
+
+impl UiDockLayout {
+    pub fn from_screen() -> Self {
+        Self {
+            remaining: UiRect::new(0, 0, width(), height()),
+        }
+    }
+
+    pub const fn from_rect(rect: UiRect) -> Self {
+        Self { remaining: rect }
+    }
+
+    pub const fn remaining(&self) -> UiRect {
+        self.remaining
+    }
+
+    pub fn dock(&mut self, edge: DockEdge, size: usize) -> UiRect {
+        match edge {
+            DockEdge::Top => {
+                let h = core::cmp::min(size, self.remaining.h);
+                let out = UiRect::new(self.remaining.x, self.remaining.y, self.remaining.w, h);
+                self.remaining.y = self.remaining.y.saturating_add(h);
+                self.remaining.h = self.remaining.h.saturating_sub(h);
+                out
+            }
+            DockEdge::Bottom => {
+                let h = core::cmp::min(size, self.remaining.h);
+                let y = self
+                    .remaining
+                    .y
+                    .saturating_add(self.remaining.h.saturating_sub(h));
+                let out = UiRect::new(self.remaining.x, y, self.remaining.w, h);
+                self.remaining.h = self.remaining.h.saturating_sub(h);
+                out
+            }
+            DockEdge::Left => {
+                let w = core::cmp::min(size, self.remaining.w);
+                let out = UiRect::new(self.remaining.x, self.remaining.y, w, self.remaining.h);
+                self.remaining.x = self.remaining.x.saturating_add(w);
+                self.remaining.w = self.remaining.w.saturating_sub(w);
+                out
+            }
+            DockEdge::Right => {
+                let w = core::cmp::min(size, self.remaining.w);
+                let x = self
+                    .remaining
+                    .x
+                    .saturating_add(self.remaining.w.saturating_sub(w));
+                let out = UiRect::new(x, self.remaining.y, w, self.remaining.h);
+                self.remaining.w = self.remaining.w.saturating_sub(w);
+                out
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UiLabel<'a> {
+    pub rect: UiRect,
+    pub text: &'a str,
+    pub fg: RgbColor,
+    pub bg: RgbColor,
+    pub align: TextAlign,
+}
+
+#[derive(Debug, Clone)]
+pub struct UiPanel<'a> {
+    pub rect: UiRect,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub theme: UiTheme,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UiProgressBar {
+    pub rect: UiRect,
+    pub value: u8, // 0..=100
+    pub fg: RgbColor,
+    pub bg: RgbColor,
+    pub border: RgbColor,
+}
+
+#[derive(Debug, Clone)]
+pub struct UiTable {
+    pub rect: UiRect,
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub theme: UiTheme,
+}
+
+#[derive(Debug, Clone)]
+struct TerminalLine {
+    text: String,
+    fg: RgbColor,
+}
+
+#[derive(Debug, Clone)]
+pub struct TerminalWidget {
+    pub rect: UiRect,
+    pub title: String,
+    pub fg: RgbColor,
+    pub bg: RgbColor,
+    pub border: RgbColor,
+    pub max_lines: usize,
+    lines: VecDeque<TerminalLine>,
+}
+
+impl TerminalWidget {
+    pub fn new(rect: UiRect, max_lines: usize) -> Self {
+        Self {
+            rect,
+            title: String::from("Terminal"),
+            fg: RgbColor::LIGHT_GREY,
+            bg: RgbColor::new(0x0F, 0x14, 0x1B),
+            border: RgbColor::new(0x3D, 0x52, 0x66),
+            max_lines: core::cmp::max(1, max_lines),
+            lines: VecDeque::new(),
+        }
+    }
+
+    pub fn push_line(&mut self, text: &str) {
+        self.push_colored_line(text, self.fg);
+    }
+
+    pub fn push_ansi_line(&mut self, text: &str) {
+        let (fg, stripped) = parse_ansi_color_prefix(text, self.fg);
+        self.push_colored_line(&stripped, fg);
+    }
+
+    fn push_colored_line(&mut self, text: &str, fg: RgbColor) {
+        if self.lines.len() >= self.max_lines {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(TerminalLine {
+            text: String::from(text),
+            fg,
+        });
+    }
+
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
+
+    pub fn draw(&self) {
+        let _ = with_writer(|w| {
+            if self.rect.w < 8 || self.rect.h < 8 {
+                return;
+            }
+            let (gw, gh) = w.glyph_size();
+            if gw == 0 || gh == 0 {
+                return;
+            }
+
+            w.fill_rect(self.rect.x, self.rect.y, self.rect.w, self.rect.h, self.bg);
+            w.draw_rect(
+                self.rect.x,
+                self.rect.y,
+                self.rect.w,
+                self.rect.h,
+                self.border,
+            );
+
+            let title_h = gh + 2;
+            w.fill_rect(
+                self.rect.x + 1,
+                self.rect.y + 1,
+                self.rect.w.saturating_sub(2),
+                title_h,
+                self.border,
+            );
+            w.draw_text(
+                self.rect.x + 4,
+                self.rect.y + 1,
+                &self.title,
+                TextOptions {
+                    fg: RgbColor::WHITE,
+                    bg: self.border,
+                    align: TextAlign::Left,
+                    wrap: false,
+                    max_width: Some(self.rect.w.saturating_sub(8)),
+                },
+            );
+
+            let content_y = self.rect.y + title_h + 2;
+            let content_h = self.rect.h.saturating_sub(title_h + 3);
+            let rows = core::cmp::max(1, content_h / gh);
+            let start = self.lines.len().saturating_sub(rows);
+
+            for (idx, line) in self.lines.iter().skip(start).enumerate() {
+                let y = content_y + idx * gh;
+                w.draw_text(
+                    self.rect.x + 4,
+                    y,
+                    &line.text,
+                    TextOptions {
+                        fg: line.fg,
+                        bg: self.bg,
+                        align: TextAlign::Left,
+                        wrap: false,
+                        max_width: Some(self.rect.w.saturating_sub(8)),
+                    },
+                );
+            }
+        });
+    }
+}
+
+fn parse_ansi_color_prefix(input: &str, default_fg: RgbColor) -> (RgbColor, String) {
+    let bytes = input.as_bytes();
+    if !bytes.starts_with(b"\x1b[") {
+        return (default_fg, String::from(input));
+    }
+    let Some(mpos) = bytes.iter().position(|b| *b == b'm') else {
+        return (default_fg, String::from(input));
+    };
+    let code = &input[2..mpos];
+    let rest = &input[mpos + 1..];
+    let fg = match code {
+        "30" => RgbColor::BLACK,
+        "31" => RgbColor::new(0xFF, 0x55, 0x55),
+        "32" => RgbColor::new(0x66, 0xFF, 0x66),
+        "33" => RgbColor::new(0xFF, 0xDD, 0x66),
+        "34" => RgbColor::new(0x77, 0xAA, 0xFF),
+        "35" => RgbColor::new(0xFF, 0x77, 0xFF),
+        "36" => RgbColor::new(0x77, 0xFF, 0xFF),
+        "37" | "0" => RgbColor::LIGHT_GREY,
+        _ => default_fg,
+    };
+    (fg, String::from(rest))
+}
 
 #[inline]
 fn color_to_rgb(c: Color) -> (u8, u8, u8) {
@@ -1393,8 +1650,12 @@ fn format_size(bytes: usize) -> String {
 }
 
 fn draw_status_bar_inner(w: &mut VgaWriter, left: &str, right: &str, theme: UiTheme) {
+    let saved_clip = w.clip;
+    w.reset_clip_rect();
+
     let (gw, gh) = w.glyph_size();
     if gh == 0 || gw == 0 {
+        w.clip = saved_clip;
         return;
     }
     let bar_h = gh;
@@ -1418,6 +1679,7 @@ fn draw_status_bar_inner(w: &mut VgaWriter, left: &str, right: &str, theme: UiTh
         max_width: Some(w.width()),
     };
     w.draw_text(0, y, right, right_opts);
+    w.clip = saved_clip;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1644,6 +1906,22 @@ impl Canvas {
     pub fn system_status_line(&self, theme: UiTheme) {
         draw_system_status_line(theme);
     }
+
+    pub fn layout_screen(&self) -> UiDockLayout {
+        UiDockLayout::from_screen()
+    }
+
+    pub fn ui_label(&self, label: &UiLabel<'_>) {
+        ui_draw_label(label);
+    }
+
+    pub fn ui_progress_bar(&self, bar: UiProgressBar) {
+        ui_draw_progress_bar(bar);
+    }
+
+    pub fn ui_table(&self, table: &UiTable) {
+        ui_draw_table(table);
+    }
 }
 
 pub fn width() -> usize {
@@ -1662,6 +1940,10 @@ pub fn height() -> usize {
 
 pub fn screen_size() -> (usize, usize) {
     (width(), height())
+}
+
+pub fn ui_layout_screen() -> UiDockLayout {
+    UiDockLayout::from_screen()
 }
 
 pub fn glyph_size() -> (usize, usize) {
@@ -1893,6 +2175,137 @@ pub fn ui_draw_panel(
         );
         // Keep an implicit reference to glyph width to avoid dead code warning for gw in tiny fonts.
         let _ = gw;
+    });
+}
+
+pub fn ui_draw_panel_widget(panel: &UiPanel<'_>) {
+    ui_draw_panel(
+        panel.rect.x,
+        panel.rect.y,
+        panel.rect.w,
+        panel.rect.h,
+        panel.title,
+        panel.body,
+        panel.theme,
+    );
+}
+
+pub fn ui_draw_label(label: &UiLabel<'_>) {
+    let _ = with_writer(|w| {
+        w.draw_text(
+            label.rect.x,
+            label.rect.y,
+            label.text,
+            TextOptions {
+                fg: label.fg,
+                bg: label.bg,
+                align: label.align,
+                wrap: false,
+                max_width: Some(label.rect.w),
+            },
+        );
+    });
+}
+
+pub fn ui_draw_progress_bar(bar: UiProgressBar) {
+    let _ = with_writer(|w| {
+        if bar.rect.w < 3 || bar.rect.h < 3 {
+            return;
+        }
+        let value = core::cmp::min(bar.value, 100) as usize;
+        w.fill_rect(bar.rect.x, bar.rect.y, bar.rect.w, bar.rect.h, bar.bg);
+        w.draw_rect(bar.rect.x, bar.rect.y, bar.rect.w, bar.rect.h, bar.border);
+        let inner_w = bar.rect.w.saturating_sub(2);
+        let fill_w = inner_w.saturating_mul(value) / 100;
+        if fill_w > 0 {
+            w.fill_rect(
+                bar.rect.x + 1,
+                bar.rect.y + 1,
+                fill_w,
+                bar.rect.h.saturating_sub(2),
+                bar.fg,
+            );
+        }
+    });
+}
+
+pub fn ui_draw_table(table: &UiTable) {
+    let _ = with_writer(|w| {
+        if table.rect.w < 8 || table.rect.h < 8 {
+            return;
+        }
+        let (_gw, gh) = w.glyph_size();
+        if gh == 0 {
+            return;
+        }
+
+        w.fill_rect(
+            table.rect.x,
+            table.rect.y,
+            table.rect.w,
+            table.rect.h,
+            table.theme.panel_bg,
+        );
+        w.draw_rect(
+            table.rect.x,
+            table.rect.y,
+            table.rect.w,
+            table.rect.h,
+            table.theme.panel_border,
+        );
+
+        let cols = core::cmp::max(1, table.headers.len());
+        let col_w = table.rect.w / cols;
+        let header_h = gh + 2;
+        w.fill_rect(
+            table.rect.x + 1,
+            table.rect.y + 1,
+            table.rect.w.saturating_sub(2),
+            header_h,
+            table.theme.accent,
+        );
+
+        for (i, h) in table.headers.iter().enumerate() {
+            let x = table.rect.x + i * col_w + 2;
+            w.draw_text(
+                x,
+                table.rect.y + 1,
+                h,
+                TextOptions {
+                    fg: table.theme.text,
+                    bg: table.theme.accent,
+                    align: TextAlign::Left,
+                    wrap: false,
+                    max_width: Some(col_w.saturating_sub(4)),
+                },
+            );
+        }
+
+        let mut y = table.rect.y + header_h + 2;
+        for row in &table.rows {
+            if y + gh > table.rect.y + table.rect.h {
+                break;
+            }
+            for c in 0..cols {
+                if c >= row.len() {
+                    continue;
+                }
+                let x = table.rect.x + c * col_w + 2;
+                w.draw_text(
+                    x,
+                    y,
+                    &row[c],
+                    TextOptions {
+                        fg: table.theme.text,
+                        bg: table.theme.panel_bg,
+                        align: TextAlign::Left,
+                        wrap: false,
+                        max_width: Some(col_w.saturating_sub(4)),
+                    },
+                );
+            }
+            y += gh;
+        }
     });
 }
 

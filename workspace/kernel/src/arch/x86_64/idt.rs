@@ -254,9 +254,8 @@ extern "x86-interrupt" fn double_fault_handler(
 extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
     // Increment tick counter
     crate::process::scheduler::timer_tick();
-    crate::arch::x86_64::vga::maybe_refresh_system_status_line(
-        crate::arch::x86_64::vga::UiTheme::OCEAN_STATUS,
-    );
+    // NOTE: avoid complex rendering/allocation work in IRQ context.
+    // Status bar refresh is currently done from non-IRQ paths.
 
     // Send EOI first so the timer can fire again on the new task
     if super::apic::is_initialized() {
