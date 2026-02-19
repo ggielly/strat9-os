@@ -273,20 +273,6 @@ impl Task {
         // Create CPU context with the allocated stack
         let context = CpuContext::new(entry_point as *const () as u64, &kernel_stack);
 
-        unsafe {
-            let frame = context.saved_rsp as *const u64;
-            let r12 = *frame.add(3);
-            let ret = *frame.add(6);
-            crate::serial_println!(
-                "[task-new] name={} entry={:#x} saved_rsp={:#x} r12={:#x} ret={:#x}",
-                name,
-                entry_point as *const () as u64,
-                context.saved_rsp,
-                r12,
-                ret
-            );
-        }
-
         log::debug!(
             "Created task '{}' (id={:?}) with stack @ {:?} (size={}KB)",
             name,

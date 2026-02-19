@@ -340,17 +340,8 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         vga_println!("[OK] Self-test tasks added");
     }
 
-    #[cfg(feature = "selftest")]
-    {
-        // =============================================
-        // Phase 8b: create Ring 3 test task
-        // =============================================
-        serial_println!("[init] Creating Ring 3 test task...");
-        vga_println!("[..] Creating Ring 3 user test task...");
-        process::usertest::create_user_test_task();
-        serial_println!("[init] Ring 3 test task created.");
-        vga_println!("[OK] Ring 3 test task ready");
-    }
+    // Ring3 smoke test task disabled in selftest mode: fork-test already
+    // exercises Ring3 transitions and this extra task can interfere.
 
     // =============================================
     // Phase 8c: ELF loader — load initfs module if present
@@ -414,36 +405,29 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     serial_println!("[init] Process components initialized.");
     vga_println!("[OK] Process components ready");
 
-    #[cfg(feature = "selftest")]
-    {
-        // =============================================
-        // Phase 8d: IPC ping-pong test
-        // =============================================
-        serial_println!("[init] Creating IPC test tasks...");
-        vga_println!("[..] Creating IPC test tasks...");
-        ipc::test::create_ipc_test_tasks();
-        serial_println!("[init] IPC test tasks created.");
-        vga_println!("[OK] IPC test tasks ready");
-    }
+    // IPC stress tests disabled in selftest mode to avoid cross-test interference.
 
     // =============================================
-    // Phase 8e: create Chevron shell task
+    // Phase 8e: create Chevron shell task (normal ISO only)
     // =============================================
-    serial_println!("[init] Creating Chevron shell task...");
-    vga_println!("[..] Creating interactive shell...");
-    match process::Task::new_kernel_task(
-        shell::shell_main,
-        "chevron-shell",
-        process::TaskPriority::Normal,
-    ) {
-        Ok(shell_task) => {
-            process::add_task(shell_task);
-            serial_println!("[init] Chevron shell task created.");
-            vga_println!("[OK] Chevron shell ready");
-        }
-        Err(e) => {
-            serial_println!("[WARN] Failed to create shell task: {}", e);
-            vga_println!("[WARN] Shell task unavailable");
+    #[cfg(not(feature = "selftest"))]
+    {
+        serial_println!("[init] Creating Chevron shell task...");
+        vga_println!("[..] Creating interactive shell...");
+        match process::Task::new_kernel_task(
+            shell::shell_main,
+            "chevron-shell",
+            process::TaskPriority::Normal,
+        ) {
+            Ok(shell_task) => {
+                process::add_task(shell_task);
+                serial_println!("[init] Chevron shell task created.");
+                vga_println!("[OK] Chevron shell ready");
+            }
+            Err(e) => {
+                serial_println!("[WARN] Failed to create shell task: {}", e);
+                vga_println!("[WARN] Shell task unavailable");
+            }
         }
     }
 

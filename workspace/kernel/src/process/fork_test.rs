@@ -57,6 +57,7 @@ fn spawn_user_program_task(
     code: &[u8],
     parent: TaskId,
 ) -> Result<TaskId, &'static str> {
+    crate::serial_println!("[fork-test] {}: new user AS", name);
     let user_as = Arc::new(AddressSpace::new_user()?);
 
     let code_flags = VmaFlags {
@@ -65,7 +66,6 @@ fn spawn_user_program_task(
         executable: true,
         user_accessible: true,
     };
-    user_as.map_region(USER_CODE_ADDR, 1, code_flags, VmaType::Code)?;
 
     let stack_flags = VmaFlags {
         readable: true,
@@ -73,6 +73,9 @@ fn spawn_user_program_task(
         executable: false,
         user_accessible: true,
     };
+    crate::serial_println!("[fork-test] {}: map code", name);
+    user_as.map_region(USER_CODE_ADDR, 1, code_flags, VmaType::Code)?;
+    crate::serial_println!("[fork-test] {}: map stack", name);
     user_as.map_region(USER_STACK_ADDR, 1, stack_flags, VmaType::Stack)?;
 
     let code_phys = user_as
@@ -83,6 +86,7 @@ fn spawn_user_program_task(
         core::ptr::write_bytes(code_virt, 0, 4096);
         core::ptr::copy_nonoverlapping(code.as_ptr(), code_virt, code.len());
     }
+    crate::serial_println!("[fork-test] {}: user payload ready", name);
 
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
     let context = CpuContext::new(ring3_test_trampoline as *const () as u64, &kernel_stack);
@@ -260,26 +264,7 @@ extern "C" fn fork_test_entry() -> ! {
 }
 
 pub fn create_fork_test_task() {
-    crate::serial_println!(
-        "[fork-test] entry={:#x} main={:#x}",
-        fork_test_entry as *const () as u64,
-        fork_test_main as *const () as u64
-    );
     if let Ok(task) = Task::new_kernel_task(fork_test_entry, "fork-test", TaskPriority::Normal) {
-        unsafe {
-            let ctx = &*task.context.get();
-            let frame = ctx.saved_rsp as *const u64;
-            let r13 = *frame.add(2);
-            let r12 = *frame.add(3);
-            let ret = *frame.add(6);
-            crate::serial_println!(
-                "[fork-test] ctx saved_rsp={:#x} r13={:#x} r12={:#x} ret={:#x}",
-                ctx.saved_rsp,
-                r13,
-                r12,
-                ret
-            );
-        }
         crate::process::add_task(task);
     } else {
         crate::serial_println!("[fork-test] failed to create orchestrator task");
