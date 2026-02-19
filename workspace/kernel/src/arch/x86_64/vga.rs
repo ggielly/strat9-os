@@ -1,9 +1,13 @@
 //! Framebuffer text console (Limine framebuffer + PSF font).
+//! https://en.wikipedia.org/wiki/PC_Screen_Font
 //!
 //! Keeps the existing `vga_print!` / `vga_println!` API but renders text into
 //! the graphical framebuffer when available. Falls back to serial otherwise.
 
-use core::{fmt, sync::atomic::{AtomicBool, Ordering}};
+use core::{
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use spin::Mutex;
 
 /// Whether framebuffer console is available.
@@ -34,6 +38,29 @@ pub enum Color {
     White = 0xF,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RgbColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl RgbColor {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    pub const BLACK: Self = Self::new(0x00, 0x00, 0x00);
+    pub const WHITE: Self = Self::new(0xFF, 0xFF, 0xFF);
+    pub const RED: Self = Self::new(0xFF, 0x00, 0x00);
+    pub const GREEN: Self = Self::new(0x00, 0xFF, 0x00);
+    pub const BLUE: Self = Self::new(0x00, 0x00, 0xFF);
+    pub const CYAN: Self = Self::new(0x00, 0xFF, 0xFF);
+    pub const MAGENTA: Self = Self::new(0xFF, 0x00, 0xFF);
+    pub const YELLOW: Self = Self::new(0xFF, 0xFF, 0x00);
+    pub const LIGHT_GREY: Self = Self::new(0xAA, 0xAA, 0xAA);
+}
+
 #[inline]
 fn color_to_rgb(c: Color) -> (u8, u8, u8) {
     match c {
@@ -53,6 +80,13 @@ fn color_to_rgb(c: Color) -> (u8, u8, u8) {
         Color::LightMagenta => (0xFF, 0x55, 0xFF),
         Color::Yellow => (0xFF, 0xFF, 0x55),
         Color::White => (0xFF, 0xFF, 0xFF),
+    }
+}
+
+impl From<Color> for RgbColor {
+    fn from(value: Color) -> Self {
+        let (r, g, b) = color_to_rgb(value);
+        Self::new(r, g, b)
     }
 }
 
@@ -110,11 +144,7 @@ fn parse_psf(font: &[u8]) -> Option<FontInfo> {
     }
 
     // PSF2
-    if font.len() >= 32
-        && font[0] == 0x72
-        && font[1] == 0xB5
-        && font[2] == 0x4A
-        && font[3] == 0x86
+    if font.len() >= 32 && font[0] == 0x72 && font[1] == 0xB5 && font[2] == 0x4A && font[3] == 0x86
     {
         let rd_u32 = |off: usize| -> u32 {
             u32::from_le_bytes([font[off], font[off + 1], font[off + 2], font[off + 3]])
@@ -228,27 +258,91 @@ impl VgaWriter {
         true
     }
 
-    fn set_color(&mut self, fg: Color, bg: Color) {
-        let (fr, fgc, fb) = color_to_rgb(fg);
-        let (br, bgc, bb) = color_to_rgb(bg);
-        self.fg = self.fmt.pack_rgb(fr, fgc, fb);
-        self.bg = self.fmt.pack_rgb(br, bgc, bb);
+    #[inline]
+    fn pack_color(&self, color: RgbColor) -> u32 {
+        self.fmt.pack_rgb(color.r, color.g, color.b)
     }
 
-    pub fn clear(&mut self) {
+    fn unpack_color(&self, value: u32) -> RgbColor {
+        fn unscale(v: u32, bits: u8) -> u8 {
+            if bits == 0 {
+                return 0;
+            }
+            let max = (1u32 << bits) - 1;
+            ((v * 255) / max) as u8
+        }
+
+        let r = unscale(
+            (value >> self.fmt.red_shift) & ((1u32 << self.fmt.red_size) - 1),
+            self.fmt.red_size,
+        );
+        let g = unscale(
+            (value >> self.fmt.green_shift) & ((1u32 << self.fmt.green_size) - 1),
+            self.fmt.green_size,
+        );
+        let b = unscale(
+            (value >> self.fmt.blue_shift) & ((1u32 << self.fmt.blue_size) - 1),
+            self.fmt.blue_size,
+        );
+        RgbColor::new(r, g, b)
+    }
+
+    pub fn set_color(&mut self, fg: Color, bg: Color) {
+        self.set_rgb_color(fg.into(), bg.into());
+    }
+
+    pub fn set_rgb_color(&mut self, fg: RgbColor, bg: RgbColor) {
+        self.fg = self.pack_color(fg);
+        self.bg = self.pack_color(bg);
+    }
+
+    pub fn text_colors(&self) -> (RgbColor, RgbColor) {
+        (self.unpack_color(self.fg), self.unpack_color(self.bg))
+    }
+
+    pub fn width(&self) -> usize {
+        self.fb_width
+    }
+
+    pub fn height(&self) -> usize {
+        self.fb_height
+    }
+
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn glyph_size(&self) -> (usize, usize) {
+        (self.font_info.glyph_w, self.font_info.glyph_h)
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn clear_with(&mut self, color: RgbColor) {
         if !self.enabled {
             return;
         }
+        let packed = self.pack_color(color);
         for y in 0..self.fb_height {
             for x in 0..self.fb_width {
-                self.put_pixel(x, y, self.bg);
+                self.put_pixel_raw(x, y, packed);
             }
         }
         self.col = 0;
         self.row = 0;
     }
 
-    fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
+    pub fn clear(&mut self) {
+        self.clear_with(self.unpack_color(self.bg));
+    }
+
+    fn put_pixel_raw(&mut self, x: usize, y: usize, color: u32) {
         if !self.enabled {
             return;
         }
@@ -263,11 +357,145 @@ impl VgaWriter {
                 }
                 24 => {
                     core::ptr::write_volatile(self.fb_addr.add(off), (color & 0xFF) as u8);
-                    core::ptr::write_volatile(self.fb_addr.add(off + 1), ((color >> 8) & 0xFF) as u8);
-                    core::ptr::write_volatile(self.fb_addr.add(off + 2), ((color >> 16) & 0xFF) as u8);
+                    core::ptr::write_volatile(
+                        self.fb_addr.add(off + 1),
+                        ((color >> 8) & 0xFF) as u8,
+                    );
+                    core::ptr::write_volatile(
+                        self.fb_addr.add(off + 2),
+                        ((color >> 16) & 0xFF) as u8,
+                    );
                 }
                 _ => {}
             }
+        }
+    }
+
+    pub fn draw_pixel(&mut self, x: usize, y: usize, color: RgbColor) {
+        self.put_pixel_raw(x, y, self.pack_color(color));
+    }
+
+    pub fn draw_line(&mut self, x0: isize, y0: isize, x1: isize, y1: isize, color: RgbColor) {
+        let mut x = x0;
+        let mut y = y0;
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let packed = self.pack_color(color);
+
+        loop {
+            if x >= 0 && y >= 0 {
+                self.put_pixel_raw(x as usize, y as usize, packed);
+            }
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    pub fn draw_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let x2 = x.saturating_add(width - 1);
+        let y2 = y.saturating_add(height - 1);
+        self.draw_line(x as isize, y as isize, x2 as isize, y as isize, color);
+        self.draw_line(x as isize, y as isize, x as isize, y2 as isize, color);
+        self.draw_line(x2 as isize, y as isize, x2 as isize, y2 as isize, color);
+        self.draw_line(x as isize, y2 as isize, x2 as isize, y2 as isize, color);
+    }
+
+    pub fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
+        if !self.enabled || width == 0 || height == 0 {
+            return;
+        }
+        let x_end = core::cmp::min(x.saturating_add(width), self.fb_width);
+        let y_end = core::cmp::min(y.saturating_add(height), self.fb_height);
+        let packed = self.pack_color(color);
+        for py in y..y_end {
+            for px in x..x_end {
+                self.put_pixel_raw(px, py, packed);
+            }
+        }
+    }
+
+    pub fn draw_text_at(
+        &mut self,
+        pixel_x: usize,
+        pixel_y: usize,
+        text: &str,
+        fg: RgbColor,
+        bg: RgbColor,
+    ) {
+        if !self.enabled {
+            return;
+        }
+
+        let saved_col = self.col;
+        let saved_row = self.row;
+        let saved_fg = self.fg;
+        let saved_bg = self.bg;
+
+        self.col = pixel_x / self.font_info.glyph_w;
+        self.row = pixel_y / self.font_info.glyph_h;
+        self.set_rgb_color(fg, bg);
+
+        for ch in text.chars() {
+            if ch.is_ascii() {
+                self.write_char(ch as u8);
+            } else {
+                self.write_char(b'?');
+            }
+            if self.row >= self.rows {
+                break;
+            }
+        }
+
+        self.col = saved_col;
+        self.row = saved_row;
+        self.fg = saved_fg;
+        self.bg = saved_bg;
+    }
+
+    pub fn draw_strata_stack(&mut self, origin_x: usize, origin_y: usize, layer_w: usize, layer_h: usize) {
+        if !self.enabled || layer_w == 0 || layer_h == 0 {
+            return;
+        }
+
+        // Simple "strata" stack: each layer is slightly shifted and tinted.
+        let palette = [
+            RgbColor::new(0x24, 0x3B, 0x55),
+            RgbColor::new(0x2B, 0x54, 0x77),
+            RgbColor::new(0x2F, 0x74, 0x93),
+            RgbColor::new(0x3A, 0x93, 0xA8),
+            RgbColor::new(0x5F, 0xB1, 0xA1),
+            RgbColor::new(0xA4, 0xCC, 0x94),
+        ];
+
+        let dx = 6usize;
+        let dy = 5usize;
+        for (i, color) in palette.iter().enumerate() {
+            let x = origin_x.saturating_add(i * dx);
+            let y = origin_y.saturating_add(i * dy);
+            let w = layer_w.saturating_sub(i * dx);
+            let h = layer_h.saturating_sub(i * dy);
+            if w < 8 || h < 8 {
+                break;
+            }
+
+            self.fill_rect(x, y, w, h, *color);
+            self.draw_rect(x, y, w, h, RgbColor::new(0x10, 0x16, 0x20));
         }
     }
 
@@ -282,15 +510,16 @@ impl VgaWriter {
         };
         let start = self.font_info.data_offset + glyph_index * self.font_info.bytes_per_glyph;
         let glyph = &self.font[start..start + self.font_info.bytes_per_glyph];
+        let row_bytes = self.font_info.glyph_w.div_ceil(8);
 
         for gy in 0..self.font_info.glyph_h {
-            let row_bits = glyph[gy];
             for gx in 0..self.font_info.glyph_w {
-                let mask = 0x80 >> gx;
+                let byte = glyph[gy * row_bytes + gx / 8];
+                let mask = 0x80 >> (gx % 8);
                 let px = cx * self.font_info.glyph_w + gx;
                 let py = cy * self.font_info.glyph_h + gy;
-                let color = if (row_bits & mask) != 0 { self.fg } else { self.bg };
-                self.put_pixel(px, py, color);
+                let color = if (byte & mask) != 0 { self.fg } else { self.bg };
+                self.put_pixel_raw(px, py, color);
             }
         }
     }
@@ -303,7 +532,7 @@ impl VgaWriter {
         let y_end = y_start + self.font_info.glyph_h;
         for y in y_start..y_end {
             for x in 0..self.fb_width {
-                self.put_pixel(x, y, self.bg);
+                self.put_pixel_raw(x, y, self.bg);
             }
         }
     }
@@ -327,12 +556,9 @@ impl VgaWriter {
                 self.fb_addr,
                 move_rows * bytes_per_row,
             );
-
-            // Clear bottom rows.
-            let clear_start = self.fb_addr.add(move_rows * bytes_per_row);
-            core::ptr::write_bytes(clear_start, 0, dy * bytes_per_row);
         }
 
+        self.fill_rect(0, move_rows, self.fb_width, dy, self.unpack_color(self.bg));
         self.row = self.rows - 1;
     }
 
@@ -445,6 +671,12 @@ pub fn init(
     ) {
         writer.set_color(Color::LightCyan, Color::Black);
         writer.clear();
+        // Decorative background mark for Strat9 identity.
+        let deco_w = (writer.width() / 3).clamp(120, 300);
+        let deco_h = (writer.height() / 4).clamp(90, 220);
+        let deco_x = writer.width().saturating_sub(deco_w + 24);
+        let deco_y = 24;
+        writer.draw_strata_stack(deco_x, deco_y, deco_w, deco_h);
         writer.write_bytes("Strat9-OS v0.1.0\n");
         writer.set_color(Color::LightGrey, Color::Black);
         VGA_AVAILABLE.store(true, Ordering::Relaxed);
@@ -485,4 +717,140 @@ pub fn _print(args: fmt::Arguments) {
         return;
     }
     crate::arch::x86_64::serial::_print(args);
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Canvas {
+    fg: RgbColor,
+    bg: RgbColor,
+}
+
+impl Default for Canvas {
+    fn default() -> Self {
+        Self {
+            fg: RgbColor::LIGHT_GREY,
+            bg: RgbColor::BLACK,
+        }
+    }
+}
+
+impl Canvas {
+    pub const fn new(fg: RgbColor, bg: RgbColor) -> Self {
+        Self { fg, bg }
+    }
+
+    pub fn set_fg(&mut self, fg: RgbColor) {
+        self.fg = fg;
+    }
+
+    pub fn set_bg(&mut self, bg: RgbColor) {
+        self.bg = bg;
+    }
+
+    pub fn set_colors(&mut self, fg: RgbColor, bg: RgbColor) {
+        self.fg = fg;
+        self.bg = bg;
+    }
+
+    pub fn clear(&self) {
+        fill_rect(0, 0, width(), height(), self.bg);
+    }
+
+    pub fn pixel(&self, x: usize, y: usize) {
+        draw_pixel(x, y, self.fg);
+    }
+
+    pub fn line(&self, x0: isize, y0: isize, x1: isize, y1: isize) {
+        draw_line(x0, y0, x1, y1, self.fg);
+    }
+
+    pub fn rect(&self, x: usize, y: usize, w: usize, h: usize) {
+        draw_rect(x, y, w, h, self.fg);
+    }
+
+    pub fn fill_rect(&self, x: usize, y: usize, w: usize, h: usize) {
+        fill_rect(x, y, w, h, self.fg);
+    }
+
+    pub fn text(&self, x: usize, y: usize, text: &str) {
+        draw_text_at(x, y, text, self.fg, self.bg);
+    }
+}
+
+pub fn width() -> usize {
+    if !is_available() {
+        return 0;
+    }
+    VGA_WRITER.lock().width()
+}
+
+pub fn height() -> usize {
+    if !is_available() {
+        return 0;
+    }
+    VGA_WRITER.lock().height()
+}
+
+pub fn screen_size() -> (usize, usize) {
+    (width(), height())
+}
+
+pub fn glyph_size() -> (usize, usize) {
+    if !is_available() {
+        return (0, 0);
+    }
+    VGA_WRITER.lock().glyph_size()
+}
+
+pub fn set_text_color(fg: RgbColor, bg: RgbColor) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().set_rgb_color(fg, bg);
+}
+
+pub fn draw_pixel(x: usize, y: usize, color: RgbColor) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().draw_pixel(x, y, color);
+}
+
+pub fn draw_line(x0: isize, y0: isize, x1: isize, y1: isize, color: RgbColor) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().draw_line(x0, y0, x1, y1, color);
+}
+
+pub fn draw_rect(x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().draw_rect(x, y, width, height, color);
+}
+
+pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().fill_rect(x, y, width, height, color);
+}
+
+pub fn draw_text_at(pixel_x: usize, pixel_y: usize, text: &str, fg: RgbColor, bg: RgbColor) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER
+        .lock()
+        .draw_text_at(pixel_x, pixel_y, text, fg, bg);
+}
+
+pub fn draw_strata_stack(origin_x: usize, origin_y: usize, layer_w: usize, layer_h: usize) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER
+        .lock()
+        .draw_strata_stack(origin_x, origin_y, layer_w, layer_h);
 }

@@ -60,6 +60,20 @@ pub fn init() {
     log::debug!("IDT initialized with {} entries", 256);
 }
 
+/// Register the VirtIO block device IRQ handler
+///
+/// Called after VirtIO block device initialization to route the device's
+/// IRQ to the correct handler.
+pub fn register_virtio_block_irq(irq: u8) {
+    // SAFETY: Called during kernel init, before interrupts are fully enabled
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[irq].set_handler_fn(virtio_block_handler);
+        (*idt).load_unsafe();
+    }
+    log::info!("VirtIO-blk IRQ {} registered", irq);
+}
+
 // =============================================
 // CPU Exception Handlers
 // =============================================
@@ -265,6 +279,24 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 /// Per Intel SDM: do NOT send EOI for spurious interrupts.
 extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {
     // Intentionally empty — no EOI per Intel SDM
+}
+
+/// VirtIO Block device IRQ handler
+///
+/// Handles interrupts from the VirtIO block device.
+/// The IRQ line is determined at runtime from PCI config.
+extern "x86-interrupt" fn virtio_block_handler(_stack_frame: InterruptStackFrame) {
+    // Handle the VirtIO block interrupt
+    crate::drivers::virtio::block::handle_interrupt();
+
+    // Send EOI
+    if super::apic::is_initialized() {
+        super::apic::eoi();
+    } else {
+        // Get the IRQ number from the device
+        let irq = crate::drivers::virtio::block::get_irq();
+        pic::end_of_interrupt(irq);
+    }
 }
 
 /// Cross-CPU reschedule IPI handler (vector 0xF0).

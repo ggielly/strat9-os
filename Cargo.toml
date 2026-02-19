@@ -57,6 +57,6 @@ strip = true      # Strip debug symbols from release
 opt-level = 0      # No optimization for faster compilation
 debug = 2          # Full debug information (maximum)
 strip = false      # Keep all symbols
-panic = "unwind"   # Full stack traces for debugging
+panic = "abort"    # no_std kernel targets cannot use unwind
 incremental = true # Faster recompilation
 lto = false        # Faster compilation

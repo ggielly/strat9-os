@@ -518,6 +518,32 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     }
 
     // =============================================
+    // Storage verification - read first sector and verify
+    // =============================================
+    if let Some(blk) = drivers::virtio::block::get_device() {
+        use drivers::virtio::block::BlockDevice;
+        serial_println!("[init] Verifying storage...");
+        vga_println!("[..] Verifying storage device...");
+        
+        let mut test_buf = [0u8; 512];
+        match blk.read_sector(0, &mut test_buf) {
+            Ok(()) => {
+                serial_println!("[init] Storage verification OK (read sector 0)");
+                vga_println!("[OK] Storage verified (sector 0 read)");
+                
+                // Check for MBR signature (0x55AA at offset 510-511)
+                if test_buf[510] == 0x55 && test_buf[511] == 0xAA {
+                    serial_println!("[INFO] MBR signature detected");
+                }
+            }
+            Err(e) => {
+                serial_println!("[WARN] Storage verification failed: {:?}", e);
+                vga_println!("[WARN] Storage verification failed");
+            }
+        }
+    }
+
+    // =============================================
     // Boot complete — start preemptive multitasking
     // =============================================
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");

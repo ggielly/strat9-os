@@ -438,6 +438,12 @@ impl VirtioDevice {
         self.read_reg_u8(19) // VIRTIO_PCI_ISR
     }
 
+    /// Acknowledge interrupt (write 0 to ISR)
+    pub fn ack_interrupt(&self) {
+        // Reading ISR already clears it, but we can also write to acknowledge
+        let _ = self.read_reg_u8(19); // VIRTIO_PCI_ISR
+    }
+
     /// Setup a virtqueue
     pub fn setup_queue(&self, queue_index: u16, queue: &Virtqueue) {
         // Select queue
