@@ -534,40 +534,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     }
 
     // =============================================
-    // Storage verification - read first sector and verify
+    // Storage verification (disabled at boot)
     // =============================================
-    if let Some(blk) = drivers::virtio::block::get_device() {
-        use drivers::virtio::block::BlockDevice;
-        serial_println!("[init] Verifying storage...");
-        vga_println!("[..] Verifying storage device...");
-        
-        let mut test_buf = [0u8; 512];
-        match blk.read_sector(0, &mut test_buf) {
-            Ok(()) => {
-                serial_println!("[init] Storage verification OK (read sector 0)");
-                vga_println!("[OK] Storage verified (sector 0 read)");
-                
-                // Check for MBR signature (0x55AA at offset 510-511)
-                if test_buf[510] == 0x55 && test_buf[511] == 0xAA {
-                    serial_println!("[INFO] MBR signature detected");
-                }
-            }
-            Err(e) => {
-                serial_println!("[WARN] Storage verification failed: {:?}", e);
-                vga_println!("[WARN] Storage verification failed");
-            }
-        }
-    }
+    // Keep boot non-blocking until VirtIO IRQ/completion path is fully robust.
+    serial_println!("[init] Storage verification skipped (boot path)");
+    vga_println!("[..] Storage verification skipped at boot");
 
     // =============================================
     // Boot complete — start preemptive multitasking
     // =============================================
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
-
-    // TODO: storage verification needs VirtIO interrupt handler implementation
-    // For now, skip it to test multitasking first
-    serial_println!("[init] (Storage verification skipped - needs VirtIO IRQ handler)");
 
     // Initialize keyboard layout to French by default
     crate::arch::x86_64::keyboard_layout::set_french_layout();
