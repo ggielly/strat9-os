@@ -4,6 +4,7 @@
 //! Keeps the existing `vga_print!` / `vga_println!` API but renders text into
 //! the graphical framebuffer when available. Falls back to serial otherwise.
 
+use alloc::vec::Vec;
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
@@ -59,6 +60,74 @@ impl RgbColor {
     pub const MAGENTA: Self = Self::new(0xFF, 0x00, 0xFF);
     pub const YELLOW: Self = Self::new(0xFF, 0xFF, 0x00);
     pub const LIGHT_GREY: Self = Self::new(0xAA, 0xAA, 0xAA);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TextOptions {
+    pub fg: RgbColor,
+    pub bg: RgbColor,
+    pub align: TextAlign,
+    pub wrap: bool,
+    pub max_width: Option<usize>,
+}
+
+impl TextOptions {
+    pub const fn new(fg: RgbColor, bg: RgbColor) -> Self {
+        Self {
+            fg,
+            bg,
+            align: TextAlign::Left,
+            wrap: false,
+            max_width: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TextMetrics {
+    pub width: usize,
+    pub height: usize,
+    pub lines: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UiTheme {
+    pub background: RgbColor,
+    pub panel_bg: RgbColor,
+    pub panel_border: RgbColor,
+    pub text: RgbColor,
+    pub accent: RgbColor,
+    pub status_bg: RgbColor,
+    pub status_text: RgbColor,
+}
+
+impl UiTheme {
+    pub const SLATE: Self = Self {
+        background: RgbColor::new(0x12, 0x16, 0x1E),
+        panel_bg: RgbColor::new(0x1A, 0x22, 0x2C),
+        panel_border: RgbColor::new(0x3D, 0x52, 0x66),
+        text: RgbColor::new(0xE2, 0xE8, 0xF0),
+        accent: RgbColor::new(0x4F, 0xB3, 0xB3),
+        status_bg: RgbColor::new(0x0E, 0x13, 0x1A),
+        status_text: RgbColor::new(0xD3, 0xDE, 0xEA),
+    };
+
+    pub const SAND: Self = Self {
+        background: RgbColor::new(0xFA, 0xF6, 0xEF),
+        panel_bg: RgbColor::new(0xF1, 0xE8, 0xD8),
+        panel_border: RgbColor::new(0xA6, 0x8F, 0x6A),
+        text: RgbColor::new(0x2B, 0x2B, 0x2B),
+        accent: RgbColor::new(0x1F, 0x7A, 0x8C),
+        status_bg: RgbColor::new(0xE6, 0xD7, 0xBF),
+        status_text: RgbColor::new(0x2B, 0x2B, 0x2B),
+    };
 }
 
 #[inline]
@@ -127,6 +196,14 @@ struct FontInfo {
     data_offset: usize,
 }
 
+#[derive(Clone, Copy)]
+struct ClipRect {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+}
+
 fn parse_psf(font: &[u8]) -> Option<FontInfo> {
     // PSF1
     if font.len() >= 4 && font[0] == 0x36 && font[1] == 0x04 {
@@ -184,6 +261,9 @@ pub struct VgaWriter {
 
     font: &'static [u8],
     font_info: FontInfo,
+    clip: ClipRect,
+    back_buffer: Option<Vec<u32>>,
+    draw_to_back: bool,
 }
 
 unsafe impl Send for VgaWriter {}
@@ -219,6 +299,14 @@ impl VgaWriter {
                 glyph_h: 16,
                 data_offset: 0,
             },
+            clip: ClipRect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+            back_buffer: None,
+            draw_to_back: false,
         }
     }
 
@@ -255,6 +343,14 @@ impl VgaWriter {
         self.bg = fmt.pack_rgb(br, bg, bb);
         self.font = FONT_PSF;
         self.font_info = font_info;
+        self.clip = ClipRect {
+            x: 0,
+            y: 0,
+            w: fb_width,
+            h: fb_height,
+        };
+        self.back_buffer = None;
+        self.draw_to_back = false;
         true
     }
 
@@ -324,6 +420,79 @@ impl VgaWriter {
         self.enabled
     }
 
+    #[inline]
+    fn in_clip(&self, x: usize, y: usize) -> bool {
+        x >= self.clip.x
+            && y >= self.clip.y
+            && x < self.clip.x.saturating_add(self.clip.w)
+            && y < self.clip.y.saturating_add(self.clip.h)
+    }
+
+    pub fn set_clip_rect(&mut self, x: usize, y: usize, width: usize, height: usize) {
+        let x_end = core::cmp::min(x.saturating_add(width), self.fb_width);
+        let y_end = core::cmp::min(y.saturating_add(height), self.fb_height);
+        self.clip = ClipRect {
+            x,
+            y,
+            w: x_end.saturating_sub(x),
+            h: y_end.saturating_sub(y),
+        };
+    }
+
+    pub fn reset_clip_rect(&mut self) {
+        self.clip = ClipRect {
+            x: 0,
+            y: 0,
+            w: self.fb_width,
+            h: self.fb_height,
+        };
+    }
+
+    fn draw_to_back_buffer(&self) -> bool {
+        self.draw_to_back && self.back_buffer.is_some()
+    }
+
+    pub fn enable_double_buffer(&mut self) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if self.back_buffer.is_none() {
+            let mut buf = Vec::with_capacity(self.fb_width.saturating_mul(self.fb_height));
+            for y in 0..self.fb_height {
+                for x in 0..self.fb_width {
+                    buf.push(self.read_hw_pixel_packed(x, y));
+                }
+            }
+            self.back_buffer = Some(buf);
+        }
+        self.draw_to_back = true;
+        true
+    }
+
+    pub fn disable_double_buffer(&mut self, present: bool) {
+        if present {
+            self.present();
+        }
+        self.draw_to_back = false;
+    }
+
+    pub fn present(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        let Some(buf) = self.back_buffer.as_ref() else {
+            return;
+        };
+        let buf_ptr = buf.as_ptr();
+        for y in 0..self.fb_height {
+            for x in 0..self.fb_width {
+                let idx = y * self.fb_width + x;
+                let packed = unsafe { *buf_ptr.add(idx) };
+                self.write_hw_pixel_packed(x, y, packed);
+            }
+        }
+    }
+
     pub fn clear_with(&mut self, color: RgbColor) {
         if !self.enabled {
             return;
@@ -342,13 +511,7 @@ impl VgaWriter {
         self.clear_with(self.unpack_color(self.bg));
     }
 
-    fn put_pixel_raw(&mut self, x: usize, y: usize, color: u32) {
-        if !self.enabled {
-            return;
-        }
-        if x >= self.fb_width || y >= self.fb_height {
-            return;
-        }
+    fn write_hw_pixel_packed(&mut self, x: usize, y: usize, color: u32) {
         let off = y * self.pitch + x * (self.fmt.bpp as usize / 8);
         unsafe {
             match self.fmt.bpp {
@@ -371,8 +534,65 @@ impl VgaWriter {
         }
     }
 
+    fn read_hw_pixel_packed(&self, x: usize, y: usize) -> u32 {
+        let off = y * self.pitch + x * (self.fmt.bpp as usize / 8);
+        unsafe {
+            match self.fmt.bpp {
+                32 => core::ptr::read_volatile(self.fb_addr.add(off) as *const u32),
+                24 => {
+                    let b0 = core::ptr::read_volatile(self.fb_addr.add(off)) as u32;
+                    let b1 = core::ptr::read_volatile(self.fb_addr.add(off + 1)) as u32;
+                    let b2 = core::ptr::read_volatile(self.fb_addr.add(off + 2)) as u32;
+                    b0 | (b1 << 8) | (b2 << 16)
+                }
+                _ => 0,
+            }
+        }
+    }
+
+    fn read_pixel_packed(&self, x: usize, y: usize) -> u32 {
+        if self.draw_to_back_buffer() {
+            if let Some(buf) = self.back_buffer.as_ref() {
+                return buf[y * self.fb_width + x];
+            }
+        }
+        self.read_hw_pixel_packed(x, y)
+    }
+
+    fn put_pixel_raw(&mut self, x: usize, y: usize, color: u32) {
+        if !self.enabled || x >= self.fb_width || y >= self.fb_height || !self.in_clip(x, y) {
+            return;
+        }
+        if self.draw_to_back_buffer() {
+            if let Some(buf) = self.back_buffer.as_mut() {
+                buf[y * self.fb_width + x] = color;
+                return;
+            }
+        }
+        self.write_hw_pixel_packed(x, y, color);
+    }
+
     pub fn draw_pixel(&mut self, x: usize, y: usize, color: RgbColor) {
         self.put_pixel_raw(x, y, self.pack_color(color));
+    }
+
+    pub fn draw_pixel_alpha(&mut self, x: usize, y: usize, color: RgbColor, alpha: u8) {
+        if !self.enabled || alpha == 0 || x >= self.fb_width || y >= self.fb_height || !self.in_clip(x, y) {
+            return;
+        }
+        if alpha == 255 {
+            self.put_pixel_raw(x, y, self.pack_color(color));
+            return;
+        }
+        let dst = self.unpack_color(self.read_pixel_packed(x, y));
+        let inv = (255u16).saturating_sub(alpha as u16);
+        let a = alpha as u16;
+        let blended = RgbColor::new(
+            ((color.r as u16 * a + dst.r as u16 * inv + 127) / 255) as u8,
+            ((color.g as u16 * a + dst.g as u16 * inv + 127) / 255) as u8,
+            ((color.b as u16 * a + dst.b as u16 * inv + 127) / 255) as u8,
+        );
+        self.put_pixel_raw(x, y, self.pack_color(blended));
     }
 
     pub fn draw_line(&mut self, x0: isize, y0: isize, x1: isize, y1: isize, color: RgbColor) {
@@ -430,6 +650,66 @@ impl VgaWriter {
         }
     }
 
+    pub fn fill_rect_alpha(&mut self, x: usize, y: usize, width: usize, height: usize, color: RgbColor, alpha: u8) {
+        if !self.enabled || width == 0 || height == 0 || alpha == 0 {
+            return;
+        }
+        if alpha == 255 {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
+        let x_end = core::cmp::min(x.saturating_add(width), self.fb_width);
+        let y_end = core::cmp::min(y.saturating_add(height), self.fb_height);
+        for py in y..y_end {
+            for px in x..x_end {
+                self.draw_pixel_alpha(px, py, color, alpha);
+            }
+        }
+    }
+
+    pub fn blit_rgb(&mut self, dst_x: usize, dst_y: usize, src_width: usize, src_height: usize, pixels: &[RgbColor]) -> bool {
+        let len = src_width.saturating_mul(src_height);
+        if !self.enabled || src_width == 0 || src_height == 0 || pixels.len() < len {
+            return false;
+        }
+        let x_end = core::cmp::min(dst_x.saturating_add(src_width), self.fb_width);
+        let y_end = core::cmp::min(dst_y.saturating_add(src_height), self.fb_height);
+        if x_end <= dst_x || y_end <= dst_y {
+            return true;
+        }
+        let copy_w = x_end - dst_x;
+        let copy_h = y_end - dst_y;
+        for row in 0..copy_h {
+            let src_row = row * src_width;
+            for col in 0..copy_w {
+                self.draw_pixel(dst_x + col, dst_y + row, pixels[src_row + col]);
+            }
+        }
+        true
+    }
+
+    pub fn blit_rgb24(&mut self, dst_x: usize, dst_y: usize, src_width: usize, src_height: usize, bytes: &[u8]) -> bool {
+        let needed = src_width.saturating_mul(src_height).saturating_mul(3);
+        if !self.enabled || src_width == 0 || src_height == 0 || bytes.len() < needed {
+            return false;
+        }
+        let x_end = core::cmp::min(dst_x.saturating_add(src_width), self.fb_width);
+        let y_end = core::cmp::min(dst_y.saturating_add(src_height), self.fb_height);
+        if x_end <= dst_x || y_end <= dst_y {
+            return true;
+        }
+        let copy_w = x_end - dst_x;
+        let copy_h = y_end - dst_y;
+        for row in 0..copy_h {
+            for col in 0..copy_w {
+                let i = (row * src_width + col) * 3;
+                let color = RgbColor::new(bytes[i], bytes[i + 1], bytes[i + 2]);
+                self.draw_pixel(dst_x + col, dst_y + row, color);
+            }
+        }
+        true
+    }
+
     pub fn draw_text_at(
         &mut self,
         pixel_x: usize,
@@ -466,6 +746,133 @@ impl VgaWriter {
         self.row = saved_row;
         self.fg = saved_fg;
         self.bg = saved_bg;
+    }
+
+    fn draw_glyph_at_pixel(&mut self, pixel_x: usize, pixel_y: usize, ch: u8, fg: u32, bg: u32) {
+        if !self.enabled {
+            return;
+        }
+        let glyph_index = if (ch as usize) < self.font_info.glyph_count {
+            ch as usize
+        } else {
+            b'?' as usize
+        };
+        let start = self.font_info.data_offset + glyph_index * self.font_info.bytes_per_glyph;
+        let glyph = &self.font[start..start + self.font_info.bytes_per_glyph];
+        let row_bytes = self.font_info.glyph_w.div_ceil(8);
+
+        for gy in 0..self.font_info.glyph_h {
+            for gx in 0..self.font_info.glyph_w {
+                let byte = glyph[gy * row_bytes + gx / 8];
+                let mask = 0x80 >> (gx % 8);
+                let color = if (byte & mask) != 0 { fg } else { bg };
+                self.put_pixel_raw(pixel_x + gx, pixel_y + gy, color);
+            }
+        }
+    }
+
+    fn layout_text_lines(&self, text: &str, wrap: bool, max_cols: Option<usize>) -> Vec<Vec<u8>> {
+        let mut lines: Vec<Vec<u8>> = Vec::new();
+        let mut current: Vec<u8> = Vec::new();
+        let wrap_cols = max_cols.filter(|&c| c > 0);
+
+        for ch in text.chars() {
+            if ch == '\n' {
+                lines.push(current);
+                current = Vec::new();
+                continue;
+            }
+
+            if wrap {
+                if let Some(cols) = wrap_cols {
+                    if current.len() >= cols {
+                        lines.push(current);
+                        current = Vec::new();
+                    }
+                }
+            }
+
+            if ch.is_ascii() {
+                current.push(ch as u8);
+            } else {
+                current.push(b'?');
+            }
+        }
+
+        lines.push(current);
+        lines
+    }
+
+    pub fn measure_text(&self, text: &str, max_width: Option<usize>, wrap: bool) -> TextMetrics {
+        if !self.enabled {
+            return TextMetrics {
+                width: 0,
+                height: 0,
+                lines: 0,
+            };
+        }
+        let gw = self.font_info.glyph_w;
+        let gh = self.font_info.glyph_h;
+        let max_cols = max_width.map(|w| core::cmp::max(1, w / gw));
+        let lines = self.layout_text_lines(text, wrap, max_cols);
+
+        let mut max_line_cols = 0usize;
+        for line in &lines {
+            max_line_cols = core::cmp::max(max_line_cols, line.len());
+        }
+
+        TextMetrics {
+            width: max_line_cols * gw,
+            height: lines.len() * gh,
+            lines: lines.len(),
+        }
+    }
+
+    pub fn draw_text(&mut self, pixel_x: usize, pixel_y: usize, text: &str, opts: TextOptions) -> TextMetrics {
+        if !self.enabled {
+            return TextMetrics {
+                width: 0,
+                height: 0,
+                lines: 0,
+            };
+        }
+
+        let gw = self.font_info.glyph_w;
+        let gh = self.font_info.glyph_h;
+        let max_cols = opts.max_width.map(|w| core::cmp::max(1, w / gw));
+        let lines = self.layout_text_lines(text, opts.wrap, max_cols);
+        let region_w = opts.max_width.unwrap_or_else(|| {
+            let mut max_line_cols = 0usize;
+            for line in &lines {
+                max_line_cols = core::cmp::max(max_line_cols, line.len());
+            }
+            max_line_cols * gw
+        });
+
+        let fg = self.pack_color(opts.fg);
+        let bg = self.pack_color(opts.bg);
+        let mut max_line_px = 0usize;
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            let line_px = line.len() * gw;
+            max_line_px = core::cmp::max(max_line_px, line_px);
+            let x = match opts.align {
+                TextAlign::Left => pixel_x,
+                TextAlign::Center => pixel_x.saturating_add(region_w.saturating_sub(line_px) / 2),
+                TextAlign::Right => pixel_x.saturating_add(region_w.saturating_sub(line_px)),
+            };
+            let y = pixel_y + line_idx * gh;
+
+            for (col, ch) in line.iter().enumerate() {
+                self.draw_glyph_at_pixel(x + col * gw, y, *ch, fg, bg);
+            }
+        }
+
+        TextMetrics {
+            width: max_line_px,
+            height: lines.len() * gh,
+            lines: lines.len(),
+        }
     }
 
     pub fn draw_strata_stack(&mut self, origin_x: usize, origin_y: usize, layer_w: usize, layer_h: usize) {
@@ -547,15 +954,22 @@ impl VgaWriter {
             return;
         }
 
-        let bytes_per_row = self.pitch;
         let move_rows = self.fb_height - dy;
-
-        unsafe {
-            core::ptr::copy(
-                self.fb_addr.add(dy * bytes_per_row),
-                self.fb_addr,
-                move_rows * bytes_per_row,
-            );
+        if self.draw_to_back_buffer() {
+            if let Some(buf) = self.back_buffer.as_mut() {
+                let src_start = dy * self.fb_width;
+                let src_end = self.fb_height * self.fb_width;
+                buf.copy_within(src_start..src_end, 0);
+            }
+        } else {
+            let bytes_per_row = self.pitch;
+            unsafe {
+                core::ptr::copy(
+                    self.fb_addr.add(dy * bytes_per_row),
+                    self.fb_addr,
+                    move_rows * bytes_per_row,
+                );
+            }
         }
 
         self.fill_rect(0, move_rows, self.fb_width, dy, self.unpack_color(self.bg));
@@ -752,6 +1166,14 @@ impl Canvas {
         self.bg = bg;
     }
 
+    pub fn set_clip_rect(&self, x: usize, y: usize, w: usize, h: usize) {
+        set_clip_rect(x, y, w, h);
+    }
+
+    pub fn reset_clip_rect(&self) {
+        reset_clip_rect();
+    }
+
     pub fn clear(&self) {
         fill_rect(0, 0, width(), height(), self.bg);
     }
@@ -772,8 +1194,47 @@ impl Canvas {
         fill_rect(x, y, w, h, self.fg);
     }
 
+    pub fn fill_rect_alpha(&self, x: usize, y: usize, w: usize, h: usize, alpha: u8) {
+        fill_rect_alpha(x, y, w, h, self.fg, alpha);
+    }
+
     pub fn text(&self, x: usize, y: usize, text: &str) {
         draw_text_at(x, y, text, self.fg, self.bg);
+    }
+
+    pub fn text_opts(&self, x: usize, y: usize, text: &str, align: TextAlign, wrap: bool, max_width: Option<usize>) -> TextMetrics {
+        draw_text(
+            x,
+            y,
+            text,
+            TextOptions {
+                fg: self.fg,
+                bg: self.bg,
+                align,
+                wrap,
+                max_width,
+            },
+        )
+    }
+
+    pub fn measure_text(&self, text: &str, max_width: Option<usize>, wrap: bool) -> TextMetrics {
+        measure_text(text, max_width, wrap)
+    }
+
+    pub fn blit_rgb(&self, x: usize, y: usize, w: usize, h: usize, pixels: &[RgbColor]) -> bool {
+        blit_rgb(x, y, w, h, pixels)
+    }
+
+    pub fn blit_rgb24(&self, x: usize, y: usize, w: usize, h: usize, bytes: &[u8]) -> bool {
+        blit_rgb24(x, y, w, h, bytes)
+    }
+
+    pub fn begin_frame(&self) -> bool {
+        begin_frame()
+    }
+
+    pub fn end_frame(&self) {
+        end_frame();
     }
 }
 
@@ -809,11 +1270,55 @@ pub fn set_text_color(fg: RgbColor, bg: RgbColor) {
     VGA_WRITER.lock().set_rgb_color(fg, bg);
 }
 
+pub fn set_clip_rect(x: usize, y: usize, width: usize, height: usize) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().set_clip_rect(x, y, width, height);
+}
+
+pub fn reset_clip_rect() {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().reset_clip_rect();
+}
+
+pub fn begin_frame() -> bool {
+    if !is_available() {
+        return false;
+    }
+    VGA_WRITER.lock().enable_double_buffer()
+}
+
+pub fn end_frame() {
+    if !is_available() {
+        return;
+    }
+    let mut writer = VGA_WRITER.lock();
+    writer.present();
+    writer.disable_double_buffer(false);
+}
+
+pub fn present() {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().present();
+}
+
 pub fn draw_pixel(x: usize, y: usize, color: RgbColor) {
     if !is_available() {
         return;
     }
     VGA_WRITER.lock().draw_pixel(x, y, color);
+}
+
+pub fn draw_pixel_alpha(x: usize, y: usize, color: RgbColor, alpha: u8) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().draw_pixel_alpha(x, y, color, alpha);
 }
 
 pub fn draw_line(x0: isize, y0: isize, x1: isize, y1: isize, color: RgbColor) {
@@ -837,6 +1342,31 @@ pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: RgbColo
     VGA_WRITER.lock().fill_rect(x, y, width, height, color);
 }
 
+pub fn fill_rect_alpha(x: usize, y: usize, width: usize, height: usize, color: RgbColor, alpha: u8) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().fill_rect_alpha(x, y, width, height, color, alpha);
+}
+
+pub fn blit_rgb(dst_x: usize, dst_y: usize, src_width: usize, src_height: usize, pixels: &[RgbColor]) -> bool {
+    if !is_available() {
+        return false;
+    }
+    VGA_WRITER
+        .lock()
+        .blit_rgb(dst_x, dst_y, src_width, src_height, pixels)
+}
+
+pub fn blit_rgb24(dst_x: usize, dst_y: usize, src_width: usize, src_height: usize, bytes: &[u8]) -> bool {
+    if !is_available() {
+        return false;
+    }
+    VGA_WRITER
+        .lock()
+        .blit_rgb24(dst_x, dst_y, src_width, src_height, bytes)
+}
+
 pub fn draw_text_at(pixel_x: usize, pixel_y: usize, text: &str, fg: RgbColor, bg: RgbColor) {
     if !is_available() {
         return;
@@ -844,6 +1374,28 @@ pub fn draw_text_at(pixel_x: usize, pixel_y: usize, text: &str, fg: RgbColor, bg
     VGA_WRITER
         .lock()
         .draw_text_at(pixel_x, pixel_y, text, fg, bg);
+}
+
+pub fn draw_text(pixel_x: usize, pixel_y: usize, text: &str, opts: TextOptions) -> TextMetrics {
+    if !is_available() {
+        return TextMetrics {
+            width: 0,
+            height: 0,
+            lines: 0,
+        };
+    }
+    VGA_WRITER.lock().draw_text(pixel_x, pixel_y, text, opts)
+}
+
+pub fn measure_text(text: &str, max_width: Option<usize>, wrap: bool) -> TextMetrics {
+    if !is_available() {
+        return TextMetrics {
+            width: 0,
+            height: 0,
+            lines: 0,
+        };
+    }
+    VGA_WRITER.lock().measure_text(text, max_width, wrap)
 }
 
 pub fn draw_strata_stack(origin_x: usize, origin_y: usize, layer_w: usize, layer_h: usize) {

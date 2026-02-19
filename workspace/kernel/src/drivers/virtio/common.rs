@@ -143,6 +143,21 @@ impl Virtqueue {
         drop(lock);
 
         // SAFETY: We just allocated these frames; convert phys→virt via HHDM
+        // First ensure ALL allocated pages are identity-mapped so we can access them
+        // Map each page in the allocated regions
+        for i in 0..desc_pages {
+            let phys_addr = desc_area.start_address.as_u64() + (i as u64 * 4096);
+            crate::memory::paging::ensure_identity_map(phys_addr);
+        }
+        for i in 0..avail_pages {
+            let phys_addr = avail_area.start_address.as_u64() + (i as u64 * 4096);
+            crate::memory::paging::ensure_identity_map(phys_addr);
+        }
+        for i in 0..used_pages {
+            let phys_addr = used_area.start_address.as_u64() + (i as u64 * 4096);
+            crate::memory::paging::ensure_identity_map(phys_addr);
+        }
+        
         let desc_virt = crate::memory::phys_to_virt(desc_area.start_address.as_u64());
         let avail_virt = crate::memory::phys_to_virt(avail_area.start_address.as_u64());
         let used_virt = crate::memory::phys_to_virt(used_area.start_address.as_u64());
@@ -154,7 +169,13 @@ impl Virtqueue {
         let used_ring_ptr = (used_virt + 4) as *mut VirtqUsedElem;
 
         // Zero out the memory
-        core::ptr::write_bytes(desc_ptr, 0, queue_size as usize);
+        // SAFETY: we allocated these pages and they're mapped via HHDM
+        // Each descriptor is 16 bytes, so we write queue_size * 16 bytes
+        core::ptr::write_bytes(
+            desc_ptr,
+            0,
+            queue_size as usize * core::mem::size_of::<VirtqDesc>(),
+        );
         core::ptr::write_bytes(avail_ptr as *mut u8, 0, avail_size);
         core::ptr::write_bytes(used_ptr as *mut u8, 0, used_size);
 
