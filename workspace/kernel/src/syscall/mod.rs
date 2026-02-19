@@ -16,6 +16,7 @@
 pub mod dispatcher;
 pub mod error;
 pub mod futex;
+pub mod mmap;
 pub mod numbers;
 pub mod signal;
 pub mod time;

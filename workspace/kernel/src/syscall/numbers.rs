@@ -22,7 +22,23 @@ pub const SYS_HANDLE_WAIT: u64 = 3;
 // Block 100-199: memory management
 // ============================================================
 
-// (stubs — not yet implemented)
+/// Map anonymous virtual memory.
+/// arg1=addr, arg2=len, arg3=prot, arg4=flags, arg5=fd, arg6=offset
+pub const SYS_MMAP: u64 = 100;
+
+/// Unmap a virtual memory range.
+/// arg1=addr, arg2=len
+pub const SYS_MUNMAP: u64 = 101;
+
+/// Set the program break (heap top).
+/// arg1=addr (0 = query). Returns new break on success, unchanged break on failure.
+pub const SYS_BRK: u64 = 102;
+
+/// Remap a virtual memory region (reserved — not yet implemented).
+pub const SYS_MREMAP: u64 = 103;
+
+/// Change protection of a virtual memory region (reserved — not yet implemented).
+pub const SYS_MPROTECT: u64 = 104;
 
 // ============================================================
 // Block 200-299: IPC

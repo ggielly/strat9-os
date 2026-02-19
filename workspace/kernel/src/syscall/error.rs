@@ -20,6 +20,8 @@ pub enum SyscallError {
     BadHandle = -9,
     /// Resource temporarily unavailable (EAGAIN)
     Again = -11,
+    /// Out of memory : no pages available (ENOMEM)
+    OutOfMemory = -12,
     /// Bad address / memory fault (EFAULT)
     Fault = -14,
     /// File or resource already exists (EEXIST)
@@ -48,6 +50,7 @@ impl SyscallError {
             -5 => SyscallError::IoError,
             -9 => SyscallError::BadHandle,
             -11 => SyscallError::Again,
+            -12 => SyscallError::OutOfMemory,
             -14 => SyscallError::Fault,
             -17 => SyscallError::AlreadyExists,
             -22 => SyscallError::InvalidArgument,

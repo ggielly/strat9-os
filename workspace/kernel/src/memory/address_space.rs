@@ -292,6 +292,159 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Find a free virtual address range of `n_pages` pages starting at or after `hint`.
+    ///
+    /// Scans the VMA list in ascending order and returns the first gap that fits.
+    /// Returns `None` if no gap of sufficient size exists before `USER_SPACE_END`.
+    pub fn find_free_vma_range(&self, hint: u64, n_pages: usize) -> Option<u64> {
+        if n_pages == 0 {
+            return None;
+        }
+        let length = (n_pages as u64).checked_mul(4096)?;
+        let upper_limit: u64 = 0x0000_8000_0000_0000; // USER_SPACE_END
+
+        // Round hint up to a page boundary; never return address 0.
+        let mut candidate = hint.saturating_add(4095) & !4095u64;
+        if candidate == 0 {
+            candidate = 4096;
+        }
+
+        let regions = self.regions.lock();
+        for (&vma_start, vma) in regions.iter() {
+            let vma_end = vma_start + vma.page_count as u64 * 4096;
+
+            // A gap exists before this VMA — candidate fits.
+            if candidate.saturating_add(length) <= vma_start {
+                break;
+            }
+
+            // Candidate overlaps this VMA; skip past it.
+            if vma_end > candidate {
+                candidate = vma_end;
+            }
+        }
+
+        // Final bounds check.
+        if candidate.checked_add(length)? <= upper_limit {
+            Some(candidate)
+        } else {
+            None
+        }
+    }
+
+    /// Unmap the virtual address range `[addr, addr + len)`, handling partial VMA overlaps.
+    ///
+    /// `addr` and `len` must both be multiples of the page size.  VMAs that
+    /// partially overlap the range are split: the portions outside the range
+    /// remain mapped and tracked.  Physical frames inside the range are freed.
+    ///
+    /// Pages that are not mapped (e.g. a gap inside a sparse range) are silently
+    /// skipped : this matches Linux `munmap` behaviour.
+    pub fn unmap_range(&self, addr: u64, len: u64) -> Result<(), &'static str> {
+        if len == 0 {
+            return Ok(());
+        }
+        let end = addr
+            .checked_add(len)
+            .ok_or("unmap_range: address overflow")?;
+
+        //  Step 1: collect all VMAs that overlap [addr, end)
+        // We take a snapshot so we can release the lock before doing page-table
+        // operations (which themselves acquire the buddy-allocator lock).
+        let overlapping: alloc::vec::Vec<(u64, VirtualMemoryRegion)> = {
+            let regions = self.regions.lock();
+            regions
+                .iter()
+                .filter(|(&vma_start, vma)| {
+                    let vma_end = vma_start + vma.page_count as u64 * 4096;
+                    vma_start < end && vma_end > addr
+                })
+                .map(|(&k, v)| (k, v.clone()))
+                .collect()
+        }; // lock released
+
+        if overlapping.is_empty() {
+            return Ok(()); // nothing to do
+        }
+
+        //  Step 2: unmap pages from the hardware page tables
+        // SAFETY: We have logical ownership of this address space; no other
+        // task modifies it concurrently (single-process model, no clone yet).
+        let mut mapper = unsafe { self.mapper() };
+
+        for (vma_start, vma) in &overlapping {
+            let vma_start = *vma_start;
+            let vma_end = vma_start + vma.page_count as u64 * 4096;
+            let range_start = core::cmp::max(vma_start, addr);
+            let range_end = core::cmp::min(vma_end, end);
+
+            let mut page_addr = range_start;
+            while page_addr < range_end {
+                let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                    .map_err(|_| "unmap_range: page address not aligned")?;
+
+                // Silently skip pages that happen to not be mapped.
+                if let Ok((frame, flush)) = mapper.unmap(page) {
+                    flush.flush();
+                    let phys = crate::memory::PhysFrame {
+                        start_address: frame.start_address(),
+                    };
+                    let lock = crate::memory::get_allocator();
+                    let mut guard = lock.lock();
+                    if let Some(allocator) = guard.as_mut() {
+                        allocator.free(phys, 0);
+                    }
+                }
+
+                page_addr += 4096;
+            }
+        }
+
+        //  Step 3: update VMA tracking
+        {
+            let mut regions = self.regions.lock();
+            for (vma_start, vma) in &overlapping {
+                let vma_start = *vma_start;
+                let vma_end = vma_start + vma.page_count as u64 * 4096;
+                let range_start = core::cmp::max(vma_start, addr);
+                let range_end = core::cmp::min(vma_end, end);
+
+                // Remove the (now partially or fully unmapped) original VMA.
+                regions.remove(&vma_start);
+
+                // Re-insert the leading fragment [vma_start, range_start).
+                if range_start > vma_start {
+                    let leading_pages = ((range_start - vma_start) / 4096) as usize;
+                    regions.insert(
+                        vma_start,
+                        VirtualMemoryRegion {
+                            start: vma_start,
+                            page_count: leading_pages,
+                            flags: vma.flags,
+                            vma_type: vma.vma_type,
+                        },
+                    );
+                }
+
+                // Re-insert the trailing fragment [range_end, vma_end).
+                if range_end < vma_end {
+                    let trailing_pages = ((vma_end - range_end) / 4096) as usize;
+                    regions.insert(
+                        range_end,
+                        VirtualMemoryRegion {
+                            start: range_end,
+                            page_count: trailing_pages,
+                            flags: vma.flags,
+                            vma_type: vma.vma_type,
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Translate a virtual address to its mapped physical address.
     pub fn translate(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
         // SAFETY: Read-only access to the page tables.

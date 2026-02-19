@@ -83,6 +83,10 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     init_serial();
     init_logger();
 
+    // Puts default panic hooks early to ensure
+    //we get useful info on any panics during init.
+    panic::install_default_panic_hooks();
+
     // Nice logo :D
     serial_println!(r"          __                 __   ________                         ");
     serial_println!(r"  _______/  |_____________ _/  |_/   __   \           ____  ______ ");
@@ -222,7 +226,8 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         } else {
             args.framebuffer_addr
         };
-        let fb_size = (args.framebuffer_stride as u64).saturating_mul(args.framebuffer_height as u64);
+        let fb_size =
+            (args.framebuffer_stride as u64).saturating_mul(args.framebuffer_height as u64);
         memory::paging::ensure_identity_map_range(fb_phys, fb_size);
         serial_println!(
             "[init] Framebuffer mapped: phys=0x{:x} size={} bytes",

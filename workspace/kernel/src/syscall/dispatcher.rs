@@ -47,6 +47,12 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NULL => sys_null(),
         SYS_HANDLE_DUPLICATE => sys_handle_duplicate(arg1),
         SYS_HANDLE_CLOSE => sys_handle_close(arg1),
+
+        // Memory management (block 100-199)
+        SYS_MMAP => super::mmap::sys_mmap(arg1, arg2, arg3 as u32, arg4 as u32, frame.r8, frame.r9),
+        SYS_MUNMAP => super::mmap::sys_munmap(arg1, arg2),
+        SYS_BRK => super::mmap::sys_brk(arg1),
+
         SYS_PROC_EXIT => sys_proc_exit(arg1),
         SYS_PROC_YIELD => sys_proc_yield(),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
