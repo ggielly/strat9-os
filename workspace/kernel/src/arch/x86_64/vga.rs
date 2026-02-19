@@ -7,7 +7,7 @@
 use alloc::{collections::VecDeque, format, string::String, vec::Vec};
 use core::{
     fmt,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
 };
 use spin::Mutex;
 
@@ -15,6 +15,12 @@ use spin::Mutex;
 static VGA_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static STATUS_LAST_REFRESH_TICK: AtomicU64 = AtomicU64::new(0);
 const STATUS_REFRESH_PERIOD_TICKS: u64 = 100; // 100Hz timer => 1s
+static PRESENTED_FRAMES: AtomicU64 = AtomicU64::new(0);
+static FPS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+static FPS_LAST_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
+static FPS_ESTIMATE: AtomicU64 = AtomicU64::new(0);
+static DOUBLE_BUFFER_MODE: AtomicBool = AtomicBool::new(false);
+static UI_SCALE: AtomicU8 = AtomicU8::new(1);
 
 const FONT_PSF: &[u8] = include_bytes!("fonts/zap-ext-light20.psf");
 
@@ -115,6 +121,19 @@ pub struct UiTheme {
     pub accent: RgbColor,
     pub status_bg: RgbColor,
     pub status_text: RgbColor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiScale {
+    Compact = 1,
+    Normal = 2,
+    Large = 3,
+}
+
+impl UiScale {
+    pub const fn factor(self) -> usize {
+        self as usize
+    }
 }
 
 impl UiTheme {
@@ -471,7 +490,9 @@ pub struct FramebufferInfo {
     pub text_rows: usize,
     pub glyph_w: usize,
     pub glyph_h: usize,
+    pub double_buffer_mode: bool,
     pub double_buffer_enabled: bool,
+    pub ui_scale: UiScale,
 }
 
 impl PixelFormat {
@@ -852,7 +873,9 @@ impl VgaWriter {
             text_rows: self.rows,
             glyph_w: self.font_info.glyph_w,
             glyph_h: self.font_info.glyph_h,
+            double_buffer_mode: DOUBLE_BUFFER_MODE.load(Ordering::Relaxed),
             double_buffer_enabled: self.draw_to_back && self.back_buffer.is_some(),
+            ui_scale: current_ui_scale(),
         }
     }
 
@@ -999,6 +1022,7 @@ impl VgaWriter {
                 self.write_hw_pixel_packed(x, y, packed);
             }
         }
+        PRESENTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         self.clear_dirty();
     }
 
@@ -1020,8 +1044,18 @@ impl VgaWriter {
         self.clear_with(self.unpack_color(self.bg));
     }
 
+    #[inline]
+    fn pixel_offset(&self, x: usize, y: usize) -> Option<usize> {
+        let bytes_pp = self.fmt.bpp as usize / 8;
+        let row = y.checked_mul(self.pitch)?;
+        let col = x.checked_mul(bytes_pp)?;
+        row.checked_add(col)
+    }
+
     fn write_hw_pixel_packed(&mut self, x: usize, y: usize, color: u32) {
-        let off = y * self.pitch + x * (self.fmt.bpp as usize / 8);
+        let Some(off) = self.pixel_offset(x, y) else {
+            return;
+        };
         unsafe {
             match self.fmt.bpp {
                 32 => {
@@ -1044,7 +1078,9 @@ impl VgaWriter {
     }
 
     fn read_hw_pixel_packed(&self, x: usize, y: usize) -> u32 {
-        let off = y * self.pitch + x * (self.fmt.bpp as usize / 8);
+        let Some(off) = self.pixel_offset(x, y) else {
+            return 0;
+        };
         unsafe {
             match self.fmt.bpp {
                 32 => core::ptr::read_volatile(self.fb_addr.add(off) as *const u32),
@@ -1167,7 +1203,9 @@ impl VgaWriter {
 
         if self.fmt.bpp == 32 {
             for py in sy..(sy + sh) {
-                let row_off = py * self.pitch + sx * 4;
+                let Some(row_off) = py.checked_mul(self.pitch).and_then(|v| v.checked_add(sx * 4)) else {
+                    continue;
+                };
                 let count = sw;
                 unsafe {
                     let ptr = self.fb_addr.add(row_off) as *mut u32;
@@ -1686,12 +1724,10 @@ fn status_line_info() -> StatusLineInfo {
             ip: String::from("n/a"),
         });
     }
-    guard.as_ref().cloned().unwrap()
-}
-
-fn format_uptime() -> String {
-    let ticks = crate::process::scheduler::ticks();
-    format_uptime_from_ticks(ticks)
+    guard.as_ref().cloned().unwrap_or(StatusLineInfo {
+        hostname: String::from("strat9"),
+        ip: String::from("n/a"),
+    })
 }
 
 fn format_uptime_from_ticks(ticks: u64) -> String {
@@ -1700,6 +1736,53 @@ fn format_uptime_from_ticks(ticks: u64) -> String {
     let m = (total_secs % 3600) / 60;
     let s = total_secs % 60;
     format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+fn current_fps(tick: u64) -> u64 {
+    let last_tick = FPS_LAST_TICK.load(Ordering::Relaxed);
+    let frames = PRESENTED_FRAMES.load(Ordering::Relaxed);
+
+    if last_tick == 0 {
+        let _ = FPS_LAST_TICK.compare_exchange(0, tick, Ordering::Relaxed, Ordering::Relaxed);
+        let _ = FPS_LAST_FRAME_COUNT.compare_exchange(0, frames, Ordering::Relaxed, Ordering::Relaxed);
+        return FPS_ESTIMATE.load(Ordering::Relaxed);
+    }
+
+    let dt = tick.saturating_sub(last_tick);
+    if dt >= STATUS_REFRESH_PERIOD_TICKS
+        && FPS_LAST_TICK
+            .compare_exchange(last_tick, tick, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        let last_frames = FPS_LAST_FRAME_COUNT.swap(frames, Ordering::Relaxed);
+        let df = frames.saturating_sub(last_frames);
+        let fps = if dt == 0 { 0 } else { df.saturating_mul(100) / dt };
+        FPS_ESTIMATE.store(fps, Ordering::Relaxed);
+    }
+
+    FPS_ESTIMATE.load(Ordering::Relaxed)
+}
+
+fn current_ui_scale() -> UiScale {
+    match UI_SCALE.load(Ordering::Relaxed) {
+        1 => UiScale::Compact,
+        3 => UiScale::Large,
+        _ => UiScale::Normal,
+    }
+}
+
+pub fn ui_scale() -> UiScale {
+    current_ui_scale()
+}
+
+pub fn set_ui_scale(scale: UiScale) {
+    UI_SCALE.store(scale as u8, Ordering::Relaxed);
+}
+
+pub fn ui_scale_px(base: usize) -> usize {
+    let factor = current_ui_scale().factor();
+    let denom = UiScale::Normal.factor();
+    base.saturating_mul(factor) / denom
 }
 
 fn format_mem_usage() -> String {
@@ -2058,6 +2141,14 @@ pub fn set_text_cursor(col: usize, row: usize) {
     VGA_WRITER.lock().set_cursor_cell(col, row);
 }
 
+pub fn double_buffer_mode() -> bool {
+    DOUBLE_BUFFER_MODE.load(Ordering::Relaxed)
+}
+
+pub fn set_double_buffer_mode(enabled: bool) {
+    DOUBLE_BUFFER_MODE.store(enabled, Ordering::Relaxed);
+}
+
 pub fn framebuffer_info() -> FramebufferInfo {
     if !is_available() {
         return FramebufferInfo {
@@ -2076,7 +2167,9 @@ pub fn framebuffer_info() -> FramebufferInfo {
             text_rows: 0,
             glyph_w: 0,
             glyph_h: 0,
+            double_buffer_mode: false,
             double_buffer_enabled: false,
+            ui_scale: UiScale::Normal,
         };
     }
     VGA_WRITER.lock().framebuffer_info()
@@ -2105,6 +2198,9 @@ pub fn reset_clip_rect() {
 
 pub fn begin_frame() -> bool {
     if !is_available() {
+        return false;
+    }
+    if !double_buffer_mode() {
         return false;
     }
     VGA_WRITER.lock().enable_double_buffer()
@@ -2475,12 +2571,14 @@ pub fn set_status_ip(ip: &str) {
 pub fn draw_system_status_line(theme: UiTheme) {
     let info = status_line_info();
     let version = env!("CARGO_PKG_VERSION");
-    let uptime = format_uptime();
+    let tick = crate::process::scheduler::ticks();
+    let uptime = format_uptime_from_ticks(tick);
     let mem = format_mem_usage();
+    let fps = current_fps(tick);
     let left = format!(" {} ", info.hostname);
     let right = format!(
-        "ip:{}  ver:{}  up:{}  load:n/a  mem:{} ",
-        info.ip, version, uptime, mem
+        "ip:{}  ver:{}  up:{}  fps:{}  load:n/a  mem:{} ",
+        info.ip, version, uptime, fps, mem
     );
     ui_draw_status_bar(&left, &right, theme);
 }
@@ -2525,14 +2623,27 @@ pub fn maybe_refresh_system_status_line(theme: UiTheme) {
     let version = env!("CARGO_PKG_VERSION");
     let uptime = format_uptime_from_ticks(tick);
     let mem = format_mem_usage();
+    let fps = current_fps(tick);
     let left = format!(" {} ", info.hostname);
     let right = format!(
-        "ip:{}  ver:{}  up:{}  load:n/a  mem:{} ",
-        info.ip, version, uptime, mem
+        "ip:{}  ver:{}  up:{}  fps:{}  load:n/a  mem:{} ",
+        info.ip, version, uptime, fps, mem
     );
 
     if let Some(mut writer) = VGA_WRITER.try_lock() {
         draw_status_bar_inner(&mut writer, &left, &right, theme);
+    }
+}
+
+pub extern "C" fn status_line_task_main() -> ! {
+    let mut last_tick = 0u64;
+    loop {
+        let tick = crate::process::scheduler::ticks();
+        if tick != last_tick {
+            last_tick = tick;
+            maybe_refresh_system_status_line(UiTheme::OCEAN_STATUS);
+        }
+        crate::process::yield_task();
     }
 }
 

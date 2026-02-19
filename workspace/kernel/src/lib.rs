@@ -438,15 +438,33 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // =============================================
     serial_println!("[init] Creating Chevron shell task...");
     vga_println!("[..] Creating interactive shell...");
-    let shell_task = process::Task::new_kernel_task(
+    match process::Task::new_kernel_task(
         shell::shell_main,
         "chevron-shell",
         process::TaskPriority::Normal,
-    )
-    .expect("Failed to create shell task");
-    process::add_task(shell_task);
-    serial_println!("[init] Chevron shell task created.");
-    vga_println!("[OK] Chevron shell ready");
+    ) {
+        Ok(shell_task) => {
+            process::add_task(shell_task);
+            serial_println!("[init] Chevron shell task created.");
+            vga_println!("[OK] Chevron shell ready");
+        }
+        Err(e) => {
+            serial_println!("[WARN] Failed to create shell task: {}", e);
+            vga_println!("[WARN] Shell task unavailable");
+        }
+    }
+
+    // Dedicated status-line updater task (keeps bottom bar live independently of shell activity).
+    if let Ok(status_task) = process::Task::new_kernel_task(
+        arch::x86_64::vga::status_line_task_main,
+        "status-line",
+        process::TaskPriority::Low,
+    ) {
+        process::add_task(status_task);
+        serial_println!("[init] Status line task created.");
+    } else {
+        serial_println!("[WARN] Failed to create status line task");
+    }
 
     // =============================================
     // Phase 9: enable interrupts
@@ -604,7 +622,10 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
         log::warn!("APIC: no I/O APIC in MADT");
         return false;
     }
-    let io_apic_entry = madt_info.io_apics[0].unwrap();
+    let Some(io_apic_entry) = madt_info.io_apics[0] else {
+        log::warn!("APIC: MADT I/O APIC entry[0] missing");
+        return false;
+    };
     // Ensure I/O APIC MMIO is mapped
     memory::paging::ensure_identity_map(io_apic_entry.io_apic_address as u64);
     ioapic::init(io_apic_entry.io_apic_address, io_apic_entry.gsi_base);

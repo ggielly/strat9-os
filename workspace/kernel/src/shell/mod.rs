@@ -63,7 +63,7 @@ pub extern "C" fn shell_main() -> ! {
                                     // Command executed successfully
                                 }
                                 Err(ShellError::UnknownCommand) => {
-                                    shell_println!("Error: Unknown command '{}'", cmd.name);
+                                    shell_println!("Error: unknown command '{}'", cmd.name);
                                     shell_println!("Type 'help' for available commands.");
                                 }
                                 Err(ShellError::InvalidArguments) => {
