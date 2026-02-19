@@ -40,12 +40,20 @@ pub fn init_free_pool() {
         }
         
         // Zero FREE_BLOCKS
-        let blocks_ptr = FREE_BLOCKS.as_mut_ptr();
-        core::ptr::write_bytes(blocks_ptr, 0, MAX_FREE_BLOCKS);
+        let blocks_ptr = FREE_BLOCKS.as_mut_ptr() as *mut u8;
+        core::ptr::write_bytes(
+            blocks_ptr,
+            0,
+            core::mem::size_of::<[Option<FreeBlock>; MAX_FREE_BLOCKS]>(),
+        );
         
         // Zero FREE_BLOCKS_FREE_NEXT
-        let next_ptr = FREE_BLOCKS_FREE_NEXT.as_mut_ptr();
-        core::ptr::write_bytes(next_ptr, 0, MAX_FREE_BLOCKS);
+        let next_ptr = FREE_BLOCKS_FREE_NEXT.as_mut_ptr() as *mut u8;
+        core::ptr::write_bytes(
+            next_ptr,
+            0,
+            core::mem::size_of::<[Option<usize>; MAX_FREE_BLOCKS]>(),
+        );
         
         FREE_BLOCKS_USED = 0;
         FREE_BLOCKS_FREE_HEAD = None;

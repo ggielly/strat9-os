@@ -1353,15 +1353,17 @@ fn format_uptime_from_ticks(ticks: u64) -> String {
 
 fn format_mem_usage() -> String {
     let lock = crate::memory::buddy::get_allocator();
-    let guard = lock.lock();
-    let Some(alloc) = guard.as_ref() else {
-        return String::from("n/a");
+    let (free, total) = {
+        let guard = lock.lock();
+        let Some(alloc) = guard.as_ref() else {
+            return String::from("n/a");
+        };
+        let stats = alloc.get_stats();
+        let page_size = 4096usize;
+        let total = stats.total_pages.saturating_mul(page_size);
+        let used = stats.allocated_pages.saturating_mul(page_size);
+        (total.saturating_sub(used), total)
     };
-    let stats = alloc.get_stats();
-    let page_size = 4096usize;
-    let total = stats.total_pages.saturating_mul(page_size);
-    let used = stats.allocated_pages.saturating_mul(page_size);
-    let free = total.saturating_sub(used);
     format!("{}/{}", format_size(free), format_size(total))
 }
 
