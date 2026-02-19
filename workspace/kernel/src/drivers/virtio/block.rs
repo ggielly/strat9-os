@@ -415,6 +415,9 @@ impl BlockDevice for VirtioBlockDevice {
 /// Global VirtIO block device
 static VIRTIO_BLOCK: SpinLock<Option<Box<VirtioBlockDevice>>> = SpinLock::new(None);
 
+/// VirtIO block IRQ line (will be set during init)
+static mut VIRTIO_BLOCK_IRQ: u8 = 0;
+
 /// Initialize VirtIO block device
 ///
 /// Scans PCI bus for VirtIO block devices and initializes the first one found.
@@ -430,13 +433,48 @@ pub fn init() {
         }
     };
 
+    // Read interrupt line from PCI config
+    let irq_line = pci_dev.read_config_u8(pci::config::INTERRUPT_LINE);
+    
     // Initialize device
     match unsafe { VirtioBlockDevice::new(pci_dev) } {
         Ok(device) => {
+            // Store IRQ line for interrupt handler
+            unsafe {
+                VIRTIO_BLOCK_IRQ = irq_line;
+            }
+            
+            // Register device
             *VIRTIO_BLOCK.lock() = Some(Box::new(device));
+            
+            // Register IRQ handler in IDT
+            crate::arch::x86_64::idt::register_virtio_block_irq(irq_line);
+            
+            log::info!("VirtIO-blk: Device initialized on IRQ {}", irq_line);
         }
         Err(e) => {
             log::error!("VirtIO-blk: Failed to initialize device: {}", e);
+        }
+    }
+}
+
+/// Handle VirtIO block device interrupt
+///
+/// Called from the IDT IRQ handler when the VirtIO device signals completion.
+/// Acknowledges the interrupt and processes completed requests.
+pub fn handle_interrupt() {
+    // Acknowledge the interrupt at the device level
+    let lock = VIRTIO_BLOCK.lock();
+    if let Some(device) = lock.as_ref() {
+        // Read ISR status to check if interrupt is for us
+        let isr_status = device.device.read_isr_status();
+        if isr_status != 0 {
+            // Acknowledge the interrupt
+            device.device.ack_interrupt();
+            
+            // Process completed requests (wake up waiting tasks)
+            // For now, just log the interrupt
+            log::trace!("VirtIO-blk: Interrupt handled (ISR={})", isr_status);
         }
     }
 }
@@ -455,4 +493,9 @@ pub fn get_device() -> Option<&'static VirtioBlockDevice> {
             None
         }
     }
+}
+
+/// Get the VirtIO block IRQ line
+pub fn get_irq() -> u8 {
+    unsafe { VIRTIO_BLOCK_IRQ }
 }

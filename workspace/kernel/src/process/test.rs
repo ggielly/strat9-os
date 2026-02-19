@@ -45,7 +45,7 @@ extern "C" fn test_task_main() -> ! {
     }
 
     // Exit the current task to allow keyboard input
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 /// Main function for the busy-loop test task (never yields).
@@ -79,5 +79,5 @@ extern "C" fn busy_task_main() -> ! {
     }
 
     // Exit the current task to allow keyboard input
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }

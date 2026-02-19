@@ -4,6 +4,7 @@
 //! shared across all VirtIO drivers.
 //!
 //! Reference: VirtIO spec v1.2, Section 2 (Basic Facilities of a Virtio Device)
+//! https://docs.oasis-open.org/virtio/virtio/v1.2/os/virtio-v1.2-os.html#_basic-facilities-of-a-virtio-device
 
 use super::{vring_flags, VirtqDesc};
 use crate::{
@@ -142,7 +143,11 @@ impl Virtqueue {
 
         drop(lock);
 
-        // SAFETY: We just allocated these frames; convert phys→virt via HHDM
+        // SAFETY: we just allocated these frames; convert phys => virt via HHDM
+        // With Limine HHDM, all physical memory is already mapped, so we can
+        // directly use phys_to_virt without additional page table modifications.
+        // DO NOT call ensure_identity_map here - it can corrupt active page tables!
+
         let desc_virt = crate::memory::phys_to_virt(desc_area.start_address.as_u64());
         let avail_virt = crate::memory::phys_to_virt(avail_area.start_address.as_u64());
         let used_virt = crate::memory::phys_to_virt(used_area.start_address.as_u64());
@@ -154,7 +159,13 @@ impl Virtqueue {
         let used_ring_ptr = (used_virt + 4) as *mut VirtqUsedElem;
 
         // Zero out the memory
-        core::ptr::write_bytes(desc_ptr, 0, queue_size as usize);
+        // SAFETY: we allocated these pages and they're mapped via HHDM
+        // Each descriptor is 16 bytes, so we write queue_size * 16 bytes
+        core::ptr::write_bytes(
+            desc_ptr,
+            0,
+            queue_size as usize * core::mem::size_of::<VirtqDesc>(),
+        );
         core::ptr::write_bytes(avail_ptr as *mut u8, 0, avail_size);
         core::ptr::write_bytes(used_ptr as *mut u8, 0, used_size);
 
@@ -436,6 +447,12 @@ impl VirtioDevice {
     /// Read ISR status (clears interrupt)
     pub fn read_isr_status(&self) -> u8 {
         self.read_reg_u8(19) // VIRTIO_PCI_ISR
+    }
+
+    /// Acknowledge interrupt (write 0 to ISR)
+    pub fn ack_interrupt(&self) {
+        // Reading ISR already clears it, but we can also write to acknowledge
+        let _ = self.read_reg_u8(19); // VIRTIO_PCI_ISR
     }
 
     /// Setup a virtqueue

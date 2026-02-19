@@ -59,10 +59,31 @@ static MODULES: ModuleRequest =
 /// Optional fs-ext4 module info (set during Limine entry).
 static mut FS_EXT4_MODULE: Option<(u64, u64)> = None;
 
+const MAX_BOOT_MEMORY_REGIONS: usize = 256;
+static mut BOOT_MEMORY_MAP: [crate::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
+    [crate::entry::MemoryRegion {
+        base: 0,
+        size: 0,
+        kind: crate::entry::MemoryKind::Reserved,
+    }; MAX_BOOT_MEMORY_REGIONS];
+static mut BOOT_MEMORY_MAP_LEN: usize = 0;
+
 /// Return the fs-ext4 module (addr, size) if present.
 pub fn fs_ext4_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
     unsafe { FS_EXT4_MODULE }
+}
+
+fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> crate::entry::MemoryKind {
+    if kind == limine::memory_map::EntryType::USABLE {
+        crate::entry::MemoryKind::Free
+    } else if kind == limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE
+        || kind == limine::memory_map::EntryType::ACPI_RECLAIMABLE
+    {
+        crate::entry::MemoryKind::Reclaim
+    } else {
+        crate::entry::MemoryKind::Reserved
+    }
 }
 
 /// Define the start and end markers for Limine requests
@@ -103,15 +124,39 @@ pub unsafe extern "C" fn kmain() -> ! {
         None => hlt_loop(),
     };
 
-    // Get framebuffer info (for VGA)
-    let fb_addr = if let Some(fb_response) = FRAMEBUFFER.get_response() {
+    // Get framebuffer info (graphics mode provided by Limine)
+    let (
+        fb_addr,
+        fb_width,
+        fb_height,
+        fb_stride,
+        fb_bpp,
+        fb_red_mask_size,
+        fb_red_mask_shift,
+        fb_green_mask_size,
+        fb_green_mask_shift,
+        fb_blue_mask_size,
+        fb_blue_mask_shift,
+    ) = if let Some(fb_response) = FRAMEBUFFER.get_response() {
         if let Some(fb) = fb_response.framebuffers().next() {
-            fb.addr() as u64
+            (
+                fb.addr() as u64,
+                fb.width() as u32,
+                fb.height() as u32,
+                fb.pitch() as u32,
+                fb.bpp(),
+                fb.red_mask_size(),
+                fb.red_mask_shift(),
+                fb.green_mask_size(),
+                fb.green_mask_shift(),
+                fb.blue_mask_size(),
+                fb.blue_mask_shift(),
+            )
         } else {
-            0xB8000 // Fallback to VGA text mode
+            (0, 0, 0, 0, 0, 8, 16, 8, 8, 8, 0)
         }
     } else {
-        0xB8000 // Fallback to VGA text mode
+        (0, 0, 0, 0, 0, 8, 16, 8, 8, 8, 0)
     };
 
     // Get RSDP for ACPI
@@ -120,14 +165,28 @@ pub unsafe extern "C" fn kmain() -> ! {
     // Get HHDM offset — critical for accessing physical memory
     let hhdm_offset = HHDM.get_response().map(|r| r.offset()).unwrap_or(0);
 
-    // Build KernelArgs from Limine data
-    // Note: We pass a dummy memory map for now since allocator needs initialization
-    // The real Limine memory map will be used once we refactor memory init
-    let dummy_mmap = [crate::entry::MemoryRegion {
-        base: 0x200000,
-        size: 0xFE00000,
-        kind: crate::entry::MemoryKind::Free,
-    }];
+    // Build a kernel-local memory map from Limine entries.
+    // Keep only the first MAX_BOOT_MEMORY_REGIONS entries to avoid dynamic allocation.
+    let (memory_map_base, memory_map_size) = if let Some(memory_map_response) = MEMORY_MAP.get_response() {
+        let entries = memory_map_response.entries();
+        let count = core::cmp::min(entries.len(), MAX_BOOT_MEMORY_REGIONS);
+        unsafe {
+            BOOT_MEMORY_MAP_LEN = count;
+            for (i, entry) in entries.iter().take(count).enumerate() {
+                BOOT_MEMORY_MAP[i] = crate::entry::MemoryRegion {
+                    base: entry.base,
+                    size: entry.length,
+                    kind: map_limine_region_kind(entry.entry_type),
+                };
+            }
+            (
+                BOOT_MEMORY_MAP.as_ptr() as u64,
+                (BOOT_MEMORY_MAP_LEN * core::mem::size_of::<crate::entry::MemoryRegion>()) as u64,
+            )
+        }
+    } else {
+        (0, 0)
+    };
 
     // Check for loaded modules (init ELF binary + fs-ext4)
     let (initfs_base, initfs_size, ext4_base, ext4_size) =
@@ -172,14 +231,21 @@ pub unsafe extern "C" fn kmain() -> ! {
         env_size: 0,
         acpi_rsdp_base: rsdp_addr,
         acpi_rsdp_size: if rsdp_addr != 0 { 36 } else { 0 },
-        memory_map_base: dummy_mmap.as_ptr() as u64,
-        memory_map_size: core::mem::size_of_val(&dummy_mmap) as u64,
+        memory_map_base,
+        memory_map_size,
         initfs_base,
         initfs_size,
         framebuffer_addr: fb_addr,
-        framebuffer_width: 80,
-        framebuffer_height: 25,
-        framebuffer_stride: 80,
+        framebuffer_width: fb_width,
+        framebuffer_height: fb_height,
+        framebuffer_stride: fb_stride,
+        framebuffer_bpp: fb_bpp,
+        framebuffer_red_mask_size: fb_red_mask_size,
+        framebuffer_red_mask_shift: fb_red_mask_shift,
+        framebuffer_green_mask_size: fb_green_mask_size,
+        framebuffer_green_mask_shift: fb_green_mask_shift,
+        framebuffer_blue_mask_size: fb_blue_mask_size,
+        framebuffer_blue_mask_shift: fb_blue_mask_shift,
         hhdm_offset,
     };
 

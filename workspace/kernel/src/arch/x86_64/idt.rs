@@ -6,7 +6,6 @@
 use super::{pic, tss};
 use x86_64::{
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
-    VirtAddr,
 };
 
 /// IRQ interrupt vector numbers (PIC1_OFFSET + IRQ number)
@@ -60,6 +59,32 @@ pub fn init() {
     log::debug!("IDT initialized with {} entries", 256);
 }
 
+/// Register the VirtIO block device IRQ handler
+///
+/// Called after VirtIO block device initialization to route the device's
+/// IRQ to the correct handler.
+pub fn register_virtio_block_irq(irq: u8) {
+    // PCI INTx gives an IRQ line number (typically 0..15), while IDT expects
+    // a vector number. Map legacy IRQ lines to the remapped interrupt vectors.
+    let vector = if irq < 16 {
+        super::pic::PIC1_OFFSET + irq
+    } else {
+        irq
+    };
+
+    // SAFETY: Called during kernel init, before interrupts are fully enabled
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[vector].set_handler_fn(virtio_block_handler);
+        (*idt).load_unsafe();
+    }
+    log::info!(
+        "VirtIO-blk IRQ {} registered on vector {:#x}",
+        irq,
+        vector
+    );
+}
+
 // =============================================
 // CPU Exception Handlers
 // =============================================
@@ -91,12 +116,34 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     use x86_64::registers::control::{Cr2, Cr3};
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
+    
+    // Get the faulting address
+    let fault_addr = Cr2::read();
+    
+    // Try to handle COW fault first (before killing the process)
+    if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) && is_user {
+        if let Some(task) = crate::process::current_task_clone() {
+            let address_space = &task.address_space;
+            if let Ok(vaddr) = fault_addr {
+                match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), address_space) {
+                    Ok(()) => {
+                        // COW fault resolved successfully - return to userland
+                        return;
+                    }
+                    Err(_) => {
+                        // Not a COW fault - fall through to normal page fault handling
+                    }
+                }
+            }
+        }
+    }
+    
     if is_user {
         if let Some(tid) = crate::process::current_task_id() {
             crate::silo::handle_user_fault(
                 tid,
                 crate::silo::SiloFaultReason::PageFault,
-                Cr2::read().unwrap_or(VirtAddr::new(0)).as_u64(),
+                fault_addr.map(|v| v.as_u64()).unwrap_or(0),
                 error_code.bits() as u64,
             );
             return;
@@ -104,7 +151,6 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 
     log::error!("EXCEPTION: PAGE FAULT");
-    let fault_addr = Cr2::read();
     log::error!("Accessed Address: {:?}", fault_addr);
     log::error!("Error Code: {:?}", error_code);
     log::error!("{:#?}", stack_frame);
@@ -222,12 +268,14 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 // =============================================
-// Hardware IRQ Handlers
+// Hardware IRQ handlers
 // =============================================
 
 extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
     // Increment tick counter
     crate::process::scheduler::timer_tick();
+    // NOTE: avoid complex rendering/allocation work in IRQ context.
+    // Status bar refresh is currently done from non-IRQ paths.
 
     // Send EOI first so the timer can fire again on the new task
     if super::apic::is_initialized() {
@@ -248,7 +296,7 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     if let Some(ch) = super::keyboard_layout::handle_scancode() {
         // Store character in keyboard buffer (for future shell input)
         crate::arch::x86_64::keyboard::add_to_buffer(ch);
-        
+
         // Echo to serial only for debugging (not VGA to avoid double-echo)
         crate::serial_print!("{}", ch as char);
     }
@@ -265,6 +313,24 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 /// Per Intel SDM: do NOT send EOI for spurious interrupts.
 extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {
     // Intentionally empty — no EOI per Intel SDM
+}
+
+/// VirtIO Block device IRQ handler
+///
+/// Handles interrupts from the VirtIO block device.
+/// The IRQ line is determined at runtime from PCI config.
+extern "x86-interrupt" fn virtio_block_handler(_stack_frame: InterruptStackFrame) {
+    // Handle the VirtIO block interrupt
+    crate::drivers::virtio::block::handle_interrupt();
+
+    // Send EOI
+    if super::apic::is_initialized() {
+        super::apic::eoi();
+    } else {
+        // Get the IRQ number from the device
+        let irq = crate::drivers::virtio::block::get_irq();
+        pic::end_of_interrupt(irq);
+    }
 }
 
 /// Cross-CPU reschedule IPI handler (vector 0xF0).

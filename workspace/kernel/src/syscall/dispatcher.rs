@@ -2,7 +2,7 @@
 //!
 //! Routes syscall numbers to handler functions and converts results to RAX values.
 //! Called from the naked `syscall_entry` assembly with a pointer to `SyscallFrame`.
-use super::{error::SyscallError, numbers::*, SyscallFrame};
+use super::{error::SyscallError, fork::sys_fork, numbers::*, SyscallFrame};
 use super::{sys_clock_gettime, sys_nanosleep};
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
@@ -17,7 +17,7 @@ use crate::{
         reply,
     },
     memory::{UserSliceRead, UserSliceWrite},
-    process::current_task_clone,
+    process::{current_task_clone, current_task_id, get_parent_id},
     silo,
 };
 use alloc::{sync::Arc, vec};
@@ -47,8 +47,19 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NULL => sys_null(),
         SYS_HANDLE_DUPLICATE => sys_handle_duplicate(arg1),
         SYS_HANDLE_CLOSE => sys_handle_close(arg1),
+
+        // Memory management (block 100-199)
+        SYS_MMAP => super::mmap::sys_mmap(arg1, arg2, arg3 as u32, arg4 as u32, frame.r8, frame.r9),
+        SYS_MUNMAP => super::mmap::sys_munmap(arg1, arg2),
+        SYS_BRK => super::mmap::sys_brk(arg1),
+
         SYS_PROC_EXIT => sys_proc_exit(arg1),
         SYS_PROC_YIELD => sys_proc_yield(),
+        SYS_PROC_FORK => sys_fork(frame).map(|result| result.child_pid.as_u64()),
+        SYS_PROC_GETPID => sys_proc_getpid(),
+        SYS_PROC_GETPPID => sys_proc_getppid(),
+        SYS_PROC_WAITPID => sys_proc_waitpid(arg1 as i64, arg2, arg3 as u32),
+        SYS_PROC_WAIT    => super::wait::sys_wait(arg1),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),
@@ -183,13 +194,31 @@ fn sys_proc_exit(exit_code: u64) -> Result<u64, SyscallError> {
 
     // Mark current task as Dead and yield. The scheduler won't re-queue dead tasks.
     // exit_current_task() diverges (-> !), so this function never returns.
-    crate::process::scheduler::exit_current_task()
+    crate::process::scheduler::exit_current_task(exit_code as i32)
 }
 
 /// SYS_PROC_YIELD (301): Yield the current time slice.
 fn sys_proc_yield() -> Result<u64, SyscallError> {
     crate::process::yield_task();
     Ok(0)
+}
+
+/// SYS_PROC_GETPID (308): return current task ID.
+fn sys_proc_getpid() -> Result<u64, SyscallError> {
+    current_task_id()
+        .map(|id| id.as_u64())
+        .ok_or(SyscallError::PermissionDenied)
+}
+
+/// SYS_PROC_GETPPID (309): return parent task ID (0 if orphan/root).
+fn sys_proc_getppid() -> Result<u64, SyscallError> {
+    let pid = current_task_id().ok_or(SyscallError::PermissionDenied)?;
+    Ok(get_parent_id(pid).map(|id| id.as_u64()).unwrap_or(0))
+}
+
+/// SYS_PROC_WAITPID (310) / SYS_PROC_WAIT (311): delegate to syscall::wait.
+fn sys_proc_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, SyscallError> {
+    super::wait::sys_waitpid(pid, status_ptr, options)
 }
 
 /// SYS_KILL (320): Send a signal to a task.

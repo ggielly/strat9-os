@@ -32,6 +32,7 @@ pub mod memory;
 pub mod namespace;
 pub mod panic;
 pub mod process;
+pub mod shell;
 pub mod silo;
 pub mod sync;
 pub mod syscall;
@@ -81,6 +82,10 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // =============================================
     init_serial();
     init_logger();
+
+    // Puts default panic hooks early to ensure
+    //we get useful info on any panics during init.
+    panic::install_default_panic_hooks();
 
     // Nice logo :D
     serial_println!(r"          __                 __   ________                         ");
@@ -144,7 +149,19 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // Phase 3: console output (VGA or serial fallback)
     // =============================================
     serial_println!("[init] Console...");
-    arch::x86_64::vga::init();
+    arch::x86_64::vga::init(
+        args.framebuffer_addr,
+        args.framebuffer_width,
+        args.framebuffer_height,
+        args.framebuffer_stride,
+        args.framebuffer_bpp,
+        args.framebuffer_red_mask_size,
+        args.framebuffer_red_mask_shift,
+        args.framebuffer_green_mask_size,
+        args.framebuffer_green_mask_shift,
+        args.framebuffer_blue_mask_size,
+        args.framebuffer_blue_mask_shift,
+    );
     vga_println!("[OK] Serial port initialized");
     vga_println!("[OK] Memory manager active");
 
@@ -201,6 +218,23 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     serial_println!("[init] Paging...");
     vga_println!("[..] Initializing page mapper...");
     memory::paging::init(hhdm);
+    // Framebuffer is often backed by MMIO memory outside RAM (e.g. around 0xFDxxxxxx),
+    // so explicitly map its full range in HHDM for all later graphics access.
+    if args.framebuffer_addr != 0 && args.framebuffer_stride != 0 && args.framebuffer_height != 0 {
+        let fb_phys = if args.framebuffer_addr >= hhdm {
+            args.framebuffer_addr - hhdm
+        } else {
+            args.framebuffer_addr
+        };
+        let fb_size =
+            (args.framebuffer_stride as u64).saturating_mul(args.framebuffer_height as u64);
+        memory::paging::ensure_identity_map_range(fb_phys, fb_size);
+        serial_println!(
+            "[init] Framebuffer mapped: phys=0x{:x} size={} bytes",
+            fb_phys,
+            fb_size
+        );
+    }
     serial_println!("[init] Paging initialized.");
     vga_println!("[OK] Paging initialized");
 
@@ -293,18 +327,6 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     }
     serial_println!("[init] Kthread components initialized.");
     vga_println!("[OK] Kthread components ready");
-
-    #[cfg(feature = "selftest")]
-    {
-        // =============================================
-        // Phase 8: create scheduler stress test tasks
-        // =============================================
-        serial_println!("[init] Creating scheduler test tasks...");
-        vga_println!("[..] Adding scheduler test tasks...");
-        process::test::create_test_tasks();
-        serial_println!("[init] Scheduler test tasks created.");
-        vga_println!("[OK] Scheduler test tasks added");
-    }
 
     #[cfg(feature = "selftest")]
     {
@@ -405,6 +427,39 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     }
 
     // =============================================
+    // Phase 8e: Create Chevron shell task
+    // =============================================
+    serial_println!("[init] Creating Chevron shell task...");
+    vga_println!("[..] Creating interactive shell...");
+    match process::Task::new_kernel_task(
+        shell::shell_main,
+        "chevron-shell",
+        process::TaskPriority::Normal,
+    ) {
+        Ok(shell_task) => {
+            process::add_task(shell_task);
+            serial_println!("[init] Chevron shell task created.");
+            vga_println!("[OK] Chevron shell ready");
+        }
+        Err(e) => {
+            serial_println!("[WARN] Failed to create shell task: {}", e);
+            vga_println!("[WARN] Shell task unavailable");
+        }
+    }
+
+    // Dedicated status-line updater task (keeps bottom bar live independently of shell activity).
+    if let Ok(status_task) = process::Task::new_kernel_task(
+        arch::x86_64::vga::status_line_task_main,
+        "status-line",
+        process::TaskPriority::Low,
+    ) {
+        process::add_task(status_task);
+        serial_println!("[init] Status line task created.");
+    } else {
+        serial_println!("[WARN] Failed to create status line task");
+    }
+
+    // =============================================
     // Phase 9: enable interrupts
     // =============================================
     serial_println!("[init] Enabling interrupts...");
@@ -490,14 +545,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     }
 
     // =============================================
+    // Storage verification (disabled at boot)
+    // =============================================
+    // Keep boot non-blocking until VirtIO IRQ/completion path is fully robust.
+    serial_println!("[init] Storage verification skipped (boot path)");
+    vga_println!("[..] Storage verification skipped at boot");
+
+    // =============================================
     // Boot complete — start preemptive multitasking
     // =============================================
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
-
-    // TODO: storage verification needs VirtIO interrupt handler implementation
-    // For now, skip it to test multitasking first
-    serial_println!("[init] (Storage verification skipped - needs VirtIO IRQ handler)");
 
     // Initialize keyboard layout to French by default
     crate::arch::x86_64::keyboard_layout::set_french_layout();
@@ -557,7 +615,10 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
         log::warn!("APIC: no I/O APIC in MADT");
         return false;
     }
-    let io_apic_entry = madt_info.io_apics[0].unwrap();
+    let Some(io_apic_entry) = madt_info.io_apics[0] else {
+        log::warn!("APIC: MADT I/O APIC entry[0] missing");
+        return false;
+    };
     // Ensure I/O APIC MMIO is mapped
     memory::paging::ensure_identity_map(io_apic_entry.io_apic_address as u64);
     ioapic::init(io_apic_entry.io_apic_address, io_apic_entry.gsi_base);

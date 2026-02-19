@@ -119,6 +119,12 @@ pub struct Task {
     /// Sleep deadline in nanoseconds (monotonic). If non-zero, the task
     /// is sleeping until this time. Checked by the scheduler to auto-wake.
     pub wake_deadline_ns: AtomicU64,
+    /// Program break (end of heap), in bytes. 0 = not yet initialised.
+    /// Lazily set to `BRK_BASE` on the first `sys_brk` call.
+    pub brk: AtomicU64,
+    /// Next candidate virtual address for anonymous `mmap` allocations.
+    /// Starts at `MMAP_BASE` and advances with each successful mapping.
+    pub mmap_hint: AtomicU64,
 }
 
 /// CPU context saved/restored during context switches.
@@ -293,6 +299,8 @@ impl Task {
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),
             wake_deadline_ns: AtomicU64::new(0),
+            brk: AtomicU64::new(0),
+            mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
         }))
     }
 
@@ -332,6 +340,8 @@ impl Task {
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),
             wake_deadline_ns: AtomicU64::new(0),
+            brk: AtomicU64::new(0),
+            mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
         }))
     }
 }

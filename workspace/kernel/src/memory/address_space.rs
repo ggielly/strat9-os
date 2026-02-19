@@ -8,7 +8,7 @@
 //! - PML4[0..256]   → User space (per-process, zeroed for new AS)
 //! - PML4[256..512] → Kernel space (shared, cloned from kernel L4)
 
-use alloc::{collections::BTreeMap, sync::Arc};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use spin::Once;
 use x86_64::{
@@ -202,14 +202,42 @@ impl AddressSpace {
         flags: VmaFlags,
         vma_type: VmaType,
     ) -> Result<(), &'static str> {
+        if page_count == 0 || start & 0xFFF != 0 {
+            return Err("Invalid region arguments");
+        }
+        let len = (page_count as u64)
+            .checked_mul(4096)
+            .ok_or("Region length overflow")?;
+        let end = start
+            .checked_add(len)
+            .ok_or("Region end overflow")?;
+        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        if end > USER_SPACE_END {
+            return Err("Region out of user-space range");
+        }
+
+        // Reject overlapping VMAs early, before touching page tables.
+        {
+            let regions = self.regions.lock();
+            if regions.iter().any(|(&vma_start, vma)| {
+                let vma_end = vma_start.saturating_add((vma.page_count as u64).saturating_mul(4096));
+                vma_start < end && vma_end > start
+            }) {
+                return Err("Region overlaps existing mapping");
+            }
+        }
+
         let page_flags = flags.to_page_flags();
         let mut frame_allocator = BuddyFrameAllocator;
 
         // SAFETY: We have logical ownership of this address space.
         let mut mapper = unsafe { self.mapper() };
+        let mut mapped_pages = 0usize;
 
         for i in 0..page_count {
-            let page_addr = start + (i as u64) * 4096;
+            let page_addr = start
+                .checked_add((i as u64).saturating_mul(4096))
+                .ok_or("Page address overflow")?;
             let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
                 .map_err(|_| "Page address not aligned")?;
 
@@ -227,11 +255,50 @@ impl AddressSpace {
 
             // Map the page to the frame.
             // SAFETY: The frame is valid and unused; flags are caller-specified.
-            unsafe {
-                mapper
-                    .map_to(page, frame, page_flags, &mut frame_allocator)
-                    .map_err(|_| "Failed to map page")?
-                    .flush();
+            let map_res = unsafe { mapper.map_to(page, frame, page_flags, &mut frame_allocator) };
+            match map_res {
+                Ok(flush) => {
+                    flush.flush();
+                    mapped_pages += 1;
+                }
+                Err(_) => {
+                    // Free frame for the page that failed to map.
+                    {
+                        let lock = crate::memory::get_allocator();
+                        let mut guard = lock.lock();
+                        if let Some(allocator) = guard.as_mut() {
+                            allocator.free(
+                                crate::memory::PhysFrame {
+                                    start_address: frame.start_address(),
+                                },
+                                0,
+                            );
+                        }
+                    }
+
+                    // Roll back already mapped pages to keep state consistent.
+                    for j in (0..mapped_pages).rev() {
+                        let rb_addr = start + (j as u64) * 4096;
+                        let rb_page =
+                            Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
+                                .map_err(|_| "Rollback: invalid page address")?;
+                        if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                            rb_flush.flush();
+                            let lock = crate::memory::get_allocator();
+                            let mut guard = lock.lock();
+                            if let Some(allocator) = guard.as_mut() {
+                                allocator.free(
+                                    crate::memory::PhysFrame {
+                                        start_address: rb_frame.start_address(),
+                                    },
+                                    0,
+                                );
+                            }
+                        }
+                    }
+
+                    return Err("Failed to map page");
+                }
             }
         }
 
@@ -292,6 +359,172 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Find a free virtual address range of `n_pages` pages starting at or after `hint`.
+    ///
+    /// Scans the VMA list in ascending order and returns the first gap that fits.
+    /// Returns `None` if no gap of sufficient size exists before `USER_SPACE_END`.
+    pub fn find_free_vma_range(&self, hint: u64, n_pages: usize) -> Option<u64> {
+        if n_pages == 0 {
+            return None;
+        }
+        let length = (n_pages as u64).checked_mul(4096)?;
+        let upper_limit: u64 = 0x0000_8000_0000_0000; // USER_SPACE_END
+
+        // Round hint up to a page boundary; never return address 0.
+        let mut candidate = hint.saturating_add(4095) & !4095u64;
+        if candidate == 0 {
+            candidate = 4096;
+        }
+
+        let regions = self.regions.lock();
+        for (&vma_start, vma) in regions.iter() {
+            let vma_end = vma_start + vma.page_count as u64 * 4096;
+
+            // A gap exists before this VMA — candidate fits.
+            if candidate.saturating_add(length) <= vma_start {
+                break;
+            }
+
+            // Candidate overlaps this VMA; skip past it.
+            if vma_end > candidate {
+                candidate = vma_end;
+            }
+        }
+
+        // Final bounds check.
+        if candidate.checked_add(length)? <= upper_limit {
+            Some(candidate)
+        } else {
+            None
+        }
+    }
+
+    /// Return true if any tracked VMA overlaps `[addr, addr + len)`.
+    pub fn has_mapping_in_range(&self, addr: u64, len: u64) -> bool {
+        let end = match addr.checked_add(len) {
+            Some(v) => v,
+            None => return true,
+        };
+        let regions = self.regions.lock();
+        regions.iter().any(|(&vma_start, vma)| {
+            let vma_end = vma_start.saturating_add((vma.page_count as u64).saturating_mul(4096));
+            vma_start < end && vma_end > addr
+        })
+    }
+
+    /// Unmap the virtual address range `[addr, addr + len)`, handling partial VMA overlaps.
+    ///
+    /// `addr` and `len` must both be multiples of the page size.  VMAs that
+    /// partially overlap the range are split: the portions outside the range
+    /// remain mapped and tracked.  Physical frames inside the range are freed.
+    ///
+    /// Pages that are not mapped (e.g. a gap inside a sparse range) are silently
+    /// skipped : this matches Linux `munmap` behaviour.
+    pub fn unmap_range(&self, addr: u64, len: u64) -> Result<(), &'static str> {
+        if len == 0 {
+            return Ok(());
+        }
+        let end = addr
+            .checked_add(len)
+            .ok_or("unmap_range: address overflow")?;
+
+        //  Step 1: collect all VMAs that overlap [addr, end)
+        // We take a snapshot so we can release the lock before doing page-table
+        // operations (which themselves acquire the buddy-allocator lock).
+        let overlapping: alloc::vec::Vec<(u64, VirtualMemoryRegion)> = {
+            let regions = self.regions.lock();
+            regions
+                .iter()
+                .filter(|(&vma_start, vma)| {
+                    let vma_end = vma_start + vma.page_count as u64 * 4096;
+                    vma_start < end && vma_end > addr
+                })
+                .map(|(&k, v)| (k, v.clone()))
+                .collect()
+        }; // lock released
+
+        if overlapping.is_empty() {
+            return Ok(()); // nothing to do
+        }
+
+        //  Step 2: unmap pages from the hardware page tables
+        // SAFETY: We have logical ownership of this address space; no other
+        // task modifies it concurrently (single-process model, no clone yet).
+        let mut mapper = unsafe { self.mapper() };
+
+        for (vma_start, vma) in &overlapping {
+            let vma_start = *vma_start;
+            let vma_end = vma_start + vma.page_count as u64 * 4096;
+            let range_start = core::cmp::max(vma_start, addr);
+            let range_end = core::cmp::min(vma_end, end);
+
+            let mut page_addr = range_start;
+            while page_addr < range_end {
+                let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                    .map_err(|_| "unmap_range: page address not aligned")?;
+
+                // Silently skip pages that happen to not be mapped.
+                if let Ok((frame, flush)) = mapper.unmap(page) {
+                    flush.flush();
+                    let phys = crate::memory::PhysFrame {
+                        start_address: frame.start_address(),
+                    };
+                    let lock = crate::memory::get_allocator();
+                    let mut guard = lock.lock();
+                    if let Some(allocator) = guard.as_mut() {
+                        allocator.free(phys, 0);
+                    }
+                }
+
+                page_addr += 4096;
+            }
+        }
+
+        //  Step 3: update VMA tracking
+        {
+            let mut regions = self.regions.lock();
+            for (vma_start, vma) in &overlapping {
+                let vma_start = *vma_start;
+                let vma_end = vma_start + vma.page_count as u64 * 4096;
+                let range_start = core::cmp::max(vma_start, addr);
+                let range_end = core::cmp::min(vma_end, end);
+
+                // Remove the (now partially or fully unmapped) original VMA.
+                regions.remove(&vma_start);
+
+                // Re-insert the leading fragment [vma_start, range_start).
+                if range_start > vma_start {
+                    let leading_pages = ((range_start - vma_start) / 4096) as usize;
+                    regions.insert(
+                        vma_start,
+                        VirtualMemoryRegion {
+                            start: vma_start,
+                            page_count: leading_pages,
+                            flags: vma.flags,
+                            vma_type: vma.vma_type,
+                        },
+                    );
+                }
+
+                // Re-insert the trailing fragment [range_end, vma_end).
+                if range_end < vma_end {
+                    let trailing_pages = ((vma_end - range_end) / 4096) as usize;
+                    regions.insert(
+                        range_end,
+                        VirtualMemoryRegion {
+                            start: range_end,
+                            page_count: trailing_pages,
+                            flags: vma.flags,
+                            vma_type: vma.vma_type,
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Translate a virtual address to its mapped physical address.
     pub fn translate(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
         // SAFETY: Read-only access to the page tables.
@@ -348,6 +581,57 @@ impl AddressSpace {
         for (start, pages) in regions {
             let _ = self.unmap_region(start, pages);
         }
+    }
+
+    /// Clone this user address space by eagerly copying all tracked VMAs/pages.
+    ///
+    /// This is used by the P1 `fork` implementation (no COW yet):
+    /// - child receives an independent page mapping for each parent user page
+    /// - page contents are byte-copied eagerly
+    pub fn clone_for_fork_eager(&self) -> Result<Arc<AddressSpace>, &'static str> {
+        if self.is_kernel {
+            return Err("Cannot fork kernel address space");
+        }
+
+        let child = Arc::new(AddressSpace::new_user()?);
+
+        let regions: Vec<VirtualMemoryRegion> = {
+            let guard = self.regions.lock();
+            guard.values().cloned().collect()
+        };
+
+        for region in regions.iter() {
+            child.map_region(
+                region.start,
+                region.page_count,
+                region.flags,
+                region.vma_type,
+            )?;
+
+            for i in 0..region.page_count {
+                let vaddr = region
+                    .start
+                    .checked_add((i as u64) * 4096)
+                    .ok_or("fork clone: virtual address overflow")?;
+
+                let src_phys = self
+                    .translate(VirtAddr::new(vaddr))
+                    .ok_or("fork clone: missing source mapping")?;
+                let dst_phys = child
+                    .translate(VirtAddr::new(vaddr))
+                    .ok_or("fork clone: missing destination mapping")?;
+
+                let src = crate::memory::phys_to_virt(src_phys.as_u64()) as *const u8;
+                let dst = crate::memory::phys_to_virt(dst_phys.as_u64()) as *mut u8;
+
+                // SAFETY: both src/dst are mapped 4KiB pages in kernel HHDM.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src, dst, 4096);
+                }
+            }
+        }
+
+        Ok(child)
     }
 
     fn free_user_page_tables(&self) {
