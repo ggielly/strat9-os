@@ -371,8 +371,9 @@ pub fn cmd_gfx_demo(_args: &[String]) -> Result<(), ShellError> {
 
     canvas.system_status_line(UiTheme::OCEAN_STATUS);
     canvas.end_frame();
-
-    shell_println!("gfx-demo: rendered");
+    // Keep shell prompt in lower text area so it does not overwrite top-left widgets.
+    let row = vga::text_rows().saturating_sub(2);
+    vga::set_text_cursor(0, row);
     Ok(())
 }
 

@@ -59,10 +59,31 @@ static MODULES: ModuleRequest =
 /// Optional fs-ext4 module info (set during Limine entry).
 static mut FS_EXT4_MODULE: Option<(u64, u64)> = None;
 
+const MAX_BOOT_MEMORY_REGIONS: usize = 256;
+static mut BOOT_MEMORY_MAP: [crate::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
+    [crate::entry::MemoryRegion {
+        base: 0,
+        size: 0,
+        kind: crate::entry::MemoryKind::Reserved,
+    }; MAX_BOOT_MEMORY_REGIONS];
+static mut BOOT_MEMORY_MAP_LEN: usize = 0;
+
 /// Return the fs-ext4 module (addr, size) if present.
 pub fn fs_ext4_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
     unsafe { FS_EXT4_MODULE }
+}
+
+fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> crate::entry::MemoryKind {
+    if kind == limine::memory_map::EntryType::USABLE {
+        crate::entry::MemoryKind::Free
+    } else if kind == limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE
+        || kind == limine::memory_map::EntryType::ACPI_RECLAIMABLE
+    {
+        crate::entry::MemoryKind::Reclaim
+    } else {
+        crate::entry::MemoryKind::Reserved
+    }
 }
 
 /// Define the start and end markers for Limine requests
@@ -144,14 +165,28 @@ pub unsafe extern "C" fn kmain() -> ! {
     // Get HHDM offset — critical for accessing physical memory
     let hhdm_offset = HHDM.get_response().map(|r| r.offset()).unwrap_or(0);
 
-    // Build KernelArgs from Limine data
-    // Note: We pass a dummy memory map for now since allocator needs initialization
-    // The real Limine memory map will be used once we refactor memory init
-    let dummy_mmap = [crate::entry::MemoryRegion {
-        base: 0x200000,
-        size: 0xFE00000,
-        kind: crate::entry::MemoryKind::Free,
-    }];
+    // Build a kernel-local memory map from Limine entries.
+    // Keep only the first MAX_BOOT_MEMORY_REGIONS entries to avoid dynamic allocation.
+    let (memory_map_base, memory_map_size) = if let Some(memory_map_response) = MEMORY_MAP.get_response() {
+        let entries = memory_map_response.entries();
+        let count = core::cmp::min(entries.len(), MAX_BOOT_MEMORY_REGIONS);
+        unsafe {
+            BOOT_MEMORY_MAP_LEN = count;
+            for (i, entry) in entries.iter().take(count).enumerate() {
+                BOOT_MEMORY_MAP[i] = crate::entry::MemoryRegion {
+                    base: entry.base,
+                    size: entry.length,
+                    kind: map_limine_region_kind(entry.entry_type),
+                };
+            }
+            (
+                BOOT_MEMORY_MAP.as_ptr() as u64,
+                (BOOT_MEMORY_MAP_LEN * core::mem::size_of::<crate::entry::MemoryRegion>()) as u64,
+            )
+        }
+    } else {
+        (0, 0)
+    };
 
     // Check for loaded modules (init ELF binary + fs-ext4)
     let (initfs_base, initfs_size, ext4_base, ext4_size) =
@@ -196,8 +231,8 @@ pub unsafe extern "C" fn kmain() -> ! {
         env_size: 0,
         acpi_rsdp_base: rsdp_addr,
         acpi_rsdp_size: if rsdp_addr != 0 { 36 } else { 0 },
-        memory_map_base: dummy_mmap.as_ptr() as u64,
-        memory_map_size: core::mem::size_of_val(&dummy_mmap) as u64,
+        memory_map_base,
+        memory_map_size,
         initfs_base,
         initfs_size,
         framebuffer_addr: fb_addr,

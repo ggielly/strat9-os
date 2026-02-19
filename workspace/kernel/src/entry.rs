@@ -31,6 +31,7 @@ pub struct KernelArgs {
 }
 
 #[repr(C, packed(8))]
+#[derive(Clone, Copy)]
 pub struct MemoryRegion {
     pub base: u64,
     pub size: u64,

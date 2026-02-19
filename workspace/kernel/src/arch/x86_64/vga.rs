@@ -799,6 +799,14 @@ impl VgaWriter {
         (self.font_info.glyph_w, self.font_info.glyph_h)
     }
 
+    pub fn set_cursor_cell(&mut self, col: usize, row: usize) {
+        if !self.enabled || self.cols == 0 || self.rows == 0 {
+            return;
+        }
+        self.col = core::cmp::min(col, self.cols - 1);
+        self.row = core::cmp::min(row, self.rows - 1);
+    }
+
     fn text_area_height(&self) -> usize {
         self.fb_height.saturating_sub(self.status_bar_height)
     }
@@ -1320,6 +1328,12 @@ impl VgaWriter {
         }
         let glyph_index = core::cmp::min(glyph_index, self.font_info.glyph_count.saturating_sub(1));
         let start = self.font_info.data_offset + glyph_index * self.font_info.bytes_per_glyph;
+        if start
+            .checked_add(self.font_info.bytes_per_glyph)
+            .map_or(true, |end| end > self.font.len())
+        {
+            return;
+        }
         let glyph = &self.font[start..start + self.font_info.bytes_per_glyph];
         let row_bytes = self.font_info.glyph_w.div_ceil(8);
 
@@ -1531,6 +1545,7 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
+        let c = normalize_console_char(c);
         match c {
             '\n' => {
                 self.col = 0;
@@ -1544,6 +1559,7 @@ impl VgaWriter {
                     self.draw_glyph(self.col, self.row, ' ');
                 }
             }
+            '\0' => {}
             ch => {
                 self.draw_glyph(self.col, self.row, ch);
                 self.col += 1;
@@ -1562,9 +1578,36 @@ impl VgaWriter {
     }
 
     fn write_bytes(&mut self, s: &str) {
-        for ch in s.chars() {
+        // Skip basic ANSI escape sequences to avoid rendering control garbage.
+        let mut chars = s.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                if matches!(chars.clone().next(), Some('[')) {
+                    let _ = chars.next();
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
             self.write_char(ch);
         }
+    }
+}
+
+fn normalize_console_char(ch: char) -> char {
+    match ch {
+        '\n' | '\r' | '\t' | '\u{8}' => ch,
+        c if c.is_control() => '\0',
+        // Graceful fallback when font lacks box-drawing coverage.
+        '\u{2500}' | '\u{2501}' | '\u{2504}' | '\u{2505}' | '\u{2013}' | '\u{2014}' => '-',
+        '\u{2502}' | '\u{2503}' => '|',
+        '\u{250c}' | '\u{2510}' | '\u{2514}' | '\u{2518}' | '\u{251c}' | '\u{2524}'
+        | '\u{252c}' | '\u{2534}' | '\u{253c}' => '+',
+        '\u{00a0}' => ' ',
+        _ => ch,
     }
 }
 
@@ -1951,6 +1994,27 @@ pub fn glyph_size() -> (usize, usize) {
         return (0, 0);
     }
     VGA_WRITER.lock().glyph_size()
+}
+
+pub fn text_cols() -> usize {
+    if !is_available() {
+        return 0;
+    }
+    VGA_WRITER.lock().cols()
+}
+
+pub fn text_rows() -> usize {
+    if !is_available() {
+        return 0;
+    }
+    VGA_WRITER.lock().rows()
+}
+
+pub fn set_text_cursor(col: usize, row: usize) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().set_cursor_cell(col, row);
 }
 
 pub fn set_text_color(fg: RgbColor, bg: RgbColor) {
