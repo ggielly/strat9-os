@@ -65,6 +65,13 @@ struct SwitchTarget {
 // exclusive access when computing these pointers.
 unsafe impl Send for SwitchTarget {}
 
+/// Result of a non-blocking wait on child exit.
+pub enum WaitChildResult {
+    Reaped { child: TaskId, status: i32 },
+    NoChildren,
+    StillRunning,
+}
+
 fn current_cpu_index() -> usize {
     if apic::is_initialized() {
         let apic_id = apic::lapic_id();
@@ -94,6 +101,12 @@ pub struct Scheduler {
     all_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// Map TaskId -> CPU index (for wake/resume routing)
     task_cpu: BTreeMap<TaskId, usize>,
+    /// Parent relationship: child -> parent
+    parent_of: BTreeMap<TaskId, TaskId>,
+    /// Children list: parent -> children
+    children_of: BTreeMap<TaskId, alloc::vec::Vec<TaskId>>,
+    /// Zombie exit statuses: child -> exit code
+    zombies: BTreeMap<TaskId, i32>,
     /// Timer interval for preemption (in milliseconds)
     quantum_ms: u64,
 }
@@ -117,6 +130,9 @@ impl Scheduler {
             blocked_tasks: BTreeMap::new(),
             all_tasks: BTreeMap::new(),
             task_cpu: BTreeMap::new(),
+            parent_of: BTreeMap::new(),
+            children_of: BTreeMap::new(),
+            zombies: BTreeMap::new(),
             quantum_ms: 10, // 10ms time slice
         }
     }
@@ -125,6 +141,14 @@ impl Scheduler {
     pub fn add_task(&mut self, task: Arc<Task>) {
         let cpu_index = self.select_cpu_for_task();
         self.add_task_on_cpu(task, cpu_index);
+    }
+
+    pub fn add_task_with_parent(&mut self, task: Arc<Task>, parent: TaskId) {
+        let child = task.id;
+        let cpu_index = self.select_cpu_for_task();
+        self.add_task_on_cpu(task, cpu_index);
+        self.parent_of.insert(child, parent);
+        self.children_of.entry(parent).or_default().push(child);
     }
 
     fn add_task_on_cpu(&mut self, task: Arc<Task>, cpu_index: usize) {
@@ -138,6 +162,58 @@ impl Scheduler {
         if let Some(cpu) = self.cpus.get_mut(cpu_index) {
             cpu.ready_queue.push_back(task);
         }
+    }
+
+    fn wake_task_locked(&mut self, id: TaskId) -> bool {
+        if let Some(task) = self.blocked_tasks.remove(&id) {
+            // SAFETY: scheduler lock held.
+            unsafe {
+                *task.state.get() = TaskState::Ready;
+            }
+            let cpu_index = self.task_cpu.get(&id).copied().unwrap_or(0);
+            if let Some(cpu) = self.cpus.get_mut(cpu_index) {
+                cpu.ready_queue.push_back(task);
+            }
+            true
+        } else if let Some(task) = self.all_tasks.get(&id) {
+            task.wake_pending
+                .store(true, core::sync::atomic::Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn try_reap_child_locked(&mut self, parent: TaskId, target: Option<TaskId>) -> WaitChildResult {
+        let Some(children) = self.children_of.get_mut(&parent) else {
+            return WaitChildResult::NoChildren;
+        };
+
+        if children.is_empty() {
+            return WaitChildResult::NoChildren;
+        }
+
+        if let Some(target_id) = target {
+            if !children.iter().any(|&id| id == target_id) {
+                return WaitChildResult::NoChildren;
+            }
+        }
+
+        let zombie = children.iter().copied().find(|id| {
+            target.map_or(true, |t| t == *id) && self.zombies.contains_key(id)
+        });
+
+        if let Some(child) = zombie {
+            let status = self.zombies.remove(&child).unwrap_or(0);
+            children.retain(|&id| id != child);
+            self.parent_of.remove(&child);
+            if children.is_empty() {
+                self.children_of.remove(&parent);
+            }
+            return WaitChildResult::Reaped { child, status };
+        }
+
+        WaitChildResult::StillRunning
     }
 
     /// Pick the next task to run on `cpu_index`.
@@ -281,6 +357,14 @@ pub fn add_task(task: Arc<Task>) {
     let mut scheduler = SCHEDULER.lock();
     if let Some(ref mut sched) = *scheduler {
         sched.add_task(task);
+    }
+}
+
+/// Add a task and register a parent/child relation.
+pub fn add_task_with_parent(task: Arc<Task>, parent: TaskId) {
+    let mut scheduler = SCHEDULER.lock();
+    if let Some(ref mut sched) = *scheduler {
+        sched.add_task_with_parent(task, parent);
     }
 }
 
@@ -442,20 +526,29 @@ extern "C" fn idle_task_main() -> ! {
 /// Called by SYS_PROC_EXIT. The task will not be re-queued because
 /// `pick_next_task()` only re-queues tasks in `Running` state.
 /// This function does not return.
-pub fn exit_current_task() -> ! {
+pub fn exit_current_task(exit_code: i32) -> ! {
     let cpu_index = current_cpu_index();
     {
         let saved_flags = save_flags_and_cli();
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
             if let Some(ref current) = sched.cpus[cpu_index].current_task {
+                let current_id = current.id;
+                let parent = sched.parent_of.get(&current_id).copied();
                 // SAFETY: We hold the scheduler lock and interrupts are disabled.
                 unsafe {
                     *current.state.get() = TaskState::Dead;
                 }
                 cleanup_task_resources(current);
-                sched.all_tasks.remove(&current.id);
-                sched.task_cpu.remove(&current.id);
+                sched.all_tasks.remove(&current_id);
+                sched.task_cpu.remove(&current_id);
+
+                if parent.is_some() {
+                    sched.zombies.insert(current_id, exit_code);
+                }
+                if let Some(parent_id) = parent {
+                    let _ = sched.wake_task_locked(parent_id);
+                }
             }
         }
         drop(scheduler);
@@ -522,6 +615,38 @@ pub fn get_task_by_id(id: TaskId) -> Option<Arc<Task>> {
     };
     restore_flags(saved_flags);
     task
+}
+
+/// Get parent task ID for a child task.
+pub fn get_parent_id(child: TaskId) -> Option<TaskId> {
+    let saved_flags = save_flags_and_cli();
+    let parent = {
+        let scheduler = SCHEDULER.lock();
+        if let Some(ref sched) = *scheduler {
+            sched.parent_of.get(&child).copied()
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    parent
+}
+
+/// Try to reap a zombie child.
+///
+/// `target=None` means "any child".
+pub fn try_wait_child(parent: TaskId, target: Option<TaskId>) -> WaitChildResult {
+    let saved_flags = save_flags_and_cli();
+    let result = {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
+            sched.try_reap_child_locked(parent, target)
+        } else {
+            WaitChildResult::NoChildren
+        }
+    };
+    restore_flags(saved_flags);
+    result
 }
 
 /// Block the current task and yield to the scheduler.
@@ -601,28 +726,7 @@ pub fn wake_task(id: TaskId) -> bool {
     let woken = {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
-            if let Some(task) = sched.blocked_tasks.remove(&id) {
-                // SAFETY: We hold the scheduler lock.
-                unsafe {
-                    *task.state.get() = TaskState::Ready;
-                }
-                let cpu_index = sched.task_cpu.get(&id).copied().unwrap_or(0);
-                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                    cpu.ready_queue.push_back(task);
-                }
-                true
-            } else {
-                // Task is not blocked yet (race: it is between adding itself
-                // to the WaitQueue waiter list and calling block_current_task).
-                // Set wake_pending so block_current_task() will abort the block.
-                if let Some(task) = sched.all_tasks.get(&id) {
-                    task.wake_pending
-                        .store(true, core::sync::atomic::Ordering::Release);
-                    true
-                } else {
-                    false
-                }
-            }
+            sched.wake_task_locked(id)
         } else {
             false
         }

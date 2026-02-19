@@ -111,6 +111,16 @@ pub const SYS_PROC_YIELD: u64 = 301;
 /// Fork the current process (COW). Returns child PID in parent, 0 in child.
 pub const SYS_PROC_FORK: u64 = 302;
 
+/// Return current process ID (task ID).
+pub const SYS_PROC_GETPID: u64 = 308;
+
+/// Return parent process ID (task ID), or 0 if none.
+pub const SYS_PROC_GETPPID: u64 = 309;
+
+/// Wait for a child to change state (currently: exit only).
+/// arg1=pid (-1 any child), arg2=status_ptr (nullable), arg3=options (WNOHANG=1 supported)
+pub const SYS_PROC_WAITPID: u64 = 310;
+
 // Futex wait. arg1=uaddr (*u32), arg2=expected_val, arg3=timeout_ns
 pub const SYS_FUTEX_WAIT: u64 = 303;
 

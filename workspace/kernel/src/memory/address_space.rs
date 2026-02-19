@@ -8,7 +8,7 @@
 //! - PML4[0..256]   → User space (per-process, zeroed for new AS)
 //! - PML4[256..512] → Kernel space (shared, cloned from kernel L4)
 
-use alloc::{collections::BTreeMap, sync::Arc};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use spin::Once;
 use x86_64::{
@@ -581,6 +581,57 @@ impl AddressSpace {
         for (start, pages) in regions {
             let _ = self.unmap_region(start, pages);
         }
+    }
+
+    /// Clone this user address space by eagerly copying all tracked VMAs/pages.
+    ///
+    /// This is used by the P1 `fork` implementation (no COW yet):
+    /// - child receives an independent page mapping for each parent user page
+    /// - page contents are byte-copied eagerly
+    pub fn clone_for_fork_eager(&self) -> Result<Arc<AddressSpace>, &'static str> {
+        if self.is_kernel {
+            return Err("Cannot fork kernel address space");
+        }
+
+        let child = Arc::new(AddressSpace::new_user()?);
+
+        let regions: Vec<VirtualMemoryRegion> = {
+            let guard = self.regions.lock();
+            guard.values().cloned().collect()
+        };
+
+        for region in regions.iter() {
+            child.map_region(
+                region.start,
+                region.page_count,
+                region.flags,
+                region.vma_type,
+            )?;
+
+            for i in 0..region.page_count {
+                let vaddr = region
+                    .start
+                    .checked_add((i as u64) * 4096)
+                    .ok_or("fork clone: virtual address overflow")?;
+
+                let src_phys = self
+                    .translate(VirtAddr::new(vaddr))
+                    .ok_or("fork clone: missing source mapping")?;
+                let dst_phys = child
+                    .translate(VirtAddr::new(vaddr))
+                    .ok_or("fork clone: missing destination mapping")?;
+
+                let src = crate::memory::phys_to_virt(src_phys.as_u64()) as *const u8;
+                let dst = crate::memory::phys_to_virt(dst_phys.as_u64()) as *mut u8;
+
+                // SAFETY: both src/dst are mapped 4KiB pages in kernel HHDM.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src, dst, 4096);
+                }
+            }
+        }
+
+        Ok(child)
     }
 
     fn free_user_page_tables(&self) {

@@ -17,8 +17,7 @@
 //! - MIT 6.828 xv6 COW Lab: https://pdos.csail.mit.edu/6.828/2021/labs/cow.html
 //! - Philipp Oppermann Paging Guide: https://os.phil-opp.com/paging-introduction/
 
-use crate::memory::frame::PhysFrame;
-use crate::memory::paging::PageTableFlags;
+use crate::memory::frame::{FrameAllocator, PhysFrame};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Maximum number of physical frames we can track
@@ -117,9 +116,14 @@ fn get_frame_meta_mut(pfn: u64) -> Option<&'static mut FrameMeta> {
     unsafe { FRAME_METAS.as_mut()?.get_mut(pfn as usize) }
 }
 
+#[inline]
+fn frame_to_pfn(frame: PhysFrame) -> u64 {
+    frame.start_address.as_u64() >> 12
+}
+
 /// Increment reference count for a physical frame
 pub fn frame_inc_ref(frame: PhysFrame) {
-    let pfn = frame.get_pfn();
+    let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta_mut(pfn) {
         meta.inc_ref();
     }
@@ -127,7 +131,7 @@ pub fn frame_inc_ref(frame: PhysFrame) {
 
 /// Decrement reference count and free if zero
 pub fn frame_dec_ref(frame: PhysFrame) {
-    let pfn = frame.get_pfn();
+    let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta_mut(pfn) {
         let old_ref = meta.dec_ref();
         if old_ref == 1 {
@@ -142,13 +146,13 @@ pub fn frame_dec_ref(frame: PhysFrame) {
 
 /// Get reference count for a frame
 pub fn frame_get_refcount(frame: PhysFrame) -> u32 {
-    let pfn = frame.get_pfn();
+    let pfn = frame_to_pfn(frame);
     get_frame_meta(pfn).map(|m| m.get_refcount()).unwrap_or(0)
 }
 
 /// Set COW flag on a frame
 pub fn frame_set_cow(frame: PhysFrame) {
-    let pfn = frame.get_pfn();
+    let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta_mut(pfn) {
         let flags = meta.get_flags() | frame_flags::COW;
         meta.set_flags(flags);
@@ -157,7 +161,7 @@ pub fn frame_set_cow(frame: PhysFrame) {
 
 /// Clear COW flag on a frame
 pub fn frame_clear_cow(frame: PhysFrame) {
-    let pfn = frame.get_pfn();
+    let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta_mut(pfn) {
         let flags = meta.get_flags() & !frame_flags::COW;
         meta.set_flags(flags);
@@ -166,13 +170,13 @@ pub fn frame_clear_cow(frame: PhysFrame) {
 
 /// Check if a frame is marked as COW
 pub fn frame_is_cow(frame: PhysFrame) -> bool {
-    let pfn = frame.get_pfn();
+    let pfn = frame_to_pfn(frame);
     get_frame_meta(pfn).map(|m| m.is_cow()).unwrap_or(false)
 }
 
 /// Mark a frame as DLL (shared, never COW)
 pub fn frame_set_dll(frame: PhysFrame) {
-    let pfn = frame.get_pfn();
+    let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta_mut(pfn) {
         let flags = meta.get_flags() | frame_flags::DLL;
         meta.set_flags(flags);
@@ -181,6 +185,6 @@ pub fn frame_set_dll(frame: PhysFrame) {
 
 /// Check if a frame is a DLL frame
 pub fn frame_is_dll(frame: PhysFrame) -> bool {
-    let pfn = frame.get_pfn();
+    let pfn = frame_to_pfn(frame);
     get_frame_meta(pfn).map(|m| m.is_dll()).unwrap_or(false)
 }

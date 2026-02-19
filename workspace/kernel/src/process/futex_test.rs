@@ -101,7 +101,7 @@ extern "C" fn waiter_a_1() -> ! {
     let r = encode_result(futex::sys_futex_wait(addr, 0, FUTEX_TIMEOUT_NS));
     SC_WAIT_RES_1.store(r, Ordering::Release);
     SC_DONE.fetch_add(1, Ordering::AcqRel);
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 extern "C" fn waiter_a_2() -> ! {
@@ -110,7 +110,7 @@ extern "C" fn waiter_a_2() -> ! {
     let r = encode_result(futex::sys_futex_wait(addr, 0, FUTEX_TIMEOUT_NS));
     SC_WAIT_RES_2.store(r, Ordering::Release);
     SC_DONE.fetch_add(1, Ordering::AcqRel);
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 extern "C" fn waiter_b_1() -> ! {
@@ -119,7 +119,7 @@ extern "C" fn waiter_b_1() -> ! {
     let r = encode_result(futex::sys_futex_wait(addr, 0, FUTEX_TIMEOUT_NS));
     SC_WAIT_RES_2.store(r, Ordering::Release);
     SC_DONE.fetch_add(1, Ordering::AcqRel);
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 extern "C" fn wake_loop_a() -> ! {
@@ -134,7 +134,7 @@ extern "C" fn wake_loop_a() -> ! {
     }
     SC_WAKE_RES_1.store(rv, Ordering::Release);
     SC_DONE.fetch_add(1, Ordering::AcqRel);
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 fn run_wait_wake_scenario() -> bool {
@@ -302,7 +302,7 @@ extern "C" fn futex_test_main() -> ! {
 
     if !map_test_pages() {
         crate::serial_println!("[futex-test] setup failed");
-        crate::process::scheduler::exit_current_task();
+        crate::process::scheduler::exit_current_task(0);
     }
 
     let s1 = run_wait_wake_scenario();
@@ -332,7 +332,7 @@ extern "C" fn futex_test_main() -> ! {
         "[futex-test] summary: {}",
         if s1 && s2 && s3 && s4 { "PASS" } else { "FAIL" }
     );
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 /// Create the futex concurrency self-test task.

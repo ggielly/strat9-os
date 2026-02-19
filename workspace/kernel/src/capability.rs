@@ -117,6 +117,14 @@ pub struct CapabilityTable {
     capabilities: BTreeMap<CapId, Capability>,
 }
 
+impl Clone for CapabilityTable {
+    fn clone(&self) -> Self {
+        Self {
+            capabilities: self.capabilities.clone(),
+        }
+    }
+}
+
 impl CapabilityTable {
     /// Create a new empty capability table
     pub fn new() -> Self {

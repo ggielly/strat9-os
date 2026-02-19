@@ -6,7 +6,6 @@
 use super::{pic, tss};
 use x86_64::{
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
-    VirtAddr,
 };
 
 /// IRQ interrupt vector numbers (PIC1_OFFSET + IRQ number)
@@ -122,9 +121,9 @@ extern "x86-interrupt" fn page_fault_handler(
     let fault_addr = Cr2::read();
     
     // Try to handle COW fault first (before killing the process)
-    if error_code.caused_by_write() && is_user {
-        if let Some(task) = crate::process::current_task() {
-            let address_space = &task.process().address_space;
+    if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) && is_user {
+        if let Some(task) = crate::process::current_task_clone() {
+            let address_space = &task.address_space;
             if let Ok(vaddr) = fault_addr {
                 match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), address_space) {
                     Ok(()) => {

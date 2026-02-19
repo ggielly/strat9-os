@@ -1,288 +1,220 @@
-//! Fork syscall implementation with Copy-on-Write
+//! `fork()` syscall implementation (P1): eager address-space copy.
 //!
-//! Implements POSIX fork() semantics with COW optimization:
-//! - Parent and child share all memory pages marked read-only + COW
-//! - First write to a shared page triggers allocation of a private copy
-//! - DLL/code pages remain shared (never COW)
-//!
-//! # Returns
-//! - In parent: PID of child process
-//! - In child: 0
-//!
-//! # References
-//! - Plan 9 rfork: https://9p.io/magic/man2html/2/fork
-//! - POSIX fork: https://pubs.opengroup.org/onlinepubs/9699919799/functions/fork.html
+//! This phase intentionally avoids COW and duplicates user mappings eagerly.
 
-use crate::process::{Task, TaskId, TaskPriority};
-use crate::syscall::error::SyscallError;
-use crate::memory::cow;
-use crate::memory::paging::PageTableFlags;
-use alloc::sync::Arc;
-use core::sync::atomic::Ordering;
+use crate::{
+    memory::AddressSpace,
+    process::{
+        scheduler::add_task_with_parent,
+        signal::{SigAction, SigStack, SignalSet},
+        task::{CpuContext, KernelStack, SyncUnsafeCell, Task},
+        current_task_clone, TaskId, TaskState,
+    },
+    syscall::{error::SyscallError, SyscallFrame},
+};
+use alloc::{boxed::Box, sync::Arc};
+use core::{mem::offset_of, sync::atomic::{AtomicBool, AtomicU64, Ordering}};
 
-/// Fork result returned to the parent
+/// Result returned by [`sys_fork`].
 pub struct ForkResult {
-    /// PID of the child process
     pub child_pid: TaskId,
-    /// Reference to child task (for scheduler)
-    pub child_task: Arc<Task>,
 }
 
-/// SYS_FORK: Create a child process with COW memory sharing
-///
-/// # Implementation
-/// 1. Clone parent's address space structure (page tables)
-/// 2. Mark all writable user pages as COW (read-only + COW flag)
-/// 3. Increment refcount on all shared frames
-/// 4. Copy parent's CPU context to child
-/// 5. Set return values (0 in child, child_pid in parent)
-/// 6. Add child to scheduler
-///
-/// # Safety
-/// - Must be called with interrupts disabled
-/// - Scheduler lock must be held
-pub fn sys_fork() -> Result<ForkResult, SyscallError> {
-    // 1. Get current (parent) task
-    let parent_task = crate::process::current_task_clone()
-        .ok_or(SyscallError::PermissionDenied)?;
-    
-    let parent_proc = parent_task.process();
-    let parent_as = &parent_proc.address_space;
-    
-    // 2. Allocate child PID and create process structure
-    let child_pid = TaskId::new();
-    let child_proc = crate::process::Process::new(child_pid)?;
-    
-    // 3. Clone address space with COW sharing
-    clone_address_space_cow(parent_as, &child_proc.address_space)?;
-    
-    // 4. Copy process resources (FDs, namespace, etc.)
-    copy_process_resources(&parent_proc, &child_proc)?;
-    
-    // 5. Create child task with copied context
-    let parent_ctx = parent_task.context();
-    let child_task = Task::new_kernel_task_with_context(
-        task_entry_wrapper,
-        "forked",
-        TaskPriority::Normal,
-        parent_ctx.clone(), // Copy CPU registers
-    )?;
-    
-    // Link child task to child process
-    child_task.set_process(child_proc.clone());
-    
-    // 6. Set return values
-    // Parent will return child_pid, child will return 0
-    // This is handled by modifying the saved RAX in the context
-    let child_ctx = child_task.context();
-    child_ctx.rax = 0; // Child returns 0
-    
-    // 7. Add child to scheduler
-    crate::process::add_task(child_task.clone());
-    
-    // 8. Parent returns child PID
-    Ok(ForkResult {
-        child_pid,
-        child_task,
-    })
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ForkUserContext {
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    rbp: u64,
+    rbx: u64,
+    r11: u64,
+    r10: u64,
+    r9: u64,
+    r8: u64,
+    rsi: u64,
+    rdi: u64,
+    rdx: u64,
+    rcx: u64,
+    user_rip: u64,
+    user_rflags: u64,
+    user_rsp: u64,
 }
 
-/// Clone address space with COW strategy
-///
-/// This function:
-/// 1. Duplicates the page table structure (not the actual data)
-/// 2. Marks all writable user pages as COW in both parent and child
-/// 3. Increments refcount on all shared frames
-fn clone_address_space_cow(
-    parent_as: &crate::memory::AddressSpace,
-    child_as: &crate::memory::AddressSpace,
-) -> Result<(), SyscallError> {
-    // Clone the page table structure (frames are shared at this point)
-    parent_as.clone_structure_for_fork(child_as)?;
-    
-    // Walk through all user pages and mark writable ones as COW
-    parent_as.for_each_user_page(|virt, entry| {
-        let flags = entry.flags();
-        
-        // Skip if:
-        // - Not present (shouldn't happen)
-        // - Not writable (already RO)
-        // - Kernel page (not user)
-        // - DLL page (never COW)
-        if !entry.is_present() 
-            || !flags.contains(PageTableFlags::WRITABLE)
-            || !flags.contains(PageTableFlags::USER)
-            || flags.contains(PageTableFlags::NO_EXECUTE) // Heuristic for code pages
-        {
-            return Ok(());
-        }
-        
-        // Get the physical frame
-        if let Some(frame) = entry.frame() {
-            // Increment refcount (now shared between parent and child)
-            cow::frame_inc_ref(frame);
-            
-            // Mark as COW in both parent and child
-            cow::frame_set_cow(frame);
-            
-            // Create new PTE with COW flags (remove WRITABLE, add COW)
-            let mut cow_flags = flags;
-            cow_flags.remove(PageTableFlags::WRITABLE);
-            // Note: COW flag is software-defined, we track it in FrameMeta
-            
-            let mut cow_entry = entry;
-            cow_entry.set_flags(cow_flags);
-            
-            // Update both parent and child page tables
-            parent_as.update_entry(virt, cow_entry)?;
-            child_as.update_entry(virt, cow_entry)?;
-        }
-        
-        Ok(())
-    })?;
-    
-    Ok(())
+const OFF_R15: usize = offset_of!(ForkUserContext, r15);
+const OFF_R14: usize = offset_of!(ForkUserContext, r14);
+const OFF_R13: usize = offset_of!(ForkUserContext, r13);
+const OFF_R12: usize = offset_of!(ForkUserContext, r12);
+const OFF_RBP: usize = offset_of!(ForkUserContext, rbp);
+const OFF_RBX: usize = offset_of!(ForkUserContext, rbx);
+const OFF_R11: usize = offset_of!(ForkUserContext, r11);
+const OFF_R10: usize = offset_of!(ForkUserContext, r10);
+const OFF_R9: usize = offset_of!(ForkUserContext, r9);
+const OFF_R8: usize = offset_of!(ForkUserContext, r8);
+const OFF_RSI: usize = offset_of!(ForkUserContext, rsi);
+const OFF_RDI: usize = offset_of!(ForkUserContext, rdi);
+const OFF_RDX: usize = offset_of!(ForkUserContext, rdx);
+const OFF_RCX: usize = offset_of!(ForkUserContext, rcx);
+const OFF_USER_RIP: usize = offset_of!(ForkUserContext, user_rip);
+const OFF_USER_RFLAGS: usize = offset_of!(ForkUserContext, user_rflags);
+const OFF_USER_RSP: usize = offset_of!(ForkUserContext, user_rsp);
+
+/// Child bootstrap: restore user register snapshot and enter Ring 3.
+extern "C" fn fork_child_start(ctx_ptr: u64) -> ! {
+    let boxed = unsafe { Box::from_raw(ctx_ptr as *mut ForkUserContext) };
+    let ctx = *boxed;
+    unsafe { fork_iret_from_ctx(&ctx as *const ForkUserContext) }
 }
 
-/// Copy process resources from parent to child
-fn copy_process_resources(
-    parent: &Process,
-    child: &Process,
-) -> Result<(), SyscallError> {
-    // Copy file descriptor table (duplicate handles)
-    *child.fd_table.lock() = parent.fd_table.lock().clone();
-    
-    // Copy namespace (Plan 9 style - shared namespace for now)
-    *child.namespace.lock() = parent.namespace.lock().clone();
-    
-    // Copy signal mask
-    child.signal_mask.store(
-        parent.signal_mask.load(Ordering::Relaxed),
-        Ordering::Relaxed,
+#[unsafe(naked)]
+unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
+    core::arch::naked_asm!(
+        "mov rsi, rdi",
+        "mov r15, [rsi + {off_r15}]",
+        "mov r14, [rsi + {off_r14}]",
+        "mov r13, [rsi + {off_r13}]",
+        "mov r12, [rsi + {off_r12}]",
+        "mov rbp, [rsi + {off_rbp}]",
+        "mov rbx, [rsi + {off_rbx}]",
+        "mov r11, [rsi + {off_r11}]",
+        "mov r10, [rsi + {off_r10}]",
+        "mov r9, [rsi + {off_r9}]",
+        "mov r8, [rsi + {off_r8}]",
+        "mov rdx, [rsi + {off_rdx}]",
+        "mov rcx, [rsi + {off_rcx}]",
+        "mov rdi, [rsi + {off_rdi}]",
+        "mov rax, 0",
+        "push 0x23",
+        "mov r8, [rsi + {off_user_rsp}]",
+        "push r8",
+        "mov r8, [rsi + {off_user_rflags}]",
+        "push r8",
+        "push 0x2B",
+        "mov r8, [rsi + {off_user_rip}]",
+        "push r8",
+        "mov rsi, [rsi + {off_rsi}]",
+        "iretq",
+        off_r15 = const OFF_R15,
+        off_r14 = const OFF_R14,
+        off_r13 = const OFF_R13,
+        off_r12 = const OFF_R12,
+        off_rbp = const OFF_RBP,
+        off_rbx = const OFF_RBX,
+        off_r11 = const OFF_R11,
+        off_r10 = const OFF_R10,
+        off_r9 = const OFF_R9,
+        off_r8 = const OFF_R8,
+        off_rsi = const OFF_RSI,
+        off_rdi = const OFF_RDI,
+        off_rdx = const OFF_RDX,
+        off_rcx = const OFF_RCX,
+        off_user_rip = const OFF_USER_RIP,
+        off_user_rflags = const OFF_USER_RFLAGS,
+        off_user_rsp = const OFF_USER_RSP,
     );
-    
-    // Copy current working directory
-    *child.cwd.lock() = parent.cwd.lock().clone();
-    
-    // Copy capabilities (with new ownership)
-    // TODO: Implement proper capability inheritance
-    
-    Ok(())
 }
 
-/// Entry point wrapper for forked tasks
-///
-/// This is a dummy entry point - the actual execution continues
-/// from where the parent was when fork() was called, because
-/// we copied the entire CPU context including RIP.
-extern "C" fn task_entry_wrapper() -> ! {
-    // Should never reach here - context switch restores parent's RIP
-    loop {
-        crate::arch::x86_64::hlt();
-    }
+fn copy_signal_set(src: &SignalSet) -> SignalSet {
+    SignalSet::from_mask(src.get_mask())
 }
 
-/// Handle COW page fault
-///
-/// Called from the page fault handler when a write to a COW page occurs.
-///
-/// # Arguments
-/// * `virt_addr` - Virtual address that caused the fault
-/// * `address_space` - Address space of the faulting process
-///
-/// # Returns
-/// - Ok(()) if fault was handled (page copied and remapped)
-/// - Err() if fault is fatal (true protection violation)
-pub fn handle_cow_fault(
-    virt_addr: u64,
-    address_space: &crate::memory::AddressSpace,
-) -> Result<(), &'static str> {
-    // Get the PTE for the faulting address
-    let entry = address_space.get_entry(virt_addr)
-        .ok_or("Failed to get PTE for COW fault")?;
-    
-    if !entry.is_present() {
-        return Err("COW fault on non-present page");
-    }
-    
-    let flags = entry.flags();
-    
-    // Check if this is actually a COW page
-    // We check the FrameMeta COW flag
-    if let Some(frame) = entry.frame() {
-        if !cow::frame_is_cow(frame) {
-            // Not a COW page - this is a real protection violation
-            return Err("Write to non-COW read-only page");
-        }
-        
-        // Check refcount to decide if we need to copy
-        let refcount = cow::frame_get_refcount(frame);
-        
-        if refcount == 1 {
-            // Optimization: frame is no longer shared
-            // Just mark it as writable (no copy needed)
-            let mut new_flags = flags;
-            new_flags.insert(PageTableFlags::WRITABLE);
-            
-            let mut new_entry = entry;
-            new_entry.set_flags(new_flags);
-            
-            cow::frame_clear_cow(frame);
-            address_space.update_entry(virt_addr, new_entry)?;
-        } else {
-            // Frame is truly shared: allocate new frame and copy
-            resolve_cow_fault(virt_addr, entry, frame, address_space)?;
-        }
-    } else {
-        return Err("COW page has no valid frame");
-    }
-    
-    Ok(())
-}
+fn build_child_task(
+    parent: &Arc<Task>,
+    child_as: Arc<AddressSpace>,
+    bootstrap_ctx_ptr: u64,
+) -> Result<Arc<Task>, SyscallError> {
+    let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)
+        .map_err(|_| SyscallError::OutOfMemory)?;
+    let context = CpuContext::new(fork_child_start as *const () as u64, &kernel_stack);
 
-/// Resolve a COW fault by allocating a new frame and copying content
-fn resolve_cow_fault(
-    virt_addr: u64,
-    old_entry: crate::memory::paging::PageTableEntry,
-    old_frame: crate::memory::frame::PhysFrame,
-    address_space: &crate::memory::AddressSpace,
-) -> Result<(), &'static str> {
-    use crate::memory::frame::FrameAllocator;
-    
-    // 1. Allocate a new physical frame
-    let mut allocator = crate::memory::get_allocator().lock();
-    let allocator = allocator.as_mut().ok_or("Allocator not available")?;
-    let new_frame = allocator.alloc(0).ok_or("Failed to allocate frame for COW")?;
-    drop(allocator);
-    
-    // 2. Map both frames into kernel space for copying
-    let old_virt = crate::memory::phys_to_virt(old_frame.start_address().as_u64());
-    let new_virt = crate::memory::phys_to_virt(new_frame.start_address().as_u64());
-    
-    // 3. Copy the page content (4096 bytes)
+    let parent_caps = unsafe { (&*parent.capabilities.get()).clone() };
+    let parent_fd = unsafe { (&*parent.fd_table.get()).clone_for_fork() };
+    let parent_blocked = unsafe { copy_signal_set(&*parent.blocked_signals.get()) };
+    let parent_actions: [SigAction; 64] = unsafe { *parent.signal_actions.get() };
+    let parent_sigstack: Option<SigStack> = unsafe { *parent.signal_stack.get() };
+
+    let task = Arc::new(Task {
+        id: TaskId::new(),
+        state: SyncUnsafeCell::new(TaskState::Ready),
+        priority: parent.priority,
+        context: SyncUnsafeCell::new(context),
+        kernel_stack,
+        user_stack: None,
+        name: "fork-child",
+        capabilities: SyncUnsafeCell::new(parent_caps),
+        address_space: child_as,
+        fd_table: SyncUnsafeCell::new(parent_fd),
+        pending_signals: SyncUnsafeCell::new(SignalSet::new()),
+        blocked_signals: SyncUnsafeCell::new(parent_blocked),
+        signal_actions: SyncUnsafeCell::new(parent_actions),
+        signal_stack: SyncUnsafeCell::new(parent_sigstack),
+        itimers: crate::process::timer::ITimers::new(),
+        wake_pending: AtomicBool::new(false),
+        wake_deadline_ns: AtomicU64::new(0),
+        brk: AtomicU64::new(parent.brk.load(Ordering::Relaxed)),
+        mmap_hint: AtomicU64::new(parent.mmap_hint.load(Ordering::Relaxed)),
+    });
+
+    // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            old_virt as *const u8,
-            new_virt as *mut u8,
-            4096,
-        );
+        let ctx = &mut *task.context.get();
+        let frame = ctx.saved_rsp as *mut u64;
+        *frame.add(2) = bootstrap_ctx_ptr;
     }
-    
-    // 4. Decrement refcount on old frame
-    cow::frame_dec_ref(old_frame);
-    
-    // 5. Create new PTE pointing to the new frame (writable, not COW)
-    let mut new_entry = old_entry;
-    new_entry.set_frame(new_frame, PageTableFlags::USER | PageTableFlags::WRITABLE | PageTableFlags::PRESENT);
-    
-    // 6. Update page table
-    address_space.update_entry(virt_addr, new_entry)?;
-    
-    // 7. Invalidate TLB for this page
-    // (update_entry should already do this via invlpg)
-    
-    log::trace!("COW fault resolved at {:#x}: copied frame {:#x} -> {:#x}",
-                virt_addr, old_frame.start_address().as_u64(), new_frame.start_address().as_u64());
-    
-    Ok(())
+
+    Ok(task)
+}
+
+/// SYS_PROC_FORK (302): eager fork (no COW yet).
+pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
+    let parent = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    if parent.address_space.is_kernel() {
+        return Err(SyscallError::PermissionDenied);
+    }
+
+    let child_as = parent
+        .address_space
+        .clone_for_fork_eager()
+        .map_err(|_| SyscallError::OutOfMemory)?;
+
+    let child_user_ctx = Box::new(ForkUserContext {
+        r15: frame.r15,
+        r14: frame.r14,
+        r13: frame.r13,
+        r12: frame.r12,
+        rbp: frame.rbp,
+        rbx: frame.rbx,
+        r11: frame.r11,
+        r10: frame.r10,
+        r9: frame.r9,
+        r8: frame.r8,
+        rsi: frame.rsi,
+        rdi: frame.rdi,
+        rdx: frame.rdx,
+        rcx: frame.rcx,
+        user_rip: frame.iret_rip,
+        user_rflags: frame.iret_rflags,
+        user_rsp: frame.iret_rsp,
+    });
+
+    let child_task = build_child_task(
+        &parent,
+        child_as,
+        Box::into_raw(child_user_ctx) as u64,
+    )?;
+    let child_pid = child_task.id;
+    add_task_with_parent(child_task, parent.id);
+
+    Ok(ForkResult { child_pid })
+}
+
+/// Try to resolve a COW write fault.
+///
+/// P1 fork is eager-copy, so this path remains disabled.
+pub fn handle_cow_fault(
+    _virt_addr: u64,
+    _address_space: &crate::memory::AddressSpace,
+) -> Result<(), &'static str> {
+    Err("COW not implemented")
 }

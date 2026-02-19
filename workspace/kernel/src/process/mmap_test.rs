@@ -131,7 +131,7 @@ extern "C" fn mmap_test_main() -> ! {
         "[mmap-test] summary: {}",
         if t1 && t2 && t3 && t4 && t5 { "PASS" } else { "FAIL" }
     );
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 pub fn create_mmap_test_task() {

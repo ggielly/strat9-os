@@ -71,7 +71,7 @@ extern "C" fn ipc_sender_main() -> ! {
     port.send(msg).expect("send should succeed");
     crate::serial_println!("[ipc-test] Task A: message sent, exiting");
 
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 /// Receiver task: waits for port ID, calls recv (blocks if needed), logs result.
@@ -108,7 +108,7 @@ extern "C" fn ipc_receiver_main() -> ! {
         crate::serial_println!("[ipc-test] IPC ping-pong test FAILED (unexpected data)");
     }
 
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 // The PortId(u64) constructor is pub(crate) via the struct definition,
@@ -166,7 +166,7 @@ extern "C" fn chan_producer1_main() -> ! {
 
     crate::serial_println!("[chan-test] Producer-1: done");
     drop(tx); // explicit: sender_count--
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 /// Producer-2: yields first so the consumer blocks, then sends 4, 5.
@@ -183,7 +183,7 @@ extern "C" fn chan_producer2_main() -> ! {
 
     crate::serial_println!("[chan-test] Producer-2: done");
     drop(tx); // last Sender → receiver wakes with Disconnected next call
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }
 
 /// Consumer: drains all messages; expects exactly 5, then Disconnected.
@@ -218,5 +218,5 @@ extern "C" fn chan_consumer_main() -> ! {
         );
     }
 
-    crate::process::scheduler::exit_current_task();
+    crate::process::scheduler::exit_current_task(0);
 }

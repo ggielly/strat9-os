@@ -17,7 +17,7 @@ use crate::{
         reply,
     },
     memory::{UserSliceRead, UserSliceWrite},
-    process::current_task_clone,
+    process::{current_task_clone, current_task_id, get_parent_id, try_wait_child, WaitChildResult},
     silo,
 };
 use alloc::{sync::Arc, vec};
@@ -55,7 +55,10 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         SYS_PROC_EXIT => sys_proc_exit(arg1),
         SYS_PROC_YIELD => sys_proc_yield(),
-        SYS_PROC_FORK => sys_fork().map(|result| result.child_pid.as_u64()),
+        SYS_PROC_FORK => sys_fork(frame).map(|result| result.child_pid.as_u64()),
+        SYS_PROC_GETPID => sys_proc_getpid(),
+        SYS_PROC_GETPPID => sys_proc_getppid(),
+        SYS_PROC_WAITPID => sys_proc_waitpid(arg1 as i64, arg2, arg3 as u32),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),
@@ -190,13 +193,67 @@ fn sys_proc_exit(exit_code: u64) -> Result<u64, SyscallError> {
 
     // Mark current task as Dead and yield. The scheduler won't re-queue dead tasks.
     // exit_current_task() diverges (-> !), so this function never returns.
-    crate::process::scheduler::exit_current_task()
+    crate::process::scheduler::exit_current_task(exit_code as i32)
 }
 
 /// SYS_PROC_YIELD (301): Yield the current time slice.
 fn sys_proc_yield() -> Result<u64, SyscallError> {
     crate::process::yield_task();
     Ok(0)
+}
+
+/// SYS_PROC_GETPID (308): return current task ID.
+fn sys_proc_getpid() -> Result<u64, SyscallError> {
+    current_task_id()
+        .map(|id| id.as_u64())
+        .ok_or(SyscallError::PermissionDenied)
+}
+
+/// SYS_PROC_GETPPID (309): return parent task ID (0 if orphan/root).
+fn sys_proc_getppid() -> Result<u64, SyscallError> {
+    let pid = current_task_id().ok_or(SyscallError::PermissionDenied)?;
+    Ok(get_parent_id(pid).map(|id| id.as_u64()).unwrap_or(0))
+}
+
+/// SYS_PROC_WAITPID (310): wait for child exit.
+///
+/// Supported today:
+/// - `pid = -1` (any child) or `pid > 0` (specific child)
+/// - `options = 0` or `WNOHANG=1`
+fn sys_proc_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, SyscallError> {
+    const WNOHANG: u32 = 1;
+    if options & !WNOHANG != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let parent = current_task_id().ok_or(SyscallError::PermissionDenied)?;
+    let target = if pid == -1 {
+        None
+    } else if pid > 0 {
+        Some(crate::process::TaskId::from_u64(pid as u64))
+    } else {
+        return Err(SyscallError::InvalidArgument);
+    };
+
+    loop {
+        match try_wait_child(parent, target) {
+            WaitChildResult::Reaped { child, status } => {
+                if status_ptr != 0 {
+                    let wait_status = ((status as i32) & 0xFF) << 8;
+                    let user = UserSliceWrite::new(status_ptr, 4)?;
+                    user.copy_from(&wait_status.to_ne_bytes());
+                }
+                return Ok(child.as_u64());
+            }
+            WaitChildResult::NoChildren => return Err(SyscallError::NotFound),
+            WaitChildResult::StillRunning => {
+                if options & WNOHANG != 0 {
+                    return Ok(0);
+                }
+                crate::process::block_current_task();
+            }
+        }
+    }
 }
 
 /// SYS_KILL (320): Send a signal to a task.
