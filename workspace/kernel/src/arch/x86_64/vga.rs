@@ -428,6 +428,31 @@ impl VgaWriter {
             && y < self.clip.y.saturating_add(self.clip.h)
     }
 
+    fn clipped_rect(
+        &self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    ) -> Option<(usize, usize, usize, usize)> {
+        if width == 0 || height == 0 || !self.enabled {
+            return None;
+        }
+        let src_x2 = core::cmp::min(x.saturating_add(width), self.fb_width);
+        let src_y2 = core::cmp::min(y.saturating_add(height), self.fb_height);
+        let clip_x2 = self.clip.x.saturating_add(self.clip.w);
+        let clip_y2 = self.clip.y.saturating_add(self.clip.h);
+
+        let sx = core::cmp::max(x, self.clip.x);
+        let sy = core::cmp::max(y, self.clip.y);
+        let ex = core::cmp::min(src_x2, clip_x2);
+        let ey = core::cmp::min(src_y2, clip_y2);
+        if ex <= sx || ey <= sy {
+            return None;
+        }
+        Some((sx, sy, ex - sx, ey - sy))
+    }
+
     pub fn set_clip_rect(&mut self, x: usize, y: usize, width: usize, height: usize) {
         let x_end = core::cmp::min(x.saturating_add(width), self.fb_width);
         let y_end = core::cmp::min(y.saturating_add(height), self.fb_height);
@@ -637,15 +662,40 @@ impl VgaWriter {
     }
 
     pub fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
-        if !self.enabled || width == 0 || height == 0 {
+        let Some((sx, sy, sw, sh)) = self.clipped_rect(x, y, width, height) else {
+            return;
+        };
+        let packed = self.pack_color(color);
+
+        if self.draw_to_back_buffer() {
+            if let Some(buf) = self.back_buffer.as_mut() {
+                for py in sy..(sy + sh) {
+                    let row = py * self.fb_width;
+                    let start = row + sx;
+                    let end = start + sw;
+                    buf[start..end].fill(packed);
+                }
+                return;
+            }
+        }
+
+        if self.fmt.bpp == 32 {
+            for py in sy..(sy + sh) {
+                let row_off = py * self.pitch + sx * 4;
+                let count = sw;
+                unsafe {
+                    let ptr = self.fb_addr.add(row_off) as *mut u32;
+                    for i in 0..count {
+                        core::ptr::write_volatile(ptr.add(i), packed);
+                    }
+                }
+            }
             return;
         }
-        let x_end = core::cmp::min(x.saturating_add(width), self.fb_width);
-        let y_end = core::cmp::min(y.saturating_add(height), self.fb_height);
-        let packed = self.pack_color(color);
-        for py in y..y_end {
-            for px in x..x_end {
-                self.put_pixel_raw(px, py, packed);
+
+        for py in sy..(sy + sh) {
+            for px in sx..(sx + sw) {
+                self.write_hw_pixel_packed(px, py, packed);
             }
         }
     }
@@ -1039,6 +1089,14 @@ pub fn is_available() -> bool {
     VGA_AVAILABLE.load(Ordering::Relaxed)
 }
 
+pub fn with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
+    if !is_available() {
+        return None;
+    }
+    let mut writer = VGA_WRITER.lock();
+    Some(f(&mut writer))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn init(
     fb_addr: u64,
@@ -1236,6 +1294,18 @@ impl Canvas {
     pub fn end_frame(&self) {
         end_frame();
     }
+
+    pub fn ui_clear(&self, theme: UiTheme) {
+        ui_clear(theme);
+    }
+
+    pub fn ui_panel(&self, x: usize, y: usize, w: usize, h: usize, title: &str, body: &str, theme: UiTheme) {
+        ui_draw_panel(x, y, w, h, title, body, theme);
+    }
+
+    pub fn ui_status_bar(&self, left: &str, right: &str, theme: UiTheme) {
+        ui_draw_status_bar(left, right, theme);
+    }
 }
 
 pub fn width() -> usize {
@@ -1396,6 +1466,101 @@ pub fn measure_text(text: &str, max_width: Option<usize>, wrap: bool) -> TextMet
         };
     }
     VGA_WRITER.lock().measure_text(text, max_width, wrap)
+}
+
+pub fn ui_clear(theme: UiTheme) {
+    let _ = with_writer(|w| w.clear_with(theme.background));
+}
+
+pub fn ui_draw_panel(
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    title: &str,
+    body: &str,
+    theme: UiTheme,
+) {
+    let _ = with_writer(|w| {
+        if width < 8 || height < 8 {
+            return;
+        }
+        let (gw, gh) = w.glyph_size();
+        w.fill_rect(x, y, width, height, theme.panel_bg);
+        w.draw_rect(x, y, width, height, theme.panel_border);
+
+        let title_h = gh + 6;
+        w.fill_rect(
+            x.saturating_add(1),
+            y.saturating_add(1),
+            width.saturating_sub(2),
+            title_h,
+            theme.accent,
+        );
+        let title_opts = TextOptions {
+            fg: theme.text,
+            bg: theme.accent,
+            align: TextAlign::Left,
+            wrap: false,
+            max_width: Some(width.saturating_sub(10)),
+        };
+        w.draw_text(x.saturating_add(6), y.saturating_add(3), title, title_opts);
+
+        let body_opts = TextOptions {
+            fg: theme.text,
+            bg: theme.panel_bg,
+            align: TextAlign::Left,
+            wrap: true,
+            max_width: Some(width.saturating_sub(10)),
+        };
+        w.draw_text(
+            x.saturating_add(6),
+            y.saturating_add(title_h + 4),
+            body,
+            body_opts,
+        );
+
+        // Visual separator.
+        w.fill_rect(
+            x.saturating_add(1),
+            y.saturating_add(title_h + 1),
+            width.saturating_sub(2),
+            1,
+            theme.panel_border,
+        );
+        // Keep an implicit reference to glyph width to avoid dead code warning for gw in tiny fonts.
+        let _ = gw;
+    });
+}
+
+pub fn ui_draw_status_bar(left: &str, right: &str, theme: UiTheme) {
+    let _ = with_writer(|w| {
+        let (gw, gh) = w.glyph_size();
+        if gh == 0 || gw == 0 {
+            return;
+        }
+        let bar_h = gh + 4;
+        let y = w.height().saturating_sub(bar_h);
+        w.fill_rect(0, y, w.width(), bar_h, theme.status_bg);
+
+        let left_opts = TextOptions {
+            fg: theme.status_text,
+            bg: theme.status_bg,
+            align: TextAlign::Left,
+            wrap: false,
+            max_width: Some(w.width().saturating_sub(8)),
+        };
+        w.draw_text(4, y + 2, left, left_opts);
+
+        let right_opts = TextOptions {
+            fg: theme.status_text,
+            bg: theme.status_bg,
+            align: TextAlign::Right,
+            wrap: false,
+            max_width: Some(w.width().saturating_sub(8)),
+        };
+        w.draw_text(4, y + 2, right, right_opts);
+    });
 }
 
 pub fn draw_strata_stack(origin_x: usize, origin_y: usize, layer_w: usize, layer_h: usize) {
