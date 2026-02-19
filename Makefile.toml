@@ -371,7 +371,34 @@ description = "Alias: run QEMU in headless/text mode"
 alias = "run"
 
 [tasks.run-test]
-description = "Load QEMU with the Limine ISO test build (text mode) + EXT4 disk"
+description = "Load QEMU with the Limine ISO test build (graphical mode) + EXT4 disk"
+dependencies = ["limine-image-test"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os-test.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu-test.log",
+    "-d",
+    "guest_errors",
+]
+
+[tasks.run-test-headless]
+description = "Load QEMU with the Limine ISO test build (headless/text mode) + EXT4 disk"
 dependencies = ["limine-image-test"]
 command = "${QEMU}"
 args = [

@@ -21,6 +21,7 @@ pub mod mmap;
 pub mod numbers;
 pub mod signal;
 pub mod time;
+pub mod wait;
 
 pub use dispatcher::dispatch;
 pub use time::{sys_clock_gettime, sys_nanosleep};

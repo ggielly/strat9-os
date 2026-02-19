@@ -17,7 +17,7 @@ use crate::{
         reply,
     },
     memory::{UserSliceRead, UserSliceWrite},
-    process::{current_task_clone, current_task_id, get_parent_id, try_wait_child, WaitChildResult},
+    process::{current_task_clone, current_task_id, get_parent_id},
     silo,
 };
 use alloc::{sync::Arc, vec};
@@ -59,6 +59,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PROC_GETPID => sys_proc_getpid(),
         SYS_PROC_GETPPID => sys_proc_getppid(),
         SYS_PROC_WAITPID => sys_proc_waitpid(arg1 as i64, arg2, arg3 as u32),
+        SYS_PROC_WAIT    => super::wait::sys_wait(arg1),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),
@@ -215,45 +216,9 @@ fn sys_proc_getppid() -> Result<u64, SyscallError> {
     Ok(get_parent_id(pid).map(|id| id.as_u64()).unwrap_or(0))
 }
 
-/// SYS_PROC_WAITPID (310): wait for child exit.
-///
-/// Supported today:
-/// - `pid = -1` (any child) or `pid > 0` (specific child)
-/// - `options = 0` or `WNOHANG=1`
+/// SYS_PROC_WAITPID (310) / SYS_PROC_WAIT (311): delegate to syscall::wait.
 fn sys_proc_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, SyscallError> {
-    const WNOHANG: u32 = 1;
-    if options & !WNOHANG != 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    let parent = current_task_id().ok_or(SyscallError::PermissionDenied)?;
-    let target = if pid == -1 {
-        None
-    } else if pid > 0 {
-        Some(crate::process::TaskId::from_u64(pid as u64))
-    } else {
-        return Err(SyscallError::InvalidArgument);
-    };
-
-    loop {
-        match try_wait_child(parent, target) {
-            WaitChildResult::Reaped { child, status } => {
-                if status_ptr != 0 {
-                    let wait_status = ((status as i32) & 0xFF) << 8;
-                    let user = UserSliceWrite::new(status_ptr, 4)?;
-                    user.copy_from(&wait_status.to_ne_bytes());
-                }
-                return Ok(child.as_u64());
-            }
-            WaitChildResult::NoChildren => return Err(SyscallError::NotFound),
-            WaitChildResult::StillRunning => {
-                if options & WNOHANG != 0 {
-                    return Ok(0);
-                }
-                crate::process::block_current_task();
-            }
-        }
-    }
+    super::wait::sys_waitpid(pid, status_ptr, options)
 }
 
 /// SYS_KILL (320): Send a signal to a task.

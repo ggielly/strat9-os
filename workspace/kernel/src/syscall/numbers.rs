@@ -121,6 +121,10 @@ pub const SYS_PROC_GETPPID: u64 = 309;
 /// arg1=pid (-1 any child), arg2=status_ptr (nullable), arg3=options (WNOHANG=1 supported)
 pub const SYS_PROC_WAITPID: u64 = 310;
 
+/// Plan 9-style wait: block until any child exits, write Waitmsg.
+/// arg1=waitmsg_ptr (*Waitmsg, 80 bytes, nullable). Returns child pid.
+pub const SYS_PROC_WAIT: u64 = 311;
+
 // Futex wait. arg1=uaddr (*u32), arg2=expected_val, arg3=timeout_ns
 pub const SYS_FUTEX_WAIT: u64 = 303;
 

@@ -331,18 +331,6 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     #[cfg(feature = "selftest")]
     {
         // =============================================
-        // Phase 8: create scheduler stress test tasks
-        // =============================================
-        serial_println!("[init] Creating scheduler test tasks...");
-        vga_println!("[..] Adding scheduler test tasks...");
-        process::test::create_test_tasks();
-        serial_println!("[init] Scheduler test tasks created.");
-        vga_println!("[OK] Scheduler test tasks added");
-    }
-
-    #[cfg(feature = "selftest")]
-    {
-        // =============================================
         // Phase 8a: runtime self-tests
         // =============================================
         serial_println!("[init] Creating self-test tasks...");

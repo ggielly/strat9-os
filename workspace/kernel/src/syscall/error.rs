@@ -18,6 +18,8 @@ pub enum SyscallError {
     IoError = -5,
     /// Bad file/handle descriptor (EBADF)
     BadHandle = -9,
+    /// No child processes (ECHILD)
+    NoChildren = -10,
     /// Resource temporarily unavailable (EAGAIN)
     Again = -11,
     /// Out of memory : no pages available (ENOMEM)
@@ -48,7 +50,8 @@ impl SyscallError {
             -1 => SyscallError::PermissionDenied,
             -4 => SyscallError::Interrupted,
             -5 => SyscallError::IoError,
-            -9 => SyscallError::BadHandle,
+            -9  => SyscallError::BadHandle,
+            -10 => SyscallError::NoChildren,
             -11 => SyscallError::Again,
             -12 => SyscallError::OutOfMemory,
             -14 => SyscallError::Fault,
