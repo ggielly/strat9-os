@@ -379,6 +379,17 @@ pub struct MemoryStats {
 }
 
 impl BuddyAllocator {
+    /// Fast totals without heap allocation (safe in low-level paths).
+    pub fn page_totals(&self) -> (usize, usize) {
+        let mut total_pages = 0usize;
+        let mut allocated_pages = 0usize;
+        for zone in &self.zones {
+            total_pages = total_pages.saturating_add(zone.page_count);
+            allocated_pages = allocated_pages.saturating_add(zone.allocated);
+        }
+        (total_pages, allocated_pages)
+    }
+
     /// Get memory statistics
     pub fn get_stats(&self) -> MemoryStats {
         let mut total_pages = 0;

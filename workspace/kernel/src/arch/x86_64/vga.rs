@@ -1358,10 +1358,10 @@ fn format_mem_usage() -> String {
         let Some(alloc) = guard.as_ref() else {
             return String::from("n/a");
         };
-        let stats = alloc.get_stats();
+        let (total_pages, allocated_pages) = alloc.page_totals();
         let page_size = 4096usize;
-        let total = stats.total_pages.saturating_mul(page_size);
-        let used = stats.allocated_pages.saturating_mul(page_size);
+        let total = total_pages.saturating_mul(page_size);
+        let used = allocated_pages.saturating_mul(page_size);
         (total.saturating_sub(used), total)
     };
     format!("{}/{}", format_size(free), format_size(total))
@@ -1474,7 +1474,7 @@ pub fn init(
             pitch
         );
         drop(writer);
-        draw_system_status_line(UiTheme::OCEAN_STATUS);
+        draw_boot_status_line(UiTheme::OCEAN_STATUS);
     } else {
         writer.enabled = false;
         VGA_AVAILABLE.store(false, Ordering::Relaxed);
@@ -1931,6 +1931,24 @@ pub fn draw_system_status_line(theme: UiTheme) {
         info.ip, version, uptime, mem
     );
     ui_draw_status_bar(&left, &right, theme);
+}
+
+fn draw_boot_status_line(theme: UiTheme) {
+    let _ = with_writer(|w| {
+        let (_gw, gh) = w.glyph_size();
+        if gh == 0 {
+            return;
+        }
+        let y = w.height().saturating_sub(gh);
+        w.fill_rect(0, y, w.width(), gh, theme.status_bg);
+        w.draw_text_at(
+            0,
+            y,
+            " strat9  ip:n/a  ver:boot  up:00:00:00  load:n/a  mem:n/a ",
+            theme.status_text,
+            theme.status_bg,
+        );
+    });
 }
 
 pub fn maybe_refresh_system_status_line(theme: UiTheme) {
