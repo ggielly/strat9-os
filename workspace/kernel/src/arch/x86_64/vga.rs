@@ -98,6 +98,13 @@ pub struct TextMetrics {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct SpriteRgba<'a> {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct UiTheme {
     pub background: RgbColor,
     pub panel_bg: RgbColor,
@@ -264,6 +271,8 @@ pub struct VgaWriter {
     clip: ClipRect,
     back_buffer: Option<Vec<u32>>,
     draw_to_back: bool,
+    dirty_rect: Option<ClipRect>,
+    track_dirty: bool,
 }
 
 unsafe impl Send for VgaWriter {}
@@ -307,6 +316,8 @@ impl VgaWriter {
             },
             back_buffer: None,
             draw_to_back: false,
+            dirty_rect: None,
+            track_dirty: false,
         }
     }
 
@@ -351,6 +362,8 @@ impl VgaWriter {
         };
         self.back_buffer = None;
         self.draw_to_back = false;
+        self.dirty_rect = None;
+        self.track_dirty = false;
         true
     }
 
@@ -453,6 +466,40 @@ impl VgaWriter {
         Some((sx, sy, ex - sx, ey - sy))
     }
 
+    fn clear_dirty(&mut self) {
+        self.dirty_rect = None;
+    }
+
+    fn mark_dirty_rect(&mut self, x: usize, y: usize, width: usize, height: usize) {
+        if !self.track_dirty {
+            return;
+        }
+        let Some((sx, sy, sw, sh)) = self.clipped_rect(x, y, width, height) else {
+            return;
+        };
+        let next = ClipRect {
+            x: sx,
+            y: sy,
+            w: sw,
+            h: sh,
+        };
+        self.dirty_rect = Some(match self.dirty_rect {
+            None => next,
+            Some(cur) => {
+                let x0 = core::cmp::min(cur.x, next.x);
+                let y0 = core::cmp::min(cur.y, next.y);
+                let x1 = core::cmp::max(cur.x.saturating_add(cur.w), next.x.saturating_add(next.w));
+                let y1 = core::cmp::max(cur.y.saturating_add(cur.h), next.y.saturating_add(next.h));
+                ClipRect {
+                    x: x0,
+                    y: y0,
+                    w: x1.saturating_sub(x0),
+                    h: y1.saturating_sub(y0),
+                }
+            }
+        });
+    }
+
     pub fn set_clip_rect(&mut self, x: usize, y: usize, width: usize, height: usize) {
         let x_end = core::cmp::min(x.saturating_add(width), self.fb_width);
         let y_end = core::cmp::min(y.saturating_add(height), self.fb_height);
@@ -491,6 +538,8 @@ impl VgaWriter {
             self.back_buffer = Some(buf);
         }
         self.draw_to_back = true;
+        self.track_dirty = true;
+        self.clear_dirty();
         true
     }
 
@@ -499,6 +548,8 @@ impl VgaWriter {
             self.present();
         }
         self.draw_to_back = false;
+        self.track_dirty = false;
+        self.clear_dirty();
     }
 
     pub fn present(&mut self) {
@@ -509,13 +560,23 @@ impl VgaWriter {
             return;
         };
         let buf_ptr = buf.as_ptr();
-        for y in 0..self.fb_height {
-            for x in 0..self.fb_width {
+        let (sx, sy, sw, sh) = if self.track_dirty {
+            let Some(dirty) = self.dirty_rect else {
+                return;
+            };
+            (dirty.x, dirty.y, dirty.w, dirty.h)
+        } else {
+            (0, 0, self.fb_width, self.fb_height)
+        };
+
+        for y in sy..(sy + sh) {
+            for x in sx..(sx + sw) {
                 let idx = y * self.fb_width + x;
                 let packed = unsafe { *buf_ptr.add(idx) };
                 self.write_hw_pixel_packed(x, y, packed);
             }
         }
+        self.clear_dirty();
     }
 
     pub fn clear_with(&mut self, color: RgbColor) {
@@ -591,6 +652,7 @@ impl VgaWriter {
         if self.draw_to_back_buffer() {
             if let Some(buf) = self.back_buffer.as_mut() {
                 buf[y * self.fb_width + x] = color;
+                self.mark_dirty_rect(x, y, 1, 1);
                 return;
             }
         }
@@ -675,6 +737,7 @@ impl VgaWriter {
                     let end = start + sw;
                     buf[start..end].fill(packed);
                 }
+                self.mark_dirty_rect(sx, sy, sw, sh);
                 return;
             }
         }
@@ -758,6 +821,62 @@ impl VgaWriter {
             }
         }
         true
+    }
+
+    pub fn blit_rgba(
+        &mut self,
+        dst_x: usize,
+        dst_y: usize,
+        src_width: usize,
+        src_height: usize,
+        bytes: &[u8],
+        global_alpha: u8,
+    ) -> bool {
+        let needed = src_width.saturating_mul(src_height).saturating_mul(4);
+        if !self.enabled || src_width == 0 || src_height == 0 || bytes.len() < needed || global_alpha == 0 {
+            return false;
+        }
+
+        let Some((sx, sy, sw, sh)) = self.clipped_rect(dst_x, dst_y, src_width, src_height) else {
+            return true;
+        };
+        let src_x0 = sx.saturating_sub(dst_x);
+        let src_y0 = sy.saturating_sub(dst_y);
+
+        for row in 0..sh {
+            let syi = src_y0 + row;
+            for col in 0..sw {
+                let sxi = src_x0 + col;
+                let i = (syi * src_width + sxi) * 4;
+                let r = bytes[i];
+                let g = bytes[i + 1];
+                let b = bytes[i + 2];
+                let sa = bytes[i + 3];
+                if sa == 0 {
+                    continue;
+                }
+                let a = ((sa as u16 * global_alpha as u16 + 127) / 255) as u8;
+                let dx = sx + col;
+                let dy = sy + row;
+                if a == 255 {
+                    self.put_pixel_raw(dx, dy, self.pack_color(RgbColor::new(r, g, b)));
+                } else if a != 0 {
+                    self.draw_pixel_alpha(dx, dy, RgbColor::new(r, g, b), a);
+                }
+            }
+        }
+        true
+    }
+
+    pub fn blit_sprite_rgba(&mut self, dst_x: usize, dst_y: usize, sprite: SpriteRgba<'_>, global_alpha: u8) -> bool {
+        self.blit_rgba(
+            dst_x,
+            dst_y,
+            sprite.width,
+            sprite.height,
+            sprite.pixels,
+            global_alpha,
+        )
     }
 
     pub fn draw_text_at(
@@ -1010,6 +1129,7 @@ impl VgaWriter {
                 let src_start = dy * self.fb_width;
                 let src_end = self.fb_height * self.fb_width;
                 buf.copy_within(src_start..src_end, 0);
+                self.mark_dirty_rect(0, 0, self.fb_width, self.fb_height);
             }
         } else {
             let bytes_per_row = self.pitch;
@@ -1287,6 +1407,14 @@ impl Canvas {
         blit_rgb24(x, y, w, h, bytes)
     }
 
+    pub fn blit_rgba(&self, x: usize, y: usize, w: usize, h: usize, bytes: &[u8], global_alpha: u8) -> bool {
+        blit_rgba(x, y, w, h, bytes, global_alpha)
+    }
+
+    pub fn blit_sprite_rgba(&self, x: usize, y: usize, sprite: SpriteRgba<'_>, global_alpha: u8) -> bool {
+        blit_sprite_rgba(x, y, sprite, global_alpha)
+    }
+
     pub fn begin_frame(&self) -> bool {
         begin_frame()
     }
@@ -1435,6 +1563,31 @@ pub fn blit_rgb24(dst_x: usize, dst_y: usize, src_width: usize, src_height: usiz
     VGA_WRITER
         .lock()
         .blit_rgb24(dst_x, dst_y, src_width, src_height, bytes)
+}
+
+pub fn blit_rgba(
+    dst_x: usize,
+    dst_y: usize,
+    src_width: usize,
+    src_height: usize,
+    bytes: &[u8],
+    global_alpha: u8,
+) -> bool {
+    if !is_available() {
+        return false;
+    }
+    VGA_WRITER
+        .lock()
+        .blit_rgba(dst_x, dst_y, src_width, src_height, bytes, global_alpha)
+}
+
+pub fn blit_sprite_rgba(dst_x: usize, dst_y: usize, sprite: SpriteRgba<'_>, global_alpha: u8) -> bool {
+    if !is_available() {
+        return false;
+    }
+    VGA_WRITER
+        .lock()
+        .blit_sprite_rgba(dst_x, dst_y, sprite, global_alpha)
 }
 
 pub fn draw_text_at(pixel_x: usize, pixel_y: usize, text: &str, fg: RgbColor, bg: RgbColor) {
