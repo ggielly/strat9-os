@@ -4,6 +4,7 @@
 //! shared across all VirtIO drivers.
 //!
 //! Reference: VirtIO spec v1.2, Section 2 (Basic Facilities of a Virtio Device)
+//! https://docs.oasis-open.org/virtio/virtio/v1.2/os/virtio-v1.2-os.html#_basic-facilities-of-a-virtio-device
 
 use super::{vring_flags, VirtqDesc};
 use crate::{
@@ -142,22 +143,11 @@ impl Virtqueue {
 
         drop(lock);
 
-        // SAFETY: We just allocated these frames; convert phys→virt via HHDM
-        // First ensure ALL allocated pages are identity-mapped so we can access them
-        // Map each page in the allocated regions
-        for i in 0..desc_pages {
-            let phys_addr = desc_area.start_address.as_u64() + (i as u64 * 4096);
-            crate::memory::paging::ensure_identity_map(phys_addr);
-        }
-        for i in 0..avail_pages {
-            let phys_addr = avail_area.start_address.as_u64() + (i as u64 * 4096);
-            crate::memory::paging::ensure_identity_map(phys_addr);
-        }
-        for i in 0..used_pages {
-            let phys_addr = used_area.start_address.as_u64() + (i as u64 * 4096);
-            crate::memory::paging::ensure_identity_map(phys_addr);
-        }
-        
+        // SAFETY: we just allocated these frames; convert phys => virt via HHDM
+        // With Limine HHDM, all physical memory is already mapped, so we can
+        // directly use phys_to_virt without additional page table modifications.
+        // DO NOT call ensure_identity_map here - it can corrupt active page tables!
+
         let desc_virt = crate::memory::phys_to_virt(desc_area.start_address.as_u64());
         let avail_virt = crate::memory::phys_to_virt(avail_area.start_address.as_u64());
         let used_virt = crate::memory::phys_to_virt(used_area.start_address.as_u64());

@@ -7,12 +7,14 @@
 use alloc::{format, string::String, vec::Vec};
 use core::{
     fmt,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use spin::Mutex;
 
 /// Whether framebuffer console is available.
 static VGA_AVAILABLE: AtomicBool = AtomicBool::new(false);
+static STATUS_LAST_REFRESH_TICK: AtomicU64 = AtomicU64::new(0);
+const STATUS_REFRESH_PERIOD_TICKS: u64 = 100; // 100Hz timer => 1s
 
 const FONT_PSF: &[u8] = include_bytes!("fonts/zap-ext-light20.psf");
 
@@ -1338,6 +1340,10 @@ fn status_line_info() -> StatusLineInfo {
 
 fn format_uptime() -> String {
     let ticks = crate::process::scheduler::ticks();
+    format_uptime_from_ticks(ticks)
+}
+
+fn format_uptime_from_ticks(ticks: u64) -> String {
     let total_secs = ticks / 100;
     let h = total_secs / 3600;
     let m = (total_secs % 3600) / 60;
@@ -1372,6 +1378,34 @@ fn format_size(bytes: usize) -> String {
     } else {
         format!("{}B", bytes)
     }
+}
+
+fn draw_status_bar_inner(w: &mut VgaWriter, left: &str, right: &str, theme: UiTheme) {
+    let (gw, gh) = w.glyph_size();
+    if gh == 0 || gw == 0 {
+        return;
+    }
+    let bar_h = gh;
+    let y = w.height().saturating_sub(bar_h);
+    w.fill_rect(0, y, w.width(), bar_h, theme.status_bg);
+
+    let left_opts = TextOptions {
+        fg: theme.status_text,
+        bg: theme.status_bg,
+        align: TextAlign::Left,
+        wrap: false,
+        max_width: Some(w.width().saturating_sub(8)),
+    };
+    w.draw_text(0, y, left, left_opts);
+
+    let right_opts = TextOptions {
+        fg: theme.status_text,
+        bg: theme.status_bg,
+        align: TextAlign::Right,
+        wrap: false,
+        max_width: Some(w.width()),
+    };
+    w.draw_text(0, y, right, right_opts);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1852,31 +1886,7 @@ pub fn ui_draw_panel(
 
 pub fn ui_draw_status_bar(left: &str, right: &str, theme: UiTheme) {
     let _ = with_writer(|w| {
-        let (gw, gh) = w.glyph_size();
-        if gh == 0 || gw == 0 {
-            return;
-        }
-        let bar_h = gh;
-        let y = w.height().saturating_sub(bar_h);
-        w.fill_rect(0, y, w.width(), bar_h, theme.status_bg);
-
-        let left_opts = TextOptions {
-            fg: theme.status_text,
-            bg: theme.status_bg,
-            align: TextAlign::Left,
-            wrap: false,
-            max_width: Some(w.width().saturating_sub(8)),
-        };
-        w.draw_text(0, y, left, left_opts);
-
-        let right_opts = TextOptions {
-            fg: theme.status_text,
-            bg: theme.status_bg,
-            align: TextAlign::Right,
-            wrap: false,
-            max_width: Some(w.width()),
-        };
-        w.draw_text(0, y, right, right_opts);
+        draw_status_bar_inner(w, left, right, theme);
     });
 }
 
@@ -1919,6 +1929,46 @@ pub fn draw_system_status_line(theme: UiTheme) {
         info.ip, version, uptime, mem
     );
     ui_draw_status_bar(&left, &right, theme);
+}
+
+pub fn maybe_refresh_system_status_line(theme: UiTheme) {
+    if !is_available() {
+        return;
+    }
+
+    let tick = crate::process::scheduler::ticks();
+    let last = STATUS_LAST_REFRESH_TICK.load(Ordering::Relaxed);
+    if tick.saturating_sub(last) < STATUS_REFRESH_PERIOD_TICKS {
+        return;
+    }
+    if STATUS_LAST_REFRESH_TICK
+        .compare_exchange(last, tick, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    let info = if let Some(guard) = STATUS_LINE_INFO.try_lock() {
+        guard.as_ref().cloned().unwrap_or(StatusLineInfo {
+            hostname: String::from("strat9"),
+            ip: String::from("n/a"),
+        })
+    } else {
+        return;
+    };
+
+    let version = env!("CARGO_PKG_VERSION");
+    let uptime = format_uptime_from_ticks(tick);
+    let mem = format_mem_usage();
+    let left = format!(" {} ", info.hostname);
+    let right = format!(
+        "ip:{}  ver:{}  up:{}  load:n/a  mem:{} ",
+        info.ip, version, uptime, mem
+    );
+
+    if let Some(mut writer) = VGA_WRITER.try_lock() {
+        draw_status_bar_inner(&mut writer, &left, &right, theme);
+    }
 }
 
 pub fn draw_strata_stack(origin_x: usize, origin_y: usize, layer_w: usize, layer_h: usize) {

@@ -236,12 +236,15 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 // =============================================
-// Hardware IRQ Handlers
+// Hardware IRQ handlers
 // =============================================
 
 extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
     // Increment tick counter
     crate::process::scheduler::timer_tick();
+    crate::arch::x86_64::vga::maybe_refresh_system_status_line(
+        crate::arch::x86_64::vga::UiTheme::OCEAN_STATUS,
+    );
 
     // Send EOI first so the timer can fire again on the new task
     if super::apic::is_initialized() {
@@ -262,7 +265,7 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     if let Some(ch) = super::keyboard_layout::handle_scancode() {
         // Store character in keyboard buffer (for future shell input)
         crate::arch::x86_64::keyboard::add_to_buffer(ch);
-        
+
         // Echo to serial only for debugging (not VGA to avoid double-echo)
         crate::serial_print!("{}", ch as char);
     }
