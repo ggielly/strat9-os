@@ -125,16 +125,26 @@ fn spawn_user_program_task(
 }
 
 fn wait_child_exit(parent: TaskId, child: TaskId) -> Result<i32, &'static str> {
+    let start = crate::process::scheduler::ticks();
+    const TIMEOUT_TICKS: u64 = 500; // ~5s at 100Hz
     loop {
         match try_wait_child(parent, Some(child)) {
             WaitChildResult::Reaped { status, .. } => return Ok(status),
             WaitChildResult::NoChildren => return Err("child not found"),
-            WaitChildResult::StillRunning => crate::process::block_current_task(),
+            WaitChildResult::StillRunning => {
+                let now = crate::process::scheduler::ticks();
+                if now.saturating_sub(start) > TIMEOUT_TICKS {
+                    let _ = crate::process::kill_task(child);
+                    return Err("wait timeout");
+                }
+                crate::process::block_current_task();
+            }
         }
     }
 }
 
 fn run_scenario(parent: TaskId, name: &'static str, code: &[u8]) -> bool {
+    crate::serial_println!("[fork-test] {}: spawn", name);
     let child = match spawn_user_program_task(name, code, parent) {
         Ok(id) => id,
         Err(e) => {
@@ -142,6 +152,7 @@ fn run_scenario(parent: TaskId, name: &'static str, code: &[u8]) -> bool {
             return false;
         }
     };
+    crate::serial_println!("[fork-test] {}: child={}", name, child.as_u64());
     match wait_child_exit(parent, child) {
         Ok(0) => true,
         Ok(status) => {

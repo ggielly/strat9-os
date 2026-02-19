@@ -74,15 +74,13 @@ pub struct Waitmsg {
 impl Waitmsg {
     fn new(pid: TaskId, exit_code: i32) -> Self {
         let mut msg = [0u8; 64];
-        if exit_code == 0 {
-            // Plan 9: empty msg means clean exit
-        } else {
-            // Write "exit <N>" into the buffer
-            let s = format_exit_msg(exit_code);
-            let n = s.len().min(63);
-            msg[..n].copy_from_slice(&s.as_bytes()[..n]);
-            msg[n] = 0;
+        if exit_code != 0 {
+            // Write "exit <N>" using a stack buffer — no heap, no format!.
+            let prefix = b"exit ";
+            msg[..prefix.len()].copy_from_slice(prefix);
+            write_decimal(exit_code, &mut msg[prefix.len()..]);
         }
+        // exit_code == 0: leave msg all-zero (Plan 9: empty = clean exit)
         Waitmsg {
             pid: pid.as_u64(),
             exit_code,
@@ -92,19 +90,54 @@ impl Waitmsg {
     }
 }
 
-/// Format "exit <N>" without heap allocation (uses a small stack buffer).
-fn format_exit_msg(code: i32) -> &'static str {
-    // We only need this for debugging; use a constant table for common codes.
-    // In a full kernel we'd use write! into an ArrayString.
-    match code {
-        1   => "exit 1",
-        2   => "exit 2",
-        126 => "exit 126",
-        127 => "exit 127",
-        128 => "exit 128",
-        130 => "exit 130",
-        _   => "exit",
+/// Write the decimal representation of `n` into `buf`, null-terminated.
+///
+/// Uses digit-reversal on a small stack scratch buffer — no heap allocation.
+/// Handles negative values with a leading `-`.  Writes at most `buf.len()-1`
+/// digits and always null-terminates `buf[0]` on empty / overflow.
+fn write_decimal(n: i32, buf: &mut [u8]) {
+    if buf.is_empty() {
+        return;
     }
+
+    // Collect digits into a scratch buffer (i32 is at most 11 chars: "-2147483648")
+    let mut scratch = [0u8; 12];
+    let mut len = 0usize;
+
+    let negative = n < 0;
+    // Work in u32 to avoid overflow on i32::MIN
+    let mut v: u32 = if negative { (n as i64).unsigned_abs() as u32 } else { n as u32 };
+
+    if v == 0 {
+        scratch[0] = b'0';
+        len = 1;
+    } else {
+        while v > 0 && len < scratch.len() {
+            scratch[len] = b'0' + (v % 10) as u8;
+            v /= 10;
+            len += 1;
+        }
+        // scratch holds digits in reverse order — fix that in-place
+        scratch[..len].reverse();
+    }
+
+    // Prepend '-' if negative
+    let (digits_start, digits_len) = if negative {
+        let total = len + 1;
+        // Shift digits right by 1 to make room for '-'
+        for i in (1..total.min(scratch.len())).rev() {
+            scratch[i] = scratch[i - 1];
+        }
+        scratch[0] = b'-';
+        (0, total.min(scratch.len()))
+    } else {
+        (0, len)
+    };
+
+    // Copy into buf, leaving room for null terminator
+    let copy_len = digits_len.min(buf.len() - 1);
+    buf[..copy_len].copy_from_slice(&scratch[digits_start..digits_start + copy_len]);
+    buf[copy_len] = 0;
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -176,11 +209,18 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
 
     let parent_id = current_task_id().ok_or(SyscallError::Fault)?;
 
-    // Build child filter: negative pid or -1 → any child.
+    // Build child filter.
+    //   pid > 0  → wait for that specific child
+    //   pid == -1 → wait for any child
+    //   pid == 0  → process-group semantics (not supported)
+    //   pid < -1  → wait for group |pid| (not supported)
     let target: Option<TaskId> = if pid > 0 {
         Some(TaskId::from_u64(pid as u64))
+    } else if pid == -1 {
+        None // any child
     } else {
-        None
+        // pid == 0 or pid < -1: process-group wait — not implemented.
+        return Err(SyscallError::InvalidArgument);
     };
 
     // ── Non-blocking fast path ────────────────────────────────────────────

@@ -427,7 +427,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     }
 
     // =============================================
-    // Phase 8e: Create Chevron shell task
+    // Phase 8e: create Chevron shell task
     // =============================================
     serial_println!("[init] Creating Chevron shell task...");
     vga_println!("[..] Creating interactive shell...");
@@ -448,15 +448,19 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     }
 
     // Dedicated status-line updater task (keeps bottom bar live independently of shell activity).
-    if let Ok(status_task) = process::Task::new_kernel_task(
-        arch::x86_64::vga::status_line_task_main,
-        "status-line",
-        process::TaskPriority::Low,
-    ) {
-        process::add_task(status_task);
-        serial_println!("[init] Status line task created.");
-    } else {
-        serial_println!("[WARN] Failed to create status line task");
+    // Disabled in selftest builds to keep runtime deterministic.
+    #[cfg(not(feature = "selftest"))]
+    {
+        if let Ok(status_task) = process::Task::new_kernel_task(
+            arch::x86_64::vga::status_line_task_main,
+            "status-line",
+            process::TaskPriority::Low,
+        ) {
+            process::add_task(status_task);
+            serial_println!("[init] Status line task created.");
+        } else {
+            serial_println!("[WARN] Failed to create status line task");
+        }
     }
 
     // =============================================
@@ -604,13 +608,13 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     };
     serial_println!("[init]   6c. MADT parsed");
 
-    // Step 6d: Initialize Local APIC
+    // Step 6d: initialize Local APIC
     // Ensure Local APIC MMIO is mapped
     memory::paging::ensure_identity_map(madt_info.local_apic_address as u64);
     apic::init(madt_info.local_apic_address);
     serial_println!("[init]   6d. Local APIC initialized");
 
-    // Step 6e: Initialize first I/O APIC
+    // Step 6e: initialize first I/O APIC
     if madt_info.io_apic_count == 0 {
         log::warn!("APIC: no I/O APIC in MADT");
         return false;
@@ -624,19 +628,19 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     ioapic::init(io_apic_entry.io_apic_address, io_apic_entry.gsi_base);
     serial_println!("[init]   6e. I/O APIC initialized");
 
-    // Step 6f: Remap PIC to 0x20+ then disable permanently
+    // Step 6f: remap PIC to 0x20+ then disable permanently
     // Must remap first to avoid stray interrupts at exception vectors (0-31)
     pic::init(pic::PIC1_OFFSET, pic::PIC2_OFFSET);
     pic::disable_permanently();
     serial_println!("[init]   6f. Legacy PIC remapped and disabled");
 
-    // Step 6g: Route IRQ0 (timer) and IRQ1 (keyboard) via I/O APIC
+    // Step 6g: route IRQ0 (timer) and IRQ1 (keyboard) via I/O APIC
     let lapic_id = apic::lapic_id();
     ioapic::route_legacy_irq(0, lapic_id, 0x20, &madt_info.overrides);
     ioapic::route_legacy_irq(1, lapic_id, 0x21, &madt_info.overrides);
     serial_println!("[init]   6g. IRQ0->vec 0x20, IRQ1->vec 0x21 routed");
 
-    // Step 6h: Calibrate APIC timer using PIT channel 2
+    // Step 6h: calibrate APIC timer using PIT channel 2
     let ticks_per_10ms = timer::calibrate_apic_timer();
     if ticks_per_10ms == 0 {
         log::warn!("APIC: timer calibration failed, falling back to PIC");
@@ -646,7 +650,7 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     }
     serial_println!("[init]   6h. APIC timer calibrated");
 
-    // Step 6i: Start APIC timer in periodic mode
+    // Step 6i: start APIC timer in periodic mode
     timer::start_apic_timer(ticks_per_10ms);
     serial_println!("[init]   6i. APIC timer started (100Hz)");
 
