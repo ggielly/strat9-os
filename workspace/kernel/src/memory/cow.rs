@@ -87,9 +87,10 @@ impl FrameMeta {
     }
 }
 
-/// Global frame metadata array
+/// Global frame metadata array pointer
 /// Initialized during boot with the number of available frames
-static mut FRAME_METAS: Option<&'static mut [FrameMeta]> = None;
+static mut FRAME_METAS_PTR: *mut FrameMeta = core::ptr::null_mut();
+static mut FRAME_METAS_LEN: usize = 0;
 
 /// Initialize the frame metadata manager
 ///
@@ -101,19 +102,30 @@ static mut FRAME_METAS: Option<&'static mut [FrameMeta]> = None;
 /// - `metas_ptr` must point to a valid array of `max_pfn` FrameMeta entries
 /// - Must be called once during boot, before any memory allocations
 pub unsafe fn init_frame_metadata(max_pfn: usize, metas_ptr: *mut FrameMeta) {
-    FRAME_METAS = Some(core::slice::from_raw_parts_mut(metas_ptr, max_pfn));
-    log::info!("Frame metadata initialized for {} frames ({:.2} GB max)", 
+    FRAME_METAS_PTR = metas_ptr;
+    FRAME_METAS_LEN = max_pfn;
+    log::info!("Frame metadata initialized for {} frames ({:.2} GB max)",
                max_pfn, (max_pfn as u64 * 4096) / (1024 * 1024 * 1024));
 }
 
 /// Get metadata for a physical frame
 fn get_frame_meta(pfn: u64) -> Option<&'static FrameMeta> {
-    unsafe { FRAME_METAS.as_ref()?.get(pfn as usize) }
+    unsafe {
+        if FRAME_METAS_PTR.is_null() || pfn as usize >= FRAME_METAS_LEN {
+            return None;
+        }
+        Some(&*FRAME_METAS_PTR.add(pfn as usize))
+    }
 }
 
 /// Get mutable metadata for a physical frame
 fn get_frame_meta_mut(pfn: u64) -> Option<&'static mut FrameMeta> {
-    unsafe { FRAME_METAS.as_mut()?.get_mut(pfn as usize) }
+    unsafe {
+        if FRAME_METAS_PTR.is_null() || pfn as usize >= FRAME_METAS_LEN {
+            return None;
+        }
+        Some(&mut *FRAME_METAS_PTR.add(pfn as usize))
+    }
 }
 
 #[inline]
