@@ -108,20 +108,23 @@ pub const SYS_PROC_EXIT: u64 = 300;
 /// Yield the current time slice.
 pub const SYS_PROC_YIELD: u64 = 301;
 
+/// Fork the current process (COW). Returns child PID in parent, 0 in child.
+pub const SYS_PROC_FORK: u64 = 302;
+
 // Futex wait. arg1=uaddr (*u32), arg2=expected_val, arg3=timeout_ns
-pub const SYS_FUTEX_WAIT: u64 = 302;
+pub const SYS_FUTEX_WAIT: u64 = 303;
 
 // Futex wake. arg1=uaddr (*u32), arg2=max_wakers
-pub const SYS_FUTEX_WAKE: u64 = 303;
+pub const SYS_FUTEX_WAKE: u64 = 304;
 
 // Futex requeue. arg1=uaddr1, arg2=max_wake, arg3=max_requeue, arg4=uaddr2
-pub const SYS_FUTEX_REQUEUE: u64 = 304;
+pub const SYS_FUTEX_REQUEUE: u64 = 305;
 
 // Futex cmp_requeue. arg1=uaddr1, arg2=max_wake, arg3=max_requeue, arg4=uaddr2, arg5=expected_val
-pub const SYS_FUTEX_CMP_REQUEUE: u64 = 305;
+pub const SYS_FUTEX_CMP_REQUEUE: u64 = 306;
 
 // Futex wake_op. arg1=uaddr1, arg2=max_wake1, arg3=max_wake2, arg4=uaddr2, arg5=op
-pub const SYS_FUTEX_WAKE_OP: u64 = 306;
+pub const SYS_FUTEX_WAKE_OP: u64 = 307;
 
 // ============================================================
 // Block 320-329: signal handling

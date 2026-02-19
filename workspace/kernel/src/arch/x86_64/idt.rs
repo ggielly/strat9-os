@@ -117,12 +117,34 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     use x86_64::registers::control::{Cr2, Cr3};
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
+    
+    // Get the faulting address
+    let fault_addr = Cr2::read();
+    
+    // Try to handle COW fault first (before killing the process)
+    if error_code.caused_by_write() && is_user {
+        if let Some(task) = crate::process::current_task() {
+            let address_space = &task.process().address_space;
+            if let Ok(vaddr) = fault_addr {
+                match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), address_space) {
+                    Ok(()) => {
+                        // COW fault resolved successfully - return to userland
+                        return;
+                    }
+                    Err(_) => {
+                        // Not a COW fault - fall through to normal page fault handling
+                    }
+                }
+            }
+        }
+    }
+    
     if is_user {
         if let Some(tid) = crate::process::current_task_id() {
             crate::silo::handle_user_fault(
                 tid,
                 crate::silo::SiloFaultReason::PageFault,
-                Cr2::read().unwrap_or(VirtAddr::new(0)).as_u64(),
+                fault_addr.map(|v| v.as_u64()).unwrap_or(0),
                 error_code.bits() as u64,
             );
             return;
@@ -130,7 +152,6 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 
     log::error!("EXCEPTION: PAGE FAULT");
-    let fault_addr = Cr2::read();
     log::error!("Accessed Address: {:?}", fault_addr);
     log::error!("Error Code: {:?}", error_code);
     log::error!("{:#?}", stack_frame);

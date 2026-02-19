@@ -2,7 +2,7 @@
 //!
 //! Routes syscall numbers to handler functions and converts results to RAX values.
 //! Called from the naked `syscall_entry` assembly with a pointer to `SyscallFrame`.
-use super::{error::SyscallError, numbers::*, SyscallFrame};
+use super::{error::SyscallError, fork::sys_fork, numbers::*, SyscallFrame};
 use super::{sys_clock_gettime, sys_nanosleep};
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
@@ -55,6 +55,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         SYS_PROC_EXIT => sys_proc_exit(arg1),
         SYS_PROC_YIELD => sys_proc_yield(),
+        SYS_PROC_FORK => sys_fork().map(|result| result.child_pid.as_u64()),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),
