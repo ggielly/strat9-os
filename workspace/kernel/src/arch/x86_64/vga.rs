@@ -4,7 +4,7 @@
 //! Keeps the existing `vga_print!` / `vga_println!` API but renders text into
 //! the graphical framebuffer when available. Falls back to serial otherwise.
 
-use alloc::vec::Vec;
+use alloc::{format, string::String, vec::Vec};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
@@ -14,7 +14,7 @@ use spin::Mutex;
 /// Whether framebuffer console is available.
 static VGA_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-const FONT_PSF: &[u8] = include_bytes!("fonts/zap-ext-vga16.psf");
+const FONT_PSF: &[u8] = include_bytes!("fonts/zap-ext-light20.psf");
 
 /// VGA colors mapped to RGB for text rendering.
 #[allow(dead_code)]
@@ -135,7 +135,25 @@ impl UiTheme {
         status_bg: RgbColor::new(0xE6, 0xD7, 0xBF),
         status_text: RgbColor::new(0x2B, 0x2B, 0x2B),
     };
+
+    pub const OCEAN_STATUS: Self = Self {
+        background: RgbColor::new(0x12, 0x16, 0x1E),
+        panel_bg: RgbColor::new(0x1A, 0x22, 0x2C),
+        panel_border: RgbColor::new(0x3D, 0x52, 0x66),
+        text: RgbColor::new(0xE2, 0xE8, 0xF0),
+        accent: RgbColor::new(0x4F, 0xB3, 0xB3),
+        status_bg: RgbColor::new(0x1B, 0x4D, 0x8A),
+        status_text: RgbColor::new(0xF5, 0xFA, 0xFF),
+    };
 }
+
+#[derive(Debug, Clone)]
+struct StatusLineInfo {
+    hostname: String,
+    ip: String,
+}
+
+static STATUS_LINE_INFO: Mutex<Option<StatusLineInfo>> = Mutex::new(None);
 
 #[inline]
 fn color_to_rgb(c: Color) -> (u8, u8, u8) {
@@ -201,6 +219,7 @@ struct FontInfo {
     glyph_w: usize,
     glyph_h: usize,
     data_offset: usize,
+    unicode_table_offset: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -224,6 +243,7 @@ fn parse_psf(font: &[u8]) -> Option<FontInfo> {
             glyph_w: 8,
             glyph_h,
             data_offset: 4,
+            unicode_table_offset: None,
         });
     }
 
@@ -234,20 +254,102 @@ fn parse_psf(font: &[u8]) -> Option<FontInfo> {
             u32::from_le_bytes([font[off], font[off + 1], font[off + 2], font[off + 3]])
         };
         let headersize = rd_u32(8) as usize;
+        let flags = rd_u32(12);
         let glyph_count = rd_u32(16) as usize;
         let bytes_per_glyph = rd_u32(20) as usize;
         let glyph_h = rd_u32(24) as usize;
         let glyph_w = rd_u32(28) as usize;
+        let glyph_bytes = glyph_count.saturating_mul(bytes_per_glyph);
+        let unicode_table_offset = if (flags & 1) != 0 {
+            Some(headersize.saturating_add(glyph_bytes))
+        } else {
+            None
+        };
         return Some(FontInfo {
             glyph_count,
             bytes_per_glyph,
             glyph_w,
             glyph_h,
             data_offset: headersize,
+            unicode_table_offset,
         });
     }
 
     None
+}
+
+fn decode_utf8_at(bytes: &[u8], pos: usize) -> Option<(u32, usize)> {
+    let b0 = *bytes.get(pos)?;
+    if b0 < 0x80 {
+        return Some((b0 as u32, 1));
+    }
+    if (b0 & 0xE0) == 0xC0 {
+        let b1 = *bytes.get(pos + 1)?;
+        if (b1 & 0xC0) != 0x80 {
+            return None;
+        }
+        let cp = (((b0 & 0x1F) as u32) << 6) | ((b1 & 0x3F) as u32);
+        return Some((cp, 2));
+    }
+    if (b0 & 0xF0) == 0xE0 {
+        let b1 = *bytes.get(pos + 1)?;
+        let b2 = *bytes.get(pos + 2)?;
+        if (b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 {
+            return None;
+        }
+        let cp =
+            (((b0 & 0x0F) as u32) << 12) | (((b1 & 0x3F) as u32) << 6) | ((b2 & 0x3F) as u32);
+        return Some((cp, 3));
+    }
+    if (b0 & 0xF8) == 0xF0 {
+        let b1 = *bytes.get(pos + 1)?;
+        let b2 = *bytes.get(pos + 2)?;
+        let b3 = *bytes.get(pos + 3)?;
+        if (b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80 {
+            return None;
+        }
+        let cp = (((b0 & 0x07) as u32) << 18)
+            | (((b1 & 0x3F) as u32) << 12)
+            | (((b2 & 0x3F) as u32) << 6)
+            | ((b3 & 0x3F) as u32);
+        return Some((cp, 4));
+    }
+    None
+}
+
+fn parse_psf2_unicode_map(font: &[u8], info: &FontInfo) -> Vec<(u32, usize)> {
+    let Some(mut i) = info.unicode_table_offset else {
+        return Vec::new();
+    };
+    if i >= font.len() {
+        return Vec::new();
+    }
+
+    let mut map = Vec::new();
+    for glyph in 0..info.glyph_count {
+        while i < font.len() {
+            let b = font[i];
+            if b == 0xFF {
+                i += 1;
+                break;
+            }
+            if b == 0xFE {
+                // PSF2 sequence marker; skip marker and continue parsing bytes until glyph separator.
+                i += 1;
+                continue;
+            }
+            if let Some((cp, adv)) = decode_utf8_at(font, i) {
+                if !map.iter().any(|(u, _)| *u == cp) {
+                    map.push((cp, glyph));
+                }
+                i += adv;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    map
 }
 
 pub struct VgaWriter {
@@ -268,6 +370,7 @@ pub struct VgaWriter {
 
     font: &'static [u8],
     font_info: FontInfo,
+    unicode_map: Vec<(u32, usize)>,
     clip: ClipRect,
     back_buffer: Option<Vec<u32>>,
     draw_to_back: bool,
@@ -307,7 +410,9 @@ impl VgaWriter {
                 glyph_w: 8,
                 glyph_h: 16,
                 data_offset: 0,
+                unicode_table_offset: None,
             },
+            unicode_map: Vec::new(),
             clip: ClipRect {
                 x: 0,
                 y: 0,
@@ -354,6 +459,7 @@ impl VgaWriter {
         self.bg = fmt.pack_rgb(br, bg, bb);
         self.font = FONT_PSF;
         self.font_info = font_info;
+        self.unicode_map = parse_psf2_unicode_map(FONT_PSF, &self.font_info);
         self.clip = ClipRect {
             x: 0,
             y: 0,
@@ -901,11 +1007,7 @@ impl VgaWriter {
         self.set_rgb_color(fg, bg);
 
         for ch in text.chars() {
-            if ch.is_ascii() {
-                self.write_char(ch as u8);
-            } else {
-                self.write_char(b'?');
-            }
+            self.write_char(ch);
             if self.row >= self.rows {
                 break;
             }
@@ -917,15 +1019,38 @@ impl VgaWriter {
         self.bg = saved_bg;
     }
 
-    fn draw_glyph_at_pixel(&mut self, pixel_x: usize, pixel_y: usize, ch: u8, fg: u32, bg: u32) {
+    fn glyph_index_for_char(&self, ch: char) -> usize {
+        if ch.is_ascii() {
+            let idx = ch as usize;
+            if idx < self.font_info.glyph_count {
+                return idx;
+            }
+        }
+        let cp = ch as u32;
+        if let Some((_, glyph)) = self.unicode_map.iter().find(|(u, _)| *u == cp) {
+            return *glyph;
+        }
+        if let Some((_, glyph)) = self.unicode_map.iter().find(|(u, _)| *u == ('?' as u32)) {
+            return *glyph;
+        }
+        if ('?' as usize) < self.font_info.glyph_count {
+            return '?' as usize;
+        }
+        0
+    }
+
+    fn draw_glyph_index_at_pixel(
+        &mut self,
+        pixel_x: usize,
+        pixel_y: usize,
+        glyph_index: usize,
+        fg: u32,
+        bg: u32,
+    ) {
         if !self.enabled {
             return;
         }
-        let glyph_index = if (ch as usize) < self.font_info.glyph_count {
-            ch as usize
-        } else {
-            b'?' as usize
-        };
+        let glyph_index = core::cmp::min(glyph_index, self.font_info.glyph_count.saturating_sub(1));
         let start = self.font_info.data_offset + glyph_index * self.font_info.bytes_per_glyph;
         let glyph = &self.font[start..start + self.font_info.bytes_per_glyph];
         let row_bytes = self.font_info.glyph_w.div_ceil(8);
@@ -940,9 +1065,14 @@ impl VgaWriter {
         }
     }
 
-    fn layout_text_lines(&self, text: &str, wrap: bool, max_cols: Option<usize>) -> Vec<Vec<u8>> {
-        let mut lines: Vec<Vec<u8>> = Vec::new();
-        let mut current: Vec<u8> = Vec::new();
+    fn draw_glyph_at_pixel(&mut self, pixel_x: usize, pixel_y: usize, ch: char, fg: u32, bg: u32) {
+        let glyph_index = self.glyph_index_for_char(ch);
+        self.draw_glyph_index_at_pixel(pixel_x, pixel_y, glyph_index, fg, bg);
+    }
+
+    fn layout_text_lines(&self, text: &str, wrap: bool, max_cols: Option<usize>) -> Vec<Vec<char>> {
+        let mut lines: Vec<Vec<char>> = Vec::new();
+        let mut current: Vec<char> = Vec::new();
         let wrap_cols = max_cols.filter(|&c| c > 0);
 
         for ch in text.chars() {
@@ -961,11 +1091,7 @@ impl VgaWriter {
                 }
             }
 
-            if ch.is_ascii() {
-                current.push(ch as u8);
-            } else {
-                current.push(b'?');
-            }
+            current.push(ch);
         }
 
         lines.push(current);
@@ -1075,29 +1201,15 @@ impl VgaWriter {
         }
     }
 
-    fn draw_glyph(&mut self, cx: usize, cy: usize, ch: u8) {
-        if !self.enabled {
-            return;
-        }
-        let glyph_index = if (ch as usize) < self.font_info.glyph_count {
-            ch as usize
-        } else {
-            b'?' as usize
-        };
-        let start = self.font_info.data_offset + glyph_index * self.font_info.bytes_per_glyph;
-        let glyph = &self.font[start..start + self.font_info.bytes_per_glyph];
-        let row_bytes = self.font_info.glyph_w.div_ceil(8);
-
-        for gy in 0..self.font_info.glyph_h {
-            for gx in 0..self.font_info.glyph_w {
-                let byte = glyph[gy * row_bytes + gx / 8];
-                let mask = 0x80 >> (gx % 8);
-                let px = cx * self.font_info.glyph_w + gx;
-                let py = cy * self.font_info.glyph_h + gy;
-                let color = if (byte & mask) != 0 { self.fg } else { self.bg };
-                self.put_pixel_raw(px, py, color);
-            }
-        }
+    fn draw_glyph(&mut self, cx: usize, cy: usize, ch: char) {
+        let glyph_index = self.glyph_index_for_char(ch);
+        self.draw_glyph_index_at_pixel(
+            cx * self.font_info.glyph_w,
+            cy * self.font_info.glyph_h,
+            glyph_index,
+            self.fg,
+            self.bg,
+        );
     }
 
     fn clear_row(&mut self, row: usize) {
@@ -1146,25 +1258,25 @@ impl VgaWriter {
         self.row = self.rows - 1;
     }
 
-    fn write_char(&mut self, c: u8) {
+    fn write_char(&mut self, c: char) {
         if !self.enabled {
             return;
         }
         match c {
-            b'\n' => {
+            '\n' => {
                 self.col = 0;
                 self.row += 1;
             }
-            b'\r' => self.col = 0,
-            b'\t' => self.col = (self.col + 4) & !3,
-            0x08 => {
+            '\r' => self.col = 0,
+            '\t' => self.col = (self.col + 4) & !3,
+            '\u{8}' => {
                 if self.col > 0 {
                     self.col -= 1;
-                    self.draw_glyph(self.col, self.row, b' ');
+                    self.draw_glyph(self.col, self.row, ' ');
                 }
             }
-            byte => {
-                self.draw_glyph(self.col, self.row, byte);
+            ch => {
+                self.draw_glyph(self.col, self.row, ch);
                 self.col += 1;
             }
         }
@@ -1182,11 +1294,7 @@ impl VgaWriter {
 
     fn write_bytes(&mut self, s: &str) {
         for ch in s.chars() {
-            if ch.is_ascii() {
-                self.write_char(ch as u8);
-            } else {
-                self.write_char(b'?');
-            }
+            self.write_char(ch);
         }
     }
 }
@@ -1215,6 +1323,55 @@ pub fn with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
     }
     let mut writer = VGA_WRITER.lock();
     Some(f(&mut writer))
+}
+
+fn status_line_info() -> StatusLineInfo {
+    let mut guard = STATUS_LINE_INFO.lock();
+    if guard.is_none() {
+        *guard = Some(StatusLineInfo {
+            hostname: String::from("strat9"),
+            ip: String::from("n/a"),
+        });
+    }
+    guard.as_ref().cloned().unwrap()
+}
+
+fn format_uptime() -> String {
+    let ticks = crate::process::scheduler::ticks();
+    let total_secs = ticks / 100;
+    let h = total_secs / 3600;
+    let m = (total_secs % 3600) / 60;
+    let s = total_secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+fn format_mem_usage() -> String {
+    let lock = crate::memory::buddy::get_allocator();
+    let guard = lock.lock();
+    let Some(alloc) = guard.as_ref() else {
+        return String::from("n/a");
+    };
+    let stats = alloc.get_stats();
+    let page_size = 4096usize;
+    let total = stats.total_pages.saturating_mul(page_size);
+    let used = stats.allocated_pages.saturating_mul(page_size);
+    let free = total.saturating_sub(used);
+    format!("{}/{}", format_size(free), format_size(total))
+}
+
+fn format_size(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * KB;
+    const GB: usize = 1024 * MB;
+    if bytes >= GB {
+        format!("{}G", bytes / GB)
+    } else if bytes >= MB {
+        format!("{}M", bytes / MB)
+    } else if bytes >= KB {
+        format!("{}K", bytes / KB)
+    } else {
+        format!("{}B", bytes)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1262,15 +1419,16 @@ pub fn init(
         fmt,
     ) {
         writer.set_color(Color::LightCyan, Color::Black);
-        writer.clear();
+        writer.clear_with(RgbColor::new(0x12, 0x16, 0x1E));
         // Decorative background mark for Strat9 identity.
         let deco_w = (writer.width() / 3).clamp(120, 300);
         let deco_h = (writer.height() / 4).clamp(90, 220);
         let deco_x = writer.width().saturating_sub(deco_w + 24);
         let deco_y = 24;
         writer.draw_strata_stack(deco_x, deco_y, deco_w, deco_h);
+        writer.set_rgb_color(RgbColor::new(0xA7, 0xD8, 0xD8), RgbColor::new(0x12, 0x16, 0x1E));
         writer.write_bytes("Strat9-OS v0.1.0\n");
-        writer.set_color(Color::LightGrey, Color::Black);
+        writer.set_rgb_color(RgbColor::new(0xE2, 0xE8, 0xF0), RgbColor::new(0x12, 0x16, 0x1E));
         VGA_AVAILABLE.store(true, Ordering::Relaxed);
         log::info!(
             "Framebuffer console enabled: {}x{} {}bpp pitch={}",
@@ -1279,6 +1437,8 @@ pub fn init(
             bpp,
             pitch
         );
+        drop(writer);
+        draw_system_status_line(UiTheme::OCEAN_STATUS);
     } else {
         writer.enabled = false;
         VGA_AVAILABLE.store(false, Ordering::Relaxed);
@@ -1433,6 +1593,10 @@ impl Canvas {
 
     pub fn ui_status_bar(&self, left: &str, right: &str, theme: UiTheme) {
         ui_draw_status_bar(left, right, theme);
+    }
+
+    pub fn system_status_line(&self, theme: UiTheme) {
+        draw_system_status_line(theme);
     }
 }
 
@@ -1692,7 +1856,7 @@ pub fn ui_draw_status_bar(left: &str, right: &str, theme: UiTheme) {
         if gh == 0 || gw == 0 {
             return;
         }
-        let bar_h = gh + 4;
+        let bar_h = gh;
         let y = w.height().saturating_sub(bar_h);
         w.fill_rect(0, y, w.width(), bar_h, theme.status_bg);
 
@@ -1703,17 +1867,58 @@ pub fn ui_draw_status_bar(left: &str, right: &str, theme: UiTheme) {
             wrap: false,
             max_width: Some(w.width().saturating_sub(8)),
         };
-        w.draw_text(4, y + 2, left, left_opts);
+        w.draw_text(0, y, left, left_opts);
 
         let right_opts = TextOptions {
             fg: theme.status_text,
             bg: theme.status_bg,
             align: TextAlign::Right,
             wrap: false,
-            max_width: Some(w.width().saturating_sub(8)),
+            max_width: Some(w.width()),
         };
-        w.draw_text(4, y + 2, right, right_opts);
+        w.draw_text(0, y, right, right_opts);
     });
+}
+
+pub fn set_status_hostname(hostname: &str) {
+    let mut guard = STATUS_LINE_INFO.lock();
+    if guard.is_none() {
+        *guard = Some(StatusLineInfo {
+            hostname: String::new(),
+            ip: String::from("n/a"),
+        });
+    }
+    if let Some(info) = guard.as_mut() {
+        info.hostname.clear();
+        info.hostname.push_str(hostname);
+    }
+}
+
+pub fn set_status_ip(ip: &str) {
+    let mut guard = STATUS_LINE_INFO.lock();
+    if guard.is_none() {
+        *guard = Some(StatusLineInfo {
+            hostname: String::from("strat9"),
+            ip: String::new(),
+        });
+    }
+    if let Some(info) = guard.as_mut() {
+        info.ip.clear();
+        info.ip.push_str(ip);
+    }
+}
+
+pub fn draw_system_status_line(theme: UiTheme) {
+    let info = status_line_info();
+    let version = env!("CARGO_PKG_VERSION");
+    let uptime = format_uptime();
+    let mem = format_mem_usage();
+    let left = format!(" {} ", info.hostname);
+    let right = format!(
+        "ip:{}  ver:{}  up:{}  load:n/a  mem:{} ",
+        info.ip, version, uptime, mem
+    );
+    ui_draw_status_bar(&left, &right, theme);
 }
 
 pub fn draw_strata_stack(origin_x: usize, origin_y: usize, layer_w: usize, layer_h: usize) {
