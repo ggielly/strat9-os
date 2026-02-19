@@ -202,14 +202,42 @@ impl AddressSpace {
         flags: VmaFlags,
         vma_type: VmaType,
     ) -> Result<(), &'static str> {
+        if page_count == 0 || start & 0xFFF != 0 {
+            return Err("Invalid region arguments");
+        }
+        let len = (page_count as u64)
+            .checked_mul(4096)
+            .ok_or("Region length overflow")?;
+        let end = start
+            .checked_add(len)
+            .ok_or("Region end overflow")?;
+        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        if end > USER_SPACE_END {
+            return Err("Region out of user-space range");
+        }
+
+        // Reject overlapping VMAs early, before touching page tables.
+        {
+            let regions = self.regions.lock();
+            if regions.iter().any(|(&vma_start, vma)| {
+                let vma_end = vma_start.saturating_add((vma.page_count as u64).saturating_mul(4096));
+                vma_start < end && vma_end > start
+            }) {
+                return Err("Region overlaps existing mapping");
+            }
+        }
+
         let page_flags = flags.to_page_flags();
         let mut frame_allocator = BuddyFrameAllocator;
 
         // SAFETY: We have logical ownership of this address space.
         let mut mapper = unsafe { self.mapper() };
+        let mut mapped_pages = 0usize;
 
         for i in 0..page_count {
-            let page_addr = start + (i as u64) * 4096;
+            let page_addr = start
+                .checked_add((i as u64).saturating_mul(4096))
+                .ok_or("Page address overflow")?;
             let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
                 .map_err(|_| "Page address not aligned")?;
 
@@ -227,11 +255,50 @@ impl AddressSpace {
 
             // Map the page to the frame.
             // SAFETY: The frame is valid and unused; flags are caller-specified.
-            unsafe {
-                mapper
-                    .map_to(page, frame, page_flags, &mut frame_allocator)
-                    .map_err(|_| "Failed to map page")?
-                    .flush();
+            let map_res = unsafe { mapper.map_to(page, frame, page_flags, &mut frame_allocator) };
+            match map_res {
+                Ok(flush) => {
+                    flush.flush();
+                    mapped_pages += 1;
+                }
+                Err(_) => {
+                    // Free frame for the page that failed to map.
+                    {
+                        let lock = crate::memory::get_allocator();
+                        let mut guard = lock.lock();
+                        if let Some(allocator) = guard.as_mut() {
+                            allocator.free(
+                                crate::memory::PhysFrame {
+                                    start_address: frame.start_address(),
+                                },
+                                0,
+                            );
+                        }
+                    }
+
+                    // Roll back already mapped pages to keep state consistent.
+                    for j in (0..mapped_pages).rev() {
+                        let rb_addr = start + (j as u64) * 4096;
+                        let rb_page =
+                            Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
+                                .map_err(|_| "Rollback: invalid page address")?;
+                        if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                            rb_flush.flush();
+                            let lock = crate::memory::get_allocator();
+                            let mut guard = lock.lock();
+                            if let Some(allocator) = guard.as_mut() {
+                                allocator.free(
+                                    crate::memory::PhysFrame {
+                                        start_address: rb_frame.start_address(),
+                                    },
+                                    0,
+                                );
+                            }
+                        }
+                    }
+
+                    return Err("Failed to map page");
+                }
             }
         }
 
@@ -330,6 +397,19 @@ impl AddressSpace {
         } else {
             None
         }
+    }
+
+    /// Return true if any tracked VMA overlaps `[addr, addr + len)`.
+    pub fn has_mapping_in_range(&self, addr: u64, len: u64) -> bool {
+        let end = match addr.checked_add(len) {
+            Some(v) => v,
+            None => return true,
+        };
+        let regions = self.regions.lock();
+        regions.iter().any(|(&vma_start, vma)| {
+            let vma_end = vma_start.saturating_add((vma.page_count as u64).saturating_mul(4096));
+            vma_start < end && vma_end > addr
+        })
     }
 
     /// Unmap the virtual address range `[addr, addr + len)`, handling partial VMA overlaps.

@@ -5,5 +5,5 @@
 
 pub fn create_selftest_tasks() {
     crate::process::futex_test::create_futex_test_task();
+    crate::process::mmap_test::create_mmap_test_task();
 }
-

@@ -41,6 +41,7 @@ const MAP_SHARED: u32 = 1 << 0;
 const MAP_PRIVATE: u32 = 1 << 1;
 const MAP_FIXED: u32 = 1 << 4;
 const MAP_ANONYMOUS: u32 = 1 << 5;
+const MAP_FIXED_NOREPLACE: u32 = 1 << 20; // Linux-compatible extension bit.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -86,14 +87,27 @@ pub fn sys_mmap(
         return Err(SyscallError::InvalidArgument);
     }
 
+    let known_flags =
+        MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE;
+    if flags & !known_flags != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
     // File-backed mappings are not yet implemented.
     if flags & MAP_ANONYMOUS == 0 {
         log::warn!("sys_mmap: file-backed mmap not yet supported");
         return Err(SyscallError::NotImplemented);
     }
 
-    // One of MAP_PRIVATE or MAP_SHARED must be set.
-    if flags & (MAP_PRIVATE | MAP_SHARED) == 0 {
+    let is_private = flags & MAP_PRIVATE != 0;
+    let is_shared = flags & MAP_SHARED != 0;
+    // Exactly one of MAP_PRIVATE / MAP_SHARED.
+    if is_private == is_shared {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // Anonymous mapping currently requires page-aligned zero offset.
+    if _offset != 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
@@ -122,10 +136,17 @@ pub fn sys_mmap(
         if addr.saturating_add(len_aligned) > USER_SPACE_END {
             return Err(SyscallError::InvalidArgument);
         }
-        // Linux semantics: silently unmap any existing mappings in the range.
-        addr_space
-            .unmap_range(addr, len_aligned)
-            .map_err(|_| SyscallError::InvalidArgument)?;
+        if flags & MAP_FIXED_NOREPLACE != 0 {
+            // MAP_FIXED_NOREPLACE: fail if any mapping overlaps.
+            if addr_space.has_mapping_in_range(addr, len_aligned) {
+                return Err(SyscallError::AlreadyExists);
+            }
+        } else {
+            // Linux MAP_FIXED semantics: unmap overlaps before remap.
+            addr_space
+                .unmap_range(addr, len_aligned)
+                .map_err(|_| SyscallError::InvalidArgument)?;
+        }
         addr
     } else {
         // Hint-based: use addr as a hint when non-zero, else use mmap_hint.
@@ -185,6 +206,9 @@ pub fn sys_munmap(addr: u64, len: u64) -> Result<u64, SyscallError> {
     }
 
     let len_aligned = page_align_up(len);
+    if len_aligned == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
     if addr.saturating_add(len_aligned) > USER_SPACE_END {
         return Err(SyscallError::InvalidArgument);
     }

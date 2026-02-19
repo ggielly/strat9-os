@@ -4,6 +4,7 @@ use core::{
 };
 
 use spin::Mutex;
+use x86_64::VirtAddr;
 
 type PanicHook = fn(&PanicInfo);
 const MAX_PANIC_HOOKS: usize = 8;
@@ -55,8 +56,60 @@ fn panic_hook_dump_context(_info: &PanicInfo) {
     );
 }
 
+#[inline(always)]
+fn read_rbp() -> u64 {
+    let rbp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags));
+    }
+    rbp
+}
+
+#[inline(always)]
+fn read_rsp() -> u64 {
+    let rsp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+    }
+    rsp
+}
+
+fn addr_readable(addr: u64) -> bool {
+    crate::memory::paging::translate(VirtAddr::new(addr)).is_some()
+}
+
+fn panic_hook_backtrace(_info: &PanicInfo) {
+    let mut rbp = read_rbp();
+    let rsp = read_rsp();
+    crate::serial_println!("panic-hook: stack rsp=0x{:x} rbp=0x{:x}", rsp, rbp);
+    crate::serial_println!("panic-hook: backtrace (frame-pointer)");
+
+    // [rbp + 0] = previous rbp, [rbp + 8] = return address
+    for i in 0..16 {
+        if rbp == 0 || (rbp & 0x7) != 0 {
+            crate::serial_println!("  #{:02}: stop (invalid rbp=0x{:x})", i, rbp);
+            break;
+        }
+        if !addr_readable(rbp) || !addr_readable(rbp.saturating_add(8)) {
+            crate::serial_println!("  #{:02}: stop (unmapped rbp=0x{:x})", i, rbp);
+            break;
+        }
+
+        let prev = unsafe { *(rbp as *const u64) };
+        let ret = unsafe { *((rbp + 8) as *const u64) };
+        crate::serial_println!("  #{:02}: rip=0x{:x} rbp=0x{:x}", i, ret, rbp);
+
+        // Stop on corrupted/non-progressing chains.
+        if prev <= rbp || prev.saturating_sub(rbp) > 1024 * 1024 {
+            break;
+        }
+        rbp = prev;
+    }
+}
+
 pub fn install_default_panic_hooks() {
     let _ = register_panic_hook(panic_hook_dump_context);
+    let _ = register_panic_hook(panic_hook_backtrace);
 }
 
 /// Panic handler for the kernel
