@@ -65,13 +65,25 @@ pub fn init() {
 /// Called after VirtIO block device initialization to route the device's
 /// IRQ to the correct handler.
 pub fn register_virtio_block_irq(irq: u8) {
+    // PCI INTx gives an IRQ line number (typically 0..15), while IDT expects
+    // a vector number. Map legacy IRQ lines to the remapped interrupt vectors.
+    let vector = if irq < 16 {
+        super::pic::PIC1_OFFSET + irq
+    } else {
+        irq
+    };
+
     // SAFETY: Called during kernel init, before interrupts are fully enabled
     unsafe {
         let idt = &raw mut IDT_STORAGE;
-        (&mut *idt)[irq].set_handler_fn(virtio_block_handler);
+        (&mut *idt)[vector].set_handler_fn(virtio_block_handler);
         (*idt).load_unsafe();
     }
-    log::info!("VirtIO-blk IRQ {} registered", irq);
+    log::info!(
+        "VirtIO-blk IRQ {} registered on vector {:#x}",
+        irq,
+        vector
+    );
 }
 
 // =============================================

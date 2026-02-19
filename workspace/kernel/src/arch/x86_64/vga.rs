@@ -373,6 +373,7 @@ pub struct VgaWriter {
     font: &'static [u8],
     font_info: FontInfo,
     unicode_map: Vec<(u32, usize)>,
+    status_bar_height: usize,
     clip: ClipRect,
     back_buffer: Option<Vec<u32>>,
     draw_to_back: bool,
@@ -415,6 +416,7 @@ impl VgaWriter {
                 unicode_table_offset: None,
             },
             unicode_map: Vec::new(),
+            status_bar_height: 0,
             clip: ClipRect {
                 x: 0,
                 y: 0,
@@ -439,8 +441,10 @@ impl VgaWriter {
         let Some(font_info) = parse_psf(FONT_PSF) else {
             return false;
         };
+        let status_bar_height = font_info.glyph_h;
+        let text_height = fb_height.saturating_sub(status_bar_height);
         let cols = fb_width / font_info.glyph_w;
-        let rows = fb_height / font_info.glyph_h;
+        let rows = text_height / font_info.glyph_h;
         if cols == 0 || rows == 0 {
             return false;
         }
@@ -462,6 +466,7 @@ impl VgaWriter {
         self.font = FONT_PSF;
         self.font_info = font_info;
         self.unicode_map = parse_psf2_unicode_map(FONT_PSF, &self.font_info);
+        self.status_bar_height = status_bar_height;
         self.clip = ClipRect {
             x: 0,
             y: 0,
@@ -535,6 +540,10 @@ impl VgaWriter {
 
     pub fn glyph_size(&self) -> (usize, usize) {
         (self.font_info.glyph_w, self.font_info.glyph_h)
+    }
+
+    fn text_area_height(&self) -> usize {
+        self.fb_height.saturating_sub(self.status_bar_height)
     }
 
     pub fn enabled(&self) -> bool {
@@ -1232,18 +1241,19 @@ impl VgaWriter {
             return;
         }
         let dy = self.font_info.glyph_h;
-        if dy >= self.fb_height {
+        let text_h = self.text_area_height();
+        if dy >= text_h {
             self.clear();
             return;
         }
 
-        let move_rows = self.fb_height - dy;
+        let move_rows = text_h - dy;
         if self.draw_to_back_buffer() {
             if let Some(buf) = self.back_buffer.as_mut() {
                 let src_start = dy * self.fb_width;
-                let src_end = self.fb_height * self.fb_width;
+                let src_end = text_h * self.fb_width;
                 buf.copy_within(src_start..src_end, 0);
-                self.mark_dirty_rect(0, 0, self.fb_width, self.fb_height);
+                self.mark_dirty_rect(0, 0, self.fb_width, text_h);
             }
         } else {
             let bytes_per_row = self.pitch;
@@ -1935,18 +1945,11 @@ pub fn draw_system_status_line(theme: UiTheme) {
 
 fn draw_boot_status_line(theme: UiTheme) {
     let _ = with_writer(|w| {
-        let (_gw, gh) = w.glyph_size();
-        if gh == 0 {
-            return;
-        }
-        let y = w.height().saturating_sub(gh);
-        w.fill_rect(0, y, w.width(), gh, theme.status_bg);
-        w.draw_text_at(
-            0,
-            y,
-            " strat9  ip:n/a  ver:boot  up:00:00:00  load:n/a  mem:n/a ",
-            theme.status_text,
-            theme.status_bg,
+        draw_status_bar_inner(
+            w,
+            " strat9 ",
+            "ip:n/a  ver:boot  up:00:00:00  load:n/a  mem:n/a ",
+            theme,
         );
     });
 }
