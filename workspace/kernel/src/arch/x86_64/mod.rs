@@ -17,6 +17,7 @@ pub mod serial;
 pub mod smp;
 pub mod syscall;
 pub mod timer;
+pub mod tlb;
 pub mod tss;
 pub mod vga;
 

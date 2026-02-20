@@ -597,8 +597,7 @@ fn decode_utf8_at(bytes: &[u8], pos: usize) -> Option<(u32, usize)> {
         if (b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 {
             return None;
         }
-        let cp =
-            (((b0 & 0x0F) as u32) << 12) | (((b1 & 0x3F) as u32) << 6) | ((b2 & 0x3F) as u32);
+        let cp = (((b0 & 0x0F) as u32) << 12) | (((b1 & 0x3F) as u32) << 6) | ((b2 & 0x3F) as u32);
         return Some((cp, 3));
     }
     if (b0 & 0xF8) == 0xF0 {
@@ -1123,7 +1122,12 @@ impl VgaWriter {
     }
 
     pub fn draw_pixel_alpha(&mut self, x: usize, y: usize, color: RgbColor, alpha: u8) {
-        if !self.enabled || alpha == 0 || x >= self.fb_width || y >= self.fb_height || !self.in_clip(x, y) {
+        if !self.enabled
+            || alpha == 0
+            || x >= self.fb_width
+            || y >= self.fb_height
+            || !self.in_clip(x, y)
+        {
             return;
         }
         if alpha == 255 {
@@ -1203,7 +1207,10 @@ impl VgaWriter {
 
         if self.fmt.bpp == 32 {
             for py in sy..(sy + sh) {
-                let Some(row_off) = py.checked_mul(self.pitch).and_then(|v| v.checked_add(sx * 4)) else {
+                let Some(row_off) = py
+                    .checked_mul(self.pitch)
+                    .and_then(|v| v.checked_add(sx * 4))
+                else {
                     continue;
                 };
                 let count = sw;
@@ -1224,7 +1231,15 @@ impl VgaWriter {
         }
     }
 
-    pub fn fill_rect_alpha(&mut self, x: usize, y: usize, width: usize, height: usize, color: RgbColor, alpha: u8) {
+    pub fn fill_rect_alpha(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        color: RgbColor,
+        alpha: u8,
+    ) {
         if !self.enabled || width == 0 || height == 0 || alpha == 0 {
             return;
         }
@@ -1241,7 +1256,14 @@ impl VgaWriter {
         }
     }
 
-    pub fn blit_rgb(&mut self, dst_x: usize, dst_y: usize, src_width: usize, src_height: usize, pixels: &[RgbColor]) -> bool {
+    pub fn blit_rgb(
+        &mut self,
+        dst_x: usize,
+        dst_y: usize,
+        src_width: usize,
+        src_height: usize,
+        pixels: &[RgbColor],
+    ) -> bool {
         let len = src_width.saturating_mul(src_height);
         if !self.enabled || src_width == 0 || src_height == 0 || pixels.len() < len {
             return false;
@@ -1262,7 +1284,14 @@ impl VgaWriter {
         true
     }
 
-    pub fn blit_rgb24(&mut self, dst_x: usize, dst_y: usize, src_width: usize, src_height: usize, bytes: &[u8]) -> bool {
+    pub fn blit_rgb24(
+        &mut self,
+        dst_x: usize,
+        dst_y: usize,
+        src_width: usize,
+        src_height: usize,
+        bytes: &[u8],
+    ) -> bool {
         let needed = src_width.saturating_mul(src_height).saturating_mul(3);
         if !self.enabled || src_width == 0 || src_height == 0 || bytes.len() < needed {
             return false;
@@ -1294,7 +1323,12 @@ impl VgaWriter {
         global_alpha: u8,
     ) -> bool {
         let needed = src_width.saturating_mul(src_height).saturating_mul(4);
-        if !self.enabled || src_width == 0 || src_height == 0 || bytes.len() < needed || global_alpha == 0 {
+        if !self.enabled
+            || src_width == 0
+            || src_height == 0
+            || bytes.len() < needed
+            || global_alpha == 0
+        {
             return false;
         }
 
@@ -1329,7 +1363,13 @@ impl VgaWriter {
         true
     }
 
-    pub fn blit_sprite_rgba(&mut self, dst_x: usize, dst_y: usize, sprite: SpriteRgba<'_>, global_alpha: u8) -> bool {
+    pub fn blit_sprite_rgba(
+        &mut self,
+        dst_x: usize,
+        dst_y: usize,
+        sprite: SpriteRgba<'_>,
+        global_alpha: u8,
+    ) -> bool {
         self.blit_rgba(
             dst_x,
             dst_y,
@@ -1484,7 +1524,13 @@ impl VgaWriter {
         }
     }
 
-    pub fn draw_text(&mut self, pixel_x: usize, pixel_y: usize, text: &str, opts: TextOptions) -> TextMetrics {
+    pub fn draw_text(
+        &mut self,
+        pixel_x: usize,
+        pixel_y: usize,
+        text: &str,
+        opts: TextOptions,
+    ) -> TextMetrics {
         if !self.enabled {
             return TextMetrics {
                 width: 0,
@@ -1531,7 +1577,13 @@ impl VgaWriter {
         }
     }
 
-    pub fn draw_strata_stack(&mut self, origin_x: usize, origin_y: usize, layer_w: usize, layer_h: usize) {
+    pub fn draw_strata_stack(
+        &mut self,
+        origin_x: usize,
+        origin_y: usize,
+        layer_w: usize,
+        layer_h: usize,
+    ) {
         if !self.enabled || layer_w == 0 || layer_h == 0 {
             return;
         }
@@ -1744,7 +1796,8 @@ fn current_fps(tick: u64) -> u64 {
 
     if last_tick == 0 {
         let _ = FPS_LAST_TICK.compare_exchange(0, tick, Ordering::Relaxed, Ordering::Relaxed);
-        let _ = FPS_LAST_FRAME_COUNT.compare_exchange(0, frames, Ordering::Relaxed, Ordering::Relaxed);
+        let _ =
+            FPS_LAST_FRAME_COUNT.compare_exchange(0, frames, Ordering::Relaxed, Ordering::Relaxed);
         return FPS_ESTIMATE.load(Ordering::Relaxed);
     }
 
@@ -1756,7 +1809,11 @@ fn current_fps(tick: u64) -> u64 {
     {
         let last_frames = FPS_LAST_FRAME_COUNT.swap(frames, Ordering::Relaxed);
         let df = frames.saturating_sub(last_frames);
-        let fps = if dt == 0 { 0 } else { df.saturating_mul(100) / dt };
+        let fps = if dt == 0 {
+            0
+        } else {
+            df.saturating_mul(100) / dt
+        };
         FPS_ESTIMATE.store(fps, Ordering::Relaxed);
     }
 
@@ -1901,9 +1958,15 @@ pub fn init(
         let deco_x = writer.width().saturating_sub(deco_w + 24);
         let deco_y = 24;
         writer.draw_strata_stack(deco_x, deco_y, deco_w, deco_h);
-        writer.set_rgb_color(RgbColor::new(0xA7, 0xD8, 0xD8), RgbColor::new(0x12, 0x16, 0x1E));
+        writer.set_rgb_color(
+            RgbColor::new(0xA7, 0xD8, 0xD8),
+            RgbColor::new(0x12, 0x16, 0x1E),
+        );
         writer.write_bytes("Strat9-OS v0.1.0\n");
-        writer.set_rgb_color(RgbColor::new(0xE2, 0xE8, 0xF0), RgbColor::new(0x12, 0x16, 0x1E));
+        writer.set_rgb_color(
+            RgbColor::new(0xE2, 0xE8, 0xF0),
+            RgbColor::new(0x12, 0x16, 0x1E),
+        );
         VGA_AVAILABLE.store(true, Ordering::Relaxed);
         log::info!(
             "Framebuffer console enabled: {}x{} {}bpp pitch={}",
@@ -2015,7 +2078,15 @@ impl Canvas {
         draw_text_at(x, y, text, self.fg, self.bg);
     }
 
-    pub fn text_opts(&self, x: usize, y: usize, text: &str, align: TextAlign, wrap: bool, max_width: Option<usize>) -> TextMetrics {
+    pub fn text_opts(
+        &self,
+        x: usize,
+        y: usize,
+        text: &str,
+        align: TextAlign,
+        wrap: bool,
+        max_width: Option<usize>,
+    ) -> TextMetrics {
         draw_text(
             x,
             y,
@@ -2042,11 +2113,25 @@ impl Canvas {
         blit_rgb24(x, y, w, h, bytes)
     }
 
-    pub fn blit_rgba(&self, x: usize, y: usize, w: usize, h: usize, bytes: &[u8], global_alpha: u8) -> bool {
+    pub fn blit_rgba(
+        &self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        bytes: &[u8],
+        global_alpha: u8,
+    ) -> bool {
         blit_rgba(x, y, w, h, bytes, global_alpha)
     }
 
-    pub fn blit_sprite_rgba(&self, x: usize, y: usize, sprite: SpriteRgba<'_>, global_alpha: u8) -> bool {
+    pub fn blit_sprite_rgba(
+        &self,
+        x: usize,
+        y: usize,
+        sprite: SpriteRgba<'_>,
+        global_alpha: u8,
+    ) -> bool {
         blit_sprite_rgba(x, y, sprite, global_alpha)
     }
 
@@ -2062,7 +2147,16 @@ impl Canvas {
         ui_clear(theme);
     }
 
-    pub fn ui_panel(&self, x: usize, y: usize, w: usize, h: usize, title: &str, body: &str, theme: UiTheme) {
+    pub fn ui_panel(
+        &self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        title: &str,
+        body: &str,
+        theme: UiTheme,
+    ) {
         ui_draw_panel(x, y, w, h, title, body, theme);
     }
 
@@ -2134,6 +2228,14 @@ pub fn text_rows() -> usize {
     VGA_WRITER.lock().rows()
 }
 
+pub fn get_text_cursor() -> (usize, usize) {
+    if !is_available() {
+        return (0, 0);
+    }
+    let writer = VGA_WRITER.lock();
+    (writer.col, writer.row)
+}
+
 pub fn set_text_cursor(col: usize, row: usize) {
     if !is_available() {
         return;
@@ -2147,6 +2249,25 @@ pub fn double_buffer_mode() -> bool {
 
 pub fn set_double_buffer_mode(enabled: bool) {
     DOUBLE_BUFFER_MODE.store(enabled, Ordering::Relaxed);
+}
+
+pub fn draw_text_cursor(color: RgbColor) {
+    if !is_available() {
+        return;
+    }
+    let mut writer = VGA_WRITER.lock();
+    let (gw, gh) = writer.glyph_size();
+    let x = writer.col * gw;
+    let y = writer.row * gh;
+    let packed = writer.pack_color(color);
+
+    // Draw a block cursor (full glyph width, 2px height at bottom or full height)
+    // Let's go with a full block for better visibility
+    for py in y..(y + gh) {
+        for px in x..(x + gw) {
+            writer.put_pixel_raw(px, py, packed);
+        }
+    }
 }
 
 pub fn framebuffer_info() -> FramebufferInfo {
@@ -2257,14 +2378,29 @@ pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: RgbColo
     VGA_WRITER.lock().fill_rect(x, y, width, height, color);
 }
 
-pub fn fill_rect_alpha(x: usize, y: usize, width: usize, height: usize, color: RgbColor, alpha: u8) {
+pub fn fill_rect_alpha(
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    color: RgbColor,
+    alpha: u8,
+) {
     if !is_available() {
         return;
     }
-    VGA_WRITER.lock().fill_rect_alpha(x, y, width, height, color, alpha);
+    VGA_WRITER
+        .lock()
+        .fill_rect_alpha(x, y, width, height, color, alpha);
 }
 
-pub fn blit_rgb(dst_x: usize, dst_y: usize, src_width: usize, src_height: usize, pixels: &[RgbColor]) -> bool {
+pub fn blit_rgb(
+    dst_x: usize,
+    dst_y: usize,
+    src_width: usize,
+    src_height: usize,
+    pixels: &[RgbColor],
+) -> bool {
     if !is_available() {
         return false;
     }
@@ -2273,7 +2409,13 @@ pub fn blit_rgb(dst_x: usize, dst_y: usize, src_width: usize, src_height: usize,
         .blit_rgb(dst_x, dst_y, src_width, src_height, pixels)
 }
 
-pub fn blit_rgb24(dst_x: usize, dst_y: usize, src_width: usize, src_height: usize, bytes: &[u8]) -> bool {
+pub fn blit_rgb24(
+    dst_x: usize,
+    dst_y: usize,
+    src_width: usize,
+    src_height: usize,
+    bytes: &[u8],
+) -> bool {
     if !is_available() {
         return false;
     }
@@ -2298,7 +2440,12 @@ pub fn blit_rgba(
         .blit_rgba(dst_x, dst_y, src_width, src_height, bytes, global_alpha)
 }
 
-pub fn blit_sprite_rgba(dst_x: usize, dst_y: usize, sprite: SpriteRgba<'_>, global_alpha: u8) -> bool {
+pub fn blit_sprite_rgba(
+    dst_x: usize,
+    dst_y: usize,
+    sprite: SpriteRgba<'_>,
+    global_alpha: u8,
+) -> bool {
     if !is_available() {
         return false;
     }
@@ -2577,8 +2724,8 @@ pub fn draw_system_status_line(theme: UiTheme) {
     let fps = current_fps(tick);
     let left = format!(" {} ", info.hostname);
     let right = format!(
-        "ip:{}  ver:{}  up:{}  fps:{}  load:n/a  mem:{} ",
-        info.ip, version, uptime, fps, mem
+        "ip:{}  ver:{}  uptime:{}  ticks:{}  FPS:{}  load:n/a  memfree:{} ",
+        info.ip, version, uptime, tick, fps, mem
     );
     ui_draw_status_bar(&left, &right, theme);
 }
@@ -2588,7 +2735,7 @@ fn draw_boot_status_line(theme: UiTheme) {
         draw_status_bar_inner(
             w,
             " strat9 ",
-            "ip:n/a  ver:boot  up:00:00:00  load:n/a  mem:n/a ",
+            "ip:n/a  ver:boot  up:00:00:00  ticks:0  load:n/a  mem:n/a ",
             theme,
         );
     });
@@ -2626,8 +2773,8 @@ pub fn maybe_refresh_system_status_line(theme: UiTheme) {
     let fps = current_fps(tick);
     let left = format!(" {} ", info.hostname);
     let right = format!(
-        "ip:{}  ver:{}  up:{}  fps:{}  load:n/a  mem:{} ",
-        info.ip, version, uptime, fps, mem
+        "ip:{}  ver:{}  up:{}  ticks:{}  fps:{}  load:n/a  mem:{} ",
+        info.ip, version, uptime, tick, fps, mem
     );
 
     if let Some(mut writer) = VGA_WRITER.try_lock() {

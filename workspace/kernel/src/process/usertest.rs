@@ -54,7 +54,13 @@ pub fn create_user_test_task() {
         executable: true,
         user_accessible: true,
     };
-    if let Err(e) = user_as.map_region(USER_CODE_ADDR, 1, code_flags, VmaType::Code) {
+    if let Err(e) = user_as.map_region(
+        USER_CODE_ADDR,
+        1,
+        code_flags,
+        VmaType::Code,
+        crate::memory::address_space::VmaPageSize::Small,
+    ) {
         log::error!("Failed to map user code page: {}", e);
         return;
     }
@@ -66,7 +72,13 @@ pub fn create_user_test_task() {
         executable: false,
         user_accessible: true,
     };
-    if let Err(e) = user_as.map_region(USER_STACK_ADDR, 1, stack_flags, VmaType::Stack) {
+    if let Err(e) = user_as.map_region(
+        USER_STACK_ADDR,
+        1,
+        stack_flags,
+        VmaType::Stack,
+        crate::memory::address_space::VmaPageSize::Small,
+    ) {
         log::error!("Failed to map user stack page: {}", e);
         return;
     }
@@ -116,7 +128,7 @@ pub fn create_user_test_task() {
         user_stack: None,
         name: "test-user-ring3",
         capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
-        address_space: user_as,
+        address_space: SyncUnsafeCell::new(user_as),
         fd_table: SyncUnsafeCell::new(crate::vfs::FileDescriptorTable::new()),
         pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
         blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
@@ -127,6 +139,7 @@ pub fn create_user_test_task() {
         wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
         brk: core::sync::atomic::AtomicU64::new(0),
         mmap_hint: core::sync::atomic::AtomicU64::new(0x0000_0000_6000_0000),
+        ticks: core::sync::atomic::AtomicU64::new(0),
     });
 
     crate::process::add_task(task);

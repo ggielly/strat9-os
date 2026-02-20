@@ -41,6 +41,7 @@ const MAP_SHARED: u32 = 1 << 0;
 const MAP_PRIVATE: u32 = 1 << 1;
 const MAP_FIXED: u32 = 1 << 4;
 const MAP_ANONYMOUS: u32 = 1 << 5;
+const MAP_HUGETLB: u32 = 1 << 11; // Standard Linux flag for huge pages
 const MAP_FIXED_NOREPLACE: u32 = 1 << 20; // Linux-compatible extension bit.
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,6 +52,12 @@ const MAP_FIXED_NOREPLACE: u32 = 1 << 20; // Linux-compatible extension bit.
 #[inline]
 fn page_align_up(addr: u64) -> u64 {
     (addr.wrapping_add(4095)) & !4095u64
+}
+
+/// Round `addr` up to the nearest 2 MiB boundary.
+#[inline]
+fn huge_page_align_up(addr: u64) -> u64 {
+    (addr.wrapping_add((2 * 1024 * 1024) - 1)) & !((2 * 1024 * 1024) - 1)
 }
 
 /// Convert POSIX protection flags to `VmaFlags`.
@@ -82,16 +89,24 @@ pub fn sys_mmap(
     _fd: u64,
     _offset: u64,
 ) -> Result<u64, SyscallError> {
-    // ── Validate arguments ────────────────────────────────────────────────
+    //  Validate arguments
     if len == 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
     let known_flags =
-        MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE;
+        MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_HUGETLB | MAP_FIXED_NOREPLACE;
     if flags & !known_flags != 0 {
         return Err(SyscallError::InvalidArgument);
     }
+
+    let is_huge = flags & MAP_HUGETLB != 0;
+    let page_size = if is_huge {
+        crate::memory::address_space::VmaPageSize::Huge
+    } else {
+        crate::memory::address_space::VmaPageSize::Small
+    };
+    let page_bytes = page_size.bytes();
 
     // File-backed mappings are not yet implemented.
     if flags & MAP_ANONYMOUS == 0 {
@@ -117,20 +132,24 @@ pub fn sys_mmap(
     }
 
     // Round len up to a page boundary.  Overflow of len itself is caught here.
-    let len_aligned = page_align_up(len);
+    let len_aligned = if is_huge {
+        huge_page_align_up(len)
+    } else {
+        page_align_up(len)
+    };
     if len_aligned == 0 {
         // len was so large that aligning it overflowed to 0.
         return Err(SyscallError::InvalidArgument);
     }
-    let n_pages = (len_aligned / 4096) as usize;
+    let n_pages = (len_aligned / page_bytes) as usize;
 
-    // ── Determine the target virtual address ──────────────────────────────
+    //  Determine the target virtual address
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    let addr_space = &task.address_space;
+    let addr_space = unsafe { &*task.address_space.get() };
 
     let target = if flags & MAP_FIXED != 0 {
         // MAP_FIXED: the caller demands this exact page-aligned address.
-        if addr & 0xFFF != 0 || addr == 0 {
+        if addr % page_bytes != 0 || addr == 0 {
             return Err(SyscallError::InvalidArgument);
         }
         if addr.saturating_add(len_aligned) > USER_SPACE_END {
@@ -158,18 +177,18 @@ pub fn sys_mmap(
 
         // Try the hint first, then fall back to MMAP_BASE.
         addr_space
-            .find_free_vma_range(hint, n_pages)
-            .or_else(|| addr_space.find_free_vma_range(MMAP_BASE, n_pages))
+            .find_free_vma_range(hint, n_pages, page_size)
+            .or_else(|| addr_space.find_free_vma_range(MMAP_BASE, n_pages, page_size))
             .ok_or(SyscallError::OutOfMemory)?
     };
 
-    // ── Map the region ────────────────────────────────────────────────────
+    //  Map the region (lazily)
     let vma_flags = prot_to_vma_flags(prot);
     addr_space
-        .map_region(target, n_pages, vma_flags, VmaType::Anonymous)
+        .reserve_region(target, n_pages, vma_flags, VmaType::Anonymous, page_size)
         .map_err(|_| SyscallError::OutOfMemory)?;
 
-    // ── Advance mmap_hint past the new mapping (non-fixed only) ──────────
+    //  Advance mmap_hint past the new mapping (non-fixed only)
     if flags & MAP_FIXED == 0 {
         let new_hint = target.saturating_add(len_aligned);
         // Atomically advance: only update if it moves forward.
@@ -214,7 +233,7 @@ pub fn sys_munmap(addr: u64, len: u64) -> Result<u64, SyscallError> {
     }
 
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    task.address_space
+    unsafe { &*task.address_space.get() }
         .unmap_range(addr, len_aligned)
         .map_err(|_| SyscallError::InvalidArgument)?;
 
@@ -287,9 +306,14 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             executable: false,
             user_accessible: true,
         };
-        if task
-            .address_space
-            .map_region(old_page_end, n_pages, vma_flags, VmaType::Anonymous)
+        if unsafe { &*task.address_space.get() }
+            .reserve_region(
+                old_page_end,
+                n_pages,
+                vma_flags,
+                VmaType::Anonymous,
+                crate::memory::address_space::VmaPageSize::Small,
+            )
             .is_err()
         {
             // OOM — return the unchanged break (Linux behaviour).
@@ -304,8 +328,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     } else if new_page_end < old_page_end {
         // ── Shrink: unmap [new_page_end, old_page_end) ───────────────────
         let len = old_page_end - new_page_end;
-        if task
-            .address_space
+        if unsafe { &*task.address_space.get() }
             .unmap_range(new_page_end, len)
             .is_err()
         {

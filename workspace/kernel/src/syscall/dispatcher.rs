@@ -2,8 +2,10 @@
 //!
 //! Routes syscall numbers to handler functions and converts results to RAX values.
 //! Called from the naked `syscall_entry` assembly with a pointer to `SyscallFrame`.
-use super::{error::SyscallError, fork::sys_fork, numbers::*, SyscallFrame};
-use super::{sys_clock_gettime, sys_nanosleep};
+use super::{
+    error::SyscallError, exec::sys_execve, fork::sys_fork, numbers::*, sys_clock_gettime,
+    sys_nanosleep, SyscallFrame,
+};
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
     drivers::virtio::{
@@ -58,8 +60,12 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PROC_FORK => sys_fork(frame).map(|result| result.child_pid.as_u64()),
         SYS_PROC_GETPID => sys_proc_getpid(),
         SYS_PROC_GETPPID => sys_proc_getppid(),
-        SYS_PROC_WAITPID => sys_proc_waitpid(arg1 as i64, arg2, arg3 as u32),
-        SYS_PROC_WAIT    => super::wait::sys_wait(arg1),
+        SYS_PROC_WAITPID => {
+            super::wait::sys_waitpid(arg1 as i64, arg2, arg3 as u32).map(|pid| pid as u64)
+        }
+        SYS_PROC_WAIT => super::wait::sys_wait(arg1),
+        SYS_PROC_EXECVE => sys_execve(frame, arg1, arg2, arg3),
+        SYS_FCNTL => super::fcntl::sys_fcntl(arg1, arg2, arg3),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),
@@ -807,6 +813,57 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
             cap.resource as u64,
         ))),
     )?;
+
+    // Bootstrap convenience: if a privileged userspace server binds root `/`,
+    // seed it with the primary volume capability so it can mount storage
+    // without waiting for an explicit bootstrap message.
+    if path == "/" || path == "/fs/ext4" {
+        if let Some(device) = crate::drivers::virtio::block::get_device() {
+            let volume_cap = crate::capability::get_capability_manager().create_capability(
+                ResourceType::Volume,
+                device as *const _ as usize,
+                CapPermissions {
+                    read: true,
+                    write: true,
+                    execute: false,
+                    grant: true,
+                    revoke: true,
+                },
+            );
+            let task_caps = unsafe { &mut *task.capabilities.get() };
+            let id = task_caps.insert(volume_cap);
+            log::info!(
+                "ipc_bind_port('/'): seeded volume capability handle={} for task {:?}",
+                id.as_u64(),
+                task.id
+            );
+
+            // Send a bootstrap message to the just-bound root filesystem server.
+            // The server expects msg_type=0x10 and handle in flags.
+            const BOOTSTRAP_MSG_TYPE: u32 = 0x10;
+            if id.as_u64() <= u32::MAX as u64 {
+                let mut boot_msg = IpcMessage::new(BOOTSTRAP_MSG_TYPE);
+                // Use the bound task as sender so capability transfer path can
+                // duplicate `flags` from a valid capability table.
+                boot_msg.sender = task.id.as_u64();
+                boot_msg.flags = id.as_u64() as u32;
+
+                let port_id = PortId::from_u64(cap.resource as u64);
+                if let Some(p) = port::get_port(port_id) {
+                    if p.send(boot_msg).is_ok() {
+                        log::info!(
+                            "ipc_bind_port('/'): queued bootstrap message (handle={})",
+                            id.as_u64()
+                        );
+                    } else {
+                        log::warn!("ipc_bind_port('/'): failed to queue bootstrap message");
+                    }
+                } else {
+                    log::warn!("ipc_bind_port('/'): bound port disappeared before bootstrap");
+                }
+            }
+        }
+    }
     Ok(0)
 }
 

@@ -1,12 +1,10 @@
 //! Interrupt Descriptor Table (IDT) for Strat9-OS
 //!
 //! Handles CPU exceptions and hardware IRQs.
-//! Inspired by MaestroOS `idt.rs` and RedoxOS kernel.
+//! Inspired by MaestroOS `idt.rs` and Redox-OS kernel.
 
 use super::{pic, tss};
-use x86_64::{
-    structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
-};
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 /// IRQ interrupt vector numbers (PIC1_OFFSET + IRQ number)
 #[allow(dead_code)]
@@ -50,13 +48,29 @@ pub fn init() {
         // Spurious interrupt handler at vector 0xFF (APIC spurious vector)
         idt_ref[0xFF_u8].set_handler_fn(spurious_handler);
 
-        // Cross-CPU reschedule IPI (vector 0xF0)
-        idt_ref[super::apic::IPI_RESCHED_VECTOR].set_handler_fn(resched_ipi_handler);
+        // Cross-CPU reschedule IPI (vector 0xE0)
+        idt_ref[super::apic::IPI_RESCHED_VECTOR as u8].set_handler_fn(resched_ipi_handler);
+
+        // Cross-CPU TLB shootdown IPI (vector 0xF0)
+        idt_ref[super::apic::IPI_TLB_SHOOTDOWN_VECTOR as u8].set_handler_fn(tlb_shootdown_handler);
 
         (*idt).load_unsafe();
     }
 
     log::debug!("IDT initialized with {} entries", 256);
+}
+
+/// Register the TLB shootdown IPI handler.
+///
+/// This is called by the TLB system during initialization to provide
+/// the architecture-independent handler function.
+pub fn register_tlb_shootdown_handler(handler: extern "C" fn()) {
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[super::apic::IPI_TLB_SHOOTDOWN_VECTOR as u8]
+            .set_handler_fn(core::mem::transmute(handler));
+        (*idt).load_unsafe();
+    }
 }
 
 /// Register the VirtIO block device IRQ handler
@@ -72,17 +86,13 @@ pub fn register_virtio_block_irq(irq: u8) {
         irq
     };
 
-    // SAFETY: Called during kernel init, before interrupts are fully enabled
+    // SAFETY: called during kernel init, before interrupts are fully enabled
     unsafe {
         let idt = &raw mut IDT_STORAGE;
         (&mut *idt)[vector].set_handler_fn(virtio_block_handler);
         (*idt).load_unsafe();
     }
-    log::info!(
-        "VirtIO-blk IRQ {} registered on vector {:#x}",
-        irq,
-        vector
-    );
+    log::info!("VirtIO-blk IRQ {} registered on vector {:#x}", irq, vector);
 }
 
 // =============================================
@@ -116,28 +126,36 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     use x86_64::registers::control::{Cr2, Cr3};
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
-    
+
     // Get the faulting address
     let fault_addr = Cr2::read();
-    
+
     // Try to handle COW fault first (before killing the process)
     if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) && is_user {
         if let Some(task) = crate::process::current_task_clone() {
-            let address_space = &task.address_space;
+            let address_space = unsafe { &*task.address_space.get() };
             if let Ok(vaddr) = fault_addr {
                 match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), address_space) {
-                    Ok(()) => {
-                        // COW fault resolved successfully - return to userland
-                        return;
-                    }
-                    Err(_) => {
-                        // Not a COW fault - fall through to normal page fault handling
-                    }
+                    Ok(()) => return,
+                    Err(_) => {}
                 }
             }
         }
     }
-    
+
+    // Try Demand Paging (lazy allocation) if page is not present
+    if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) && is_user {
+        if let Some(task) = crate::process::current_task_clone() {
+            let address_space = unsafe { &*task.address_space.get() };
+            if let Ok(vaddr) = fault_addr {
+                match address_space.handle_fault(vaddr.as_u64()) {
+                    Ok(()) => return,
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
     if is_user {
         if let Some(tid) = crate::process::current_task_id() {
             crate::silo::handle_user_fault(
@@ -152,7 +170,7 @@ extern "x86-interrupt" fn page_fault_handler(
 
     log::error!("EXCEPTION: PAGE FAULT");
     log::error!("Accessed Address: {:?}", fault_addr);
-    log::error!("Error Code: {:?}", error_code);
+    log::error!("Error code: {:?}", error_code);
     log::error!("{:#?}", stack_frame);
 
     // Diagnostic: manual page table walk to show which level fails
@@ -252,7 +270,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         }
     }
     log::error!("EXCEPTION: GENERAL PROTECTION FAULT");
-    log::error!("Error Code: {:#x}", error_code);
+    log::error!("Error code: {:#x}", error_code);
     log::error!("{:#?}", stack_frame);
     panic!("General protection fault");
 }
@@ -340,9 +358,15 @@ extern "x86-interrupt" fn virtio_block_handler(_stack_frame: InterruptStackFrame
 /// timer tick. This is used when a task running on this CPU is killed or
 /// suspended by a different CPU.
 ///
-/// EOI is sent **before** `maybe_preempt()` so the APIC can accept further
+/// EOI is sent ***before*** ` maybe_preempt()` so the APIC can accept further
 /// IPIs before the potentially long context-switch path runs.
 extern "x86-interrupt" fn resched_ipi_handler(_stack_frame: InterruptStackFrame) {
     super::apic::eoi();
     crate::process::scheduler::maybe_preempt();
+}
+
+/// Cross-CPU TLB shootdown IPI handler (vector 0xF0).
+extern "x86-interrupt" fn tlb_shootdown_handler(_stack_frame: InterruptStackFrame) {
+    // Note: EOI is sent by the architecture-independent handler.
+    super::tlb::tlb_shootdown_ipi_handler();
 }

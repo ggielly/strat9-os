@@ -8,6 +8,7 @@ members = [
     "workspace/components/syscall",
     "workspace/components/strate-silo-test",
     "workspace/components/strate-net",
+    "workspace/components/strate-fs-ramfs",
 ]
 exclude = [
     "workspace/components/relibc",        # External dependency, built separately
@@ -44,7 +45,7 @@ unused_imports = "deny"
 unused_must_use = "deny"
 unused_mut = "deny"
 unused_unsafe = "deny"
-unused_variables = "allow" # TODO review occurrences (too many for now)
+unused_variables = "allow" # TODO review occurrences (too many for now :D)
 
 [profile.release]
 opt-level = "z"   # Optimize for size

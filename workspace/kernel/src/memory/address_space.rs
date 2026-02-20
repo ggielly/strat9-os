@@ -14,8 +14,8 @@ use spin::Once;
 use x86_64::{
     registers::control::{Cr3, Cr3Flags},
     structures::paging::{
-        FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
-        PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB, Translate,
+        mapper::TranslateResult, FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable,
+        Page, PageTable, PageTableFlags, PhysFrame as X86PhysFrame, Size2MiB, Size4KiB, Translate,
     },
     PhysAddr, VirtAddr,
 };
@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// Flags describing permissions for a virtual memory region.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmaFlags {
     pub readable: bool,
     pub writable: bool,
@@ -64,17 +64,37 @@ pub enum VmaType {
     Kernel,
 }
 
+/// Supported page sizes for VMAs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmaPageSize {
+    /// Standard 4 KiB page.
+    Small,
+    /// Huge 2 MiB page.
+    Huge,
+}
+
+impl VmaPageSize {
+    pub fn bytes(self) -> u64 {
+        match self {
+            VmaPageSize::Small => 4096,
+            VmaPageSize::Huge => 2 * 1024 * 1024,
+        }
+    }
+}
+
 /// A tracked virtual memory region within an address space.
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryRegion {
     /// Start virtual address (page-aligned).
     pub start: u64,
-    /// Number of 4KiB pages in this region.
+    /// Number of pages in this region (size depends on `page_size`).
     pub page_count: usize,
     /// Access permissions.
     pub flags: VmaFlags,
     /// Purpose of this region.
     pub vma_type: VmaType,
+    /// Size of each page in this region.
+    pub page_size: VmaPageSize,
 }
 
 /// A per-process address space backed by a PML4 page table.
@@ -179,7 +199,7 @@ impl AddressSpace {
     /// # Safety
     /// The caller must ensure exclusive access to the page tables (e.g. via
     /// the scheduler lock or single-threaded context).
-    unsafe fn mapper(&self) -> OffsetPageTable<'_> {
+    pub(crate) unsafe fn mapper(&self) -> OffsetPageTable<'_> {
         let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
         // SAFETY: l4_table_virt is the HHDM-mapped address of our PML4.
         // The caller guarantees exclusive access.
@@ -189,6 +209,241 @@ impl AddressSpace {
                 phys_offset,
             )
         }
+    }
+
+    /// Reserve a contiguous region of virtual pages without allocating physical frames.
+    ///
+    /// The pages will be mapped lazily during page faults (Demand Paging).
+    pub fn reserve_region(
+        &self,
+        start: u64,
+        page_count: usize,
+        flags: VmaFlags,
+        vma_type: VmaType,
+        page_size: VmaPageSize,
+    ) -> Result<(), &'static str> {
+        let page_bytes = page_size.bytes();
+        if page_count == 0 || start % page_bytes != 0 {
+            return Err("Invalid region arguments");
+        }
+        let len = (page_count as u64)
+            .checked_mul(page_bytes)
+            .ok_or("Region length overflow")?;
+        let end = start.checked_add(len).ok_or("Region end overflow")?;
+        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        if end > USER_SPACE_END {
+            return Err("Region out of user-space range");
+        }
+
+        // Reject overlapping VMAs
+        {
+            let regions = self.regions.lock();
+            if regions.iter().any(|(&vma_start, vma)| {
+                let vma_end = vma_start
+                    .saturating_add((vma.page_count as u64).saturating_mul(vma.page_size.bytes()));
+                vma_start < end && vma_end > start
+            }) {
+                return Err("Region overlaps existing mapping");
+            }
+        }
+
+        // Track the region, attempting to merge with previous.
+        let mut regions = self.regions.lock();
+        let mut merged = false;
+
+        if let Some((&prev_start, prev_vma)) = regions.range(..start).next_back() {
+            let prev_end = prev_start + (prev_vma.page_count as u64) * prev_vma.page_size.bytes();
+            if prev_end == start
+                && prev_vma.flags == flags
+                && prev_vma.vma_type == vma_type
+                && prev_vma.page_size == page_size
+            {
+                let new_count = prev_vma
+                    .page_count
+                    .checked_add(page_count)
+                    .ok_or("Region page_count overflow")?;
+                let updated_vma = VirtualMemoryRegion {
+                    start: prev_start,
+                    page_count: new_count,
+                    flags,
+                    vma_type,
+                    page_size,
+                };
+                regions.insert(prev_start, updated_vma);
+                merged = true;
+            }
+        }
+
+        if !merged {
+            let region = VirtualMemoryRegion {
+                start,
+                page_count,
+                flags,
+                vma_type,
+                page_size,
+            };
+            regions.insert(start, region);
+        }
+
+        log::trace!(
+            "Reserved lazy region: {:#x} ({} pages, size={:?})",
+            start,
+            page_count,
+            page_size
+        );
+        Ok(())
+    }
+
+    /// Handle a page fault by checking if the address falls within a reserved VMA.
+    ///
+    /// If it does, allocates a physical frame and maps it.
+    pub fn handle_fault(&self, fault_addr: u64) -> Result<(), &'static str> {
+        use x86_64::structures::paging::mapper::MapToError;
+
+        // 1. Find the VMA covering this address
+        let vma = {
+            let regions = self.regions.lock();
+            let mut iter = regions.range(..=fault_addr);
+            let (&start, vma) = iter.next_back().ok_or("No VMA found for address")?;
+            let end = start + (vma.page_count as u64) * vma.page_size.bytes();
+            if fault_addr >= end {
+                return Err("Address outside VMA bounds");
+            }
+            vma.clone()
+        };
+
+        // Align fault address to the page size used by this VMA.
+        let page_bytes = vma.page_size.bytes();
+        let page_addr = fault_addr & !(page_bytes - 1);
+
+        // 2. Only Anonymous/Stack regions support demand paging for now
+        match vma.vma_type {
+            VmaType::Anonymous | VmaType::Stack | VmaType::Code => {}
+            _ => return Err("VMA type does not support demand paging"),
+        }
+
+        // 3. If already mapped (race/re-fault), treat as handled.
+        if self.translate(VirtAddr::new(page_addr)).is_some() {
+            return Ok(());
+        }
+
+        // 4. Allocate and map a single page of the required size
+        let mut frame_allocator = crate::memory::paging::BuddyFrameAllocator;
+        let order = match vma.page_size {
+            VmaPageSize::Small => 0,
+            VmaPageSize::Huge => 9,
+        };
+
+        let lock = crate::memory::get_allocator();
+        let mut guard = lock.lock();
+        let allocator = guard.as_mut().ok_or("Allocator not initialized")?;
+        let frame = allocator
+            .alloc(order)
+            .map_err(|_| "OOM during demand paging")?;
+        drop(guard);
+
+        // Zero the frame
+        unsafe {
+            let virt = crate::memory::phys_to_virt(frame.start_address.as_u64());
+            core::ptr::write_bytes(virt as *mut u8, 0, page_bytes as usize);
+        }
+
+        let mut page_flags = vma.flags.to_page_flags();
+
+        // SAFETY: We own the address space.
+        unsafe {
+            let mut mapper = self.mapper();
+            match vma.page_size {
+                VmaPageSize::Small => {
+                    let page =
+                        Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
+                    let phys_frame =
+                        x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                            frame.start_address,
+                        );
+                    match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
+                        Ok(flush) => flush.flush(),
+                        Err(MapToError::PageAlreadyMapped(_)) => {
+                            let lock = crate::memory::get_allocator();
+                            let mut guard = lock.lock();
+                            if let Some(allocator) = guard.as_mut() {
+                                allocator.free(
+                                    crate::memory::PhysFrame {
+                                        start_address: frame.start_address,
+                                    },
+                                    order,
+                                );
+                            }
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            let lock = crate::memory::get_allocator();
+                            let mut guard = lock.lock();
+                            if let Some(allocator) = guard.as_mut() {
+                                allocator.free(
+                                    crate::memory::PhysFrame {
+                                        start_address: frame.start_address,
+                                    },
+                                    order,
+                                );
+                            }
+                            return Err("Failed to map demand page (4K)");
+                        }
+                    }
+                }
+                VmaPageSize::Huge => {
+                    let page =
+                        Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
+                    let phys_frame =
+                        x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                            frame.start_address,
+                        );
+                    page_flags |= PageTableFlags::HUGE_PAGE;
+                    match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
+                        Ok(flush) => flush.flush(),
+                        Err(MapToError::PageAlreadyMapped(_)) => {
+                            let lock = crate::memory::get_allocator();
+                            let mut guard = lock.lock();
+                            if let Some(allocator) = guard.as_mut() {
+                                allocator.free(
+                                    crate::memory::PhysFrame {
+                                        start_address: frame.start_address,
+                                    },
+                                    order,
+                                );
+                            }
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            let lock = crate::memory::get_allocator();
+                            let mut guard = lock.lock();
+                            if let Some(allocator) = guard.as_mut() {
+                                allocator.free(
+                                    crate::memory::PhysFrame {
+                                        start_address: frame.start_address,
+                                    },
+                                    order,
+                                );
+                            }
+                            return Err("Failed to map demand page (2M)");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Track refcount for COW
+        crate::memory::cow::frame_inc_ref(crate::memory::PhysFrame {
+            start_address: frame.start_address,
+        });
+
+        log::trace!(
+            "Demand paging ({:?}): mapped {:#x} to frame {:#x}",
+            vma.page_size,
+            page_addr,
+            frame.start_address.as_u64()
+        );
+        Ok(())
     }
 
     /// Map a contiguous region of pages backed by newly allocated physical frames.
@@ -201,26 +456,27 @@ impl AddressSpace {
         page_count: usize,
         flags: VmaFlags,
         vma_type: VmaType,
+        page_size: VmaPageSize,
     ) -> Result<(), &'static str> {
-        if page_count == 0 || start & 0xFFF != 0 {
+        let page_bytes = page_size.bytes();
+        if page_count == 0 || start % page_bytes != 0 {
             return Err("Invalid region arguments");
         }
         let len = (page_count as u64)
-            .checked_mul(4096)
+            .checked_mul(page_bytes)
             .ok_or("Region length overflow")?;
-        let end = start
-            .checked_add(len)
-            .ok_or("Region end overflow")?;
+        let end = start.checked_add(len).ok_or("Region end overflow")?;
         const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
         if end > USER_SPACE_END {
             return Err("Region out of user-space range");
         }
 
-        // Reject overlapping VMAs early, before touching page tables.
+        // Reject overlapping VMAs early
         {
             let regions = self.regions.lock();
             if regions.iter().any(|(&vma_start, vma)| {
-                let vma_end = vma_start.saturating_add((vma.page_count as u64).saturating_mul(4096));
+                let vma_end = vma_start
+                    .saturating_add((vma.page_count as u64).saturating_mul(vma.page_size.bytes()));
                 vma_start < end && vma_end > start
             }) {
                 return Err("Region overlaps existing mapping");
@@ -230,155 +486,221 @@ impl AddressSpace {
         let page_flags = flags.to_page_flags();
         let mut frame_allocator = BuddyFrameAllocator;
 
-        // SAFETY: We have logical ownership of this address space.
+        // SAFETY: we have logical ownership of this address space.
         let mut mapper = unsafe { self.mapper() };
         let mut mapped_pages = 0usize;
 
         for i in 0..page_count {
             let page_addr = start
-                .checked_add((i as u64).saturating_mul(4096))
+                .checked_add((i as u64).saturating_mul(page_bytes))
                 .ok_or("Page address overflow")?;
-            let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
-                .map_err(|_| "Page address not aligned")?;
 
-            // Allocate a physical frame.
-            let frame = frame_allocator
-                .allocate_frame()
-                .ok_or("Failed to allocate frame for mapping")?;
+            // Allocate a physical frame of appropriate size.
+            let order = match page_size {
+                VmaPageSize::Small => 0,
+                VmaPageSize::Huge => 9,
+            };
 
-            // Zero the frame before mapping.
-            // SAFETY: The frame is freshly allocated and we access it via HHDM.
+            let lock = crate::memory::get_allocator();
+            let mut guard = lock.lock();
+            let allocator = guard.as_mut().ok_or("Allocator not initialized")?;
+            let frame = allocator
+                .alloc(order)
+                .map_err(|_| "Failed to allocate frame")?;
+            drop(guard);
+
+            // Zero the frame
             unsafe {
-                let frame_virt = crate::memory::phys_to_virt(frame.start_address().as_u64());
-                core::ptr::write_bytes(frame_virt as *mut u8, 0, 4096);
+                let frame_virt = crate::memory::phys_to_virt(frame.start_address.as_u64());
+                core::ptr::write_bytes(frame_virt as *mut u8, 0, page_bytes as usize);
             }
 
-            // Map the page to the frame.
-            // SAFETY: The frame is valid and unused; flags are caller-specified.
-            let map_res = unsafe { mapper.map_to(page, frame, page_flags, &mut frame_allocator) };
-            match map_res {
-                Ok(flush) => {
-                    flush.flush();
-                    mapped_pages += 1;
-                }
-                Err(_) => {
-                    // Free frame for the page that failed to map.
-                    {
-                        let lock = crate::memory::get_allocator();
-                        let mut guard = lock.lock();
-                        if let Some(allocator) = guard.as_mut() {
-                            allocator.free(
-                                crate::memory::PhysFrame {
-                                    start_address: frame.start_address(),
-                                },
-                                0,
-                            );
-                        }
+            // Map the page.
+            let map_ok = match page_size {
+                VmaPageSize::Small => {
+                    use x86_64::structures::paging::Size4KiB;
+                    let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                        .map_err(|_| "Map 4K: invalid page address")?;
+                    let phys_frame =
+                        x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                            frame.start_address,
+                        );
+                    unsafe {
+                        mapper
+                            .map_to(page, phys_frame, page_flags, &mut frame_allocator)
+                            .map(|flush| flush.flush())
+                            .is_ok()
                     }
+                }
+                VmaPageSize::Huge => {
+                    use x86_64::structures::paging::Size2MiB;
+                    let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
+                        .map_err(|_| "Map 2M: invalid page address")?;
+                    let phys_frame =
+                        x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                            frame.start_address,
+                        );
+                    let mut huge_flags = page_flags;
+                    huge_flags |= PageTableFlags::HUGE_PAGE;
+                    unsafe {
+                        mapper
+                            .map_to(page, phys_frame, huge_flags, &mut frame_allocator)
+                            .map(|flush| flush.flush())
+                            .is_ok()
+                    }
+                }
+            };
 
-                    // Roll back already mapped pages to keep state consistent.
-                    for j in (0..mapped_pages).rev() {
-                        let rb_addr = start + (j as u64) * 4096;
-                        let rb_page =
-                            Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
-                                .map_err(|_| "Rollback: invalid page address")?;
-                        if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
-                            rb_flush.flush();
-                            let lock = crate::memory::get_allocator();
-                            let mut guard = lock.lock();
-                            if let Some(allocator) = guard.as_mut() {
-                                allocator.free(
-                                    crate::memory::PhysFrame {
-                                        start_address: rb_frame.start_address(),
-                                    },
-                                    0,
-                                );
+            if !map_ok {
+                log::error!(
+                    "map_region: map_to failed at page {} vaddr={:#x} size={:?}",
+                    i,
+                    page_addr,
+                    page_size
+                );
+                // Free frame for this page that failed to map.
+                let lock = crate::memory::get_allocator();
+                let mut guard = lock.lock();
+                if let Some(allocator) = guard.as_mut() {
+                    allocator.free(frame, order);
+                }
+                drop(guard);
+
+                // Roll back already mapped pages to keep state consistent.
+                for j in (0..mapped_pages).rev() {
+                    let rb_addr = start + (j as u64) * page_bytes;
+                    match page_size {
+                        VmaPageSize::Small => {
+                            use x86_64::structures::paging::Size4KiB;
+                            let rb_page =
+                                Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
+                                    .map_err(|_| "Rollback: invalid 4K page address")?;
+                            if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                                rb_flush.flush();
+                                crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
+                                    start_address: rb_frame.start_address(),
+                                });
+                            }
+                        }
+                        VmaPageSize::Huge => {
+                            use x86_64::structures::paging::Size2MiB;
+                            let rb_page =
+                                Page::<Size2MiB>::from_start_address(VirtAddr::new(rb_addr))
+                                    .map_err(|_| "Rollback: invalid 2M page address")?;
+                            if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                                rb_flush.flush();
+                                crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
+                                    start_address: rb_frame.start_address(),
+                                });
                             }
                         }
                     }
-
-                    return Err("Failed to map page");
                 }
+
+                return Err("Failed to map page");
             }
+
+            // Track refcount for COW
+            crate::memory::cow::frame_inc_ref(crate::memory::PhysFrame {
+                start_address: frame.start_address,
+            });
+
+            mapped_pages += 1;
         }
 
-        // Track the region.
+        // Track the region
+        let mut regions = self.regions.lock();
         let region = VirtualMemoryRegion {
             start,
             page_count,
             flags,
             vma_type,
+            page_size,
         };
-        self.regions.lock().insert(start, region);
-
-        log::trace!(
-            "Mapped region: {:#x}..{:#x} ({} pages, {:?})",
-            start,
-            start + (page_count as u64) * 4096,
-            page_count,
-            vma_type
-        );
+        regions.insert(start, region);
 
         Ok(())
     }
 
     /// Unmap a previously mapped region and free the backing frames.
-    pub fn unmap_region(&self, start: u64, page_count: usize) -> Result<(), &'static str> {
+    pub fn unmap_region(
+        &self,
+        start: u64,
+        page_count: usize,
+        page_size: VmaPageSize,
+    ) -> Result<(), &'static str> {
+        let page_bytes = page_size.bytes();
         // SAFETY: We have logical ownership of this address space.
         let mut mapper = unsafe { self.mapper() };
 
         for i in 0..page_count {
-            let page_addr = start + (i as u64) * 4096;
-            let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
-                .map_err(|_| "Page address not aligned")?;
+            let page_addr = start + (i as u64) * page_bytes;
 
-            let (frame, flush) = mapper.unmap(page).map_err(|_| "Failed to unmap page")?;
-            flush.flush();
-
-            // Free the physical frame back to the buddy allocator.
-            let phys_frame = crate::memory::PhysFrame {
-                start_address: frame.start_address(),
+            let frame_addr = match page_size {
+                VmaPageSize::Small => {
+                    use x86_64::structures::paging::Size4KiB;
+                    let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                        .map_err(|_| "Failed to unmap: invalid 4K page address")?;
+                    let (frame, flush) =
+                        mapper.unmap(page).map_err(|_| "Failed to unmap 4K page")?;
+                    flush.flush();
+                    frame.start_address()
+                }
+                VmaPageSize::Huge => {
+                    use x86_64::structures::paging::Size2MiB;
+                    let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
+                        .map_err(|_| "Failed to unmap: invalid 2M page address")?;
+                    let (frame, flush) =
+                        mapper.unmap(page).map_err(|_| "Failed to unmap 2M page")?;
+                    flush.flush();
+                    frame.start_address()
+                }
             };
-            let lock = crate::memory::get_allocator();
-            let mut guard = lock.lock();
-            if let Some(allocator) = guard.as_mut() {
-                allocator.free(phys_frame, 0);
-            }
+
+            // COW-aware refcount decrement: free only when last mapping disappears.
+            let phys_frame = crate::memory::PhysFrame {
+                start_address: frame_addr,
+            };
+            crate::memory::cow::frame_dec_ref(phys_frame);
         }
 
         // Remove from VMA tracking.
         self.regions.lock().remove(&start);
 
         log::trace!(
-            "Unmapped region: {:#x}..{:#x} ({} pages)",
+            "Unmapped region: {:#x}..{:#x} ({} pages, size={:?})",
             start,
-            start + (page_count as u64) * 4096,
-            page_count
+            start + (page_count as u64) * page_bytes,
+            page_count,
+            page_size
         );
 
         Ok(())
     }
 
-    /// Find a free virtual address range of `n_pages` pages starting at or after `hint`.
-    ///
-    /// Scans the VMA list in ascending order and returns the first gap that fits.
-    /// Returns `None` if no gap of sufficient size exists before `USER_SPACE_END`.
-    pub fn find_free_vma_range(&self, hint: u64, n_pages: usize) -> Option<u64> {
+    /// Find a free virtual address range of `n_pages` pages of `page_size` starting at or after `hint`.
+    pub fn find_free_vma_range(
+        &self,
+        hint: u64,
+        n_pages: usize,
+        page_size: VmaPageSize,
+    ) -> Option<u64> {
         if n_pages == 0 {
             return None;
         }
-        let length = (n_pages as u64).checked_mul(4096)?;
+        let page_bytes = page_size.bytes();
+        let length = (n_pages as u64).checked_mul(page_bytes)?;
         let upper_limit: u64 = 0x0000_8000_0000_0000; // USER_SPACE_END
 
-        // Round hint up to a page boundary; never return address 0.
-        let mut candidate = hint.saturating_add(4095) & !4095u64;
+        // Round hint up to a page boundary
+        let mut candidate = (hint.saturating_add(page_bytes - 1)) & !(page_bytes - 1);
         if candidate == 0 {
-            candidate = 4096;
+            candidate = page_bytes;
         }
 
         let regions = self.regions.lock();
         for (&vma_start, vma) in regions.iter() {
-            let vma_end = vma_start + vma.page_count as u64 * 4096;
+            let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
 
             // A gap exists before this VMA — candidate fits.
             if candidate.saturating_add(length) <= vma_start {
@@ -387,7 +709,7 @@ impl AddressSpace {
 
             // Candidate overlaps this VMA; skip past it.
             if vma_end > candidate {
-                candidate = vma_end;
+                candidate = (vma_end.saturating_add(page_bytes - 1)) & !(page_bytes - 1);
             }
         }
 
@@ -407,19 +729,12 @@ impl AddressSpace {
         };
         let regions = self.regions.lock();
         regions.iter().any(|(&vma_start, vma)| {
-            let vma_end = vma_start.saturating_add((vma.page_count as u64).saturating_mul(4096));
+            let vma_end = vma_start
+                .saturating_add((vma.page_count as u64).saturating_mul(vma.page_size.bytes()));
             vma_start < end && vma_end > addr
         })
     }
 
-    /// Unmap the virtual address range `[addr, addr + len)`, handling partial VMA overlaps.
-    ///
-    /// `addr` and `len` must both be multiples of the page size.  VMAs that
-    /// partially overlap the range are split: the portions outside the range
-    /// remain mapped and tracked.  Physical frames inside the range are freed.
-    ///
-    /// Pages that are not mapped (e.g. a gap inside a sparse range) are silently
-    /// skipped : this matches Linux `munmap` behaviour.
     pub fn unmap_range(&self, addr: u64, len: u64) -> Result<(), &'static str> {
         if len == 0 {
             return Ok(());
@@ -428,73 +743,93 @@ impl AddressSpace {
             .checked_add(len)
             .ok_or("unmap_range: address overflow")?;
 
-        //  Step 1: collect all VMAs that overlap [addr, end)
-        // We take a snapshot so we can release the lock before doing page-table
-        // operations (which themselves acquire the buddy-allocator lock).
-        let overlapping: alloc::vec::Vec<(u64, VirtualMemoryRegion)> = {
+        // Pre-validate huge-page overlaps: partial unmap of 2MiB mappings is
+        // not supported yet. Callers must unmap on huge-page boundaries.
+        {
             let regions = self.regions.lock();
-            regions
-                .iter()
-                .filter(|(&vma_start, vma)| {
-                    let vma_end = vma_start + vma.page_count as u64 * 4096;
-                    vma_start < end && vma_end > addr
-                })
-                .map(|(&k, v)| (k, v.clone()))
-                .collect()
-        }; // lock released
-
-        if overlapping.is_empty() {
-            return Ok(()); // nothing to do
-        }
-
-        //  Step 2: unmap pages from the hardware page tables
-        // SAFETY: We have logical ownership of this address space; no other
-        // task modifies it concurrently (single-process model, no clone yet).
-        let mut mapper = unsafe { self.mapper() };
-
-        for (vma_start, vma) in &overlapping {
-            let vma_start = *vma_start;
-            let vma_end = vma_start + vma.page_count as u64 * 4096;
-            let range_start = core::cmp::max(vma_start, addr);
-            let range_end = core::cmp::min(vma_end, end);
-
-            let mut page_addr = range_start;
-            while page_addr < range_end {
-                let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
-                    .map_err(|_| "unmap_range: page address not aligned")?;
-
-                // Silently skip pages that happen to not be mapped.
-                if let Ok((frame, flush)) = mapper.unmap(page) {
-                    flush.flush();
-                    let phys = crate::memory::PhysFrame {
-                        start_address: frame.start_address(),
-                    };
-                    let lock = crate::memory::get_allocator();
-                    let mut guard = lock.lock();
-                    if let Some(allocator) = guard.as_mut() {
-                        allocator.free(phys, 0);
+            for (&vma_start, vma) in regions.iter() {
+                let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
+                if vma_start >= end || vma_end <= addr {
+                    continue;
+                }
+                if vma.page_size == VmaPageSize::Huge {
+                    let range_start = core::cmp::max(vma_start, addr);
+                    let range_end = core::cmp::min(vma_end, end);
+                    if range_start % vma.page_size.bytes() != 0
+                        || range_end % vma.page_size.bytes() != 0
+                    {
+                        return Err("unmap_range: partial unmap of 2MiB pages is not supported");
                     }
                 }
-
-                page_addr += 4096;
             }
         }
 
-        //  Step 3: update VMA tracking
-        {
-            let mut regions = self.regions.lock();
-            for (vma_start, vma) in &overlapping {
-                let vma_start = *vma_start;
-                let vma_end = vma_start + vma.page_count as u64 * 4096;
-                let range_start = core::cmp::max(vma_start, addr);
-                let range_end = core::cmp::min(vma_end, end);
+        // Process regions one by one to avoid heap allocation (Vec)
+        loop {
+            // Find the first overlapping region
+            let region_info = {
+                let regions = self.regions.lock();
+                regions
+                    .iter()
+                    .find(|(&vma_start, vma)| {
+                        let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
+                        vma_start < end && vma_end > addr
+                    })
+                    .map(|(&k, v)| (k, v.clone()))
+            };
 
-                // Remove the (now partially or fully unmapped) original VMA.
+            let Some((vma_start, vma)) = region_info else {
+                break; // No more overlapping regions
+            };
+
+            let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
+            let range_start = core::cmp::max(vma_start, addr);
+            let range_end = core::cmp::min(vma_end, end);
+
+            // 1. Hardware unmap
+            // SAFETY: Logical ownership of address space.
+            let mut mapper = unsafe { self.mapper() };
+            let mut page_addr = range_start;
+            let page_bytes = vma.page_size.bytes();
+            while page_addr < range_end {
+                let frame_addr = match vma.page_size {
+                    VmaPageSize::Small => {
+                        use x86_64::structures::paging::Size4KiB;
+                        let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                            .map_err(|_| "unmap_range: invalid 4K page address")?;
+                        let (frame, flush) = mapper
+                            .unmap(page)
+                            .map_err(|_| "unmap_range: unmap 4K failed")?;
+                        flush.flush();
+                        frame.start_address()
+                    }
+                    VmaPageSize::Huge => {
+                        use x86_64::structures::paging::Size2MiB;
+                        let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
+                            .map_err(|_| "unmap_range: invalid 2M page address")?;
+                        let (frame, flush) = mapper
+                            .unmap(page)
+                            .map_err(|_| "unmap_range: unmap 2M failed")?;
+                        flush.flush();
+                        frame.start_address()
+                    }
+                };
+
+                let phys = crate::memory::PhysFrame {
+                    start_address: frame_addr,
+                };
+                crate::memory::cow::frame_dec_ref(phys);
+                page_addr += page_bytes;
+            }
+
+            // 2. Update tracking: remove and re-insert fragments
+            {
+                let mut regions = self.regions.lock();
                 regions.remove(&vma_start);
 
-                // Re-insert the leading fragment [vma_start, range_start).
                 if range_start > vma_start {
-                    let leading_pages = ((range_start - vma_start) / 4096) as usize;
+                    let leading_pages =
+                        ((range_start - vma_start) / vma.page_size.bytes()) as usize;
                     regions.insert(
                         vma_start,
                         VirtualMemoryRegion {
@@ -502,13 +837,13 @@ impl AddressSpace {
                             page_count: leading_pages,
                             flags: vma.flags,
                             vma_type: vma.vma_type,
+                            page_size: vma.page_size,
                         },
                     );
                 }
 
-                // Re-insert the trailing fragment [range_end, vma_end).
                 if range_end < vma_end {
-                    let trailing_pages = ((vma_end - range_end) / 4096) as usize;
+                    let trailing_pages = ((vma_end - range_end) / vma.page_size.bytes()) as usize;
                     regions.insert(
                         range_end,
                         VirtualMemoryRegion {
@@ -516,6 +851,7 @@ impl AddressSpace {
                             page_count: trailing_pages,
                             flags: vma.flags,
                             vma_type: vma.vma_type,
+                            page_size: vma.page_size,
                         },
                     );
                 }
@@ -565,30 +901,45 @@ impl AddressSpace {
         self.is_kernel
     }
 
+    /// Check if this address space has any user-space memory mappings.
+    pub fn has_user_mappings(&self) -> bool {
+        if self.is_kernel {
+            return false;
+        }
+        let regions = self.regions.lock();
+        // Check for any non-kernel mappings.
+        regions.values().any(|vma| vma.vma_type != VmaType::Kernel)
+    }
+
     /// Unmap all tracked user regions (best-effort).
     ///
     /// This frees user frames and clears the VMA list. Kernel mappings are untouched.
+    /// Does not allocate memory.
     pub fn unmap_all_user_regions(&self) {
         if self.is_kernel {
             return;
         }
 
-        let regions: alloc::vec::Vec<(u64, usize)> = {
-            let guard = self.regions.lock();
-            guard.values().map(|r| (r.start, r.page_count)).collect()
-        };
+        loop {
+            // Pop the first region from the map to avoid allocation
+            let first = {
+                let mut guard = self.regions.lock();
+                if let Some(&start) = guard.keys().next() {
+                    guard.remove(&start)
+                } else {
+                    None
+                }
+            };
 
-        for (start, pages) in regions {
-            let _ = self.unmap_region(start, pages);
+            if let Some(region) = first {
+                let _ = self.unmap_region(region.start, region.page_count, region.page_size);
+            } else {
+                break;
+            }
         }
     }
 
-    /// Clone this user address space by eagerly copying all tracked VMAs/pages.
-    ///
-    /// This is used by the P1 `fork` implementation (no COW yet):
-    /// - child receives an independent page mapping for each parent user page
-    /// - page contents are byte-copied eagerly
-    pub fn clone_for_fork_eager(&self) -> Result<Arc<AddressSpace>, &'static str> {
+    pub fn clone_cow(&self) -> Result<Arc<AddressSpace>, &'static str> {
         if self.is_kernel {
             return Err("Cannot fork kernel address space");
         }
@@ -600,37 +951,142 @@ impl AddressSpace {
             guard.values().cloned().collect()
         };
 
-        for region in regions.iter() {
-            child.map_region(
-                region.start,
-                region.page_count,
-                region.flags,
-                region.vma_type,
-            )?;
+        let mut tlb_flush_needed = false;
+        let mut processed_pages = Vec::new();
 
-            for i in 0..region.page_count {
-                let vaddr = region
-                    .start
-                    .checked_add((i as u64) * 4096)
-                    .ok_or("fork clone: virtual address overflow")?;
+        let res: Result<(), &'static str> = (|| {
+            let mut parent_mapper = unsafe { self.mapper() };
+            let mut child_mapper = unsafe { child.mapper() };
+            let mut frame_allocator = BuddyFrameAllocator;
 
-                let src_phys = self
-                    .translate(VirtAddr::new(vaddr))
-                    .ok_or("fork clone: missing source mapping")?;
-                let dst_phys = child
-                    .translate(VirtAddr::new(vaddr))
-                    .ok_or("fork clone: missing destination mapping")?;
+            for region in regions.iter() {
+                // Register VMA in child
+                {
+                    let mut child_regions = child.regions.lock();
+                    child_regions.insert(region.start, region.clone());
+                }
 
-                let src = crate::memory::phys_to_virt(src_phys.as_u64()) as *const u8;
-                let dst = crate::memory::phys_to_virt(dst_phys.as_u64()) as *mut u8;
+                let page_bytes = region.page_size.bytes();
 
-                // SAFETY: both src/dst are mapped 4KiB pages in kernel HHDM.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src, dst, 4096);
+                for i in 0..region.page_count {
+                    let vaddr = VirtAddr::new(region.start + (i as u64) * page_bytes);
+
+                    // Translate parent page to frame
+                    let (phys_frame_addr, flags): (PhysAddr, PageTableFlags) =
+                        match parent_mapper.translate(vaddr) {
+                            TranslateResult::Mapped {
+                                frame,
+                                offset: _,
+                                flags,
+                            } => (frame.start_address(), flags),
+                            _ => continue,
+                        };
+
+                    let mut new_flags = flags;
+                    let is_writable = flags.contains(PageTableFlags::WRITABLE);
+                    const COW_BIT: PageTableFlags = PageTableFlags::BIT_9;
+
+                    if is_writable {
+                        new_flags.remove(PageTableFlags::WRITABLE);
+                        new_flags.insert(COW_BIT);
+
+                        unsafe {
+                            let res: Result<(), &'static str> = match region.page_size {
+                                VmaPageSize::Small => parent_mapper
+                                    .update_flags(
+                                        Page::<Size4KiB>::from_start_address(vaddr).unwrap(),
+                                        new_flags,
+                                    )
+                                    .map(|f| f.ignore())
+                                    .map_err(|_| "Failed to update parent 4K flags"),
+                                VmaPageSize::Huge => parent_mapper
+                                    .update_flags(
+                                        Page::<Size2MiB>::from_start_address(vaddr).unwrap(),
+                                        new_flags,
+                                    )
+                                    .map(|f| f.ignore())
+                                    .map_err(|_| "Failed to update parent 2M flags"),
+                            };
+                            if let Err(e) = res {
+                                return Err(e);
+                            }
+                        }
+                        tlb_flush_needed = true;
+                    }
+
+                    let phys = crate::memory::PhysFrame {
+                        start_address: phys_frame_addr,
+                    };
+                    crate::memory::cow::frame_inc_ref(phys);
+
+                    // Map in child
+                    unsafe {
+                        let map_res: Result<(), &'static str> = match region.page_size {
+                            VmaPageSize::Small => {
+                                let page = Page::<Size4KiB>::from_start_address(vaddr).unwrap();
+                                let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(phys_frame_addr);
+                                child_mapper
+                                    .map_to(page, frame, new_flags, &mut frame_allocator)
+                                    .map(|f| f.ignore())
+                                    .map_err(|_| "Failed to map 4K in child")
+                            }
+                            VmaPageSize::Huge => {
+                                let page = Page::<Size2MiB>::from_start_address(vaddr).unwrap();
+                                let frame = x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(phys_frame_addr);
+                                child_mapper
+                                    .map_to(page, frame, new_flags, &mut frame_allocator)
+                                    .map(|f| f.ignore())
+                                    .map_err(|_| "Failed to map 2M in child")
+                            }
+                        };
+
+                        if let Err(e) = map_res {
+                            crate::memory::cow::frame_dec_ref(phys);
+                            return Err(e);
+                        }
+                    }
+
+                    processed_pages.push((vaddr.as_u64(), flags, phys, region.page_size));
                 }
             }
+            Ok(())
+        })();
+
+        if let Err(e) = res {
+            log::error!("clone_cow error: {}. Rolling back...", e);
+            let mut parent_mapper = unsafe { self.mapper() };
+            for (vaddr, original_flags, phys, page_size) in processed_pages.into_iter().rev() {
+                if original_flags.contains(PageTableFlags::WRITABLE) {
+                    unsafe {
+                        match page_size {
+                            VmaPageSize::Small => {
+                                let _ = parent_mapper.update_flags(
+                                    Page::<Size4KiB>::from_start_address(VirtAddr::new(vaddr))
+                                        .unwrap(),
+                                    original_flags,
+                                );
+                            }
+                            VmaPageSize::Huge => {
+                                let _ = parent_mapper.update_flags(
+                                    Page::<Size2MiB>::from_start_address(VirtAddr::new(vaddr))
+                                        .unwrap(),
+                                    original_flags,
+                                );
+                            }
+                        };
+                    }
+                }
+                crate::memory::cow::frame_dec_ref(phys);
+            }
+            if tlb_flush_needed {
+                crate::arch::x86_64::tlb::shootdown_all();
+            }
+            return Err(e);
         }
 
+        if tlb_flush_needed {
+            crate::arch::x86_64::tlb::shootdown_all();
+        }
         Ok(child)
     }
 

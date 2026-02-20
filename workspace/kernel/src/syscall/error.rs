@@ -30,6 +30,10 @@ pub enum SyscallError {
     AlreadyExists = -17,
     /// Invalid argument (EINVAL)
     InvalidArgument = -22,
+    /// Argument list too long (E2BIG)
+    ArgumentListTooLong = -7,
+    /// Exec format error (ENOEXEC)
+    ExecFormatError = -8,
     /// Function not implemented (ENOSYS)
     NotImplemented = -38,
     /// No buffer space available / queue full (ENOBUFS)
@@ -50,13 +54,15 @@ impl SyscallError {
             -1 => SyscallError::PermissionDenied,
             -4 => SyscallError::Interrupted,
             -5 => SyscallError::IoError,
-            -9  => SyscallError::BadHandle,
+            -9 => SyscallError::BadHandle,
             -10 => SyscallError::NoChildren,
             -11 => SyscallError::Again,
             -12 => SyscallError::OutOfMemory,
             -14 => SyscallError::Fault,
             -17 => SyscallError::AlreadyExists,
             -22 => SyscallError::InvalidArgument,
+            -7 => SyscallError::ArgumentListTooLong,
+            -8 => SyscallError::ExecFormatError,
             -38 => SyscallError::NotImplemented,
             -110 => SyscallError::TimedOut,
             _ => SyscallError::InvalidArgument,

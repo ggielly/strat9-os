@@ -171,31 +171,126 @@ enum ProcEntry {
     Directory,
 }
 
+impl ProcScheme {
+    fn encode_id(base: u64, pid: u64) -> u64 {
+        base + pid
+    }
+
+    fn decode_id(id: u64) -> (u64, u64) {
+        if id >= 3000 {
+            (3000, id - 3000)
+        } else if id >= 2000 {
+            (2000, id - 2000)
+        } else if id >= 1000 {
+            (1000, id - 1000)
+        } else {
+            (id, 0)
+        }
+    }
+}
+
 impl Scheme for ProcScheme {
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         let entry = self.get_entry(path)?;
 
-        let flags = match entry {
-            ProcEntry::File(_) => FileFlags::empty(),
-            ProcEntry::Directory => FileFlags::DIRECTORY,
+        let (flags, file_id) = match entry {
+            ProcEntry::File(_) => {
+                let id = match path {
+                    "cpuinfo" => 10,
+                    "meminfo" => 11,
+                    "version" => 12,
+                    "self/status" => {
+                        Self::encode_id(2000, current_task_id().map(|t| t.as_u64()).unwrap_or(0))
+                    }
+                    "self/cmdline" => {
+                        Self::encode_id(3000, current_task_id().map(|t| t.as_u64()).unwrap_or(0))
+                    }
+                    _ if path.starts_with("self") => 1, // Should not happen with get_entry logic
+                    _ => {
+                        // Handle <pid>/status and <pid>/cmdline
+                        if let Some(slash_idx) = path.find('/') {
+                            let pid_str = &path[..slash_idx];
+                            let sub = &path[slash_idx + 1..];
+                            if let Ok(pid) = pid_str.parse::<u64>() {
+                                match sub {
+                                    "status" => Self::encode_id(2000, pid),
+                                    "cmdline" => Self::encode_id(3000, pid),
+                                    _ => 0xFFFF,
+                                }
+                            } else {
+                                0xFFFF
+                            }
+                        } else {
+                            // Path is just <pid> - should be a directory handled below
+                            0xFFFF
+                        }
+                    }
+                };
+                (FileFlags::empty(), id)
+            }
+            ProcEntry::Directory => {
+                let id = if path.is_empty() || path == "/" {
+                    0
+                } else if path == "self" || path == "self/" {
+                    1
+                } else if let Ok(pid) = path.parse::<u64>() {
+                    Self::encode_id(1000, pid)
+                } else {
+                    2
+                };
+                (FileFlags::DIRECTORY, id)
+            }
         };
 
-        // Use path hash as file ID (simple but works for procfs)
-        let file_id = path.len() as u64 ^ (path.as_ptr() as u64);
+        if file_id == 0xFFFF {
+            return Err(SyscallError::NotFound);
+        }
 
         Ok(OpenResult {
             file_id,
-            size: None, // Dynamic size
+            size: None,
             flags,
         })
     }
 
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        // For simplicity, we regenerate content on each read
-        // A real implementation would cache the content
-        let content = match file_id {
-            // These would be properly tracked in a real implementation
-            _ => self.get_cpuinfo(), // Fallback
+        let content = if file_id == 0 {
+            // Root directory listing
+            let mut list = String::from("self\ncpuinfo\nmeminfo\nversion\n");
+            if let Some(tasks) = get_all_tasks() {
+                for task in tasks {
+                    let _ = writeln!(list, "{}", task.id.as_u64());
+                }
+            }
+            list
+        } else if file_id == 1 || (file_id >= 1000 && file_id < 2000) {
+            // Process directory listing
+            String::from("status\ncmdline\n")
+        } else {
+            // File content
+            let (base, pid) = Self::decode_id(file_id);
+            match base {
+                10 => self.get_cpuinfo(),
+                11 => self.get_meminfo(),
+                12 => self.get_version(),
+                2000 => {
+                    let tasks = get_all_tasks().ok_or(SyscallError::NotFound)?;
+                    let task = tasks
+                        .iter()
+                        .find(|t| t.id.as_u64() == pid)
+                        .ok_or(SyscallError::NotFound)?;
+                    self.get_process_status(task)
+                }
+                3000 => {
+                    let tasks = get_all_tasks().ok_or(SyscallError::NotFound)?;
+                    let task = tasks
+                        .iter()
+                        .find(|t| t.id.as_u64() == pid)
+                        .ok_or(SyscallError::NotFound)?;
+                    format!("{}\n", task.name)
+                }
+                _ => return Err(SyscallError::IoError),
+            }
         };
 
         if offset >= content.len() as u64 {

@@ -182,10 +182,18 @@ impl fmt::Display for BootInfo {
                 region.size / 1024
             )?;
         }
-        writeln!(f, "  Total Usable RAM: {} MB", self.total_usable_ram() / (1024 * 1024))?;
+        writeln!(
+            f,
+            "  Total Usable RAM: {} MB",
+            self.total_usable_ram() / (1024 * 1024)
+        )?;
         writeln!(f, "  Modules: {}", self.modules.len())?;
         for module in &self.modules {
-            writeln!(f, "    {}: 0x{:x} ({} bytes)", module.name, module.base, module.size)?;
+            writeln!(
+                f,
+                "    {}: 0x{:x} ({} bytes)",
+                module.name, module.base, module.size
+            )?;
         }
         if !self.cmdline.is_empty() {
             writeln!(f, "  Command Line: {}", self.cmdline)?;

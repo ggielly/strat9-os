@@ -5,6 +5,8 @@
 //! - Process abstraction
 //! - Basic scheduler functionality
 
+#[cfg(feature = "selftest")]
+pub mod demand_paging_test;
 pub mod elf;
 #[cfg(feature = "selftest")]
 pub mod fork_test;
@@ -12,9 +14,9 @@ pub mod fork_test;
 pub mod futex_test;
 #[cfg(feature = "selftest")]
 pub mod mmap_test;
+pub mod scheduler;
 #[cfg(feature = "selftest")]
 pub mod selftest;
-pub mod scheduler;
 pub mod signal;
 pub mod task;
 pub mod test;

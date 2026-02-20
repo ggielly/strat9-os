@@ -10,6 +10,7 @@ pub mod userslice;
 pub mod zone;
 
 use crate::entry::MemoryRegion;
+use alloc::{boxed::Box, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Higher Half Direct Map offset.
@@ -42,10 +43,41 @@ pub fn virt_to_phys(virt: u64) -> u64 {
 /// Initialize the memory management subsystem
 pub fn init_memory_manager(memory_regions: &[MemoryRegion]) {
     buddy::init_buddy_allocator(memory_regions);
+    init_cow_metadata(memory_regions);
+}
+
+fn init_cow_metadata(memory_regions: &[MemoryRegion]) {
+    use crate::entry::MemoryKind;
+
+    let max_end = memory_regions
+        .iter()
+        .filter(|r| matches!(r.kind, MemoryKind::Free | MemoryKind::Reclaim))
+        .map(|r| r.base.saturating_add(r.size))
+        .max()
+        .unwrap_or(0);
+
+    if max_end == 0 {
+        log::warn!("COW metadata not initialized: no usable memory regions");
+        return;
+    }
+
+    let max_pfn = ((max_end.saturating_add(4095)) / 4096) as usize;
+    let mut metas = Vec::with_capacity(max_pfn);
+    for _ in 0..max_pfn {
+        metas.push(cow::FrameMeta::new());
+    }
+
+    let boxed = metas.into_boxed_slice();
+    let ptr = Box::into_raw(boxed) as *mut cow::FrameMeta;
+
+    // SAFETY: `ptr` points to a leaked boxed slice of exactly `max_pfn` entries.
+    unsafe {
+        cow::init_frame_metadata(max_pfn, ptr);
+    }
 }
 
 // Re-exports
-pub use address_space::{kernel_address_space, AddressSpace};
+pub use address_space::{kernel_address_space, AddressSpace, VmaFlags, VmaPageSize, VmaType};
 pub use buddy::get_allocator;
 pub use frame::{AllocError, FrameAllocator, PhysFrame};
 pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSliceWrite};

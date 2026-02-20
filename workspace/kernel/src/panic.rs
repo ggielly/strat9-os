@@ -135,11 +135,11 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
                 crate::arch::x86_64::vga::RgbColor::new(0x3A, 0x1F, 0x00),
             );
             writer.clear();
-            let _ = writeln!(writer, "=== KERNEL PANIC ===");
+            let _ = writeln!(writer, "=== GURU MEDIATiON :: KERNEL PANiK ===");
             if let Some(location) = info.location() {
                 let _ = writeln!(
                     writer,
-                    "Panic at {}:{}:{}",
+                    "not kalm :: panik at {}:{}:{}",
                     location.file(),
                     location.line(),
                     location.column()
@@ -150,10 +150,10 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     }
 
     // Serial log (always works)
-    crate::serial_println!("=== KERNEL PANiK ===");
+    crate::serial_println!("=== GURU MEDIATiON :: KERNEL PANiK ===");
     if let Some(location) = info.location() {
         crate::serial_println!(
-            "Panic at {}:{}:{}",
+            "not kalm :: panik at {}:{}:{}",
             location.file(),
             location.line(),
             location.column()

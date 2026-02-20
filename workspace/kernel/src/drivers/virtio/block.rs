@@ -302,8 +302,12 @@ impl VirtioBlockDevice {
         }
         drop(queue);
 
-        // Wait for completion (Busy wait for now)
-        // TODO: Use interrupts
+        // Wait for completion (busy-poll for now).
+        //
+        // IMPORTANT:
+        // Do not use HLT here. This path can run from syscall context where IF
+        // may be masked, and HLT would deadlock the CPU.
+        // TODO: replace with proper waitqueue + interrupt completion.
         loop {
             let mut queue = self.queue.lock();
             if queue.has_used() {
@@ -323,7 +327,7 @@ impl VirtioBlockDevice {
                 }
             }
             drop(queue);
-            crate::arch::x86_64::hlt();
+            core::hint::spin_loop();
         }
 
         // Check status
@@ -435,7 +439,7 @@ pub fn init() {
 
     // Read interrupt line from PCI config
     let irq_line = pci_dev.read_config_u8(pci::config::INTERRUPT_LINE);
-    
+
     // Initialize device
     match unsafe { VirtioBlockDevice::new(pci_dev) } {
         Ok(device) => {
@@ -443,13 +447,13 @@ pub fn init() {
             unsafe {
                 VIRTIO_BLOCK_IRQ = irq_line;
             }
-            
+
             // Register device
             *VIRTIO_BLOCK.lock() = Some(Box::new(device));
-            
+
             // Register IRQ handler in IDT
             crate::arch::x86_64::idt::register_virtio_block_irq(irq_line);
-            
+
             log::info!("VirtIO-blk: Device initialized on IRQ {}", irq_line);
         }
         Err(e) => {
@@ -471,7 +475,7 @@ pub fn handle_interrupt() {
         if isr_status != 0 {
             // Acknowledge the interrupt
             device.device.ack_interrupt();
-            
+
             // Process completed requests (wake up waiting tasks)
             // For now, just log the interrupt
             log::trace!("VirtIO-blk: Interrupt handled (ISR={})", isr_status);

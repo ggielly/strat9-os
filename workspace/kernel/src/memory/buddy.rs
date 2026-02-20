@@ -14,12 +14,12 @@ use x86_64::PhysAddr;
 const MAX_FREE_BLOCKS: usize = 65536;
 
 // Use MaybeUninit to avoid .bss initialization issues in higher-half kernel
-static mut FREE_BLOCKS: core::mem::MaybeUninit<[Option<FreeBlock>; MAX_FREE_BLOCKS]> = 
+static mut FREE_BLOCKS: core::mem::MaybeUninit<[Option<FreeBlock>; MAX_FREE_BLOCKS]> =
     core::mem::MaybeUninit::uninit();
 static mut FREE_BLOCKS_INIT: bool = false;
 static mut FREE_BLOCKS_USED: usize = 0;
 static mut FREE_BLOCKS_FREE_HEAD: Option<usize> = None;
-static mut FREE_BLOCKS_FREE_NEXT: core::mem::MaybeUninit<[Option<usize>; MAX_FREE_BLOCKS]> = 
+static mut FREE_BLOCKS_FREE_NEXT: core::mem::MaybeUninit<[Option<usize>; MAX_FREE_BLOCKS]> =
     core::mem::MaybeUninit::uninit();
 
 const PAGE_SIZE: u64 = 4096;
@@ -38,7 +38,7 @@ pub fn init_free_pool() {
         if FREE_BLOCKS_INIT {
             return; // Already initialized
         }
-        
+
         // Zero FREE_BLOCKS
         let blocks_ptr = FREE_BLOCKS.as_mut_ptr() as *mut u8;
         core::ptr::write_bytes(
@@ -46,7 +46,7 @@ pub fn init_free_pool() {
             0,
             core::mem::size_of::<[Option<FreeBlock>; MAX_FREE_BLOCKS]>(),
         );
-        
+
         // Zero FREE_BLOCKS_FREE_NEXT
         let next_ptr = FREE_BLOCKS_FREE_NEXT.as_mut_ptr() as *mut u8;
         core::ptr::write_bytes(
@@ -54,39 +54,53 @@ pub fn init_free_pool() {
             0,
             core::mem::size_of::<[Option<usize>; MAX_FREE_BLOCKS]>(),
         );
-        
+
         FREE_BLOCKS_USED = 0;
         FREE_BLOCKS_FREE_HEAD = None;
         FREE_BLOCKS_INIT = true;
-        
-        serial_println!("  Free block pool initialized ({} entries)", MAX_FREE_BLOCKS);
+
+        serial_println!(
+            "  Free block pool initialized ({} entries)",
+            MAX_FREE_BLOCKS
+        );
     }
 }
 
-fn get_free_blocks() -> &'static mut [Option<FreeBlock>; MAX_FREE_BLOCKS] {
+/// Get pointer to free blocks array
+///
+/// # Safety
+/// - Must be called after init_free_pool()
+/// - Caller must ensure exclusive access or proper synchronization
+#[inline(always)]
+fn get_free_blocks_ptr() -> *mut Option<FreeBlock> {
     unsafe {
         if !FREE_BLOCKS_INIT {
             panic!("Free block pool not initialized!");
         }
-        &mut *FREE_BLOCKS.as_mut_ptr()
+        FREE_BLOCKS.as_mut_ptr().cast()
     }
 }
 
-fn get_free_next() -> &'static mut [Option<usize>; MAX_FREE_BLOCKS] {
+/// Get pointer to free next array
+///
+/// # Safety
+/// - Must be called after init_free_pool()
+/// - Caller must ensure exclusive access or proper synchronization
+#[inline(always)]
+fn get_free_next_ptr() -> *mut Option<usize> {
     unsafe {
         if !FREE_BLOCKS_INIT {
             panic!("Free block pool not initialized!");
         }
-        &mut *FREE_BLOCKS_FREE_NEXT.as_mut_ptr()
+        FREE_BLOCKS_FREE_NEXT.as_mut_ptr().cast()
     }
 }
 
 fn pool_alloc(frame: PhysFrame) -> Option<usize> {
     unsafe {
-        let free_next = get_free_next();
+        let free_next = get_free_next_ptr();
         let idx = if let Some(free_idx) = FREE_BLOCKS_FREE_HEAD {
-            FREE_BLOCKS_FREE_HEAD = free_next[free_idx];
-            free_next[free_idx] = None;
+            FREE_BLOCKS_FREE_HEAD = (*free_next.add(free_idx)).take();
             free_idx
         } else {
             if FREE_BLOCKS_USED >= MAX_FREE_BLOCKS {
@@ -96,36 +110,36 @@ fn pool_alloc(frame: PhysFrame) -> Option<usize> {
             FREE_BLOCKS_USED += 1;
             i
         };
-        let blocks = get_free_blocks();
-        blocks[idx] = Some(FreeBlock { frame, next: None });
+        let blocks = get_free_blocks_ptr();
+        (*blocks.add(idx)) = Some(FreeBlock { frame, next: None });
         Some(idx)
     }
 }
 
 fn pool_release(idx: usize) {
     unsafe {
-        let blocks = get_free_blocks();
-        let free_next = get_free_next();
-        blocks[idx] = None;
-        free_next[idx] = FREE_BLOCKS_FREE_HEAD;
+        let blocks = get_free_blocks_ptr();
+        let free_next = get_free_next_ptr();
+        (*blocks.add(idx)) = None;
+        (*free_next.add(idx)) = FREE_BLOCKS_FREE_HEAD;
         FREE_BLOCKS_FREE_HEAD = Some(idx);
     }
 }
 
 fn free_list_push(zone: &mut Zone, frame: PhysFrame, order: u8) {
     let idx = pool_alloc(frame).expect("Free block pool exhausted");
-    let blocks = get_free_blocks();
     unsafe {
-        blocks[idx].as_mut().unwrap().next = zone.free_lists[order as usize];
+        let blocks = get_free_blocks_ptr();
+        (*blocks.add(idx)).as_mut().unwrap().next = zone.free_lists[order as usize];
         zone.free_lists[order as usize] = Some(idx);
     }
 }
 
 fn free_list_pop(zone: &mut Zone, order: u8) -> Option<PhysFrame> {
     let head_idx = zone.free_lists[order as usize]?;
-    let blocks = get_free_blocks();
     unsafe {
-        let block = blocks[head_idx].as_ref().unwrap();
+        let blocks = get_free_blocks_ptr();
+        let block = (*blocks.add(head_idx)).as_ref().unwrap();
         let frame = block.frame;
         zone.free_lists[order as usize] = block.next;
         pool_release(head_idx);
@@ -136,14 +150,14 @@ fn free_list_pop(zone: &mut Zone, order: u8) -> Option<PhysFrame> {
 fn free_list_remove(zone: &mut Zone, order: u8, target: PhysFrame) -> bool {
     let mut prev_idx: Option<usize> = None;
     let mut current_idx = zone.free_lists[order as usize];
-    let blocks = get_free_blocks();
     unsafe {
+        let blocks = get_free_blocks_ptr();
         while let Some(idx) = current_idx {
-            let block = blocks[idx].as_ref().unwrap();
+            let block = (*blocks.add(idx)).as_ref().unwrap();
             if block.frame == target {
                 let next = block.next;
                 if let Some(prev) = prev_idx {
-                    blocks[prev].as_mut().unwrap().next = next;
+                    (*blocks.add(prev)).as_mut().unwrap().next = next;
                 } else {
                     zone.free_lists[order as usize] = next;
                 }

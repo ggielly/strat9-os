@@ -78,6 +78,24 @@ pub trait Scheme: Send + Sync {
         let _ = file_id;
         Ok(()) // No-op by default
     }
+
+    /// Create a new regular file.
+    fn create_file(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
+        let _ = (path, mode);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Create a new directory.
+    fn create_directory(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
+        let _ = (path, mode);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Remove a file or directory.
+    fn unlink(&self, path: &str) -> Result<(), SyscallError> {
+        let _ = path;
+        Err(SyscallError::NotImplemented)
+    }
 }
 
 /// Type-erased Scheme reference.
@@ -285,6 +303,101 @@ impl Scheme for IpcScheme {
 
         Ok(())
     }
+
+    fn create_file(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
+        const OPCODE_CREATE_FILE: u32 = 0x05;
+        self.handle_create_op(OPCODE_CREATE_FILE, path, mode)
+    }
+
+    fn create_directory(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
+        const OPCODE_CREATE_DIR: u32 = 0x06;
+        self.handle_create_op(OPCODE_CREATE_DIR, path, mode)
+    }
+
+    fn unlink(&self, path: &str) -> Result<(), SyscallError> {
+        const OPCODE_UNLINK: u32 = 0x07;
+        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
+        let mut msg = IpcMessage::new(OPCODE_UNLINK);
+
+        if path.len() > 42 {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        msg.payload[0..2].copy_from_slice(&(path.len() as u16).to_le_bytes());
+        msg.payload[2..2 + path.len()].copy_from_slice(path.as_bytes());
+
+        port.send(msg).map_err(|_| SyscallError::BadHandle)?;
+        let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
+
+        if reply.msg_type != 0x80 {
+            return Err(SyscallError::IoError);
+        }
+        let status = u32::from_le_bytes([
+            reply.payload[0],
+            reply.payload[1],
+            reply.payload[2],
+            reply.payload[3],
+        ]);
+        if status != 0 {
+            return Err(SyscallError::from_code(status as i64));
+        }
+
+        Ok(())
+    }
+}
+
+impl IpcScheme {
+    fn handle_create_op(
+        &self,
+        opcode: u32,
+        path: &str,
+        mode: u32,
+    ) -> Result<OpenResult, SyscallError> {
+        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
+        let mut msg = IpcMessage::new(opcode);
+
+        if path.len() > 40 {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        msg.payload[0..4].copy_from_slice(&mode.to_le_bytes());
+        msg.payload[4..6].copy_from_slice(&(path.len() as u16).to_le_bytes());
+        msg.payload[6..6 + path.len()].copy_from_slice(path.as_bytes());
+
+        port.send(msg).map_err(|_| SyscallError::BadHandle)?;
+        let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
+
+        if reply.msg_type != 0x80 {
+            return Err(SyscallError::IoError);
+        }
+
+        let status = u32::from_le_bytes([
+            reply.payload[0],
+            reply.payload[1],
+            reply.payload[2],
+            reply.payload[3],
+        ]);
+        if status != 0 {
+            return Err(SyscallError::from_code(status as i64));
+        }
+
+        let file_id = u64::from_le_bytes([
+            reply.payload[4],
+            reply.payload[5],
+            reply.payload[6],
+            reply.payload[7],
+            reply.payload[8],
+            reply.payload[9],
+            reply.payload[10],
+            reply.payload[11],
+        ]);
+
+        Ok(OpenResult {
+            file_id,
+            size: Some(0),
+            flags: FileFlags::empty(),
+        })
+    }
 }
 
 /// Kernel-backed scheme: serves files from kernel memory (read-only).
@@ -321,6 +434,14 @@ impl KernelScheme {
 
 impl Scheme for KernelScheme {
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
+        if path.is_empty() || path == "/" {
+            return Ok(OpenResult {
+                file_id: 0, // Root directory ID
+                size: None,
+                flags: FileFlags::DIRECTORY,
+            });
+        }
+
         let file = self.files.get(path).ok_or(SyscallError::BadHandle)?;
         Ok(OpenResult {
             file_id: file.id,
@@ -330,6 +451,25 @@ impl Scheme for KernelScheme {
     }
 
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
+        if file_id == 0 {
+            // Handle directory listing for root
+            let mut list = String::new();
+            for name in self.files.keys() {
+                list.push_str(name);
+                list.push('\n');
+            }
+
+            if offset >= list.len() as u64 {
+                return Ok(0);
+            }
+
+            let start = offset as usize;
+            let end = core::cmp::min(start + buf.len(), list.len());
+            let to_copy = end - start;
+            buf[..to_copy].copy_from_slice(&list.as_bytes()[start..end]);
+            return Ok(to_copy);
+        }
+
         let file = self
             .files
             .values()

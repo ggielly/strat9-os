@@ -318,3 +318,8 @@ pub extern "C" fn smp_main() -> ! {
     // Start per-CPU scheduler (never returns).
     crate::process::scheduler::schedule_on_cpu(cpu_index);
 }
+
+/// Return the number of online CPUs.
+pub fn cpu_count() -> usize {
+    BOOTED_CORES.load(Ordering::Acquire)
+}

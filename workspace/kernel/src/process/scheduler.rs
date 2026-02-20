@@ -89,6 +89,8 @@ struct SchedulerCpu {
     current_task: Option<Arc<Task>>,
     /// Idle task to run when no other tasks are ready
     idle_task: Arc<Task>,
+    /// Task that was just preempted and needs to be re-queued
+    task_to_requeue: Option<Arc<Task>>,
 }
 
 /// The round-robin scheduler (per-CPU queues)
@@ -111,6 +113,24 @@ pub struct Scheduler {
     quantum_ms: u64,
 }
 
+fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
+    let saved_rsp = unsafe { (*task.context.get()).saved_rsp };
+    let stack_base = task.kernel_stack.virt_base.as_u64();
+    let stack_top = stack_base.saturating_add(task.kernel_stack.size as u64);
+
+    if saved_rsp < stack_base || saved_rsp.saturating_add(56) > stack_top {
+        return Err("saved_rsp outside kernel stack bounds");
+    }
+
+    // For our switch frame layout, return IP is at [saved_rsp + 48].
+    let ret_ip = unsafe { core::ptr::read((saved_rsp + 48) as *const u64) };
+    if ret_ip == 0 {
+        return Err("null return IP in switch frame");
+    }
+
+    Ok(())
+}
+
 impl Scheduler {
     /// Create a new scheduler instance
     pub fn new(cpu_count: usize) -> Self {
@@ -122,6 +142,7 @@ impl Scheduler {
                 ready_queue: VecDeque::new(),
                 current_task: None,
                 idle_task,
+                task_to_requeue: None,
             });
         }
 
@@ -199,9 +220,10 @@ impl Scheduler {
             }
         }
 
-        let zombie = children.iter().copied().find(|id| {
-            target.map_or(true, |t| t == *id) && self.zombies.contains_key(id)
-        });
+        let zombie = children
+            .iter()
+            .copied()
+            .find(|id| target.map_or(true, |t| t == *id) && self.zombies.contains_key(id));
 
         if let Some(child) = zombie {
             let status = self.zombies.remove(&child).unwrap_or(0);
@@ -219,6 +241,10 @@ impl Scheduler {
     /// Pick the next task to run on `cpu_index`.
     ///
     /// 1. Re-queues the current Running task (round-robin).
+    ///    The **idle task is never re-queued** — it is always available
+    ///    as the last-resort fallback.  Keeping it out of the ready queue
+    ///    ensures the queue becomes truly empty when there is no real work,
+    ///    which lets work-stealing kick in on other CPUs.
     /// 2. Pops from the local ready queue.
     /// 3. Falls back to **work-stealing** from the busiest other CPU.
     /// 4. Falls back to the per-CPU idle task.
@@ -232,7 +258,15 @@ impl Scheduler {
                 unsafe {
                     *task.state.get() = TaskState::Ready;
                 }
-                self.cpus[cpu_index].ready_queue.push_back(task);
+                // Never re-queue the per-CPU idle task.  It lives in
+                // `cpus[cpu_index].idle_task` and is cloned as a fallback
+                // below.  Putting it in the ready queue prevents it from
+                // ever being empty, which breaks work-stealing.
+                if !Arc::ptr_eq(&task, &self.cpus[cpu_index].idle_task) {
+                    // DO NOT push to ready_queue yet!
+                    // Another CPU could steal it before its context is saved.
+                    self.cpus[cpu_index].task_to_requeue = Some(task);
+                }
             }
         }
 
@@ -299,6 +333,13 @@ impl Scheduler {
             return None;
         }
 
+        if let Err(e) = validate_task_context(&next) {
+            panic!(
+                "scheduler: refusing to switch to invalid task '{}' (id={:?}): {}",
+                next.name, next.id, e
+            );
+        }
+
         // Update TSS.rsp0 for the new task (needed for Ring 3 → Ring 0 transitions)
         let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
         crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
@@ -309,7 +350,7 @@ impl Scheduler {
         // Switch CR3 if the new task has a different address space
         // SAFETY: The new task's address space has a valid PML4 with the kernel half mapped.
         unsafe {
-            next.address_space.switch_to();
+            (*next.address_space.get()).switch_to();
         }
 
         // Return raw pointers for switch_context
@@ -377,6 +418,21 @@ pub fn schedule() -> ! {
 }
 
 pub fn schedule_on_cpu(cpu_index: usize) -> ! {
+    // Disable interrupts for the entire critical section.
+    //
+    // On the BSP, IF may be 1 (interrupts were enabled in Phase 9).
+    // Without CLI, a timer interrupt between `pick_next_task` (which sets
+    // `current_task`) and `restore_first_task` would let `maybe_preempt()`
+    // call `switch_context` on the *init stack*, corrupting the task's
+    // `saved_rsp` and creating an infinite loop.
+    //
+    // APs already arrive here with IF=0 (from the trampoline), but the
+    // explicit CLI makes the contract clear for all callers.
+    //
+    // `task_entry_trampoline` executes `sti` when the first task starts,
+    // so interrupts are re-enabled at exactly the right moment.
+    crate::arch::x86_64::cli();
+
     // APs may arrive here before the BSP has called init_scheduler().
     // Spin-wait (releasing the lock each iteration) until the scheduler
     // is initialized, then pick the first task.
@@ -405,15 +461,34 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 
     // Switch to the first task's address space (no-op for kernel tasks)
     // SAFETY: The first task's address space is valid (kernel AS at boot).
+    if let Err(e) = validate_task_context(&first_task) {
+        panic!(
+            "scheduler: invalid first task '{}' (id={:?}): {}",
+            first_task.name, first_task.id, e
+        );
+    }
     unsafe {
-        first_task.address_space.switch_to();
+        (*first_task.address_space.get()).switch_to();
     }
 
     // Jump to the first task (never returns)
     // SAFETY: The context was set up by CpuContext::new with a valid stack frame.
+    // Interrupts are disabled; the trampoline's `sti` re-enables them.
     unsafe {
         restore_first_task(&raw const (*first_task.context.get()).saved_rsp);
         core::hint::unreachable_unchecked()
+    }
+}
+
+/// Called immediately after a context switch completes (in the new task's context).
+/// This safely re-queues the previously running task now that its state is fully saved.
+pub fn finish_switch() {
+    let cpu_index = current_cpu_index();
+    let mut scheduler = SCHEDULER.lock();
+    if let Some(ref mut sched) = *scheduler {
+        if let Some(task) = sched.cpus[cpu_index].task_to_requeue.take() {
+            sched.cpus[cpu_index].ready_queue.push_back(task);
+        }
     }
 }
 
@@ -452,6 +527,7 @@ pub fn yield_task() {
         // We return here when this task is rescheduled in the future.
         // The task that switched back to us may have had different flags,
         // so restore our own saved flags.
+        finish_switch();
     }
 
     // Restore interrupt state (re-enables IF if it was enabled before)
@@ -509,6 +585,7 @@ pub fn maybe_preempt() {
         // When we return here, this task was rescheduled. We're back in
         // the timer handler context, which will return via iretq and
         // restore the original RFLAGS (including IF=1).
+        finish_switch();
     }
 }
 
@@ -516,6 +593,10 @@ pub fn maybe_preempt() {
 extern "C" fn idle_task_main() -> ! {
     log::info!("Idle task started");
     loop {
+        // Be explicit on SMP: never rely on inherited IF state.
+        // If IF=0, HLT can deadlock that CPU forever.
+        crate::arch::x86_64::sti();
+
         // Halt until next interrupt (saves power, timer will wake us)
         crate::arch::x86_64::hlt();
     }
@@ -548,6 +629,11 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 }
                 if let Some(parent_id) = parent {
                     let _ = sched.wake_task_locked(parent_id);
+                    // Notify parent that a child has terminated.
+                    let _ = crate::process::signal::send_signal(
+                        parent_id,
+                        crate::process::signal::Signal::SIGCHLD,
+                    );
                 }
             }
         }
@@ -705,6 +791,7 @@ pub fn block_current_task() {
             switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
         }
         // We return here when woken and rescheduled.
+        finish_switch();
     }
 
     restore_flags(saved_flags);
@@ -806,6 +893,7 @@ pub fn suspend_task(id: TaskId) -> bool {
         unsafe {
             switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
         }
+        finish_switch();
     }
 
     // Send IPI after releasing the lock to avoid lock inversion.
@@ -932,6 +1020,7 @@ pub fn kill_task(id: TaskId) -> bool {
         unsafe {
             switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
         }
+        finish_switch();
     }
 
     // Send IPI after releasing the lock to avoid lock inversion.
@@ -946,15 +1035,15 @@ pub fn kill_task(id: TaskId) -> bool {
 fn cleanup_task_resources(task: &Arc<Task>) {
     crate::silo::on_task_terminated(task.id);
 
-    // Revoke all capabilities for this task.
-    let caps = unsafe { (&mut *task.capabilities.get()).take_all() };
-    for cap in caps {
-        let _ = get_capability_manager().revoke_capability(cap.id);
+    // Revoke all capabilities for this task (allocation-free)
+    unsafe {
+        (&mut *task.capabilities.get()).revoke_all();
     }
 
     // Best-effort cleanup of user address space if uniquely owned.
-    if !task.address_space.is_kernel() && Arc::strong_count(&task.address_space) == 1 {
-        task.address_space.unmap_all_user_regions();
+    let as_ref = unsafe { &*task.address_space.get() };
+    if !as_ref.is_kernel() && Arc::strong_count(as_ref) == 1 {
+        as_ref.unmap_all_user_regions();
     }
 }
 
@@ -984,6 +1073,18 @@ pub fn timer_tick() {
 
     // Check wake deadlines for sleeping tasks
     check_wake_deadlines(current_time_ns);
+
+    // Increment ticks for the task currently running on this CPU
+    if let Some(mut guard) = SCHEDULER.try_lock() {
+        if let Some(ref mut sched) = *guard {
+            let cpu_idx = current_cpu_index();
+            if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
+                if let Some(ref current_task) = cpu.current_task {
+                    current_task.ticks.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
 }
 
 /// Check wake deadlines for all tasks and wake up those whose sleep has expired.
@@ -1000,18 +1101,26 @@ fn check_wake_deadlines(current_time_ns: u64) {
     };
 
     if let Some(ref mut sched) = *scheduler {
-        // Collect IDs of tasks to wake (to avoid borrow issues)
-        let mut to_wake = alloc::vec::Vec::new();
+        // Use a fixed-size array to avoid heap allocation in interrupt context
+        const MAX_WAKE: usize = 32;
+        let mut to_wake = [TaskId::from_u64(0); MAX_WAKE];
+        let mut count = 0;
 
         for (id, task) in sched.all_tasks.iter() {
             let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
             if deadline != 0 && current_time_ns >= deadline {
-                to_wake.push(*id);
+                if count < MAX_WAKE {
+                    to_wake[count] = *id;
+                    count += 1;
+                } else {
+                    break; // Wake others on next tick
+                }
             }
         }
 
-        // Wake up tasks whose deadline has passed
-        for id in to_wake {
+        // Wake up tasks
+        for i in 0..count {
+            let id = to_wake[i];
             if let Some(task) = sched.all_tasks.get(&id) {
                 // Clear the deadline
                 task.wake_deadline_ns.store(0, Ordering::Relaxed);

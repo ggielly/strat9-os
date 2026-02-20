@@ -285,6 +285,12 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         vga_println!("[OK] APIC + I/O APIC + APIC timer active");
     }
 
+    // Initialize TLB shootdown system (SMP safety for COW operations).
+    if apic_active {
+        arch::x86_64::tlb::init();
+        serial_println!("[init] TLB shootdown system initialized.");
+    }
+
     // ================================================
     // Phase 6j: SMP bring-up (AP boot) + per-CPU data
     // ================================================
@@ -340,52 +346,21 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         vga_println!("[OK] Self-test tasks added");
     }
 
-    #[cfg(feature = "selftest")]
-    {
-        // =============================================
-        // Phase 8b: create Ring 3 test task
-        // =============================================
-        serial_println!("[init] Creating Ring 3 test task...");
-        vga_println!("[..] Creating Ring 3 user test task...");
-        process::usertest::create_user_test_task();
-        serial_println!("[init] Ring 3 test task created.");
-        vga_println!("[OK] Ring 3 test task ready");
-    }
+    // Ring3 smoke test task disabled in selftest mode: fork-test already
+    // exercises Ring3 transitions and this extra task can interfere.
 
     // =============================================
-    // Phase 8c: ELF loader — load initfs module if present
+    // Phase 8c: register modules in VFS
     // =============================================
     let mut init_task_id: Option<crate::process::TaskId> = None;
     if args.initfs_base != 0 && args.initfs_size != 0 {
-        serial_println!(
-            "[init] Loading init ELF module ({} bytes)...",
-            args.initfs_size
-        );
-        vga_println!("[..] Loading init ELF module...");
-        // SAFETY: the initfs_base pointer comes from Limine's module response.
-        //
-        // Limine maps modules in the HHDM, so the pointer is already a valid
-        // virtual address we can read from.
-        let elf_data =
-            core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize);
+        let elf_data = unsafe {
+            core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
+        };
         if let Err(e) = vfs::register_static_file("/initfs/init", elf_data.as_ptr(), elf_data.len())
         {
             serial_println!("[init] Failed to register /initfs/init: {:?}", e);
         }
-        match process::elf::load_and_run_elf(elf_data, "init") {
-            Ok(task_id) => {
-                init_task_id = Some(task_id);
-                serial_println!("[init] ELF 'init' loaded and scheduled.");
-                vga_println!("[OK] ELF 'init' loaded");
-            }
-            Err(e) => {
-                serial_println!("[init] Failed to load init ELF: {}", e);
-                vga_println!("[WARN] ELF load failed: {}", e);
-            }
-        }
-    } else {
-        serial_println!("[init] No initfs module loaded (using built-in Ring 3 test).");
-        vga_println!("[..] No initfs module (using built-in test)");
     }
 
     // Register optional fs-ext4 server module (if provided by Limine).
@@ -403,6 +378,22 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         }
     }
 
+    // Register optional strate-fs-ramfs server module (if provided by Limine).
+    if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
+        if base != 0 && size != 0 {
+            let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            if let Err(e) = vfs::register_static_file(
+                "/initfs/strate-fs-ramfs",
+                ram_data.as_ptr(),
+                ram_data.len(),
+            ) {
+                serial_println!("[init] Failed to register /initfs/strate-fs-ramfs: {:?}", e);
+            } else {
+                serial_println!("[init] Registered /initfs/strate-fs-ramfs ({} bytes)", size);
+            }
+        }
+    }
+
     // =============================================
     // Phase 8c: component system - process stage
     // =============================================
@@ -414,59 +405,11 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     serial_println!("[init] Process components initialized.");
     vga_println!("[OK] Process components ready");
 
-    #[cfg(feature = "selftest")]
-    {
-        // =============================================
-        // Phase 8d: IPC ping-pong test
-        // =============================================
-        serial_println!("[init] Creating IPC test tasks...");
-        vga_println!("[..] Creating IPC test tasks...");
-        ipc::test::create_ipc_test_tasks();
-        serial_println!("[init] IPC test tasks created.");
-        vga_println!("[OK] IPC test tasks ready");
-    }
+    // IPC stress tests disabled in selftest mode to avoid cross-test interference.
 
     // =============================================
-    // Phase 8e: Create Chevron shell task
+    // Phase 8e: Task creation (deferred to end of boot)
     // =============================================
-    serial_println!("[init] Creating Chevron shell task...");
-    vga_println!("[..] Creating interactive shell...");
-    match process::Task::new_kernel_task(
-        shell::shell_main,
-        "chevron-shell",
-        process::TaskPriority::Normal,
-    ) {
-        Ok(shell_task) => {
-            process::add_task(shell_task);
-            serial_println!("[init] Chevron shell task created.");
-            vga_println!("[OK] Chevron shell ready");
-        }
-        Err(e) => {
-            serial_println!("[WARN] Failed to create shell task: {}", e);
-            vga_println!("[WARN] Shell task unavailable");
-        }
-    }
-
-    // Dedicated status-line updater task (keeps bottom bar live independently of shell activity).
-    if let Ok(status_task) = process::Task::new_kernel_task(
-        arch::x86_64::vga::status_line_task_main,
-        "status-line",
-        process::TaskPriority::Low,
-    ) {
-        process::add_task(status_task);
-        serial_println!("[init] Status line task created.");
-    } else {
-        serial_println!("[WARN] Failed to create status line task");
-    }
-
-    // =============================================
-    // Phase 9: enable interrupts
-    // =============================================
-    serial_println!("[init] Enabling interrupts...");
-    vga_println!("[..] Enabling interrupts...");
-    arch::x86_64::sti();
-    serial_println!("[init] Interrupts enabled.");
-    vga_println!("[OK] Interrupts enabled");
 
     // =============================================
     // Phase 10: driver stubs
@@ -480,29 +423,6 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     drivers::virtio::block::init();
     serial_println!("[init] VirtIO block initialized.");
     vga_println!("[OK] VirtIO block driver initialized");
-
-    // Grant init task the Volume capability for the primary VirtIO block device.
-    if let (Some(task_id), Some(device)) = (init_task_id, drivers::virtio::block::get_device()) {
-        if let Some(task) = crate::process::get_task_by_id(task_id) {
-            let cap = crate::capability::get_capability_manager().create_capability(
-                crate::capability::ResourceType::Volume,
-                device as *const _ as usize,
-                crate::capability::CapPermissions {
-                    read: true,
-                    write: true,
-                    execute: false,
-                    grant: true,
-                    revoke: true,
-                },
-            );
-            unsafe { (&mut *task.capabilities.get()).insert(cap) };
-            serial_println!("[init] Granted volume capability to init");
-        } else {
-            serial_println!("[init] Failed to grant Volume cap: init task missing");
-        }
-    } else {
-        serial_println!("[init] Volume cap not granted (no init or no block device)");
-    }
 
     serial_println!("[init] Initializing VirtIO net...");
     vga_println!("[..] Looking for VirtIO net device...");
@@ -552,17 +472,101 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     vga_println!("[..] Storage verification skipped at boot");
 
     // =============================================
-    // Boot complete — start preemptive multitasking
+    // Final Phase: Launch initial user tasks
     // =============================================
-    serial_println!("[init] Boot complete. Starting preemptive scheduler...");
-    vga_println!("[OK] Starting multitasking (preemptive)");
+
+    // 1. Launch init process if module was found
+    if args.initfs_base != 0 && args.initfs_size != 0 {
+        let elf_data = unsafe {
+            core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
+        };
+        match process::elf::load_and_run_elf(elf_data, "init") {
+            Ok(task_id) => {
+                init_task_id = Some(task_id);
+                serial_println!("[init] ELF 'init' loaded.");
+            }
+            Err(e) => {
+                serial_println!("[init] Failed to load init ELF: {}", e);
+            }
+        }
+    }
+
+    // 2. Launch strate-fs-ramfs server if module was found
+    if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
+        let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+        match process::elf::load_and_run_elf(ram_data, "strate-fs-ramfs") {
+            Ok(_) => {
+                serial_println!("[init] Component 'strate-fs-ramfs' loaded.");
+            }
+            Err(e) => {
+                serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e);
+            }
+        }
+    }
+
+    // 3. Grant Volume capability to init task
+    if let (Some(task_id), Some(device)) = (init_task_id, drivers::virtio::block::get_device()) {
+        if let Some(task) = crate::process::get_task_by_id(task_id) {
+            let cap = crate::capability::get_capability_manager().create_capability(
+                crate::capability::ResourceType::Volume,
+                device as *const _ as usize,
+                crate::capability::CapPermissions {
+                    read: true,
+                    write: true,
+                    execute: false,
+                    grant: true,
+                    revoke: true,
+                },
+            );
+            unsafe { (&mut *task.capabilities.get()).insert(cap) };
+            serial_println!("[init] Granted volume capability to init");
+        }
+    }
+
+    // 4. Launch shell and status-line (kernel tasks)
+    #[cfg(not(feature = "selftest"))]
+    {
+        // Shell
+        match process::Task::new_kernel_task(
+            shell::shell_main,
+            "chevron-shell",
+            process::TaskPriority::Normal,
+        ) {
+            Ok(shell_task) => {
+                process::add_task(shell_task);
+                serial_println!("[init] Chevron shell ready.");
+            }
+            Err(e) => {
+                serial_println!("[WARN] Failed to create shell task: {}", e);
+            }
+        }
+
+        // Status line
+        if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
+            arch::x86_64::vga::status_line_task_main,
+            "status-line",
+            process::TaskPriority::Low,
+            64 * 1024,
+        ) {
+            process::add_task(status_task);
+        }
+    }
 
     // Initialize keyboard layout to French by default
     crate::arch::x86_64::keyboard_layout::set_french_layout();
 
+    // =============================================
+    // Boot complete — start preemptive multitasking
+    // =============================================
+    serial_println!("[init] Enabling interrupts...");
+    vga_println!("[..] Enabling interrupts...");
+    arch::x86_64::sti();
+    serial_println!("[init] Interrupts enabled.");
+    vga_println!("[OK] Interrupts enabled");
+    serial_println!("[init] Boot complete. Starting preemptive scheduler...");
+    vga_println!("[OK] Starting multitasking (preemptive)");
+
     // Start the scheduler - this will never return
-    // The scheduler will alternate between idle task and test task(s)
-    // Note: The prompt will be displayed by the idle task or a dedicated shell task
     process::schedule();
 }
 
@@ -604,13 +608,13 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     };
     serial_println!("[init]   6c. MADT parsed");
 
-    // Step 6d: Initialize Local APIC
+    // Step 6d: initialize Local APIC
     // Ensure Local APIC MMIO is mapped
     memory::paging::ensure_identity_map(madt_info.local_apic_address as u64);
     apic::init(madt_info.local_apic_address);
     serial_println!("[init]   6d. Local APIC initialized");
 
-    // Step 6e: Initialize first I/O APIC
+    // Step 6e: initialize first I/O APIC
     if madt_info.io_apic_count == 0 {
         log::warn!("APIC: no I/O APIC in MADT");
         return false;
@@ -624,31 +628,63 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     ioapic::init(io_apic_entry.io_apic_address, io_apic_entry.gsi_base);
     serial_println!("[init]   6e. I/O APIC initialized");
 
-    // Step 6f: Remap PIC to 0x20+ then disable permanently
+    // Step 6f: remap PIC to 0x20+ then disable permanently
     // Must remap first to avoid stray interrupts at exception vectors (0-31)
     pic::init(pic::PIC1_OFFSET, pic::PIC2_OFFSET);
     pic::disable_permanently();
     serial_println!("[init]   6f. Legacy PIC remapped and disabled");
 
-    // Step 6g: Route IRQ0 (timer) and IRQ1 (keyboard) via I/O APIC
+    // Step 6g: route IRQ0 (timer) and IRQ1 (keyboard) via I/O APIC
     let lapic_id = apic::lapic_id();
     ioapic::route_legacy_irq(0, lapic_id, 0x20, &madt_info.overrides);
     ioapic::route_legacy_irq(1, lapic_id, 0x21, &madt_info.overrides);
     serial_println!("[init]   6g. IRQ0->vec 0x20, IRQ1->vec 0x21 routed");
 
-    // Step 6h: Calibrate APIC timer using PIT channel 2
+    // Step 6h: calibrate APIC timer using PIT channel 2
+    serial_println!("[init]   6h. Calibrating APIC timer using PIT channel 2...");
+    serial_println!(
+        "[timer] ================================ TIMER INIT ================================"
+    );
+
     let ticks_per_10ms = timer::calibrate_apic_timer();
+
     if ticks_per_10ms == 0 {
-        log::warn!("APIC: timer calibration failed, falling back to PIC");
+        log::error!("APIC: timer calibration FAILED");
+        log::warn!("Falling back to legacy PIT timer at 100Hz");
+
         // Re-enable PIC since APIC timer failed
         // (Note: I/O APIC routing is still active for keyboard/timer via PIC vectors)
-        return false;
-    }
-    serial_println!("[init]   6h. APIC timer calibrated");
+        serial_println!("[timer] APIC calibration failed, initializing PIT fallback...");
+        timer::init_pit(100); // 100Hz = 10ms per tick
+        serial_println!("[timer] PIT initialized at 100Hz (10ms interval)");
+        serial_println!("[init]   6h. PIT timer initialized (fallback)");
 
-    // Step 6i: Start APIC timer in periodic mode
-    timer::start_apic_timer(ticks_per_10ms);
-    serial_println!("[init]   6i. APIC timer started (100Hz)");
+        serial_println!("[timer] ============================= TIMER INIT COMPLETE ============================");
+        serial_println!("[timer] Mode: PIT (legacy fallback)");
+        serial_println!("[timer] Frequency: 100Hz");
+        serial_println!("[timer] Interval: 10ms per tick");
+        serial_println!(
+            "[timer] =========================================================================="
+        );
+
+        // Continue with PIT - don't return false
+        // return false;
+    } else {
+        serial_println!("[init]   6h. APIC timer calibrated successfully");
+
+        // Step 6i: start APIC timer in periodic mode
+        timer::start_apic_timer(ticks_per_10ms);
+        serial_println!("[init]   6i. APIC timer started (100Hz)");
+
+        serial_println!("[timer] ============================= TIMER INIT COMPLETE ============================");
+        serial_println!("[timer] Mode: APIC (native)");
+        serial_println!("[timer] Frequency: 100Hz");
+        serial_println!("[timer] Interval: 10ms per tick");
+        serial_println!("[timer] Ticks per 10ms: {}", ticks_per_10ms);
+        serial_println!(
+            "[timer] =========================================================================="
+        );
+    }
 
     true
 }

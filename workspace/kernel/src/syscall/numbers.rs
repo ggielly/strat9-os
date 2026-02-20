@@ -125,6 +125,14 @@ pub const SYS_PROC_WAITPID: u64 = 310;
 /// arg1=waitmsg_ptr (*Waitmsg, 80 bytes, nullable). Returns child pid.
 pub const SYS_PROC_WAIT: u64 = 311;
 
+/// Execute a new program.
+/// arg1=path_ptr, arg2=argv_ptr, arg3=envp_ptr
+pub const SYS_PROC_EXECVE: u64 = 312;
+
+/// Manipulate file descriptor (fcntl).
+/// arg1=fd, arg2=cmd (F_GETFD/F_SETFD/...), arg3=arg
+pub const SYS_FCNTL: u64 = 313;
+
 // Futex wait. arg1=uaddr (*u32), arg2=expected_val, arg3=timeout_ns
 pub const SYS_FUTEX_WAIT: u64 = 303;
 

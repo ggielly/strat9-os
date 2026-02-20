@@ -58,10 +58,10 @@ const APIC_BASE_ENABLE: u64 = 1 << 11;
 const SPURIOUS_VECTOR: u8 = 0xFF;
 
 /// Vector used for cross-CPU reschedule IPIs.
-///
-/// Chosen at 0xF0 — below the spurious vector (0xFF), above all hardware IRQs,
-/// and not conflicting with any other IPI vectors we define.
-pub const IPI_RESCHED_VECTOR: u8 = 0xF0;
+pub const IPI_RESCHED_VECTOR: u8 = 0xE0;
+
+/// Vector used for TLB shootdown IPIs.
+pub const IPI_TLB_SHOOTDOWN_VECTOR: u8 = 0xF0;
 
 /// Check if APIC is present via CPUID
 pub fn is_present() -> bool {

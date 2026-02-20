@@ -27,19 +27,19 @@
 pub mod fd;
 pub mod file;
 pub mod mount;
+pub mod procfs;
 pub mod scheme;
 pub mod scheme_router;
-pub mod procfs;
 
 use crate::{process::current_task_clone, syscall::error::SyscallError};
 use alloc::{string::String, sync::Arc};
 
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
-pub use mount::{mount, resolve, unmount, Namespace};
-pub use scheme::{DynScheme, FileFlags, IpcScheme, KernelScheme, OpenFlags, Scheme};
-pub use scheme_router::{register_scheme, mount_scheme, init_builtin_schemes, list_schemes};
+pub use mount::{list_mounts, mount, resolve, unmount, Namespace};
 pub use procfs::ProcScheme;
+pub use scheme::{DynScheme, FileFlags, IpcScheme, KernelScheme, OpenFlags, Scheme};
+pub use scheme_router::{init_builtin_schemes, list_schemes, mount_scheme, register_scheme};
 
 use crate::memory::{UserSliceRead, UserSliceWrite};
 
@@ -73,6 +73,27 @@ pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
     let fd = unsafe { (&mut *task.fd_table.get()).insert(open_file) };
 
     Ok(fd)
+}
+
+/// Create a directory.
+pub fn mkdir(path: &str, mode: u32) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.create_directory(&relative_path, mode)?;
+    Ok(())
+}
+
+/// Create an empty regular file.
+pub fn create_file(path: &str, mode: u32) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.create_file(&relative_path, mode)?;
+    Ok(())
+}
+
+/// Remove a file or directory.
+pub fn unlink(path: &str) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.unlink(&relative_path)?;
+    Ok(())
 }
 
 /// Read from a file descriptor.
@@ -287,7 +308,7 @@ pub fn init() {
     kernel_scheme.register("cmdline", CMDLINE.as_ptr(), CMDLINE.len());
 
     let kernel_scheme = Arc::new(kernel_scheme);
-    
+
     // Mount /sys
     if let Err(e) = mount::mount("/sys", kernel_scheme.clone()) {
         log::error!("[VFS] Failed to mount /sys: {:?}", e);
@@ -302,7 +323,7 @@ pub fn init() {
     } else {
         log::info!("[VFS] Registered proc scheme");
     }
-    
+
     if let Err(e) = mount::mount("/proc", proc_scheme) {
         log::error!("[VFS] Failed to mount /proc: {:?}", e);
     } else {

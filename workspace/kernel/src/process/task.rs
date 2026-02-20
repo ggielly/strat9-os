@@ -98,7 +98,7 @@ pub struct Task {
     /// Capabilities granted to this task
     pub capabilities: SyncUnsafeCell<CapabilityTable>,
     /// Address space for this task (kernel tasks share the kernel AS)
-    pub address_space: Arc<AddressSpace>,
+    pub address_space: SyncUnsafeCell<Arc<AddressSpace>>,
     /// File descriptor table for this task
     pub fd_table: SyncUnsafeCell<FileDescriptorTable>,
     /// Pending signals for this task
@@ -122,9 +122,10 @@ pub struct Task {
     /// Program break (end of heap), in bytes. 0 = not yet initialised.
     /// Lazily set to `BRK_BASE` on the first `sys_brk` call.
     pub brk: AtomicU64,
-    /// Next candidate virtual address for anonymous `mmap` allocations.
-    /// Starts at `MMAP_BASE` and advances with each successful mapping.
+    /// mmap_hint: next candidate virtual address for anonymous mmap allocations
     pub mmap_hint: AtomicU64,
+    /// Total CPU ticks consumed by this task
+    pub ticks: AtomicU64,
 }
 
 /// CPU context saved/restored during context switches.
@@ -200,9 +201,13 @@ impl CpuContext {
 #[unsafe(naked)]
 unsafe extern "C" fn task_entry_trampoline() {
     core::arch::naked_asm!(
+        "call {finish_switch}",
         "sti",          // Enable interrupts for the new task
+        "call {mark_tlb_ready}",
         "mov rdi, r13", // Bootstrap arg (seeded cap handle)
         "jmp r12",      // Jump to real entry point (loaded from initial stack frame)
+        finish_switch = sym crate::process::scheduler::finish_switch,
+        mark_tlb_ready = sym crate::arch::x86_64::percpu::mark_tlb_ready_current,
     );
 }
 
@@ -267,8 +272,18 @@ impl Task {
         name: &'static str,
         priority: TaskPriority,
     ) -> Result<Arc<Self>, &'static str> {
+        Self::new_kernel_task_with_stack(entry_point, name, priority, Self::DEFAULT_STACK_SIZE)
+    }
+
+    /// Create a new kernel task with a custom kernel stack size.
+    pub fn new_kernel_task_with_stack(
+        entry_point: extern "C" fn() -> !,
+        name: &'static str,
+        priority: TaskPriority,
+        stack_size: usize,
+    ) -> Result<Arc<Self>, &'static str> {
         // Allocate a real kernel stack
-        let kernel_stack = KernelStack::allocate(Self::DEFAULT_STACK_SIZE)?;
+        let kernel_stack = KernelStack::allocate(stack_size)?;
 
         // Create CPU context with the allocated stack
         let context = CpuContext::new(entry_point as *const () as u64, &kernel_stack);
@@ -290,7 +305,7 @@ impl Task {
             user_stack: None,
             name,
             capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
-            address_space: crate::memory::kernel_address_space().clone(),
+            address_space: SyncUnsafeCell::new(crate::memory::kernel_address_space().clone()),
             fd_table: SyncUnsafeCell::new(FileDescriptorTable::new()),
             pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
             blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
@@ -301,6 +316,7 @@ impl Task {
             wake_deadline_ns: AtomicU64::new(0),
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
+            ticks: AtomicU64::new(0),
         }))
     }
 
@@ -331,7 +347,7 @@ impl Task {
             user_stack: None,
             name,
             capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
-            address_space,
+            address_space: SyncUnsafeCell::new(address_space),
             fd_table: SyncUnsafeCell::new(FileDescriptorTable::new()),
             pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
             blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
@@ -342,7 +358,30 @@ impl Task {
             wake_deadline_ns: AtomicU64::new(0),
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
+            ticks: AtomicU64::new(0),
         }))
+    }
+
+    /// Reset all signal handlers to SIG_DFL (default).
+    ///
+    /// Called during execve to reset signal handlers as per POSIX:
+    /// handlers set to catch signals are reset to SIG_DFL, but SIG_IGN
+    /// remains ignored (implementation simplification: we reset all).
+    pub fn reset_signals(&self) {
+        // SAFETY: We have a valid reference to the task.
+        unsafe {
+            let actions = &mut *self.signal_actions.get();
+            for action in actions.iter_mut() {
+                *action = super::signal::SigAction::Default;
+            }
+        }
+    }
+
+    /// Returns true if this is a kernel task (shares the kernel address space).
+    pub fn is_kernel(&self) -> bool {
+        // SAFETY: address_space is immutable for the lifetime of the Arc?
+        // Actually we just updated it to SyncUnsafeCell.
+        unsafe { (*self.address_space.get()).is_kernel() }
     }
 }
 
