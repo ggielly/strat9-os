@@ -435,10 +435,11 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // Disabled in selftest builds to keep runtime deterministic.
     #[cfg(not(feature = "selftest"))]
     {
-        if let Ok(status_task) = process::Task::new_kernel_task(
+        if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
             arch::x86_64::vga::status_line_task_main,
             "status-line",
             process::TaskPriority::Low,
+            64 * 1024,
         ) {
             process::add_task(status_task);
             serial_println!("[init] Status line task created.");

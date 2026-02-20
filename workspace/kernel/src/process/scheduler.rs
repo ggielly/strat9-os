@@ -113,6 +113,24 @@ pub struct Scheduler {
     quantum_ms: u64,
 }
 
+fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
+    let saved_rsp = unsafe { (*task.context.get()).saved_rsp };
+    let stack_base = task.kernel_stack.virt_base.as_u64();
+    let stack_top = stack_base.saturating_add(task.kernel_stack.size as u64);
+
+    if saved_rsp < stack_base || saved_rsp.saturating_add(56) > stack_top {
+        return Err("saved_rsp outside kernel stack bounds");
+    }
+
+    // For our switch frame layout, return IP is at [saved_rsp + 48].
+    let ret_ip = unsafe { core::ptr::read((saved_rsp + 48) as *const u64) };
+    if ret_ip == 0 {
+        return Err("null return IP in switch frame");
+    }
+
+    Ok(())
+}
+
 impl Scheduler {
     /// Create a new scheduler instance
     pub fn new(cpu_count: usize) -> Self {
@@ -315,6 +333,13 @@ impl Scheduler {
             return None;
         }
 
+        if let Err(e) = validate_task_context(&next) {
+            panic!(
+                "scheduler: refusing to switch to invalid task '{}' (id={:?}): {}",
+                next.name, next.id, e
+            );
+        }
+
         // Update TSS.rsp0 for the new task (needed for Ring 3 → Ring 0 transitions)
         let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
         crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
@@ -436,6 +461,12 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 
     // Switch to the first task's address space (no-op for kernel tasks)
     // SAFETY: The first task's address space is valid (kernel AS at boot).
+    if let Err(e) = validate_task_context(&first_task) {
+        panic!(
+            "scheduler: invalid first task '{}' (id={:?}): {}",
+            first_task.name, first_task.id, e
+        );
+    }
     unsafe {
         (*first_task.address_space.get()).switch_to();
     }

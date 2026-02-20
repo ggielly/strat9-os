@@ -196,9 +196,12 @@ fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
     }
 
     // Entry point must be canonical user space (for ET_DYN this is relative and
-    // validated again after relocation).
+    // validated again after relocation). ET_EXEC must be non-zero.
     if header.e_entry >= USER_ADDR_MAX {
         return Err("Entry point outside user address range");
+    }
+    if header.e_type == ET_EXEC && header.e_entry == 0 {
+        return Err("ET_EXEC has null entry");
     }
 
     // Sanity check program headers
@@ -433,6 +436,12 @@ fn read_user_mapped_bytes(
     mut vaddr: u64,
     out: &mut [u8],
 ) -> Result<(), &'static str> {
+    let end = vaddr
+        .checked_add(out.len() as u64)
+        .ok_or("Read range overflow")?;
+    if end > USER_ADDR_MAX {
+        return Err("Read range outside user space");
+    }
     let mut copied = 0usize;
     while copied < out.len() {
         let page_off = (vaddr & 0xFFF) as usize;
@@ -456,6 +465,12 @@ fn write_user_mapped_bytes(
     mut vaddr: u64,
     src: &[u8],
 ) -> Result<(), &'static str> {
+    let end = vaddr
+        .checked_add(src.len() as u64)
+        .ok_or("Write range overflow")?;
+    if end > USER_ADDR_MAX {
+        return Err("Write range outside user space");
+    }
     let mut written = 0usize;
     while written < src.len() {
         let page_off = (vaddr & 0xFFF) as usize;
@@ -515,6 +530,9 @@ fn apply_relr_relocations(
             where_addr = load_bias
                 .checked_add(entry)
                 .ok_or("DT_RELR absolute relocation overflow")?;
+            if where_addr >= USER_ADDR_MAX {
+                return Err("DT_RELR target outside user space");
+            }
             let cur = read_user_u64(user_as, where_addr)?;
             write_user_u64(
                 user_as,
@@ -533,6 +551,9 @@ fn apply_relr_relocations(
                     let slot = where_addr
                         .checked_add(bit * 8)
                         .ok_or("DT_RELR bitmap target overflow")?;
+                    if slot >= USER_ADDR_MAX {
+                        return Err("DT_RELR bitmap target outside user space");
+                    }
                     let cur = read_user_u64(user_as, slot)?;
                     write_user_u64(
                         user_as,
@@ -718,6 +739,9 @@ fn apply_dynamic_relocations(
                     .r_offset
                     .checked_add(load_bias)
                     .ok_or("Relocation target overflow")?;
+                if target >= USER_ADDR_MAX {
+                    return Err("Relocation target outside user space");
+                }
 
                 let value = match r_type {
                     R_X86_64_RELATIVE => {

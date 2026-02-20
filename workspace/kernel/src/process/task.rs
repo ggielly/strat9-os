@@ -270,8 +270,18 @@ impl Task {
         name: &'static str,
         priority: TaskPriority,
     ) -> Result<Arc<Self>, &'static str> {
+        Self::new_kernel_task_with_stack(entry_point, name, priority, Self::DEFAULT_STACK_SIZE)
+    }
+
+    /// Create a new kernel task with a custom kernel stack size.
+    pub fn new_kernel_task_with_stack(
+        entry_point: extern "C" fn() -> !,
+        name: &'static str,
+        priority: TaskPriority,
+        stack_size: usize,
+    ) -> Result<Arc<Self>, &'static str> {
         // Allocate a real kernel stack
-        let kernel_stack = KernelStack::allocate(Self::DEFAULT_STACK_SIZE)?;
+        let kernel_stack = KernelStack::allocate(stack_size)?;
 
         // Create CPU context with the allocated stack
         let context = CpuContext::new(entry_point as *const () as u64, &kernel_stack);
