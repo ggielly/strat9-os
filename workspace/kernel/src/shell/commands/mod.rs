@@ -33,6 +33,10 @@ impl CommandRegistry {
         registry.register("scheme", vfs::cmd_scheme);
         registry.register("ls", vfs::cmd_ls);
         registry.register("cat", vfs::cmd_cat);
+        registry.register("mkdir", vfs::cmd_mkdir);
+        registry.register("touch", vfs::cmd_touch);
+        registry.register("rm", vfs::cmd_rm);
+        registry.register("write", vfs::cmd_write);
         registry.register("cpuinfo", sys::cmd_cpuinfo);
         registry.register("reboot", sys::cmd_reboot);
         registry.register("gfx", gfx::cmd_gfx);

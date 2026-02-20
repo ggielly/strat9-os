@@ -16,6 +16,10 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  top               - Graphical task manager (interactive)");
     shell_println!("  ls [path]         - List mount points or directory contents");
     shell_println!("  cat <path>        - Display file contents");
+    shell_println!("  mkdir <path>      - Create a new directory");
+    shell_println!("  touch <path>      - Create a new empty file");
+    shell_println!("  rm <path>         - Remove a file or directory");
+    shell_println!("  write <path> <t>  - Write text to a file");
     shell_println!("  scheme ls         - List registered schemes");
     shell_println!("  cpuinfo           - Display CPU information");
     shell_println!("  reboot            - Reboot the system");

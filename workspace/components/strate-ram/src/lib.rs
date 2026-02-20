@@ -64,6 +64,16 @@ impl RamFileSystem {
         self.inodes.lock().insert(id, Arc::new(Mutex::new(node)));
         id
     }
+
+    /// Internal helper to resolve path to Inode (used by IPC server)
+    pub fn resolve_path(&self, path: &str) -> FsResult<u64> {
+        let mut current_ino = self.root_inode();
+        for part in path.split('/').filter(|s| !s.is_empty()) {
+            let info = self.lookup(current_ino, part)?;
+            current_ino = info.ino;
+        }
+        Ok(current_ino)
+    }
 }
 
 impl VfsFileSystem for RamFileSystem {
@@ -112,20 +122,16 @@ impl VfsFileSystem for RamFileSystem {
         let guard = parent.lock();
         match &*guard {
             RamNode::Directory { entries } => {
-                let ino = entries.get(name).ok_or(FsError::NotFound)?;
-                self.stat(*ino)
+                let ino = *entries.get(name).ok_or(FsError::NotFound)?;
+                drop(guard);
+                self.stat(ino)
             }
             _ => Err(FsError::NotADirectory),
         }
     }
 
     fn resolve_path(&self, path: &str) -> FsResult<u64> {
-        let mut current_ino = self.root_inode();
-        for part in path.split('/').filter(|s| !s.is_empty()) {
-            let info = self.lookup(current_ino, part)?;
-            current_ino = info.ino;
-        }
-        Ok(current_ino)
+        self.resolve_path(path)
     }
 
     fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
@@ -194,6 +200,7 @@ impl VfsFileSystem for RamFileSystem {
                 }
                 let new_ino = self.allocate_inode(RamNode::File { data: Vec::new() });
                 entries.insert(name.to_string(), new_ino);
+                drop(guard);
                 self.stat(new_ino)
             }
             _ => Err(FsError::NotADirectory),
@@ -212,7 +219,37 @@ impl VfsFileSystem for RamFileSystem {
                     entries: BTreeMap::new(),
                 });
                 entries.insert(name.to_string(), new_ino);
+                drop(guard);
                 self.stat(new_ino)
+            }
+            _ => Err(FsError::NotADirectory),
+        }
+    }
+
+    fn unlink(&self, parent_ino: u64, name: &str, target_ino: u64) -> FsResult<()> {
+        let parent = self.get_node(parent_ino)?;
+        let mut guard = parent.lock();
+        match &mut *guard {
+            RamNode::Directory { entries } => {
+                let ino = *entries.get(name).ok_or(FsError::NotFound)?;
+                if ino != target_ino {
+                    return Err(FsError::InvalidArgument);
+                }
+                
+                let node = self.get_node(ino)?;
+                let node_guard = node.lock();
+                
+                if let RamNode::Directory { entries: child_entries } = &*node_guard {
+                    if !child_entries.is_empty() {
+                        return Err(FsError::NotEmpty);
+                    }
+                }
+                
+                drop(node_guard);
+                entries.remove(name);
+                drop(guard);
+                self.inodes.lock().remove(&ino);
+                Ok(())
             }
             _ => Err(FsError::NotADirectory),
         }
@@ -224,4 +261,17 @@ impl VfsFileSystem for RamFileSystem {
 
     fn invalidate_inode(&self, _ino: u64) {}
     fn invalidate_all_caches(&self) {}
+}
+
+pub fn split_path(path: &str) -> (&str, &str) {
+    let path = path.trim_end_matches('/');
+    if let Some(idx) = path.rfind('/') {
+        if idx == 0 {
+            ("/", &path[1..])
+        } else {
+            (&path[..idx], &path[idx + 1..])
+        }
+    } else {
+        ("/", path)
+    }
 }

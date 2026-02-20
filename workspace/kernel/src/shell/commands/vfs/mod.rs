@@ -107,3 +107,73 @@ pub fn cmd_scheme(args: &[String]) -> Result<(), ShellError> {
     shell_println!("");
     Ok(())
 }
+
+/// Create a new directory
+pub fn cmd_mkdir(args: &[String]) -> Result<(), ShellError> {
+    if args.is_empty() {
+        shell_println!("Usage: mkdir <path>");
+        return Ok(());
+    }
+
+    let path = &args[0];
+    match vfs::mkdir(path, 0o755) {
+        Ok(()) => shell_println!("Directory created: {}", path),
+        Err(e) => shell_println!("Error creating directory {}: {:?}", path, e),
+    }
+    Ok(())
+}
+
+/// Create a new empty file
+pub fn cmd_touch(args: &[String]) -> Result<(), ShellError> {
+    if args.is_empty() {
+        shell_println!("Usage: touch <path>");
+        return Ok(());
+    }
+
+    let path = &args[0];
+    match vfs::create_file(path, 0o644) {
+        Ok(()) => shell_println!("File created: {}", path),
+        Err(e) => shell_println!("Error creating file {}: {:?}", path, e),
+    }
+    Ok(())
+}
+
+/// Remove a file or directory
+pub fn cmd_rm(args: &[String]) -> Result<(), ShellError> {
+    if args.is_empty() {
+        shell_println!("Usage: rm <path>");
+        return Ok(());
+    }
+
+    let path = &args[0];
+    match vfs::unlink(path) {
+        Ok(()) => shell_println!("Removed: {}", path),
+        Err(e) => shell_println!("Error removing {}: {:?}", path, e),
+    }
+    Ok(())
+}
+
+/// Write text to a file
+pub fn cmd_write(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 2 {
+        shell_println!("Usage: write <path> <text>");
+        return Ok(());
+    }
+
+    let path = &args[0];
+    let text = &args[1];
+
+    match vfs::open(path, vfs::OpenFlags::WRITE) {
+        Ok(fd) => {
+            match vfs::write(fd, text.as_bytes()) {
+                Ok(n) => shell_println!("Wrote {} bytes to {}", n, path),
+                Err(e) => shell_println!("Error writing to {}: {:?}", path, e),
+            }
+            let _ = vfs::close(fd);
+        }
+        Err(e) => {
+            shell_println!("Error opening {}: {:?}", path, e);
+        }
+    }
+    Ok(())
+}

@@ -75,6 +75,27 @@ pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
     Ok(fd)
 }
 
+/// Create a directory.
+pub fn mkdir(path: &str, mode: u32) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.create_directory(&relative_path, mode)?;
+    Ok(())
+}
+
+/// Create an empty regular file.
+pub fn create_file(path: &str, mode: u32) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.create_file(&relative_path, mode)?;
+    Ok(())
+}
+
+/// Remove a file or directory.
+pub fn unlink(path: &str) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.unlink(&relative_path)?;
+    Ok(())
+}
+
 /// Read from a file descriptor.
 pub fn read(fd: u32, buf: &mut [u8]) -> Result<usize, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
