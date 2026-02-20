@@ -63,13 +63,45 @@ pub extern "C" fn shell_main() -> ! {
     let mut history_idx: isize = -1; 
     let mut current_input_saved = String::new();
 
-    // Display welcome message
-    shell_println!("");
-    shell_println!("+--------------------------------------------------------------+");
-    shell_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)             |");
-    shell_println!("|         Type 'help' for available commands                   |");
-    shell_println!("+--------------------------------------------------------------+");
-    shell_println!("");
+    // Display welcome message - Serial only for text part
+    crate::serial_println!("");
+    crate::serial_println!("+--------------------------------------------------------------+");
+    crate::serial_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)             |");
+    crate::serial_println!("|         Type 'help' for available commands                   |");
+    crate::serial_println!("+--------------------------------------------------------------+");
+    crate::serial_println!("");
+
+    // Graphical welcome banner
+    if crate::arch::x86_64::vga::is_available() {
+        use crate::arch::x86_64::vga::{self, UiTheme};
+        let (w, h) = vga::screen_size();
+        let (gw, gh) = vga::glyph_size();
+        
+        // Define banner size (approx 60% of width)
+        let panel_w = (w * 60) / 100;
+        let panel_h = gh * 5; // Title + 2 lines + padding
+        let x = (w.saturating_sub(panel_w)) / 2;
+        let y = (h / 6); // Position it in the upper part
+        
+        vga::ui_draw_panel(
+            x, y, panel_w, panel_h,
+            "Strat9-OS Chevron Shell v0.1.0",
+            "Welcome to the Bedrock kernel shell.\nType 'help' for available commands.",
+            UiTheme::SLATE
+        );
+        
+        // Position the text cursor below the banner for the first prompt
+        let next_row = (y + panel_h + (gh * 2)) / gh;
+        vga::set_text_cursor(0, next_row);
+    } else {
+        // Fallback ASCII box on VGA if graphical mode is not initialized
+        shell_println!("");
+        shell_println!("+--------------------------------------------------------------+");
+        shell_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)             |");
+        shell_println!("|         Type 'help' for available commands                   |");
+        shell_println!("+--------------------------------------------------------------+");
+        shell_println!("");
+    }
 
     print_prompt();
 

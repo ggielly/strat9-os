@@ -5,15 +5,19 @@
 use crate::{
     memory::AddressSpace,
     process::{
+        current_task_clone,
         scheduler::add_task_with_parent,
         signal::{SigAction, SigStack, SignalSet},
         task::{CpuContext, KernelStack, SyncUnsafeCell, Task},
-        current_task_clone, TaskId, TaskState,
+        TaskId, TaskState,
     },
     syscall::{error::SyscallError, SyscallFrame},
 };
 use alloc::{boxed::Box, sync::Arc};
-use core::{mem::offset_of, sync::atomic::{AtomicBool, AtomicU64, Ordering}};
+use core::{
+    mem::offset_of,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
@@ -38,8 +42,10 @@ struct ForkUserContext {
     rdx: u64,
     rcx: u64,
     user_rip: u64,
+    user_cs: u64,
     user_rflags: u64,
     user_rsp: u64,
+    user_ss: u64,
 }
 
 const OFF_R15: usize = offset_of!(ForkUserContext, r15);
@@ -57,8 +63,10 @@ const OFF_RDI: usize = offset_of!(ForkUserContext, rdi);
 const OFF_RDX: usize = offset_of!(ForkUserContext, rdx);
 const OFF_RCX: usize = offset_of!(ForkUserContext, rcx);
 const OFF_USER_RIP: usize = offset_of!(ForkUserContext, user_rip);
+const OFF_USER_CS: usize = offset_of!(ForkUserContext, user_cs);
 const OFF_USER_RFLAGS: usize = offset_of!(ForkUserContext, user_rflags);
 const OFF_USER_RSP: usize = offset_of!(ForkUserContext, user_rsp);
+const OFF_USER_SS: usize = offset_of!(ForkUserContext, user_ss);
 
 /// Child bootstrap: restore user register snapshot and enter Ring 3.
 extern "C" fn fork_child_start(ctx_ptr: u64) -> ! {
@@ -71,6 +79,21 @@ extern "C" fn fork_child_start(ctx_ptr: u64) -> ! {
 unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
     core::arch::naked_asm!(
         "mov rsi, rdi",
+
+        // ── Build IRET frame FIRST, using r8 as scratch ──────────────
+        // (r8 has not been restored yet, so we can clobber it safely)
+        "mov r8, [rsi + {off_user_ss}]",
+        "push r8",                            // SS
+        "mov r8, [rsi + {off_user_rsp}]",
+        "push r8",                            // user RSP
+        "mov r8, [rsi + {off_user_rflags}]",
+        "push r8",                            // user RFLAGS
+        "mov r8, [rsi + {off_user_cs}]",
+        "push r8",                            // CS
+        "mov r8, [rsi + {off_user_rip}]",
+        "push r8",                            // user RIP
+
+        // ── Now restore ALL general-purpose registers ────────────────
         "mov r15, [rsi + {off_r15}]",
         "mov r14, [rsi + {off_r14}]",
         "mov r13, [rsi + {off_r13}]",
@@ -79,21 +102,13 @@ unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
         "mov rbx, [rsi + {off_rbx}]",
         "mov r11, [rsi + {off_r11}]",
         "mov r10, [rsi + {off_r10}]",
-        "mov r9, [rsi + {off_r9}]",
-        "mov r8, [rsi + {off_r8}]",
+        "mov r9,  [rsi + {off_r9}]",
+        "mov r8,  [rsi + {off_r8}]",          // r8 now gets its correct value
         "mov rdx, [rsi + {off_rdx}]",
         "mov rcx, [rsi + {off_rcx}]",
         "mov rdi, [rsi + {off_rdi}]",
-        "mov rax, 0",
-        "push 0x23",
-        "mov r8, [rsi + {off_user_rsp}]",
-        "push r8",
-        "mov r8, [rsi + {off_user_rflags}]",
-        "push r8",
-        "push 0x2B",
-        "mov r8, [rsi + {off_user_rip}]",
-        "push r8",
-        "mov rsi, [rsi + {off_rsi}]",
+        "mov rax, 0",                         // child fork() returns 0
+        "mov rsi, [rsi + {off_rsi}]",         // rsi restored last
         "iretq",
         off_r15 = const OFF_R15,
         off_r14 = const OFF_R14,
@@ -110,8 +125,10 @@ unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
         off_rdx = const OFF_RDX,
         off_rcx = const OFF_RCX,
         off_user_rip = const OFF_USER_RIP,
+        off_user_cs = const OFF_USER_CS,
         off_user_rflags = const OFF_USER_RFLAGS,
         off_user_rsp = const OFF_USER_RSP,
+        off_user_ss = const OFF_USER_SS,
     );
 }
 
@@ -124,8 +141,8 @@ fn build_child_task(
     child_as: Arc<AddressSpace>,
     bootstrap_ctx_ptr: u64,
 ) -> Result<Arc<Task>, SyscallError> {
-    let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)
-        .map_err(|_| SyscallError::OutOfMemory)?;
+    let kernel_stack =
+        KernelStack::allocate(Task::DEFAULT_STACK_SIZE).map_err(|_| SyscallError::OutOfMemory)?;
     let context = CpuContext::new(fork_child_start as *const () as u64, &kernel_stack);
 
     let parent_caps = unsafe { (&*parent.capabilities.get()).clone() };
@@ -194,15 +211,13 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
         rdx: frame.rdx,
         rcx: frame.rcx,
         user_rip: frame.iret_rip,
+        user_cs: frame.iret_cs,
         user_rflags: frame.iret_rflags,
         user_rsp: frame.iret_rsp,
+        user_ss: frame.iret_ss,
     });
 
-    let child_task = build_child_task(
-        &parent,
-        child_as,
-        Box::into_raw(child_user_ctx) as u64,
-    )?;
+    let child_task = build_child_task(&parent, child_as, Box::into_raw(child_user_ctx) as u64)?;
     let child_pid = child_task.id;
     add_task_with_parent(child_task, parent.id);
 
