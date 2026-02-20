@@ -18,6 +18,7 @@ use crate::{
 const USER_CODE_ADDR: u64 = 0x0040_0000;
 const USER_STACK_ADDR: u64 = 0x0080_0000;
 const USER_STACK_TOP: u64 = USER_STACK_ADDR + 0x1000;
+const COW_TEST_ADDR: u64 = 0x0000_5000_0000;
 
 #[repr(C)]
 struct UserLaunchCtx {
@@ -172,6 +173,166 @@ fn run_scenario(parent: TaskId, name: &'static str, code: &[u8]) -> bool {
     }
 }
 
+fn cow_test_refcount_unmap() -> bool {
+    let aspace = match AddressSpace::new_user() {
+        Ok(v) => Arc::new(v),
+        Err(e) => {
+            crate::serial_println!("[fork-test] cow refcount: new_user failed: {}", e);
+            return false;
+        }
+    };
+    let flags = VmaFlags {
+        readable: true,
+        writable: true,
+        executable: false,
+        user_accessible: true,
+    };
+    if let Err(e) = aspace.map_region(COW_TEST_ADDR, 1, flags, VmaType::Anonymous) {
+        crate::serial_println!("[fork-test] cow refcount: map failed: {}", e);
+        return false;
+    }
+
+    let phys = match aspace.translate(x86_64::VirtAddr::new(COW_TEST_ADDR)) {
+        Some(p) => p,
+        None => {
+            crate::serial_println!("[fork-test] cow refcount: translate parent failed");
+            return false;
+        }
+    };
+    let frame = crate::memory::PhysFrame {
+        start_address: phys,
+    };
+    let r1 = crate::memory::cow::frame_get_refcount(frame);
+    if r1 != 1 {
+        crate::serial_println!("[fork-test] cow refcount: expected 1, got {}", r1);
+        return false;
+    }
+
+    let child = match aspace.clone_cow() {
+        Ok(v) => v,
+        Err(e) => {
+            crate::serial_println!("[fork-test] cow refcount: clone_cow failed: {}", e);
+            return false;
+        }
+    };
+    let r2 = crate::memory::cow::frame_get_refcount(frame);
+    if r2 != 2 {
+        crate::serial_println!("[fork-test] cow refcount: expected 2 after clone, got {}", r2);
+        return false;
+    }
+
+    if let Err(e) = aspace.unmap_region(COW_TEST_ADDR, 1) {
+        crate::serial_println!("[fork-test] cow refcount: parent unmap failed: {}", e);
+        return false;
+    }
+    let r3 = crate::memory::cow::frame_get_refcount(frame);
+    if r3 != 1 {
+        crate::serial_println!("[fork-test] cow refcount: expected 1 after parent unmap, got {}", r3);
+        return false;
+    }
+
+    if let Err(e) = child.unmap_region(COW_TEST_ADDR, 1) {
+        crate::serial_println!("[fork-test] cow refcount: child unmap failed: {}", e);
+        return false;
+    }
+    let r4 = crate::memory::cow::frame_get_refcount(frame);
+    if r4 != 0 {
+        crate::serial_println!("[fork-test] cow refcount: expected 0 after child unmap, got {}", r4);
+        return false;
+    }
+
+    true
+}
+
+fn cow_test_write_fault_copy() -> bool {
+    let aspace = match AddressSpace::new_user() {
+        Ok(v) => Arc::new(v),
+        Err(e) => {
+            crate::serial_println!("[fork-test] cow fault: new_user failed: {}", e);
+            return false;
+        }
+    };
+    let flags = VmaFlags {
+        readable: true,
+        writable: true,
+        executable: false,
+        user_accessible: true,
+    };
+    if let Err(e) = aspace.map_region(COW_TEST_ADDR, 1, flags, VmaType::Anonymous) {
+        crate::serial_println!("[fork-test] cow fault: map failed: {}", e);
+        return false;
+    }
+
+    let parent_phys = match aspace.translate(x86_64::VirtAddr::new(COW_TEST_ADDR)) {
+        Some(p) => p,
+        None => {
+            crate::serial_println!("[fork-test] cow fault: translate parent failed");
+            return false;
+        }
+    };
+    unsafe {
+        *(crate::memory::phys_to_virt(parent_phys.as_u64()) as *mut u8) = 0x11;
+    }
+
+    let child = match aspace.clone_cow() {
+        Ok(v) => v,
+        Err(e) => {
+            crate::serial_println!("[fork-test] cow fault: clone_cow failed: {}", e);
+            return false;
+        }
+    };
+
+    if let Err(e) = crate::syscall::fork::handle_cow_fault(COW_TEST_ADDR, &child) {
+        crate::serial_println!("[fork-test] cow fault: handler failed: {}", e);
+        return false;
+    }
+
+    let child_phys = match child.translate(x86_64::VirtAddr::new(COW_TEST_ADDR)) {
+        Some(p) => p,
+        None => {
+            crate::serial_println!("[fork-test] cow fault: translate child failed");
+            return false;
+        }
+    };
+    if child_phys == parent_phys {
+        crate::serial_println!("[fork-test] cow fault: expected private frame after write fault");
+        return false;
+    }
+
+    let parent_ptr = crate::memory::phys_to_virt(parent_phys.as_u64()) as *mut u8;
+    let child_ptr = crate::memory::phys_to_virt(child_phys.as_u64()) as *mut u8;
+    unsafe {
+        if *child_ptr != 0x11 {
+            crate::serial_println!("[fork-test] cow fault: copied data mismatch");
+            return false;
+        }
+        *child_ptr = 0x22;
+        if *parent_ptr != 0x11 {
+            crate::serial_println!("[fork-test] cow fault: parent mutated by child write");
+            return false;
+        }
+    }
+
+    let parent_ref = crate::memory::cow::frame_get_refcount(crate::memory::PhysFrame {
+        start_address: parent_phys,
+    });
+    let child_ref = crate::memory::cow::frame_get_refcount(crate::memory::PhysFrame {
+        start_address: child_phys,
+    });
+    if parent_ref != 1 || child_ref != 1 {
+        crate::serial_println!(
+            "[fork-test] cow fault: refcounts invalid parent={} child={}",
+            parent_ref,
+            child_ref
+        );
+        return false;
+    }
+
+    let _ = aspace.unmap_region(COW_TEST_ADDR, 1);
+    let _ = child.unmap_region(COW_TEST_ADDR, 1);
+    true
+}
+
 // Scenario 1:
 // - getpid != 0
 // - fork works (parent gets pid, child gets 0)
@@ -245,6 +406,18 @@ extern "C" fn fork_test_main() -> ! {
         }
     };
 
+    let s0a = cow_test_refcount_unmap();
+    crate::serial_println!(
+        "[fork-test] cow refcount/unmap: {}",
+        if s0a { "ok" } else { "FAIL" }
+    );
+
+    let s0b = cow_test_write_fault_copy();
+    crate::serial_println!(
+        "[fork-test] cow write fault: {}",
+        if s0b { "ok" } else { "FAIL" }
+    );
+
     let s1 = run_scenario(parent, "fork-test-basic", PROG_FORK_BASIC);
     crate::serial_println!("[fork-test] fork basic: {}", if s1 { "ok" } else { "FAIL" });
 
@@ -268,7 +441,11 @@ extern "C" fn fork_test_main() -> ! {
 
     crate::serial_println!(
         "[fork-test] summary: {}",
-        if s1 && s2 && s3 && s4 { "PASS" } else { "FAIL" }
+        if s0a && s0b && s1 && s2 && s3 && s4 {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     );
     crate::process::scheduler::exit_current_task(0);
 }

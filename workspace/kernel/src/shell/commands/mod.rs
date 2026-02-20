@@ -9,6 +9,7 @@ pub mod sys;
 pub mod gfx;
 pub mod top;
 pub mod vfs;
+pub mod timer;
 
 use alloc::{string::String, vec::Vec, collections::BTreeMap};
 use super::ShellError;
@@ -23,7 +24,7 @@ impl CommandRegistry {
         let mut registry = Self {
             commands: BTreeMap::new(),
         };
-        
+
         // Register commands
         registry.register("help", help::cmd_help);
         registry.register("version", sys::cmd_version);
@@ -42,7 +43,8 @@ impl CommandRegistry {
         registry.register("gfx", gfx::cmd_gfx);
         registry.register("gfx-demo", gfx::cmd_gfx_demo);
         registry.register("top", top::cmd_top);
-        
+        registry.register("timer", timer::cmd_timer);
+
         registry
     }
 

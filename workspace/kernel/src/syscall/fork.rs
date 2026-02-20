@@ -1,9 +1,7 @@
-//! `fork()` syscall implementation 
-//!
-//! 
+//! `fork()` syscall implementation with copy-on-write (COW).
 
 use crate::{
-    memory::AddressSpace,
+    memory::{AddressSpace, FrameAllocator as _},
     process::{
         current_task_clone,
         scheduler::add_task_with_parent,
@@ -140,7 +138,7 @@ fn copy_signal_set(src: &SignalSet) -> SignalSet {
 fn build_child_task(
     parent: &Arc<Task>,
     child_as: Arc<AddressSpace>,
-    bootstrap_ctx_ptr: u64,
+    bootstrap_ctx: Box<ForkUserContext>,
 ) -> Result<Arc<Task>, SyscallError> {
     let kernel_stack =
         KernelStack::allocate(Task::DEFAULT_STACK_SIZE).map_err(|_| SyscallError::OutOfMemory)?;
@@ -179,13 +177,13 @@ fn build_child_task(
     unsafe {
         let ctx = &mut *task.context.get();
         let frame = ctx.saved_rsp as *mut u64;
-        *frame.add(2) = bootstrap_ctx_ptr;
+        *frame.add(2) = Box::into_raw(bootstrap_ctx) as u64;
     }
 
     Ok(task)
 }
 
-/// SYS_PROC_FORK (302): eager fork (no COW yet).
+/// SYS_PROC_FORK (302): fork with copy-on-write address-space cloning.
 pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
     let parent = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let parent_as = unsafe { &*parent.address_space.get() };
@@ -219,7 +217,7 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
         user_ss: frame.iret_ss,
     });
 
-    let child_task = build_child_task(&parent, child_as, Box::into_raw(child_user_ctx) as u64)?;
+    let child_task = build_child_task(&parent, child_as, child_user_ctx)?;
     let child_pid = child_task.id;
     add_task_with_parent(child_task, parent.id);
 
@@ -299,17 +297,43 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
     // Update mapping to new frame, Writable, no COW
     let new_flags = (flags | PageTableFlags::WRITABLE) & !COW_BIT;
 
-    unsafe {
-        mapper
-            .map_to(page, new_frame, new_flags, &mut frame_allocator)
-            .map_err(|_| "Failed to map new COW frame")?
-            .ignore();
+    // Replace existing mapping (present+COW) by the private writable mapping.
+    let old_unmapped = mapper
+        .unmap(page)
+        .map_err(|_| "Failed to unmap old COW frame")?
+        .0;
+    debug_assert_eq!(old_unmapped.start_address(), old_frame.start_address);
+
+    let remap_res = unsafe { mapper.map_to(page, new_frame, new_flags, &mut frame_allocator) };
+    if remap_res.is_err() {
+        unsafe {
+            let _ = mapper.map_to(page, phys_frame, flags, &mut frame_allocator);
+        }
+        let lock = crate::memory::get_allocator();
+        let mut guard = lock.lock();
+        if let Some(allocator) = guard.as_mut() {
+            allocator.free(
+                crate::memory::PhysFrame {
+                    start_address: new_frame.start_address(),
+                },
+                0,
+            );
+        }
+        return Err("Failed to map new COW frame");
     }
+    match remap_res {
+        Ok(flush) => flush.ignore(),
+        Err(_) => unreachable!("checked remap result above"),
+    }
+
+    crate::memory::cow::frame_inc_ref(crate::memory::PhysFrame {
+        start_address: new_frame.start_address(),
+    });
 
     // Invalidate TLB on all CPUs (SMP-safe).
     crate::arch::x86_64::tlb::shootdown_page(VirtAddr::new(virt_addr));
 
-    // Decrement refcount of old frame
+    // Decrement refcount of old frame after the new mapping is installed.
     crate::memory::cow::frame_dec_ref(old_frame);
 
     Ok(())

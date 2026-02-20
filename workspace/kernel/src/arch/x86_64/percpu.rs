@@ -28,6 +28,7 @@ pub struct PerCpu {
     apic_id: AtomicU32,
     cpu_index: AtomicU32,
     kernel_stack_top: AtomicU64,
+    tlb_ready: AtomicBool,
     /// Preemption-disable depth counter.
     /// When > 0, `maybe_preempt()` and `yield_task()` are no-ops on this CPU.
     pub preempt_count: AtomicU32,
@@ -45,6 +46,7 @@ impl PerCpu {
             apic_id: AtomicU32::new(0),
             cpu_index: AtomicU32::new(0),
             kernel_stack_top: AtomicU64::new(0),
+            tlb_ready: AtomicBool::new(false),
             preempt_count: AtomicU32::new(0),
         }
     }
@@ -68,6 +70,7 @@ pub fn init_boot_cpu(apic_id: u32) -> usize {
     cpu.online.store(true, Ordering::Release);
     cpu.apic_id.store(apic_id, Ordering::Release);
     cpu.cpu_index.store(0, Ordering::Release);
+    cpu.tlb_ready.store(false, Ordering::Release);
     CPU_COUNT.store(1, Ordering::Release);
     0
 }
@@ -80,6 +83,7 @@ pub fn register_cpu(apic_id: u32) -> Option<usize> {
             cpu.online.store(false, Ordering::Release);
             cpu.apic_id.store(apic_id, Ordering::Release);
             cpu.cpu_index.store(idx as u32, Ordering::Release);
+            cpu.tlb_ready.store(false, Ordering::Release);
             CPU_COUNT.fetch_add(1, Ordering::AcqRel);
             return Some(idx);
         }
@@ -92,6 +96,7 @@ pub fn mark_online_by_apic(apic_id: u32) -> Option<usize> {
     for (idx, cpu) in PERCPU.iter().enumerate() {
         if cpu.present.load(Ordering::Acquire) && cpu.apic_id.load(Ordering::Acquire) == apic_id {
             cpu.online.store(true, Ordering::Release);
+            cpu.tlb_ready.store(false, Ordering::Release);
             return Some(idx);
         }
     }
@@ -199,4 +204,22 @@ fn current_cpu_index_fast() -> usize {
 /// Access the per-CPU array (read-only).
 pub fn percpu() -> &'static [PerCpu; MAX_CPUS] {
     &PERCPU
+}
+
+/// Mark current CPU as ready to handle TLB shootdown IPIs.
+pub fn mark_tlb_ready_current() {
+    let idx = current_cpu_index_fast();
+    PERCPU[idx].tlb_ready.store(true, Ordering::Release);
+}
+
+/// Returns true iff CPU `index` is online and ready for TLB shootdown.
+pub fn tlb_ready(index: usize) -> bool {
+    PERCPU
+        .get(index)
+        .map(|cpu| {
+            cpu.present.load(Ordering::Acquire)
+                && cpu.online.load(Ordering::Acquire)
+                && cpu.tlb_ready.load(Ordering::Acquire)
+        })
+        .unwrap_or(false)
 }

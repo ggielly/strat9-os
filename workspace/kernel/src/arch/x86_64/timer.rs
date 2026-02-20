@@ -109,17 +109,36 @@ pub fn calibrate_apic_timer() -> u32 {
     }
     log::info!("APIC timer divide set to 16 (0x03)");
 
-    // Step 1: Enable PIT channel 2 gate
+    // ========================================================================
+    // CRITICAL TIMING SECTION — no log messages between gate-up and poll end
+    // ========================================================================
+    // The PIT channel 2 gate must be LOW while programming the counter.
+    // In mode 0, counting starts as soon as the count is loaded AND gate is
+    // HIGH. If gate is already HIGH when we load the count, the 10 ms window
+    // begins before we can start the APIC timer → measurement is wrong.
+    //
+    // Correct sequence:
+    //   1. Gate LOW  — prevent counting while we program the PIT
+    //   2. Program PIT channel 2 (mode 0, one-shot, count = PIT_10MS_COUNT)
+    //   3. Set APIC timer initial count to 0xFFFF_FFFF
+    //   4. Gate HIGH — PIT starts counting NOW, APIC is already counting
+    //   5. Poll bit 5 of port 0x61 until PIT output goes HIGH (10 ms elapsed)
+    //   6. Read APIC timer current count
+    // ========================================================================
+
+    // Step 1: Disable PIT channel 2 gate (prevent counting during setup)
     // Port 0x61: bit 0 = gate, bit 1 = speaker enable
     unsafe {
         let val = inb(0x61);
         log::info!("Port 0x61 initial value: 0x{:02X}", val);
-        outb(0x61, (val & 0xFD) | 0x01); // Enable gate, disable speaker
+        outb(0x61, val & 0xFC); // Clear bit 0 (gate) and bit 1 (speaker)
     }
-    log::info!("PIT channel 2 gate enabled");
+    log::info!("PIT channel 2 gate DISABLED for setup");
 
     // Step 2: Program PIT channel 2 in mode 0 (one-shot)
     // Command: 0xB0 = channel 2, lobyte/hibyte, mode 0, binary
+    // Writing the command sets output LOW. Count is loaded but gate is LOW
+    // so counting does NOT start yet.
     unsafe {
         outb(0x43, 0xB0);
         outb(0x42, (PIT_10MS_COUNT & 0xFF) as u8); // Low byte
@@ -138,29 +157,23 @@ pub fn calibrate_apic_timer() -> u32 {
         apic::write_reg(apic::REG_TIMER_INIT, 0xFFFF_FFFF);
     }
     log::info!("APIC timer initial count set to MAX (0xFFFFFFFF)");
+    log::info!("Enabling PIT gate NOW — measurement starts...");
 
-    // Step 4: Restart PIT channel 2 by toggling the gate
+    // Step 4: Enable PIT channel 2 gate — starts PIT counting
+    // APIC timer is already counting from step 3, so the measurement
+    // window begins precisely here.  NO LOG MESSAGES until poll completes.
     unsafe {
         let val = inb(0x61);
-        log::info!("Port 0x61 before toggle: 0x{:02X}", val);
-        outb(0x61, val & 0xFE); // Gate low
-        outb(0x61, val | 0x01); // Gate high — starts counting
+        outb(0x61, (val | 0x01) & 0xFD); // Set bit 0 (gate), clear bit 1 (speaker)
     }
-    log::info!("PIT channel 2 gate toggled - counting started");
 
     // Step 5: Poll PIT channel 2 output (bit 5 of port 0x61)
     // When the count reaches 0, bit 5 goes high
     let mut iterations: u32 = 0;
-    log::info!("Polling PIT channel 2 output (bit 5 of port 0x61)...");
     loop {
         // SAFETY: reading port 0x61 is safe
         let status = unsafe { inb(0x61) };
         if status & 0x20 != 0 {
-            log::info!(
-                "PIT output went HIGH after {} iterations (status=0x{:02X})",
-                iterations,
-                status
-            );
             break; // PIT output went high — 10ms elapsed
         }
         iterations += 1;
@@ -175,20 +188,23 @@ pub fn calibrate_apic_timer() -> u32 {
         }
     }
 
-    // Step 6: Read APIC timer current count
+    // Step 6: Read APIC timer current count — end of critical section
     // SAFETY: APIC is initialized
     let current = unsafe { apic::read_reg(apic::REG_TIMER_CURRENT) };
     let elapsed = 0xFFFF_FFFFu32.wrapping_sub(current);
-
-    log::info!("APIC timer current count: 0x{:08X}", current);
-    log::info!("APIC timer elapsed ticks: {} (0x{:08X})", elapsed, elapsed);
 
     // Stop the APIC timer
     // SAFETY: APIC is initialized
     unsafe {
         apic::write_reg(apic::REG_TIMER_INIT, 0);
     }
-    log::info!("APIC timer stopped");
+
+    // ========================================================================
+    // END CRITICAL TIMING SECTION — safe to log again
+    // ========================================================================
+    log::info!("PIT poll completed after {} iterations", iterations);
+    log::info!("APIC timer current count: 0x{:08X}", current);
+    log::info!("APIC timer elapsed ticks: {} (0x{:08X})", elapsed, elapsed);
 
     // Validate calibration result
     if elapsed == 0 {
@@ -198,9 +214,12 @@ pub fn calibrate_apic_timer() -> u32 {
     }
 
     // Check for suspicious values
-    // For a typical CPU (2-4 GHz) with div=16, we expect ~1250-2500 ticks/10ms
-    const MIN_EXPECTED_TICKS: u32 = 500;   // ~800 MHz CPU minimum
-    const MAX_EXPECTED_TICKS: u32 = 10000; // ~16 GHz CPU maximum (unreasonable)
+    // With div=16, ticks_10ms = APIC_bus_freq / 16 / 100.
+    // QEMU default APIC frequency is ~1 GHz → ~625,000 ticks/10ms.
+    // Real hardware with a 200 MHz bus → ~125,000 ticks/10ms.
+    // Use wide bounds to support both real hardware and emulators.
+    const MIN_EXPECTED_TICKS: u32 = 1_000;      // extremely slow / throttled
+    const MAX_EXPECTED_TICKS: u32 = 5_000_000;  // very fast host or low divider
 
     if elapsed < MIN_EXPECTED_TICKS {
         log::warn!(

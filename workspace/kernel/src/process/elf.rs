@@ -1,10 +1,12 @@
-//! Minimal ELF64 loader for Strat9-OS.
+//! ELF64 loader for Strat9-OS.
 //!
 //! Parses ELF64 headers and loads PT_LOAD segments into a user address space,
 //! then creates a kernel task that trampolines into Ring 3 via IRETQ.
 //!
-//! Supports ET_EXEC and ET_DYN (PIE/static-PIE) ELF64 little-endian x86_64
-//! binaries.
+//! Supports :
+//!   - ET_EXEC
+//!   - ET_DYN (PIE/static-PIE) 
+//!   - ELF64 little-endian x86_64 binaries.
 
 use alloc::{sync::Arc, vec::Vec};
 use x86_64::{
@@ -411,6 +413,8 @@ fn apply_segment_permissions(
     page_count: usize,
     flags: VmaFlags,
 ) -> Result<(), &'static str> {
+    use x86_64::registers::control::Cr3;
+
     let pte_flags = flags.to_page_flags();
     // SAFETY: loader owns this AddressSpace during image construction.
     let mut mapper = unsafe { user_as.mapper() };
@@ -426,12 +430,25 @@ fn apply_segment_permissions(
                 .update_flags(page, pte_flags)
                 .map_err(|_| "Failed to update segment page flags")?
         };
-        // Local flush is done via shootdown_range/all below.
+        // We ignore flush here and do a targeted flush decision below.
     }
 
-    // Perform TLB shootdown to ensure all CPUs see the new permissions.
-    let end = page_start + (page_count as u64) * 4096;
-    crate::arch::x86_64::tlb::shootdown_range(VirtAddr::new(page_start), VirtAddr::new(end));
+    // During ELF loading we update a freshly-created user address space that is
+    // not active on other CPUs.  Cross-CPU shootdowns here only add boot-time
+    // latency and can timeout while APs are not yet servicing IPIs.
+    // If this address space is currently active on this CPU, local invalidation
+    // is enough for the loader path.
+    let (current_cr3, _) = Cr3::read();
+    if current_cr3.start_address() == user_as.cr3() {
+        let end = page_start + (page_count as u64) * 4096;
+        let mut v = page_start;
+        while v < end {
+            unsafe {
+                core::arch::asm!("invlpg [{}]", in(reg) v, options(nostack, preserves_flags));
+            }
+            v += 4096;
+        }
+    }
 
     Ok(())
 }

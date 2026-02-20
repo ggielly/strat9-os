@@ -17,12 +17,10 @@
 //! - xv6 RISC-V: kernel/vm.c (sfence.vma)
 
 use core::sync::atomic::{AtomicU32, Ordering};
+use alloc::vec::Vec;
 use x86_64::VirtAddr;
 
 use crate::sync::SpinLock;
-
-/// Maximum number of CPUs we can support.
-const MAX_CPUS: usize = 256;
 
 /// Globally shared TLB shootdown request.
 static TLB_SHOOTDOWN_REQUEST: SpinLock<TlbShootdownRequest> = SpinLock::new(TlbShootdownRequest {
@@ -81,8 +79,8 @@ pub fn shootdown_page(vaddr: VirtAddr) {
         return;
     }
 
-    let num_cpus = crate::arch::x86_64::smp::cpu_count();
-    if num_cpus <= 1 {
+    let targets = collect_tlb_targets();
+    if targets.is_empty() {
         // Single-CPU system, no IPI needed.
         unsafe {
             invlpg(vaddr);
@@ -96,15 +94,12 @@ pub fn shootdown_page(vaddr: VirtAddr) {
     // Reset acknowledgement counter.
     TLB_ACK_COUNTER.store(0, Ordering::Release);
     
-    // We expect (num_cpus - 1) acknowledgements (all CPUs except ourselves).
-    TLB_EXPECTED_ACKS.store((num_cpus - 1) as u32, Ordering::Release);
-    
-    // Build target mask: all CPUs except the current one.
-    let current_apic_id = crate::arch::x86_64::apic::lapic_id();
-    let current_cpu_id = crate::arch::x86_64::percpu::cpu_index_by_apic(current_apic_id).unwrap_or(0);
+    // We expect acknowledgements only from CPUs that are online and TLB-ready.
+    TLB_EXPECTED_ACKS.store(targets.len() as u32, Ordering::Release);
+
     let mut target_mask: u64 = 0;
-    for i in 0..num_cpus {
-        if i != current_cpu_id {
+    for i in 0..crate::arch::x86_64::percpu::MAX_CPUS {
+        if crate::arch::x86_64::percpu::tlb_ready(i) {
             target_mask |= 1u64 << i;
         }
     }
@@ -119,15 +114,22 @@ pub fn shootdown_page(vaddr: VirtAddr) {
     unsafe {
         invlpg(vaddr);
     }
-    
-    // Send IPI to all other CPUs.
-    broadcast_ipi_except_self(crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR);
-    
-    // Wait for all CPUs to acknowledge (with timeout).
-    wait_for_acks((num_cpus - 1) as u32);
-    
+
+    // Release request lock before sending IPIs and waiting for ACKs.
+    drop(req);
+
+    // Send IPI only to target CPUs.
+    for apic_id in targets.iter().copied() {
+        send_tlb_ipi(apic_id);
+    }
+
+    // Wait for all target CPUs to acknowledge (with timeout).
+    wait_for_acks(targets.len() as u32);
+
     // Clear the request.
+    let mut req = TLB_SHOOTDOWN_REQUEST.lock();
     req.kind = TlbShootdownKind::None;
+    req.pending_mask = 0;
     drop(req);
     
     log::trace!("TLB shootdown complete for page {:#x}", vaddr.as_u64());
@@ -155,8 +157,8 @@ pub fn shootdown_range(start: VirtAddr, end: VirtAddr) {
         return;
     }
     
-    let num_cpus = crate::arch::x86_64::smp::cpu_count();
-    if num_cpus <= 1 {
+    let targets = collect_tlb_targets();
+    if targets.is_empty() {
         for i in 0..page_count {
             let addr = start + (i * 4096);
             unsafe {
@@ -168,13 +170,11 @@ pub fn shootdown_range(start: VirtAddr, end: VirtAddr) {
     
     let mut req = TLB_SHOOTDOWN_REQUEST.lock();
     TLB_ACK_COUNTER.store(0, Ordering::Release);
-    TLB_EXPECTED_ACKS.store((num_cpus - 1) as u32, Ordering::Release);
-    
-    let current_apic_id = crate::arch::x86_64::apic::lapic_id();
-    let current_cpu_id = crate::arch::x86_64::percpu::cpu_index_by_apic(current_apic_id).unwrap_or(0);
+    TLB_EXPECTED_ACKS.store(targets.len() as u32, Ordering::Release);
+
     let mut target_mask: u64 = 0;
-    for i in 0..num_cpus {
-        if i != current_cpu_id {
+    for i in 0..crate::arch::x86_64::percpu::MAX_CPUS {
+        if crate::arch::x86_64::percpu::tlb_ready(i) {
             target_mask |= 1u64 << i;
         }
     }
@@ -192,10 +192,17 @@ pub fn shootdown_range(start: VirtAddr, end: VirtAddr) {
         }
     }
     
-    broadcast_ipi_except_self(crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR);
-    wait_for_acks((num_cpus - 1) as u32);
-    
+    // Release request lock before sending IPIs and waiting for ACKs.
+    drop(req);
+
+    for apic_id in targets.iter().copied() {
+        send_tlb_ipi(apic_id);
+    }
+    wait_for_acks(targets.len() as u32);
+
+    let mut req = TLB_SHOOTDOWN_REQUEST.lock();
     req.kind = TlbShootdownKind::None;
+    req.pending_mask = 0;
     drop(req);
     
     log::trace!("TLB shootdown complete for range {:#x}..{:#x}", start.as_u64(), end.as_u64());
@@ -212,8 +219,8 @@ pub fn shootdown_all() {
         return;
     }
     
-    let num_cpus = crate::arch::x86_64::smp::cpu_count();
-    if num_cpus <= 1 {
+    let targets = collect_tlb_targets();
+    if targets.is_empty() {
         unsafe {
             flush_tlb_all();
         }
@@ -222,13 +229,11 @@ pub fn shootdown_all() {
     
     let mut req = TLB_SHOOTDOWN_REQUEST.lock();
     TLB_ACK_COUNTER.store(0, Ordering::Release);
-    TLB_EXPECTED_ACKS.store((num_cpus - 1) as u32, Ordering::Release);
-    
-    let current_apic_id = crate::arch::x86_64::apic::lapic_id();
-    let current_cpu_id = crate::arch::x86_64::percpu::cpu_index_by_apic(current_apic_id).unwrap_or(0);
+    TLB_EXPECTED_ACKS.store(targets.len() as u32, Ordering::Release);
+
     let mut target_mask: u64 = 0;
-    for i in 0..num_cpus {
-        if i != current_cpu_id {
+    for i in 0..crate::arch::x86_64::percpu::MAX_CPUS {
+        if crate::arch::x86_64::percpu::tlb_ready(i) {
             target_mask |= 1u64 << i;
         }
     }
@@ -241,10 +246,17 @@ pub fn shootdown_all() {
         flush_tlb_all();
     }
     
-    broadcast_ipi_except_self(crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR);
-    wait_for_acks((num_cpus - 1) as u32);
-    
+    // Release request lock before sending IPIs and waiting for ACKs.
+    drop(req);
+
+    for apic_id in targets.iter().copied() {
+        send_tlb_ipi(apic_id);
+    }
+    wait_for_acks(targets.len() as u32);
+
+    let mut req = TLB_SHOOTDOWN_REQUEST.lock();
     req.kind = TlbShootdownKind::None;
+    req.pending_mask = 0;
     drop(req);
     
     log::trace!("Full TLB shootdown complete");
@@ -254,40 +266,52 @@ pub fn shootdown_all() {
 ///
 /// Processes the global shootdown request and increments the acknowledgement counter.
 pub extern "C" fn tlb_shootdown_ipi_handler() {
-    let req = TLB_SHOOTDOWN_REQUEST.lock();
-    
-    match req.kind {
-        TlbShootdownKind::None => {
-            // Spurious IPI, ignore.
-        }
-        TlbShootdownKind::SinglePage => {
-            let vaddr = VirtAddr::new(req.vaddr_start);
-            unsafe {
-                invlpg(vaddr);
+    let mut should_ack = false;
+    if let Some(req) = TLB_SHOOTDOWN_REQUEST.try_lock() {
+        match req.kind {
+            TlbShootdownKind::None => {
+                // Spurious IPI, ignore.
             }
-        }
-        TlbShootdownKind::Range => {
-            let start = req.vaddr_start;
-            let end = req.vaddr_end;
-            let page_count = (end - start) / 4096;
-            for i in 0..page_count {
-                let addr = VirtAddr::new(start + i * 4096);
+            TlbShootdownKind::SinglePage => {
+                let vaddr = VirtAddr::new(req.vaddr_start);
                 unsafe {
-                    invlpg(addr);
+                    invlpg(vaddr);
                 }
+                should_ack = true;
+            }
+            TlbShootdownKind::Range => {
+                let start = req.vaddr_start;
+                let end = req.vaddr_end;
+                let page_count = (end - start) / 4096;
+                for i in 0..page_count {
+                    let addr = VirtAddr::new(start + i * 4096);
+                    unsafe {
+                        invlpg(addr);
+                    }
+                }
+                should_ack = true;
+            }
+            TlbShootdownKind::Full => {
+                unsafe {
+                    flush_tlb_all();
+                }
+                should_ack = true;
             }
         }
-        TlbShootdownKind::Full => {
-            unsafe {
-                flush_tlb_all();
-            }
+        drop(req);
+    } else {
+        // Hardened fallback: if request lock is contended, perform a full local
+        // flush and ACK. This avoids deadlocks/timeouts during bring-up races.
+        unsafe {
+            flush_tlb_all();
         }
+        should_ack = true;
     }
-    
-    drop(req);
-    
-    // Acknowledge processing.
-    TLB_ACK_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+    // Acknowledge only real shootdown requests.
+    if should_ack {
+        TLB_ACK_COUNTER.fetch_add(1, Ordering::SeqCst);
+    }
     
     // Send EOI to LAPIC.
     crate::arch::x86_64::apic::eoi();
@@ -307,15 +331,31 @@ unsafe fn flush_tlb_all() {
     Cr3::write(frame, flags);
 }
 
-/// Broadcast an IPI to all CPUs except the current one.
-fn broadcast_ipi_except_self(vector: u8) {
-    // Use APIC shortcuts: destination shorthand 11b = all-excluding-self.
-    // ICR format: [63:32] = reserved/destination, [31:0] = vector | delivery mode | level | etc.
-    // Shorthand 11b is bits 19-18.
+fn send_tlb_ipi(target_apic_id: u32) {
+    // SAFETY: APIC base is valid and mapped; ICR MMIO is 32-bit aligned.
     unsafe {
-        let icr_low: u32 = (vector as u32) | (1 << 14) | (3 << 18); // Fixed delivery, all-excluding-self
+        crate::arch::x86_64::apic::write_reg(crate::arch::x86_64::apic::REG_ESR, 0);
+        crate::arch::x86_64::apic::write_reg(crate::arch::x86_64::apic::REG_ICR_HIGH, target_apic_id << 24);
+        let icr_low = crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR as u32 | (1 << 14);
         crate::arch::x86_64::apic::write_reg(crate::arch::x86_64::apic::REG_ICR_LOW, icr_low);
     }
+}
+
+fn collect_tlb_targets() -> Vec<u32> {
+    let current_apic_id = crate::arch::x86_64::apic::lapic_id();
+    let mut targets = Vec::new();
+    for cpu_idx in 0..crate::arch::x86_64::percpu::MAX_CPUS {
+        if !crate::arch::x86_64::percpu::tlb_ready(cpu_idx) {
+            continue;
+        }
+        let Some(apic_id) = crate::arch::x86_64::percpu::apic_id_by_cpu_index(cpu_idx) else {
+            continue;
+        };
+        if apic_id != current_apic_id {
+            targets.push(apic_id);
+        }
+    }
+    targets
 }
 
 /// Wait for all target CPUs to acknowledge the shootdown.

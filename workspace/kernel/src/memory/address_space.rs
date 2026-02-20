@@ -230,7 +230,7 @@ impl AddressSpace {
         let page_flags = flags.to_page_flags();
         let mut frame_allocator = BuddyFrameAllocator;
 
-        // SAFETY: We have logical ownership of this address space.
+        // SAFETY: we have logical ownership of this address space.
         let mut mapper = unsafe { self.mapper() };
         let mut mapped_pages = 0usize;
 
@@ -247,18 +247,21 @@ impl AddressSpace {
                 .ok_or("Failed to allocate frame for mapping")?;
 
             // Zero the frame before mapping.
-            // SAFETY: The frame is freshly allocated and we access it via HHDM.
+            // SAFETY: the frame is freshly allocated and we access it via HHDM.
             unsafe {
                 let frame_virt = crate::memory::phys_to_virt(frame.start_address().as_u64());
                 core::ptr::write_bytes(frame_virt as *mut u8, 0, 4096);
             }
 
             // Map the page to the frame.
-            // SAFETY: The frame is valid and unused; flags are caller-specified.
+            // SAFETY: the frame is valid and unused; flags are caller-specified.
             let map_res = unsafe { mapper.map_to(page, frame, page_flags, &mut frame_allocator) };
             match map_res {
                 Ok(flush) => {
                     flush.flush();
+                    crate::memory::cow::frame_inc_ref(crate::memory::PhysFrame {
+                        start_address: frame.start_address(),
+                    });
                     mapped_pages += 1;
                 }
                 Err(_) => {
@@ -284,16 +287,9 @@ impl AddressSpace {
                                 .map_err(|_| "Rollback: invalid page address")?;
                         if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
                             rb_flush.flush();
-                            let lock = crate::memory::get_allocator();
-                            let mut guard = lock.lock();
-                            if let Some(allocator) = guard.as_mut() {
-                                allocator.free(
-                                    crate::memory::PhysFrame {
-                                        start_address: rb_frame.start_address(),
-                                    },
-                                    0,
-                                );
-                            }
+                            crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
+                                start_address: rb_frame.start_address(),
+                            });
                         }
                     }
 
@@ -335,15 +331,11 @@ impl AddressSpace {
             let (frame, flush) = mapper.unmap(page).map_err(|_| "Failed to unmap page")?;
             flush.flush();
 
-            // Free the physical frame back to the buddy allocator.
+            // COW-aware refcount decrement: free only when last mapping disappears.
             let phys_frame = crate::memory::PhysFrame {
                 start_address: frame.start_address(),
             };
-            let lock = crate::memory::get_allocator();
-            let mut guard = lock.lock();
-            if let Some(allocator) = guard.as_mut() {
-                allocator.free(phys_frame, 0);
-            }
+            crate::memory::cow::frame_dec_ref(phys_frame);
         }
 
         // Remove from VMA tracking.
@@ -463,11 +455,7 @@ impl AddressSpace {
                     let phys = crate::memory::PhysFrame {
                         start_address: frame.start_address(),
                     };
-                    let lock = crate::memory::get_allocator();
-                    let mut guard = lock.lock();
-                    if let Some(allocator) = guard.as_mut() {
-                        allocator.free(phys, 0);
-                    }
+                    crate::memory::cow::frame_dec_ref(phys);
                 }
                 page_addr += 4096;
             }

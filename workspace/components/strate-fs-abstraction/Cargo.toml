@@ -1,10 +1,12 @@
 [package]
 name = "strate-fs-abstraction"
 description = "Filesystem abstraction layer with safe math, error handling, and Unicode support"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 repository.workspace = true
+
 
 [dependencies]
 
