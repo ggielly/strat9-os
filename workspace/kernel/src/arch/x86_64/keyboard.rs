@@ -236,6 +236,14 @@ static SCANCODE_TO_ASCII_SHIFT: [u8; 128] = {
     table
 };
 
+// Special key constants (non-ASCII, outside 0-127)
+pub const KEY_UP: u8 = 0x80;
+pub const KEY_DOWN: u8 = 0x81;
+pub const KEY_LEFT: u8 = 0x82;
+pub const KEY_RIGHT: u8 = 0x83;
+pub const KEY_HOME: u8 = 0x84;
+pub const KEY_END: u8 = 0x85;
+
 /// Handle a keyboard IRQ (called from interrupt handler)
 ///
 /// Returns the ASCII character if a printable key was pressed,
@@ -279,6 +287,13 @@ pub fn handle_scancode() -> Option<u8> {
             kbd.caps_lock = !kbd.caps_lock;
             return None;
         }
+        // Arrow keys and special keys (Set 1 scancodes)
+        0x48 => return Some(KEY_UP),
+        0x50 => return Some(KEY_DOWN),
+        0x4B => return Some(KEY_LEFT),
+        0x4D => return Some(KEY_RIGHT),
+        0x47 => return Some(KEY_HOME),
+        0x4F => return Some(KEY_END),
         _ => {}
     }
 

@@ -2149,6 +2149,25 @@ pub fn set_double_buffer_mode(enabled: bool) {
     DOUBLE_BUFFER_MODE.store(enabled, Ordering::Relaxed);
 }
 
+pub fn draw_text_cursor(color: RgbColor) {
+    if !is_available() {
+        return;
+    }
+    let mut writer = VGA_WRITER.lock();
+    let (gw, gh) = writer.glyph_size();
+    let x = writer.col * gw;
+    let y = writer.row * gh;
+    let packed = writer.pack_color(color);
+    
+    // Draw a block cursor (full glyph width, 2px height at bottom or full height)
+    // Let's go with a full block for better visibility
+    for py in y..(y + gh) {
+        for px in x..(x + gw) {
+            writer.put_pixel_raw(px, py, packed);
+        }
+    }
+}
+
 pub fn framebuffer_info() -> FramebufferInfo {
     if !is_available() {
         return FramebufferInfo {
