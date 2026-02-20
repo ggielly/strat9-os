@@ -302,8 +302,12 @@ impl VirtioBlockDevice {
         }
         drop(queue);
 
-        // Wait for completion (Busy wait for now)
-        // TODO: Use interrupts
+        // Wait for completion (busy-poll for now).
+        //
+        // IMPORTANT:
+        // Do not use HLT here. This path can run from syscall context where IF
+        // may be masked, and HLT would deadlock the CPU.
+        // TODO: replace with proper waitqueue + interrupt completion.
         loop {
             let mut queue = self.queue.lock();
             if queue.has_used() {
@@ -323,7 +327,7 @@ impl VirtioBlockDevice {
                 }
             }
             drop(queue);
-            crate::arch::x86_64::hlt();
+            core::hint::spin_loop();
         }
 
         // Check status

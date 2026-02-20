@@ -49,15 +49,19 @@ static STACK_SIZE: StackSizeRequest = StackSizeRequest::new().with_size(0x10000)
 static INIT_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/init");
 /// Internal module: request Limine to load /initfs/fs-ext4 (userspace EXT4 server)
 static EXT4_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/fs-ext4");
+/// Internal module: request Limine to load /initfs/strate-ram (userspace RAMFS server)
+static RAM_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-ram");
 
 /// Request modules (files loaded alongside the kernel)
 #[used]
 #[link_section = ".requests"]
 static MODULES: ModuleRequest =
-    ModuleRequest::new().with_internal_modules(&[&INIT_MODULE, &EXT4_MODULE]);
+    ModuleRequest::new().with_internal_modules(&[&INIT_MODULE, &EXT4_MODULE, &RAM_MODULE]);
 
 /// Optional fs-ext4 module info (set during Limine entry).
 static mut FS_EXT4_MODULE: Option<(u64, u64)> = None;
+/// Optional strate-ram module info (set during Limine entry).
+static mut STRATE_RAM_MODULE: Option<(u64, u64)> = None;
 
 const MAX_BOOT_MEMORY_REGIONS: usize = 256;
 static mut BOOT_MEMORY_MAP: [crate::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
@@ -72,6 +76,12 @@ static mut BOOT_MEMORY_MAP_LEN: usize = 0;
 pub fn fs_ext4_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
     unsafe { FS_EXT4_MODULE }
+}
+
+/// Return the strate-ram module (addr, size) if present.
+pub fn strate_ram_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { STRATE_RAM_MODULE }
 }
 
 fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> crate::entry::MemoryKind {
@@ -188,8 +198,8 @@ pub unsafe extern "C" fn kmain() -> ! {
         (0, 0)
     };
 
-    // Check for loaded modules (init ELF binary + fs-ext4)
-    let (initfs_base, initfs_size, ext4_base, ext4_size) =
+    // Check for loaded modules (init ELF binary + fs-ext4 + strate-ram)
+    let (initfs_base, initfs_size, ext4_base, ext4_size, ram_base, ram_size) =
         if let Some(module_response) = MODULES.get_response() {
             let modules = module_response.modules();
             let (init_base, init_size) = if !modules.is_empty() {
@@ -204,15 +214,28 @@ pub unsafe extern "C" fn kmain() -> ! {
             } else {
                 (0u64, 0u64)
             };
-            (init_base, init_size, ext4_base, ext4_size)
+            let (ram_base, ram_size) = if modules.len() > 2 {
+                let module = modules[2];
+                (module.addr() as u64, module.size())
+            } else {
+                (0u64, 0u64)
+            };
+            (init_base, init_size, ext4_base, ext4_size, ram_base, ram_size)
         } else {
-            (0u64, 0u64, 0u64, 0u64)
+            (0u64, 0u64, 0u64, 0u64, 0u64, 0u64)
         };
 
     if ext4_base != 0 && ext4_size != 0 {
         // SAFETY: set once during early boot.
         unsafe {
             FS_EXT4_MODULE = Some((ext4_base, ext4_size));
+        }
+    }
+
+    if ram_base != 0 && ram_size != 0 {
+        // SAFETY: set once during early boot.
+        unsafe {
+            STRATE_RAM_MODULE = Some((ram_base, ram_size));
         }
     }
 

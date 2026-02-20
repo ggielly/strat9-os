@@ -9,6 +9,7 @@ pub mod number {
     pub const SYS_IPC_RECV: usize = 202;
     pub const SYS_IPC_REPLY: usize = 204;
     pub const SYS_IPC_BIND_PORT: usize = 205;
+    pub const SYS_IPC_TRY_RECV: usize = 207;
     pub const SYS_PROC_EXIT: usize = 300;
     pub const SYS_PROC_YIELD: usize = 301;
     pub const SYS_OPEN: usize = 403;

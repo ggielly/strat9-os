@@ -394,6 +394,29 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         }
     }
 
+    // Register and launch strate-ram server module (if provided by Limine).
+    if let Some((base, size)) = crate::limine_entry::strate_ram_module() {
+        if base != 0 && size != 0 {
+            let ram_data =
+                unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            if let Err(e) =
+                vfs::register_static_file("/initfs/strate-ram", ram_data.as_ptr(), ram_data.len())
+            {
+                serial_println!("[init] Failed to register /initfs/strate-ram: {:?}", e);
+            } else {
+                serial_println!("[init] Registered /initfs/strate-ram ({} bytes)", size);
+                match process::elf::load_and_run_elf(ram_data, "strate-ram") {
+                    Ok(_) => {
+                        serial_println!("[init] Component 'strate-ram' loaded and scheduled.");
+                    }
+                    Err(e) => {
+                        serial_println!("[init] Failed to load strate-ram component: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
     // =============================================
     // Phase 8c: component system - process stage
     // =============================================
@@ -447,15 +470,6 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
             serial_println!("[WARN] Failed to create status line task");
         }
     }
-
-    // =============================================
-    // Phase 9: enable interrupts
-    // =============================================
-    serial_println!("[init] Enabling interrupts...");
-    vga_println!("[..] Enabling interrupts...");
-    arch::x86_64::sti();
-    serial_println!("[init] Interrupts enabled.");
-    vga_println!("[OK] Interrupts enabled");
 
     // =============================================
     // Phase 10: driver stubs
@@ -543,6 +557,12 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // =============================================
     // Boot complete — start preemptive multitasking
     // =============================================
+    serial_println!("[init] Enabling interrupts...");
+    vga_println!("[..] Enabling interrupts...");
+    arch::x86_64::sti();
+    serial_println!("[init] Interrupts enabled.");
+    vga_println!("[OK] Interrupts enabled");
+
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
 

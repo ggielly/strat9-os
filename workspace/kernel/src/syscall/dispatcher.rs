@@ -808,6 +808,57 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
             cap.resource as u64,
         ))),
     )?;
+
+    // Bootstrap convenience: if a privileged userspace server binds root `/`,
+    // seed it with the primary volume capability so it can mount storage
+    // without waiting for an explicit bootstrap message.
+    if path == "/" || path == "/fs/ext4" {
+        if let Some(device) = crate::drivers::virtio::block::get_device() {
+            let volume_cap = crate::capability::get_capability_manager().create_capability(
+                ResourceType::Volume,
+                device as *const _ as usize,
+                CapPermissions {
+                    read: true,
+                    write: true,
+                    execute: false,
+                    grant: true,
+                    revoke: true,
+                },
+            );
+            let task_caps = unsafe { &mut *task.capabilities.get() };
+            let id = task_caps.insert(volume_cap);
+            log::info!(
+                "ipc_bind_port('/'): seeded volume capability handle={} for task {:?}",
+                id.as_u64(),
+                task.id
+            );
+
+            // Send a bootstrap message to the just-bound root filesystem server.
+            // The server expects msg_type=0x10 and handle in flags.
+            const BOOTSTRAP_MSG_TYPE: u32 = 0x10;
+            if id.as_u64() <= u32::MAX as u64 {
+                let mut boot_msg = IpcMessage::new(BOOTSTRAP_MSG_TYPE);
+                // Use the bound task as sender so capability transfer path can
+                // duplicate `flags` from a valid capability table.
+                boot_msg.sender = task.id.as_u64();
+                boot_msg.flags = id.as_u64() as u32;
+
+                let port_id = PortId::from_u64(cap.resource as u64);
+                if let Some(p) = port::get_port(port_id) {
+                    if p.send(boot_msg).is_ok() {
+                        log::info!(
+                            "ipc_bind_port('/'): queued bootstrap message (handle={})",
+                            id.as_u64()
+                        );
+                    } else {
+                        log::warn!("ipc_bind_port('/'): failed to queue bootstrap message");
+                    }
+                } else {
+                    log::warn!("ipc_bind_port('/'): bound port disappeared before bootstrap");
+                }
+            }
+        }
+    }
     Ok(0)
 }
 

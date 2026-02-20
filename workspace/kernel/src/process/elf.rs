@@ -912,12 +912,14 @@ fn load_segment(
 struct TrampolineParams {
     entry_point: u64,
     stack_top: u64,
+    arg0: u64,
     address_space: Option<Arc<AddressSpace>>,
 }
 
 static mut TRAMPOLINE_PARAMS: TrampolineParams = TrampolineParams {
     entry_point: 0,
     stack_top: 0,
+    arg0: 0,
     address_space: None,
 };
 
@@ -925,7 +927,7 @@ static mut TRAMPOLINE_PARAMS: TrampolineParams = TrampolineParams {
 extern "C" fn elf_ring3_trampoline() -> ! {
     use crate::arch::x86_64::gdt;
 
-    let (user_rip, user_rsp);
+    let (user_rip, user_rsp, user_arg0);
 
     // SAFETY: Single-threaded setup. The params are written before the task
     // is scheduled. We read and clear them atomically at first execution.
@@ -933,12 +935,14 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         let params = &raw mut TRAMPOLINE_PARAMS;
         user_rip = (*params).entry_point;
         user_rsp = (*params).stack_top;
+        user_arg0 = (*params).arg0;
 
         if let Some(ref as_ref) = (*params).address_space {
             as_ref.switch_to();
         }
         // Clear to avoid dangling Arc reference
         (*params).address_space = None;
+        (*params).arg0 = 0;
     }
 
     let user_cs = gdt::user_code_selector().0 as u64;
@@ -953,12 +957,14 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "push {rflags}",
             "push {cs}",
             "push {rip}",
+            "mov rdi, {arg0}",
             "iretq",
             ss = in(reg) user_ss,
             rsp_val = in(reg) user_rsp,
             rflags = in(reg) user_rflags,
             cs = in(reg) user_cs,
             rip = in(reg) user_rip,
+            arg0 = in(reg) user_arg0,
             options(noreturn),
         );
     }
@@ -1078,6 +1084,7 @@ pub fn load_and_run_elf_with_caps(
         let params = &raw mut TRAMPOLINE_PARAMS;
         (*params).entry_point = runtime_entry;
         (*params).stack_top = USER_STACK_TOP;
+        (*params).arg0 = 0;
         (*params).address_space = Some(user_as.clone());
     }
 
@@ -1108,24 +1115,23 @@ pub fn load_and_run_elf_with_caps(
     });
 
     // Seed capabilities into the new task (before scheduling).
-    let mut bootstrap_handle: u64 = 0;
+    let mut bootstrap_handle: Option<u64> = None;
     if !seed_caps.is_empty() {
         let caps = unsafe { &mut *task.capabilities.get() };
         for cap in seed_caps {
             let id = caps.insert(cap.clone());
-            if bootstrap_handle == 0 && cap.resource_type == crate::capability::ResourceType::Volume
+            if bootstrap_handle.is_none()
+                && cap.resource_type == crate::capability::ResourceType::Volume
             {
-                bootstrap_handle = id.as_u64();
+                bootstrap_handle = Some(id.as_u64());
             }
         }
     }
 
-    if bootstrap_handle != 0 {
-        let ctx = unsafe { &mut *task.context.get() };
+    if let Some(h) = bootstrap_handle {
+        // Program entry will see this in its first argument register (RDI).
         unsafe {
-            // CpuContext stack layout: r15, r14, r13, r12, rbp, rbx, ret
-            let frame = ctx.saved_rsp as *mut u64;
-            *frame.add(2) = bootstrap_handle;
+            (*(&raw mut TRAMPOLINE_PARAMS)).arg0 = h;
         }
     }
 

@@ -11,7 +11,7 @@ extern crate alloc;
 
 mod syscalls;
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
+use alloc::{collections::BTreeMap, format, vec, vec::Vec};
 use core::{
     alloc::Layout,
     panic::PanicInfo,
@@ -317,6 +317,56 @@ fn map_sys_err(err: isize) -> BlockDeviceError {
     }
 }
 
+fn sys_err_name(err: isize) -> &'static str {
+    match err {
+        -1 => "EPERM",
+        -2 => "ENOENT",
+        -5 => "EIO",
+        -9 => "EBADF",
+        -10 => "ECHILD",
+        -11 => "EAGAIN",
+        -12 => "ENOMEM",
+        -14 => "EFAULT",
+        -17 => "EEXIST",
+        -22 => "EINVAL",
+        -38 => "ENOSYS",
+        -110 => "ETIMEDOUT",
+        _ => "EUNKNOWN",
+    }
+}
+
+fn log_sys_err(prefix: &str, err: isize) {
+    let msg = format!("[fs-ext4] {}: {} ({})\n", prefix, err, sys_err_name(err));
+    debug_log(&msg);
+}
+
+fn validate_volume_handle(handle: u64) -> core::result::Result<u64, isize> {
+    let sectors = volume_info(handle)?;
+    if sectors == 0 {
+        return Err(-22);
+    }
+    // Probe first sector to verify read permission/path is valid.
+    let mut probe = [0u8; SECTOR_SIZE];
+    let _ = volume_read(handle, 0, &mut probe, 1)?;
+    Ok(sectors)
+}
+
+fn discover_volume_handle_local() -> Option<u64> {
+    // Pragmatic fallback: probe low capability ids for a usable Volume handle.
+    // In current boot flow, init often receives the first inserted capability.
+    for h in 0u64..256u64 {
+        if let Ok(sectors) = validate_volume_handle(h) {
+            let msg = format!(
+                "[fs-ext4] Discovered local volume handle={} sectors={}\n",
+                h, sectors
+            );
+            debug_log(&msg);
+            return Some(h);
+        }
+    }
+    None
+}
+
 impl BlockDevice for VolumeBlockDevice {
     fn read_offset(&self, offset: usize) -> core::result::Result<Vec<u8>, BlockDeviceError> {
         if offset % SECTOR_SIZE != 0 {
@@ -382,6 +432,45 @@ fn wait_for_bootstrap(port_handle: u64) -> u64 {
     }
 }
 
+fn try_wait_for_bootstrap(port_handle: u64, attempts: usize) -> Option<u64> {
+    for _ in 0..attempts {
+        let mut msg = IpcMessage::new(0);
+        let result = unsafe {
+            syscall2(
+                number::SYS_IPC_TRY_RECV,
+                port_handle as usize,
+                &mut msg as *mut IpcMessage as usize,
+            )
+        };
+        match result {
+            Ok(_) => {
+                if msg.msg_type == OPCODE_BOOTSTRAP && msg.flags != 0 {
+                    let mut reply = IpcMessage::new(0);
+                    reply.sender = msg.sender;
+                    let _ = unsafe {
+                        syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
+                    };
+                    return Some(msg.flags as u64);
+                }
+                let reply = IpcMessage::error_reply(msg.sender);
+                let _ = unsafe {
+                    syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
+                };
+            }
+            Err(-11) => {
+                // EAGAIN: no message yet.
+            }
+            Err(err) => {
+                if err != -11 {
+                    log_sys_err("try_recv bootstrap failed", err);
+                }
+            }
+        }
+        let _ = unsafe { syscall1(number::SYS_PROC_YIELD, 0) };
+    }
+    None
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
     // TODO: Initialize allocator (we need heap)
@@ -402,8 +491,8 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
 
     debug_log("[fs-ext4] IPC port created\n");
 
-    // Bind port to root path "/"
-    let path = b"/";
+    // Bind under a dedicated namespace to avoid hijacking the whole VFS root.
+    let path = b"/fs/ext4";
     let bind_result = unsafe {
         syscall3(
             number::SYS_IPC_BIND_PORT,
@@ -414,40 +503,97 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
     };
 
     if bind_result.is_err() {
-        debug_log("[fs-ext4] Failed to bind port to /\n");
+        debug_log("[fs-ext4] Failed to bind port to /fs/ext4\n");
         exit(2);
     }
 
-    debug_log("[fs-ext4] Port bound to /\n");
+    debug_log("[fs-ext4] Port bound to /fs/ext4\n");
 
     let mut volume_handle = bootstrap_handle;
     if volume_handle == 0 {
-        volume_handle = wait_for_bootstrap(port_handle);
+        debug_log("[fs-ext4] Waiting for early bootstrap message...\n");
+        if let Some(h) = try_wait_for_bootstrap(port_handle, 2048) {
+            let msg = format!("[fs-ext4] Received bootstrap handle: {}\n", h);
+            debug_log(&msg);
+            volume_handle = h;
+        } else if let Some(h) = discover_volume_handle_local() {
+            debug_log("[fs-ext4] Bootstrap message timeout, using local discovery fallback\n");
+            volume_handle = h;
+        } else {
+            debug_log("[fs-ext4] Bootstrap message timeout, switching to blocking wait\n");
+            volume_handle = wait_for_bootstrap(port_handle);
+        }
     }
-    debug_log("[fs-ext4] Volume handle ready\n");
+    {
+        let msg = format!("[fs-ext4] Volume handle ready: {}\n", volume_handle);
+        debug_log(&msg);
+    }
 
-    // Mount EXT4 (still stubbed, but wired to volume syscalls).
-    let device = match VolumeBlockDevice::new(volume_handle) {
-        Ok(dev) => alloc::sync::Arc::new(dev),
-        Err(_) => {
-            debug_log("[fs-ext4] Failed to init volume device\n");
-            exit(3);
+    // Mount EXT4 with retry/backoff instead of hard exit.
+    let mut attempts: u64 = 0;
+    loop {
+        attempts = attempts.wrapping_add(1);
+        match validate_volume_handle(volume_handle) {
+            Ok(sectors) => {
+                let msg = format!(
+                    "[fs-ext4] volume probe OK: handle={} sectors={} (attempt={})\n",
+                    volume_handle, sectors, attempts
+                );
+                debug_log(&msg);
+            }
+            Err(err) => {
+                log_sys_err("volume probe failed", err);
+                // If we started without bootstrap capability, wait for a fresh handle periodically.
+                if bootstrap_handle == 0 && attempts % 8 == 0 {
+                    debug_log("[fs-ext4] Waiting for refreshed bootstrap handle...\n");
+                    volume_handle = wait_for_bootstrap(port_handle);
+                    let msg = format!("[fs-ext4] Refreshed volume handle: {}\n", volume_handle);
+                    debug_log(&msg);
+                }
+                for _ in 0..2048 {
+                    let _ = unsafe { syscall1(number::SYS_PROC_YIELD, 0) };
+                }
+                continue;
+            }
         }
-    };
-    let fs = match Ext4FileSystem::mount(device) {
-        Ok(fs) => fs,
-        Err(_) => {
-            debug_log("[fs-ext4] Failed to mount EXT4 filesystem\n");
-            exit(3);
-        }
-    };
 
-    debug_log("[fs-ext4] EXT4 mounted successfully\n");
-    debug_log("[fs-ext4] Strate ready, waiting for requests...\n");
+        let device = match VolumeBlockDevice::new(volume_handle) {
+            Ok(dev) => alloc::sync::Arc::new(dev),
+            Err(e) => {
+                let msg = format!(
+                    "[fs-ext4] Failed to init volume device (attempt={}): {:?}\n",
+                    attempts, e
+                );
+                debug_log(&msg);
+                for _ in 0..2048 {
+                    let _ = unsafe { syscall1(number::SYS_PROC_YIELD, 0) };
+                }
+                continue;
+            }
+        };
 
-    // Create strate and start serving
-    let mut strate = Ext4Strate::new(fs);
-    strate.serve(port_handle)
+        let fs = match Ext4FileSystem::mount(device) {
+            Ok(fs) => fs,
+            Err(e) => {
+                let msg = format!(
+                    "[fs-ext4] Failed to mount EXT4 filesystem (attempt={}): {:?}\n",
+                    attempts, e
+                );
+                debug_log(&msg);
+                for _ in 0..2048 {
+                    let _ = unsafe { syscall1(number::SYS_PROC_YIELD, 0) };
+                }
+                continue;
+            }
+        };
+
+        debug_log("[fs-ext4] EXT4 mounted successfully\n");
+        debug_log("[fs-ext4] Strate ready, waiting for requests...\n");
+
+        // Create strate and start serving
+        let mut strate = Ext4Strate::new(fs);
+        strate.serve(port_handle);
+    }
 }
 
 #[panic_handler]
