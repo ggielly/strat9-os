@@ -1,0 +1,17 @@
+[package]
+name = "strate-ram"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+strate-fs-abstraction = { path = "../strate-fs-abstraction", features = ["alloc"] }
+strate-syscall = { path = "../syscall" }
+spin = "0.9"
+bitflags = "2.4"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "strate-ram"
+path = "src/main.rs"
