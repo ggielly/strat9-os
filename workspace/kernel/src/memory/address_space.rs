@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// Flags describing permissions for a virtual memory region.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmaFlags {
     pub readable: bool,
     pub writable: bool,
@@ -298,22 +298,48 @@ impl AddressSpace {
             }
         }
 
-        // Track the region.
-        let region = VirtualMemoryRegion {
-            start,
-            page_count,
-            flags,
-            vma_type,
-        };
-        self.regions.lock().insert(start, region);
+        // Track the region, attempting to merge with the previous one if compatible.
+        let mut regions = self.regions.lock();
+        let mut merged = false;
 
-        log::trace!(
-            "Mapped region: {:#x}..{:#x} ({} pages, {:?})",
-            start,
-            start + (page_count as u64) * 4096,
-            page_count,
-            vma_type
-        );
+        // Try to merge with the preceding region (most common for heap growth)
+        if let Some((&prev_start, prev_vma)) = regions.range(..start).next_back() {
+            let prev_end = prev_start + (prev_vma.page_count as u64) * 4096;
+            if prev_end == start && prev_vma.flags == flags && prev_vma.vma_type == vma_type {
+                // Compatible and adjacent: extend the previous VMA
+                let new_count = prev_vma.page_count + page_count;
+                let updated_vma = VirtualMemoryRegion {
+                    start: prev_start,
+                    page_count: new_count,
+                    flags,
+                    vma_type,
+                };
+                regions.insert(prev_start, updated_vma);
+                merged = true;
+                log::trace!(
+                    "Merged region: extended {:#x} to {} pages",
+                    prev_start,
+                    new_count
+                );
+            }
+        }
+
+        if !merged {
+            let region = VirtualMemoryRegion {
+                start,
+                page_count,
+                flags,
+                vma_type,
+            };
+            regions.insert(start, region);
+            log::trace!(
+                "Mapped new region: {:#x}..{:#x} ({} pages, {:?})",
+                start,
+                start + (page_count as u64) * 4096,
+                page_count,
+                vma_type
+            );
+        }
 
         Ok(())
     }
