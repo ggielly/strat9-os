@@ -3,11 +3,14 @@
 //! Parses ELF64 headers and loads PT_LOAD segments into a user address space,
 //! then creates a kernel task that trampolines into Ring 3 via IRETQ.
 //!
-//! Only supports ET_EXEC (fixed-address) ELF64 little-endian x86_64 binaries.
-//! PIE (ET_DYN) support is deferred.
+//! Supports ET_EXEC and ET_DYN (PIE/static-PIE) ELF64 little-endian x86_64
+//! binaries.
 
 use alloc::sync::Arc;
-use x86_64::VirtAddr;
+use x86_64::{
+    structures::paging::{Mapper, Page, Size4KiB},
+    VirtAddr,
+};
 
 use crate::{
     capability::{Capability, CapabilityTable},
@@ -26,16 +29,19 @@ const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
 const ET_EXEC: u16 = 2;
-#[allow(dead_code)]
 const ET_DYN: u16 = 3;
+const EV_CURRENT: u32 = 1;
 const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
+const PT_INTERP: u32 = 3;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
 
 /// Maximum virtual address we accept for user-space mappings.
 pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
+/// Preferred base when placing ET_DYN (PIE) images.
+const PIE_BASE_ADDR: u64 = 0x0000_0001_0000_0000;
 
 /// User stack location (below the non-canonical gap).
 pub const USER_STACK_BASE: u64 = 0x0000_7FFF_F000_0000;
@@ -117,13 +123,19 @@ fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
         return Err("Not x86_64 ELF");
     }
 
-    // Type: must be ET_EXEC (fixed addresses) for now
-    if header.e_type != ET_EXEC {
-        return Err("Only ET_EXEC supported (no PIE)");
+    // Type: executable or shared object (PIE/static PIE executable image)
+    if header.e_type != ET_EXEC && header.e_type != ET_DYN {
+        return Err("Unsupported ELF type (expected ET_EXEC or ET_DYN)");
     }
 
-    // Entry point must be in user space
-    if header.e_entry == 0 || header.e_entry >= USER_ADDR_MAX {
+    // ELF version
+    if header.e_version != EV_CURRENT {
+        return Err("Unsupported ELF version");
+    }
+
+    // Entry point must be canonical user space (for ET_DYN this is relative and
+    // validated again after relocation).
+    if header.e_entry >= USER_ADDR_MAX {
         return Err("Entry point outside user address range");
     }
 
@@ -159,6 +171,118 @@ fn program_headers<'a>(
     })
 }
 
+/// Compute total mapped bounds for all PT_LOAD segments.
+fn compute_load_bounds(phdrs: &[Elf64Phdr]) -> Result<(u64, u64), &'static str> {
+    let mut min_vaddr = u64::MAX;
+    let mut max_vaddr = 0u64;
+    let mut saw_load = false;
+
+    for phdr in phdrs {
+        if phdr.p_type != PT_LOAD {
+            continue;
+        }
+        if phdr.p_memsz == 0 {
+            continue;
+        }
+        saw_load = true;
+
+        if phdr.p_memsz < phdr.p_filesz {
+            return Err("PT_LOAD memsz < filesz");
+        }
+
+        // ELF requires p_vaddr % page == p_offset % page for PT_LOAD.
+        if ((phdr.p_vaddr ^ phdr.p_offset) & 0xFFF) != 0 {
+            return Err("PT_LOAD alignment mismatch (vaddr/offset)");
+        }
+
+        let seg_end = phdr
+            .p_vaddr
+            .checked_add(phdr.p_memsz)
+            .ok_or("PT_LOAD vaddr+memsz overflow")?;
+        if seg_end > USER_ADDR_MAX {
+            return Err("PT_LOAD exceeds user address space");
+        }
+
+        let seg_start_page = phdr.p_vaddr & !0xFFF;
+        let seg_end_page = (seg_end + 0xFFF) & !0xFFF;
+        min_vaddr = min_vaddr.min(seg_start_page);
+        max_vaddr = max_vaddr.max(seg_end_page);
+    }
+
+    if !saw_load {
+        return Err("ELF has no PT_LOAD segments");
+    }
+    Ok((min_vaddr, max_vaddr))
+}
+
+/// Compute load bias and relocated entry for ET_EXEC / ET_DYN.
+fn compute_load_bias_and_entry(
+    user_as: &AddressSpace,
+    header: &Elf64Header,
+    phdrs: &[Elf64Phdr],
+) -> Result<(u64, u64), &'static str> {
+    let (min_vaddr, max_vaddr) = compute_load_bounds(phdrs)?;
+    let span = max_vaddr
+        .checked_sub(min_vaddr)
+        .ok_or("Invalid PT_LOAD bounds")?;
+
+    let load_bias = if header.e_type == ET_EXEC {
+        0
+    } else {
+        let n_pages = (span as usize).div_ceil(4096);
+        let load_base = user_as
+            .find_free_vma_range(PIE_BASE_ADDR, n_pages)
+            .or_else(|| user_as.find_free_vma_range(0x0000_0000_1000_0000, n_pages))
+            .ok_or("No virtual range for ET_DYN image")?;
+        load_base
+            .checked_sub(min_vaddr)
+            .ok_or("ET_DYN load bias underflow")?
+    };
+
+    let relocated_end = max_vaddr
+        .checked_add(load_bias)
+        .ok_or("Relocated PT_LOAD range overflow")?;
+    if relocated_end > USER_ADDR_MAX {
+        return Err("Relocated PT_LOAD range exceeds user space");
+    }
+
+    let relocated_entry = header
+        .e_entry
+        .checked_add(load_bias)
+        .ok_or("Relocated entry overflow")?;
+    if relocated_entry == 0 || relocated_entry >= USER_ADDR_MAX {
+        return Err("Relocated entry outside user space");
+    }
+
+    Ok((load_bias, relocated_entry))
+}
+
+fn apply_segment_permissions(
+    user_as: &AddressSpace,
+    page_start: u64,
+    page_count: usize,
+    flags: VmaFlags,
+) -> Result<(), &'static str> {
+    let pte_flags = flags.to_page_flags();
+    // SAFETY: loader owns this AddressSpace during image construction.
+    let mut mapper = unsafe { user_as.mapper() };
+    for i in 0..page_count {
+        let vaddr = page_start
+            .checked_add((i as u64) * 4096)
+            .ok_or("Permission update address overflow")?;
+        let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(vaddr))
+            .map_err(|_| "Invalid page while updating segment flags")?;
+        // SAFETY: the page is already mapped by map_region for this segment.
+        let flush = unsafe {
+            mapper
+                .update_flags(page, pte_flags)
+                .map_err(|_| "Failed to update segment page flags")?
+        };
+        flush.flush();
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
@@ -182,8 +306,12 @@ fn load_segment(
     user_as: &AddressSpace,
     elf_data: &[u8],
     phdr: &Elf64Phdr,
+    load_bias: u64,
 ) -> Result<(), &'static str> {
-    let vaddr = phdr.p_vaddr;
+    let vaddr = phdr
+        .p_vaddr
+        .checked_add(load_bias)
+        .ok_or("PT_LOAD relocated vaddr overflow")?;
     let memsz = phdr.p_memsz;
     let filesz = phdr.p_filesz;
     let offset = phdr.p_offset;
@@ -212,9 +340,7 @@ fn load_segment(
     let page_end = (end + 0xFFF) & !0xFFF;
     let page_count = ((page_end - page_start) / 4096) as usize;
 
-    // Map with writable for initial copy, even if the segment is read-only.
-    // TODO: After copy, remap to actual permissions (needs unmap+remap or mprotect).
-    // For now, we map with the union of actual flags + WRITABLE during load.
+    // Map writable during copy, then restore final ELF flags.
     let actual_flags = elf_flags_to_vma(phdr.p_flags);
     let load_flags = VmaFlags {
         readable: true,
@@ -223,7 +349,12 @@ fn load_segment(
         user_accessible: true,
     };
 
-    user_as.map_region(page_start, page_count, load_flags, VmaType::Code)?;
+    let vma_type = if actual_flags.executable {
+        VmaType::Code
+    } else {
+        VmaType::Anonymous
+    };
+    user_as.map_region(page_start, page_count, load_flags, vma_type)?;
 
     // Copy file data into the mapped pages.
     // We translate each page through the user AS to find its physical frame,
@@ -252,6 +383,9 @@ fn load_segment(
             copied += chunk;
         }
     }
+
+    // Tighten PTE permissions after copy.
+    apply_segment_permissions(user_as, page_start, page_count, actual_flags)?;
 
     log::debug!(
         "  PT_LOAD: {:#x}..{:#x} ({} pages, file {:#x}+{:#x}, flags {:?})",
@@ -352,30 +486,36 @@ pub fn load_and_run_elf_with_caps(
 
     // Step 1: Parse and validate ELF header
     let header = parse_header(elf_data)?;
-    let entry = header.e_entry;
-
-    let phnum = header.e_phnum;
-    log::info!(
-        "[elf] ELF '{}': entry={:#x}, {} program headers",
-        name,
-        entry,
-        phnum,
-    );
-
     // Step 2: Create user address space
     let user_as = Arc::new(AddressSpace::new_user()?);
 
+    let phdrs: alloc::vec::Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+    if phdrs.iter().any(|ph| ph.p_type == PT_INTERP) {
+        return Err("PT_INTERP not supported yet (dynamic linker required)");
+    }
+    let (load_bias, entry) = compute_load_bias_and_entry(&user_as, &header, &phdrs)?;
+
+    let phnum = header.e_phnum;
+    log::info!(
+        "[elf] ELF '{}': type={}, entry={:#x}, bias={:#x}, {} program headers",
+        name,
+        if header.e_type == ET_DYN {
+            "ET_DYN"
+        } else {
+            "ET_EXEC"
+        },
+        entry,
+        load_bias,
+        phnum,
+    );
+
     // Step 3: Load all PT_LOAD segments
     let mut load_count = 0u32;
-    for phdr in program_headers(elf_data, &header) {
-        if phdr.p_type == PT_LOAD {
-            load_segment(&user_as, elf_data, &phdr)?;
+    for phdr in phdrs.iter() {
+        if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
+            load_segment(&user_as, elf_data, phdr, load_bias)?;
             load_count += 1;
         }
-    }
-
-    if load_count == 0 {
-        return Err("ELF has no PT_LOAD segments");
     }
 
     log::info!("[elf] Loaded {} PT_LOAD segment(s)", load_count);
@@ -483,11 +623,16 @@ pub fn load_elf_image(
     user_as: &AddressSpace,
 ) -> Result<u64, &'static str> {
     let header = parse_header(elf_data)?;
+    let phdrs: alloc::vec::Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+    if phdrs.iter().any(|ph| ph.p_type == PT_INTERP) {
+        return Err("PT_INTERP not supported yet (dynamic linker required)");
+    }
+    let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;
 
-    for phdr in program_headers(elf_data, &header) {
-        if phdr.p_type == PT_LOAD {
-            load_segment(user_as, elf_data, &phdr)?;
+    for phdr in phdrs.iter() {
+        if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
+            load_segment(user_as, elf_data, phdr, load_bias)?;
         }
     }
-    Ok(header.e_entry)
+    Ok(entry)
 }
