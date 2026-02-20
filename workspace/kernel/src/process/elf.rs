@@ -440,7 +440,7 @@ fn read_user_mapped_bytes(
         let phys = user_as
             .translate(VirtAddr::new(vaddr))
             .ok_or("Failed to translate mapped user bytes")?;
-        let src = (crate::memory::phys_to_virt(phys.as_u64()) as *const u8).wrapping_add(page_off);
+        let src = crate::memory::phys_to_virt(phys.as_u64()) as *const u8;
         // SAFETY: src points to mapped physical memory via HHDM.
         unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(copied), chunk) };
         copied += chunk;
@@ -463,7 +463,7 @@ fn write_user_mapped_bytes(
         let phys = user_as
             .translate(VirtAddr::new(vaddr))
             .ok_or("Failed to translate relocation target")?;
-        let dst = (crate::memory::phys_to_virt(phys.as_u64()) as *mut u8).wrapping_add(page_off);
+        let dst = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
         // SAFETY: destination points to mapped user frame through HHDM.
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(written), dst, chunk) };
         written += chunk;
@@ -472,6 +472,87 @@ fn write_user_mapped_bytes(
             .ok_or("Virtual address overflow while writing mapped bytes")?;
     }
     Ok(())
+}
+
+fn read_user_u64(user_as: &AddressSpace, vaddr: u64) -> Result<u64, &'static str> {
+    let mut raw = [0u8; 8];
+    read_user_mapped_bytes(user_as, vaddr, &mut raw)?;
+    Ok(u64::from_le_bytes(raw))
+}
+
+fn write_user_u64(user_as: &AddressSpace, vaddr: u64, value: u64) -> Result<(), &'static str> {
+    write_user_mapped_bytes(user_as, vaddr, &value.to_le_bytes())
+}
+
+fn apply_relr_relocations(
+    user_as: &AddressSpace,
+    load_bias: u64,
+    relr_base: u64,
+    relr_size: usize,
+    relr_ent: usize,
+) -> Result<usize, &'static str> {
+    if relr_size == 0 {
+        return Ok(0);
+    }
+    if relr_ent != core::mem::size_of::<u64>() {
+        return Err("Unsupported DT_RELRENT size");
+    }
+    if relr_size % relr_ent != 0 {
+        return Err("DT_RELR table size is not aligned");
+    }
+
+    let count = relr_size / relr_ent;
+    let mut applied = 0usize;
+    let mut where_addr = 0u64;
+
+    for i in 0..count {
+        let entry_addr = relr_base
+            .checked_add((i * relr_ent) as u64)
+            .ok_or("DT_RELR walk overflow")?;
+        let entry = read_user_u64(user_as, entry_addr)?;
+
+        if (entry & 1) == 0 {
+            where_addr = load_bias
+                .checked_add(entry)
+                .ok_or("DT_RELR absolute relocation overflow")?;
+            let cur = read_user_u64(user_as, where_addr)?;
+            write_user_u64(
+                user_as,
+                where_addr,
+                cur.checked_add(load_bias)
+                    .ok_or("DT_RELR relocated value overflow")?,
+            )?;
+            where_addr = where_addr
+                .checked_add(8)
+                .ok_or("DT_RELR where pointer overflow")?;
+            applied += 1;
+        } else {
+            let mut bitmap = entry >> 1;
+            for bit in 0..63u64 {
+                if (bitmap & 1) != 0 {
+                    let slot = where_addr
+                        .checked_add(bit * 8)
+                        .ok_or("DT_RELR bitmap target overflow")?;
+                    let cur = read_user_u64(user_as, slot)?;
+                    write_user_u64(
+                        user_as,
+                        slot,
+                        cur.checked_add(load_bias)
+                            .ok_or("DT_RELR bitmap relocated value overflow")?,
+                    )?;
+                    applied += 1;
+                }
+                bitmap >>= 1;
+                if bitmap == 0 {
+                    break;
+                }
+            }
+            where_addr = where_addr
+                .checked_add(63 * 8)
+                .ok_or("DT_RELR where advance overflow")?;
+        }
+    }
+    Ok(applied)
 }
 
 fn apply_dynamic_relocations(
@@ -575,8 +656,11 @@ fn apply_dynamic_relocations(
         }
     }
 
-    if relr_addr.is_some() || relr_size != 0 || relr_ent != 0 {
-        return Err("DT_RELR relocations are not supported yet");
+    let mut relr_applied = 0usize;
+    if let Some(relr_base) = relr_addr {
+        relr_applied = apply_relr_relocations(user_as, load_bias, relr_base, relr_size, relr_ent)?;
+    } else if relr_size != 0 || relr_ent != 0 {
+        return Err("DT_RELR metadata present without DT_RELR base");
     }
     if rela_ent != core::mem::size_of::<Elf64Rela>() {
         return Err("Unsupported DT_RELAENT size");
@@ -671,6 +755,9 @@ fn apply_dynamic_relocations(
 
     if total_applied > 0 {
         log::debug!("[elf] Applied {} RELA relocations", total_applied);
+    }
+    if relr_applied > 0 {
+        log::debug!("[elf] Applied {} RELR relocations", relr_applied);
     }
     Ok(())
 }
