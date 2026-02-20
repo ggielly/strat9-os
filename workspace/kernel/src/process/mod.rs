@@ -7,6 +7,8 @@
 
 pub mod elf;
 #[cfg(feature = "selftest")]
+pub mod demand_paging_test;
+#[cfg(feature = "selftest")]
 pub mod fork_test;
 #[cfg(feature = "selftest")]
 pub mod futex_test;

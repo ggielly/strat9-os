@@ -231,7 +231,10 @@ impl AddressSpace {
         if let Some((&prev_start, prev_vma)) = regions.range(..start).next_back() {
             let prev_end = prev_start + (prev_vma.page_count as u64) * 4096;
             if prev_end == start && prev_vma.flags == flags && prev_vma.vma_type == vma_type {
-                let new_count = prev_vma.page_count + page_count;
+                let new_count = prev_vma
+                    .page_count
+                    .checked_add(page_count)
+                    .ok_or("Region page_count overflow")?;
                 let updated_vma = VirtualMemoryRegion {
                     start: prev_start,
                     page_count: new_count,
@@ -261,6 +264,8 @@ impl AddressSpace {
     ///
     /// If it does, allocates a physical frame and maps it.
     pub fn handle_fault(&self, fault_addr: u64) -> Result<(), &'static str> {
+        use x86_64::structures::paging::mapper::MapToError;
+
         let page_addr = fault_addr & !0xFFF;
         
         // 1. Find the VMA covering this address
@@ -281,7 +286,12 @@ impl AddressSpace {
             _ => return Err("VMA type does not support demand paging"),
         }
 
-        // 3. Allocate and map a single page
+        // 3. If already mapped (race/re-fault), treat as handled.
+        if self.translate(VirtAddr::new(page_addr)).is_some() {
+            return Ok(());
+        }
+
+        // 4. Allocate and map a single page
         let mut frame_allocator = crate::memory::paging::BuddyFrameAllocator;
         let frame = frame_allocator.allocate_frame().ok_or("OOM during demand paging")?;
         
@@ -296,9 +306,42 @@ impl AddressSpace {
 
         // SAFETY: We own the address space.
         unsafe {
-            self.mapper().map_to(page, frame, page_flags, &mut frame_allocator)
-                .map_err(|_| "Failed to map demand page")?
-                .flush();
+            let mut mapper = self.mapper();
+            match mapper.map_to(page, frame, page_flags, &mut frame_allocator) {
+                Ok(flush) => {
+                    flush.flush();
+                    crate::memory::cow::frame_inc_ref(crate::memory::PhysFrame {
+                        start_address: frame.start_address(),
+                    });
+                }
+                Err(MapToError::PageAlreadyMapped(_)) => {
+                    // Another execution path mapped this page before us.
+                    let lock = crate::memory::get_allocator();
+                    let mut guard = lock.lock();
+                    if let Some(allocator) = guard.as_mut() {
+                        allocator.free(
+                            crate::memory::PhysFrame {
+                                start_address: frame.start_address(),
+                            },
+                            0,
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(_) => {
+                    let lock = crate::memory::get_allocator();
+                    let mut guard = lock.lock();
+                    if let Some(allocator) = guard.as_mut() {
+                        allocator.free(
+                            crate::memory::PhysFrame {
+                                start_address: frame.start_address(),
+                            },
+                            0,
+                        );
+                    }
+                    return Err("Failed to map demand page");
+                }
+            }
         }
 
         log::trace!("Demand paging: mapped {:#x} to frame {:#x}", page_addr, frame.start_address().as_u64());

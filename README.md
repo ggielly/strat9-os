@@ -15,6 +15,20 @@ The goal is to run silos (a kind of containers with ELF/WASM etc) directly on th
 
 This project is in active development and not production-ready.
 
+### Screenshots
+
+![Scheme filesystem](doc/scheme.jpg)
+*Scheme-style filesystem paths*
+
+![Top - process monitor](doc/top.jpg)
+*Process monitor (top command)*
+
+![Memory and CPU info](doc/mem_cpu.jpg)
+*Memory and CPU information*
+
+![Graphics test](doc/gfx-test.jpg)
+*Graphics subsystem test*
+
 Kernel :
 
 - SMP boot with per-CPU data, TSS/GDT, GSBase SYSCALL, and per-CPU scheduler.

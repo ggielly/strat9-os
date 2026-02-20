@@ -23,6 +23,15 @@ pub struct ForkResult {
     pub child_pid: TaskId,
 }
 
+#[inline]
+fn local_invlpg(vaddr: u64) {
+    // Local TLB invalidation is sufficient here: this kernel currently runs
+    // one task per user address space (no shared user CR3 across CPUs).
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct ForkUserContext {
@@ -275,8 +284,8 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
                 .map_err(|_| "Failed to update flags")?
                 .ignore();
         }
-        // Invalidate TLB on all CPUs (SMP-safe).
-        crate::arch::x86_64::tlb::shootdown_page(VirtAddr::new(virt_addr));
+        // Only the current CPU can hold this CR3 in the current design.
+        local_invlpg(virt_addr);
         return Ok(());
     }
 
@@ -330,8 +339,8 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
         start_address: new_frame.start_address(),
     });
 
-    // Invalidate TLB on all CPUs (SMP-safe).
-    crate::arch::x86_64::tlb::shootdown_page(VirtAddr::new(virt_addr));
+    // Only the current CPU can hold this CR3 in the current design.
+    local_invlpg(virt_addr);
 
     // Decrement refcount of old frame after the new mapping is installed.
     crate::memory::cow::frame_dec_ref(old_frame);
