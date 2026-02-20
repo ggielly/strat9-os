@@ -12,7 +12,7 @@ IMAGE_FILE="$BUILD_DIR/${IMAGE_BASENAME}.img"
 ISO_FILE="$BUILD_DIR/${IMAGE_BASENAME}.iso"
 KERNEL_ELF="target/x86_64-unknown-none/release/kernel"
 FS_EXT4_ELF="target/x86_64-unknown-none/release/fs-ext4-strate"
-FS_RAM_ELF="target/x86_64-unknown-none/release/strate-ram"
+FS_RAM_ELF="target/x86_64-unknown-none/release/strate-fs-ramfs"
 
 echo ""
 echo "=== Creating Limine bootable image ==="
@@ -42,9 +42,9 @@ else
 fi
 if [ -f "$FS_RAM_ELF" ]; then
     ram_size=$(stat -c%s "$FS_RAM_ELF")
-    echo "    strate-ram : $ram_size bytes"
+    echo "    strate-fs-ramfs : $ram_size bytes"
 else
-    echo "    strate-ram : (missing)"
+    echo "    strate-fs-ramfs : (missing)"
 fi
 echo ""
 
@@ -76,10 +76,10 @@ else
 fi
 
 if [ -f "$FS_RAM_ELF" ]; then
-    cp "$FS_RAM_ELF" "$ISO_ROOT/initfs/strate-ram"
-    echo "  [OK] Copied strate-ram"
+    cp "$FS_RAM_ELF" "$ISO_ROOT/initfs/strate-fs-ramfs"
+    echo "  [OK] Copied strate-fs-ramfs"
 else
-    echo "  [WARN] strate-ram not found at $FS_RAM_ELF"
+    echo "  [WARN] strate-fs-ramfs not found at $FS_RAM_ELF"
 fi
 
 # Create ISO using xorriso

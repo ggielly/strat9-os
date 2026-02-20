@@ -11,7 +11,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use core::{alloc::Layout, panic::PanicInfo, sync::atomic::Ordering};
-use strate_ram::{RamFileSystem, split_path};
+use strate_fs_ramfs::{RamFileSystem, split_path};
 use strate_fs_abstraction::VfsFileSystem;
 use strat9_syscall::*;
 use linked_list_allocator::LockedHeap;

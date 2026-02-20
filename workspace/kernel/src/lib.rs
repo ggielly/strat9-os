@@ -344,39 +344,16 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // exercises Ring3 transitions and this extra task can interfere.
 
     // =============================================
-    // Phase 8c: ELF loader — load initfs module if present
+    // Phase 8c: register modules in VFS
     // =============================================
     let mut init_task_id: Option<crate::process::TaskId> = None;
     if args.initfs_base != 0 && args.initfs_size != 0 {
-        serial_println!(
-            "[init] Loading init ELF module ({} bytes)...",
-            args.initfs_size
-        );
-        vga_println!("[..] Loading init ELF module...");
-        // SAFETY: the initfs_base pointer comes from Limine's module response.
-        //
-        // Limine maps modules in the HHDM, so the pointer is already a valid
-        // virtual address we can read from.
         let elf_data =
-            core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize);
+            unsafe { core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize) };
         if let Err(e) = vfs::register_static_file("/initfs/init", elf_data.as_ptr(), elf_data.len())
         {
             serial_println!("[init] Failed to register /initfs/init: {:?}", e);
         }
-        match process::elf::load_and_run_elf(elf_data, "init") {
-            Ok(task_id) => {
-                init_task_id = Some(task_id);
-                serial_println!("[init] ELF 'init' loaded and scheduled.");
-                vga_println!("[OK] ELF 'init' loaded");
-            }
-            Err(e) => {
-                serial_println!("[init] Failed to load init ELF: {}", e);
-                vga_println!("[WARN] ELF load failed: {}", e);
-            }
-        }
-    } else {
-        serial_println!("[init] No initfs module loaded (using built-in Ring 3 test).");
-        vga_println!("[..] No initfs module (using built-in test)");
     }
 
     // Register optional fs-ext4 server module (if provided by Limine).
@@ -394,25 +371,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         }
     }
 
-    // Register and launch strate-ram server module (if provided by Limine).
-    if let Some((base, size)) = crate::limine_entry::strate_ram_module() {
+    // Register optional strate-fs-ramfs server module (if provided by Limine).
+    if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
         if base != 0 && size != 0 {
             let ram_data =
                 unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
             if let Err(e) =
-                vfs::register_static_file("/initfs/strate-ram", ram_data.as_ptr(), ram_data.len())
+                vfs::register_static_file("/initfs/strate-fs-ramfs", ram_data.as_ptr(), ram_data.len())
             {
-                serial_println!("[init] Failed to register /initfs/strate-ram: {:?}", e);
+                serial_println!("[init] Failed to register /initfs/strate-fs-ramfs: {:?}", e);
             } else {
-                serial_println!("[init] Registered /initfs/strate-ram ({} bytes)", size);
-                match process::elf::load_and_run_elf(ram_data, "strate-ram") {
-                    Ok(_) => {
-                        serial_println!("[init] Component 'strate-ram' loaded and scheduled.");
-                    }
-                    Err(e) => {
-                        serial_println!("[init] Failed to load strate-ram component: {}", e);
-                    }
-                }
+                serial_println!("[init] Registered /initfs/strate-fs-ramfs ({} bytes)", size);
             }
         }
     }
@@ -431,46 +400,9 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // IPC stress tests disabled in selftest mode to avoid cross-test interference.
 
     // =============================================
-    // Phase 8e: create Chevron shell task (normal ISO only)
+    // Phase 8e: Task creation (deferred to end of boot)
     // =============================================
-    #[cfg(not(feature = "selftest"))]
-    {
-        serial_println!("[init] Creating Chevron shell task...");
-        vga_println!("[..] Creating interactive shell...");
-        match process::Task::new_kernel_task(
-            shell::shell_main,
-            "chevron-shell",
-            process::TaskPriority::Normal,
-        ) {
-            Ok(shell_task) => {
-                process::add_task(shell_task);
-                serial_println!("[init] Chevron shell task created.");
-                vga_println!("[OK] Chevron shell ready");
-            }
-            Err(e) => {
-                serial_println!("[WARN] Failed to create shell task: {}", e);
-                vga_println!("[WARN] Shell task unavailable");
-            }
-        }
-    }
-
-    // Dedicated status-line updater task (keeps bottom bar live independently of shell activity).
-    // Disabled in selftest builds to keep runtime deterministic.
-    #[cfg(not(feature = "selftest"))]
-    {
-        if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
-            arch::x86_64::vga::status_line_task_main,
-            "status-line",
-            process::TaskPriority::Low,
-            64 * 1024,
-        ) {
-            process::add_task(status_task);
-            serial_println!("[init] Status line task created.");
-        } else {
-            serial_println!("[WARN] Failed to create status line task");
-        }
-    }
-
+    
     // =============================================
     // Phase 10: driver stubs
     // =============================================
@@ -483,29 +415,6 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     drivers::virtio::block::init();
     serial_println!("[init] VirtIO block initialized.");
     vga_println!("[OK] VirtIO block driver initialized");
-
-    // Grant init task the Volume capability for the primary VirtIO block device.
-    if let (Some(task_id), Some(device)) = (init_task_id, drivers::virtio::block::get_device()) {
-        if let Some(task) = crate::process::get_task_by_id(task_id) {
-            let cap = crate::capability::get_capability_manager().create_capability(
-                crate::capability::ResourceType::Volume,
-                device as *const _ as usize,
-                crate::capability::CapPermissions {
-                    read: true,
-                    write: true,
-                    execute: false,
-                    grant: true,
-                    revoke: true,
-                },
-            );
-            unsafe { (&mut *task.capabilities.get()).insert(cap) };
-            serial_println!("[init] Granted volume capability to init");
-        } else {
-            serial_println!("[init] Failed to grant Volume cap: init task missing");
-        }
-    } else {
-        serial_println!("[init] Volume cap not granted (no init or no block device)");
-    }
 
     serial_println!("[init] Initializing VirtIO net...");
     vga_println!("[..] Looking for VirtIO net device...");
@@ -566,12 +475,85 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
 
+    // =============================================
+    // Final Phase: Launch initial user tasks
+    // =============================================
+    
+    // 1. Launch init process if module was found
+    if args.initfs_base != 0 && args.initfs_size != 0 {
+        let elf_data = unsafe { core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize) };
+        match process::elf::load_and_run_elf(elf_data, "init") {
+            Ok(task_id) => {
+                init_task_id = Some(task_id);
+                serial_println!("[init] ELF 'init' loaded.");
+            }
+            Err(e) => {
+                serial_println!("[init] Failed to load init ELF: {}", e);
+            }
+        }
+    }
+
+    // 2. Launch strate-fs-ramfs server if module was found
+    if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
+        let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+        match process::elf::load_and_run_elf(ram_data, "strate-fs-ramfs") {
+            Ok(_) => {
+                serial_println!("[init] Component 'strate-fs-ramfs' loaded.");
+            }
+            Err(e) => {
+                serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e);
+            }
+        }
+    }
+
+    // 3. Grant Volume capability to init task
+    if let (Some(task_id), Some(device)) = (init_task_id, drivers::virtio::block::get_device()) {
+        if let Some(task) = crate::process::get_task_by_id(task_id) {
+            let cap = crate::capability::get_capability_manager().create_capability(
+                crate::capability::ResourceType::Volume,
+                device as *const _ as usize,
+                crate::capability::CapPermissions {
+                    read: true,
+                    write: true,
+                    execute: false,
+                    grant: true,
+                    revoke: true,
+                },
+            );
+            unsafe { (&mut *task.capabilities.get()).insert(cap) };
+            serial_println!("[init] Granted volume capability to init");
+        }
+    }
+
+    // 4. Launch shell and status-line (kernel tasks)
+    #[cfg(not(feature = "selftest"))]
+    {
+        // Shell
+        match process::Task::new_kernel_task(shell::shell_main, "chevron-shell", process::TaskPriority::Normal) {
+            Ok(shell_task) => {
+                process::add_task(shell_task);
+                serial_println!("[init] Chevron shell ready.");
+            }
+            Err(e) => {
+                serial_println!("[WARN] Failed to create shell task: {}", e);
+            }
+        }
+
+        // Status line
+        if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
+            arch::x86_64::vga::status_line_task_main,
+            "status-line",
+            process::TaskPriority::Low,
+            64 * 1024,
+        ) {
+            process::add_task(status_task);
+        }
+    }
+
     // Initialize keyboard layout to French by default
     crate::arch::x86_64::keyboard_layout::set_french_layout();
 
     // Start the scheduler - this will never return
-    // The scheduler will alternate between idle task and test task(s)
-    // Note: The prompt will be displayed by the idle task or a dedicated shell task
     process::schedule();
 }
 

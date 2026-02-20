@@ -8,7 +8,7 @@ members = [
     "workspace/components/syscall",
     "workspace/components/strate-silo-test",
     "workspace/components/strate-net",
-    "workspace/components/strate-ram",
+    "workspace/components/strate-fs-ramfs",
 ]
 exclude = [
     "workspace/components/relibc",        # External dependency, built separately

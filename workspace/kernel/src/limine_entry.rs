@@ -49,8 +49,8 @@ static STACK_SIZE: StackSizeRequest = StackSizeRequest::new().with_size(0x10000)
 static INIT_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/init");
 /// Internal module: request Limine to load /initfs/fs-ext4 (userspace EXT4 server)
 static EXT4_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/fs-ext4");
-/// Internal module: request Limine to load /initfs/strate-ram (userspace RAMFS server)
-static RAM_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-ram");
+/// Internal module: request Limine to load /initfs/strate-fs-ramfs (userspace RAMFS server)
+static RAM_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-fs-ramfs");
 
 /// Request modules (files loaded alongside the kernel)
 #[used]
@@ -60,8 +60,8 @@ static MODULES: ModuleRequest =
 
 /// Optional fs-ext4 module info (set during Limine entry).
 static mut FS_EXT4_MODULE: Option<(u64, u64)> = None;
-/// Optional strate-ram module info (set during Limine entry).
-static mut STRATE_RAM_MODULE: Option<(u64, u64)> = None;
+/// Optional strate-fs-ramfs module info (set during Limine entry).
+static mut STRATE_FS_RAMFS_MODULE: Option<(u64, u64)> = None;
 
 const MAX_BOOT_MEMORY_REGIONS: usize = 256;
 static mut BOOT_MEMORY_MAP: [crate::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
@@ -78,10 +78,10 @@ pub fn fs_ext4_module() -> Option<(u64, u64)> {
     unsafe { FS_EXT4_MODULE }
 }
 
-/// Return the strate-ram module (addr, size) if present.
-pub fn strate_ram_module() -> Option<(u64, u64)> {
+/// Return the strate-fs-ramfs module (addr, size) if present.
+pub fn strate_fs_ramfs_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
-    unsafe { STRATE_RAM_MODULE }
+    unsafe { STRATE_FS_RAMFS_MODULE }
 }
 
 fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> crate::entry::MemoryKind {
@@ -235,7 +235,7 @@ pub unsafe extern "C" fn kmain() -> ! {
     if ram_base != 0 && ram_size != 0 {
         // SAFETY: set once during early boot.
         unsafe {
-            STRATE_RAM_MODULE = Some((ram_base, ram_size));
+            STRATE_FS_RAMFS_MODULE = Some((ram_base, ram_size));
         }
     }
 
