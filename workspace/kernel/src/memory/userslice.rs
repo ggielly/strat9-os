@@ -254,6 +254,28 @@ impl UserSliceRead {
         n
     }
 
+    /// Read a single byte from the user slice at the given offset.
+    pub fn read_u8(&self, offset: usize) -> Result<u8, UserSliceError> {
+        if offset >= self.len {
+            return Err(UserSliceError::InvalidSize);
+        }
+        // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
+        unsafe {
+            Ok(core::ptr::read_unaligned((self.ptr + offset as u64) as *const u8))
+        }
+    }
+
+    /// Read a u64 from the user slice at the given offset.
+    pub fn read_u64(&self, offset: usize) -> Result<u64, UserSliceError> {
+        if offset + 8 > self.len {
+            return Err(UserSliceError::InvalidSize);
+        }
+        // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
+        unsafe {
+            Ok(core::ptr::read_unaligned((self.ptr + offset as u64) as *const u64))
+        }
+    }
+
     /// Read a value of type T from the user slice.
     ///
     /// # Safety

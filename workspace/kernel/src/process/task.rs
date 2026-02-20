@@ -98,7 +98,7 @@ pub struct Task {
     /// Capabilities granted to this task
     pub capabilities: SyncUnsafeCell<CapabilityTable>,
     /// Address space for this task (kernel tasks share the kernel AS)
-    pub address_space: Arc<AddressSpace>,
+    pub address_space: SyncUnsafeCell<Arc<AddressSpace>>,
     /// File descriptor table for this task
     pub fd_table: SyncUnsafeCell<FileDescriptorTable>,
     /// Pending signals for this task

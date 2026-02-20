@@ -6,7 +6,7 @@
 //! Supports ET_EXEC and ET_DYN (PIE/static-PIE) ELF64 little-endian x86_64
 //! binaries.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use x86_64::{
     structures::paging::{Mapper, Page, Size4KiB},
     VirtAddr,
@@ -42,8 +42,20 @@ const DT_NULL: i64 = 0;
 const DT_RELA: i64 = 7;
 const DT_RELASZ: i64 = 8;
 const DT_RELAENT: i64 = 9;
+const DT_STRTAB: i64 = 5;
+const DT_SYMTAB: i64 = 6;
+const DT_SYMENT: i64 = 11;
+const DT_JMPREL: i64 = 23;
+const DT_PLTRELSZ: i64 = 2;
+const DT_PLTREL: i64 = 20;
 const DT_RELACOUNT: i64 = 0x6fff_fff9;
+const DT_RELR: i64 = 36;
+const DT_RELRSZ: i64 = 35;
+const DT_RELRENT: i64 = 37;
 const R_X86_64_RELATIVE: u32 = 8;
+const R_X86_64_64: u32 = 1;
+const R_X86_64_GLOB_DAT: u32 = 6;
+const R_X86_64_JUMP_SLOT: u32 = 7;
 
 /// Maximum virtual address we accept for user-space mappings.
 pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
@@ -108,6 +120,17 @@ struct Elf64Rela {
     r_offset: u64,
     r_info: u64,
     r_addend: i64,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+struct Elf64Sym {
+    st_name: u32,
+    st_info: u8,
+    st_other: u8,
+    st_shndx: u16,
+    st_value: u64,
+    st_size: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +214,58 @@ fn program_headers<'a>(
         // within `data`, and Elf64Phdr is packed (align 1).
         unsafe { core::ptr::read_unaligned(data.as_ptr().add(offset) as *const Elf64Phdr) }
     })
+}
+
+fn parse_interp_path<'a>(elf_data: &'a [u8], phdrs: &[Elf64Phdr]) -> Result<Option<&'a str>, &'static str> {
+    let Some(interp) = phdrs.iter().find(|ph| ph.p_type == PT_INTERP) else {
+        return Ok(None);
+    };
+    if interp.p_filesz == 0 {
+        return Err("PT_INTERP has empty path");
+    }
+    let start = interp.p_offset as usize;
+    let end = start
+        .checked_add(interp.p_filesz as usize)
+        .ok_or("PT_INTERP range overflow")?;
+    if end > elf_data.len() {
+        return Err("PT_INTERP extends past file");
+    }
+    let raw = &elf_data[start..end];
+    let nul = raw.iter().position(|&b| b == 0).ok_or("PT_INTERP path is not NUL terminated")?;
+    let s = core::str::from_utf8(&raw[..nul]).map_err(|_| "PT_INTERP path is not UTF-8")?;
+    if s.is_empty() {
+        return Err("PT_INTERP path is empty");
+    }
+    Ok(Some(s))
+}
+
+fn read_elf_from_vfs(path: &str) -> Result<Vec<u8>, &'static str> {
+    const MAX_ELF_SIZE: usize = 64 * 1024 * 1024;
+    let fd = crate::vfs::open(path, crate::vfs::OpenFlags::READ).map_err(|_| "PT_INTERP open failed")?;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match crate::vfs::read(fd, &mut buf) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = crate::vfs::close(fd);
+                return Err("PT_INTERP read failed");
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        if out.len().saturating_add(n) > MAX_ELF_SIZE {
+            let _ = crate::vfs::close(fd);
+            return Err("PT_INTERP file too large");
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    let _ = crate::vfs::close(fd);
+    if out.is_empty() {
+        return Err("PT_INTERP file is empty");
+    }
+    Ok(out)
 }
 
 /// Compute total mapped bounds for all PT_LOAD segments.
@@ -317,7 +392,7 @@ fn read_user_mapped_bytes(
         let phys = user_as
             .translate(VirtAddr::new(vaddr))
             .ok_or("Failed to translate mapped user bytes")?;
-        let src = (crate::memory::phys_to_virt(phys.as_u64()) as *const u8).wrapping_add(page_off);
+        let src = crate::memory::phys_to_virt(phys.as_u64()) as *const u8;
         // SAFETY: src points to mapped physical memory via HHDM.
         unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(copied), chunk) };
         copied += chunk;
@@ -328,14 +403,26 @@ fn read_user_mapped_bytes(
     Ok(())
 }
 
-fn write_user_u64(user_as: &AddressSpace, vaddr: u64, value: u64) -> Result<(), &'static str> {
-    let phys = user_as
-        .translate(VirtAddr::new(vaddr))
-        .ok_or("Failed to translate relocation target")?;
-    let dst = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
-    let bytes = value.to_le_bytes();
-    // SAFETY: destination points to mapped user frame through HHDM.
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, 8) };
+fn write_user_mapped_bytes(
+    user_as: &AddressSpace,
+    mut vaddr: u64,
+    src: &[u8],
+) -> Result<(), &'static str> {
+    let mut written = 0usize;
+    while written < src.len() {
+        let page_off = (vaddr & 0xFFF) as usize;
+        let chunk = core::cmp::min(src.len() - written, 4096 - page_off);
+        let phys = user_as
+            .translate(VirtAddr::new(vaddr))
+            .ok_or("Failed to translate relocation target")?;
+        let dst = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
+        // SAFETY: destination points to mapped user frame through HHDM.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(written), dst, chunk) };
+        written += chunk;
+        vaddr = vaddr
+            .checked_add(chunk as u64)
+            .ok_or("Virtual address overflow while writing mapped bytes")?;
+    }
     Ok(())
 }
 
@@ -366,7 +453,16 @@ fn apply_dynamic_relocations(
     let mut rela_addr: Option<u64> = None;
     let mut rela_size: usize = 0;
     let mut rela_ent: usize = core::mem::size_of::<Elf64Rela>();
+    let mut jmprel_addr: Option<u64> = None;
+    let mut jmprel_size: usize = 0;
+    let mut pltrel_kind: Option<u64> = None;
+    let mut symtab_addr: Option<u64> = None;
+    let mut sym_ent: usize = core::mem::size_of::<Elf64Sym>();
+    let mut strtab_addr: Option<u64> = None;
     let mut rela_count_hint: Option<usize> = None;
+    let mut relr_addr: Option<u64> = None;
+    let mut relr_size: usize = 0;
+    let mut relr_ent: usize = 0;
 
     for i in 0..dyn_count {
         let entry_addr = dyn_addr
@@ -390,57 +486,144 @@ fn apply_dynamic_relocations(
             DT_RELASZ => rela_size = dyn_entry.d_val as usize,
             DT_RELAENT => rela_ent = dyn_entry.d_val as usize,
             DT_RELACOUNT => rela_count_hint = Some(dyn_entry.d_val as usize),
+            DT_JMPREL => {
+                jmprel_addr = Some(
+                    dyn_entry
+                        .d_val
+                        .checked_add(load_bias)
+                        .ok_or("DT_JMPREL relocated address overflow")?,
+                )
+            }
+            DT_PLTRELSZ => jmprel_size = dyn_entry.d_val as usize,
+            DT_PLTREL => pltrel_kind = Some(dyn_entry.d_val),
+            DT_SYMTAB => {
+                symtab_addr = Some(
+                    dyn_entry
+                        .d_val
+                        .checked_add(load_bias)
+                        .ok_or("DT_SYMTAB relocated address overflow")?,
+                )
+            }
+            DT_SYMENT => sym_ent = dyn_entry.d_val as usize,
+            DT_STRTAB => {
+                strtab_addr = Some(
+                    dyn_entry
+                        .d_val
+                        .checked_add(load_bias)
+                        .ok_or("DT_STRTAB relocated address overflow")?,
+                )
+            }
+            DT_RELR => {
+                relr_addr = Some(
+                    dyn_entry
+                        .d_val
+                        .checked_add(load_bias)
+                        .ok_or("DT_RELR relocated address overflow")?,
+                )
+            }
+            DT_RELRSZ => relr_size = dyn_entry.d_val as usize,
+            DT_RELRENT => relr_ent = dyn_entry.d_val as usize,
             _ => {}
         }
     }
 
-    let Some(rela_base) = rela_addr else {
-        return Ok(());
-    };
+    if relr_addr.is_some() || relr_size != 0 || relr_ent != 0 {
+        return Err("DT_RELR relocations are not supported yet");
+    }
     if rela_ent != core::mem::size_of::<Elf64Rela>() {
         return Err("Unsupported DT_RELAENT size");
     }
-    if rela_size == 0 {
-        return Ok(());
+    if sym_ent != core::mem::size_of::<Elf64Sym>() {
+        return Err("Unsupported DT_SYMENT size");
+    }
+    if pltrel_kind.is_some() && pltrel_kind != Some(DT_RELA as u64) {
+        return Err("Only DT_PLTREL=DT_RELA is supported");
     }
 
-    let mut rela_count = rela_size / rela_ent;
-    if let Some(hint) = rela_count_hint {
-        rela_count = core::cmp::min(rela_count, hint);
-    }
-
-    for i in 0..rela_count {
-        let rela_addr_i = rela_base
-            .checked_add((i * rela_ent) as u64)
-            .ok_or("Rela table overflow")?;
-        let mut raw = [0u8; core::mem::size_of::<Elf64Rela>()];
-        read_user_mapped_bytes(user_as, rela_addr_i, &mut raw)?;
-        // SAFETY: raw has exact size of Elf64Rela.
-        let rela = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Rela) };
-
-        let r_type = (rela.r_info & 0xffff_ffff) as u32;
-        let r_sym = (rela.r_info >> 32) as u32;
-        if r_type != R_X86_64_RELATIVE {
-            return Err("Unsupported dynamic relocation type");
+    let resolve_symbol = |sym_idx: u32| -> Result<u64, &'static str> {
+        if sym_idx == 0 {
+            return Ok(0);
         }
-        if r_sym != 0 {
-            return Err("R_X86_64_RELATIVE with non-zero symbol");
+        let symtab = symtab_addr.ok_or("Missing DT_SYMTAB for symbol relocations")?;
+        let _ = strtab_addr.ok_or("Missing DT_STRTAB for symbol relocations")?;
+        let sym_addr = symtab
+            .checked_add((sym_idx as u64) * (sym_ent as u64))
+            .ok_or("Symbol table address overflow")?;
+        let mut raw = [0u8; core::mem::size_of::<Elf64Sym>()];
+        read_user_mapped_bytes(user_as, sym_addr, &mut raw)?;
+        // SAFETY: raw has exact size of Elf64Sym.
+        let sym = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Sym) };
+        if sym.st_shndx == 0 {
+            return Err("Undefined symbol relocation not supported");
         }
-
-        let target = rela
-            .r_offset
+        sym.st_value
             .checked_add(load_bias)
-            .ok_or("Relocation target overflow")?;
-        let value = (load_bias as i128)
-            .checked_add(rela.r_addend as i128)
-            .ok_or("Relocation value overflow")?;
-        if value < 0 || value > u64::MAX as i128 {
-            return Err("Relocation value out of range");
-        }
-        write_user_u64(user_as, target, value as u64)?;
+            .ok_or("Symbol value relocation overflow")
+    };
+
+    let apply_rela_table =
+        |table_base: u64, table_size: usize, count_hint: Option<usize>| -> Result<usize, &'static str> {
+            if table_size == 0 {
+                return Ok(0);
+            }
+            let mut count = table_size / rela_ent;
+            if let Some(hint) = count_hint {
+                count = core::cmp::min(count, hint);
+            }
+            let mut applied = 0usize;
+            for i in 0..count {
+                let rela_addr_i = table_base
+                    .checked_add((i * rela_ent) as u64)
+                    .ok_or("Rela table overflow")?;
+                let mut raw = [0u8; core::mem::size_of::<Elf64Rela>()];
+                read_user_mapped_bytes(user_as, rela_addr_i, &mut raw)?;
+                // SAFETY: raw has exact size of Elf64Rela.
+                let rela = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Rela) };
+
+                let r_type = (rela.r_info & 0xffff_ffff) as u32;
+                let r_sym = (rela.r_info >> 32) as u32;
+                let target = rela
+                    .r_offset
+                    .checked_add(load_bias)
+                    .ok_or("Relocation target overflow")?;
+
+                let value = match r_type {
+                    R_X86_64_RELATIVE => {
+                        if r_sym != 0 {
+                            return Err("R_X86_64_RELATIVE with non-zero symbol");
+                        }
+                        (load_bias as i128)
+                            .checked_add(rela.r_addend as i128)
+                            .ok_or("Relocation value overflow")?
+                    }
+                    R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_64 => {
+                        let sym_val = resolve_symbol(r_sym)? as i128;
+                        sym_val
+                            .checked_add(rela.r_addend as i128)
+                            .ok_or("Relocation value overflow")?
+                    }
+                    _ => return Err("Unsupported dynamic relocation type"),
+                };
+                if value < 0 || value > u64::MAX as i128 {
+                    return Err("Relocation value out of range");
+                }
+                write_user_mapped_bytes(user_as, target, &(value as u64).to_le_bytes())?;
+                applied += 1;
+            }
+            Ok(applied)
+        };
+
+    let mut total_applied = 0usize;
+    if let Some(rela_base) = rela_addr {
+        total_applied += apply_rela_table(rela_base, rela_size, rela_count_hint)?;
+    }
+    if let Some(jmprel_base) = jmprel_addr {
+        total_applied += apply_rela_table(jmprel_base, jmprel_size, None)?;
     }
 
-    log::debug!("[elf] Applied {} RELA relocations", rela_count);
+    if total_applied > 0 {
+        log::debug!("[elf] Applied {} RELA relocations", total_applied);
+    }
     Ok(())
 }
 
@@ -650,10 +833,8 @@ pub fn load_and_run_elf_with_caps(
     // Step 2: Create user address space
     let user_as = Arc::new(AddressSpace::new_user()?);
 
-    let phdrs: alloc::vec::Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
-    if phdrs.iter().any(|ph| ph.p_type == PT_INTERP) {
-        return Err("PT_INTERP not supported yet (dynamic linker required)");
-    }
+    let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+    let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(&user_as, &header, &phdrs)?;
 
     let phnum = header.e_phnum;
@@ -678,9 +859,38 @@ pub fn load_and_run_elf_with_caps(
             load_count += 1;
         }
     }
-    apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
+    if interp_path.is_none() {
+        apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
+    }
 
     log::info!("[elf] Loaded {} PT_LOAD segment(s)", load_count);
+
+    let mut runtime_entry = entry;
+    if let Some(path) = interp_path {
+        let interp_data = read_elf_from_vfs(path)?;
+        let interp_header = parse_header(&interp_data)?;
+        let interp_phdrs: Vec<Elf64Phdr> = program_headers(&interp_data, &interp_header).collect();
+        if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
+            return Err("Nested PT_INTERP is not supported");
+        }
+        let (interp_bias, interp_entry) =
+            compute_load_bias_and_entry(&user_as, &interp_header, &interp_phdrs)?;
+        let mut interp_load_count = 0u32;
+        for phdr in interp_phdrs.iter() {
+            if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
+                load_segment(&user_as, &interp_data, phdr, interp_bias)?;
+                interp_load_count += 1;
+            }
+        }
+        apply_dynamic_relocations(&user_as, &interp_phdrs, interp_header.e_type, interp_bias)?;
+        runtime_entry = interp_entry;
+        log::info!(
+            "[elf] PT_INTERP '{}' loaded: {} PT_LOAD, entry={:#x}",
+            path,
+            interp_load_count,
+            runtime_entry
+        );
+    }
 
     // Step 4: Map user stack
     let stack_flags = VmaFlags {
@@ -707,7 +917,7 @@ pub fn load_and_run_elf_with_caps(
     // scheduled until after we've finished writing the params.
     unsafe {
         let params = &raw mut TRAMPOLINE_PARAMS;
-        (*params).entry_point = entry;
+        (*params).entry_point = runtime_entry;
         (*params).stack_top = USER_STACK_TOP;
         (*params).address_space = Some(user_as.clone());
     }
@@ -771,7 +981,7 @@ pub fn load_and_run_elf_with_caps(
     log::info!(
         "[elf] Task '{}' created: entry={:#x}, stack_top={:#x}",
         name,
-        entry,
+        runtime_entry,
         USER_STACK_TOP,
     );
 
@@ -785,10 +995,8 @@ pub fn load_elf_image(
     user_as: &AddressSpace,
 ) -> Result<u64, &'static str> {
     let header = parse_header(elf_data)?;
-    let phdrs: alloc::vec::Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
-    if phdrs.iter().any(|ph| ph.p_type == PT_INTERP) {
-        return Err("PT_INTERP not supported yet (dynamic linker required)");
-    }
+    let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+    let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;
 
     for phdr in phdrs.iter() {
@@ -796,6 +1004,28 @@ pub fn load_elf_image(
             load_segment(user_as, elf_data, phdr, load_bias)?;
         }
     }
-    apply_dynamic_relocations(user_as, &phdrs, header.e_type, load_bias)?;
-    Ok(entry)
+    if interp_path.is_none() {
+        apply_dynamic_relocations(user_as, &phdrs, header.e_type, load_bias)?;
+    }
+
+    let mut runtime_entry = entry;
+    if let Some(path) = interp_path {
+        let interp_data = read_elf_from_vfs(path)?;
+        let interp_header = parse_header(&interp_data)?;
+        let interp_phdrs: Vec<Elf64Phdr> = program_headers(&interp_data, &interp_header).collect();
+        if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
+            return Err("Nested PT_INTERP is not supported");
+        }
+        let (interp_bias, interp_entry) =
+            compute_load_bias_and_entry(user_as, &interp_header, &interp_phdrs)?;
+        for phdr in interp_phdrs.iter() {
+            if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
+                load_segment(user_as, &interp_data, phdr, interp_bias)?;
+            }
+        }
+        apply_dynamic_relocations(user_as, &interp_phdrs, interp_header.e_type, interp_bias)?;
+        runtime_entry = interp_entry;
+    }
+
+    Ok(runtime_entry)
 }

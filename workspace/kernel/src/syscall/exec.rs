@@ -38,7 +38,7 @@ pub fn sys_execve(
     let path_str = core::str::from_utf8(&path_buf[..len]).map_err(|_| SyscallError::InvalidArgument)?;
 
     
-    let fd = vfs::open(path_str, vfs::OpenFlags::O_RDONLY)?;
+    let fd = vfs::open(path_str, vfs::OpenFlags::READ)?;
 
     // Read into memory
     const MAX_EXEC_SIZE: usize = 64 * 1024 * 1024;
