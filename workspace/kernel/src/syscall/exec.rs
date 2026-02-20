@@ -5,13 +5,22 @@ use crate::{
     memory::{AddressSpace, UserSliceRead, VmaFlags, VmaType},
     process::{
         current_task_clone,
-        elf::{load_elf_image, USER_STACK_BASE, USER_STACK_PAGES, USER_STACK_TOP},
-        Task,
+        elf::{load_elf_image, LoadedElfInfo, USER_STACK_BASE, USER_STACK_PAGES, USER_STACK_TOP},
     },
     syscall::{error::SyscallError, SyscallFrame},
     vfs,
 };
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
+
+const AT_NULL: u64 = 0;
+const AT_PHDR: u64 = 3;
+const AT_PHENT: u64 = 4;
+const AT_PHNUM: u64 = 5;
+const AT_PAGESZ: u64 = 6;
+const AT_BASE: u64 = 7;
+const AT_ENTRY: u64 = 9;
+const AT_RANDOM: u64 = 25;
+const AT_EXECFN: u64 = 31;
 
 /// SYS_PROC_EXECVE (301): Replace current process image.
 pub fn sys_execve(
@@ -71,7 +80,7 @@ pub fn sys_execve(
     let new_as_arc = alloc::sync::Arc::new(new_as);
 
     
-    let entry_point = load_elf_image(&elf_data, &new_as_arc).map_err(|_| SyscallError::ExecFormatError)?;
+    let load_info = load_elf_image(&elf_data, &new_as_arc).map_err(|_| SyscallError::ExecFormatError)?;
 
     
     let stack_flags = VmaFlags {
@@ -89,17 +98,16 @@ pub fn sys_execve(
         )
         .map_err(|_| SyscallError::OutOfMemory)?;
 
-    let sp = setup_user_stack(&new_as_arc, argv_ptr, envp_ptr)?;
+    let sp = setup_user_stack(&new_as_arc, argv_ptr, envp_ptr, &load_info, path_str.as_bytes())?;
 
     
     unsafe {
-        let addr_ptr = &current.address_space as *const _ as *mut alloc::sync::Arc<AddressSpace>;
-        core::ptr::write(addr_ptr, new_as_arc.clone());
-        (*addr_ptr).switch_to();
+        *current.address_space.get() = new_as_arc.clone();
+        (&*current.address_space.get()).switch_to();
     }
 
     
-    frame.iret_rip = entry_point;
+    frame.iret_rip = load_info.runtime_entry;
     frame.iret_rsp = sp;
     
     frame.rdi = 0; frame.rsi = 0; frame.rdx = 0; frame.rcx = 0;
@@ -115,6 +123,8 @@ fn setup_user_stack(
     new_as: &AddressSpace,
     argv_ptr: u64,
     envp_ptr: u64,
+    elf_info: &LoadedElfInfo,
+    exec_path: &[u8],
 ) -> Result<u64, SyscallError> {
     let args = read_string_array(argv_ptr)?;
     let envs = read_string_array(envp_ptr)?;
@@ -151,11 +161,54 @@ fn setup_user_stack(
     }
     str_ptrs.reverse();
 
+    // Push exec path (for AT_EXECFN).
+    let mut execfn_ptr = 0u64;
+    if !exec_path.is_empty() {
+        let len = (exec_path.len() + 1) as u64;
+        sp -= len;
+        write_bytes_to_as(new_as, sp, exec_path)?;
+        write_bytes_to_as(new_as, sp + exec_path.len() as u64, &[0])?;
+        execfn_ptr = sp;
+    }
+
+    // Push 16 bytes of random seed for AT_RANDOM (deterministic fallback source).
+    sp -= 16;
+    let rand_ptr = sp;
+    let seed = generate_aux_random_seed();
+    write_bytes_to_as(new_as, rand_ptr, &seed)?;
+
     // Align SP to 16 bytes for System V ABI
     sp &= !0xF;
 
-    // Phase 2: Push pointer arrays (envp and argv) and argc
+    // Phase 2: Push auxv, pointer arrays, then argc.
     let size_ptr = 8u64;
+
+    // auxv entries end with AT_NULL.
+    let mut auxv: Vec<(u64, u64)> = Vec::with_capacity(10);
+    auxv.push((AT_PHDR, elf_info.phdr_vaddr));
+    auxv.push((AT_PHENT, elf_info.phent as u64));
+    auxv.push((AT_PHNUM, elf_info.phnum as u64));
+    auxv.push((AT_PAGESZ, 4096));
+    if let Some(base) = elf_info.interp_base {
+        auxv.push((AT_BASE, base));
+    }
+    auxv.push((AT_ENTRY, elf_info.program_entry));
+    auxv.push((AT_RANDOM, rand_ptr));
+    if execfn_ptr != 0 {
+        auxv.push((AT_EXECFN, execfn_ptr));
+    }
+
+    // AT_NULL terminator.
+    sp -= size_ptr;
+    write_u64_to_as(new_as, sp, 0)?;
+    sp -= size_ptr;
+    write_u64_to_as(new_as, sp, AT_NULL)?;
+    for &(key, val) in auxv.iter().rev() {
+        sp -= size_ptr;
+        write_u64_to_as(new_as, sp, val)?;
+        sp -= size_ptr;
+        write_u64_to_as(new_as, sp, key)?;
+    }
 
     // Push ENVP array
     // [NULL]
@@ -264,4 +317,15 @@ fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(
 fn write_u64_to_as(as_ref: &AddressSpace, vaddr: u64, val: u64) -> Result<(), SyscallError> {
     let bytes = val.to_ne_bytes();
     write_bytes_to_as(as_ref, vaddr, &bytes)
+}
+
+fn generate_aux_random_seed() -> [u8; 16] {
+    use x86_64::registers::control::Cr3;
+    let mut s = [0u8; 16];
+    let t = crate::process::scheduler::ticks();
+    let (cr3, _) = Cr3::read();
+    let x = t ^ (cr3.start_address().as_u64().wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    s[..8].copy_from_slice(&x.to_le_bytes());
+    s[8..].copy_from_slice(&(x.rotate_left(17) ^ 0xa076_1d64_78bd_642f).to_le_bytes());
+    s
 }

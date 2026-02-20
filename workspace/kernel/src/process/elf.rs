@@ -69,6 +69,23 @@ pub const USER_STACK_PAGES: usize = 16;
 /// Top of the user stack (stack grows down).
 pub const USER_STACK_TOP: u64 = USER_STACK_BASE + (USER_STACK_PAGES as u64) * 4096;
 
+/// Result of loading an ELF image into an address space.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadedElfInfo {
+    /// Entry point to jump to (ld.so entry if PT_INTERP, otherwise program entry).
+    pub runtime_entry: u64,
+    /// Program entry point from the main executable after relocation.
+    pub program_entry: u64,
+    /// Relocated virtual address of the main executable program header table.
+    pub phdr_vaddr: u64,
+    /// Program header entry size.
+    pub phent: u16,
+    /// Program header count.
+    pub phnum: u16,
+    /// Dynamic loader base address when PT_INTERP is present.
+    pub interp_base: Option<u64>,
+}
+
 // ---------------------------------------------------------------------------
 // ELF64 header structures
 // ---------------------------------------------------------------------------
@@ -239,6 +256,37 @@ fn parse_interp_path<'a>(elf_data: &'a [u8], phdrs: &[Elf64Phdr]) -> Result<Opti
     Ok(Some(s))
 }
 
+fn find_relocated_phdr_vaddr(
+    header: &Elf64Header,
+    phdrs: &[Elf64Phdr],
+    load_bias: u64,
+) -> Result<u64, &'static str> {
+    let phoff = header.e_phoff;
+    for ph in phdrs {
+        if ph.p_type != PT_LOAD || ph.p_filesz == 0 {
+            continue;
+        }
+        let file_start = ph.p_offset;
+        let file_end = ph
+            .p_offset
+            .checked_add(ph.p_filesz)
+            .ok_or("PHDR location overflow")?;
+        if phoff >= file_start && phoff < file_end {
+            let delta = phoff - file_start;
+            let vaddr = ph
+                .p_vaddr
+                .checked_add(delta)
+                .and_then(|v| v.checked_add(load_bias))
+                .ok_or("Relocated PHDR address overflow")?;
+            if vaddr >= USER_ADDR_MAX {
+                return Err("Relocated PHDR outside user address space");
+            }
+            return Ok(vaddr);
+        }
+    }
+    Err("Program headers are not covered by a PT_LOAD segment")
+}
+
 fn read_elf_from_vfs(path: &str) -> Result<Vec<u8>, &'static str> {
     const MAX_ELF_SIZE: usize = 64 * 1024 * 1024;
     let fd = crate::vfs::open(path, crate::vfs::OpenFlags::READ).map_err(|_| "PT_INTERP open failed")?;
@@ -392,7 +440,7 @@ fn read_user_mapped_bytes(
         let phys = user_as
             .translate(VirtAddr::new(vaddr))
             .ok_or("Failed to translate mapped user bytes")?;
-        let src = crate::memory::phys_to_virt(phys.as_u64()) as *const u8;
+        let src = (crate::memory::phys_to_virt(phys.as_u64()) as *const u8).wrapping_add(page_off);
         // SAFETY: src points to mapped physical memory via HHDM.
         unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(copied), chunk) };
         copied += chunk;
@@ -415,7 +463,7 @@ fn write_user_mapped_bytes(
         let phys = user_as
             .translate(VirtAddr::new(vaddr))
             .ok_or("Failed to translate relocation target")?;
-        let dst = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
+        let dst = (crate::memory::phys_to_virt(phys.as_u64()) as *mut u8).wrapping_add(page_off);
         // SAFETY: destination points to mapped user frame through HHDM.
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(written), dst, chunk) };
         written += chunk;
@@ -934,7 +982,7 @@ pub fn load_and_run_elf_with_caps(
         user_stack: None,
         name,
         capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
-        address_space: user_as,
+        address_space: SyncUnsafeCell::new(user_as),
         fd_table: SyncUnsafeCell::new(crate::vfs::FileDescriptorTable::new()),
         pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
         blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
@@ -993,11 +1041,12 @@ pub fn load_and_run_elf_with_caps(
 pub fn load_elf_image(
     elf_data: &[u8],
     user_as: &AddressSpace,
-) -> Result<u64, &'static str> {
+) -> Result<LoadedElfInfo, &'static str> {
     let header = parse_header(elf_data)?;
     let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;
+    let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
 
     for phdr in phdrs.iter() {
         if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
@@ -1009,6 +1058,7 @@ pub fn load_elf_image(
     }
 
     let mut runtime_entry = entry;
+    let mut interp_base = None;
     if let Some(path) = interp_path {
         let interp_data = read_elf_from_vfs(path)?;
         let interp_header = parse_header(&interp_data)?;
@@ -1018,6 +1068,7 @@ pub fn load_elf_image(
         }
         let (interp_bias, interp_entry) =
             compute_load_bias_and_entry(user_as, &interp_header, &interp_phdrs)?;
+        let (interp_min_vaddr, _) = compute_load_bounds(&interp_phdrs)?;
         for phdr in interp_phdrs.iter() {
             if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
                 load_segment(user_as, &interp_data, phdr, interp_bias)?;
@@ -1025,7 +1076,15 @@ pub fn load_elf_image(
         }
         apply_dynamic_relocations(user_as, &interp_phdrs, interp_header.e_type, interp_bias)?;
         runtime_entry = interp_entry;
+        interp_base = Some(interp_min_vaddr.saturating_add(interp_bias));
     }
 
-    Ok(runtime_entry)
+    Ok(LoadedElfInfo {
+        runtime_entry,
+        program_entry: entry,
+        phdr_vaddr,
+        phent: header.e_phentsize,
+        phnum: header.e_phnum,
+        interp_base,
+    })
 }

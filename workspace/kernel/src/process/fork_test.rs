@@ -101,7 +101,7 @@ fn spawn_user_program_task(
         user_stack: None,
         name,
         capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
-        address_space: user_as,
+        address_space: SyncUnsafeCell::new(user_as),
         fd_table: SyncUnsafeCell::new(crate::vfs::FileDescriptorTable::new()),
         pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
         blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),

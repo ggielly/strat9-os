@@ -162,7 +162,7 @@ fn build_child_task(
         user_stack: None,
         name: "fork-child",
         capabilities: SyncUnsafeCell::new(parent_caps),
-        address_space: child_as,
+        address_space: SyncUnsafeCell::new(child_as),
         fd_table: SyncUnsafeCell::new(parent_fd),
         pending_signals: SyncUnsafeCell::new(SignalSet::new()),
         blocked_signals: SyncUnsafeCell::new(parent_blocked),
@@ -189,14 +189,12 @@ fn build_child_task(
 /// SYS_PROC_FORK (302): eager fork (no COW yet).
 pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
     let parent = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    if parent.address_space.is_kernel() {
+    let parent_as = unsafe { &*parent.address_space.get() };
+    if parent_as.is_kernel() {
         return Err(SyscallError::PermissionDenied);
     }
 
-    let child_as = parent
-        .address_space
-        .clone_cow()
-        .map_err(|_| SyscallError::OutOfMemory)?;
+    let child_as = parent_as.clone_cow().map_err(|_| SyscallError::OutOfMemory)?;
 
     let child_user_ctx = Box::new(ForkUserContext {
         r15: frame.r15,

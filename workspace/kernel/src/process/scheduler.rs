@@ -325,7 +325,7 @@ impl Scheduler {
         // Switch CR3 if the new task has a different address space
         // SAFETY: The new task's address space has a valid PML4 with the kernel half mapped.
         unsafe {
-            next.address_space.switch_to();
+            (*next.address_space.get()).switch_to();
         }
 
         // Return raw pointers for switch_context
@@ -437,7 +437,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     // Switch to the first task's address space (no-op for kernel tasks)
     // SAFETY: The first task's address space is valid (kernel AS at boot).
     unsafe {
-        first_task.address_space.switch_to();
+        (*first_task.address_space.get()).switch_to();
     }
 
     // Jump to the first task (never returns)
@@ -1001,8 +1001,9 @@ fn cleanup_task_resources(task: &Arc<Task>) {
     }
 
     // Best-effort cleanup of user address space if uniquely owned.
-    if !task.address_space.is_kernel() && Arc::strong_count(&task.address_space) == 1 {
-        task.address_space.unmap_all_user_regions();
+    let as_ref = unsafe { &*task.address_space.get() };
+    if !as_ref.is_kernel() && Arc::strong_count(as_ref) == 1 {
+        as_ref.unmap_all_user_regions();
     }
 }
 

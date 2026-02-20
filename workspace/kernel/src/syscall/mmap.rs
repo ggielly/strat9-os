@@ -126,7 +126,7 @@ pub fn sys_mmap(
 
     // ── Determine the target virtual address ──────────────────────────────
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    let addr_space = &task.address_space;
+    let addr_space = unsafe { &*task.address_space.get() };
 
     let target = if flags & MAP_FIXED != 0 {
         // MAP_FIXED: the caller demands this exact page-aligned address.
@@ -214,7 +214,7 @@ pub fn sys_munmap(addr: u64, len: u64) -> Result<u64, SyscallError> {
     }
 
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    task.address_space
+    unsafe { &*task.address_space.get() }
         .unmap_range(addr, len_aligned)
         .map_err(|_| SyscallError::InvalidArgument)?;
 
@@ -287,8 +287,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             executable: false,
             user_accessible: true,
         };
-        if task
-            .address_space
+        if unsafe { &*task.address_space.get() }
             .map_region(old_page_end, n_pages, vma_flags, VmaType::Anonymous)
             .is_err()
         {
@@ -304,8 +303,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     } else if new_page_end < old_page_end {
         // ── Shrink: unmap [new_page_end, old_page_end) ───────────────────
         let len = old_page_end - new_page_end;
-        if task
-            .address_space
+        if unsafe { &*task.address_space.get() }
             .unmap_range(new_page_end, len)
             .is_err()
         {

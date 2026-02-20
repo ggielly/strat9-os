@@ -123,7 +123,7 @@ extern "x86-interrupt" fn page_fault_handler(
     // Try to handle COW fault first (before killing the process)
     if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) && is_user {
         if let Some(task) = crate::process::current_task_clone() {
-            let address_space = &task.address_space;
+            let address_space = unsafe { &*task.address_space.get() };
             if let Ok(vaddr) = fault_addr {
                 match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), address_space) {
                     Ok(()) => {
