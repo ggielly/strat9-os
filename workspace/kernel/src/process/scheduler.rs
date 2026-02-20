@@ -89,6 +89,8 @@ struct SchedulerCpu {
     current_task: Option<Arc<Task>>,
     /// Idle task to run when no other tasks are ready
     idle_task: Arc<Task>,
+    /// Task that was just preempted and needs to be re-queued
+    task_to_requeue: Option<Arc<Task>>,
 }
 
 /// The round-robin scheduler (per-CPU queues)
@@ -122,6 +124,7 @@ impl Scheduler {
                 ready_queue: VecDeque::new(),
                 current_task: None,
                 idle_task,
+                task_to_requeue: None,
             });
         }
 
@@ -242,7 +245,9 @@ impl Scheduler {
                 // below.  Putting it in the ready queue prevents it from
                 // ever being empty, which breaks work-stealing.
                 if !Arc::ptr_eq(&task, &self.cpus[cpu_index].idle_task) {
-                    self.cpus[cpu_index].ready_queue.push_back(task);
+                    // DO NOT push to ready_queue yet!
+                    // Another CPU could steal it before its context is saved.
+                    self.cpus[cpu_index].task_to_requeue = Some(task);
                 }
             }
         }
@@ -444,6 +449,18 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     }
 }
 
+/// Called immediately after a context switch completes (in the new task's context).
+/// This safely re-queues the previously running task now that its state is fully saved.
+pub fn finish_switch() {
+    let cpu_index = current_cpu_index();
+    let mut scheduler = SCHEDULER.lock();
+    if let Some(ref mut sched) = *scheduler {
+        if let Some(task) = sched.cpus[cpu_index].task_to_requeue.take() {
+            sched.cpus[cpu_index].ready_queue.push_back(task);
+        }
+    }
+}
+
 /// Yield the current task to allow other tasks to run (cooperative).
 ///
 /// Disables interrupts around the scheduler lock to prevent deadlock
@@ -479,6 +496,7 @@ pub fn yield_task() {
         // We return here when this task is rescheduled in the future.
         // The task that switched back to us may have had different flags,
         // so restore our own saved flags.
+        finish_switch();
     }
 
     // Restore interrupt state (re-enables IF if it was enabled before)
@@ -536,6 +554,7 @@ pub fn maybe_preempt() {
         // When we return here, this task was rescheduled. We're back in
         // the timer handler context, which will return via iretq and
         // restore the original RFLAGS (including IF=1).
+        finish_switch();
     }
 }
 
@@ -732,6 +751,7 @@ pub fn block_current_task() {
             switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
         }
         // We return here when woken and rescheduled.
+        finish_switch();
     }
 
     restore_flags(saved_flags);
@@ -833,6 +853,7 @@ pub fn suspend_task(id: TaskId) -> bool {
         unsafe {
             switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
         }
+        finish_switch();
     }
 
     // Send IPI after releasing the lock to avoid lock inversion.
@@ -959,6 +980,7 @@ pub fn kill_task(id: TaskId) -> bool {
         unsafe {
             switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
         }
+        finish_switch();
     }
 
     // Send IPI after releasing the lock to avoid lock inversion.

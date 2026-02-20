@@ -201,9 +201,11 @@ impl CpuContext {
 #[unsafe(naked)]
 unsafe extern "C" fn task_entry_trampoline() {
     core::arch::naked_asm!(
+        "call {finish_switch}",
         "sti",          // Enable interrupts for the new task
         "mov rdi, r13", // Bootstrap arg (seeded cap handle)
         "jmp r12",      // Jump to real entry point (loaded from initial stack frame)
+        finish_switch = sym crate::process::scheduler::finish_switch,
     );
 }
 

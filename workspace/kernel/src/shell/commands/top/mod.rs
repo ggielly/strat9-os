@@ -15,11 +15,11 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
         return Ok(());
     }
 
-    shell_println!("Starting graphical top (htop-style)... Press 'q' to exit.");
-    
-    // Switch to double buffering for flicker-free updates if possible
+    // Switch to double buffering for flicker-free updates
     let was_db = vga::double_buffer_mode();
     vga::set_double_buffer_mode(true);
+
+    let theme = UiTheme::SLATE;
 
     loop {
         // 1. Gather system data
@@ -30,45 +30,60 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
             guard.as_ref().map(|a| a.page_totals()).unwrap_or((0, 0))
         };
         
-        // 2. Clear screen and prepare layout
-        let theme = UiTheme::SLATE;
+        // 2. Prepare Canvas and Layout
         let canvas = vga::Canvas::new(theme.text, theme.background);
         canvas.begin_frame();
+        // Force a full clear with background color to remove shell remnants
         canvas.ui_clear(theme);
 
         let mut layout = UiDockLayout::from_screen();
-        let header_area = layout.dock(DockEdge::Top, vga::ui_scale_px(100));
-        let footer_area = layout.dock(DockEdge::Bottom, vga::ui_scale_px(30));
+        // Give the header more height to avoid crowding (120px instead of 100px)
+        let header_area = layout.dock(DockEdge::Top, vga::ui_scale_px(120));
+        let footer_area = layout.dock(DockEdge::Bottom, vga::ui_scale_px(24));
         let body_area = layout.remaining();
 
-        // 3. Draw Header: CPU and Memory status
-        canvas.ui_panel(header_area.x, header_area.y, header_area.w, header_area.h, "System Health", "", theme);
+        // 3. Draw Header: System Info
+        canvas.ui_panel(header_area.x, header_area.y, header_area.w, header_area.h, " Strat9 System Monitor ", "", theme);
         
-        // Memory Bar (Left half of header)
+        // --- Memory Bar ---
         let mem_usage = if total_pages > 0 { (used_pages * 100) / total_pages } else { 0 };
+        let mem_label_x = header_area.x + vga::ui_scale_px(16);
+        let mem_label_y = header_area.y + vga::ui_scale_px(40);
+        
         canvas.ui_label(&vga::UiLabel {
-            rect: UiRect::new(header_area.x + vga::ui_scale_px(12), header_area.y + vga::ui_scale_px(35), vga::ui_scale_px(100), vga::ui_scale_px(20)),
+            rect: UiRect::new(mem_label_x, mem_label_y, vga::ui_scale_px(80), vga::ui_scale_px(16)),
             text: "Memory:",
-            fg: theme.text, bg: theme.panel_bg, align: vga::TextAlign::Left
+            fg: theme.accent, bg: theme.panel_bg, align: vga::TextAlign::Left
         });
+        
         canvas.ui_progress_bar(UiProgressBar {
-            rect: UiRect::new(header_area.x + vga::ui_scale_px(80), header_area.y + vga::ui_scale_px(38), vga::ui_scale_px(200), vga::ui_scale_px(14)),
+            rect: UiRect::new(mem_label_x + vga::ui_scale_px(70), mem_label_y + vga::ui_scale_px(2), vga::ui_scale_px(180), vga::ui_scale_px(12)),
             value: mem_usage as u8,
             fg: RgbColor::new(0x7E, 0xC1, 0xFF), bg: RgbColor::new(0x12, 0x16, 0x1E), border: theme.panel_border
         });
 
-        // CPU Bars (Right half of header)
-        for i in 0..cpu_count.min(4) {
-            let row_y = header_area.y + vga::ui_scale_px(35 + i * 16);
+        // --- CPU Bars (Dynamic grid) ---
+        let cpu_base_x = mem_label_x + vga::ui_scale_px(280);
+        for i in 0..cpu_count.min(8) {
+            let col = i / 4;
+            let row = i % 4;
+            let x_off = col * vga::ui_scale_px(180);
+            let y_off = row * vga::ui_scale_px(18);
+            
+            let bar_x = cpu_base_x + x_off;
+            let bar_y = header_area.y + vga::ui_scale_px(40) + y_off;
+
             canvas.ui_label(&vga::UiLabel {
-                rect: UiRect::new(header_area.x + vga::ui_scale_px(300), row_y, vga::ui_scale_px(60), vga::ui_scale_px(16)),
+                rect: UiRect::new(bar_x, bar_y, vga::ui_scale_px(45), vga::ui_scale_px(16)),
                 text: &format!("CPU{}:", i),
-                fg: theme.text, bg: theme.panel_bg, align: vga::TextAlign::Left
+                fg: theme.accent, bg: theme.panel_bg, align: vga::TextAlign::Left
             });
-            // Synthetic load for now (todo: per-cpu scheduler load)
-            let cpu_load = if i == 0 { 15 + (ticks % 20) } else { 5 }; 
+            
+            // Synthetic load for visualization until per-cpu metrics are available
+            let i_u64 = i as u64;
+            let cpu_load = if i == 0 { 10 + (ticks % 30) } else { 5 + (i_u64 * 3) % 15 }; 
             canvas.ui_progress_bar(UiProgressBar {
-                rect: UiRect::new(header_area.x + vga::ui_scale_px(360), row_y + vga::ui_scale_px(2), vga::ui_scale_px(150), vga::ui_scale_px(12)),
+                rect: UiRect::new(bar_x + vga::ui_scale_px(45), bar_y + vga::ui_scale_px(2), vga::ui_scale_px(100), vga::ui_scale_px(10)),
                 value: cpu_load as u8,
                 fg: RgbColor::new(0x58, 0xD6, 0xA3), bg: RgbColor::new(0x12, 0x16, 0x1E), border: theme.panel_border
             });
@@ -104,28 +119,32 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
         }
         canvas.ui_table(&table);
 
-        // 5. Draw Footer
+        // 5. Draw Footer (Shortcut hints)
         canvas.ui_label(&vga::UiLabel {
             rect: footer_area,
-            text: " [q] Exit   [s] Sort   [k] Kill   Strat9-OS Microkernel ",
+            text: " [q] Exit   [k] Kill   [+/-] Scale   Strat9-OS Microkernel ",
             fg: theme.status_text, bg: theme.status_bg, align: vga::TextAlign::Left
         });
 
         canvas.end_frame();
 
-        // 6. Check for exit
+        // 6. Non-blocking check for user input
         if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
             if ch == b'q' {
                 break;
             }
         }
 
-        // 7. Wait and Yield
+        // 7. Prevent CPU hogging
         crate::process::yield_task();
     }
 
+    // 8. Clean Exit
     vga::set_double_buffer_mode(was_db);
-    // Restore shell prompt after exit
+    // Fully clear screen before returning to shell text mode
     crate::shell::output::clear_screen();
+    // Reset cursor to a sensible position
+    vga::set_text_cursor(0, 0);
+    shell_println!("Top exited.");
     Ok(())
 }

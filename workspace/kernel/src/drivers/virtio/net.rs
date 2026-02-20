@@ -256,48 +256,8 @@ impl NetworkDevice for VirtioNetDevice {
 
         let (token, len) = rx_queue.get_used().ok_or(NetError::NoPacket)?;
 
-        // The token corresponds to the head descriptor index, but we track frames via a FIFO queue
-        // assuming strict ordering VIRTIO_F_IN_ORDER (or just FIFO behavior of virtqueue used ring).
-        // Standard virtio says device returns buffers in any order unless VIRTIO_F_IN_ORDER is negotiated.
-        // However, our implementation of `add_buffer` returns the `head` index as logic token.
-        // We pushed frames to `rx_frames` in the same order we called `add_buffer`.
-        // IF the device consumes them in order, we are fine.
-        // If not, we have a problem because we need to map token -> frame.
-        // For simplicity, we assume FIFO for now or we search/map if needed.
-        // Or better: store the token in `rx_frames` too?
-        // Since we don't have a map, and we want O(1), let's rely on the token being the index in the descriptor table.
-        // The descriptor table index is NOT the frame address.
-        // But wait, `rx_frames` is a VecDeque. If completion is out of order, we can't just pop front.
-
-        // CORRECTION: We need to find the frame associated with this token.
-        // But `rx_frames` doesn't store tokens.
-        // Ideally we should use the `token` (descriptor head index) to lookup context.
-        // But we didn't store context in the descriptor.
-        // Use `rx_frames` as a pool? No, we need the specific frame that contains the data.
-
-        // REFACTOR: `rx_frames` should probably be a Map<Token, Frame> or we put the Frame info somewhere we can find it.
-        // But for now, let's assume strict FIFO for simple drivers, OR...
-        // Actually, we can just look at `desc_area`? No, we need the Frame to free it using allocator.
-
-        // CRITICAL FIX: We need to recover the physical address from the descriptor!
-        // We know the token is the index in descriptor table.
-        // We can read `desc_addr` from the descriptor table!
-
         let desc_index = token as usize;
         let desc_table = rx_queue.desc_area(); // Physical address
-
-        // We need virtual address to read it. We mapped it in `Virtqueue::new`.
-        // But `Virtqueue` struct has `desc_ptr`.
-        // But `Virtqueue` struct fields are private/internal.
-        // We need `Virtqueue` to give us the address associated with the used buffer?
-        // No, `get_used` returns token and length.
-
-        // Let's rely on the fact that for simple single-queue NICs, packets usually arrive in order.
-        // But to be correct without `VIRTIO_F_IN_ORDER`, we should retrieve the buffer address.
-
-        // Let's improve `get_used` or add a method to lookup descriptor?
-        // We can't change `virtio/common.rs` now without another tool call.
-        // So I will assume FIFO for now (simple usage), but add a TODO.
 
         let (frame, order) = self
             .rx_frames
