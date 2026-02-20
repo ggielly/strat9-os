@@ -1,6 +1,7 @@
 //! RAM Filesystem implementation for Strat9-OS
 //!
 //! Stores all file data and directory structure in memory.
+//! Compliant with VfsFileSystem trait from strate-fs-abstraction.
 
 #![no_std]
 
@@ -12,9 +13,11 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use strate_fs_abstraction::{
-    FsError, FsResult, OpenFlags, VfsDirEntry, VfsFileInfo, VfsFileType, VfsFileSystem, VfsTimestamp,
+    FsCapabilities, FsError, FsResult, VfsDirEntry, VfsFileInfo, VfsFileType, VfsFileSystem,
+    VfsVolumeInfo,
 };
 
 /// Internal node type for RamFS
@@ -23,86 +26,110 @@ enum RamNode {
         data: Vec<u8>,
     },
     Directory {
-        entries: BTreeMap<String, Arc<Mutex<RamNode>>>,
+        entries: BTreeMap<String, u64>, // Maps name to Inode ID
     },
 }
 
-impl RamNode {
-    fn info(&self) -> VfsFileInfo {
-        match self {
-            RamNode::File { data } => VfsFileInfo {
-                size: data.len() as u64,
-                file_type: VfsFileType::Regular,
-                permissions: 0o644,
-                created: VfsTimestamp::default(),
-                modified: VfsTimestamp::default(),
-                accessed: VfsTimestamp::default(),
-            },
-            RamNode::Directory { .. } => VfsFileInfo {
-                size: 0,
-                file_type: VfsFileType::Directory,
-                permissions: 0o755,
-                created: VfsTimestamp::default(),
-                modified: VfsTimestamp::default(),
-                accessed: VfsTimestamp::default(),
-            },
-        }
-    }
-}
-
 pub struct RamFileSystem {
-    root: Arc<Mutex<RamNode>>,
+    inodes: Mutex<BTreeMap<u64, Arc<Mutex<RamNode>>>>,
+    next_inode: AtomicU64,
+    capabilities: FsCapabilities,
 }
 
 impl RamFileSystem {
     pub fn new() -> Self {
+        let root = Arc::new(Mutex::new(RamNode::Directory {
+            entries: BTreeMap::new(),
+        }));
+        let mut inodes = BTreeMap::new();
+        inodes.insert(2, root); // Standard root inode is 2
+
         Self {
-            root: Arc::new(Mutex::new(RamNode::Directory {
-                entries: BTreeMap::new(),
-            })),
+            inodes: Mutex::new(inodes),
+            next_inode: AtomicU64::new(10), // Start user inodes at 10
+            capabilities: FsCapabilities::writable_linux(), 
         }
     }
 
-    fn resolve(&self, path: &str) -> FsResult<Arc<Mutex<RamNode>>> {
-        let mut current = self.root.clone();
-        
-        for part in path.split('/').filter(|s| !s.is_empty()) {
-            let next = {
-                let guard = current.lock();
-                match &*guard {
-                    RamNode::Directory { entries } => {
-                        entries.get(part).cloned().ok_or(FsError::NotFound)?
-                    }
-                    _ => return Err(FsError::NotADirectory),
-                }
-            };
-            current = next;
-        }
-        
-        Ok(current)
+    fn get_node(&self, ino: u64) -> FsResult<Arc<Mutex<RamNode>>> {
+        self.inodes
+            .lock()
+            .get(&ino)
+            .cloned()
+            .ok_or(FsError::InodeNotFound)
+    }
+
+    fn allocate_inode(&self, node: RamNode) -> u64 {
+        let id = self.next_inode.fetch_add(1, Ordering::SeqCst);
+        self.inodes.lock().insert(id, Arc::new(Mutex::new(node)));
+        id
     }
 }
 
 impl VfsFileSystem for RamFileSystem {
-    fn open(&self, path: &str, flags: OpenFlags) -> FsResult<VfsFileInfo> {
-        match self.resolve(path) {
-            Ok(node) => {
-                if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCLUSIVE) {
-                    return Err(FsError::AlreadyExists);
-                }
-                Ok(node.lock().info())
+    fn fs_type(&self) -> &'static str {
+        "ramfs"
+    }
+
+    fn capabilities(&self) -> &FsCapabilities {
+        &self.capabilities
+    }
+
+    fn root_inode(&self) -> u64 {
+        2
+    }
+
+    fn get_volume_info(&self) -> FsResult<VfsVolumeInfo> {
+        Ok(VfsVolumeInfo {
+            fs_type: String::from("ramfs"),
+            block_size: 4096,
+            ..VfsVolumeInfo::default()
+        })
+    }
+
+    fn stat(&self, ino: u64) -> FsResult<VfsFileInfo> {
+        let node = self.get_node(ino)?;
+        let guard = node.lock();
+        let mut info = VfsFileInfo::default();
+        info.ino = ino;
+        match &*guard {
+            RamNode::File { data } => {
+                info.size = data.len() as u64;
+                info.file_type = VfsFileType::RegularFile;
+                info.mode = 0o100644;
             }
-            Err(FsError::NotFound) if flags.contains(OpenFlags::CREATE) => {
-                // Create file logic would go here, simplified for now
-                // In a real impl, we need the parent directory
-                Err(FsError::NotImplemented)
+            RamNode::Directory { .. } => {
+                info.size = 0;
+                info.file_type = VfsFileType::Directory;
+                info.mode = 0o040755;
             }
-            Err(e) => Err(e),
+        }
+        Ok(info)
+    }
+
+    fn lookup(&self, parent_ino: u64, name: &str) -> FsResult<VfsFileInfo> {
+        let parent = self.get_node(parent_ino)?;
+        let guard = parent.lock();
+        match &*guard {
+            RamNode::Directory { entries } => {
+                let ino = entries.get(name).ok_or(FsError::NotFound)?;
+                self.stat(*ino)
+            }
+            _ => Err(FsError::NotADirectory),
         }
     }
 
-    fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
-        let node = self.resolve(path)?;
+    fn resolve_path(&self, path: &str) -> FsResult<u64> {
+        let mut current_ino = self.root_inode();
+        for part in path.split('/').filter(|s| !s.is_empty()) {
+            let info = self.lookup(current_ino, part)?;
+            current_ino = info.ino;
+        }
+        Ok(current_ino)
+    }
+
+    fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
+        let node = self.get_node(ino)?;
         let guard = node.lock();
         match &*guard {
             RamNode::File { data } => {
@@ -119,34 +146,36 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
-    fn write(&self, path: &str, offset: u64, buf: &[u8]) -> FsResult<usize> {
-        let node = self.resolve(path)?;
+    fn write(&self, ino: u64, offset: u64, data: &[u8]) -> FsResult<usize> {
+        let node = self.get_node(ino)?;
         let mut guard = node.lock();
         match &mut *guard {
-            RamNode::File { data } => {
+            RamNode::File { data: file_data } => {
                 let start = offset as usize;
-                let end = start + buf.len();
-                if end > data.len() {
-                    data.resize(end, 0);
+                let end = start + data.len();
+                if end > file_data.len() {
+                    file_data.resize(end, 0);
                 }
-                data[start..end].copy_from_slice(buf);
-                Ok(buf.len())
+                file_data[start..end].copy_from_slice(data);
+                Ok(data.len())
             }
             _ => Err(FsError::IsADirectory),
         }
     }
 
-    fn read_dir(&self, path: &str) -> FsResult<Vec<VfsDirEntry>> {
-        let node = self.resolve(path)?;
+    fn readdir(&self, ino: u64) -> FsResult<Vec<VfsDirEntry>> {
+        let node = self.get_node(ino)?;
         let guard = node.lock();
         match &*guard {
             RamNode::Directory { entries } => {
                 let mut result = Vec::new();
-                for (name, child) in entries {
-                    let info = child.lock().info();
+                for (name, &child_ino) in entries {
+                    let info = self.stat(child_ino)?;
                     result.push(VfsDirEntry {
                         name: name.clone(),
-                        info,
+                        ino: child_ino,
+                        file_type: info.file_type,
+                        offset: 0,
                     });
                 }
                 Ok(result)
@@ -155,32 +184,44 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
-    // Other methods (mkdir, unlink, etc.)
-    fn create_dir(&self, path: &str) -> FsResult<()> {
-        // Implementation for mkdir
-        let (parent_path, name) = split_path(path);
-        let parent_node = self.resolve(parent_path)?;
-        let mut guard = parent_node.lock();
+    fn create_file(&self, parent_ino: u64, name: &str, _mode: u32) -> FsResult<VfsFileInfo> {
+        let parent = self.get_node(parent_ino)?;
+        let mut guard = parent.lock();
         match &mut *guard {
             RamNode::Directory { entries } => {
                 if entries.contains_key(name) {
                     return Err(FsError::AlreadyExists);
                 }
-                entries.insert(name.to_string(), Arc::new(Mutex::new(RamNode::Directory {
-                    entries: BTreeMap::new(),
-                })));
-                Ok(())
+                let new_ino = self.allocate_inode(RamNode::File { data: Vec::new() });
+                entries.insert(name.to_string(), new_ino);
+                self.stat(new_ino)
             }
             _ => Err(FsError::NotADirectory),
         }
     }
-}
 
-fn split_path(path: &str) -> (&str, &str) {
-    let path = path.trim_end_matches('/');
-    if let Some(idx) = path.rfind('/') {
-        (&path[..idx], &path[idx+1..])
-    } else {
-        ("/", path)
+    fn create_directory(&self, parent_ino: u64, name: &str, _mode: u32) -> FsResult<VfsFileInfo> {
+        let parent = self.get_node(parent_ino)?;
+        let mut guard = parent.lock();
+        match &mut *guard {
+            RamNode::Directory { entries } => {
+                if entries.contains_key(name) {
+                    return Err(FsError::AlreadyExists);
+                }
+                let new_ino = self.allocate_inode(RamNode::Directory {
+                    entries: BTreeMap::new(),
+                });
+                entries.insert(name.to_string(), new_ino);
+                self.stat(new_ino)
+            }
+            _ => Err(FsError::NotADirectory),
+        }
     }
+
+    fn readlink(&self, _ino: u64) -> FsResult<String> {
+        Err(FsError::NotSupported)
+    }
+
+    fn invalidate_inode(&self, _ino: u64) {}
+    fn invalidate_all_caches(&self) {}
 }

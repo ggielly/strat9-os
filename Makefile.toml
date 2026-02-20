@@ -247,9 +247,24 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-ram]
+description = "Build the RAM filesystem component"
+cwd = "workspace/components/strate-ram"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.limine-image]
 description = "Create bootable ISO/IMG with Limine + kernel"
-dependencies = ["setup-limine", "kernel", "strate-ext4"]
+dependencies = ["setup-limine", "kernel", "strate-ext4", "strate-ram"]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os" }
 script_runner = "@shell"
 script = ['''
@@ -258,7 +273,7 @@ bash tools/scripts/create-limine-image.sh
 
 [tasks.limine-image-test]
 description = "Create bootable ISO/IMG with Limine + kernel (self-tests enabled)"
-dependencies = ["setup-limine", "kernel-test", "strate-ext4"]
+dependencies = ["setup-limine", "kernel-test", "strate-ext4", "strate-ram"]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os-test" }
 script_runner = "@shell"
 script = ['''
