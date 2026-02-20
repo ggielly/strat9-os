@@ -33,10 +33,17 @@ const ET_DYN: u16 = 3;
 const EV_CURRENT: u32 = 1;
 const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
+const DT_NULL: i64 = 0;
+const DT_RELA: i64 = 7;
+const DT_RELASZ: i64 = 8;
+const DT_RELAENT: i64 = 9;
+const DT_RELACOUNT: i64 = 0x6fff_fff9;
+const R_X86_64_RELATIVE: u32 = 8;
 
 /// Maximum virtual address we accept for user-space mappings.
 pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
@@ -86,6 +93,21 @@ struct Elf64Phdr {
     p_filesz: u64,
     p_memsz: u64,
     p_align: u64,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+struct Elf64Dyn {
+    d_tag: i64,
+    d_val: u64,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+struct Elf64Rela {
+    r_offset: u64,
+    r_info: u64,
+    r_addend: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +302,145 @@ fn apply_segment_permissions(
         };
         flush.flush();
     }
+    Ok(())
+}
+
+fn read_user_mapped_bytes(
+    user_as: &AddressSpace,
+    mut vaddr: u64,
+    out: &mut [u8],
+) -> Result<(), &'static str> {
+    let mut copied = 0usize;
+    while copied < out.len() {
+        let page_off = (vaddr & 0xFFF) as usize;
+        let chunk = core::cmp::min(out.len() - copied, 4096 - page_off);
+        let phys = user_as
+            .translate(VirtAddr::new(vaddr))
+            .ok_or("Failed to translate mapped user bytes")?;
+        let src = (crate::memory::phys_to_virt(phys.as_u64()) as *const u8).wrapping_add(page_off);
+        // SAFETY: src points to mapped physical memory via HHDM.
+        unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(copied), chunk) };
+        copied += chunk;
+        vaddr = vaddr
+            .checked_add(chunk as u64)
+            .ok_or("Virtual address overflow while reading mapped bytes")?;
+    }
+    Ok(())
+}
+
+fn write_user_u64(user_as: &AddressSpace, vaddr: u64, value: u64) -> Result<(), &'static str> {
+    let phys = user_as
+        .translate(VirtAddr::new(vaddr))
+        .ok_or("Failed to translate relocation target")?;
+    let dst = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
+    let bytes = value.to_le_bytes();
+    // SAFETY: destination points to mapped user frame through HHDM.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, 8) };
+    Ok(())
+}
+
+fn apply_dynamic_relocations(
+    user_as: &AddressSpace,
+    phdrs: &[Elf64Phdr],
+    elf_type: u16,
+    load_bias: u64,
+) -> Result<(), &'static str> {
+    if elf_type != ET_DYN {
+        return Ok(());
+    }
+
+    let dynamic = phdrs.iter().find(|ph| ph.p_type == PT_DYNAMIC);
+    let Some(dynamic_ph) = dynamic else {
+        return Ok(());
+    };
+    if dynamic_ph.p_filesz == 0 {
+        return Ok(());
+    }
+
+    let dyn_addr = dynamic_ph
+        .p_vaddr
+        .checked_add(load_bias)
+        .ok_or("PT_DYNAMIC relocated address overflow")?;
+    let dyn_count = (dynamic_ph.p_filesz as usize) / core::mem::size_of::<Elf64Dyn>();
+
+    let mut rela_addr: Option<u64> = None;
+    let mut rela_size: usize = 0;
+    let mut rela_ent: usize = core::mem::size_of::<Elf64Rela>();
+    let mut rela_count_hint: Option<usize> = None;
+
+    for i in 0..dyn_count {
+        let entry_addr = dyn_addr
+            .checked_add((i * core::mem::size_of::<Elf64Dyn>()) as u64)
+            .ok_or("PT_DYNAMIC walk overflow")?;
+        let mut raw = [0u8; core::mem::size_of::<Elf64Dyn>()];
+        read_user_mapped_bytes(user_as, entry_addr, &mut raw)?;
+        // SAFETY: raw has exact size of Elf64Dyn; read_unaligned handles packing.
+        let dyn_entry = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Dyn) };
+
+        match dyn_entry.d_tag {
+            DT_NULL => break,
+            DT_RELA => {
+                rela_addr = Some(
+                    dyn_entry
+                        .d_val
+                        .checked_add(load_bias)
+                        .ok_or("DT_RELA relocated address overflow")?,
+                )
+            }
+            DT_RELASZ => rela_size = dyn_entry.d_val as usize,
+            DT_RELAENT => rela_ent = dyn_entry.d_val as usize,
+            DT_RELACOUNT => rela_count_hint = Some(dyn_entry.d_val as usize),
+            _ => {}
+        }
+    }
+
+    let Some(rela_base) = rela_addr else {
+        return Ok(());
+    };
+    if rela_ent != core::mem::size_of::<Elf64Rela>() {
+        return Err("Unsupported DT_RELAENT size");
+    }
+    if rela_size == 0 {
+        return Ok(());
+    }
+
+    let mut rela_count = rela_size / rela_ent;
+    if let Some(hint) = rela_count_hint {
+        rela_count = core::cmp::min(rela_count, hint);
+    }
+
+    for i in 0..rela_count {
+        let rela_addr_i = rela_base
+            .checked_add((i * rela_ent) as u64)
+            .ok_or("Rela table overflow")?;
+        let mut raw = [0u8; core::mem::size_of::<Elf64Rela>()];
+        read_user_mapped_bytes(user_as, rela_addr_i, &mut raw)?;
+        // SAFETY: raw has exact size of Elf64Rela.
+        let rela = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Rela) };
+
+        let r_type = (rela.r_info & 0xffff_ffff) as u32;
+        let r_sym = (rela.r_info >> 32) as u32;
+        if r_type != R_X86_64_RELATIVE {
+            return Err("Unsupported dynamic relocation type");
+        }
+        if r_sym != 0 {
+            return Err("R_X86_64_RELATIVE with non-zero symbol");
+        }
+
+        let target = rela
+            .r_offset
+            .checked_add(load_bias)
+            .ok_or("Relocation target overflow")?;
+        let value = (load_bias as i128)
+            .checked_add(rela.r_addend as i128)
+            .ok_or("Relocation value overflow")?;
+        if value < 0 || value > u64::MAX as i128 {
+            return Err("Relocation value out of range");
+        }
+        write_user_u64(user_as, target, value as u64)?;
+    }
+
+    log::debug!("[elf] Applied {} RELA relocations", rela_count);
     Ok(())
 }
 
@@ -517,6 +678,7 @@ pub fn load_and_run_elf_with_caps(
             load_count += 1;
         }
     }
+    apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
 
     log::info!("[elf] Loaded {} PT_LOAD segment(s)", load_count);
 
@@ -634,5 +796,6 @@ pub fn load_elf_image(
             load_segment(user_as, elf_data, phdr, load_bias)?;
         }
     }
+    apply_dynamic_relocations(user_as, &phdrs, header.e_type, load_bias)?;
     Ok(entry)
 }
