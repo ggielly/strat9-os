@@ -14,7 +14,7 @@ use spin::Once;
 use x86_64::{
     registers::control::{Cr3, Cr3Flags},
     structures::paging::{
-        FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
+        mapper::TranslateResult, FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
         PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB, Translate,
     },
     PhysAddr, VirtAddr,
@@ -179,7 +179,7 @@ impl AddressSpace {
     /// # Safety
     /// The caller must ensure exclusive access to the page tables (e.g. via
     /// the scheduler lock or single-threaded context).
-    unsafe fn mapper(&self) -> OffsetPageTable<'_> {
+    pub(crate) unsafe fn mapper(&self) -> OffsetPageTable<'_> {
         let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
         // SAFETY: l4_table_virt is the HHDM-mapped address of our PML4.
         // The caller guarantees exclusive access.
@@ -576,52 +576,101 @@ impl AddressSpace {
         }
     }
 
-    /// Clone this user address space by eagerly copying all tracked VMAs/pages.
+    /// Clone this user address space using Copy-on-Write (COW).
     ///
-    /// This is used by the P1 `fork` implementation (no COW yet):
-    /// - child receives an independent page mapping for each parent user page
-    /// - page contents are byte-copied eagerly
-    pub fn clone_for_fork_eager(&self) -> Result<Arc<AddressSpace>, &'static str> {
+    /// This is used by the optimized P2 `fork` implementation:
+    /// - Child shares the same physical frames as the parent initially.
+    /// - Pages are marked Read-Only and COW in both parent and child.
+    /// - Physical frame reference counts are incremented.
+    /// - Actual copying happens lazily on write fault.
+    pub fn clone_cow(&self) -> Result<Arc<AddressSpace>, &'static str> {
         if self.is_kernel {
             return Err("Cannot fork kernel address space");
         }
 
         let child = Arc::new(AddressSpace::new_user()?);
 
+        // We need to lock the regions to safely iterate
         let regions: Vec<VirtualMemoryRegion> = {
             let guard = self.regions.lock();
             guard.values().cloned().collect()
         };
 
+        // Track validation for TLB flush
+        let mut tlb_flush_needed = false;
+
+        // SAFETY: We are modifying page tables. We hold the lock logically via `regions` snapshot
+        // but we must be careful not to race with other threads if multithreading is added later.
+        // For now, `fork` is single-threaded regarding the parent task.
+        let mut parent_mapper = unsafe { self.mapper() };
+        let mut child_mapper = unsafe { child.mapper() };
+        let mut frame_allocator = BuddyFrameAllocator;
+
         for region in regions.iter() {
-            child.map_region(
-                region.start,
-                region.page_count,
-                region.flags,
-                region.vma_type,
-            )?;
+            // Register VMA in child
+            {
+                let mut child_regions = child.regions.lock();
+                child_regions.insert(region.start, region.clone());
+            }
 
             for i in 0..region.page_count {
-                let vaddr = region
-                    .start
-                    .checked_add((i as u64) * 4096)
-                    .ok_or("fork clone: virtual address overflow")?;
+                let vaddr = VirtAddr::new(region.start + (i as u64) * 4096);
+                let page = Page::<Size4KiB>::from_start_address(vaddr)
+                    .map_err(|_| "Invalid page address")?;
 
-                let src_phys = self
-                    .translate(VirtAddr::new(vaddr))
-                    .ok_or("fork clone: missing source mapping")?;
-                let dst_phys = child
-                    .translate(VirtAddr::new(vaddr))
-                    .ok_or("fork clone: missing destination mapping")?;
+                // Translate parent page to frame
+                let (phys_frame, flags): (X86PhysFrame<Size4KiB>, PageTableFlags) = match parent_mapper.translate(vaddr) {
+                    TranslateResult::Mapped { frame: x86_64::structures::paging::mapper::MappedFrame::Size4KiB(frame), offset: _, flags } => (frame, flags),
+                    _ => continue, // Page not mapped or huge page (TODO: handle huge pages)
+                };
 
-                let src = crate::memory::phys_to_virt(src_phys.as_u64()) as *const u8;
-                let dst = crate::memory::phys_to_virt(dst_phys.as_u64()) as *mut u8;
+                // Determine new flags (COW if writable)
+                let mut new_flags = flags;
+                let is_writable = flags.contains(PageTableFlags::WRITABLE);
+                
+                // We use bit 9 (available 1) as software COW flag
+                // See: x86_64 crate PageTableFlags::BIT_9
+                const COW_BIT: PageTableFlags = PageTableFlags::BIT_9;
 
-                // SAFETY: both src/dst are mapped 4KiB pages in kernel HHDM.
+                if is_writable {
+                    new_flags.remove(PageTableFlags::WRITABLE);
+                    new_flags.insert(COW_BIT);
+                    
+                    // Update parent page table to be RO + COW
+                    unsafe {
+                        // We need to update flags. clean usage of update_flags is tricky with OffsetPageTable
+                        // so we remap (which is safe here as we own the identity mapping).
+                        // Actually, x86_64 Mapper trait has `update_flags`.
+                        match parent_mapper.update_flags(page, new_flags) {
+                            Ok(flush) => flush.ignore(), // We flush globally later
+                            Err(_) => return Err("Failed to update parent flags"),
+                        }
+                    }
+                    tlb_flush_needed = true;
+                }
+
+                // Increment refcount for the physical frame
+                let phys = crate::memory::PhysFrame {
+                    start_address: phys_frame.start_address(),
+                };
+                crate::memory::cow::frame_inc_ref(phys);
+
+                // Map in child with same flags
                 unsafe {
-                    core::ptr::copy_nonoverlapping(src, dst, 4096);
+                    match child_mapper.map_to(page, phys_frame, new_flags, &mut frame_allocator) {
+                        Ok(flush) => flush.ignore(), // Child not active yet
+                        Err(_) => {
+                            // TODO: rollback on failure
+                            return Err("Failed to map CoW page in child");
+                        }
+                    }
                 }
             }
+        }
+
+        // Flush parent TLB if we modified any protections
+        if tlb_flush_needed {
+            x86_64::instructions::tlb::flush_all();
         }
 
         Ok(child)

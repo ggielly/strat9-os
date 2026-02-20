@@ -18,6 +18,8 @@ use core::{
     mem::offset_of,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use x86_64::structures::paging::mapper::TranslateResult;
+use x86_64::structures::paging::FrameAllocator; // Required for allocate_frame
 
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
@@ -193,7 +195,7 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
 
     let child_as = parent
         .address_space
-        .clone_for_fork_eager()
+        .clone_cow()
         .map_err(|_| SyscallError::OutOfMemory)?;
 
     let child_user_ctx = Box::new(ForkUserContext {
@@ -225,12 +227,72 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
     Ok(ForkResult { child_pid })
 }
 
-/// Try to resolve a COW write fault.
-///
-/// P1 fork is eager-copy, so this path remains disabled.
+/// Called from the page fault handler when a write fault occurs on a present page.
+/// Returns Ok(()) if the fault was successfully handled (COW resolution),
+/// or Err if it wasn't a COW fault (real access violation).
 pub fn handle_cow_fault(
-    _virt_addr: u64,
-    _address_space: &crate::memory::AddressSpace,
+    virt_addr: u64,
+    address_space: &AddressSpace,
 ) -> Result<(), &'static str> {
-    Err("COW not implemented")
+    use x86_64::{
+        structures::paging::{Mapper, Page, PageTableFlags, Size4KiB, Translate},
+        VirtAddr,
+    };
+    use crate::memory::paging::BuddyFrameAllocator;
+
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_addr));
+    
+    // SAFETY: We are in an exception handler, address space is active.
+    let mut mapper = unsafe { address_space.mapper() };
+
+    // 1. Check if page is mapped and has COW flag
+    let (phys_frame, flags): (x86_64::structures::paging::PhysFrame<Size4KiB>, PageTableFlags) = match mapper.translate(VirtAddr::new(virt_addr)) {
+        TranslateResult::Mapped { frame: x86_64::structures::paging::mapper::MappedFrame::Size4KiB(frame), offset: _, flags } => (frame, flags),
+        _ => return Err("Page not mapped or huge page"),
+    };
+
+    // We use BIT_9 as software COW flag
+    const COW_BIT: PageTableFlags = PageTableFlags::BIT_9;
+    if !flags.contains(COW_BIT) {
+        return Err("Not a COW page");
+    }
+
+    let old_frame = crate::memory::PhysFrame {
+        start_address: phys_frame.start_address(),
+    };
+    let refcount = crate::memory::cow::frame_get_refcount(old_frame);
+
+    if refcount == 1 {
+        // Case 1: We are the sole owner. Just make it writable.
+        let new_flags = (flags | PageTableFlags::WRITABLE) & !COW_BIT;
+        unsafe {
+            mapper.update_flags(page, new_flags).map_err(|_| "Failed to update flags")?.flush();
+        }
+        return Ok(());
+    }
+
+    // Case 2: Shared page. Copy to new frame.
+    let mut frame_allocator = BuddyFrameAllocator;
+    let new_frame = frame_allocator.allocate_frame().ok_or("OOM during COW copy")?;
+    
+    // Copy content
+    unsafe {
+        let src = crate::memory::phys_to_virt(old_frame.start_address.as_u64()) as *const u8;
+        let dst = crate::memory::phys_to_virt(new_frame.start_address().as_u64()) as *mut u8;
+        core::ptr::copy_nonoverlapping(src, dst, 4096);
+    }
+
+    // Update mapping to new frame, Writable, no COW
+    let new_flags = (flags | PageTableFlags::WRITABLE) & !COW_BIT;
+    
+    unsafe {
+        mapper.map_to(page, new_frame, new_flags, &mut frame_allocator)
+            .map_err(|_| "Failed to map new COW frame")?
+            .flush();
+    }
+
+    // Decrement refcount of old frame
+    crate::memory::cow::frame_dec_ref(old_frame);
+
+    Ok(())
 }
