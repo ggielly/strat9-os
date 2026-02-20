@@ -14,7 +14,12 @@ pub fn init() {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    SERIAL1.lock().write_fmt(args).expect("Serial write failed");
+    // Use try_lock to avoid deadlock in interrupt/exception handlers
+    if let Some(mut port) = SERIAL1.try_lock() {
+        let _ = port.write_fmt(args);
+    }
+    // If locked, we drop the log message to keep the system running.
+    // Safety is more important than exhaustive logging in crash scenarios.
 }
 
 /// Print to serial port

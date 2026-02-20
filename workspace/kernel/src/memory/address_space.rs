@@ -428,42 +428,36 @@ impl AddressSpace {
             .checked_add(len)
             .ok_or("unmap_range: address overflow")?;
 
-        //  Step 1: collect all VMAs that overlap [addr, end)
-        // We take a snapshot so we can release the lock before doing page-table
-        // operations (which themselves acquire the buddy-allocator lock).
-        let overlapping: alloc::vec::Vec<(u64, VirtualMemoryRegion)> = {
-            let regions = self.regions.lock();
-            regions
-                .iter()
-                .filter(|(&vma_start, vma)| {
-                    let vma_end = vma_start + vma.page_count as u64 * 4096;
-                    vma_start < end && vma_end > addr
-                })
-                .map(|(&k, v)| (k, v.clone()))
-                .collect()
-        }; // lock released
+        // Process regions one by one to avoid heap allocation (Vec)
+        loop {
+            // Find the first overlapping region
+            let region_info = {
+                let regions = self.regions.lock();
+                regions
+                    .iter()
+                    .find(|(&vma_start, vma)| {
+                        let vma_end = vma_start + vma.page_count as u64 * 4096;
+                        vma_start < end && vma_end > addr
+                    })
+                    .map(|(&k, v)| (k, v.clone()))
+            };
 
-        if overlapping.is_empty() {
-            return Ok(()); // nothing to do
-        }
+            let Some((vma_start, vma)) = region_info else {
+                break; // No more overlapping regions
+            };
 
-        //  Step 2: unmap pages from the hardware page tables
-        // SAFETY: We have logical ownership of this address space; no other
-        // task modifies it concurrently (single-process model, no clone yet).
-        let mut mapper = unsafe { self.mapper() };
-
-        for (vma_start, vma) in &overlapping {
-            let vma_start = *vma_start;
             let vma_end = vma_start + vma.page_count as u64 * 4096;
             let range_start = core::cmp::max(vma_start, addr);
             let range_end = core::cmp::min(vma_end, end);
 
+            // 1. Hardware unmap
+            // SAFETY: Logical ownership of address space.
+            let mut mapper = unsafe { self.mapper() };
             let mut page_addr = range_start;
             while page_addr < range_end {
                 let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
                     .map_err(|_| "unmap_range: page address not aligned")?;
 
-                // Silently skip pages that happen to not be mapped.
                 if let Ok((frame, flush)) = mapper.unmap(page) {
                     flush.flush();
                     let phys = crate::memory::PhysFrame {
@@ -475,24 +469,14 @@ impl AddressSpace {
                         allocator.free(phys, 0);
                     }
                 }
-
                 page_addr += 4096;
             }
-        }
 
-        //  Step 3: update VMA tracking
-        {
-            let mut regions = self.regions.lock();
-            for (vma_start, vma) in &overlapping {
-                let vma_start = *vma_start;
-                let vma_end = vma_start + vma.page_count as u64 * 4096;
-                let range_start = core::cmp::max(vma_start, addr);
-                let range_end = core::cmp::min(vma_end, end);
-
-                // Remove the (now partially or fully unmapped) original VMA.
+            // 2. Update tracking: remove and re-insert fragments
+            {
+                let mut regions = self.regions.lock();
                 regions.remove(&vma_start);
 
-                // Re-insert the leading fragment [vma_start, range_start).
                 if range_start > vma_start {
                     let leading_pages = ((range_start - vma_start) / 4096) as usize;
                     regions.insert(
@@ -506,7 +490,6 @@ impl AddressSpace {
                     );
                 }
 
-                // Re-insert the trailing fragment [range_end, vma_end).
                 if range_end < vma_end {
                     let trailing_pages = ((vma_end - range_end) / 4096) as usize;
                     regions.insert(
@@ -568,18 +551,28 @@ impl AddressSpace {
     /// Unmap all tracked user regions (best-effort).
     ///
     /// This frees user frames and clears the VMA list. Kernel mappings are untouched.
+    /// Does not allocate memory.
     pub fn unmap_all_user_regions(&self) {
         if self.is_kernel {
             return;
         }
 
-        let regions: alloc::vec::Vec<(u64, usize)> = {
-            let guard = self.regions.lock();
-            guard.values().map(|r| (r.start, r.page_count)).collect()
-        };
+        loop {
+            // Pop the first region from the map to avoid allocation
+            let first = {
+                let mut guard = self.regions.lock();
+                if let Some(&start) = guard.keys().next() {
+                    guard.remove(&start)
+                } else {
+                    None
+                }
+            };
 
-        for (start, pages) in regions {
-            let _ = self.unmap_region(start, pages);
+            if let Some(region) = first {
+                let _ = self.unmap_region(region.start, region.page_count);
+            } else {
+                break;
+            }
         }
     }
 

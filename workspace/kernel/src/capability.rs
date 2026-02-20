@@ -150,12 +150,15 @@ impl CapabilityTable {
         self.capabilities.get(&id)
     }
 
-    /// Drain all capabilities from this table.
-    pub fn take_all(&mut self) -> Vec<Capability> {
-        core::mem::take(&mut self.capabilities)
-            .into_iter()
-            .map(|(_, cap)| cap)
-            .collect()
+    /// Revoke all capabilities in this table and clear it.
+    /// Does not allocate memory.
+    pub fn revoke_all(&mut self) {
+        let mgr = get_capability_manager();
+        // BTreeMap::clear() does not allocate
+        for (id, _) in self.capabilities.iter() {
+            mgr.revoke_capability(*id);
+        }
+        self.capabilities.clear();
     }
 
     /// Check whether any capability of the given resource type has required permissions.

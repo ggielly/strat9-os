@@ -995,10 +995,9 @@ pub fn kill_task(id: TaskId) -> bool {
 fn cleanup_task_resources(task: &Arc<Task>) {
     crate::silo::on_task_terminated(task.id);
 
-    // Revoke all capabilities for this task.
-    let caps = unsafe { (&mut *task.capabilities.get()).take_all() };
-    for cap in caps {
-        let _ = get_capability_manager().revoke_capability(cap.id);
+    // Revoke all capabilities for this task (allocation-free)
+    unsafe {
+        (&mut *task.capabilities.get()).revoke_all();
     }
 
     // Best-effort cleanup of user address space if uniquely owned.
