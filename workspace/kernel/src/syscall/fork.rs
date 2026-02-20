@@ -1,6 +1,6 @@
-//! `fork()` syscall implementation (P1): eager address-space copy.
+//! `fork()` syscall implementation 
 //!
-//! This phase intentionally avoids COW and duplicates user mappings eagerly.
+//! 
 
 use crate::{
     memory::AddressSpace,
@@ -18,8 +18,7 @@ use core::{
     mem::offset_of,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use x86_64::structures::paging::mapper::TranslateResult;
-use x86_64::structures::paging::FrameAllocator; // Required for allocate_frame
+use x86_64::structures::paging::{mapper::TranslateResult, FrameAllocator}; // Required for allocate_frame
 
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
@@ -82,7 +81,7 @@ unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
     core::arch::naked_asm!(
         "mov rsi, rdi",
 
-        // ── Build IRET frame FIRST, using r8 as scratch ──────────────
+        // ===== Build IRET frame FIRST, using r8 as scratch ===========
         // (r8 has not been restored yet, so we can clobber it safely)
         "mov r8, [rsi + {off_user_ss}]",
         "push r8",                            // SS
@@ -95,7 +94,7 @@ unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
         "mov r8, [rsi + {off_user_rip}]",
         "push r8",                            // user RIP
 
-        // ── Now restore ALL general-purpose registers ────────────────
+        // ===== Now restore ALL general-purpose registers============
         "mov r15, [rsi + {off_r15}]",
         "mov r14, [rsi + {off_r14}]",
         "mov r13, [rsi + {off_r13}]",
@@ -194,7 +193,9 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
         return Err(SyscallError::PermissionDenied);
     }
 
-    let child_as = parent_as.clone_cow().map_err(|_| SyscallError::OutOfMemory)?;
+    let child_as = parent_as
+        .clone_cow()
+        .map_err(|_| SyscallError::OutOfMemory)?;
 
     let child_user_ctx = Box::new(ForkUserContext {
         r15: frame.r15,
@@ -228,29 +229,34 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
 /// Called from the page fault handler when a write fault occurs on a present page.
 /// Returns Ok(()) if the fault was successfully handled (COW resolution),
 /// or Err if it wasn't a COW fault (real access violation).
-pub fn handle_cow_fault(
-    virt_addr: u64,
-    address_space: &AddressSpace,
-) -> Result<(), &'static str> {
+pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<(), &'static str> {
+    use crate::memory::paging::BuddyFrameAllocator;
     use x86_64::{
         structures::paging::{Mapper, Page, PageTableFlags, Size4KiB, Translate},
         VirtAddr,
     };
-    use crate::memory::paging::BuddyFrameAllocator;
 
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_addr));
-    
-    // SAFETY: We are in an exception handler, address space is active.
+
+    // SAFETY: we are in an exception handler, address space is active.
     let mut mapper = unsafe { address_space.mapper() };
 
-    // 1. Check if page is mapped and has COW flag
-    let (phys_frame, flags): (x86_64::structures::paging::PhysFrame<Size4KiB>, PageTableFlags) = match mapper.translate(VirtAddr::new(virt_addr)) {
-        TranslateResult::Mapped { frame: x86_64::structures::paging::mapper::MappedFrame::Size4KiB(frame), offset: _, flags } => (frame, flags),
+    //Check if page is mapped and has COW flag
+    let (phys_frame, flags): (
+        x86_64::structures::paging::PhysFrame<Size4KiB>,
+        PageTableFlags,
+    ) = match mapper.translate(VirtAddr::new(virt_addr)) {
+        TranslateResult::Mapped {
+            frame: x86_64::structures::paging::mapper::MappedFrame::Size4KiB(frame),
+            offset: _,
+            flags,
+        } => (frame, flags),
         _ => return Err("Page not mapped or huge page"),
     };
 
     // We use BIT_9 as software COW flag
     const COW_BIT: PageTableFlags = PageTableFlags::BIT_9;
+
     if !flags.contains(COW_BIT) {
         return Err("Not a COW page");
     }
@@ -258,23 +264,31 @@ pub fn handle_cow_fault(
     let old_frame = crate::memory::PhysFrame {
         start_address: phys_frame.start_address(),
     };
+
     let refcount = crate::memory::cow::frame_get_refcount(old_frame);
 
     if refcount == 1 {
-        // Case 1: We are the sole owner. Just make it writable.
+        // Case 1: we are the sole owner. Just make it writable.
         let new_flags = (flags | PageTableFlags::WRITABLE) & !COW_BIT;
+
         unsafe {
-            mapper.update_flags(page, new_flags).map_err(|_| "Failed to update flags")?.ignore();
+            mapper
+                .update_flags(page, new_flags)
+                .map_err(|_| "Failed to update flags")?
+                .ignore();
         }
         // Invalidate TLB on all CPUs (SMP-safe).
         crate::arch::x86_64::tlb::shootdown_page(VirtAddr::new(virt_addr));
         return Ok(());
     }
 
-    // Case 2: Shared page. Copy to new frame.
+    // Case 2: shared page. Copy to new frame.
     let mut frame_allocator = BuddyFrameAllocator;
-    let new_frame = frame_allocator.allocate_frame().ok_or("OOM during COW copy")?;
-    
+
+    let new_frame = frame_allocator
+        .allocate_frame()
+        .ok_or("OOM during COW copy")?;
+
     // Copy content
     unsafe {
         let src = crate::memory::phys_to_virt(old_frame.start_address.as_u64()) as *const u8;
@@ -284,13 +298,14 @@ pub fn handle_cow_fault(
 
     // Update mapping to new frame, Writable, no COW
     let new_flags = (flags | PageTableFlags::WRITABLE) & !COW_BIT;
-    
+
     unsafe {
-        mapper.map_to(page, new_frame, new_flags, &mut frame_allocator)
+        mapper
+            .map_to(page, new_frame, new_flags, &mut frame_allocator)
             .map_err(|_| "Failed to map new COW frame")?
             .ignore();
     }
-    
+
     // Invalidate TLB on all CPUs (SMP-safe).
     crate::arch::x86_64::tlb::shootdown_page(VirtAddr::new(virt_addr));
 

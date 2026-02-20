@@ -634,18 +634,44 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     serial_println!("[init]   6g. IRQ0->vec 0x20, IRQ1->vec 0x21 routed");
 
     // Step 6h: calibrate APIC timer using PIT channel 2
+    serial_println!("[init]   6h. Calibrating APIC timer using PIT channel 2...");
+    serial_println!("[timer] ================================ TIMER INIT ================================");
+    
     let ticks_per_10ms = timer::calibrate_apic_timer();
+    
     if ticks_per_10ms == 0 {
-        log::warn!("APIC: timer calibration failed, falling back to PIC");
+        log::error!("APIC: timer calibration FAILED");
+        log::warn!("Falling back to legacy PIT timer at 100Hz");
+        
         // Re-enable PIC since APIC timer failed
         // (Note: I/O APIC routing is still active for keyboard/timer via PIC vectors)
-        return false;
+        serial_println!("[timer] APIC calibration failed, initializing PIT fallback...");
+        timer::init_pit(100); // 100Hz = 10ms per tick
+        serial_println!("[timer] PIT initialized at 100Hz (10ms interval)");
+        serial_println!("[init]   6h. PIT timer initialized (fallback)");
+        
+        serial_println!("[timer] ============================= TIMER INIT COMPLETE ============================");
+        serial_println!("[timer] Mode: PIT (legacy fallback)");
+        serial_println!("[timer] Frequency: 100Hz");
+        serial_println!("[timer] Interval: 10ms per tick");
+        serial_println!("[timer] ==========================================================================");
+        
+        // Continue with PIT - don't return false
+        // return false;
+    } else {
+        serial_println!("[init]   6h. APIC timer calibrated successfully");
+        
+        // Step 6i: start APIC timer in periodic mode
+        timer::start_apic_timer(ticks_per_10ms);
+        serial_println!("[init]   6i. APIC timer started (100Hz)");
+        
+        serial_println!("[timer] ============================= TIMER INIT COMPLETE ============================");
+        serial_println!("[timer] Mode: APIC (native)");
+        serial_println!("[timer] Frequency: 100Hz");
+        serial_println!("[timer] Interval: 10ms per tick");
+        serial_println!("[timer] Ticks per 10ms: {}", ticks_per_10ms);
+        serial_println!("[timer] ==========================================================================");
     }
-    serial_println!("[init]   6h. APIC timer calibrated");
-
-    // Step 6i: start APIC timer in periodic mode
-    timer::start_apic_timer(ticks_per_10ms);
-    serial_println!("[init]   6i. APIC timer started (100Hz)");
 
     true
 }
