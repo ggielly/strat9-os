@@ -18,26 +18,6 @@ pub fn cmd_clear(_args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-/// List mounted schemes
-pub fn cmd_scheme(args: &[String]) -> Result<(), ShellError> {
-    if args.len() == 0 || args[0] != "ls" {
-        shell_println!("Usage: scheme ls");
-        return Ok(());
-    }
-
-    shell_println!("Mounted Schemes:");
-    shell_println!("Path         Type");
-    shell_println!("────────────────────────────────────");
-
-    let schemes = crate::vfs::list_schemes();
-    for scheme in schemes {
-        shell_println!("  {:<12} {}", scheme, "Kernel");
-    }
-
-    shell_println!("");
-    Ok(())
-}
-
 /// Display CPU information
 pub fn cmd_cpuinfo(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("CPU information:");

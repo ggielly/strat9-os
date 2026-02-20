@@ -8,6 +8,7 @@ pub mod ps;
 pub mod sys;
 pub mod gfx;
 pub mod top;
+pub mod vfs;
 
 use alloc::{string::String, vec::Vec, collections::BTreeMap};
 use super::ShellError;
@@ -29,7 +30,9 @@ impl CommandRegistry {
         registry.register("clear", sys::cmd_clear);
         registry.register("mem", mem::cmd_mem);
         registry.register("ps", ps::cmd_ps);
-        registry.register("scheme", sys::cmd_scheme);
+        registry.register("scheme", vfs::cmd_scheme);
+        registry.register("ls", vfs::cmd_ls);
+        registry.register("cat", vfs::cmd_cat);
         registry.register("cpuinfo", sys::cmd_cpuinfo);
         registry.register("reboot", sys::cmd_reboot);
         registry.register("gfx", gfx::cmd_gfx);

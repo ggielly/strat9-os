@@ -321,6 +321,14 @@ impl KernelScheme {
 
 impl Scheme for KernelScheme {
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
+        if path.is_empty() || path == "/" {
+            return Ok(OpenResult {
+                file_id: 0, // Root directory ID
+                size: None,
+                flags: FileFlags::DIRECTORY,
+            });
+        }
+
         let file = self.files.get(path).ok_or(SyscallError::BadHandle)?;
         Ok(OpenResult {
             file_id: file.id,
@@ -330,6 +338,25 @@ impl Scheme for KernelScheme {
     }
 
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
+        if file_id == 0 {
+            // Handle directory listing for root
+            let mut list = String::new();
+            for name in self.files.keys() {
+                list.push_str(name);
+                list.push('\n');
+            }
+
+            if offset >= list.len() as u64 {
+                return Ok(0);
+            }
+
+            let start = offset as usize;
+            let end = core::cmp::min(start + buf.len(), list.len());
+            let to_copy = end - start;
+            buf[..to_copy].copy_from_slice(&list.as_bytes()[start..end]);
+            return Ok(to_copy);
+        }
+
         let file = self
             .files
             .values()

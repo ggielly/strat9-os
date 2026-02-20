@@ -36,7 +36,7 @@ use alloc::{string::String, sync::Arc};
 
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
-pub use mount::{mount, resolve, unmount, Namespace};
+pub use mount::{mount, resolve, unmount, list_mounts, Namespace};
 pub use scheme::{DynScheme, FileFlags, IpcScheme, KernelScheme, OpenFlags, Scheme};
 pub use scheme_router::{register_scheme, mount_scheme, init_builtin_schemes, list_schemes};
 pub use procfs::ProcScheme;

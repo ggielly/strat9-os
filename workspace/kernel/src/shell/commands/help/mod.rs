@@ -14,7 +14,9 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  mem zones         - Display detailed zone information");
     shell_println!("  ps                - List all tasks");
     shell_println!("  top               - Graphical task manager (interactive)");
-    shell_println!("  scheme ls         - List mounted schemes");
+    shell_println!("  ls [path]         - List mount points or directory contents");
+    shell_println!("  cat <path>        - Display file contents");
+    shell_println!("  scheme ls         - List registered schemes");
     shell_println!("  cpuinfo           - Display CPU information");
     shell_println!("  reboot            - Reboot the system");
     shell_println!("  gfx help          - Show gfx command help");
