@@ -359,6 +359,21 @@ impl Task {
             ticks: AtomicU64::new(0),
         }))
     }
+
+    /// Reset all signal handlers to SIG_DFL (default).
+    ///
+    /// Called during execve to reset signal handlers as per POSIX:
+    /// handlers set to catch signals are reset to SIG_DFL, but SIG_IGN
+    /// remains ignored (implementation simplification: we reset all).
+    pub fn reset_signals(&self) {
+        // SAFETY: We have a valid reference to the task.
+        unsafe {
+            let actions = &mut *self.signal_actions.get();
+            for action in actions.iter_mut() {
+                *action = super::signal::SigAction::Default;
+            }
+        }
+    }
 }
 
 /// Low-level context switch: save callee-saved registers on current stack,

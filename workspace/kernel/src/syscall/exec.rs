@@ -100,6 +100,18 @@ pub fn sys_execve(
 
     let sp = setup_user_stack(&new_as_arc, argv_ptr, envp_ptr, &load_info, path_str.as_bytes())?;
 
+    // === EXECVE CLEANUP (POSIX semantics) ===
+    // Now that ELF is valid and loaded, perform cleanup before switching address space.
+    
+    // 1. Close all file descriptors with CLOEXEC flag
+    unsafe {
+        let fd_table = &mut *current.fd_table.get();
+        fd_table.close_cloexec();
+    }
+
+    // 2. Reset all signal handlers to SIG_DFL
+    current.reset_signals();
+
     
     unsafe {
         *current.address_space.get() = new_as_arc.clone();

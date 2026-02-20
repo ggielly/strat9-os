@@ -61,6 +61,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PROC_WAITPID => super::wait::sys_waitpid(arg1 as i64, arg2, arg3 as u32).map(|pid| pid as u64),
         SYS_PROC_WAIT    => super::wait::sys_wait(arg1),
         SYS_PROC_EXECVE  => sys_execve(frame, arg1, arg2, arg3),
+        SYS_FCNTL => super::fcntl::sys_fcntl(arg1, arg2, arg3),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),
