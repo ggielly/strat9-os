@@ -21,9 +21,6 @@ use x86_64::VirtAddr;
 
 use crate::sync::SpinLock;
 
-/// IPI vector for TLB shootdown (must be >= 32 and not conflict with other IPIs).
-const TLB_SHOOTDOWN_VECTOR: u8 = 0xF0;
-
 /// Maximum number of CPUs we can support.
 const MAX_CPUS: usize = 256;
 
@@ -67,8 +64,8 @@ struct TlbShootdownRequest {
 /// Registers the TLB shootdown IPI handler in the IDT.
 /// Must be called during early boot, single-threaded.
 pub fn init() {
-    // TODO: Register TLB_SHOOTDOWN_VECTOR in IDT to call tlb_shootdown_ipi_handler
-    log::debug!("TLB shootdown initialized (vector {:#x})", TLB_SHOOTDOWN_VECTOR);
+    super::idt::register_tlb_shootdown_handler(tlb_shootdown_ipi_handler);
+    log::debug!("TLB shootdown initialized (vector {:#x})", crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR);
 }
 
 /// Invalidate a single page on all CPUs.
@@ -124,7 +121,7 @@ pub fn shootdown_page(vaddr: VirtAddr) {
     }
     
     // Send IPI to all other CPUs.
-    broadcast_ipi_except_self(TLB_SHOOTDOWN_VECTOR);
+    broadcast_ipi_except_self(crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR);
     
     // Wait for all CPUs to acknowledge (with timeout).
     wait_for_acks((num_cpus - 1) as u32);
@@ -195,7 +192,7 @@ pub fn shootdown_range(start: VirtAddr, end: VirtAddr) {
         }
     }
     
-    broadcast_ipi_except_self(TLB_SHOOTDOWN_VECTOR);
+    broadcast_ipi_except_self(crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR);
     wait_for_acks((num_cpus - 1) as u32);
     
     req.kind = TlbShootdownKind::None;
@@ -244,7 +241,7 @@ pub fn shootdown_all() {
         flush_tlb_all();
     }
     
-    broadcast_ipi_except_self(TLB_SHOOTDOWN_VECTOR);
+    broadcast_ipi_except_self(crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR);
     wait_for_acks((num_cpus - 1) as u32);
     
     req.kind = TlbShootdownKind::None;
@@ -256,7 +253,7 @@ pub fn shootdown_all() {
 /// IPI handler for TLB shootdown (called on receiving CPU).
 ///
 /// Processes the global shootdown request and increments the acknowledgement counter.
-pub fn tlb_shootdown_ipi_handler() {
+pub extern "C" fn tlb_shootdown_ipi_handler() {
     let req = TLB_SHOOTDOWN_REQUEST.lock();
     
     match req.kind {

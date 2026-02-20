@@ -421,13 +421,18 @@ fn apply_segment_permissions(
         let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(vaddr))
             .map_err(|_| "Invalid page while updating segment flags")?;
         // SAFETY: the page is already mapped by map_region for this segment.
-        let flush = unsafe {
+        let _ = unsafe {
             mapper
                 .update_flags(page, pte_flags)
                 .map_err(|_| "Failed to update segment page flags")?
         };
-        flush.flush();
+        // Local flush is done via shootdown_range/all below.
     }
+
+    // Perform TLB shootdown to ensure all CPUs see the new permissions.
+    let end = page_start + (page_count as u64) * 4096;
+    crate::arch::x86_64::tlb::shootdown_range(VirtAddr::new(page_start), VirtAddr::new(end));
+
     Ok(())
 }
 
