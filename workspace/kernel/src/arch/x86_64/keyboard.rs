@@ -34,7 +34,7 @@ impl KeyboardBuffer {
         let mut buffer = self.buffer.lock();
         buffer[*tail] = ch;
         *tail = (*tail + 1) % KEYBOARD_BUFFER_SIZE;
-        
+
         // If buffer is full, advance head to drop oldest character
         let mut head = self.head.lock();
         if *head == *tail {
@@ -46,11 +46,11 @@ impl KeyboardBuffer {
     pub fn pop(&self) -> Option<u8> {
         let mut head = self.head.lock();
         let tail = *self.tail.lock();
-        
+
         if *head == tail {
             return None; // Buffer empty
         }
-        
+
         let ch = self.buffer.lock()[*head];
         *head = (*head + 1) % KEYBOARD_BUFFER_SIZE;
         Some(ch)

@@ -2,10 +2,7 @@
 //!
 //! Provides fcntl operations for file descriptor flags (CLOEXEC).
 
-use crate::{
-    process::current_task_clone,
-    syscall::error::SyscallError,
-};
+use crate::{process::current_task_clone, syscall::error::SyscallError};
 
 // fcntl commands
 pub const F_DUPFD: u64 = 0;

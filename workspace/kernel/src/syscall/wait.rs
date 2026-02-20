@@ -106,7 +106,11 @@ fn write_decimal(n: i32, buf: &mut [u8]) {
 
     let negative = n < 0;
     // Work in u32 to avoid overflow on i32::MIN
-    let mut v: u32 = if negative { (n as i64).unsigned_abs() as u32 } else { n as u32 };
+    let mut v: u32 = if negative {
+        (n as i64).unsigned_abs() as u32
+    } else {
+        n as u32
+    };
 
     if v == 0 {
         scratch[0] = b'0';
@@ -155,10 +159,7 @@ fn encode_wstatus(exit_code: i32) -> i32 {
 ///
 /// Returns `Ok(WaitChildResult::Reaped { .. })` or propagates `EINTR` /
 /// `NoChildren`.
-fn wait_blocking(
-    parent_id: TaskId,
-    target: Option<TaskId>,
-) -> Result<(TaskId, i32), SyscallError> {
+fn wait_blocking(parent_id: TaskId, target: Option<TaskId>) -> Result<(TaskId, i32), SyscallError> {
     loop {
         match try_wait_child(parent_id, target) {
             WaitChildResult::Reaped { child, status } => return Ok((child, status)),
@@ -231,7 +232,7 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
                 log::debug!("waitpid(WNOHANG): reaped {:?} status={}", child, status);
                 Ok(child.as_u64())
             }
-            WaitChildResult::NoChildren  => Err(SyscallError::NoChildren),
+            WaitChildResult::NoChildren => Err(SyscallError::NoChildren),
             WaitChildResult::StillRunning => Ok(0), // no zombie yet
         };
     }

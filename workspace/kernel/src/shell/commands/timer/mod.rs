@@ -2,8 +2,7 @@
 //!
 //! Provides shell commands for debugging and verifying timer accuracy.
 
-use crate::shell_println;
-use crate::shell::ShellError;
+use crate::{shell::ShellError, shell_println};
 use alloc::string::String;
 
 /// Timer debug command

@@ -23,9 +23,23 @@ fn test_flags_validation() -> bool {
     // Missing MAP_PRIVATE/MAP_SHARED.
     let r1 = mmap::sys_mmap(0, 4096, PROT_RW, MAP_ANONYMOUS, 0, 0);
     // Both MAP_PRIVATE and MAP_SHARED set.
-    let r2 = mmap::sys_mmap(0, 4096, PROT_RW, MAP_ANONYMOUS | MAP_PRIVATE | MAP_SHARED, 0, 0);
+    let r2 = mmap::sys_mmap(
+        0,
+        4096,
+        PROT_RW,
+        MAP_ANONYMOUS | MAP_PRIVATE | MAP_SHARED,
+        0,
+        0,
+    );
     // Unknown flag bit.
-    let r3 = mmap::sys_mmap(0, 4096, PROT_RW, MAP_ANONYMOUS | MAP_PRIVATE | (1 << 30), 0, 0);
+    let r3 = mmap::sys_mmap(
+        0,
+        4096,
+        PROT_RW,
+        MAP_ANONYMOUS | MAP_PRIVATE | (1 << 30),
+        0,
+        0,
+    );
     is_err(&r1, SyscallError::InvalidArgument)
         && is_err(&r2, SyscallError::InvalidArgument)
         && is_err(&r3, SyscallError::InvalidArgument)
@@ -113,23 +127,42 @@ extern "C" fn mmap_test_main() -> ! {
     crate::serial_println!("[mmap-test] start");
 
     let t1 = test_flags_validation();
-    crate::serial_println!("[mmap-test] flags validation: {}", if t1 { "ok" } else { "FAIL" });
+    crate::serial_println!(
+        "[mmap-test] flags validation: {}",
+        if t1 { "ok" } else { "FAIL" }
+    );
 
     let t2 = test_munmap_overflow_guard();
-    crate::serial_println!("[mmap-test] munmap overflow guard: {}", if t2 { "ok" } else { "FAIL" });
+    crate::serial_println!(
+        "[mmap-test] munmap overflow guard: {}",
+        if t2 { "ok" } else { "FAIL" }
+    );
 
     let t3 = test_fixed_noreplace();
-    crate::serial_println!("[mmap-test] MAP_FIXED_NOREPLACE: {}", if t3 { "ok" } else { "FAIL" });
+    crate::serial_println!(
+        "[mmap-test] MAP_FIXED_NOREPLACE: {}",
+        if t3 { "ok" } else { "FAIL" }
+    );
 
     let t4 = test_brk_contract();
-    crate::serial_println!("[mmap-test] brk contract: {}", if t4 { "ok" } else { "FAIL" });
+    crate::serial_println!(
+        "[mmap-test] brk contract: {}",
+        if t4 { "ok" } else { "FAIL" }
+    );
 
     let t5 = test_oom_rollback();
-    crate::serial_println!("[mmap-test] OOM rollback: {}", if t5 { "ok" } else { "FAIL" });
+    crate::serial_println!(
+        "[mmap-test] OOM rollback: {}",
+        if t5 { "ok" } else { "FAIL" }
+    );
 
     crate::serial_println!(
         "[mmap-test] summary: {}",
-        if t1 && t2 && t3 && t4 && t5 { "PASS" } else { "FAIL" }
+        if t1 && t2 && t3 && t4 && t5 {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     );
     crate::process::scheduler::exit_current_task(0);
 }
@@ -141,4 +174,3 @@ pub fn create_mmap_test_task() {
         crate::serial_println!("[mmap-test] failed to create task");
     }
 }
-

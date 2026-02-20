@@ -54,7 +54,7 @@ impl SyscallError {
             -1 => SyscallError::PermissionDenied,
             -4 => SyscallError::Interrupted,
             -5 => SyscallError::IoError,
-            -9  => SyscallError::BadHandle,
+            -9 => SyscallError::BadHandle,
             -10 => SyscallError::NoChildren,
             -11 => SyscallError::Again,
             -12 => SyscallError::OutOfMemory,

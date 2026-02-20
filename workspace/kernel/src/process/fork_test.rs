@@ -235,7 +235,10 @@ fn cow_test_refcount_unmap() -> bool {
     };
     let r2 = crate::memory::cow::frame_get_refcount(frame);
     if r2 != 2 {
-        crate::serial_println!("[fork-test] cow refcount: expected 2 after clone, got {}", r2);
+        crate::serial_println!(
+            "[fork-test] cow refcount: expected 2 after clone, got {}",
+            r2
+        );
         return false;
     }
 
@@ -249,7 +252,10 @@ fn cow_test_refcount_unmap() -> bool {
     }
     let r3 = crate::memory::cow::frame_get_refcount(frame);
     if r3 != 1 {
-        crate::serial_println!("[fork-test] cow refcount: expected 1 after parent unmap, got {}", r3);
+        crate::serial_println!(
+            "[fork-test] cow refcount: expected 1 after parent unmap, got {}",
+            r3
+        );
         return false;
     }
 
@@ -263,7 +269,10 @@ fn cow_test_refcount_unmap() -> bool {
     }
     let r4 = crate::memory::cow::frame_get_refcount(frame);
     if r4 != 0 {
-        crate::serial_println!("[fork-test] cow refcount: expected 0 after child unmap, got {}", r4);
+        crate::serial_println!(
+            "[fork-test] cow refcount: expected 0 after child unmap, got {}",
+            r4
+        );
         return false;
     }
 

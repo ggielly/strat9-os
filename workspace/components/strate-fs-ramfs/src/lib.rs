@@ -16,7 +16,7 @@ use alloc::{
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use strate_fs_abstraction::{
-    FsCapabilities, FsError, FsResult, VfsDirEntry, VfsFileInfo, VfsFileType, VfsFileSystem,
+    FsCapabilities, FsError, FsResult, VfsDirEntry, VfsFileInfo, VfsFileSystem, VfsFileType,
     VfsVolumeInfo,
 };
 
@@ -47,7 +47,7 @@ impl RamFileSystem {
         Self {
             inodes: Mutex::new(inodes),
             next_inode: AtomicU64::new(10), // Start user inodes at 10
-            capabilities: FsCapabilities::writable_linux(), 
+            capabilities: FsCapabilities::writable_linux(),
         }
     }
 
@@ -235,16 +235,19 @@ impl VfsFileSystem for RamFileSystem {
                 if ino != target_ino {
                     return Err(FsError::InvalidArgument);
                 }
-                
+
                 let node = self.get_node(ino)?;
                 let node_guard = node.lock();
-                
-                if let RamNode::Directory { entries: child_entries } = &*node_guard {
+
+                if let RamNode::Directory {
+                    entries: child_entries,
+                } = &*node_guard
+                {
                     if !child_entries.is_empty() {
                         return Err(FsError::NotEmpty);
                     }
                 }
-                
+
                 drop(node_guard);
                 entries.remove(name);
                 drop(guard);

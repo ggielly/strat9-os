@@ -139,15 +139,12 @@ pub fn create_channel_test_tasks() {
     *CHAN_TX2.lock() = Some(tx2);
     *CHAN_RX.lock() = Some(rx);
 
-    let producer1 =
-        Task::new_kernel_task(chan_producer1_main, "chan-prod-1", TaskPriority::Normal)
-            .expect("chan-prod-1 alloc failed");
-    let producer2 =
-        Task::new_kernel_task(chan_producer2_main, "chan-prod-2", TaskPriority::Normal)
-            .expect("chan-prod-2 alloc failed");
-    let consumer =
-        Task::new_kernel_task(chan_consumer_main, "chan-consumer", TaskPriority::Normal)
-            .expect("chan-consumer alloc failed");
+    let producer1 = Task::new_kernel_task(chan_producer1_main, "chan-prod-1", TaskPriority::Normal)
+        .expect("chan-prod-1 alloc failed");
+    let producer2 = Task::new_kernel_task(chan_producer2_main, "chan-prod-2", TaskPriority::Normal)
+        .expect("chan-prod-2 alloc failed");
+    let consumer = Task::new_kernel_task(chan_consumer_main, "chan-consumer", TaskPriority::Normal)
+        .expect("chan-consumer alloc failed");
 
     add_task(producer1);
     add_task(producer2);
@@ -199,7 +196,10 @@ extern "C" fn chan_consumer_main() -> ! {
                 received += 1;
             }
             Err(channel::ChannelError::Disconnected) => {
-                crate::serial_println!("[chan-test] Consumer: disconnected after {} msgs", received);
+                crate::serial_println!(
+                    "[chan-test] Consumer: disconnected after {} msgs",
+                    received
+                );
                 break;
             }
             Err(e) => {
@@ -210,7 +210,10 @@ extern "C" fn chan_consumer_main() -> ! {
     }
 
     if received == 5 {
-        crate::serial_println!("[chan-test] SyncChannel MPMC test PASSED ({} msgs)", received);
+        crate::serial_println!(
+            "[chan-test] SyncChannel MPMC test PASSED ({} msgs)",
+            received
+        );
     } else {
         crate::serial_println!(
             "[chan-test] SyncChannel MPMC test FAILED (expected 5, got {})",

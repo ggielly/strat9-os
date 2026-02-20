@@ -23,11 +23,7 @@ pub fn clock_gettime_ns() -> Result<u64> {
 /// Sleep for a specified duration.
 pub fn nanosleep(req: &TimeSpec) -> Result<()> {
     unsafe {
-        syscall2(
-            number::SYS_NANOSLEEP,
-            req as *const TimeSpec as usize,
-            0,
-        )?;
+        syscall2(number::SYS_NANOSLEEP, req as *const TimeSpec as usize, 0)?;
         Ok(())
     }
 }

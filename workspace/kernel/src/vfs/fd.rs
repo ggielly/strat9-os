@@ -69,7 +69,8 @@ impl FileDescriptorTable {
     /// Insert a file with explicit CLOEXEC flag.
     pub fn insert_with_flags(&mut self, file: Arc<OpenFile>, cloexec: bool) -> u32 {
         let fd = self.next_fd;
-        self.fds.insert(fd, FileDescriptor::new_cloexec(file, cloexec));
+        self.fds
+            .insert(fd, FileDescriptor::new_cloexec(file, cloexec));
         self.next_fd += 1;
         fd
     }

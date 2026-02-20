@@ -77,7 +77,7 @@ fn init_cow_metadata(memory_regions: &[MemoryRegion]) {
 }
 
 // Re-exports
-pub use address_space::{kernel_address_space, AddressSpace, VmaFlags, VmaType, VmaPageSize};
+pub use address_space::{kernel_address_space, AddressSpace, VmaFlags, VmaPageSize, VmaType};
 pub use buddy::get_allocator;
 pub use frame::{AllocError, FrameAllocator, PhysFrame};
 pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSliceWrite};

@@ -596,7 +596,7 @@ extern "C" fn idle_task_main() -> ! {
         // Be explicit on SMP: never rely on inherited IF state.
         // If IF=0, HLT can deadlock that CPU forever.
         crate::arch::x86_64::sti();
-        
+
         // Halt until next interrupt (saves power, timer will wake us)
         crate::arch::x86_64::hlt();
     }
@@ -630,7 +630,10 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 if let Some(parent_id) = parent {
                     let _ = sched.wake_task_locked(parent_id);
                     // Notify parent that a child has terminated.
-                    let _ = crate::process::signal::send_signal(parent_id, crate::process::signal::Signal::SIGCHLD);
+                    let _ = crate::process::signal::send_signal(
+                        parent_id,
+                        crate::process::signal::Signal::SIGCHLD,
+                    );
                 }
             }
         }

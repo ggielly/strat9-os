@@ -318,30 +318,48 @@ impl Scheme for IpcScheme {
         const OPCODE_UNLINK: u32 = 0x07;
         let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
         let mut msg = IpcMessage::new(OPCODE_UNLINK);
-        
-        if path.len() > 42 { return Err(SyscallError::InvalidArgument); }
-        
+
+        if path.len() > 42 {
+            return Err(SyscallError::InvalidArgument);
+        }
+
         msg.payload[0..2].copy_from_slice(&(path.len() as u16).to_le_bytes());
         msg.payload[2..2 + path.len()].copy_from_slice(path.as_bytes());
 
         port.send(msg).map_err(|_| SyscallError::BadHandle)?;
         let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
 
-        if reply.msg_type != 0x80 { return Err(SyscallError::IoError); }
-        let status = u32::from_le_bytes([reply.payload[0], reply.payload[1], reply.payload[2], reply.payload[3]]);
-        if status != 0 { return Err(SyscallError::from_code(status as i64)); }
-        
+        if reply.msg_type != 0x80 {
+            return Err(SyscallError::IoError);
+        }
+        let status = u32::from_le_bytes([
+            reply.payload[0],
+            reply.payload[1],
+            reply.payload[2],
+            reply.payload[3],
+        ]);
+        if status != 0 {
+            return Err(SyscallError::from_code(status as i64));
+        }
+
         Ok(())
     }
 }
 
 impl IpcScheme {
-    fn handle_create_op(&self, opcode: u32, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
+    fn handle_create_op(
+        &self,
+        opcode: u32,
+        path: &str,
+        mode: u32,
+    ) -> Result<OpenResult, SyscallError> {
         let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
         let mut msg = IpcMessage::new(opcode);
-        
-        if path.len() > 40 { return Err(SyscallError::InvalidArgument); }
-        
+
+        if path.len() > 40 {
+            return Err(SyscallError::InvalidArgument);
+        }
+
         msg.payload[0..4].copy_from_slice(&mode.to_le_bytes());
         msg.payload[4..6].copy_from_slice(&(path.len() as u16).to_le_bytes());
         msg.payload[6..6 + path.len()].copy_from_slice(path.as_bytes());
@@ -349,13 +367,31 @@ impl IpcScheme {
         port.send(msg).map_err(|_| SyscallError::BadHandle)?;
         let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
 
-        if reply.msg_type != 0x80 { return Err(SyscallError::IoError); }
-        
-        let status = u32::from_le_bytes([reply.payload[0], reply.payload[1], reply.payload[2], reply.payload[3]]);
-        if status != 0 { return Err(SyscallError::from_code(status as i64)); }
+        if reply.msg_type != 0x80 {
+            return Err(SyscallError::IoError);
+        }
 
-        let file_id = u64::from_le_bytes([reply.payload[4],reply.payload[5],reply.payload[6],reply.payload[7],reply.payload[8],reply.payload[9],reply.payload[10],reply.payload[11]]);
-        
+        let status = u32::from_le_bytes([
+            reply.payload[0],
+            reply.payload[1],
+            reply.payload[2],
+            reply.payload[3],
+        ]);
+        if status != 0 {
+            return Err(SyscallError::from_code(status as i64));
+        }
+
+        let file_id = u64::from_le_bytes([
+            reply.payload[4],
+            reply.payload[5],
+            reply.payload[6],
+            reply.payload[7],
+            reply.payload[8],
+            reply.payload[9],
+            reply.payload[10],
+            reply.payload[11],
+        ]);
+
         Ok(OpenResult {
             file_id,
             size: Some(0),

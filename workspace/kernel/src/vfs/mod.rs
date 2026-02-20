@@ -27,19 +27,19 @@
 pub mod fd;
 pub mod file;
 pub mod mount;
+pub mod procfs;
 pub mod scheme;
 pub mod scheme_router;
-pub mod procfs;
 
 use crate::{process::current_task_clone, syscall::error::SyscallError};
 use alloc::{string::String, sync::Arc};
 
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
-pub use mount::{mount, resolve, unmount, list_mounts, Namespace};
-pub use scheme::{DynScheme, FileFlags, IpcScheme, KernelScheme, OpenFlags, Scheme};
-pub use scheme_router::{register_scheme, mount_scheme, init_builtin_schemes, list_schemes};
+pub use mount::{list_mounts, mount, resolve, unmount, Namespace};
 pub use procfs::ProcScheme;
+pub use scheme::{DynScheme, FileFlags, IpcScheme, KernelScheme, OpenFlags, Scheme};
+pub use scheme_router::{init_builtin_schemes, list_schemes, mount_scheme, register_scheme};
 
 use crate::memory::{UserSliceRead, UserSliceWrite};
 
@@ -308,7 +308,7 @@ pub fn init() {
     kernel_scheme.register("cmdline", CMDLINE.as_ptr(), CMDLINE.len());
 
     let kernel_scheme = Arc::new(kernel_scheme);
-    
+
     // Mount /sys
     if let Err(e) = mount::mount("/sys", kernel_scheme.clone()) {
         log::error!("[VFS] Failed to mount /sys: {:?}", e);
@@ -323,7 +323,7 @@ pub fn init() {
     } else {
         log::info!("[VFS] Registered proc scheme");
     }
-    
+
     if let Err(e) = mount::mount("/proc", proc_scheme) {
         log::error!("[VFS] Failed to mount /proc: {:?}", e);
     } else {

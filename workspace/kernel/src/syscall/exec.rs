@@ -2,7 +2,7 @@
 //! Replaces the current process image with a new one.
 
 use crate::{
-    memory::{AddressSpace, UserSliceRead, VmaFlags, VmaType, VmaPageSize},
+    memory::{AddressSpace, UserSliceRead, VmaFlags, VmaPageSize, VmaType},
     process::{
         current_task_clone,
         elf::{load_elf_image, LoadedElfInfo, USER_STACK_BASE, USER_STACK_PAGES, USER_STACK_TOP},
@@ -31,22 +31,25 @@ pub fn sys_execve(
 ) -> Result<u64, SyscallError> {
     let current = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
-    
     let mut path_buf = [0u8; 4096];
     let path_slice = UserSliceRead::new(path_ptr, 4096).map_err(|_| SyscallError::Fault)?;
-    
+
     let mut len = 0;
 
     loop {
-        if len >= 4096 { return Err(SyscallError::ArgumentListTooLong); } // Reused error code
+        if len >= 4096 {
+            return Err(SyscallError::ArgumentListTooLong);
+        } // Reused error code
         let b = path_slice.read_u8(len).map_err(|_| SyscallError::Fault)?;
-        if b == 0 { break; }
+        if b == 0 {
+            break;
+        }
         path_buf[len] = b;
         len += 1;
     }
-    let path_str = core::str::from_utf8(&path_buf[..len]).map_err(|_| SyscallError::InvalidArgument)?;
+    let path_str =
+        core::str::from_utf8(&path_buf[..len]).map_err(|_| SyscallError::InvalidArgument)?;
 
-    
     let fd = vfs::open(path_str, vfs::OpenFlags::READ)?;
 
     // Read into memory
@@ -56,7 +59,9 @@ pub fn sys_execve(
     loop {
         match vfs::read(fd, &mut buf) {
             Ok(n) => {
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 if elf_data.len() + n > MAX_EXEC_SIZE {
                     let _ = vfs::close(fd);
                     return Err(SyscallError::OutOfMemory);
@@ -75,14 +80,12 @@ pub fn sys_execve(
         return Err(SyscallError::ExecFormatError);
     }
 
-    
     let new_as = AddressSpace::new_user().map_err(|_| SyscallError::OutOfMemory)?;
     let new_as_arc = alloc::sync::Arc::new(new_as);
 
-    
-    let load_info = load_elf_image(&elf_data, &new_as_arc).map_err(|_| SyscallError::ExecFormatError)?;
+    let load_info =
+        load_elf_image(&elf_data, &new_as_arc).map_err(|_| SyscallError::ExecFormatError)?;
 
-    
     let stack_flags = VmaFlags {
         readable: true,
         writable: true,
@@ -99,11 +102,17 @@ pub fn sys_execve(
         )
         .map_err(|_| SyscallError::OutOfMemory)?;
 
-    let sp = setup_user_stack(&new_as_arc, argv_ptr, envp_ptr, &load_info, path_str.as_bytes())?;
+    let sp = setup_user_stack(
+        &new_as_arc,
+        argv_ptr,
+        envp_ptr,
+        &load_info,
+        path_str.as_bytes(),
+    )?;
 
     // === EXECVE CLEANUP (POSIX semantics) ===
     // Now that ELF is valid and loaded, perform cleanup before switching address space.
-    
+
     // 1. Close all file descriptors with CLOEXEC flag
     unsafe {
         let fd_table = &mut *current.fd_table.get();
@@ -113,20 +122,28 @@ pub fn sys_execve(
     // 2. Reset all signal handlers to SIG_DFL
     current.reset_signals();
 
-    
     unsafe {
         *current.address_space.get() = new_as_arc.clone();
         (&*current.address_space.get()).switch_to();
     }
 
-    
     frame.iret_rip = load_info.runtime_entry;
     frame.iret_rsp = sp;
-    
-    frame.rdi = 0; frame.rsi = 0; frame.rdx = 0; frame.rcx = 0;
-    frame.r8 = 0; frame.r9 = 0; frame.r10 = 0; frame.r11 = 0;
-    frame.rbx = 0; frame.rbp = 0; frame.r12 = 0; frame.r13 = 0;
-    frame.r14 = 0; frame.r15 = 0;
+
+    frame.rdi = 0;
+    frame.rsi = 0;
+    frame.rdx = 0;
+    frame.rcx = 0;
+    frame.r8 = 0;
+    frame.r9 = 0;
+    frame.r10 = 0;
+    frame.r11 = 0;
+    frame.rbx = 0;
+    frame.rbp = 0;
+    frame.r12 = 0;
+    frame.r13 = 0;
+    frame.r14 = 0;
+    frame.r15 = 0;
     frame.rax = 0;
 
     Ok(0)
@@ -150,7 +167,7 @@ fn setup_user_stack(
     // We push them in reverse order so they appear in memory roughly sequentially for cache locality?
     // Actually standard is to put them at very top. Order doesn't strictly matter as long as pointers are correct.
     // We'll push ENV strings first (highest), then ARG strings.
-    
+
     // Push ENV strings
     for env in envs.iter().rev() {
         let len = (env.len() + 1) as u64;
@@ -260,26 +277,34 @@ fn setup_user_stack(
 
 fn read_string_array(ptr: u64) -> Result<Vec<Vec<u8>>, SyscallError> {
     let mut res = Vec::new();
-    if ptr == 0 { return Ok(res); }
-    
+    if ptr == 0 {
+        return Ok(res);
+    }
+
     let mut arr_off = 0;
     loop {
         // Read string pointer from user memory (current AS)
         let str_ptr = match UserSliceRead::new(ptr + arr_off, 8) {
             Ok(slice) => match slice.read_u64(0) {
-                 Ok(p) => p,
-                 Err(_) => return Err(SyscallError::Fault),
+                Ok(p) => p,
+                Err(_) => return Err(SyscallError::Fault),
             },
             Err(_) => return Err(SyscallError::Fault),
         };
 
-        if str_ptr == 0 { break; }
-        if res.len() > 1024 { return Err(SyscallError::ArgumentListTooLong); }
+        if str_ptr == 0 {
+            break;
+        }
+        if res.len() > 1024 {
+            return Err(SyscallError::ArgumentListTooLong);
+        }
 
         let mut s = Vec::new();
         let mut i = 0;
         loop {
-            if i > 4096 { return Err(SyscallError::ArgumentListTooLong); }
+            if i > 4096 {
+                return Err(SyscallError::ArgumentListTooLong);
+            }
             let b = match UserSliceRead::new(str_ptr + i, 1) {
                 Ok(slice) => match slice.read_u8(0) {
                     Ok(byte) => byte,
@@ -287,7 +312,9 @@ fn read_string_array(ptr: u64) -> Result<Vec<Vec<u8>>, SyscallError> {
                 },
                 Err(_) => return Err(SyscallError::Fault),
             };
-            if b == 0 { break; }
+            if b == 0 {
+                break;
+            }
             s.push(b);
             i += 1;
         }
@@ -302,7 +329,7 @@ fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(
     let mut written = 0;
     // We assume data is small enough or we loop? Using unsafe pointer arithmetic.
     // The `AddressSpace` methods like `translate` are needed.
-    
+
     // Since `load_elf_image` in `elf.rs` used `translate`, we should verify visibility.
     // `AddressSpace` is usually public. `translate` is on `Mapper` trait?
     // `AddressSpace` in `strat9` likely implements `Mapper` or has it.
@@ -313,12 +340,14 @@ fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(
         let curr_vaddr = vaddr + written as u64;
         let page_offset = (curr_vaddr & 0xFFF) as usize;
         let chunk_size = core::cmp::min(data.len() - written, 4096 - page_offset);
-        
+
         // translate might fail if page not mapped.
         // `USER_STACK_BASE`..`USER_STACK_TOP` is mapped.
-        let phys = as_ref.translate(VirtAddr::new(curr_vaddr)).ok_or(SyscallError::Fault)?;
+        let phys = as_ref
+            .translate(VirtAddr::new(curr_vaddr))
+            .ok_or(SyscallError::Fault)?;
         let virt = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
-        
+
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr().add(written), virt, chunk_size);
         }
@@ -337,7 +366,11 @@ fn generate_aux_random_seed() -> [u8; 16] {
     let mut s = [0u8; 16];
     let t = crate::process::scheduler::ticks();
     let (cr3, _) = Cr3::read();
-    let x = t ^ (cr3.start_address().as_u64().wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let x = t
+        ^ (cr3
+            .start_address()
+            .as_u64()
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15));
     s[..8].copy_from_slice(&x.to_le_bytes());
     s[8..].copy_from_slice(&(x.rotate_left(17) ^ 0xa076_1d64_78bd_642f).to_le_bytes());
     s

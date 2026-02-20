@@ -14,12 +14,12 @@ use x86_64::PhysAddr;
 const MAX_FREE_BLOCKS: usize = 65536;
 
 // Use MaybeUninit to avoid .bss initialization issues in higher-half kernel
-static mut FREE_BLOCKS: core::mem::MaybeUninit<[Option<FreeBlock>; MAX_FREE_BLOCKS]> = 
+static mut FREE_BLOCKS: core::mem::MaybeUninit<[Option<FreeBlock>; MAX_FREE_BLOCKS]> =
     core::mem::MaybeUninit::uninit();
 static mut FREE_BLOCKS_INIT: bool = false;
 static mut FREE_BLOCKS_USED: usize = 0;
 static mut FREE_BLOCKS_FREE_HEAD: Option<usize> = None;
-static mut FREE_BLOCKS_FREE_NEXT: core::mem::MaybeUninit<[Option<usize>; MAX_FREE_BLOCKS]> = 
+static mut FREE_BLOCKS_FREE_NEXT: core::mem::MaybeUninit<[Option<usize>; MAX_FREE_BLOCKS]> =
     core::mem::MaybeUninit::uninit();
 
 const PAGE_SIZE: u64 = 4096;
@@ -59,12 +59,15 @@ pub fn init_free_pool() {
         FREE_BLOCKS_FREE_HEAD = None;
         FREE_BLOCKS_INIT = true;
 
-        serial_println!("  Free block pool initialized ({} entries)", MAX_FREE_BLOCKS);
+        serial_println!(
+            "  Free block pool initialized ({} entries)",
+            MAX_FREE_BLOCKS
+        );
     }
 }
 
 /// Get pointer to free blocks array
-/// 
+///
 /// # Safety
 /// - Must be called after init_free_pool()
 /// - Caller must ensure exclusive access or proper synchronization
@@ -79,7 +82,7 @@ fn get_free_blocks_ptr() -> *mut Option<FreeBlock> {
 }
 
 /// Get pointer to free next array
-/// 
+///
 /// # Safety
 /// - Must be called after init_free_pool()
 /// - Caller must ensure exclusive access or proper synchronization

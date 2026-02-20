@@ -63,7 +63,9 @@ fn test_fault_maps_and_refcount() -> bool {
         }
     }
 
-    let frame = crate::memory::PhysFrame { start_address: phys };
+    let frame = crate::memory::PhysFrame {
+        start_address: phys,
+    };
     if crate::memory::cow::frame_get_refcount(frame) != 1 {
         return false;
     }
@@ -150,13 +152,22 @@ extern "C" fn demand_paging_test_main() -> ! {
     crate::serial_println!("[dp-test] start");
 
     let t1 = test_fault_maps_and_refcount();
-    crate::serial_println!("[dp-test] fault map/refcount: {}", if t1 { "ok" } else { "FAIL" });
+    crate::serial_println!(
+        "[dp-test] fault map/refcount: {}",
+        if t1 { "ok" } else { "FAIL" }
+    );
 
     let t2 = test_repeat_fault_same_page_no_leak();
-    crate::serial_println!("[dp-test] repeat fault no-leak: {}", if t2 { "ok" } else { "FAIL" });
+    crate::serial_println!(
+        "[dp-test] repeat fault no-leak: {}",
+        if t2 { "ok" } else { "FAIL" }
+    );
 
     let t3 = test_unmap_lazy_unfaulted_region();
-    crate::serial_println!("[dp-test] unmap unfaulted lazy: {}", if t3 { "ok" } else { "FAIL" });
+    crate::serial_println!(
+        "[dp-test] unmap unfaulted lazy: {}",
+        if t3 { "ok" } else { "FAIL" }
+    );
 
     crate::serial_println!(
         "[dp-test] summary: {}",

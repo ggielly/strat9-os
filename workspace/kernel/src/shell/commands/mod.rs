@@ -2,17 +2,17 @@
 //!
 //! Organizes shell commands into separate modules for better maintenance.
 
+pub mod gfx;
 pub mod help;
 pub mod mem;
 pub mod ps;
 pub mod sys;
-pub mod gfx;
+pub mod timer;
 pub mod top;
 pub mod vfs;
-pub mod timer;
 
-use alloc::{string::String, vec::Vec, collections::BTreeMap};
 use super::ShellError;
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 /// Registry for all shell commands
 pub struct CommandRegistry {

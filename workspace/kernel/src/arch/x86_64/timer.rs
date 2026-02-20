@@ -27,22 +27,32 @@ pub fn init_pit(frequency_hz: u32) {
     log::info!("========================================");
     log::info!("Target frequency: {} Hz", frequency_hz);
     log::info!("PIT base frequency: {} Hz", PIT_FREQUENCY);
-    
+
     let divisor = PIT_FREQUENCY / frequency_hz;
     log::info!("Calculated divisor: {} (0x{:04X})", divisor, divisor);
-    
+
     // Expected actual frequency
     let actual_freq = PIT_FREQUENCY / divisor;
-    log::info!("Expected actual frequency: {} Hz (error: {} Hz)", 
-               actual_freq, 
-               if actual_freq > frequency_hz { actual_freq - frequency_hz } else { frequency_hz - actual_freq });
+    log::info!(
+        "Expected actual frequency: {} Hz (error: {} Hz)",
+        actual_freq,
+        if actual_freq > frequency_hz {
+            actual_freq - frequency_hz
+        } else {
+            frequency_hz - actual_freq
+        }
+    );
 
     // Send command byte to configure PIT
     let mut cmd_port = Port::new(PIT_COMMAND_PORT);
     unsafe {
         cmd_port.write(0x36u8); // Channel 0, low/high byte, rate generator
     }
-    log::info!("PIT command port (0x{:X}) wrote: 0x{:02X}", PIT_COMMAND_PORT, 0x36u8);
+    log::info!(
+        "PIT command port (0x{:X}) wrote: 0x{:02X}",
+        PIT_COMMAND_PORT,
+        0x36u8
+    );
     log::info!("  Channel: 0");
     log::info!("  Access: low byte then high byte");
     log::info!("  Mode: 3 (square wave generator / rate generator)");
@@ -51,16 +61,16 @@ pub fn init_pit(frequency_hz: u32) {
     let mut ch0_port = Port::new(PIT_CHANNEL0_PORT);
     let low_byte = (divisor & 0xFF) as u8;
     let high_byte = ((divisor >> 8) & 0xFF) as u8;
-    
+
     unsafe {
-        ch0_port.write(low_byte);  // Low byte
+        ch0_port.write(low_byte); // Low byte
         ch0_port.write(high_byte); // High byte
     }
-    
+
     log::info!("PIT channel 0 port (0x{:X}) wrote:", PIT_CHANNEL0_PORT);
     log::info!("  Low byte:  0x{:02X} ({})", low_byte, low_byte);
     log::info!("  High byte: 0x{:02X} ({})", high_byte, high_byte);
-    
+
     log::info!("========================================");
     log::info!("PIT INITIALIZED SUCCESSFULLY");
     log::info!("  Frequency: {} Hz", frequency_hz);
@@ -149,7 +159,10 @@ pub fn calibrate_apic_timer() -> u32 {
         PIT_10MS_COUNT
     );
     log::info!("  Low byte:  0x{:02X}", (PIT_10MS_COUNT & 0xFF) as u8);
-    log::info!("  High byte: 0x{:02X}", ((PIT_10MS_COUNT >> 8) & 0xFF) as u8);
+    log::info!(
+        "  High byte: 0x{:02X}",
+        ((PIT_10MS_COUNT >> 8) & 0xFF) as u8
+    );
 
     // Step 3: Set APIC timer initial count to maximum
     // SAFETY: APIC is initialized
@@ -178,7 +191,10 @@ pub fn calibrate_apic_timer() -> u32 {
         }
         iterations += 1;
         if iterations >= MAX_POLL_ITERATIONS {
-            log::warn!("APIC timer calibration: PIT poll timeout after {} iterations", iterations);
+            log::warn!(
+                "APIC timer calibration: PIT poll timeout after {} iterations",
+                iterations
+            );
             log::warn!("  This may indicate a hardware issue or incorrect PIT configuration");
             // SAFETY: APIC is initialized
             unsafe {
@@ -218,15 +234,19 @@ pub fn calibrate_apic_timer() -> u32 {
     // QEMU default APIC frequency is ~1 GHz → ~625,000 ticks/10ms.
     // Real hardware with a 200 MHz bus → ~125,000 ticks/10ms.
     // Use wide bounds to support both real hardware and emulators.
-    const MIN_EXPECTED_TICKS: u32 = 1_000;      // extremely slow / throttled
-    const MAX_EXPECTED_TICKS: u32 = 5_000_000;  // very fast host or low divider
+    const MIN_EXPECTED_TICKS: u32 = 1_000; // extremely slow / throttled
+    const MAX_EXPECTED_TICKS: u32 = 5_000_000; // very fast host or low divider
 
     if elapsed < MIN_EXPECTED_TICKS {
         log::warn!(
             "APIC calibration SUSPICIOUS: {} ticks/10ms is TOO LOW",
             elapsed
         );
-        log::warn!("  Expected range: {} - {} ticks/10ms", MIN_EXPECTED_TICKS, MAX_EXPECTED_TICKS);
+        log::warn!(
+            "  Expected range: {} - {} ticks/10ms",
+            MIN_EXPECTED_TICKS,
+            MAX_EXPECTED_TICKS
+        );
         log::warn!("  Possible causes:");
         log::warn!("    - APIC divide configured incorrectly");
         log::warn!("    - PIT frequency mismatch");
@@ -240,7 +260,11 @@ pub fn calibrate_apic_timer() -> u32 {
             "APIC calibration SUSPICIOUS: {} ticks/10ms is TOO HIGH",
             elapsed
         );
-        log::warn!("  Expected range: {} - {} ticks/10ms", MIN_EXPECTED_TICKS, MAX_EXPECTED_TICKS);
+        log::warn!(
+            "  Expected range: {} - {} ticks/10ms",
+            MIN_EXPECTED_TICKS,
+            MAX_EXPECTED_TICKS
+        );
         log::warn!("  Possible causes:");
         log::warn!("    - PIT poll completed too early");
         log::warn!("    - APIC timer running at wrong frequency");
@@ -252,7 +276,10 @@ pub fn calibrate_apic_timer() -> u32 {
     // Calculate estimated CPU frequency
     // CPU_freq = elapsed_ticks * div * 100
     let estimated_cpu_freq_mhz = (elapsed as u64) * 16 * 100 / 1_000_000;
-    log::info!("Estimated CPU frequency: {} MHz (based on APIC ticks)", estimated_cpu_freq_mhz);
+    log::info!(
+        "Estimated CPU frequency: {} MHz (based on APIC ticks)",
+        estimated_cpu_freq_mhz
+    );
 
     // Store calibration result
     APIC_TICKS_PER_10MS.store(elapsed, Ordering::Release);
@@ -293,25 +320,39 @@ pub fn start_apic_timer(ticks_per_10ms: u32) {
         log::info!("APIC timer divide register before: 0x{:08X}", divide_val);
         apic::write_reg(apic::REG_TIMER_DIVIDE, 0x03);
         let divide_val_after = apic::read_reg(apic::REG_TIMER_DIVIDE);
-        log::info!("APIC timer divide register after: 0x{:08X}", divide_val_after);
+        log::info!(
+            "APIC timer divide register after: 0x{:08X}",
+            divide_val_after
+        );
 
         // Configure LVT Timer: periodic mode, vector 0x20
         let lvt_before = apic::read_reg(apic::REG_LVT_TIMER);
         log::info!("LVT Timer register before: 0x{:08X}", lvt_before);
-        
+
         let lvt_config = apic::LVT_TIMER_PERIODIC | 0x20;
-        log::info!("LVT Timer config: 0x{:08X} (periodic + vector 0x20)", lvt_config);
+        log::info!(
+            "LVT Timer config: 0x{:08X} (periodic + vector 0x20)",
+            lvt_config
+        );
         apic::write_reg(apic::REG_LVT_TIMER, lvt_config);
-        
+
         let lvt_after = apic::read_reg(apic::REG_LVT_TIMER);
         log::info!("LVT Timer register after: 0x{:08X}", lvt_after);
 
         // Set initial count (fires every ~10ms = 100Hz)
-        log::info!("Setting timer initial count to: {} (0x{:08X})", ticks_per_10ms, ticks_per_10ms);
+        log::info!(
+            "Setting timer initial count to: {} (0x{:08X})",
+            ticks_per_10ms,
+            ticks_per_10ms
+        );
         apic::write_reg(apic::REG_TIMER_INIT, ticks_per_10ms);
-        
+
         let init_verify = apic::read_reg(apic::REG_TIMER_INIT);
-        log::info!("Timer initial count verified: {} (0x{:08X})", init_verify, init_verify);
+        log::info!(
+            "Timer initial count verified: {} (0x{:08X})",
+            init_verify,
+            init_verify
+        );
     }
 
     APIC_TIMER_ACTIVE.store(true, Ordering::Relaxed);
@@ -344,51 +385,58 @@ pub fn start_apic_timer_cached() {
 /// Should block for approximately `seconds` real seconds.
 pub fn debug_measure_time(seconds: u32) {
     use core::arch::x86_64::_rdtsc;
-    
+
     log::info!("========================================");
     log::info!("TIMER DEBUG: Measuring {} seconds...", seconds);
     log::info!("========================================");
-    
+
     let start_tick = crate::process::scheduler::ticks();
     let start_tsc = unsafe { _rdtsc() };
-    
+
     log::info!("Start: tick={}, TSC={}", start_tick, start_tsc);
-    
+
     // Wait for the specified number of ticks (100 ticks = 1 second at 100Hz)
     let target_ticks = start_tick + (seconds as u64 * 100);
-    
+
     while crate::process::scheduler::ticks() < target_ticks {
         core::hint::spin_loop();
     }
-    
+
     let end_tick = crate::process::scheduler::ticks();
     let end_tsc = unsafe { _rdtsc() };
-    
+
     let elapsed_ticks = end_tick - start_tick;
     let elapsed_tsc = end_tsc - start_tsc;
-    
+
     log::info!("End: tick={}, TSC={}", end_tick, end_tsc);
     log::info!("Elapsed ticks: {}", elapsed_ticks);
     log::info!("Elapsed TSC: {}", elapsed_tsc);
-    
+
     // Calculate expected TSC (assuming constant CPU frequency)
     let expected_tsc = (elapsed_ticks as u64) * (apic_ticks_per_10ms() as u64) * 16;
     log::info!("Expected TSC (approx): {}", expected_tsc);
-    
+
     // Calculate estimated CPU frequency
     // CPU_freq = TSC_elapsed / time_seconds
     let estimated_cpu_mhz = (elapsed_tsc / seconds as u64) / 1_000_000;
     log::info!("Estimated CPU frequency: {} MHz", estimated_cpu_mhz);
-    
+
     // Calculate actual tick frequency
     // If we waited 100 ticks expecting 1 second, but it was actually different
     let expected_ticks = seconds as u64 * 100;
     if elapsed_ticks != expected_ticks {
-        log::warn!("TICK MISMATCH: expected {} ticks, got {} ticks", expected_ticks, elapsed_ticks);
+        log::warn!(
+            "TICK MISMATCH: expected {} ticks, got {} ticks",
+            expected_ticks,
+            elapsed_ticks
+        );
     }
-    
+
     log::info!("========================================");
-    log::info!("If this message appeared after ~{} real seconds, timer is CORRECT", seconds);
+    log::info!(
+        "If this message appeared after ~{} real seconds, timer is CORRECT",
+        seconds
+    );
     log::info!("If it was faster/slower, timer calibration may be WRONG");
     log::info!("========================================");
 }

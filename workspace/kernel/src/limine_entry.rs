@@ -177,7 +177,9 @@ pub unsafe extern "C" fn kmain() -> ! {
 
     // Build a kernel-local memory map from Limine entries.
     // Keep only the first MAX_BOOT_MEMORY_REGIONS entries to avoid dynamic allocation.
-    let (memory_map_base, memory_map_size) = if let Some(memory_map_response) = MEMORY_MAP.get_response() {
+    let (memory_map_base, memory_map_size) = if let Some(memory_map_response) =
+        MEMORY_MAP.get_response()
+    {
         let entries = memory_map_response.entries();
         let count = core::cmp::min(entries.len(), MAX_BOOT_MEMORY_REGIONS);
         unsafe {
@@ -220,7 +222,9 @@ pub unsafe extern "C" fn kmain() -> ! {
             } else {
                 (0u64, 0u64)
             };
-            (init_base, init_size, ext4_base, ext4_size, ram_base, ram_size)
+            (
+                init_base, init_size, ext4_base, ext4_size, ram_base, ram_size,
+            )
         } else {
             (0u64, 0u64, 0u64, 0u64, 0u64, 0u64)
         };

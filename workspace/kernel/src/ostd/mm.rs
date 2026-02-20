@@ -13,8 +13,7 @@
 
 extern crate alloc;
 
-use core::marker::PhantomData;
-use core::ops::Range;
+use core::{marker::PhantomData, ops::Range};
 
 /// Physical address type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -320,7 +319,11 @@ impl Drop for MappedPages {
             // SAFETY: We own the mapping and are responsible for unmapping
             unsafe {
                 crate::memory::address_space::kernel_address_space()
-                    .unmap_region(self.start_vaddr.as_u64(), page_count, crate::memory::address_space::VmaPageSize::Small)
+                    .unmap_region(
+                        self.start_vaddr.as_u64(),
+                        page_count,
+                        crate::memory::address_space::VmaPageSize::Small,
+                    )
                     .ok();
             }
         }
@@ -515,25 +518,20 @@ impl Vmar {
     }
 
     /// Allocates a new region within this VMAR
-    pub fn alloc(
-        &self,
-        offset: usize,
-        size: usize,
-        flags: MapFlags,
-    ) -> Result<VirtAddr, MapError> {
+    pub fn alloc(&self, offset: usize, size: usize, flags: MapFlags) -> Result<VirtAddr, MapError> {
         // TODO: implement proper allocation with conflict detection
         let vaddr = self.base.add(offset as u64);
-        
+
         // TODO: map the region with the given flags
         let _ = flags; // Suppress unused warning
-        
+
         let mut children = self.children.lock();
         children.push(VmarChild {
             offset,
             size,
             mapping: None,
         });
-        
+
         Ok(vaddr)
     }
 

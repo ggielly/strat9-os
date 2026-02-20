@@ -54,7 +54,13 @@ pub fn create_user_test_task() {
         executable: true,
         user_accessible: true,
     };
-    if let Err(e) = user_as.map_region(USER_CODE_ADDR, 1, code_flags, VmaType::Code, crate::memory::address_space::VmaPageSize::Small) {
+    if let Err(e) = user_as.map_region(
+        USER_CODE_ADDR,
+        1,
+        code_flags,
+        VmaType::Code,
+        crate::memory::address_space::VmaPageSize::Small,
+    ) {
         log::error!("Failed to map user code page: {}", e);
         return;
     }
@@ -66,7 +72,13 @@ pub fn create_user_test_task() {
         executable: false,
         user_accessible: true,
     };
-    if let Err(e) = user_as.map_region(USER_STACK_ADDR, 1, stack_flags, VmaType::Stack, crate::memory::address_space::VmaPageSize::Small) {
+    if let Err(e) = user_as.map_region(
+        USER_STACK_ADDR,
+        1,
+        stack_flags,
+        VmaType::Stack,
+        crate::memory::address_space::VmaPageSize::Small,
+    ) {
         log::error!("Failed to map user stack page: {}", e);
         return;
     }

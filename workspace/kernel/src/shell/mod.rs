@@ -25,9 +25,11 @@ pub enum ShellError {
     ExecutionFailed,
 }
 
-use alloc::collections::VecDeque;
-use alloc::string::{String, ToString};
-use crate::arch::x86_64::keyboard::{KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END};
+use crate::arch::x86_64::keyboard::{KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_UP};
+use alloc::{
+    collections::VecDeque,
+    string::{String, ToString},
+};
 
 /// Redraw the current shell input line after the prompt
 fn redraw_line(input: &[u8], cursor_pos: usize) {
@@ -35,11 +37,11 @@ fn redraw_line(input: &[u8], cursor_pos: usize) {
     for &b in input {
         print_char(b as char);
     }
-    
+
     // Print a trailing space to clear any leftover char from a longer previous line
     print_char(' ');
     print_char('\x08');
-    
+
     // Move visual cursor back to its logical position
     let back_moves = input.len() - cursor_pos;
     for _ in 0..back_moves {
@@ -59,7 +61,7 @@ pub extern "C" fn shell_main() -> ! {
 
     // Command history
     let mut history = VecDeque::new();
-    let mut history_idx: isize = -1; 
+    let mut history_idx: isize = -1;
     let mut current_input_saved = String::new();
 
     // Display welcome message using Unicode box-drawing characters
@@ -81,7 +83,7 @@ pub extern "C" fn shell_main() -> ! {
         if ticks / 50 != last_blink_tick {
             last_blink_tick = ticks / 50;
             cursor_visible = !cursor_visible;
-            
+
             if crate::arch::x86_64::vga::is_available() {
                 let color = if cursor_visible {
                     crate::arch::x86_64::vga::RgbColor::new(0x4F, 0xB3, 0xB3) // Cyan
@@ -96,7 +98,9 @@ pub extern "C" fn shell_main() -> ! {
         if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
             // Hide cursor before any action
             if crate::arch::x86_64::vga::is_available() {
-                crate::arch::x86_64::vga::draw_text_cursor(crate::arch::x86_64::vga::RgbColor::new(0x12, 0x16, 0x1E));
+                crate::arch::x86_64::vga::draw_text_cursor(
+                    crate::arch::x86_64::vga::RgbColor::new(0x12, 0x16, 0x1E),
+                );
             }
 
             match ch {
@@ -105,9 +109,11 @@ pub extern "C" fn shell_main() -> ! {
 
                     if input_len > 0 {
                         let line = core::str::from_utf8(&input_buf[..input_len]).unwrap_or("");
-                        
+
                         if !line.is_empty() {
-                            if history.is_empty() || history.back().map(|s: &String| s.as_str()) != Some(line) {
+                            if history.is_empty()
+                                || history.back().map(|s: &String| s.as_str()) != Some(line)
+                            {
                                 history.push_back(line.to_string());
                                 if history.len() > 50 {
                                     history.pop_front();
@@ -141,7 +147,7 @@ pub extern "C" fn shell_main() -> ! {
                     if cursor_pos > 0 {
                         print_char('\x08');
                         for i in (cursor_pos - 1)..(input_len - 1) {
-                            input_buf[i] = input_buf[i+1];
+                            input_buf[i] = input_buf[i + 1];
                         }
                         input_len -= 1;
                         cursor_pos -= 1;
@@ -177,9 +183,11 @@ pub extern "C" fn shell_main() -> ! {
                 KEY_UP => {
                     if !history.is_empty() && history_idx < (history.len() as isize - 1) {
                         if history_idx == -1 {
-                            current_input_saved = core::str::from_utf8(&input_buf[..input_len]).unwrap_or("").to_string();
+                            current_input_saved = core::str::from_utf8(&input_buf[..input_len])
+                                .unwrap_or("")
+                                .to_string();
                         }
-                        
+
                         while cursor_pos < input_len {
                             print_char(input_buf[cursor_pos] as char);
                             cursor_pos += 1;
@@ -189,7 +197,7 @@ pub extern "C" fn shell_main() -> ! {
                             print_char(' ');
                             print_char('\x08');
                         }
-                        
+
                         history_idx += 1;
                         let hist_str = &history[history.len() - 1 - history_idx as usize];
                         let bytes = hist_str.as_bytes();
@@ -197,7 +205,7 @@ pub extern "C" fn shell_main() -> ! {
                         input_buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
                         input_len = copy_len;
                         cursor_pos = input_len;
-                        
+
                         for &b in &input_buf[..input_len] {
                             print_char(b as char);
                         }
@@ -214,7 +222,7 @@ pub extern "C" fn shell_main() -> ! {
                             print_char(' ');
                             print_char('\x08');
                         }
-                        
+
                         history_idx -= 1;
                         if history_idx == -1 {
                             let bytes = current_input_saved.as_bytes();
@@ -229,7 +237,7 @@ pub extern "C" fn shell_main() -> ! {
                             input_len = copy_len;
                         }
                         cursor_pos = input_len;
-                        
+
                         for &b in &input_buf[..input_len] {
                             print_char(b as char);
                         }
@@ -239,7 +247,7 @@ pub extern "C" fn shell_main() -> ! {
                     if input_len < input_buf.len() {
                         if cursor_pos < input_len {
                             for i in (cursor_pos + 1..=input_len).rev() {
-                                input_buf[i] = input_buf[i-1];
+                                input_buf[i] = input_buf[i - 1];
                             }
                         }
                         input_buf[cursor_pos] = ch;

@@ -354,8 +354,9 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // =============================================
     let mut init_task_id: Option<crate::process::TaskId> = None;
     if args.initfs_base != 0 && args.initfs_size != 0 {
-        let elf_data =
-            unsafe { core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize) };
+        let elf_data = unsafe {
+            core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
+        };
         if let Err(e) = vfs::register_static_file("/initfs/init", elf_data.as_ptr(), elf_data.len())
         {
             serial_println!("[init] Failed to register /initfs/init: {:?}", e);
@@ -380,11 +381,12 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // Register optional strate-fs-ramfs server module (if provided by Limine).
     if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
         if base != 0 && size != 0 {
-            let ram_data =
-                unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-            if let Err(e) =
-                vfs::register_static_file("/initfs/strate-fs-ramfs", ram_data.as_ptr(), ram_data.len())
-            {
+            let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            if let Err(e) = vfs::register_static_file(
+                "/initfs/strate-fs-ramfs",
+                ram_data.as_ptr(),
+                ram_data.len(),
+            ) {
                 serial_println!("[init] Failed to register /initfs/strate-fs-ramfs: {:?}", e);
             } else {
                 serial_println!("[init] Registered /initfs/strate-fs-ramfs ({} bytes)", size);
@@ -408,7 +410,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // =============================================
     // Phase 8e: Task creation (deferred to end of boot)
     // =============================================
-    
+
     // =============================================
     // Phase 10: driver stubs
     // =============================================
@@ -470,24 +472,14 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     vga_println!("[..] Storage verification skipped at boot");
 
     // =============================================
-    // Boot complete — start preemptive multitasking
-    // =============================================
-    serial_println!("[init] Enabling interrupts...");
-    vga_println!("[..] Enabling interrupts...");
-    arch::x86_64::sti();
-    serial_println!("[init] Interrupts enabled.");
-    vga_println!("[OK] Interrupts enabled");
-
-    serial_println!("[init] Boot complete. Starting preemptive scheduler...");
-    vga_println!("[OK] Starting multitasking (preemptive)");
-
-    // =============================================
     // Final Phase: Launch initial user tasks
     // =============================================
-    
+
     // 1. Launch init process if module was found
     if args.initfs_base != 0 && args.initfs_size != 0 {
-        let elf_data = unsafe { core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize) };
+        let elf_data = unsafe {
+            core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
+        };
         match process::elf::load_and_run_elf(elf_data, "init") {
             Ok(task_id) => {
                 init_task_id = Some(task_id);
@@ -535,7 +527,11 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     #[cfg(not(feature = "selftest"))]
     {
         // Shell
-        match process::Task::new_kernel_task(shell::shell_main, "chevron-shell", process::TaskPriority::Normal) {
+        match process::Task::new_kernel_task(
+            shell::shell_main,
+            "chevron-shell",
+            process::TaskPriority::Normal,
+        ) {
             Ok(shell_task) => {
                 process::add_task(shell_task);
                 serial_println!("[init] Chevron shell ready.");
@@ -558,6 +554,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
 
     // Initialize keyboard layout to French by default
     crate::arch::x86_64::keyboard_layout::set_french_layout();
+
+    // =============================================
+    // Boot complete — start preemptive multitasking
+    // =============================================
+    serial_println!("[init] Enabling interrupts...");
+    vga_println!("[..] Enabling interrupts...");
+    arch::x86_64::sti();
+    serial_println!("[init] Interrupts enabled.");
+    vga_println!("[OK] Interrupts enabled");
+    serial_println!("[init] Boot complete. Starting preemptive scheduler...");
+    vga_println!("[OK] Starting multitasking (preemptive)");
 
     // Start the scheduler - this will never return
     process::schedule();
@@ -635,42 +642,48 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
 
     // Step 6h: calibrate APIC timer using PIT channel 2
     serial_println!("[init]   6h. Calibrating APIC timer using PIT channel 2...");
-    serial_println!("[timer] ================================ TIMER INIT ================================");
-    
+    serial_println!(
+        "[timer] ================================ TIMER INIT ================================"
+    );
+
     let ticks_per_10ms = timer::calibrate_apic_timer();
-    
+
     if ticks_per_10ms == 0 {
         log::error!("APIC: timer calibration FAILED");
         log::warn!("Falling back to legacy PIT timer at 100Hz");
-        
+
         // Re-enable PIC since APIC timer failed
         // (Note: I/O APIC routing is still active for keyboard/timer via PIC vectors)
         serial_println!("[timer] APIC calibration failed, initializing PIT fallback...");
         timer::init_pit(100); // 100Hz = 10ms per tick
         serial_println!("[timer] PIT initialized at 100Hz (10ms interval)");
         serial_println!("[init]   6h. PIT timer initialized (fallback)");
-        
+
         serial_println!("[timer] ============================= TIMER INIT COMPLETE ============================");
         serial_println!("[timer] Mode: PIT (legacy fallback)");
         serial_println!("[timer] Frequency: 100Hz");
         serial_println!("[timer] Interval: 10ms per tick");
-        serial_println!("[timer] ==========================================================================");
-        
+        serial_println!(
+            "[timer] =========================================================================="
+        );
+
         // Continue with PIT - don't return false
         // return false;
     } else {
         serial_println!("[init]   6h. APIC timer calibrated successfully");
-        
+
         // Step 6i: start APIC timer in periodic mode
         timer::start_apic_timer(ticks_per_10ms);
         serial_println!("[init]   6i. APIC timer started (100Hz)");
-        
+
         serial_println!("[timer] ============================= TIMER INIT COMPLETE ============================");
         serial_println!("[timer] Mode: APIC (native)");
         serial_println!("[timer] Frequency: 100Hz");
         serial_println!("[timer] Interval: 10ms per tick");
         serial_println!("[timer] Ticks per 10ms: {}", ticks_per_10ms);
-        serial_println!("[timer] ==========================================================================");
+        serial_println!(
+            "[timer] =========================================================================="
+        );
     }
 
     true

@@ -89,7 +89,7 @@ pub fn sys_mmap(
     _fd: u64,
     _offset: u64,
 ) -> Result<u64, SyscallError> {
-    //  Validate arguments 
+    //  Validate arguments
     if len == 0 {
         return Err(SyscallError::InvalidArgument);
     }
@@ -101,7 +101,11 @@ pub fn sys_mmap(
     }
 
     let is_huge = flags & MAP_HUGETLB != 0;
-    let page_size = if is_huge { crate::memory::address_space::VmaPageSize::Huge } else { crate::memory::address_space::VmaPageSize::Small };
+    let page_size = if is_huge {
+        crate::memory::address_space::VmaPageSize::Huge
+    } else {
+        crate::memory::address_space::VmaPageSize::Small
+    };
     let page_bytes = page_size.bytes();
 
     // File-backed mappings are not yet implemented.
@@ -128,14 +132,18 @@ pub fn sys_mmap(
     }
 
     // Round len up to a page boundary.  Overflow of len itself is caught here.
-    let len_aligned = if is_huge { huge_page_align_up(len) } else { page_align_up(len) };
+    let len_aligned = if is_huge {
+        huge_page_align_up(len)
+    } else {
+        page_align_up(len)
+    };
     if len_aligned == 0 {
         // len was so large that aligning it overflowed to 0.
         return Err(SyscallError::InvalidArgument);
     }
     let n_pages = (len_aligned / page_bytes) as usize;
 
-    //  Determine the target virtual address 
+    //  Determine the target virtual address
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
     let addr_space = unsafe { &*task.address_space.get() };
 
@@ -174,13 +182,13 @@ pub fn sys_mmap(
             .ok_or(SyscallError::OutOfMemory)?
     };
 
-    //  Map the region (lazily) 
+    //  Map the region (lazily)
     let vma_flags = prot_to_vma_flags(prot);
     addr_space
         .reserve_region(target, n_pages, vma_flags, VmaType::Anonymous, page_size)
         .map_err(|_| SyscallError::OutOfMemory)?;
 
-    //  Advance mmap_hint past the new mapping (non-fixed only) 
+    //  Advance mmap_hint past the new mapping (non-fixed only)
     if flags & MAP_FIXED == 0 {
         let new_hint = target.saturating_add(len_aligned);
         // Atomically advance: only update if it moves forward.
@@ -299,7 +307,13 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             user_accessible: true,
         };
         if unsafe { &*task.address_space.get() }
-            .reserve_region(old_page_end, n_pages, vma_flags, VmaType::Anonymous, crate::memory::address_space::VmaPageSize::Small)
+            .reserve_region(
+                old_page_end,
+                n_pages,
+                vma_flags,
+                VmaType::Anonymous,
+                crate::memory::address_space::VmaPageSize::Small,
+            )
             .is_err()
         {
             // OOM — return the unchanged break (Linux behaviour).

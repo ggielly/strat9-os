@@ -44,8 +44,8 @@ pub use component_macro::{init_component, parse_components_toml};
 #[repr(u8)]
 pub enum InitStage {
     Bootstrap = 0,
-    Kthread   = 1,
-    Process   = 2,
+    Kthread = 1,
+    Process = 2,
 }
 
 // ─── Error ───────────────────────────────────────────────────────────────────
@@ -106,7 +106,14 @@ impl ComponentEntry {
         priority: u32,
         depends_on: &'static [&'static str],
     ) -> Self {
-        Self { name, stage, init_fn, path, priority, depends_on }
+        Self {
+            name,
+            stage,
+            init_fn,
+            path,
+            priority,
+            depends_on,
+        }
     }
 }
 
@@ -130,10 +137,22 @@ impl ComponentInfo {
     }
 }
 
-impl PartialEq  for ComponentInfo { fn eq(&self, o: &Self) -> bool { self.priority == o.priority } }
-impl Eq         for ComponentInfo {}
-impl Ord        for ComponentInfo { fn cmp(&self, o: &Self) -> core::cmp::Ordering { self.priority.cmp(&o.priority) } }
-impl PartialOrd for ComponentInfo { fn partial_cmp(&self, o: &Self) -> Option<core::cmp::Ordering> { Some(self.cmp(o)) } }
+impl PartialEq for ComponentInfo {
+    fn eq(&self, o: &Self) -> bool {
+        self.priority == o.priority
+    }
+}
+impl Eq for ComponentInfo {}
+impl Ord for ComponentInfo {
+    fn cmp(&self, o: &Self) -> core::cmp::Ordering {
+        self.priority.cmp(&o.priority)
+    }
+}
+impl PartialOrd for ComponentInfo {
+    fn partial_cmp(&self, o: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
 
 // ─── Linker section symbols ───────────────────────────────────────────────────
 
@@ -143,7 +162,7 @@ impl PartialOrd for ComponentInfo { fn partial_cmp(&self, o: &Self) -> Option<co
 #[allow(improper_ctypes)]
 extern "C" {
     static __start_component_entries: ComponentEntry;
-    static __stop_component_entries:  ComponentEntry;
+    static __stop_component_entries: ComponentEntry;
 }
 
 // ─── init_all ────────────────────────────────────────────────────────────────
@@ -173,7 +192,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
     // objects in the section are `ComponentEntry` structs placed by the macro.
     unsafe {
         let start = &raw const __start_component_entries as *const ComponentEntry;
-        let stop  = &raw const __stop_component_entries  as *const ComponentEntry;
+        let stop = &raw const __stop_component_entries as *const ComponentEntry;
         let mut cur = start;
         while cur < stop {
             let entry = &*cur;
@@ -213,7 +232,9 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
                 // Not in this stage — assumed handled in a prior stage.
                 log::warn!(
                     "[component] '{}': dep '{}' not in {:?} stage (cross-stage, skipped)",
-                    entry.name, dep_name, stage
+                    entry.name,
+                    dep_name,
+                    stage
                 );
             }
         }
@@ -222,9 +243,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
     // ── 3. Kahn's topological sort with priority tiebreaker ──────────────────
     // `ready` is sorted ascending by priority so `remove(0)` always gives the
     // component with the smallest priority number (= earliest boot precedence).
-    let mut ready: Vec<usize> = (0..n)
-        .filter(|&i| in_degree[i] == 0)
-        .collect();
+    let mut ready: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
     ready.sort_by_key(|&i| components[i].priority);
 
     let mut ordered: Vec<usize> = Vec::with_capacity(n);
@@ -243,8 +262,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
 
         // Merge newly-ready nodes while maintaining sort by priority.
         for nr in newly_ready {
-            let pos = ready
-                .partition_point(|&i| components[i].priority <= components[nr].priority);
+            let pos = ready.partition_point(|&i| components[i].priority <= components[nr].priority);
             ready.insert(pos, nr);
         }
     }
@@ -255,9 +273,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
             "[component] Dependency cycle in {:?} stage — cyclic components will run last",
             stage
         );
-        let mut remaining: Vec<usize> = (0..n)
-            .filter(|i| !ordered.contains(i))
-            .collect();
+        let mut remaining: Vec<usize> = (0..n).filter(|i| !ordered.contains(i)).collect();
         remaining.sort_by_key(|&i| components[i].priority);
         ordered.extend(remaining);
     }
@@ -295,11 +311,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
         }
     }
 
-    log::info!(
-        "[component] {:?} stage complete ({} failed)",
-        stage,
-        failed
-    );
+    log::info!("[component] {:?} stage complete ({} failed)", stage, failed);
     Ok(())
 }
 
@@ -312,7 +324,7 @@ pub fn list_components() -> Vec<&'static ComponentEntry> {
 
     unsafe {
         let start = &raw const __start_component_entries as *const ComponentEntry;
-        let stop  = &raw const __stop_component_entries  as *const ComponentEntry;
+        let stop = &raw const __stop_component_entries as *const ComponentEntry;
         let mut cur = start;
         while cur < stop {
             components.push(&*cur);

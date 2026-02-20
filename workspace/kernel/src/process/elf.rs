@@ -5,7 +5,7 @@
 //!
 //! Supports :
 //!   - ET_EXEC
-//!   - ET_DYN (PIE/static-PIE) 
+//!   - ET_DYN (PIE/static-PIE)
 //!   - ELF64 little-endian x86_64 binaries.
 
 use alloc::{sync::Arc, vec::Vec};
@@ -16,7 +16,7 @@ use x86_64::{
 
 use crate::{
     capability::{Capability, CapabilityTable},
-    memory::address_space::{AddressSpace, VmaFlags, VmaType, VmaPageSize},
+    memory::address_space::{AddressSpace, VmaFlags, VmaPageSize, VmaType},
     process::{
         task::{CpuContext, KernelStack, SyncUnsafeCell, Task},
         TaskId, TaskPriority, TaskState,
@@ -238,7 +238,10 @@ fn program_headers<'a>(
     })
 }
 
-fn parse_interp_path<'a>(elf_data: &'a [u8], phdrs: &[Elf64Phdr]) -> Result<Option<&'a str>, &'static str> {
+fn parse_interp_path<'a>(
+    elf_data: &'a [u8],
+    phdrs: &[Elf64Phdr],
+) -> Result<Option<&'a str>, &'static str> {
     let Some(interp) = phdrs.iter().find(|ph| ph.p_type == PT_INTERP) else {
         return Ok(None);
     };
@@ -253,7 +256,10 @@ fn parse_interp_path<'a>(elf_data: &'a [u8], phdrs: &[Elf64Phdr]) -> Result<Opti
         return Err("PT_INTERP extends past file");
     }
     let raw = &elf_data[start..end];
-    let nul = raw.iter().position(|&b| b == 0).ok_or("PT_INTERP path is not NUL terminated")?;
+    let nul = raw
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or("PT_INTERP path is not NUL terminated")?;
     let s = core::str::from_utf8(&raw[..nul]).map_err(|_| "PT_INTERP path is not UTF-8")?;
     if s.is_empty() {
         return Err("PT_INTERP path is empty");
@@ -294,7 +300,8 @@ fn find_relocated_phdr_vaddr(
 
 fn read_elf_from_vfs(path: &str) -> Result<Vec<u8>, &'static str> {
     const MAX_ELF_SIZE: usize = 64 * 1024 * 1024;
-    let fd = crate::vfs::open(path, crate::vfs::OpenFlags::READ).map_err(|_| "PT_INTERP open failed")?;
+    let fd =
+        crate::vfs::open(path, crate::vfs::OpenFlags::READ).map_err(|_| "PT_INTERP open failed")?;
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
@@ -382,7 +389,9 @@ fn compute_load_bias_and_entry(
         let n_pages = (span as usize).div_ceil(4096);
         let load_base = user_as
             .find_free_vma_range(PIE_BASE_ADDR, n_pages, VmaPageSize::Small)
-            .or_else(|| user_as.find_free_vma_range(0x0000_0000_1000_0000, n_pages, VmaPageSize::Small))
+            .or_else(|| {
+                user_as.find_free_vma_range(0x0000_0000_1000_0000, n_pages, VmaPageSize::Small)
+            })
             .ok_or("No virtual range for ET_DYN image")?;
         load_base
             .checked_sub(min_vaddr)
@@ -736,60 +745,62 @@ fn apply_dynamic_relocations(
             .ok_or("Symbol value relocation overflow")
     };
 
-    let apply_rela_table =
-        |table_base: u64, table_size: usize, count_hint: Option<usize>| -> Result<usize, &'static str> {
-            if table_size == 0 {
-                return Ok(0);
-            }
-            let mut count = table_size / rela_ent;
-            if let Some(hint) = count_hint {
-                count = core::cmp::min(count, hint);
-            }
-            let mut applied = 0usize;
-            for i in 0..count {
-                let rela_addr_i = table_base
-                    .checked_add((i * rela_ent) as u64)
-                    .ok_or("Rela table overflow")?;
-                let mut raw = [0u8; core::mem::size_of::<Elf64Rela>()];
-                read_user_mapped_bytes(user_as, rela_addr_i, &mut raw)?;
-                // SAFETY: raw has exact size of Elf64Rela.
-                let rela = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Rela) };
+    let apply_rela_table = |table_base: u64,
+                            table_size: usize,
+                            count_hint: Option<usize>|
+     -> Result<usize, &'static str> {
+        if table_size == 0 {
+            return Ok(0);
+        }
+        let mut count = table_size / rela_ent;
+        if let Some(hint) = count_hint {
+            count = core::cmp::min(count, hint);
+        }
+        let mut applied = 0usize;
+        for i in 0..count {
+            let rela_addr_i = table_base
+                .checked_add((i * rela_ent) as u64)
+                .ok_or("Rela table overflow")?;
+            let mut raw = [0u8; core::mem::size_of::<Elf64Rela>()];
+            read_user_mapped_bytes(user_as, rela_addr_i, &mut raw)?;
+            // SAFETY: raw has exact size of Elf64Rela.
+            let rela = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Rela) };
 
-                let r_type = (rela.r_info & 0xffff_ffff) as u32;
-                let r_sym = (rela.r_info >> 32) as u32;
-                let target = rela
-                    .r_offset
-                    .checked_add(load_bias)
-                    .ok_or("Relocation target overflow")?;
-                if target >= USER_ADDR_MAX {
-                    return Err("Relocation target outside user space");
-                }
-
-                let value = match r_type {
-                    R_X86_64_RELATIVE => {
-                        if r_sym != 0 {
-                            return Err("R_X86_64_RELATIVE with non-zero symbol");
-                        }
-                        (load_bias as i128)
-                            .checked_add(rela.r_addend as i128)
-                            .ok_or("Relocation value overflow")?
-                    }
-                    R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_64 => {
-                        let sym_val = resolve_symbol(r_sym)? as i128;
-                        sym_val
-                            .checked_add(rela.r_addend as i128)
-                            .ok_or("Relocation value overflow")?
-                    }
-                    _ => return Err("Unsupported dynamic relocation type"),
-                };
-                if value < 0 || value > u64::MAX as i128 {
-                    return Err("Relocation value out of range");
-                }
-                write_user_mapped_bytes(user_as, target, &(value as u64).to_le_bytes())?;
-                applied += 1;
+            let r_type = (rela.r_info & 0xffff_ffff) as u32;
+            let r_sym = (rela.r_info >> 32) as u32;
+            let target = rela
+                .r_offset
+                .checked_add(load_bias)
+                .ok_or("Relocation target overflow")?;
+            if target >= USER_ADDR_MAX {
+                return Err("Relocation target outside user space");
             }
-            Ok(applied)
-        };
+
+            let value = match r_type {
+                R_X86_64_RELATIVE => {
+                    if r_sym != 0 {
+                        return Err("R_X86_64_RELATIVE with non-zero symbol");
+                    }
+                    (load_bias as i128)
+                        .checked_add(rela.r_addend as i128)
+                        .ok_or("Relocation value overflow")?
+                }
+                R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_64 => {
+                    let sym_val = resolve_symbol(r_sym)? as i128;
+                    sym_val
+                        .checked_add(rela.r_addend as i128)
+                        .ok_or("Relocation value overflow")?
+                }
+                _ => return Err("Unsupported dynamic relocation type"),
+            };
+            if value < 0 || value > u64::MAX as i128 {
+                return Err("Relocation value out of range");
+            }
+            write_user_mapped_bytes(user_as, target, &(value as u64).to_le_bytes())?;
+            applied += 1;
+        }
+        Ok(applied)
+    };
 
     let mut total_applied = 0usize;
     if let Some(rela_base) = rela_addr {
@@ -879,7 +890,19 @@ fn load_segment(
     } else {
         VmaType::Anonymous
     };
-    user_as.map_region(page_start, page_count, load_flags, vma_type, VmaPageSize::Small)?;
+    log::debug!(
+        "[elf] map PT_LOAD: start={:#x} pages={} filesz={:#x}",
+        page_start,
+        page_count,
+        filesz
+    );
+    user_as.map_region(
+        page_start,
+        page_count,
+        load_flags,
+        vma_type,
+        VmaPageSize::Small,
+    )?;
 
     // Copy file data into the mapped pages.
     // We translate each page through the user AS to find its physical frame,

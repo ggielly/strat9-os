@@ -1,8 +1,10 @@
 //! Graphics console commands
-use crate::shell_println;
-use crate::shell::ShellError;
+use crate::{
+    arch::x86_64::vga::{self, RgbColor, TextAlign, TextOptions, UiTheme},
+    shell::ShellError,
+    shell_println,
+};
 use alloc::{string::String, vec, vec::Vec};
-use crate::arch::x86_64::vga::{self, RgbColor, TextAlign, TextOptions, UiTheme};
 
 /// Graphics console commands
 pub fn cmd_gfx(args: &[String]) -> Result<(), ShellError> {
@@ -62,7 +64,11 @@ pub fn cmd_gfx(args: &[String]) -> Result<(), ShellError> {
             );
             shell_println!(
                 "  Double buffer active: {}",
-                if info.double_buffer_enabled { "yes" } else { "no" }
+                if info.double_buffer_enabled {
+                    "yes"
+                } else {
+                    "no"
+                }
             );
             let scale = match info.ui_scale {
                 vga::UiScale::Compact => "compact",
@@ -123,15 +129,30 @@ pub fn cmd_gfx_test() -> Result<(), ShellError> {
     }
 
     let (w, h) = vga::screen_size();
-    let canvas = vga::Canvas::new(RgbColor::new(0xE2, 0xE8, 0xF0), RgbColor::new(0x12, 0x16, 0x1E));
+    let canvas = vga::Canvas::new(
+        RgbColor::new(0xE2, 0xE8, 0xF0),
+        RgbColor::new(0x12, 0x16, 0x1E),
+    );
     canvas.begin_frame();
     canvas.clear();
 
     for y in (0..h).step_by(40) {
-        vga::draw_line(0, y as isize, w.saturating_sub(1) as isize, y as isize, RgbColor::new(0x22, 0x2E, 0x3A));
+        vga::draw_line(
+            0,
+            y as isize,
+            w.saturating_sub(1) as isize,
+            y as isize,
+            RgbColor::new(0x22, 0x2E, 0x3A),
+        );
     }
     for x in (0..w).step_by(40) {
-        vga::draw_line(x as isize, 0, x as isize, h.saturating_sub(1) as isize, RgbColor::new(0x22, 0x2E, 0x3A));
+        vga::draw_line(
+            x as isize,
+            0,
+            x as isize,
+            h.saturating_sub(1) as isize,
+            RgbColor::new(0x22, 0x2E, 0x3A),
+        );
     }
 
     let bw = w.saturating_sub(120).min(560);
@@ -148,7 +169,12 @@ pub fn cmd_gfx_test() -> Result<(), ShellError> {
         RgbColor::new(0x7E, 0xC1, 0xFF),
         96,
     );
-    vga::set_clip_rect(bx + 12, by + 12, bw.saturating_sub(24), bh.saturating_sub(24));
+    vga::set_clip_rect(
+        bx + 12,
+        by + 12,
+        bw.saturating_sub(24),
+        bh.saturating_sub(24),
+    );
     vga::fill_rect(bx, by, bw, bh, RgbColor::new(0x1B, 0x4D, 0x8A));
     vga::reset_clip_rect();
 
@@ -174,8 +200,7 @@ pub fn cmd_gfx_test() -> Result<(), ShellError> {
 
 pub fn cmd_gfx_demo(_args: &[String]) -> Result<(), ShellError> {
     use vga::{
-        DockEdge, TerminalWidget, UiDockLayout, UiLabel, UiPanel,
-        UiProgressBar, UiRect, UiTable,
+        DockEdge, TerminalWidget, UiDockLayout, UiLabel, UiPanel, UiProgressBar, UiRect, UiTable,
     };
 
     if !vga::is_available() {
@@ -244,7 +269,11 @@ pub fn cmd_gfx_demo(_args: &[String]) -> Result<(), ShellError> {
     ];
     let rows: Vec<Vec<String>> = vec![
         vec![String::from("CPU"), String::from("72%"), String::from("ok")],
-        vec![String::from("Memory"), String::from("43%"), String::from("ok")],
+        vec![
+            String::from("Memory"),
+            String::from("43%"),
+            String::from("ok"),
+        ],
     ];
     canvas.ui_table(&UiTable {
         rect: UiRect::new(

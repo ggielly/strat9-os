@@ -199,7 +199,7 @@ fn build_child_task(
 /// SYS_PROC_FORK (302): fork with copy-on-write address-space cloning.
 pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
     let parent = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    
+
     // 1. Sanity check: cannot fork a kernel thread.
     if parent.is_kernel() {
         log::warn!("fork: attempt to fork kernel thread '{}'", parent.name);
@@ -211,10 +211,13 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
     // TODO: implement ResourceType::Process/Task restricted capabilities.
 
     let parent_as = unsafe { &*parent.address_space.get() };
-    
+
     // 3. Memory check: ensure parent has actual user-space mappings.
     if !parent_as.has_user_mappings() {
-        log::warn!("fork: attempt to fork task '{}' with no user mappings", parent.name);
+        log::warn!(
+            "fork: attempt to fork task '{}' with no user mappings",
+            parent.name
+        );
         return Err(SyscallError::InvalidArgument);
     }
 

@@ -38,7 +38,10 @@
 
 use super::message::IpcMessage;
 use crate::sync::{SpinLock, WaitQueue};
-use alloc::{collections::BTreeMap, collections::VecDeque, sync::Arc};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 // ── Channel status byte values ────────────────────────────────────────────────
@@ -220,9 +223,7 @@ impl<T: Send> Sender<T> {
     pub fn receiver(&self) -> Receiver<T> {
         self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
         if self.inner.status.load(Ordering::Acquire) == STATUS_RECEIVER_GONE {
-            self.inner
-                .status
-                .store(STATUS_CONNECTED, Ordering::Release);
+            self.inner.status.store(STATUS_CONNECTED, Ordering::Release);
         }
         Receiver {
             inner: self.inner.clone(),
@@ -321,9 +322,7 @@ impl<T: Send> Receiver<T> {
     pub fn sender(&self) -> Sender<T> {
         self.inner.sender_count.fetch_add(1, Ordering::Relaxed);
         if self.inner.status.load(Ordering::Acquire) == STATUS_SENDER_GONE {
-            self.inner
-                .status
-                .store(STATUS_CONNECTED, Ordering::Release);
+            self.inner.status.store(STATUS_CONNECTED, Ordering::Release);
         }
         Sender {
             inner: self.inner.clone(),

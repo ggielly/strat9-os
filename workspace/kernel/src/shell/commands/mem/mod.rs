@@ -1,7 +1,8 @@
 //! Memory management commands
-use crate::shell_println;
-use crate::shell::ShellError;
-use crate::shell::output::format_bytes;
+use crate::{
+    shell::{output::format_bytes, ShellError},
+    shell_println,
+};
 use alloc::string::String;
 
 /// Display memory status
@@ -55,7 +56,7 @@ pub fn cmd_mem(args: &[String]) -> Result<(), ShellError> {
 /// Display detailed memory zone information
 fn cmd_mem_zones() -> Result<(), ShellError> {
     const MAX_ZONES: usize = 4;
-    let mut zones_info = [(0u8, 0u64, 0usize, 0usize); MAX_ZONES]; 
+    let mut zones_info = [(0u8, 0u64, 0usize, 0usize); MAX_ZONES];
     let mut zone_count = 0;
 
     {

@@ -230,13 +230,8 @@ impl<F: Fn() -> bool> WaitCondition<F> {
     ///
     /// Panics if called outside of a task context.
     pub fn wait(&self) {
-        self.queue.wait_until(|| {
-            if (self.condition)() {
-                Some(())
-            } else {
-                None
-            }
-        })
+        self.queue
+            .wait_until(|| if (self.condition)() { Some(()) } else { None })
     }
 
     /// Wake one task waiting on this condition.

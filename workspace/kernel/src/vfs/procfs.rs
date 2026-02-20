@@ -199,8 +199,12 @@ impl Scheme for ProcScheme {
                     "cpuinfo" => 10,
                     "meminfo" => 11,
                     "version" => 12,
-                    "self/status" => Self::encode_id(2000, current_task_id().map(|t| t.as_u64()).unwrap_or(0)),
-                    "self/cmdline" => Self::encode_id(3000, current_task_id().map(|t| t.as_u64()).unwrap_or(0)),
+                    "self/status" => {
+                        Self::encode_id(2000, current_task_id().map(|t| t.as_u64()).unwrap_or(0))
+                    }
+                    "self/cmdline" => {
+                        Self::encode_id(3000, current_task_id().map(|t| t.as_u64()).unwrap_or(0))
+                    }
                     _ if path.starts_with("self") => 1, // Should not happen with get_entry logic
                     _ => {
                         // Handle <pid>/status and <pid>/cmdline
@@ -213,7 +217,9 @@ impl Scheme for ProcScheme {
                                     "cmdline" => Self::encode_id(3000, pid),
                                     _ => 0xFFFF,
                                 }
-                            } else { 0xFFFF }
+                            } else {
+                                0xFFFF
+                            }
                         } else {
                             // Path is just <pid> - should be a directory handled below
                             0xFFFF
@@ -269,12 +275,18 @@ impl Scheme for ProcScheme {
                 12 => self.get_version(),
                 2000 => {
                     let tasks = get_all_tasks().ok_or(SyscallError::NotFound)?;
-                    let task = tasks.iter().find(|t| t.id.as_u64() == pid).ok_or(SyscallError::NotFound)?;
+                    let task = tasks
+                        .iter()
+                        .find(|t| t.id.as_u64() == pid)
+                        .ok_or(SyscallError::NotFound)?;
                     self.get_process_status(task)
                 }
                 3000 => {
                     let tasks = get_all_tasks().ok_or(SyscallError::NotFound)?;
-                    let task = tasks.iter().find(|t| t.id.as_u64() == pid).ok_or(SyscallError::NotFound)?;
+                    let task = tasks
+                        .iter()
+                        .find(|t| t.id.as_u64() == pid)
+                        .ok_or(SyscallError::NotFound)?;
                     format!("{}\n", task.name)
                 }
                 _ => return Err(SyscallError::IoError),

@@ -1,6 +1,5 @@
 //! Process management commands
-use crate::shell_println;
-use crate::shell::ShellError;
+use crate::{shell::ShellError, shell_println};
 use alloc::string::String;
 
 /// List all tasks

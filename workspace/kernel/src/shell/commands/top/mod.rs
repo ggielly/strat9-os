@@ -2,11 +2,15 @@
 //!
 //! Provides a real-time system monitoring interface using the VGA framebuffer.
 
-use crate::shell_println;
-use crate::shell::ShellError;
-use alloc::{string::String, vec, vec::Vec, format};
+use crate::{
+    arch::x86_64::vga::{
+        self, DockEdge, RgbColor, UiDockLayout, UiProgressBar, UiRect, UiTable, UiTheme,
+    },
+    shell::ShellError,
+    shell_println,
+};
+use alloc::{format, string::String, vec, vec::Vec};
 use core::sync::atomic::Ordering;
-use crate::arch::x86_64::vga::{self, RgbColor, UiTheme, UiRect, UiProgressBar, UiTable, UiDockLayout, DockEdge};
 
 /// Top command main loop
 pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
@@ -24,12 +28,14 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
 
     loop {
         let ticks = crate::process::scheduler::ticks();
-        
+
         // Only refresh every 100ms (assuming 100Hz timer)
         if ticks.saturating_sub(last_refresh_tick) < 10 {
             // Still check for input to stay responsive
             if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
-                if ch == b'q' { break; }
+                if ch == b'q' {
+                    break;
+                }
             }
             crate::process::yield_task();
             continue;
@@ -42,7 +48,7 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
             let guard = crate::memory::buddy::get_allocator().lock();
             guard.as_ref().map(|a| a.page_totals()).unwrap_or((0, 0))
         };
-        
+
         // 2. Prepare Canvas and Layout
         let canvas = vga::Canvas::new(theme.text, theme.background);
         canvas.begin_frame();
@@ -56,23 +62,49 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
         let body_area = layout.remaining();
 
         // 3. Draw Header: System Info
-        canvas.ui_panel(header_area.x, header_area.y, header_area.w, header_area.h, " Strat9 System Monitor ", "", theme);
-        
+        canvas.ui_panel(
+            header_area.x,
+            header_area.y,
+            header_area.w,
+            header_area.h,
+            " Strat9 System Monitor ",
+            "",
+            theme,
+        );
+
         // --- Memory Bar ---
-        let mem_usage = if total_pages > 0 { (used_pages * 100) / total_pages } else { 0 };
+        let mem_usage = if total_pages > 0 {
+            (used_pages * 100) / total_pages
+        } else {
+            0
+        };
         let mem_label_x = header_area.x + vga::ui_scale_px(16);
         let mem_label_y = header_area.y + vga::ui_scale_px(40);
-        
+
         canvas.ui_label(&vga::UiLabel {
-            rect: UiRect::new(mem_label_x, mem_label_y, vga::ui_scale_px(80), vga::ui_scale_px(16)),
+            rect: UiRect::new(
+                mem_label_x,
+                mem_label_y,
+                vga::ui_scale_px(80),
+                vga::ui_scale_px(16),
+            ),
             text: "Memory:",
-            fg: theme.accent, bg: theme.panel_bg, align: vga::TextAlign::Left
+            fg: theme.accent,
+            bg: theme.panel_bg,
+            align: vga::TextAlign::Left,
         });
-        
+
         canvas.ui_progress_bar(UiProgressBar {
-            rect: UiRect::new(mem_label_x + vga::ui_scale_px(70), mem_label_y + vga::ui_scale_px(2), vga::ui_scale_px(180), vga::ui_scale_px(12)),
+            rect: UiRect::new(
+                mem_label_x + vga::ui_scale_px(70),
+                mem_label_y + vga::ui_scale_px(2),
+                vga::ui_scale_px(180),
+                vga::ui_scale_px(12),
+            ),
             value: mem_usage as u8,
-            fg: RgbColor::new(0x7E, 0xC1, 0xFF), bg: RgbColor::new(0x12, 0x16, 0x1E), border: theme.panel_border
+            fg: RgbColor::new(0x7E, 0xC1, 0xFF),
+            bg: RgbColor::new(0x12, 0x16, 0x1E),
+            border: theme.panel_border,
         });
 
         // --- CPU Bars (Dynamic grid) ---
@@ -82,30 +114,49 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
             let row = i % 4;
             let x_off = col * vga::ui_scale_px(180);
             let y_off = row * vga::ui_scale_px(18);
-            
+
             let bar_x = cpu_base_x + x_off;
             let bar_y = header_area.y + vga::ui_scale_px(40) + y_off;
 
             canvas.ui_label(&vga::UiLabel {
                 rect: UiRect::new(bar_x, bar_y, vga::ui_scale_px(45), vga::ui_scale_px(16)),
                 text: &format!("CPU{}:", i),
-                fg: theme.accent, bg: theme.panel_bg, align: vga::TextAlign::Left
+                fg: theme.accent,
+                bg: theme.panel_bg,
+                align: vga::TextAlign::Left,
             });
-            
+
             // Synthetic load for visualization until per-cpu metrics are available
             let i_u64 = i as u64;
-            let cpu_load = if i == 0 { 10 + (ticks % 30) } else { 5 + (i_u64 * 3) % 15 }; 
+            let cpu_load = if i == 0 {
+                10 + (ticks % 30)
+            } else {
+                5 + (i_u64 * 3) % 15
+            };
             canvas.ui_progress_bar(UiProgressBar {
-                rect: UiRect::new(bar_x + vga::ui_scale_px(45), bar_y + vga::ui_scale_px(2), vga::ui_scale_px(100), vga::ui_scale_px(10)),
+                rect: UiRect::new(
+                    bar_x + vga::ui_scale_px(45),
+                    bar_y + vga::ui_scale_px(2),
+                    vga::ui_scale_px(100),
+                    vga::ui_scale_px(10),
+                ),
                 value: cpu_load as u8,
-                fg: RgbColor::new(0x58, 0xD6, 0xA3), bg: RgbColor::new(0x12, 0x16, 0x1E), border: theme.panel_border
+                fg: RgbColor::new(0x58, 0xD6, 0xA3),
+                bg: RgbColor::new(0x12, 0x16, 0x1E),
+                border: theme.panel_border,
             });
         }
 
         // 4. Draw Task List (Body)
         let mut table = UiTable {
             rect: body_area,
-            headers: vec![String::from("PID"), String::from("Name"), String::from("State"), String::from("Prio"), String::from("Ticks")],
+            headers: vec![
+                String::from("PID"),
+                String::from("Name"),
+                String::from("State"),
+                String::from("Prio"),
+                String::from("Ticks"),
+            ],
             rows: Vec::new(),
             theme,
         };
@@ -136,7 +187,9 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
         canvas.ui_label(&vga::UiLabel {
             rect: footer_area,
             text: " [q] Exit   [k] Kill   [+/-] Scale   Strat9-OS Microkernel ",
-            fg: theme.status_text, bg: theme.status_bg, align: vga::TextAlign::Left
+            fg: theme.status_text,
+            bg: theme.status_bg,
+            align: vga::TextAlign::Left,
         });
 
         canvas.end_frame();

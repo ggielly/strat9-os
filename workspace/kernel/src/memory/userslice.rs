@@ -261,7 +261,9 @@ impl UserSliceRead {
         }
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
         unsafe {
-            Ok(core::ptr::read_unaligned((self.ptr + offset as u64) as *const u8))
+            Ok(core::ptr::read_unaligned(
+                (self.ptr + offset as u64) as *const u8,
+            ))
         }
     }
 
@@ -272,7 +274,9 @@ impl UserSliceRead {
         }
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
         unsafe {
-            Ok(core::ptr::read_unaligned((self.ptr + offset as u64) as *const u64))
+            Ok(core::ptr::read_unaligned(
+                (self.ptr + offset as u64) as *const u64,
+            ))
         }
     }
 
@@ -287,9 +291,7 @@ impl UserSliceRead {
         }
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
         // T is Copy, so we can safely read it.
-        unsafe {
-            Ok(core::ptr::read_unaligned(self.ptr as *const T))
-        }
+        unsafe { Ok(core::ptr::read_unaligned(self.ptr as *const T)) }
     }
 
     /// Get the raw pointer (for logging/debugging only).

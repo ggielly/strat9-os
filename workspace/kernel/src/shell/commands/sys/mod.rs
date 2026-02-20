@@ -1,7 +1,8 @@
 //! System management commands
-use crate::shell_println;
-use crate::shell::ShellError;
-use crate::shell::output::clear_screen;
+use crate::{
+    shell::{output::clear_screen, ShellError},
+    shell_println,
+};
 use alloc::string::String;
 
 /// Display kernel version

@@ -1,16 +1,14 @@
 //! VFS management commands
-use crate::shell_println;
-use crate::shell::ShellError;
-use crate::vfs::{self, OpenFlags};
+use crate::{
+    shell::ShellError,
+    shell_println,
+    vfs::{self, OpenFlags},
+};
 use alloc::string::String;
 
 /// List mounted schemes or directory contents
 pub fn cmd_ls(args: &[String]) -> Result<(), ShellError> {
-    let path = if args.is_empty() {
-        "/"
-    } else {
-        &args[0]
-    };
+    let path = if args.is_empty() { "/" } else { &args[0] };
 
     if path == "/" {
         shell_println!("Mount points:");
@@ -71,8 +69,11 @@ pub fn cmd_cat(args: &[String]) -> Result<(), ShellError> {
                         crate::shell_print!("{}", s);
                     }
                     Err(e) => {
-                        shell_println!("
-Error reading file: {:?}", e);
+                        shell_println!(
+                            "
+Error reading file: {:?}",
+                            e
+                        );
                         break;
                     }
                 }
