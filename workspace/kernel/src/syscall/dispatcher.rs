@@ -2,7 +2,7 @@
 //!
 //! Routes syscall numbers to handler functions and converts results to RAX values.
 //! Called from the naked `syscall_entry` assembly with a pointer to `SyscallFrame`.
-use super::{error::SyscallError, fork::sys_fork, numbers::*, SyscallFrame};
+use super::{error::SyscallError, exec::sys_execve, fork::sys_fork, numbers::*, SyscallFrame};
 use super::{sys_clock_gettime, sys_nanosleep};
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
@@ -58,8 +58,9 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PROC_FORK => sys_fork(frame).map(|result| result.child_pid.as_u64()),
         SYS_PROC_GETPID => sys_proc_getpid(),
         SYS_PROC_GETPPID => sys_proc_getppid(),
-        SYS_PROC_WAITPID => sys_proc_waitpid(arg1 as i64, arg2, arg3 as u32),
+        SYS_PROC_WAITPID => super::wait::sys_waitpid(arg1 as i64, arg2, arg3 as u32).map(|pid| pid as u64),
         SYS_PROC_WAIT    => super::wait::sys_wait(arg1),
+        SYS_PROC_EXECVE  => sys_execve(frame, arg1, arg2, arg3),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),

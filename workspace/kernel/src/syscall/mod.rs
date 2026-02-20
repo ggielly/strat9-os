@@ -15,6 +15,7 @@
 
 pub mod dispatcher;
 pub mod error;
+pub mod exec;
 pub mod fork;
 pub mod futex;
 pub mod mmap;
@@ -24,6 +25,7 @@ pub mod time;
 pub mod wait;
 
 pub use dispatcher::dispatch;
+pub use exec::sys_execve;
 pub use time::{sys_clock_gettime, sys_nanosleep};
 pub use fork::sys_fork;
 

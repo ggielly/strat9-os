@@ -35,14 +35,14 @@ const PF_W: u32 = 2;
 const PF_R: u32 = 4;
 
 /// Maximum virtual address we accept for user-space mappings.
-const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
+pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
 
 /// User stack location (below the non-canonical gap).
-const USER_STACK_BASE: u64 = 0x0000_7FFF_F000_0000;
+pub const USER_STACK_BASE: u64 = 0x0000_7FFF_F000_0000;
 /// Number of 4 KiB pages for the user stack (16 pages = 64 KiB).
-const USER_STACK_PAGES: usize = 16;
+pub const USER_STACK_PAGES: usize = 16;
 /// Top of the user stack (stack grows down).
-const USER_STACK_TOP: u64 = USER_STACK_BASE + (USER_STACK_PAGES as u64) * 4096;
+pub const USER_STACK_TOP: u64 = USER_STACK_BASE + (USER_STACK_PAGES as u64) * 4096;
 
 // ---------------------------------------------------------------------------
 // ELF64 header structures
@@ -474,4 +474,20 @@ pub fn load_and_run_elf_with_caps(
     );
 
     Ok(task_id)
+}
+
+/// Load an ELF binary into the provided address space.
+/// Returns the entry point address.
+pub fn load_elf_image(
+    elf_data: &[u8],
+    user_as: &AddressSpace,
+) -> Result<u64, &'static str> {
+    let header = parse_header(elf_data)?;
+
+    for phdr in program_headers(elf_data, &header) {
+        if phdr.p_type == PT_LOAD {
+            load_segment(user_as, elf_data, &phdr)?;
+        }
+    }
+    Ok(header.e_entry)
 }
