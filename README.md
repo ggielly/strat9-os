@@ -1,13 +1,16 @@
 # Strat9-OS
 
-Strat9-OS is a modular microkernel written in Rust and assembly. The kernel provides scheduling, IPC, memory primitives, and interrupt routing. Everything else (filesystems, networking, drivers) runs as isolated userspace components called Silos, also written in Rust. The goal is to run various native binaries (ELF, JS, WASM..) into the kernel.
+Strat9-OS is a modular microkernel written in Rust and assembly. The kernel provides scheduling, IPC, memory primitives, and interrupt routing. Everything else (filesystems, networking, drivers) runs as isolated userspace components called Silos, also written in Rust. 
 
-The goal is to run silos (a kind of containers with ELF/WASM etc) directly on the kernel.
+The goal is to run various native binaries (ELF, JS, WASM..) inside the silo environment => IPC => kernel. And give features to silos like network stack, filesystem, etc. with Strates
+
+The Chevron shell can manage silos and strates.
 
 ## Architecture
 
 - Kernel (Bedrock) in Ring 0 : minimal, `#![no_std]`.
 - Silos are in Ring 3 : isolated components communicate via IPC.
+- Strate are in Silo : network stack, filesystem, etc.
 - Capabilities gate access to resources.
 - Plan 9 style scheme model for resources.
 
@@ -15,13 +18,13 @@ The goal is to run silos (a kind of containers with ELF/WASM etc) directly on th
 
 This project is in active development and not production-ready.
 
-### Screenshots
+### Screenshots from QEMU : bootsequence and Chevron shell
 
 ![Scheme filesystem](doc/scheme.jpg)
-*Scheme-style filesystem paths*
+*Scheme-style filesystem paths inside Chevron shell*
 
 ![Top - process monitor](doc/top.jpg)
-*Process monitor (top command)*
+*2D framebuffered process monitor like (top command)*
 
 ![Memory and CPU info](doc/mem_cpu.jpg)
 *Memory and CPU information*
@@ -106,13 +109,13 @@ rustup target add x86_64-unknown-none
 ```bash
 cargo make kernel
 cargo make limine-image
-cargo make run
+cargo make run-gui-smp or cargo make run-gui (for single CPU test)
 ```
 
 or
 
 ```bash
-cargo make run-gui
+cargo make
 ```
 
 ## Repository way of life
