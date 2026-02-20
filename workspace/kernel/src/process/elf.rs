@@ -16,7 +16,7 @@ use x86_64::{
 
 use crate::{
     capability::{Capability, CapabilityTable},
-    memory::address_space::{AddressSpace, VmaFlags, VmaType},
+    memory::address_space::{AddressSpace, VmaFlags, VmaType, VmaPageSize},
     process::{
         task::{CpuContext, KernelStack, SyncUnsafeCell, Task},
         TaskId, TaskPriority, TaskState,
@@ -381,8 +381,8 @@ fn compute_load_bias_and_entry(
     } else {
         let n_pages = (span as usize).div_ceil(4096);
         let load_base = user_as
-            .find_free_vma_range(PIE_BASE_ADDR, n_pages)
-            .or_else(|| user_as.find_free_vma_range(0x0000_0000_1000_0000, n_pages))
+            .find_free_vma_range(PIE_BASE_ADDR, n_pages, VmaPageSize::Small)
+            .or_else(|| user_as.find_free_vma_range(0x0000_0000_1000_0000, n_pages, VmaPageSize::Small))
             .ok_or("No virtual range for ET_DYN image")?;
         load_base
             .checked_sub(min_vaddr)
@@ -879,7 +879,7 @@ fn load_segment(
     } else {
         VmaType::Anonymous
     };
-    user_as.map_region(page_start, page_count, load_flags, vma_type)?;
+    user_as.map_region(page_start, page_count, load_flags, vma_type, VmaPageSize::Small)?;
 
     // Copy file data into the mapped pages.
     // We translate each page through the user AS to find its physical frame,
@@ -1091,6 +1091,7 @@ pub fn load_and_run_elf_with_caps(
         USER_STACK_PAGES,
         stack_flags,
         VmaType::Stack,
+        VmaPageSize::Small,
     )?;
     log::debug!(
         "[elf] User stack: {:#x}..{:#x} ({} pages)",

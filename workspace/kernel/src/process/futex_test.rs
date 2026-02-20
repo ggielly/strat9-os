@@ -75,11 +75,23 @@ fn map_test_pages() -> bool {
         user_accessible: true,
     };
 
-    if let Err(e) = aspace.map_region(TEST_PAGE_A, 1, flags, VmaType::Anonymous) {
+    if let Err(e) = aspace.map_region(
+        TEST_PAGE_A,
+        1,
+        flags,
+        VmaType::Anonymous,
+        crate::memory::address_space::VmaPageSize::Small,
+    ) {
         crate::serial_println!("[futex-test] map A failed: {}", e);
         return false;
     }
-    if let Err(e) = aspace.map_region(TEST_PAGE_B, 1, flags, VmaType::Anonymous) {
+    if let Err(e) = aspace.map_region(
+        TEST_PAGE_B,
+        1,
+        flags,
+        VmaType::Anonymous,
+        crate::memory::address_space::VmaPageSize::Small,
+    ) {
         crate::serial_println!("[futex-test] map B failed: {}", e);
         return false;
     }
@@ -325,8 +337,16 @@ extern "C" fn futex_test_main() -> ! {
 
     // Cleanup mapped pages.
     let aspace = crate::memory::kernel_address_space();
-    let _ = aspace.unmap_region(TEST_PAGE_A, 1);
-    let _ = aspace.unmap_region(TEST_PAGE_B, 1);
+    let _ = aspace.unmap_region(
+        TEST_PAGE_A,
+        1,
+        crate::memory::address_space::VmaPageSize::Small,
+    );
+    let _ = aspace.unmap_region(
+        TEST_PAGE_B,
+        1,
+        crate::memory::address_space::VmaPageSize::Small,
+    );
 
     crate::serial_println!(
         "[futex-test] summary: {}",

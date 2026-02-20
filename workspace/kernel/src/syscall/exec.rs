@@ -2,7 +2,7 @@
 //! Replaces the current process image with a new one.
 
 use crate::{
-    memory::{AddressSpace, UserSliceRead, VmaFlags, VmaType},
+    memory::{AddressSpace, UserSliceRead, VmaFlags, VmaType, VmaPageSize},
     process::{
         current_task_clone,
         elf::{load_elf_image, LoadedElfInfo, USER_STACK_BASE, USER_STACK_PAGES, USER_STACK_TOP},
@@ -95,6 +95,7 @@ pub fn sys_execve(
             USER_STACK_PAGES,
             stack_flags,
             VmaType::Stack,
+            VmaPageSize::Small,
         )
         .map_err(|_| SyscallError::OutOfMemory)?;
 

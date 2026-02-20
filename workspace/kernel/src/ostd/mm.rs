@@ -320,7 +320,7 @@ impl Drop for MappedPages {
             // SAFETY: We own the mapping and are responsible for unmapping
             unsafe {
                 crate::memory::address_space::kernel_address_space()
-                    .unmap_region(self.start_vaddr.as_u64(), page_count)
+                    .unmap_region(self.start_vaddr.as_u64(), page_count, crate::memory::address_space::VmaPageSize::Small)
                     .ok();
             }
         }

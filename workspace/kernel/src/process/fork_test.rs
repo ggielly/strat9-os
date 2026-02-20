@@ -76,9 +76,21 @@ fn spawn_user_program_task(
         user_accessible: true,
     };
     crate::serial_println!("[fork-test] {}: map code", name);
-    user_as.map_region(USER_CODE_ADDR, 1, code_flags, VmaType::Code)?;
+    user_as.map_region(
+        USER_CODE_ADDR,
+        1,
+        code_flags,
+        VmaType::Code,
+        crate::memory::address_space::VmaPageSize::Small,
+    )?;
     crate::serial_println!("[fork-test] {}: map stack", name);
-    user_as.map_region(USER_STACK_ADDR, 1, stack_flags, VmaType::Stack)?;
+    user_as.map_region(
+        USER_STACK_ADDR,
+        1,
+        stack_flags,
+        VmaType::Stack,
+        crate::memory::address_space::VmaPageSize::Small,
+    )?;
 
     let code_phys = user_as
         .translate(x86_64::VirtAddr::new(USER_CODE_ADDR))
@@ -187,7 +199,13 @@ fn cow_test_refcount_unmap() -> bool {
         executable: false,
         user_accessible: true,
     };
-    if let Err(e) = aspace.map_region(COW_TEST_ADDR, 1, flags, VmaType::Anonymous) {
+    if let Err(e) = aspace.map_region(
+        COW_TEST_ADDR,
+        1,
+        flags,
+        VmaType::Anonymous,
+        crate::memory::address_space::VmaPageSize::Small,
+    ) {
         crate::serial_println!("[fork-test] cow refcount: map failed: {}", e);
         return false;
     }
@@ -221,7 +239,11 @@ fn cow_test_refcount_unmap() -> bool {
         return false;
     }
 
-    if let Err(e) = aspace.unmap_region(COW_TEST_ADDR, 1) {
+    if let Err(e) = aspace.unmap_region(
+        COW_TEST_ADDR,
+        1,
+        crate::memory::address_space::VmaPageSize::Small,
+    ) {
         crate::serial_println!("[fork-test] cow refcount: parent unmap failed: {}", e);
         return false;
     }
@@ -231,7 +253,11 @@ fn cow_test_refcount_unmap() -> bool {
         return false;
     }
 
-    if let Err(e) = child.unmap_region(COW_TEST_ADDR, 1) {
+    if let Err(e) = child.unmap_region(
+        COW_TEST_ADDR,
+        1,
+        crate::memory::address_space::VmaPageSize::Small,
+    ) {
         crate::serial_println!("[fork-test] cow refcount: child unmap failed: {}", e);
         return false;
     }
@@ -258,7 +284,13 @@ fn cow_test_write_fault_copy() -> bool {
         executable: false,
         user_accessible: true,
     };
-    if let Err(e) = aspace.map_region(COW_TEST_ADDR, 1, flags, VmaType::Anonymous) {
+    if let Err(e) = aspace.map_region(
+        COW_TEST_ADDR,
+        1,
+        flags,
+        VmaType::Anonymous,
+        crate::memory::address_space::VmaPageSize::Small,
+    ) {
         crate::serial_println!("[fork-test] cow fault: map failed: {}", e);
         return false;
     }
@@ -328,8 +360,16 @@ fn cow_test_write_fault_copy() -> bool {
         return false;
     }
 
-    let _ = aspace.unmap_region(COW_TEST_ADDR, 1);
-    let _ = child.unmap_region(COW_TEST_ADDR, 1);
+    let _ = aspace.unmap_region(
+        COW_TEST_ADDR,
+        1,
+        crate::memory::address_space::VmaPageSize::Small,
+    );
+    let _ = child.unmap_region(
+        COW_TEST_ADDR,
+        1,
+        crate::memory::address_space::VmaPageSize::Small,
+    );
     true
 }
 

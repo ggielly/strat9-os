@@ -35,7 +35,13 @@ fn test_fault_maps_and_refcount() -> bool {
         }
     };
     if aspace
-        .reserve_region(DP_ADDR_A, 2, rw_flags(), VmaType::Anonymous)
+        .reserve_region(
+            DP_ADDR_A,
+            2,
+            rw_flags(),
+            VmaType::Anonymous,
+            crate::memory::address_space::VmaPageSize::Small,
+        )
         .is_err()
     {
         return false;
@@ -74,7 +80,13 @@ fn test_repeat_fault_same_page_no_leak() -> bool {
         Err(_) => return false,
     };
     if aspace
-        .reserve_region(DP_ADDR_B, 1, rw_flags(), VmaType::Anonymous)
+        .reserve_region(
+            DP_ADDR_B,
+            1,
+            rw_flags(),
+            VmaType::Anonymous,
+            crate::memory::address_space::VmaPageSize::Small,
+        )
         .is_err()
     {
         return false;
@@ -117,7 +129,13 @@ fn test_unmap_lazy_unfaulted_region() -> bool {
         Err(_) => return false,
     };
     if aspace
-        .reserve_region(DP_ADDR_C, 4, rw_flags(), VmaType::Anonymous)
+        .reserve_region(
+            DP_ADDR_C,
+            4,
+            rw_flags(),
+            VmaType::Anonymous,
+            crate::memory::address_space::VmaPageSize::Small,
+        )
         .is_err()
     {
         return false;
@@ -158,4 +176,3 @@ pub fn create_demand_paging_test_task() {
         crate::serial_println!("[dp-test] failed to create task");
     }
 }
-
