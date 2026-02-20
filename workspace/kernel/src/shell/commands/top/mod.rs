@@ -20,10 +20,23 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
     vga::set_double_buffer_mode(true);
 
     let theme = UiTheme::SLATE;
+    let mut last_refresh_tick = 0;
 
     loop {
-        // 1. Gather system data
         let ticks = crate::process::scheduler::ticks();
+        
+        // Only refresh every 100ms (assuming 100Hz timer)
+        if ticks.saturating_sub(last_refresh_tick) < 10 {
+            // Still check for input to stay responsive
+            if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
+                if ch == b'q' { break; }
+            }
+            crate::process::yield_task();
+            continue;
+        }
+        last_refresh_tick = ticks;
+
+        // 1. Gather system data
         let cpu_count = crate::arch::x86_64::percpu::cpu_count();
         let (total_pages, used_pages) = {
             let guard = crate::memory::buddy::get_allocator().lock();

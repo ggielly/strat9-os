@@ -1061,18 +1061,26 @@ fn check_wake_deadlines(current_time_ns: u64) {
     };
 
     if let Some(ref mut sched) = *scheduler {
-        // Collect IDs of tasks to wake (to avoid borrow issues)
-        let mut to_wake = alloc::vec::Vec::new();
+        // Use a fixed-size array to avoid heap allocation in interrupt context
+        const MAX_WAKE: usize = 32;
+        let mut to_wake = [TaskId::from_u64(0); MAX_WAKE];
+        let mut count = 0;
 
         for (id, task) in sched.all_tasks.iter() {
             let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
             if deadline != 0 && current_time_ns >= deadline {
-                to_wake.push(*id);
+                if count < MAX_WAKE {
+                    to_wake[count] = *id;
+                    count += 1;
+                } else {
+                    break; // Wake others on next tick
+                }
             }
         }
 
-        // Wake up tasks whose deadline has passed
-        for id in to_wake {
+        // Wake up tasks
+        for i in 0..count {
+            let id = to_wake[i];
             if let Some(task) = sched.all_tasks.get(&id) {
                 // Clear the deadline
                 task.wake_deadline_ns.store(0, Ordering::Relaxed);
