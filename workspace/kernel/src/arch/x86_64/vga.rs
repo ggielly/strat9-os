@@ -2604,8 +2604,8 @@ pub fn draw_system_status_line(theme: UiTheme) {
     let fps = current_fps(tick);
     let left = format!(" {} ", info.hostname);
     let right = format!(
-        "ip:{}  ver:{}  up:{}  fps:{}  load:n/a  mem:{} ",
-        info.ip, version, uptime, fps, mem
+        "ip:{}  ver:{}  uptime:{}  ticks:{}  FPS:{}  load:n/a  memfree:{} ",
+        info.ip, version, uptime, tick, fps, mem
     );
     ui_draw_status_bar(&left, &right, theme);
 }
@@ -2615,7 +2615,7 @@ fn draw_boot_status_line(theme: UiTheme) {
         draw_status_bar_inner(
             w,
             " strat9 ",
-            "ip:n/a  ver:boot  up:00:00:00  load:n/a  mem:n/a ",
+            "ip:n/a  ver:boot  up:00:00:00  ticks:0  load:n/a  mem:n/a ",
             theme,
         );
     });
@@ -2653,8 +2653,8 @@ pub fn maybe_refresh_system_status_line(theme: UiTheme) {
     let fps = current_fps(tick);
     let left = format!(" {} ", info.hostname);
     let right = format!(
-        "ip:{}  ver:{}  up:{}  fps:{}  load:n/a  mem:{} ",
-        info.ip, version, uptime, fps, mem
+        "ip:{}  ver:{}  up:{}  ticks:{}  fps:{}  load:n/a  mem:{} ",
+        info.ip, version, uptime, tick, fps, mem
     );
 
     if let Some(mut writer) = VGA_WRITER.try_lock() {
