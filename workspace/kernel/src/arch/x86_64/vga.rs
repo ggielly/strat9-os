@@ -2134,6 +2134,14 @@ pub fn text_rows() -> usize {
     VGA_WRITER.lock().rows()
 }
 
+pub fn get_text_cursor() -> (usize, usize) {
+    if !is_available() {
+        return (0, 0);
+    }
+    let writer = VGA_WRITER.lock();
+    (writer.col, writer.row)
+}
+
 pub fn set_text_cursor(col: usize, row: usize) {
     if !is_available() {
         return;

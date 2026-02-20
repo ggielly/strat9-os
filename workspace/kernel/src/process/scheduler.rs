@@ -199,9 +199,10 @@ impl Scheduler {
             }
         }
 
-        let zombie = children.iter().copied().find(|id| {
-            target.map_or(true, |t| t == *id) && self.zombies.contains_key(id)
-        });
+        let zombie = children
+            .iter()
+            .copied()
+            .find(|id| target.map_or(true, |t| t == *id) && self.zombies.contains_key(id));
 
         if let Some(child) = zombie {
             let status = self.zombies.remove(&child).unwrap_or(0);
@@ -219,6 +220,10 @@ impl Scheduler {
     /// Pick the next task to run on `cpu_index`.
     ///
     /// 1. Re-queues the current Running task (round-robin).
+    ///    The **idle task is never re-queued** — it is always available
+    ///    as the last-resort fallback.  Keeping it out of the ready queue
+    ///    ensures the queue becomes truly empty when there is no real work,
+    ///    which lets work-stealing kick in on other CPUs.
     /// 2. Pops from the local ready queue.
     /// 3. Falls back to **work-stealing** from the busiest other CPU.
     /// 4. Falls back to the per-CPU idle task.
@@ -232,7 +237,13 @@ impl Scheduler {
                 unsafe {
                     *task.state.get() = TaskState::Ready;
                 }
-                self.cpus[cpu_index].ready_queue.push_back(task);
+                // Never re-queue the per-CPU idle task.  It lives in
+                // `cpus[cpu_index].idle_task` and is cloned as a fallback
+                // below.  Putting it in the ready queue prevents it from
+                // ever being empty, which breaks work-stealing.
+                if !Arc::ptr_eq(&task, &self.cpus[cpu_index].idle_task) {
+                    self.cpus[cpu_index].ready_queue.push_back(task);
+                }
             }
         }
 
@@ -377,6 +388,21 @@ pub fn schedule() -> ! {
 }
 
 pub fn schedule_on_cpu(cpu_index: usize) -> ! {
+    // Disable interrupts for the entire critical section.
+    //
+    // On the BSP, IF may be 1 (interrupts were enabled in Phase 9).
+    // Without CLI, a timer interrupt between `pick_next_task` (which sets
+    // `current_task`) and `restore_first_task` would let `maybe_preempt()`
+    // call `switch_context` on the *init stack*, corrupting the task's
+    // `saved_rsp` and creating an infinite loop.
+    //
+    // APs already arrive here with IF=0 (from the trampoline), but the
+    // explicit CLI makes the contract clear for all callers.
+    //
+    // `task_entry_trampoline` executes `sti` when the first task starts,
+    // so interrupts are re-enabled at exactly the right moment.
+    crate::arch::x86_64::cli();
+
     // APs may arrive here before the BSP has called init_scheduler().
     // Spin-wait (releasing the lock each iteration) until the scheduler
     // is initialized, then pick the first task.
@@ -411,6 +437,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 
     // Jump to the first task (never returns)
     // SAFETY: The context was set up by CpuContext::new with a valid stack frame.
+    // Interrupts are disabled; the trampoline's `sti` re-enables them.
     unsafe {
         restore_first_task(&raw const (*first_task.context.get()).saved_rsp);
         core::hint::unreachable_unchecked()
@@ -984,6 +1011,18 @@ pub fn timer_tick() {
 
     // Check wake deadlines for sleeping tasks
     check_wake_deadlines(current_time_ns);
+
+    // Increment ticks for the task currently running on this CPU
+    if let Some(mut guard) = SCHEDULER.try_lock() {
+        if let Some(ref mut sched) = *guard {
+            let cpu_idx = current_cpu_index();
+            if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
+                if let Some(ref current_task) = cpu.current_task {
+                    current_task.ticks.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
 }
 
 /// Check wake deadlines for all tasks and wake up those whose sleep has expired.

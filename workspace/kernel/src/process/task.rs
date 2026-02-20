@@ -122,9 +122,10 @@ pub struct Task {
     /// Program break (end of heap), in bytes. 0 = not yet initialised.
     /// Lazily set to `BRK_BASE` on the first `sys_brk` call.
     pub brk: AtomicU64,
-    /// Next candidate virtual address for anonymous `mmap` allocations.
-    /// Starts at `MMAP_BASE` and advances with each successful mapping.
+    /// mmap_hint: next candidate virtual address for anonymous mmap allocations
     pub mmap_hint: AtomicU64,
+    /// Total CPU ticks consumed by this task
+    pub ticks: AtomicU64,
 }
 
 /// CPU context saved/restored during context switches.
@@ -301,6 +302,7 @@ impl Task {
             wake_deadline_ns: AtomicU64::new(0),
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
+            ticks: AtomicU64::new(0),
         }))
     }
 
@@ -342,6 +344,7 @@ impl Task {
             wake_deadline_ns: AtomicU64::new(0),
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
+            ticks: AtomicU64::new(0),
         }))
     }
 }

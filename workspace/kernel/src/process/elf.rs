@@ -433,6 +433,7 @@ pub fn load_and_run_elf_with_caps(
         wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
         brk: core::sync::atomic::AtomicU64::new(0),
         mmap_hint: core::sync::atomic::AtomicU64::new(0x0000_0000_6000_0000),
+        ticks: core::sync::atomic::AtomicU64::new(0),
     });
 
     // Seed capabilities into the new task (before scheduling).
