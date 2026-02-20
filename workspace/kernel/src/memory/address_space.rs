@@ -719,6 +719,16 @@ impl AddressSpace {
         self.is_kernel
     }
 
+    /// Check if this address space has any user-space memory mappings.
+    pub fn has_user_mappings(&self) -> bool {
+        if self.is_kernel {
+            return false;
+        }
+        let regions = self.regions.lock();
+        // Check for any non-kernel mappings.
+        regions.values().any(|vma| vma.vma_type != VmaType::Kernel)
+    }
+
     /// Unmap all tracked user regions (best-effort).
     ///
     /// This frees user frames and clears the VMA list. Kernel mappings are untouched.

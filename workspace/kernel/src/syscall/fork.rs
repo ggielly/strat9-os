@@ -170,8 +170,12 @@ fn build_child_task(
         capabilities: SyncUnsafeCell::new(parent_caps),
         address_space: SyncUnsafeCell::new(child_as),
         fd_table: SyncUnsafeCell::new(parent_fd),
+        // POSIX: pending signals are NOT inherited by the child.
         pending_signals: SyncUnsafeCell::new(SignalSet::new()),
+        // POSIX: signal mask IS inherited.
         blocked_signals: SyncUnsafeCell::new(parent_blocked),
+        // POSIX: signal actions (handlers) ARE inherited.
+        // TODO: support SA_NOCLDWAIT and other complex signal flags.
         signal_actions: SyncUnsafeCell::new(parent_actions),
         signal_stack: SyncUnsafeCell::new(parent_sigstack),
         itimers: crate::process::timer::ITimers::new(),
@@ -195,9 +199,23 @@ fn build_child_task(
 /// SYS_PROC_FORK (302): fork with copy-on-write address-space cloning.
 pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
     let parent = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let parent_as = unsafe { &*parent.address_space.get() };
-    if parent_as.is_kernel() {
+    
+    // 1. Sanity check: cannot fork a kernel thread.
+    if parent.is_kernel() {
+        log::warn!("fork: attempt to fork kernel thread '{}'", parent.name);
         return Err(SyscallError::PermissionDenied);
+    }
+
+    // 2. Capability check: check if task is restricted from forking.
+    // For now, we allow fork for all user processes unless restricted.
+    // TODO: implement ResourceType::Process/Task restricted capabilities.
+
+    let parent_as = unsafe { &*parent.address_space.get() };
+    
+    // 3. Memory check: ensure parent has actual user-space mappings.
+    if !parent_as.has_user_mappings() {
+        log::warn!("fork: attempt to fork task '{}' with no user mappings", parent.name);
+        return Err(SyscallError::InvalidArgument);
     }
 
     let child_as = parent_as

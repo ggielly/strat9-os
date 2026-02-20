@@ -629,6 +629,8 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 }
                 if let Some(parent_id) = parent {
                     let _ = sched.wake_task_locked(parent_id);
+                    // Notify parent that a child has terminated.
+                    let _ = crate::process::signal::send_signal(parent_id, crate::process::signal::Signal::SIGCHLD);
                 }
             }
         }
