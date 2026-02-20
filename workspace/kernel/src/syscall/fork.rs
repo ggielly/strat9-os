@@ -264,8 +264,10 @@ pub fn handle_cow_fault(
         // Case 1: We are the sole owner. Just make it writable.
         let new_flags = (flags | PageTableFlags::WRITABLE) & !COW_BIT;
         unsafe {
-            mapper.update_flags(page, new_flags).map_err(|_| "Failed to update flags")?.flush();
+            mapper.update_flags(page, new_flags).map_err(|_| "Failed to update flags")?.ignore();
         }
+        // Invalidate TLB on all CPUs (SMP-safe).
+        crate::arch::x86_64::tlb::shootdown_page(VirtAddr::new(virt_addr));
         return Ok(());
     }
 
@@ -286,8 +288,11 @@ pub fn handle_cow_fault(
     unsafe {
         mapper.map_to(page, new_frame, new_flags, &mut frame_allocator)
             .map_err(|_| "Failed to map new COW frame")?
-            .flush();
+            .ignore();
     }
+    
+    // Invalidate TLB on all CPUs (SMP-safe).
+    crate::arch::x86_64::tlb::shootdown_page(VirtAddr::new(virt_addr));
 
     // Decrement refcount of old frame
     crate::memory::cow::frame_dec_ref(old_frame);

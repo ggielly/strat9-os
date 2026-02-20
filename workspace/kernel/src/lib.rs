@@ -285,6 +285,12 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         vga_println!("[OK] APIC + I/O APIC + APIC timer active");
     }
 
+    // Initialize TLB shootdown system (SMP safety for COW operations).
+    if apic_active {
+        arch::x86_64::tlb::init();
+        serial_println!("[init] TLB shootdown system initialized.");
+    }
+
     // ================================================
     // Phase 6j: SMP bring-up (AP boot) + per-CPU data
     // ================================================

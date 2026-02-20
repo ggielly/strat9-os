@@ -12,13 +12,32 @@
 //!   1. If refcount > 1: allocate new frame, copy content, update PTE
 //!   2. If refcount == 1: just mark page as writable (no copy needed)
 //!
+//! # SMP Safety
+//!
+//! - Frame metadata operations are protected by a global COW_LOCK spinlock
+//! - TLB shootdown is performed after modifying page table flags
+//! - Refcounting is atomic (SeqCst) for concurrent access safety
+//!
 //! # References
 //!
 //! - MIT 6.828 xv6 COW Lab: https://pdos.csail.mit.edu/6.828/2021/labs/cow.html
 //! - Philipp Oppermann Paging Guide: https://os.phil-opp.com/paging-introduction/
+//! - Linux kernel: mm/memory.c (do_wp_page)
 
-use crate::memory::frame::{FrameAllocator, PhysFrame};
+use crate::{memory::frame::{FrameAllocator, PhysFrame}, sync::SpinLock};
 use core::sync::atomic::{AtomicU32, Ordering};
+
+/// Global lock protecting COW metadata operations.
+///
+/// This lock must be held when:
+/// - Modifying frame reference counts
+/// - Allocating/freeing frames during COW resolution
+/// - Updating COW flags in frame metadata
+///
+/// Single-page TLB invalidation (invlpg) is performed locally without holding
+/// the lock, but TLB shootdown IPIs are sent while holding the lock to prevent
+/// races with concurrent COW operations.
+static COW_LOCK: SpinLock<()> = SpinLock::new(());
 
 /// Maximum number of physical frames we can track
 /// Adjust based on your system's maximum RAM (e.g., 64GB = 16M frames)
@@ -133,21 +152,29 @@ fn frame_to_pfn(frame: PhysFrame) -> u64 {
     frame.start_address.as_u64() >> 12
 }
 
-/// Increment reference count for a physical frame
+/// Increment reference count for a physical frame (SMP-safe).
+///
+/// Acquires COW_LOCK to prevent races with concurrent dec_ref operations.
 pub fn frame_inc_ref(frame: PhysFrame) {
+    let _lock = COW_LOCK.lock();
     let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta_mut(pfn) {
         meta.inc_ref();
     }
 }
 
-/// Decrement reference count and free if zero
+/// Decrement reference count and free if zero (SMP-safe).
+///
+/// Acquires COW_LOCK to prevent races with concurrent inc_ref operations.
+/// If refcount drops to zero, the frame is freed to the buddy allocator.
 pub fn frame_dec_ref(frame: PhysFrame) {
+    let _lock = COW_LOCK.lock();
     let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta_mut(pfn) {
         let old_ref = meta.dec_ref();
         if old_ref == 1 {
-            // Last reference: free the frame
+            // Last reference: free the frame (lock is already held).
+            drop(_lock); // Release COW_LOCK before acquiring allocator lock
             let mut allocator = crate::memory::get_allocator().lock();
             if let Some(alloc) = allocator.as_mut() {
                 alloc.free(frame, 0); // Order 0 = single page
@@ -156,14 +183,15 @@ pub fn frame_dec_ref(frame: PhysFrame) {
     }
 }
 
-/// Get reference count for a frame
+/// Get reference count for a frame (lock-free read).
 pub fn frame_get_refcount(frame: PhysFrame) -> u32 {
     let pfn = frame_to_pfn(frame);
     get_frame_meta(pfn).map(|m| m.get_refcount()).unwrap_or(0)
 }
 
-/// Set COW flag on a frame
+/// Set COW flag on a frame (SMP-safe).
 pub fn frame_set_cow(frame: PhysFrame) {
+    let _lock = COW_LOCK.lock();
     let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta_mut(pfn) {
         let flags = meta.get_flags() | frame_flags::COW;
@@ -171,8 +199,9 @@ pub fn frame_set_cow(frame: PhysFrame) {
     }
 }
 
-/// Clear COW flag on a frame
+/// Clear COW flag on a frame (SMP-safe).
 pub fn frame_clear_cow(frame: PhysFrame) {
+    let _lock = COW_LOCK.lock();
     let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta_mut(pfn) {
         let flags = meta.get_flags() & !frame_flags::COW;
@@ -180,14 +209,15 @@ pub fn frame_clear_cow(frame: PhysFrame) {
     }
 }
 
-/// Check if a frame is marked as COW
+/// Check if a frame is marked as COW (lock-free read).
 pub fn frame_is_cow(frame: PhysFrame) -> bool {
     let pfn = frame_to_pfn(frame);
     get_frame_meta(pfn).map(|m| m.is_cow()).unwrap_or(false)
 }
 
-/// Mark a frame as DLL (shared, never COW)
+/// Mark a frame as DLL (shared, never COW) (SMP-safe).
 pub fn frame_set_dll(frame: PhysFrame) {
+    let _lock = COW_LOCK.lock();
     let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta_mut(pfn) {
         let flags = meta.get_flags() | frame_flags::DLL;
@@ -195,7 +225,7 @@ pub fn frame_set_dll(frame: PhysFrame) {
     }
 }
 
-/// Check if a frame is a DLL frame
+/// Check if a frame is a DLL frame (lock-free read).
 pub fn frame_is_dll(frame: PhysFrame) -> bool {
     let pfn = frame_to_pfn(frame);
     get_frame_meta(pfn).map(|m| m.is_dll()).unwrap_or(false)

@@ -668,9 +668,10 @@ impl AddressSpace {
             }
         }
 
-        // Flush parent TLB if we modified any protections
+        // Flush parent TLB if we modified any protections.
+        // Use TLB shootdown to invalidate on all CPUs (SMP-safe).
         if tlb_flush_needed {
-            x86_64::instructions::tlb::flush_all();
+            crate::arch::x86_64::tlb::shootdown_all();
         }
 
         Ok(child)
