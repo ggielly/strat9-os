@@ -191,6 +191,120 @@ impl AddressSpace {
         }
     }
 
+    /// Reserve a contiguous region of virtual pages without allocating physical frames.
+    ///
+    /// The pages will be mapped lazily during page faults (Demand Paging).
+    pub fn reserve_region(
+        &self,
+        start: u64,
+        page_count: usize,
+        flags: VmaFlags,
+        vma_type: VmaType,
+    ) -> Result<(), &'static str> {
+        if page_count == 0 || start & 0xFFF != 0 {
+            return Err("Invalid region arguments");
+        }
+        let len = (page_count as u64)
+            .checked_mul(4096)
+            .ok_or("Region length overflow")?;
+        let end = start.checked_add(len).ok_or("Region end overflow")?;
+        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        if end > USER_SPACE_END {
+            return Err("Region out of user-space range");
+        }
+
+        // Reject overlapping VMAs
+        {
+            let regions = self.regions.lock();
+            if regions.iter().any(|(&vma_start, vma)| {
+                let vma_end = vma_start.saturating_add((vma.page_count as u64).saturating_mul(4096));
+                vma_start < end && vma_end > start
+            }) {
+                return Err("Region overlaps existing mapping");
+            }
+        }
+
+        // Track the region, attempting to merge with previous.
+        let mut regions = self.regions.lock();
+        let mut merged = false;
+
+        if let Some((&prev_start, prev_vma)) = regions.range(..start).next_back() {
+            let prev_end = prev_start + (prev_vma.page_count as u64) * 4096;
+            if prev_end == start && prev_vma.flags == flags && prev_vma.vma_type == vma_type {
+                let new_count = prev_vma.page_count + page_count;
+                let updated_vma = VirtualMemoryRegion {
+                    start: prev_start,
+                    page_count: new_count,
+                    flags,
+                    vma_type,
+                };
+                regions.insert(prev_start, updated_vma);
+                merged = true;
+            }
+        }
+
+        if !merged {
+            let region = VirtualMemoryRegion {
+                start,
+                page_count,
+                flags,
+                vma_type,
+            };
+            regions.insert(start, region);
+        }
+
+        log::trace!("Reserved lazy region: {:#x} ({} pages)", start, page_count);
+        Ok(())
+    }
+
+    /// Handle a page fault by checking if the address falls within a reserved VMA.
+    ///
+    /// If it does, allocates a physical frame and maps it.
+    pub fn handle_fault(&self, fault_addr: u64) -> Result<(), &'static str> {
+        let page_addr = fault_addr & !0xFFF;
+        
+        // 1. Find the VMA covering this address
+        let vma = {
+            let regions = self.regions.lock();
+            let mut iter = regions.range(..=page_addr);
+            let (&start, vma) = iter.next_back().ok_or("No VMA found for address")?;
+            let end = start + (vma.page_count as u64) * 4096;
+            if fault_addr >= end {
+                return Err("Address outside VMA bounds");
+            }
+            vma.clone()
+        };
+
+        // 2. Only Anonymous/Stack regions support demand paging for now
+        match vma.vma_type {
+            VmaType::Anonymous | VmaType::Stack | VmaType::Code => {},
+            _ => return Err("VMA type does not support demand paging"),
+        }
+
+        // 3. Allocate and map a single page
+        let mut frame_allocator = crate::memory::paging::BuddyFrameAllocator;
+        let frame = frame_allocator.allocate_frame().ok_or("OOM during demand paging")?;
+        
+        // Zero the frame
+        unsafe {
+            let virt = crate::memory::phys_to_virt(frame.start_address().as_u64());
+            core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+        }
+
+        let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
+        let page_flags = vma.flags.to_page_flags();
+
+        // SAFETY: We own the address space.
+        unsafe {
+            self.mapper().map_to(page, frame, page_flags, &mut frame_allocator)
+                .map_err(|_| "Failed to map demand page")?
+                .flush();
+        }
+
+        log::trace!("Demand paging: mapped {:#x} to frame {:#x}", page_addr, frame.start_address().as_u64());
+        Ok(())
+    }
+
     /// Map a contiguous region of pages backed by newly allocated physical frames.
     ///
     /// Frames are allocated from the buddy allocator and zero-filled.

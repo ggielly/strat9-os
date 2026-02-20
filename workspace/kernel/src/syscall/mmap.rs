@@ -163,10 +163,10 @@ pub fn sys_mmap(
             .ok_or(SyscallError::OutOfMemory)?
     };
 
-    // ── Map the region ────────────────────────────────────────────────────
+    // ── Map the region (Lazily) ───────────────────────────────────────────
     let vma_flags = prot_to_vma_flags(prot);
     addr_space
-        .map_region(target, n_pages, vma_flags, VmaType::Anonymous)
+        .reserve_region(target, n_pages, vma_flags, VmaType::Anonymous)
         .map_err(|_| SyscallError::OutOfMemory)?;
 
     // ── Advance mmap_hint past the new mapping (non-fixed only) ──────────
@@ -288,7 +288,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             user_accessible: true,
         };
         if unsafe { &*task.address_space.get() }
-            .map_region(old_page_end, n_pages, vma_flags, VmaType::Anonymous)
+            .reserve_region(old_page_end, n_pages, vma_flags, VmaType::Anonymous)
             .is_err()
         {
             // OOM — return the unchanged break (Linux behaviour).

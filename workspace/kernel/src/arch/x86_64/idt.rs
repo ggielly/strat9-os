@@ -136,13 +136,21 @@ extern "x86-interrupt" fn page_fault_handler(
             let address_space = unsafe { &*task.address_space.get() };
             if let Ok(vaddr) = fault_addr {
                 match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), address_space) {
-                    Ok(()) => {
-                        // COW fault resolved successfully - return to userland
-                        return;
-                    }
-                    Err(_) => {
-                        // Not a COW fault - fall through to normal page fault handling
-                    }
+                    Ok(()) => return,
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
+    // Try Demand Paging (lazy allocation) if page is not present
+    if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) && is_user {
+        if let Some(task) = crate::process::current_task_clone() {
+            let address_space = unsafe { &*task.address_space.get() };
+            if let Ok(vaddr) = fault_addr {
+                match address_space.handle_fault(vaddr.as_u64()) {
+                    Ok(()) => return,
+                    Err(_) => {}
                 }
             }
         }
