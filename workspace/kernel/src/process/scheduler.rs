@@ -593,6 +593,10 @@ pub fn maybe_preempt() {
 extern "C" fn idle_task_main() -> ! {
     log::info!("Idle task started");
     loop {
+        // Be explicit on SMP: never rely on inherited IF state.
+        // If IF=0, HLT can deadlock that CPU forever.
+        crate::arch::x86_64::sti();
+        
         // Halt until next interrupt (saves power, timer will wake us)
         crate::arch::x86_64::hlt();
     }
