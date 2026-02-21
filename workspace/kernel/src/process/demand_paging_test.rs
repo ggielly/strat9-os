@@ -37,7 +37,7 @@ fn test_fault_maps_and_refcount() -> bool {
     if aspace
         .reserve_region(
             DP_ADDR_A,
-            2,
+            1,
             rw_flags(),
             VmaType::Anonymous,
             crate::memory::address_space::VmaPageSize::Small,
@@ -77,10 +77,12 @@ fn test_fault_maps_and_refcount() -> bool {
 }
 
 fn test_repeat_fault_same_page_no_leak() -> bool {
+    crate::serial_println!("[dp-test] t2: new_user");
     let aspace = match new_user_as() {
         Ok(v) => v,
         Err(_) => return false,
     };
+    crate::serial_println!("[dp-test] t2: reserve");
     if aspace
         .reserve_region(
             DP_ADDR_B,
@@ -91,10 +93,13 @@ fn test_repeat_fault_same_page_no_leak() -> bool {
         )
         .is_err()
     {
+        crate::serial_println!("[dp-test] t2: reserve failed");
         return false;
     }
 
+    crate::serial_println!("[dp-test] t2: fault-1");
     if aspace.handle_fault(DP_ADDR_B).is_err() {
+        crate::serial_println!("[dp-test] t2: fault-1 failed");
         return false;
     }
     let phys1 = match aspace.translate(x86_64::VirtAddr::new(DP_ADDR_B)) {
@@ -102,7 +107,9 @@ fn test_repeat_fault_same_page_no_leak() -> bool {
         None => return false,
     };
 
+    crate::serial_println!("[dp-test] t2: fault-2");
     if aspace.handle_fault(DP_ADDR_B).is_err() {
+        crate::serial_println!("[dp-test] t2: fault-2 failed");
         return false;
     }
     let phys2 = match aspace.translate(x86_64::VirtAddr::new(DP_ADDR_B)) {
@@ -117,9 +124,12 @@ fn test_repeat_fault_same_page_no_leak() -> bool {
         start_address: phys1,
     };
     if crate::memory::cow::frame_get_refcount(frame) != 1 {
+        crate::serial_println!("[dp-test] t2: bad refcount");
         return false;
     }
+    crate::serial_println!("[dp-test] t2: unmap");
     if aspace.unmap_range(DP_ADDR_B, 4096).is_err() {
+        crate::serial_println!("[dp-test] t2: unmap failed");
         return false;
     }
     crate::memory::cow::frame_get_refcount(frame) == 0
