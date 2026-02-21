@@ -177,10 +177,11 @@ extern "C" fn demand_paging_test_main() -> ! {
 }
 
 pub fn create_demand_paging_test_task() {
-    if let Ok(task) = Task::new_kernel_task(
+    if let Ok(task) = Task::new_kernel_task_with_stack(
         demand_paging_test_main,
         "demand-paging-test",
         TaskPriority::Normal,
+        64 * 1024,
     ) {
         add_task(task);
     } else {
