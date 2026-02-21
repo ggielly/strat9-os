@@ -173,7 +173,7 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                 let task_ticks = task.ticks.load(Ordering::Relaxed);
 
                 table.rows.push(vec![
-                    format!("{}", task.id.as_u64()),
+                    format!("{}", task.pid),
                     String::from(task.name),
                     String::from(state_str),
                     format!("{:?}", task.priority),

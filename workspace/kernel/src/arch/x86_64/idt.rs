@@ -121,6 +121,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
                 crate::silo::SiloFaultReason::InvalidOpcode,
                 stack_frame.instruction_pointer.as_u64(),
                 0,
+                stack_frame.instruction_pointer.as_u64(),
             );
             return;
         }
@@ -172,6 +173,7 @@ extern "x86-interrupt" fn page_fault_handler(
                 crate::silo::SiloFaultReason::PageFault,
                 fault_addr.map(|v| v.as_u64()).unwrap_or(0),
                 error_code.bits() as u64,
+                stack_frame.instruction_pointer.as_u64(),
             );
             return;
         }
@@ -274,6 +276,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
                 crate::silo::SiloFaultReason::GeneralProtection,
                 stack_frame.instruction_pointer.as_u64(),
                 error_code,
+                stack_frame.instruction_pointer.as_u64(),
             );
             return;
         }

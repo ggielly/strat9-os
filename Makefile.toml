@@ -7,6 +7,9 @@ CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
 KERNEL_TARGET = "x86_64-unknown-none"
 BUILD_DIR = "build"
 QEMU = "qemu-system-x86_64"
+GDB = "gdb"
+QEMU_GDB_PORT = "1234"
+STRAT9_PROFILE = "debug"
 
 # =============================================================================
 # Build Tasks - limine bootloader
@@ -187,29 +190,38 @@ args = [
 # =============================================================================
 
 [tasks.kernel]
-description = "Build the Strat9 kernel (release)"
+description = "Build the Strat9 kernel (debug profile, symbols enabled)"
 cwd = "workspace/kernel"
 command = "cargo"
-args = ["build", "--release", "--target", "${KERNEL_TARGET}"]
+args = ["build", "--target", "${KERNEL_TARGET}"]
 
 [tasks.kernel-test]
-description = "Build the Strat9 kernel (release) with runtime self-tests"
+description = "Build the Strat9 kernel (debug profile) with runtime self-tests"
 cwd = "workspace/kernel"
 command = "cargo"
 args = [
     "build",
-    "--release",
     "--target",
     "${KERNEL_TARGET}",
     "--features",
     "selftest",
 ]
 
-[tasks.kernel-debug]
-description = "Build the Strat9 kernel (debug)"
+[tasks.kernel-release]
+description = "Build the Strat9 kernel (release profile)"
 cwd = "workspace/kernel"
 command = "cargo"
-args = ["build", "--target", "${KERNEL_TARGET}"]
+args = ["build", "--release", "--target", "${KERNEL_TARGET}"]
+
+[tasks.kernel-dev-opt]
+description = "Build the Strat9 kernel (dev-opt profile)"
+cwd = "workspace/kernel"
+command = "cargo"
+args = ["build", "--profile", "dev-opt", "--target", "${KERNEL_TARGET}"]
+
+[tasks.kernel-debug]
+description = "Alias: build the Strat9 kernel (debug profile)"
+alias = "kernel"
 
 [tasks.check]
 description = "Check kernel code without building"
@@ -233,7 +245,35 @@ args = ["fmt", "--all"]
 # =============================================================================
 
 [tasks.strate-ext4]
-description = "Build the EXT4 userspace filesystem component (LEGACY)"
+description = "Build the EXT4 userspace filesystem component (debug profile)"
+cwd = "workspace/components/strate-fs-ext4"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-fs-ramfs]
+description = "Build the RAM filesystem component (debug profile)"
+cwd = "workspace/components/strate-fs-ramfs"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-ext4-release]
+description = "Build the EXT4 userspace filesystem component (release profile)"
 cwd = "workspace/components/strate-fs-ext4"
 command = "cargo"
 args = [
@@ -247,8 +287,8 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
-[tasks.strate-fs-ramfs]
-description = "Build the RAM filesystem component"
+[tasks.strate-fs-ramfs-release]
+description = "Build the RAM filesystem component (release profile)"
 cwd = "workspace/components/strate-fs-ramfs"
 command = "cargo"
 args = [
@@ -256,6 +296,38 @@ args = [
     "--target",
     "x86_64-unknown-none",
     "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-ext4-dev-opt]
+description = "Build the EXT4 userspace filesystem component (dev-opt profile)"
+cwd = "workspace/components/strate-fs-ext4"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-fs-ramfs-dev-opt]
+description = "Build the RAM filesystem component (dev-opt profile)"
+cwd = "workspace/components/strate-fs-ramfs"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
     "-Z",
     "build-std=core,alloc",
     "-Z",
@@ -275,6 +347,24 @@ bash tools/scripts/create-limine-image.sh
 description = "Create bootable ISO/IMG with Limine + kernel (self-tests enabled)"
 dependencies = ["setup-limine", "kernel-test", "strate-ext4", "strate-fs-ramfs"]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os-test" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-limine-image.sh
+''']
+
+[tasks.limine-image-dev-opt]
+description = "Create bootable ISO/IMG with Limine + kernel (dev-opt profile)"
+dependencies = ["setup-limine", "kernel-dev-opt", "strate-ext4-dev-opt", "strate-fs-ramfs-dev-opt"]
+env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "dev-opt" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-limine-image.sh
+''']
+
+[tasks.limine-image-release]
+description = "Create bootable ISO/IMG with Limine + kernel (release profile)"
+dependencies = ["setup-limine", "kernel-release", "strate-ext4-release", "strate-fs-ramfs-release"]
+env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release" }
 script_runner = "@shell"
 script = ['''
 bash tools/scripts/create-limine-image.sh
@@ -322,9 +412,121 @@ args = [
     "guest_errors",
 ]
 
+[tasks.run-gui-release]
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk (release profile)"
+dependencies = ["limine-image-release"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu.log",
+    "-d",
+    "guest_errors",
+]
+
+[tasks.run-gui-dev-opt]
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk (dev-opt profile)"
+dependencies = ["limine-image-dev-opt"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu.log",
+    "-d",
+    "guest_errors",
+]
+
 [tasks.run-gui-smp]
 description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs"
 dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-smp",
+    "2",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu.log",
+    "-d",
+    "guest_errors",
+]
+
+[tasks.run-gui-smp-release]
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs (release profile)"
+dependencies = ["limine-image-release"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-smp",
+    "2",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu.log",
+    "-d",
+    "guest_errors",
+]
+
+[tasks.run-gui-smp-dev-opt]
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs (dev-opt profile)"
+dependencies = ["limine-image-dev-opt"]
 command = "${QEMU}"
 args = [
     "-cdrom",
@@ -457,7 +659,8 @@ args = [
     "256M",
     "-no-reboot",
     "-no-shutdown",
-    "-s",
+    "-gdb",
+    "tcp::${QEMU_GDB_PORT}",
     "-S",
     "-serial",
     "mon:stdio",
@@ -465,6 +668,51 @@ args = [
     "build/qemu-debug.log",
     "-d",
     "int,cpu_reset,guest_errors",
+]
+
+[tasks.run-qemu-debug]
+description = "Alias: run QEMU paused with GDB server"
+alias = "run-debug"
+
+[tasks.run-debug-headless]
+description = "Load QEMU in debug mode (headless, paused, GDB server)"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-nographic",
+    "-no-reboot",
+    "-no-shutdown",
+    "-gdb",
+    "tcp::${QEMU_GDB_PORT}",
+    "-S",
+    "-serial",
+    "mon:stdio",
+    "-D",
+    "build/qemu-debug.log",
+    "-d",
+    "int,cpu_reset,guest_errors",
+]
+
+[tasks.gdb-kernel]
+description = "Attach GDB to the paused QEMU kernel"
+dependencies = ["kernel"]
+command = "${GDB}"
+args = [
+    "target/x86_64-unknown-none/${STRAT9_PROFILE}/kernel",
+    "-ex",
+    "target remote :${QEMU_GDB_PORT}",
 ]
 
 [tasks.test-boot]
@@ -504,7 +752,7 @@ description = "Display the size of the kernel and its sections"
 dependencies = ["kernel"]
 script_runner = "@shell"
 script = ['''
-kernel="target/x86_64-unknown-none/release/kernel"
+kernel="target/x86_64-unknown-none/${STRAT9_PROFILE}/kernel"
 if [ -f "$kernel" ]; then
     echo ""
     echo "=== Size of the kernel ==="

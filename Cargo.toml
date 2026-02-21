@@ -62,3 +62,11 @@ strip = false      # Keep all symbols
 panic = "abort"    # no_std kernel targets cannot use unwind
 incremental = true # Faster recompilation
 lto = false        # Faster compilation
+
+[profile.dev-opt]
+inherits = "dev"
+opt-level = 2      # Better runtime performance while keeping debug symbols
+debug = 2          # Keep full symbols for debugging
+strip = false      # Keep all symbols
+lto = false        # Keep link times reasonable for iterative work
+incremental = true # Preserve fast rebuild behavior
