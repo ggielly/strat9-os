@@ -6,7 +6,7 @@ use crate::{
         current_task_clone,
         scheduler::add_task_with_parent,
         signal::{SigAction, SigStack, SignalSet},
-        task::{CpuContext, KernelStack, SyncUnsafeCell, Task},
+        task::{CpuContext, KernelStack, Pid, SyncUnsafeCell, Task},
         TaskId, TaskState,
     },
     syscall::{error::SyscallError, SyscallFrame},
@@ -20,7 +20,7 @@ use x86_64::structures::paging::{mapper::TranslateResult, FrameAllocator}; // Re
 
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
-    pub child_pid: TaskId,
+    pub child_pid: Pid,
 }
 
 #[inline]
@@ -159,8 +159,12 @@ fn build_child_task(
     let parent_actions: [SigAction; 64] = unsafe { *parent.signal_actions.get() };
     let parent_sigstack: Option<SigStack> = unsafe { *parent.signal_stack.get() };
 
+    let (pid, tid, tgid) = Task::allocate_process_ids();
     let task = Arc::new(Task {
         id: TaskId::new(),
+        pid,
+        tid,
+        tgid,
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: parent.priority,
         context: SyncUnsafeCell::new(context),
@@ -248,7 +252,7 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
     });
 
     let child_task = build_child_task(&parent, child_as, child_user_ctx)?;
-    let child_pid = child_task.id;
+    let child_pid = child_task.pid;
     add_task_with_parent(child_task, parent.id);
 
     Ok(ForkResult { child_pid })

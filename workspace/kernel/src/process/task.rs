@@ -4,8 +4,25 @@
 
 use crate::{capability::CapabilityTable, memory::AddressSpace, vfs::FileDescriptorTable};
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use x86_64::{PhysAddr, VirtAddr};
+
+/// POSIX process ID.
+pub type Pid = u32;
+/// POSIX thread ID.
+pub type Tid = u32;
+
+#[inline]
+fn next_pid() -> Pid {
+    static NEXT_PID: AtomicU32 = AtomicU32::new(1);
+    NEXT_PID.fetch_add(1, Ordering::SeqCst)
+}
+
+#[inline]
+fn next_tid() -> Tid {
+    static NEXT_TID: AtomicU32 = AtomicU32::new(1);
+    NEXT_TID.fetch_add(1, Ordering::SeqCst)
+}
 
 /// Unique identifier for a task
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -83,6 +100,12 @@ impl<T> SyncUnsafeCell<T> {
 pub struct Task {
     /// Unique identifier for this task
     pub id: TaskId,
+    /// Process identifier visible to userspace.
+    pub pid: Pid,
+    /// Thread identifier visible to userspace.
+    pub tid: Tid,
+    /// Thread-group identifier (equals process leader PID).
+    pub tgid: Pid,
     /// Current state of the task
     pub state: SyncUnsafeCell<TaskState>,
     /// Priority level of the task
@@ -287,17 +310,24 @@ impl Task {
 
         // Create CPU context with the allocated stack
         let context = CpuContext::new(entry_point as *const () as u64, &kernel_stack);
+        let id = TaskId::new();
+        let (pid, tid, tgid) = Self::allocate_process_ids();
 
         log::debug!(
-            "Created task '{}' (id={:?}) with stack @ {:?} (size={}KB)",
+            "Created task '{}' (id={:?}, pid={}, tid={}) with stack @ {:?} (size={}KB)",
             name,
-            TaskId::new(),
+            id,
+            pid,
+            tid,
             kernel_stack.virt_base,
             kernel_stack.size / 1024
         );
 
         Ok(Arc::new(Task {
-            id: TaskId::new(),
+            id,
+            pid,
+            tid,
+            tgid,
             state: SyncUnsafeCell::new(TaskState::Ready),
             priority,
             context: SyncUnsafeCell::new(context),
@@ -331,15 +361,23 @@ impl Task {
     ) -> Result<Arc<Self>, &'static str> {
         let kernel_stack = KernelStack::allocate(Self::DEFAULT_STACK_SIZE)?;
         let context = CpuContext::new(entry_point, &kernel_stack);
+        let id = TaskId::new();
+        let (pid, tid, tgid) = Self::allocate_process_ids();
 
         log::debug!(
-            "Created user task '{}' with CR3={:#x}",
+            "Created user task '{}' (id={:?}, pid={}, tid={}) with CR3={:#x}",
             name,
+            id,
+            pid,
+            tid,
             address_space.cr3().as_u64()
         );
 
         Ok(Arc::new(Task {
-            id: TaskId::new(),
+            id,
+            pid,
+            tid,
+            tgid,
             state: SyncUnsafeCell::new(TaskState::Ready),
             priority,
             context: SyncUnsafeCell::new(context),
@@ -382,6 +420,13 @@ impl Task {
         // SAFETY: address_space is immutable for the lifetime of the Arc?
         // Actually we just updated it to SyncUnsafeCell.
         unsafe { (*self.address_space.get()).is_kernel() }
+    }
+
+    /// Allocate POSIX identifiers for a new process leader.
+    pub fn allocate_process_ids() -> (Pid, Tid, Pid) {
+        let pid = next_pid();
+        let tid = next_tid();
+        (pid, tid, pid)
     }
 }
 

@@ -104,9 +104,13 @@ fn spawn_user_program_task(
 
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
     let context = CpuContext::new(ring3_test_trampoline as *const () as u64, &kernel_stack);
+    let (pid, tid_ids, tgid) = Task::allocate_process_ids();
 
     let task = Arc::new(Task {
         id: TaskId::new(),
+        pid,
+        tid: tid_ids,
+        tgid,
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),

@@ -15,7 +15,7 @@
 //! Each task has its own 16KB kernel stack. Callee-saved registers are
 //! pushed/popped by `switch_context()`. `CpuContext` only stores `saved_rsp`.
 
-use super::task::{restore_first_task, switch_context, Task, TaskId, TaskPriority, TaskState};
+use super::task::{restore_first_task, switch_context, Pid, Task, TaskId, TaskPriority, TaskState, Tid};
 use crate::{
     arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer},
     capability::get_capability_manager,
@@ -67,7 +67,7 @@ unsafe impl Send for SwitchTarget {}
 
 /// Result of a non-blocking wait on child exit.
 pub enum WaitChildResult {
-    Reaped { child: TaskId, status: i32 },
+    Reaped { child: TaskId, pid: Pid, status: i32 },
     NoChildren,
     StillRunning,
 }
@@ -103,6 +103,8 @@ pub struct Scheduler {
     all_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// Map TaskId -> CPU index (for wake/resume routing)
     task_cpu: BTreeMap<TaskId, usize>,
+    /// Map userspace PID -> internal TaskId (process leader in current model).
+    pid_to_task: BTreeMap<Pid, TaskId>,
     /// Parent relationship: child -> parent
     parent_of: BTreeMap<TaskId, TaskId>,
     /// Children list: parent -> children
@@ -151,6 +153,7 @@ impl Scheduler {
             blocked_tasks: BTreeMap::new(),
             all_tasks: BTreeMap::new(),
             task_cpu: BTreeMap::new(),
+            pid_to_task: BTreeMap::new(),
             parent_of: BTreeMap::new(),
             children_of: BTreeMap::new(),
             zombies: BTreeMap::new(),
@@ -180,6 +183,7 @@ impl Scheduler {
 
         self.all_tasks.insert(task.id, task.clone());
         self.task_cpu.insert(task.id, cpu_index);
+        self.pid_to_task.insert(task.pid, task.id);
         if let Some(cpu) = self.cpus.get_mut(cpu_index) {
             cpu.ready_queue.push_back(task);
         }
@@ -227,12 +231,18 @@ impl Scheduler {
 
         if let Some(child) = zombie {
             let status = self.zombies.remove(&child).unwrap_or(0);
+            let child_pid = self.pid_to_task.iter().find_map(|(pid, tid)| {
+                if *tid == child { Some(*pid) } else { None }
+            }).unwrap_or(0);
+            if child_pid != 0 {
+                self.pid_to_task.remove(&child_pid);
+            }
             children.retain(|&id| id != child);
             self.parent_of.remove(&child);
             if children.is_empty() {
                 self.children_of.remove(&parent);
             }
-            return WaitChildResult::Reaped { child, status };
+            return WaitChildResult::Reaped { child, pid: child_pid, status };
         }
 
         WaitChildResult::StillRunning
@@ -626,6 +636,8 @@ pub fn exit_current_task(exit_code: i32) -> ! {
 
                 if parent.is_some() {
                     sched.zombies.insert(current_id, exit_code);
+                } else {
+                    sched.pid_to_task.retain(|_, tid| *tid != current_id);
                 }
                 if let Some(parent_id) = parent {
                     let _ = sched.wake_task_locked(parent_id);
@@ -669,6 +681,16 @@ pub fn current_task_id() -> Option<TaskId> {
     id
 }
 
+/// Get the current process ID (POSIX pid).
+pub fn current_pid() -> Option<Pid> {
+    current_task_clone().map(|t| t.pid)
+}
+
+/// Get the current thread ID (POSIX tid).
+pub fn current_tid() -> Option<Tid> {
+    current_task_clone().map(|t| t.tid)
+}
+
 /// Get the current task (cloned Arc), if any.
 pub fn current_task_clone() -> Option<Arc<Task>> {
     let saved_flags = save_flags_and_cli();
@@ -686,6 +708,27 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
     };
     restore_flags(saved_flags);
     task
+}
+
+/// Resolve a POSIX pid to internal TaskId.
+pub fn get_task_id_by_pid(pid: Pid) -> Option<TaskId> {
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = SCHEDULER.lock();
+        if let Some(ref sched) = *scheduler {
+            sched.pid_to_task.get(&pid).copied()
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
+/// Resolve a POSIX pid to the corresponding task.
+pub fn get_task_by_pid(pid: Pid) -> Option<Arc<Task>> {
+    let tid = get_task_id_by_pid(pid)?;
+    get_task_by_id(tid)
 }
 
 /// Get a task by its TaskId (if still registered).
@@ -716,6 +759,13 @@ pub fn get_parent_id(child: TaskId) -> Option<TaskId> {
     };
     restore_flags(saved_flags);
     parent
+}
+
+/// Get parent process ID for a child task.
+pub fn get_parent_pid(child: TaskId) -> Option<Pid> {
+    let parent_tid = get_parent_id(child)?;
+    let parent = get_task_by_id(parent_tid)?;
+    Some(parent.pid)
 }
 
 /// Try to reap a zombie child.
@@ -966,6 +1016,7 @@ pub fn kill_task(id: TaskId) -> bool {
                         cleanup_task_resources(current);
                         sched.all_tasks.remove(&id);
                         sched.task_cpu.remove(&id);
+                        sched.pid_to_task.retain(|_, tid| *tid != id);
                         killed = true;
                         if ci == my_cpu {
                             switch_target = sched.yield_cpu(ci);
@@ -990,6 +1041,7 @@ pub fn kill_task(id: TaskId) -> bool {
                             cleanup_task_resources(&task);
                             sched.all_tasks.remove(&id);
                             sched.task_cpu.remove(&id);
+                            sched.pid_to_task.retain(|_, tid| *tid != id);
                             killed = true;
                         } else {
                             new_queue.push_back(task);
@@ -1009,6 +1061,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     cleanup_task_resources(&task);
                     sched.all_tasks.remove(&id);
                     sched.task_cpu.remove(&id);
+                    sched.pid_to_task.retain(|_, tid| *tid != id);
                     killed = true;
                 }
             }

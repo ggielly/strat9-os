@@ -1136,9 +1136,13 @@ pub fn load_and_run_elf_with_caps(
 
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
     let context = CpuContext::new(elf_ring3_trampoline as *const () as u64, &kernel_stack);
+    let (pid, tid, tgid) = Task::allocate_process_ids();
 
     let task = Arc::new(Task {
         id: TaskId::new(),
+        pid,
+        tid,
+        tgid,
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),
