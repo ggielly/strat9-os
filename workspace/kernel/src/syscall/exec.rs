@@ -122,8 +122,11 @@ pub fn sys_execve(
     // 2. Reset all signal handlers to SIG_DFL
     current.reset_signals();
 
+    let old_as = unsafe {
+        core::mem::replace(&mut *current.address_space.get(), new_as_arc.clone())
+    };
+
     unsafe {
-        *current.address_space.get() = new_as_arc.clone();
         (&*current.address_space.get()).switch_to();
     }
 
@@ -145,6 +148,9 @@ pub fn sys_execve(
     frame.r14 = 0;
     frame.r15 = 0;
     frame.rax = 0;
+
+    // Safely drop the old address space now that the new CR3 is loaded
+    drop(old_as);
 
     Ok(0)
 }

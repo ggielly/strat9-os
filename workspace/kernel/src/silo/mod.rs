@@ -1300,7 +1300,12 @@ pub fn handle_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, s
         let mut mgr = SILO_MANAGER.lock();
         let silo_id = match mgr.silo_for_task(task_id) {
             Some(id) => id,
-            None => return,
+            None => {
+                crate::serial_println!("[handle_user_fault] Non-silo task {} crashed (reason={:?})! Killing it.", task_id.as_u64(), reason);
+                drop(mgr);
+                crate::process::kill_task(task_id);
+                return;
+            }
         };
         let mut tasks = Vec::new();
         {

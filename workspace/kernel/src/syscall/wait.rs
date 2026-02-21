@@ -160,25 +160,27 @@ fn encode_wstatus(exit_code: i32) -> i32 {
 /// Returns `Ok(WaitChildResult::Reaped { .. })` or propagates `EINTR` /
 /// `NoChildren`.
 fn wait_blocking(parent_id: TaskId, target: Option<TaskId>) -> Result<(TaskId, u64, i32), SyscallError> {
+    crate::serial_println!("[wait_blocking] start: parent={:?}, target={:?}", parent_id, target);
     loop {
+        crate::serial_println!("[wait_blocking] trying wait...");
         match try_wait_child(parent_id, target) {
-            WaitChildResult::Reaped { child, pid, status } => return Ok((child, pid as u64, status)),
-
-            WaitChildResult::NoChildren => return Err(SyscallError::NoChildren),
-
+            WaitChildResult::Reaped { child, pid, status } => {
+                crate::serial_println!("[wait_blocking] reaped child pid={}", pid);
+                return Ok((child, pid as u64, status));
+            }
+            WaitChildResult::NoChildren => {
+                crate::serial_println!("[wait_blocking] no children");
+                return Err(SyscallError::NoChildren);
+            }
             WaitChildResult::StillRunning => {
-                // Check for pending signals before sleeping so we can
-                // return EINTR and let userspace run the signal handler.
                 if has_pending_signals() {
+                    crate::serial_println!("[wait_blocking] interrupted");
                     return Err(SyscallError::Interrupted);
                 }
 
-                // Sleep until a child exits.  exit_current_task() calls
-                // wake_task_locked(parent_id) which either unblocks us or
-                // sets wake_pending so block_current_task() aborts immediately.
+                crate::serial_println!("[wait_blocking] blocking current task");
                 block_current_task();
-
-                // Woken — re-run the scan at the top of the loop.
+                crate::serial_println!("[wait_blocking] woken up");
             }
         }
     }

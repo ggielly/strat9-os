@@ -194,6 +194,8 @@ fn build_child_task(
         brk: AtomicU64::new(parent.brk.load(Ordering::Relaxed)),
         mmap_hint: AtomicU64::new(parent.mmap_hint.load(Ordering::Relaxed)),
         ticks: AtomicU64::new(0),
+        sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
+        vruntime: AtomicU64::new(parent.vruntime()),
     });
 
     // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret
