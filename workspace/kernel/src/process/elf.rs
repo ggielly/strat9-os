@@ -1143,6 +1143,8 @@ pub fn load_and_run_elf_with_caps(
         pid,
         tid,
         tgid,
+        pgid: core::sync::atomic::AtomicU32::new(pid),
+        sid: core::sync::atomic::AtomicU32::new(pid),
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),

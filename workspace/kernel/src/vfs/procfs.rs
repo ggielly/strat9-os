@@ -17,7 +17,7 @@
 //! ```
 
 use crate::{
-    process::{current_pid, get_all_tasks},
+    process::{current_pid, get_all_tasks, get_parent_pid},
     syscall::error::SyscallError,
     vfs::scheme::{DynScheme, FileFlags, OpenFlags, OpenResult, Scheme},
 };
@@ -156,7 +156,13 @@ impl ProcScheme {
         let _ = writeln!(output, "State:\tR (running)");
         let _ = writeln!(output, "Tgid:\t{}", task.tgid);
         let _ = writeln!(output, "Pid:\t{}", task.pid);
-        let _ = writeln!(output, "PPid:\t1");
+        let _ = writeln!(
+            output,
+            "PPid:\t{}",
+            get_parent_pid(task.id).map(|p| p as u64).unwrap_or(0)
+        );
+        let _ = writeln!(output, "Pgid:\t{}", task.pgid.load(core::sync::atomic::Ordering::Relaxed));
+        let _ = writeln!(output, "Sid:\t{}", task.sid.load(core::sync::atomic::Ordering::Relaxed));
         let _ = writeln!(output, "Uid:\t0\t0\t0\t0");
         let _ = writeln!(output, "Gid:\t0\t0\t0\t0");
         let _ = writeln!(output, "Threads:\t1");

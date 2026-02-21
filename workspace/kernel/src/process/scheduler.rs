@@ -691,6 +691,16 @@ pub fn current_tid() -> Option<Tid> {
     current_task_clone().map(|t| t.tid)
 }
 
+/// Get the current process group id.
+pub fn current_pgid() -> Option<Pid> {
+    current_task_clone().map(|t| t.pgid.load(Ordering::Relaxed))
+}
+
+/// Get the current session id.
+pub fn current_sid() -> Option<Pid> {
+    current_task_clone().map(|t| t.sid.load(Ordering::Relaxed))
+}
+
 /// Get the current task (cloned Arc), if any.
 pub fn current_task_clone() -> Option<Arc<Task>> {
     let saved_flags = save_flags_and_cli();
@@ -729,6 +739,142 @@ pub fn get_task_id_by_pid(pid: Pid) -> Option<TaskId> {
 pub fn get_task_by_pid(pid: Pid) -> Option<Arc<Task>> {
     let tid = get_task_id_by_pid(pid)?;
     get_task_by_id(tid)
+}
+
+/// Resolve a PID to the current process group id.
+pub fn get_pgid_by_pid(pid: Pid) -> Option<Pid> {
+    let task = get_task_by_pid(pid)?;
+    Some(task.pgid.load(Ordering::Relaxed))
+}
+
+/// Collect task IDs that currently belong to process group `pgid`.
+pub fn get_task_ids_in_pgid(pgid: Pid) -> alloc::vec::Vec<TaskId> {
+    use alloc::vec::Vec;
+    let saved_flags = save_flags_and_cli();
+    let mut out = Vec::new();
+    {
+        let scheduler = SCHEDULER.lock();
+        if let Some(ref sched) = *scheduler {
+            for task in sched.all_tasks.values() {
+                if task.pgid.load(Ordering::Relaxed) == pgid {
+                    out.push(task.id);
+                }
+            }
+        }
+    }
+    restore_flags(saved_flags);
+    out
+}
+
+/// Set process group id for `target_pid` (or current if `None`).
+pub fn set_process_group(
+    requester: TaskId,
+    target_pid: Option<Pid>,
+    new_pgid: Option<Pid>,
+) -> Result<Pid, crate::syscall::error::SyscallError> {
+    use crate::syscall::error::SyscallError;
+
+    let saved_flags = save_flags_and_cli();
+    let result = {
+        let mut scheduler = SCHEDULER.lock();
+        let Some(ref mut sched) = *scheduler else {
+            return Err(SyscallError::Fault);
+        };
+
+        let requester_task = sched
+            .all_tasks
+            .get(&requester)
+            .cloned()
+            .ok_or(SyscallError::Fault)?;
+        let requester_sid = requester_task.sid.load(Ordering::Relaxed);
+
+        let target_id = match target_pid {
+            None => requester,
+            Some(pid) => sched
+                .pid_to_task
+                .get(&pid)
+                .copied()
+                .ok_or(SyscallError::NotFound)?,
+        };
+
+        if target_id != requester {
+            let is_child = sched
+                .children_of
+                .get(&requester)
+                .map(|children| children.iter().any(|child| *child == target_id))
+                .unwrap_or(false);
+            if !is_child {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
+
+        let target_task = sched
+            .all_tasks
+            .get(&target_id)
+            .cloned()
+            .ok_or(SyscallError::NotFound)?;
+        let target_pid_value = target_task.pid;
+        let target_sid = target_task.sid.load(Ordering::Relaxed);
+
+        if target_sid != requester_sid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        if target_pid_value == target_sid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        let desired_pgid = new_pgid.unwrap_or(target_pid_value);
+        if desired_pgid != target_pid_value {
+            let group_leader_tid = sched
+                .pid_to_task
+                .get(&desired_pgid)
+                .copied()
+                .ok_or(SyscallError::NotFound)?;
+            let group_leader = sched
+                .all_tasks
+                .get(&group_leader_tid)
+                .cloned()
+                .ok_or(SyscallError::NotFound)?;
+            if group_leader.sid.load(Ordering::Relaxed) != target_sid {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
+
+        target_task.pgid.store(desired_pgid, Ordering::Relaxed);
+        Ok(desired_pgid)
+    };
+    restore_flags(saved_flags);
+    result
+}
+
+/// Create a new session for the calling task.
+pub fn create_session(requester: TaskId) -> Result<Pid, crate::syscall::error::SyscallError> {
+    use crate::syscall::error::SyscallError;
+
+    let saved_flags = save_flags_and_cli();
+    let result = {
+        let mut scheduler = SCHEDULER.lock();
+        let Some(ref mut sched) = *scheduler else {
+            return Err(SyscallError::Fault);
+        };
+
+        let requester_task = sched
+            .all_tasks
+            .get(&requester)
+            .cloned()
+            .ok_or(SyscallError::Fault)?;
+        let pid = requester_task.pid;
+        if requester_task.pgid.load(Ordering::Relaxed) == pid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        requester_task.sid.store(pid, Ordering::Relaxed);
+        requester_task.pgid.store(pid, Ordering::Relaxed);
+        Ok(pid)
+    };
+    restore_flags(saved_flags);
+    result
 }
 
 /// Get a task by its TaskId (if still registered).

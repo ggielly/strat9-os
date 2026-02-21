@@ -141,6 +141,15 @@ pub const SYS_PROC_EXECVE: u64 = 315;
 /// Manipulate file descriptor (fcntl).
 pub const SYS_FCNTL: u64 = 316;
 
+/// Set process group id. arg1=pid (0=self), arg2=pgid (0=pid).
+pub const SYS_SETPGID: u64 = 317;
+
+/// Get process group id. arg1=pid (0=self).
+pub const SYS_GETPGID: u64 = 318;
+
+/// Create a new session (setsid). Returns new sid (caller pid).
+pub const SYS_SETSID: u64 = 319;
+
 // Futex wait. arg1=uaddr (*u32), arg2=expected_val, arg3=timeout_ns
 pub const SYS_FUTEX_WAIT: u64 = 303;
 
@@ -160,7 +169,7 @@ pub const SYS_FUTEX_WAKE_OP: u64 = 307;
 // Block 320-329: signal handling
 // ============================================================
 
-/// Send a signal to a task. arg1=task_id, arg2=signal_number
+/// Send a signal with POSIX kill semantics. arg1=pid, arg2=signal_number
 pub const SYS_KILL: u64 = 320;
 
 /// Examine and change blocked signals. arg1=how, arg2=set_ptr, arg3=oldset_ptr

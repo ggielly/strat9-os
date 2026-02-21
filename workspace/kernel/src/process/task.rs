@@ -106,6 +106,10 @@ pub struct Task {
     pub tid: Tid,
     /// Thread-group identifier (equals process leader PID).
     pub tgid: Pid,
+    /// Process group id (job-control group).
+    pub pgid: AtomicU32,
+    /// Session id.
+    pub sid: AtomicU32,
     /// Current state of the task
     pub state: SyncUnsafeCell<TaskState>,
     /// Priority level of the task
@@ -328,6 +332,8 @@ impl Task {
             pid,
             tid,
             tgid,
+            pgid: AtomicU32::new(pid),
+            sid: AtomicU32::new(pid),
             state: SyncUnsafeCell::new(TaskState::Ready),
             priority,
             context: SyncUnsafeCell::new(context),
@@ -378,6 +384,8 @@ impl Task {
             pid,
             tid,
             tgid,
+            pgid: AtomicU32::new(pid),
+            sid: AtomicU32::new(pid),
             state: SyncUnsafeCell::new(TaskState::Ready),
             priority,
             context: SyncUnsafeCell::new(context),

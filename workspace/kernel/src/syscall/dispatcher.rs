@@ -67,6 +67,9 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PROC_WAIT => super::wait::sys_wait(arg1),
         SYS_PROC_EXECVE => sys_execve(frame, arg1, arg2, arg3),
         SYS_FCNTL => super::fcntl::sys_fcntl(arg1, arg2, arg3),
+        SYS_SETPGID => proc_sys::sys_setpgid(arg1 as i64, arg2 as i64),
+        SYS_GETPGID => proc_sys::sys_getpgid(arg1 as i64),
+        SYS_SETSID => proc_sys::sys_setsid(),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),
@@ -80,14 +83,14 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_FUTEX_WAKE_OP => {
             super::futex::sys_futex_wake_op(arg1, arg2 as u32, arg3 as u32, arg4, frame.r8 as u32)
         }
-        SYS_KILL => sys_kill(arg1, arg2 as u32),
+        SYS_KILL => super::signal::sys_kill(arg1 as i64, arg2 as u32),
         SYS_SIGPROCMASK => sys_sigprocmask(arg1 as i32, arg2, arg3),
         SYS_SIGACTION => super::signal::sys_sigaction(arg1, arg2, arg3),
         SYS_SIGALTSTACK => super::signal::sys_sigaltstack(arg1, arg2),
         SYS_SIGPENDING => super::signal::sys_sigpending(arg1),
         SYS_SIGSUSPEND => super::signal::sys_sigsuspend(arg1),
         SYS_SIGTIMEDWAIT => super::signal::sys_sigtimedwait(arg1, arg2, arg3),
-        SYS_SIGQUEUE => super::signal::sys_sigqueue(arg1, arg2 as u32, arg3),
+        SYS_SIGQUEUE => super::signal::sys_sigqueue(arg1 as i64, arg2 as u32, arg3),
         SYS_KILLPG => super::signal::sys_killpg(arg1, arg2 as u32),
         SYS_GETITIMER => super::signal::sys_getitimer(arg1 as u32, arg2),
         SYS_SETITIMER => super::signal::sys_setitimer(arg1 as u32, arg2, arg3),
@@ -207,27 +210,6 @@ fn sys_proc_exit(exit_code: u64) -> Result<u64, SyscallError> {
 /// SYS_PROC_YIELD (301): Yield the current time slice.
 fn sys_proc_yield() -> Result<u64, SyscallError> {
     crate::process::yield_task();
-    Ok(0)
-}
-
-/// SYS_PROC_WAITPID (310) / SYS_PROC_WAIT (311): delegate to syscall::wait.
-fn sys_proc_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, SyscallError> {
-    super::wait::sys_waitpid(pid, status_ptr, options)
-}
-
-/// SYS_KILL (320): Send a signal to a task.
-///
-/// arg1 = target task ID, arg2 = signal number
-fn sys_kill(target_id: u64, signal_num: u32) -> Result<u64, SyscallError> {
-    use crate::process::{send_signal, Signal, TaskId};
-
-    // Convert signal number to Signal enum.
-    let signal = Signal::from_u32(signal_num).ok_or(SyscallError::InvalidArgument)?;
-
-    // Send the signal to the target task.
-    let target = TaskId::from_u64(target_id);
-    send_signal(target, signal)?;
-
     Ok(0)
 }
 

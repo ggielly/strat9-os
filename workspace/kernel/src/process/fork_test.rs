@@ -111,6 +111,8 @@ fn spawn_user_program_task(
         pid,
         tid: tid_ids,
         tgid,
+        pgid: core::sync::atomic::AtomicU32::new(pid),
+        sid: core::sync::atomic::AtomicU32::new(pid),
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),

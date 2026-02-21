@@ -125,6 +125,8 @@ pub fn create_user_test_task() {
         pid,
         tid,
         tgid,
+        pgid: core::sync::atomic::AtomicU32::new(pid),
+        sid: core::sync::atomic::AtomicU32::new(pid),
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),

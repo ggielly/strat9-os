@@ -14,7 +14,7 @@ use crate::{
 use alloc::{boxed::Box, sync::Arc};
 use core::{
     mem::offset_of,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use x86_64::structures::paging::{mapper::TranslateResult, FrameAllocator}; // Required for allocate_frame
 
@@ -165,6 +165,8 @@ fn build_child_task(
         pid,
         tid,
         tgid,
+        pgid: AtomicU32::new(parent.pgid.load(Ordering::Relaxed)),
+        sid: AtomicU32::new(parent.sid.load(Ordering::Relaxed)),
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: parent.priority,
         context: SyncUnsafeCell::new(context),
