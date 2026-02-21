@@ -83,6 +83,24 @@ pub fn is_apic_timer_active() -> bool {
     APIC_TIMER_ACTIVE.load(Ordering::Relaxed)
 }
 
+/// Stop PIT channel 0 to prevent phantom interrupts.
+///
+/// Programs channel 0 in mode 0 (one-shot) with count = 0, which effectively
+/// disables further periodic interrupts from the PIT. Should be called after
+/// the APIC timer has been started.
+pub fn stop_pit() {
+    let mut cmd_port = Port::new(PIT_COMMAND_PORT);
+    let mut ch0_port = Port::new(PIT_CHANNEL0_PORT);
+    unsafe {
+        // Channel 0, lobyte/hibyte, mode 0 (one-shot), binary
+        cmd_port.write(0x30u8);
+        // Count = 0 => immediate terminal count, no further interrupts
+        ch0_port.write(0u8);
+        ch0_port.write(0u8);
+    }
+    log::debug!("PIT channel 0 stopped (one-shot mode, count=0)");
+}
+
 /// Calibrate the APIC timer using PIT channel 2 as a reference.
 ///
 /// Uses PIT channel 2 in one-shot mode (~10ms) to measure how many

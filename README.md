@@ -32,21 +32,23 @@ This project is in active development and not production-ready.
 ![Graphics test](doc/gfx-test.jpg)
 *Graphics subsystem test*
 
-Kernel :
+#### Kernel
 
-- SMP boot with per-CPU data, TSS/GDT, GSBase SYSCALL, and per-CPU scheduler.
-- Preemptive multitasking with APIC timer
-- Limine boot path and bootable ISO
-- IPC ports, capability manager, and VFS scheme router
-- ELF loader and Ring 3 execution
-- POSIX interval timers + signal infrastructure
+    - SMP boot with per-CPU data, TSS/GDT, GSBase SYSCALL, and per-CPU scheduler.
+    - Preemptive multitasking with APIC timer
+    - Limine boot path and bootable ISO
+    - IPC ports, capability manager, and VFS scheme router
+    - ELF loader and Ring 3 execution
+    - POSIX interval timers + signal infrastructure
+    - ACPI support
 
-Userspace components :
 
-- EXT4 filesystem component (userspace server)
-- XFS filesystem component (userspace server)
-- VirtIO block and net drivers (kernel-side)
-- libc (relibc from the Redox-OS project)
+#### Userspace components
+
+    - EXT4 filesystem component (userspace server)
+    - XFS filesystem component (userspace server)
+    - VirtIO block and net drivers (kernel-side)
+    - libc (relibc from the Redox-OS project)
 
 ```mermaid
 graph TD

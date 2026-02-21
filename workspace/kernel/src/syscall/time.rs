@@ -34,7 +34,7 @@ impl TimeSpec {
     /// Create from nanoseconds
     pub fn from_nanos(nanos: u64) -> Self {
         let tv_sec = (nanos / 1_000_000_000) as i64;
-        let tv_nsec = ((nanos % 1_000_000_000) / 1_000) as i64;
+        let tv_nsec = (nanos % 1_000_000_000) as i64;
         Self { tv_sec, tv_nsec }
     }
 }

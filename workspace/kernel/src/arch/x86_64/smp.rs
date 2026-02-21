@@ -297,7 +297,15 @@ pub extern "C" fn smp_main() -> ! {
     apic::init_ap();
 
     let apic_id = apic::lapic_id();
-    let cpu_index = percpu::cpu_index_by_apic(apic_id).unwrap_or(0);
+    let cpu_index = match percpu::cpu_index_by_apic(apic_id) {
+        Some(idx) => idx,
+        None => {
+            // If we fall back to 0, this AP would share the BSP's
+            // CPU index and double-increment TICK_COUNT 2× timer speed.
+            log::error!("SMP AP: APIC id {} not registered — halting core", apic_id);
+            loop { core::hint::spin_loop(); }
+        }
+    };
 
     // Initialize per-CPU TSS/GDT.
     crate::arch::x86_64::tss::init_cpu(cpu_index);
