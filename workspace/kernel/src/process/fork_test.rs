@@ -514,7 +514,12 @@ extern "C" fn fork_test_entry() -> ! {
 }
 
 pub fn create_fork_test_task() {
-    if let Ok(task) = Task::new_kernel_task(fork_test_entry, "fork-test", TaskPriority::Normal) {
+    if let Ok(task) = Task::new_kernel_task_with_stack(
+        fork_test_entry,
+        "fork-test",
+        TaskPriority::Normal,
+        64 * 1024,
+    ) {
         crate::process::add_task(task);
     } else {
         crate::serial_println!("[fork-test] failed to create orchestrator task");
