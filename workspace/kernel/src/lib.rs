@@ -349,184 +349,138 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // Ring3 smoke test task disabled in selftest mode: fork-test already
     // exercises Ring3 transitions and this extra task can interfere.
 
-    // =============================================
-    // Phase 8c: register modules in VFS
-    // =============================================
-    let mut init_task_id: Option<crate::process::TaskId> = None;
-    if args.initfs_base != 0 && args.initfs_size != 0 {
-        let elf_data = unsafe {
-            core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
-        };
-        if let Err(e) = vfs::register_static_file("/initfs/init", elf_data.as_ptr(), elf_data.len())
-        {
-            serial_println!("[init] Failed to register /initfs/init: {:?}", e);
-        }
-    }
-
-    // Register optional fs-ext4 server module (if provided by Limine).
-    if let Some((base, size)) = crate::limine_entry::fs_ext4_module() {
-        if base != 0 && size != 0 {
-            let ext4_data =
-                unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-            if let Err(e) =
-                vfs::register_static_file("/initfs/fs-ext4", ext4_data.as_ptr(), ext4_data.len())
-            {
-                serial_println!("[init] Failed to register /initfs/fs-ext4: {:?}", e);
-            } else {
-                serial_println!("[init] Registered /initfs/fs-ext4 ({} bytes)", size);
-            }
-        }
-    }
-
-    // Register optional strate-fs-ramfs server module (if provided by Limine).
-    if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
-        if base != 0 && size != 0 {
-            let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-            if let Err(e) = vfs::register_static_file(
-                "/initfs/strate-fs-ramfs",
-                ram_data.as_ptr(),
-                ram_data.len(),
-            ) {
-                serial_println!("[init] Failed to register /initfs/strate-fs-ramfs: {:?}", e);
-            } else {
-                serial_println!("[init] Registered /initfs/strate-fs-ramfs ({} bytes)", size);
-            }
-        }
-    }
-
-    // =============================================
-    // Phase 8c: component system - process stage
-    // =============================================
-    serial_println!("[init] Components (process)...");
-    vga_println!("[..] Initializing process components...");
-    if let Err(e) = component::init_all(component::InitStage::Process) {
-        serial_println!("[WARN] Some process components failed: {:?}", e);
-    }
-    serial_println!("[init] Process components initialized.");
-    vga_println!("[OK] Process components ready");
-
-    // IPC stress tests disabled in selftest mode to avoid cross-test interference.
-
-    // =============================================
-    // Phase 8e: Task creation (deferred to end of boot)
-    // =============================================
-
-    // =============================================
-    // Phase 10: driver stubs
-    // =============================================
-    serial_println!("[init] Loading driver stubs...");
-    vga_println!("[..] Initializing VirtIO drivers...");
-
-    // Initialize PCI drivers
-    serial_println!("[init] Initializing VirtIO block...");
-    vga_println!("[..] Looking for VirtIO Block device...");
-    drivers::virtio::block::init();
-    serial_println!("[init] VirtIO block initialized.");
-    vga_println!("[OK] VirtIO block driver initialized");
-
-    serial_println!("[init] Initializing VirtIO net...");
-    vga_println!("[..] Looking for VirtIO net device...");
-    drivers::virtio::net::init();
-    serial_println!("[init] VirtIO net initialized.");
-    vga_println!("[OK] VirtIO net driver initialized");
-
-    // Check for devices
-    serial_println!("[init] Checking for devices...");
-    vga_println!("[..] Checking for devices...");
-
-    if let Some(blk) = drivers::virtio::block::get_device() {
-        use drivers::virtio::block::BlockDevice;
-        serial_println!(
-            "[INFO] VirtIO block Device found. Capacity: {} sectors",
-            blk.sector_count()
-        );
-        vga_println!("[OK] VirtIO block Driver loaded");
-    } else {
-        serial_println!("[WARN] No VirtIO block Device found");
-        vga_println!("[WARN] No VirtIO block Device found");
-    }
-
-    if let Some(net) = drivers::virtio::net::get_device() {
-        use drivers::virtio::net::NetworkDevice;
-        let mac = net.mac_address();
-        serial_println!(
-            "[INFO] VirtIO net device found. MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac[0],
-            mac[1],
-            mac[2],
-            mac[3],
-            mac[4],
-            mac[5]
-        );
-        vga_println!("[OK] VirtIO net driver loaded");
-    } else {
-        serial_println!("[WARN] No VirtIO net device found");
-        vga_println!("[WARN] No VirtIO net device found");
-    }
-
-    // =============================================
-    // Storage verification (disabled at boot)
-    // =============================================
-    // Keep boot non-blocking until VirtIO IRQ/completion path is fully robust.
-    serial_println!("[init] Storage verification skipped (boot path)");
-    vga_println!("[..] Storage verification skipped at boot");
-
-    // =============================================
-    // Final Phase: Launch initial user tasks
-    // =============================================
-
-    // 1. Launch init process if module was found
-    if args.initfs_base != 0 && args.initfs_size != 0 {
-        let elf_data = unsafe {
-            core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
-        };
-        match process::elf::load_and_run_elf(elf_data, "init") {
-            Ok(task_id) => {
-                init_task_id = Some(task_id);
-                serial_println!("[init] ELF 'init' loaded.");
-            }
-            Err(e) => {
-                serial_println!("[init] Failed to load init ELF: {}", e);
-            }
-        }
-    }
-
-    // 2. Launch strate-fs-ramfs server if module was found
-    if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
-        let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-        match process::elf::load_and_run_elf(ram_data, "strate-fs-ramfs") {
-            Ok(_) => {
-                serial_println!("[init] Component 'strate-fs-ramfs' loaded.");
-            }
-            Err(e) => {
-                serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e);
-            }
-        }
-    }
-
-    // 3. Grant Volume capability to init task
-    if let (Some(task_id), Some(device)) = (init_task_id, drivers::virtio::block::get_device()) {
-        if let Some(task) = crate::process::get_task_by_id(task_id) {
-            let cap = crate::capability::get_capability_manager().create_capability(
-                crate::capability::ResourceType::Volume,
-                device as *const _ as usize,
-                crate::capability::CapPermissions {
-                    read: true,
-                    write: true,
-                    execute: false,
-                    grant: true,
-                    revoke: true,
-                },
-            );
-            unsafe { (&mut *task.capabilities.get()).insert(cap) };
-            serial_println!("[init] Granted volume capability to init");
-        }
-    }
-
-    // 4. Launch shell and status-line (kernel tasks)
     #[cfg(not(feature = "selftest"))]
     {
-        // Shell
+        // =============================================
+        // Phase 8c: register modules in VFS
+        // =============================================
+        let mut init_task_id: Option<crate::process::TaskId> = None;
+        if args.initfs_base != 0 && args.initfs_size != 0 {
+            let elf_data = unsafe {
+                core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
+            };
+            if let Err(e) = vfs::register_static_file("/initfs/init", elf_data.as_ptr(), elf_data.len())
+            {
+                serial_println!("[init] Failed to register /initfs/init: {:?}", e);
+            }
+        }
+        if let Some((base, size)) = crate::limine_entry::fs_ext4_module() {
+            if base != 0 && size != 0 {
+                let ext4_data =
+                    unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+                if let Err(e) =
+                    vfs::register_static_file("/initfs/fs-ext4", ext4_data.as_ptr(), ext4_data.len())
+                {
+                    serial_println!("[init] Failed to register /initfs/fs-ext4: {:?}", e);
+                } else {
+                    serial_println!("[init] Registered /initfs/fs-ext4 ({} bytes)", size);
+                }
+            }
+        }
+        if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
+            if base != 0 && size != 0 {
+                let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+                if let Err(e) = vfs::register_static_file(
+                    "/initfs/strate-fs-ramfs",
+                    ram_data.as_ptr(),
+                    ram_data.len(),
+                ) {
+                    serial_println!("[init] Failed to register /initfs/strate-fs-ramfs: {:?}", e);
+                } else {
+                    serial_println!("[init] Registered /initfs/strate-fs-ramfs ({} bytes)", size);
+                }
+            }
+        }
+
+        serial_println!("[init] Components (process)...");
+        vga_println!("[..] Initializing process components...");
+        if let Err(e) = component::init_all(component::InitStage::Process) {
+            serial_println!("[WARN] Some process components failed: {:?}", e);
+        }
+        serial_println!("[init] Process components initialized.");
+        vga_println!("[OK] Process components ready");
+
+        serial_println!("[init] Loading driver stubs...");
+        vga_println!("[..] Initializing VirtIO drivers...");
+        serial_println!("[init] Initializing VirtIO block...");
+        vga_println!("[..] Looking for VirtIO Block device...");
+        drivers::virtio::block::init();
+        serial_println!("[init] VirtIO block initialized.");
+        vga_println!("[OK] VirtIO block driver initialized");
+        serial_println!("[init] Initializing VirtIO net...");
+        vga_println!("[..] Looking for VirtIO net device...");
+        drivers::virtio::net::init();
+        serial_println!("[init] VirtIO net initialized.");
+        vga_println!("[OK] VirtIO net driver initialized");
+        serial_println!("[init] Checking for devices...");
+        vga_println!("[..] Checking for devices...");
+
+        if let Some(blk) = drivers::virtio::block::get_device() {
+            use drivers::virtio::block::BlockDevice;
+            serial_println!(
+                "[INFO] VirtIO block Device found. Capacity: {} sectors",
+                blk.sector_count()
+            );
+            vga_println!("[OK] VirtIO block Driver loaded");
+        } else {
+            serial_println!("[WARN] No VirtIO block Device found");
+            vga_println!("[WARN] No VirtIO block Device found");
+        }
+        if let Some(net) = drivers::virtio::net::get_device() {
+            use drivers::virtio::net::NetworkDevice;
+            let mac = net.mac_address();
+            serial_println!(
+                "[INFO] VirtIO net device found. MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            );
+            vga_println!("[OK] VirtIO net driver loaded");
+        } else {
+            serial_println!("[WARN] No VirtIO net device found");
+            vga_println!("[WARN] No VirtIO net device found");
+        }
+
+        serial_println!("[init] Storage verification skipped (boot path)");
+        vga_println!("[..] Storage verification skipped at boot");
+
+        if args.initfs_base != 0 && args.initfs_size != 0 {
+            let elf_data = unsafe {
+                core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
+            };
+            match process::elf::load_and_run_elf(elf_data, "init") {
+                Ok(task_id) => {
+                    init_task_id = Some(task_id);
+                    serial_println!("[init] ELF 'init' loaded.");
+                }
+                Err(e) => {
+                    serial_println!("[init] Failed to load init ELF: {}", e);
+                }
+            }
+        }
+        if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
+            let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            match process::elf::load_and_run_elf(ram_data, "strate-fs-ramfs") {
+                Ok(_) => serial_println!("[init] Component 'strate-fs-ramfs' loaded."),
+                Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
+            }
+        }
+        if let (Some(task_id), Some(device)) = (init_task_id, drivers::virtio::block::get_device()) {
+            if let Some(task) = crate::process::get_task_by_id(task_id) {
+                let cap = crate::capability::get_capability_manager().create_capability(
+                    crate::capability::ResourceType::Volume,
+                    device as *const _ as usize,
+                    crate::capability::CapPermissions {
+                        read: true,
+                        write: true,
+                        execute: false,
+                        grant: true,
+                        revoke: true,
+                    },
+                );
+                unsafe { (&mut *task.capabilities.get()).insert(cap) };
+                serial_println!("[init] Granted volume capability to init");
+            }
+        }
+
         match process::Task::new_kernel_task(
             shell::shell_main,
             "chevron-shell",
@@ -540,8 +494,6 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 serial_println!("[WARN] Failed to create shell task: {}", e);
             }
         }
-
-        // Status line
         if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
             arch::x86_64::vga::status_line_task_main,
             "status-line",
@@ -550,6 +502,10 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         ) {
             process::add_task(status_task);
         }
+    }
+    #[cfg(feature = "selftest")]
+    {
+        serial_println!("[init] Selftest mode: skipping process services and virtio drivers");
     }
 
     // Initialize keyboard layout to French by default
