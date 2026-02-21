@@ -1,64 +1,86 @@
-//! MADT (Multiple APIC Description Table) parsing
-//!
-//! Extracts Local APIC address, I/O APIC entries, and interrupt source overrides.
+//! Support for the MADT ACPI table, 
+//! which includes interrupt and multicore info.
+//! Inspired by Theseus OS.
 
-use super::SdtHeader;
+use super::sdt::Sdt;
+use zerocopy::{FromBytes, FromZeroes};
 
-/// MADT table header (after SDT header)
+pub const MADT_SIGNATURE: &[u8; 4] = b"APIC";
+
+/// The fixed-size components of the MADT ACPI table.
+#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
 #[repr(C, packed)]
-struct Madt {
-    header: SdtHeader,
-    local_apic_address: u32,
-    flags: u32,
-    // Variable-length entries follow
-}
-
-/// MADT entry header (common to all entry types)
-#[repr(C, packed)]
-struct MadtEntryHeader {
-    entry_type: u8,
-    length: u8,
-}
-
-/// MADT entry type 0: Processor Local APIC
-#[repr(C, packed)]
-#[allow(dead_code)]
-struct MadtLocalApic {
-    header: MadtEntryHeader,
-    acpi_processor_id: u8,
-    apic_id: u8,
+struct MadtAcpiTable {
+    header: Sdt,
+    local_apic_phys_addr: u32,
     flags: u32,
 }
 
-/// MADT entry type 1: I/O APIC
+/// A MADT entry record, which precedes each actual MADT entry.
+#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
 #[repr(C, packed)]
-struct MadtIoApic {
-    header: MadtEntryHeader,
-    io_apic_id: u8,
+struct EntryRecord {
+    typ: u8,
+    size: u8,
+}
+
+/// MADT Local APIC entry (Type 0)
+#[derive(Copy, Clone, Debug, FromBytes, FromZeroes)]
+#[repr(C, packed)]
+pub struct MadtLocalApic {
+    _header: EntryRecord,
+    pub processor: u8,
+    pub apic_id: u8,
+    pub flags: u32,
+}
+
+/// MADT I/O APIC entry (Type 1)
+#[derive(Copy, Clone, Debug, FromBytes, FromZeroes)]
+#[repr(C, packed)]
+pub struct MadtIoApic {
+    _header: EntryRecord,
+    pub id: u8,
     _reserved: u8,
-    io_apic_address: u32,
-    global_system_interrupt_base: u32,
-}
-
-/// MADT entry type 2: Interrupt Source Override
-#[repr(C, packed)]
-struct MadtInterruptOverride {
-    header: MadtEntryHeader,
-    bus_source: u8,
-    irq_source: u8,
-    global_system_interrupt: u32,
-    flags: u16,
-}
-
-/// I/O APIC entry extracted from MADT
-#[derive(Clone, Copy, Debug)]
-pub struct IoApicEntry {
-    pub io_apic_id: u8,
-    pub io_apic_address: u32,
+    pub address: u32,
     pub gsi_base: u32,
 }
 
-/// Interrupt Source Override extracted from MADT
+/// MADT Interrupt Source Override (Type 2)
+#[derive(Copy, Clone, Debug, FromBytes, FromZeroes)]
+#[repr(C, packed)]
+pub struct MadtIntSrcOverride {
+    _header: EntryRecord,
+    pub bus_source: u8,
+    pub irq_source: u8,
+    pub gsi: u32,
+    pub flags: u16,
+}
+
+pub struct MadtInfo {
+    pub local_apic_address: u32,
+    pub flags: u32,
+    pub local_apics: [Option<LocalApicEntry>; 32],
+    pub local_apic_count: usize,
+    pub io_apics: [Option<IoApicEntry>; 4],
+    pub io_apic_count: usize,
+    pub overrides: [Option<InterruptSourceOverride>; 16],
+    pub override_count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LocalApicEntry {
+    pub processor: u8,
+    pub apic_id: u8,
+    pub flags: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct IoApicEntry {
+    pub id: u8,
+    pub address: u32,
+    pub gsi_base: u32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct InterruptSourceOverride {
     pub bus_source: u8,
@@ -81,33 +103,6 @@ impl InterruptSourceOverride {
     }
 }
 
-/// Parsed MADT information
-pub struct MadtInfo {
-    pub local_apic_address: u32,
-    pub flags: u32,
-    pub local_apics: [Option<LocalApicEntry>; 32],
-    pub local_apic_count: usize,
-    pub io_apics: [Option<IoApicEntry>; 4],
-    pub io_apic_count: usize,
-    pub overrides: [Option<InterruptSourceOverride>; 16],
-    pub override_count: usize,
-}
-
-/// Local APIC entry extracted from MADT
-#[derive(Clone, Copy, Debug)]
-pub struct LocalApicEntry {
-    pub acpi_processor_id: u8,
-    pub apic_id: u8,
-    pub flags: u32,
-}
-
-impl LocalApicEntry {
-    /// Whether this processor is enabled (flags bit 0).
-    pub fn enabled(&self) -> bool {
-        self.flags & 1 != 0
-    }
-}
-
 impl MadtInfo {
     /// Look up an IRQ's GSI and polarity/trigger, applying source overrides.
     ///
@@ -126,24 +121,26 @@ impl MadtInfo {
     }
 }
 
-/// Parse the MADT table from ACPI.
-///
-/// Returns `Some(MadtInfo)` with discovered hardware, or `None` if MADT not found.
 pub fn parse_madt() -> Option<MadtInfo> {
-    let madt_ptr = super::find_table(b"APIC")? as *const Madt;
-
-    // SAFETY: find_table returned a valid HHDM-mapped pointer.
-    // Use raw pointer arithmetic for packed struct fields to avoid UB.
-    let local_apic_address =
-        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*madt_ptr).local_apic_address)) };
-    let flags = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*madt_ptr).flags)) };
-    let total_length =
-        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*madt_ptr).header.length)) }
-            as usize;
+    let madt_ptr = super::find_table(MADT_SIGNATURE)? as *const MadtAcpiTable;
+    let madt = unsafe { &*madt_ptr };
+    if madt.header.length < core::mem::size_of::<MadtAcpiTable>() as u32 {
+        log::error!("ACPI: MADT length smaller than header");
+        return None;
+    }
+    let madt_len = madt.header.length as usize;
+    let mut sum: u8 = 0;
+    for i in 0..madt_len {
+        sum = sum.wrapping_add(unsafe { *((madt_ptr as *const u8).add(i)) });
+    }
+    if sum != 0 {
+        log::error!("ACPI: MADT checksum failed");
+        return None;
+    }
 
     let mut info = MadtInfo {
-        local_apic_address,
-        flags,
+        local_apic_address: madt.local_apic_phys_addr,
+        flags: madt.flags,
         local_apics: [None; 32],
         local_apic_count: 0,
         io_apics: [None; 4],
@@ -152,144 +149,58 @@ pub fn parse_madt() -> Option<MadtInfo> {
         override_count: 0,
     };
 
-    // Walk variable-length entries starting after the fixed MADT header
-    let entries_start = madt_ptr as usize + core::mem::size_of::<Madt>();
+    let total_length = madt_len;
+    let entries_start = madt_ptr as usize + core::mem::size_of::<MadtAcpiTable>();
     let entries_end = madt_ptr as usize + total_length;
     let mut offset = entries_start;
 
     while offset + 2 <= entries_end {
-        let entry_header = offset as *const MadtEntryHeader;
-        // SAFETY: within MADT table bounds
-        let entry_type = unsafe { (*entry_header).entry_type };
-        let entry_length = unsafe { (*entry_header).length } as usize;
+        let record = unsafe { &*(offset as *const EntryRecord) };
+        let entry_type = record.typ;
+        let entry_size = record.size as usize;
 
-        if entry_length < 2 || offset + entry_length > entries_end {
+        if entry_size < 2 || offset + entry_size > entries_end {
             break;
         }
 
         match entry_type {
-            // Type 0: Processor Local APIC (we just log it, don't need it for single-core)
             0 => {
                 if info.local_apic_count < info.local_apics.len() {
-                    let entry = offset as *const MadtLocalApic;
-                    // SAFETY: type 0 entry is at least 8 bytes, within bounds
-                    let acpi_processor_id = unsafe { (*entry).acpi_processor_id };
-                    let apic_id = unsafe { (*entry).apic_id };
-                    let flags =
-                        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*entry).flags)) };
-
-                    let local = LocalApicEntry {
-                        acpi_processor_id,
-                        apic_id,
-                        flags,
-                    };
-
-                    // Only store enabled processors; keep disabled for diagnostics if needed.
-                    if local.enabled() {
-                        info.local_apics[info.local_apic_count] = Some(local);
-                        info.local_apic_count += 1;
-                    }
+                    let entry = unsafe { &*(offset as *const MadtLocalApic) };
+                    info.local_apics[info.local_apic_count] = Some(LocalApicEntry {
+                        processor: entry.processor,
+                        apic_id: entry.apic_id,
+                        flags: entry.flags,
+                    });
+                    info.local_apic_count += 1;
                 }
             }
-
-            // Type 1: I/O APIC
             1 => {
                 if info.io_apic_count < info.io_apics.len() {
-                    let entry = offset as *const MadtIoApic;
-                    // SAFETY: type 1 entry is at least 12 bytes, within bounds
-                    let io_apic_id = unsafe { (*entry).io_apic_id };
-                    let io_apic_address = unsafe {
-                        core::ptr::read_unaligned(core::ptr::addr_of!((*entry).io_apic_address))
-                    };
-                    let gsi_base = unsafe {
-                        core::ptr::read_unaligned(core::ptr::addr_of!(
-                            (*entry).global_system_interrupt_base
-                        ))
-                    };
-
+                    let entry = unsafe { &*(offset as *const MadtIoApic) };
                     info.io_apics[info.io_apic_count] = Some(IoApicEntry {
-                        io_apic_id,
-                        io_apic_address,
-                        gsi_base,
+                        id: entry.id,
+                        address: entry.address,
+                        gsi_base: entry.gsi_base,
                     });
                     info.io_apic_count += 1;
                 }
             }
-
-            // Type 2: Interrupt Source Override
             2 => {
                 if info.override_count < info.overrides.len() {
-                    let entry = offset as *const MadtInterruptOverride;
-                    // SAFETY: type 2 entry is at least 10 bytes, within bounds
-                    let bus_source = unsafe { (*entry).bus_source };
-                    let irq_source = unsafe { (*entry).irq_source };
-                    let gsi = unsafe {
-                        core::ptr::read_unaligned(core::ptr::addr_of!(
-                            (*entry).global_system_interrupt
-                        ))
-                    };
-                    let flags =
-                        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*entry).flags)) };
-
+                    let entry = unsafe { &*(offset as *const MadtIntSrcOverride) };
                     info.overrides[info.override_count] = Some(InterruptSourceOverride {
-                        bus_source,
-                        irq_source,
-                        gsi,
-                        flags,
+                        bus_source: entry.bus_source,
+                        irq_source: entry.irq_source,
+                        gsi: entry.gsi,
+                        flags: entry.flags,
                     });
                     info.override_count += 1;
                 }
             }
-
-            // Other types (NMI, LAPIC NMI, etc.) — skip for now
             _ => {}
         }
-
-        offset += entry_length;
-    }
-
-    log::info!(
-        "MADT: LAPIC addr=0x{:08X}, {} Local APIC(s), {} I/O APIC(s), {} override(s)",
-        info.local_apic_address,
-        info.local_apic_count,
-        info.io_apic_count,
-        info.override_count
-    );
-
-    for i in 0..info.local_apic_count {
-        if let Some(ref entry) = info.local_apics[i] {
-            log::info!(
-                "  Local APIC #{}: acpi_id={}, apic_id={}, flags=0x{:08X}",
-                i,
-                entry.acpi_processor_id,
-                entry.apic_id,
-                entry.flags
-            );
-        }
-    }
-
-    for i in 0..info.io_apic_count {
-        if let Some(ref entry) = info.io_apics[i] {
-            log::info!(
-                "  I/O APIC #{}: id={}, addr=0x{:08X}, GSI base={}",
-                i,
-                entry.io_apic_id,
-                entry.io_apic_address,
-                entry.gsi_base
-            );
-        }
-    }
-
-    for i in 0..info.override_count {
-        if let Some(ref ovr) = info.overrides[i] {
-            log::info!(
-                "  Override: IRQ{} -> GSI{} (pol={}, trig={})",
-                ovr.irq_source,
-                ovr.gsi,
-                ovr.polarity(),
-                ovr.trigger_mode()
-            );
-        }
+        offset += entry_size;
     }
 
     Some(info)

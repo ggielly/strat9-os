@@ -17,6 +17,7 @@ selftest = []
 spin = { workspace = true }
 bitflags = { workspace = true }
 log = { workspace = true }
+zerocopy = { workspace = true }
 x86_64 = "0.15"                         # CPU structures, paging, GDT, IDT
 uart_16550 = "0.4"                      # Serial port (used in serial.rs)
 limine = "0.5.0"                        # Limine boot protocol

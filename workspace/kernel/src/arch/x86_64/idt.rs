@@ -42,7 +42,7 @@ pub fn init() {
 
         // Hardware IRQs (PIC remapped to 0x20+)
         let idt_ref = &mut *idt;
-        idt_ref[irq::TIMER as u8].set_handler_fn(timer_handler);
+        idt_ref[irq::TIMER as u8].set_handler_fn(legacy_timer_handler);
         idt_ref[irq::KEYBOARD as u8].set_handler_fn(keyboard_handler);
 
         // Spurious interrupt handler at vector 0xFF (APIC spurious vector)
@@ -69,6 +69,15 @@ pub fn register_tlb_shootdown_handler(handler: extern "C" fn()) {
         let idt = &raw mut IDT_STORAGE;
         (&mut *idt)[super::apic::IPI_TLB_SHOOTDOWN_VECTOR as u8]
             .set_handler_fn(core::mem::transmute(handler));
+        (*idt).load_unsafe();
+    }
+}
+
+/// Register the Local APIC timer IRQ vector to use the timer handler.
+pub fn register_lapic_timer_vector(vector: u8) {
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[vector].set_handler_fn(lapic_timer_handler);
         (*idt).load_unsafe();
     }
 }
@@ -289,7 +298,20 @@ extern "x86-interrupt" fn double_fault_handler(
 // Hardware IRQ handlers
 // =============================================
 
-extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
+/// Legacy external timer IRQ handler (PIC/IOAPIC IRQ0 path, vector 0x20).
+///
+/// When the LAPIC timer is active, we ignore this source to avoid double-ticking.
+extern "x86-interrupt" fn legacy_timer_handler(_stack_frame: InterruptStackFrame) {
+    if crate::arch::x86_64::timer::is_apic_timer_active() {
+        // Ignore legacy timer source once LAPIC timer is running.
+        if super::apic::is_initialized() {
+            super::apic::eoi();
+        } else {
+            pic::end_of_interrupt(0);
+        }
+        return;
+    }
+
     // Increment tick counter
     crate::process::scheduler::timer_tick();
     // NOTE: avoid complex rendering/allocation work in IRQ context.
@@ -304,6 +326,13 @@ extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
 
     // Try to preempt the current task (no-op if scheduler lock is held
     // or no task is running yet)
+    crate::process::scheduler::maybe_preempt();
+}
+
+/// Local APIC timer handler (dedicated vector, e.g. 0x22).
+extern "x86-interrupt" fn lapic_timer_handler(_stack_frame: InterruptStackFrame) {
+    crate::process::scheduler::timer_tick();
+    super::apic::eoi();
     crate::process::scheduler::maybe_preempt();
 }
 

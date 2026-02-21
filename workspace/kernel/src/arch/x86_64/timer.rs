@@ -111,11 +111,14 @@ pub fn calibrate_apic_timer() -> u32 {
     log::info!("PIT 10ms count: {}", PIT_10MS_COUNT);
     log::info!("Target wait time: ~10ms");
 
-    // Set APIC timer divide to 16
-    // Divide configuration: 0x03 = divide by 16
+    // Set APIC timer to a known state before calibration:
+    // - masked one-shot (no interrupts during measurement)
+    // - divide by 16
     // SAFETY: APIC is initialized
     unsafe {
+        apic::write_reg(apic::REG_LVT_TIMER, apic::LVT_TIMER_MASKED);
         apic::write_reg(apic::REG_TIMER_DIVIDE, 0x03);
+        apic::write_reg(apic::REG_TIMER_INIT, 0);
     }
     log::info!("APIC timer divide set to 16 (0x03)");
 
@@ -209,9 +212,10 @@ pub fn calibrate_apic_timer() -> u32 {
     let current = unsafe { apic::read_reg(apic::REG_TIMER_CURRENT) };
     let elapsed = 0xFFFF_FFFFu32.wrapping_sub(current);
 
-    // Stop the APIC timer
+    // Stop and mask the APIC timer
     // SAFETY: APIC is initialized
     unsafe {
+        apic::write_reg(apic::REG_LVT_TIMER, apic::LVT_TIMER_MASKED);
         apic::write_reg(apic::REG_TIMER_INIT, 0);
     }
 
@@ -313,6 +317,9 @@ pub fn start_apic_timer(ticks_per_10ms: u32) {
     log::info!("Ticks per 10ms: {}", ticks_per_10ms);
     log::info!("Target frequency: 100Hz (10ms interval)");
 
+    // Ensure the LAPIC timer vector is routed in the IDT before unmasking it.
+    super::idt::register_lapic_timer_vector(apic::LVT_TIMER_VECTOR);
+
     // SAFETY: APIC is initialized
     unsafe {
         // Set divide to 16 (same as calibration)
@@ -325,14 +332,15 @@ pub fn start_apic_timer(ticks_per_10ms: u32) {
             divide_val_after
         );
 
-        // Configure LVT Timer: periodic mode, vector 0x20
+        // Configure LVT Timer: periodic mode on dedicated LAPIC timer vector
         let lvt_before = apic::read_reg(apic::REG_LVT_TIMER);
         log::info!("LVT Timer register before: 0x{:08X}", lvt_before);
 
-        let lvt_config = apic::LVT_TIMER_PERIODIC | 0x20;
+        let lvt_config = apic::LVT_TIMER_PERIODIC | (apic::LVT_TIMER_VECTOR as u32);
         log::info!(
-            "LVT Timer config: 0x{:08X} (periodic + vector 0x20)",
+            "LVT Timer config: 0x{:08X} (periodic + vector {:#x})",
             lvt_config
+            , apic::LVT_TIMER_VECTOR
         );
         apic::write_reg(apic::REG_LVT_TIMER, lvt_config);
 
@@ -358,8 +366,9 @@ pub fn start_apic_timer(ticks_per_10ms: u32) {
     APIC_TIMER_ACTIVE.store(true, Ordering::Relaxed);
 
     log::info!(
-        "APIC timer: started periodic mode, vector=0x20, count={} (~100Hz)",
-        ticks_per_10ms
+        "APIC timer: started periodic mode, vector={:#x}, count={} (~100Hz)",
+        apic::LVT_TIMER_VECTOR,
+        ticks_per_10ms,
     );
     log::info!("========================================");
 }

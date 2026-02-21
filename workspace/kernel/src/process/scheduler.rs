@@ -1062,22 +1062,42 @@ pub fn timer_tick() {
     }
     drop(scheduler_check); // Release immediately, just checking
 
-    let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Resolve current CPU robustly; if APIC->CPU mapping is unknown, skip this tick
+    // instead of incorrectly attributing it to CPU0 (which accelerates time).
+    let cpu_idx = if let Some(idx) = percpu::cpu_index_from_gs() {
+        idx
+    } else if apic::is_initialized() {
+        let apic_id = apic::lapic_id();
+        match percpu::cpu_index_by_apic(apic_id) {
+            Some(idx) => idx,
+            None => {
+                log::trace!("timer_tick: unmapped LAPIC id {}", apic_id);
+                return;
+            }
+        }
+    } else {
+        0
+    };
 
-    // Assume 100Hz timer (10ms per tick)
-    // Convert ticks to nanoseconds
-    let current_time_ns = tick * 10_000_000; // 10ms = 10,000,000 ns
+    // Keep wall-clock accounting on BSP only. APs still receive timer interrupts
+    // for local preemption, but must not accelerate global time in SMP.
+    if cpu_idx == 0 {
+        let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
-    // Check interval timers for all tasks
-    super::timer::tick_all_timers(current_time_ns);
+        // Assume 100Hz timer (10ms per tick)
+        // Convert ticks to nanoseconds
+        let current_time_ns = tick * 10_000_000; // 10ms = 10,000,000 ns
 
-    // Check wake deadlines for sleeping tasks
-    check_wake_deadlines(current_time_ns);
+        // Check interval timers for all tasks
+        super::timer::tick_all_timers(current_time_ns);
+
+        // Check wake deadlines for sleeping tasks
+        check_wake_deadlines(current_time_ns);
+    }
 
     // Increment ticks for the task currently running on this CPU
     if let Some(mut guard) = SCHEDULER.try_lock() {
         if let Some(ref mut sched) = *guard {
-            let cpu_idx = current_cpu_index();
             if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
                 if let Some(ref current_task) = cpu.current_task {
                     current_task.ticks.fetch_add(1, Ordering::Relaxed);

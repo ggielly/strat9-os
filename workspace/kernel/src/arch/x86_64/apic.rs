@@ -48,6 +48,8 @@ pub const LVT_TIMER_PERIODIC: u32 = 1 << 17;
 /// LVT Timer: masked (bit 16)
 #[allow(dead_code)]
 pub const LVT_TIMER_MASKED: u32 = 1 << 16;
+/// Dedicated Local APIC timer interrupt vector (aligned with Theseus-style setup).
+pub const LVT_TIMER_VECTOR: u8 = 0x22;
 
 /// MSR address for APIC base
 const IA32_APIC_BASE_MSR: u32 = 0x1B;
@@ -70,10 +72,17 @@ pub fn is_present() -> bool {
     edx & (1 << 9) != 0
 }
 
-/// Get the Local APIC ID from CPUID
+/// Get the current Local APIC ID.
+///
+/// When APIC is initialized, read the LAPIC ID register (authoritative at runtime).
+/// Before APIC init, fall back to CPUID initial APIC ID.
 pub fn lapic_id() -> u32 {
+    if APIC_INITIALIZED.load(Ordering::Relaxed) {
+        // SAFETY: guarded by APIC_INITIALIZED.
+        return unsafe { read_reg(REG_ID) >> 24 };
+    }
+
     let (_eax, ebx, _ecx, _edx) = super::cpuid(1, 0);
-    // CPUID.01H:EBX[31:24] = initial APIC ID
     (ebx >> 24) & 0xFF
 }
 

@@ -193,6 +193,20 @@ pub fn apic_id_by_cpu_index(index: usize) -> Option<u32> {
         .map(|cpu| cpu.apic_id.load(Ordering::Acquire))
 }
 
+/// Resolve current CPU index from GS base, if initialized.
+///
+/// This avoids relying on LAPIC-ID reads in hot paths like timer IRQs.
+pub fn cpu_index_from_gs() -> Option<usize> {
+    let gs_base = crate::arch::x86_64::rdmsr(0xC000_0101);
+    for (idx, cpu) in PERCPU.iter().enumerate() {
+        let ptr = cpu as *const PerCpu as u64;
+        if ptr == gs_base && cpu.present.load(Ordering::Acquire) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
 /// Fast current-CPU index lookup via APIC ID (CPUID instruction).
 /// Returns 0 if APIC is not yet initialized.
 #[inline]

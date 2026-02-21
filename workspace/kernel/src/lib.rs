@@ -608,6 +608,22 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     };
     serial_println!("[init]   6c. MADT parsed");
 
+    if let Some(mcfg) = acpi::mcfg::parse_mcfg() {
+        serial_println!("[init]   6c+. MCFG parsed ({} segment(s))", mcfg.entries.len());
+        for entry in mcfg.entries.iter() {
+            log::info!(
+                "ACPI: MCFG seg={} ecam={:#x} buses={}..{} ({} bus(es))",
+                entry.segment_group,
+                entry.base_address,
+                entry.start_bus,
+                entry.end_bus,
+                entry.bus_count()
+            );
+        }
+    } else {
+        serial_println!("[init]   6c+. MCFG not found");
+    }
+
     // Step 6d: initialize Local APIC
     // Ensure Local APIC MMIO is mapped
     memory::paging::ensure_identity_map(madt_info.local_apic_address as u64);
@@ -624,8 +640,8 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
         return false;
     };
     // Ensure I/O APIC MMIO is mapped
-    memory::paging::ensure_identity_map(io_apic_entry.io_apic_address as u64);
-    ioapic::init(io_apic_entry.io_apic_address, io_apic_entry.gsi_base);
+    memory::paging::ensure_identity_map(io_apic_entry.address as u64);
+    ioapic::init(io_apic_entry.address, io_apic_entry.gsi_base);
     serial_println!("[init]   6e. I/O APIC initialized");
 
     // Step 6f: remap PIC to 0x20+ then disable permanently
