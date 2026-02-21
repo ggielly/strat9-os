@@ -91,6 +91,8 @@ struct SchedulerCpu {
     idle_task: Arc<Task>,
     /// Task that was just preempted and needs to be re-queued
     task_to_requeue: Option<Arc<Task>>,
+    /// Task that is dying or blocked, to drop outside the scheduler lock
+    task_to_drop: Option<Arc<Task>>,
 }
 
 /// The round-robin scheduler (per-CPU queues)
@@ -145,6 +147,7 @@ impl Scheduler {
                 current_task: None,
                 idle_task,
                 task_to_requeue: None,
+                task_to_drop: None,
             });
         }
 
@@ -277,6 +280,10 @@ impl Scheduler {
                     // Another CPU could steal it before its context is saved.
                     self.cpus[cpu_index].task_to_requeue = Some(task);
                 }
+            } else {
+                // Task is Dead or Blocked. Prevent it from dropping right here
+                // by deferring the drop to finish_switch().
+                self.cpus[cpu_index].task_to_drop = Some(task);
             }
         }
 
@@ -494,9 +501,23 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 /// This safely re-queues the previously running task now that its state is fully saved.
 pub fn finish_switch() {
     let cpu_index = current_cpu_index();
-    let mut scheduler = SCHEDULER.lock();
-    if let Some(ref mut sched) = *scheduler {
-        if let Some(task) = sched.cpus[cpu_index].task_to_requeue.take() {
+    let mut task_to_requeue = None;
+    let mut task_to_drop = None;
+    {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
+            task_to_requeue = sched.cpus[cpu_index].task_to_requeue.take();
+            task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
+        }
+    }
+    
+    // Drop the previous task outside the scheduler lock (if it was the last ref).
+    // This is safe because we are fully switched to the new task's stack and CR3.
+    drop(task_to_drop);
+
+    if let Some(task) = task_to_requeue {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
             sched.cpus[cpu_index].ready_queue.push_back(task);
         }
     }
