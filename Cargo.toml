@@ -28,6 +28,7 @@ repository = "https://github.com/ggielly/strat9-os"
 spin = "0.10.0"
 bitflags = "2.11.0"
 log = "0.4"
+zerocopy = { version = "0.7.35", features = ["derive"] }
 
 [workspace.lints.rust]
 dangling_pointers_from_temporaries = "deny"
