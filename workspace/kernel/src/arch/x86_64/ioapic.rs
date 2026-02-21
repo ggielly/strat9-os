@@ -203,8 +203,14 @@ fn find_override(irq: u8, overrides: &[Option<InterruptSourceOverride>]) -> (u32
     (irq as u32, 0, 0)
 }
 
+/// Mask a legacy IRQ, resolving MADT overrides to the correct GSI.
+pub fn mask_legacy_irq(irq: u8, overrides: &[Option<InterruptSourceOverride>]) {
+    let (gsi, _, _) = find_override(irq, overrides);
+    mask_irq(gsi);
+    log::debug!("I/O APIC: masked legacy IRQ{} (GSI{})", irq, gsi);
+}
+
 /// Mask a GSI (disable the interrupt)
-#[allow(dead_code)]
 pub fn mask_irq(gsi: u32) {
     let gsi_base = IOAPIC_GSI_BASE.load(Ordering::Relaxed);
     if gsi < gsi_base {

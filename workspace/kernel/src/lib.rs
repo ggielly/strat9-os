@@ -692,6 +692,14 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
         timer::start_apic_timer(ticks_per_10ms);
         serial_println!("[init]   6i. APIC timer started (100Hz)");
 
+        // Step 6i+: quench legacy PIT to prevent phantom timer interrupts.
+        // The Limine bootloader leaves PIT channel 0 running (~100Hz).
+        // Even though legacy_timer_handler guards against double-counting,
+        // masking the source eliminates wasted interrupt cycles entirely.
+        timer::stop_pit();
+        ioapic::mask_legacy_irq(0, &madt_info.overrides);
+        serial_println!("[init]   6i+. Legacy PIT stopped and masked in IOAPIC");
+
         serial_println!("[timer] ============================= TIMER INIT COMPLETE ============================");
         serial_println!("[timer] Mode: APIC (native)");
         serial_println!("[timer] Frequency: 100Hz");
