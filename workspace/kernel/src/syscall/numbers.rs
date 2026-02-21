@@ -111,10 +111,10 @@ pub const SYS_PROC_YIELD: u64 = 301;
 /// Fork the current process (COW). Returns child PID in parent, 0 in child.
 pub const SYS_PROC_FORK: u64 = 302;
 
-/// Return current process ID (task ID).
+/// Return current process ID (pid).
 pub const SYS_PROC_GETPID: u64 = 308;
 
-/// Return parent process ID (task ID), or 0 if none.
+/// Return parent process ID (pid), or 0 if none.
 pub const SYS_PROC_GETPPID: u64 = 309;
 
 /// Wait for a child to change state (currently: exit only).
