@@ -14,20 +14,42 @@
 //!
 //! Each task has its own 16KB kernel stack. Callee-saved registers are
 //! pushed/popped by `switch_context()`. `CpuContext` only stores `saved_rsp`.
+//!
+//! TODO(v2 scheduler):
+//! - formalize a full scheduling-classes framework with runtime-pluggable policy mapping.
+//! - replace fixed policy->class routing with a configurable registry:
+//!   - class id, class ops, policy matcher, priority rank, preempt rules.
+//!   - support dynamic add/remove/reorder of classes with validation.
+//! - add atomic class-table reconfiguration:
+//!   - stop-the-world or RCU-style swap for class table pointer.
+//!   - migrate queued tasks across classes safely without dropping runnable tasks.
+//!   - preserve per-task accounting (vruntime, rt budget, deadlines) during migration.
+//! - split scheduling decisions into explicit hooks:
+//!   - enqueue/dequeue/select/update_tick/should_preempt/yield/steal_candidate.
+//!   - optional class-local state serialization for debug dump and hot-reload.
+//! - isolate balancing into a dedicated module:
+//!   - per-class steal policy, NUMA-aware balancing (future), CPU affinity masks.
+//!   - anti-thrashing hysteresis and migration rate limiting.
+//! - expose kernel config + shell controls:
+//!   - `scheduler class list`, `scheduler class order set`, `scheduler policy map set`.
+//!   - runtime-safe reject path when requested config is inconsistent.
+//! - harden SMP behavior:
+//!   - explicit lock hierarchy for class-rq + global metadata.
+//!   - resched IPI batching and reduced cross-cpu ping-pong.
+//! - observability:
+//!   - per-class metrics (latency, wait time, runtime, preempt count, steal count).
+//!   - structured dump for post-mortem traces and selftest assertions.
+//! - tests:
+//!   - deterministic class migration tests, policy remap tests, SMP steal tests.
+//!   - starvation/fairness regression suite and long-running stress suite in test ISO.
 
-use super::task::{restore_first_task, switch_context, Task, TaskId, TaskPriority, TaskState};
+use super::task::{restore_first_task, switch_context, Pid, Task, TaskId, TaskPriority, TaskState, Tid};
 use crate::{
     arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer},
-    capability::get_capability_manager,
-    serial_println,
     sync::SpinLock,
-    vga_println,
 };
-use alloc::{
-    collections::{BTreeMap, VecDeque},
-    sync::Arc,
-};
-use core::sync::atomic::{AtomicU64, Ordering};
+use alloc::{collections::BTreeMap, sync::Arc};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ─── Cross-CPU IPI helpers ────────────────────────────────────────────────────
 
@@ -51,6 +73,15 @@ static SCHEDULER: SpinLock<Option<Scheduler>> = SpinLock::new(None);
 
 /// Global tick counter (safe to increment from interrupt context)
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Verbose scheduler trace switch.
+static SCHED_VERBOSE: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn sched_trace(args: core::fmt::Arguments<'_>) {
+    if SCHED_VERBOSE.load(Ordering::Relaxed) {
+        log::debug!("[sched] {}", args);
+    }
+}
 
 /// Information needed to perform a context switch after releasing the lock.
 struct SwitchTarget {
@@ -67,7 +98,7 @@ unsafe impl Send for SwitchTarget {}
 
 /// Result of a non-blocking wait on child exit.
 pub enum WaitChildResult {
-    Reaped { child: TaskId, status: i32 },
+    Reaped { child: TaskId, pid: Pid, status: i32 },
     NoChildren,
     StillRunning,
 }
@@ -81,16 +112,112 @@ fn current_cpu_index() -> usize {
     }
 }
 
+struct PerCpuClassRqSet {
+    real_time: crate::process::sched::real_time::RealTimeClassRq,
+    fair: crate::process::sched::fair::FairClassRq,
+    idle: crate::process::sched::idle::IdleClassRq,
+}
+
+impl PerCpuClassRqSet {
+    fn new() -> Self {
+        Self {
+            real_time: crate::process::sched::real_time::RealTimeClassRq::new(),
+            fair: crate::process::sched::fair::FairClassRq::new(),
+            idle: crate::process::sched::idle::IdleClassRq::new(),
+        }
+    }
+
+    fn enqueue(&mut self, class: crate::process::sched::SchedClassId, task: Arc<Task>) {
+        use crate::process::sched::SchedClassRq;
+        match class {
+            crate::process::sched::SchedClassId::Fair => self.fair.enqueue(task),
+            crate::process::sched::SchedClassId::RealTime => self.real_time.enqueue(task),
+            crate::process::sched::SchedClassId::Idle => self.idle.enqueue(task),
+        }
+    }
+
+    fn len_by_class(&self, class: crate::process::sched::SchedClassId) -> usize {
+        use crate::process::sched::SchedClassRq;
+        match class {
+            crate::process::sched::SchedClassId::Fair => self.fair.len(),
+            crate::process::sched::SchedClassId::RealTime => self.real_time.len(),
+            crate::process::sched::SchedClassId::Idle => self.idle.len(),
+        }
+    }
+
+    fn runnable_len(&self) -> usize {
+        self.len_by_class(crate::process::sched::SchedClassId::RealTime)
+            + self.len_by_class(crate::process::sched::SchedClassId::Fair)
+    }
+
+    fn pick_next_by_class(&mut self, class: crate::process::sched::SchedClassId) -> Option<Arc<Task>> {
+        use crate::process::sched::SchedClassRq;
+        match class {
+            crate::process::sched::SchedClassId::Fair => self.fair.pick_next(),
+            crate::process::sched::SchedClassId::RealTime => self.real_time.pick_next(),
+            crate::process::sched::SchedClassId::Idle => self.idle.pick_next(),
+        }
+    }
+
+    fn pick_next(&mut self, table: &crate::process::sched::SchedClassTable) -> Option<Arc<Task>> {
+        for class in table.pick_order().iter().copied() {
+            if let Some(task) = self.pick_next_by_class(class) {
+                return Some(task);
+            }
+        }
+        None
+    }
+
+    fn update_current(
+        &mut self,
+        rt: &crate::process::sched::CurrentRuntime,
+        task: &Task,
+        is_yield: bool,
+        table: &crate::process::sched::SchedClassTable,
+    ) -> bool {
+        use crate::process::sched::SchedClassRq;
+        let should_preempt = match table.class_for_task(task) {
+            crate::process::sched::SchedClassId::Fair => self.fair.update_current(rt, task, is_yield),
+            crate::process::sched::SchedClassId::RealTime => self.real_time.update_current(rt, task, is_yield),
+            crate::process::sched::SchedClassId::Idle => self.idle.update_current(rt, task, is_yield),
+        };
+        // Always preempt idle task if there are other tasks ready
+        let any_ready = !self.real_time.is_empty() || !self.fair.is_empty();
+        should_preempt
+            || (table.class_for_task(task) == crate::process::sched::SchedClassId::Idle && any_ready)
+    }
+
+    fn remove(&mut self, task_id: crate::process::TaskId) -> bool {
+        use crate::process::sched::SchedClassRq;
+        self.real_time.remove(task_id) || self.fair.remove(task_id) || self.idle.remove(task_id)
+    }
+
+    fn steal_candidate(&mut self, table: &crate::process::sched::SchedClassTable) -> Option<Arc<Task>> {
+        for class in table.steal_order().iter().copied() {
+            if let Some(task) = self.pick_next_by_class(class) {
+                return Some(task);
+            }
+        }
+        None
+    }
+}
+
 /// Per-CPU scheduler state
 struct SchedulerCpu {
-    /// Queue of ready tasks
-    ready_queue: VecDeque<Arc<Task>>,
+    /// Multi-class priority queues
+    class_rqs: PerCpuClassRqSet,
     /// Currently running task
     current_task: Option<Arc<Task>>,
+    /// Current runtime accounting
+    current_runtime: crate::process::sched::CurrentRuntime,
     /// Idle task to run when no other tasks are ready
     idle_task: Arc<Task>,
     /// Task that was just preempted and needs to be re-queued
     task_to_requeue: Option<Arc<Task>>,
+    /// Task that is dying or blocked, to drop outside the scheduler lock
+    task_to_drop: Option<Arc<Task>>,
+    /// Flag indicating if the current task's time slice has expired
+    need_resched: bool,
 }
 
 /// The round-robin scheduler (per-CPU queues)
@@ -103,6 +230,8 @@ pub struct Scheduler {
     all_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// Map TaskId -> CPU index (for wake/resume routing)
     task_cpu: BTreeMap<TaskId, usize>,
+    /// Map userspace PID -> internal TaskId (process leader in current model).
+    pid_to_task: BTreeMap<Pid, TaskId>,
     /// Parent relationship: child -> parent
     parent_of: BTreeMap<TaskId, TaskId>,
     /// Children list: parent -> children
@@ -111,6 +240,8 @@ pub struct Scheduler {
     zombies: BTreeMap<TaskId, i32>,
     /// Timer interval for preemption (in milliseconds)
     quantum_ms: u64,
+    /// Scheduler class table (pick order, steal order, class metadata)
+    class_table: crate::process::sched::SchedClassTable,
 }
 
 fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
@@ -138,11 +269,17 @@ impl Scheduler {
         for _ in 0..cpu_count {
             let idle_task = Task::new_kernel_task(idle_task_main, "idle", TaskPriority::Idle)
                 .expect("Failed to create idle task");
+            idle_task.set_sched_policy(crate::process::sched::SchedPolicy::Idle);
+            let mut class_rqs = PerCpuClassRqSet::new();
+            class_rqs.enqueue(crate::process::sched::SchedClassId::Idle, idle_task.clone());
             cpus.push(SchedulerCpu {
-                ready_queue: VecDeque::new(),
+                class_rqs,
                 current_task: None,
+                current_runtime: crate::process::sched::CurrentRuntime::new(),
                 idle_task,
                 task_to_requeue: None,
+                task_to_drop: None,
+                need_resched: false,
             });
         }
 
@@ -151,10 +288,12 @@ impl Scheduler {
             blocked_tasks: BTreeMap::new(),
             all_tasks: BTreeMap::new(),
             task_cpu: BTreeMap::new(),
+            pid_to_task: BTreeMap::new(),
             parent_of: BTreeMap::new(),
             children_of: BTreeMap::new(),
             zombies: BTreeMap::new(),
             quantum_ms: 10, // 10ms time slice
+            class_table: crate::process::sched::SchedClassTable::default(),
         }
     }
 
@@ -173,15 +312,23 @@ impl Scheduler {
     }
 
     fn add_task_on_cpu(&mut self, task: Arc<Task>, cpu_index: usize) {
+        let task_id = task.id;
         // SAFETY: We have exclusive access via the scheduler lock
         unsafe {
             *task.state.get() = TaskState::Ready;
         }
 
-        self.all_tasks.insert(task.id, task.clone());
-        self.task_cpu.insert(task.id, cpu_index);
+        self.all_tasks.insert(task_id, task.clone());
+        self.task_cpu.insert(task_id, cpu_index);
+        self.pid_to_task.insert(task.pid, task_id);
         if let Some(cpu) = self.cpus.get_mut(cpu_index) {
-            cpu.ready_queue.push_back(task);
+            let class = self.class_table.class_for_task(&task);
+            cpu.class_rqs.enqueue(class, task);
+            cpu.need_resched = true;
+        }
+        sched_trace(format_args!("enqueue task={} cpu={}", task_id.as_u64(), cpu_index));
+        if cpu_index != current_cpu_index() {
+            send_resched_ipi_to_cpu(cpu_index);
         }
     }
 
@@ -193,7 +340,12 @@ impl Scheduler {
             }
             let cpu_index = self.task_cpu.get(&id).copied().unwrap_or(0);
             if let Some(cpu) = self.cpus.get_mut(cpu_index) {
-                cpu.ready_queue.push_back(task);
+                let class = self.class_table.class_for_task(&task);
+                cpu.class_rqs.enqueue(class, task);
+                cpu.need_resched = true;
+            }
+            if cpu_index != current_cpu_index() {
+                send_resched_ipi_to_cpu(cpu_index);
             }
             true
         } else if let Some(task) = self.all_tasks.get(&id) {
@@ -227,12 +379,18 @@ impl Scheduler {
 
         if let Some(child) = zombie {
             let status = self.zombies.remove(&child).unwrap_or(0);
+            let child_pid = self.pid_to_task.iter().find_map(|(pid, tid)| {
+                if *tid == child { Some(*pid) } else { None }
+            }).unwrap_or(0);
+            if child_pid != 0 {
+                self.pid_to_task.remove(&child_pid);
+            }
             children.retain(|&id| id != child);
             self.parent_of.remove(&child);
             if children.is_empty() {
                 self.children_of.remove(&parent);
             }
-            return WaitChildResult::Reaped { child, status };
+            return WaitChildResult::Reaped { child, pid: child_pid, status };
         }
 
         WaitChildResult::StillRunning
@@ -267,11 +425,15 @@ impl Scheduler {
                     // Another CPU could steal it before its context is saved.
                     self.cpus[cpu_index].task_to_requeue = Some(task);
                 }
+            } else {
+                // Task is Dead or Blocked. Prevent it from dropping right here
+                // by deferring the drop to finish_switch().
+                self.cpus[cpu_index].task_to_drop = Some(task);
             }
         }
 
         // Step 2: local queue, then work-steal, then idle.
-        let next_task = if let Some(task) = self.cpus[cpu_index].ready_queue.pop_front() {
+        let next_task = if let Some(task) = self.cpus[cpu_index].class_rqs.pick_next(&self.class_table) {
             task
         } else if let Some(task) = self.steal_task(cpu_index) {
             task
@@ -284,6 +446,14 @@ impl Scheduler {
             *next_task.state.get() = TaskState::Running;
         }
         self.cpus[cpu_index].current_task = Some(next_task.clone());
+        // Reset the runtime accounting for the new task
+        self.cpus[cpu_index].current_runtime = crate::process::sched::CurrentRuntime::new();
+        sched_trace(format_args!(
+            "cpu={} pick_next task={} policy={:?}",
+            cpu_index,
+            next_task.id.as_u64(),
+            next_task.sched_policy()
+        ));
         next_task
     }
 
@@ -296,14 +466,14 @@ impl Scheduler {
         // Find the busiest CPU that isn't ourselves.
         let best_src = (0..self.cpus.len())
             .filter(|&i| i != dst_cpu)
-            .max_by_key(|&i| self.cpus[i].ready_queue.len())?;
+            .max_by_key(|&i| self.cpus[i].class_rqs.runnable_len())?;
 
         // Only steal if source will still have work left.
-        if self.cpus[best_src].ready_queue.len() < 2 {
+        if self.cpus[best_src].class_rqs.runnable_len() < 2 {
             return None;
         }
 
-        let task = self.cpus[best_src].ready_queue.pop_back()?;
+        let task = self.cpus[best_src].class_rqs.steal_candidate(&self.class_table)?;
         // Update the task→CPU mapping so wake/resume route correctly.
         self.task_cpu.insert(task.id, dst_cpu);
         log::trace!(
@@ -311,8 +481,14 @@ impl Scheduler {
             dst_cpu,
             task.id,
             best_src,
-            self.cpus[best_src].ready_queue.len() + 1
+            self.cpus[best_src].class_rqs.runnable_len() + 1
         );
+        sched_trace(format_args!(
+            "work-steal dst_cpu={} src_cpu={} task={}",
+            dst_cpu,
+            best_src,
+            task.id.as_u64()
+        ));
         Some(task)
     }
 
@@ -364,7 +540,7 @@ impl Scheduler {
         let mut best = 0usize;
         let mut best_load = usize::MAX;
         for (idx, cpu) in self.cpus.iter().enumerate() {
-            let mut load = cpu.ready_queue.len();
+            let mut load = cpu.class_rqs.runnable_len();
             if cpu.current_task.is_some() {
                 load += 1;
             }
@@ -484,10 +660,25 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 /// This safely re-queues the previously running task now that its state is fully saved.
 pub fn finish_switch() {
     let cpu_index = current_cpu_index();
-    let mut scheduler = SCHEDULER.lock();
-    if let Some(ref mut sched) = *scheduler {
-        if let Some(task) = sched.cpus[cpu_index].task_to_requeue.take() {
-            sched.cpus[cpu_index].ready_queue.push_back(task);
+    let mut task_to_requeue = None;
+    let mut task_to_drop = None;
+    {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
+            task_to_requeue = sched.cpus[cpu_index].task_to_requeue.take();
+            task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
+        }
+    }
+    
+    // Drop the previous task outside the scheduler lock (if it was the last ref).
+    // This is safe because we are fully switched to the new task's stack and CR3.
+    drop(task_to_drop);
+
+    if let Some(task) = task_to_requeue {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
+            let class = sched.class_table.class_for_task(&task);
+            sched.cpus[cpu_index].class_rqs.enqueue(class, task);
         }
     }
 }
@@ -560,14 +751,25 @@ pub fn maybe_preempt() {
 
         if let Some(ref mut sched) = *scheduler {
             // Skip if no task is running yet (during early boot)
-            if sched
-                .cpus
-                .get(cpu_index)
-                .and_then(|c| c.current_task.as_ref())
-                .is_none()
-            {
+            let cpu = match sched.cpus.get_mut(cpu_index) {
+                Some(cpu) => cpu,
+                None => return,
+            };
+            if cpu.current_task.is_none() {
                 return;
             }
+            if !cpu.need_resched {
+                return;
+            }
+            if let Some(current) = cpu.current_task.as_ref() {
+                sched_trace(format_args!(
+                    "cpu={} preempt request task={} rt_delta={}",
+                    cpu_index,
+                    current.id.as_u64(),
+                    cpu.current_runtime.period_delta_ticks
+                ));
+            }
+            cpu.need_resched = false;
             sched.yield_cpu(cpu_index)
         } else {
             None
@@ -587,6 +789,86 @@ pub fn maybe_preempt() {
         // restore the original RFLAGS (including IF=1).
         finish_switch();
     }
+}
+
+/// Enable or disable verbose scheduler tracing.
+pub fn set_verbose(enabled: bool) {
+    SCHED_VERBOSE.store(enabled, Ordering::Relaxed);
+    log::info!("scheduler verbose tracing {}", if enabled { "enabled" } else { "disabled" });
+}
+
+/// Return current verbose tracing state.
+pub fn verbose_enabled() -> bool {
+    SCHED_VERBOSE.load(Ordering::Relaxed)
+}
+
+/// Return the scheduler class-table currently in use.
+pub fn class_table() -> crate::process::sched::SchedClassTable {
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = SCHEDULER.lock();
+        if let Some(ref sched) = *scheduler {
+            sched.class_table
+        } else {
+            crate::process::sched::SchedClassTable::default()
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
+/// Configure scheduler class pick/steal order at runtime.
+pub fn configure_class_table(
+    table: crate::process::sched::SchedClassTable,
+) -> bool {
+    let saved_flags = save_flags_and_cli();
+    let applied = {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
+            sched.class_table = table;
+            true
+        } else {
+            false
+        }
+    };
+    restore_flags(saved_flags);
+    applied
+}
+
+/// Dump per-cpu scheduler queues for tracing/debug.
+pub fn log_state(label: &str) {
+    let saved_flags = save_flags_and_cli();
+    let scheduler = SCHEDULER.lock();
+    if let Some(ref sched) = *scheduler {
+        let pick = sched.class_table.pick_order();
+        let steal = sched.class_table.steal_order();
+        log::info!(
+            "[sched:{}] class-table pick=[{},{},{}] steal=[{},{}]",
+            label,
+            pick[0].as_str(),
+            pick[1].as_str(),
+            pick[2].as_str(),
+            steal[0].as_str(),
+            steal[1].as_str()
+        );
+        for (cpu_id, cpu) in sched.cpus.iter().enumerate() {
+            use crate::process::sched::SchedClassRq;
+            let current = cpu.current_task.as_ref().map(|t| t.id.as_u64()).unwrap_or(u64::MAX);
+            log::info!(
+                "[sched:{}] cpu={} current={} rq_rt={} rq_fair={} rq_idle={} blocked={} need_resched={}",
+                label,
+                cpu_id,
+                current,
+                cpu.class_rqs.real_time.len(),
+                cpu.class_rqs.fair.len(),
+                cpu.class_rqs.idle.len(),
+                sched.blocked_tasks.len(),
+                cpu.need_resched
+            );
+        }
+    }
+    drop(scheduler);
+    restore_flags(saved_flags);
 }
 
 /// The main function for the idle task
@@ -626,6 +908,8 @@ pub fn exit_current_task(exit_code: i32) -> ! {
 
                 if parent.is_some() {
                     sched.zombies.insert(current_id, exit_code);
+                } else {
+                    sched.pid_to_task.retain(|_, tid| *tid != current_id);
                 }
                 if let Some(parent_id) = parent {
                     let _ = sched.wake_task_locked(parent_id);
@@ -669,6 +953,26 @@ pub fn current_task_id() -> Option<TaskId> {
     id
 }
 
+/// Get the current process ID (POSIX pid).
+pub fn current_pid() -> Option<Pid> {
+    current_task_clone().map(|t| t.pid)
+}
+
+/// Get the current thread ID (POSIX tid).
+pub fn current_tid() -> Option<Tid> {
+    current_task_clone().map(|t| t.tid)
+}
+
+/// Get the current process group id.
+pub fn current_pgid() -> Option<Pid> {
+    current_task_clone().map(|t| t.pgid.load(Ordering::Relaxed))
+}
+
+/// Get the current session id.
+pub fn current_sid() -> Option<Pid> {
+    current_task_clone().map(|t| t.sid.load(Ordering::Relaxed))
+}
+
 /// Get the current task (cloned Arc), if any.
 pub fn current_task_clone() -> Option<Arc<Task>> {
     let saved_flags = save_flags_and_cli();
@@ -688,6 +992,169 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
     task
 }
 
+/// Resolve a POSIX pid to internal TaskId.
+pub fn get_task_id_by_pid(pid: Pid) -> Option<TaskId> {
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = SCHEDULER.lock();
+        if let Some(ref sched) = *scheduler {
+            sched.pid_to_task.get(&pid).copied()
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
+/// Resolve a POSIX pid to the corresponding task.
+pub fn get_task_by_pid(pid: Pid) -> Option<Arc<Task>> {
+    let tid = get_task_id_by_pid(pid)?;
+    get_task_by_id(tid)
+}
+
+/// Resolve a PID to the current process group id.
+pub fn get_pgid_by_pid(pid: Pid) -> Option<Pid> {
+    let task = get_task_by_pid(pid)?;
+    Some(task.pgid.load(Ordering::Relaxed))
+}
+
+/// Resolve a PID to the current session id.
+pub fn get_sid_by_pid(pid: Pid) -> Option<Pid> {
+    let task = get_task_by_pid(pid)?;
+    Some(task.sid.load(Ordering::Relaxed))
+}
+
+/// Collect task IDs that currently belong to process group `pgid`.
+pub fn get_task_ids_in_pgid(pgid: Pid) -> alloc::vec::Vec<TaskId> {
+    use alloc::vec::Vec;
+    let saved_flags = save_flags_and_cli();
+    let mut out = Vec::new();
+    {
+        let scheduler = SCHEDULER.lock();
+        if let Some(ref sched) = *scheduler {
+            for task in sched.all_tasks.values() {
+                if task.pgid.load(Ordering::Relaxed) == pgid {
+                    out.push(task.id);
+                }
+            }
+        }
+    }
+    restore_flags(saved_flags);
+    out
+}
+
+/// Set process group id for `target_pid` (or current if `None`).
+pub fn set_process_group(
+    requester: TaskId,
+    target_pid: Option<Pid>,
+    new_pgid: Option<Pid>,
+) -> Result<Pid, crate::syscall::error::SyscallError> {
+    use crate::syscall::error::SyscallError;
+
+    let saved_flags = save_flags_and_cli();
+    let result = {
+        let mut scheduler = SCHEDULER.lock();
+        let Some(ref mut sched) = *scheduler else {
+            return Err(SyscallError::Fault);
+        };
+
+        let requester_task = sched
+            .all_tasks
+            .get(&requester)
+            .cloned()
+            .ok_or(SyscallError::Fault)?;
+        let requester_sid = requester_task.sid.load(Ordering::Relaxed);
+
+        let target_id = match target_pid {
+            None => requester,
+            Some(pid) => sched
+                .pid_to_task
+                .get(&pid)
+                .copied()
+                .ok_or(SyscallError::NotFound)?,
+        };
+
+        if target_id != requester {
+            let is_child = sched
+                .children_of
+                .get(&requester)
+                .map(|children| children.iter().any(|child| *child == target_id))
+                .unwrap_or(false);
+            if !is_child {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
+
+        let target_task = sched
+            .all_tasks
+            .get(&target_id)
+            .cloned()
+            .ok_or(SyscallError::NotFound)?;
+        let target_pid_value = target_task.pid;
+        let target_sid = target_task.sid.load(Ordering::Relaxed);
+
+        if target_sid != requester_sid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        if target_pid_value == target_sid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        let desired_pgid = new_pgid.unwrap_or(target_pid_value);
+        if desired_pgid != target_pid_value {
+            let group_leader_tid = sched
+                .pid_to_task
+                .get(&desired_pgid)
+                .copied()
+                .ok_or(SyscallError::NotFound)?;
+            let group_leader = sched
+                .all_tasks
+                .get(&group_leader_tid)
+                .cloned()
+                .ok_or(SyscallError::NotFound)?;
+            if group_leader.sid.load(Ordering::Relaxed) != target_sid {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
+
+        target_task.pgid.store(desired_pgid, Ordering::Relaxed);
+        Ok(desired_pgid)
+    };
+    restore_flags(saved_flags);
+    result
+}
+
+/// Create a new session for the calling task.
+pub fn create_session(requester: TaskId) -> Result<Pid, crate::syscall::error::SyscallError> {
+    use crate::syscall::error::SyscallError;
+
+    let saved_flags = save_flags_and_cli();
+    let result = {
+        let mut scheduler = SCHEDULER.lock();
+        let Some(ref mut sched) = *scheduler else {
+            return Err(SyscallError::Fault);
+        };
+
+        let requester_task = sched
+            .all_tasks
+            .get(&requester)
+            .cloned()
+            .ok_or(SyscallError::Fault)?;
+        let pid = requester_task.pid;
+        if requester_task.pgid.load(Ordering::Relaxed) == pid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        requester_task.sid.store(pid, Ordering::Relaxed);
+        requester_task.pgid.store(pid, Ordering::Relaxed);
+        Ok(pid)
+    };
+    restore_flags(saved_flags);
+    result
+}
+
 /// Get a task by its TaskId (if still registered).
 pub fn get_task_by_id(id: TaskId) -> Option<Arc<Task>> {
     let saved_flags = save_flags_and_cli();
@@ -703,6 +1170,52 @@ pub fn get_task_by_id(id: TaskId) -> Option<Arc<Task>> {
     task
 }
 
+/// Update a task scheduling policy and requeue if needed.
+pub fn set_task_sched_policy(
+    id: TaskId,
+    policy: crate::process::sched::SchedPolicy,
+) -> bool {
+    let saved_flags = save_flags_and_cli();
+    let mut ipi_to_cpu: Option<usize> = None;
+    let updated = {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
+            let cpu_index = sched.task_cpu.get(&id).copied().unwrap_or(0);
+            let task = match sched.all_tasks.get(&id).cloned() {
+                Some(t) => t,
+                None => return false,
+            };
+            task.set_sched_policy(policy);
+            let class = sched.class_table.class_for_task(&task);
+
+            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                // If task is queued in ready classes, migrate it to the new class.
+                if cpu.class_rqs.remove(id) {
+                    cpu.class_rqs.enqueue(class, task.clone());
+                }
+                cpu.need_resched = true;
+            }
+            if cpu_index != current_cpu_index() {
+                ipi_to_cpu = Some(cpu_index);
+            }
+            sched_trace(format_args!(
+                "set_policy task={} cpu={} policy={:?}",
+                id.as_u64(),
+                cpu_index,
+                policy
+            ));
+            true
+        } else {
+            false
+        }
+    };
+    if let Some(ci) = ipi_to_cpu {
+        send_resched_ipi_to_cpu(ci);
+    }
+    restore_flags(saved_flags);
+    updated
+}
+
 /// Get parent task ID for a child task.
 pub fn get_parent_id(child: TaskId) -> Option<TaskId> {
     let saved_flags = save_flags_and_cli();
@@ -716,6 +1229,13 @@ pub fn get_parent_id(child: TaskId) -> Option<TaskId> {
     };
     restore_flags(saved_flags);
     parent
+}
+
+/// Get parent process ID for a child task.
+pub fn get_parent_pid(child: TaskId) -> Option<Pid> {
+    let parent_tid = get_parent_id(child)?;
+    let parent = get_task_by_id(parent_tid)?;
+    Some(parent.pid)
 }
 
 /// Try to reap a zombie child.
@@ -767,19 +1287,21 @@ pub fn block_current_task() {
                     .swap(false, core::sync::atomic::Ordering::AcqRel)
                 {
                     // Pending wakeup consumed — do not block.
-                    return;
+                    None
+                } else {
+                    // SAFETY: We hold the scheduler lock and interrupts are disabled.
+                    unsafe {
+                        *current.state.get() = TaskState::Blocked;
+                    }
+                    // Move it to the blocked map
+                    sched.blocked_tasks.insert(current.id, current.clone());
+                    // Now pick the next task (the blocked task won't be re-queued
+                    // because pick_next_task only re-queues Running tasks)
+                    sched.yield_cpu(cpu_index)
                 }
-
-                // SAFETY: We hold the scheduler lock and interrupts are disabled.
-                unsafe {
-                    *current.state.get() = TaskState::Blocked;
-                }
-                // Move it to the blocked map
-                sched.blocked_tasks.insert(current.id, current.clone());
+            } else {
+                sched.yield_cpu(cpu_index)
             }
-            // Now pick the next task (the blocked task won't be re-queued
-            // because pick_next_task only re-queues Running tasks)
-            sched.yield_cpu(cpu_index)
         } else {
             None
         }
@@ -865,19 +1387,16 @@ pub fn suspend_task(id: TaskId) -> bool {
             // Remove from ready queues (task was not running anywhere).
             if !suspended {
                 for cpu in &mut sched.cpus {
-                    let mut new_queue = VecDeque::new();
-                    while let Some(task) = cpu.ready_queue.pop_front() {
-                        if task.id == id {
+                    if cpu.class_rqs.remove(id) {
+                        if let Some(task) = sched.all_tasks.get(&id) {
                             unsafe {
                                 *task.state.get() = TaskState::Blocked;
                             }
                             sched.blocked_tasks.insert(task.id, task.clone());
-                            suspended = true;
-                        } else {
-                            new_queue.push_back(task);
                         }
+                        suspended = true;
+                        break;
                     }
-                    cpu.ready_queue = new_queue;
                 }
             }
 
@@ -910,6 +1429,7 @@ pub fn suspend_task(id: TaskId) -> bool {
 /// Moves the task from blocked to ready queue and marks it Ready.
 pub fn resume_task(id: TaskId) -> bool {
     let saved_flags = save_flags_and_cli();
+    let mut ipi_to_cpu: Option<usize> = None;
     let resumed = {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
@@ -919,8 +1439,13 @@ pub fn resume_task(id: TaskId) -> bool {
                     *task.state.get() = TaskState::Ready;
                 }
                 let cpu_index = sched.task_cpu.get(&id).copied().unwrap_or(0);
+                let class = sched.class_table.class_for_task(&task);
                 if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                    cpu.ready_queue.push_back(task);
+                    cpu.class_rqs.enqueue(class, task);
+                    cpu.need_resched = true;
+                }
+                if cpu_index != current_cpu_index() {
+                    ipi_to_cpu = Some(cpu_index);
                 }
                 true
             } else {
@@ -930,6 +1455,9 @@ pub fn resume_task(id: TaskId) -> bool {
             false
         }
     };
+    if let Some(ci) = ipi_to_cpu {
+        send_resched_ipi_to_cpu(ci);
+    }
     restore_flags(saved_flags);
     resumed
 }
@@ -966,6 +1494,7 @@ pub fn kill_task(id: TaskId) -> bool {
                         cleanup_task_resources(current);
                         sched.all_tasks.remove(&id);
                         sched.task_cpu.remove(&id);
+                        sched.pid_to_task.retain(|_, tid| *tid != id);
                         killed = true;
                         if ci == my_cpu {
                             switch_target = sched.yield_cpu(ci);
@@ -981,21 +1510,18 @@ pub fn kill_task(id: TaskId) -> bool {
             // Remove from ready queues.
             if !killed {
                 for cpu in &mut sched.cpus {
-                    let mut new_queue = VecDeque::new();
-                    while let Some(task) = cpu.ready_queue.pop_front() {
-                        if task.id == id {
+                    if cpu.class_rqs.remove(id) {
+                        if let Some(task) = sched.all_tasks.remove(&id) {
                             unsafe {
                                 *task.state.get() = TaskState::Dead;
                             }
                             cleanup_task_resources(&task);
-                            sched.all_tasks.remove(&id);
                             sched.task_cpu.remove(&id);
-                            killed = true;
-                        } else {
-                            new_queue.push_back(task);
+                            sched.pid_to_task.retain(|_, tid| *tid != id);
                         }
+                        killed = true;
+                        break;
                     }
-                    cpu.ready_queue = new_queue;
                 }
             }
 
@@ -1009,6 +1535,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     cleanup_task_resources(&task);
                     sched.all_tasks.remove(&id);
                     sched.task_cpu.remove(&id);
+                    sched.pid_to_task.retain(|_, tid| *tid != id);
                     killed = true;
                 }
             }
@@ -1099,8 +1626,15 @@ pub fn timer_tick() {
     if let Some(mut guard) = SCHEDULER.try_lock() {
         if let Some(ref mut sched) = *guard {
             if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
-                if let Some(ref current_task) = cpu.current_task {
+                if let Some(ref current_task) = cpu.current_task.clone() {
                     current_task.ticks.fetch_add(1, Ordering::Relaxed);
+                    cpu.current_runtime.update();
+                    if cpu
+                        .class_rqs
+                        .update_current(&cpu.current_runtime, &current_task, false, &sched.class_table)
+                    {
+                        cpu.need_resched = true;
+                    }
                 }
             }
         }
@@ -1152,8 +1686,9 @@ fn check_wake_deadlines(current_time_ns: u64) {
                         *blocked_task.state.get() = TaskState::Ready;
                     }
                     let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
+                    let class = sched.class_table.class_for_task(&blocked_task);
                     if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
-                        cpu_sched.ready_queue.push_back(blocked_task);
+                        cpu_sched.class_rqs.enqueue(class, blocked_task);
                     }
                 }
             }

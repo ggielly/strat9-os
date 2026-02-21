@@ -4,8 +4,25 @@
 
 use crate::{capability::CapabilityTable, memory::AddressSpace, vfs::FileDescriptorTable};
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use x86_64::{PhysAddr, VirtAddr};
+
+/// POSIX process ID.
+pub type Pid = u32;
+/// POSIX thread ID.
+pub type Tid = u32;
+
+#[inline]
+fn next_pid() -> Pid {
+    static NEXT_PID: AtomicU32 = AtomicU32::new(1);
+    NEXT_PID.fetch_add(1, Ordering::SeqCst)
+}
+
+#[inline]
+fn next_tid() -> Tid {
+    static NEXT_TID: AtomicU32 = AtomicU32::new(1);
+    NEXT_TID.fetch_add(1, Ordering::SeqCst)
+}
 
 /// Unique identifier for a task
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -83,6 +100,24 @@ impl<T> SyncUnsafeCell<T> {
 pub struct Task {
     /// Unique identifier for this task
     pub id: TaskId,
+    /// Process identifier visible to userspace.
+    pub pid: Pid,
+    /// Thread identifier visible to userspace.
+    pub tid: Tid,
+    /// Thread-group identifier (equals process leader PID).
+    pub tgid: Pid,
+    /// Process group id (job-control group).
+    pub pgid: AtomicU32,
+    /// Session id.
+    pub sid: AtomicU32,
+    /// real user id.
+    pub uid: AtomicU32,
+    /// effective user id.
+    pub euid: AtomicU32,
+    /// real group id.
+    pub gid: AtomicU32,
+    /// effective group id.
+    pub egid: AtomicU32,
     /// Current state of the task
     pub state: SyncUnsafeCell<TaskState>,
     /// Priority level of the task
@@ -126,6 +161,45 @@ pub struct Task {
     pub mmap_hint: AtomicU64,
     /// Total CPU ticks consumed by this task
     pub ticks: AtomicU64,
+    /// Scheduling policy (Fair, RealTime, Idle)
+    pub sched_policy: SyncUnsafeCell<crate::process::sched::SchedPolicy>,
+    /// Virtual runtime for CFS
+    pub vruntime: AtomicU64,
+}
+
+impl Task {
+    pub fn default_sched_policy(priority: TaskPriority) -> crate::process::sched::SchedPolicy {
+        use crate::process::sched::{nice::Nice, real_time::RealTimePriority, SchedPolicy};
+        match priority {
+            TaskPriority::Idle => SchedPolicy::Idle,
+            TaskPriority::Realtime => SchedPolicy::RealTimeRR {
+                prio: RealTimePriority::new(50),
+            },
+            TaskPriority::High => SchedPolicy::Fair(Nice::new(-10)),
+            TaskPriority::Low => SchedPolicy::Fair(Nice::new(10)),
+            TaskPriority::Normal => SchedPolicy::Fair(Nice::default()),
+        }
+    }
+
+    /// Get the current scheduling policy of the task
+    pub fn sched_policy(&self) -> crate::process::sched::SchedPolicy {
+        unsafe { *self.sched_policy.get() }
+    }
+
+    /// Set the scheduling policy of the task
+    pub fn set_sched_policy(&self, policy: crate::process::sched::SchedPolicy) {
+        unsafe { *self.sched_policy.get() = policy; }
+    }
+
+    /// Get virtual runtime
+    pub fn vruntime(&self) -> u64 {
+        self.vruntime.load(Ordering::Relaxed)
+    }
+
+    /// Set virtual runtime
+    pub fn set_vruntime(&self, vruntime: u64) {
+        self.vruntime.store(vruntime, Ordering::Relaxed);
+    }
 }
 
 /// CPU context saved/restored during context switches.
@@ -287,17 +361,30 @@ impl Task {
 
         // Create CPU context with the allocated stack
         let context = CpuContext::new(entry_point as *const () as u64, &kernel_stack);
+        let id = TaskId::new();
+        let (pid, tid, tgid) = Self::allocate_process_ids();
 
         log::debug!(
-            "Created task '{}' (id={:?}) with stack @ {:?} (size={}KB)",
+            "Created task '{}' (id={:?}, pid={}, tid={}) with stack @ {:?} (size={}KB)",
             name,
-            TaskId::new(),
+            id,
+            pid,
+            tid,
             kernel_stack.virt_base,
             kernel_stack.size / 1024
         );
 
         Ok(Arc::new(Task {
-            id: TaskId::new(),
+            id,
+            pid,
+            tid,
+            tgid,
+            pgid: AtomicU32::new(pid),
+            sid: AtomicU32::new(pid),
+            uid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
             state: SyncUnsafeCell::new(TaskState::Ready),
             priority,
             context: SyncUnsafeCell::new(context),
@@ -317,6 +404,8 @@ impl Task {
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
             ticks: AtomicU64::new(0),
+            sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
+            vruntime: AtomicU64::new(0),
         }))
     }
 
@@ -331,15 +420,29 @@ impl Task {
     ) -> Result<Arc<Self>, &'static str> {
         let kernel_stack = KernelStack::allocate(Self::DEFAULT_STACK_SIZE)?;
         let context = CpuContext::new(entry_point, &kernel_stack);
+        let id = TaskId::new();
+        let (pid, tid, tgid) = Self::allocate_process_ids();
 
         log::debug!(
-            "Created user task '{}' with CR3={:#x}",
+            "Created user task '{}' (id={:?}, pid={}, tid={}) with CR3={:#x}",
             name,
+            id,
+            pid,
+            tid,
             address_space.cr3().as_u64()
         );
 
         Ok(Arc::new(Task {
-            id: TaskId::new(),
+            id,
+            pid,
+            tid,
+            tgid,
+            pgid: AtomicU32::new(pid),
+            sid: AtomicU32::new(pid),
+            uid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
             state: SyncUnsafeCell::new(TaskState::Ready),
             priority,
             context: SyncUnsafeCell::new(context),
@@ -359,6 +462,8 @@ impl Task {
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
             ticks: AtomicU64::new(0),
+            sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
+            vruntime: AtomicU64::new(0),
         }))
     }
 
@@ -382,6 +487,13 @@ impl Task {
         // SAFETY: address_space is immutable for the lifetime of the Arc?
         // Actually we just updated it to SyncUnsafeCell.
         unsafe { (*self.address_space.get()).is_kernel() }
+    }
+
+    /// Allocate POSIX identifiers for a new process leader.
+    pub fn allocate_process_ids() -> (Pid, Tid, Pid) {
+        let pid = next_pid();
+        let tid = next_tid();
+        (pid, tid, pid)
     }
 }
 

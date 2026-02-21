@@ -28,6 +28,7 @@ impl<T> SpinLock<T> {
 
     /// Acquire the lock, spinning until it's available
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
+        let saved_flags = crate::arch::x86_64::save_flags_and_cli();
         // Spin until we can set locked from false to true
         while self
             .locked
@@ -38,22 +39,20 @@ impl<T> SpinLock<T> {
             core::hint::spin_loop();
         }
 
-        SpinLockGuard { lock: self }
+        SpinLockGuard { lock: self, saved_flags }
     }
 
     /// Try to acquire the lock without spinning.
-    ///
-    /// Returns `Some(guard)` if the lock was acquired, `None` if it's
-    /// already held. Used by interrupt handlers that must not spin
-    /// (e.g., `maybe_preempt()` in the timer handler).
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
+        let saved_flags = crate::arch::x86_64::save_flags_and_cli();
         if self
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            Some(SpinLockGuard { lock: self })
+            Some(SpinLockGuard { lock: self, saved_flags })
         } else {
+            crate::arch::x86_64::restore_flags(saved_flags);
             None
         }
     }
@@ -62,6 +61,7 @@ impl<T> SpinLock<T> {
 /// RAII guard for SpinLock
 pub struct SpinLockGuard<'a, T> {
     lock: &'a SpinLock<T>,
+    saved_flags: u64,
 }
 
 impl<'a, T> Deref for SpinLockGuard<'a, T> {
@@ -84,5 +84,6 @@ impl<'a, T> Drop for SpinLockGuard<'a, T> {
     fn drop(&mut self) {
         // Release the lock
         self.lock.locked.store(false, Ordering::Release);
+        crate::arch::x86_64::restore_flags(self.saved_flags);
     }
 }

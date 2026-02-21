@@ -4,7 +4,8 @@ use super::error::SyscallError;
 use crate::{
     memory::{UserSliceRead, UserSliceWrite},
     process::{
-        current_task_clone,
+        current_pgid, current_task_clone, current_task_id, get_all_tasks, get_task_id_by_pid,
+        get_task_by_id, get_task_ids_in_pgid,
         signal::{SigAction, SigStack, Signal, SignalSet},
         TaskId,
     },
@@ -299,23 +300,102 @@ pub fn sys_sigtimedwait(
 
 /// SYS_SIGQUEUE (327): Send signal with value to a task.
 ///
-/// arg1 = task_id, arg2 = signum, arg3 = sigval_ptr
-pub fn sys_sigqueue(task_id: u64, signum: u32, _sigval_ptr: u64) -> Result<u64, SyscallError> {
-    let signal = Signal::from_u32(signum).ok_or(SyscallError::InvalidArgument)?;
-    let target = TaskId::from_u64(task_id);
-
-    // TODO: Store sigval with the signal
-    crate::process::send_signal(target, signal)?;
-
-    Ok(0)
+/// arg1 = pid, arg2 = signum, arg3 = sigval_ptr
+pub fn sys_sigqueue(pid: i64, signum: u32, _sigval_ptr: u64) -> Result<u64, SyscallError> {
+    // TODO: store sigval with the pending signal record.
+    sys_kill(pid, signum)
 }
 
 /// SYS_KILLPG (328): Send signal to process group.
 ///
 /// arg1 = pgrp, arg2 = signum
-pub fn sys_killpg(_pgrp: u64, _signum: u32) -> Result<u64, SyscallError> {
-    // TODO: Implement process group signal delivery
-    Err(SyscallError::NotImplemented)
+pub fn sys_killpg(pgrp: u64, signum: u32) -> Result<u64, SyscallError> {
+    if pgrp == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    sys_kill(-(pgrp as i64), signum)
+}
+
+/// SYS_KILL (320): POSIX kill semantics by pid/group.
+pub fn sys_kill(pid: i64, signum: u32) -> Result<u64, SyscallError> {
+    let targets = resolve_kill_targets(pid)?;
+    let sender = current_task_clone().ok_or(SyscallError::Fault)?;
+    if signum == 0 {
+        // Existence + permission check only.
+        for target in &targets {
+            if !has_kill_permission(&sender, *target)? {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
+        return Ok(0);
+    }
+
+    let signal = Signal::from_u32(signum).ok_or(SyscallError::InvalidArgument)?;
+    let mut delivered = 0usize;
+    for target in targets {
+        if !has_kill_permission(&sender, target)? {
+            continue;
+        }
+        crate::process::send_signal(target, signal)?;
+        delivered += 1;
+    }
+    if delivered == 0 {
+        return Err(SyscallError::PermissionDenied);
+    }
+    Ok(0)
+}
+
+fn has_kill_permission(sender: &alloc::sync::Arc<crate::process::Task>, target_id: TaskId) -> Result<bool, SyscallError> {
+    let target = get_task_by_id(target_id).ok_or(SyscallError::NotFound)?;
+
+    let sender_euid = sender.euid.load(core::sync::atomic::Ordering::Relaxed);
+    if sender_euid == 0 {
+        return Ok(true);
+    }
+
+    let sender_uid = sender.uid.load(core::sync::atomic::Ordering::Relaxed);
+    let target_uid = target.uid.load(core::sync::atomic::Ordering::Relaxed);
+    let target_euid = target.euid.load(core::sync::atomic::Ordering::Relaxed);
+    Ok(sender_uid == target_uid || sender_uid == target_euid || sender_euid == target_uid || sender_euid == target_euid)
+}
+
+fn resolve_kill_targets(pid: i64) -> Result<alloc::vec::Vec<TaskId>, SyscallError> {
+    use alloc::vec::Vec;
+
+    let mut targets = Vec::new();
+    match pid {
+        p if p > 0 => {
+            let target = get_task_id_by_pid(p as u32).ok_or(SyscallError::NotFound)?;
+            targets.push(target);
+        }
+        0 => {
+            let pgid = current_pgid().ok_or(SyscallError::Fault)?;
+            targets = get_task_ids_in_pgid(pgid);
+        }
+        -1 => {
+            let me = current_task_id();
+            if let Some(tasks) = get_all_tasks() {
+                for task in tasks {
+                    if task.is_kernel() {
+                        continue;
+                    }
+                    if Some(task.id) == me {
+                        continue;
+                    }
+                    targets.push(task.id);
+                }
+            }
+        }
+        p => {
+            let pgid = (-p) as u32;
+            targets = get_task_ids_in_pgid(pgid);
+        }
+    }
+
+    if targets.is_empty() {
+        return Err(SyscallError::NotFound);
+    }
+    Ok(targets)
 }
 
 /// SYS_GETITIMER (329): Get interval timer value.

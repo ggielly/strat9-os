@@ -6,7 +6,7 @@ use crate::{
         current_task_clone,
         scheduler::add_task_with_parent,
         signal::{SigAction, SigStack, SignalSet},
-        task::{CpuContext, KernelStack, SyncUnsafeCell, Task},
+        task::{CpuContext, KernelStack, Pid, SyncUnsafeCell, Task},
         TaskId, TaskState,
     },
     syscall::{error::SyscallError, SyscallFrame},
@@ -14,13 +14,13 @@ use crate::{
 use alloc::{boxed::Box, sync::Arc};
 use core::{
     mem::offset_of,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use x86_64::structures::paging::{mapper::TranslateResult, FrameAllocator}; // Required for allocate_frame
 
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
-    pub child_pid: TaskId,
+    pub child_pid: Pid,
 }
 
 #[inline]
@@ -159,8 +159,18 @@ fn build_child_task(
     let parent_actions: [SigAction; 64] = unsafe { *parent.signal_actions.get() };
     let parent_sigstack: Option<SigStack> = unsafe { *parent.signal_stack.get() };
 
+    let (pid, tid, tgid) = Task::allocate_process_ids();
     let task = Arc::new(Task {
         id: TaskId::new(),
+        pid,
+        tid,
+        tgid,
+        pgid: AtomicU32::new(parent.pgid.load(Ordering::Relaxed)),
+        sid: AtomicU32::new(parent.sid.load(Ordering::Relaxed)),
+        uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
+        euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
+        gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
+        egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: parent.priority,
         context: SyncUnsafeCell::new(context),
@@ -184,6 +194,8 @@ fn build_child_task(
         brk: AtomicU64::new(parent.brk.load(Ordering::Relaxed)),
         mmap_hint: AtomicU64::new(parent.mmap_hint.load(Ordering::Relaxed)),
         ticks: AtomicU64::new(0),
+        sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
+        vruntime: AtomicU64::new(parent.vruntime()),
     });
 
     // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret
@@ -248,7 +260,7 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
     });
 
     let child_task = build_child_task(&parent, child_as, child_user_ctx)?;
-    let child_pid = child_task.id;
+    let child_pid = child_task.pid;
     add_task_with_parent(child_task, parent.id);
 
     Ok(ForkResult { child_pid })

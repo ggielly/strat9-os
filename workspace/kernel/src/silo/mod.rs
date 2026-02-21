@@ -1294,13 +1294,96 @@ pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
 // Fault handling (called from exception handlers)
 // ============================================================================
 
-pub fn handle_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode: u64) {
+fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode: u64, rip: u64) {
+    let task_meta = crate::process::get_task_by_id(task_id).map(|task| {
+        let state = unsafe { *task.state.get() };
+        let as_ref = unsafe { &*task.address_space.get() };
+        (
+            task.pid,
+            task.tid,
+            task.name,
+            state,
+            as_ref.cr3().as_u64(),
+            as_ref.is_kernel(),
+        )
+    });
+
+    if let Some((pid, tid, name, state, as_cr3, as_is_kernel)) = task_meta {
+        crate::serial_println!(
+            "[handle_user_fault] task={} pid={} tid={} name='{}' state={:?} reason={:?} rip={:#x} extra={:#x} subcode={:#x} as_cr3={:#x} as_kernel={}",
+            task_id.as_u64(),
+            pid,
+            tid,
+            name,
+            state,
+            reason,
+            rip,
+            extra,
+            subcode,
+            as_cr3,
+            as_is_kernel
+        );
+    } else {
+        crate::serial_println!(
+            "[handle_user_fault] task={} reason={:?} rip={:#x} extra={:#x} subcode={:#x} (task metadata unavailable)",
+            task_id.as_u64(),
+            reason,
+            rip,
+            extra,
+            subcode
+        );
+    }
+
+    if reason == SiloFaultReason::PageFault {
+        let present = (subcode & 0x1) != 0;
+        let write = (subcode & 0x2) != 0;
+        let user = (subcode & 0x4) != 0;
+        let reserved = (subcode & 0x8) != 0;
+        let instr_fetch = (subcode & 0x10) != 0;
+        let pkey = (subcode & 0x20) != 0;
+        let shadow_stack = (subcode & 0x40) != 0;
+        let sgx = (subcode & 0x8000) != 0;
+        crate::serial_println!(
+            "[handle_user_fault] pagefault addr={:#x} rip={:#x} ec={:#x} present={} write={} user={} reserved={} ifetch={} pkey={} shadow_stack={} sgx={}",
+            extra,
+            rip,
+            subcode,
+            present,
+            write,
+            user,
+            reserved,
+            instr_fetch,
+            pkey,
+            shadow_stack,
+            sgx
+        );
+    } else {
+        crate::serial_println!(
+            "[handle_user_fault] fault detail rip={:#x} code={:#x}",
+            rip,
+            subcode
+        );
+    }
+}
+
+pub fn handle_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode: u64, rip: u64) {
+    dump_user_fault(task_id, reason, extra, subcode, rip);
+
     // Best-effort: map task to silo, mark crashed, emit event, kill tasks.
     let tasks = {
         let mut mgr = SILO_MANAGER.lock();
         let silo_id = match mgr.silo_for_task(task_id) {
             Some(id) => id,
-            None => return,
+            None => {
+                crate::serial_println!(
+                    "[handle_user_fault] Non-silo task {} crashed (reason={:?})! Killing it.",
+                    task_id.as_u64(),
+                    reason
+                );
+                drop(mgr);
+                crate::process::kill_task(task_id);
+                return;
+            }
         };
         let mut tasks = Vec::new();
         {

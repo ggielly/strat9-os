@@ -24,6 +24,7 @@ pub mod numbers;
 pub mod signal;
 pub mod time;
 pub mod wait;
+pub mod process;
 
 pub use dispatcher::dispatch;
 pub use exec::sys_execve;

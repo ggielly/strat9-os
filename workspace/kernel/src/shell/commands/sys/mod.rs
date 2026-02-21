@@ -1,5 +1,8 @@
 //! System management commands
 use crate::{
+    process::{
+        log_scheduler_state, scheduler_class_table, scheduler_verbose_enabled, set_scheduler_verbose,
+    },
     shell::{output::clear_screen, ShellError},
     shell_println,
 };
@@ -46,6 +49,50 @@ pub fn cmd_reboot(_args: &[String]) -> Result<(), ShellError> {
         crate::arch::x86_64::io::outb(0x64, 0xFE);
         loop {
             crate::arch::x86_64::hlt();
+        }
+    }
+}
+
+/// scheduler debug on|off|dump
+pub fn cmd_scheduler(args: &[String]) -> Result<(), ShellError> {
+    if args.len() != 2 || args[0].as_str() != "debug" {
+        shell_println!("Usage: scheduler debug on|off|dump");
+        return Err(ShellError::InvalidArguments);
+    }
+
+    match args[1].as_str() {
+        "on" => {
+            set_scheduler_verbose(true);
+            shell_println!("scheduler debug: on");
+            Ok(())
+        }
+        "off" => {
+            set_scheduler_verbose(false);
+            shell_println!("scheduler debug: off");
+            Ok(())
+        }
+        "dump" => {
+            let table = scheduler_class_table();
+            let pick = table.pick_order();
+            let steal = table.steal_order();
+            shell_println!(
+                "scheduler debug: {}",
+                if scheduler_verbose_enabled() { "on" } else { "off" }
+            );
+            shell_println!(
+                "class table: pick=[{},{},{}] steal=[{},{}]",
+                pick[0].as_str(),
+                pick[1].as_str(),
+                pick[2].as_str(),
+                steal[0].as_str(),
+                steal[1].as_str()
+            );
+            log_scheduler_state("shell");
+            Ok(())
+        }
+        _ => {
+            shell_println!("Usage: scheduler debug on|off|dump");
+            Err(ShellError::InvalidArguments)
         }
     }
 }

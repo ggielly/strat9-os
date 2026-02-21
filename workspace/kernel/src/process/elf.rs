@@ -1136,9 +1136,19 @@ pub fn load_and_run_elf_with_caps(
 
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
     let context = CpuContext::new(elf_ring3_trampoline as *const () as u64, &kernel_stack);
+    let (pid, tid, tgid) = Task::allocate_process_ids();
 
     let task = Arc::new(Task {
         id: TaskId::new(),
+        pid,
+        tid,
+        tgid,
+        pgid: core::sync::atomic::AtomicU32::new(pid),
+        sid: core::sync::atomic::AtomicU32::new(pid),
+        uid: core::sync::atomic::AtomicU32::new(0),
+        euid: core::sync::atomic::AtomicU32::new(0),
+        gid: core::sync::atomic::AtomicU32::new(0),
+        egid: core::sync::atomic::AtomicU32::new(0),
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),
@@ -1158,6 +1168,10 @@ pub fn load_and_run_elf_with_caps(
         brk: core::sync::atomic::AtomicU64::new(0),
         mmap_hint: core::sync::atomic::AtomicU64::new(0x0000_0000_6000_0000),
         ticks: core::sync::atomic::AtomicU64::new(0),
+        sched_policy: crate::process::task::SyncUnsafeCell::new(Task::default_sched_policy(
+            TaskPriority::Normal,
+        )),
+        vruntime: core::sync::atomic::AtomicU64::new(0),
     });
 
     // Seed capabilities into the new task (before scheduling).

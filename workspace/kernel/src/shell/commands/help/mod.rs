@@ -22,6 +22,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  scheme ls         - List registered schemes");
     shell_println!("  cpuinfo           - Display CPU information");
     shell_println!("  reboot            - Reboot the system");
+    shell_println!("  scheduler debug   - Scheduler debug on|off|dump");
     shell_println!("  gfx help          - Show gfx command help");
     shell_println!("  gfx info          - Display framebuffer/console info");
     shell_println!("  gfx mode on|off   - Enable/disable double-buffer mode");

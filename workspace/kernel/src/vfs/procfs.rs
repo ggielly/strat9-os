@@ -17,7 +17,7 @@
 //! ```
 
 use crate::{
-    process::{current_task_id, get_all_tasks},
+    process::{current_pid, get_all_tasks, get_parent_pid},
     syscall::error::SyscallError,
     vfs::scheme::{DynScheme, FileFlags, OpenFlags, OpenResult, Scheme},
 };
@@ -38,8 +38,8 @@ impl ProcScheme {
     fn get_entry(&self, path: &str) -> Result<ProcEntry, SyscallError> {
         // Handle /proc/self
         if path == "self" || path == "self/" {
-            if let Some(task_id) = current_task_id() {
-                return Ok(ProcEntry::File(format!("{}\n", task_id.as_u64())));
+            if let Some(pid) = current_pid() {
+                return Ok(ProcEntry::File(format!("{}\n", pid)));
             }
             return Err(SyscallError::NotFound);
         }
@@ -47,8 +47,8 @@ impl ProcScheme {
         // Handle /proc/self/status
         if path.starts_with("self/") {
             let subpath = &path[5..];
-            if let Some(task_id) = current_task_id() {
-                return self.get_process_entry(task_id.as_u64(), subpath);
+            if let Some(pid) = current_pid() {
+                return self.get_process_entry(pid as u64, subpath);
             }
             return Err(SyscallError::NotFound);
         }
@@ -82,7 +82,7 @@ impl ProcScheme {
         let tasks = get_all_tasks().ok_or(SyscallError::NotFound)?;
         let task = tasks
             .iter()
-            .find(|t| t.id.as_u64() == pid)
+            .find(|t| t.pid as u64 == pid)
             .ok_or(SyscallError::NotFound)?;
 
         match subpath {
@@ -154,11 +154,29 @@ impl ProcScheme {
 
         let _ = writeln!(output, "Name:\t{}", task.name);
         let _ = writeln!(output, "State:\tR (running)");
-        let _ = writeln!(output, "Tgid:\t{}", task.id.as_u64());
-        let _ = writeln!(output, "Pid:\t{}", task.id.as_u64());
-        let _ = writeln!(output, "PPid:\t1");
-        let _ = writeln!(output, "Uid:\t0\t0\t0\t0");
-        let _ = writeln!(output, "Gid:\t0\t0\t0\t0");
+        let _ = writeln!(output, "Tgid:\t{}", task.tgid);
+        let _ = writeln!(output, "Pid:\t{}", task.pid);
+        let _ = writeln!(
+            output,
+            "PPid:\t{}",
+            get_parent_pid(task.id).map(|p| p as u64).unwrap_or(0)
+        );
+        let _ = writeln!(
+            output,
+            "Pgid:\t{}",
+            task.pgid.load(core::sync::atomic::Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "Sid:\t{}",
+            task.sid.load(core::sync::atomic::Ordering::Relaxed)
+        );
+        let uid = task.uid.load(core::sync::atomic::Ordering::Relaxed);
+        let euid = task.euid.load(core::sync::atomic::Ordering::Relaxed);
+        let gid = task.gid.load(core::sync::atomic::Ordering::Relaxed);
+        let egid = task.egid.load(core::sync::atomic::Ordering::Relaxed);
+        let _ = writeln!(output, "Uid:\t{}\t{}\t{}\t{}", uid, euid, euid, euid);
+        let _ = writeln!(output, "Gid:\t{}\t{}\t{}\t{}", gid, egid, egid, egid);
         let _ = writeln!(output, "Threads:\t1");
 
         output
@@ -200,10 +218,10 @@ impl Scheme for ProcScheme {
                     "meminfo" => 11,
                     "version" => 12,
                     "self/status" => {
-                        Self::encode_id(2000, current_task_id().map(|t| t.as_u64()).unwrap_or(0))
+                        Self::encode_id(2000, current_pid().map(|p| p as u64).unwrap_or(0))
                     }
                     "self/cmdline" => {
-                        Self::encode_id(3000, current_task_id().map(|t| t.as_u64()).unwrap_or(0))
+                        Self::encode_id(3000, current_pid().map(|p| p as u64).unwrap_or(0))
                     }
                     _ if path.starts_with("self") => 1, // Should not happen with get_entry logic
                     _ => {
@@ -259,7 +277,7 @@ impl Scheme for ProcScheme {
             let mut list = String::from("self\ncpuinfo\nmeminfo\nversion\n");
             if let Some(tasks) = get_all_tasks() {
                 for task in tasks {
-                    let _ = writeln!(list, "{}", task.id.as_u64());
+                    let _ = writeln!(list, "{}", task.pid);
                 }
             }
             list
@@ -277,7 +295,7 @@ impl Scheme for ProcScheme {
                     let tasks = get_all_tasks().ok_or(SyscallError::NotFound)?;
                     let task = tasks
                         .iter()
-                        .find(|t| t.id.as_u64() == pid)
+                        .find(|t| t.pid as u64 == pid)
                         .ok_or(SyscallError::NotFound)?;
                     self.get_process_status(task)
                 }
@@ -285,7 +303,7 @@ impl Scheme for ProcScheme {
                     let tasks = get_all_tasks().ok_or(SyscallError::NotFound)?;
                     let task = tasks
                         .iter()
-                        .find(|t| t.id.as_u64() == pid)
+                        .find(|t| t.pid as u64 == pid)
                         .ok_or(SyscallError::NotFound)?;
                     format!("{}\n", task.name)
                 }

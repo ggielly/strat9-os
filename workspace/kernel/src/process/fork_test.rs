@@ -104,9 +104,19 @@ fn spawn_user_program_task(
 
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
     let context = CpuContext::new(ring3_test_trampoline as *const () as u64, &kernel_stack);
+    let (pid, tid_ids, tgid) = Task::allocate_process_ids();
 
     let task = Arc::new(Task {
         id: TaskId::new(),
+        pid,
+        tid: tid_ids,
+        tgid,
+        pgid: core::sync::atomic::AtomicU32::new(pid),
+        sid: core::sync::atomic::AtomicU32::new(pid),
+        uid: core::sync::atomic::AtomicU32::new(0),
+        euid: core::sync::atomic::AtomicU32::new(0),
+        gid: core::sync::atomic::AtomicU32::new(0),
+        egid: core::sync::atomic::AtomicU32::new(0),
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),
@@ -126,6 +136,10 @@ fn spawn_user_program_task(
         brk: core::sync::atomic::AtomicU64::new(0),
         mmap_hint: core::sync::atomic::AtomicU64::new(0x0000_0000_6000_0000),
         ticks: core::sync::atomic::AtomicU64::new(0),
+        sched_policy: crate::process::task::SyncUnsafeCell::new(Task::default_sched_policy(
+            TaskPriority::Normal,
+        )),
+        vruntime: core::sync::atomic::AtomicU64::new(0),
     });
 
     let launch = Box::new(UserLaunchCtx {
@@ -504,7 +518,12 @@ extern "C" fn fork_test_entry() -> ! {
 }
 
 pub fn create_fork_test_task() {
-    if let Ok(task) = Task::new_kernel_task(fork_test_entry, "fork-test", TaskPriority::Normal) {
+    if let Ok(task) = Task::new_kernel_task_with_stack(
+        fork_test_entry,
+        "fork-test",
+        TaskPriority::Normal,
+        64 * 1024,
+    ) {
         crate::process::add_task(task);
     } else {
         crate::serial_println!("[fork-test] failed to create orchestrator task");

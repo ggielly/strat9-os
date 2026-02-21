@@ -44,6 +44,7 @@ impl CommandRegistry {
         registry.register("gfx-demo", gfx::cmd_gfx_demo);
         registry.register("top", top::cmd_top);
         registry.register("timer", timer::cmd_timer);
+        registry.register("scheduler", sys::cmd_scheduler);
 
         registry
     }

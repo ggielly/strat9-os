@@ -35,7 +35,7 @@
 use crate::{
     memory::UserSliceWrite,
     process::{
-        block_current_task, current_task_id, get_parent_id, has_pending_signals,
+        block_current_task, current_task_id, get_task_id_by_pid, has_pending_signals,
         scheduler::{try_wait_child, WaitChildResult},
         TaskId,
     },
@@ -72,7 +72,7 @@ pub struct Waitmsg {
 }
 
 impl Waitmsg {
-    fn new(pid: TaskId, exit_code: i32) -> Self {
+    fn new(pid: u64, exit_code: i32) -> Self {
         let mut msg = [0u8; 64];
         if exit_code != 0 {
             // Write "exit <N>" using a stack buffer — no heap, no format!.
@@ -82,7 +82,7 @@ impl Waitmsg {
         }
         // exit_code == 0: leave msg all-zero (Plan 9: empty = clean exit)
         Waitmsg {
-            pid: pid.as_u64(),
+            pid,
             exit_code,
             _pad: 0,
             msg,
@@ -159,26 +159,28 @@ fn encode_wstatus(exit_code: i32) -> i32 {
 ///
 /// Returns `Ok(WaitChildResult::Reaped { .. })` or propagates `EINTR` /
 /// `NoChildren`.
-fn wait_blocking(parent_id: TaskId, target: Option<TaskId>) -> Result<(TaskId, i32), SyscallError> {
+fn wait_blocking(parent_id: TaskId, target: Option<TaskId>) -> Result<(TaskId, u64, i32), SyscallError> {
+    crate::serial_println!("[wait_blocking] start: parent={:?}, target={:?}", parent_id, target);
     loop {
+        crate::serial_println!("[wait_blocking] trying wait...");
         match try_wait_child(parent_id, target) {
-            WaitChildResult::Reaped { child, status } => return Ok((child, status)),
-
-            WaitChildResult::NoChildren => return Err(SyscallError::NoChildren),
-
+            WaitChildResult::Reaped { child, pid, status } => {
+                crate::serial_println!("[wait_blocking] reaped child pid={}", pid);
+                return Ok((child, pid as u64, status));
+            }
+            WaitChildResult::NoChildren => {
+                crate::serial_println!("[wait_blocking] no children");
+                return Err(SyscallError::NoChildren);
+            }
             WaitChildResult::StillRunning => {
-                // Check for pending signals before sleeping so we can
-                // return EINTR and let userspace run the signal handler.
                 if has_pending_signals() {
+                    crate::serial_println!("[wait_blocking] interrupted");
                     return Err(SyscallError::Interrupted);
                 }
 
-                // Sleep until a child exits.  exit_current_task() calls
-                // wake_task_locked(parent_id) which either unblocks us or
-                // sets wake_pending so block_current_task() aborts immediately.
+                crate::serial_println!("[wait_blocking] blocking current task");
                 block_current_task();
-
-                // Woken — re-run the scan at the top of the loop.
+                crate::serial_println!("[wait_blocking] woken up");
             }
         }
     }
@@ -216,7 +218,10 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
     //   pid == 0  → process-group semantics (not supported)
     //   pid < -1  → wait for group |pid| (not supported)
     let target: Option<TaskId> = if pid > 0 {
-        Some(TaskId::from_u64(pid as u64))
+        match get_task_id_by_pid(pid as u32) {
+            Some(t) => Some(t),
+            None => return Err(SyscallError::NoChildren),
+        }
     } else if pid == -1 {
         None // any child
     } else {
@@ -227,10 +232,10 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
     // ── Non-blocking fast path ────────────────────────────────────────────
     if wnohang {
         return match try_wait_child(parent_id, target) {
-            WaitChildResult::Reaped { child, status } => {
+            WaitChildResult::Reaped { pid, status, .. } => {
                 write_wstatus(status_ptr, status)?;
-                log::debug!("waitpid(WNOHANG): reaped {:?} status={}", child, status);
-                Ok(child.as_u64())
+                log::debug!("waitpid(WNOHANG): reaped pid={} status={}", pid, status);
+                Ok(pid as u64)
             }
             WaitChildResult::NoChildren => Err(SyscallError::NoChildren),
             WaitChildResult::StillRunning => Ok(0), // no zombie yet
@@ -238,10 +243,10 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
     }
 
     // ── Blocking path ─────────────────────────────────────────────────────
-    let (child, status) = wait_blocking(parent_id, target)?;
+    let (_child, child_pid, status) = wait_blocking(parent_id, target)?;
     write_wstatus(status_ptr, status)?;
-    log::debug!("waitpid: reaped {:?} status={}", child, status);
-    Ok(child.as_u64())
+    log::debug!("waitpid: reaped pid={} status={}", child_pid, status);
+    Ok(child_pid)
 }
 
 /// SYS_PROC_WAIT (311): Plan 9-style wait — any child, writes full Waitmsg.
@@ -255,10 +260,10 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
 /// Errors: `-ECHILD`, `-EINTR`.
 pub fn sys_wait(waitmsg_ptr: u64) -> Result<u64, SyscallError> {
     let parent_id = current_task_id().ok_or(SyscallError::Fault)?;
-    let (child, status) = wait_blocking(parent_id, None)?;
+    let (_child, child_pid, status) = wait_blocking(parent_id, None)?;
 
     if waitmsg_ptr != 0 {
-        let wmsg = Waitmsg::new(child, status);
+        let wmsg = Waitmsg::new(child_pid, status);
         let user = UserSliceWrite::new(waitmsg_ptr, core::mem::size_of::<Waitmsg>())?;
         // SAFETY: Waitmsg is repr(C) and fully initialised above.
         user.copy_from(unsafe {
@@ -269,19 +274,18 @@ pub fn sys_wait(waitmsg_ptr: u64) -> Result<u64, SyscallError> {
         });
     }
 
-    log::debug!("sys_wait: reaped {:?} exit_code={}", child, status);
-    Ok(child.as_u64())
+    log::debug!("sys_wait: reaped pid={} exit_code={}", child_pid, status);
+    Ok(child_pid)
 }
 
 /// SYS_PROC_GETPID (308): return the current task's ID.
 pub fn sys_getpid() -> Result<u64, SyscallError> {
-    Ok(current_task_id().ok_or(SyscallError::Fault)?.as_u64())
+    super::process::sys_getpid()
 }
 
 /// SYS_PROC_GETPPID (309): return the parent task's ID, or 0 if none.
 pub fn sys_getppid() -> Result<u64, SyscallError> {
-    let id = current_task_id().ok_or(SyscallError::Fault)?;
-    Ok(get_parent_id(id).map(|p| p.as_u64()).unwrap_or(0))
+    super::process::sys_getppid()
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────

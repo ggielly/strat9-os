@@ -111,27 +111,44 @@ pub const SYS_PROC_YIELD: u64 = 301;
 /// Fork the current process (COW). Returns child PID in parent, 0 in child.
 pub const SYS_PROC_FORK: u64 = 302;
 
-/// Return current process ID (task ID).
+/// Return current process ID (pid).
 pub const SYS_PROC_GETPID: u64 = 308;
 
-/// Return parent process ID (task ID), or 0 if none.
+/// Return parent process ID (pid), or 0 if none.
 pub const SYS_PROC_GETPPID: u64 = 309;
 
 /// Wait for a child to change state (currently: exit only).
 /// arg1=pid (-1 any child), arg2=status_ptr (nullable), arg3=options (WNOHANG=1 supported)
 pub const SYS_PROC_WAITPID: u64 = 310;
 
+/// Return current process ID (getpid).
+pub const SYS_GETPID: u64 = 311;
+
+/// Return current thread ID (gettid).
+pub const SYS_GETTID: u64 = 312;
+
+/// Return parent process ID (getppid).
+pub const SYS_GETPPID: u64 = 313;
+
 /// Plan 9-style wait: block until any child exits, write Waitmsg.
 /// arg1=waitmsg_ptr (*Waitmsg, 80 bytes, nullable). Returns child pid.
-pub const SYS_PROC_WAIT: u64 = 311;
+pub const SYS_PROC_WAIT: u64 = 314;
 
 /// Execute a new program.
 /// arg1=path_ptr, arg2=argv_ptr, arg3=envp_ptr
-pub const SYS_PROC_EXECVE: u64 = 312;
+pub const SYS_PROC_EXECVE: u64 = 315;
 
 /// Manipulate file descriptor (fcntl).
-/// arg1=fd, arg2=cmd (F_GETFD/F_SETFD/...), arg3=arg
-pub const SYS_FCNTL: u64 = 313;
+pub const SYS_FCNTL: u64 = 316;
+
+/// Set process group id. arg1=pid (0=self), arg2=pgid (0=pid).
+pub const SYS_SETPGID: u64 = 317;
+
+/// Get process group id. arg1=pid (0=self).
+pub const SYS_GETPGID: u64 = 318;
+
+/// Create a new session (setsid). Returns new sid (caller pid).
+pub const SYS_SETSID: u64 = 319;
 
 // Futex wait. arg1=uaddr (*u32), arg2=expected_val, arg3=timeout_ns
 pub const SYS_FUTEX_WAIT: u64 = 303;
@@ -152,7 +169,7 @@ pub const SYS_FUTEX_WAKE_OP: u64 = 307;
 // Block 320-329: signal handling
 // ============================================================
 
-/// Send a signal to a task. arg1=task_id, arg2=signal_number
+/// Send a signal with POSIX kill semantics. arg1=pid, arg2=signal_number
 pub const SYS_KILL: u64 = 320;
 
 /// Examine and change blocked signals. arg1=how, arg2=set_ptr, arg3=oldset_ptr
@@ -184,6 +201,12 @@ pub const SYS_GETITIMER: u64 = 329;
 
 /// Set interval timer value. arg1=which, arg2=new_value_ptr, arg3=old_value_ptr
 pub const SYS_SETITIMER: u64 = 330;
+
+/// Get process group id of current process (getpgrp).
+pub const SYS_GETPGRP: u64 = 331;
+
+/// Get session id. arg1=pid (0=self).
+pub const SYS_GETSID: u64 = 332;
 
 // ============================================================
 // Block 400-499: filesystem / VFS
