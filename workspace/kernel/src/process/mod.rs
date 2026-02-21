@@ -16,6 +16,8 @@ pub mod futex_test;
 pub mod mmap_test;
 #[cfg(feature = "selftest")]
 pub mod posix_signal_test;
+#[cfg(feature = "selftest")]
+pub mod scheduler_test;
 pub mod scheduler;
 #[cfg(feature = "selftest")]
 pub mod selftest;
@@ -32,7 +34,9 @@ pub use scheduler::{
     get_parent_pid, get_pgid_by_pid, get_sid_by_pid, get_task_by_id, get_task_by_pid,
     get_task_id_by_pid,
     get_task_ids_in_pgid, init_scheduler, kill_task, resume_task, schedule, schedule_on_cpu,
-    set_process_group, suspend_task, try_wait_child, wake_task, yield_task, WaitChildResult,
+    set_process_group, set_task_sched_policy, set_verbose as set_scheduler_verbose, log_state as log_scheduler_state,
+    suspend_task, try_wait_child, verbose_enabled as scheduler_verbose_enabled, wake_task, yield_task,
+    WaitChildResult,
 };
 pub use signal::{has_pending_signals, send_signal, Signal, SignalSet};
 pub use task::{Pid, Task, TaskId, TaskPriority, TaskState, Tid};
