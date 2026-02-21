@@ -161,10 +161,22 @@ impl ProcScheme {
             "PPid:\t{}",
             get_parent_pid(task.id).map(|p| p as u64).unwrap_or(0)
         );
-        let _ = writeln!(output, "Pgid:\t{}", task.pgid.load(core::sync::atomic::Ordering::Relaxed));
-        let _ = writeln!(output, "Sid:\t{}", task.sid.load(core::sync::atomic::Ordering::Relaxed));
-        let _ = writeln!(output, "Uid:\t0\t0\t0\t0");
-        let _ = writeln!(output, "Gid:\t0\t0\t0\t0");
+        let _ = writeln!(
+            output,
+            "Pgid:\t{}",
+            task.pgid.load(core::sync::atomic::Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "Sid:\t{}",
+            task.sid.load(core::sync::atomic::Ordering::Relaxed)
+        );
+        let uid = task.uid.load(core::sync::atomic::Ordering::Relaxed);
+        let euid = task.euid.load(core::sync::atomic::Ordering::Relaxed);
+        let gid = task.gid.load(core::sync::atomic::Ordering::Relaxed);
+        let egid = task.egid.load(core::sync::atomic::Ordering::Relaxed);
+        let _ = writeln!(output, "Uid:\t{}\t{}\t{}\t{}", uid, euid, euid, euid);
+        let _ = writeln!(output, "Gid:\t{}\t{}\t{}\t{}", gid, egid, egid, egid);
         let _ = writeln!(output, "Threads:\t1");
 
         output

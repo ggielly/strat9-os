@@ -110,6 +110,14 @@ pub struct Task {
     pub pgid: AtomicU32,
     /// Session id.
     pub sid: AtomicU32,
+    /// real user id.
+    pub uid: AtomicU32,
+    /// effective user id.
+    pub euid: AtomicU32,
+    /// real group id.
+    pub gid: AtomicU32,
+    /// effective group id.
+    pub egid: AtomicU32,
     /// Current state of the task
     pub state: SyncUnsafeCell<TaskState>,
     /// Priority level of the task
@@ -334,6 +342,10 @@ impl Task {
             tgid,
             pgid: AtomicU32::new(pid),
             sid: AtomicU32::new(pid),
+            uid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
             state: SyncUnsafeCell::new(TaskState::Ready),
             priority,
             context: SyncUnsafeCell::new(context),
@@ -386,6 +398,10 @@ impl Task {
             tgid,
             pgid: AtomicU32::new(pid),
             sid: AtomicU32::new(pid),
+            uid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
             state: SyncUnsafeCell::new(TaskState::Ready),
             priority,
             context: SyncUnsafeCell::new(context),

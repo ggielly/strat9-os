@@ -70,6 +70,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SETPGID => proc_sys::sys_setpgid(arg1 as i64, arg2 as i64),
         SYS_GETPGID => proc_sys::sys_getpgid(arg1 as i64),
         SYS_SETSID => proc_sys::sys_setsid(),
+        SYS_GETPGRP => proc_sys::sys_getpgrp(),
+        SYS_GETSID => proc_sys::sys_getsid(arg1 as i64),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),

@@ -202,6 +202,12 @@ pub const SYS_GETITIMER: u64 = 329;
 /// Set interval timer value. arg1=which, arg2=new_value_ptr, arg3=old_value_ptr
 pub const SYS_SETITIMER: u64 = 330;
 
+/// Get process group id of current process (getpgrp).
+pub const SYS_GETPGRP: u64 = 331;
+
+/// Get session id. arg1=pid (0=self).
+pub const SYS_GETSID: u64 = 332;
+
 // ============================================================
 // Block 400-499: filesystem / VFS
 // ============================================================

@@ -747,6 +747,12 @@ pub fn get_pgid_by_pid(pid: Pid) -> Option<Pid> {
     Some(task.pgid.load(Ordering::Relaxed))
 }
 
+/// Resolve a PID to the current session id.
+pub fn get_sid_by_pid(pid: Pid) -> Option<Pid> {
+    let task = get_task_by_pid(pid)?;
+    Some(task.sid.load(Ordering::Relaxed))
+}
+
 /// Collect task IDs that currently belong to process group `pgid`.
 pub fn get_task_ids_in_pgid(pgid: Pid) -> alloc::vec::Vec<TaskId> {
     use alloc::vec::Vec;

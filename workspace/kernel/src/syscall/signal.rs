@@ -5,7 +5,7 @@ use crate::{
     memory::{UserSliceRead, UserSliceWrite},
     process::{
         current_pgid, current_task_clone, current_task_id, get_all_tasks, get_task_id_by_pid,
-        get_task_ids_in_pgid,
+        get_task_by_id, get_task_ids_in_pgid,
         signal::{SigAction, SigStack, Signal, SignalSet},
         TaskId,
     },
@@ -319,15 +319,44 @@ pub fn sys_killpg(pgrp: u64, signum: u32) -> Result<u64, SyscallError> {
 /// SYS_KILL (320): POSIX kill semantics by pid/group.
 pub fn sys_kill(pid: i64, signum: u32) -> Result<u64, SyscallError> {
     let targets = resolve_kill_targets(pid)?;
+    let sender = current_task_clone().ok_or(SyscallError::Fault)?;
     if signum == 0 {
+        // Existence + permission check only.
+        for target in &targets {
+            if !has_kill_permission(&sender, *target)? {
+                return Err(SyscallError::PermissionDenied);
+            }
+        }
         return Ok(0);
     }
 
     let signal = Signal::from_u32(signum).ok_or(SyscallError::InvalidArgument)?;
+    let mut delivered = 0usize;
     for target in targets {
+        if !has_kill_permission(&sender, target)? {
+            continue;
+        }
         crate::process::send_signal(target, signal)?;
+        delivered += 1;
+    }
+    if delivered == 0 {
+        return Err(SyscallError::PermissionDenied);
     }
     Ok(0)
+}
+
+fn has_kill_permission(sender: &alloc::sync::Arc<crate::process::Task>, target_id: TaskId) -> Result<bool, SyscallError> {
+    let target = get_task_by_id(target_id).ok_or(SyscallError::NotFound)?;
+
+    let sender_euid = sender.euid.load(core::sync::atomic::Ordering::Relaxed);
+    if sender_euid == 0 {
+        return Ok(true);
+    }
+
+    let sender_uid = sender.uid.load(core::sync::atomic::Ordering::Relaxed);
+    let target_uid = target.uid.load(core::sync::atomic::Ordering::Relaxed);
+    let target_euid = target.euid.load(core::sync::atomic::Ordering::Relaxed);
+    Ok(sender_uid == target_uid || sender_uid == target_euid || sender_euid == target_uid || sender_euid == target_euid)
 }
 
 fn resolve_kill_targets(pid: i64) -> Result<alloc::vec::Vec<TaskId>, SyscallError> {

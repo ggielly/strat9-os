@@ -4,7 +4,7 @@
 
 use crate::process::{
     create_session, current_pgid, current_pid, current_task_id, current_tid, get_parent_pid,
-    get_pgid_by_pid, set_process_group,
+    get_pgid_by_pid, get_sid_by_pid, set_process_group,
 };
 use super::error::SyscallError;
 
@@ -48,6 +48,21 @@ pub fn sys_getpgrp() -> Result<u64, SyscallError> {
     current_pgid()
         .map(|pgid| pgid as u64)
         .ok_or(SyscallError::Fault)
+}
+
+/// SYS_GETSID (332): Return session id for `pid` (`0` = caller).
+pub fn sys_getsid(pid: i64) -> Result<u64, SyscallError> {
+    if pid < 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if pid == 0 {
+        return crate::process::current_sid()
+            .map(|sid| sid as u64)
+            .ok_or(SyscallError::Fault);
+    }
+    get_sid_by_pid(pid as u32)
+        .map(|sid| sid as u64)
+        .ok_or(SyscallError::NotFound)
 }
 
 /// SYS_SETPGID (317): set process group id.
