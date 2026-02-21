@@ -3,12 +3,12 @@
 //! Adapted from Asterinas.
 
 pub mod fair;
+pub mod idle;
 pub mod nice;
 pub mod real_time;
-pub mod idle;
 
-use alloc::sync::Arc;
 use crate::process::task::Task;
+use alloc::sync::Arc;
 
 /// The scheduling policy of a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +28,98 @@ pub enum SchedPolicyKind {
     Fair,
     RealTime,
     Idle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedClassId {
+    RealTime,
+    Fair,
+    Idle,
+}
+
+impl SchedClassId {
+    pub const ALL: [Self; 3] = [Self::RealTime, Self::Fair, Self::Idle];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RealTime => "rt",
+            Self::Fair => "fair",
+            Self::Idle => "idle",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SchedClassEntry {
+    pub id: SchedClassId,
+    pub name: &'static str,
+    pub rank: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SchedClassTable {
+    entries: [SchedClassEntry; 3],
+    pick_order: [SchedClassId; 3],
+    steal_order: [SchedClassId; 2],
+}
+
+impl Default for SchedClassTable {
+    fn default() -> Self {
+        Self {
+            entries: [
+                SchedClassEntry {
+                    id: SchedClassId::RealTime,
+                    name: "real-time",
+                    rank: 0,
+                },
+                SchedClassEntry {
+                    id: SchedClassId::Fair,
+                    name: "fair",
+                    rank: 1,
+                },
+                SchedClassEntry {
+                    id: SchedClassId::Idle,
+                    name: "idle",
+                    rank: 2,
+                },
+            ],
+            pick_order: [SchedClassId::RealTime, SchedClassId::Fair, SchedClassId::Idle],
+            steal_order: [SchedClassId::Fair, SchedClassId::RealTime],
+        }
+    }
+}
+
+impl SchedClassTable {
+    pub fn new(pick_order: [SchedClassId; 3], steal_order: [SchedClassId; 2]) -> Self {
+        let mut out = Self::default();
+        out.pick_order = pick_order;
+        out.steal_order = steal_order;
+        out
+    }
+
+    pub fn entries(&self) -> &[SchedClassEntry; 3] {
+        &self.entries
+    }
+
+    pub fn pick_order(&self) -> &[SchedClassId; 3] {
+        &self.pick_order
+    }
+
+    pub fn steal_order(&self) -> &[SchedClassId; 2] {
+        &self.steal_order
+    }
+
+    pub fn class_for_policy(&self, policy: SchedPolicy) -> SchedClassId {
+        match policy.kind() {
+            SchedPolicyKind::Fair => SchedClassId::Fair,
+            SchedPolicyKind::RealTime => SchedClassId::RealTime,
+            SchedPolicyKind::Idle => SchedClassId::Idle,
+        }
+    }
+
+    pub fn class_for_task(&self, task: &Task) -> SchedClassId {
+        self.class_for_policy(task.sched_policy())
+    }
 }
 
 impl SchedPolicy {
@@ -70,4 +162,3 @@ pub trait SchedClassRq {
     fn update_current(&mut self, rt: &CurrentRuntime, task: &Task, is_yield: bool) -> bool;
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool;
 }
-
