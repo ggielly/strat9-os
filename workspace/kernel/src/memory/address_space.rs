@@ -792,6 +792,16 @@ impl AddressSpace {
             let mut page_addr = range_start;
             let page_bytes = vma.page_size.bytes();
             while page_addr < range_end {
+                // Lazy VMAs can contain unfaulted pages (no PTE). In that case
+                // there is nothing to unmap in hardware; just update VMA metadata.
+                if mapper
+                    .translate_addr(VirtAddr::new(page_addr))
+                    .is_none()
+                {
+                    page_addr += page_bytes;
+                    continue;
+                }
+
                 let frame_addr = match vma.page_size {
                     VmaPageSize::Small => {
                         use x86_64::structures::paging::Size4KiB;
