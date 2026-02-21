@@ -24,6 +24,7 @@ pub mod task;
 pub mod test;
 pub mod timer;
 pub mod usertest;
+pub mod sched;
 
 pub use scheduler::{
     add_task, block_current_task, current_task_clone, current_task_id, get_all_tasks,

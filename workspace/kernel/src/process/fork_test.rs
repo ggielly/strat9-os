@@ -136,6 +136,10 @@ fn spawn_user_program_task(
         brk: core::sync::atomic::AtomicU64::new(0),
         mmap_hint: core::sync::atomic::AtomicU64::new(0x0000_0000_6000_0000),
         ticks: core::sync::atomic::AtomicU64::new(0),
+        sched_policy: crate::process::task::SyncUnsafeCell::new(Task::default_sched_policy(
+            TaskPriority::Normal,
+        )),
+        vruntime: core::sync::atomic::AtomicU64::new(0),
     });
 
     let launch = Box::new(UserLaunchCtx {

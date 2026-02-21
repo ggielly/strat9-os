@@ -161,6 +161,45 @@ pub struct Task {
     pub mmap_hint: AtomicU64,
     /// Total CPU ticks consumed by this task
     pub ticks: AtomicU64,
+    /// Scheduling policy (Fair, RealTime, Idle)
+    pub sched_policy: SyncUnsafeCell<crate::process::sched::SchedPolicy>,
+    /// Virtual runtime for CFS
+    pub vruntime: AtomicU64,
+}
+
+impl Task {
+    pub fn default_sched_policy(priority: TaskPriority) -> crate::process::sched::SchedPolicy {
+        use crate::process::sched::{nice::Nice, real_time::RealTimePriority, SchedPolicy};
+        match priority {
+            TaskPriority::Idle => SchedPolicy::Idle,
+            TaskPriority::Realtime => SchedPolicy::RealTimeRR {
+                prio: RealTimePriority::new(50),
+            },
+            TaskPriority::High => SchedPolicy::Fair(Nice::new(-10)),
+            TaskPriority::Low => SchedPolicy::Fair(Nice::new(10)),
+            TaskPriority::Normal => SchedPolicy::Fair(Nice::default()),
+        }
+    }
+
+    /// Get the current scheduling policy of the task
+    pub fn sched_policy(&self) -> crate::process::sched::SchedPolicy {
+        unsafe { *self.sched_policy.get() }
+    }
+
+    /// Set the scheduling policy of the task
+    pub fn set_sched_policy(&self, policy: crate::process::sched::SchedPolicy) {
+        unsafe { *self.sched_policy.get() = policy; }
+    }
+
+    /// Get virtual runtime
+    pub fn vruntime(&self) -> u64 {
+        self.vruntime.load(Ordering::Relaxed)
+    }
+
+    /// Set virtual runtime
+    pub fn set_vruntime(&self, vruntime: u64) {
+        self.vruntime.store(vruntime, Ordering::Relaxed);
+    }
 }
 
 /// CPU context saved/restored during context switches.
@@ -365,6 +404,8 @@ impl Task {
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
             ticks: AtomicU64::new(0),
+            sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
+            vruntime: AtomicU64::new(0),
         }))
     }
 
@@ -421,6 +462,8 @@ impl Task {
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
             ticks: AtomicU64::new(0),
+            sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
+            vruntime: AtomicU64::new(0),
         }))
     }
 

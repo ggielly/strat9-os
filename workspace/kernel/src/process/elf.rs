@@ -1168,6 +1168,10 @@ pub fn load_and_run_elf_with_caps(
         brk: core::sync::atomic::AtomicU64::new(0),
         mmap_hint: core::sync::atomic::AtomicU64::new(0x0000_0000_6000_0000),
         ticks: core::sync::atomic::AtomicU64::new(0),
+        sched_policy: crate::process::task::SyncUnsafeCell::new(Task::default_sched_policy(
+            TaskPriority::Normal,
+        )),
+        vruntime: core::sync::atomic::AtomicU64::new(0),
     });
 
     // Seed capabilities into the new task (before scheduling).
