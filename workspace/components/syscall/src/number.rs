@@ -1,16 +1,14 @@
 //! Strat9-OS syscall numbers
 
-// Block 0-99: capabilities / handles
+// Block 0-99: capabilities / handle management
 pub const SYS_NULL: usize = 0;
 pub const SYS_HANDLE_DUPLICATE: usize = 1;
 pub const SYS_HANDLE_CLOSE: usize = 2;
 pub const SYS_HANDLE_WAIT: usize = 3;
 
-// Block 100-199: memory
+// Block 100-199: memory management
 pub const SYS_MMAP: usize = 100;
 pub const SYS_MUNMAP: usize = 101;
-pub const SYS_FMAP: usize = 100;
-pub const SYS_FUNMAP: usize = 101;
 pub const SYS_BRK: usize = 102;
 pub const SYS_MREMAP: usize = 103;
 pub const SYS_MPROTECT: usize = 104;
@@ -23,19 +21,38 @@ pub const SYS_IPC_CALL: usize = 203;
 pub const SYS_IPC_REPLY: usize = 204;
 pub const SYS_IPC_BIND_PORT: usize = 205;
 pub const SYS_IPC_UNBIND_PORT: usize = 206;
+pub const SYS_IPC_TRY_RECV: usize = 207;
+pub const SYS_IPC_RING_CREATE: usize = 210;
+pub const SYS_IPC_RING_MAP: usize = 211;
+pub const SYS_CHAN_CREATE: usize = 220;
+pub const SYS_CHAN_SEND: usize = 221;
+pub const SYS_CHAN_RECV: usize = 222;
+pub const SYS_CHAN_TRY_RECV: usize = 223;
+pub const SYS_CHAN_CLOSE: usize = 224;
 
-// Block 300-399: process
+// Block 300-399: process / thread
 pub const SYS_PROC_EXIT: usize = 300;
-pub const SYS_YIELD: usize = 301;
 pub const SYS_PROC_YIELD: usize = 301;
 pub const SYS_PROC_FORK: usize = 302;
+pub const SYS_FUTEX_WAIT: usize = 303;
+pub const SYS_FUTEX_WAKE: usize = 304;
+pub const SYS_FUTEX_REQUEUE: usize = 305;
+pub const SYS_FUTEX_CMP_REQUEUE: usize = 306;
+pub const SYS_FUTEX_WAKE_OP: usize = 307;
 pub const SYS_PROC_GETPID: usize = 308;
 pub const SYS_PROC_GETPPID: usize = 309;
 pub const SYS_PROC_WAITPID: usize = 310;
-pub const SYS_PROC_WAIT: usize = 311;
-pub const SYS_FUTEX: usize = 303;
+pub const SYS_GETPID: usize = 311;
+pub const SYS_GETTID: usize = 312;
+pub const SYS_GETPPID: usize = 313;
+pub const SYS_PROC_WAIT: usize = 314;
+pub const SYS_PROC_EXECVE: usize = 315;
+pub const SYS_FCNTL: usize = 316;
+pub const SYS_SETPGID: usize = 317;
+pub const SYS_GETPGID: usize = 318;
+pub const SYS_SETSID: usize = 319;
 
-// Signal block (from kernel)
+// Block 320-329: signal handling
 pub const SYS_KILL: usize = 320;
 pub const SYS_SIGPROCMASK: usize = 321;
 pub const SYS_SIGACTION: usize = 322;
@@ -47,37 +64,45 @@ pub const SYS_SIGQUEUE: usize = 327;
 pub const SYS_KILLPG: usize = 328;
 pub const SYS_GETITIMER: usize = 329;
 pub const SYS_SETITIMER: usize = 330;
+pub const SYS_GETPGRP: usize = 331;
+pub const SYS_GETSID: usize = 332;
 
-// Block 400-499: VFS
+// Block 400-499: filesystem / VFS
 pub const SYS_OPEN: usize = 403;
 pub const SYS_WRITE: usize = 404;
 pub const SYS_READ: usize = 405;
 pub const SYS_CLOSE: usize = 406;
-pub const SYS_FCHMOD: usize = 407;
-pub const SYS_FCHOWN: usize = 408;
-pub const SYS_FCNTL: usize = 409;
-pub const SYS_FPATH: usize = 6; // Old / temporary
-pub const SYS_FSTAT: usize = 7; // Old / temporary
-pub const SYS_LSEEK: usize = 8; // Old / temporary
-pub const SYS_FTRUNCATE: usize = 9; // Old / temporary
-pub const SYS_FSYNC: usize = 12; // Old / temporary
-pub const SYS_FSTATVFS: usize = 20;
-pub const SYS_FUTIMENS: usize = 21;
-pub const SYS_DUP: usize = 22;
-pub const SYS_DUP2: usize = 23;
-pub const SYS_FLINK: usize = 24;
-pub const SYS_FRENAME: usize = 25;
-pub const SYS_OPENAT: usize = 26;
-pub const SYS_UNLINKAT: usize = 27;
-pub const SYS_MKNS: usize = 28;
-pub const SYS_CALL: usize = 29;
-pub const SYS_SENDFD: usize = 30;
-pub const SYS_OPENAT_WITH_FILTER: usize = 31;
-pub const SYS_UNLINKAT_WITH_FILTER: usize = 32;
 
-// Block 500-599: Time
+// Block 410-419: network
+pub const SYS_NET_RECV: usize = 410;
+pub const SYS_NET_SEND: usize = 411;
+pub const SYS_NET_INFO: usize = 412;
+
+// Block 420-429: volumes / block devices
+pub const SYS_VOLUME_READ: usize = 420;
+pub const SYS_VOLUME_WRITE: usize = 421;
+pub const SYS_VOLUME_INFO: usize = 422;
+
+// Block 500-599: time / alarms
 pub const SYS_CLOCK_GETTIME: usize = 500;
 pub const SYS_NANOSLEEP: usize = 501;
 
-// Block 600-699: Debug
+// Block 600-699: debug / profiling
 pub const SYS_DEBUG_LOG: usize = 600;
+
+// Block 700-799: module management (.cmod)
+pub const SYS_MODULE_LOAD: usize = 700;
+pub const SYS_MODULE_UNLOAD: usize = 701;
+pub const SYS_MODULE_GET_SYMBOL: usize = 702;
+pub const SYS_MODULE_QUERY: usize = 703;
+
+// Block 800-899: silo manager
+pub const SYS_SILO_CREATE: usize = 800;
+pub const SYS_SILO_CONFIG: usize = 801;
+pub const SYS_SILO_ATTACH_MODULE: usize = 802;
+pub const SYS_SILO_START: usize = 803;
+pub const SYS_SILO_STOP: usize = 804;
+pub const SYS_SILO_KILL: usize = 805;
+pub const SYS_SILO_EVENT_NEXT: usize = 806;
+pub const SYS_SILO_SUSPEND: usize = 807;
+pub const SYS_SILO_RESUME: usize = 808;

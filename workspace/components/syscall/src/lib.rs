@@ -175,6 +175,14 @@ pub unsafe fn syscall6(
 #[cfg(feature = "userspace")]
 pub mod call {
     use super::*;
+    const MAP_PRIVATE: usize = 1 << 1;
+    const MAP_ANONYMOUS: usize = 1 << 5;
+
+    const FUTEX_WAIT: usize = 0;
+    const FUTEX_WAKE: usize = 1;
+    const FUTEX_REQUEUE: usize = 3;
+    const FUTEX_CMP_REQUEUE: usize = 4;
+    const FUTEX_WAKE_OP: usize = 5;
 
     /// Close a file
     pub fn close(fd: usize) -> error::Result<usize> {
@@ -194,30 +202,26 @@ pub mod call {
 
     /// Copy and transform a file descriptor
     pub fn dup(fd: usize, buf: &[u8]) -> error::Result<usize> {
-        unsafe { syscall3(number::SYS_DUP, fd, buf.as_ptr() as usize, buf.len()) }
+        let _ = buf;
+        unsafe { syscall1(number::SYS_HANDLE_DUPLICATE, fd) }
     }
 
     /// Copy and transform a file descriptor
     pub fn dup2(fd: usize, newfd: usize, buf: &[u8]) -> error::Result<usize> {
-        unsafe {
-            syscall4(
-                number::SYS_DUP2,
-                fd,
-                newfd,
-                buf.as_ptr() as usize,
-                buf.len(),
-            )
-        }
+        let _ = (fd, newfd, buf);
+        Err(error::Error::NotSupported)
     }
 
     /// Change file permissions
     pub fn fchmod(fd: usize, mode: u16) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_FCHMOD, fd, mode as usize) }
+        let _ = (fd, mode);
+        Err(error::Error::NotSupported)
     }
 
     /// Change file ownership
     pub fn fchown(fd: usize, uid: u32, gid: u32) -> error::Result<usize> {
-        unsafe { syscall3(number::SYS_FCHOWN, fd, uid as usize, gid as usize) }
+        let _ = (fd, uid, gid);
+        Err(error::Error::NotSupported)
     }
 
     /// Change file descriptor flags
@@ -236,80 +240,76 @@ pub mod call {
     /// `EEXIST` - if [`MapFlags::MAP_FIXED`] was set, and the address specified was already in use.
     ///
     pub unsafe fn fmap(fd: usize, map: &data::Map) -> error::Result<usize> {
-        syscall3(
-            number::SYS_FMAP,
+        // ABI v2 exposes SYS_MMAP directly: (addr, len, prot, flags, fd, offset).
+        let prot = (map.flags as usize) & 0x7;
+        let mut flags = map.flags as usize;
+        // Ensure kernel-required anonymous private default for legacy callers.
+        if flags & (1 << 0 | MAP_PRIVATE) == 0 {
+            flags |= MAP_PRIVATE;
+        }
+        flags |= MAP_ANONYMOUS;
+        syscall6(
+            number::SYS_MMAP,
+            map.addr,
+            map.size,
+            prot,
+            flags,
             fd,
-            map as *const data::Map as usize,
-            core::mem::size_of::<data::Map>(),
+            map.offset,
         )
     }
 
     /// Unmap whole (or partial) continous memory-mapped files
     pub unsafe fn funmap(addr: usize, len: usize) -> error::Result<usize> {
-        syscall2(number::SYS_FUNMAP, addr, len)
+        syscall2(number::SYS_MUNMAP, addr, len)
     }
 
     /// Retrieve the canonical path of a file
     pub fn fpath(fd: usize, buf: &mut [u8]) -> error::Result<usize> {
-        unsafe { syscall3(number::SYS_FPATH, fd, buf.as_mut_ptr() as usize, buf.len()) }
+        let _ = (fd, buf);
+        Err(error::Error::NotSupported)
     }
 
     /// Create a link to a file
     pub fn flink<T: AsRef<str>>(fd: usize, path: T) -> error::Result<usize> {
-        let path = path.as_ref();
-        unsafe { syscall3(number::SYS_FLINK, fd, path.as_ptr() as usize, path.len()) }
+        let _ = (fd, path.as_ref());
+        Err(error::Error::NotSupported)
     }
 
     /// Rename a file
     pub fn frename<T: AsRef<str>>(fd: usize, path: T) -> error::Result<usize> {
-        let path = path.as_ref();
-        unsafe { syscall3(number::SYS_FRENAME, fd, path.as_ptr() as usize, path.len()) }
+        let _ = (fd, path.as_ref());
+        Err(error::Error::NotSupported)
     }
 
     /// Get metadata about a file
     pub fn fstat(fd: usize, stat: &mut data::Stat) -> error::Result<usize> {
-        unsafe {
-            syscall3(
-                number::SYS_FSTAT,
-                fd,
-                stat as *mut data::Stat as usize,
-                core::mem::size_of::<data::Stat>(),
-            )
-        }
+        let _ = (fd, stat);
+        Err(error::Error::NotSupported)
     }
 
     /// Get metadata about a filesystem
     pub fn fstatvfs(fd: usize, stat: &mut data::StatVfs) -> error::Result<usize> {
-        unsafe {
-            syscall3(
-                number::SYS_FSTATVFS,
-                fd,
-                stat as *mut data::StatVfs as usize,
-                core::mem::size_of::<data::StatVfs>(),
-            )
-        }
+        let _ = (fd, stat);
+        Err(error::Error::NotSupported)
     }
 
     /// Sync a file descriptor to its underlying medium
     pub fn fsync(fd: usize) -> error::Result<usize> {
-        unsafe { syscall1(number::SYS_FSYNC, fd) }
+        let _ = fd;
+        Err(error::Error::NotSupported)
     }
 
     /// Truncate or extend a file to a specified length
     pub fn ftruncate(fd: usize, len: usize) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_FTRUNCATE, fd, len) }
+        let _ = (fd, len);
+        Err(error::Error::NotSupported)
     }
 
     // Change modify and/or access times
     pub fn futimens(fd: usize, times: &[data::TimeSpec]) -> error::Result<usize> {
-        unsafe {
-            syscall3(
-                number::SYS_FUTIMENS,
-                fd,
-                times.as_ptr() as usize,
-                times.len() * core::mem::size_of::<data::TimeSpec>(),
-            )
-        }
+        let _ = (fd, times);
+        Err(error::Error::NotSupported)
     }
 
     /// Fast userspace mutex
@@ -320,24 +320,46 @@ pub mod call {
         val2: usize,
         addr2: *mut i32,
     ) -> error::Result<usize> {
-        syscall5(
-            number::SYS_FUTEX,
-            addr as usize,
-            op,
-            (val as isize) as usize,
-            val2,
-            addr2 as usize,
-        )
+        match op {
+            FUTEX_WAIT => syscall3(number::SYS_FUTEX_WAIT, addr as usize, val as usize, val2),
+            FUTEX_WAKE => syscall2(number::SYS_FUTEX_WAKE, addr as usize, val as usize),
+            FUTEX_REQUEUE => syscall4(
+                number::SYS_FUTEX_REQUEUE,
+                addr as usize,
+                val as usize,
+                val2,
+                addr2 as usize,
+            ),
+            FUTEX_CMP_REQUEUE => syscall5(
+                number::SYS_FUTEX_CMP_REQUEUE,
+                addr as usize,
+                val as usize,
+                val2,
+                addr2 as usize,
+                0,
+            ),
+            FUTEX_WAKE_OP => syscall5(
+                number::SYS_FUTEX_WAKE_OP,
+                addr as usize,
+                val as usize,
+                val2,
+                addr2 as usize,
+                0,
+            ),
+            _ => Err(error::Error::Invalid),
+        }
     }
 
     /// Seek to `offset` bytes in a file descriptor
     pub fn lseek(fd: usize, offset: isize, whence: usize) -> error::Result<usize> {
-        unsafe { syscall3(number::SYS_LSEEK, fd, offset as usize, whence) }
+        let _ = (fd, offset, whence);
+        Err(error::Error::NotSupported)
     }
 
     /// Make a new scheme namespace
     pub fn mkns(schemes: &[[usize; 2]]) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_MKNS, schemes.as_ptr() as usize, schemes.len()) }
+        let _ = schemes;
+        Err(error::Error::NotSupported)
     }
 
     /// Change mapping flags
@@ -367,15 +389,14 @@ pub mod call {
         flags: usize,
         fcntl_flags: usize,
     ) -> error::Result<usize> {
+        let _ = fd;
         let path = path.as_ref();
         unsafe {
-            syscall5(
-                number::SYS_OPENAT,
-                fd,
+            syscall3(
+                number::SYS_OPEN,
                 path.as_ptr() as usize,
                 path.len(),
-                flags,
-                fcntl_flags,
+                flags | fcntl_flags,
             )
         }
     }
@@ -389,35 +410,14 @@ pub mod call {
         euid: u32,
         egid: u32,
     ) -> error::Result<usize> {
-        let path = path.as_ref();
-        unsafe {
-            syscall6(
-                number::SYS_OPENAT_WITH_FILTER,
-                fd,
-                path.as_ptr() as usize,
-                path.len(),
-                flags | fcntl_flags,
-                // NOTE: Short-term solution to allow namespace management.
-                // In the long term, we need to figure out how we should best handle
-                // Unix permissions using capabilities.
-                euid as usize,
-                egid as usize,
-            )
-        }
+        let _ = (euid, egid);
+        openat(fd, path, flags, fcntl_flags)
     }
 
     /// Remove a file at at specific path
     pub fn unlinkat<T: AsRef<str>>(fd: usize, path: T, flags: usize) -> error::Result<usize> {
-        let path = path.as_ref();
-        unsafe {
-            syscall4(
-                number::SYS_UNLINKAT,
-                fd,
-                path.as_ptr() as usize,
-                path.len(),
-                flags,
-            )
-        }
+        let _ = (fd, path.as_ref(), flags);
+        Err(error::Error::NotSupported)
     }
 
     /// Remove a file at at specific path with filter
@@ -428,21 +428,8 @@ pub mod call {
         euid: u32,
         egid: u32,
     ) -> error::Result<usize> {
-        let path = path.as_ref();
-        unsafe {
-            syscall6(
-                number::SYS_UNLINKAT_WITH_FILTER,
-                fd,
-                path.as_ptr() as usize,
-                path.len(),
-                flags,
-                // NOTE: Short-term solution to allow namespace management.
-                // In the long term, we need to figure out how we should best handle
-                // Unix permissions using capabilities.
-                euid as usize,
-                egid as usize,
-            )
-        }
+        let _ = (euid, egid);
+        unlinkat(fd, path, flags)
     }
 
     /// Read from a file descriptor into a buffer
@@ -472,7 +459,7 @@ pub mod call {
     ///
     /// This function will return Ok(0) on success
     pub fn sched_yield() -> error::Result<usize> {
-        unsafe { syscall0(number::SYS_YIELD) }
+        unsafe { syscall0(number::SYS_PROC_YIELD) }
     }
 
     /// Send a file descriptor `fd`, handled by the scheme providing `receiver_socket`. `flags` is
@@ -485,22 +472,8 @@ pub mod call {
         flags: usize,
         arg: u64,
     ) -> error::Result<usize> {
-        #[cfg(target_pointer_width = "32")]
-        unsafe {
-            syscall5(
-                number::SYS_SENDFD,
-                receiver_socket,
-                fd,
-                flags,
-                arg as u32 as usize,
-                (arg >> 32) as u32 as usize,
-            )
-        }
-
-        #[cfg(target_pointer_width = "64")]
-        unsafe {
-            syscall4(number::SYS_SENDFD, receiver_socket, fd, flags, arg as usize)
-        }
+        let _ = (receiver_socket, fd, flags, arg);
+        Err(error::Error::NotSupported)
     }
 
     /// SYS_CALL interface, read-only variant
@@ -510,17 +483,8 @@ pub mod call {
         flags: flag::CallFlags,
         metadata: &[u64],
     ) -> error::Result<usize> {
-        let combined_flags = flags | flag::CallFlags::READ;
-        unsafe {
-            syscall5(
-                number::SYS_CALL,
-                fd,
-                payload.as_mut_ptr() as usize,
-                payload.len(),
-                metadata.len() | combined_flags.bits() as usize,
-                metadata.as_ptr() as usize,
-            )
-        }
+        let _ = (fd, payload, flags, metadata);
+        Err(error::Error::NotSupported)
     }
 
     /// SYS_CALL interface, write-only variant
@@ -530,17 +494,8 @@ pub mod call {
         flags: flag::CallFlags,
         metadata: &[u64],
     ) -> error::Result<usize> {
-        let combined_flags = flags | flag::CallFlags::WRITE;
-        unsafe {
-            syscall5(
-                number::SYS_CALL,
-                fd,
-                payload.as_ptr() as *mut u8 as usize,
-                payload.len(),
-                metadata.len() | combined_flags.bits() as usize,
-                metadata.as_ptr() as usize,
-            )
-        }
+        let _ = (fd, payload, flags, metadata);
+        Err(error::Error::NotSupported)
     }
 
     /// SYS_CALL interface, read-write variant
@@ -550,16 +505,7 @@ pub mod call {
         flags: flag::CallFlags,
         metadata: &[u64],
     ) -> error::Result<usize> {
-        let combined_flags = flags | flag::CallFlags::READ | flag::CallFlags::WRITE;
-        unsafe {
-            syscall5(
-                number::SYS_CALL,
-                fd,
-                payload.as_mut_ptr() as usize,
-                payload.len(),
-                metadata.len() | combined_flags.bits() as usize,
-                metadata.as_ptr() as usize,
-            )
-        }
+        let _ = (fd, payload, flags, metadata);
+        Err(error::Error::NotSupported)
     }
 }
