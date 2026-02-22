@@ -12,7 +12,6 @@ members = [
 ]
 exclude = [
     "workspace/components/relibc",        # External dependency, built separately
-    "workspace/components/libc-strat9",   # Placeholder, not yet implemented
     "workspace/components/strate-fs-xfs", # Missing fs-abstraction dependency
 ]
 resolver = "2"

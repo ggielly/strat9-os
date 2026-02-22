@@ -22,33 +22,33 @@ args = ["tools/scripts/setup-limine.sh"]
 
 
 [tasks.patch-relibc]
-description = "Patch relibc with Strat9-OS PAL (Idempotent)"
+description = "Verify/patch relibc Strat9 integration (source of truth: sdk/relibc)"
 script_runner = "@shell"
 script_extension = "sh"
 script = [
     '''
-    relibc_dir="sdk/relibc"
-    strat9_libc_dir="sdk/strat9-libc"
+    root_dir="$(pwd)"
+    relibc_dir="$root_dir/sdk/relibc"
     platform_mod="$relibc_dir/src/platform/mod.rs"
     target_dir="$relibc_dir/src/platform/strat9"
 
     if [ ! -d "$relibc_dir" ]; then
-        echo "relibc directory not found. Cloning first..."
-        exit 0
+        echo "ERROR: $relibc_dir not found. Run setup-relibc first."
+        exit 1
     fi
 
-    # 1. Ensure target directory exists
-    mkdir -p "$target_dir"
+    if [ ! -f "$target_dir/mod.rs" ] || [ ! -f "$target_dir/auxv_defs.rs" ]; then
+        echo "ERROR: Strat9 PAL files must live in $target_dir (mod.rs + auxv_defs.rs)."
+        echo "This repository is configured for Choice 1 (single source in sdk/relibc)."
+        exit 1
+    fi
 
-    # 2. Copy Strat9 PAL files
-    cp "$strat9_libc_dir"/*.rs "$target_dir/"
-
-    # 3. Patch src/platform/mod.rs (Idempotent with markers)
+    # Patch src/platform/mod.rs (idempotent with markers)
     echo "Patching $platform_mod..."
-    
+
     # Remove any existing Strat9 blocks (idempotent removal)
     sed -i '/\/\/ STRAT9-OS-START/,/\/\/ STRAT9-OS-END/d' "$platform_mod"
-    
+
     # Define the blocks to insert
     sys_block="// STRAT9-OS-START
 #[cfg(all(not(feature = \"no_std\"), target_os = \"strat9\"))]
@@ -62,62 +62,59 @@ pub use self::sys::auxv_defs;
 // STRAT9-OS-END"
 
     modified=false
-    # Insert sys block after redox sys
+    # Insert sys block after redox sys.
     if grep -q 'redox/mod.rs.*pub(crate) mod sys' "$platform_mod"; then
         sed -i "/redox\/mod\.rs.*pub(crate) mod sys/a $sys_block" "$platform_mod"
         modified=true
     fi
-    
-    # Insert auxv block after redox auxv
+
+    # Insert auxv block after redox auxv.
     if grep -q 'redox_rt::auxv_defs' "$platform_mod"; then
         sed -i "/redox_rt::auxv_defs/a $auxv_block" "$platform_mod"
         modified=true
     fi
-    
+
     if [ "$modified" = true ]; then
         echo "Successfully patched $platform_mod with markers."
     else
-        echo "Could not find insertion points in $platform_mod"
+        echo "ERROR: Could not find insertion points in $platform_mod"
+        exit 1
     fi
     ''',
 ]
 
 [tasks.setup-relibc]
-description = "Clone and setup relibc source for Strat9"
+description = "Clone/update external relibc fork and validate Strat9 PAL (Choice 1)"
 script_runner = "@shell"
 script = [
     '''
-    if [ ! -d "sdk/relibc" ]; then
-        mkdir -p sdk/relibc
-        git clone https://github.com/ggielly/relibc sdk/relibc
-        cd sdk/relibc
-        git checkout strat9-os
-        git submodule update --init --recursive
-    else
-        cd sdk/relibc
-        git fetch origin
-        git checkout strat9-os
-        git pull origin strat9-os
-    fi
-
-    relibc_dir="sdk/relibc"
-    strat9_libc_dir="sdk/strat9-libc"
+    root_dir="$(pwd)"
+    relibc_dir="$root_dir/sdk/relibc"
     platform_mod="$relibc_dir/src/platform/mod.rs"
     target_dir="$relibc_dir/src/platform/strat9"
 
-    # 1. Ensure target directory exists
-    mkdir -p "$target_dir"
-
-    # 2. Optionally copy Strat9 PAL files if present (not required when fork already contains them)
-    if [ -d "$strat9_libc_dir" ]; then
-        cp "$strat9_libc_dir"/*.rs "$target_dir/"
+    if [ -d "$relibc_dir/.git" ]; then
+        cd "$relibc_dir"
+        git fetch origin
+        git checkout strat9-os
+        git pull origin strat9-os
+    else
+        rm -rf "$relibc_dir"
+        git clone https://github.com/ggielly/relibc "$relibc_dir"
+        cd "$relibc_dir"
+        git checkout strat9-os
+        git submodule update --init --recursive
     fi
 
-    # 3. Patch src/platform/mod.rs (Idempotent with markers)
-    echo "Verifying $platform_mod has Strat9 markers..."
+    # Choice 1 is mandatory: Strat9 PAL lives directly in relibc fork.
+    if [ ! -f "$target_dir/mod.rs" ] || [ ! -f "$target_dir/auxv_defs.rs" ]; then
+        echo "ERROR: Missing $target_dir/mod.rs or $target_dir/auxv_defs.rs."
+        echo "Choice 1 is enforced: maintain PAL only inside sdk/relibc."
+        exit 1
+    fi
 
-    # Verify the markers exist (they should already be in the fork).
-    # Check for STRAT9-OS markers in relibc fork.
+    # Verify marker blocks are present in relibc platform registry.
+    echo "Verifying $platform_mod has Strat9 markers..."
     if ! grep -q '// STRAT9-OS-START' "$platform_mod"; then
         echo "ERROR: Strat9 markers not found in $platform_mod. Please update your fork."
         exit 1
