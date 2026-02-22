@@ -45,8 +45,8 @@ static HHDM: HhdmRequest = HhdmRequest::new();
 #[link_section = ".requests"]
 static STACK_SIZE: StackSizeRequest = StackSizeRequest::new().with_size(0x10000); // 64KB
 
-/// Internal module: request Limine to load /initfs/init (the init ELF binary)
-static INIT_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/init");
+/// Internal module: request Limine to load /initfs/test_pid (first userspace PID test binary)
+static INIT_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_pid");
 /// Internal module: request Limine to load /initfs/fs-ext4 (userspace EXT4 server)
 static EXT4_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/fs-ext4");
 /// Internal module: request Limine to load /initfs/strate-fs-ramfs (userspace RAMFS server)
@@ -82,6 +82,25 @@ pub fn fs_ext4_module() -> Option<(u64, u64)> {
 pub fn strate_fs_ramfs_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
     unsafe { STRATE_FS_RAMFS_MODULE }
+}
+
+fn find_module_by_path(
+    modules: &[&limine::file::File],
+    expected_path: &[u8],
+) -> Option<(u64, u64)> {
+    let expected_no_leading = expected_path.strip_prefix(b"/").unwrap_or(expected_path);
+    modules.iter().find_map(|module| {
+        let path = module.path().to_bytes();
+        if path == expected_path
+            || path.ends_with(expected_path)
+            || path == expected_no_leading
+            || path.ends_with(expected_no_leading)
+        {
+            Some((module.addr() as u64, module.size()))
+        } else {
+            None
+        }
+    })
 }
 
 fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> crate::entry::MemoryKind {
@@ -200,28 +219,37 @@ pub unsafe extern "C" fn kmain() -> ! {
         (0, 0)
     };
 
-    // Check for loaded modules (init ELF binary + fs-ext4 + strate-ram)
+    // Resolve loaded modules by exact path, not by index/order.
+    // Limine may return modules from config and internal requests in any order.
     let (initfs_base, initfs_size, ext4_base, ext4_size, ram_base, ram_size) =
         if let Some(module_response) = MODULES.get_response() {
             let modules = module_response.modules();
-            let (init_base, init_size) = if !modules.is_empty() {
-                let module = modules[0];
-                (module.addr() as u64, module.size())
-            } else {
-                (0u64, 0u64)
-            };
-            let (ext4_base, ext4_size) = if modules.len() > 1 {
-                let module = modules[1];
-                (module.addr() as u64, module.size())
-            } else {
-                (0u64, 0u64)
-            };
-            let (ram_base, ram_size) = if modules.len() > 2 {
-                let module = modules[2];
-                (module.addr() as u64, module.size())
-            } else {
-                (0u64, 0u64)
-            };
+            crate::serial_println!("[limine] modules reported: {}", modules.len());
+            for (idx, module) in modules.iter().enumerate() {
+                crate::serial_println!(
+                    "[limine] module[{}]: path='{}' size={}",
+                    idx,
+                    module.path().to_string_lossy(),
+                    module.size()
+                );
+            }
+            let (init_base, init_size) =
+                find_module_by_path(modules, b"/initfs/test_pid").unwrap_or((0, 0));
+            let (ext4_base, ext4_size) =
+                find_module_by_path(modules, b"/initfs/fs-ext4").unwrap_or((0, 0));
+            let (ram_base, ram_size) =
+                find_module_by_path(modules, b"/initfs/strate-fs-ramfs").unwrap_or((0, 0));
+            if init_base == 0 {
+                crate::serial_println!("[limine] WARN: /initfs/test_pid not found in modules");
+            }
+            if ext4_base == 0 {
+                crate::serial_println!("[limine] WARN: /initfs/fs-ext4 not found in modules");
+            }
+            if ram_base == 0 {
+                crate::serial_println!(
+                    "[limine] WARN: /initfs/strate-fs-ramfs not found in modules"
+                );
+            }
             (
                 init_base, init_size, ext4_base, ext4_size, ram_base, ram_size,
             )

@@ -191,7 +191,9 @@ fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
     let caps = unsafe { &mut *task.capabilities.get() };
     if let Some(cap) = caps.remove(CapId::from_raw(_handle)) {
         if cap.resource_type == ResourceType::File {
-            let _ = crate::vfs::close_open_file(cap.resource as u64);
+            if let Ok(fd) = u32::try_from(cap.resource) {
+                let _ = crate::vfs::close(fd);
+            }
         }
         log::trace!("syscall: HANDLE_CLOSE({})", _handle);
         Ok(0)

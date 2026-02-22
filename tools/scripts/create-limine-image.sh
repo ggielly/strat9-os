@@ -14,6 +14,7 @@ ISO_FILE="$BUILD_DIR/${IMAGE_BASENAME}.iso"
 KERNEL_ELF="target/x86_64-unknown-none/${PROFILE}/kernel"
 FS_EXT4_ELF="target/x86_64-unknown-none/${PROFILE}/fs-ext4-strate"
 FS_RAM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-fs-ramfs"
+INIT_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_pid"
 
 echo ""
 echo "=== Creating Limine bootable image ==="
@@ -48,6 +49,12 @@ if [ -f "$FS_RAM_ELF" ]; then
 else
     echo "    strate-fs-ramfs : (missing)"
 fi
+if [ -f "$INIT_TEST_ELF" ]; then
+    init_size=$(stat -c%s "$INIT_TEST_ELF")
+    echo "    init-test   : $init_size bytes"
+else
+    echo "    init-test   : (missing)"
+fi
 echo ""
 
 # Create ISO root structure
@@ -71,8 +78,9 @@ echo "  [OK] Copied configuration"
 
 # Copy userspace modules (initfs)
 if [ -f "$FS_EXT4_ELF" ]; then
+    cp "$FS_EXT4_ELF" "$ISO_ROOT/initfs/fs-ext4"
     cp "$FS_EXT4_ELF" "$ISO_ROOT/initfs/fs-ext4-strate"
-    echo "  [OK] Copied fs-ext4 strate"
+    echo "  [OK] Copied fs-ext4 (aliases: fs-ext4 + fs-ext4-strate)"
 else
     echo "  [WARN] fs-ext4 strate not found at $FS_EXT4_ELF"
 fi
@@ -82,6 +90,15 @@ if [ -f "$FS_RAM_ELF" ]; then
     echo "  [OK] Copied strate-fs-ramfs"
 else
     echo "  [WARN] strate-fs-ramfs not found at $FS_RAM_ELF"
+fi
+
+if [ -f "$INIT_TEST_ELF" ]; then
+    cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
+    echo "  [OK] Copied init-test binary: /initfs/test_pid"
+else
+    echo "  ERROR: init-test binary not found at $INIT_TEST_ELF"
+    echo "  Build it first (e.g. cargo make strate-silo-test or strate-silo-test-release)"
+    exit 1
 fi
 
 # Create ISO using xorriso

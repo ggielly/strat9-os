@@ -147,7 +147,17 @@ extern "x86-interrupt" fn page_fault_handler(
             if let Ok(vaddr) = fault_addr {
                 match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), address_space) {
                     Ok(()) => return,
-                    Err(_) => {}
+                    Err(reason) => {
+                        crate::serial_println!(
+                            "[pagefault] COW resolve failed: task={} pid={} tid={} addr={:#x} rip={:#x} err={}",
+                            task.id.as_u64(),
+                            task.pid,
+                            task.tid,
+                            vaddr.as_u64(),
+                            stack_frame.instruction_pointer.as_u64(),
+                            reason
+                        );
+                    }
                 }
             }
         }

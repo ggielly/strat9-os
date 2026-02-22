@@ -359,17 +359,16 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
             let elf_data = unsafe {
                 core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
             };
-            if let Err(e) = vfs::register_static_file("/initfs/init", elf_data.as_ptr(), elf_data.len())
+            if let Err(e) = vfs::register_initfs_file("test_pid", elf_data.as_ptr(), elf_data.len())
             {
-                serial_println!("[init] Failed to register /initfs/init: {:?}", e);
+                serial_println!("[init] Failed to register /initfs/test_pid: {:?}", e);
             }
         }
         if let Some((base, size)) = crate::limine_entry::fs_ext4_module() {
             if base != 0 && size != 0 {
                 let ext4_data =
                     unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-                if let Err(e) =
-                    vfs::register_static_file("/initfs/fs-ext4", ext4_data.as_ptr(), ext4_data.len())
+                if let Err(e) = vfs::register_initfs_file("fs-ext4", ext4_data.as_ptr(), ext4_data.len())
                 {
                     serial_println!("[init] Failed to register /initfs/fs-ext4: {:?}", e);
                 } else {
@@ -380,11 +379,9 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
             if base != 0 && size != 0 {
                 let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-                if let Err(e) = vfs::register_static_file(
-                    "/initfs/strate-fs-ramfs",
-                    ram_data.as_ptr(),
-                    ram_data.len(),
-                ) {
+                if let Err(e) =
+                    vfs::register_initfs_file("strate-fs-ramfs", ram_data.as_ptr(), ram_data.len())
+                {
                     serial_println!("[init] Failed to register /initfs/strate-fs-ramfs: {:?}", e);
                 } else {
                     serial_println!("[init] Registered /initfs/strate-fs-ramfs ({} bytes)", size);
@@ -446,13 +443,15 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
             let elf_data = unsafe {
                 core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
             };
+            // Keep task name "init" so bootstrap capabilities (including console/admin path)
+            // are granted exactly like the previous init flow.
             match process::elf::load_and_run_elf(elf_data, "init") {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
-                    serial_println!("[init] ELF 'init' loaded.");
+                    serial_println!("[init] ELF '/initfs/test_pid' loaded as task 'init'.");
                 }
                 Err(e) => {
-                    serial_println!("[init] Failed to load init ELF: {}", e);
+                    serial_println!("[init] Failed to load test_pid ELF: {}", e);
                 }
             }
         }

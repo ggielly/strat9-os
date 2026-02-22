@@ -1,10 +1,12 @@
 //! System management commands
 use crate::{
+    process::elf::load_and_run_elf,
     process::{
         log_scheduler_state, scheduler_class_table, scheduler_verbose_enabled, set_scheduler_verbose,
     },
     shell::{output::clear_screen, ShellError},
     shell_println,
+    vfs,
 };
 use alloc::string::String;
 
@@ -93,6 +95,43 @@ pub fn cmd_scheduler(args: &[String]) -> Result<(), ShellError> {
         _ => {
             shell_println!("Usage: scheduler debug on|off|dump");
             Err(ShellError::InvalidArguments)
+        }
+    }
+}
+
+/// Launch the userspace PID test binary from initfs.
+pub fn cmd_test_pid(_args: &[String]) -> Result<(), ShellError> {
+    let path = "/initfs/test_pid";
+    shell_println!("Launching {} ...", path);
+
+    let fd = match vfs::open(path, vfs::OpenFlags::READ) {
+        Ok(fd) => fd,
+        Err(e) => {
+            shell_println!("open failed: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+
+    let data = match vfs::read_all(fd) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = vfs::close(fd);
+            shell_println!("read failed: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+    let _ = vfs::close(fd);
+
+    shell_println!("ELF size: {} bytes", data.len());
+    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
+    match load_and_run_elf(&data, "init") {
+        Ok(task_id) => {
+            shell_println!("test_pid started (task id={})", task_id);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("load_and_run_elf failed: {}", e);
+            Err(ShellError::ExecutionFailed)
         }
     }
 }

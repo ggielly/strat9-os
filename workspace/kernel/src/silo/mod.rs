@@ -623,7 +623,10 @@ pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
         .get_with_permissions(CapId::from_raw(fd_or_ptr), required)
         .ok_or(SyscallError::PermissionDenied)?;
     let data = match cap.resource_type {
-        ResourceType::File => crate::vfs::read_open_file_all(cap.resource as u64)?,
+        ResourceType::File => {
+            let fd = u32::try_from(cap.resource).map_err(|_| SyscallError::BadHandle)?;
+            crate::vfs::read_all(fd)?
+        }
         ResourceType::IpcPort => {
             let port_id = PortId::from_u64(cap.resource as u64);
             let port = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;

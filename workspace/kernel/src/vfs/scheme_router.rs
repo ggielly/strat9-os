@@ -1,4 +1,4 @@
-//! Scheme Router - central registry for all schemes.
+//! Scheme Router (SR) - central registry for all schemes.
 //!
 //! The Scheme Router manages scheme registration and provides
 //! a unified interface for mounting schemes in the VFS namespace.
@@ -29,6 +29,7 @@ pub struct SchemeEntry {
 
 /// Global scheme router
 static SCHEME_ROUTER: SpinLock<SchemeRouter> = SpinLock::new(SchemeRouter::new());
+static INITFS_KERNEL_SCHEME: SpinLock<Option<Arc<KernelScheme>>> = SpinLock::new(None);
 
 /// Scheme router state
 pub struct SchemeRouter {
@@ -103,19 +104,23 @@ pub fn mount_scheme(name: &str, path: &str) -> Result<(), SyscallError> {
 
 /// Initialize built-in schemes
 pub fn init_builtin_schemes() -> Result<(), SyscallError> {
-    use crate::vfs::scheme::KernelScheme;
-
     // Create kernel scheme for /initfs
-    let mut kernel_scheme = KernelScheme::new();
-
-    // Register static files (populated at boot)
-    kernel_scheme.register("init", core::ptr::null(), 0);
-
-    let kernel_scheme = Arc::new(kernel_scheme);
+    let kernel_scheme = Arc::new(KernelScheme::new());
     register_scheme("kernel", kernel_scheme.clone())?;
     mount_scheme("kernel", "/initfs")?;
+    *INITFS_KERNEL_SCHEME.lock() = Some(kernel_scheme);
 
     log::info!("[SchemeRouter] Built-in schemes initialized");
+    Ok(())
+}
+
+/// Register a static file in the kernel-backed /initfs scheme.
+pub fn register_initfs_file(path: &str, base: *const u8, len: usize) -> Result<(), SyscallError> {
+    let scheme = INITFS_KERNEL_SCHEME
+        .lock()
+        .clone()
+        .ok_or(SyscallError::BadHandle)?;
+    scheme.register(path, base, len);
     Ok(())
 }
 
