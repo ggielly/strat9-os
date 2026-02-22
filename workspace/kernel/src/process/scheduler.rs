@@ -891,6 +891,7 @@ extern "C" fn idle_task_main() -> ! {
 /// This function does not return.
 pub fn exit_current_task(exit_code: i32) -> ! {
     let cpu_index = current_cpu_index();
+    let mut parent_to_signal: Option<TaskId> = None;
     {
         let saved_flags = save_flags_and_cli();
         let mut scheduler = SCHEDULER.lock();
@@ -913,16 +914,17 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 }
                 if let Some(parent_id) = parent {
                     let _ = sched.wake_task_locked(parent_id);
-                    // Notify parent that a child has terminated.
-                    let _ = crate::process::signal::send_signal(
-                        parent_id,
-                        crate::process::signal::Signal::SIGCHLD,
-                    );
+                    parent_to_signal = Some(parent_id);
                 }
             }
         }
         drop(scheduler);
         restore_flags(saved_flags);
+    }
+
+    if let Some(parent_id) = parent_to_signal {
+        // Must happen outside scheduler lock to avoid lock recursion.
+        let _ = crate::process::signal::send_signal(parent_id, crate::process::signal::Signal::SIGCHLD);
     }
 
     // Yield to pick the next task. Since we're Dead, we won't come back.
@@ -1478,6 +1480,7 @@ pub fn kill_task(id: TaskId) -> bool {
     let mut switch_target: Option<SwitchTarget> = None;
     let mut killed = false;
     let mut ipi_to_cpu: Option<usize> = None;
+    let mut parent_to_signal: Option<TaskId> = None;
 
     {
         let mut scheduler = SCHEDULER.lock();
@@ -1497,7 +1500,7 @@ pub fn kill_task(id: TaskId) -> bool {
                         cleanup_task_resources(current);
                         sched.all_tasks.remove(&id);
                         sched.task_cpu.remove(&id);
-                        finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
+                        parent_to_signal = finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
                         killed = true;
                         if ci == my_cpu {
                             switch_target = sched.yield_cpu(ci);
@@ -1520,7 +1523,8 @@ pub fn kill_task(id: TaskId) -> bool {
                             }
                             cleanup_task_resources(&task);
                             sched.task_cpu.remove(&id);
-                            finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
+                            parent_to_signal =
+                                finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
                         }
                         killed = true;
                         break;
@@ -1538,7 +1542,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     cleanup_task_resources(&task);
                     sched.all_tasks.remove(&id);
                     sched.task_cpu.remove(&id);
-                    finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
+                    parent_to_signal = finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
                     killed = true;
                 }
             }
@@ -1558,18 +1562,24 @@ pub fn kill_task(id: TaskId) -> bool {
         send_resched_ipi_to_cpu(ci);
     }
 
+    if let Some(parent_id) = parent_to_signal {
+        // Must happen outside scheduler lock to avoid lock recursion.
+        let _ = crate::process::signal::send_signal(parent_id, crate::process::signal::Signal::SIGCHLD);
+    }
+
     restore_flags(saved_flags);
     killed
 }
 
-fn finalize_forced_death(sched: &mut Scheduler, task_id: TaskId, exit_code: i32) {
+fn finalize_forced_death(sched: &mut Scheduler, task_id: TaskId, exit_code: i32) -> Option<TaskId> {
     let parent = sched.parent_of.get(&task_id).copied();
     if let Some(parent_id) = parent {
         sched.zombies.insert(task_id, exit_code);
         let _ = sched.wake_task_locked(parent_id);
-        let _ = crate::process::signal::send_signal(parent_id, crate::process::signal::Signal::SIGCHLD);
+        Some(parent_id)
     } else {
         sched.pid_to_task.retain(|_, tid| *tid != task_id);
+        None
     }
 }
 
