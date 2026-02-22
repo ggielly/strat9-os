@@ -104,25 +104,23 @@ pub fn cmd_test_pid(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_pid";
     shell_println!("Launching {} ...", path);
 
-    // Use compatibility API because boot modules are still registered
-    // in the legacy static-file table.
-    let open_id = match vfs::open_path(path) {
-        Ok(id) => id,
+    let fd = match vfs::open(path, vfs::OpenFlags::READ) {
+        Ok(fd) => fd,
         Err(e) => {
             shell_println!("open failed: {:?}", e);
             return Err(ShellError::ExecutionFailed);
         }
     };
 
-    let data = match vfs::read_open_file_all(open_id) {
+    let data = match vfs::read_all(fd) {
         Ok(d) => d,
         Err(e) => {
-            let _ = vfs::close_open_file(open_id);
+            let _ = vfs::close(fd);
             shell_println!("read failed: {:?}", e);
             return Err(ShellError::ExecutionFailed);
         }
     };
-    let _ = vfs::close_open_file(open_id);
+    let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
     shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");

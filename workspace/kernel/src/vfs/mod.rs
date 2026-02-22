@@ -39,7 +39,9 @@ pub use file::OpenFile;
 pub use mount::{list_mounts, mount, resolve, unmount, Namespace};
 pub use procfs::ProcScheme;
 pub use scheme::{DynScheme, FileFlags, IpcScheme, KernelScheme, OpenFlags, Scheme};
-pub use scheme_router::{init_builtin_schemes, list_schemes, mount_scheme, register_scheme};
+pub use scheme_router::{
+    init_builtin_schemes, list_schemes, mount_scheme, register_initfs_file, register_scheme,
+};
 
 use crate::memory::{UserSliceRead, UserSliceWrite};
 
@@ -157,6 +159,20 @@ pub fn fsync(fd: u32) -> Result<(), SyscallError> {
     let fd_table = unsafe { &*task.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.sync()
+}
+
+/// Read all remaining bytes from a file descriptor.
+pub fn read_all(fd: u32) -> Result<alloc::vec::Vec<u8>, SyscallError> {
+    let mut out = alloc::vec::Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = read(fd, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    Ok(out)
 }
 
 // ============================================================================
@@ -298,7 +314,7 @@ pub fn init() {
     }
 
     // Create and mount kernel scheme for /sys
-    let mut kernel_scheme = KernelScheme::new();
+    let kernel_scheme = KernelScheme::new();
 
     // Register some basic kernel files
     static VERSION: &[u8] = b"Strat9-OS v0.1.0 (Bedrock)\n";
@@ -331,196 +347,4 @@ pub fn init() {
     }
 
     log::info!("[VFS] VFS ready");
-}
-
-// ============================================================================
-// Legacy compatibility (temporary)
-// ============================================================================
-
-/// Open a path using the old VFS API (for backwards compatibility).
-///
-/// DEPRECATED: Use vfs::open() instead.
-pub fn open_path(path: &str) -> Result<u64, SyscallError> {
-    // Try new VFS first
-    if let Ok(fd) = open(path, OpenFlags::READ) {
-        return Ok(fd as u64);
-    }
-
-    // Fallback to old static file table
-    old_vfs::open_path(path)
-}
-
-/// Read from an old-style open file ID.
-///
-/// DEPRECATED: Use vfs::read() instead.
-pub fn read_open_file(open_id: u64, dest: &mut [u8]) -> Result<usize, SyscallError> {
-    // Try as FD first
-    if open_id <= u32::MAX as u64 {
-        if let Ok(bytes) = read(open_id as u32, dest) {
-            return Ok(bytes);
-        }
-    }
-
-    // Fallback to old VFS
-    old_vfs::read_open_file(open_id, dest)
-}
-
-/// Read entire file (old API).
-///
-/// DEPRECATED: Use vfs::open() + vfs::read() in a loop.
-pub fn read_open_file_all(open_id: u64) -> Result<alloc::vec::Vec<u8>, SyscallError> {
-    old_vfs::read_open_file_all(open_id)
-}
-
-/// Close old-style open file.
-///
-/// DEPRECATED: Use vfs::close() instead.
-pub fn close_open_file(open_id: u64) -> Result<(), SyscallError> {
-    // Try as FD first
-    if open_id <= u32::MAX as u64 {
-        if close(open_id as u32).is_ok() {
-            return Ok(());
-        }
-    }
-
-    // Fallback to old VFS
-    old_vfs::close_open_file(open_id)
-}
-
-/// Register a static file (old API).
-///
-/// DEPRECATED: Use KernelScheme::register() and mount it.
-pub fn register_static_file(path: &str, base: *const u8, len: usize) -> Result<u64, SyscallError> {
-    old_vfs::register_static_file(path, base, len)
-}
-
-// ============================================================================
-// Old VFS (to be removed)
-// ============================================================================
-
-mod old_vfs {
-    use super::*;
-    use crate::sync::SpinLock;
-    use alloc::{collections::BTreeMap, string::ToString, vec::Vec};
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    #[derive(Clone, Copy)]
-    struct SafePtr(*const u8);
-    unsafe impl Send for SafePtr {}
-    unsafe impl Sync for SafePtr {}
-
-    #[derive(Clone)]
-    struct KernelFile {
-        id: u64,
-        path: String,
-        base: SafePtr,
-        len: usize,
-    }
-
-    struct OpenFile {
-        id: u64,
-        base: SafePtr,
-        len: usize,
-        offset: usize,
-    }
-
-    struct VfsState {
-        files: BTreeMap<String, KernelFile>,
-        open_files: BTreeMap<u64, OpenFile>,
-    }
-
-    impl VfsState {
-        const fn new() -> Self {
-            VfsState {
-                files: BTreeMap::new(),
-                open_files: BTreeMap::new(),
-            }
-        }
-    }
-
-    static VFS: SpinLock<VfsState> = SpinLock::new(VfsState::new());
-    static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
-    static NEXT_OPEN_ID: AtomicU64 = AtomicU64::new(1000); // Start at 1000 to avoid FD collision
-
-    pub fn register_static_file(
-        path: &str,
-        base: *const u8,
-        len: usize,
-    ) -> Result<u64, SyscallError> {
-        if path.is_empty() {
-            return Err(SyscallError::InvalidArgument);
-        }
-        let id = NEXT_FILE_ID.fetch_add(1, Ordering::SeqCst);
-        let mut vfs = VFS.lock();
-        let file = KernelFile {
-            id,
-            path: path.to_string(),
-            base: SafePtr(base),
-            len,
-        };
-        vfs.files.insert(path.to_string(), file);
-        Ok(id)
-    }
-
-    pub fn open_path(path: &str) -> Result<u64, SyscallError> {
-        let mut vfs = VFS.lock();
-        let file = vfs.files.get(path).ok_or(SyscallError::BadHandle)?.clone();
-        let open_id = NEXT_OPEN_ID.fetch_add(1, Ordering::SeqCst);
-        vfs.open_files.insert(
-            open_id,
-            OpenFile {
-                id: open_id,
-                base: file.base,
-                len: file.len,
-                offset: 0,
-            },
-        );
-        Ok(open_id)
-    }
-
-    pub fn read_open_file(open_id: u64, dest: &mut [u8]) -> Result<usize, SyscallError> {
-        let mut vfs = VFS.lock();
-        let file = vfs
-            .open_files
-            .get_mut(&open_id)
-            .ok_or(SyscallError::BadHandle)?;
-        if file.offset >= file.len || dest.is_empty() {
-            return Ok(0);
-        }
-        let remaining = file.len - file.offset;
-        let to_copy = core::cmp::min(remaining, dest.len());
-        unsafe {
-            let src = (file.base.0).add(file.offset);
-            core::ptr::copy_nonoverlapping(src, dest.as_mut_ptr(), to_copy);
-        }
-        file.offset += to_copy;
-        Ok(to_copy)
-    }
-
-    pub fn read_open_file_all(open_id: u64) -> Result<Vec<u8>, SyscallError> {
-        let mut vfs = VFS.lock();
-        let file = vfs
-            .open_files
-            .get_mut(&open_id)
-            .ok_or(SyscallError::BadHandle)?;
-        if file.offset >= file.len {
-            return Ok(Vec::new());
-        }
-        let remaining = file.len - file.offset;
-        let mut buf = alloc::vec![0u8; remaining];
-        unsafe {
-            let src = (file.base.0).add(file.offset);
-            core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), remaining);
-        }
-        file.offset = file.len;
-        Ok(buf)
-    }
-
-    pub fn close_open_file(open_id: u64) -> Result<(), SyscallError> {
-        let mut vfs = VFS.lock();
-        vfs.open_files
-            .remove(&open_id)
-            .ok_or(SyscallError::BadHandle)?;
-        Ok(())
-    }
 }

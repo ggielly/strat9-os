@@ -5,9 +5,10 @@
 
 use crate::{
     ipc::{message::IpcMessage, port::PortId},
+    sync::SpinLock,
     syscall::error::SyscallError,
 };
-use alloc::{string::String, sync::Arc};
+use alloc::{collections::BTreeMap, string::String, sync::Arc};
 
 /// Result of an open operation.
 #[derive(Debug, Clone)]
@@ -402,7 +403,7 @@ impl IpcScheme {
 
 /// Kernel-backed scheme: serves files from kernel memory (read-only).
 pub struct KernelScheme {
-    files: alloc::collections::BTreeMap<String, KernelFile>,
+    files: SpinLock<BTreeMap<String, KernelFile>>,
 }
 
 #[derive(Clone)]
@@ -419,15 +420,16 @@ unsafe impl Sync for KernelFile {}
 impl KernelScheme {
     pub fn new() -> Self {
         KernelScheme {
-            files: alloc::collections::BTreeMap::new(),
+            files: SpinLock::new(BTreeMap::new()),
         }
     }
 
     /// Register a static kernel file.
-    pub fn register(&mut self, path: &str, base: *const u8, len: usize) {
+    pub fn register(&self, path: &str, base: *const u8, len: usize) {
         static NEXT_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
         let id = NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         self.files
+            .lock()
             .insert(String::from(path), KernelFile { id, base, len });
     }
 }
@@ -442,7 +444,8 @@ impl Scheme for KernelScheme {
             });
         }
 
-        let file = self.files.get(path).ok_or(SyscallError::BadHandle)?;
+        let files = self.files.lock();
+        let file = files.get(path).ok_or(SyscallError::BadHandle)?;
         Ok(OpenResult {
             file_id: file.id,
             size: Some(file.len as u64),
@@ -454,7 +457,8 @@ impl Scheme for KernelScheme {
         if file_id == 0 {
             // Handle directory listing for root
             let mut list = String::new();
-            for name in self.files.keys() {
+            let files = self.files.lock();
+            for name in files.keys() {
                 list.push_str(name);
                 list.push('\n');
             }
@@ -470,8 +474,8 @@ impl Scheme for KernelScheme {
             return Ok(to_copy);
         }
 
-        let file = self
-            .files
+        let files = self.files.lock();
+        let file = files
             .values()
             .find(|f| f.id == file_id)
             .ok_or(SyscallError::BadHandle)?;
@@ -501,8 +505,8 @@ impl Scheme for KernelScheme {
     }
 
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
-        let file = self
-            .files
+        let files = self.files.lock();
+        let file = files
             .values()
             .find(|f| f.id == file_id)
             .ok_or(SyscallError::BadHandle)?;
