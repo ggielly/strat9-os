@@ -136,41 +136,35 @@ unsafe extern "C" fn syscall_entry() {
         "pop rcx",
         "pop rax",                 // Restored return value
 
-        // Skip the IRET frame: RIP, CS, RFLAGS, RSP, SS
-        // We use SYSRETQ instead which is faster
+        // Peek at user RIP without consuming it from the IRET frame.
+        // RSP stays pointing at [RIP | CS | RFLAGS | RSP_user | SS], so:
+        //   - the IRET path needs zero stack adjustment (just swapgs + iretq), and
+        //   - the SYSRETQ path skips RIP+CS in one add rsp, 16.
+        "mov rcx, [rsp]",
 
-        // Pop user RIP into RCX (SYSRETQ target)
-        "pop rcx",
-
-        // Canonical address check on RCX to prevent privilege escalation.
-        // If a non-canonical address was somehow placed in RCX, SYSRETQ would
-        // execute it in Ring 0 on some CPUs (Intel erratum).
-        // Sign-extend bit 47 to bits 48-63:
+        // Canonical address check: SYSRETQ with a non-canonical RCX executes the
+        // target in Ring 0 on some Intel CPUs (AMD64 erratum).  Fall back to IRETQ
+        // which faults cleanly instead.  Sign-extend bit 47 to bits 48-63:
         "mov r11, rcx",
         "sar r11, 47",
         "cmp r11, 0",
         "je 2f",
         "cmp r11, -1",
         "je 2f",
-        // Non-canonical! Fall through to IRET path for safety
         "jmp 3f",
 
         "2:",
-        // SYSRETQ fast path
-        "add rsp, 8",              // Skip CS
+        // SYSRETQ fast path — skip RIP and CS in one step.
+        "add rsp, 16",             // Skip RIP + CS
         "pop r11",                 // User RFLAGS into R11
         "pop rsp",                 // User RSP
-        "swapgs",                  // Restore user GS base
-        // SYSRETQ: RCX→RIP, R11→RFLAGS, loads user CS/SS from STAR
-        "sysretq",
+        "swapgs",
+        "sysretq",                 // RCX→RIP, R11→RFLAGS, CS/SS from STAR MSR
 
         "3:",
-        // Slow IRET path (non-canonical RIP or fallback).
-        // "pop rcx" above incremented RSP by 8 (consumed RIP from IRET frame).
-        // A single "push rcx" puts it back — RSP returns exactly where it was.
-        // No "sub rsp, 8" here: that would corrupt the frame by shifting it down 8 bytes.
-        "push rcx",                // Restore RIP into IRET frame
-        "swapgs",                  // Restore user GS base
+        // IRET slow path — RSP already points at the complete [RIP, CS, RFLAGS, RSP, SS]
+        // frame; no stack fixup needed.
+        "swapgs",
         "iretq",
 
         user_rsp_off = const crate::arch::x86_64::percpu::USER_RSP_OFFSET,
