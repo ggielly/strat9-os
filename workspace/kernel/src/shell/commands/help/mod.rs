@@ -21,6 +21,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  write <path> <t>  - Write text to a file");
     shell_println!("  scheme ls         - List registered schemes");
     shell_println!("  cpuinfo           - Display CPU information");
+    shell_println!("  test_pid          - Launch /initfs/test_pid userspace binary");
     shell_println!("  reboot            - Reboot the system");
     shell_println!("  scheduler debug   - Scheduler debug on|off|dump");
     shell_println!("  gfx help          - Show gfx command help");

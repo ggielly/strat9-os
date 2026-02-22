@@ -45,8 +45,8 @@ static HHDM: HhdmRequest = HhdmRequest::new();
 #[link_section = ".requests"]
 static STACK_SIZE: StackSizeRequest = StackSizeRequest::new().with_size(0x10000); // 64KB
 
-/// Internal module: request Limine to load /initfs/init (the init ELF binary)
-static INIT_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/init");
+/// Internal module: request Limine to load /initfs/test_pid (first userspace PID test binary)
+static INIT_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_pid");
 /// Internal module: request Limine to load /initfs/fs-ext4 (userspace EXT4 server)
 static EXT4_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/fs-ext4");
 /// Internal module: request Limine to load /initfs/strate-fs-ramfs (userspace RAMFS server)

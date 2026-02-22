@@ -5,7 +5,12 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 
+[[bin]]
+name = "test_pid"
+path = "src/main.rs"
+
 [dependencies]
+strat9-syscall = { path = "../syscall", features = ["userspace"] }
 
 [profile.release]
 panic = "abort"

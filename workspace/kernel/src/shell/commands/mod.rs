@@ -39,6 +39,7 @@ impl CommandRegistry {
         registry.register("rm", vfs::cmd_rm);
         registry.register("write", vfs::cmd_write);
         registry.register("cpuinfo", sys::cmd_cpuinfo);
+        registry.register("test_pid", sys::cmd_test_pid);
         registry.register("reboot", sys::cmd_reboot);
         registry.register("gfx", gfx::cmd_gfx);
         registry.register("gfx-demo", gfx::cmd_gfx_demo);

@@ -177,6 +177,7 @@ pub mod call {
     use super::*;
     const MAP_PRIVATE: usize = 1 << 1;
     const MAP_ANONYMOUS: usize = 1 << 5;
+    pub const WNOHANG: usize = 1;
 
     const FUTEX_WAIT: usize = 0;
     const FUTEX_WAKE: usize = 1;
@@ -460,6 +461,66 @@ pub mod call {
     /// This function will return Ok(0) on success
     pub fn sched_yield() -> error::Result<usize> {
         unsafe { syscall0(number::SYS_PROC_YIELD) }
+    }
+
+    /// Fork the current process.
+    ///
+    /// Returns child PID in parent, and 0 in child.
+    pub fn fork() -> error::Result<usize> {
+        unsafe { syscall0(number::SYS_PROC_FORK) }
+    }
+
+    /// Return current process ID.
+    pub fn getpid() -> error::Result<usize> {
+        unsafe { syscall0(number::SYS_GETPID) }
+    }
+
+    /// Return current thread ID.
+    pub fn gettid() -> error::Result<usize> {
+        unsafe { syscall0(number::SYS_GETTID) }
+    }
+
+    /// Return parent process ID.
+    pub fn getppid() -> error::Result<usize> {
+        unsafe { syscall0(number::SYS_GETPPID) }
+    }
+
+    /// Wait for a child process.
+    ///
+    /// `pid` supports POSIX values (`-1` = any child).
+    /// `status` receives encoded wait status (same layout as Linux waitpid).
+    pub fn waitpid(pid: isize, status: Option<&mut i32>, options: usize) -> error::Result<usize> {
+        let status_ptr = status.map_or(0usize, |s| s as *mut i32 as usize);
+        unsafe { syscall3(number::SYS_PROC_WAITPID, pid as usize, status_ptr, options) }
+    }
+
+    /// Set process group ID.
+    ///
+    /// `pid == 0` targets the current process, `pgid == 0` uses target pid.
+    pub fn setpgid(pid: isize, pgid: isize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_SETPGID, pid as usize, pgid as usize) }
+    }
+
+    /// Return process group ID.
+    ///
+    /// `pid == 0` queries current process group.
+    pub fn getpgid(pid: isize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_GETPGID, pid as usize) }
+    }
+
+    /// Create a new session and return its session ID.
+    pub fn setsid() -> error::Result<usize> {
+        unsafe { syscall0(number::SYS_SETSID) }
+    }
+
+    /// Return session ID for `pid` (`0` = current process).
+    pub fn getsid(pid: isize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_GETSID, pid as usize) }
+    }
+
+    /// Return current process group ID.
+    pub fn getpgrp() -> error::Result<usize> {
+        unsafe { syscall0(number::SYS_GETPGRP) }
     }
 
     /// Send a file descriptor `fd`, handled by the scheme providing `receiver_socket`. `flags` is
