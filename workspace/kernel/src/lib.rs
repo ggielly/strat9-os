@@ -36,6 +36,7 @@ pub mod shell;
 pub mod silo;
 pub mod sync;
 pub mod syscall;
+pub mod trace;
 pub mod vfs;
 
 // Limine entry point module

@@ -619,6 +619,23 @@ impl AddressSpace {
         };
         regions.insert(start, region);
 
+        let end = start + (page_count as u64) * page_bytes;
+        crate::trace_mem!(
+            crate::trace::category::MEM_MAP,
+            crate::trace::TraceKind::MemMap,
+            page_size.bytes(),
+            crate::trace::TraceTaskCtx {
+                task_id: 0,
+                pid: 0,
+                tid: 0,
+                cr3: self.cr3_phys.as_u64(),
+            },
+            0,
+            start,
+            end,
+            page_count as u64
+        );
+
         Ok(())
     }
 
@@ -673,6 +690,23 @@ impl AddressSpace {
             start + (page_count as u64) * page_bytes,
             page_count,
             page_size
+        );
+
+        let end = start + (page_count as u64) * page_bytes;
+        crate::trace_mem!(
+            crate::trace::category::MEM_UNMAP,
+            crate::trace::TraceKind::MemUnmap,
+            page_size.bytes(),
+            crate::trace::TraceTaskCtx {
+                task_id: 0,
+                pid: 0,
+                tid: 0,
+                cr3: self.cr3_phys.as_u64(),
+            },
+            0,
+            start,
+            end,
+            page_count as u64
         );
 
         Ok(())

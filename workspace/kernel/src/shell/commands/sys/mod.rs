@@ -99,6 +99,116 @@ pub fn cmd_scheduler(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// trace mem on|off|dump [n]|clear|serial on|off|mask
+pub fn cmd_trace(args: &[String]) -> Result<(), ShellError> {
+    if args.is_empty() || args[0].as_str() != "mem" {
+        shell_println!("Usage: trace mem on|off|dump [n]|clear|serial on|off|mask");
+        return Err(ShellError::InvalidArguments);
+    }
+
+    if args.len() < 2 {
+        shell_println!("Usage: trace mem on|off|dump [n]|clear|serial on|off|mask");
+        return Err(ShellError::InvalidArguments);
+    }
+
+    match args[1].as_str() {
+        "on" => {
+            crate::trace::enable(crate::trace::category::MEM_ALL);
+            shell_println!(
+                "trace mem: on (mask={:#x}, mode={})",
+                crate::trace::mask(),
+                crate::trace::mask_human(crate::trace::mask())
+            );
+            Ok(())
+        }
+        "off" => {
+            crate::trace::disable(crate::trace::category::MEM_ALL);
+            shell_println!(
+                "trace mem: off (mask={:#x}, mode={})",
+                crate::trace::mask(),
+                crate::trace::mask_human(crate::trace::mask())
+            );
+            Ok(())
+        }
+        "mask" => {
+            let stats = crate::trace::stats();
+            shell_println!(
+                "trace mem: mask={:#x} mode={} serial={} stored={} dropped={}",
+                crate::trace::mask(),
+                crate::trace::mask_human(crate::trace::mask()),
+                if crate::trace::serial_echo() { "on" } else { "off" },
+                stats.stored,
+                stats.dropped
+            );
+            Ok(())
+        }
+        "clear" => {
+            crate::trace::clear_all();
+            shell_println!("trace mem: buffers cleared");
+            Ok(())
+        }
+        "serial" => {
+            if args.len() != 3 {
+                shell_println!("Usage: trace mem serial on|off");
+                return Err(ShellError::InvalidArguments);
+            }
+            match args[2].as_str() {
+                "on" => {
+                    crate::trace::set_serial_echo(true);
+                    shell_println!("trace mem serial: on");
+                    Ok(())
+                }
+                "off" => {
+                    crate::trace::set_serial_echo(false);
+                    shell_println!("trace mem serial: off");
+                    Ok(())
+                }
+                _ => {
+                    shell_println!("Usage: trace mem serial on|off");
+                    Err(ShellError::InvalidArguments)
+                }
+            }
+        }
+        "dump" => {
+            let limit = if args.len() >= 3 {
+                args[2].parse::<usize>().unwrap_or(64)
+            } else {
+                64
+            };
+            let events = crate::trace::snapshot_all(limit);
+            let stats = crate::trace::stats();
+            shell_println!(
+                "trace mem dump: events={} stored={} dropped={}",
+                events.len(),
+                stats.stored,
+                stats.dropped
+            );
+            for e in events.iter() {
+                shell_println!(
+                    "  seq={} t={} cpu={} kind={} pid={} tid={} cr3={:#x} rip={:#x} vaddr={:#x} fl={:#x} a0={:#x} a1={:#x}",
+                    e.seq,
+                    e.ticks,
+                    e.cpu,
+                    crate::trace::kind_name(e.kind),
+                    e.pid,
+                    e.tid,
+                    e.cr3,
+                    e.rip,
+                    e.vaddr,
+                    e.flags,
+                    e.arg0,
+                    e.arg1
+                );
+            }
+            Ok(())
+        }
+        _ => {
+            shell_println!("Usage: trace mem on|off|dump [n]|clear|serial on|off|mask");
+            Err(ShellError::InvalidArguments)
+        }
+    }
+}
+
 /// Launch the userspace PID test binary from initfs.
 pub fn cmd_test_pid(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_pid";

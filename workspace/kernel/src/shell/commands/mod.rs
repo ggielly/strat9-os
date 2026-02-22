@@ -46,6 +46,7 @@ impl CommandRegistry {
         registry.register("top", top::cmd_top);
         registry.register("timer", timer::cmd_timer);
         registry.register("scheduler", sys::cmd_scheduler);
+        registry.register("trace", sys::cmd_trace);
 
         registry
     }
