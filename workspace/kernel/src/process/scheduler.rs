@@ -1482,6 +1482,9 @@ pub fn kill_task(id: TaskId) -> bool {
     {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
+            // Keep parent/waitpid semantics even for forced termination paths.
+            // A killed child must still become a zombie until reaped by waitpid().
+            const FORCED_KILL_EXIT_CODE: i32 = 1;
             let my_cpu = current_cpu_index();
 
             // Check if the task is the current task on any CPU.
@@ -1494,7 +1497,7 @@ pub fn kill_task(id: TaskId) -> bool {
                         cleanup_task_resources(current);
                         sched.all_tasks.remove(&id);
                         sched.task_cpu.remove(&id);
-                        sched.pid_to_task.retain(|_, tid| *tid != id);
+                        finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
                         killed = true;
                         if ci == my_cpu {
                             switch_target = sched.yield_cpu(ci);
@@ -1517,7 +1520,7 @@ pub fn kill_task(id: TaskId) -> bool {
                             }
                             cleanup_task_resources(&task);
                             sched.task_cpu.remove(&id);
-                            sched.pid_to_task.retain(|_, tid| *tid != id);
+                            finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
                         }
                         killed = true;
                         break;
@@ -1535,7 +1538,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     cleanup_task_resources(&task);
                     sched.all_tasks.remove(&id);
                     sched.task_cpu.remove(&id);
-                    sched.pid_to_task.retain(|_, tid| *tid != id);
+                    finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
                     killed = true;
                 }
             }
@@ -1557,6 +1560,17 @@ pub fn kill_task(id: TaskId) -> bool {
 
     restore_flags(saved_flags);
     killed
+}
+
+fn finalize_forced_death(sched: &mut Scheduler, task_id: TaskId, exit_code: i32) {
+    let parent = sched.parent_of.get(&task_id).copied();
+    if let Some(parent_id) = parent {
+        sched.zombies.insert(task_id, exit_code);
+        let _ = sched.wake_task_locked(parent_id);
+        let _ = crate::process::signal::send_signal(parent_id, crate::process::signal::Signal::SIGCHLD);
+    } else {
+        sched.pid_to_task.retain(|_, tid| *tid != task_id);
+    }
 }
 
 fn cleanup_task_resources(task: &Arc<Task>) {

@@ -405,7 +405,7 @@ bash tools/scripts/create-limine-image.sh
 
 [tasks.limine-image-release]
 description = "Create bootable ISO/IMG with Limine + kernel (release profile)"
-dependencies = ["setup-limine", "kernel-release", "strate-ext4-release", "strate-fs-ramfs-release"]
+dependencies = ["setup-limine", "kernel-release", "strate-ext4-release", "strate-fs-ramfs-release", "strate-silo-test-release"]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release" }
 script_runner = "@shell"
 script = ['''

@@ -96,7 +96,9 @@ if [ -f "$INIT_TEST_ELF" ]; then
     cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
     echo "  [OK] Copied init-test binary: /initfs/test_pid"
 else
-    echo "  [WARN] init-test binary not found at $INIT_TEST_ELF"
+    echo "  ERROR: init-test binary not found at $INIT_TEST_ELF"
+    echo "  Build it first (e.g. cargo make strate-silo-test or strate-silo-test-release)"
+    exit 1
 fi
 
 # Create ISO using xorriso
