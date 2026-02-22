@@ -165,9 +165,11 @@ unsafe extern "C" fn syscall_entry() {
         "sysretq",
 
         "3:",
-        // Slow IRET path (non-canonical or fallback)
-        "sub rsp, 8",              // Undo the pop rcx: push RIP back
-        "push rcx",
+        // Slow IRET path (non-canonical RIP or fallback).
+        // "pop rcx" above incremented RSP by 8 (consumed RIP from IRET frame).
+        // A single "push rcx" puts it back — RSP returns exactly where it was.
+        // No "sub rsp, 8" here: that would corrupt the frame by shifting it down 8 bytes.
+        "push rcx",                // Restore RIP into IRET frame
         "swapgs",                  // Restore user GS base
         "iretq",
 

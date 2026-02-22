@@ -953,41 +953,28 @@ fn load_segment(
 // ---------------------------------------------------------------------------
 
 /// Parameters for the Ring 3 trampoline, stored in a static so the
-/// extern "C" trampoline function can access them.
-struct TrampolineParams {
-    entry_point: u64,
-    stack_top: u64,
-    arg0: u64,
-    address_space: Option<Arc<AddressSpace>>,
-}
-
-static mut TRAMPOLINE_PARAMS: TrampolineParams = TrampolineParams {
-    entry_point: 0,
-    stack_top: 0,
-    arg0: 0,
-    address_space: None,
-};
-
 /// Trampoline that switches to user address space and does IRETQ to Ring 3.
+///
+/// Parameters (entry point, stack top, arg0, address space) are read from the
+/// *current task* so that each ELF task carries its own copy.  This makes the
+/// trampoline safe under SMP: two tasks can run their trampolines concurrently
+/// on different CPUs without any shared mutable state.
 extern "C" fn elf_ring3_trampoline() -> ! {
     use crate::arch::x86_64::gdt;
+    use core::sync::atomic::Ordering;
 
-    let (user_rip, user_rsp, user_arg0);
+    let task = crate::process::scheduler::current_task_clone()
+        .expect("elf_ring3_trampoline: no current task");
 
-    // SAFETY: Single-threaded setup. The params are written before the task
-    // is scheduled. We read and clear them atomically at first execution.
+    let user_rip = task.trampoline_entry.load(Ordering::Acquire);
+    let user_rsp = task.trampoline_stack_top.load(Ordering::Acquire);
+    let user_arg0 = task.trampoline_arg0.load(Ordering::Acquire);
+
+    // Switch to the user address space stored in the task.
+    // SAFETY: The address space was set up during task creation and is valid.
     unsafe {
-        let params = &raw mut TRAMPOLINE_PARAMS;
-        user_rip = (*params).entry_point;
-        user_rsp = (*params).stack_top;
-        user_arg0 = (*params).arg0;
-
-        if let Some(ref as_ref) = (*params).address_space {
-            as_ref.switch_to();
-        }
-        // Clear to avoid dangling Arc reference
-        (*params).address_space = None;
-        (*params).arg0 = 0;
+        let as_ref = &*task.address_space.get();
+        as_ref.switch_to();
     }
 
     let user_cs = gdt::user_code_selector().0 as u64;
@@ -1123,17 +1110,8 @@ pub fn load_and_run_elf_with_caps(
         USER_STACK_PAGES,
     );
 
-    // Step 5: Set up trampoline params and create kernel task
-    // SAFETY: We are in single-threaded init context. The task is not
-    // scheduled until after we've finished writing the params.
-    unsafe {
-        let params = &raw mut TRAMPOLINE_PARAMS;
-        (*params).entry_point = runtime_entry;
-        (*params).stack_top = USER_STACK_TOP;
-        (*params).arg0 = 0;
-        (*params).address_space = Some(user_as.clone());
-    }
-
+    // Step 5: Create kernel task — trampoline params are stored inside the task
+    // itself so that concurrent SMP execution of multiple trampolines is safe.
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
     let context = CpuContext::new(elf_ring3_trampoline as *const () as u64, &kernel_stack);
     let (pid, tid, tgid) = Task::allocate_process_ids();
@@ -1167,6 +1145,9 @@ pub fn load_and_run_elf_with_caps(
         wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
         brk: core::sync::atomic::AtomicU64::new(0),
         mmap_hint: core::sync::atomic::AtomicU64::new(0x0000_0000_6000_0000),
+        trampoline_entry: core::sync::atomic::AtomicU64::new(runtime_entry),
+        trampoline_stack_top: core::sync::atomic::AtomicU64::new(USER_STACK_TOP),
+        trampoline_arg0: core::sync::atomic::AtomicU64::new(0),
         ticks: core::sync::atomic::AtomicU64::new(0),
         sched_policy: crate::process::task::SyncUnsafeCell::new(Task::default_sched_policy(
             TaskPriority::Normal,
@@ -1190,9 +1171,7 @@ pub fn load_and_run_elf_with_caps(
 
     if let Some(h) = bootstrap_handle {
         // Program entry will see this in its first argument register (RDI).
-        unsafe {
-            (*(&raw mut TRAMPOLINE_PARAMS)).arg0 = h;
-        }
+        task.trampoline_arg0.store(h, core::sync::atomic::Ordering::Release);
     }
 
     // Bootstrapping: grant Silo Admin capability to the initial userspace task.

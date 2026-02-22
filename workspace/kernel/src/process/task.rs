@@ -159,6 +159,12 @@ pub struct Task {
     pub brk: AtomicU64,
     /// mmap_hint: next candidate virtual address for anonymous mmap allocations
     pub mmap_hint: AtomicU64,
+    /// User-space entry point for ring3 trampoline (ELF tasks only, 0 otherwise).
+    pub trampoline_entry: AtomicU64,
+    /// User-space stack top for ring3 trampoline (ELF tasks only, 0 otherwise).
+    pub trampoline_stack_top: AtomicU64,
+    /// First argument (RDI) passed to the user process on entry (e.g. bootstrap cap handle).
+    pub trampoline_arg0: AtomicU64,
     /// Total CPU ticks consumed by this task
     pub ticks: AtomicU64,
     /// Scheduling policy (Fair, RealTime, Idle)
@@ -403,6 +409,9 @@ impl Task {
             wake_deadline_ns: AtomicU64::new(0),
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
+            trampoline_entry: AtomicU64::new(0),
+            trampoline_stack_top: AtomicU64::new(0),
+            trampoline_arg0: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
             vruntime: AtomicU64::new(0),
@@ -461,6 +470,9 @@ impl Task {
             wake_deadline_ns: AtomicU64::new(0),
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
+            trampoline_entry: AtomicU64::new(0),
+            trampoline_stack_top: AtomicU64::new(0),
+            trampoline_arg0: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
             vruntime: AtomicU64::new(0),

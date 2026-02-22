@@ -149,6 +149,9 @@ pub fn create_user_test_task() {
         wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
         brk: core::sync::atomic::AtomicU64::new(0),
         mmap_hint: core::sync::atomic::AtomicU64::new(0x0000_0000_6000_0000),
+        trampoline_entry: core::sync::atomic::AtomicU64::new(0),
+        trampoline_stack_top: core::sync::atomic::AtomicU64::new(0),
+        trampoline_arg0: core::sync::atomic::AtomicU64::new(0),
         ticks: core::sync::atomic::AtomicU64::new(0),
         sched_policy: crate::process::task::SyncUnsafeCell::new(Task::default_sched_policy(
             TaskPriority::Normal,
