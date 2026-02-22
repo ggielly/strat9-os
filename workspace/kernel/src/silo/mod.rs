@@ -1360,6 +1360,12 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
             shadow_stack,
             sgx
         );
+        if user && extra < 0x1000 {
+            crate::serial_println!(
+                "[handle_user_fault] hint: low user address fault ({:#x}) -> probable NULL/near-NULL dereference",
+                extra
+            );
+        }
     } else {
         crate::serial_println!(
             "[handle_user_fault] fault detail rip={:#x} code={:#x}",

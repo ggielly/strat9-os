@@ -144,8 +144,9 @@ impl CpuTraceRing {
 }
 
 static TRACE_SEQ: AtomicU64 = AtomicU64::new(1);
-static TRACE_MASK: AtomicU64 = AtomicU64::new(category::MEM_ALL);
-static TRACE_SERIAL_ECHO: AtomicBool = AtomicBool::new(false);
+// Default: keep early boot noise low but always surface PF/COW instantly.
+static TRACE_MASK: AtomicU64 = AtomicU64::new(category::MEM_PF | category::MEM_COW);
+static TRACE_SERIAL_ECHO: AtomicBool = AtomicBool::new(true);
 static TRACE_DROPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static TRACE_RINGS: [SpinLock<CpuTraceRing>; percpu::MAX_CPUS] =
     [const { SpinLock::new(CpuTraceRing::new()) }; percpu::MAX_CPUS];
