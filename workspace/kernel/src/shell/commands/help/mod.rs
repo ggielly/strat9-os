@@ -4,7 +4,7 @@ use alloc::string::String;
 
 /// Display help information
 pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
-    shell_println!("Strat9-OS shell (Chevron) - available commands:");
+    shell_println!("Strat9-OS shell (Chevron) - available commands :");
     shell_println!("");
     shell_println!("  help              - Display this help message");
     shell_println!("  version           - Display kernel version");
