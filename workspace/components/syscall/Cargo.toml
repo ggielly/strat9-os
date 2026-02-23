@@ -13,3 +13,5 @@ bitflags = "2.4"
 [features]
 default = ["userspace"]
 userspace = []
+# Optionnel : active std et impl std::error::Error pour Error (no_std par défaut).
+std = []

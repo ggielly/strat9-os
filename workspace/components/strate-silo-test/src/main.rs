@@ -178,6 +178,10 @@ fn log_raw_ret(label: &str, ret: usize) {
     if (ret as isize) < 0 {
         log(" signed=");
         log_i64(ret as isize as i64);
+        if let Err(e) = Error::demux(ret) {
+            log(" err=");
+            log(e.name());
+        }
     }
     log_nl();
 }
@@ -518,8 +522,41 @@ pub extern "C" fn _start() -> ! {
     log_u64(cow_multi_child_pid as u64);
     log_nl();
     let mut cow_multi_status: i32 = -1;
-    let waited_multi = call::waitpid(cow_multi_child_pid as isize, Some(&mut cow_multi_status), 0);
-    if log_result("[cow4k-parent] waitpid(cow4k-child, blocking)", waited_multi).is_none() {
+    let mut waited_multi_ok = false;
+    for attempt in 0..2000usize {
+        let waited_multi = call::waitpid(
+            cow_multi_child_pid as isize,
+            Some(&mut cow_multi_status),
+            call::WNOHANG,
+        );
+        match waited_multi {
+            Ok(0) => {
+                if attempt % 100 == 0 {
+                    log("[init-test:cow4k:parent] waitpid WNOHANG: child still running, attempt=");
+                    log_u64(attempt as u64);
+                    log_nl();
+                }
+                let _ = call::sched_yield();
+            }
+            Ok(pid_done) => {
+                log_result("[cow4k-parent] waitpid(cow4k-child, WNOHANG)", Ok(pid_done));
+                waited_multi_ok = true;
+                break;
+            }
+            Err(Error::Interrupted) => {
+                log("[init-test:cow4k:parent] waitpid interrupted (EINTR), retry attempt=");
+                log_u64((attempt + 1) as u64);
+                log_nl();
+                let _ = call::sched_yield();
+            }
+            Err(e) => {
+                log_result("[cow4k-parent] waitpid(cow4k-child, WNOHANG)", Err(e));
+                break;
+            }
+        }
+    }
+    if !waited_multi_ok {
+        log("[init-test:cow4k:parent] ERROR: waitpid timeout after retries\n");
         exit_process(17);
     }
     decode_wait_status(cow_multi_status);
