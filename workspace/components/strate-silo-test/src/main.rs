@@ -97,9 +97,9 @@ fn log_result(label: &str, res: core::result::Result<usize, Error>) -> Option<us
             Some(v)
         }
         Err(e) => {
-            log("ERR errno=");
-            log_u64(e.to_errno() as u64);
-            log(" (enum=");
+            log("ERR ");
+            log(e.name());
+            log(" (errno=");
             log_u64(e.to_errno() as u64);
             log(")");
             log_nl();
@@ -184,6 +184,26 @@ fn log_raw_ret(label: &str, ret: usize) {
         }
     }
     log_nl();
+}
+
+/// Appelle `waitpid` en boucle tant que le noyau renvoie EINTR.
+fn waitpid_retry(
+    pid: isize,
+    status: &mut i32,
+    flags: usize,
+    label: &str,
+) -> core::result::Result<usize, Error> {
+    loop {
+        match call::waitpid(pid, Some(status), flags) {
+            Err(Error::Interrupted) => {
+                log("[init-test] ");
+                log(label);
+                log(" interrupted (EINTR), retrying\n");
+                let _ = call::sched_yield();
+            }
+            other => return other,
+        }
+    }
 }
 
 fn cow_addr() -> u64 {
@@ -342,7 +362,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
     }
-    let waited = call::waitpid(child_pid as isize, Some(&mut child1_status), 0);
+    let waited = waitpid_retry(child_pid as isize, &mut child1_status, 0, "waitpid(child1)");
     if let Some(done) = log_result("waitpid(child1, blocking)", waited) {
         log("[init-test:parent] blocking wait returned pid=");
         log_u64(done as u64);
@@ -377,7 +397,7 @@ pub extern "C" fn _start() -> ! {
     log_u64(child2_pid as u64);
     log_nl();
     let mut child2_status: i32 = 0;
-    let _ = log_result("waitpid(-1, blocking)", call::waitpid(-1, Some(&mut child2_status), 0));
+    let _ = log_result("waitpid(-1, blocking)", waitpid_retry(-1, &mut child2_status, 0, "waitpid(-1)"));
     decode_wait_status(child2_status);
 
     log_section("STEP 8/11: targeted CoW test (single 64-bit sentinel)");
@@ -442,7 +462,7 @@ pub extern "C" fn _start() -> ! {
     log_nl();
 
     let mut cow_status: i32 = -1;
-    let waited_cow = call::waitpid(cow_child_pid as isize, Some(&mut cow_status), 0);
+    let waited_cow = waitpid_retry(cow_child_pid as isize, &mut cow_status, 0, "waitpid(cow-child)");
     let waited_cow_pid = if let Some(done) = log_result("[cow-parent] waitpid(cow-child, blocking)", waited_cow) {
         done
     } else {
