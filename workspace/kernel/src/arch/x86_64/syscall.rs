@@ -136,36 +136,34 @@ unsafe extern "C" fn syscall_entry() {
         "pop rcx",
         "pop rax",                 // Restored return value
 
-        // Peek at user RIP without consuming it from the IRET frame.
-        // RSP stays pointing at [RIP | CS | RFLAGS | RSP_user | SS], so:
-        //   - the IRET path needs zero stack adjustment (just swapgs + iretq), and
-        //   - the SYSRETQ path skips RIP+CS in one add rsp, 16.
+        // Now RSP points to the RIP of the IRET frame.
+        // Peek at user RIP without consuming it yet.
         "mov rcx, [rsp]",
 
-        // Canonical address check: SYSRETQ with a non-canonical RCX executes the
-        // target in Ring 0 on some Intel CPUs (AMD64 erratum).  Fall back to IRETQ
-        // which faults cleanly instead.  Sign-extend bit 47 to bits 48-63:
+        // Canonical address check on RCX to prevent privilege escalation.
+        // If a non-canonical address was somehow placed in RCX, SYSRETQ would
+        // execute it in Ring 0 on some CPUs (Intel erratum).
+        // Sign-extend bit 47 to bits 48-63:
         "mov r11, rcx",
         "sar r11, 47",
         "cmp r11, 0",
         "je 2f",
         "cmp r11, -1",
         "je 2f",
-        "jmp 3f",
+
+        // Slow IRET path (non-canonical or fallback)
+        // The stack is already perfectly set up as an IRET frame [RIP, CS, RFLAGS, RSP, SS].
+        "swapgs",                  // Restore user GS base
+        "iretq",
 
         "2:",
         // SYSRETQ fast path — skip RIP and CS in one step.
         "add rsp, 16",             // Skip RIP + CS
         "pop r11",                 // User RFLAGS into R11
         "pop rsp",                 // User RSP
-        "swapgs",
-        "sysretq",                 // RCX→RIP, R11→RFLAGS, CS/SS from STAR MSR
-
-        "3:",
-        // IRET slow path — RSP already points at the complete [RIP, CS, RFLAGS, RSP, SS]
-        // frame; no stack fixup needed.
-        "swapgs",
-        "iretq",
+        "swapgs",                  // Restore user GS base
+        // SYSRETQ: RCX→RIP, R11→RFLAGS, loads user CS/SS from STAR
+        "sysretq",
 
         user_rsp_off = const crate::arch::x86_64::percpu::USER_RSP_OFFSET,
         kernel_rsp_off = const crate::arch::x86_64::percpu::KERNEL_RSP_OFFSET,

@@ -318,7 +318,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             mapper
                 .update_flags(page, new_flags)
                 .map_err(|_| "Failed to update flags")?
-                .ignore();
+                .flush();
         }
         // Only the current CPU can hold this CR3 in the current design.
         local_invlpg(virt_addr);
@@ -367,7 +367,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
         return Err("Failed to map new COW frame");
     }
     match remap_res {
-        Ok(flush) => flush.ignore(),
+        Ok(flush) => flush.flush(),
         Err(_) => unreachable!("checked remap result above"),
     }
 
