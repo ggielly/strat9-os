@@ -267,7 +267,7 @@ pub fn record(
 
     if serial_echo() {
         crate::serial_println!(
-            "[trace] seq={} cpu={} kind={} pid={} tid={} rip={:#x} vaddr={:#x} a0={:#x} a1={:#x} fl={:#x}",
+            "\x1b[90m[trace] seq={}\x1b[0m cpu={} kind={} \x1b[36mpid={}\x1b[0m tid={} \x1b[35mrip={:#x}\x1b[0m \x1b[35mvaddr={:#x}\x1b[0m a0={:#x} a1={:#x} fl={:#x}",
             event.seq,
             event.cpu,
             kind_name(event.kind),

@@ -205,7 +205,7 @@ extern "x86-interrupt" fn page_fault_handler(
                             0
                         );
                         crate::serial_println!(
-                            "[pagefault] COW resolve failed: task={} pid={} tid={} addr={:#x} rip={:#x} err={}",
+                            "\x1b[31m[pagefault] COW resolve failed\x1b[0m: task={} \x1b[36mpid={}\x1b[0m tid={} \x1b[35maddr={:#x}\x1b[0m \x1b[35mrip={:#x}\x1b[0m err={}",
                             task.id.as_u64(),
                             task.pid,
                             task.tid,
