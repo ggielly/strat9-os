@@ -1,11 +1,11 @@
-//! Gestion des erreurs des appels système (no_std).
+//! Syscall error handling (no_std).
 //!
-//! Les valeurs de retour du noyau suivent la convention Linux : en cas d'erreur,
-//! RAX contient `-errno` (entier signé en complément à deux).
+//! Kernel return values follow the Linux convention: on error, RAX contains
+//! `-errno` (signed integer, two's complement).
 
 use core::fmt;
 
-// Constantes errno (alignées sur le noyau / POSIX)
+// Errno constants (aligned with kernel / POSIX)
 pub const EPERM: usize = 1;
 pub const ENOENT: usize = 2;
 pub const EINTR: usize = 4;
@@ -28,7 +28,7 @@ pub const ENOTSUP: usize = 52;
 pub const ENOBUFS: usize = 105;
 pub const ETIMEDOUT: usize = 110;
 
-/// Plage des errno négatifs retournés par le noyau (Linux-style).
+/// Range of negative errno values returned by the kernel (Linux-style).
 const ERRNO_MAX: isize = 4095;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +57,7 @@ pub enum Error {
 }
 
 impl Error {
-    /// Construit une erreur à partir d'un code errno positif (ex. 2 pour ENOENT).
+    /// Build an error from a positive errno code (e.g. 2 for ENOENT).
     pub fn from_errno(errno: usize) -> Self {
         match errno {
             EPERM => Error::PermissionDenied,
@@ -85,7 +85,7 @@ impl Error {
         }
     }
 
-    /// Retourne le code errno positif correspondant.
+    /// Return the corresponding positive errno code.
     pub fn to_errno(&self) -> usize {
         match self {
             Error::PermissionDenied => EPERM,
@@ -112,8 +112,8 @@ impl Error {
         }
     }
 
-    /// Démultiplexe la valeur de retour brute d'un syscall (RAX).
-    /// Le noyau retourne `-errno` en cas d'erreur (convention Linux).
+    /// Demultiplex the raw syscall return value (RAX).
+    /// The kernel returns `-errno` on error (Linux convention).
     #[inline]
     pub fn demux(ret: usize) -> core::result::Result<usize, Error> {
         let ret_s = ret as isize;
@@ -124,13 +124,13 @@ impl Error {
         }
     }
 
-    /// `true` si l'appel peut être réessayé (EINTR, EAGAIN).
+    /// `true` if the syscall can be retried (EINTR, EAGAIN).
     #[inline]
     pub fn is_retryable(&self) -> bool {
         matches!(self, Error::Interrupted | Error::Again)
     }
 
-    /// Nom court de l'erreur pour logs (no_std, pas d'allocation).
+    /// Short errno name for logging (no_std, no allocation).
     #[inline]
     pub fn name(&self) -> &'static str {
         match self {
@@ -187,7 +187,6 @@ impl fmt::Display for Error {
     }
 }
 
-/// Implémentation no_std : le trait `Error` est dans `core` depuis Rust 1.75.
 impl core::error::Error for Error {}
 
 #[cfg(feature = "std")]

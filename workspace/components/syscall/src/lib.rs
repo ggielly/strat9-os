@@ -456,6 +456,19 @@ pub mod call {
         unsafe { syscall3(number::SYS_WRITE, fd, buf.as_ptr() as usize, buf.len()) }
     }
 
+    /// Terminate the current process with the given exit `code`.
+    ///
+    /// This function never returns.
+    pub fn exit(code: usize) -> ! {
+        unsafe {
+            syscall1(number::SYS_PROC_EXIT, code).ok();
+        }
+        #[allow(clippy::empty_loop)]
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     /// Yield the process's time slice to the kernel
     ///
     /// This function will return Ok(0) on success
@@ -468,6 +481,25 @@ pub mod call {
     /// Returns child PID in parent, and 0 in child.
     pub fn fork() -> error::Result<usize> {
         unsafe { syscall0(number::SYS_PROC_FORK) }
+    }
+
+    /// Replace the current process image with a new program.
+    ///
+    /// `path`: executable path as a byte slice.
+    /// `argv` and `envp`: pointers to null-terminated C-style arrays.
+    pub unsafe fn execve(
+        path: &[u8],
+        argv: usize,
+        envp: usize,
+    ) -> error::Result<usize> {
+        syscall5(
+            number::SYS_PROC_EXECVE,
+            path.as_ptr() as usize,
+            path.len(),
+            argv,
+            envp,
+            0,
+        )
     }
 
     /// Return current process ID.
@@ -485,13 +517,32 @@ pub mod call {
         unsafe { syscall0(number::SYS_GETPPID) }
     }
 
-    /// Wait for a child process.
+    /// Wait for a child process (raw, single attempt).
     ///
     /// `pid` supports POSIX values (`-1` = any child).
     /// `status` receives encoded wait status (same layout as Linux waitpid).
+    ///
+    /// Prefer [`waitpid_blocking`] for blocking waits — it automatically
+    /// retries on `EINTR`.
     pub fn waitpid(pid: isize, status: Option<&mut i32>, options: usize) -> error::Result<usize> {
         let status_ptr = status.map_or(0usize, |s| s as *mut i32 as usize);
         unsafe { syscall3(number::SYS_PROC_WAITPID, pid as usize, status_ptr, options) }
+    }
+
+    /// Wait for a child process, automatically retrying on `EINTR`.
+    ///
+    /// This is the recommended wrapper for blocking waits. It calls
+    /// [`waitpid`] in a loop and yields the CPU between retries when
+    /// the kernel interrupts the wait with `EINTR`.
+    pub fn waitpid_blocking(pid: isize, status: &mut i32) -> error::Result<usize> {
+        loop {
+            match waitpid(pid, Some(status), 0) {
+                Err(error::Error::Interrupted) => {
+                    let _ = sched_yield();
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Set process group ID.
