@@ -30,6 +30,7 @@ echo ""
     -machine q35 \
     -cpu qemu64 \
     -m 256M \
+    -display gtk,zoom-to-fit=on \
     -serial file:build/serial.txt \
     -no-reboot \
     -no-shutdown \
