@@ -1844,17 +1844,18 @@ pub fn ui_scale_px(base: usize) -> usize {
 
 fn format_mem_usage() -> String {
     let lock = crate::memory::buddy::get_allocator();
-    let (free, total) = {
-        let guard = lock.lock();
-        let Some(alloc) = guard.as_ref() else {
-            return String::from("n/a");
-        };
-        let (total_pages, allocated_pages) = alloc.page_totals();
-        let page_size = 4096usize;
-        let total = total_pages.saturating_mul(page_size);
-        let used = allocated_pages.saturating_mul(page_size);
-        (total.saturating_sub(used), total)
+    let Some(guard) = lock.try_lock() else {
+        // Never block the status-line task on allocator contention.
+        return String::from("n/a");
     };
+    let Some(alloc) = guard.as_ref() else {
+        return String::from("n/a");
+    };
+    let (total_pages, allocated_pages) = alloc.page_totals();
+    let page_size = 4096usize;
+    let total = total_pages.saturating_mul(page_size);
+    let used = allocated_pages.saturating_mul(page_size);
+    let free = total.saturating_sub(used);
     format!("{}/{}", format_size(free), format_size(total))
 }
 

@@ -1600,21 +1600,11 @@ fn cleanup_task_resources(task: &Arc<Task>) {
 
 /// Timer interrupt handler — called from interrupt context.
 ///
-/// Increments the global tick counter. Preemption is handled separately
-/// by `maybe_preempt()` which is called after EOI in the timer handler.
-/// Also checks interval timers for expiration and wake deadlines for sleep.
+/// Increments the global tick counter unconditionally on BSP so wall-clock
+/// time never drifts. All secondary bookkeeping (interval timers, wake
+/// deadlines, per-task accounting) runs under a single `try_lock` with
+/// zero heap allocation to avoid deadlocking against the buddy allocator.
 pub fn timer_tick() {
-    // Early return if scheduler is not initialized yet
-    // This can happen during AP boot before schedule() is called
-    let scheduler_check = SCHEDULER.try_lock();
-    if scheduler_check.is_none() {
-        // Scheduler is locked (being initialized or in use), skip this tick
-        return;
-    }
-    drop(scheduler_check); // Release immediately, just checking
-
-    // Resolve current CPU robustly; if APIC->CPU mapping is unknown, skip this tick
-    // instead of incorrectly attributing it to CPU0 (which accelerates time).
     let cpu_idx = if let Some(idx) = percpu::cpu_index_from_gs() {
         idx
     } else if apic::is_initialized() {
@@ -1630,96 +1620,83 @@ pub fn timer_tick() {
         0
     };
 
-    // Keep wall-clock accounting on BSP only. APs still receive timer interrupts
-    // for local preemption, but must not accelerate global time in SMP.
+    // BSP wall-clock: ALWAYS advance, regardless of any lock state.
     if cpu_idx == 0 {
-        let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
-
-        // Assume 100Hz timer (10ms per tick)
-        // Convert ticks to nanoseconds
-        let current_time_ns = tick * 10_000_000; // 10ms = 10,000,000 ns
-
-        // Check interval timers for all tasks
-        super::timer::tick_all_timers(current_time_ns);
-
-        // Check wake deadlines for sleeping tasks
-        check_wake_deadlines(current_time_ns);
+        TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
-    // Increment ticks for the task currently running on this CPU
-    if let Some(mut guard) = SCHEDULER.try_lock() {
-        if let Some(ref mut sched) = *guard {
-            if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
-                if let Some(ref current_task) = cpu.current_task.clone() {
-                    current_task.ticks.fetch_add(1, Ordering::Relaxed);
-                    cpu.current_runtime.update();
-                    if cpu
-                        .class_rqs
-                        .update_current(&cpu.current_runtime, &current_task, false, &sched.class_table)
-                    {
-                        cpu.need_resched = true;
+    // Single try_lock for all remaining work. If the scheduler is contended
+    // we skip secondary bookkeeping (deferred to next tick) but the global
+    // tick counter above is never lost.
+    let Some(mut guard) = SCHEDULER.try_lock() else {
+        return;
+    };
+    let Some(ref mut sched) = *guard else {
+        return;
+    };
+
+    if cpu_idx == 0 {
+        let tick = TICK_COUNT.load(Ordering::Relaxed);
+        let current_time_ns = tick * 10_000_000; // 100 Hz → 10 ms per tick
+
+        // --- interval timers (zero-alloc) ---
+        for (_, task) in sched.all_tasks.iter() {
+            for which in [
+                super::timer::ITimerWhich::Real,
+                super::timer::ITimerWhich::Virtual,
+                super::timer::ITimerWhich::Prof,
+            ] {
+                if task.itimers.get(which).check_expired(current_time_ns) {
+                    if let Some(sig) = super::signal::Signal::from_u32(which.signal()) {
+                        unsafe { (*task.pending_signals.get()).add(sig) };
                     }
                 }
             }
         }
-    }
-}
 
-/// Check wake deadlines for all tasks and wake up those whose sleep has expired.
-///
-/// Called from timer_tick() with interrupts disabled.
-///
-/// Uses try_lock() to avoid deadlock if called while scheduler lock is held.
-fn check_wake_deadlines(current_time_ns: u64) {
-    // Use try_lock to avoid deadlock - if scheduler is already locked,
-    // we'll check wake deadlines on the next timer tick.
-    let mut scheduler = match SCHEDULER.try_lock() {
-        Some(guard) => guard,
-        None => return, // Scheduler locked, skip this tick
-    };
-
-    if let Some(ref mut sched) = *scheduler {
-        // Use a fixed-size array to avoid heap allocation in interrupt context
+        // --- wake deadlines (fixed-size buffer, zero-alloc) ---
         const MAX_WAKE: usize = 32;
         let mut to_wake = [TaskId::from_u64(0); MAX_WAKE];
-        let mut count = 0;
+        let mut wake_count = 0usize;
 
         for (id, task) in sched.all_tasks.iter() {
             let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
             if deadline != 0 && current_time_ns >= deadline {
-                if count < MAX_WAKE {
-                    to_wake[count] = *id;
-                    count += 1;
-                } else {
-                    break; // Wake others on next tick
+                task.wake_deadline_ns.store(0, Ordering::Relaxed);
+                if wake_count < MAX_WAKE {
+                    to_wake[wake_count] = *id;
+                    wake_count += 1;
                 }
             }
         }
-
-        // Wake up tasks
-        for i in 0..count {
+        for i in 0..wake_count {
             let id = to_wake[i];
-            if let Some(task) = sched.all_tasks.get(&id) {
-                // Clear the deadline
-                task.wake_deadline_ns.store(0, Ordering::Relaxed);
-
-                // If task is blocked on sleep, wake it up
-                if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
-                    // SAFETY: scheduler lock held
-                    unsafe {
-                        *blocked_task.state.get() = TaskState::Ready;
-                    }
-                    let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
-                    let class = sched.class_table.class_for_task(&blocked_task);
-                    if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
-                        cpu_sched.class_rqs.enqueue(class, blocked_task);
-                    }
+            if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
+                unsafe { *blocked_task.state.get() = TaskState::Ready };
+                let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
+                let class = sched.class_table.class_for_task(&blocked_task);
+                if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
+                    cpu_sched.class_rqs.enqueue(class, blocked_task);
                 }
             }
         }
     }
-    // Lock released when scheduler goes out of scope
+
+    // Per-task accounting on this CPU
+    if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
+        if let Some(ref current_task) = cpu.current_task.clone() {
+            current_task.ticks.fetch_add(1, Ordering::Relaxed);
+            cpu.current_runtime.update();
+            if cpu
+                .class_rqs
+                .update_current(&cpu.current_runtime, &current_task, false, &sched.class_table)
+            {
+                cpu.need_resched = true;
+            }
+        }
+    }
 }
+
 
 /// Get the current tick count
 pub fn ticks() -> u64 {
