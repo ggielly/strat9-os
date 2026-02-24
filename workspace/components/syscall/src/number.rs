@@ -72,6 +72,15 @@ pub const SYS_OPEN: usize = 403;
 pub const SYS_WRITE: usize = 404;
 pub const SYS_READ: usize = 405;
 pub const SYS_CLOSE: usize = 406;
+pub const SYS_LSEEK: usize = 407;
+pub const SYS_FSTAT: usize = 408;
+pub const SYS_STAT: usize = 409;
+
+// Block 430-449: VFS extended
+pub const SYS_GETDENTS: usize = 430;
+pub const SYS_PIPE: usize = 431;
+pub const SYS_DUP: usize = 432;
+pub const SYS_DUP2: usize = 433;
 
 // Block 410-419: network
 pub const SYS_NET_RECV: usize = 410;

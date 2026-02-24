@@ -121,6 +121,13 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_WRITE => sys_write(arg1, arg2, arg3),
         SYS_READ => sys_read(arg1, arg2, arg3),
         SYS_CLOSE => sys_close(arg1),
+        SYS_LSEEK => sys_lseek(arg1, arg2, arg3),
+        SYS_FSTAT => sys_fstat(arg1, arg2),
+        SYS_STAT => sys_stat(arg1, arg2, arg3),
+        SYS_GETDENTS => sys_getdents(arg1, arg2, arg3),
+        SYS_PIPE => sys_pipe(arg1),
+        SYS_DUP => sys_dup(arg1),
+        SYS_DUP2 => sys_dup2(arg1, arg2),
 
         // Network
         SYS_NET_RECV => sys_net_recv(arg1, arg2),
@@ -294,6 +301,41 @@ fn sys_read(fd: u64, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 /// SYS_CLOSE (406): Close a handle (fd).
 fn sys_close(fd: u64) -> Result<u64, SyscallError> {
     crate::vfs::sys_close(fd as u32)
+}
+
+/// SYS_LSEEK (407): Seek in a file.
+fn sys_lseek(fd: u64, offset: u64, whence: u64) -> Result<u64, SyscallError> {
+    crate::vfs::sys_lseek(fd as u32, offset as i64, whence as u32)
+}
+
+/// SYS_FSTAT (408): Get metadata of an open file.
+fn sys_fstat(fd: u64, stat_ptr: u64) -> Result<u64, SyscallError> {
+    crate::vfs::sys_fstat(fd as u32, stat_ptr)
+}
+
+/// SYS_STAT (409): Get metadata by path.
+fn sys_stat(path_ptr: u64, path_len: u64, stat_ptr: u64) -> Result<u64, SyscallError> {
+    crate::vfs::sys_stat(path_ptr, path_len, stat_ptr)
+}
+
+/// SYS_GETDENTS (430): Read directory entries.
+fn sys_getdents(fd: u64, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
+    crate::vfs::sys_getdents(fd as u32, buf_ptr, buf_len)
+}
+
+/// SYS_PIPE (431): Create a pipe pair.
+fn sys_pipe(fds_ptr: u64) -> Result<u64, SyscallError> {
+    crate::vfs::sys_pipe(fds_ptr)
+}
+
+/// SYS_DUP (432): Duplicate a file descriptor.
+fn sys_dup(old_fd: u64) -> Result<u64, SyscallError> {
+    crate::vfs::sys_dup(old_fd as u32)
+}
+
+/// SYS_DUP2 (433): Duplicate fd to a specific number.
+fn sys_dup2(old_fd: u64, new_fd: u64) -> Result<u64, SyscallError> {
+    crate::vfs::sys_dup2(old_fd as u32, new_fd as u32)
 }
 
 // ============================================================

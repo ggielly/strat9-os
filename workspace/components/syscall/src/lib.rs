@@ -201,16 +201,28 @@ pub mod call {
         }
     }
 
-    /// Copy and transform a file descriptor
-    pub fn dup(fd: usize, buf: &[u8]) -> error::Result<usize> {
-        let _ = buf;
+    /// Duplicate a capability handle (legacy).
+    pub fn handle_dup(fd: usize) -> error::Result<usize> {
         unsafe { syscall1(number::SYS_HANDLE_DUPLICATE, fd) }
     }
 
-    /// Copy and transform a file descriptor
-    pub fn dup2(fd: usize, newfd: usize, buf: &[u8]) -> error::Result<usize> {
-        let _ = (fd, newfd, buf);
-        Err(error::Error::NotSupported)
+    /// Duplicate a file descriptor (POSIX dup). Returns the new fd.
+    pub fn dup(fd: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_DUP, fd) }
+    }
+
+    /// Duplicate a file descriptor to a specific number (POSIX dup2).
+    pub fn dup2(old_fd: usize, new_fd: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_DUP2, old_fd, new_fd) }
+    }
+
+    /// Create a pipe. Returns (read_fd, write_fd).
+    pub fn pipe() -> error::Result<(u32, u32)> {
+        let mut fds = [0u32; 2];
+        unsafe {
+            syscall1(number::SYS_PIPE, fds.as_mut_ptr() as usize)?;
+        }
+        Ok((fds[0], fds[1]))
     }
 
     /// Change file permissions
@@ -283,10 +295,48 @@ pub mod call {
         Err(error::Error::NotSupported)
     }
 
-    /// Get metadata about a file
-    pub fn fstat(fd: usize, stat: &mut data::Stat) -> error::Result<usize> {
+    /// Get metadata about a file (legacy Stat struct).
+    pub fn fstat_legacy(fd: usize, stat: &mut data::Stat) -> error::Result<usize> {
         let _ = (fd, stat);
         Err(error::Error::NotSupported)
+    }
+
+    /// Get metadata about an open file descriptor.
+    pub fn fstat(fd: usize, stat: &mut data::FileStat) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_FSTAT,
+                fd,
+                stat as *mut data::FileStat as usize,
+            )
+        }
+    }
+
+    /// Get metadata by path.
+    pub fn stat(path: &str, stat: &mut data::FileStat) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_STAT,
+                path.as_ptr() as usize,
+                path.len(),
+                stat as *mut data::FileStat as usize,
+            )
+        }
+    }
+
+    /// Read directory entries from an open directory fd.
+    ///
+    /// Fills `buf` with packed kernel dirent entries.
+    /// Returns the number of bytes written into `buf`.
+    pub fn getdents(fd: usize, buf: &mut [u8]) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_GETDENTS,
+                fd,
+                buf.as_mut_ptr() as usize,
+                buf.len(),
+            )
+        }
     }
 
     /// Get metadata about a filesystem
@@ -351,10 +401,12 @@ pub mod call {
         }
     }
 
-    /// Seek to `offset` bytes in a file descriptor
+    /// Seek to `offset` bytes in a file descriptor.
+    ///
+    /// `whence`: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END.
+    /// Returns the new absolute offset.
     pub fn lseek(fd: usize, offset: isize, whence: usize) -> error::Result<usize> {
-        let _ = (fd, offset, whence);
-        Err(error::Error::NotSupported)
+        unsafe { syscall3(number::SYS_LSEEK, fd, offset as usize, whence) }
     }
 
     /// Make a new scheme namespace

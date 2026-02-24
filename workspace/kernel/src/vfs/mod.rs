@@ -27,18 +27,20 @@
 pub mod fd;
 pub mod file;
 pub mod mount;
+pub mod pipe;
 pub mod procfs;
 pub mod scheme;
 pub mod scheme_router;
 
-use crate::{process::current_task_clone, syscall::error::SyscallError};
+use crate::{process::current_task_clone, sync::SpinLock, syscall::error::SyscallError};
 use alloc::{string::String, sync::Arc};
 
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
 pub use mount::{list_mounts, mount, resolve, unmount, Namespace};
 pub use procfs::ProcScheme;
-pub use scheme::{DynScheme, FileFlags, IpcScheme, KernelScheme, OpenFlags, Scheme};
+pub use pipe::PipeScheme;
+pub use scheme::{DirEntry, DynScheme, FileFlags, FileStat, IpcScheme, KernelScheme, OpenFlags, Scheme};
 pub use scheme_router::{
     init_builtin_schemes, list_schemes, mount_scheme, register_initfs_file, register_scheme,
 };
@@ -159,6 +161,98 @@ pub fn fsync(fd: u32) -> Result<(), SyscallError> {
     let fd_table = unsafe { &*task.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.sync()
+}
+
+/// POSIX lseek on a file descriptor.
+pub fn lseek(fd: u32, offset: i64, whence: u32) -> Result<u64, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    file.lseek(offset, whence)
+}
+
+/// fstat on an open file descriptor.
+pub fn fstat(fd: u32) -> Result<FileStat, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    file.stat()
+}
+
+/// stat by path (opens, stats, closes).
+pub fn stat_path(path: &str) -> Result<FileStat, SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    let open_result = scheme.open(&relative_path, OpenFlags::READ)?;
+    let result = scheme.stat(open_result.file_id);
+    let _ = scheme.close(open_result.file_id);
+    result
+}
+
+/// Read directory entries from an open directory fd.
+pub fn getdents(fd: u32) -> Result<alloc::vec::Vec<DirEntry>, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    file.readdir()
+}
+
+/// Create a pipe, returning (read_fd, write_fd).
+pub fn pipe() -> Result<(u32, u32), SyscallError> {
+    let pipe_scheme = get_pipe_scheme();
+    let (base_id, _pipe) = pipe_scheme.create_pipe();
+
+    let dyn_scheme: DynScheme = pipe_scheme as Arc<dyn Scheme>;
+
+    let read_file = Arc::new(OpenFile::new(
+        dyn_scheme.clone(),
+        base_id,
+        String::from("pipe:[read]"),
+        OpenFlags::READ,
+        FileFlags::PIPE,
+        None,
+    ));
+    let write_file = Arc::new(OpenFile::new(
+        dyn_scheme.clone(),
+        base_id + 1,
+        String::from("pipe:[write]"),
+        OpenFlags::WRITE,
+        FileFlags::PIPE,
+        None,
+    ));
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &mut *task.fd_table.get() };
+    let read_fd = fd_table.insert(read_file);
+    let write_fd = fd_table.insert(write_file);
+
+    Ok((read_fd, write_fd))
+}
+
+/// Duplicate a file descriptor (POSIX dup).
+pub fn dup(old_fd: u32) -> Result<u32, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &mut *task.fd_table.get() };
+    fd_table.duplicate(old_fd)
+}
+
+/// Duplicate a file descriptor to a specific number (POSIX dup2).
+pub fn dup2(old_fd: u32, new_fd: u32) -> Result<u32, SyscallError> {
+    if old_fd == new_fd {
+        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+        let fd_table = unsafe { &*task.fd_table.get() };
+        fd_table.get(old_fd)?;
+        return Ok(new_fd);
+    }
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &mut *task.fd_table.get() };
+
+    // Close new_fd if it exists (silently ignore errors)
+    let _ = fd_table.remove(new_fd);
+
+    // Get the file from old_fd and insert at new_fd
+    let file = fd_table.get(old_fd)?;
+    fd_table.insert_at(new_fd, file);
+    Ok(new_fd)
 }
 
 /// Read all remaining bytes from a file descriptor.
@@ -298,6 +392,114 @@ pub fn sys_write(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallErro
 pub fn sys_close(fd: u32) -> Result<u64, SyscallError> {
     close(fd)?;
     Ok(0)
+}
+
+/// Syscall handler for lseek.
+pub fn sys_lseek(fd: u32, offset: i64, whence: u32) -> Result<u64, SyscallError> {
+    lseek(fd, offset, whence)
+}
+
+/// Syscall handler for fstat.
+pub fn sys_fstat(fd: u32, stat_ptr: u64) -> Result<u64, SyscallError> {
+    let st = fstat(fd)?;
+    let user = UserSliceWrite::new(stat_ptr, core::mem::size_of::<FileStat>())?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(&st as *const FileStat as *const u8, core::mem::size_of::<FileStat>())
+    };
+    user.copy_from(bytes);
+    Ok(0)
+}
+
+/// Syscall handler for stat (by path).
+pub fn sys_stat(path_ptr: u64, path_len: u64, stat_ptr: u64) -> Result<u64, SyscallError> {
+    const MAX_PATH_LEN: usize = 4096;
+    if path_len == 0 || path_len as usize > MAX_PATH_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let user = UserSliceRead::new(path_ptr, path_len as usize)?;
+    let bytes = user.read_to_vec();
+    let path = core::str::from_utf8(&bytes).map_err(|_| SyscallError::InvalidArgument)?;
+
+    let st = stat_path(path)?;
+    let user_out = UserSliceWrite::new(stat_ptr, core::mem::size_of::<FileStat>())?;
+    let out_bytes = unsafe {
+        core::slice::from_raw_parts(&st as *const FileStat as *const u8, core::mem::size_of::<FileStat>())
+    };
+    user_out.copy_from(out_bytes);
+    Ok(0)
+}
+
+/// Syscall handler for getdents.
+///
+/// Writes a packed array of `KernelDirent` entries into the user buffer.
+/// Returns the number of bytes written.
+pub fn sys_getdents(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
+    let entries = getdents(fd)?;
+
+    let mut offset: usize = 0;
+    let buf_size = buf_len as usize;
+
+    for entry in &entries {
+        let name_bytes = entry.name.as_bytes();
+        let name_len = core::cmp::min(name_bytes.len(), 255);
+        let entry_size = 8 + 1 + 2 + name_len + 1; // ino(8) + type(1) + name_len(2) + name + nul
+
+        if offset + entry_size > buf_size {
+            break;
+        }
+
+        let user = UserSliceWrite::new(buf_ptr + offset as u64, entry_size)?;
+        let mut kbuf = [0u8; 268]; // max entry
+        kbuf[0..8].copy_from_slice(&entry.ino.to_le_bytes());
+        kbuf[8] = entry.file_type;
+        kbuf[9..11].copy_from_slice(&(name_len as u16).to_le_bytes());
+        kbuf[11..11 + name_len].copy_from_slice(&name_bytes[..name_len]);
+        kbuf[11 + name_len] = 0; // nul-terminator
+        user.copy_from(&kbuf[..entry_size]);
+
+        offset += entry_size;
+    }
+
+    Ok(offset as u64)
+}
+
+/// Syscall handler for pipe.
+pub fn sys_pipe(fds_ptr: u64) -> Result<u64, SyscallError> {
+    let (read_fd, write_fd) = pipe()?;
+    let user = UserSliceWrite::new(fds_ptr, 8)?; // 2 x u32
+    let mut buf = [0u8; 8];
+    buf[0..4].copy_from_slice(&read_fd.to_le_bytes());
+    buf[4..8].copy_from_slice(&write_fd.to_le_bytes());
+    user.copy_from(&buf);
+    Ok(0)
+}
+
+/// Syscall handler for dup.
+pub fn sys_dup(old_fd: u32) -> Result<u64, SyscallError> {
+    let new_fd = dup(old_fd)?;
+    Ok(new_fd as u64)
+}
+
+/// Syscall handler for dup2.
+pub fn sys_dup2(old_fd: u32, new_fd: u32) -> Result<u64, SyscallError> {
+    let fd = dup2(old_fd, new_fd)?;
+    Ok(fd as u64)
+}
+
+// ============================================================================
+// Global PipeScheme singleton
+// ============================================================================
+
+static PIPE_SCHEME: SpinLock<Option<Arc<PipeScheme>>> = SpinLock::new(None);
+
+fn get_pipe_scheme() -> Arc<PipeScheme> {
+    let mut guard = PIPE_SCHEME.lock();
+    if let Some(ref scheme) = *guard {
+        return scheme.clone();
+    }
+    let scheme = Arc::new(PipeScheme::new());
+    *guard = Some(scheme.clone());
+    scheme
 }
 
 // ============================================================================

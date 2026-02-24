@@ -225,6 +225,27 @@ pub const SYS_WRITE: u64 = 404;
 /// Close a handle (fd). arg1=fd.
 pub const SYS_CLOSE: u64 = 406;
 
+/// Seek in a file. arg1=fd, arg2=offset(i64), arg3=whence (0=SET,1=CUR,2=END).
+pub const SYS_LSEEK: u64 = 407;
+
+/// Get metadata of an open file. arg1=fd, arg2=stat_ptr.
+pub const SYS_FSTAT: u64 = 408;
+
+/// Get metadata by path. arg1=path_ptr, arg2=path_len, arg3=stat_ptr.
+pub const SYS_STAT: u64 = 409;
+
+/// Read directory entries. arg1=fd, arg2=buf_ptr, arg3=buf_len.
+pub const SYS_GETDENTS: u64 = 430;
+
+/// Create a pipe. arg1=fds_ptr (writes [read_fd, write_fd] to user).
+pub const SYS_PIPE: u64 = 431;
+
+/// Duplicate a file descriptor. arg1=old_fd. Returns new fd.
+pub const SYS_DUP: u64 = 432;
+
+/// Duplicate a file descriptor to a specific number. arg1=old_fd, arg2=new_fd.
+pub const SYS_DUP2: u64 = 433;
+
 // ============================================================
 // Block 410-419: network
 // ============================================================
