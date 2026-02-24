@@ -201,16 +201,28 @@ pub mod call {
         }
     }
 
-    /// Copy and transform a file descriptor
-    pub fn dup(fd: usize, buf: &[u8]) -> error::Result<usize> {
-        let _ = buf;
+    /// Duplicate a capability handle (legacy).
+    pub fn handle_dup(fd: usize) -> error::Result<usize> {
         unsafe { syscall1(number::SYS_HANDLE_DUPLICATE, fd) }
     }
 
-    /// Copy and transform a file descriptor
-    pub fn dup2(fd: usize, newfd: usize, buf: &[u8]) -> error::Result<usize> {
-        let _ = (fd, newfd, buf);
-        Err(error::Error::NotSupported)
+    /// Duplicate a file descriptor (POSIX dup). Returns the new fd.
+    pub fn dup(fd: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_DUP, fd) }
+    }
+
+    /// Duplicate a file descriptor to a specific number (POSIX dup2).
+    pub fn dup2(old_fd: usize, new_fd: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_DUP2, old_fd, new_fd) }
+    }
+
+    /// Create a pipe. Returns (read_fd, write_fd).
+    pub fn pipe() -> error::Result<(u32, u32)> {
+        let mut fds = [0u32; 2];
+        unsafe {
+            syscall1(number::SYS_PIPE, fds.as_mut_ptr() as usize)?;
+        }
+        Ok((fds[0], fds[1]))
     }
 
     /// Change file permissions
