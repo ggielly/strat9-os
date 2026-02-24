@@ -325,14 +325,7 @@ fn resolve_volume_device(
     Ok(device)
 }
 
-fn map_block_error(err: block::BlockError) -> SyscallError {
-    match err {
-        block::BlockError::IoError => SyscallError::IoError,
-        block::BlockError::InvalidSector => SyscallError::InvalidArgument,
-        block::BlockError::BufferTooSmall => SyscallError::InvalidArgument,
-        block::BlockError::NotReady => SyscallError::Again,
-    }
-}
+
 
 fn sys_volume_read(
     handle: u64,
@@ -363,7 +356,7 @@ fn sys_volume_read(
     let mut kbuf = [0u8; SECTOR_SIZE];
     for i in 0..sector_count {
         let cur_sector = sector.checked_add(i).ok_or(SyscallError::InvalidArgument)?;
-        BlockDevice::read_sector(device, cur_sector, &mut kbuf).map_err(map_block_error)?;
+        BlockDevice::read_sector(device, cur_sector, &mut kbuf).map_err(SyscallError::from)?;
         let offset = (i as usize)
             .checked_mul(SECTOR_SIZE)
             .ok_or(SyscallError::InvalidArgument)?;
@@ -418,7 +411,7 @@ fn sys_volume_write(
             return Err(SyscallError::InvalidArgument);
         }
         kbuf.copy_from_slice(&data);
-        BlockDevice::write_sector(device, cur_sector, &kbuf).map_err(map_block_error)?;
+        BlockDevice::write_sector(device, cur_sector, &kbuf).map_err(SyscallError::from)?;
     }
 
     Ok(sector_count)
@@ -1013,8 +1006,7 @@ fn sys_chan_try_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
             }
             Ok(0)
         }
-        Err(channel::ChannelError::WouldBlock) => Err(SyscallError::Again),
-        Err(_) => Err(SyscallError::BadHandle),
+        Err(e) => Err(SyscallError::from(e)),
     }
 }
 

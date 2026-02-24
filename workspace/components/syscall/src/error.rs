@@ -22,8 +22,8 @@ pub const EEXIST: usize = 17;
 pub const EINVAL: usize = 22;
 pub const ENOTTY: usize = 25;
 pub const ENOSPC: usize = 28;
-pub const ENOSYS: usize = 38;
 pub const EPIPE: usize = 32;
+pub const ENOSYS: usize = 38;
 pub const ENOTSUP: usize = 52;
 pub const ENOBUFS: usize = 105;
 pub const ETIMEDOUT: usize = 110;
@@ -31,6 +31,10 @@ pub const ETIMEDOUT: usize = 110;
 /// Range of negative errno values returned by the kernel (Linux-style).
 const ERRNO_MAX: isize = 4095;
 
+/// Syscall error type for userspace programs.
+///
+/// The `Unknown(usize)` variant preserves unrecognized errno codes instead
+/// of silently mapping them to a wrong variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     PermissionDenied,
@@ -54,6 +58,8 @@ pub enum Error {
     NotImplemented,
     QueueFull,
     TimedOut,
+    /// Unrecognized errno — preserves the raw code for forward compatibility.
+    Unknown(usize),
 }
 
 impl Error {
@@ -81,7 +87,7 @@ impl Error {
             ENOSYS => Error::NotImplemented,
             ENOBUFS => Error::QueueFull,
             ETIMEDOUT => Error::TimedOut,
-            _ => Error::Io,
+            other => Error::Unknown(other),
         }
     }
 
@@ -109,6 +115,7 @@ impl Error {
             Error::NotImplemented => ENOSYS,
             Error::QueueFull => ENOBUFS,
             Error::TimedOut => ETIMEDOUT,
+            Error::Unknown(n) => *n,
         }
     }
 
@@ -155,6 +162,7 @@ impl Error {
             Error::NotImplemented => "ENOSYS",
             Error::QueueFull => "ENOBUFS",
             Error::TimedOut => "ETIMEDOUT",
+            Error::Unknown(_) => "E???",
         }
     }
 }
@@ -183,6 +191,7 @@ impl fmt::Display for Error {
             Error::NotImplemented => write!(f, "Function not implemented"),
             Error::QueueFull => write!(f, "No buffer space available"),
             Error::TimedOut => write!(f, "Connection timed out"),
+            Error::Unknown(n) => write!(f, "Unknown error (errno={})", n),
         }
     }
 }

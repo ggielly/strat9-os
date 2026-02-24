@@ -87,7 +87,7 @@ const NANOS_PER_MICRO: u64 = 1_000;
 
 fn now_instant() -> Instant {
     match clock_gettime_ns() {
-        Ok(ns) => Instant::from_micros(ns / NANOS_PER_MICRO),
+        Ok(ns) => Instant::from_micros((ns / NANOS_PER_MICRO) as i64),
         Err(_) => Instant::from_micros(0),
     }
 }

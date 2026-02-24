@@ -308,44 +308,25 @@ impl VolumeBlockDevice {
     }
 }
 
-fn map_sys_err(err: isize) -> BlockDeviceError {
+fn map_sys_err(err: Error) -> BlockDeviceError {
     match err {
-        -11 => BlockDeviceError::NotReady,
-        -5 => BlockDeviceError::Io,
-        -22 => BlockDeviceError::InvalidOffset,
+        Error::Again => BlockDeviceError::NotReady,
+        Error::Io => BlockDeviceError::Io,
+        Error::Invalid => BlockDeviceError::InvalidOffset,
         _ => BlockDeviceError::Other,
     }
 }
 
-fn sys_err_name(err: isize) -> &'static str {
-    match err {
-        -1 => "EPERM",
-        -2 => "ENOENT",
-        -5 => "EIO",
-        -9 => "EBADF",
-        -10 => "ECHILD",
-        -11 => "EAGAIN",
-        -12 => "ENOMEM",
-        -14 => "EFAULT",
-        -17 => "EEXIST",
-        -22 => "EINVAL",
-        -38 => "ENOSYS",
-        -110 => "ETIMEDOUT",
-        _ => "EUNKNOWN",
-    }
-}
-
-fn log_sys_err(prefix: &str, err: isize) {
-    let msg = format!("[fs-ext4] {}: {} ({})\n", prefix, err, sys_err_name(err));
+fn log_sys_err(prefix: &str, err: Error) {
+    let msg = format!("[fs-ext4] {}: {} ({})\n", prefix, err.name(), err);
     debug_log(&msg);
 }
 
-fn validate_volume_handle(handle: u64) -> core::result::Result<u64, isize> {
+fn validate_volume_handle(handle: u64) -> Result<u64> {
     let sectors = volume_info(handle)?;
     if sectors == 0 {
-        return Err(-22);
+        return Err(Error::Invalid);
     }
-    // Probe first sector to verify read permission/path is valid.
     let mut probe = [0u8; SECTOR_SIZE];
     let _ = volume_read(handle, 0, &mut probe, 1)?;
     Ok(sectors)
@@ -457,13 +438,11 @@ fn try_wait_for_bootstrap(port_handle: u64, attempts: usize) -> Option<u64> {
                     syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
                 };
             }
-            Err(-11) => {
+            Err(Error::Again) => {
                 // EAGAIN: no message yet.
             }
             Err(err) => {
-                if err != -11 {
-                    log_sys_err("try_recv bootstrap failed", err);
-                }
+                log_sys_err("try_recv bootstrap failed", err);
             }
         }
         let _ = unsafe { syscall1(number::SYS_PROC_YIELD, 0) };
