@@ -283,10 +283,48 @@ pub mod call {
         Err(error::Error::NotSupported)
     }
 
-    /// Get metadata about a file
-    pub fn fstat(fd: usize, stat: &mut data::Stat) -> error::Result<usize> {
+    /// Get metadata about a file (legacy Stat struct).
+    pub fn fstat_legacy(fd: usize, stat: &mut data::Stat) -> error::Result<usize> {
         let _ = (fd, stat);
         Err(error::Error::NotSupported)
+    }
+
+    /// Get metadata about an open file descriptor.
+    pub fn fstat(fd: usize, stat: &mut data::FileStat) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_FSTAT,
+                fd,
+                stat as *mut data::FileStat as usize,
+            )
+        }
+    }
+
+    /// Get metadata by path.
+    pub fn stat(path: &str, stat: &mut data::FileStat) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_STAT,
+                path.as_ptr() as usize,
+                path.len(),
+                stat as *mut data::FileStat as usize,
+            )
+        }
+    }
+
+    /// Read directory entries from an open directory fd.
+    ///
+    /// Fills `buf` with packed kernel dirent entries.
+    /// Returns the number of bytes written into `buf`.
+    pub fn getdents(fd: usize, buf: &mut [u8]) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_GETDENTS,
+                fd,
+                buf.as_mut_ptr() as usize,
+                buf.len(),
+            )
+        }
     }
 
     /// Get metadata about a filesystem
@@ -351,10 +389,12 @@ pub mod call {
         }
     }
 
-    /// Seek to `offset` bytes in a file descriptor
+    /// Seek to `offset` bytes in a file descriptor.
+    ///
+    /// `whence`: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END.
+    /// Returns the new absolute offset.
     pub fn lseek(fd: usize, offset: isize, whence: usize) -> error::Result<usize> {
-        let _ = (fd, offset, whence);
-        Err(error::Error::NotSupported)
+        unsafe { syscall3(number::SYS_LSEEK, fd, offset as usize, whence) }
     }
 
     /// Make a new scheme namespace
