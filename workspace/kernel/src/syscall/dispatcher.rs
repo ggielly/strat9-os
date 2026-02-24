@@ -766,7 +766,7 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
     }
     let user = UserSliceRead::new(_path_ptr, _path_len as usize)?;
     let bytes = user.read_to_vec();
-    let path = core::str::from_utf8(&bytes).map_err(|_| SyscallError::InvalidArgument)?;
+    let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.capabilities.get() };
@@ -857,7 +857,7 @@ fn sys_ipc_unbind_port(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError
     }
     let user = UserSliceRead::new(path_ptr, path_len as usize)?;
     let bytes = user.read_to_vec();
-    let path = core::str::from_utf8(&bytes).map_err(|_| SyscallError::InvalidArgument)?;
+    let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
     crate::vfs::unmount(path)?;
     Ok(0)
 }

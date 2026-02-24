@@ -8,6 +8,7 @@ use core::fmt;
 
 /// Syscall error codes (returned as negative values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
 #[repr(i64)]
 pub enum SyscallError {
     /// Operation not permitted (EPERM)
@@ -153,6 +154,43 @@ impl fmt::Display for SyscallError {
 }
 
 // ── From impls for kernel-internal error types ──────────────────────────────
+
+impl From<core::str::Utf8Error> for SyscallError {
+    #[inline]
+    fn from(_: core::str::Utf8Error) -> Self {
+        SyscallError::InvalidArgument
+    }
+}
+
+impl From<crate::ostd::util::Error> for SyscallError {
+    fn from(err: crate::ostd::util::Error) -> Self {
+        use crate::ostd::util::Error;
+        match err {
+            Error::OutOfMemory => SyscallError::OutOfMemory,
+            Error::InvalidArgument => SyscallError::InvalidArgument,
+            Error::NotFound => SyscallError::NotFound,
+            Error::AlreadyExists => SyscallError::AlreadyExists,
+            Error::PermissionDenied => SyscallError::PermissionDenied,
+            Error::Busy => SyscallError::Again,
+            Error::PageFault => SyscallError::Fault,
+            Error::ArchError(_) => SyscallError::IoError,
+        }
+    }
+}
+
+impl From<crate::ostd::mm::MapError> for SyscallError {
+    fn from(err: crate::ostd::mm::MapError) -> Self {
+        use crate::ostd::mm::MapError;
+        match err {
+            MapError::OutOfBounds => SyscallError::InvalidArgument,
+            MapError::NotOwner => SyscallError::PermissionDenied,
+            MapError::AlreadyMapped => SyscallError::AlreadyExists,
+            MapError::InvalidAddress => SyscallError::InvalidArgument,
+            MapError::OutOfMemory => SyscallError::OutOfMemory,
+            MapError::ArchError(_) => SyscallError::IoError,
+        }
+    }
+}
 
 impl From<crate::drivers::virtio::block::BlockError> for SyscallError {
     fn from(err: crate::drivers::virtio::block::BlockError) -> Self {

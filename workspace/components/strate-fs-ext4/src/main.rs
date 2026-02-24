@@ -232,54 +232,34 @@ impl Ext4Strate {
     /// Main strate loop
     fn serve(&mut self, port_handle: u64) -> ! {
         loop {
-            // Receive message
             let mut msg = IpcMessage::new(0);
-            let result = unsafe {
-                syscall2(
-                    number::SYS_IPC_RECV,
-                    port_handle as usize,
-                    &mut msg as *mut IpcMessage as usize,
-                )
-            };
-
-            if result.is_err() {
-                continue; // Ignore errors, keep serving
+            if call::ipc_recv(port_handle as usize, &mut msg as *mut IpcMessage as usize).is_err() {
+                continue;
             }
 
-            // Dispatch based on opcode
             match msg.msg_type {
                 OPCODE_BOOTSTRAP => {
                     let reply = IpcMessage::error_reply(msg.sender);
-                    let _ = unsafe {
-                        syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                    };
+                    let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
                 }
                 OPCODE_OPEN => {
                     let reply = self.handle_open(msg.sender, &msg.payload, port_handle);
-                    let _ = unsafe {
-                        syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                    };
+                    let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
                 }
                 OPCODE_READ => {
                     let reply = self.handle_read(msg.sender, &msg.payload);
-                    let _ = unsafe {
-                        syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                    };
+                    let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
                 }
                 OPCODE_WRITE => {
                     let _ = self.handle_write(msg.sender, &msg.payload);
                 }
                 OPCODE_CLOSE => {
                     let reply = self.handle_close(msg.sender);
-                    let _ = unsafe {
-                        syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                    };
+                    let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
                 }
                 _ => {
                     let reply = IpcMessage::error_reply(msg.sender);
-                    let _ = unsafe {
-                        syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                    };
+                    let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
                 }
             }
         }
@@ -311,8 +291,8 @@ impl VolumeBlockDevice {
 fn map_sys_err(err: Error) -> BlockDeviceError {
     match err {
         Error::Again => BlockDeviceError::NotReady,
-        Error::Io => BlockDeviceError::Io,
-        Error::Invalid => BlockDeviceError::InvalidOffset,
+        Error::IoError => BlockDeviceError::Io,
+        Error::InvalidArgument => BlockDeviceError::InvalidOffset,
         _ => BlockDeviceError::Other,
     }
 }
@@ -325,7 +305,7 @@ fn log_sys_err(prefix: &str, err: Error) {
 fn validate_volume_handle(handle: u64) -> Result<u64> {
     let sectors = volume_info(handle)?;
     if sectors == 0 {
-        return Err(Error::Invalid);
+        return Err(Error::InvalidArgument);
     }
     let mut probe = [0u8; SECTOR_SIZE];
     let _ = volume_read(handle, 0, &mut probe, 1)?;
@@ -389,63 +369,42 @@ fn wait_for_bootstrap(port_handle: u64) -> u64 {
     debug_log("[fs-ext4] Waiting for volume bootstrap...\n");
     loop {
         let mut msg = IpcMessage::new(0);
-        let result = unsafe {
-            syscall2(
-                number::SYS_IPC_RECV,
-                port_handle as usize,
-                &mut msg as *mut IpcMessage as usize,
-            )
-        };
-        if result.is_err() {
+        if call::ipc_recv(port_handle as usize, &mut msg as *mut IpcMessage as usize).is_err() {
             continue;
         }
 
         if msg.msg_type == OPCODE_BOOTSTRAP && msg.flags != 0 {
             let mut reply = IpcMessage::new(0);
             reply.sender = msg.sender;
-            let _ =
-                unsafe { syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize) };
+            let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
             return msg.flags as u64;
         }
 
         let reply = IpcMessage::error_reply(msg.sender);
-        let _ = unsafe { syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize) };
+        let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
     }
 }
 
 fn try_wait_for_bootstrap(port_handle: u64, attempts: usize) -> Option<u64> {
     for _ in 0..attempts {
         let mut msg = IpcMessage::new(0);
-        let result = unsafe {
-            syscall2(
-                number::SYS_IPC_TRY_RECV,
-                port_handle as usize,
-                &mut msg as *mut IpcMessage as usize,
-            )
-        };
-        match result {
+        match call::ipc_try_recv(port_handle as usize, &mut msg as *mut IpcMessage as usize) {
             Ok(_) => {
                 if msg.msg_type == OPCODE_BOOTSTRAP && msg.flags != 0 {
                     let mut reply = IpcMessage::new(0);
                     reply.sender = msg.sender;
-                    let _ = unsafe {
-                        syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                    };
+                    let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
                     return Some(msg.flags as u64);
                 }
                 let reply = IpcMessage::error_reply(msg.sender);
-                let _ = unsafe {
-                    syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                };
+                let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
             }
-            Err(Error::Again) => {
-                // EAGAIN: no message yet.
-            }
+            Err(Error::Again) => {}
             Err(err) => {
                 log_sys_err("try_recv bootstrap failed", err);
             }
         }
-        let _ = unsafe { syscall1(number::SYS_PROC_YIELD, 0) };
+        let _ = call::sched_yield();
     }
     None
 }
@@ -457,10 +416,7 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
 
     debug_log("[fs-ext4] Starting EXT4 filesystem strate\n");
 
-    // Create IPC port
-    let port_result = unsafe { syscall1(number::SYS_IPC_CREATE_PORT, 0) };
-
-    let port_handle = match port_result {
+    let port_handle = match call::ipc_create_port(0) {
         Ok(h) => h as u64,
         Err(_) => {
             debug_log("[fs-ext4] Failed to create IPC port\n");
@@ -470,18 +426,7 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
 
     debug_log("[fs-ext4] IPC port created\n");
 
-    // Bind under a dedicated namespace to avoid hijacking the whole VFS root.
-    let path = b"/fs/ext4";
-    let bind_result = unsafe {
-        syscall3(
-            number::SYS_IPC_BIND_PORT,
-            port_handle as usize,
-            path.as_ptr() as usize,
-            path.len(),
-        )
-    };
-
-    if bind_result.is_err() {
+    if call::ipc_bind_port(port_handle as usize, b"/fs/ext4").is_err() {
         debug_log("[fs-ext4] Failed to bind port to /fs/ext4\n");
         exit(2);
     }
@@ -530,7 +475,7 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
                     debug_log(&msg);
                 }
                 for _ in 0..2048 {
-                    let _ = unsafe { syscall1(number::SYS_PROC_YIELD, 0) };
+                    let _ = call::sched_yield();
                 }
                 continue;
             }
@@ -545,7 +490,7 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
                 );
                 debug_log(&msg);
                 for _ in 0..2048 {
-                    let _ = unsafe { syscall1(number::SYS_PROC_YIELD, 0) };
+                    let _ = call::sched_yield();
                 }
                 continue;
             }
@@ -560,7 +505,7 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
                 );
                 debug_log(&msg);
                 for _ in 0..2048 {
-                    let _ = unsafe { syscall1(number::SYS_PROC_YIELD, 0) };
+                    let _ = call::sched_yield();
                 }
                 continue;
             }

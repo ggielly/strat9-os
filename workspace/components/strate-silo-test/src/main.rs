@@ -122,22 +122,7 @@ fn decode_wait_status(status: i32) {
     log_nl();
 }
 
-unsafe fn raw_syscall0(nr: usize) -> usize {
-    let mut ret = nr;
-    unsafe {
-        asm!(
-            "syscall",
-            inout("rax") ret,
-            out("rcx") _,
-            out("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-
-unsafe fn raw_syscall3(nr: usize, a1: usize, a2: usize, a3: usize) -> usize {
+unsafe fn raw_syscall(nr: usize, a1: usize, a2: usize, a3: usize) -> usize {
     let mut ret = nr;
     unsafe {
         asm!(
@@ -249,9 +234,9 @@ pub extern "C" fn _start() -> ! {
     log_nl();
 
     log_section("STEP 2/11: reading identifiers via raw syscalls for cross-check");
-    log_raw_ret("SYS_GETPID", unsafe { raw_syscall0(number::SYS_GETPID) });
-    log_raw_ret("SYS_GETPPID", unsafe { raw_syscall0(number::SYS_GETPPID) });
-    log_raw_ret("SYS_GETTID", unsafe { raw_syscall0(number::SYS_GETTID) });
+    log_raw_ret("SYS_GETPID", unsafe { raw_syscall(number::SYS_GETPID, 0, 0, 0) });
+    log_raw_ret("SYS_GETPPID", unsafe { raw_syscall(number::SYS_GETPPID, 0, 0, 0) });
+    log_raw_ret("SYS_GETTID", unsafe { raw_syscall(number::SYS_GETTID, 0, 0, 0) });
 
     log_section("STEP 3/11: waitpid(-1, WNOHANG) before any fork (expect no child)");
     let mut status_nochild: i32 = -9999;
@@ -263,7 +248,7 @@ pub extern "C" fn _start() -> ! {
     log_i64(status_nochild as i64);
     log_nl();
     let raw_nochild = unsafe {
-        raw_syscall3(
+        raw_syscall(
             number::SYS_PROC_WAITPID,
             (-1isize) as usize,
             (&mut status_nochild as *mut i32) as usize,
@@ -576,7 +561,7 @@ pub extern "C" fn _start() -> ! {
     log_section("STEP 10/11: raw syscall sanity check for waitpid on no child again");
     let mut st: i32 = 0;
     let raw = unsafe {
-        raw_syscall3(
+        raw_syscall(
             number::SYS_PROC_WAITPID,
             (-1isize) as usize,
             (&mut st as *mut i32) as usize,

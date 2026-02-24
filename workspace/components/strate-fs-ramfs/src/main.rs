@@ -24,13 +24,11 @@ static mut HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
 #[alloc_error_handler]
 fn oom(_: Layout) -> ! {
-    let _ = unsafe { syscall1(number::SYS_PROC_EXIT, 12) };
-    loop {}
+    call::exit(12)
 }
 
 fn exit(code: usize) -> ! {
-    let _ = unsafe { syscall1(number::SYS_PROC_EXIT, code) };
-    loop {}
+    call::exit(code)
 }
 
 // --- IPC Protocol ---
@@ -230,15 +228,7 @@ impl StrateRamServer {
     fn serve(&mut self, port: u64) -> ! {
         loop {
             let mut msg = IpcMessage::new(0);
-            if unsafe {
-                syscall2(
-                    number::SYS_IPC_RECV,
-                    port as usize,
-                    &mut msg as *mut _ as usize,
-                )
-            }
-            .is_ok()
-            {
+            if call::ipc_recv(port as usize, &mut msg as *mut _ as usize).is_ok() {
                 let reply = match msg.msg_type {
                     OPCODE_OPEN => self.handle_open(msg.sender, &msg.payload),
                     OPCODE_READ => self.handle_read(msg.sender, &msg.payload),
@@ -252,7 +242,7 @@ impl StrateRamServer {
                         r
                     }
                 };
-                let _ = unsafe { syscall1(number::SYS_IPC_REPLY, &reply as *const _ as usize) };
+                let _ = call::ipc_reply(&reply as *const _ as usize);
             }
         }
     }
@@ -264,20 +254,12 @@ pub extern "C" fn _start() -> ! {
         ALLOCATOR.lock().init(HEAP.as_mut_ptr(), HEAP_SIZE);
     }
 
-    let port = match unsafe { syscall1(number::SYS_IPC_CREATE_PORT, 0) } {
+    let port = match call::ipc_create_port(0) {
         Ok(p) => p as u64,
         Err(_) => exit(1),
     };
 
-    let path = b"/ram";
-    let _ = unsafe {
-        syscall3(
-            number::SYS_IPC_BIND_PORT,
-            port as usize,
-            path.as_ptr() as usize,
-            path.len(),
-        )
-    };
+    let _ = call::ipc_bind_port(port as usize, b"/ram");
 
     let mut server = StrateRamServer::new();
     server.serve(port)

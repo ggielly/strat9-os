@@ -222,38 +222,14 @@ impl NetworkStrate {
             let mut got_ipc = false;
             if ipc_try_recv(port, &mut msg).is_ok() {
                 got_ipc = true;
-                match msg.msg_type {
-                    OPCODE_OPEN => {
-                        let reply = self.handle_open(&msg);
-                        let _ = unsafe {
-                            syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                        };
-                    }
-                    OPCODE_READ => {
-                        let reply = self.handle_read(&msg);
-                        let _ = unsafe {
-                            syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                        };
-                    }
-                    OPCODE_WRITE => {
-                        let reply = self.handle_write(&msg);
-                        let _ = unsafe {
-                            syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                        };
-                    }
-                    OPCODE_CLOSE => {
-                        let reply = self.handle_close(&msg);
-                        let _ = unsafe {
-                            syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                        };
-                    }
-                    _ => {
-                        let reply = IpcMessage::error_reply(msg.sender, -22); // EINVAL
-                        let _ = unsafe {
-                            syscall1(number::SYS_IPC_REPLY, &reply as *const IpcMessage as usize)
-                        };
-                    }
-                }
+                let reply = match msg.msg_type {
+                    OPCODE_OPEN => self.handle_open(&msg),
+                    OPCODE_READ => self.handle_read(&msg),
+                    OPCODE_WRITE => self.handle_write(&msg),
+                    OPCODE_CLOSE => self.handle_close(&msg),
+                    _ => IpcMessage::error_reply(msg.sender, -22),
+                };
+                let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
             }
 
             if !got_ipc && poll_result == smoltcp::iface::PollResult::None {
@@ -276,8 +252,7 @@ impl NetworkStrate {
 pub extern "C" fn _start() -> ! {
     debug_log("[strate-net] Starting network silo\n");
 
-    // 1. Create IPC port
-    let port = match unsafe { syscall1(number::SYS_IPC_CREATE_PORT, 0) } {
+    let port = match call::ipc_create_port(0) {
         Ok(p) => p as u64,
         Err(_) => {
             debug_log("[strate-net] Failed to create port\n");
@@ -285,18 +260,7 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
-    // 2. Bind port to /net
-    let path = b"/net";
-    let bind = unsafe {
-        syscall3(
-            number::SYS_IPC_BIND_PORT,
-            port as usize,
-            path.as_ptr() as usize,
-            path.len(),
-        )
-    };
-
-    if bind.is_err() {
+    if call::ipc_bind_port(port as usize, b"/net").is_err() {
         debug_log("[strate-net] Failed to bind to /net\n");
         exit(2);
     }

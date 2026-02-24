@@ -347,7 +347,7 @@ pub mod call {
                 addr2 as usize,
                 0,
             ),
-            _ => Err(error::Error::Invalid),
+            _ => Err(error::Error::InvalidArgument),
         }
     }
 
