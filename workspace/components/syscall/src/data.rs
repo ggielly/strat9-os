@@ -50,6 +50,39 @@ pub struct Map {
     pub addr: usize,
 }
 
+/// Kernel-level file metadata returned by fstat/stat syscalls.
+///
+/// Matches kernel `vfs::scheme::FileStat` layout exactly.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FileStat {
+    pub st_ino: u64,
+    pub st_mode: u32,
+    pub st_nlink: u32,
+    pub st_size: u64,
+    pub st_blksize: u64,
+    pub st_blocks: u64,
+}
+
+impl FileStat {
+    pub const fn zeroed() -> Self {
+        FileStat { st_ino: 0, st_mode: 0, st_nlink: 0, st_size: 0, st_blksize: 0, st_blocks: 0 }
+    }
+
+    pub fn is_dir(&self) -> bool {
+        (self.st_mode & 0o170000) == 0o040000
+    }
+
+    pub fn is_file(&self) -> bool {
+        (self.st_mode & 0o170000) == 0o100000
+    }
+}
+
+/// POSIX lseek whence constants.
+pub const SEEK_SET: usize = 0;
+pub const SEEK_CUR: usize = 1;
+pub const SEEK_END: usize = 2;
+
 /// Canonical 64-byte IPC message (cache-line aligned).
 ///
 /// Layout matches the kernel's `ipc::message::IpcMessage`:

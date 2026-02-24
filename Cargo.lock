@@ -190,6 +190,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_enum"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1207a7e20ad57b847bbddc6776b968420d38292bbfe2089accff5e19e82454c"
+dependencies = [
+ "num_enum_derive",
+ "rustversion",
+]
+
+[[package]]
+name = "num_enum_derive"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff32365de1b6743cb203b710788263c44a03de03802daf96092f2da4fe6ba4d7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "proc-macro-error-attr2"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -302,6 +323,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
 name = "strat9-bootloader"
 version = "0.1.0"
 dependencies = [
@@ -316,6 +343,9 @@ dependencies = [
 [[package]]
 name = "strat9-components-api"
 version = "0.1.0"
+dependencies = [
+ "strate-fs-abstraction",
+]
 
 [[package]]
 name = "strat9-kernel"
@@ -326,7 +356,10 @@ dependencies = [
  "component",
  "limine",
  "log",
+ "num_enum",
  "spin",
+ "static_assertions",
+ "thiserror",
  "uart_16550",
  "x86_64",
  "zerocopy",
@@ -337,11 +370,19 @@ name = "strat9-syscall"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.11.0",
+ "num_enum",
+ "static_assertions",
+ "thiserror",
+ "zerocopy",
 ]
 
 [[package]]
 name = "strate-fs-abstraction"
 version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
+ "thiserror",
+]
 
 [[package]]
 name = "strate-fs-ext4"
@@ -351,6 +392,7 @@ dependencies = [
  "ext4_rs",
  "log",
  "spin",
+ "strat9-syscall",
 ]
 
 [[package]]
@@ -372,6 +414,7 @@ dependencies = [
  "log",
  "smoltcp",
  "spin",
+ "strat9-syscall",
 ]
 
 [[package]]

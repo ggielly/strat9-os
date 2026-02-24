@@ -19,7 +19,7 @@
 use crate::{
     process::{current_pid, get_all_tasks, get_parent_pid},
     syscall::error::SyscallError,
-    vfs::scheme::{DynScheme, FileFlags, OpenFlags, OpenResult, Scheme},
+    vfs::scheme::{DirEntry, DynScheme, DT_DIR, DT_REG, FileFlags, FileStat, OpenFlags, OpenResult, Scheme},
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::fmt::Write;
@@ -329,5 +329,56 @@ impl Scheme for ProcScheme {
 
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(())
+    }
+
+    fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
+        let (base, _pid) = Self::decode_id(file_id);
+        let is_dir = file_id == 0 || file_id == 1 || (base == 1000);
+        if is_dir {
+            Ok(FileStat {
+                st_ino: file_id,
+                st_mode: 0o040555,
+                st_nlink: 2,
+                st_size: 0,
+                st_blksize: 512,
+                st_blocks: 0,
+            })
+        } else {
+            Ok(FileStat {
+                st_ino: file_id,
+                st_mode: 0o100444,
+                st_nlink: 1,
+                st_size: 0,
+                st_blksize: 512,
+                st_blocks: 0,
+            })
+        }
+    }
+
+    fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
+        if file_id == 0 {
+            let mut entries = Vec::new();
+            entries.push(DirEntry { ino: 1, file_type: DT_DIR, name: String::from("self") });
+            entries.push(DirEntry { ino: 10, file_type: DT_REG, name: String::from("cpuinfo") });
+            entries.push(DirEntry { ino: 11, file_type: DT_REG, name: String::from("meminfo") });
+            entries.push(DirEntry { ino: 12, file_type: DT_REG, name: String::from("version") });
+            if let Some(tasks) = get_all_tasks() {
+                for task in tasks {
+                    entries.push(DirEntry {
+                        ino: Self::encode_id(1000, task.pid as u64),
+                        file_type: DT_DIR,
+                        name: format!("{}", task.pid),
+                    });
+                }
+            }
+            Ok(entries)
+        } else if file_id == 1 || (file_id >= 1000 && file_id < 2000) {
+            Ok(alloc::vec![
+                DirEntry { ino: file_id + 1000, file_type: DT_REG, name: String::from("status") },
+                DirEntry { ino: file_id + 2000, file_type: DT_REG, name: String::from("cmdline") },
+            ])
+        } else {
+            Err(SyscallError::InvalidArgument)
+        }
     }
 }
