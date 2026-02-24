@@ -325,14 +325,7 @@ fn resolve_volume_device(
     Ok(device)
 }
 
-fn map_block_error(err: block::BlockError) -> SyscallError {
-    match err {
-        block::BlockError::IoError => SyscallError::IoError,
-        block::BlockError::InvalidSector => SyscallError::InvalidArgument,
-        block::BlockError::BufferTooSmall => SyscallError::InvalidArgument,
-        block::BlockError::NotReady => SyscallError::Again,
-    }
-}
+
 
 fn sys_volume_read(
     handle: u64,
@@ -363,7 +356,7 @@ fn sys_volume_read(
     let mut kbuf = [0u8; SECTOR_SIZE];
     for i in 0..sector_count {
         let cur_sector = sector.checked_add(i).ok_or(SyscallError::InvalidArgument)?;
-        BlockDevice::read_sector(device, cur_sector, &mut kbuf).map_err(map_block_error)?;
+        BlockDevice::read_sector(device, cur_sector, &mut kbuf).map_err(SyscallError::from)?;
         let offset = (i as usize)
             .checked_mul(SECTOR_SIZE)
             .ok_or(SyscallError::InvalidArgument)?;
@@ -418,7 +411,7 @@ fn sys_volume_write(
             return Err(SyscallError::InvalidArgument);
         }
         kbuf.copy_from_slice(&data);
-        BlockDevice::write_sector(device, cur_sector, &kbuf).map_err(map_block_error)?;
+        BlockDevice::write_sector(device, cur_sector, &kbuf).map_err(SyscallError::from)?;
     }
 
     Ok(sector_count)
@@ -474,9 +467,7 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let device = crate::drivers::virtio::net::get_device().ok_or(SyscallError::NotImplemented)?;
     let mut kbuf = vec![0u8; buf_len as usize];
 
-    let n = device
-        .receive(&mut kbuf)
-        .map_err(|_| SyscallError::IoError)?;
+    let n = device.receive(&mut kbuf).map_err(SyscallError::from)?;
 
     let user = UserSliceWrite::new(buf_ptr, n)?;
     user.copy_from(&kbuf[..n]);
@@ -488,7 +479,7 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let user = UserSliceRead::new(buf_ptr, buf_len as usize)?;
     let kbuf = user.read_to_vec();
 
-    device.transmit(&kbuf).map_err(|_| SyscallError::IoError)?;
+    device.transmit(&kbuf).map_err(SyscallError::from)?;
 
     Ok(buf_len)
 }
@@ -566,7 +557,7 @@ fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
-    port.send(msg).map_err(|_| SyscallError::BadHandle)?;
+    port.send(msg).map_err(SyscallError::from)?;
     Ok(0)
 }
 
@@ -590,7 +581,7 @@ fn sys_ipc_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
-    let mut msg = port.recv().map_err(|_| SyscallError::BadHandle)?;
+    let mut msg = port.recv().map_err(SyscallError::from)?;
 
     // Handle transfer (optional): msg.flags contains a handle in the sender table.
     if msg.flags != 0 {
@@ -641,7 +632,7 @@ fn sys_ipc_try_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
-    let msg_opt = port.try_recv().map_err(|_| SyscallError::BadHandle)?;
+    let msg_opt = port.try_recv().map_err(SyscallError::from)?;
 
     let mut msg = match msg_opt {
         Some(m) => m,
@@ -719,7 +710,7 @@ fn sys_ipc_call(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
-    port.send(msg).map_err(|_| SyscallError::BadHandle)?;
+    port.send(msg).map_err(SyscallError::from)?;
 
     let reply_msg = reply::wait_for_reply(task.id);
     let mut out_buf = [0u8; MSG_SIZE];
@@ -775,7 +766,7 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
     }
     let user = UserSliceRead::new(_path_ptr, _path_len as usize)?;
     let bytes = user.read_to_vec();
-    let path = core::str::from_utf8(&bytes).map_err(|_| SyscallError::InvalidArgument)?;
+    let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.capabilities.get() };
@@ -866,7 +857,7 @@ fn sys_ipc_unbind_port(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError
     }
     let user = UserSliceRead::new(path_ptr, path_len as usize)?;
     let bytes = user.read_to_vec();
-    let path = core::str::from_utf8(&bytes).map_err(|_| SyscallError::InvalidArgument)?;
+    let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
     crate::vfs::unmount(path)?;
     Ok(0)
 }
@@ -947,7 +938,7 @@ fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     let chan_id = ChanId::from_u64(cap.resource as u64);
 
     let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
-    chan.send(msg).map_err(|_| SyscallError::BadHandle)?;
+    chan.send(msg).map_err(SyscallError::from)?;
 
     Ok(0)
 }
@@ -969,7 +960,7 @@ fn sys_chan_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     let chan_id = ChanId::from_u64(cap.resource as u64);
 
     let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
-    let msg = chan.recv().map_err(|_| SyscallError::BadHandle)?;
+    let msg = chan.recv().map_err(SyscallError::from)?;
 
     // Write the received message to userspace.
     let user_slice = UserSliceWrite::new(msg_ptr, 64).map_err(SyscallError::from)?;
@@ -1013,8 +1004,7 @@ fn sys_chan_try_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
             }
             Ok(0)
         }
-        Err(channel::ChannelError::WouldBlock) => Err(SyscallError::Again),
-        Err(_) => Err(SyscallError::BadHandle),
+        Err(e) => Err(SyscallError::from(e)),
     }
 }
 
@@ -1033,7 +1023,7 @@ fn sys_chan_close(handle: u64) -> Result<u64, SyscallError> {
         return Err(SyscallError::BadHandle);
     }
     let chan_id = ChanId::from_u64(cap.resource as u64);
-    channel::destroy_channel(chan_id).map_err(|_| SyscallError::BadHandle)?;
+    channel::destroy_channel(chan_id).map_err(SyscallError::from)?;
 
     log::debug!("syscall: CHAN_CLOSE(handle={}) → chan={}", handle, chan_id);
     Ok(0)

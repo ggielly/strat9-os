@@ -4,7 +4,7 @@ use alloc::string::String;
 
 /// Display help information
 pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
-    shell_println!("Strat9-OS shell (Chevron) - available commands:");
+    shell_println!("Strat9-OS shell (Chevron) - available commands :");
     shell_println!("");
     shell_println!("  help              - Display this help message");
     shell_println!("  version           - Display kernel version");
@@ -24,6 +24,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  test_pid          - Launch /initfs/test_pid userspace binary");
     shell_println!("  reboot            - Reboot the system");
     shell_println!("  scheduler debug   - Scheduler debug on|off|dump");
+    shell_println!("  trace mem ...     - Memory trace on|off|dump|clear|serial|mask");
     shell_println!("  gfx help          - Show gfx command help");
     shell_println!("  gfx info          - Display framebuffer/console info");
     shell_println!("  gfx mode on|off   - Enable/disable double-buffer mode");

@@ -619,6 +619,23 @@ impl AddressSpace {
         };
         regions.insert(start, region);
 
+        let end = start + (page_count as u64) * page_bytes;
+        crate::trace_mem!(
+            crate::trace::category::MEM_MAP,
+            crate::trace::TraceKind::MemMap,
+            page_size.bytes(),
+            crate::trace::TraceTaskCtx {
+                task_id: 0,
+                pid: 0,
+                tid: 0,
+                cr3: self.cr3_phys.as_u64(),
+            },
+            0,
+            start,
+            end,
+            page_count as u64
+        );
+
         Ok(())
     }
 
@@ -673,6 +690,23 @@ impl AddressSpace {
             start + (page_count as u64) * page_bytes,
             page_count,
             page_size
+        );
+
+        let end = start + (page_count as u64) * page_bytes;
+        crate::trace_mem!(
+            crate::trace::category::MEM_UNMAP,
+            crate::trace::TraceKind::MemUnmap,
+            page_size.bytes(),
+            crate::trace::TraceTaskCtx {
+                task_id: 0,
+                pid: 0,
+                tid: 0,
+                cr3: self.cr3_phys.as_u64(),
+            },
+            0,
+            start,
+            end,
+            page_count as u64
         );
 
         Ok(())
@@ -1029,14 +1063,19 @@ impl AddressSpace {
                     };
                     crate::memory::cow::frame_inc_ref(phys);
 
-                    // Map in child
+                    // Map in child. We map it as WRITABLE first to ensure intermediate
+                    // page tables (PDPT, PD) are created with WRITABLE bit set.
+                    // If we mapped directly as COW (Read-only), some Mapper implementations
+                    // might create Read-Only intermediate tables, blocking future COW resolution.
+                    let map_flags = new_flags | PageTableFlags::WRITABLE;
+
                     unsafe {
                         let map_res: Result<(), &'static str> = match region.page_size {
                             VmaPageSize::Small => {
                                 let page = Page::<Size4KiB>::from_start_address(vaddr).unwrap();
                                 let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(phys_frame_addr);
                                 child_mapper
-                                    .map_to(page, frame, new_flags, &mut frame_allocator)
+                                    .map_to(page, frame, map_flags, &mut frame_allocator)
                                     .map(|f| f.ignore())
                                     .map_err(|_| "Failed to map 4K in child")
                             }
@@ -1044,7 +1083,7 @@ impl AddressSpace {
                                 let page = Page::<Size2MiB>::from_start_address(vaddr).unwrap();
                                 let frame = x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(phys_frame_addr);
                                 child_mapper
-                                    .map_to(page, frame, new_flags, &mut frame_allocator)
+                                    .map_to(page, frame, map_flags, &mut frame_allocator)
                                     .map(|f| f.ignore())
                                     .map_err(|_| "Failed to map 2M in child")
                             }
@@ -1053,6 +1092,42 @@ impl AddressSpace {
                         if let Err(e) = map_res {
                             crate::memory::cow::frame_dec_ref(phys);
                             return Err(e);
+                        }
+
+                        // Now downgrade to the actual COW flags (which may be Read-Only).
+                        if !new_flags.contains(PageTableFlags::WRITABLE) {
+                            let downgrade_res: Result<(), &'static str> = match region.page_size {
+                                VmaPageSize::Small => {
+                                    let page = Page::<Size4KiB>::from_start_address(vaddr).unwrap();
+                                    child_mapper
+                                        .update_flags(page, new_flags)
+                                        .map(|f| f.ignore())
+                                        .map_err(|_| "Failed to update child 4K flags")
+                                }
+                                VmaPageSize::Huge => {
+                                    let page = Page::<Size2MiB>::from_start_address(vaddr).unwrap();
+                                    child_mapper
+                                        .update_flags(page, new_flags)
+                                        .map(|f| f.ignore())
+                                        .map_err(|_| "Failed to update child 2M flags")
+                                }
+                            };
+                            if let Err(e) = downgrade_res {
+                                let unmapped = match region.page_size {
+                                    VmaPageSize::Small => {
+                                        let page = Page::<Size4KiB>::from_start_address(vaddr).unwrap();
+                                        child_mapper.unmap(page).map(|(_, f)| f.ignore()).is_ok()
+                                    }
+                                    VmaPageSize::Huge => {
+                                        let page = Page::<Size2MiB>::from_start_address(vaddr).unwrap();
+                                        child_mapper.unmap(page).map(|(_, f)| f.ignore()).is_ok()
+                                    }
+                                };
+                                if unmapped {
+                                    crate::memory::cow::frame_dec_ref(phys);
+                                }
+                                return Err(e);
+                            }
                         }
                     }
 

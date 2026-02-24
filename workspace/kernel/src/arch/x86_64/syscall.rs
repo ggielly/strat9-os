@@ -136,11 +136,9 @@ unsafe extern "C" fn syscall_entry() {
         "pop rcx",
         "pop rax",                 // Restored return value
 
-        // Skip the IRET frame: RIP, CS, RFLAGS, RSP, SS
-        // We use SYSRETQ instead which is faster
-
-        // Pop user RIP into RCX (SYSRETQ target)
-        "pop rcx",
+        // Now RSP points to the RIP of the IRET frame.
+        // Peek at user RIP without consuming it yet.
+        "mov rcx, [rsp]",
 
         // Canonical address check on RCX to prevent privilege escalation.
         // If a non-canonical address was somehow placed in RCX, SYSRETQ would
@@ -152,24 +150,20 @@ unsafe extern "C" fn syscall_entry() {
         "je 2f",
         "cmp r11, -1",
         "je 2f",
-        // Non-canonical! Fall through to IRET path for safety
-        "jmp 3f",
+
+        // Slow IRET path (non-canonical or fallback)
+        // The stack is already perfectly set up as an IRET frame [RIP, CS, RFLAGS, RSP, SS].
+        "swapgs",                  // Restore user GS base
+        "iretq",
 
         "2:",
-        // SYSRETQ fast path
-        "add rsp, 8",              // Skip CS
+        // SYSRETQ fast path — skip RIP and CS in one step.
+        "add rsp, 16",             // Skip RIP + CS
         "pop r11",                 // User RFLAGS into R11
         "pop rsp",                 // User RSP
         "swapgs",                  // Restore user GS base
         // SYSRETQ: RCX→RIP, R11→RFLAGS, loads user CS/SS from STAR
         "sysretq",
-
-        "3:",
-        // Slow IRET path (non-canonical or fallback)
-        "sub rsp, 8",              // Undo the pop rcx: push RIP back
-        "push rcx",
-        "swapgs",                  // Restore user GS base
-        "iretq",
 
         user_rsp_off = const crate::arch::x86_64::percpu::USER_RSP_OFFSET,
         kernel_rsp_off = const crate::arch::x86_64::percpu::KERNEL_RSP_OFFSET,

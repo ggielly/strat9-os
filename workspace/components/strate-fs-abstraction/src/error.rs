@@ -272,3 +272,38 @@ impl fmt::Display for FsError {
         write!(f, "{}", self.as_str())
     }
 }
+
+#[cfg(feature = "syscall")]
+impl From<FsError> for strat9_syscall::error::Error {
+    fn from(e: FsError) -> Self {
+        use strat9_syscall::error::Error as SE;
+        match e {
+            FsError::BufferTooSmall => SE::InvalidArgument,
+            FsError::EndOfFile => SE::IoError,
+            FsError::DiskError => SE::IoError,
+            FsError::DeviceNotReady => SE::Again,
+            FsError::Corrupted | FsError::InvalidBlockType | FsError::InvalidMagic => SE::IoError,
+            FsError::UnsupportedVersion => SE::NotSupported,
+            FsError::InvalidBlockAddress => SE::InvalidArgument,
+            FsError::InodeNotFound | FsError::NotFound => SE::NotFound,
+            FsError::NotADirectory | FsError::IsADirectory => SE::InvalidArgument,
+            FsError::InvalidPath | FsError::PathTooLong => SE::InvalidArgument,
+            FsError::ArithmeticOverflow | FsError::SecurityViolation => SE::Fault,
+            FsError::AlignmentError => SE::Fault,
+            FsError::OutOfMemory => SE::OutOfMemory,
+            FsError::NoSpace => SE::NoSpace,
+            FsError::TooManyOpenFiles => SE::Again,
+            FsError::InvalidUtf8 | FsError::InvalidUtf16 | FsError::StringTooLong => SE::InvalidArgument,
+            FsError::NotImplemented => SE::NotImplemented,
+            FsError::NotSupported | FsError::ReadOnly => SE::NotSupported,
+            FsError::AlreadyExists => SE::AlreadyExists,
+            FsError::NotEmpty => SE::InvalidArgument,
+            FsError::InvalidArgument => SE::InvalidArgument,
+            FsError::PermissionDenied => SE::PermissionDenied,
+            FsError::CrossDeviceLink => SE::NotSupported,
+            FsError::TooManySymlinks => SE::IoError,
+            FsError::FileTooLarge => SE::NoSpace,
+            FsError::UnknownFilesystem => SE::NotSupported,
+        }
+    }
+}

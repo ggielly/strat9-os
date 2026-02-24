@@ -193,6 +193,9 @@ fn build_child_task(
         wake_deadline_ns: AtomicU64::new(0),
         brk: AtomicU64::new(parent.brk.load(Ordering::Relaxed)),
         mmap_hint: AtomicU64::new(parent.mmap_hint.load(Ordering::Relaxed)),
+        trampoline_entry: AtomicU64::new(0),
+        trampoline_stack_top: AtomicU64::new(0),
+        trampoline_arg0: AtomicU64::new(0),
         ticks: AtomicU64::new(0),
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
         vruntime: AtomicU64::new(parent.vruntime()),
@@ -315,7 +318,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             mapper
                 .update_flags(page, new_flags)
                 .map_err(|_| "Failed to update flags")?
-                .ignore();
+                .flush();
         }
         // Only the current CPU can hold this CR3 in the current design.
         local_invlpg(virt_addr);
@@ -364,7 +367,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
         return Err("Failed to map new COW frame");
     }
     match remap_res {
-        Ok(flush) => flush.ignore(),
+        Ok(flush) => flush.flush(),
         Err(_) => unreachable!("checked remap result above"),
     }
 

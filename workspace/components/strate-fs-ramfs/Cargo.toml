@@ -6,7 +6,7 @@ license = "GPLv3"
 authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 
 [dependencies]
-strate-fs-abstraction = { path = "../strate-fs-abstraction", features = ["alloc"] }
+strate-fs-abstraction = { path = "../strate-fs-abstraction", features = ["alloc", "syscall"] }
 strat9-syscall = { path = "../syscall" }
 spin = "0.10.0"
 bitflags = "2.4"

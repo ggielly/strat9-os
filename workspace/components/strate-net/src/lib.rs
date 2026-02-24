@@ -4,33 +4,7 @@ extern crate alloc;
 
 pub mod syscalls;
 
-/// IPC Message format (64 bytes, cache-line aligned)
-#[repr(C, align(64))]
-#[derive(Clone, Copy)]
-pub struct IpcMessage {
-    pub sender: u64,
-    pub msg_type: u32,
-    pub flags: u32,
-    pub payload: [u8; 48],
-}
-
-impl IpcMessage {
-    pub fn new(msg_type: u32) -> Self {
-        IpcMessage {
-            sender: 0,
-            msg_type,
-            flags: 0,
-            payload: [0u8; 48],
-        }
-    }
-
-    pub fn error_reply(sender: u64, status: i32) -> Self {
-        let mut msg = IpcMessage::new(0x81); // 0x81 = Generic error reply
-        msg.sender = sender;
-        msg.payload[0..4].copy_from_slice(&(status as u32).to_le_bytes());
-        msg
-    }
-}
+pub use strat9_syscall::data::IpcMessage;
 
 pub const OPCODE_OPEN: u32 = 0x01;
 pub const OPCODE_READ: u32 = 0x02;

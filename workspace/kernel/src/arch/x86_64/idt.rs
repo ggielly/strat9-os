@@ -139,6 +139,40 @@ extern "x86-interrupt" fn page_fault_handler(
 
     // Get the faulting address
     let fault_addr = Cr2::read();
+    let fault_vaddr = fault_addr.as_ref().map(|v| v.as_u64()).unwrap_or(0);
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let user_rsp = stack_frame.stack_pointer.as_u64();
+
+    let mut trace_ctx = crate::trace::TraceTaskCtx::empty();
+    if is_user {
+        if let Some(task) = crate::process::current_task_clone() {
+            let as_ref = unsafe { &*task.address_space.get() };
+            trace_ctx = crate::trace::TraceTaskCtx {
+                task_id: task.id.as_u64(),
+                pid: task.pid,
+                tid: task.tid,
+                cr3: as_ref.cr3().as_u64(),
+            };
+        }
+    }
+
+    crate::trace_mem!(
+        crate::trace::category::MEM_PF,
+        crate::trace::TraceKind::MemPageFault,
+        error_code.bits() as u64,
+        trace_ctx,
+        rip,
+        fault_vaddr,
+        user_rsp,
+        0
+    );
+
+    if is_user {
+        if let Some(task) = crate::process::current_task_clone() {
+            let as_ref = unsafe { &*task.address_space.get() };
+            dump_user_pf_context(as_ref, rip, user_rsp);
+        }
+    }
 
     // Try to handle COW fault first (before killing the process)
     if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) && is_user {
@@ -146,10 +180,32 @@ extern "x86-interrupt" fn page_fault_handler(
             let address_space = unsafe { &*task.address_space.get() };
             if let Ok(vaddr) = fault_addr {
                 match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), address_space) {
-                    Ok(()) => return,
+                    Ok(()) => {
+                        crate::trace_mem!(
+                            crate::trace::category::MEM_COW,
+                            crate::trace::TraceKind::MemCow,
+                            1,
+                            trace_ctx,
+                            rip,
+                            vaddr.as_u64(),
+                            0,
+                            0
+                        );
+                        return;
+                    }
                     Err(reason) => {
+                        crate::trace_mem!(
+                            crate::trace::category::MEM_COW,
+                            crate::trace::TraceKind::MemCow,
+                            0,
+                            trace_ctx,
+                            rip,
+                            vaddr.as_u64(),
+                            0,
+                            0
+                        );
                         crate::serial_println!(
-                            "[pagefault] COW resolve failed: task={} pid={} tid={} addr={:#x} rip={:#x} err={}",
+                            "\x1b[31m[pagefault] COW resolve failed\x1b[0m: task={} \x1b[36mpid={}\x1b[0m tid={} \x1b[35maddr={:#x}\x1b[0m \x1b[35mrip={:#x}\x1b[0m err={}",
                             task.id.as_u64(),
                             task.pid,
                             task.tid,
@@ -272,6 +328,48 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 
     panic!("Page fault");
+}
+
+fn dump_user_pf_context(as_ref: &crate::memory::AddressSpace, rip: u64, rsp: u64) {
+    use x86_64::VirtAddr;
+
+    let hhdm = crate::memory::hhdm_offset();
+
+    if let Some(phys) = as_ref.translate(VirtAddr::new(rip)) {
+        let off = (rip & 0xfff) as usize;
+        let mut bytes = [0u8; 8];
+        // SAFETY: We read at most 8 bytes from a mapped user instruction page via HHDM.
+        unsafe {
+            let src = (phys.as_u64() - (rip & 0xfff) + hhdm + off as u64) as *const u8;
+            core::ptr::copy_nonoverlapping(src, bytes.as_mut_ptr(), bytes.len());
+        }
+        crate::serial_println!(
+            "[pagefault] ctx: rsp={:#x} rip-bytes={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+            rsp,
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+        );
+    } else {
+        crate::serial_println!("[pagefault] ctx: rsp={:#x} rip page unmapped", rsp);
+    }
+
+    if let Some(phys) = as_ref.translate(VirtAddr::new(rsp)) {
+        // SAFETY: Read two u64 words from the mapped stack location.
+        unsafe {
+            let p = (phys.as_u64() + hhdm) as *const u64;
+            let w0 = core::ptr::read_unaligned(p);
+            let w1 = core::ptr::read_unaligned(p.add(1));
+            crate::serial_println!("[pagefault] stack-top: [{:#x}, {:#x}]", w0, w1);
+        }
+    } else {
+        crate::serial_println!("[pagefault] stack-top: rsp unmapped");
+    }
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(

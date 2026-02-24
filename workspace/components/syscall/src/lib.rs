@@ -347,7 +347,7 @@ pub mod call {
                 addr2 as usize,
                 0,
             ),
-            _ => Err(error::Error::Invalid),
+            _ => Err(error::Error::InvalidArgument),
         }
     }
 
@@ -456,6 +456,19 @@ pub mod call {
         unsafe { syscall3(number::SYS_WRITE, fd, buf.as_ptr() as usize, buf.len()) }
     }
 
+    /// Terminate the current process with the given exit `code`.
+    ///
+    /// This function never returns.
+    pub fn exit(code: usize) -> ! {
+        unsafe {
+            syscall1(number::SYS_PROC_EXIT, code).ok();
+        }
+        #[allow(clippy::empty_loop)]
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     /// Yield the process's time slice to the kernel
     ///
     /// This function will return Ok(0) on success
@@ -468,6 +481,25 @@ pub mod call {
     /// Returns child PID in parent, and 0 in child.
     pub fn fork() -> error::Result<usize> {
         unsafe { syscall0(number::SYS_PROC_FORK) }
+    }
+
+    /// Replace the current process image with a new program.
+    ///
+    /// `path`: executable path as a byte slice.
+    /// `argv` and `envp`: pointers to null-terminated C-style arrays.
+    pub unsafe fn execve(
+        path: &[u8],
+        argv: usize,
+        envp: usize,
+    ) -> error::Result<usize> {
+        syscall5(
+            number::SYS_PROC_EXECVE,
+            path.as_ptr() as usize,
+            path.len(),
+            argv,
+            envp,
+            0,
+        )
     }
 
     /// Return current process ID.
@@ -485,13 +517,32 @@ pub mod call {
         unsafe { syscall0(number::SYS_GETPPID) }
     }
 
-    /// Wait for a child process.
+    /// Wait for a child process (raw, single attempt).
     ///
     /// `pid` supports POSIX values (`-1` = any child).
     /// `status` receives encoded wait status (same layout as Linux waitpid).
+    ///
+    /// Prefer [`waitpid_blocking`] for blocking waits — it automatically
+    /// retries on `EINTR`.
     pub fn waitpid(pid: isize, status: Option<&mut i32>, options: usize) -> error::Result<usize> {
         let status_ptr = status.map_or(0usize, |s| s as *mut i32 as usize);
         unsafe { syscall3(number::SYS_PROC_WAITPID, pid as usize, status_ptr, options) }
+    }
+
+    /// Wait for a child process, automatically retrying on `EINTR`.
+    ///
+    /// This is the recommended wrapper for blocking waits. It calls
+    /// [`waitpid`] in a loop and yields the CPU between retries when
+    /// the kernel interrupts the wait with `EINTR`.
+    pub fn waitpid_blocking(pid: isize, status: &mut i32) -> error::Result<usize> {
+        loop {
+            match waitpid(pid, Some(status), 0) {
+                Err(error::Error::Interrupted) => {
+                    let _ = sched_yield();
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Set process group ID.
@@ -568,5 +619,378 @@ pub mod call {
     ) -> error::Result<usize> {
         let _ = (fd, payload, flags, metadata);
         Err(error::Error::NotSupported)
+    }
+
+    // -----------------------------------------------------------------------
+    // Handle management (block 0-99)
+    // -----------------------------------------------------------------------
+
+    /// Close a capability handle.
+    pub fn handle_close(handle: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_HANDLE_CLOSE, handle) }
+    }
+
+    /// Wait on a capability handle until it becomes signaled.
+    pub fn handle_wait(handle: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_HANDLE_WAIT, handle) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Memory management (block 100-199)
+    // -----------------------------------------------------------------------
+
+    /// Adjust the program break (heap boundary).
+    ///
+    /// `new_brk == 0` queries the current break without changing it.
+    /// Returns the new (or current) program break on success.
+    pub fn brk(new_brk: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_BRK, new_brk) }
+    }
+
+    /// Remap a previously mapped memory region.
+    pub unsafe fn mremap(
+        old_addr: usize,
+        old_size: usize,
+        new_size: usize,
+        flags: usize,
+    ) -> error::Result<usize> {
+        syscall4(number::SYS_MREMAP, old_addr, old_size, new_size, flags)
+    }
+
+    // -----------------------------------------------------------------------
+    // IPC — Ports (block 200-211)
+    // -----------------------------------------------------------------------
+
+    /// Create a new IPC port.
+    ///
+    /// `flags` is reserved (pass 0). Returns a capability handle for the port.
+    pub fn ipc_create_port(flags: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_IPC_CREATE_PORT, flags) }
+    }
+
+    /// Send a message through an IPC port.
+    pub fn ipc_send(port_handle: usize, msg: &data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_SEND, port_handle, msg as *const data::IpcMessage as usize) }
+    }
+
+    /// Receive a message from an IPC port (blocking).
+    pub fn ipc_recv(port_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_RECV, port_handle, msg as *mut data::IpcMessage as usize) }
+    }
+
+    /// Non-blocking receive from an IPC port.
+    ///
+    /// Returns `Err(Error::Again)` if the port is empty.
+    pub fn ipc_try_recv(port_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_TRY_RECV, port_handle, msg as *mut data::IpcMessage as usize) }
+    }
+
+    /// Send a message and block until a reply arrives (RPC-style).
+    ///
+    /// On return the message buffer is overwritten with the reply.
+    pub fn ipc_call(port_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_CALL, port_handle, msg as *mut data::IpcMessage as usize) }
+    }
+
+    /// Reply to the sender of the last received message.
+    pub fn ipc_reply(msg: &data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_IPC_REPLY, msg as *const data::IpcMessage as usize) }
+    }
+
+    /// Bind an IPC port to a named path in the namespace.
+    pub fn ipc_bind_port(port_handle: usize, path: &[u8]) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_IPC_BIND_PORT,
+                port_handle,
+                path.as_ptr() as usize,
+                path.len(),
+            )
+        }
+    }
+
+    /// Unbind an IPC port from the namespace.
+    pub fn ipc_unbind_port(port_handle: usize, name_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_UNBIND_PORT, port_handle, name_ptr) }
+    }
+
+    /// Create a shared-memory ring buffer.
+    ///
+    /// `size`: requested ring size in bytes.
+    /// Returns a capability handle for the ring.
+    pub fn ipc_ring_create(size: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_IPC_RING_CREATE, size) }
+    }
+
+    /// Map a shared-memory ring buffer into the calling process.
+    ///
+    /// `ring_handle`: capability handle returned by [`ipc_ring_create`].
+    /// `flags`: mapping flags. Returns the user-virtual address.
+    pub fn ipc_ring_map(ring_handle: usize, flags: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_RING_MAP, ring_handle, flags) }
+    }
+
+    // -----------------------------------------------------------------------
+    // IPC — Channels (block 220-224)
+    // -----------------------------------------------------------------------
+
+    /// Create a typed MPMC sync-channel.
+    ///
+    /// `capacity`: maximum number of queued messages.
+    /// Returns a capability handle for the channel.
+    pub fn chan_create(capacity: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_CHAN_CREATE, capacity) }
+    }
+
+    /// Send a message into a channel (blocking if full).
+    pub fn chan_send(chan_handle: usize, msg: &data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_CHAN_SEND, chan_handle, msg as *const data::IpcMessage as usize) }
+    }
+
+    /// Receive a message from a channel (blocking if empty).
+    pub fn chan_recv(chan_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_CHAN_RECV, chan_handle, msg as *mut data::IpcMessage as usize) }
+    }
+
+    /// Non-blocking receive from a channel.
+    ///
+    /// Returns `Err(Error::Again)` if the channel is empty.
+    pub fn chan_try_recv(chan_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_CHAN_TRY_RECV, chan_handle, msg as *mut data::IpcMessage as usize) }
+    }
+
+    /// Close and destroy a channel.
+    pub fn chan_close(chan_handle: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_CHAN_CLOSE, chan_handle) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Signals (block 320-332)
+    // -----------------------------------------------------------------------
+
+    /// Send a signal to a process.
+    pub fn kill(pid: isize, signal: u32) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_KILL, pid as usize, signal as usize) }
+    }
+
+    /// Examine and change blocked signals.
+    ///
+    /// `how`: SIG_BLOCK / SIG_UNBLOCK / SIG_SETMASK.
+    /// `set_ptr` / `oldset_ptr`: pointers to signal set bitmasks (0 = ignore).
+    pub fn sigprocmask(how: i32, set_ptr: usize, oldset_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall3(number::SYS_SIGPROCMASK, how as usize, set_ptr, oldset_ptr) }
+    }
+
+    /// Install a signal handler.
+    ///
+    /// `signum`: signal number.
+    /// `act_ptr`: pointer to new `SigAction` (0 = query only).
+    /// `oldact_ptr`: pointer to receive previous action (0 = ignore).
+    pub fn sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall3(number::SYS_SIGACTION, signum, act_ptr, oldact_ptr) }
+    }
+
+    /// Set or query the alternate signal stack.
+    pub fn sigaltstack(ss_ptr: usize, old_ss_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_SIGALTSTACK, ss_ptr, old_ss_ptr) }
+    }
+
+    /// Return the set of pending signals.
+    pub fn sigpending(set_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SIGPENDING, set_ptr) }
+    }
+
+    /// Temporarily replace the signal mask and suspend until a signal arrives.
+    pub fn sigsuspend(mask: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SIGSUSPEND, mask) }
+    }
+
+    /// Wait for a signal from `set`, with optional timeout.
+    pub fn sigtimedwait(
+        set_ptr: usize,
+        info_ptr: usize,
+        timeout_ptr: usize,
+    ) -> error::Result<usize> {
+        unsafe { syscall3(number::SYS_SIGTIMEDWAIT, set_ptr, info_ptr, timeout_ptr) }
+    }
+
+    /// Queue a signal with a value to a process.
+    pub fn sigqueue(pid: isize, signal: u32, value: usize) -> error::Result<usize> {
+        unsafe { syscall3(number::SYS_SIGQUEUE, pid as usize, signal as usize, value) }
+    }
+
+    /// Send a signal to a process group.
+    pub fn killpg(pgrp: usize, signal: u32) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_KILLPG, pgrp, signal as usize) }
+    }
+
+    /// Get the value of an interval timer.
+    pub fn getitimer(which: u32, value_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_GETITIMER, which as usize, value_ptr) }
+    }
+
+    /// Set an interval timer.
+    pub fn setitimer(
+        which: u32,
+        new_value_ptr: usize,
+        old_value_ptr: usize,
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_SETITIMER,
+                which as usize,
+                new_value_ptr,
+                old_value_ptr,
+            )
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Network (block 410-412)
+    // -----------------------------------------------------------------------
+
+    /// Receive a network packet into `buf`.
+    ///
+    /// Returns the number of bytes received.
+    pub fn net_recv(buf: &mut [u8]) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_NET_RECV, buf.as_mut_ptr() as usize, buf.len()) }
+    }
+
+    /// Send a network packet from `buf`.
+    pub fn net_send(buf: &[u8]) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_NET_SEND, buf.as_ptr() as usize, buf.len()) }
+    }
+
+    /// Query network device information.
+    ///
+    /// `info_type`: type of info requested. `buf_ptr`: output buffer.
+    pub fn net_info(info_type: usize, buf_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_NET_INFO, info_type, buf_ptr) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Volumes / block devices (block 420-422)
+    // -----------------------------------------------------------------------
+
+    /// Read sectors from a volume.
+    ///
+    /// `handle`: volume capability handle.
+    /// `lba`: starting logical block address.
+    /// `buf_ptr`: destination buffer in user memory.
+    /// `sector_count`: number of 512-byte sectors to read.
+    pub fn volume_read(
+        handle: usize,
+        lba: usize,
+        buf_ptr: usize,
+        sector_count: usize,
+    ) -> error::Result<usize> {
+        unsafe { syscall4(number::SYS_VOLUME_READ, handle, lba, buf_ptr, sector_count) }
+    }
+
+    /// Write sectors to a volume.
+    pub fn volume_write(
+        handle: usize,
+        lba: usize,
+        buf_ptr: usize,
+        sector_count: usize,
+    ) -> error::Result<usize> {
+        unsafe { syscall4(number::SYS_VOLUME_WRITE, handle, lba, buf_ptr, sector_count) }
+    }
+
+    /// Query volume metadata (e.g. total sector count).
+    pub fn volume_info(handle: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_VOLUME_INFO, handle) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Debug (block 600)
+    // -----------------------------------------------------------------------
+
+    /// Write a debug log message to the kernel serial console.
+    pub fn debug_log(msg: &[u8]) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_DEBUG_LOG, msg.as_ptr() as usize, msg.len()) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Module management (block 700-703)
+    // -----------------------------------------------------------------------
+
+    /// Load a kernel module by name.
+    ///
+    /// Returns a module ID on success.
+    pub fn module_load(name: &[u8]) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_MODULE_LOAD, name.as_ptr() as usize, name.len()) }
+    }
+
+    /// Unload a previously loaded kernel module.
+    pub fn module_unload(module_id: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_MODULE_UNLOAD, module_id) }
+    }
+
+    /// Look up a symbol exported by a kernel module.
+    ///
+    /// `module_id`: module to query. `sym_name_ptr`: pointer to symbol name.
+    /// Returns the symbol address.
+    pub fn module_get_symbol(module_id: usize, sym_name_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_MODULE_GET_SYMBOL, module_id, sym_name_ptr) }
+    }
+
+    /// Query metadata about a loaded module.
+    pub fn module_query(module_id: usize, buf_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_MODULE_QUERY, module_id, buf_ptr) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Silo management (block 800-808)
+    // -----------------------------------------------------------------------
+
+    /// Create a new silo (isolated execution environment).
+    ///
+    /// `config_ptr`: pointer to silo configuration structure.
+    /// Returns the silo ID.
+    pub fn silo_create(config_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SILO_CREATE, config_ptr) }
+    }
+
+    /// Configure an existing silo.
+    pub fn silo_config(silo_id: usize, config_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_SILO_CONFIG, silo_id, config_ptr) }
+    }
+
+    /// Attach a loaded kernel module to a silo.
+    pub fn silo_attach_module(silo_id: usize, module_id: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_SILO_ATTACH_MODULE, silo_id, module_id) }
+    }
+
+    /// Start a silo (begin executing its init process).
+    pub fn silo_start(silo_id: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SILO_START, silo_id) }
+    }
+
+    /// Gracefully stop a silo.
+    pub fn silo_stop(silo_id: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SILO_STOP, silo_id) }
+    }
+
+    /// Force-kill a silo and all its processes.
+    pub fn silo_kill(silo_id: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SILO_KILL, silo_id) }
+    }
+
+    /// Dequeue the next event from a silo's event queue.
+    ///
+    /// Returns the raw event value, or `Err(Error::Again)` if empty.
+    pub fn silo_event_next(silo_id: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SILO_EVENT_NEXT, silo_id) }
+    }
+
+    /// Suspend a running silo.
+    pub fn silo_suspend(silo_id: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SILO_SUSPEND, silo_id) }
+    }
+
+    /// Resume a suspended silo.
+    pub fn silo_resume(silo_id: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SILO_RESUME, silo_id) }
     }
 }

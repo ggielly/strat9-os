@@ -1313,7 +1313,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
 
     if let Some((pid, tid, name, state, as_cr3, as_is_kernel)) = task_meta {
         crate::serial_println!(
-            "[handle_user_fault] task={} pid={} tid={} name='{}' state={:?} reason={:?} rip={:#x} extra={:#x} subcode={:#x} as_cr3={:#x} as_kernel={}",
+            "\x1b[31m[handle_user_fault]\x1b[0m task={} \x1b[36mpid={}\x1b[0m tid={} name='{}' state={:?} reason={:?} \x1b[35mrip={:#x}\x1b[0m \x1b[35mextra={:#x}\x1b[0m subcode={:#x} as_cr3={:#x} as_kernel={}",
             task_id.as_u64(),
             pid,
             tid,
@@ -1328,7 +1328,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
         );
     } else {
         crate::serial_println!(
-            "[handle_user_fault] task={} reason={:?} rip={:#x} extra={:#x} subcode={:#x} (task metadata unavailable)",
+            "\x1b[31m[handle_user_fault]\x1b[0m task={} reason={:?} \x1b[35mrip={:#x}\x1b[0m \x1b[35mextra={:#x}\x1b[0m subcode={:#x} (task metadata unavailable)",
             task_id.as_u64(),
             reason,
             rip,
@@ -1347,7 +1347,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
         let shadow_stack = (subcode & 0x40) != 0;
         let sgx = (subcode & 0x8000) != 0;
         crate::serial_println!(
-            "[handle_user_fault] pagefault addr={:#x} rip={:#x} ec={:#x} present={} write={} user={} reserved={} ifetch={} pkey={} shadow_stack={} sgx={}",
+            "\x1b[31m[handle_user_fault]\x1b[0m \x1b[31mpagefault\x1b[0m \x1b[35maddr={:#x}\x1b[0m \x1b[35mrip={:#x}\x1b[0m ec={:#x} present={} write={} user={} reserved={} ifetch={} pkey={} shadow_stack={} sgx={}",
             extra,
             rip,
             subcode,
@@ -1360,9 +1360,15 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
             shadow_stack,
             sgx
         );
+        if user && extra < 0x1000 {
+            crate::serial_println!(
+                "\x1b[31m[handle_user_fault]\x1b[0m \x1b[33mhint: low user address fault ({:#x}) -> probable NULL/near-NULL dereference\x1b[0m",
+                extra
+            );
+        }
     } else {
         crate::serial_println!(
-            "[handle_user_fault] fault detail rip={:#x} code={:#x}",
+            "\x1b[31m[handle_user_fault]\x1b[0m \x1b[31mfault detail\x1b[0m \x1b[35mrip={:#x}\x1b[0m code={:#x}",
             rip,
             subcode
         );
