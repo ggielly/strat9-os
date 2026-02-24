@@ -307,7 +307,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             user_accessible: true,
         };
         if unsafe { &*task.address_space.get() }
-            .reserve_region(
+            .map_region(
                 old_page_end,
                 n_pages,
                 vma_flags,

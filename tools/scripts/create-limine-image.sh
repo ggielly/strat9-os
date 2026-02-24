@@ -15,6 +15,8 @@ KERNEL_ELF="target/x86_64-unknown-none/${PROFILE}/kernel"
 FS_EXT4_ELF="target/x86_64-unknown-none/${PROFILE}/fs-ext4-strate"
 FS_RAM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-fs-ramfs"
 INIT_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_pid"
+INIT_ELF="target/x86_64-unknown-none/${PROFILE}/init"
+CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 
 echo ""
 echo "=== Creating Limine bootable image ==="
@@ -54,6 +56,18 @@ if [ -f "$INIT_TEST_ELF" ]; then
     echo "    init-test   : $init_size bytes"
 else
     echo "    init-test   : (missing)"
+fi
+if [ -f "$INIT_ELF" ]; then
+    init_real_size=$(stat -c%s "$INIT_ELF")
+    echo "    init        : $init_real_size bytes"
+else
+    echo "    init        : (missing)"
+fi
+if [ -f "$CONSOLE_ADMIN_ELF" ]; then
+    ca_size=$(stat -c%s "$CONSOLE_ADMIN_ELF")
+    echo "    console-admin: $ca_size bytes"
+else
+    echo "    console-admin: (missing)"
 fi
 echo ""
 
@@ -96,9 +110,21 @@ if [ -f "$INIT_TEST_ELF" ]; then
     cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
     echo "  [OK] Copied init-test binary: /initfs/test_pid"
 else
-    echo "  ERROR: init-test binary not found at $INIT_TEST_ELF"
-    echo "  Build it first (e.g. cargo make strate-silo-test or strate-silo-test-release)"
-    exit 1
+    echo "  [WARN] init-test binary not found at $INIT_TEST_ELF (optional fallback)"
+fi
+
+if [ -f "$INIT_ELF" ]; then
+    cp "$INIT_ELF" "$ISO_ROOT/initfs/init"
+    echo "  [OK] Copied init process: /initfs/init"
+else
+    echo "  [WARN] init binary not found at $INIT_ELF"
+fi
+
+if [ -f "$CONSOLE_ADMIN_ELF" ]; then
+    cp "$CONSOLE_ADMIN_ELF" "$ISO_ROOT/initfs/console-admin"
+    echo "  [OK] Copied console-admin: /initfs/console-admin"
+else
+    echo "  [WARN] console-admin binary not found at $CONSOLE_ADMIN_ELF"
 fi
 
 # Create ISO using xorriso

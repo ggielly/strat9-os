@@ -1,0 +1,14 @@
+[package]
+name = "strate-console-admin"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Console admin silo for strat9-os. Interactive shell with silo management."
+
+[[bin]]
+name = "console-admin"
+path = "src/main.rs"
+
+[dependencies]
+strat9-syscall = { path = "../syscall", features = ["userspace"] }
