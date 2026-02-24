@@ -669,41 +669,32 @@ pub mod call {
     }
 
     /// Send a message through an IPC port.
-    ///
-    /// `port_handle`: capability handle for the port.
-    /// `msg_ptr`: pointer to a 64-byte `IpcMessage` in user memory.
-    pub fn ipc_send(port_handle: usize, msg_ptr: usize) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_IPC_SEND, port_handle, msg_ptr) }
+    pub fn ipc_send(port_handle: usize, msg: &data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_SEND, port_handle, msg as *const data::IpcMessage as usize) }
     }
 
     /// Receive a message from an IPC port (blocking).
-    ///
-    /// `port_handle`: capability handle.
-    /// `msg_ptr`: pointer to a 64-byte output buffer in user memory.
-    pub fn ipc_recv(port_handle: usize, msg_ptr: usize) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_IPC_RECV, port_handle, msg_ptr) }
+    pub fn ipc_recv(port_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_RECV, port_handle, msg as *mut data::IpcMessage as usize) }
     }
 
     /// Non-blocking receive from an IPC port.
     ///
     /// Returns `Err(Error::Again)` if the port is empty.
-    pub fn ipc_try_recv(port_handle: usize, msg_ptr: usize) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_IPC_TRY_RECV, port_handle, msg_ptr) }
+    pub fn ipc_try_recv(port_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_TRY_RECV, port_handle, msg as *mut data::IpcMessage as usize) }
     }
 
     /// Send a message and block until a reply arrives (RPC-style).
     ///
-    /// `msg_ptr`: pointer to a 64-byte `IpcMessage` buffer.
-    /// On return the buffer is overwritten with the reply.
-    pub fn ipc_call(port_handle: usize, msg_ptr: usize) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_IPC_CALL, port_handle, msg_ptr) }
+    /// On return the message buffer is overwritten with the reply.
+    pub fn ipc_call(port_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_CALL, port_handle, msg as *mut data::IpcMessage as usize) }
     }
 
     /// Reply to the sender of the last received message.
-    ///
-    /// `msg_ptr`: pointer to a 64-byte `IpcMessage` reply buffer.
-    pub fn ipc_reply(msg_ptr: usize) -> error::Result<usize> {
-        unsafe { syscall1(number::SYS_IPC_REPLY, msg_ptr) }
+    pub fn ipc_reply(msg: &data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_IPC_REPLY, msg as *const data::IpcMessage as usize) }
     }
 
     /// Bind an IPC port to a named path in the namespace.
@@ -752,25 +743,20 @@ pub mod call {
     }
 
     /// Send a message into a channel (blocking if full).
-    ///
-    /// `chan_handle`: capability handle.
-    /// `msg_ptr`: pointer to a 64-byte `IpcMessage`.
-    pub fn chan_send(chan_handle: usize, msg_ptr: usize) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_CHAN_SEND, chan_handle, msg_ptr) }
+    pub fn chan_send(chan_handle: usize, msg: &data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_CHAN_SEND, chan_handle, msg as *const data::IpcMessage as usize) }
     }
 
     /// Receive a message from a channel (blocking if empty).
-    ///
-    /// `msg_ptr`: pointer to a 64-byte output buffer.
-    pub fn chan_recv(chan_handle: usize, msg_ptr: usize) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_CHAN_RECV, chan_handle, msg_ptr) }
+    pub fn chan_recv(chan_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_CHAN_RECV, chan_handle, msg as *mut data::IpcMessage as usize) }
     }
 
     /// Non-blocking receive from a channel.
     ///
     /// Returns `Err(Error::Again)` if the channel is empty.
-    pub fn chan_try_recv(chan_handle: usize, msg_ptr: usize) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_CHAN_TRY_RECV, chan_handle, msg_ptr) }
+    pub fn chan_try_recv(chan_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_CHAN_TRY_RECV, chan_handle, msg as *mut data::IpcMessage as usize) }
     }
 
     /// Close and destroy a channel.

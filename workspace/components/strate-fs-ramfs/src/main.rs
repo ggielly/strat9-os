@@ -40,24 +40,7 @@ const OPCODE_CREATE_FILE: u32 = 0x05;
 const OPCODE_CREATE_DIR: u32 = 0x06;
 const OPCODE_UNLINK: u32 = 0x07;
 
-#[repr(C, align(64))]
-struct IpcMessage {
-    sender: u64,
-    msg_type: u32,
-    flags: u32,
-    payload: [u8; 48],
-}
-
-impl IpcMessage {
-    fn new(msg_type: u32) -> Self {
-        Self {
-            sender: 0,
-            msg_type,
-            flags: 0,
-            payload: [0u8; 48],
-        }
-    }
-}
+use strat9_syscall::data::IpcMessage;
 
 struct StrateRamServer {
     fs: RamFileSystem,
@@ -228,7 +211,7 @@ impl StrateRamServer {
     fn serve(&mut self, port: u64) -> ! {
         loop {
             let mut msg = IpcMessage::new(0);
-            if call::ipc_recv(port as usize, &mut msg as *mut _ as usize).is_ok() {
+            if call::ipc_recv(port as usize, &mut msg).is_ok() {
                 let reply = match msg.msg_type {
                     OPCODE_OPEN => self.handle_open(msg.sender, &msg.payload),
                     OPCODE_READ => self.handle_read(msg.sender, &msg.payload),
@@ -242,7 +225,7 @@ impl StrateRamServer {
                         r
                     }
                 };
-                let _ = call::ipc_reply(&reply as *const _ as usize);
+                let _ = call::ipc_reply(&reply);
             }
         }
     }

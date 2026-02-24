@@ -229,7 +229,7 @@ impl NetworkStrate {
                     OPCODE_CLOSE => self.handle_close(&msg),
                     _ => IpcMessage::error_reply(msg.sender, -22),
                 };
-                let _ = call::ipc_reply(&reply as *const IpcMessage as usize);
+                let _ = call::ipc_reply(&reply);
             }
 
             if !got_ipc && poll_result == smoltcp::iface::PollResult::None {

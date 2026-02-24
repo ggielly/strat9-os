@@ -3,9 +3,8 @@
 //! Kernel return values follow the Linux convention: on error, RAX contains
 //! `-errno` (signed integer, two's complement).
 
-use core::fmt;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-// Errno constants (aligned with kernel / POSIX)
 pub const EPERM: usize = 1;
 pub const ENOENT: usize = 2;
 pub const EINTR: usize = 4;
@@ -28,97 +27,80 @@ pub const ENOTSUP: usize = 52;
 pub const ENOBUFS: usize = 105;
 pub const ETIMEDOUT: usize = 110;
 
-/// Range of negative errno values returned by the kernel (Linux-style).
 const ERRNO_MAX: isize = 4095;
 
 /// Syscall error type for userspace programs.
 ///
-/// Variant names are aligned with the kernel's `SyscallError` for consistency.
-/// The `Unknown(usize)` variant preserves unrecognized errno codes instead
-/// of silently mapping them to a wrong variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Discriminant values match POSIX errno codes. The `Unknown` catch-all
+/// variant preserves unrecognized errno values for forward compatibility.
+///
+/// Conversions via `From<usize>` (from errno) and `Into<usize>` (to errno)
+/// are derived by `num_enum` and replace the hand-rolled match tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive, thiserror::Error)]
 #[must_use]
+#[repr(usize)]
 pub enum Error {
-    PermissionDenied,
-    NotFound,
-    Interrupted,
-    IoError,
-    ArgumentListTooLong,
-    ExecFormatError,
-    BadHandle,
-    NoChildren,
-    Again,
-    OutOfMemory,
-    AccessDenied,
-    Fault,
-    AlreadyExists,
-    InvalidArgument,
-    NotATty,
-    NoSpace,
-    Pipe,
-    NotSupported,
-    NotImplemented,
-    QueueFull,
-    TimedOut,
-    /// Unrecognized errno — preserves the raw code for forward compatibility.
+    #[error("Operation not permitted")]
+    PermissionDenied    = EPERM,
+    #[error("No such file or directory")]
+    NotFound            = ENOENT,
+    #[error("Interrupted system call")]
+    Interrupted         = EINTR,
+    #[error("Input/output error")]
+    IoError             = EIO,
+    #[error("Argument list too long")]
+    ArgumentListTooLong = E2BIG,
+    #[error("Exec format error")]
+    ExecFormatError     = ENOEXEC,
+    #[error("Bad file descriptor")]
+    BadHandle           = EBADF,
+    #[error("No child processes")]
+    NoChildren          = ECHILD,
+    #[error("Resource temporarily unavailable")]
+    Again               = EAGAIN,
+    #[error("Cannot allocate memory")]
+    OutOfMemory         = ENOMEM,
+    #[error("Permission denied")]
+    AccessDenied        = EACCES,
+    #[error("Bad address")]
+    Fault               = EFAULT,
+    #[error("File exists")]
+    AlreadyExists       = EEXIST,
+    #[error("Invalid argument")]
+    InvalidArgument     = EINVAL,
+    #[error("Not a typewriter")]
+    NotATty             = ENOTTY,
+    #[error("No space left on device")]
+    NoSpace             = ENOSPC,
+    #[error("Broken pipe")]
+    Pipe                = EPIPE,
+    #[error("Function not implemented")]
+    NotImplemented      = ENOSYS,
+    #[error("Not supported")]
+    NotSupported        = ENOTSUP,
+    #[error("No buffer space available")]
+    QueueFull           = ENOBUFS,
+    #[error("Connection timed out")]
+    TimedOut            = ETIMEDOUT,
+    #[error("Unknown error (errno={0})")]
+    #[num_enum(catch_all)]
     Unknown(usize),
 }
 
 impl Error {
     /// Build an error from a positive errno code (e.g. 2 for ENOENT).
+    ///
+    /// Never panics: the `#[num_enum(catch_all)]` variant guarantees
+    /// exhaustive mapping — unrecognized codes land in `Unknown(n)`.
+    #[inline]
     pub fn from_errno(errno: usize) -> Self {
-        match errno {
-            EPERM => Error::PermissionDenied,
-            ENOENT => Error::NotFound,
-            EINTR => Error::Interrupted,
-            EIO => Error::IoError,
-            E2BIG => Error::ArgumentListTooLong,
-            ENOEXEC => Error::ExecFormatError,
-            EBADF => Error::BadHandle,
-            ECHILD => Error::NoChildren,
-            EAGAIN => Error::Again,
-            ENOMEM => Error::OutOfMemory,
-            EACCES => Error::AccessDenied,
-            EFAULT => Error::Fault,
-            EEXIST => Error::AlreadyExists,
-            EINVAL => Error::InvalidArgument,
-            ENOTTY => Error::NotATty,
-            ENOSPC => Error::NoSpace,
-            EPIPE => Error::Pipe,
-            ENOTSUP => Error::NotSupported,
-            ENOSYS => Error::NotImplemented,
-            ENOBUFS => Error::QueueFull,
-            ETIMEDOUT => Error::TimedOut,
-            other => Error::Unknown(other),
-        }
+        Self::try_from(errno).unwrap_or(Error::Unknown(errno))
     }
 
     /// Return the corresponding positive errno code.
+    #[inline]
     pub fn to_errno(&self) -> usize {
-        match self {
-            Error::PermissionDenied => EPERM,
-            Error::NotFound => ENOENT,
-            Error::Interrupted => EINTR,
-            Error::IoError => EIO,
-            Error::ArgumentListTooLong => E2BIG,
-            Error::ExecFormatError => ENOEXEC,
-            Error::BadHandle => EBADF,
-            Error::NoChildren => ECHILD,
-            Error::Again => EAGAIN,
-            Error::OutOfMemory => ENOMEM,
-            Error::AccessDenied => EACCES,
-            Error::Fault => EFAULT,
-            Error::AlreadyExists => EEXIST,
-            Error::InvalidArgument => EINVAL,
-            Error::NotATty => ENOTTY,
-            Error::NoSpace => ENOSPC,
-            Error::Pipe => EPIPE,
-            Error::NotSupported => ENOTSUP,
-            Error::NotImplemented => ENOSYS,
-            Error::QueueFull => ENOBUFS,
-            Error::TimedOut => ETIMEDOUT,
-            Error::Unknown(n) => *n,
-        }
+        usize::from(*self)
     }
 
     /// Demultiplex the raw syscall return value (RAX).
@@ -143,65 +125,30 @@ impl Error {
     #[inline]
     pub fn name(&self) -> &'static str {
         match self {
-            Error::PermissionDenied => "EPERM",
-            Error::NotFound => "ENOENT",
-            Error::Interrupted => "EINTR",
-            Error::IoError => "EIO",
+            Error::PermissionDenied    => "EPERM",
+            Error::NotFound            => "ENOENT",
+            Error::Interrupted         => "EINTR",
+            Error::IoError             => "EIO",
             Error::ArgumentListTooLong => "E2BIG",
-            Error::ExecFormatError => "ENOEXEC",
-            Error::BadHandle => "EBADF",
-            Error::NoChildren => "ECHILD",
-            Error::Again => "EAGAIN",
-            Error::OutOfMemory => "ENOMEM",
-            Error::AccessDenied => "EACCES",
-            Error::Fault => "EFAULT",
-            Error::AlreadyExists => "EEXIST",
-            Error::InvalidArgument => "EINVAL",
-            Error::NotATty => "ENOTTY",
-            Error::NoSpace => "ENOSPC",
-            Error::Pipe => "EPIPE",
-            Error::NotSupported => "ENOTSUP",
-            Error::NotImplemented => "ENOSYS",
-            Error::QueueFull => "ENOBUFS",
-            Error::TimedOut => "ETIMEDOUT",
-            Error::Unknown(_) => "E???",
+            Error::ExecFormatError     => "ENOEXEC",
+            Error::BadHandle           => "EBADF",
+            Error::NoChildren          => "ECHILD",
+            Error::Again               => "EAGAIN",
+            Error::OutOfMemory         => "ENOMEM",
+            Error::AccessDenied        => "EACCES",
+            Error::Fault               => "EFAULT",
+            Error::AlreadyExists       => "EEXIST",
+            Error::InvalidArgument     => "EINVAL",
+            Error::NotATty             => "ENOTTY",
+            Error::NoSpace             => "ENOSPC",
+            Error::Pipe                => "EPIPE",
+            Error::NotSupported        => "ENOTSUP",
+            Error::NotImplemented      => "ENOSYS",
+            Error::QueueFull           => "ENOBUFS",
+            Error::TimedOut            => "ETIMEDOUT",
+            Error::Unknown(_)          => "E???",
         }
     }
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::PermissionDenied => write!(f, "Operation not permitted"),
-            Error::NotFound => write!(f, "No such file or directory"),
-            Error::Interrupted => write!(f, "Interrupted system call"),
-            Error::IoError => write!(f, "Input/output error"),
-            Error::ArgumentListTooLong => write!(f, "Argument list too long"),
-            Error::ExecFormatError => write!(f, "Exec format error"),
-            Error::BadHandle => write!(f, "Bad file descriptor"),
-            Error::NoChildren => write!(f, "No child processes"),
-            Error::Again => write!(f, "Resource temporarily unavailable"),
-            Error::OutOfMemory => write!(f, "Cannot allocate memory"),
-            Error::AccessDenied => write!(f, "Permission denied"),
-            Error::Fault => write!(f, "Bad address"),
-            Error::AlreadyExists => write!(f, "File exists"),
-            Error::InvalidArgument => write!(f, "Invalid argument"),
-            Error::NotATty => write!(f, "Not a typewriter"),
-            Error::NoSpace => write!(f, "No space left on device"),
-            Error::Pipe => write!(f, "Broken pipe"),
-            Error::NotSupported => write!(f, "Not supported"),
-            Error::NotImplemented => write!(f, "Function not implemented"),
-            Error::QueueFull => write!(f, "No buffer space available"),
-            Error::TimedOut => write!(f, "Connection timed out"),
-            Error::Unknown(n) => write!(f, "Unknown error (errno={})", n),
-        }
-    }
-}
-
-impl core::error::Error for Error {}
-
-#[cfg(feature = "std")]
-impl std::error::Error for Error {}
-
-// Result type alias
 pub type Result<T> = core::result::Result<T, Error>;
