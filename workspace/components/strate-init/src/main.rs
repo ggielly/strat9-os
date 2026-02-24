@@ -94,9 +94,7 @@ fn create_console_admin_silo() -> Result<(), &'static str> {
     // Attach the module
     call::silo_attach_module(silo_handle, module_handle).map_err(|_| "silo_attach failed")?;
 
-    // Configure: grant console + silo admin capabilities
-    // For now use a minimal config (zeroed = defaults)
-    let config = SiloConfigUser::zeroed();
+    let config = SiloConfigUser::admin();
     let config_ptr = &config as *const SiloConfigUser as usize;
     call::silo_config(silo_handle, config_ptr).map_err(|_| "silo_config failed")?;
 
@@ -118,6 +116,8 @@ fn monitor_loop() -> ! {
     }
 }
 
+const SILO_FLAG_ADMIN: u64 = 1 << 0;
+
 #[repr(C)]
 struct SiloConfigUser {
     mem_min: u64,
@@ -131,10 +131,11 @@ struct SiloConfigUser {
     io_bw_write: u64,
     caps_ptr: u64,
     caps_len: u64,
+    flags: u64,
 }
 
 impl SiloConfigUser {
-    const fn zeroed() -> Self {
+    const fn admin() -> Self {
         SiloConfigUser {
             mem_min: 0,
             mem_max: 0,
@@ -147,6 +148,7 @@ impl SiloConfigUser {
             io_bw_write: 0,
             caps_ptr: 0,
             caps_len: 0,
+            flags: SILO_FLAG_ADMIN,
         }
     }
 }
