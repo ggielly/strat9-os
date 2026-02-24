@@ -389,6 +389,22 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 }
             }
         }
+        if let Some((base, size)) = crate::limine_entry::init_module() {
+            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            if let Err(e) = vfs::register_initfs_file("init", data.as_ptr(), data.len()) {
+                serial_println!("[init] Failed to register /initfs/init: {:?}", e);
+            } else {
+                serial_println!("[init] Registered /initfs/init ({} bytes)", size);
+            }
+        }
+        if let Some((base, size)) = crate::limine_entry::console_admin_module() {
+            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            if let Err(e) = vfs::register_initfs_file("console-admin", data.as_ptr(), data.len()) {
+                serial_println!("[init] Failed to register /initfs/console-admin: {:?}", e);
+            } else {
+                serial_println!("[init] Registered /initfs/console-admin ({} bytes)", size);
+            }
+        }
 
         serial_println!("[init] Components (process)...");
         vga_println!("[..] Initializing process components...");
@@ -440,16 +456,26 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         serial_println!("[init] Storage verification skipped (boot path)");
         vga_println!("[..] Storage verification skipped at boot");
 
-        if args.initfs_base != 0 && args.initfs_size != 0 {
-            let elf_data = unsafe {
-                core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
-            };
-            // Keep task name "init" so bootstrap capabilities (including console/admin path)
-            // are granted exactly like the previous init flow.
+        // Launch the init process: prefer /initfs/init, fall back to /initfs/test_pid
+        if let Some((base, size)) = crate::limine_entry::init_module() {
+            let elf_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
             match process::elf::load_and_run_elf(elf_data, "init") {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
-                    serial_println!("[init] ELF '/initfs/test_pid' loaded as task 'init'.");
+                    serial_println!("[init] ELF '/initfs/init' loaded as task 'init'.");
+                }
+                Err(e) => {
+                    serial_println!("[init] Failed to load init ELF: {}", e);
+                }
+            }
+        } else if args.initfs_base != 0 && args.initfs_size != 0 {
+            let elf_data = unsafe {
+                core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
+            };
+            match process::elf::load_and_run_elf(elf_data, "init") {
+                Ok(task_id) => {
+                    init_task_id = Some(task_id);
+                    serial_println!("[init] ELF '/initfs/test_pid' loaded as task 'init' (fallback).");
                 }
                 Err(e) => {
                     serial_println!("[init] Failed to load test_pid ELF: {}", e);

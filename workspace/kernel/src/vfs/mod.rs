@@ -315,6 +315,20 @@ pub fn sys_read(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError
         return Ok(0);
     }
 
+    // Special case for stdin (fd 0): read from the kernel keyboard buffer.
+    // Userspace processes get one byte at a time (non-blocking: yields until
+    // a key is available, then returns 1 byte).
+    if fd == STDIN {
+        loop {
+            if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
+                let user = UserSliceWrite::new(buf_ptr, 1)?;
+                user.copy_from(&[ch]);
+                return Ok(1);
+            }
+            crate::process::yield_task();
+        }
+    }
+
     // Read directly into chunks to avoid large kernel allocations
     let mut kbuf = [0u8; 4096];
     let mut total_read = 0;
