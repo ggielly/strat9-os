@@ -9,6 +9,7 @@ repository.workspace = true
 
 
 [dependencies]
+strat9-syscall = { path = "../syscall", optional = true }
 
 [features]
 default = []
@@ -17,3 +18,5 @@ nightly = []
 alloc = []
 # Enable full standard library (user mode / WinFsp)
 std = ["alloc"]
+# Enable From<FsError> for strat9_syscall::error::Error
+syscall = ["dep:strat9-syscall"]

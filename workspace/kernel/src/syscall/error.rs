@@ -166,6 +166,30 @@ impl From<crate::drivers::virtio::block::BlockError> for SyscallError {
     }
 }
 
+impl From<crate::ipc::port::IpcError> for SyscallError {
+    fn from(err: crate::ipc::port::IpcError) -> Self {
+        use crate::ipc::port::IpcError;
+        match err {
+            IpcError::PortNotFound => SyscallError::NotFound,
+            IpcError::NotOwner => SyscallError::PermissionDenied,
+            IpcError::PortDestroyed => SyscallError::Pipe,
+        }
+    }
+}
+
+impl From<crate::drivers::virtio::net::NetError> for SyscallError {
+    fn from(err: crate::drivers::virtio::net::NetError) -> Self {
+        use crate::drivers::virtio::net::NetError;
+        match err {
+            NetError::NoPacket => SyscallError::Again,
+            NetError::TxQueueFull => SyscallError::QueueFull,
+            NetError::BufferTooSmall => SyscallError::InvalidArgument,
+            NetError::NotReady => SyscallError::Again,
+            NetError::LinkDown => SyscallError::IoError,
+        }
+    }
+}
+
 impl From<crate::ipc::channel::ChannelError> for SyscallError {
     fn from(err: crate::ipc::channel::ChannelError) -> Self {
         use crate::ipc::channel::ChannelError;

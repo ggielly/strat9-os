@@ -467,9 +467,7 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let device = crate::drivers::virtio::net::get_device().ok_or(SyscallError::NotImplemented)?;
     let mut kbuf = vec![0u8; buf_len as usize];
 
-    let n = device
-        .receive(&mut kbuf)
-        .map_err(|_| SyscallError::IoError)?;
+    let n = device.receive(&mut kbuf).map_err(SyscallError::from)?;
 
     let user = UserSliceWrite::new(buf_ptr, n)?;
     user.copy_from(&kbuf[..n]);
@@ -481,7 +479,7 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let user = UserSliceRead::new(buf_ptr, buf_len as usize)?;
     let kbuf = user.read_to_vec();
 
-    device.transmit(&kbuf).map_err(|_| SyscallError::IoError)?;
+    device.transmit(&kbuf).map_err(SyscallError::from)?;
 
     Ok(buf_len)
 }
@@ -559,7 +557,7 @@ fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
-    port.send(msg).map_err(|_| SyscallError::BadHandle)?;
+    port.send(msg).map_err(SyscallError::from)?;
     Ok(0)
 }
 
@@ -583,7 +581,7 @@ fn sys_ipc_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
-    let mut msg = port.recv().map_err(|_| SyscallError::BadHandle)?;
+    let mut msg = port.recv().map_err(SyscallError::from)?;
 
     // Handle transfer (optional): msg.flags contains a handle in the sender table.
     if msg.flags != 0 {
@@ -634,7 +632,7 @@ fn sys_ipc_try_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
-    let msg_opt = port.try_recv().map_err(|_| SyscallError::BadHandle)?;
+    let msg_opt = port.try_recv().map_err(SyscallError::from)?;
 
     let mut msg = match msg_opt {
         Some(m) => m,
@@ -712,7 +710,7 @@ fn sys_ipc_call(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
-    port.send(msg).map_err(|_| SyscallError::BadHandle)?;
+    port.send(msg).map_err(SyscallError::from)?;
 
     let reply_msg = reply::wait_for_reply(task.id);
     let mut out_buf = [0u8; MSG_SIZE];
@@ -940,7 +938,7 @@ fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     let chan_id = ChanId::from_u64(cap.resource as u64);
 
     let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
-    chan.send(msg).map_err(|_| SyscallError::BadHandle)?;
+    chan.send(msg).map_err(SyscallError::from)?;
 
     Ok(0)
 }
@@ -962,7 +960,7 @@ fn sys_chan_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     let chan_id = ChanId::from_u64(cap.resource as u64);
 
     let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
-    let msg = chan.recv().map_err(|_| SyscallError::BadHandle)?;
+    let msg = chan.recv().map_err(SyscallError::from)?;
 
     // Write the received message to userspace.
     let user_slice = UserSliceWrite::new(msg_ptr, 64).map_err(SyscallError::from)?;
@@ -1025,7 +1023,7 @@ fn sys_chan_close(handle: u64) -> Result<u64, SyscallError> {
         return Err(SyscallError::BadHandle);
     }
     let chan_id = ChanId::from_u64(cap.resource as u64);
-    channel::destroy_channel(chan_id).map_err(|_| SyscallError::BadHandle)?;
+    channel::destroy_channel(chan_id).map_err(SyscallError::from)?;
 
     log::debug!("syscall: CHAN_CLOSE(handle={}) → chan={}", handle, chan_id);
     Ok(0)
