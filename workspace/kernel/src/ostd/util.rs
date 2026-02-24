@@ -11,7 +11,6 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::fmt;
 
 /// A set of IDs (e.g., CPU IDs, task IDs)
 ///
@@ -226,40 +225,24 @@ pub const fn round_down(value: usize, align: usize) -> usize {
     bits::align_down(value, align)
 }
 
-/// Error type for OSTD operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
-    /// Out of memory
+    #[error("out of memory")]
     OutOfMemory,
-    /// Invalid argument
+    #[error("invalid argument")]
     InvalidArgument,
-    /// Not found
+    #[error("not found")]
     NotFound,
-    /// Already exists
+    #[error("already exists")]
     AlreadyExists,
-    /// Permission denied
+    #[error("permission denied")]
     PermissionDenied,
-    /// Busy
+    #[error("busy")]
     Busy,
-    /// Page fault
+    #[error("page fault")]
     PageFault,
-    /// Architecture-specific error
+    #[error("architecture error: {0}")]
     ArchError(&'static str),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OutOfMemory => write!(f, "out of memory"),
-            Self::InvalidArgument => write!(f, "invalid argument"),
-            Self::NotFound => write!(f, "not found"),
-            Self::AlreadyExists => write!(f, "already exists"),
-            Self::PermissionDenied => write!(f, "permission denied"),
-            Self::Busy => write!(f, "busy"),
-            Self::PageFault => write!(f, "page fault"),
-            Self::ArchError(msg) => write!(f, "architecture error: {}", msg),
-        }
-    }
 }
 
 /// Result type alias for OSTD operations

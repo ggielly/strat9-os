@@ -54,12 +54,11 @@ const STATUS_RECEIVER_GONE: u8 = 2;
 // Error type
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Errors returned by channel send / receive operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ChannelError {
-    /// The operation would block (returned only by `try_*` variants).
+    #[error("would block")]
     WouldBlock,
-    /// The other end has been dropped (or the channel was destroyed).
+    #[error("channel disconnected")]
     Disconnected,
 }
 

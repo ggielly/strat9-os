@@ -15,14 +15,13 @@ description = "XFS filesystem support for strat9-os. Based on the crisscrofs pro
 # ============================================================================
 
 [dependencies]
-strat9-kernel = { path = "../../kernel" }
 strat9-components-api = { path = "../api" }
+strate-fs-abstraction = { path = "../strate-fs-abstraction", features = ["alloc"] }
 xfs-rs = { path = "xfs-rs" }
-fs-abstraction = { path = "fs-abstraction" }
 spin = "0.10.0"
 log = "0.4"
 
 [features]
-default = []                     # XFS disabled by default
-alloc = ["fs-abstraction/alloc"]
-xfs = ["alloc"]                  # Enable this feature to activate XFS support
+default = []
+alloc = ["strate-fs-abstraction/alloc"]
+xfs = ["alloc"]

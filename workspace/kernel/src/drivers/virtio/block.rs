@@ -93,16 +93,15 @@ pub trait BlockDevice {
     fn sector_count(&self) -> u64;
 }
 
-/// Block device errors
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BlockError {
-    /// Device I/O error
+    #[error("device I/O error")]
     IoError,
-    /// Invalid sector number
+    #[error("invalid sector number")]
     InvalidSector,
-    /// Buffer too small
+    #[error("buffer too small")]
     BufferTooSmall,
-    /// Device not ready
+    #[error("device not ready")]
     NotReady,
 }
 

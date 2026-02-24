@@ -79,18 +79,17 @@ pub trait NetworkDevice {
     fn link_up(&self) -> bool;
 }
 
-/// Network device errors
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum NetError {
-    /// No packet available
+    #[error("no packet available")]
     NoPacket,
-    /// Transmit queue full
+    #[error("transmit queue full")]
     TxQueueFull,
-    /// Buffer too small
+    #[error("buffer too small")]
     BufferTooSmall,
-    /// Device not ready
+    #[error("device not ready")]
     NotReady,
-    /// Link down
+    #[error("link down")]
     LinkDown,
 }
 

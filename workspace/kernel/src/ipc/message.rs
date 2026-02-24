@@ -1,8 +1,9 @@
 //! IPC message type.
 //!
-//! Messages are 64 bytes (one cache line), matching the ABI defined in
-//! `components/api/src/lib.rs`. The kernel fills in the `sender` field
-//! before delivering the message to the receiver.
+//! Messages are 64 bytes (one cache line). The kernel fills in the `sender`
+//! field before delivering the message to the receiver.
+
+use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 /// A 64-byte inline IPC message.
 ///
@@ -14,23 +15,18 @@
 /// 16.. 64  payload  (48 bytes, opaque data)
 /// ```
 #[repr(C, align(64))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, FromZeroes, FromBytes, AsBytes)]
 pub struct IpcMessage {
-    /// TaskId of the sender (set by the kernel on send).
     pub sender: u64,
-    /// Application-defined message type / opcode.
     pub msg_type: u32,
-    /// Reserved flags (must be 0 for now).
     pub flags: u32,
-    /// Inline payload (up to 48 bytes).
     pub payload: [u8; 48],
 }
 
-// Compile-time check: IpcMessage must be exactly 64 bytes.
-const _: () = assert!(core::mem::size_of::<IpcMessage>() == 64);
+static_assertions::assert_eq_size!(IpcMessage, [u8; 64]);
+static_assertions::const_assert_eq!(core::mem::align_of::<IpcMessage>(), 64);
 
 impl IpcMessage {
-    /// Create a new message with the given type and zeroed payload.
     pub fn new(msg_type: u32) -> Self {
         IpcMessage {
             sender: 0,
@@ -46,10 +42,8 @@ impl IpcMessage {
     ///
     /// The caller must ensure `buf` points to at least 64 readable bytes.
     pub unsafe fn from_raw(buf: *const u8) -> Self {
-        let mut msg = IpcMessage::new(0);
-        // SAFETY: Caller guarantees buf is valid for 64 bytes.
-        core::ptr::copy_nonoverlapping(buf, &mut msg as *mut IpcMessage as *mut u8, 64);
-        msg
+        let slice = unsafe { core::slice::from_raw_parts(buf, 64) };
+        *Self::ref_from(slice).unwrap()
     }
 
     /// Write this message to a raw 64-byte buffer.
@@ -58,8 +52,8 @@ impl IpcMessage {
     ///
     /// The caller must ensure `buf` points to at least 64 writable bytes.
     pub unsafe fn to_raw(&self, buf: *mut u8) {
-        // SAFETY: Caller guarantees buf is valid for 64 bytes.
-        core::ptr::copy_nonoverlapping(self as *const IpcMessage as *const u8, buf, 64);
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf, 64) };
+        slice.copy_from_slice(self.as_bytes());
     }
 }
 
@@ -67,7 +61,7 @@ impl core::fmt::Debug for IpcMessage {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("IpcMessage")
             .field("sender", &self.sender)
-            .field("msg_type", &self.msg_type)
+            .field("msg_type", &format_args!("0x{:02x}", self.msg_type))
             .field("flags", &self.flags)
             .finish()
     }

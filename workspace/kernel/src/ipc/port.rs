@@ -40,14 +40,13 @@ impl core::fmt::Display for PortId {
     }
 }
 
-/// Errors returned by port operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum IpcError {
-    /// The port was not found in the global registry.
+    #[error("port not found")]
     PortNotFound,
-    /// The caller is not the owner of the port (for destroy).
+    #[error("not owner of port")]
     NotOwner,
-    /// The port was destroyed while waiting.
+    #[error("port destroyed")]
     PortDestroyed,
 }
 

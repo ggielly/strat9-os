@@ -15,53 +15,10 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 // ---------------------------------------------------------------------------
-// IPC primitives (standalone, no kernel dependency)
+// Filesystem abstractions — re-exported from strate-fs-abstraction
 // ---------------------------------------------------------------------------
 
-/// Inline IPC message (cache-line sized, 64 bytes).
-///
-/// Used for small synchronous messages between components. Bulk data
-/// transfers use shared-memory ring buffers instead.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct IpcMessage {
-    /// Message type / opcode
-    pub msg_type: u32,
-    /// Flags (reserved)
-    pub flags: u32,
-    /// Payload (up to 56 bytes inline)
-    pub payload: [u8; 56],
-}
-
-impl IpcMessage {
-    pub const fn new(msg_type: u32) -> Self {
-        Self {
-            msg_type,
-            flags: 0,
-            payload: [0u8; 56],
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Filesystem abstractions
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub enum FsError {
-    NotFound,
-    PermissionDenied,
-    InvalidFormat,
-    Corrupted,
-    IsADirectory,
-    NotADirectory,
-    NotImplemented,
-    IoError,
-    OutOfMemory,
-    InvalidArgument,
-}
-
-pub type FsResult<T> = Result<T, FsError>;
+pub use strate_fs_abstraction::error::{FsError, FsResult};
 
 #[derive(Debug, Clone, Copy)]
 pub enum FileType {

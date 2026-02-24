@@ -445,34 +445,20 @@ impl MapFlags {
     }
 }
 
-/// Memory mapping error types
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum MapError {
-    /// Address out of bounds
+    #[error("address out of bounds")]
     OutOfBounds,
-    /// Not owner of the mapping
+    #[error("not owner of mapping")]
     NotOwner,
-    /// Mapping already exists
+    #[error("address already mapped")]
     AlreadyMapped,
-    /// Invalid address
+    #[error("invalid address")]
     InvalidAddress,
-    /// Out of memory
+    #[error("out of memory")]
     OutOfMemory,
-    /// Architecture-specific error
+    #[error("architecture error: {0}")]
     ArchError(&'static str),
-}
-
-impl core::fmt::Display for MapError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::OutOfBounds => write!(f, "address out of bounds"),
-            Self::NotOwner => write!(f, "not owner of mapping"),
-            Self::AlreadyMapped => write!(f, "address already mapped"),
-            Self::InvalidAddress => write!(f, "invalid address"),
-            Self::OutOfMemory => write!(f, "out of memory"),
-            Self::ArchError(msg) => write!(f, "architecture error: {}", msg),
-        }
-    }
 }
 
 /// Virtual Memory Address Region (VMAR)
