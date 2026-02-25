@@ -4,6 +4,7 @@
 //! to kernel services (PCI, DMA allocator, VFS schemes).
 
 pub mod e1000_drv;
+pub mod virtio_net;
 pub mod scheme;
 
 pub use net_core::{MTU, NetError, NetworkDevice};

@@ -135,9 +135,9 @@ impl From<crate::ostd::mm::MapError> for SyscallError {
     }
 }
 
-impl From<crate::hardware::virtio::block::BlockError> for SyscallError {
-    fn from(err: crate::hardware::virtio::block::BlockError) -> Self {
-        use crate::hardware::virtio::block::BlockError;
+impl From<crate::hardware::storage::virtio_block::BlockError> for SyscallError {
+    fn from(err: crate::hardware::storage::virtio_block::BlockError) -> Self {
+        use crate::hardware::storage::virtio_block::BlockError;
         match err {
             BlockError::IoError => SyscallError::IoError,
             BlockError::InvalidSector => SyscallError::InvalidArgument,

@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
-    hardware::virtio::block::{self, BlockDevice, SECTOR_SIZE},
+    hardware::storage::virtio_block::{self, BlockDevice, SECTOR_SIZE},
     ipc::{
         channel::{self, ChanId},
         message::IpcMessage,
@@ -344,7 +344,7 @@ const MAX_SECTORS_PER_CALL: u64 = 256;
 fn resolve_volume_device(
     handle: u64,
     required: CapPermissions,
-) -> Result<&'static block::VirtioBlockDevice, SyscallError> {
+) -> Result<&'static virtio_block::VirtioBlockDevice, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.capabilities.get() };
@@ -355,8 +355,8 @@ fn resolve_volume_device(
         return Err(SyscallError::BadHandle);
     }
 
-    let device = block::get_device().ok_or(SyscallError::BadHandle)?;
-    let device_ptr = device as *const block::VirtioBlockDevice as usize;
+    let device = virtio_block::get_device().ok_or(SyscallError::BadHandle)?;
+    let device_ptr = device as *const virtio_block::VirtioBlockDevice as usize;
     if cap.resource != device_ptr {
         return Err(SyscallError::BadHandle);
     }
@@ -835,7 +835,7 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
     // seed it with the primary volume capability so it can mount storage
     // without waiting for an explicit bootstrap message.
     if path == "/" || path == "/fs/ext4" {
-        if let Some(device) = crate::hardware::virtio::block::get_device() {
+        if let Some(device) = crate::hardware::storage::virtio_block::get_device() {
             let volume_cap = crate::capability::get_capability_manager().create_capability(
                 ResourceType::Volume,
                 device as *const _ as usize,

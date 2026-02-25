@@ -6,7 +6,7 @@
 //!
 //! Reference: VirtIO spec v1.2, Section 5.1 (Network Device)
 
-use super::{
+use crate::hardware::virtio::{
     common::{VirtioDevice, Virtqueue},
     status,
 };

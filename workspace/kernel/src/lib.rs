@@ -447,21 +447,21 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
 
         serial_println!("[init] Initializing VirtIO block...");
         vga_println!("[..] Looking for VirtIO block device...");
-        hardware::virtio::block::init();
+        hardware::storage::virtio_block::init();
         serial_println!("[init] VirtIO block initialized.");
         vga_println!("[OK] VirtIO block driver initialized");
 
         serial_println!("[init] Initializing VirtIO net...");
         vga_println!("[..] Looking for VirtIO net device...");
-        hardware::virtio::net::init();
+        hardware::nic::virtio_net::init();
         serial_println!("[init] VirtIO net initialized.");
         vga_println!("[OK] VirtIO net driver initialized");
 
         serial_println!("[init] Checking for devices...");
         vga_println!("[..] Checking for devices...");
 
-        if let Some(blk) = hardware::virtio::block::get_device() {
-            use hardware::virtio::block::BlockDevice;
+        if let Some(blk) = hardware::storage::virtio_block::get_device() {
+            use hardware::storage::virtio_block::BlockDevice;
             serial_println!(
                 "[INFO] VirtIO block device found. Capacity: {} sectors",
                 blk.sector_count()
@@ -538,7 +538,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
             }
         }
-        if let (Some(task_id), Some(device)) = (init_task_id, hardware::virtio::block::get_device()) {
+        if let (Some(task_id), Some(device)) = (init_task_id, hardware::storage::virtio_block::get_device()) {
             if let Some(task) = crate::process::get_task_by_id(task_id) {
                 let cap = crate::capability::get_capability_manager().create_capability(
                     crate::capability::ResourceType::Volume,

@@ -7,9 +7,7 @@
 //! - VirtIO spec: https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html
 //! - RedoxOS drivers: https://gitlab.redox-os.org/redox-os/drivers
 
-pub mod block;
 pub mod common;
-pub mod net;
 
 /// VirtIO device status flags
 #[allow(dead_code)]
