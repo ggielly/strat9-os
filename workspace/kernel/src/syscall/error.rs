@@ -158,9 +158,9 @@ impl From<crate::ipc::port::IpcError> for SyscallError {
     }
 }
 
-impl From<crate::drivers::net::NetError> for SyscallError {
-    fn from(err: crate::drivers::net::NetError) -> Self {
-        use crate::drivers::net::NetError;
+impl From<net_core::NetError> for SyscallError {
+    fn from(err: net_core::NetError) -> Self {
+        use net_core::NetError;
         match err {
             NetError::NoPacket => SyscallError::Again,
             NetError::TxQueueFull => SyscallError::QueueFull,

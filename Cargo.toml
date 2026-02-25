@@ -2,6 +2,12 @@
 members = [
     "workspace/kernel",
     "workspace/bootloader",
+    "workspace/net-core",
+    "workspace/nic-buffers",
+    "workspace/nic-queues",
+    "workspace/intel-ethernet",
+    "workspace/e1000",
+    "workspace/driver-net-proto",
     "workspace/components/api",
     "workspace/components/strate-fs-abstraction",
     "workspace/components/strate-fs-ext4",

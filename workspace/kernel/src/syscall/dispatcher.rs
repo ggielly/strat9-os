@@ -8,10 +8,7 @@ use super::{
 };
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
-    drivers::{
-        net::NetworkDevice,
-        virtio::block::{self, BlockDevice, SECTOR_SIZE},
-    },
+    drivers::virtio::block::{self, BlockDevice, SECTOR_SIZE},
     ipc::{
         channel::{self, ChanId},
         message::IpcMessage,

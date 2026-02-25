@@ -12,12 +12,13 @@ use super::{
 };
 use crate::{
     arch::x86_64::pci::{self, PciDevice},
-    drivers::net::{self, NetError, NetworkDevice},
+    drivers::net,
     memory::{get_allocator, FrameAllocator, PhysFrame},
     sync::SpinLock,
 };
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::{mem, ptr};
+use net_core::{NetError, NetworkDevice};
 
 /// VirtIO net header size
 const NET_HDR_SIZE: usize = mem::size_of::<VirtioNetHeader>();
