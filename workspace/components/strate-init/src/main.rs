@@ -105,6 +105,45 @@ fn create_console_admin_silo() -> Result<(), &'static str> {
     Ok(())
 }
 
+fn create_net_silo() -> Result<(), &'static str> {
+    log("[init] Loading /initfs/strate-net...\n");
+
+    let (data_ptr, data_len) = read_file_to_heap("/initfs/strate-net")?;
+
+    // Load as a module blob
+    let module_handle = unsafe {
+        strat9_syscall::syscall2(
+            number::SYS_MODULE_LOAD,
+            data_ptr as usize,
+            data_len,
+        )
+    }
+    .map_err(|_| "module_load failed")?;
+
+    log("[init] Module loaded, handle=");
+    log_u64(module_handle as u64);
+    log("\n");
+
+    // Create the silo
+    let silo_handle = call::silo_create(0).map_err(|_| "silo_create failed")?;
+    log("[init] Silo created, handle=");
+    log_u64(silo_handle as u64);
+    log("\n");
+
+    // Attach the module
+    call::silo_attach_module(silo_handle, module_handle).map_err(|_| "silo_attach failed")?;
+
+    let config = SiloConfigUser::admin(); // Network needs admin privileges for now to access NIC
+    let config_ptr = &config as *const SiloConfigUser as usize;
+    call::silo_config(silo_handle, config_ptr).map_err(|_| "silo_config failed")?;
+
+    // Start the silo
+    call::silo_start(silo_handle).map_err(|_| "silo_start failed")?;
+    log("[init] Network silo started.\n");
+
+    Ok(())
+}
+
 /// Monitor the console-admin silo and restart it if it crashes.
 fn monitor_loop() -> ! {
     log("[init] Entering monitor loop.\n");
@@ -175,6 +214,17 @@ pub extern "C" fn _start() -> ! {
             log(msg);
             log("\n");
             log("[init] Falling back to idle loop.\n");
+        }
+    }
+
+    match create_net_silo() {
+        Ok(()) => {
+            log("[init] Network silo launched successfully.\n");
+        }
+        Err(msg) => {
+            log("[init] Failed to launch network silo: ");
+            log(msg);
+            log("\n");
         }
     }
 

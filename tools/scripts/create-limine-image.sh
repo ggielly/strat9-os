@@ -19,6 +19,7 @@ MEM_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem"
 MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/init"
 CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
+NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
 
 echo ""
 echo "=== Creating Limine bootable image ==="
@@ -83,6 +84,12 @@ if [ -f "$CONSOLE_ADMIN_ELF" ]; then
 else
     echo "    console-admin: (missing)"
 fi
+if [ -f "$NET_ELF" ]; then
+    net_size=$(stat -c%s "$NET_ELF")
+    echo "    strate-net   : $net_size bytes"
+else
+    echo "    strate-net   : (missing)"
+fi
 echo ""
 
 # Create ISO root structure
@@ -124,35 +131,44 @@ if [ -f "$INIT_TEST_ELF" ]; then
     cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
     echo "  [OK] Copied init-test binary: /initfs/test_pid"
 else
-    echo "  [WARN] init-test binary not found at $INIT_TEST_ELF (optional fallback)"
+    echo "  ERROR: init-test binary not found at $INIT_TEST_ELF"
+    echo "  Build it first (e.g. cargo make strate-silo-test or strate-silo-test-release)"
+    exit 1
 fi
 
 if [ -f "$MEM_TEST_ELF" ]; then
     cp "$MEM_TEST_ELF" "$ISO_ROOT/initfs/test_mem"
     echo "  [OK] Copied mem-test binary: /initfs/test_mem"
 else
-    echo "  [WARN] mem-test binary not found at $MEM_TEST_ELF (optional diagnostic)"
+    echo "  [WARN] mem-test binary not found at $MEM_TEST_ELF"
 fi
 
 if [ -f "$MEM_STRESSED_ELF" ]; then
     cp "$MEM_STRESSED_ELF" "$ISO_ROOT/initfs/test_mem_stressed"
     echo "  [OK] Copied mem-stressed binary: /initfs/test_mem_stressed"
 else
-    echo "  [WARN] mem-stressed binary not found at $MEM_STRESSED_ELF (optional diagnostic)"
+    echo "  [WARN] mem-stressed binary not found at $MEM_STRESSED_ELF"
 fi
 
 if [ -f "$INIT_ELF" ]; then
     cp "$INIT_ELF" "$ISO_ROOT/initfs/init"
-    echo "  [OK] Copied init process: /initfs/init"
+    echo "  [OK] Copied init binary: /initfs/init"
 else
     echo "  [WARN] init binary not found at $INIT_ELF"
 fi
 
 if [ -f "$CONSOLE_ADMIN_ELF" ]; then
     cp "$CONSOLE_ADMIN_ELF" "$ISO_ROOT/initfs/console-admin"
-    echo "  [OK] Copied console-admin: /initfs/console-admin"
+    echo "  [OK] Copied console-admin binary: /initfs/console-admin"
 else
     echo "  [WARN] console-admin binary not found at $CONSOLE_ADMIN_ELF"
+fi
+
+if [ -f "$NET_ELF" ]; then
+    cp "$NET_ELF" "$ISO_ROOT/initfs/strate-net"
+    echo "  [OK] Copied strate-net: /initfs/strate-net"
+else
+    echo "  [WARN] strate-net binary not found at $NET_ELF"
 fi
 
 # Create ISO using xorriso

@@ -196,13 +196,7 @@ args = ["build", "--target", "${KERNEL_TARGET}"]
 description = "Build the Strat9 kernel (debug profile) with runtime self-tests"
 cwd = "workspace/kernel"
 command = "cargo"
-args = [
-    "build",
-    "--target",
-    "${KERNEL_TARGET}",
-    "--features",
-    "selftest",
-]
+args = ["build", "--target", "${KERNEL_TARGET}", "--features", "selftest"]
 
 [tasks.kernel-release]
 description = "Build the Strat9 kernel (release profile)"
@@ -270,6 +264,8 @@ args = [
 ]
 
 [tasks.strate-silo-test]
+
+
 description = "Build the first userspace init/test component (debug profile)"
 cwd = "workspace/components/strate-silo-test"
 command = "cargo"
@@ -282,7 +278,6 @@ args = [
     "-Z",
     "build-std-features=compiler-builtins-mem",
 ]
-
 [tasks.strate-mem-test]
 description = "Build the memory stress test userspace component (debug profile)"
 cwd = "workspace/components/strate-mem-test"
@@ -311,7 +306,23 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-net]
+description = "Build the network silo (debug profile)"
+cwd = "workspace/components/strate-net"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-console-admin]
+
+
 description = "Build the console-admin silo (debug profile)"
 cwd = "workspace/components/strate-console-admin"
 command = "cargo"
@@ -324,7 +335,6 @@ args = [
     "-Z",
     "build-std-features=compiler-builtins-mem",
 ]
-
 [tasks.strate-ext4-release]
 description = "Build the EXT4 userspace filesystem component (release profile)"
 cwd = "workspace/components/strate-fs-ext4"
@@ -356,6 +366,8 @@ args = [
 ]
 
 [tasks.strate-silo-test-release]
+
+
 description = "Build the first userspace init/test component (release profile)"
 cwd = "workspace/components/strate-silo-test"
 command = "cargo"
@@ -369,7 +381,6 @@ args = [
     "-Z",
     "build-std-features=compiler-builtins-mem",
 ]
-
 [tasks.strate-mem-test-release]
 description = "Build the memory stress test userspace component (release profile)"
 cwd = "workspace/components/strate-mem-test"
@@ -400,7 +411,24 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-net-release]
+description = "Build the network silo (release profile)"
+cwd = "workspace/components/strate-net"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-console-admin-release]
+
+
 description = "Build the console-admin silo (release profile)"
 cwd = "workspace/components/strate-console-admin"
 command = "cargo"
@@ -414,7 +442,6 @@ args = [
     "-Z",
     "build-std-features=compiler-builtins-mem",
 ]
-
 [tasks.strate-ext4-dev-opt]
 description = "Build the EXT4 userspace filesystem component (dev-opt profile)"
 cwd = "workspace/components/strate-fs-ext4"
@@ -462,7 +489,6 @@ args = [
     "-Z",
     "build-std-features=compiler-builtins-mem",
 ]
-
 [tasks.strate-mem-test-dev-opt]
 description = "Build the memory stress test userspace component (dev-opt profile)"
 cwd = "workspace/components/strate-mem-test"
@@ -495,6 +521,22 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-net-dev-opt]
+description = "Build the network silo (dev-opt profile)"
+cwd = "workspace/components/strate-net"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-console-admin-dev-opt]
 description = "Build the console-admin silo (dev-opt profile)"
 cwd = "workspace/components/strate-console-admin"
@@ -512,8 +554,19 @@ args = [
 ]
 
 [tasks.limine-image]
+
 description = "Create bootable ISO/IMG with Limine + kernel"
-dependencies = ["setup-limine", "kernel", "strate-ext4", "strate-fs-ramfs", "strate-silo-test", "strate-mem-test", "strate-init", "strate-console-admin"]
+dependencies = [
+    "setup-limine",
+    "kernel",
+    "strate-ext4",
+    "strate-fs-ramfs",
+    "strate-silo-test",
+    "strate-mem-test",
+    "strate-init",
+    "strate-console-admin",
+    "strate-net",
+]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os" }
 script_runner = "@shell"
 script = ['''
@@ -521,8 +574,19 @@ bash tools/scripts/create-limine-image.sh
 ''']
 
 [tasks.limine-image-test]
+
 description = "Create bootable ISO/IMG with Limine + kernel (self-tests enabled)"
-dependencies = ["setup-limine", "kernel-test", "strate-ext4", "strate-fs-ramfs", "strate-silo-test", "strate-mem-test", "strate-init", "strate-console-admin"]
+dependencies = [
+    "setup-limine",
+    "kernel-test",
+    "strate-ext4",
+    "strate-fs-ramfs",
+    "strate-silo-test",
+    "strate-mem-test",
+    "strate-init",
+    "strate-console-admin",
+    "strate-net",
+]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os-test" }
 script_runner = "@shell"
 script = ['''
@@ -530,8 +594,19 @@ bash tools/scripts/create-limine-image.sh
 ''']
 
 [tasks.limine-image-dev-opt]
+
 description = "Create bootable ISO/IMG with Limine + kernel (dev-opt profile)"
-dependencies = ["setup-limine", "kernel-dev-opt", "strate-ext4-dev-opt", "strate-fs-ramfs-dev-opt", "strate-silo-test-dev-opt", "strate-mem-test-dev-opt", "strate-init-dev-opt", "strate-console-admin-dev-opt"]
+dependencies = [
+    "setup-limine",
+    "kernel-dev-opt",
+    "strate-ext4-dev-opt",
+    "strate-fs-ramfs-dev-opt",
+    "strate-silo-test-dev-opt",
+    "strate-mem-test-dev-opt",
+    "strate-init-dev-opt",
+    "strate-console-admin-dev-opt",
+    "strate-net-dev-opt",
+]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "dev-opt" }
 script_runner = "@shell"
 script = ['''
@@ -539,8 +614,19 @@ bash tools/scripts/create-limine-image.sh
 ''']
 
 [tasks.limine-image-release]
+
 description = "Create bootable ISO/IMG with Limine + kernel (release profile)"
-dependencies = ["setup-limine", "kernel-release", "strate-ext4-release", "strate-fs-ramfs-release", "strate-silo-test-release", "strate-mem-test-release", "strate-init-release", "strate-console-admin-release"]
+dependencies = [
+    "setup-limine",
+    "kernel-release",
+    "strate-ext4-release",
+    "strate-fs-ramfs-release",
+    "strate-silo-test-release",
+    "strate-mem-test-release",
+    "strate-init-release",
+    "strate-console-admin-release",
+    "strate-net-release",
+]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release" }
 script_runner = "@shell"
 script = ['''
@@ -579,8 +665,6 @@ args = [
     "qemu64",
     "-m",
     "256M",
-    "-display",
-    "gtk,zoom-to-fit=on",
     "-no-reboot",
     "-no-shutdown",
     "-serial",
@@ -608,8 +692,6 @@ args = [
     "qemu64",
     "-m",
     "256M",
-    "-display",
-    "gtk,zoom-to-fit=on",
     "-no-reboot",
     "-no-shutdown",
     "-serial",
@@ -637,8 +719,6 @@ args = [
     "qemu64",
     "-m",
     "256M",
-    "-display",
-    "gtk,zoom-to-fit=on",
     "-no-reboot",
     "-no-shutdown",
     "-serial",
@@ -668,8 +748,6 @@ args = [
     "2",
     "-m",
     "256M",
-    "-display",
-    "gtk,zoom-to-fit=on",
     "-no-reboot",
     "-no-shutdown",
     "-serial",
@@ -699,8 +777,6 @@ args = [
     "2",
     "-m",
     "256M",
-    "-display",
-    "gtk,zoom-to-fit=on",
     "-no-reboot",
     "-no-shutdown",
     "-serial",
@@ -730,8 +806,6 @@ args = [
     "2",
     "-m",
     "256M",
-    "-display",
-    "gtk,zoom-to-fit=on",
     "-no-reboot",
     "-no-shutdown",
     "-serial",
@@ -793,8 +867,6 @@ args = [
     "qemu64",
     "-m",
     "256M",
-    "-display",
-    "gtk,zoom-to-fit=on",
     "-no-reboot",
     "-no-shutdown",
     "-serial",
@@ -848,8 +920,6 @@ args = [
     "qemu64",
     "-m",
     "256M",
-    "-display",
-    "gtk,zoom-to-fit=on",
     "-no-reboot",
     "-no-shutdown",
     "-gdb",
