@@ -119,12 +119,16 @@ pub fn write(fd: u32, buf: &[u8]) -> Result<usize, SyscallError> {
 }
 
 /// Close a file descriptor.
+///
+/// Removes the fd from the table.  If this was the last Arc<OpenFile> reference
+/// (no dup'd / fork'd copies remain) the Drop impl will call scheme.close().
 pub fn close(fd: u32) -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Syscall context
     let fd_table = unsafe { &mut *task.fd_table.get() };
-    let file = fd_table.remove(fd)?;
-    file.close()
+    let _file = fd_table.remove(fd)?;
+    Ok(())
+    // _file (Arc<OpenFile>) is dropped here; if refcount → 0, Drop fires → scheme.close()
 }
 
 /// Seek within a file.
@@ -315,20 +319,6 @@ pub fn sys_read(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError
         return Ok(0);
     }
 
-    // Special case for stdin (fd 0): read from the kernel keyboard buffer.
-    // Userspace processes get one byte at a time (non-blocking: yields until
-    // a key is available, then returns 1 byte).
-    if fd == STDIN {
-        loop {
-            if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
-                let user = UserSliceWrite::new(buf_ptr, 1)?;
-                user.copy_from(&[ch]);
-                return Ok(1);
-            }
-            crate::process::yield_task();
-        }
-    }
-
     // Read directly into chunks to avoid large kernel allocations
     let mut kbuf = [0u8; 4096];
     let mut total_read = 0;
@@ -371,9 +361,21 @@ pub fn sys_write(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallErro
             let to_write = core::cmp::min(kbuf.len(), len - total_written);
             let n = user_buf.copy_to(&mut kbuf[..to_write]);
 
-            for &byte in &kbuf[..n] {
-                crate::serial_print!("{}", byte as char);
+            if crate::arch::x86_64::vga::is_available() {
+                if let Ok(s) = core::str::from_utf8(&kbuf[..n]) {
+                    crate::serial_print!("{}", s);
+                    crate::vga_print!("{}", s);
+                } else {
+                    for &byte in &kbuf[..n] {
+                        crate::serial_print!("{}", byte as char);
+                    }
+                }
+            } else {
+                for &byte in &kbuf[..n] {
+                    crate::serial_print!("{}", byte as char);
+                }
             }
+
             total_written += n;
         }
 

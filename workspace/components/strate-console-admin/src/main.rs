@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![allow(dead_code)]
 
 use core::panic::PanicInfo;
 use strat9_syscall::{call, number};
@@ -456,13 +457,12 @@ pub extern "C" fn _start() -> ! {
     write_str("\n");
     write_str("============================================================\n");
     write_str("[console-admin] strat9-os Console Admin Silo\n");
-    write_str("[console-admin] Type 'help' for available commands.\n");
+    write_str("[console-admin] Ready (IPC mode — use chevron shell to interact).\n");
     write_str("============================================================\n");
 
-    let mut line = LineBuf::new();
+    // TODO: replace with IPC event loop once IPC channels are wired up.
+    // For now, idle so we don't steal keyboard input from the chevron shell.
     loop {
-        prompt();
-        read_line(&mut line);
-        dispatch(line.as_str());
+        let _ = call::sched_yield();
     }
 }

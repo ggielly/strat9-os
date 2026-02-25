@@ -69,7 +69,7 @@ fn send_resched_ipi_to_cpu(cpu_index: usize) {
 }
 
 /// The global scheduler instance
-static SCHEDULER: SpinLock<Option<Scheduler>> = SpinLock::new(None);
+pub(crate) static SCHEDULER: SpinLock<Option<Scheduler>> = SpinLock::new(None);
 
 /// Global tick counter (safe to increment from interrupt context)
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -227,7 +227,7 @@ pub struct Scheduler {
     /// Tasks blocked waiting for an event (keyed by TaskId for O(log n) wake)
     blocked_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// All tasks in the system (for lookup by TaskId)
-    all_tasks: BTreeMap<TaskId, Arc<Task>>,
+    pub(crate) all_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// Map TaskId -> CPU index (for wake/resume routing)
     task_cpu: BTreeMap<TaskId, usize>,
     /// Map userspace PID -> internal TaskId (process leader in current model).
