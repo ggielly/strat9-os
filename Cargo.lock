@@ -181,6 +181,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
 
 [[package]]
+name = "mem-test"
+version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
+]
+
+[[package]]
 name = "nasm-rs"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

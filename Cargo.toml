@@ -7,6 +7,7 @@ members = [
     "workspace/components/strate-fs-ext4",
     "workspace/components/syscall",
     "workspace/components/strate-silo-test",
+    "workspace/components/strate-mem-test",
     "workspace/components/strate-net",
     "workspace/components/strate-fs-ramfs",
     "workspace/components/strate-init",

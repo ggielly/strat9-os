@@ -15,6 +15,8 @@ KERNEL_ELF="target/x86_64-unknown-none/${PROFILE}/kernel"
 FS_EXT4_ELF="target/x86_64-unknown-none/${PROFILE}/fs-ext4-strate"
 FS_RAM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-fs-ramfs"
 INIT_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_pid"
+MEM_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem"
+MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/init"
 CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 
@@ -56,6 +58,18 @@ if [ -f "$INIT_TEST_ELF" ]; then
     echo "    init-test   : $init_size bytes"
 else
     echo "    init-test   : (missing)"
+fi
+if [ -f "$MEM_TEST_ELF" ]; then
+    mem_test_size=$(stat -c%s "$MEM_TEST_ELF")
+    echo "    mem-test    : $mem_test_size bytes"
+else
+    echo "    mem-test    : (missing)"
+fi
+if [ -f "$MEM_STRESSED_ELF" ]; then
+    mem_stressed_size=$(stat -c%s "$MEM_STRESSED_ELF")
+    echo "    mem-stressed: $mem_stressed_size bytes"
+else
+    echo "    mem-stressed: (missing)"
 fi
 if [ -f "$INIT_ELF" ]; then
     init_real_size=$(stat -c%s "$INIT_ELF")
@@ -111,6 +125,20 @@ if [ -f "$INIT_TEST_ELF" ]; then
     echo "  [OK] Copied init-test binary: /initfs/test_pid"
 else
     echo "  [WARN] init-test binary not found at $INIT_TEST_ELF (optional fallback)"
+fi
+
+if [ -f "$MEM_TEST_ELF" ]; then
+    cp "$MEM_TEST_ELF" "$ISO_ROOT/initfs/test_mem"
+    echo "  [OK] Copied mem-test binary: /initfs/test_mem"
+else
+    echo "  [WARN] mem-test binary not found at $MEM_TEST_ELF (optional diagnostic)"
+fi
+
+if [ -f "$MEM_STRESSED_ELF" ]; then
+    cp "$MEM_STRESSED_ELF" "$ISO_ROOT/initfs/test_mem_stressed"
+    echo "  [OK] Copied mem-stressed binary: /initfs/test_mem_stressed"
+else
+    echo "  [WARN] mem-stressed binary not found at $MEM_STRESSED_ELF (optional diagnostic)"
 fi
 
 if [ -f "$INIT_ELF" ]; then

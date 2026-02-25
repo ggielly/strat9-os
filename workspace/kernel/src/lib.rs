@@ -365,6 +365,30 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 serial_println!("[init] Failed to register /initfs/test_pid: {:?}", e);
             }
         }
+        if let Some((base, size)) = crate::limine_entry::test_mem_module() {
+            if base != 0 && size != 0 {
+                let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+                if let Err(e) = vfs::register_initfs_file("test_mem", data.as_ptr(), data.len()) {
+                    serial_println!("[init] Failed to register /initfs/test_mem: {:?}", e);
+                } else {
+                    serial_println!("[init] Registered /initfs/test_mem ({} bytes)", size);
+                }
+            }
+        }
+        if let Some((base, size)) = crate::limine_entry::test_mem_stressed_module() {
+            if base != 0 && size != 0 {
+                let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+                if let Err(e) = vfs::register_initfs_file("test_mem_stressed", data.as_ptr(), data.len())
+                {
+                    serial_println!("[init] Failed to register /initfs/test_mem_stressed: {:?}", e);
+                } else {
+                    serial_println!(
+                        "[init] Registered /initfs/test_mem_stressed ({} bytes)",
+                        size
+                    );
+                }
+            }
+        }
         if let Some((base, size)) = crate::limine_entry::fs_ext4_module() {
             if base != 0 && size != 0 {
                 let ext4_data =
