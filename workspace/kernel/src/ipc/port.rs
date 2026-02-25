@@ -9,12 +9,9 @@ use crate::{
     process::TaskId,
     sync::{SpinLock, WaitQueue},
 };
-use alloc::{
-    collections::BTreeMap,
-    sync::Arc,
-};
-use crossbeam_queue::ArrayQueue;
+use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crossbeam_queue::ArrayQueue;
 
 /// Maximum number of messages buffered in a single port.
 const PORT_QUEUE_CAPACITY: usize = 16;
