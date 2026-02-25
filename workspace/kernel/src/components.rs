@@ -91,11 +91,9 @@ fn ipc_init() -> Result<(), ComponentInitError> {
 }
 
 /// Driver framework — needs arch primitives and memory.
-/// Scans PCI for E1000 and registers the `/dev/net/` scheme.
-/// VirtIO devices are probed later (after VFS/paging are fully ready).
+/// Hardware probing is deferred until paging + VFS are ready.
 #[component::init_component(bootstrap, priority = 5, depends_on = [memory_init, arch_init])]
 fn drivers_init() -> Result<(), ComponentInitError> {
-    crate::drivers::init();
     log::info!("[component] Driver framework initialized");
     Ok(())
 }

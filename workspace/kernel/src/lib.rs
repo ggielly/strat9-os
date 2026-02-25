@@ -441,10 +441,9 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         // =============================================
         // Phase 8d: VirtIO + hardware drivers
         // =============================================
-        // E1000 was already probed in drivers_init (bootstrap component).
-        // Now probe VirtIO devices (they need full paging/VFS ready).
         serial_println!("[init] Loading hardware drivers...");
         vga_println!("[..] Initializing hardware drivers...");
+        drivers::init();
 
         serial_println!("[init] Initializing VirtIO block...");
         vga_println!("[..] Looking for VirtIO block device...");
