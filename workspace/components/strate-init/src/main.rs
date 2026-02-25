@@ -134,33 +134,33 @@ fn create_net_silo() -> Result<(), &'static str> {
     Ok(())
 }
 
-fn create_dhcpd_silo() -> Result<(), &'static str> {
-    log("[init] Loading /initfs/bin/dhcpd...\n");
+fn create_dhcp_client_silo() -> Result<(), &'static str> {
+    log("[init] Loading /initfs/bin/dhcp-client...\n");
 
-    let (data_ptr, data_len) = read_file_to_heap("/initfs/bin/dhcpd")?;
+    let (data_ptr, data_len) = read_file_to_heap("/initfs/bin/dhcp-client")?;
 
     let module_handle =
         unsafe { strat9_syscall::syscall2(number::SYS_MODULE_LOAD, data_ptr as usize, data_len) }
             .map_err(|_| "module_load failed")?;
 
-    log("[init] dhcpd module loaded, handle=");
+    log("[init] dhcp-client module loaded, handle=");
     log_u64(module_handle as u64);
     log("\n");
 
     let silo_handle = call::silo_create(0).map_err(|_| "silo_create failed")?;
-    log("[init] dhcpd silo created, handle=");
+    log("[init] dhcp-client silo created, handle=");
     log_u64(silo_handle as u64);
     log("\n");
 
     call::silo_attach_module(silo_handle, module_handle).map_err(|_| "silo_attach failed")?;
 
-    // dhcpd only needs read access to /net – no admin privileges needed
+    // dhcp-client only needs read access to /net – no admin privileges needed
     let config = SiloConfigUser::admin(); // TODO: reduce to unprivileged once caps allow reading /net
     let config_ptr = &config as *const SiloConfigUser as usize;
     call::silo_config(silo_handle, config_ptr).map_err(|_| "silo_config failed")?;
 
     call::silo_start(silo_handle).map_err(|_| "silo_start failed")?;
-    log("[init] dhcpd silo started (polling /net for DHCP).\n");
+    log("[init] dhcp-client silo started (polling /net for DHCP).\n");
 
     Ok(())
 }
@@ -249,13 +249,13 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Launch dhcpd after the network stack – it polls /net/ip until DHCP completes
-    match create_dhcpd_silo() {
+    // Launch dhcp-client after the network stack – it polls /net/ip until DHCP completes
+    match create_dhcp_client_silo() {
         Ok(()) => {
-            log("[init] dhcpd launched (will report when DHCP completes).\n");
+            log("[init] dhcp-client launched (will report when DHCP completes).\n");
         }
         Err(msg) => {
-            log("[init] Failed to launch dhcpd: ");
+            log("[init] Failed to launch dhcp-client: ");
             log(msg);
             log("\n");
         }

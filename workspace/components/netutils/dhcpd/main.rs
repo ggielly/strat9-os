@@ -1,7 +1,7 @@
-//! dhcpd – DHCP status monitor for strat9-os
+//! dhcp-client – DHCP status monitor for strat9-os
 //!
 //! This is **not** a full DHCP client.  The actual DHCP exchange is performed
-//! by the `strate-net` silo (via smoltcp's DHCPv4 socket).  `dhcpd` simply
+//! by the `strate-net` silo (via smoltcp's DHCPv4 socket).  `dhcp-client` simply
 //! polls the `/net/ip`, `/net/gateway`, `/net/route` and `/net/dns` scheme files until a
 //! valid address is obtained, then prints the result to the console.
 //!
@@ -26,7 +26,7 @@ use strat9_syscall::{call, data::TimeSpec, number};
 
 struct BumpAllocator;
 
-const HEAP_SIZE: usize = 64 * 1024; // 64 KiB – dhcpd is tiny
+const HEAP_SIZE: usize = 64 * 1024; // 64 KiB – client is tiny
 static mut HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 static HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
@@ -66,13 +66,13 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    log("[dhcpd] OOM\n");
+    log("[dhcp-client] OOM\n");
     call::exit(12)
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    log("[dhcpd] PANIC: ");
+    log("[dhcp-client] PANIC: ");
     let msg = info.message();
     let mut buf = [0u8; 256];
     use core::fmt::Write;
@@ -148,7 +148,7 @@ const POLL_INTERVAL_MS: u64 = 500;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    log("[dhcpd] Waiting for DHCP configuration via /net scheme...\n");
+    log("[dhcp-client] Waiting for DHCP configuration via /net scheme...\n");
 
     let mut ip_buf = [0u8; 64];
     let mut gw_buf = [0u8; 64];
@@ -162,11 +162,11 @@ pub extern "C" fn _start() -> ! {
             Ok(n) => n,
             Err(_) => {
                 if retries == 0 {
-                    log("[dhcpd] /net not available yet, retrying...\n");
+                    log("[dhcp-client] /net not available yet, retrying...\n");
                 }
                 retries += 1;
                 if retries >= MAX_RETRIES {
-                    log("[dhcpd] Timeout waiting for /net scheme\n");
+                    log("[dhcp-client] Timeout waiting for /net scheme\n");
                     call::exit(1);
                 }
                 sleep_ms(POLL_INTERVAL_MS);
@@ -177,7 +177,7 @@ pub extern "C" fn _start() -> ! {
         if ip_n == 0 || is_unconfigured(&ip_buf[..ip_n]) {
             retries += 1;
             if retries >= MAX_RETRIES {
-                log("[dhcpd] Timeout: DHCP did not complete within 30s\n");
+                log("[dhcp-client] Timeout: DHCP did not complete within 30s\n");
                 call::exit(1);
             }
             sleep_ms(POLL_INTERVAL_MS);
@@ -190,7 +190,7 @@ pub extern "C" fn _start() -> ! {
         let dns_n = scheme_read("/net/dns", &mut dns_buf).unwrap_or(0);
 
         // Report
-        log("[dhcpd] DHCP configuration acquired:\n");
+        log("[dhcp-client] DHCP configuration acquired:\n");
         log("  IP      : ");
         if let Ok(s) = core::str::from_utf8(&ip_buf[..ip_n]) {
             log(s.trim());
@@ -224,6 +224,6 @@ pub extern "C" fn _start() -> ! {
         break;
     }
 
-    log("[dhcpd] Done.\n");
+    log("[dhcp-client] Done.\n");
     call::exit(0)
 }

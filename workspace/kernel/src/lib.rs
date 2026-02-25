@@ -393,7 +393,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
             ("init", crate::limine_entry::init_module()),
             ("console-admin", crate::limine_entry::console_admin_module()),
             ("strate-net", crate::limine_entry::strate_net_module()),
-            ("bin/dhcpd", crate::limine_entry::dhcpd_module()),
+            ("bin/dhcp-client", crate::limine_entry::dhcp_client_module()),
             ("bin/ping", crate::limine_entry::ping_module()),
         ];
 

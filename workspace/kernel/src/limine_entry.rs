@@ -63,8 +63,9 @@ static CONSOLE_ADMIN_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/console-admin");
 /// Internal module: request Limine to load /initfs/strate-net (network silo)
 static STRATE_NET_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-net");
-/// Internal module: request Limine to load /initfs/bin/dhcpd (DHCP monitor)
-static DHCPD_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/dhcpd");
+/// Internal module: request Limine to load /initfs/bin/dhcp-client (DHCP monitor)
+static DHCP_CLIENT_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/bin/dhcp-client");
 /// Internal module: request Limine to load /initfs/bin/ping (ICMP utility)
 static PING_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/ping");
 
@@ -80,7 +81,7 @@ static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
     &INIT_MODULE,
     &CONSOLE_ADMIN_MODULE,
     &STRATE_NET_MODULE,
-    &DHCPD_MODULE,
+    &DHCP_CLIENT_MODULE,
     &PING_MODULE,
 ]);
 
@@ -98,8 +99,8 @@ static mut INIT_ELF_MODULE: Option<(u64, u64)> = None;
 static mut CONSOLE_ADMIN_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional strate-net module info (set during Limine entry).
 static mut STRATE_NET_ELF_MODULE: Option<(u64, u64)> = None;
-/// Optional dhcpd module info (set during Limine entry).
-static mut DHCPD_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional dhcp-client module info (set during Limine entry).
+static mut DHCP_CLIENT_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional ping module info (set during Limine entry).
 static mut PING_ELF_MODULE: Option<(u64, u64)> = None;
 
@@ -154,10 +155,10 @@ pub fn strate_net_module() -> Option<(u64, u64)> {
     unsafe { STRATE_NET_ELF_MODULE }
 }
 
-/// Return the dhcpd module (addr, size) if present.
-pub fn dhcpd_module() -> Option<(u64, u64)> {
+/// Return the dhcp-client module (addr, size) if present.
+pub fn dhcp_client_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
-    unsafe { DHCPD_ELF_MODULE }
+    unsafe { DHCP_CLIENT_ELF_MODULE }
 }
 
 /// Return the ping module (addr, size) if present.
@@ -184,7 +185,7 @@ struct ResolvedModules {
     init: Option<(u64, u64)>,
     console_admin: Option<(u64, u64)>,
     strate_net: Option<(u64, u64)>,
-    dhcpd: Option<(u64, u64)>,
+    dhcp_client: Option<(u64, u64)>,
     ping: Option<(u64, u64)>,
 }
 
@@ -209,8 +210,8 @@ fn resolve_modules_once(modules: &[&limine::file::File]) -> ResolvedModules {
             resolved.console_admin = Some(info);
         } else if path_matches(path, b"/initfs/strate-net") {
             resolved.strate_net = Some(info);
-        } else if path_matches(path, b"/initfs/bin/dhcpd") {
-            resolved.dhcpd = Some(info);
+        } else if path_matches(path, b"/initfs/bin/dhcp-client") {
+            resolved.dhcp_client = Some(info);
         } else if path_matches(path, b"/initfs/bin/ping") {
             resolved.ping = Some(info);
         }
@@ -413,15 +414,17 @@ pub unsafe extern "C" fn kmain() -> ! {
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/strate-net not found in modules");
             }
-            if let Some((base, size)) = resolved.dhcpd {
-                unsafe { DHCPD_ELF_MODULE = Some((base, size)) };
+            if let Some((base, size)) = resolved.dhcp_client {
+                unsafe { DHCP_CLIENT_ELF_MODULE = Some((base, size)) };
                 crate::serial_println!(
-                    "[limine] /initfs/bin/dhcpd found: base={:#x} size={}",
+                    "[limine] /initfs/bin/dhcp-client found: base={:#x} size={}",
                     base,
                     size
                 );
             } else {
-                crate::serial_println!("[limine] WARN: /initfs/bin/dhcpd not found in modules");
+                crate::serial_println!(
+                    "[limine] WARN: /initfs/bin/dhcp-client not found in modules"
+                );
             }
             if let Some((base, size)) = resolved.ping {
                 unsafe { PING_ELF_MODULE = Some((base, size)) };

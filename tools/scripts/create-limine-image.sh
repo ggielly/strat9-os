@@ -20,7 +20,7 @@ MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/init"
 CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
-DHCPD_ELF="target/x86_64-unknown-none/${PROFILE}/dhcpd"
+DHCP_CLIENT_ELF="target/x86_64-unknown-none/${PROFILE}/dhcp-client"
 PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
 
 echo ""
@@ -92,11 +92,11 @@ if [ -f "$NET_ELF" ]; then
 else
     echo "    strate-net   : (missing)"
 fi
-if [ -f "$DHCPD_ELF" ]; then
-    dhcpd_size=$(stat -c%s "$DHCPD_ELF")
-    echo "    dhcpd        : $dhcpd_size bytes"
+if [ -f "$DHCP_CLIENT_ELF" ]; then
+    dhcp_client_size=$(stat -c%s "$DHCP_CLIENT_ELF")
+    echo "    dhcp-client  : $dhcp_client_size bytes"
 else
-    echo "    dhcpd        : (missing)"
+    echo "    dhcp-client  : (missing)"
 fi
 if [ -f "$PING_ELF" ]; then
     ping_size=$(stat -c%s "$PING_ELF")
@@ -186,11 +186,11 @@ else
     echo "  [WARN] strate-net binary not found at $NET_ELF"
 fi
 
-if [ -f "$DHCPD_ELF" ]; then
-    cp "$DHCPD_ELF" "$ISO_ROOT/initfs/bin/dhcpd"
-    echo "  [OK] Copied dhcpd: /initfs/bin/dhcpd"
+if [ -f "$DHCP_CLIENT_ELF" ]; then
+    cp "$DHCP_CLIENT_ELF" "$ISO_ROOT/initfs/bin/dhcp-client"
+    echo "  [OK] Copied dhcp-client: /initfs/bin/dhcp-client"
 else
-    echo "  [WARN] dhcpd binary not found at $DHCPD_ELF"
+    echo "  [WARN] dhcp-client binary not found at $DHCP_CLIENT_ELF"
 fi
 
 if [ -f "$PING_ELF" ]; then

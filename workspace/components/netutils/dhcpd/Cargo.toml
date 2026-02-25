@@ -1,13 +1,13 @@
 [package]
-name = "dhcpd"
+name = "dhcp-client"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
-description = "DHCP status monitor for strat9-os (Plan 9 scheme based)"
+description = "DHCP client status monitor for strat9-os (Plan 9 scheme based)"
 
 [[bin]]
-name = "dhcpd"
+name = "dhcp-client"
 path = "main.rs"
 
 [dependencies]

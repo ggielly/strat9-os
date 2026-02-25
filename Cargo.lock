@@ -108,7 +108,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dhcpd"
+name = "dhcp-client"
 version = "0.1.0"
 dependencies = [
  "strat9-syscall",
