@@ -1,7 +1,7 @@
 //! VirtIO Network Device driver
 //!
 //! Provides network I/O via VirtIO-net protocol for QEMU/KVM environments.
-//! Implements the common [`crate::drivers::net::NetworkDevice`] trait so
+//! Implements the common [`crate::hardware::nic::NetworkDevice`] trait so
 //! this driver plugs into the unified `/dev/net/` scheme.
 //!
 //! Reference: VirtIO spec v1.2, Section 5.1 (Network Device)
@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     arch::x86_64::pci::{self, PciDevice},
-    drivers::net,
+    hardware::nic as net,
     memory::{get_allocator, FrameAllocator, PhysFrame},
     sync::SpinLock,
 };

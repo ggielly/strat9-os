@@ -25,12 +25,12 @@ x86_64 = "0.15"
 uart_16550 = "0.4"
 limine = "0.5.0"
 component = { path = "libs/component" }
-net-core = { path = "../net-core" }
-nic-buffers = { path = "../nic-buffers" }
-nic-queues = { path = "../nic-queues" }
-intel-ethernet = { path = "../intel-ethernet" }
-e1000 = { path = "../e1000" }
-driver-net-proto = { path = "../driver-net-proto" }
+net-core = { path = "../drivers/nic/net-core" }
+nic-buffers = { path = "../drivers/nic/nic-buffers" }
+nic-queues = { path = "../drivers/nic/nic-queues" }
+intel-ethernet = { path = "../drivers/nic/intel-ethernet" }
+e1000 = { path = "../drivers/nic/e1000" }
+driver-net-proto = { path = "../drivers/nic/driver-net-proto" }
 
 [build-dependencies]
 cc = "1.0"

@@ -24,7 +24,7 @@ pub mod arch;
 pub mod boot;
 pub mod capability;
 pub mod components;
-pub mod drivers;
+pub mod hardware;
 pub mod entry;
 pub mod ipc;
 pub mod logger;
@@ -443,25 +443,25 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         // =============================================
         serial_println!("[init] Loading hardware drivers...");
         vga_println!("[..] Initializing hardware drivers...");
-        drivers::init();
+        hardware::init();
 
         serial_println!("[init] Initializing VirtIO block...");
         vga_println!("[..] Looking for VirtIO block device...");
-        drivers::virtio::block::init();
+        hardware::virtio::block::init();
         serial_println!("[init] VirtIO block initialized.");
         vga_println!("[OK] VirtIO block driver initialized");
 
         serial_println!("[init] Initializing VirtIO net...");
         vga_println!("[..] Looking for VirtIO net device...");
-        drivers::virtio::net::init();
+        hardware::virtio::net::init();
         serial_println!("[init] VirtIO net initialized.");
         vga_println!("[OK] VirtIO net driver initialized");
 
         serial_println!("[init] Checking for devices...");
         vga_println!("[..] Checking for devices...");
 
-        if let Some(blk) = drivers::virtio::block::get_device() {
-            use drivers::virtio::block::BlockDevice;
+        if let Some(blk) = hardware::virtio::block::get_device() {
+            use hardware::virtio::block::BlockDevice;
             serial_println!(
                 "[INFO] VirtIO block device found. Capacity: {} sectors",
                 blk.sector_count()
@@ -474,14 +474,14 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
 
         // Report all registered network interfaces (E1000 + VirtIO)
         {
-            use drivers::net::NetworkDevice;
-            let ifaces = drivers::net::list_interfaces();
+            use hardware::nic::NetworkDevice;
+            let ifaces = hardware::nic::list_interfaces();
             if ifaces.is_empty() {
                 serial_println!("[WARN] No network devices found");
                 vga_println!("[WARN] No network devices found");
             } else {
                 for name in &ifaces {
-                    if let Some(dev) = drivers::net::get_device(name) {
+                    if let Some(dev) = hardware::nic::get_device(name) {
                         let mac = dev.mac_address();
                         serial_println!(
                             "[INFO] Network {} ({}) MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} link={}",
@@ -538,7 +538,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
             }
         }
-        if let (Some(task_id), Some(device)) = (init_task_id, drivers::virtio::block::get_device()) {
+        if let (Some(task_id), Some(device)) = (init_task_id, hardware::virtio::block::get_device()) {
             if let Some(task) = crate::process::get_task_by_id(task_id) {
                 let cap = crate::capability::get_capability_manager().create_capability(
                     crate::capability::ResourceType::Volume,

@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
-    drivers::virtio::block::{self, BlockDevice, SECTOR_SIZE},
+    hardware::virtio::block::{self, BlockDevice, SECTOR_SIZE},
     ipc::{
         channel::{self, ChanId},
         message::IpcMessage,
@@ -503,7 +503,7 @@ fn sys_debug_log(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 // ============================================================
 
 pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let device = crate::drivers::net::get_default_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
     let mut kbuf = vec![0u8; buf_len as usize];
 
     let n = device.receive(&mut kbuf).map_err(SyscallError::from)?;
@@ -514,7 +514,7 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 }
 
 pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let device = crate::drivers::net::get_default_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
     let user = UserSliceRead::new(buf_ptr, buf_len as usize)?;
     let kbuf = user.read_to_vec();
 
@@ -524,7 +524,7 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 }
 
 pub fn sys_net_info(info_type: u64, buf_ptr: u64) -> Result<u64, SyscallError> {
-    let device = crate::drivers::net::get_default_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
 
     match info_type {
         0 => {
@@ -835,7 +835,7 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
     // seed it with the primary volume capability so it can mount storage
     // without waiting for an explicit bootstrap message.
     if path == "/" || path == "/fs/ext4" {
-        if let Some(device) = crate::drivers::virtio::block::get_device() {
+        if let Some(device) = crate::hardware::virtio::block::get_device() {
             let volume_cap = crate::capability::get_capability_manager().create_capability(
                 ResourceType::Volume,
                 device as *const _ as usize,

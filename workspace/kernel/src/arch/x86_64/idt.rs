@@ -477,14 +477,14 @@ extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {
 /// The IRQ line is determined at runtime from PCI config.
 extern "x86-interrupt" fn virtio_block_handler(_stack_frame: InterruptStackFrame) {
     // Handle the VirtIO block interrupt
-    crate::drivers::virtio::block::handle_interrupt();
+    crate::hardware::virtio::block::handle_interrupt();
 
     // Send EOI
     if super::apic::is_initialized() {
         super::apic::eoi();
     } else {
         // Get the IRQ number from the device
-        let irq = crate::drivers::virtio::block::get_irq();
+        let irq = crate::hardware::virtio::block::get_irq();
         pic::end_of_interrupt(irq);
     }
 }
