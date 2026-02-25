@@ -18,6 +18,11 @@ struct PipeInner {
     len: usize,
     read_closed: bool,
     write_closed: bool,
+    /// Number of open file-descriptions referencing the read end.
+    /// The end is marked closed only when this reaches zero.
+    read_refs: usize,
+    /// Number of open file-descriptions referencing the write end.
+    write_refs: usize,
 }
 
 impl PipeInner {
@@ -29,6 +34,8 @@ impl PipeInner {
             len: 0,
             read_closed: false,
             write_closed: false,
+            read_refs: 1,
+            write_refs: 1,
         }
     }
 
@@ -123,14 +130,46 @@ impl Pipe {
         Ok(total)
     }
 
-    /// Close the read end.
-    pub fn close_read(&self) {
-        self.inner.lock().read_closed = true;
+    /// Increment the read-end refcount (called on dup/fork).
+    pub fn dup_read(&self) {
+        self.inner.lock().read_refs += 1;
     }
 
-    /// Close the write end.
-    pub fn close_write(&self) {
-        self.inner.lock().write_closed = true;
+    /// Increment the write-end refcount (called on dup/fork).
+    pub fn dup_write(&self) {
+        self.inner.lock().write_refs += 1;
+    }
+
+    /// Decrement the read-end refcount; marks the end closed only when it
+    /// reaches zero.  Returns true if the end was actually closed.
+    pub fn close_read(&self) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.read_refs == 0 {
+            return false;
+        }
+        inner.read_refs -= 1;
+        if inner.read_refs == 0 {
+            inner.read_closed = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Decrement the write-end refcount; marks the end closed only when it
+    /// reaches zero.  Returns true if the end was actually closed.
+    pub fn close_write(&self) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.write_refs == 0 {
+            return false;
+        }
+        inner.write_refs -= 1;
+        if inner.write_refs == 0 {
+            inner.write_closed = true;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -205,7 +244,8 @@ impl Scheme for PipeScheme {
             pipe.close_write();
         }
 
-        // If both ends are closed, remove the pipe
+        // Remove the shared Pipe entry only when both ends are fully closed
+        // (both refcounts have reached zero).
         let base = file_id & !1;
         let inner = pipe.inner.lock();
         if inner.read_closed && inner.write_closed {

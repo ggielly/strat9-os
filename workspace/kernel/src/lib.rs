@@ -456,19 +456,26 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         serial_println!("[init] Storage verification skipped (boot path)");
         vga_println!("[..] Storage verification skipped at boot");
 
-        // Launch the init process: prefer /initfs/init, fall back to /initfs/test_pid
+        // Launch the init process: prefer /initfs/init, fall back to /initfs/test_pid.
+        // The fallback is tried both when the primary module is absent AND when it
+        // is present but contains an invalid ELF (corrupt / wrong arch).
+        let mut init_loaded = false;
+
         if let Some((base, size)) = crate::limine_entry::init_module() {
             let elf_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
             match process::elf::load_and_run_elf(elf_data, "init") {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
+                    init_loaded = true;
                     serial_println!("[init] ELF '/initfs/init' loaded as task 'init'.");
                 }
                 Err(e) => {
-                    serial_println!("[init] Failed to load init ELF: {}", e);
+                    serial_println!("[init] Failed to load init ELF: {}; trying fallback.", e);
                 }
             }
-        } else if args.initfs_base != 0 && args.initfs_size != 0 {
+        }
+
+        if !init_loaded && args.initfs_base != 0 && args.initfs_size != 0 {
             let elf_data = unsafe {
                 core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
             };

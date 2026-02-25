@@ -925,6 +925,15 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
         }
     };
 
+    // Give the silo an EOF stdin so that any read(0, …) returns 0 immediately
+    // instead of EBADF (which can cause busy-loops) or blocking on the
+    // keyboard (which would steal input from the foreground shell).
+    if let Some(task) = crate::process::get_task_by_id(task_id) {
+        let bg_stdin = crate::vfs::create_background_stdin();
+        let fd_table = unsafe { &mut *task.fd_table.get() };
+        fd_table.insert_at(crate::vfs::STDIN, bg_stdin);
+    }
+
     let mut mgr = SILO_MANAGER.lock();
     {
         let silo = mgr.get_mut(silo_id)?;

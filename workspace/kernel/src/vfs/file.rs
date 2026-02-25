@@ -137,9 +137,13 @@ impl OpenFile {
         self.scheme.sync(self.file_id)
     }
 
-    /// Close the file (called when last reference is dropped).
+    /// Signal that this file descriptor is being closed.
+    ///
+    /// Does NOT call scheme.close() directly; the actual scheme close is deferred
+    /// to the Drop impl so it fires only when the last Arc<OpenFile> is released
+    /// (POSIX: scheme is closed when all dup'd/fork'd copies are gone).
     pub fn close(&self) -> Result<(), SyscallError> {
-        self.scheme.close(self.file_id)
+        Ok(())
     }
 
     /// Get file flags.
