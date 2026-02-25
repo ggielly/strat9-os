@@ -60,14 +60,13 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    debug_log("[strate-net] OOM\n");
+    let _ = call::write(1, b"[strate-net] OOM\n");
     exit(12);
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    debug_log("[strate-net] PANIC: ");
-    // info.message() is stable since Rust 1.73
+    let _ = call::write(1, b"[strate-net] PANIC: ");
     let msg = info.message();
     let mut buf = [0u8; 256];
     use core::fmt::Write;
@@ -78,11 +77,9 @@ fn panic(info: &PanicInfo) -> ! {
     let _ = write!(cursor, "{}", msg);
     let written = cursor.pos;
     if written > 0 {
-        if let Ok(s) = core::str::from_utf8(&buf[..written]) {
-            debug_log(s);
-        }
+        let _ = call::write(1, &buf[..written]);
     }
-    debug_log("\n");
+    let _ = call::write(1, b"\n");
     exit(255);
 }
 
@@ -110,10 +107,26 @@ impl core::fmt::Write for BufWriter<'_> {
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{self, Device, DeviceCapabilities, Medium},
-    socket::dhcpv4,
+    socket::{dhcpv4, icmp},
     time::Instant,
     wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address},
 };
+
+fn icmp_checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
 
 const MAX_FRAME_SIZE: usize = 1514;
 const NANOS_PER_SEC: u64 = 1_000_000_000;
@@ -189,7 +202,7 @@ impl phy::TxToken for Strat9TxToken {
         F: FnOnce(&mut [u8]) -> R,
     {
         if len > MAX_FRAME_SIZE {
-            debug_log("[strate-net] TX frame too large\n");
+            log("[strate-net] TX frame too large\n");
             return f(&mut []);
         }
         let mut buf = [0u8; MAX_FRAME_SIZE];
@@ -301,6 +314,14 @@ fn reply_read(sender: u64, data: &[u8]) -> IpcMessage {
     msg
 }
 
+fn reply_write(sender: u64, n: usize) -> IpcMessage {
+    let mut msg = IpcMessage::new(0x80);
+    msg.sender = sender;
+    msg.payload[0..4].copy_from_slice(&0u32.to_le_bytes());
+    msg.payload[4..8].copy_from_slice(&(n as u32).to_le_bytes());
+    msg
+}
+
 fn reply_ok(sender: u64) -> IpcMessage {
     let mut msg = IpcMessage::new(0x80);
     msg.sender = sender;
@@ -308,22 +329,61 @@ fn reply_ok(sender: u64) -> IpcMessage {
     msg
 }
 
+fn parse_ipv4(s: &str) -> Option<Ipv4Address> {
+    let mut octets = [0u8; 4];
+    let mut idx = 0;
+    let mut val: u16 = 0;
+    let mut has_digit = false;
+    for &b in s.as_bytes() {
+        if b == b'.' {
+            if !has_digit || idx >= 3 {
+                return None;
+            }
+            if val > 255 {
+                return None;
+            }
+            octets[idx] = val as u8;
+            idx += 1;
+            val = 0;
+            has_digit = false;
+        } else if b >= b'0' && b <= b'9' {
+            val = val * 10 + (b - b'0') as u16;
+            has_digit = true;
+        } else {
+            break;
+        }
+    }
+    if !has_digit || idx != 3 || val > 255 {
+        return None;
+    }
+    octets[3] = val as u8;
+    Some(Ipv4Address::new(octets[0], octets[1], octets[2], octets[3]))
+}
+
 // ---------------------------------------------------------------------------
 // NetworkStrate  – main state machine
 // ---------------------------------------------------------------------------
+
+struct PendingPing {
+    seq: u16,
+    send_ts_ns: u64,
+}
 
 struct NetworkStrate {
     device: Strat9NetDevice,
     interface: Interface,
     sockets: SocketSet<'static>,
-    /// Handle to the smoltcp DHCP socket
     dhcp_handle: SocketHandle,
-    /// Populated once DHCP handshake completes
+    icmp_handle: SocketHandle,
     ip_config: Option<IpConfig>,
-    /// VFS handles: file_id → virtual path ("ip", "gateway", "route", "dns", "" = root dir)
+    /// VFS handles: file_id → virtual path ("ip", "gateway", "route", "dns", "ping/<ip>", "" = root dir)
     open_handles: BTreeMap<u64, String>,
-    /// Monotonically-increasing file handle allocator
     next_fid: u64,
+    /// Last ping that was sent, waiting for reply
+    pending_ping: Option<PendingPing>,
+    /// Received reply: (seq, rtt_us)
+    ping_reply: Option<(u16, u64)>,
+    ping_ident: u16,
 }
 
 impl NetworkStrate {
@@ -333,18 +393,32 @@ impl NetworkStrate {
         let interface = Interface::new(config, &mut device, Instant::from_micros(0));
         let mut sockets = SocketSet::new(alloc::vec![]);
 
-        // Create the DHCP socket – smoltcp will handle the full DORA sequence
         let dhcp_socket = dhcpv4::Socket::new();
         let dhcp_handle = sockets.add(dhcp_socket);
+
+        let icmp_rx_buf = icmp::PacketBuffer::new(
+            alloc::vec![icmp::PacketMetadata::EMPTY; 4],
+            alloc::vec![0u8; 1024],
+        );
+        let icmp_tx_buf = icmp::PacketBuffer::new(
+            alloc::vec![icmp::PacketMetadata::EMPTY; 4],
+            alloc::vec![0u8; 1024],
+        );
+        let icmp_socket = icmp::Socket::new(icmp_rx_buf, icmp_tx_buf);
+        let icmp_handle = sockets.add(icmp_socket);
 
         Self {
             device,
             interface,
             sockets,
             dhcp_handle,
+            icmp_handle,
             ip_config: None,
             open_handles: BTreeMap::new(),
             next_fid: 1,
+            pending_ping: None,
+            ping_reply: None,
+            ping_ident: 0x9001,
         }
     }
 
@@ -360,7 +434,7 @@ impl NetworkStrate {
 
         match event {
             Some(dhcpv4::Event::Configured(config)) => {
-                debug_log("[strate-net] DHCP: address acquired\n");
+                log("[strate-net] DHCP: address acquired\n");
 
                 // Apply address to the interface
                 self.interface.update_ip_addrs(|addrs| {
@@ -395,7 +469,7 @@ impl NetworkStrate {
                 });
             }
             Some(dhcpv4::Event::Deconfigured) => {
-                debug_log("[strate-net] DHCP: deconfigured (lease expired?)\n");
+                log("[strate-net] DHCP: deconfigured (lease expired?)\n");
                 self.ip_config = None;
                 // Clear interface addresses
                 self.interface.update_ip_addrs(|addrs| addrs.clear());
@@ -406,21 +480,89 @@ impl NetworkStrate {
     }
 
     // -----------------------------------------------------------------------
-    // VFS / IPC handlers  (Plan 9 style, mounted at /net)
-    //
-    //  /net            — directory: lists available virtual files
-    //  /net/ip         — read: "a.b.c.d/prefix\n"  (from DHCP)
-    //  /net/gateway    — read: "a.b.c.d\n"          (from DHCP)
-    //  /net/route      — read: "default via a.b.c.d\n" (from DHCP router option)
-    //  /net/dns        — read: "a.b.c.d\n..."       (all DNS from DHCP)
-    //  /net/em0        — read/write: raw Ethernet frames (future, FreeBSD naming)
+    // ICMP echo processing
+    // -----------------------------------------------------------------------
+
+    fn process_icmp(&mut self) {
+        let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
+        if !socket.can_recv() {
+            return;
+        }
+        let now_ns = clock_gettime_ns().unwrap_or(0);
+        while socket.can_recv() {
+            let Ok((data, _addr)) = socket.recv() else {
+                break;
+            };
+            // data is the raw ICMP payload after IP header
+            if data.len() < 8 {
+                continue;
+            }
+            // ICMP type=0 (echo reply), code=0
+            if data[0] != 0 {
+                continue;
+            }
+            let ident = u16::from_be_bytes([data[4], data[5]]);
+            let seq = u16::from_be_bytes([data[6], data[7]]);
+            if ident != self.ping_ident {
+                continue;
+            }
+            if let Some(ref pending) = self.pending_ping {
+                if seq == pending.seq {
+                    let rtt_us = now_ns.saturating_sub(pending.send_ts_ns) / 1000;
+                    self.ping_reply = Some((seq, rtt_us));
+                    self.pending_ping = None;
+                }
+            }
+        }
+    }
+
+    fn send_ping(&mut self, target: Ipv4Address, seq: u16) -> bool {
+        // One in-flight ping at a time, and don't overwrite unread replies.
+        if self.pending_ping.is_some() || self.ping_reply.is_some() {
+            return false;
+        }
+        let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
+        if !socket.is_open() {
+            socket.bind(icmp::Endpoint::Ident(self.ping_ident)).ok();
+        }
+        if !socket.can_send() {
+            return false;
+        }
+        // Build ICMP echo request manually: type(1)+code(1)+cksum(2)+ident(2)+seq(2)+payload
+        let payload_len = 40;
+        let icmp_len = 8 + payload_len;
+        let Ok(buf) = socket.send(icmp_len, IpAddress::Ipv4(target)) else {
+            return false;
+        };
+        buf[0] = 8; // type = echo request
+        buf[1] = 0; // code
+        buf[2] = 0; // checksum (filled later)
+        buf[3] = 0;
+        buf[4..6].copy_from_slice(&self.ping_ident.to_be_bytes());
+        buf[6..8].copy_from_slice(&seq.to_be_bytes());
+        for i in 8..icmp_len {
+            buf[i] = 0xAA;
+        }
+        // Compute ICMP checksum
+        let cksum = icmp_checksum(buf);
+        buf[2..4].copy_from_slice(&cksum.to_be_bytes());
+
+        let now_ns = clock_gettime_ns().unwrap_or(0);
+        self.pending_ping = Some(PendingPing {
+            seq,
+            send_ts_ns: now_ns,
+        });
+        true
+    }
+
+    // -----------------------------------------------------------------------
+    // VFS / IPC handlers
     // -----------------------------------------------------------------------
 
     fn handle_open(&mut self, msg: &IpcMessage) -> IpcMessage {
-        // Decode path from payload: [flags:u32][path_len:u16][path bytes…]
         let path_len = u16::from_le_bytes([msg.payload[4], msg.payload[5]]) as usize;
         if path_len > 42 {
-            return IpcMessage::error_reply(msg.sender, -22); // EINVAL
+            return IpcMessage::error_reply(msg.sender, -22);
         }
         let path_bytes = &msg.payload[6..6 + path_len];
         let path = match core::str::from_utf8(path_bytes) {
@@ -429,11 +571,9 @@ impl NetworkStrate {
         };
 
         match path {
-            // Root directory
             "" => {
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(""));
-                // FileFlags::DIRECTORY = 1
                 reply_open(msg.sender, fid, u64::MAX, 1)
             }
             "ip" | "gateway" | "route" | "dns" => {
@@ -441,7 +581,12 @@ impl NetworkStrate {
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
-            _ => IpcMessage::error_reply(msg.sender, -2), // ENOENT
+            p if p.starts_with("ping/") => {
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            _ => IpcMessage::error_reply(msg.sender, -2),
         }
     }
 
@@ -451,18 +596,16 @@ impl NetworkStrate {
 
         let path = match self.open_handles.get(&file_id) {
             Some(p) => p.clone(),
-            None => return IpcMessage::error_reply(msg.sender, -9), // EBADF
+            None => return IpcMessage::error_reply(msg.sender, -9),
         };
 
         let mut tmp = [0u8; 64];
 
         match path.as_str() {
-            // Root listing
             "" => {
-                let listing = b"ip\ngateway\nroute\ndns\n";
+                let listing = b"ip\ngateway\nroute\ndns\nping\n";
                 let start = (offset as usize).min(listing.len());
-                let data = &listing[start..];
-                reply_read(msg.sender, data)
+                reply_read(msg.sender, &listing[start..])
             }
             "ip" => {
                 if let Some(ref cfg) = self.ip_config {
@@ -501,12 +644,47 @@ impl NetworkStrate {
                 }
                 reply_read(msg.sender, b"none\n")
             }
-            _ => IpcMessage::error_reply(msg.sender, -9), // EBADF
+            p if p.starts_with("ping/") => {
+                if let Some((seq, rtt_us)) = self.ping_reply.take() {
+                    let mut buf = [0u8; 10];
+                    buf[0..2].copy_from_slice(&seq.to_le_bytes());
+                    buf[2..10].copy_from_slice(&rtt_us.to_le_bytes());
+                    let start = (offset as usize).min(buf.len());
+                    reply_read(msg.sender, &buf[start..])
+                } else {
+                    reply_read(msg.sender, &[])
+                }
+            }
+            _ => IpcMessage::error_reply(msg.sender, -9),
         }
     }
 
     fn handle_write(&mut self, msg: &IpcMessage) -> IpcMessage {
-        // Write not supported on virtual status files
+        let file_id = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap_or([0u8; 8]));
+
+        let path = match self.open_handles.get(&file_id) {
+            Some(p) => p.clone(),
+            None => return IpcMessage::error_reply(msg.sender, -9),
+        };
+
+        if path.starts_with("ping/") {
+            let ip_str = &path[5..];
+            if let Some(target) = parse_ipv4(ip_str) {
+                let data_len =
+                    u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+                let seq = if data_len >= 2 {
+                    u16::from_le_bytes([msg.payload[18], msg.payload[19]])
+                } else {
+                    0
+                };
+                if self.send_ping(target, seq) {
+                    return reply_write(msg.sender, data_len);
+                }
+                return IpcMessage::error_reply(msg.sender, -11); // EAGAIN
+            }
+            return IpcMessage::error_reply(msg.sender, -22);
+        }
+
         IpcMessage::error_reply(msg.sender, -1) // EPERM
     }
 
@@ -527,7 +705,7 @@ impl NetworkStrate {
     // -----------------------------------------------------------------------
 
     fn serve(&mut self, port: u64) -> ! {
-        debug_log("[strate-net] Starting DHCP...\n");
+        log("[strate-net] Starting DHCP...\n");
 
         loop {
             // 1. Drive the smoltcp stack (transmits queued packets, processes received ones)
@@ -536,8 +714,9 @@ impl NetworkStrate {
                 .interface
                 .poll(now, &mut self.device, &mut self.sockets);
 
-            // 2. Check DHCP state machine for new events
+            // 2. Check DHCP and ICMP state machines
             self.process_dhcp();
+            self.process_icmp();
 
             // 3. Handle IPC messages from other strates / VFS callers (non-blocking)
             let mut msg = IpcMessage::new(0);
@@ -554,51 +733,72 @@ impl NetworkStrate {
                 let _ = call::ipc_reply(&reply);
             }
 
-            // 4. Sleep until the next smoltcp deadline if there is nothing to do
+            // 4. Brief sleep when idle — capped to stay responsive to IPC
             if !got_ipc && poll_result == smoltcp::iface::PollResult::None {
+                const MAX_SLEEP_US: u64 = 10_000; // 10 ms
                 if let Some(delay) = self.interface.poll_delay(now, &self.sockets) {
-                    let micros = delay.total_micros();
+                    let micros = delay.total_micros().min(MAX_SLEEP_US);
                     if micros > 0 {
                         sleep_micros(micros);
                     } else {
                         let _ = proc_yield();
                     }
                 } else {
-                    let _ = proc_yield();
+                    sleep_micros(MAX_SLEEP_US);
                 }
             }
         }
     }
 }
 
+fn log(msg: &str) {
+    let _ = call::write(1, msg.as_bytes());
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    debug_log("[strate-net] Starting network silo\n");
+    log("[strate-net] Starting network silo\n");
 
     let port = match call::ipc_create_port(0) {
         Ok(p) => p as u64,
-        Err(_) => {
-            debug_log("[strate-net] Failed to create port\n");
+        Err(e) => {
+            log("[strate-net] Failed to create port: ");
+            log_error_code(e);
+            log("\n");
             exit(1);
         }
     };
 
-    if call::ipc_bind_port(port as usize, b"/net").is_err() {
-        debug_log("[strate-net] Failed to bind to /net\n");
+    if let Err(e) = call::ipc_bind_port(port as usize, b"/net") {
+        log("[strate-net] Failed to bind to /net: ");
+        log_error_code(e);
+        log("\n");
         exit(2);
     }
 
-    debug_log("[strate-net] Bound to /net\n");
+    log("[strate-net] Bound to /net\n");
 
-    // Get MAC address from kernel (fallback to a QEMU-safe address if unavailable)
     let mut mac = [0u8; 6];
     if net_info(0, &mut mac).is_err() {
-        debug_log("[strate-net] Failed to get MAC address, using fallback\n");
+        log("[strate-net] No NIC found, using fallback MAC\n");
         mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
     } else {
-        debug_log("[strate-net] MAC acquired from kernel\n");
+        log("[strate-net] MAC acquired from kernel\n");
     }
 
     let mut strate = NetworkStrate::new(mac);
     strate.serve(port);
+}
+
+fn log_error_code(e: strate_net::syscalls::Error) {
+    use core::fmt::Write;
+    let mut buf = [0u8; 32];
+    let n = {
+        let mut w = BufWriter { buf: &mut buf, pos: 0 };
+        let _ = write!(w, "{}", e.to_errno());
+        w.pos
+    };
+    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+        log(s);
+    }
 }

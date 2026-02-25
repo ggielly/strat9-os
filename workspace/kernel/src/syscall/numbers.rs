@@ -208,6 +208,41 @@ pub const SYS_GETPGRP: u64 = 331;
 /// Get session id. arg1=pid (0=self).
 pub const SYS_GETSID: u64 = 332;
 
+/// Set TID address for futex-based thread join (pthread).
+/// arg1 = tidptr (*u32). Kernel writes 0 there on thread exit, then futex_wake.
+/// Returns current TID.
+pub const SYS_SET_TID_ADDRESS: u64 = 333;
+
+/// Exit all threads in the thread group (C library _exit / exit_group).
+/// arg1 = exit_code.
+pub const SYS_EXIT_GROUP: u64 = 334;
+
+/// Return real user id.
+pub const SYS_GETUID: u64 = 335;
+
+/// Return effective user id.
+pub const SYS_GETEUID: u64 = 336;
+
+/// Return real group id.
+pub const SYS_GETGID: u64 = 337;
+
+/// Return effective group id.
+pub const SYS_GETEGID: u64 = 338;
+
+/// Set real user id. arg1 = uid.
+pub const SYS_SETUID: u64 = 339;
+
+/// Set real group id. arg1 = gid.
+pub const SYS_SETGID: u64 = 340;
+
+/// Architecture-specific process info (x86_64: FS/GS base).
+/// arg1 = code (ARCH_SET_FS=0x1002, ARCH_GET_FS=0x1003, etc.), arg2 = addr.
+pub const SYS_ARCH_PRCTL: u64 = 350;
+
+/// Send signal to a specific thread in a thread group.
+/// arg1 = tgid, arg2 = tid, arg3 = signal_number.
+pub const SYS_TGKILL: u64 = 352;
+
 // ============================================================
 // Block 400-499: filesystem / VFS
 // ============================================================
@@ -245,6 +280,54 @@ pub const SYS_DUP: u64 = 432;
 
 /// Duplicate a file descriptor to a specific number. arg1=old_fd, arg2=new_fd.
 pub const SYS_DUP2: u64 = 433;
+
+/// Change current working directory. arg1=path_ptr, arg2=path_len.
+pub const SYS_CHDIR: u64 = 440;
+
+/// Change current working directory (fd variant). arg1=fd.
+pub const SYS_FCHDIR: u64 = 441;
+
+/// Get current working directory. arg1=buf_ptr, arg2=buf_len. Returns bytes written.
+pub const SYS_GETCWD: u64 = 442;
+
+/// I/O control. arg1=fd, arg2=request, arg3=arg.
+pub const SYS_IOCTL: u64 = 443;
+
+/// Set and get file creation mask. arg1=mask. Returns old mask.
+pub const SYS_UMASK: u64 = 444;
+
+/// Remove a file. arg1=path_ptr, arg2=path_len.
+pub const SYS_UNLINK: u64 = 445;
+
+/// Remove a directory. arg1=path_ptr, arg2=path_len.
+pub const SYS_RMDIR: u64 = 446;
+
+/// Create directory. arg1=path_ptr, arg2=path_len, arg3=mode.
+pub const SYS_MKDIR: u64 = 447;
+
+/// Rename a file. arg1=old_ptr, arg2=old_len, arg3=new_ptr, arg4=new_len.
+pub const SYS_RENAME: u64 = 448;
+
+/// Create a hard link. arg1=old_ptr, arg2=old_len, arg3=new_ptr, arg4=new_len.
+pub const SYS_LINK: u64 = 449;
+
+/// Create a symbolic link. arg1=target_ptr, arg2=target_len, arg3=linkpath_ptr, arg4=linkpath_len.
+pub const SYS_SYMLINK: u64 = 450;
+
+/// Read a symbolic link. arg1=path_ptr, arg2=path_len, arg3=buf_ptr, arg4=buf_len.
+pub const SYS_READLINK: u64 = 451;
+
+/// Change file permissions. arg1=path_ptr, arg2=path_len, arg3=mode.
+pub const SYS_CHMOD: u64 = 452;
+
+/// Change file permissions on open fd. arg1=fd, arg2=mode.
+pub const SYS_FCHMOD: u64 = 453;
+
+/// Truncate file to length. arg1=path_ptr, arg2=path_len, arg3=length.
+pub const SYS_TRUNCATE: u64 = 454;
+
+/// Truncate open fd to length. arg1=fd, arg2=length.
+pub const SYS_FTRUNCATE: u64 = 455;
 
 // ============================================================
 // Block 410-419: network

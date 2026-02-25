@@ -69,6 +69,20 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SETSID => proc_sys::sys_setsid(),
         SYS_GETPGRP => proc_sys::sys_getpgrp(),
         SYS_GETSID => proc_sys::sys_getsid(arg1 as i64),
+        // ── Credentials (335-340) ────────────────────────────────────────────
+        SYS_GETUID => proc_sys::sys_getuid(),
+        SYS_GETEUID => proc_sys::sys_geteuid(),
+        SYS_GETGID => proc_sys::sys_getgid(),
+        SYS_GETEGID => proc_sys::sys_getegid(),
+        SYS_SETUID => proc_sys::sys_setuid(arg1),
+        SYS_SETGID => proc_sys::sys_setgid(arg1),
+        // ── Thread lifecycle (333-334) ────────────────────────────────────────
+        SYS_SET_TID_ADDRESS => proc_sys::sys_set_tid_address(arg1),
+        SYS_EXIT_GROUP => proc_sys::sys_exit_group(arg1),
+        // ── Architecture-specific (350) ───────────────────────────────────────
+        SYS_ARCH_PRCTL => proc_sys::sys_arch_prctl(arg1, arg2),
+        // ── tgkill (352) ──────────────────────────────────────────────────────
+        SYS_TGKILL => proc_sys::sys_tgkill(arg1, arg2, arg3),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),
@@ -125,6 +139,23 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PIPE => sys_pipe(arg1),
         SYS_DUP => sys_dup(arg1),
         SYS_DUP2 => sys_dup2(arg1, arg2),
+        // ── New VFS syscalls (440-455) ─────────────────────────────────────────
+        SYS_CHDIR => crate::vfs::sys_chdir(arg1, arg2),
+        SYS_FCHDIR => crate::vfs::sys_fchdir(arg1 as u32),
+        SYS_GETCWD => crate::vfs::sys_getcwd(arg1, arg2),
+        SYS_IOCTL => crate::vfs::sys_ioctl(arg1 as u32, arg2, arg3),
+        SYS_UMASK => crate::vfs::sys_umask(arg1),
+        SYS_UNLINK => crate::vfs::sys_unlink(arg1, arg2),
+        SYS_RMDIR => crate::vfs::sys_rmdir(arg1, arg2),
+        SYS_MKDIR => crate::vfs::sys_mkdir(arg1, arg2, arg3),
+        SYS_RENAME => crate::vfs::sys_rename(arg1, arg2, arg3, arg4),
+        SYS_LINK => crate::vfs::sys_link(arg1, arg2, arg3, arg4),
+        SYS_SYMLINK => crate::vfs::sys_symlink(arg1, arg2, arg3, arg4),
+        SYS_READLINK => crate::vfs::sys_readlink(arg1, arg2, arg3, arg4),
+        SYS_CHMOD => crate::vfs::sys_chmod(arg1, arg2, arg3),
+        SYS_FCHMOD => crate::vfs::sys_fchmod(arg1 as u32, arg2),
+        SYS_TRUNCATE => crate::vfs::sys_truncate(arg1, arg2, arg3),
+        SYS_FTRUNCATE => crate::vfs::sys_ftruncate(arg1 as u32, arg2),
 
         // Network
         SYS_NET_RECV => sys_net_recv(arg1, arg2),

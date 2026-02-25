@@ -5,6 +5,7 @@
 pub mod gfx;
 pub mod help;
 pub mod mem;
+pub mod net;
 pub mod ps;
 pub mod sys;
 pub mod timer;
@@ -49,6 +50,8 @@ impl CommandRegistry {
         registry.register("timer", timer::cmd_timer);
         registry.register("scheduler", sys::cmd_scheduler);
         registry.register("trace", sys::cmd_trace);
+        registry.register("ping", net::cmd_ping);
+        registry.register("ifconfig", net::cmd_ifconfig);
 
         registry
     }

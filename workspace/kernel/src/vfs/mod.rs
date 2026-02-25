@@ -533,6 +533,213 @@ pub fn sys_dup2(old_fd: u32, new_fd: u32) -> Result<u64, SyscallError> {
     Ok(fd as u64)
 }
 
+// ─── Path helpers ─────────────────────────────────────────────────────────────
+
+/// Read a NUL-terminated or length-bounded path from user space.
+///
+/// `path_ptr` and `path_len` come directly from syscall arguments.
+/// If `path_len` is 0 the string is assumed to be NUL-terminated up to 4096 bytes.
+fn read_user_path(path_ptr: u64, path_len: u64) -> Result<alloc::string::String, SyscallError> {
+    const MAX_PATH: usize = 4096;
+    let len = if path_len == 0 || path_len as usize > MAX_PATH {
+        MAX_PATH
+    } else {
+        path_len as usize
+    };
+    let user = UserSliceRead::new(path_ptr, len)?;
+    let bytes = user.read_to_vec();
+    // Trim at first NUL byte if present.
+    let trimmed = bytes.split(|&b| b == 0).next().unwrap_or(&bytes);
+    if trimmed.is_empty() {
+        return Err(SyscallError::InvalidArgument);
+    }
+    core::str::from_utf8(trimmed)
+        .map(|s| alloc::string::String::from(s))
+        .map_err(|_| SyscallError::InvalidArgument)
+}
+
+/// Resolve `path` relative to the current working directory when it is not
+/// absolute. Returns the absolute path to use with the VFS.
+fn resolve_path(path: &str, cwd: &str) -> alloc::string::String {
+    if path.starts_with('/') {
+        return alloc::string::String::from(path);
+    }
+    // Relative path: concatenate cwd + "/" + path.
+    if cwd.ends_with('/') {
+        alloc::format!("{}{}", cwd, path)
+    } else {
+        alloc::format!("{}/{}", cwd, path)
+    }
+}
+
+// ─── New VFS syscall handlers ─────────────────────────────────────────────────
+
+/// SYS_CHDIR (440): Change current working directory.
+pub fn sys_chdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
+    let raw = read_user_path(path_ptr, path_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { &*task.cwd.get() };
+    let abs = resolve_path(&raw, cwd);
+
+    // Verify the directory exists by trying to open it.
+    let (scheme, rel) = mount::resolve(&abs)?;
+    let res = scheme.open(&rel, OpenFlags::READ | OpenFlags::DIRECTORY)?;
+    let _ = scheme.close(res.file_id);
+
+    // Store the new cwd.
+    unsafe { *task.cwd.get() = abs };
+    Ok(0)
+}
+
+/// SYS_FCHDIR (441): Change cwd using an open file descriptor.
+pub fn sys_fchdir(fd: u32) -> Result<u64, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    let path = alloc::string::String::from(file.path());
+    drop(fd_table);
+    unsafe { *task.cwd.get() = path };
+    Ok(0)
+}
+
+/// SYS_GETCWD (442): Write the current working directory into a user buffer.
+pub fn sys_getcwd(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
+    if buf_len == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.cwd.get()).clone() };
+    let bytes = cwd.as_bytes();
+    let needed = bytes.len() + 1; // include NUL terminator
+    if needed > buf_len as usize {
+        return Err(SyscallError::OutOfMemory); // ERANGE in POSIX
+    }
+    let out = UserSliceWrite::new(buf_ptr, needed)?;
+    let mut tmp = alloc::vec![0u8; needed];
+    tmp[..bytes.len()].copy_from_slice(bytes);
+    tmp[bytes.len()] = 0;
+    out.copy_from(&tmp);
+    Ok(needed as u64) // Like Linux: returns byte count written (including NUL)
+}
+
+/// SYS_IOCTL (443): I/O control — stub.
+///
+/// Returns ENOTTY for all file descriptors that are not character devices.
+/// Terminal / PTY support will be added when a TTY driver is implemented.
+pub fn sys_ioctl(_fd: u32, _request: u64, _arg: u64) -> Result<u64, SyscallError> {
+    Err(SyscallError::NotATty)
+}
+
+/// SYS_UMASK (444): Set file creation mask; return the old mask.
+pub fn sys_umask(mask: u64) -> Result<u64, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let old = task
+        .umask
+        .swap(mask as u32 & 0o777, core::sync::atomic::Ordering::Relaxed);
+    Ok(old as u64)
+}
+
+/// SYS_UNLINK (445): Remove a file.
+pub fn sys_unlink(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
+    let raw = read_user_path(path_ptr, path_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.cwd.get()).clone() };
+    let abs = resolve_path(&raw, &cwd);
+    unlink(&abs)?;
+    Ok(0)
+}
+
+/// SYS_RMDIR (446): Remove an empty directory.
+pub fn sys_rmdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
+    // Reuse unlink for now — filesystem backends distinguish DIR vs FILE.
+    let raw = read_user_path(path_ptr, path_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.cwd.get()).clone() };
+    let abs = resolve_path(&raw, &cwd);
+    unlink(&abs)?;
+    Ok(0)
+}
+
+/// SYS_MKDIR (447): Create a directory.
+pub fn sys_mkdir(path_ptr: u64, path_len: u64, mode: u64) -> Result<u64, SyscallError> {
+    let raw = read_user_path(path_ptr, path_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let umask = task.umask.load(core::sync::atomic::Ordering::Relaxed);
+    let cwd = unsafe { (&*task.cwd.get()).clone() };
+    let abs = resolve_path(&raw, &cwd);
+    let effective_mode = (mode as u32) & !umask;
+    mkdir(&abs, effective_mode)?;
+    Ok(0)
+}
+
+/// SYS_RENAME (448): Rename a file or directory.
+///
+/// Not yet implemented in the scheme abstraction; returns ENOSYS.
+pub fn sys_rename(
+    old_ptr: u64,
+    old_len: u64,
+    new_ptr: u64,
+    new_len: u64,
+) -> Result<u64, SyscallError> {
+    // Read both paths (for validation / future use).
+    let _old = read_user_path(old_ptr, old_len)?;
+    let _new = read_user_path(new_ptr, new_len)?;
+    Err(SyscallError::NotImplemented)
+}
+
+/// SYS_LINK (449): Create a hard link — not yet implemented.
+pub fn sys_link(
+    _old_ptr: u64,
+    _old_len: u64,
+    _new_ptr: u64,
+    _new_len: u64,
+) -> Result<u64, SyscallError> {
+    Err(SyscallError::NotImplemented)
+}
+
+/// SYS_SYMLINK (450): Create a symbolic link — not yet implemented.
+pub fn sys_symlink(
+    _target_ptr: u64,
+    _target_len: u64,
+    _linkpath_ptr: u64,
+    _linkpath_len: u64,
+) -> Result<u64, SyscallError> {
+    Err(SyscallError::NotImplemented)
+}
+
+/// SYS_READLINK (451): Read a symbolic link — not yet implemented.
+pub fn sys_readlink(
+    _path_ptr: u64,
+    _path_len: u64,
+    _buf_ptr: u64,
+    _buf_len: u64,
+) -> Result<u64, SyscallError> {
+    Err(SyscallError::NotImplemented)
+}
+
+/// SYS_CHMOD (452): Change file mode bits.
+pub fn sys_chmod(path_ptr: u64, path_len: u64, _mode: u64) -> Result<u64, SyscallError> {
+    let _path = read_user_path(path_ptr, path_len)?;
+    // Not implemented in scheme abstraction yet.
+    Err(SyscallError::NotImplemented)
+}
+
+/// SYS_FCHMOD (453): Change file mode bits on open fd.
+pub fn sys_fchmod(_fd: u32, _mode: u64) -> Result<u64, SyscallError> {
+    Err(SyscallError::NotImplemented)
+}
+
+/// SYS_TRUNCATE (454): Truncate file to given length.
+pub fn sys_truncate(path_ptr: u64, path_len: u64, _length: u64) -> Result<u64, SyscallError> {
+    let _path = read_user_path(path_ptr, path_len)?;
+    Err(SyscallError::NotImplemented)
+}
+
+/// SYS_FTRUNCATE (455): Truncate open fd to given length.
+pub fn sys_ftruncate(_fd: u32, _length: u64) -> Result<u64, SyscallError> {
+    Err(SyscallError::NotImplemented)
+}
+
 // ============================================================================
 // Global PipeScheme singleton
 // ============================================================================

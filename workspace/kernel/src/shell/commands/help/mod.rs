@@ -33,6 +33,8 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  gfx ui <scale>    - Set UI scale: compact|normal|large");
     shell_println!("  gfx test          - Draw graphics validation screen");
     shell_println!("  gfx-demo          - Draw a graphics console UI demo");
+    shell_println!("  ping [ip] [count] - ICMP echo request (default: gateway, 4)");
+    shell_println!("  ifconfig          - Display network configuration");
     shell_println!("");
     Ok(())
 }

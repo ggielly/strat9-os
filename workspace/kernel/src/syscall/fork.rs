@@ -11,7 +11,7 @@ use crate::{
     },
     syscall::{error::SyscallError, SyscallFrame},
 };
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, string::String, sync::Arc};
 use core::{
     mem::offset_of,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -199,6 +199,17 @@ fn build_child_task(
         ticks: AtomicU64::new(0),
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
         vruntime: AtomicU64::new(parent.vruntime()),
+        // POSIX: clear_child_tid is NOT inherited — child starts with 0.
+        clear_child_tid: AtomicU64::new(0),
+        // POSIX: cwd IS inherited.
+        cwd: {
+            let parent_cwd = unsafe { (&*parent.cwd.get()).clone() };
+            SyncUnsafeCell::new(parent_cwd)
+        },
+        // POSIX: umask IS inherited.
+        umask: AtomicU32::new(parent.umask.load(Ordering::Relaxed)),
+        // FS.base: child starts with 0 (its own TLS not yet set up).
+        user_fs_base: AtomicU64::new(0),
     });
 
     // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret

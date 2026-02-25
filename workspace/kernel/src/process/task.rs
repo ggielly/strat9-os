@@ -3,7 +3,7 @@
 //! Defines the Task structure and related types for the Strat9-OS scheduler.
 
 use crate::{capability::CapabilityTable, memory::AddressSpace, vfs::FileDescriptorTable};
-use alloc::sync::Arc;
+use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -171,6 +171,16 @@ pub struct Task {
     pub sched_policy: SyncUnsafeCell<crate::process::sched::SchedPolicy>,
     /// Virtual runtime for CFS
     pub vruntime: AtomicU64,
+    /// TID address for futex-based thread join (set_tid_address).
+    /// The kernel writes 0 here when the thread exits, then futex_wake.
+    pub clear_child_tid: AtomicU64,
+    /// Current working directory (POSIX, inherited by children).
+    pub cwd: SyncUnsafeCell<String>,
+    /// File creation mask (inherited by children, NOT reset by exec).
+    pub umask: AtomicU32,
+    /// User-space FS.base (TLS on x86_64, set via arch_prctl ARCH_SET_FS).
+    /// Saved/restored across context switches.
+    pub user_fs_base: AtomicU64,
 }
 
 impl Task {
@@ -417,6 +427,10 @@ impl Task {
             ticks: AtomicU64::new(0),
             sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
             vruntime: AtomicU64::new(0),
+            clear_child_tid: AtomicU64::new(0),
+            cwd: SyncUnsafeCell::new(String::from("/")),
+            umask: AtomicU32::new(0o022),
+            user_fs_base: AtomicU64::new(0),
         }))
     }
 
@@ -478,6 +492,10 @@ impl Task {
             ticks: AtomicU64::new(0),
             sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
             vruntime: AtomicU64::new(0),
+            clear_child_tid: AtomicU64::new(0),
+            cwd: SyncUnsafeCell::new(String::from("/")),
+            umask: AtomicU32::new(0o022),
+            user_fs_base: AtomicU64::new(0),
         }))
     }
 

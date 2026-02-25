@@ -122,6 +122,20 @@ pub fn sys_execve(
     // 2. Reset all signal handlers to SIG_DFL
     current.reset_signals();
 
+    // 3. Clear thread-local storage address and TID pointer — POSIX exec semantics.
+    current.clear_child_tid.store(0, core::sync::atomic::Ordering::Relaxed);
+    current.user_fs_base.store(0, core::sync::atomic::Ordering::Relaxed);
+    // Reset FS.base MSR to 0 so the new image starts with a clean TLS pointer.
+    unsafe {
+        core::arch::asm!(
+            "xor eax, eax",
+            "xor edx, edx",
+            "mov ecx, 0xC0000100",  // MSR_FS_BASE
+            "wrmsr",
+            options(nostack, preserves_flags),
+        );
+    }
+
     let old_as =
         unsafe { core::mem::replace(&mut *current.address_space.get(), new_as_arc.clone()) };
 

@@ -135,15 +135,52 @@ fn sleep_ms(ms: u64) {
 }
 
 fn is_unconfigured(data: &[u8]) -> bool {
-    // "169.254.9.9" means DHCP failed successfully
-    data.starts_with(b"169.254.9.9")
+    data.starts_with(b"0.0.0.0") || data.starts_with(b"169.254.")
+}
+
+fn cidr_to_netmask(prefix_str: &str) -> Option<[u8; 20]> {
+    let mut out = [0u8; 20];
+    let s = prefix_str.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    let mut prefix: u16 = 0;
+    for &b in s.as_bytes() {
+        if b < b'0' || b > b'9' {
+            return None;
+        }
+        prefix = prefix
+            .checked_mul(10)?
+            .checked_add((b - b'0') as u16)?;
+    }
+    if prefix > 32 {
+        return None;
+    }
+
+    let prefix = prefix as u8;
+    let mask: u32 = if prefix == 32 {
+        0xFFFF_FFFF
+    } else if prefix == 0 {
+        0
+    } else {
+        !((1u32 << (32 - prefix)) - 1)
+    };
+    let o = mask.to_be_bytes();
+    use core::fmt::Write;
+    let mut w = BufWriter {
+        buf: &mut out,
+        pos: 0,
+    };
+    let _ = write!(w, "{}.{}.{}.{}", o[0], o[1], o[2], o[3]);
+    Some(out)
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-const MAX_RETRIES: usize = 60; // 60 x 500ms = 30 seconds timeout
+const MAX_RETRIES: usize = 60;
 const POLL_INTERVAL_MS: u64 = 500;
 
 #[unsafe(no_mangle)]
@@ -184,42 +221,52 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
 
-        // We have a valid IP - read the rest
         let gw_n = scheme_read("/net/gateway", &mut gw_buf).unwrap_or(0);
         let route_n = scheme_read("/net/route", &mut route_buf).unwrap_or(0);
         let dns_n = scheme_read("/net/dns", &mut dns_buf).unwrap_or(0);
 
-        // Report
-        log("[dhcp-client] DHCP configuration acquired:\n");
-        log("  IP      : ");
-        if let Ok(s) = core::str::from_utf8(&ip_buf[..ip_n]) {
-            log(s.trim());
+        let ip_str = core::str::from_utf8(&ip_buf[..ip_n]).unwrap_or("").trim();
+
+        // Split "a.b.c.d/prefix" into address and netmask
+        let (addr, netmask) = if let Some(slash) = ip_str.find('/') {
+            let prefix_str = &ip_str[slash + 1..];
+            let mask = cidr_to_netmask(prefix_str).unwrap_or([0u8; 20]);
+            (&ip_str[..slash], mask)
+        } else {
+            (ip_str, [0u8; 20])
+        };
+
+        log("\n");
+        log("============================================================\n");
+        log("  Network configuration (DHCP)\n");
+        log("------------------------------------------------------------\n");
+        log("  Address : ");
+        log(addr);
+        log("\n  Netmask : ");
+        if let Ok(s) = core::str::from_utf8(&netmask) {
+            let s = s.trim_end_matches('\0');
+            if !s.is_empty() { log(s); } else { log("(none)"); }
         }
         log("\n  Gateway : ");
         if gw_n > 0 {
-            if let Ok(s) = core::str::from_utf8(&gw_buf[..gw_n]) {
-                log(s.trim());
-            }
+            if let Ok(s) = core::str::from_utf8(&gw_buf[..gw_n]) { log(s.trim()); }
         } else {
             log("(none)");
         }
         log("\n  Route   : ");
         if route_n > 0 {
-            if let Ok(s) = core::str::from_utf8(&route_buf[..route_n]) {
-                log(s.trim());
-            }
+            if let Ok(s) = core::str::from_utf8(&route_buf[..route_n]) { log(s.trim()); }
         } else {
             log("(none)");
         }
         log("\n  DNS     : ");
         if dns_n > 0 {
-            if let Ok(s) = core::str::from_utf8(&dns_buf[..dns_n]) {
-                log(s.trim());
-            }
+            if let Ok(s) = core::str::from_utf8(&dns_buf[..dns_n]) { log(s.trim()); }
         } else {
             log("(none)");
         }
         log("\n");
+        log("============================================================\n");
 
         break;
     }

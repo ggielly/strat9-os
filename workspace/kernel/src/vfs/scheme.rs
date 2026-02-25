@@ -256,14 +256,33 @@ impl IpcScheme {
     }
 }
 
+impl IpcScheme {
+    /// Perform a synchronous IPC call: send `msg` to the server port and block
+    /// the current task until the server calls `ipc_reply`.  This mirrors
+    /// `sys_ipc_call` exactly so that `sys_ipc_reply` can correctly route the
+    /// reply back to us via `reply::deliver_reply`.
+    fn call(&self, mut msg: IpcMessage) -> Result<IpcMessage, SyscallError> {
+        let task_id = crate::process::current_task_id()
+            .ok_or(SyscallError::PermissionDenied)?;
+
+        // Stamp our task-id so the server knows where to deliver the reply.
+        msg.sender = task_id.as_u64();
+
+        let port =
+            crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
+        port.send(msg).map_err(|_| SyscallError::BadHandle)?;
+        // Drop the Arc before blocking so we don't hold the port alive across
+        // a potentially long sleep.
+        drop(port);
+
+        Ok(crate::ipc::reply::wait_for_reply(task_id))
+    }
+}
+
 impl Scheme for IpcScheme {
     fn open(&self, path: &str, flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         let msg = Self::build_open_msg(path, flags)?;
-        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
-
-        // Send request and wait for reply
-        port.send(msg).map_err(|_| SyscallError::BadHandle)?;
-        let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
+        let reply = self.call(msg)?;
 
         // Parse reply: [status: u32][file_id: u64][size: u64][flags: u32]
         Self::parse_status(&reply)?;
@@ -305,11 +324,8 @@ impl Scheme for IpcScheme {
     }
 
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
-
         let msg = Self::build_read_msg(file_id, offset, buf.len() as u32);
-        port.send(msg).map_err(|_| SyscallError::BadHandle)?;
-        let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
+        let reply = self.call(msg)?;
 
         // Parse reply: [status: u32][bytes_read: u32][data...]
         Self::parse_status(&reply)?;
@@ -329,11 +345,8 @@ impl Scheme for IpcScheme {
     }
 
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
-        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
-
         let msg = Self::build_write_msg(file_id, offset, buf);
-        port.send(msg).map_err(|_| SyscallError::BadHandle)?;
-        let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
+        let reply = self.call(msg)?;
 
         // Parse reply: [status: u32][bytes_written: u32]
         Self::parse_status(&reply)?;
@@ -349,11 +362,8 @@ impl Scheme for IpcScheme {
     }
 
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
-        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
-
         let msg = Self::build_close_msg(file_id);
-        port.send(msg).map_err(|_| SyscallError::BadHandle)?;
-        let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
+        let reply = self.call(msg)?;
 
         Self::parse_status(&reply)?;
 
@@ -372,7 +382,6 @@ impl Scheme for IpcScheme {
 
     fn unlink(&self, path: &str) -> Result<(), SyscallError> {
         const OPCODE_UNLINK: u32 = 0x07;
-        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
         let mut msg = IpcMessage::new(OPCODE_UNLINK);
 
         if path.len() > 42 {
@@ -382,23 +391,19 @@ impl Scheme for IpcScheme {
         msg.payload[0..2].copy_from_slice(&(path.len() as u16).to_le_bytes());
         msg.payload[2..2 + path.len()].copy_from_slice(path.as_bytes());
 
-        port.send(msg).map_err(|_| SyscallError::BadHandle)?;
-        let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
-
+        let reply = self.call(msg)?;
         Self::parse_status(&reply)?;
 
         Ok(())
     }
 
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
-        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
         let mut cursor: u16 = 0;
         let mut entries = Vec::new();
 
         loop {
             let msg = Self::build_readdir_msg(file_id, cursor);
-            port.send(msg).map_err(|_| SyscallError::BadHandle)?;
-            let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
+            let reply = self.call(msg)?;
             Self::parse_status(&reply)?;
 
             let next_cursor = u16::from_le_bytes([reply.payload[4], reply.payload[5]]);
@@ -462,7 +467,6 @@ impl IpcScheme {
         path: &str,
         mode: u32,
     ) -> Result<OpenResult, SyscallError> {
-        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
         let mut msg = IpcMessage::new(opcode);
 
         if path.len() > 40 {
@@ -473,8 +477,7 @@ impl IpcScheme {
         msg.payload[4..6].copy_from_slice(&(path.len() as u16).to_le_bytes());
         msg.payload[6..6 + path.len()].copy_from_slice(path.as_bytes());
 
-        port.send(msg).map_err(|_| SyscallError::BadHandle)?;
-        let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
+        let reply = self.call(msg)?;
 
         if reply.msg_type != 0x80 {
             return Err(SyscallError::IoError);

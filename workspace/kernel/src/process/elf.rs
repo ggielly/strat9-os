@@ -1153,6 +1153,10 @@ pub fn load_and_run_elf_with_caps(
             TaskPriority::Normal,
         )),
         vruntime: core::sync::atomic::AtomicU64::new(0),
+        clear_child_tid: core::sync::atomic::AtomicU64::new(0),
+        cwd: crate::process::task::SyncUnsafeCell::new(alloc::string::String::from("/")),
+        umask: core::sync::atomic::AtomicU32::new(0o022),
+        user_fs_base: core::sync::atomic::AtomicU64::new(0),
     });
 
     // Seed capabilities into the new task (before scheduling).

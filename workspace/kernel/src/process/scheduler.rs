@@ -713,6 +713,23 @@ pub fn finish_switch() {
             sched.cpus[cpu_index].class_rqs.enqueue(class, task);
         }
     }
+
+    // Restore user FS.base for the incoming task (TLS on x86_64).
+    // This is a no-op for kernel tasks (fs_base == 0).
+    if let Some(task) = current_task_clone() {
+        let fs_base = task.user_fs_base.load(core::sync::atomic::Ordering::Relaxed);
+        if fs_base != 0 {
+            unsafe {
+                core::arch::asm!(
+                    "wrmsr",
+                    in("ecx") 0xC000_0100u32, // MSR_FS_BASE
+                    in("eax") fs_base as u32,
+                    in("edx") (fs_base >> 32) as u32,
+                    options(nostack, preserves_flags),
+                );
+            }
+        }
+    }
 }
 
 /// Yield the current task to allow other tasks to run (cooperative).
@@ -927,6 +944,23 @@ extern "C" fn idle_task_main() -> ! {
 /// `pick_next_task()` only re-queues tasks in `Running` state.
 /// This function does not return.
 pub fn exit_current_task(exit_code: i32) -> ! {
+    // ── clear_child_tid (POSIX pthread join) ─────────────────────────────────
+    // Must happen BEFORE we drop the address space — write 0 to the TID pointer
+    // and do a futex_wake so any waiting pthread_join() can proceed.
+    if let Some(task) = current_task_clone() {
+        let tidptr = task.clear_child_tid.load(core::sync::atomic::Ordering::Relaxed);
+        if tidptr != 0 {
+            // Safety: tidptr is a user address in the still-active address space.
+            let ptr = tidptr as *mut u32;
+            // Use is_aligned (pointer alignment check, not user-mapped check).
+            if (tidptr & 3) == 0 && tidptr < 0xFFFF_8000_0000_0000 {
+                unsafe { ptr.write_volatile(0) };
+                // Futex wake: wake all threads waiting on this address (e.g. pthread_join).
+                let _ = crate::syscall::futex::sys_futex_wake(tidptr, u32::MAX);
+            }
+        }
+    }
+
     let cpu_index = current_cpu_index();
     let mut parent_to_signal: Option<TaskId> = None;
     {

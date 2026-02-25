@@ -13,6 +13,7 @@ use alloc::sync::Arc;
 use e1000::E1000Nic;
 use net_core::{NetError, NetworkDevice};
 use nic_buffers::{DmaAllocator, DmaRegion};
+use x86_64::VirtAddr;
 
 struct KernelDma;
 
@@ -101,6 +102,20 @@ pub fn init() {
 
             memory::paging::ensure_identity_map_range(mmio_phys, 0x2_0000);
             let mmio_virt = memory::phys_to_virt(mmio_phys);
+            let mmio_page_phys = mmio_phys & !0xFFF;
+            let mmio_page_virt = mmio_virt & !0xFFF;
+            let mapped = memory::paging::translate(VirtAddr::new(mmio_page_virt))
+                .map(|p| p.as_u64())
+                .unwrap_or(0);
+            if mapped != mmio_page_phys {
+                log::error!(
+                    "E1000: MMIO not mapped after ensure_identity_map_range phys={:#x} virt={:#x} mapped={:#x}; skipping device",
+                    mmio_phys,
+                    mmio_virt,
+                    mapped
+                );
+                continue;
+            }
 
             match E1000Nic::init(mmio_virt, &KernelDma) {
                 Ok(nic) => {
