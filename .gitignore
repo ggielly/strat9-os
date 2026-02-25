@@ -9,6 +9,7 @@ sysroot/
 
 /.vim
 
+docs/
 target/
 build/
 

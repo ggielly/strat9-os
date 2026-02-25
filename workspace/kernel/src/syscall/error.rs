@@ -158,15 +158,16 @@ impl From<crate::ipc::port::IpcError> for SyscallError {
     }
 }
 
-impl From<crate::drivers::virtio::net::NetError> for SyscallError {
-    fn from(err: crate::drivers::virtio::net::NetError) -> Self {
-        use crate::drivers::virtio::net::NetError;
+impl From<crate::drivers::net::NetError> for SyscallError {
+    fn from(err: crate::drivers::net::NetError) -> Self {
+        use crate::drivers::net::NetError;
         match err {
             NetError::NoPacket => SyscallError::Again,
             NetError::TxQueueFull => SyscallError::QueueFull,
             NetError::BufferTooSmall => SyscallError::InvalidArgument,
             NetError::NotReady => SyscallError::Again,
             NetError::LinkDown => SyscallError::IoError,
+            NetError::DeviceNotFound => SyscallError::NotImplemented,
         }
     }
 }

@@ -438,43 +438,62 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         serial_println!("[init] Process components initialized.");
         vga_println!("[OK] Process components ready");
 
-        serial_println!("[init] Loading driver stubs...");
-        vga_println!("[..] Initializing VirtIO drivers...");
+        // =============================================
+        // Phase 8d: VirtIO + hardware drivers
+        // =============================================
+        // E1000 was already probed in drivers_init (bootstrap component).
+        // Now probe VirtIO devices (they need full paging/VFS ready).
+        serial_println!("[init] Loading hardware drivers...");
+        vga_println!("[..] Initializing hardware drivers...");
+
         serial_println!("[init] Initializing VirtIO block...");
-        vga_println!("[..] Looking for VirtIO Block device...");
+        vga_println!("[..] Looking for VirtIO block device...");
         drivers::virtio::block::init();
         serial_println!("[init] VirtIO block initialized.");
         vga_println!("[OK] VirtIO block driver initialized");
+
         serial_println!("[init] Initializing VirtIO net...");
         vga_println!("[..] Looking for VirtIO net device...");
         drivers::virtio::net::init();
         serial_println!("[init] VirtIO net initialized.");
         vga_println!("[OK] VirtIO net driver initialized");
+
         serial_println!("[init] Checking for devices...");
         vga_println!("[..] Checking for devices...");
 
         if let Some(blk) = drivers::virtio::block::get_device() {
             use drivers::virtio::block::BlockDevice;
             serial_println!(
-                "[INFO] VirtIO block Device found. Capacity: {} sectors",
+                "[INFO] VirtIO block device found. Capacity: {} sectors",
                 blk.sector_count()
             );
-            vga_println!("[OK] VirtIO block Driver loaded");
+            vga_println!("[OK] VirtIO block driver loaded");
         } else {
-            serial_println!("[WARN] No VirtIO block Device found");
-            vga_println!("[WARN] No VirtIO block Device found");
+            serial_println!("[WARN] No VirtIO block device found");
+            vga_println!("[WARN] No VirtIO block device found");
         }
-        if let Some(net) = drivers::virtio::net::get_device() {
-            use drivers::virtio::net::NetworkDevice;
-            let mac = net.mac_address();
-            serial_println!(
-                "[INFO] VirtIO net device found. MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-            );
-            vga_println!("[OK] VirtIO net driver loaded");
-        } else {
-            serial_println!("[WARN] No VirtIO net device found");
-            vga_println!("[WARN] No VirtIO net device found");
+
+        // Report all registered network interfaces (E1000 + VirtIO)
+        {
+            use drivers::net::NetworkDevice;
+            let ifaces = drivers::net::list_interfaces();
+            if ifaces.is_empty() {
+                serial_println!("[WARN] No network devices found");
+                vga_println!("[WARN] No network devices found");
+            } else {
+                for name in &ifaces {
+                    if let Some(dev) = drivers::net::get_device(name) {
+                        let mac = dev.mac_address();
+                        serial_println!(
+                            "[INFO] Network {} ({}) MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} link={}",
+                            name, dev.name(),
+                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                            if dev.link_up() { "up" } else { "down" },
+                        );
+                        vga_println!("[OK] Network {} ({}) loaded", name, dev.name());
+                    }
+                }
+            }
         }
 
         serial_println!("[init] Storage verification skipped (boot path)");
@@ -578,6 +597,11 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     vga_println!("[OK] Interrupts enabled");
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
+
+    // Diagnostic: verify RFLAGS.IF is set
+    let rflags: u64;
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags) };
+    serial_println!("[init] RFLAGS={:#018x} IF={}", rflags, (rflags >> 9) & 1);
 
     // Start the scheduler - this will never return
     process::schedule();

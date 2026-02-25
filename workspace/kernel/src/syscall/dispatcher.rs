@@ -8,9 +8,9 @@ use super::{
 };
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
-    drivers::virtio::{
-        block::{self, BlockDevice, SECTOR_SIZE},
+    drivers::{
         net::NetworkDevice,
+        virtio::block::{self, BlockDevice, SECTOR_SIZE},
     },
     ipc::{
         channel::{self, ChanId},
@@ -506,7 +506,7 @@ fn sys_debug_log(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 // ============================================================
 
 pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let device = crate::drivers::virtio::net::get_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::drivers::net::get_default_device().ok_or(SyscallError::NotImplemented)?;
     let mut kbuf = vec![0u8; buf_len as usize];
 
     let n = device.receive(&mut kbuf).map_err(SyscallError::from)?;
@@ -517,7 +517,7 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 }
 
 pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let device = crate::drivers::virtio::net::get_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::drivers::net::get_default_device().ok_or(SyscallError::NotImplemented)?;
     let user = UserSliceRead::new(buf_ptr, buf_len as usize)?;
     let kbuf = user.read_to_vec();
 
@@ -527,11 +527,10 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 }
 
 pub fn sys_net_info(info_type: u64, buf_ptr: u64) -> Result<u64, SyscallError> {
-    let device = crate::drivers::virtio::net::get_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::drivers::net::get_default_device().ok_or(SyscallError::NotImplemented)?;
 
     match info_type {
         0 => {
-            // MAC Address
             let mac = device.mac_address();
             let user = UserSliceWrite::new(buf_ptr, 6)?;
             user.copy_from(&mac);

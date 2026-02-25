@@ -31,3 +31,12 @@ pub fn handle_scancode() -> Option<u8> {
         crate::arch::x86_64::keyboard_us::handle_scancode()
     }
 }
+
+/// Handle a pre-read raw scancode (port 0x60 already consumed by caller).
+pub fn handle_scancode_raw(scancode: u8) -> Option<u8> {
+    if is_french_layout() {
+        crate::arch::x86_64::keyboard::handle_scancode_raw(scancode)
+    } else {
+        crate::arch::x86_64::keyboard_us::handle_scancode_raw(scancode)
+    }
+}

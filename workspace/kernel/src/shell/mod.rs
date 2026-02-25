@@ -76,10 +76,16 @@ pub extern "C" fn shell_main() -> ! {
 
     let mut last_blink_tick = 0;
     let mut cursor_visible = false;
+    let mut shell_heartbeat: u64 = 0;
 
     loop {
         // Handle cursor blinking (graphics only)
         let ticks = crate::process::scheduler::ticks();
+
+        shell_heartbeat += 1;
+        if shell_heartbeat % 50000 == 0 {
+            crate::serial_println!("[shell] heartbeat iter={} tick={}", shell_heartbeat, ticks);
+        }
         if ticks / 50 != last_blink_tick {
             last_blink_tick = ticks / 50;
             cursor_visible = !cursor_visible;
