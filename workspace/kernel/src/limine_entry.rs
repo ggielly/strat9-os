@@ -61,6 +61,12 @@ static INIT_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/i
 /// Internal module: request Limine to load /initfs/console-admin (admin silo strate)
 static CONSOLE_ADMIN_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/console-admin");
+/// Internal module: request Limine to load /initfs/strate-net (network silo)
+static STRATE_NET_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-net");
+/// Internal module: request Limine to load /initfs/bin/dhcpd (DHCP monitor)
+static DHCPD_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/dhcpd");
+/// Internal module: request Limine to load /initfs/bin/ping (ICMP utility)
+static PING_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/ping");
 
 /// Request modules (files loaded alongside the kernel)
 #[used]
@@ -73,6 +79,9 @@ static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
     &RAM_MODULE,
     &INIT_MODULE,
     &CONSOLE_ADMIN_MODULE,
+    &STRATE_NET_MODULE,
+    &DHCPD_MODULE,
+    &PING_MODULE,
 ]);
 
 /// Optional fs-ext4 module info (set during Limine entry).
@@ -87,6 +96,12 @@ static mut STRATE_FS_RAMFS_MODULE: Option<(u64, u64)> = None;
 static mut INIT_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional console-admin module info (set during Limine entry).
 static mut CONSOLE_ADMIN_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional strate-net module info (set during Limine entry).
+static mut STRATE_NET_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional dhcpd module info (set during Limine entry).
+static mut DHCPD_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional ping module info (set during Limine entry).
+static mut PING_ELF_MODULE: Option<(u64, u64)> = None;
 
 const MAX_BOOT_MEMORY_REGIONS: usize = 256;
 static mut BOOT_MEMORY_MAP: [crate::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
@@ -131,6 +146,24 @@ pub fn init_module() -> Option<(u64, u64)> {
 pub fn console_admin_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
     unsafe { CONSOLE_ADMIN_ELF_MODULE }
+}
+
+/// Return the strate-net module (addr, size) if present.
+pub fn strate_net_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { STRATE_NET_ELF_MODULE }
+}
+
+/// Return the dhcpd module (addr, size) if present.
+pub fn dhcpd_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { DHCPD_ELF_MODULE }
+}
+
+/// Return the ping module (addr, size) if present.
+pub fn ping_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { PING_ELF_MODULE }
 }
 
 fn find_module_by_path(
@@ -339,6 +372,36 @@ pub unsafe extern "C" fn kmain() -> ! {
                 );
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/console-admin not found in modules");
+            }
+            if let Some((base, size)) = find_module_by_path(modules, b"/initfs/strate-net") {
+                unsafe { STRATE_NET_ELF_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/strate-net found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/strate-net not found in modules");
+            }
+            if let Some((base, size)) = find_module_by_path(modules, b"/initfs/bin/dhcpd") {
+                unsafe { DHCPD_ELF_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/bin/dhcpd found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/bin/dhcpd not found in modules");
+            }
+            if let Some((base, size)) = find_module_by_path(modules, b"/initfs/bin/ping") {
+                unsafe { PING_ELF_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/bin/ping found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/bin/ping not found in modules");
             }
 
             if init_base == 0 {

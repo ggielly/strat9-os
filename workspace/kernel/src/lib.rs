@@ -438,6 +438,30 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 serial_println!("[init] Registered /initfs/console-admin ({} bytes)", size);
             }
         }
+        if let Some((base, size)) = crate::limine_entry::strate_net_module() {
+            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            if let Err(e) = vfs::register_initfs_file("strate-net", data.as_ptr(), data.len()) {
+                serial_println!("[init] Failed to register /initfs/strate-net: {:?}", e);
+            } else {
+                serial_println!("[init] Registered /initfs/strate-net ({} bytes)", size);
+            }
+        }
+        if let Some((base, size)) = crate::limine_entry::dhcpd_module() {
+            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            if let Err(e) = vfs::register_initfs_file("bin/dhcpd", data.as_ptr(), data.len()) {
+                serial_println!("[init] Failed to register /initfs/bin/dhcpd: {:?}", e);
+            } else {
+                serial_println!("[init] Registered /initfs/bin/dhcpd ({} bytes)", size);
+            }
+        }
+        if let Some((base, size)) = crate::limine_entry::ping_module() {
+            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            if let Err(e) = vfs::register_initfs_file("bin/ping", data.as_ptr(), data.len()) {
+                serial_println!("[init] Failed to register /initfs/bin/ping: {:?}", e);
+            } else {
+                serial_println!("[init] Registered /initfs/bin/ping ({} bytes)", size);
+            }
+        }
 
         serial_println!("[init] Components (process)...");
         vga_println!("[..] Initializing process components...");
