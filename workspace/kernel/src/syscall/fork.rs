@@ -210,6 +210,13 @@ fn build_child_task(
         umask: AtomicU32::new(parent.umask.load(Ordering::Relaxed)),
         // FS.base: child starts with 0 (its own TLS not yet set up).
         user_fs_base: AtomicU64::new(0),
+        // FPU state: child inherits parent's FPU state.
+        fpu_state: {
+            let parent_fpu = unsafe { &*parent.fpu_state.get() };
+            let mut child_fpu = crate::process::task::FpuState::new();
+            child_fpu.data.copy_from_slice(&parent_fpu.data);
+            SyncUnsafeCell::new(child_fpu)
+        },
     });
 
     // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret

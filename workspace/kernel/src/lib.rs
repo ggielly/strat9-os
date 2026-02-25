@@ -100,6 +100,9 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     init_serial();
     init_logger();
 
+    // Initialize FPU/SSE for the BSP
+    crate::arch::x86_64::init_fpu();
+
     // Puts default panic hooks early to ensure
     //we get useful info on any panics during init.
     panic::install_default_panic_hooks();

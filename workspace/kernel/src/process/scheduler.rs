@@ -91,6 +91,10 @@ struct SwitchTarget {
     old_rsp_ptr: *mut u64,
     /// Pointer to new task's saved_rsp (in CpuContext)
     new_rsp_ptr: *const u64,
+    /// Pointer to old task's FPU state
+    old_fpu_ptr: *mut crate::process::task::FpuState,
+    /// Pointer to new task's FPU state
+    new_fpu_ptr: *const crate::process::task::FpuState,
 }
 
 // SAFETY: The pointers in SwitchTarget point into Arc<Task> objects
@@ -565,6 +569,8 @@ impl Scheduler {
         Some(SwitchTarget {
             old_rsp_ptr: unsafe { &raw mut (*current.context.get()).saved_rsp },
             new_rsp_ptr: unsafe { &raw const (*next.context.get()).saved_rsp },
+            old_fpu_ptr: current.fpu_state.get(),
+            new_fpu_ptr: next.fpu_state.get(),
         })
     }
 
@@ -683,7 +689,10 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     // SAFETY: The context was set up by CpuContext::new with a valid stack frame.
     // Interrupts are disabled; the trampoline's `sti` re-enables them.
     unsafe {
-        restore_first_task(&raw const (*first_task.context.get()).saved_rsp);
+        restore_first_task(
+            &raw const (*first_task.context.get()).saved_rsp,
+            first_task.fpu_state.get(),
+        );
         core::hint::unreachable_unchecked()
     }
 }
@@ -717,7 +726,9 @@ pub fn finish_switch() {
     // Restore user FS.base for the incoming task (TLS on x86_64).
     // This is a no-op for kernel tasks (fs_base == 0).
     if let Some(task) = current_task_clone() {
-        let fs_base = task.user_fs_base.load(core::sync::atomic::Ordering::Relaxed);
+        let fs_base = task
+            .user_fs_base
+            .load(core::sync::atomic::Ordering::Relaxed);
         if fs_base != 0 {
             unsafe {
                 core::arch::asm!(
@@ -762,7 +773,12 @@ pub fn yield_task() {
         // SAFETY: Pointers are valid (they point into Arc<Task> contexts
         // kept alive by the scheduler). Interrupts are disabled.
         unsafe {
-            switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
+            switch_context(
+                target.old_rsp_ptr,
+                target.new_rsp_ptr,
+                target.old_fpu_ptr,
+                target.new_fpu_ptr,
+            );
         }
         // We return here when this task is rescheduled in the future.
         // The task that switched back to us may have had different flags,
@@ -831,7 +847,12 @@ pub fn maybe_preempt() {
         // eventually return through its own interrupt handler → iretq (if preempted)
         // or through yield_task → restore_flags (if it yielded cooperatively).
         unsafe {
-            switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
+            switch_context(
+                target.old_rsp_ptr,
+                target.new_rsp_ptr,
+                target.old_fpu_ptr,
+                target.new_fpu_ptr,
+            );
         }
         // When we return here, this task was rescheduled. We're back in
         // the timer handler context, which will return via iretq and
@@ -948,7 +969,9 @@ pub fn exit_current_task(exit_code: i32) -> ! {
     // Must happen BEFORE we drop the address space — write 0 to the TID pointer
     // and do a futex_wake so any waiting pthread_join() can proceed.
     if let Some(task) = current_task_clone() {
-        let tidptr = task.clear_child_tid.load(core::sync::atomic::Ordering::Relaxed);
+        let tidptr = task
+            .clear_child_tid
+            .load(core::sync::atomic::Ordering::Relaxed);
         if tidptr != 0 {
             // Safety: tidptr is a user address in the still-active address space.
             let ptr = tidptr as *mut u32;
@@ -1381,7 +1404,12 @@ pub fn block_current_task() {
     if let Some(target) = switch_target {
         // SAFETY: Pointers are valid. Interrupts are disabled.
         unsafe {
-            switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
+            switch_context(
+                target.old_rsp_ptr,
+                target.new_rsp_ptr,
+                target.old_fpu_ptr,
+                target.new_fpu_ptr,
+            );
         }
         // We return here when woken and rescheduled.
         finish_switch();
@@ -1481,7 +1509,12 @@ pub fn suspend_task(id: TaskId) -> bool {
     if let Some(target) = switch_target {
         // SAFETY: pointers valid. Interrupts disabled.
         unsafe {
-            switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
+            switch_context(
+                target.old_rsp_ptr,
+                target.new_rsp_ptr,
+                target.old_fpu_ptr,
+                target.new_fpu_ptr,
+            );
         }
         finish_switch();
     }
@@ -1621,7 +1654,12 @@ pub fn kill_task(id: TaskId) -> bool {
     if let Some(target) = switch_target {
         // SAFETY: pointers valid. Interrupts disabled.
         unsafe {
-            switch_context(target.old_rsp_ptr, target.new_rsp_ptr);
+            switch_context(
+                target.old_rsp_ptr,
+                target.new_rsp_ptr,
+                target.old_fpu_ptr,
+                target.new_fpu_ptr,
+            );
         }
         finish_switch();
     }

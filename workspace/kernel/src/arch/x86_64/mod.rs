@@ -23,6 +23,27 @@ pub mod vga;
 
 use core::arch::asm;
 
+/// Initialize FPU/SSE for the current CPU
+pub fn init_fpu() {
+    unsafe {
+        // Enable OSFXSR (bit 9) and OSXMMEXCPT (bit 10) in CR4
+        let mut cr4: u64;
+        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+        cr4 |= (1 << 9) | (1 << 10);
+        asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
+
+        // Clear EM (bit 2) and set MP (bit 1) in CR0
+        let mut cr0: u64;
+        asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
+        cr0 &= !(1 << 2);
+        cr0 |= (1 << 1);
+        asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack));
+
+        // Initialize FPU state
+        asm!("fninit", options(nomem, nostack));
+    }
+}
+
 /// Halt the CPU until the next interrupt
 #[inline]
 pub fn hlt() {

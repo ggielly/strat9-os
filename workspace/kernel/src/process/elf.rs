@@ -1157,6 +1157,7 @@ pub fn load_and_run_elf_with_caps(
         cwd: crate::process::task::SyncUnsafeCell::new(alloc::string::String::from("/")),
         umask: core::sync::atomic::AtomicU32::new(0o022),
         user_fs_base: core::sync::atomic::AtomicU64::new(0),
+        fpu_state: crate::process::task::SyncUnsafeCell::new(crate::process::task::FpuState::new()),
     });
 
     // Seed capabilities into the new task (before scheduling).

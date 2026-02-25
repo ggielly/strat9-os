@@ -83,9 +83,9 @@ _gdt:
     mov eax, [SMP_VAR_ADDR]
     mov cr3, eax
 
-    # Enable PSE and PAE
+    # Enable PSE, PAE, OSFXSR, OSXMMEXCPT
     mov eax, cr4
-    or eax, 0x30
+    or eax, 0x630
     mov cr4, eax
 
     # Enable LME
@@ -95,9 +95,10 @@ _gdt:
     or eax, 0x901
     wrmsr
 
-    # Enable paging and write protect
+    # Enable paging, write protect, and FPU/SSE
     mov eax, cr0
-    or eax, 0x80010000
+    and eax, 0xFFFFFFFB # Clear EM (bit 2)
+    or eax, 0x80010002  # Set PG, WP, MP (bit 1)
     mov cr0, eax
 
     ljmp 8, 0x80c0
@@ -314,6 +315,7 @@ pub extern "C" fn smp_main() -> ! {
     crate::arch::x86_64::gdt::init_cpu(cpu_index);
     crate::arch::x86_64::percpu::init_gs_base(cpu_index);
     crate::arch::x86_64::syscall::init();
+    crate::arch::x86_64::init_fpu();
 
     if let Some(stack_top) = percpu::kernel_stack_top(cpu_index) {
         crate::arch::x86_64::tss::set_kernel_stack_for(cpu_index, x86_64::VirtAddr::new(stack_top));

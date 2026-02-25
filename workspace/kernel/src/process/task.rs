@@ -96,6 +96,25 @@ impl<T> SyncUnsafeCell<T> {
     }
 }
 
+#[derive(Debug)]
+#[repr(C, align(16))]
+pub struct FpuState {
+    pub data: [u8; 512],
+}
+
+impl FpuState {
+    pub const fn new() -> Self {
+        let mut data = [0; 512];
+        // Default x87 FPU Control Word (FCW) = 0x037F
+        data[0] = 0x7F;
+        data[1] = 0x03;
+        // Default MXCSR = 0x1F80
+        data[24] = 0x80;
+        data[25] = 0x1F;
+        Self { data }
+    }
+}
+
 /// Represents a single task/thread in the system
 pub struct Task {
     /// Unique identifier for this task
@@ -181,6 +200,8 @@ pub struct Task {
     /// User-space FS.base (TLS on x86_64, set via arch_prctl ARCH_SET_FS).
     /// Saved/restored across context switches.
     pub user_fs_base: AtomicU64,
+    /// FPU/SSE/AVX state saved during context switch.
+    pub fpu_state: SyncUnsafeCell<FpuState>,
 }
 
 impl Task {
@@ -431,6 +452,7 @@ impl Task {
             cwd: SyncUnsafeCell::new(String::from("/")),
             umask: AtomicU32::new(0o022),
             user_fs_base: AtomicU64::new(0),
+            fpu_state: SyncUnsafeCell::new(FpuState::new()),
         }))
     }
 
@@ -496,6 +518,7 @@ impl Task {
             cwd: SyncUnsafeCell::new(String::from("/")),
             umask: AtomicU32::new(0o022),
             user_fs_base: AtomicU64::new(0),
+            fpu_state: SyncUnsafeCell::new(FpuState::new()),
         }))
     }
 
@@ -535,11 +558,20 @@ impl Task {
 /// Arguments (x86-64 SysV ABI):
 /// - rdi = pointer to old task's `saved_rsp` field
 /// - rsi = pointer to new task's `saved_rsp` field
+/// - rdx = pointer to old task's FPU state
+/// - rcx = pointer to new task's FPU state
 ///
 /// The caller (scheduler) has already handled TSS.rsp0 and CR3 switching.
 #[unsafe(naked)]
-pub(super) unsafe extern "C" fn switch_context(_old_rsp_ptr: *mut u64, _new_rsp_ptr: *const u64) {
+pub(super) unsafe extern "C" fn switch_context(
+    _old_rsp_ptr: *mut u64,
+    _new_rsp_ptr: *const u64,
+    _old_fpu_ptr: *mut FpuState,
+    _new_fpu_ptr: *const FpuState,
+) {
     core::arch::naked_asm!(
+        // Save FPU state
+        "fxsave [rdx]",
         // Save callee-saved registers on current stack
         "push rbx",
         "push rbp",
@@ -558,6 +590,8 @@ pub(super) unsafe extern "C" fn switch_context(_old_rsp_ptr: *mut u64, _new_rsp_
         "pop r12",
         "pop rbp",
         "pop rbx",
+        // Restore FPU state
+        "fxrstor [rcx]",
         // Return to wherever the new task left off
         // (or to task_entry_trampoline for new tasks)
         "ret",
@@ -568,8 +602,12 @@ pub(super) unsafe extern "C" fn switch_context(_old_rsp_ptr: *mut u64, _new_rsp_
 ///
 /// Argument (x86-64 SysV ABI):
 /// - rdi = pointer to the first task's `saved_rsp` field
+/// - rsi = pointer to the first task's FPU state
 #[unsafe(naked)]
-pub(super) unsafe extern "C" fn restore_first_task(_rsp_ptr: *const u64) {
+pub(super) unsafe extern "C" fn restore_first_task(
+    _rsp_ptr: *const u64,
+    _fpu_ptr: *const FpuState,
+) {
     core::arch::naked_asm!(
         // Load RSP from context
         "mov rsp, [rdi]",
@@ -580,6 +618,8 @@ pub(super) unsafe extern "C" fn restore_first_task(_rsp_ptr: *const u64) {
         "pop r12",
         "pop rbp",
         "pop rbx",
+        // Restore FPU state
+        "fxrstor [rsi]",
         // Jump to task_entry_trampoline -> real entry point
         "ret",
     );
