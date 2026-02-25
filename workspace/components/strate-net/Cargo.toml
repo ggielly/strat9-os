@@ -27,7 +27,3 @@ spin = { workspace = true }
 log = { workspace = true }
 bitflags = { workspace = true }
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
-
-[profile.release]
-panic = "abort"
-strip = true

@@ -166,23 +166,56 @@ pub fn ping_module() -> Option<(u64, u64)> {
     unsafe { PING_ELF_MODULE }
 }
 
-fn find_module_by_path(
-    modules: &[&limine::file::File],
-    expected_path: &[u8],
-) -> Option<(u64, u64)> {
+fn path_matches(module_path: &[u8], expected_path: &[u8]) -> bool {
     let expected_no_leading = expected_path.strip_prefix(b"/").unwrap_or(expected_path);
-    modules.iter().find_map(|module| {
+    module_path == expected_path
+        || module_path.ends_with(expected_path)
+        || module_path == expected_no_leading
+        || module_path.ends_with(expected_no_leading)
+}
+
+#[derive(Default, Clone, Copy)]
+struct ResolvedModules {
+    test_pid: Option<(u64, u64)>,
+    test_mem: Option<(u64, u64)>,
+    test_mem_stressed: Option<(u64, u64)>,
+    fs_ext4: Option<(u64, u64)>,
+    fs_ram: Option<(u64, u64)>,
+    init: Option<(u64, u64)>,
+    console_admin: Option<(u64, u64)>,
+    strate_net: Option<(u64, u64)>,
+    dhcpd: Option<(u64, u64)>,
+    ping: Option<(u64, u64)>,
+}
+
+fn resolve_modules_once(modules: &[&limine::file::File]) -> ResolvedModules {
+    let mut resolved = ResolvedModules::default();
+    for module in modules {
         let path = module.path().to_bytes();
-        if path == expected_path
-            || path.ends_with(expected_path)
-            || path == expected_no_leading
-            || path.ends_with(expected_no_leading)
-        {
-            Some((module.addr() as u64, module.size()))
-        } else {
-            None
+        let info = (module.addr() as u64, module.size());
+        if path_matches(path, b"/initfs/test_pid") {
+            resolved.test_pid = Some(info);
+        } else if path_matches(path, b"/initfs/test_mem") {
+            resolved.test_mem = Some(info);
+        } else if path_matches(path, b"/initfs/test_mem_stressed") {
+            resolved.test_mem_stressed = Some(info);
+        } else if path_matches(path, b"/initfs/fs-ext4") {
+            resolved.fs_ext4 = Some(info);
+        } else if path_matches(path, b"/initfs/strate-fs-ramfs") {
+            resolved.fs_ram = Some(info);
+        } else if path_matches(path, b"/initfs/init") {
+            resolved.init = Some(info);
+        } else if path_matches(path, b"/initfs/console-admin") {
+            resolved.console_admin = Some(info);
+        } else if path_matches(path, b"/initfs/strate-net") {
+            resolved.strate_net = Some(info);
+        } else if path_matches(path, b"/initfs/bin/dhcpd") {
+            resolved.dhcpd = Some(info);
+        } else if path_matches(path, b"/initfs/bin/ping") {
+            resolved.ping = Some(info);
         }
-    })
+    }
+    resolved
 }
 
 fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> crate::entry::MemoryKind {
@@ -315,16 +348,13 @@ pub unsafe extern "C" fn kmain() -> ! {
                     module.size()
                 );
             }
-            let (init_base, init_size) =
-                find_module_by_path(modules, b"/initfs/test_pid").unwrap_or((0, 0));
-            let (test_mem_base, test_mem_size) =
-                find_module_by_path(modules, b"/initfs/test_mem").unwrap_or((0, 0));
+            let resolved = resolve_modules_once(modules);
+            let (init_base, init_size) = resolved.test_pid.unwrap_or((0, 0));
+            let (test_mem_base, test_mem_size) = resolved.test_mem.unwrap_or((0, 0));
             let (test_mem_stressed_base, test_mem_stressed_size) =
-                find_module_by_path(modules, b"/initfs/test_mem_stressed").unwrap_or((0, 0));
-            let (ext4_base, ext4_size) =
-                find_module_by_path(modules, b"/initfs/fs-ext4").unwrap_or((0, 0));
-            let (ram_base, ram_size) =
-                find_module_by_path(modules, b"/initfs/strate-fs-ramfs").unwrap_or((0, 0));
+                resolved.test_mem_stressed.unwrap_or((0, 0));
+            let (ext4_base, ext4_size) = resolved.fs_ext4.unwrap_or((0, 0));
+            let (ram_base, ram_size) = resolved.fs_ram.unwrap_or((0, 0));
 
             if test_mem_base != 0 && test_mem_size != 0 {
                 unsafe { TEST_MEM_ELF_MODULE = Some((test_mem_base, test_mem_size)) };
@@ -353,7 +383,7 @@ pub unsafe extern "C" fn kmain() -> ! {
             }
 
             // New modules: init + console-admin
-            if let Some((base, size)) = find_module_by_path(modules, b"/initfs/init") {
+            if let Some((base, size)) = resolved.init {
                 unsafe { INIT_ELF_MODULE = Some((base, size)) };
                 crate::serial_println!(
                     "[limine] /initfs/init found: base={:#x} size={}",
@@ -363,7 +393,7 @@ pub unsafe extern "C" fn kmain() -> ! {
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/init not found in modules");
             }
-            if let Some((base, size)) = find_module_by_path(modules, b"/initfs/console-admin") {
+            if let Some((base, size)) = resolved.console_admin {
                 unsafe { CONSOLE_ADMIN_ELF_MODULE = Some((base, size)) };
                 crate::serial_println!(
                     "[limine] /initfs/console-admin found: base={:#x} size={}",
@@ -373,7 +403,7 @@ pub unsafe extern "C" fn kmain() -> ! {
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/console-admin not found in modules");
             }
-            if let Some((base, size)) = find_module_by_path(modules, b"/initfs/strate-net") {
+            if let Some((base, size)) = resolved.strate_net {
                 unsafe { STRATE_NET_ELF_MODULE = Some((base, size)) };
                 crate::serial_println!(
                     "[limine] /initfs/strate-net found: base={:#x} size={}",
@@ -383,7 +413,7 @@ pub unsafe extern "C" fn kmain() -> ! {
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/strate-net not found in modules");
             }
-            if let Some((base, size)) = find_module_by_path(modules, b"/initfs/bin/dhcpd") {
+            if let Some((base, size)) = resolved.dhcpd {
                 unsafe { DHCPD_ELF_MODULE = Some((base, size)) };
                 crate::serial_println!(
                     "[limine] /initfs/bin/dhcpd found: base={:#x} size={}",
@@ -393,7 +423,7 @@ pub unsafe extern "C" fn kmain() -> ! {
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/bin/dhcpd not found in modules");
             }
-            if let Some((base, size)) = find_module_by_path(modules, b"/initfs/bin/ping") {
+            if let Some((base, size)) = resolved.ping {
                 unsafe { PING_ELF_MODULE = Some((base, size)) };
                 crate::serial_println!(
                     "[limine] /initfs/bin/ping found: base={:#x} size={}",

@@ -15,7 +15,3 @@ path = "src/stressed.rs"
 
 [dependencies]
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
-
-[profile.release]
-panic = "abort"
-strip = true

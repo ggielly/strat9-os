@@ -74,6 +74,22 @@ fn panic_handler(info: &PanicInfo) -> ! {
     panic::panic_handler(info)
 }
 
+fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
+    let Some((base, size)) = module else {
+        return;
+    };
+    if base == 0 || size == 0 {
+        return;
+    }
+
+    let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+    if let Err(e) = vfs::register_initfs_file(path, data.as_ptr(), data.len()) {
+        serial_println!("[init] Failed to register /initfs/{}: {:?}", path, e);
+    } else {
+        serial_println!("[init] Registered /initfs/{} ({} bytes)", path, size);
+    }
+}
+
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     use core::fmt::Write;
@@ -356,111 +372,33 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         // Phase 8c: register modules in VFS
         // =============================================
         let mut init_task_id: Option<crate::process::TaskId> = None;
-        if args.initfs_base != 0 && args.initfs_size != 0 {
-            let elf_data = unsafe {
-                core::slice::from_raw_parts(
-                    args.initfs_base as *const u8,
-                    args.initfs_size as usize,
-                )
-            };
-            if let Err(e) = vfs::register_initfs_file("test_pid", elf_data.as_ptr(), elf_data.len())
-            {
-                serial_println!("[init] Failed to register /initfs/test_pid: {:?}", e);
-            }
-        }
-        if let Some((base, size)) = crate::limine_entry::test_mem_module() {
-            if base != 0 && size != 0 {
-                let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-                if let Err(e) = vfs::register_initfs_file("test_mem", data.as_ptr(), data.len()) {
-                    serial_println!("[init] Failed to register /initfs/test_mem: {:?}", e);
-                } else {
-                    serial_println!("[init] Registered /initfs/test_mem ({} bytes)", size);
-                }
-            }
-        }
-        if let Some((base, size)) = crate::limine_entry::test_mem_stressed_module() {
-            if base != 0 && size != 0 {
-                let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-                if let Err(e) =
-                    vfs::register_initfs_file("test_mem_stressed", data.as_ptr(), data.len())
-                {
-                    serial_println!(
-                        "[init] Failed to register /initfs/test_mem_stressed: {:?}",
-                        e
-                    );
-                } else {
-                    serial_println!(
-                        "[init] Registered /initfs/test_mem_stressed ({} bytes)",
-                        size
-                    );
-                }
-            }
-        }
-        if let Some((base, size)) = crate::limine_entry::fs_ext4_module() {
-            if base != 0 && size != 0 {
-                let ext4_data =
-                    unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-                if let Err(e) =
-                    vfs::register_initfs_file("fs-ext4", ext4_data.as_ptr(), ext4_data.len())
-                {
-                    serial_println!("[init] Failed to register /initfs/fs-ext4: {:?}", e);
-                } else {
-                    serial_println!("[init] Registered /initfs/fs-ext4 ({} bytes)", size);
-                }
-            }
-        }
-        if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
-            if base != 0 && size != 0 {
-                let ram_data =
-                    unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-                if let Err(e) =
-                    vfs::register_initfs_file("strate-fs-ramfs", ram_data.as_ptr(), ram_data.len())
-                {
-                    serial_println!("[init] Failed to register /initfs/strate-fs-ramfs: {:?}", e);
-                } else {
-                    serial_println!("[init] Registered /initfs/strate-fs-ramfs ({} bytes)", size);
-                }
-            }
-        }
-        if let Some((base, size)) = crate::limine_entry::init_module() {
-            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-            if let Err(e) = vfs::register_initfs_file("init", data.as_ptr(), data.len()) {
-                serial_println!("[init] Failed to register /initfs/init: {:?}", e);
-            } else {
-                serial_println!("[init] Registered /initfs/init ({} bytes)", size);
-            }
-        }
-        if let Some((base, size)) = crate::limine_entry::console_admin_module() {
-            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-            if let Err(e) = vfs::register_initfs_file("console-admin", data.as_ptr(), data.len()) {
-                serial_println!("[init] Failed to register /initfs/console-admin: {:?}", e);
-            } else {
-                serial_println!("[init] Registered /initfs/console-admin ({} bytes)", size);
-            }
-        }
-        if let Some((base, size)) = crate::limine_entry::strate_net_module() {
-            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-            if let Err(e) = vfs::register_initfs_file("strate-net", data.as_ptr(), data.len()) {
-                serial_println!("[init] Failed to register /initfs/strate-net: {:?}", e);
-            } else {
-                serial_println!("[init] Registered /initfs/strate-net ({} bytes)", size);
-            }
-        }
-        if let Some((base, size)) = crate::limine_entry::dhcpd_module() {
-            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-            if let Err(e) = vfs::register_initfs_file("bin/dhcpd", data.as_ptr(), data.len()) {
-                serial_println!("[init] Failed to register /initfs/bin/dhcpd: {:?}", e);
-            } else {
-                serial_println!("[init] Registered /initfs/bin/dhcpd ({} bytes)", size);
-            }
-        }
-        if let Some((base, size)) = crate::limine_entry::ping_module() {
-            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-            if let Err(e) = vfs::register_initfs_file("bin/ping", data.as_ptr(), data.len()) {
-                serial_println!("[init] Failed to register /initfs/bin/ping: {:?}", e);
-            } else {
-                serial_println!("[init] Registered /initfs/bin/ping ({} bytes)", size);
-            }
+        let boot_test_pid = if args.initfs_base != 0 && args.initfs_size != 0 {
+            Some((args.initfs_base, args.initfs_size))
+        } else {
+            None
+        };
+
+        let initfs_modules = [
+            ("test_pid", boot_test_pid),
+            ("test_mem", crate::limine_entry::test_mem_module()),
+            (
+                "test_mem_stressed",
+                crate::limine_entry::test_mem_stressed_module(),
+            ),
+            ("fs-ext4", crate::limine_entry::fs_ext4_module()),
+            (
+                "strate-fs-ramfs",
+                crate::limine_entry::strate_fs_ramfs_module(),
+            ),
+            ("init", crate::limine_entry::init_module()),
+            ("console-admin", crate::limine_entry::console_admin_module()),
+            ("strate-net", crate::limine_entry::strate_net_module()),
+            ("bin/dhcpd", crate::limine_entry::dhcpd_module()),
+            ("bin/ping", crate::limine_entry::ping_module()),
+        ];
+
+        for (path, module) in initfs_modules {
+            register_initfs_module(path, module);
         }
 
         serial_println!("[init] Components (process)...");
