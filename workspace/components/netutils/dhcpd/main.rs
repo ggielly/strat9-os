@@ -2,7 +2,7 @@
 //!
 //! This is **not** a full DHCP client.  The actual DHCP exchange is performed
 //! by the `strate-net` silo (via smoltcp's DHCPv4 socket).  `dhcpd` simply
-//! polls the `/net/ip`, `/net/gateway` and `/net/dns` scheme files until a
+//! polls the `/net/ip`, `/net/gateway`, `/net/route` and `/net/dns` scheme files until a
 //! valid address is obtained, then prints the result to the console.
 //!
 //! All I/O is done through Plan 9–style schemes – no BSD sockets.
@@ -152,7 +152,8 @@ pub extern "C" fn _start() -> ! {
 
     let mut ip_buf = [0u8; 64];
     let mut gw_buf = [0u8; 64];
-    let mut dns_buf = [0u8; 64];
+    let mut route_buf = [0u8; 64];
+    let mut dns_buf = [0u8; 96];
     let mut retries = 0;
 
     loop {
@@ -185,6 +186,7 @@ pub extern "C" fn _start() -> ! {
 
         // We have a valid IP - read the rest
         let gw_n = scheme_read("/net/gateway", &mut gw_buf).unwrap_or(0);
+        let route_n = scheme_read("/net/route", &mut route_buf).unwrap_or(0);
         let dns_n = scheme_read("/net/dns", &mut dns_buf).unwrap_or(0);
 
         // Report
@@ -196,6 +198,14 @@ pub extern "C" fn _start() -> ! {
         log("\n  Gateway : ");
         if gw_n > 0 {
             if let Ok(s) = core::str::from_utf8(&gw_buf[..gw_n]) {
+                log(s.trim());
+            }
+        } else {
+            log("(none)");
+        }
+        log("\n  Route   : ");
+        if route_n > 0 {
+            if let Ok(s) = core::str::from_utf8(&route_buf[..route_n]) {
                 log(s.trim());
             }
         } else {

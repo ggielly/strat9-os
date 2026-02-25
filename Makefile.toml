@@ -773,6 +773,37 @@ args = [
     "guest_errors",
 ]
 
+[tasks.run-gui-net]
+description = "Load QEMU with NAT networking (DHCP server enabled) + graphical interface"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-netdev",
+    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1",
+    "-device",
+    "e1000,netdev=net0,mac=52:54:00:12:34:56",
+    "-D",
+    "build/qemu.log",
+    "-d",
+    "guest_errors",
+]
+
 [tasks.run-gui-release]
 description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk (release profile)"
 dependencies = ["limine-image-release"]
@@ -879,6 +910,10 @@ args = [
     "-no-shutdown",
     "-serial",
     "mon:stdio",
+    "-netdev",
+    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1",
+    "-device",
+    "e1000,netdev=net0,mac=52:54:00:12:34:56",
     "-D",
     "build/qemu.log",
     "-d",
@@ -936,6 +971,36 @@ args = [
     "-no-shutdown",
     "-serial",
     "mon:stdio",
+    "-D",
+    "build/qemu.log",
+]
+
+[tasks.run-net]
+description = "Load QEMU with NAT networking (DHCP server enabled) + text mode"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-nographic",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-netdev",
+    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1",
+    "-device",
+    "e1000,netdev=net0,mac=52:54:00:12:34:56",
     "-D",
     "build/qemu.log",
 ]
@@ -1031,6 +1096,40 @@ args = [
     "int,cpu_reset,guest_errors",
 ]
 
+[tasks.run-debug-net]
+description = "Load QEMU in debug mode with NAT networking (GDB server + DHCP)"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-gdb",
+    "tcp::${QEMU_GDB_PORT}",
+    "-S",
+    "-serial",
+    "mon:stdio",
+    "-netdev",
+    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1",
+    "-device",
+    "e1000,netdev=net0,mac=52:54:00:12:34:56",
+    "-D",
+    "build/qemu-debug.log",
+    "-d",
+    "int,cpu_reset,guest_errors",
+]
+
 [tasks.run-qemu-debug]
 description = "Alias: run QEMU paused with GDB server"
 alias = "run-debug"
@@ -1060,6 +1159,41 @@ args = [
     "-S",
     "-serial",
     "mon:stdio",
+    "-D",
+    "build/qemu-debug.log",
+    "-d",
+    "int,cpu_reset,guest_errors",
+]
+
+[tasks.run-debug-net-headless]
+description = "Load QEMU in debug mode with NAT networking (headless, GDB server + DHCP)"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-nographic",
+    "-no-reboot",
+    "-no-shutdown",
+    "-gdb",
+    "tcp::${QEMU_GDB_PORT}",
+    "-S",
+    "-serial",
+    "mon:stdio",
+    "-netdev",
+    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1",
+    "-device",
+    "e1000,netdev=net0,mac=52:54:00:12:34:56",
     "-D",
     "build/qemu-debug.log",
     "-d",

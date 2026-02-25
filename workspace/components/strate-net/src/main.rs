@@ -239,6 +239,29 @@ fn ipv4_addr_to_str(addr: &Ipv4Address, buf: &mut [u8]) -> usize {
     w.pos
 }
 
+fn route_to_str(gateway: &Ipv4Address, buf: &mut [u8]) -> usize {
+    use core::fmt::Write;
+    let mut w = BufWriter { buf, pos: 0 };
+    let a = gateway.octets();
+    let _ = write!(w, "default via {}.{}.{}.{}\n", a[0], a[1], a[2], a[3]);
+    w.pos
+}
+
+fn dns_list_to_str(dns: &[Option<Ipv4Address>; 3], buf: &mut [u8]) -> usize {
+    use core::fmt::Write;
+    let mut w = BufWriter { buf, pos: 0 };
+    let mut wrote_any = false;
+    for server in dns.iter().flatten() {
+        let a = server.octets();
+        let _ = write!(w, "{}.{}.{}.{}\n", a[0], a[1], a[2], a[3]);
+        wrote_any = true;
+    }
+    if !wrote_any {
+        let _ = write!(w, "0.0.0.0\n");
+    }
+    w.pos
+}
+
 // ---------------------------------------------------------------------------
 // IPC reply builders  (match the layout expected by kernel IpcScheme)
 // ---------------------------------------------------------------------------
@@ -297,7 +320,7 @@ struct NetworkStrate {
     dhcp_handle: SocketHandle,
     /// Populated once DHCP handshake completes
     ip_config: Option<IpConfig>,
-    /// VFS handles: file_id → virtual path ("ip", "gateway", "dns", "" = root dir)
+    /// VFS handles: file_id → virtual path ("ip", "gateway", "route", "dns", "" = root dir)
     open_handles: BTreeMap<u64, String>,
     /// Monotonically-increasing file handle allocator
     next_fid: u64,
@@ -354,6 +377,7 @@ impl NetworkStrate {
                 });
 
                 // Apply default route
+                let _ = self.interface.routes_mut().remove_default_ipv4_route();
                 if let Some(gw) = config.router {
                     self.interface.routes_mut().add_default_ipv4_route(gw).ok();
                 }
@@ -375,6 +399,7 @@ impl NetworkStrate {
                 self.ip_config = None;
                 // Clear interface addresses
                 self.interface.update_ip_addrs(|addrs| addrs.clear());
+                let _ = self.interface.routes_mut().remove_default_ipv4_route();
             }
             None => {}
         }
@@ -386,7 +411,8 @@ impl NetworkStrate {
     //  /net            — directory: lists available virtual files
     //  /net/ip         — read: "a.b.c.d/prefix\n"  (from DHCP)
     //  /net/gateway    — read: "a.b.c.d\n"          (from DHCP)
-    //  /net/dns        — read: "a.b.c.d\n"          (first DNS)
+    //  /net/route      — read: "default via a.b.c.d\n" (from DHCP router option)
+    //  /net/dns        — read: "a.b.c.d\n..."       (all DNS from DHCP)
     //  /net/em0        — read/write: raw Ethernet frames (future, FreeBSD naming)
     // -----------------------------------------------------------------------
 
@@ -410,7 +436,7 @@ impl NetworkStrate {
                 // FileFlags::DIRECTORY = 1
                 reply_open(msg.sender, fid, u64::MAX, 1)
             }
-            "ip" | "gateway" | "dns" => {
+            "ip" | "gateway" | "route" | "dns" => {
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
@@ -428,12 +454,12 @@ impl NetworkStrate {
             None => return IpcMessage::error_reply(msg.sender, -9), // EBADF
         };
 
-        let mut tmp = [0u8; 48];
+        let mut tmp = [0u8; 64];
 
         match path.as_str() {
             // Root listing
             "" => {
-                let listing = b"ip\ngateway\ndns\n";
+                let listing = b"ip\ngateway\nroute\ndns\n";
                 let start = (offset as usize).min(listing.len());
                 let data = &listing[start..];
                 reply_read(msg.sender, data)
@@ -459,13 +485,21 @@ impl NetworkStrate {
             }
             "dns" => {
                 if let Some(ref cfg) = self.ip_config {
-                    if let Some(dns0) = cfg.dns[0] {
-                        let n = ipv4_addr_to_str(&dns0, &mut tmp);
+                    let n = dns_list_to_str(&cfg.dns, &mut tmp);
+                    let start = (offset as usize).min(n);
+                    return reply_read(msg.sender, &tmp[start..n]);
+                }
+                reply_read(msg.sender, b"0.0.0.0\n")
+            }
+            "route" => {
+                if let Some(ref cfg) = self.ip_config {
+                    if let Some(gw) = cfg.gateway {
+                        let n = route_to_str(&gw, &mut tmp);
                         let start = (offset as usize).min(n);
                         return reply_read(msg.sender, &tmp[start..n]);
                     }
                 }
-                reply_read(msg.sender, b"0.0.0.0\n")
+                reply_read(msg.sender, b"none\n")
             }
             _ => IpcMessage::error_reply(msg.sender, -9), // EBADF
         }
