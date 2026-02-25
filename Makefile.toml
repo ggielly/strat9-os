@@ -335,6 +335,34 @@ args = [
     "-Z",
     "build-std-features=compiler-builtins-mem",
 ]
+
+[tasks.dhcpd]
+description = "Build the DHCP status monitor (debug profile)"
+cwd = "workspace/components/netutils/dhcpd"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.ping]
+description = "Build the ping utility (debug profile)"
+cwd = "workspace/components/netutils/ping"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 [tasks.strate-ext4-release]
 description = "Build the EXT4 userspace filesystem component (release profile)"
 cwd = "workspace/components/strate-fs-ext4"
@@ -431,6 +459,36 @@ args = [
 
 description = "Build the console-admin silo (release profile)"
 cwd = "workspace/components/strate-console-admin"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.dhcpd-release]
+description = "Build the DHCP status monitor (release profile)"
+cwd = "workspace/components/netutils/dhcpd"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.ping-release]
+description = "Build the ping utility (release profile)"
+cwd = "workspace/components/netutils/ping"
 command = "cargo"
 args = [
     "build",
@@ -553,6 +611,38 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.dhcpd-dev-opt]
+description = "Build the DHCP status monitor (dev-opt profile)"
+cwd = "workspace/components/netutils/dhcpd"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.ping-dev-opt]
+description = "Build the ping utility (dev-opt profile)"
+cwd = "workspace/components/netutils/ping"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.limine-image]
 
 description = "Create bootable ISO/IMG with Limine + kernel"
@@ -566,6 +656,8 @@ dependencies = [
     "strate-init",
     "strate-console-admin",
     "strate-net",
+    "dhcpd",
+    "ping",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os" }
 script_runner = "@shell"
@@ -586,6 +678,8 @@ dependencies = [
     "strate-init",
     "strate-console-admin",
     "strate-net",
+    "dhcpd",
+    "ping",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os-test" }
 script_runner = "@shell"
@@ -606,6 +700,8 @@ dependencies = [
     "strate-init-dev-opt",
     "strate-console-admin-dev-opt",
     "strate-net-dev-opt",
+    "dhcpd-dev-opt",
+    "ping-dev-opt",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "dev-opt" }
 script_runner = "@shell"
@@ -626,6 +722,8 @@ dependencies = [
     "strate-init-release",
     "strate-console-admin-release",
     "strate-net-release",
+    "dhcpd-release",
+    "ping-release",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release" }
 script_runner = "@shell"

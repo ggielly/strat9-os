@@ -9,7 +9,6 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
 use core::{alloc::Layout, panic::PanicInfo};
 use linked_list_allocator::LockedHeap;
 use strat9_syscall::*;
@@ -48,20 +47,19 @@ const MAX_CREATE_PATH: usize = 40;
 const MAX_UNLINK_PATH: usize = 42;
 const MAX_READ_DATA: usize = 40; // payload[8..48]
 const MAX_WRITE_DATA: usize = 30; // payload[18..48]
+const OPEN_CREATE: u32 = 1 << 2;
+const OPEN_TRUNCATE: u32 = 1 << 3;
+const OPEN_DIRECTORY: u32 = 1 << 5;
 
 use strat9_syscall::data::IpcMessage;
 
 struct StrateRamServer {
     fs: RamFileSystem,
-    open_counts: BTreeMap<u64, u32>,
 }
 
 impl StrateRamServer {
     fn new() -> Self {
-        Self {
-            fs: RamFileSystem::new(),
-            open_counts: BTreeMap::new(),
-        }
+        Self { fs: RamFileSystem::new() }
     }
 
     fn ok_reply(sender: u64) -> IpcMessage {
@@ -128,30 +126,66 @@ impl StrateRamServer {
     }
 
     fn handle_open(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
+        let flags = match Self::read_u32(payload, 0) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
+        };
         let path = match Self::parse_path(payload, 4, 6, MAX_OPEN_PATH) {
             Ok(path) => path,
             Err(code) => return Self::err_reply(sender, code),
         };
 
-        match self.fs.resolve_path_internal(path) {
-            Ok(ino) => {
-                let counter = self.open_counts.entry(ino).or_insert(0);
-                *counter = counter.saturating_add(1);
-
-                let info = match self.fs.stat(ino) {
-                    Ok(info) => info,
+        let ino = match self.fs.resolve_path_internal(path) {
+            Ok(ino) => ino,
+            Err(FsError::NotFound) if (flags & OPEN_CREATE) != 0 => {
+                if (flags & OPEN_DIRECTORY) != 0 {
+                    return Self::err_reply(sender, EINVAL as u32);
+                }
+                if path.is_empty() || path == "/" {
+                    return Self::err_reply(sender, EINVAL as u32);
+                }
+                let (parent_path, name) = split_path(path);
+                let parent_ino = match self.fs.resolve_path_internal(parent_path) {
+                    Ok(v) => v,
                     Err(err) => return Self::err_reply(sender, Self::fs_status(err)),
                 };
-
-                let mut reply = Self::ok_reply(sender);
-                reply.payload[4..12].copy_from_slice(&ino.to_le_bytes());
-                reply.payload[12..20].copy_from_slice(&info.size.to_le_bytes());
-                let f_flags: u32 = if info.is_dir() { 1 } else { 0 };
-                reply.payload[20..24].copy_from_slice(&f_flags.to_le_bytes());
-                reply
+                match self.fs.create_file(parent_ino, name, 0o644) {
+                    Ok(info) => info.ino,
+                    Err(err) => return Self::err_reply(sender, Self::fs_status(err)),
+                }
             }
-            Err(err) => Self::err_reply(sender, Self::fs_status(err)),
+            Err(err) => return Self::err_reply(sender, Self::fs_status(err)),
+        };
+
+        let mut info = match self.fs.stat(ino) {
+            Ok(info) => info,
+            Err(err) => return Self::err_reply(sender, Self::fs_status(err)),
+        };
+
+        if (flags & OPEN_DIRECTORY) != 0 && !info.is_dir() {
+            return Self::err_reply(sender, EINVAL as u32);
         }
+
+        if (flags & OPEN_TRUNCATE) != 0 && !info.is_dir() {
+            if let Err(err) = self.fs.set_size(info.ino, 0) {
+                return Self::err_reply(sender, Self::fs_status(err));
+            }
+            info = match self.fs.stat(info.ino) {
+                Ok(i) => i,
+                Err(err) => return Self::err_reply(sender, Self::fs_status(err)),
+            };
+        }
+
+        if let Err(err) = self.fs.register_open(info.ino) {
+            return Self::err_reply(sender, Self::fs_status(err));
+        }
+
+        let mut reply = Self::ok_reply(sender);
+        reply.payload[4..12].copy_from_slice(&info.ino.to_le_bytes());
+        reply.payload[12..20].copy_from_slice(&info.size.to_le_bytes());
+        let f_flags: u32 = if info.is_dir() { 1 } else { 0 };
+        reply.payload[20..24].copy_from_slice(&f_flags.to_le_bytes());
+        reply
     }
 
     fn handle_read(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
@@ -213,8 +247,6 @@ impl StrateRamServer {
             Ok(info) => {
                 let mut reply = Self::ok_reply(sender);
                 reply.payload[4..12].copy_from_slice(&info.ino.to_le_bytes());
-                let counter = self.open_counts.entry(info.ino).or_insert(0);
-                *counter = counter.saturating_add(1);
                 reply
             }
             Err(err) => Self::err_reply(sender, Self::fs_status(err)),
@@ -261,16 +293,10 @@ impl StrateRamServer {
             Err(code) => return Self::err_reply(sender, code),
         };
 
-        match self.open_counts.get_mut(&ino) {
-            Some(count) if *count > 1 => {
-                *count -= 1;
-                Self::ok_reply(sender)
-            }
-            Some(_) => {
-                self.open_counts.remove(&ino);
-                Self::ok_reply(sender)
-            }
-            None => Self::err_reply(sender, EBADF as u32),
+        match self.fs.unregister_open(ino) {
+            Ok(()) => Self::ok_reply(sender),
+            Err(FsError::InodeNotFound) => Self::err_reply(sender, EBADF as u32),
+            Err(err) => Self::err_reply(sender, Self::fs_status(err)),
         }
     }
 

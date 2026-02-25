@@ -20,6 +20,8 @@ MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/init"
 CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
+DHCPD_ELF="target/x86_64-unknown-none/${PROFILE}/dhcpd"
+PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
 
 echo ""
 echo "=== Creating Limine bootable image ==="
@@ -90,12 +92,25 @@ if [ -f "$NET_ELF" ]; then
 else
     echo "    strate-net   : (missing)"
 fi
+if [ -f "$DHCPD_ELF" ]; then
+    dhcpd_size=$(stat -c%s "$DHCPD_ELF")
+    echo "    dhcpd        : $dhcpd_size bytes"
+else
+    echo "    dhcpd        : (missing)"
+fi
+if [ -f "$PING_ELF" ]; then
+    ping_size=$(stat -c%s "$PING_ELF")
+    echo "    ping         : $ping_size bytes"
+else
+    echo "    ping         : (missing)"
+fi
 echo ""
 
 # Create ISO root structure
 rm -rf "$ISO_ROOT"
 mkdir -p "$ISO_ROOT/boot/limine"
 mkdir -p "$ISO_ROOT/initfs"
+mkdir -p "$ISO_ROOT/initfs/bin"
 
 # Copy kernel
 cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel.elf"
@@ -169,6 +184,20 @@ if [ -f "$NET_ELF" ]; then
     echo "  [OK] Copied strate-net: /initfs/strate-net"
 else
     echo "  [WARN] strate-net binary not found at $NET_ELF"
+fi
+
+if [ -f "$DHCPD_ELF" ]; then
+    cp "$DHCPD_ELF" "$ISO_ROOT/initfs/bin/dhcpd"
+    echo "  [OK] Copied dhcpd: /initfs/bin/dhcpd"
+else
+    echo "  [WARN] dhcpd binary not found at $DHCPD_ELF"
+fi
+
+if [ -f "$PING_ELF" ]; then
+    cp "$PING_ELF" "$ISO_ROOT/initfs/bin/ping"
+    echo "  [OK] Copied ping: /initfs/bin/ping"
+else
+    echo "  [WARN] ping binary not found at $PING_ELF"
 fi
 
 # Create ISO using xorriso

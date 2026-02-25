@@ -18,6 +18,8 @@ members = [
     "workspace/components/strate-fs-ramfs",
     "workspace/components/strate-init",
     "workspace/components/strate-console-admin",
+    "workspace/components/netutils/dhcpd",
+    "workspace/components/netutils/ping",
 ]
 exclude = [
     "workspace/components/relibc",        # External dependency, built separately

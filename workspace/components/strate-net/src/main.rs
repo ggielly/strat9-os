@@ -217,7 +217,7 @@ struct IpConfig {
 fn ipv4_cidr_to_str(cidr: &smoltcp::wire::Ipv4Cidr, buf: &mut [u8]) -> usize {
     use core::fmt::Write;
     let mut w = BufWriter { buf, pos: 0 };
-    let a = cidr.address().as_bytes();
+    let a = cidr.address().octets();
     let _ = write!(
         w,
         "{}.{}.{}.{}/{}\n",
@@ -234,7 +234,7 @@ fn ipv4_cidr_to_str(cidr: &smoltcp::wire::Ipv4Cidr, buf: &mut [u8]) -> usize {
 fn ipv4_addr_to_str(addr: &Ipv4Address, buf: &mut [u8]) -> usize {
     use core::fmt::Write;
     let mut w = BufWriter { buf, pos: 0 };
-    let a = addr.as_bytes();
+    let a = addr.octets();
     let _ = write!(w, "{}.{}.{}.{}\n", a[0], a[1], a[2], a[3]);
     w.pos
 }
@@ -387,7 +387,7 @@ impl NetworkStrate {
     //  /net/ip         — read: "a.b.c.d/prefix\n"  (from DHCP)
     //  /net/gateway    — read: "a.b.c.d\n"          (from DHCP)
     //  /net/dns        — read: "a.b.c.d\n"          (first DNS)
-    //  /net/ethX       — read/write: raw Ethernet frames (future)
+    //  /net/em0        — read/write: raw Ethernet frames (future, FreeBSD naming)
     // -----------------------------------------------------------------------
 
     fn handle_open(&mut self, msg: &IpcMessage) -> IpcMessage {

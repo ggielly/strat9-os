@@ -108,6 +108,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dhcpd"
+version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
+]
+
+[[package]]
 name = "driver-net-proto"
 version = "0.1.0"
 
@@ -248,6 +255,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "ping"
+version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
 ]
 
 [[package]]

@@ -34,6 +34,7 @@ enum RamNode {
 
 pub struct RamFileSystem {
     inodes: Mutex<BTreeMap<u64, Arc<Mutex<RamNode>>>>,
+    open_counts: Mutex<BTreeMap<u64, u32>>,
     next_inode: AtomicU64,
     capabilities: FsCapabilities,
 }
@@ -49,6 +50,7 @@ impl RamFileSystem {
 
         Self {
             inodes: Mutex::new(inodes),
+            open_counts: Mutex::new(BTreeMap::new()),
             next_inode: AtomicU64::new(10), // Start user inodes at 10
             capabilities: FsCapabilities::writable_linux(),
         }
@@ -68,12 +70,20 @@ impl RamFileSystem {
         id
     }
 
+    fn lookup_child_inode(&self, parent_ino: u64, name: &str) -> FsResult<u64> {
+        let parent = self.get_node(parent_ino)?;
+        let guard = parent.lock();
+        match &*guard {
+            RamNode::Directory { entries, .. } => entries.get(name).copied().ok_or(FsError::NotFound),
+            _ => Err(FsError::NotADirectory),
+        }
+    }
+
     /// Internal helper to resolve path to inode (used by IPC server)
     pub fn resolve_path_internal(&self, path: &str) -> FsResult<u64> {
         let mut current_ino = self.root_inode();
         for part in path.split('/').filter(|s| !s.is_empty()) {
-            let info = self.lookup(current_ino, part)?;
-            current_ino = info.ino;
+            current_ino = self.lookup_child_inode(current_ino, part)?;
         }
         Ok(current_ino)
     }
@@ -84,6 +94,105 @@ impl RamFileSystem {
 
     fn to_dir_mode(mode: u32) -> u32 {
         0o040000 | (mode & 0o7777)
+    }
+
+    pub fn register_open(&self, ino: u64) -> FsResult<()> {
+        let mut counts = self.open_counts.lock();
+        if !self.inodes.lock().contains_key(&ino) {
+            return Err(FsError::InodeNotFound);
+        }
+        let count = counts.entry(ino).or_insert(0);
+        *count = count.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn unregister_open(&self, ino: u64) -> FsResult<()> {
+        let mut counts = self.open_counts.lock();
+        let removed_last = match counts.get_mut(&ino) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => {
+                counts.remove(&ino);
+                true
+            }
+            None => return Err(FsError::InodeNotFound),
+        };
+        drop(counts);
+
+        if removed_last {
+            self.collect_if_detached(ino)?;
+        }
+        Ok(())
+    }
+
+    fn is_open(&self, ino: u64) -> bool {
+        self.open_counts.lock().get(&ino).copied().unwrap_or(0) > 0
+    }
+
+    fn directory_contains_inode(&self, root_dir_ino: u64, target_ino: u64) -> FsResult<bool> {
+        let mut stack = Vec::new();
+        stack.push(root_dir_ino);
+
+        while let Some(current) = stack.pop() {
+            if current == target_ino {
+                return Ok(true);
+            }
+
+            let node = self.get_node(current)?;
+            let guard = node.lock();
+            if let RamNode::Directory { entries, .. } = &*guard {
+                for &child in entries.values() {
+                    stack.push(child);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn collect_if_detached(&self, ino: u64) -> FsResult<()> {
+        if ino == self.root_inode() || self.is_open(ino) {
+            return Ok(());
+        }
+        if self.directory_contains_inode(self.root_inode(), ino)? {
+            return Ok(());
+        }
+        self.collect_detached_subtree(ino)
+    }
+
+    fn collect_detached_subtree(&self, ino: u64) -> FsResult<()> {
+        if self.is_open(ino) {
+            return Ok(());
+        }
+
+        let children = match self.get_node(ino) {
+            Ok(node) => {
+                let guard = node.lock();
+                match &*guard {
+                    RamNode::Directory { entries, .. } => {
+                        let mut out = Vec::new();
+                        for &child in entries.values() {
+                            out.push(child);
+                        }
+                        out
+                    }
+                    RamNode::File { .. } => Vec::new(),
+                }
+            }
+            Err(_) => return Ok(()),
+        };
+
+        for child in children {
+            self.collect_detached_subtree(child)?;
+        }
+
+        if !self.is_open(ino) {
+            self.open_counts.lock().remove(&ino);
+            self.inodes.lock().remove(&ino);
+        }
+        Ok(())
     }
 }
 
@@ -129,16 +238,8 @@ impl VfsFileSystem for RamFileSystem {
     }
 
     fn lookup(&self, parent_ino: u64, name: &str) -> FsResult<VfsFileInfo> {
-        let parent = self.get_node(parent_ino)?;
-        let guard = parent.lock();
-        match &*guard {
-            RamNode::Directory { entries, .. } => {
-                let ino = *entries.get(name).ok_or(FsError::NotFound)?;
-                drop(guard);
-                self.stat(ino)
-            }
-            _ => Err(FsError::NotADirectory),
-        }
+        let ino = self.lookup_child_inode(parent_ino, name)?;
+        self.stat(ino)
     }
 
     fn resolve_path(&self, path: &str) -> FsResult<u64> {
@@ -150,10 +251,10 @@ impl VfsFileSystem for RamFileSystem {
         let guard = node.lock();
         match &*guard {
             RamNode::File { data, .. } => {
+                let start = usize::try_from(offset).map_err(|_| FsError::InvalidArgument)?;
                 if offset >= data.len() as u64 {
                     return Ok(0);
                 }
-                let start = offset as usize;
                 let end = (start + buf.len()).min(data.len());
                 let count = end - start;
                 buf[..count].copy_from_slice(&data[start..end]);
@@ -170,8 +271,10 @@ impl VfsFileSystem for RamFileSystem {
             RamNode::File {
                 data: file_data, ..
             } => {
-                let start = offset as usize;
-                let end = start + data.len();
+                let start = usize::try_from(offset).map_err(|_| FsError::InvalidArgument)?;
+                let end = start
+                    .checked_add(data.len())
+                    .ok_or(FsError::FileTooLarge)?;
                 if end > file_data.len() {
                     file_data.resize(end, 0);
                 }
@@ -193,11 +296,16 @@ impl VfsFileSystem for RamFileSystem {
 
                 let mut result = Vec::new();
                 for (name, child_ino) in children {
-                    let info = self.stat(child_ino)?;
+                    let child_node = self.get_node(child_ino)?;
+                    let child_guard = child_node.lock();
+                    let file_type = match &*child_guard {
+                        RamNode::File { .. } => VfsFileType::RegularFile,
+                        RamNode::Directory { .. } => VfsFileType::Directory,
+                    };
                     result.push(VfsDirEntry {
                         name,
                         ino: child_ino,
-                        file_type: info.file_type,
+                        file_type,
                         offset: 0,
                     });
                 }
@@ -318,7 +426,7 @@ impl VfsFileSystem for RamFileSystem {
                 }
                 entries.remove(name);
                 drop(guard);
-                self.inodes.lock().remove(&child_ino);
+                self.collect_if_detached(child_ino)?;
                 Ok(())
             }
             _ => Err(FsError::NotADirectory),
@@ -351,6 +459,16 @@ impl VfsFileSystem for RamFileSystem {
                 _ => return Err(FsError::NotADirectory),
             }
         };
+
+        {
+            let moved_node = self.get_node(moved_ino)?;
+            let moved_guard = moved_node.lock();
+            if let RamNode::Directory { .. } = &*moved_guard {
+                if self.directory_contains_inode(moved_ino, new_parent)? {
+                    return Err(FsError::InvalidArgument);
+                }
+            }
+        }
 
         let new_parent_node = self.get_node(new_parent)?;
         let mut new_guard = new_parent_node.lock();
@@ -403,10 +521,15 @@ impl VfsFileSystem for RamFileSystem {
         let mut guard = new_parent_node.lock();
         match &mut *guard {
             RamNode::Directory { entries, .. } => {
+                let mut replaced_for_gc: Option<u64> = None;
                 if let Some(existing_ino) = entries.insert(new_name.to_string(), moved_ino) {
                     if existing_ino != moved_ino {
-                        self.inodes.lock().remove(&existing_ino);
+                        replaced_for_gc = Some(existing_ino);
                     }
+                }
+                drop(guard);
+                if let Some(existing_ino) = replaced_for_gc {
+                    self.collect_if_detached(existing_ino)?;
                 }
                 Ok(())
             }
@@ -419,7 +542,8 @@ impl VfsFileSystem for RamFileSystem {
         let mut guard = node.lock();
         match &mut *guard {
             RamNode::File { data, .. } => {
-                data.resize(size as usize, 0);
+                let new_size = usize::try_from(size).map_err(|_| FsError::FileTooLarge)?;
+                data.resize(new_size, 0);
                 Ok(())
             }
             _ => Err(FsError::IsADirectory),

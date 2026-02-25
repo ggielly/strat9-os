@@ -4,10 +4,10 @@
 //! to kernel services (PCI, DMA allocator, VFS schemes).
 
 pub mod e1000_drv;
-pub mod virtio_net;
 pub mod scheme;
+pub mod virtio_net;
 
-pub use net_core::{MTU, NetError, NetworkDevice};
+pub use net_core::{NetError, NetworkDevice, MTU};
 
 use crate::sync::SpinLock;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
@@ -19,21 +19,83 @@ struct NetDeviceEntry {
 
 static NET_DEVICES: SpinLock<Vec<NetDeviceEntry>> = SpinLock::new(Vec::new());
 
+/// Map a driver name to a FreeBSD-style interface prefix.
+///
+/// | Driver          | Prefix   | Example |
+/// |-----------------|----------|---------|
+/// | e1000 / Intel   | `em`     | `em0`   |
+/// | VirtIO-net      | `vtnet`  | `vtnet0`|
+/// | (other)         | `net`    | `net0`  |
+fn bsd_prefix(driver_name: &str) -> &'static str {
+    let lower = driver_name.as_bytes();
+    // Match common patterns without pulling in a full lowercase comparison
+    if lower.len() >= 4
+        && (lower[0] | 0x20) == b'e'
+        && (lower[1] | 0x20) == b'1'
+        && lower[2] == b'0'
+        && lower[3] == b'0'
+    {
+        return "em"; // Intel PRO/1000 family
+    }
+    if lower.len() >= 6
+        && (lower[0] | 0x20) == b'v'
+        && (lower[1] | 0x20) == b'i'
+        && (lower[2] | 0x20) == b'r'
+        && (lower[3] | 0x20) == b't'
+        && (lower[4] | 0x20) == b'i'
+        && (lower[5] | 0x20) == b'o'
+    {
+        return "vtnet"; // VirtIO
+    }
+    "net" // fallback
+}
+
+/// Counters per-prefix so that `em0`, `em1`, `vtnet0` are independent.
+static PREFIX_COUNTERS: SpinLock<Vec<(String, usize)>> = SpinLock::new(Vec::new());
+
+fn next_index_for(prefix: &str) -> usize {
+    let mut counters = PREFIX_COUNTERS.lock();
+    for entry in counters.iter_mut() {
+        if entry.0 == prefix {
+            let idx = entry.1;
+            entry.1 += 1;
+            return idx;
+        }
+    }
+    counters.push((String::from(prefix), 1));
+    0
+}
+
 pub fn register_device(device: Arc<dyn NetworkDevice>) -> String {
-    let mut devs = NET_DEVICES.lock();
-    let idx = devs.len();
-    let iface = format!("eth{}", idx);
+    let prefix = bsd_prefix(device.name());
+    let idx = next_index_for(prefix);
+    let iface = format!("{}{}", prefix, idx);
     let mac = device.mac_address();
     log::info!(
         "[net] {} -> {} (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-        device.name(), iface, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        device.name(),
+        iface,
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5],
     );
-    devs.push(NetDeviceEntry { iface: iface.clone(), device });
+    let mut devs = NET_DEVICES.lock();
+    devs.push(NetDeviceEntry {
+        iface: iface.clone(),
+        device,
+    });
     iface
 }
 
 pub fn get_device(name: &str) -> Option<Arc<dyn NetworkDevice>> {
-    NET_DEVICES.lock().iter().find(|e| e.iface == name).map(|e| e.device.clone())
+    NET_DEVICES
+        .lock()
+        .iter()
+        .find(|e| e.iface == name)
+        .map(|e| e.device.clone())
 }
 
 pub fn get_default_device() -> Option<Arc<dyn NetworkDevice>> {
