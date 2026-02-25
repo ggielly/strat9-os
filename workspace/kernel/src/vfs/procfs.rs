@@ -19,7 +19,7 @@
 use crate::{
     process::{current_pid, get_all_tasks, get_parent_pid},
     syscall::error::SyscallError,
-    vfs::scheme::{DynScheme, FileFlags, OpenFlags, OpenResult, Scheme},
+    vfs::scheme::{DirEntry, DynScheme, DT_DIR, DT_REG, FileFlags, FileStat, OpenFlags, OpenResult, Scheme},
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::fmt::Write;
@@ -189,21 +189,24 @@ enum ProcEntry {
     Directory,
 }
 
+/// Kind constants for procfs file-id encoding.
+/// Fixed IDs (0, 1, 10, 11, 12) use kind = 0 and are stored as-is.
+const KIND_PROC_DIR: u64 = 1; // /proc/<pid>  directory
+const KIND_PROC_STATUS: u64 = 2; // /proc/<pid>/status
+const KIND_PROC_CMDLINE: u64 = 3; // /proc/<pid>/cmdline
+
 impl ProcScheme {
-    fn encode_id(base: u64, pid: u64) -> u64 {
-        base + pid
+    /// Encode a (kind, pid) pair into a file_id.
+    ///
+    /// The high 32 bits hold the kind; the low 32 bits hold the pid.
+    /// This guarantees no collision between entries regardless of PID value.
+    fn encode_id(kind: u64, pid: u64) -> u64 {
+        (kind << 32) | (pid & 0xFFFF_FFFF)
     }
 
+    /// Decode a file_id back into (kind, pid).
     fn decode_id(id: u64) -> (u64, u64) {
-        if id >= 3000 {
-            (3000, id - 3000)
-        } else if id >= 2000 {
-            (2000, id - 2000)
-        } else if id >= 1000 {
-            (1000, id - 1000)
-        } else {
-            (id, 0)
-        }
+        (id >> 32, id & 0xFFFF_FFFF)
     }
 }
 
@@ -218,28 +221,26 @@ impl Scheme for ProcScheme {
                     "meminfo" => 11,
                     "version" => 12,
                     "self/status" => {
-                        Self::encode_id(2000, current_pid().map(|p| p as u64).unwrap_or(0))
+                        Self::encode_id(KIND_PROC_STATUS, current_pid().map(|p| p as u64).unwrap_or(0))
                     }
                     "self/cmdline" => {
-                        Self::encode_id(3000, current_pid().map(|p| p as u64).unwrap_or(0))
+                        Self::encode_id(KIND_PROC_CMDLINE, current_pid().map(|p| p as u64).unwrap_or(0))
                     }
-                    _ if path.starts_with("self") => 1, // Should not happen with get_entry logic
+                    _ if path.starts_with("self") => 1,
                     _ => {
-                        // Handle <pid>/status and <pid>/cmdline
                         if let Some(slash_idx) = path.find('/') {
                             let pid_str = &path[..slash_idx];
                             let sub = &path[slash_idx + 1..];
                             if let Ok(pid) = pid_str.parse::<u64>() {
                                 match sub {
-                                    "status" => Self::encode_id(2000, pid),
-                                    "cmdline" => Self::encode_id(3000, pid),
+                                    "status" => Self::encode_id(KIND_PROC_STATUS, pid),
+                                    "cmdline" => Self::encode_id(KIND_PROC_CMDLINE, pid),
                                     _ => 0xFFFF,
                                 }
                             } else {
                                 0xFFFF
                             }
                         } else {
-                            // Path is just <pid> - should be a directory handled below
                             0xFFFF
                         }
                     }
@@ -252,7 +253,7 @@ impl Scheme for ProcScheme {
                 } else if path == "self" || path == "self/" {
                     1
                 } else if let Ok(pid) = path.parse::<u64>() {
-                    Self::encode_id(1000, pid)
+                    Self::encode_id(KIND_PROC_DIR, pid)
                 } else {
                     2
                 };
@@ -272,6 +273,7 @@ impl Scheme for ProcScheme {
     }
 
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
+        let (kind, pid) = Self::decode_id(file_id);
         let content = if file_id == 0 {
             // Root directory listing
             let mut list = String::from("self\ncpuinfo\nmeminfo\nversion\n");
@@ -281,17 +283,17 @@ impl Scheme for ProcScheme {
                 }
             }
             list
-        } else if file_id == 1 || (file_id >= 1000 && file_id < 2000) {
-            // Process directory listing
+        } else if file_id == 1 || kind == KIND_PROC_DIR {
+            // Process directory listing (self dir or /proc/<pid>)
             String::from("status\ncmdline\n")
         } else {
-            // File content
-            let (base, pid) = Self::decode_id(file_id);
-            match base {
-                10 => self.get_cpuinfo(),
-                11 => self.get_meminfo(),
-                12 => self.get_version(),
-                2000 => {
+            // File content — distinguish by kind (high 32 bits) for process files,
+            // or by the literal file_id for well-known fixed files.
+            match (kind, file_id) {
+                (0, 10) => self.get_cpuinfo(),
+                (0, 11) => self.get_meminfo(),
+                (0, 12) => self.get_version(),
+                (KIND_PROC_STATUS, _) => {
                     let tasks = get_all_tasks().ok_or(SyscallError::NotFound)?;
                     let task = tasks
                         .iter()
@@ -299,7 +301,7 @@ impl Scheme for ProcScheme {
                         .ok_or(SyscallError::NotFound)?;
                     self.get_process_status(task)
                 }
-                3000 => {
+                (KIND_PROC_CMDLINE, _) => {
                     let tasks = get_all_tasks().ok_or(SyscallError::NotFound)?;
                     let task = tasks
                         .iter()
@@ -329,5 +331,66 @@ impl Scheme for ProcScheme {
 
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(())
+    }
+
+    fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
+        let (kind, _pid) = Self::decode_id(file_id);
+        let is_dir = file_id == 0 || file_id == 1 || kind == KIND_PROC_DIR;
+        if is_dir {
+            Ok(FileStat {
+                st_ino: file_id,
+                st_mode: 0o040555,
+                st_nlink: 2,
+                st_size: 0,
+                st_blksize: 512,
+                st_blocks: 0,
+            })
+        } else {
+            Ok(FileStat {
+                st_ino: file_id,
+                st_mode: 0o100444,
+                st_nlink: 1,
+                st_size: 0,
+                st_blksize: 512,
+                st_blocks: 0,
+            })
+        }
+    }
+
+    fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
+        let (kind, pid) = Self::decode_id(file_id);
+        if file_id == 0 {
+            let mut entries = Vec::new();
+            entries.push(DirEntry { ino: 1, file_type: DT_DIR, name: String::from("self") });
+            entries.push(DirEntry { ino: 10, file_type: DT_REG, name: String::from("cpuinfo") });
+            entries.push(DirEntry { ino: 11, file_type: DT_REG, name: String::from("meminfo") });
+            entries.push(DirEntry { ino: 12, file_type: DT_REG, name: String::from("version") });
+            if let Some(tasks) = get_all_tasks() {
+                for task in tasks {
+                    entries.push(DirEntry {
+                        ino: Self::encode_id(KIND_PROC_DIR, task.pid as u64),
+                        file_type: DT_DIR,
+                        name: format!("{}", task.pid),
+                    });
+                }
+            }
+            Ok(entries)
+        } else if file_id == 1 || kind == KIND_PROC_DIR {
+            // self dir or /proc/<pid>: list status + cmdline with correct inos
+            Ok(alloc::vec![
+                DirEntry {
+                    ino: Self::encode_id(KIND_PROC_STATUS, pid),
+                    file_type: DT_REG,
+                    name: String::from("status"),
+                },
+                DirEntry {
+                    ino: Self::encode_id(KIND_PROC_CMDLINE, pid),
+                    file_type: DT_REG,
+                    name: String::from("cmdline"),
+                },
+            ])
+        } else {
+            Err(SyscallError::InvalidArgument)
+        }
     }
 }

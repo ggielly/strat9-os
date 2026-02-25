@@ -22,6 +22,8 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  scheme ls         - List registered schemes");
     shell_println!("  cpuinfo           - Display CPU information");
     shell_println!("  test_pid          - Launch /initfs/test_pid userspace binary");
+    shell_println!("  test_mem          - Launch /initfs/test_mem verbose memory test");
+    shell_println!("  test_mem_stressed - Launch /initfs/test_mem_stressed stress test");
     shell_println!("  reboot            - Reboot the system");
     shell_println!("  scheduler debug   - Scheduler debug on|off|dump");
     shell_println!("  trace mem ...     - Memory trace on|off|dump|clear|serial|mask");

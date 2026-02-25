@@ -24,7 +24,7 @@ pub mod arch;
 pub mod boot;
 pub mod capability;
 pub mod components;
-pub mod drivers;
+pub mod hardware;
 pub mod entry;
 pub mod ipc;
 pub mod logger;
@@ -365,6 +365,30 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 serial_println!("[init] Failed to register /initfs/test_pid: {:?}", e);
             }
         }
+        if let Some((base, size)) = crate::limine_entry::test_mem_module() {
+            if base != 0 && size != 0 {
+                let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+                if let Err(e) = vfs::register_initfs_file("test_mem", data.as_ptr(), data.len()) {
+                    serial_println!("[init] Failed to register /initfs/test_mem: {:?}", e);
+                } else {
+                    serial_println!("[init] Registered /initfs/test_mem ({} bytes)", size);
+                }
+            }
+        }
+        if let Some((base, size)) = crate::limine_entry::test_mem_stressed_module() {
+            if base != 0 && size != 0 {
+                let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+                if let Err(e) = vfs::register_initfs_file("test_mem_stressed", data.as_ptr(), data.len())
+                {
+                    serial_println!("[init] Failed to register /initfs/test_mem_stressed: {:?}", e);
+                } else {
+                    serial_println!(
+                        "[init] Registered /initfs/test_mem_stressed ({} bytes)",
+                        size
+                    );
+                }
+            }
+        }
         if let Some((base, size)) = crate::limine_entry::fs_ext4_module() {
             if base != 0 && size != 0 {
                 let ext4_data =
@@ -389,6 +413,22 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 }
             }
         }
+        if let Some((base, size)) = crate::limine_entry::init_module() {
+            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            if let Err(e) = vfs::register_initfs_file("init", data.as_ptr(), data.len()) {
+                serial_println!("[init] Failed to register /initfs/init: {:?}", e);
+            } else {
+                serial_println!("[init] Registered /initfs/init ({} bytes)", size);
+            }
+        }
+        if let Some((base, size)) = crate::limine_entry::console_admin_module() {
+            let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            if let Err(e) = vfs::register_initfs_file("console-admin", data.as_ptr(), data.len()) {
+                serial_println!("[init] Failed to register /initfs/console-admin: {:?}", e);
+            } else {
+                serial_println!("[init] Registered /initfs/console-admin ({} bytes)", size);
+            }
+        }
 
         serial_println!("[init] Components (process)...");
         vga_println!("[..] Initializing process components...");
@@ -398,58 +438,93 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         serial_println!("[init] Process components initialized.");
         vga_println!("[OK] Process components ready");
 
-        serial_println!("[init] Loading driver stubs...");
-        vga_println!("[..] Initializing VirtIO drivers...");
+        // =============================================
+        // Phase 8d: VirtIO + hardware drivers
+        // =============================================
+        serial_println!("[init] Loading hardware drivers...");
+        vga_println!("[..] Initializing hardware drivers...");
+        hardware::init();
+
         serial_println!("[init] Initializing VirtIO block...");
-        vga_println!("[..] Looking for VirtIO Block device...");
-        drivers::virtio::block::init();
+        vga_println!("[..] Looking for VirtIO block device...");
+        hardware::storage::virtio_block::init();
         serial_println!("[init] VirtIO block initialized.");
         vga_println!("[OK] VirtIO block driver initialized");
+
         serial_println!("[init] Initializing VirtIO net...");
         vga_println!("[..] Looking for VirtIO net device...");
-        drivers::virtio::net::init();
+        hardware::nic::virtio_net::init();
         serial_println!("[init] VirtIO net initialized.");
         vga_println!("[OK] VirtIO net driver initialized");
+
         serial_println!("[init] Checking for devices...");
         vga_println!("[..] Checking for devices...");
 
-        if let Some(blk) = drivers::virtio::block::get_device() {
-            use drivers::virtio::block::BlockDevice;
+        if let Some(blk) = hardware::storage::virtio_block::get_device() {
+            use hardware::storage::virtio_block::BlockDevice;
             serial_println!(
-                "[INFO] VirtIO block Device found. Capacity: {} sectors",
+                "[INFO] VirtIO block device found. Capacity: {} sectors",
                 blk.sector_count()
             );
-            vga_println!("[OK] VirtIO block Driver loaded");
+            vga_println!("[OK] VirtIO block driver loaded");
         } else {
-            serial_println!("[WARN] No VirtIO block Device found");
-            vga_println!("[WARN] No VirtIO block Device found");
+            serial_println!("[WARN] No VirtIO block device found");
+            vga_println!("[WARN] No VirtIO block device found");
         }
-        if let Some(net) = drivers::virtio::net::get_device() {
-            use drivers::virtio::net::NetworkDevice;
-            let mac = net.mac_address();
-            serial_println!(
-                "[INFO] VirtIO net device found. MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-            );
-            vga_println!("[OK] VirtIO net driver loaded");
-        } else {
-            serial_println!("[WARN] No VirtIO net device found");
-            vga_println!("[WARN] No VirtIO net device found");
+
+        // Report all registered network interfaces (E1000 + VirtIO)
+        {
+            use hardware::nic::NetworkDevice;
+            let ifaces = hardware::nic::list_interfaces();
+            if ifaces.is_empty() {
+                serial_println!("[WARN] No network devices found");
+                vga_println!("[WARN] No network devices found");
+            } else {
+                for name in &ifaces {
+                    if let Some(dev) = hardware::nic::get_device(name) {
+                        let mac = dev.mac_address();
+                        serial_println!(
+                            "[INFO] Network {} ({}) MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} link={}",
+                            name, dev.name(),
+                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                            if dev.link_up() { "up" } else { "down" },
+                        );
+                        vga_println!("[OK] Network {} ({}) loaded", name, dev.name());
+                    }
+                }
+            }
         }
 
         serial_println!("[init] Storage verification skipped (boot path)");
         vga_println!("[..] Storage verification skipped at boot");
 
-        if args.initfs_base != 0 && args.initfs_size != 0 {
-            let elf_data = unsafe {
-                core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
-            };
-            // Keep task name "init" so bootstrap capabilities (including console/admin path)
-            // are granted exactly like the previous init flow.
+        // Launch the init process: prefer /initfs/init, fall back to /initfs/test_pid.
+        // The fallback is tried both when the primary module is absent AND when it
+        // is present but contains an invalid ELF (corrupt / wrong arch).
+        let mut init_loaded = false;
+
+        if let Some((base, size)) = crate::limine_entry::init_module() {
+            let elf_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
             match process::elf::load_and_run_elf(elf_data, "init") {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
-                    serial_println!("[init] ELF '/initfs/test_pid' loaded as task 'init'.");
+                    init_loaded = true;
+                    serial_println!("[init] ELF '/initfs/init' loaded as task 'init'.");
+                }
+                Err(e) => {
+                    serial_println!("[init] Failed to load init ELF: {}; trying fallback.", e);
+                }
+            }
+        }
+
+        if !init_loaded && args.initfs_base != 0 && args.initfs_size != 0 {
+            let elf_data = unsafe {
+                core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
+            };
+            match process::elf::load_and_run_elf(elf_data, "init") {
+                Ok(task_id) => {
+                    init_task_id = Some(task_id);
+                    serial_println!("[init] ELF '/initfs/test_pid' loaded as task 'init' (fallback).");
                 }
                 Err(e) => {
                     serial_println!("[init] Failed to load test_pid ELF: {}", e);
@@ -463,7 +538,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
             }
         }
-        if let (Some(task_id), Some(device)) = (init_task_id, drivers::virtio::block::get_device()) {
+        if let (Some(task_id), Some(device)) = (init_task_id, hardware::storage::virtio_block::get_device()) {
             if let Some(task) = crate::process::get_task_by_id(task_id) {
                 let cap = crate::capability::get_capability_manager().create_capability(
                     crate::capability::ResourceType::Volume,
@@ -521,6 +596,11 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     vga_println!("[OK] Interrupts enabled");
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
+
+    // Diagnostic: verify RFLAGS.IF is set
+    let rflags: u64;
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags) };
+    serial_println!("[init] RFLAGS={:#018x} IF={}", rflags, (rflags >> 9) & 1);
 
     // Start the scheduler - this will never return
     process::schedule();

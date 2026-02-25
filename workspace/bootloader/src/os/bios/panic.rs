@@ -8,7 +8,7 @@ use core::panic::PanicInfo;
 #[panic_handler]
 pub fn rust_begin_unwind(info: &PanicInfo) -> ! {
     unsafe {
-        println!("BOOTLOADER PANIC:\n{}", info);
+        println!("BOOTLOADER PANiK:\n{}", info);
         loop {
             asm!("hlt");
         }

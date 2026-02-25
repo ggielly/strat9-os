@@ -69,7 +69,7 @@ fn send_resched_ipi_to_cpu(cpu_index: usize) {
 }
 
 /// The global scheduler instance
-static SCHEDULER: SpinLock<Option<Scheduler>> = SpinLock::new(None);
+pub(crate) static SCHEDULER: SpinLock<Option<Scheduler>> = SpinLock::new(None);
 
 /// Global tick counter (safe to increment from interrupt context)
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -227,7 +227,7 @@ pub struct Scheduler {
     /// Tasks blocked waiting for an event (keyed by TaskId for O(log n) wake)
     blocked_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// All tasks in the system (for lookup by TaskId)
-    all_tasks: BTreeMap<TaskId, Arc<Task>>,
+    pub(crate) all_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// Map TaskId -> CPU index (for wake/resume routing)
     task_cpu: BTreeMap<TaskId, usize>,
     /// Map userspace PID -> internal TaskId (process leader in current model).
@@ -1600,21 +1600,11 @@ fn cleanup_task_resources(task: &Arc<Task>) {
 
 /// Timer interrupt handler — called from interrupt context.
 ///
-/// Increments the global tick counter. Preemption is handled separately
-/// by `maybe_preempt()` which is called after EOI in the timer handler.
-/// Also checks interval timers for expiration and wake deadlines for sleep.
+/// Increments the global tick counter unconditionally on BSP so wall-clock
+/// time never drifts even when the scheduler lock is contended. Secondary
+/// bookkeeping (interval timers, wake deadlines, per-task accounting) is
+/// deferred when the lock is unavailable.
 pub fn timer_tick() {
-    // Early return if scheduler is not initialized yet
-    // This can happen during AP boot before schedule() is called
-    let scheduler_check = SCHEDULER.try_lock();
-    if scheduler_check.is_none() {
-        // Scheduler is locked (being initialized or in use), skip this tick
-        return;
-    }
-    drop(scheduler_check); // Release immediately, just checking
-
-    // Resolve current CPU robustly; if APIC->CPU mapping is unknown, skip this tick
-    // instead of incorrectly attributing it to CPU0 (which accelerates time).
     let cpu_idx = if let Some(idx) = percpu::cpu_index_from_gs() {
         idx
     } else if apic::is_initialized() {
@@ -1630,23 +1620,29 @@ pub fn timer_tick() {
         0
     };
 
-    // Keep wall-clock accounting on BSP only. APs still receive timer interrupts
-    // for local preemption, but must not accelerate global time in SMP.
+    // BSP wall-clock: ALWAYS advance, regardless of any lock state.
     if cpu_idx == 0 {
-        let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+        TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
 
-        // Assume 100Hz timer (10ms per tick)
-        // Convert ticks to nanoseconds
-        let current_time_ns = tick * 10_000_000; // 10ms = 10,000,000 ns
+    // Probe: if the scheduler is not reachable yet, skip secondary work.
+    // The probe is dropped immediately; called functions re-acquire as needed.
+    {
+        let probe = SCHEDULER.try_lock();
+        if probe.is_none() {
+            return;
+        }
+    }
 
-        // Check interval timers for all tasks
+    if cpu_idx == 0 {
+        let tick = TICK_COUNT.load(Ordering::Relaxed);
+        let current_time_ns = tick * 10_000_000; // 100 Hz → 10 ms per tick
+
         super::timer::tick_all_timers(current_time_ns);
-
-        // Check wake deadlines for sleeping tasks
         check_wake_deadlines(current_time_ns);
     }
 
-    // Increment ticks for the task currently running on this CPU
+    // Per-task accounting on this CPU
     if let Some(mut guard) = SCHEDULER.try_lock() {
         if let Some(ref mut sched) = *guard {
             if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
@@ -1668,18 +1664,14 @@ pub fn timer_tick() {
 /// Check wake deadlines for all tasks and wake up those whose sleep has expired.
 ///
 /// Called from timer_tick() with interrupts disabled.
-///
 /// Uses try_lock() to avoid deadlock if called while scheduler lock is held.
 fn check_wake_deadlines(current_time_ns: u64) {
-    // Use try_lock to avoid deadlock - if scheduler is already locked,
-    // we'll check wake deadlines on the next timer tick.
     let mut scheduler = match SCHEDULER.try_lock() {
         Some(guard) => guard,
-        None => return, // Scheduler locked, skip this tick
+        None => return,
     };
 
     if let Some(ref mut sched) = *scheduler {
-        // Use a fixed-size array to avoid heap allocation in interrupt context
         const MAX_WAKE: usize = 32;
         let mut to_wake = [TaskId::from_u64(0); MAX_WAKE];
         let mut count = 0;
@@ -1691,24 +1683,17 @@ fn check_wake_deadlines(current_time_ns: u64) {
                     to_wake[count] = *id;
                     count += 1;
                 } else {
-                    break; // Wake others on next tick
+                    break;
                 }
             }
         }
 
-        // Wake up tasks
         for i in 0..count {
             let id = to_wake[i];
             if let Some(task) = sched.all_tasks.get(&id) {
-                // Clear the deadline
                 task.wake_deadline_ns.store(0, Ordering::Relaxed);
-
-                // If task is blocked on sleep, wake it up
                 if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
-                    // SAFETY: scheduler lock held
-                    unsafe {
-                        *blocked_task.state.get() = TaskState::Ready;
-                    }
+                    unsafe { *blocked_task.state.get() = TaskState::Ready };
                     let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
                     let class = sched.class_table.class_for_task(&blocked_task);
                     if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
@@ -1718,8 +1703,8 @@ fn check_wake_deadlines(current_time_ns: u64) {
             }
         }
     }
-    // Lock released when scheduler goes out of scope
 }
+
 
 /// Get the current tick count
 pub fn ticks() -> u64 {

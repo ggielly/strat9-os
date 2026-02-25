@@ -9,70 +9,100 @@ use spin::Mutex;
 /// Keyboard input buffer size
 const KEYBOARD_BUFFER_SIZE: usize = 256;
 
-/// Global keyboard input buffer (circular buffer)
-static KEYBOARD_BUFFER: KeyboardBuffer = KeyboardBuffer::new();
+// ─── Interrupt-safe ring buffer ───────────────────────────────────────────────
+//
+// The previous design used three separate `Mutex` fields (buffer, head, tail).
+// `push()` — called from the keyboard ISR — acquired them in order
+// tail → buffer → head.  `pop()` — called from task context — acquired them in
+// order head → tail → buffer.
+//
+// This created a classic spinlock + interrupt deadlock:
+//   1. Task context calls `pop()` → acquires `head` lock.
+//   2. Keyboard IRQ fires before `pop()` releases `head`.
+//   3. ISR calls `push()` → acquires `tail`, then `buffer`, then tries `head`
+//      → spins forever because `head` is still held by the preempted task.
+//
+// Fix: collapse all state into a SINGLE `Mutex` and, in the non-ISR path
+// (`pop` / `has_data`), disable interrupts BEFORE taking the lock.
+// The ISR already runs with IF=0, so it never needs to disable interrupts.
 
-/// Circular buffer for keyboard input
-struct KeyboardBuffer {
-    buffer: Mutex<[u8; KEYBOARD_BUFFER_SIZE]>,
-    head: Mutex<usize>,
-    tail: Mutex<usize>,
+struct KeyboardBufferInner {
+    buf:  [u8; KEYBOARD_BUFFER_SIZE],
+    head: usize,
+    tail: usize,
 }
+
+struct KeyboardBuffer {
+    inner: Mutex<KeyboardBufferInner>,
+}
+
+static KEYBOARD_BUFFER: KeyboardBuffer = KeyboardBuffer::new();
 
 impl KeyboardBuffer {
     const fn new() -> Self {
         Self {
-            buffer: Mutex::new([0u8; KEYBOARD_BUFFER_SIZE]),
-            head: Mutex::new(0),
-            tail: Mutex::new(0),
+            inner: Mutex::new(KeyboardBufferInner {
+                buf:  [0u8; KEYBOARD_BUFFER_SIZE],
+                head: 0,
+                tail: 0,
+            }),
         }
     }
 
-    /// Add a character to the buffer
+    /// Called exclusively from IRQ context (IF=0 already).  No need to
+    /// save/restore flags here.
     pub fn push(&self, ch: u8) {
-        let mut tail = self.tail.lock();
-        let mut buffer = self.buffer.lock();
-        buffer[*tail] = ch;
-        *tail = (*tail + 1) % KEYBOARD_BUFFER_SIZE;
-
-        // If buffer is full, advance head to drop oldest character
-        let mut head = self.head.lock();
-        if *head == *tail {
-            *head = (*head + 1) % KEYBOARD_BUFFER_SIZE;
+        let mut g = self.inner.lock();
+        let tail = g.tail;
+        g.buf[tail] = ch;
+        g.tail = (tail + 1) % KEYBOARD_BUFFER_SIZE;
+        // Buffer full — drop oldest character silently.
+        if g.head == g.tail {
+            g.head = (g.head + 1) % KEYBOARD_BUFFER_SIZE;
         }
     }
 
-    /// Get a character from the buffer (blocking)
+    /// Called from task context.  We must disable interrupts before taking
+    /// the lock so that the keyboard ISR cannot fire while we hold it.
     pub fn pop(&self) -> Option<u8> {
-        let mut head = self.head.lock();
-        let tail = *self.tail.lock();
-
-        if *head == tail {
-            return None; // Buffer empty
-        }
-
-        let ch = self.buffer.lock()[*head];
-        *head = (*head + 1) % KEYBOARD_BUFFER_SIZE;
-        Some(ch)
+        let saved = super::save_flags_and_cli();
+        let result = {
+            let mut g = self.inner.lock();
+            if g.head == g.tail {
+                None
+            } else {
+                let ch = g.buf[g.head];
+                g.head = (g.head + 1) % KEYBOARD_BUFFER_SIZE;
+                Some(ch)
+            }
+        };
+        super::restore_flags(saved);
+        result
     }
 
-    /// Check if buffer has data
+    /// Called from task context — same interrupt-disable discipline as `pop`.
     pub fn has_data(&self) -> bool {
-        *self.head.lock() != *self.tail.lock()
+        let saved = super::save_flags_and_cli();
+        let result = {
+            let g = self.inner.lock();
+            g.head != g.tail
+        };
+        super::restore_flags(saved);
+        result
     }
 }
 
-/// Add a character to the keyboard buffer
+/// Add a character to the keyboard buffer (called from IRQ context).
 pub fn add_to_buffer(ch: u8) {
     KEYBOARD_BUFFER.push(ch);
 }
 
-/// Get a character from the keyboard buffer (non-blocking)
+/// Get a character from the keyboard buffer (non-blocking, task context only).
 pub fn read_char() -> Option<u8> {
     KEYBOARD_BUFFER.pop()
 }
 
-/// Check if keyboard buffer has data
+/// Check if keyboard buffer has data (task context only).
 pub fn has_input() -> bool {
     KEYBOARD_BUFFER.has_data()
 }
@@ -250,6 +280,11 @@ pub const KEY_END: u8 = 0x85;
 /// or None for modifier keys / key releases.
 pub fn handle_scancode() -> Option<u8> {
     let scancode = unsafe { inb(KEYBOARD_DATA_PORT) };
+    handle_scancode_raw(scancode)
+}
+
+/// Same as `handle_scancode` but takes a pre-read scancode byte.
+pub fn handle_scancode_raw(scancode: u8) -> Option<u8> {
     let mut kbd = KEYBOARD.lock();
 
     // Key release (bit 7 set)

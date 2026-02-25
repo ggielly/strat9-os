@@ -224,21 +224,26 @@ impl ITimers {
 }
 
 /// Global timer tick function to be called from timer interrupt handler.
-/// Checks all tasks for expired interval timers and sends appropriate signals.
+/// Checks all tasks for expired interval timers and delivers signals.
 ///
-/// # Safety
-/// Should only be called from the timer interrupt handler with interrupts disabled.
+/// Zero-allocation: iterates tasks directly under the scheduler try_lock
+/// and sets pending signals via atomic ops. This avoids Vec/heap allocation
+/// in interrupt context which would deadlock against the buddy allocator.
 pub fn tick_all_timers(current_time_ns: u64) {
-    use crate::process::{get_all_tasks, send_signal, signal::Signal};
+    use crate::process::signal::Signal;
+    use crate::process::scheduler::SCHEDULER;
 
-    // Get all tasks and check their timers
-    // Use get_all_tasks which now uses try_lock internally
-    if let Some(tasks) = get_all_tasks() {
-        for task in tasks {
-            let expired = task.itimers.check_all(current_time_ns);
-            for (_which, signal_num) in expired {
-                if let Some(signal) = Signal::from_u32(signal_num) {
-                    let _ = send_signal(task.id, signal);
+    let scheduler = match SCHEDULER.try_lock() {
+        Some(guard) => guard,
+        None => return,
+    };
+    let Some(ref sched) = *scheduler else { return };
+
+    for (_, task) in sched.all_tasks.iter() {
+        for which in [ITimerWhich::Real, ITimerWhich::Virtual, ITimerWhich::Prof] {
+            if task.itimers.get(which).check_expired(current_time_ns) {
+                if let Some(sig) = Signal::from_u32(which.signal()) {
+                    unsafe { (*task.pending_signals.get()).add(sig) };
                 }
             }
         }

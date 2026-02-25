@@ -91,6 +91,7 @@ fn ipc_init() -> Result<(), ComponentInitError> {
 }
 
 /// Driver framework — needs arch primitives and memory.
+/// Hardware probing is deferred until paging + VFS are ready.
 #[component::init_component(bootstrap, priority = 5, depends_on = [memory_init, arch_init])]
 fn drivers_init() -> Result<(), ComponentInitError> {
     log::info!("[component] Driver framework initialized");

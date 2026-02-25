@@ -48,6 +48,8 @@ pub enum SiloState {
     Destroyed = 9,
 }
 
+pub const SILO_FLAG_ADMIN: u64 = 1 << 0;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SiloConfig {
@@ -64,6 +66,8 @@ pub struct SiloConfig {
     pub caps_ptr: u64,
     /// Number of entries in the capability array.
     pub caps_len: u64,
+    /// Silo flags (see SILO_FLAG_*).
+    pub flags: u64,
 }
 
 #[repr(C, packed)]
@@ -117,6 +121,7 @@ impl Default for SiloConfig {
             io_bw_write: 0,
             caps_ptr: 0,
             caps_len: 0,
+            flags: 0,
         }
     }
 }
@@ -851,7 +856,7 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
         revoke: false,
     };
     let silo_id = resolve_silo_handle(handle, required)?;
-    let (module_id, granted_caps, can_start, within_task_limit) = {
+    let (module_id, granted_caps, silo_flags, can_start, within_task_limit) = {
         let mut mgr = SILO_MANAGER.lock();
         let silo = mgr.get_mut(silo_id)?;
         let can_start = matches!(silo.state, SiloState::Ready | SiloState::Stopped);
@@ -861,10 +866,11 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
         };
         let module_id = silo.module_id;
         let granted_caps = silo.granted_caps.clone();
+        let silo_flags = silo.config.flags;
         if can_start && within_task_limit {
             silo.state = SiloState::Loading;
         }
-        (module_id, granted_caps, can_start, within_task_limit)
+        (module_id, granted_caps, silo_flags, can_start, within_task_limit)
     };
 
     if !can_start {
@@ -894,11 +900,17 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
         out
     };
 
+    let task_name: &'static str = if silo_flags & SILO_FLAG_ADMIN != 0 {
+        "silo-admin"
+    } else {
+        "silo"
+    };
+
     // Load the module entry without holding the manager lock.
     let load_result = {
         let registry = MODULE_REGISTRY.lock();
         let module = registry.get(module_id).ok_or(SyscallError::BadHandle)?;
-        crate::process::elf::load_and_run_elf_with_caps(&module.data, "silo", &seed_caps)
+        crate::process::elf::load_and_run_elf_with_caps(&module.data, task_name, &seed_caps)
             .map_err(|_| SyscallError::InvalidArgument)
     };
 
@@ -912,6 +924,15 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
             return Err(e);
         }
     };
+
+    // Give the silo an EOF stdin so that any read(0, …) returns 0 immediately
+    // instead of EBADF (which can cause busy-loops) or blocking on the
+    // keyboard (which would steal input from the foreground shell).
+    if let Some(task) = crate::process::get_task_by_id(task_id) {
+        let bg_stdin = crate::vfs::create_background_stdin();
+        let fd_table = unsafe { &mut *task.fd_table.get() };
+        fd_table.insert_at(crate::vfs::STDIN, bg_stdin);
+    }
 
     let mut mgr = SILO_MANAGER.lock();
     {

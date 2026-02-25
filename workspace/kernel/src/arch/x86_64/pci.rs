@@ -32,6 +32,15 @@ pub mod device {
     pub const VIRTIO_INPUT: u16 = 0x1052;
 }
 
+/// Intel Ethernet device IDs
+pub mod intel_eth {
+    pub const E1000_82540EM: u16 = 0x100E; // QEMU default e1000
+    pub const E1000_82545EM: u16 = 0x100F;
+    pub const E1000E_82574L: u16 = 0x10D3; // QEMU e1000e
+    pub const I217_LM: u16 = 0x153A;
+    pub const I211_AT: u16 = 0x1539;
+}
+
 /// PCI configuration register offsets
 pub mod config {
     pub const VENDOR_ID: u8 = 0x00;

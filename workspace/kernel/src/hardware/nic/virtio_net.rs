@@ -1,24 +1,24 @@
 //! VirtIO Network Device driver
 //!
 //! Provides network I/O via VirtIO-net protocol for QEMU/KVM environments.
-//! Designed to interface with smoltcp for the TCP/IP stack.
+//! Implements the common [`crate::hardware::nic::NetworkDevice`] trait so
+//! this driver plugs into the unified `/dev/net/` scheme.
 //!
 //! Reference: VirtIO spec v1.2, Section 5.1 (Network Device)
 
-use super::{
+use crate::hardware::virtio::{
     common::{VirtioDevice, Virtqueue},
     status,
 };
 use crate::{
     arch::x86_64::pci::{self, PciDevice},
+    hardware::nic as net,
     memory::{get_allocator, FrameAllocator, PhysFrame},
     sync::SpinLock,
 };
-use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::{mem, ptr};
-
-/// Maximum transmission unit
-pub const MTU: usize = 1514; // Ethernet MTU
+use net_core::{NetError, NetworkDevice};
 
 /// VirtIO net header size
 const NET_HDR_SIZE: usize = mem::size_of::<VirtioNetHeader>();
@@ -63,34 +63,6 @@ pub struct VirtioNetHeader {
     pub csum_start: u16,
     pub csum_offset: u16,
     pub num_buffers: u16,
-}
-
-/// Network device trait
-///
-/// This trait is designed to be compatible with smoltcp's `Device` trait.
-pub trait NetworkDevice {
-    /// Receive a packet from the device
-    fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError>;
-    /// Send a packet through the device
-    fn transmit(&self, buf: &[u8]) -> Result<(), NetError>;
-    /// Get the MAC address
-    fn mac_address(&self) -> [u8; 6];
-    /// Check if link is up
-    fn link_up(&self) -> bool;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum NetError {
-    #[error("no packet available")]
-    NoPacket,
-    #[error("transmit queue full")]
-    TxQueueFull,
-    #[error("buffer too small")]
-    BufferTooSmall,
-    #[error("device not ready")]
-    NotReady,
-    #[error("link down")]
-    LinkDown,
 }
 
 /// VirtIO Network Device driver
@@ -198,7 +170,7 @@ impl VirtioNetDevice {
 
         for _ in 0..(target_filled - current_filled) {
             // Allocate buffer for header + MTU
-            let buf_size = NET_HDR_SIZE + MTU;
+            let buf_size = NET_HDR_SIZE + net::MTU;
             let buf_pages = (buf_size + 4095) / 4096;
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
@@ -245,6 +217,10 @@ impl VirtioNetDevice {
 }
 
 impl NetworkDevice for VirtioNetDevice {
+    fn name(&self) -> &str {
+        "virtio-net"
+    }
+
     fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
         let mut rx_queue = self.rx_queue.lock();
 
@@ -311,7 +287,7 @@ impl NetworkDevice for VirtioNetDevice {
     }
 
     fn transmit(&self, buf: &[u8]) -> Result<(), NetError> {
-        if buf.len() > MTU {
+        if buf.len() > net::MTU {
             return Err(NetError::BufferTooSmall);
         }
 
@@ -391,13 +367,12 @@ impl NetworkDevice for VirtioNetDevice {
 }
 
 /// Global VirtIO network device
-static VIRTIO_NET: SpinLock<Option<Box<VirtioNetDevice>>> = SpinLock::new(None);
+static VIRTIO_NET: SpinLock<Option<Arc<VirtioNetDevice>>> = SpinLock::new(None);
 
-/// Initialize VirtIO network device
+/// Initialize VirtIO network device and register it in the global net registry.
 pub fn init() {
     log::info!("VirtIO-net: Scanning for devices...");
 
-    // Find VirtIO network device
     let pci_dev = match pci::find_virtio_device(pci::device::VIRTIO_NET) {
         Some(dev) => dev,
         None => {
@@ -406,10 +381,11 @@ pub fn init() {
         }
     };
 
-    // Initialize device
     match unsafe { VirtioNetDevice::new(pci_dev) } {
         Ok(device) => {
-            *VIRTIO_NET.lock() = Some(Box::new(device));
+            let arc = Arc::new(device);
+            *VIRTIO_NET.lock() = Some(arc.clone());
+            net::register_device(arc);
         }
         Err(e) => {
             log::error!("VirtIO-net: Failed to initialize device: {}", e);
@@ -417,15 +393,7 @@ pub fn init() {
     }
 }
 
-/// Get the global VirtIO network device
-pub fn get_device() -> Option<&'static VirtioNetDevice> {
-    unsafe {
-        let lock = VIRTIO_NET.lock();
-        if lock.is_some() {
-            let ptr = &**lock.as_ref().unwrap() as *const VirtioNetDevice;
-            Some(&*ptr)
-        } else {
-            None
-        }
-    }
+/// Get the VirtIO network device instance (if present).
+pub fn get_device() -> Option<Arc<VirtioNetDevice>> {
+    VIRTIO_NET.lock().clone()
 }

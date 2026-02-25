@@ -8,7 +8,39 @@ use crate::{
     sync::SpinLock,
     syscall::error::SyscallError,
 };
-use alloc::{collections::BTreeMap, string::String, sync::Arc};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+
+/// File type constants (matching Linux DT_* values).
+pub const DT_UNKNOWN: u8 = 0;
+pub const DT_REG: u8 = 8;
+pub const DT_DIR: u8 = 4;
+pub const DT_LNK: u8 = 10;
+
+/// Metadata returned by stat operations.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FileStat {
+    pub st_ino: u64,
+    pub st_mode: u32,
+    pub st_nlink: u32,
+    pub st_size: u64,
+    pub st_blksize: u64,
+    pub st_blocks: u64,
+}
+
+impl FileStat {
+    pub const fn zeroed() -> Self {
+        FileStat { st_ino: 0, st_mode: 0, st_nlink: 1, st_size: 0, st_blksize: 512, st_blocks: 0 }
+    }
+}
+
+/// A single directory entry returned by readdir.
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub ino: u64,
+    pub file_type: u8,
+    pub name: String,
+}
 
 /// Result of an open operation.
 #[derive(Debug, Clone)]
@@ -95,6 +127,18 @@ pub trait Scheme: Send + Sync {
     /// Remove a file or directory.
     fn unlink(&self, path: &str) -> Result<(), SyscallError> {
         let _ = path;
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Get metadata for an open file.
+    fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
+        let _ = file_id;
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Read directory entries from an open directory handle.
+    fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
+        let _ = file_id;
         Err(SyscallError::NotImplemented)
     }
 }
@@ -511,5 +555,40 @@ impl Scheme for KernelScheme {
             .find(|f| f.id == file_id)
             .ok_or(SyscallError::BadHandle)?;
         Ok(file.len as u64)
+    }
+
+    fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
+        if file_id == 0 {
+            return Ok(FileStat {
+                st_ino: 0,
+                st_mode: 0o040555,
+                st_nlink: 2,
+                st_size: 0,
+                st_blksize: 512,
+                st_blocks: 0,
+            });
+        }
+        let files = self.files.lock();
+        let file = files.values().find(|f| f.id == file_id).ok_or(SyscallError::BadHandle)?;
+        Ok(FileStat {
+            st_ino: file_id,
+            st_mode: 0o100444,
+            st_nlink: 1,
+            st_size: file.len as u64,
+            st_blksize: 512,
+            st_blocks: ((file.len as u64) + 511) / 512,
+        })
+    }
+
+    fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
+        if file_id != 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let files = self.files.lock();
+        let mut entries = Vec::new();
+        for (name, kf) in files.iter() {
+            entries.push(DirEntry { ino: kf.id, file_type: DT_REG, name: name.clone() });
+        }
+        Ok(entries)
     }
 }

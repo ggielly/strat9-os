@@ -2,9 +2,9 @@
 //!
 //! Represents an open file with its associated scheme and current offset.
 
-use super::scheme::{DynScheme, FileFlags, OpenFlags};
+use super::scheme::{DirEntry, DynScheme, FileFlags, FileStat, OpenFlags};
 use crate::{sync::SpinLock, syscall::error::SyscallError};
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 /// An open file handle.
 pub struct OpenFile {
@@ -92,11 +92,30 @@ impl OpenFile {
         self.scheme.write(self.file_id, offset, buf)
     }
 
-    /// Seek to a new offset.
+    /// Seek to a new offset (absolute).
     pub fn seek(&self, new_offset: u64) -> Result<u64, SyscallError> {
         let mut offset = self.offset.lock();
         *offset = new_offset;
         Ok(*offset)
+    }
+
+    /// POSIX lseek: whence=0 SET, 1 CUR, 2 END.
+    pub fn lseek(&self, off: i64, whence: u32) -> Result<u64, SyscallError> {
+        let mut cur = self.offset.lock();
+        let new_pos: i64 = match whence {
+            0 => off,
+            1 => (*cur as i64).checked_add(off).ok_or(SyscallError::InvalidArgument)?,
+            2 => {
+                let sz = self.size().unwrap_or(0) as i64;
+                sz.checked_add(off).ok_or(SyscallError::InvalidArgument)?
+            }
+            _ => return Err(SyscallError::InvalidArgument),
+        };
+        if new_pos < 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        *cur = new_pos as u64;
+        Ok(*cur)
     }
 
     /// Get current offset.
@@ -118,9 +137,13 @@ impl OpenFile {
         self.scheme.sync(self.file_id)
     }
 
-    /// Close the file (called when last reference is dropped).
+    /// Signal that this file descriptor is being closed.
+    ///
+    /// Does NOT call scheme.close() directly; the actual scheme close is deferred
+    /// to the Drop impl so it fires only when the last Arc<OpenFile> is released
+    /// (POSIX: scheme is closed when all dup'd/fork'd copies are gone).
     pub fn close(&self) -> Result<(), SyscallError> {
-        self.scheme.close(self.file_id)
+        Ok(())
     }
 
     /// Get file flags.
@@ -136,6 +159,29 @@ impl OpenFile {
     /// Get path (for debugging).
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Get file metadata.
+    pub fn stat(&self) -> Result<FileStat, SyscallError> {
+        self.scheme.stat(self.file_id)
+    }
+
+    /// List directory entries (only valid for directories).
+    pub fn readdir(&self) -> Result<Vec<DirEntry>, SyscallError> {
+        if !self.file_flags.contains(FileFlags::DIRECTORY) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        self.scheme.readdir(self.file_id)
+    }
+
+    /// Get internal file_id (for scheme delegation).
+    pub fn file_id(&self) -> u64 {
+        self.file_id
+    }
+
+    /// Get the underlying scheme.
+    pub fn scheme(&self) -> &DynScheme {
+        &self.scheme
     }
 }
 

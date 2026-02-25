@@ -170,6 +170,11 @@ static SCANCODE_TO_ASCII_SHIFT: [u8; 128] = {
 /// or None for modifier keys / key releases.
 pub fn handle_scancode() -> Option<u8> {
     let scancode = unsafe { inb(KEYBOARD_DATA_PORT) };
+    handle_scancode_raw(scancode)
+}
+
+/// Same as `handle_scancode` but takes a pre-read scancode byte.
+pub fn handle_scancode_raw(scancode: u8) -> Option<u8> {
     let mut kbd = KEYBOARD.lock();
 
     // Key release (bit 7 set)

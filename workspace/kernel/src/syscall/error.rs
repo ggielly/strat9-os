@@ -135,9 +135,9 @@ impl From<crate::ostd::mm::MapError> for SyscallError {
     }
 }
 
-impl From<crate::drivers::virtio::block::BlockError> for SyscallError {
-    fn from(err: crate::drivers::virtio::block::BlockError) -> Self {
-        use crate::drivers::virtio::block::BlockError;
+impl From<crate::hardware::storage::virtio_block::BlockError> for SyscallError {
+    fn from(err: crate::hardware::storage::virtio_block::BlockError) -> Self {
+        use crate::hardware::storage::virtio_block::BlockError;
         match err {
             BlockError::IoError => SyscallError::IoError,
             BlockError::InvalidSector => SyscallError::InvalidArgument,
@@ -158,15 +158,16 @@ impl From<crate::ipc::port::IpcError> for SyscallError {
     }
 }
 
-impl From<crate::drivers::virtio::net::NetError> for SyscallError {
-    fn from(err: crate::drivers::virtio::net::NetError) -> Self {
-        use crate::drivers::virtio::net::NetError;
+impl From<net_core::NetError> for SyscallError {
+    fn from(err: net_core::NetError) -> Self {
+        use net_core::NetError;
         match err {
             NetError::NoPacket => SyscallError::Again,
             NetError::TxQueueFull => SyscallError::QueueFull,
             NetError::BufferTooSmall => SyscallError::InvalidArgument,
             NetError::NotReady => SyscallError::Again,
             NetError::LinkDown => SyscallError::IoError,
+            NetError::DeviceNotFound => SyscallError::NotImplemented,
         }
     }
 }

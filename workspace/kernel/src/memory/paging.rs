@@ -39,6 +39,10 @@ static mut MAPPER: Option<OffsetPageTable<'static>> = None;
 /// Physical address of the kernel's level-4 page table (set at init, never changes).
 static mut KERNEL_CR3: PhysAddr = PhysAddr::new_truncate(0);
 
+pub fn is_initialized() -> bool {
+    unsafe { (*(&raw const MAPPER)).is_some() }
+}
+
 /// Initialize the paging subsystem.
 ///
 /// Reads the active CR3 (level-4 page table) and creates an `OffsetPageTable`

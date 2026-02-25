@@ -119,12 +119,16 @@ pub fn write(fd: u32, buf: &[u8]) -> Result<usize, SyscallError> {
 }
 
 /// Close a file descriptor.
+///
+/// Removes the fd from the table.  If this was the last Arc<OpenFile> reference
+/// (no dup'd / fork'd copies remain) the Drop impl will call scheme.close().
 pub fn close(fd: u32) -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Syscall context
     let fd_table = unsafe { &mut *task.fd_table.get() };
-    let file = fd_table.remove(fd)?;
-    file.close()
+    let _file = fd_table.remove(fd)?;
+    Ok(())
+    // _file (Arc<OpenFile>) is dropped here; if refcount → 0, Drop fires → scheme.close()
 }
 
 /// Seek within a file.
@@ -194,6 +198,29 @@ pub fn getdents(fd: u32) -> Result<alloc::vec::Vec<DirEntry>, SyscallError> {
     let fd_table = unsafe { &*task.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.readdir()
+}
+
+/// Create a background stdin: a pipe read-end whose write end is immediately
+/// closed.  Any `read()` on the returned file will return 0 (EOF) at once,
+/// preventing processes launched in the background from blocking on stdin or
+/// spinning on EBADF.
+pub fn create_background_stdin() -> Arc<OpenFile> {
+    let pipe_scheme = get_pipe_scheme();
+    let (base_id, pipe) = pipe_scheme.create_pipe();
+
+    // Close write end now (refcount → 0 → write_closed = true).
+    // Subsequent reads on the read end will return EOF immediately.
+    pipe.close_write();
+
+    let dyn_scheme: DynScheme = pipe_scheme as Arc<dyn Scheme>;
+    Arc::new(OpenFile::new(
+        dyn_scheme,
+        base_id, // even = read end
+        String::from("pipe:[bg-stdin]"),
+        OpenFlags::READ,
+        FileFlags::PIPE,
+        None,
+    ))
 }
 
 /// Create a pipe, returning (read_fd, write_fd).
@@ -357,9 +384,21 @@ pub fn sys_write(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallErro
             let to_write = core::cmp::min(kbuf.len(), len - total_written);
             let n = user_buf.copy_to(&mut kbuf[..to_write]);
 
-            for &byte in &kbuf[..n] {
-                crate::serial_print!("{}", byte as char);
+            if crate::arch::x86_64::vga::is_available() {
+                if let Ok(s) = core::str::from_utf8(&kbuf[..n]) {
+                    crate::serial_print!("{}", s);
+                    crate::vga_print!("{}", s);
+                } else {
+                    for &byte in &kbuf[..n] {
+                        crate::serial_print!("{}", byte as char);
+                    }
+                }
+            } else {
+                for &byte in &kbuf[..n] {
+                    crate::serial_print!("{}", byte as char);
+                }
             }
+
             total_written += n;
         }
 

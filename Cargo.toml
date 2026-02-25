@@ -2,13 +2,22 @@
 members = [
     "workspace/kernel",
     "workspace/bootloader",
+    "workspace/drivers/nic/net-core",
+    "workspace/drivers/nic/nic-buffers",
+    "workspace/drivers/nic/nic-queues",
+    "workspace/drivers/nic/intel-ethernet",
+    "workspace/drivers/nic/e1000",
+    "workspace/drivers/nic/driver-net-proto",
     "workspace/components/api",
     "workspace/components/strate-fs-abstraction",
     "workspace/components/strate-fs-ext4",
     "workspace/components/syscall",
     "workspace/components/strate-silo-test",
+    "workspace/components/strate-mem-test",
     "workspace/components/strate-net",
     "workspace/components/strate-fs-ramfs",
+    "workspace/components/strate-init",
+    "workspace/components/strate-console-admin",
 ]
 exclude = [
     "workspace/components/relibc",        # External dependency, built separately

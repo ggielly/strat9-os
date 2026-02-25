@@ -5,7 +5,7 @@
 //!
 //! Reference: VirtIO spec v1.2, Section 5.2 (Block Device)
 
-use super::{
+use crate::hardware::virtio::{
     common::{VirtioDevice, Virtqueue},
     status,
 };

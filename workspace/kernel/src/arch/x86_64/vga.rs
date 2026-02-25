@@ -1844,17 +1844,18 @@ pub fn ui_scale_px(base: usize) -> usize {
 
 fn format_mem_usage() -> String {
     let lock = crate::memory::buddy::get_allocator();
-    let (free, total) = {
-        let guard = lock.lock();
-        let Some(alloc) = guard.as_ref() else {
-            return String::from("n/a");
-        };
-        let (total_pages, allocated_pages) = alloc.page_totals();
-        let page_size = 4096usize;
-        let total = total_pages.saturating_mul(page_size);
-        let used = allocated_pages.saturating_mul(page_size);
-        (total.saturating_sub(used), total)
+    let Some(guard) = lock.try_lock() else {
+        // Never block the status-line task on allocator contention.
+        return String::from("n/a");
     };
+    let Some(alloc) = guard.as_ref() else {
+        return String::from("n/a");
+    };
+    let (total_pages, allocated_pages) = alloc.page_totals();
+    let page_size = 4096usize;
+    let total = total_pages.saturating_mul(page_size);
+    let used = allocated_pages.saturating_mul(page_size);
+    let free = total.saturating_sub(used);
     format!("{}/{}", format_size(free), format_size(total))
 }
 
@@ -2741,6 +2742,32 @@ fn draw_boot_status_line(theme: UiTheme) {
     });
 }
 
+/// Stack-only string buffer to avoid heap allocation in the status-line path.
+struct StackStr<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> StackStr<N> {
+    const fn new() -> Self {
+        Self { buf: [0; N], len: 0 }
+    }
+    fn as_str(&self) -> &str {
+        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+    }
+}
+
+impl<const N: usize> core::fmt::Write for StackStr<N> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let avail = N - self.len;
+        let n = bytes.len().min(avail);
+        self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
+        self.len += n;
+        Ok(())
+    }
+}
+
 pub fn maybe_refresh_system_status_line(theme: UiTheme) {
     if !is_available() {
         return;
@@ -2758,37 +2785,109 @@ pub fn maybe_refresh_system_status_line(theme: UiTheme) {
         return;
     }
 
-    let info = if let Some(guard) = STATUS_LINE_INFO.try_lock() {
-        guard.as_ref().cloned().unwrap_or(StatusLineInfo {
-            hostname: String::from("strat9"),
-            ip: String::from("n/a"),
-        })
+    let (hostname, ip) = if let Some(guard) = STATUS_LINE_INFO.try_lock() {
+        if let Some(info) = guard.as_ref() {
+            let mut h = StackStr::<64>::new();
+            let mut i = StackStr::<48>::new();
+            let _ = core::fmt::Write::write_str(&mut h, &info.hostname);
+            let _ = core::fmt::Write::write_str(&mut i, &info.ip);
+            (h, i)
+        } else {
+            let mut h = StackStr::<64>::new();
+            let mut i = StackStr::<48>::new();
+            let _ = core::fmt::Write::write_str(&mut h, "strat9");
+            let _ = core::fmt::Write::write_str(&mut i, "n/a");
+            (h, i)
+        }
     } else {
         return;
     };
 
     let version = env!("CARGO_PKG_VERSION");
-    let uptime = format_uptime_from_ticks(tick);
-    let mem = format_mem_usage();
+
+    let total_secs = tick / 100;
+    let h = total_secs / 3600;
+    let m = (total_secs % 3600) / 60;
+    let s = total_secs % 60;
+
+    let mem_str = {
+        use core::fmt::Write;
+        let lock = crate::memory::buddy::get_allocator();
+        if let Some(guard) = lock.try_lock() {
+            if let Some(alloc) = guard.as_ref() {
+                let (tp, ap) = alloc.page_totals();
+                let total = tp.saturating_mul(4096);
+                let used = ap.saturating_mul(4096);
+                let free = total.saturating_sub(used);
+                let mut buf = StackStr::<32>::new();
+                let _ = write!(buf, "{}/{}", format_size_stack(free), format_size_stack(total));
+                buf
+            } else {
+                let mut buf = StackStr::<32>::new();
+                let _ = core::fmt::Write::write_str(&mut buf, "n/a");
+                buf
+            }
+        } else {
+            let mut buf = StackStr::<32>::new();
+            let _ = core::fmt::Write::write_str(&mut buf, "n/a");
+            buf
+        }
+    };
+
     let fps = current_fps(tick);
-    let left = format!(" {} ", info.hostname);
-    let right = format!(
-        "ip:{}  ver:{}  up:{}  ticks:{}  fps:{}  load:n/a  mem:{} ",
-        info.ip, version, uptime, tick, fps, mem
+
+    use core::fmt::Write;
+    let mut left = StackStr::<80>::new();
+    let _ = write!(left, " {} ", hostname.as_str());
+
+    let mut right = StackStr::<256>::new();
+    let _ = write!(
+        right,
+        "ip:{}  ver:{}  up:{:02}:{:02}:{:02}  ticks:{}  fps:{}  load:n/a  mem:{} ",
+        ip.as_str(), version, h, m, s, tick, fps, mem_str.as_str()
     );
 
     if let Some(mut writer) = VGA_WRITER.try_lock() {
-        draw_status_bar_inner(&mut writer, &left, &right, theme);
+        draw_status_bar_inner(&mut writer, left.as_str(), right.as_str(), theme);
+    }
+}
+
+fn format_size_stack(bytes: usize) -> StackStr<16> {
+    use core::fmt::Write;
+    const KB: usize = 1024;
+    const MB: usize = 1024 * KB;
+    const GB: usize = 1024 * MB;
+    let mut buf = StackStr::<16>::new();
+    if bytes >= GB {
+        let _ = write!(buf, "{}G", bytes / GB);
+    } else if bytes >= MB {
+        let _ = write!(buf, "{}M", bytes / MB);
+    } else if bytes >= KB {
+        let _ = write!(buf, "{}K", bytes / KB);
+    } else {
+        let _ = write!(buf, "{}B", bytes);
+    }
+    buf
+}
+
+impl<const N: usize> core::fmt::Display for StackStr<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
 pub extern "C" fn status_line_task_main() -> ! {
     let mut last_tick = 0u64;
+    let mut diag_counter = 0u64;
     loop {
         let tick = crate::process::scheduler::ticks();
         if tick != last_tick {
             last_tick = tick;
             maybe_refresh_system_status_line(UiTheme::OCEAN_STATUS);
+        }
+        diag_counter += 1;
+        if diag_counter % 5000 == 0 {
+            crate::serial_println!("[status-line] heartbeat tick={} vga={}", tick, is_available());
         }
         crate::process::yield_task();
     }

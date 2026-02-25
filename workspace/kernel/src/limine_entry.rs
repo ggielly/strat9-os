@@ -46,22 +46,47 @@ static HHDM: HhdmRequest = HhdmRequest::new();
 static STACK_SIZE: StackSizeRequest = StackSizeRequest::new().with_size(0x10000); // 64KB
 
 /// Internal module: request Limine to load /initfs/test_pid (first userspace PID test binary)
-static INIT_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_pid");
+static TEST_PID_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_pid");
+/// Internal module: request Limine to load /initfs/test_mem (userspace memory test binary)
+static TEST_MEM_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_mem");
+/// Internal module: request Limine to load /initfs/test_mem_stressed (userspace stressed memory test)
+static TEST_MEM_STRESSED_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/test_mem_stressed");
 /// Internal module: request Limine to load /initfs/fs-ext4 (userspace EXT4 server)
 static EXT4_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/fs-ext4");
 /// Internal module: request Limine to load /initfs/strate-fs-ramfs (userspace RAMFS server)
 static RAM_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-fs-ramfs");
+/// Internal module: request Limine to load /initfs/init (init process)
+static INIT_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/init");
+/// Internal module: request Limine to load /initfs/console-admin (admin silo strate)
+static CONSOLE_ADMIN_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/console-admin");
 
 /// Request modules (files loaded alongside the kernel)
 #[used]
 #[link_section = ".requests"]
-static MODULES: ModuleRequest =
-    ModuleRequest::new().with_internal_modules(&[&INIT_MODULE, &EXT4_MODULE, &RAM_MODULE]);
+static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
+    &TEST_PID_MODULE,
+    &TEST_MEM_MODULE,
+    &TEST_MEM_STRESSED_MODULE,
+    &EXT4_MODULE,
+    &RAM_MODULE,
+    &INIT_MODULE,
+    &CONSOLE_ADMIN_MODULE,
+]);
 
 /// Optional fs-ext4 module info (set during Limine entry).
 static mut FS_EXT4_MODULE: Option<(u64, u64)> = None;
+/// Optional test_mem module info (set during Limine entry).
+static mut TEST_MEM_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional test_mem_stressed module info (set during Limine entry).
+static mut TEST_MEM_STRESSED_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional strate-fs-ramfs module info (set during Limine entry).
 static mut STRATE_FS_RAMFS_MODULE: Option<(u64, u64)> = None;
+/// Optional init module info (set during Limine entry).
+static mut INIT_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional console-admin module info (set during Limine entry).
+static mut CONSOLE_ADMIN_ELF_MODULE: Option<(u64, u64)> = None;
 
 const MAX_BOOT_MEMORY_REGIONS: usize = 256;
 static mut BOOT_MEMORY_MAP: [crate::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
@@ -78,10 +103,34 @@ pub fn fs_ext4_module() -> Option<(u64, u64)> {
     unsafe { FS_EXT4_MODULE }
 }
 
+/// Return the test_mem module (addr, size) if present.
+pub fn test_mem_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { TEST_MEM_ELF_MODULE }
+}
+
+/// Return the test_mem_stressed module (addr, size) if present.
+pub fn test_mem_stressed_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { TEST_MEM_STRESSED_ELF_MODULE }
+}
+
 /// Return the strate-fs-ramfs module (addr, size) if present.
 pub fn strate_fs_ramfs_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
     unsafe { STRATE_FS_RAMFS_MODULE }
+}
+
+/// Return the init module (addr, size) if present.
+pub fn init_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { INIT_ELF_MODULE }
+}
+
+/// Return the console-admin module (addr, size) if present.
+pub fn console_admin_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { CONSOLE_ADMIN_ELF_MODULE }
 }
 
 fn find_module_by_path(
@@ -235,10 +284,53 @@ pub unsafe extern "C" fn kmain() -> ! {
             }
             let (init_base, init_size) =
                 find_module_by_path(modules, b"/initfs/test_pid").unwrap_or((0, 0));
+            let (test_mem_base, test_mem_size) =
+                find_module_by_path(modules, b"/initfs/test_mem").unwrap_or((0, 0));
+            let (test_mem_stressed_base, test_mem_stressed_size) =
+                find_module_by_path(modules, b"/initfs/test_mem_stressed").unwrap_or((0, 0));
             let (ext4_base, ext4_size) =
                 find_module_by_path(modules, b"/initfs/fs-ext4").unwrap_or((0, 0));
             let (ram_base, ram_size) =
                 find_module_by_path(modules, b"/initfs/strate-fs-ramfs").unwrap_or((0, 0));
+
+            if test_mem_base != 0 && test_mem_size != 0 {
+                unsafe { TEST_MEM_ELF_MODULE = Some((test_mem_base, test_mem_size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/test_mem found: base={:#x} size={}",
+                    test_mem_base,
+                    test_mem_size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/test_mem not found in modules");
+            }
+            if test_mem_stressed_base != 0 && test_mem_stressed_size != 0 {
+                unsafe {
+                    TEST_MEM_STRESSED_ELF_MODULE =
+                        Some((test_mem_stressed_base, test_mem_stressed_size))
+                };
+                crate::serial_println!(
+                    "[limine] /initfs/test_mem_stressed found: base={:#x} size={}",
+                    test_mem_stressed_base,
+                    test_mem_stressed_size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/test_mem_stressed not found in modules");
+            }
+
+            // New modules: init + console-admin
+            if let Some((base, size)) = find_module_by_path(modules, b"/initfs/init") {
+                unsafe { INIT_ELF_MODULE = Some((base, size)) };
+                crate::serial_println!("[limine] /initfs/init found: base={:#x} size={}", base, size);
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/init not found in modules");
+            }
+            if let Some((base, size)) = find_module_by_path(modules, b"/initfs/console-admin") {
+                unsafe { CONSOLE_ADMIN_ELF_MODULE = Some((base, size)) };
+                crate::serial_println!("[limine] /initfs/console-admin found: base={:#x} size={}", base, size);
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/console-admin not found in modules");
+            }
+
             if init_base == 0 {
                 crate::serial_println!("[limine] WARN: /initfs/test_pid not found in modules");
             }

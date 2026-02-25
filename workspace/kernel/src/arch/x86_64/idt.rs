@@ -448,18 +448,16 @@ extern "x86-interrupt" fn lapic_timer_handler(_stack_frame: InterruptStackFrame)
 }
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
-    // Read scancode and convert to character using the selected layout
-    // Store in keyboard buffer for userspace/shell to read
-    // Do NOT echo here - let the shell handle display to avoid double-echo
-    if let Some(ch) = super::keyboard_layout::handle_scancode() {
-        // Store character in keyboard buffer (for future shell input)
-        crate::arch::x86_64::keyboard::add_to_buffer(ch);
+    let raw = unsafe { super::io::inb(0x60) };
+    crate::serial_print!("[K:{:02x}]", raw);
 
-        // Echo to serial only for debugging (not VGA to avoid double-echo)
+    // Put byte back for handle_scancode by peeking — but PS/2 is consumed on read.
+    // We must NOT re-read: feed the scancode directly.
+    if let Some(ch) = super::keyboard_layout::handle_scancode_raw(raw) {
+        crate::arch::x86_64::keyboard::add_to_buffer(ch);
         crate::serial_print!("{}", ch as char);
     }
 
-    // Send EOI to the appropriate interrupt controller
     if super::apic::is_initialized() {
         super::apic::eoi();
     } else {
@@ -479,14 +477,14 @@ extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {
 /// The IRQ line is determined at runtime from PCI config.
 extern "x86-interrupt" fn virtio_block_handler(_stack_frame: InterruptStackFrame) {
     // Handle the VirtIO block interrupt
-    crate::drivers::virtio::block::handle_interrupt();
+    crate::hardware::storage::virtio_block::handle_interrupt();
 
     // Send EOI
     if super::apic::is_initialized() {
         super::apic::eoi();
     } else {
         // Get the IRQ number from the device
-        let irq = crate::drivers::virtio::block::get_irq();
+        let irq = crate::hardware::storage::virtio_block::get_irq();
         pic::end_of_interrupt(irq);
     }
 }
