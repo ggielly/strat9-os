@@ -13,6 +13,7 @@
 //! mount_scheme("my_scheme", "/my/path")?;
 //! ```
 
+use spin::RwLock;
 use crate::{
     ipc::port::PortId,
     sync::SpinLock,
@@ -28,7 +29,7 @@ pub struct SchemeEntry {
 }
 
 /// Global scheme router
-static SCHEME_ROUTER: SpinLock<SchemeRouter> = SpinLock::new(SchemeRouter::new());
+static SCHEME_ROUTER: RwLock<SchemeRouter> = RwLock::new(SchemeRouter::new());
 static INITFS_KERNEL_SCHEME: SpinLock<Option<Arc<KernelScheme>>> = SpinLock::new(None);
 
 /// Scheme router state
@@ -88,12 +89,12 @@ impl SchemeRouter {
 
 /// Register a scheme globally
 pub fn register_scheme(name: &str, scheme: DynScheme) -> Result<u64, SyscallError> {
-    SCHEME_ROUTER.lock().register(name, scheme)
+    SCHEME_ROUTER.write().register(name, scheme)
 }
 
 /// Get a scheme by name
 pub fn get_scheme(name: &str) -> Option<DynScheme> {
-    SCHEME_ROUTER.lock().get(name)
+    SCHEME_ROUTER.read().get(name)
 }
 
 /// Mount a registered scheme at a path
@@ -132,5 +133,5 @@ pub fn register_ipc_scheme(name: &str, port_id: PortId) -> Result<u64, SyscallEr
 
 /// List all registered schemes (for debugging)
 pub fn list_schemes() -> Vec<String> {
-    SCHEME_ROUTER.lock().list()
+    SCHEME_ROUTER.read().list()
 }

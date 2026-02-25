@@ -14,6 +14,7 @@ default = []
 selftest = []
 
 [dependencies]
+lru = { version = "0.12", default-features = false, features = ["hashbrown"] }
 crossbeam-queue = { version = "0.3.12", default-features = false, features = [
     "alloc",
 ] }

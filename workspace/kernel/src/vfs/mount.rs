@@ -4,6 +4,9 @@
 
 use super::scheme::DynScheme;
 use crate::{sync::SpinLock, syscall::error::SyscallError};
+use spin::{RwLock, Lazy};
+use lru::LruCache;
+use core::num::NonZeroUsize;
 use alloc::{string::String, vec::Vec};
 
 /// A mount point binding a path prefix to a scheme.
@@ -18,11 +21,15 @@ struct Mount {
 /// Global mount table.
 pub struct MountTable {
     mounts: Vec<Mount>,
+    cache: SpinLock<LruCache<String, (DynScheme, String)>>,
 }
 
 impl MountTable {
-    pub const fn new() -> Self {
-        MountTable { mounts: Vec::new() }
+    pub fn new() -> Self {
+        MountTable {
+            mounts: Vec::new(),
+            cache: SpinLock::new(LruCache::new(NonZeroUsize::new(128).unwrap())),
+        }
     }
 
     /// Mount a scheme at a path prefix.
@@ -54,6 +61,7 @@ impl MountTable {
         self.mounts
             .sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
 
+        self.cache.lock().clear();
         Ok(())
     }
 
@@ -65,6 +73,7 @@ impl MountTable {
             .position(|m| m.prefix == prefix)
             .ok_or(SyscallError::BadHandle)?;
         self.mounts.remove(pos);
+        self.cache.lock().clear();
         Ok(())
     }
 
@@ -76,17 +85,25 @@ impl MountTable {
             return Err(SyscallError::InvalidArgument);
         }
 
+        if let Some(cached) = self.cache.lock().get(path) {
+            return Ok(cached.clone());
+        }
+
         for mount in &self.mounts {
             if path == mount.prefix {
                 // Exact match
-                return Ok((mount.scheme.clone(), String::new()));
+                let res = (mount.scheme.clone(), String::new());
+                self.cache.lock().put(String::from(path), res.clone());
+                return Ok(res);
             } else if path.starts_with(&mount.prefix) {
                 // Check prefix boundary
                 let next_byte = path.as_bytes().get(mount.prefix.len());
                 if next_byte == Some(&b'/') {
                     // Valid prefix match
                     let relative = &path[mount.prefix.len() + 1..];
-                    return Ok((mount.scheme.clone(), String::from(relative)));
+                    let res = (mount.scheme.clone(), String::from(relative));
+                    self.cache.lock().put(String::from(path), res.clone());
+                    return Ok(res);
                 }
             }
         }
@@ -100,26 +117,26 @@ impl MountTable {
     }
 }
 
-static GLOBAL_MOUNTS: SpinLock<MountTable> = SpinLock::new(MountTable::new());
+static GLOBAL_MOUNTS: Lazy<RwLock<MountTable>> = Lazy::new(|| RwLock::new(MountTable::new()));
 
 /// Mount a scheme at a global path.
 pub fn mount(prefix: &str, scheme: DynScheme) -> Result<(), SyscallError> {
-    GLOBAL_MOUNTS.lock().mount(prefix, scheme)
+    GLOBAL_MOUNTS.write().mount(prefix, scheme)
 }
 
 /// Unmount a global path.
 pub fn unmount(prefix: &str) -> Result<(), SyscallError> {
-    GLOBAL_MOUNTS.lock().unmount(prefix)
+    GLOBAL_MOUNTS.write().unmount(prefix)
 }
 
 /// Resolve a path using the global mount table.
 pub fn resolve(path: &str) -> Result<(DynScheme, String), SyscallError> {
-    GLOBAL_MOUNTS.lock().resolve(path)
+    GLOBAL_MOUNTS.read().resolve(path)
 }
 
 /// List all global mount points.
 pub fn list_mounts() -> Vec<String> {
-    GLOBAL_MOUNTS.lock().list()
+    GLOBAL_MOUNTS.read().list()
 }
 
 // ============================================================================
@@ -142,10 +159,11 @@ impl Namespace {
 
     /// Clone the global mount table.
     pub fn from_global() -> Self {
-        let global = GLOBAL_MOUNTS.lock();
+        let global = GLOBAL_MOUNTS.read();
         Namespace {
             mounts: MountTable {
                 mounts: global.mounts.clone(),
+                cache: SpinLock::new(LruCache::new(NonZeroUsize::new(128).unwrap())),
             },
         }
     }
