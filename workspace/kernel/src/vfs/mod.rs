@@ -200,6 +200,29 @@ pub fn getdents(fd: u32) -> Result<alloc::vec::Vec<DirEntry>, SyscallError> {
     file.readdir()
 }
 
+/// Create a background stdin: a pipe read-end whose write end is immediately
+/// closed.  Any `read()` on the returned file will return 0 (EOF) at once,
+/// preventing processes launched in the background from blocking on stdin or
+/// spinning on EBADF.
+pub fn create_background_stdin() -> Arc<OpenFile> {
+    let pipe_scheme = get_pipe_scheme();
+    let (base_id, pipe) = pipe_scheme.create_pipe();
+
+    // Close write end now (refcount → 0 → write_closed = true).
+    // Subsequent reads on the read end will return EOF immediately.
+    pipe.close_write();
+
+    let dyn_scheme: DynScheme = pipe_scheme as Arc<dyn Scheme>;
+    Arc::new(OpenFile::new(
+        dyn_scheme,
+        base_id, // even = read end
+        String::from("pipe:[bg-stdin]"),
+        OpenFlags::READ,
+        FileFlags::PIPE,
+        None,
+    ))
+}
+
 /// Create a pipe, returning (read_fd, write_fd).
 pub fn pipe() -> Result<(u32, u32), SyscallError> {
     let pipe_scheme = get_pipe_scheme();
