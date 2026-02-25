@@ -1,7 +1,7 @@
-use core::{fmt, slice};
+use core::{fmt, ptr};
 
 #[derive(Clone, Copy)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct VgaTextBlock {
     pub char: u8,
     pub color: u8,
@@ -40,7 +40,7 @@ pub struct Vga {
 }
 
 impl Vga {
-    pub const unsafe fn new(base: usize, width: usize, height: usize) -> Self {
+    pub const fn new(base: usize, width: usize, height: usize) -> Self {
         Self {
             base,
             width,
@@ -52,65 +52,105 @@ impl Vga {
         }
     }
 
-    pub unsafe fn blocks(&mut self) -> &'static mut [VgaTextBlock] {
-        unsafe {
-            slice::from_raw_parts_mut(self.base as *mut VgaTextBlock, self.width * self.height)
+    #[inline(always)]
+    fn color_byte(&self) -> u8 {
+        ((self.bg as u8) << 4) | (self.fg as u8)
+    }
+
+    #[inline(always)]
+    fn is_disabled(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.width * self.height
+    }
+
+    #[inline(always)]
+    fn ptr(&self) -> *mut VgaTextBlock {
+        self.base as *mut VgaTextBlock
+    }
+
+    #[inline(always)]
+    unsafe fn write_block(&self, index: usize, value: VgaTextBlock) {
+        unsafe { ptr::write_volatile(self.ptr().add(index), value) };
+    }
+
+    #[inline(always)]
+    unsafe fn read_block(&self, index: usize) -> VgaTextBlock {
+        unsafe { ptr::read_volatile(self.ptr().add(index)) }
+    }
+
+    fn scroll_up_one(&mut self, blank: VgaTextBlock) {
+        let width = self.width;
+        let len = self.len();
+        let visible_len = len.saturating_sub(width);
+
+        for i in 0..visible_len {
+            let src = unsafe { self.read_block(i + width) };
+            unsafe { self.write_block(i, src) };
+        }
+
+        for i in visible_len..len {
+            unsafe { self.write_block(i, blank) };
         }
     }
 
     pub fn clear(&mut self) {
+        if self.is_disabled() {
+            self.x = 0;
+            self.y = 0;
+            return;
+        }
+
         self.x = 0;
         self.y = 0;
-        let blocks = unsafe { self.blocks() };
-        for i in 0..blocks.len() {
-            blocks[i] = VgaTextBlock {
-                char: 0,
-                color: ((self.bg as u8) << 4) | (self.fg as u8),
-            };
+        let blank = VgaTextBlock {
+            char: b' ',
+            color: self.color_byte(),
+        };
+        for i in 0..self.len() {
+            unsafe { self.write_block(i, blank) };
         }
     }
 }
 
 impl fmt::Write for Vga {
     fn write_str(&mut self, s: &str) -> Result<(), fmt::Error> {
-        let blocks = unsafe { self.blocks() };
-        for c in s.chars() {
+        if self.is_disabled() {
+            return Ok(());
+        }
+
+        let color = self.color_byte();
+        let blank = VgaTextBlock { char: b' ', color };
+
+        for b in s.bytes() {
             if self.x >= self.width {
                 self.x = 0;
                 self.y += 1;
             }
             while self.y >= self.height {
-                for y in 1..self.height {
-                    for x in 0..self.width {
-                        let i = y * self.width + x;
-                        let j = i - self.width;
-                        blocks[j] = blocks[i];
-                        if y + 1 == self.height {
-                            blocks[i].char = 0;
-                        }
-                    }
-                }
+                self.scroll_up_one(blank);
                 self.y -= 1;
             }
-            match c {
-                '\x08' => {
+            match b {
+                b'\x08' => {
                     if self.x > 0 {
                         self.x -= 1;
                     }
                 }
-                '\r' => {
+                b'\r' => {
                     self.x = 0;
                 }
-                '\n' => {
+                b'\n' => {
                     self.x = 0;
                     self.y += 1;
                 }
                 _ => {
                     let i = self.y * self.width + self.x;
-                    if let Some(block) = blocks.get_mut(i) {
-                        block.char = c as u8;
-                        block.color = ((self.bg as u8) << 4) | (self.fg as u8);
-                    }
+                    let char = if b.is_ascii() { b } else { b'?' };
+                    unsafe { self.write_block(i, VgaTextBlock { char, color }) };
                     self.x += 1;
                 }
             }
