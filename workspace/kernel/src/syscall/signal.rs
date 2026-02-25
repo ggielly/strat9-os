@@ -209,7 +209,7 @@ pub fn sys_sigpending(set_ptr: u64) -> Result<u64, SyscallError> {
 
     // SAFETY: We have a reference to the task.
     unsafe {
-        let pending = &*task.pending_signals.get();
+        let pending = &task.pending_signals;
         let mask = pending.get_mask();
 
         if set_ptr != 0 {
@@ -231,7 +231,7 @@ pub fn sys_sigsuspend(mask_ptr: u64) -> Result<u64, SyscallError> {
     // SAFETY: We have a reference to the task.
     unsafe {
         // Save the old mask
-        let blocked = &*task.blocked_signals.get();
+        let blocked = &task.blocked_signals;
         let old_mask = blocked.get_mask();
 
         // Set the new mask
@@ -270,8 +270,8 @@ pub fn sys_sigtimedwait(
 
     // SAFETY: We have a reference to the task.
     unsafe {
-        let pending = &*task.pending_signals.get();
-        let blocked = &*task.blocked_signals.get();
+        let pending = &task.pending_signals;
+        let blocked = &task.blocked_signals;
 
         // Read the signal set to wait for
         if set_ptr != 0 {

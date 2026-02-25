@@ -154,9 +154,9 @@ pub struct Task {
     pub process: Arc<crate::process::process::Process>,
     /// File descriptor table for this task
     /// Pending signals for this task
-    pub pending_signals: SyncUnsafeCell<super::signal::SignalSet>,
+    pub pending_signals: super::signal::SignalSet,
     /// Blocked signals mask for this task
-    pub blocked_signals: SyncUnsafeCell<super::signal::SignalSet>,
+    pub blocked_signals: super::signal::SignalSet,
     /// Signal actions (handlers) for this task
     /// Signal alternate stack for this task
     pub signal_stack: SyncUnsafeCell<Option<super::signal::SigStack>>,
@@ -424,8 +424,8 @@ impl Task {
             user_stack: None,
             name,
             process: Arc::new(crate::process::process::Process::new(pid, crate::memory::kernel_address_space().clone())),
-            pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
-            blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
+            pending_signals: super::signal::SignalSet::new(),
+            blocked_signals: super::signal::SignalSet::new(),
             signal_stack: SyncUnsafeCell::new(None),
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),
@@ -483,8 +483,8 @@ impl Task {
             user_stack: None,
             name,
             process: Arc::new(crate::process::process::Process::new(pid, address_space)),
-            pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
-            blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
+            pending_signals: super::signal::SignalSet::new(),
+            blocked_signals: super::signal::SignalSet::new(),
             signal_stack: SyncUnsafeCell::new(None),
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),

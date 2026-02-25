@@ -104,8 +104,8 @@ pub fn sys_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, SyscallError> {
 
     // Check for pending signals before blocking
     if let Some(task) = crate::process::get_task_by_id(task_id) {
-        let pending = unsafe { (*task.pending_signals.get()).get_mask() };
-        let blocked = unsafe { (*task.blocked_signals.get()).get_mask() };
+        let pending = task.pending_signals.get_mask();
+        let blocked = task.blocked_signals.get_mask();
         let unblocked_pending = pending & !blocked;
         if unblocked_pending != 0 {
             // Clear the deadline since we're not sleeping

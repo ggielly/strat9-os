@@ -70,7 +70,7 @@ fn test_kill_permissions() -> bool {
         return false;
     }
     {
-        let pending = unsafe { &*target.pending_signals.get() };
+        let pending = &target.pending_signals;
         if !pending.contains(crate::process::Signal::SIGUSR1) {
             let _ = kill_task(target_id);
             return false;

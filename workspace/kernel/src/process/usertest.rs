@@ -139,9 +139,9 @@ pub fn create_user_test_task() {
 
         name: "test-user-ring3",
         process: alloc::sync::Arc::new(crate::process::process::Process::new(pid, user_as)),
-        pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
+        pending_signals: super::signal::SignalSet::new(),
 
-        blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
+        blocked_signals: super::signal::SignalSet::new(),
         signal_stack: SyncUnsafeCell::new(None),
         itimers: super::timer::ITimers::new(),
         wake_pending: core::sync::atomic::AtomicBool::new(false),

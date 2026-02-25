@@ -242,7 +242,7 @@ pub fn tick_all_timers(current_time_ns: u64) {
         for which in [ITimerWhich::Real, ITimerWhich::Virtual, ITimerWhich::Prof] {
             if task.itimers.get(which).check_expired(current_time_ns) {
                 if let Some(sig) = Signal::from_u32(which.signal()) {
-                    unsafe { (*task.pending_signals.get()).add(sig) };
+                    task.pending_signals.add(sig);
                 }
             }
         }

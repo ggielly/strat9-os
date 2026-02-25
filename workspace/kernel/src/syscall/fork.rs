@@ -140,9 +140,6 @@ unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
     );
 }
 
-fn copy_signal_set(src: &SignalSet) -> SignalSet {
-    SignalSet::from_mask(src.get_mask())
-}
 
 fn build_child_task(
     parent: &Arc<Task>,
@@ -155,7 +152,7 @@ fn build_child_task(
 
     let parent_caps = unsafe { (&*parent.process.capabilities.get()).clone() };
     let parent_fd = unsafe { (&*parent.process.fd_table.get()).clone_for_fork() };
-    let parent_blocked = unsafe { copy_signal_set(&*parent.blocked_signals.get()) };
+    let parent_blocked = parent.blocked_signals.clone();
     let parent_actions: [SigAction; 64] = unsafe { *parent.process.signal_actions.get() };
     let parent_sigstack: Option<SigStack> = unsafe { *parent.signal_stack.get() };
 
@@ -191,9 +188,9 @@ fn build_child_task(
         }),
         // POSIX: pending signals are NOT inherited by the child.
 
-        pending_signals: SyncUnsafeCell::new(SignalSet::new()),
+        pending_signals: SignalSet::new(),
         // POSIX: signal mask IS inherited.
-        blocked_signals: SyncUnsafeCell::new(parent_blocked),
+        blocked_signals: parent_blocked,
         signal_stack: SyncUnsafeCell::new(parent_sigstack),
         itimers: crate::process::timer::ITimers::new(),
         wake_pending: AtomicBool::new(false),

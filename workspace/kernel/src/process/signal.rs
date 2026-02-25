@@ -144,6 +144,13 @@ pub struct SignalSet {
     mask: AtomicU64,
 }
 
+
+impl Clone for SignalSet {
+    fn clone(&self) -> Self {
+        Self::from_mask(self.get_mask())
+    }
+}
+
 impl SignalSet {
     /// Create an empty signal set.
     pub const fn new() -> Self {
@@ -283,7 +290,7 @@ pub fn send_signal(
     // Add signal to the task's pending set.
     // SAFETY: We have a reference to the task, so it's safe to access its fields.
     unsafe {
-        let pending = &*task.pending_signals.get();
+        let pending = &task.pending_signals;
         pending.add(signal);
     }
 
@@ -291,7 +298,7 @@ pub fn send_signal(
     unsafe {
         let state = &*task.state.get();
         if *state == crate::process::TaskState::Blocked {
-            let blocked = &*task.blocked_signals.get();
+            let blocked = &task.blocked_signals;
             if !blocked.contains(signal) {
                 // Wake the task so it can handle the signal.
                 crate::process::wake_task(target);
@@ -310,8 +317,8 @@ pub fn has_pending_signals() -> bool {
 
     if let Some(task) = current_task_clone() {
         unsafe {
-            let pending = &*task.pending_signals.get();
-            let blocked = &*task.blocked_signals.get();
+            let pending = &task.pending_signals;
+            let blocked = &task.blocked_signals;
             pending.unblocked(blocked) != 0
         }
     } else {
@@ -327,8 +334,8 @@ pub fn consume_next_signal() -> Option<Signal> {
 
     if let Some(task) = current_task_clone() {
         unsafe {
-            let pending = &*task.pending_signals.get();
-            let blocked = &*task.blocked_signals.get();
+            let pending = &task.pending_signals;
+            let blocked = &task.blocked_signals;
             let unblocked = pending.unblocked(blocked);
             if unblocked != 0 {
                 let signal_num = unblocked.trailing_zeros() + 1;

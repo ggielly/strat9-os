@@ -280,7 +280,7 @@ fn sys_sigprocmask(how: i32, set_ptr: u64, oldset_ptr: u64) -> Result<u64, Sysca
 
     // SAFETY: We have a reference to the task.
     unsafe {
-        let blocked = &*task.blocked_signals.get();
+        let blocked = &task.blocked_signals;
 
         // If oldset_ptr is not null, write the old mask.
         if oldset_ptr != 0 {
