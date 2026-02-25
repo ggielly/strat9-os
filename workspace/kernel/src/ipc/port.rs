@@ -10,10 +10,11 @@ use crate::{
     sync::{SpinLock, WaitQueue},
 };
 use alloc::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     sync::Arc,
 };
-use core::sync::atomic::{AtomicU64, Ordering};
+use crossbeam_queue::ArrayQueue;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Maximum number of messages buffered in a single port.
 const PORT_QUEUE_CAPACITY: usize = 16;
@@ -57,18 +58,13 @@ pub struct Port {
     /// TaskId of the port's creator/owner.
     pub owner: TaskId,
     /// The message queue (bounded to `PORT_QUEUE_CAPACITY`).
-    queue: SpinLock<PortQueue>,
+    queue: ArrayQueue<IpcMessage>,
+    /// Set to true when the port is destroyed; blocked tasks wake with error.
+    destroyed: AtomicBool,
     /// Tasks blocked because the queue is full (waiting to send).
     send_waitq: WaitQueue,
     /// Tasks blocked because the queue is empty (waiting to receive).
     recv_waitq: WaitQueue,
-}
-
-/// Internal queue state, protected by a spinlock.
-struct PortQueue {
-    messages: VecDeque<IpcMessage>,
-    /// Set to true when the port is destroyed; blocked tasks wake with error.
-    destroyed: bool,
 }
 
 impl Port {
@@ -77,10 +73,8 @@ impl Port {
         Port {
             id,
             owner,
-            queue: SpinLock::new(PortQueue {
-                messages: VecDeque::with_capacity(PORT_QUEUE_CAPACITY),
-                destroyed: false,
-            }),
+            queue: ArrayQueue::new(PORT_QUEUE_CAPACITY),
+            destroyed: AtomicBool::new(false),
             send_waitq: WaitQueue::new(),
             recv_waitq: WaitQueue::new(),
         }
@@ -92,24 +86,18 @@ impl Port {
     /// Returns `Err(IpcError::PortDestroyed)` if the port is destroyed while
     /// the sender is blocked.
     pub fn send(&self, msg: IpcMessage) -> Result<(), IpcError> {
-        loop {
-            {
-                let mut q = self.queue.lock();
-                if q.destroyed {
-                    return Err(IpcError::PortDestroyed);
-                }
-                if q.messages.len() < PORT_QUEUE_CAPACITY {
-                    q.messages.push_back(msg);
-                    drop(q);
-                    // Wake one receiver that may be waiting for a message.
-                    self.recv_waitq.wake_one();
-                    return Ok(());
-                }
+        self.send_waitq.wait_until(|| {
+            if self.destroyed.load(Ordering::Acquire) {
+                return Some(Err(IpcError::PortDestroyed));
             }
-            // Queue is full — block until a receiver drains a message.
-            self.send_waitq.wait();
-            // After waking, loop back and re-check (might have been destroyed).
-        }
+            match self.queue.push(msg) {
+                Ok(()) => {
+                    self.recv_waitq.wake_one();
+                    Some(Ok(()))
+                }
+                Err(_) => None,
+            }
+        })
     }
 
     /// Receive a message from this port.
@@ -118,22 +106,16 @@ impl Port {
     /// Returns `Err(IpcError::PortDestroyed)` if the port is destroyed while
     /// the receiver is blocked.
     pub fn recv(&self) -> Result<IpcMessage, IpcError> {
-        loop {
-            {
-                let mut q = self.queue.lock();
-                if let Some(msg) = q.messages.pop_front() {
-                    drop(q);
-                    // Wake one sender that may be waiting for space.
-                    self.send_waitq.wake_one();
-                    return Ok(msg);
-                }
-                if q.destroyed {
-                    return Err(IpcError::PortDestroyed);
-                }
+        self.recv_waitq.wait_until(|| {
+            if let Some(msg) = self.queue.pop() {
+                self.send_waitq.wake_one();
+                return Some(Ok(msg));
             }
-            // Queue is empty — block until a sender posts a message.
-            self.recv_waitq.wait();
-        }
+            if self.destroyed.load(Ordering::Acquire) {
+                return Some(Err(IpcError::PortDestroyed));
+            }
+            None
+        })
     }
 
     /// Try to receive a message from this port without blocking.
@@ -141,14 +123,11 @@ impl Port {
     /// Returns `Ok(Some(msg))` if a message was available, `Ok(None)` if empty,
     /// or `Err(IpcError::PortDestroyed)` if the port is destroyed.
     pub fn try_recv(&self) -> Result<Option<IpcMessage>, IpcError> {
-        let mut q = self.queue.lock();
-        if let Some(msg) = q.messages.pop_front() {
-            drop(q);
-            // Wake one sender that may be waiting for space.
+        if let Some(msg) = self.queue.pop() {
             self.send_waitq.wake_one();
             return Ok(Some(msg));
         }
-        if q.destroyed {
+        if self.destroyed.load(Ordering::Acquire) {
             return Err(IpcError::PortDestroyed);
         }
         Ok(None)
@@ -156,10 +135,7 @@ impl Port {
 
     /// Mark the port as destroyed and wake all blocked tasks.
     fn destroy(&self) {
-        {
-            let mut q = self.queue.lock();
-            q.destroyed = true;
-        }
+        self.destroyed.store(true, Ordering::Release);
         self.send_waitq.wake_all();
         self.recv_waitq.wake_all();
     }

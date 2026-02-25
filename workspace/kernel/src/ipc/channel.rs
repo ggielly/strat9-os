@@ -38,21 +38,13 @@
 
 use super::message::IpcMessage;
 use crate::sync::{SpinLock, WaitQueue};
-use alloc::{
-    collections::{BTreeMap, VecDeque},
-    sync::Arc,
-};
+use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-
-// ── Channel status byte values ────────────────────────────────────────────────
+use crossbeam_queue::ArrayQueue;
 
 const STATUS_CONNECTED: u8 = 0;
 const STATUS_SENDER_GONE: u8 = 1;
 const STATUS_RECEIVER_GONE: u8 = 2;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Error type
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ChannelError {
@@ -69,9 +61,7 @@ pub enum ChannelError {
 /// Shared inner state for the typed MPMC channel.
 struct ChannelInner<T: Send> {
     /// Bounded message queue.
-    buffer: SpinLock<VecDeque<T>>,
-    /// Maximum number of items allowed in the buffer.
-    capacity: usize,
+    buffer: ArrayQueue<T>,
     /// Tasks blocked because the buffer is full (waiting to send).
     send_waitq: WaitQueue,
     /// Tasks blocked because the buffer is empty (waiting to receive).
@@ -87,8 +77,7 @@ struct ChannelInner<T: Send> {
 impl<T: Send> ChannelInner<T> {
     fn new(capacity: usize) -> Self {
         ChannelInner {
-            buffer: SpinLock::new(VecDeque::with_capacity(capacity)),
-            capacity: capacity.max(1),
+            buffer: ArrayQueue::new(capacity.max(1)),
             send_waitq: WaitQueue::new(),
             recv_waitq: WaitQueue::new(),
             status: AtomicU8::new(STATUS_CONNECTED),
@@ -107,8 +96,6 @@ impl<T: Send> ChannelInner<T> {
         self.status.load(Ordering::Acquire) == STATUS_RECEIVER_GONE
     }
 }
-
-// ── Sender<T> ─────────────────────────────────────────────────────────────────
 
 /// The send end of a [`channel`].
 ///
@@ -159,13 +146,12 @@ impl<T: Send> Sender<T> {
             // closure.  It is `take`-n here and either pushed (success) or
             // replaced (full queue → retry next wakeup).
             let m = pending.take().unwrap();
-            let mut buf = self.inner.buffer.lock();
-            if buf.len() < self.inner.capacity {
-                buf.push_back(m);
-                Some(Ok(()))
-            } else {
-                pending = Some(m); // put back for the next wakeup
-                None
+            match self.inner.buffer.push(m) {
+                Ok(()) => Some(Ok(())),
+                Err(m) => {
+                    pending = Some(m);
+                    None
+                }
             }
             // `buf` (queue lock) is released here, before returning from the
             // closure — never held while wake_one() is called below.
@@ -186,30 +172,19 @@ impl<T: Send> Sender<T> {
         if self.inner.is_receiver_gone() {
             return Err((msg, ChannelError::Disconnected));
         }
-        // Wrap in Option so the message can be recovered if not pushed.
-        let mut slot = Some(msg);
-        let pushed = {
-            let mut buf = self.inner.buffer.lock();
-            if buf.len() < self.inner.capacity {
-                // SAFETY: slot is Some; we take it here and push.
-                buf.push_back(slot.take().unwrap());
-                true
-            } else {
-                false
+        match self.inner.buffer.push(msg) {
+            Ok(()) => {
+                self.inner.recv_waitq.wake_one();
+                Ok(())
             }
-        }; // queue lock released here
-        if pushed {
-            self.inner.recv_waitq.wake_one();
-            Ok(())
-        } else {
-            // SAFETY: slot is still Some because we did not push.
-            let msg = slot.unwrap();
-            let err = if self.inner.is_receiver_gone() {
-                ChannelError::Disconnected
-            } else {
-                ChannelError::WouldBlock
-            };
-            Err((msg, err))
+            Err(m) => {
+                let err = if self.inner.is_receiver_gone() {
+                    ChannelError::Disconnected
+                } else {
+                    ChannelError::WouldBlock
+                };
+                Err((m, err))
+            }
         }
     }
 
@@ -229,8 +204,6 @@ impl<T: Send> Sender<T> {
         }
     }
 }
-
-// ── Receiver<T> ───────────────────────────────────────────────────────────────
 
 /// The receive end of a [`channel`].
 ///
@@ -270,11 +243,7 @@ impl<T: Send> Receiver<T> {
     pub fn recv(&self) -> Result<T, ChannelError> {
         let result = self.inner.recv_waitq.wait_until(|| {
             // Try to pop under the waiters lock so we don't race with senders.
-            let msg_opt = {
-                let mut buf = self.inner.buffer.lock();
-                buf.pop_front()
-                // queue lock released here
-            };
+            let msg_opt = self.inner.buffer.pop();
             if let Some(msg) = msg_opt {
                 return Some(Ok(msg));
             }
@@ -297,11 +266,7 @@ impl<T: Send> Receiver<T> {
     /// Returns `Err(WouldBlock)` if the buffer is empty, or
     /// `Err(Disconnected)` if all senders are gone and the buffer is empty.
     pub fn try_recv(&self) -> Result<T, ChannelError> {
-        let msg_opt = {
-            let mut buf = self.inner.buffer.lock();
-            buf.pop_front()
-            // queue lock released here
-        };
+        let msg_opt = self.inner.buffer.pop();
         if let Some(msg) = msg_opt {
             self.inner.send_waitq.wake_one();
             return Ok(msg);
@@ -329,8 +294,6 @@ impl<T: Send> Receiver<T> {
     }
 }
 
-// ── Constructor ───────────────────────────────────────────────────────────────
-
 /// Create a new bounded MPMC channel with the given `capacity`.
 ///
 /// Returns `(Sender<T>, Receiver<T>)`.  Both endpoints are cloneable to add
@@ -353,10 +316,7 @@ pub fn channel<T: Send>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Symmetric channel (SyncChan) — userspace / silo-to-silo IPC
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// A symmetric bounded channel over [`IpcMessage`], used by the global
 /// channel registry for silo-to-silo syscall-level IPC.
 ///
@@ -366,9 +326,7 @@ pub fn channel<T: Send>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 /// when the last userspace handle is closed.
 pub struct SyncChan {
     /// Bounded message queue.
-    queue: SpinLock<VecDeque<IpcMessage>>,
-    /// Maximum number of messages allowed in the queue.
-    capacity: usize,
+    queue: ArrayQueue<IpcMessage>,
     /// Tasks blocked because the queue is full.
     send_waitq: WaitQueue,
     /// Tasks blocked because the queue is empty.
@@ -380,8 +338,7 @@ pub struct SyncChan {
 impl SyncChan {
     fn new(capacity: usize) -> Self {
         SyncChan {
-            queue: SpinLock::new(VecDeque::with_capacity(capacity)),
-            capacity: capacity.max(1),
+            queue: ArrayQueue::new(capacity.max(1)),
             send_waitq: WaitQueue::new(),
             recv_waitq: WaitQueue::new(),
             destroyed: AtomicBool::new(false),
@@ -402,13 +359,12 @@ impl SyncChan {
             }
             // SAFETY: `pending` is always `Some` on every closure invocation.
             let m = pending.take().unwrap();
-            let mut q = self.queue.lock();
-            if q.len() < self.capacity {
-                q.push_back(m);
-                Some(Ok(()))
-            } else {
-                pending = Some(m);
-                None // keep waiting
+            match self.queue.push(m) {
+                Ok(()) => Some(Ok(())),
+                Err(m) => {
+                    pending = Some(m);
+                    None
+                }
             }
             // queue lock released here
         });
@@ -427,20 +383,12 @@ impl SyncChan {
         if self.destroyed.load(Ordering::Acquire) {
             return Err(ChannelError::Disconnected);
         }
-        let pushed = {
-            let mut q = self.queue.lock();
-            if q.len() < self.capacity {
-                q.push_back(msg);
-                true
-            } else {
-                false
+        match self.queue.push(msg) {
+            Ok(()) => {
+                self.recv_waitq.wake_one();
+                Ok(())
             }
-        }; // queue lock released
-        if pushed {
-            self.recv_waitq.wake_one();
-            Ok(())
-        } else {
-            Err(ChannelError::WouldBlock)
+            Err(_) => Err(ChannelError::WouldBlock),
         }
     }
 
@@ -450,11 +398,7 @@ impl SyncChan {
     /// destroyed while the receiver was blocked.
     pub fn recv(&self) -> Result<IpcMessage, ChannelError> {
         let result = self.recv_waitq.wait_until(|| {
-            let msg_opt = {
-                let mut q = self.queue.lock();
-                q.pop_front()
-                // queue lock released here
-            };
+            let msg_opt = self.queue.pop();
             if let Some(msg) = msg_opt {
                 return Some(Ok(msg));
             }
@@ -475,11 +419,7 @@ impl SyncChan {
     /// Returns `Err(WouldBlock)` if the queue is empty, or
     /// `Err(Disconnected)` if the channel is destroyed and empty.
     pub fn try_recv(&self) -> Result<IpcMessage, ChannelError> {
-        let msg_opt = {
-            let mut q = self.queue.lock();
-            q.pop_front()
-            // queue lock released here
-        };
+        let msg_opt = self.queue.pop();
         if let Some(msg) = msg_opt {
             self.send_waitq.wake_one();
             return Ok(msg);
@@ -507,7 +447,7 @@ impl SyncChan {
 
     /// Returns the current number of messages buffered.
     pub fn len(&self) -> usize {
-        self.queue.lock().len()
+        self.queue.len()
     }
 
     /// Returns `true` if the queue is empty.
@@ -516,10 +456,7 @@ impl SyncChan {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Global channel registry — userspace syscall surface
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Unique identifier for a [`SyncChan`] in the global registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChanId(pub u64);
