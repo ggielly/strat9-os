@@ -321,9 +321,7 @@ fn cmd_mod_load(args: &str) {
             break;
         }
         let chunk_size = if remaining > 4096 { 4096 } else { remaining };
-        let chunk = unsafe {
-            core::slice::from_raw_parts_mut(scratch_ptr.add(total), chunk_size)
-        };
+        let chunk = unsafe { core::slice::from_raw_parts_mut(scratch_ptr.add(total), chunk_size) };
         match call::read(fd as usize, chunk) {
             Ok(0) => break,
             Ok(n) => total += n,
@@ -342,13 +340,8 @@ fn cmd_mod_load(args: &str) {
     write_u64(total as u64);
     write_str(" bytes. Loading module...\n");
 
-    let result = unsafe {
-        strat9_syscall::syscall2(
-            number::SYS_MODULE_LOAD,
-            scratch_ptr as usize,
-            total,
-        )
-    };
+    let result =
+        unsafe { strat9_syscall::syscall2(number::SYS_MODULE_LOAD, scratch_ptr as usize, total) };
 
     match result {
         Ok(handle) => {
@@ -381,22 +374,20 @@ fn cmd_silo_attach(args: &str) {
     let (silo_str, rest) = split_first_word(args);
     let (mod_str, _) = split_first_word(rest);
     match (parse_usize(silo_str), parse_usize(mod_str)) {
-        (Some(silo_id), Some(mod_id)) => {
-            match call::silo_attach_module(silo_id, mod_id) {
-                Ok(_) => {
-                    write_str("Module ");
-                    write_u64(mod_id as u64);
-                    write_str(" attached to silo ");
-                    write_u64(silo_id as u64);
-                    write_str(".\n");
-                }
-                Err(e) => {
-                    write_str("silo_attach_module failed: ");
-                    write_str(e.name());
-                    write_str("\n");
-                }
+        (Some(silo_id), Some(mod_id)) => match call::silo_attach_module(silo_id, mod_id) {
+            Ok(_) => {
+                write_str("Module ");
+                write_u64(mod_id as u64);
+                write_str(" attached to silo ");
+                write_u64(silo_id as u64);
+                write_str(".\n");
             }
-        }
+            Err(e) => {
+                write_str("silo_attach_module failed: ");
+                write_str(e.name());
+                write_str("\n");
+            }
+        },
         _ => write_str("Usage: silo-attach <silo-handle> <module-handle>\n"),
     }
 }

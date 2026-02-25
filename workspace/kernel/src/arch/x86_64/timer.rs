@@ -357,8 +357,8 @@ pub fn start_apic_timer(ticks_per_10ms: u32) {
         let lvt_config = apic::LVT_TIMER_PERIODIC | (apic::LVT_TIMER_VECTOR as u32);
         log::info!(
             "LVT Timer config: 0x{:08X} (periodic + vector {:#x})",
-            lvt_config
-            , apic::LVT_TIMER_VECTOR
+            lvt_config,
+            apic::LVT_TIMER_VECTOR
         );
         apic::write_reg(apic::REG_LVT_TIMER, lvt_config);
 

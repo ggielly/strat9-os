@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use super::{CurrentRuntime, SchedClassRq};
+use crate::process::task::Task;
 use alloc::{collections::BinaryHeap, sync::Arc};
 use core::cmp::{self, Reverse};
-use crate::process::task::Task;
-use super::{CurrentRuntime, SchedClassRq};
 
 const WEIGHT_0: u64 = 1024;
 
@@ -41,7 +41,9 @@ pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {
 struct FairQueueItem(Arc<Task>, u64); // Task, vruntime
 
 impl FairQueueItem {
-    fn key(&self) -> u64 { self.1 }
+    fn key(&self) -> u64 {
+        self.1
+    }
 }
 
 impl core::fmt::Debug for FairQueueItem {
@@ -51,7 +53,9 @@ impl core::fmt::Debug for FairQueueItem {
 }
 
 impl PartialEq for FairQueueItem {
-    fn eq(&self, other: &Self) -> bool { self.key().eq(&other.key()) }
+    fn eq(&self, other: &Self) -> bool {
+        self.key().eq(&other.key())
+    }
 }
 impl Eq for FairQueueItem {}
 
@@ -97,7 +101,9 @@ impl FairClassRq {
     }
 
     fn time_slice(&self, cur_weight: u64) -> u64 {
-        if self.total_weight + cur_weight == 0 { return self.period(); }
+        if self.total_weight + cur_weight == 0 {
+            return self.period();
+        }
         self.period() * cur_weight / (self.total_weight + cur_weight)
     }
 }
@@ -131,13 +137,19 @@ impl SchedClassRq for FairClassRq {
     }
 
     fn update_current(&mut self, rt: &CurrentRuntime, task: &Task, is_yield: bool) -> bool {
-        if is_yield { return true; }
+        if is_yield {
+            return true;
+        }
         if let super::SchedPolicy::Fair(nice) = task.sched_policy() {
             let weight = nice_to_weight(nice);
-            let delta_vruntime = if weight == 0 { 0 } else { rt.delta_ticks * WEIGHT_0 / weight };
+            let delta_vruntime = if weight == 0 {
+                0
+            } else {
+                rt.delta_ticks * WEIGHT_0 / weight
+            };
             let vruntime = task.vruntime() + delta_vruntime;
             task.set_vruntime(vruntime);
-            
+
             let leftmost = self.entities.peek();
             self.min_vruntime = match leftmost {
                 Some(Reverse(leftmost)) => vruntime.min(leftmost.key()),

@@ -46,7 +46,7 @@ pub struct AtomicNice(AtomicI32);
 
 impl AtomicNice {
     pub const fn new(nice: Nice) -> Self {
-        Self(AtomicI32::new(nice.0.0 as i32))
+        Self(AtomicI32::new(nice.0 .0 as i32))
     }
 
     pub fn load(&self, order: Ordering) -> Nice {
@@ -54,6 +54,6 @@ impl AtomicNice {
     }
 
     pub fn store(&self, nice: Nice, order: Ordering) {
-        self.0.store(nice.0.0 as i32, order)
+        self.0.store(nice.0 .0 as i32, order)
     }
 }

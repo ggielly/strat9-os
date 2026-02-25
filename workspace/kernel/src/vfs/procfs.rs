@@ -19,7 +19,9 @@
 use crate::{
     process::{current_pid, get_all_tasks, get_parent_pid},
     syscall::error::SyscallError,
-    vfs::scheme::{DirEntry, DynScheme, DT_DIR, DT_REG, FileFlags, FileStat, OpenFlags, OpenResult, Scheme},
+    vfs::scheme::{
+        DirEntry, DynScheme, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_DIR, DT_REG,
+    },
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::fmt::Write;
@@ -220,12 +222,14 @@ impl Scheme for ProcScheme {
                     "cpuinfo" => 10,
                     "meminfo" => 11,
                     "version" => 12,
-                    "self/status" => {
-                        Self::encode_id(KIND_PROC_STATUS, current_pid().map(|p| p as u64).unwrap_or(0))
-                    }
-                    "self/cmdline" => {
-                        Self::encode_id(KIND_PROC_CMDLINE, current_pid().map(|p| p as u64).unwrap_or(0))
-                    }
+                    "self/status" => Self::encode_id(
+                        KIND_PROC_STATUS,
+                        current_pid().map(|p| p as u64).unwrap_or(0),
+                    ),
+                    "self/cmdline" => Self::encode_id(
+                        KIND_PROC_CMDLINE,
+                        current_pid().map(|p| p as u64).unwrap_or(0),
+                    ),
                     _ if path.starts_with("self") => 1,
                     _ => {
                         if let Some(slash_idx) = path.find('/') {
@@ -361,10 +365,26 @@ impl Scheme for ProcScheme {
         let (kind, pid) = Self::decode_id(file_id);
         if file_id == 0 {
             let mut entries = Vec::new();
-            entries.push(DirEntry { ino: 1, file_type: DT_DIR, name: String::from("self") });
-            entries.push(DirEntry { ino: 10, file_type: DT_REG, name: String::from("cpuinfo") });
-            entries.push(DirEntry { ino: 11, file_type: DT_REG, name: String::from("meminfo") });
-            entries.push(DirEntry { ino: 12, file_type: DT_REG, name: String::from("version") });
+            entries.push(DirEntry {
+                ino: 1,
+                file_type: DT_DIR,
+                name: String::from("self"),
+            });
+            entries.push(DirEntry {
+                ino: 10,
+                file_type: DT_REG,
+                name: String::from("cpuinfo"),
+            });
+            entries.push(DirEntry {
+                ino: 11,
+                file_type: DT_REG,
+                name: String::from("meminfo"),
+            });
+            entries.push(DirEntry {
+                ino: 12,
+                file_type: DT_REG,
+                name: String::from("version"),
+            });
             if let Some(tasks) = get_all_tasks() {
                 for task in tasks {
                     entries.push(DirEntry {

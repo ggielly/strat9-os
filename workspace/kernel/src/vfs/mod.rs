@@ -38,9 +38,11 @@ use alloc::{string::String, sync::Arc};
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
 pub use mount::{list_mounts, mount, resolve, unmount, Namespace};
-pub use procfs::ProcScheme;
 pub use pipe::PipeScheme;
-pub use scheme::{DirEntry, DynScheme, FileFlags, FileStat, IpcScheme, KernelScheme, OpenFlags, Scheme};
+pub use procfs::ProcScheme;
+pub use scheme::{
+    DirEntry, DynScheme, FileFlags, FileStat, IpcScheme, KernelScheme, OpenFlags, Scheme,
+};
 pub use scheme_router::{
     init_builtin_schemes, list_schemes, mount_scheme, register_initfs_file, register_scheme,
 };
@@ -443,7 +445,10 @@ pub fn sys_fstat(fd: u32, stat_ptr: u64) -> Result<u64, SyscallError> {
     let st = fstat(fd)?;
     let user = UserSliceWrite::new(stat_ptr, core::mem::size_of::<FileStat>())?;
     let bytes = unsafe {
-        core::slice::from_raw_parts(&st as *const FileStat as *const u8, core::mem::size_of::<FileStat>())
+        core::slice::from_raw_parts(
+            &st as *const FileStat as *const u8,
+            core::mem::size_of::<FileStat>(),
+        )
     };
     user.copy_from(bytes);
     Ok(0)
@@ -462,7 +467,10 @@ pub fn sys_stat(path_ptr: u64, path_len: u64, stat_ptr: u64) -> Result<u64, Sysc
     let st = stat_path(path)?;
     let user_out = UserSliceWrite::new(stat_ptr, core::mem::size_of::<FileStat>())?;
     let out_bytes = unsafe {
-        core::slice::from_raw_parts(&st as *const FileStat as *const u8, core::mem::size_of::<FileStat>())
+        core::slice::from_raw_parts(
+            &st as *const FileStat as *const u8,
+            core::mem::size_of::<FileStat>(),
+        )
     };
     user_out.copy_from(out_bytes);
     Ok(0)

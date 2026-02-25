@@ -1,9 +1,11 @@
 //! Domain-specific syscall wrappers for the network strate.
 
-pub use strat9_syscall::error::{self, Error};
-pub use strat9_syscall::call;
-pub use strat9_syscall::data::TimeSpec;
-pub use strat9_syscall::{syscall0, syscall2, number};
+pub use strat9_syscall::{
+    call,
+    data::TimeSpec,
+    error::{self, Error},
+    number, syscall0, syscall2,
+};
 
 pub type Result<T> = error::Result<T>;
 

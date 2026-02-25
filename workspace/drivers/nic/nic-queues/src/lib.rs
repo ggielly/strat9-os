@@ -1,6 +1,5 @@
 #![no_std]
 
-
 pub trait RxDescriptor: Copy {
     fn set_buffer_addr(&mut self, phys: u64);
     fn is_done(&self) -> bool;

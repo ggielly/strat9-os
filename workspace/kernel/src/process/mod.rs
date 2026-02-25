@@ -16,9 +16,10 @@ pub mod futex_test;
 pub mod mmap_test;
 #[cfg(feature = "selftest")]
 pub mod posix_signal_test;
+pub mod sched;
+pub mod scheduler;
 #[cfg(feature = "selftest")]
 pub mod scheduler_test;
-pub mod scheduler;
 #[cfg(feature = "selftest")]
 pub mod selftest;
 pub mod signal;
@@ -26,16 +27,15 @@ pub mod task;
 pub mod test;
 pub mod timer;
 pub mod usertest;
-pub mod sched;
 
 pub use scheduler::{
-    add_task, block_current_task, current_task_clone, current_task_id, get_all_tasks,
-    current_pgid, current_pid, current_sid, current_tid, create_session, get_parent_id,
-    get_parent_pid, get_pgid_by_pid, get_sid_by_pid, get_task_by_id, get_task_by_pid,
-    get_task_id_by_pid, class_table as scheduler_class_table, configure_class_table,
-    get_task_ids_in_pgid, init_scheduler, kill_task, resume_task, schedule, schedule_on_cpu,
-    set_process_group, set_task_sched_policy, set_verbose as set_scheduler_verbose, log_state as log_scheduler_state,
-    suspend_task, try_wait_child, verbose_enabled as scheduler_verbose_enabled, wake_task, yield_task,
+    add_task, block_current_task, class_table as scheduler_class_table, configure_class_table,
+    create_session, current_pgid, current_pid, current_sid, current_task_clone, current_task_id,
+    current_tid, get_all_tasks, get_parent_id, get_parent_pid, get_pgid_by_pid, get_sid_by_pid,
+    get_task_by_id, get_task_by_pid, get_task_id_by_pid, get_task_ids_in_pgid, init_scheduler,
+    kill_task, log_state as log_scheduler_state, resume_task, schedule, schedule_on_cpu,
+    set_process_group, set_task_sched_policy, set_verbose as set_scheduler_verbose, suspend_task,
+    try_wait_child, verbose_enabled as scheduler_verbose_enabled, wake_task, yield_task,
     WaitChildResult,
 };
 pub use signal::{has_pending_signals, send_signal, Signal, SignalSet};

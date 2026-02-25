@@ -161,7 +161,9 @@ impl From<FsError> for strat9_syscall::error::Error {
             FsError::OutOfMemory => SE::OutOfMemory,
             FsError::NoSpace => SE::NoSpace,
             FsError::TooManyOpenFiles => SE::Again,
-            FsError::InvalidUtf8 | FsError::InvalidUtf16 | FsError::StringTooLong => SE::InvalidArgument,
+            FsError::InvalidUtf8 | FsError::InvalidUtf16 | FsError::StringTooLong => {
+                SE::InvalidArgument
+            }
             FsError::NotImplemented => SE::NotImplemented,
             FsError::NotSupported | FsError::ReadOnly => SE::NotSupported,
             FsError::AlreadyExists => SE::AlreadyExists,

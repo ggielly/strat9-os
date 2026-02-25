@@ -56,10 +56,11 @@ fn test_rt_preempts_fair() -> bool {
     RT_HITS.store(0, Ordering::Relaxed);
     FAIR_HITS.store(0, Ordering::Relaxed);
 
-    let fair = match Task::new_kernel_task(fair_probe_main, "sched-fair-probe", TaskPriority::Normal) {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
+    let fair =
+        match Task::new_kernel_task(fair_probe_main, "sched-fair-probe", TaskPriority::Normal) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
     let fair_id = fair.id;
     let rt = match Task::new_kernel_task(rt_probe_main, "sched-rt-probe", TaskPriority::Realtime) {
         Ok(t) => t,
@@ -83,7 +84,11 @@ fn test_dynamic_policy_switch() -> bool {
     SWITCH_WORKER_HITS.store(0, Ordering::Relaxed);
     SWITCH_WORKER_DONE.store(false, Ordering::Relaxed);
 
-    let worker = match Task::new_kernel_task(switch_probe_main, "sched-switch-probe", TaskPriority::Normal) {
+    let worker = match Task::new_kernel_task(
+        switch_probe_main,
+        "sched-switch-probe",
+        TaskPriority::Normal,
+    ) {
         Ok(t) => t,
         Err(_) => return false,
     };
@@ -141,9 +146,12 @@ extern "C" fn scheduler_test_main() -> ! {
 }
 
 pub fn create_scheduler_test_task() {
-    if let Ok(task) =
-        Task::new_kernel_task_with_stack(scheduler_test_main, "scheduler-test", TaskPriority::High, 64 * 1024)
-    {
+    if let Ok(task) = Task::new_kernel_task_with_stack(
+        scheduler_test_main,
+        "scheduler-test",
+        TaskPriority::High,
+        64 * 1024,
+    ) {
         add_task(task);
     } else {
         crate::serial_println!("[sched-test] failed to create task");

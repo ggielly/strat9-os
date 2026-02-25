@@ -25,15 +25,18 @@ impl DmaAllocator for KernelDma {
         let frame = alloc.alloc(order).map_err(|_| ())?;
         let phys = frame.start_address.as_u64();
         let virt = memory::phys_to_virt(phys) as *mut u8;
-        Ok(DmaRegion { phys, virt, size: pages * 4096 })
+        Ok(DmaRegion {
+            phys,
+            virt,
+            size: pages * 4096,
+        })
     }
 
     unsafe fn free_dma(&self, region: DmaRegion) {
         let pages = (region.size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let frame = crate::memory::PhysFrame::containing_address(
-            x86_64::PhysAddr::new(region.phys),
-        );
+        let frame =
+            crate::memory::PhysFrame::containing_address(x86_64::PhysAddr::new(region.phys));
         let mut lock = get_allocator().lock();
         if let Some(alloc) = lock.as_mut() {
             alloc.free(frame, order);
@@ -47,9 +50,15 @@ pub struct KernelE1000 {
 }
 
 impl NetworkDevice for KernelE1000 {
-    fn name(&self) -> &str { "e1000" }
-    fn mac_address(&self) -> [u8; 6] { self.mac }
-    fn link_up(&self) -> bool { self.inner.lock().link_up() }
+    fn name(&self) -> &str {
+        "e1000"
+    }
+    fn mac_address(&self) -> [u8; 6] {
+        self.mac
+    }
+    fn link_up(&self) -> bool {
+        self.inner.lock().link_up()
+    }
 
     fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
         self.inner.lock().receive(buf)
@@ -72,14 +81,22 @@ pub fn init() {
 
     for &dev_id in e1000::E1000_DEVICE_IDS {
         if let Some(pci_dev) = pci::find_device(pci::vendor::INTEL, dev_id) {
-            log::info!("E1000: PCI {:04x}:{:04x} at {:?}", pci_dev.vendor_id, pci_dev.device_id, pci_dev.address);
+            log::info!(
+                "E1000: PCI {:04x}:{:04x} at {:?}",
+                pci_dev.vendor_id,
+                pci_dev.device_id,
+                pci_dev.address
+            );
             pci_dev.enable_bus_master();
             pci_dev.enable_memory_space();
 
             let mmio_phys = match pci_dev.read_bar(0) {
                 Some(Bar::Memory32 { addr, .. }) => addr as u64,
                 Some(Bar::Memory64 { addr, .. }) => addr,
-                _ => { log::error!("E1000: BAR0 not memory-mapped"); continue; }
+                _ => {
+                    log::error!("E1000: BAR0 not memory-mapped");
+                    continue;
+                }
             };
 
             memory::paging::ensure_identity_map_range(mmio_phys, 0x2_0000);

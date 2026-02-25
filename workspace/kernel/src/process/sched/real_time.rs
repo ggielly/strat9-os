@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{collections::VecDeque, sync::Arc};
-use crate::process::task::Task;
 use super::{CurrentRuntime, SchedClassRq};
+use crate::process::task::Task;
+use alloc::{collections::VecDeque, sync::Arc};
 
 /// Real-time priority (0-99). Higher value means higher priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

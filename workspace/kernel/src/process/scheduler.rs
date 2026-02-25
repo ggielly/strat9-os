@@ -43,7 +43,9 @@
 //!   - deterministic class migration tests, policy remap tests, SMP steal tests.
 //!   - starvation/fairness regression suite and long-running stress suite in test ISO.
 
-use super::task::{restore_first_task, switch_context, Pid, Task, TaskId, TaskPriority, TaskState, Tid};
+use super::task::{
+    restore_first_task, switch_context, Pid, Task, TaskId, TaskPriority, TaskState, Tid,
+};
 use crate::{
     arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer},
     sync::SpinLock,
@@ -98,7 +100,11 @@ unsafe impl Send for SwitchTarget {}
 
 /// Result of a non-blocking wait on child exit.
 pub enum WaitChildResult {
-    Reaped { child: TaskId, pid: Pid, status: i32 },
+    Reaped {
+        child: TaskId,
+        pid: Pid,
+        status: i32,
+    },
     NoChildren,
     StillRunning,
 }
@@ -150,7 +156,10 @@ impl PerCpuClassRqSet {
             + self.len_by_class(crate::process::sched::SchedClassId::Fair)
     }
 
-    fn pick_next_by_class(&mut self, class: crate::process::sched::SchedClassId) -> Option<Arc<Task>> {
+    fn pick_next_by_class(
+        &mut self,
+        class: crate::process::sched::SchedClassId,
+    ) -> Option<Arc<Task>> {
         use crate::process::sched::SchedClassRq;
         match class {
             crate::process::sched::SchedClassId::Fair => self.fair.pick_next(),
@@ -177,14 +186,21 @@ impl PerCpuClassRqSet {
     ) -> bool {
         use crate::process::sched::SchedClassRq;
         let should_preempt = match table.class_for_task(task) {
-            crate::process::sched::SchedClassId::Fair => self.fair.update_current(rt, task, is_yield),
-            crate::process::sched::SchedClassId::RealTime => self.real_time.update_current(rt, task, is_yield),
-            crate::process::sched::SchedClassId::Idle => self.idle.update_current(rt, task, is_yield),
+            crate::process::sched::SchedClassId::Fair => {
+                self.fair.update_current(rt, task, is_yield)
+            }
+            crate::process::sched::SchedClassId::RealTime => {
+                self.real_time.update_current(rt, task, is_yield)
+            }
+            crate::process::sched::SchedClassId::Idle => {
+                self.idle.update_current(rt, task, is_yield)
+            }
         };
         // Always preempt idle task if there are other tasks ready
         let any_ready = !self.real_time.is_empty() || !self.fair.is_empty();
         should_preempt
-            || (table.class_for_task(task) == crate::process::sched::SchedClassId::Idle && any_ready)
+            || (table.class_for_task(task) == crate::process::sched::SchedClassId::Idle
+                && any_ready)
     }
 
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool {
@@ -192,7 +208,10 @@ impl PerCpuClassRqSet {
         self.real_time.remove(task_id) || self.fair.remove(task_id) || self.idle.remove(task_id)
     }
 
-    fn steal_candidate(&mut self, table: &crate::process::sched::SchedClassTable) -> Option<Arc<Task>> {
+    fn steal_candidate(
+        &mut self,
+        table: &crate::process::sched::SchedClassTable,
+    ) -> Option<Arc<Task>> {
         for class in table.steal_order().iter().copied() {
             if let Some(task) = self.pick_next_by_class(class) {
                 return Some(task);
@@ -326,7 +345,11 @@ impl Scheduler {
             cpu.class_rqs.enqueue(class, task);
             cpu.need_resched = true;
         }
-        sched_trace(format_args!("enqueue task={} cpu={}", task_id.as_u64(), cpu_index));
+        sched_trace(format_args!(
+            "enqueue task={} cpu={}",
+            task_id.as_u64(),
+            cpu_index
+        ));
         if cpu_index != current_cpu_index() {
             send_resched_ipi_to_cpu(cpu_index);
         }
@@ -379,9 +402,11 @@ impl Scheduler {
 
         if let Some(child) = zombie {
             let status = self.zombies.remove(&child).unwrap_or(0);
-            let child_pid = self.pid_to_task.iter().find_map(|(pid, tid)| {
-                if *tid == child { Some(*pid) } else { None }
-            }).unwrap_or(0);
+            let child_pid = self
+                .pid_to_task
+                .iter()
+                .find_map(|(pid, tid)| if *tid == child { Some(*pid) } else { None })
+                .unwrap_or(0);
             if child_pid != 0 {
                 self.pid_to_task.remove(&child_pid);
             }
@@ -390,7 +415,11 @@ impl Scheduler {
             if children.is_empty() {
                 self.children_of.remove(&parent);
             }
-            return WaitChildResult::Reaped { child, pid: child_pid, status };
+            return WaitChildResult::Reaped {
+                child,
+                pid: child_pid,
+                status,
+            };
         }
 
         WaitChildResult::StillRunning
@@ -433,13 +462,14 @@ impl Scheduler {
         }
 
         // Step 2: local queue, then work-steal, then idle.
-        let next_task = if let Some(task) = self.cpus[cpu_index].class_rqs.pick_next(&self.class_table) {
-            task
-        } else if let Some(task) = self.steal_task(cpu_index) {
-            task
-        } else {
-            self.cpus[cpu_index].idle_task.clone()
-        };
+        let next_task =
+            if let Some(task) = self.cpus[cpu_index].class_rqs.pick_next(&self.class_table) {
+                task
+            } else if let Some(task) = self.steal_task(cpu_index) {
+                task
+            } else {
+                self.cpus[cpu_index].idle_task.clone()
+            };
 
         // SAFETY: scheduler lock held.
         unsafe {
@@ -473,7 +503,9 @@ impl Scheduler {
             return None;
         }
 
-        let task = self.cpus[best_src].class_rqs.steal_candidate(&self.class_table)?;
+        let task = self.cpus[best_src]
+            .class_rqs
+            .steal_candidate(&self.class_table)?;
         // Update the task→CPU mapping so wake/resume route correctly.
         self.task_cpu.insert(task.id, dst_cpu);
         log::trace!(
@@ -669,7 +701,7 @@ pub fn finish_switch() {
             task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
         }
     }
-    
+
     // Drop the previous task outside the scheduler lock (if it was the last ref).
     // This is safe because we are fully switched to the new task's stack and CR3.
     drop(task_to_drop);
@@ -794,7 +826,10 @@ pub fn maybe_preempt() {
 /// Enable or disable verbose scheduler tracing.
 pub fn set_verbose(enabled: bool) {
     SCHED_VERBOSE.store(enabled, Ordering::Relaxed);
-    log::info!("scheduler verbose tracing {}", if enabled { "enabled" } else { "disabled" });
+    log::info!(
+        "scheduler verbose tracing {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
 }
 
 /// Return current verbose tracing state.
@@ -818,9 +853,7 @@ pub fn class_table() -> crate::process::sched::SchedClassTable {
 }
 
 /// Configure scheduler class pick/steal order at runtime.
-pub fn configure_class_table(
-    table: crate::process::sched::SchedClassTable,
-) -> bool {
+pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> bool {
     let saved_flags = save_flags_and_cli();
     let applied = {
         let mut scheduler = SCHEDULER.lock();
@@ -853,7 +886,11 @@ pub fn log_state(label: &str) {
         );
         for (cpu_id, cpu) in sched.cpus.iter().enumerate() {
             use crate::process::sched::SchedClassRq;
-            let current = cpu.current_task.as_ref().map(|t| t.id.as_u64()).unwrap_or(u64::MAX);
+            let current = cpu
+                .current_task
+                .as_ref()
+                .map(|t| t.id.as_u64())
+                .unwrap_or(u64::MAX);
             log::info!(
                 "[sched:{}] cpu={} current={} rq_rt={} rq_fair={} rq_idle={} blocked={} need_resched={}",
                 label,
@@ -924,7 +961,8 @@ pub fn exit_current_task(exit_code: i32) -> ! {
 
     if let Some(parent_id) = parent_to_signal {
         // Must happen outside scheduler lock to avoid lock recursion.
-        let _ = crate::process::signal::send_signal(parent_id, crate::process::signal::Signal::SIGCHLD);
+        let _ =
+            crate::process::signal::send_signal(parent_id, crate::process::signal::Signal::SIGCHLD);
     }
 
     // Yield to pick the next task. Since we're Dead, we won't come back.
@@ -1173,10 +1211,7 @@ pub fn get_task_by_id(id: TaskId) -> Option<Arc<Task>> {
 }
 
 /// Update a task scheduling policy and requeue if needed.
-pub fn set_task_sched_policy(
-    id: TaskId,
-    policy: crate::process::sched::SchedPolicy,
-) -> bool {
+pub fn set_task_sched_policy(id: TaskId, policy: crate::process::sched::SchedPolicy) -> bool {
     let saved_flags = save_flags_and_cli();
     let mut ipi_to_cpu: Option<usize> = None;
     let updated = {
@@ -1564,7 +1599,8 @@ pub fn kill_task(id: TaskId) -> bool {
 
     if let Some(parent_id) = parent_to_signal {
         // Must happen outside scheduler lock to avoid lock recursion.
-        let _ = crate::process::signal::send_signal(parent_id, crate::process::signal::Signal::SIGCHLD);
+        let _ =
+            crate::process::signal::send_signal(parent_id, crate::process::signal::Signal::SIGCHLD);
     }
 
     restore_flags(saved_flags);
@@ -1649,10 +1685,12 @@ pub fn timer_tick() {
                 if let Some(ref current_task) = cpu.current_task.clone() {
                     current_task.ticks.fetch_add(1, Ordering::Relaxed);
                     cpu.current_runtime.update();
-                    if cpu
-                        .class_rqs
-                        .update_current(&cpu.current_runtime, &current_task, false, &sched.class_table)
-                    {
+                    if cpu.class_rqs.update_current(
+                        &cpu.current_runtime,
+                        &current_task,
+                        false,
+                        &sched.class_table,
+                    ) {
                         cpu.need_resched = true;
                     }
                 }
@@ -1704,7 +1742,6 @@ fn check_wake_deadlines(current_time_ns: u64) {
         }
     }
 }
-
 
 /// Get the current tick count
 pub fn ticks() -> u64 {

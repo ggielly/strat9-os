@@ -1,7 +1,7 @@
 //! Support for the HPET: High Precision Event Timer.
 //! Inspired by Theseus OS.
 
-use super::sdt::{Sdt, GenericAddressStructure};
+use super::sdt::{GenericAddressStructure, Sdt};
 use zerocopy::{FromBytes, FromZeroes};
 
 pub const HPET_SIGNATURE: &[u8; 4] = b"HPET";
@@ -24,8 +24,6 @@ pub struct HpetAcpiTable {
 impl HpetAcpiTable {
     /// Finds the HPET in the given `AcpiTables` and returns a reference to it.
     pub fn get() -> Option<&'static HpetAcpiTable> {
-        unsafe {
-            super::find_table(HPET_SIGNATURE).map(|ptr| &*(ptr as *const HpetAcpiTable))
-        }
+        unsafe { super::find_table(HPET_SIGNATURE).map(|ptr| &*(ptr as *const HpetAcpiTable)) }
     }
 }

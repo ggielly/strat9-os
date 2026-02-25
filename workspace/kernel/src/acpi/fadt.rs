@@ -1,7 +1,7 @@
 //! Definitions for FADT, the Fixed ACPI Description Table.
 //! Inspired by Theseus OS.
 
-use super::sdt::{Sdt, GenericAddressStructure};
+use super::sdt::{GenericAddressStructure, Sdt};
 use zerocopy::{FromBytes, FromZeroes};
 
 pub const FADT_SIGNATURE: &[u8; 4] = b"FACP";
@@ -13,7 +13,7 @@ pub struct Fadt {
     pub firmware_ctrl: u32,
     /// 32-bit physical address of the DSDT.
     pub dsdt: u32,
-    _reserved: u8, 
+    _reserved: u8,
     pub preferred_power_managament: u8,
     pub sci_interrupt: u16,
     pub smi_command_port: u32,
@@ -69,8 +69,6 @@ pub struct Fadt {
 impl Fadt {
     /// Finds the FADT in the given `AcpiTables` and returns a reference to it.
     pub fn get() -> Option<&'static Fadt> {
-        unsafe {
-            super::find_table(FADT_SIGNATURE).map(|ptr| &*(ptr as *const Fadt))
-        }
+        unsafe { super::find_table(FADT_SIGNATURE).map(|ptr| &*(ptr as *const Fadt)) }
     }
 }

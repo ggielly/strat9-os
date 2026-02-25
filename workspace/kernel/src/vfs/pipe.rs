@@ -207,7 +207,11 @@ impl PipeScheme {
 
     fn get_pipe(&self, file_id: u64) -> Result<Arc<Pipe>, SyscallError> {
         let base = file_id & !1; // Even = base
-        self.pipes.lock().get(&base).cloned().ok_or(SyscallError::BadHandle)
+        self.pipes
+            .lock()
+            .get(&base)
+            .cloned()
+            .ok_or(SyscallError::BadHandle)
     }
 
     fn is_read_end(file_id: u64) -> bool {

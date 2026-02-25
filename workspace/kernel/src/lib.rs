@@ -24,8 +24,8 @@ pub mod arch;
 pub mod boot;
 pub mod capability;
 pub mod components;
-pub mod hardware;
 pub mod entry;
+pub mod hardware;
 pub mod ipc;
 pub mod logger;
 pub mod memory;
@@ -358,7 +358,10 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         let mut init_task_id: Option<crate::process::TaskId> = None;
         if args.initfs_base != 0 && args.initfs_size != 0 {
             let elf_data = unsafe {
-                core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
+                core::slice::from_raw_parts(
+                    args.initfs_base as *const u8,
+                    args.initfs_size as usize,
+                )
             };
             if let Err(e) = vfs::register_initfs_file("test_pid", elf_data.as_ptr(), elf_data.len())
             {
@@ -378,9 +381,13 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         if let Some((base, size)) = crate::limine_entry::test_mem_stressed_module() {
             if base != 0 && size != 0 {
                 let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-                if let Err(e) = vfs::register_initfs_file("test_mem_stressed", data.as_ptr(), data.len())
+                if let Err(e) =
+                    vfs::register_initfs_file("test_mem_stressed", data.as_ptr(), data.len())
                 {
-                    serial_println!("[init] Failed to register /initfs/test_mem_stressed: {:?}", e);
+                    serial_println!(
+                        "[init] Failed to register /initfs/test_mem_stressed: {:?}",
+                        e
+                    );
                 } else {
                     serial_println!(
                         "[init] Registered /initfs/test_mem_stressed ({} bytes)",
@@ -393,7 +400,8 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
             if base != 0 && size != 0 {
                 let ext4_data =
                     unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-                if let Err(e) = vfs::register_initfs_file("fs-ext4", ext4_data.as_ptr(), ext4_data.len())
+                if let Err(e) =
+                    vfs::register_initfs_file("fs-ext4", ext4_data.as_ptr(), ext4_data.len())
                 {
                     serial_println!("[init] Failed to register /initfs/fs-ext4: {:?}", e);
                 } else {
@@ -403,7 +411,8 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         }
         if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
             if base != 0 && size != 0 {
-                let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+                let ram_data =
+                    unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
                 if let Err(e) =
                     vfs::register_initfs_file("strate-fs-ramfs", ram_data.as_ptr(), ram_data.len())
                 {
@@ -519,12 +528,17 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
 
         if !init_loaded && args.initfs_base != 0 && args.initfs_size != 0 {
             let elf_data = unsafe {
-                core::slice::from_raw_parts(args.initfs_base as *const u8, args.initfs_size as usize)
+                core::slice::from_raw_parts(
+                    args.initfs_base as *const u8,
+                    args.initfs_size as usize,
+                )
             };
             match process::elf::load_and_run_elf(elf_data, "init") {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
-                    serial_println!("[init] ELF '/initfs/test_pid' loaded as task 'init' (fallback).");
+                    serial_println!(
+                        "[init] ELF '/initfs/test_pid' loaded as task 'init' (fallback)."
+                    );
                 }
                 Err(e) => {
                     serial_println!("[init] Failed to load test_pid ELF: {}", e);
@@ -538,7 +552,9 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
             }
         }
-        if let (Some(task_id), Some(device)) = (init_task_id, hardware::storage::virtio_block::get_device()) {
+        if let (Some(task_id), Some(device)) =
+            (init_task_id, hardware::storage::virtio_block::get_device())
+        {
             if let Some(task) = crate::process::get_task_by_id(task_id) {
                 let cap = crate::capability::get_capability_manager().create_capability(
                     crate::capability::ResourceType::Volume,
@@ -645,7 +661,10 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     serial_println!("[init]   6c. MADT parsed");
 
     if let Some(mcfg) = acpi::mcfg::parse_mcfg() {
-        serial_println!("[init]   6c+. MCFG parsed ({} segment(s))", mcfg.entries.len());
+        serial_println!(
+            "[init]   6c+. MCFG parsed ({} segment(s))",
+            mcfg.entries.len()
+        );
         for entry in mcfg.entries.iter() {
             log::info!(
                 "ACPI: MCFG seg={} ecam={:#x} buses={}..{} ({} bus(es))",

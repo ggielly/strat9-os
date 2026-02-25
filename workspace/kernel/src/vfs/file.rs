@@ -104,7 +104,9 @@ impl OpenFile {
         let mut cur = self.offset.lock();
         let new_pos: i64 = match whence {
             0 => off,
-            1 => (*cur as i64).checked_add(off).ok_or(SyscallError::InvalidArgument)?,
+            1 => (*cur as i64)
+                .checked_add(off)
+                .ok_or(SyscallError::InvalidArgument)?,
             2 => {
                 let sz = self.size().unwrap_or(0) as i64;
                 sz.checked_add(off).ok_or(SyscallError::InvalidArgument)?

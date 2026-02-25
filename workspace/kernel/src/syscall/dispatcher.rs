@@ -364,8 +364,6 @@ fn resolve_volume_device(
     Ok(device)
 }
 
-
-
 fn sys_volume_read(
     handle: u64,
     sector: u64,

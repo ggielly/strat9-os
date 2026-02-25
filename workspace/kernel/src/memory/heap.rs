@@ -13,11 +13,13 @@
 // class needs a fresh page).  No code path holds the buddy lock and then tries
 // to acquire SLAB_ALLOC, so there is no deadlock.
 
-use crate::memory::{
-    buddy::get_allocator,
-    frame::{FrameAllocator, PhysFrame},
+use crate::{
+    memory::{
+        buddy::get_allocator,
+        frame::{FrameAllocator, PhysFrame},
+    },
+    sync::SpinLock,
 };
-use crate::sync::SpinLock;
 use core::{
     alloc::{GlobalAlloc, Layout},
     ptr,

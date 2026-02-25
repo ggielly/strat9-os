@@ -828,10 +828,7 @@ impl AddressSpace {
             while page_addr < range_end {
                 // Lazy VMAs can contain unfaulted pages (no PTE). In that case
                 // there is nothing to unmap in hardware; just update VMA metadata.
-                if mapper
-                    .translate_addr(VirtAddr::new(page_addr))
-                    .is_none()
-                {
+                if mapper.translate_addr(VirtAddr::new(page_addr)).is_none() {
                     page_addr += page_bytes;
                     continue;
                 }
@@ -1115,11 +1112,13 @@ impl AddressSpace {
                             if let Err(e) = downgrade_res {
                                 let unmapped = match region.page_size {
                                     VmaPageSize::Small => {
-                                        let page = Page::<Size4KiB>::from_start_address(vaddr).unwrap();
+                                        let page =
+                                            Page::<Size4KiB>::from_start_address(vaddr).unwrap();
                                         child_mapper.unmap(page).map(|(_, f)| f.ignore()).is_ok()
                                     }
                                     VmaPageSize::Huge => {
-                                        let page = Page::<Size2MiB>::from_start_address(vaddr).unwrap();
+                                        let page =
+                                            Page::<Size2MiB>::from_start_address(vaddr).unwrap();
                                         child_mapper.unmap(page).map(|(_, f)| f.ignore()).is_ok()
                                     }
                                 };

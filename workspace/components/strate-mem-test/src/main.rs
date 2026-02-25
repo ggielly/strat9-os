@@ -106,7 +106,9 @@ fn fill_and_verify_pages(base: usize, pages: usize, seed: u8, tag: &str) {
         let page_off = p * PAGE_SIZE;
         let a = seed.wrapping_add((p as u8).wrapping_mul(3));
         let b = seed.wrapping_add((p as u8).wrapping_mul(7)).wrapping_add(1);
-        let c = seed.wrapping_add((p as u8).wrapping_mul(11)).wrapping_add(2);
+        let c = seed
+            .wrapping_add((p as u8).wrapping_mul(11))
+            .wrapping_add(2);
 
         buf[page_off] = a;
         buf[page_off + 17] = b;
@@ -117,7 +119,9 @@ fn fill_and_verify_pages(base: usize, pages: usize, seed: u8, tag: &str) {
         let page_off = p * PAGE_SIZE;
         let a = seed.wrapping_add((p as u8).wrapping_mul(3));
         let b = seed.wrapping_add((p as u8).wrapping_mul(7)).wrapping_add(1);
-        let c = seed.wrapping_add((p as u8).wrapping_mul(11)).wrapping_add(2);
+        let c = seed
+            .wrapping_add((p as u8).wrapping_mul(11))
+            .wrapping_add(2);
 
         if buf[page_off] != a || buf[page_off + 17] != b || buf[page_off + PAGE_SIZE - 1] != c {
             log_err("[test_mem] verify failed at page ");

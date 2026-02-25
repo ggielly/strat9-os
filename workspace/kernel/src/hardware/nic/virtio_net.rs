@@ -6,13 +6,15 @@
 //!
 //! Reference: VirtIO spec v1.2, Section 5.1 (Network Device)
 
-use crate::hardware::virtio::{
-    common::{VirtioDevice, Virtqueue},
-    status,
-};
 use crate::{
     arch::x86_64::pci::{self, PciDevice},
-    hardware::nic as net,
+    hardware::{
+        nic as net,
+        virtio::{
+            common::{VirtioDevice, Virtqueue},
+            status,
+        },
+    },
     memory::{get_allocator, FrameAllocator, PhysFrame},
     sync::SpinLock,
 };

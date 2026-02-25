@@ -16,20 +16,30 @@ impl RsdtXsdt {
     pub fn from_rsdp(rsdp_vaddr: u64, revision: u8) -> Option<Self> {
         // ACPI 2.0+: XSDT address at byte offset 24 in RSDP v2 struct.
         if revision >= 2 {
-            let xsdt_phys = unsafe { core::ptr::read_unaligned((rsdp_vaddr as *const u8).add(24) as *const u64) };
+            let xsdt_phys = unsafe {
+                core::ptr::read_unaligned((rsdp_vaddr as *const u8).add(24) as *const u64)
+            };
             if xsdt_phys != 0 {
-                crate::memory::paging::ensure_identity_map_range(xsdt_phys, core::mem::size_of::<Sdt>() as u64);
+                crate::memory::paging::ensure_identity_map_range(
+                    xsdt_phys,
+                    core::mem::size_of::<Sdt>() as u64,
+                );
                 let xsdt_ptr = crate::memory::phys_to_virt(xsdt_phys) as *const Sdt;
                 return Some(RsdtXsdt::Extended(xsdt_ptr));
             }
         }
 
         // ACPI 1.0 fallback: RSDT address at byte offset 16.
-        let rsdt_phys = unsafe { core::ptr::read_unaligned((rsdp_vaddr as *const u8).add(16) as *const u32) } as u64;
+        let rsdt_phys =
+            unsafe { core::ptr::read_unaligned((rsdp_vaddr as *const u8).add(16) as *const u32) }
+                as u64;
         if rsdt_phys == 0 {
             return None;
         }
-        crate::memory::paging::ensure_identity_map_range(rsdt_phys, core::mem::size_of::<Sdt>() as u64);
+        crate::memory::paging::ensure_identity_map_range(
+            rsdt_phys,
+            core::mem::size_of::<Sdt>() as u64,
+        );
         let rsdt_ptr = crate::memory::phys_to_virt(rsdt_phys) as *const Sdt;
         Some(RsdtXsdt::Regular(rsdt_ptr))
     }

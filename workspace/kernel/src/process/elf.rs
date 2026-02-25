@@ -1171,7 +1171,8 @@ pub fn load_and_run_elf_with_caps(
 
     if let Some(h) = bootstrap_handle {
         // Program entry will see this in its first argument register (RDI).
-        task.trampoline_arg0.store(h, core::sync::atomic::Ordering::Release);
+        task.trampoline_arg0
+            .store(h, core::sync::atomic::Ordering::Release);
     }
 
     // Bootstrapping: grant Silo Admin capability to the initial userspace task.

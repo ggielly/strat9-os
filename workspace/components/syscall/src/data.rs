@@ -66,7 +66,14 @@ pub struct FileStat {
 
 impl FileStat {
     pub const fn zeroed() -> Self {
-        FileStat { st_ino: 0, st_mode: 0, st_nlink: 0, st_size: 0, st_blksize: 0, st_blocks: 0 }
+        FileStat {
+            st_ino: 0,
+            st_mode: 0,
+            st_nlink: 0,
+            st_size: 0,
+            st_blksize: 0,
+            st_blocks: 0,
+        }
     }
 
     pub fn is_dir(&self) -> bool {

@@ -3,18 +3,23 @@
 //! read = receive packet, write = send packet.
 
 use super::{get_device, list_interfaces};
-use net_core::NetError;
 use crate::{
     sync::SpinLock,
     syscall::error::SyscallError,
-    vfs::scheme::{DirEntry, FileStat, FileFlags, OpenFlags, OpenResult, Scheme, DT_REG},
-    vfs::scheme_router,
+    vfs::{
+        scheme::{DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_REG},
+        scheme_router,
+    },
 };
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
+use net_core::NetError;
 
 #[derive(Clone)]
-enum Handle { Root, Iface(String) }
+enum Handle {
+    Root,
+    Iface(String),
+}
 
 pub struct NetScheme {
     handles: SpinLock<BTreeMap<u64, Handle>>,
@@ -22,8 +27,15 @@ pub struct NetScheme {
 }
 
 impl NetScheme {
-    fn new() -> Self { Self { handles: SpinLock::new(BTreeMap::new()), next: AtomicU64::new(1) } }
-    fn alloc_id(&self) -> u64 { self.next.fetch_add(1, Ordering::Relaxed) }
+    fn new() -> Self {
+        Self {
+            handles: SpinLock::new(BTreeMap::new()),
+            next: AtomicU64::new(1),
+        }
+    }
+    fn alloc_id(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 impl Scheme for NetScheme {
@@ -32,13 +44,23 @@ impl Scheme for NetScheme {
         let id = self.alloc_id();
         if path.is_empty() {
             self.handles.lock().insert(id, Handle::Root);
-            return Ok(OpenResult { file_id: id, size: None, flags: FileFlags::DIRECTORY });
+            return Ok(OpenResult {
+                file_id: id,
+                size: None,
+                flags: FileFlags::DIRECTORY,
+            });
         }
         if !list_interfaces().iter().any(|n| n == path) {
             return Err(SyscallError::BadHandle);
         }
-        self.handles.lock().insert(id, Handle::Iface(String::from(path)));
-        Ok(OpenResult { file_id: id, size: None, flags: FileFlags::DEVICE })
+        self.handles
+            .lock()
+            .insert(id, Handle::Iface(String::from(path)));
+        Ok(OpenResult {
+            file_id: id,
+            size: None,
+            flags: FileFlags::DEVICE,
+        })
     }
 
     fn read(&self, fid: u64, _off: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
@@ -89,16 +111,38 @@ impl Scheme for NetScheme {
         let h = self.handles.lock();
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
         Ok(match handle {
-            Handle::Root => FileStat { st_ino: 0, st_mode: 0o040555, st_nlink: 2, st_size: 0, st_blksize: 1514, st_blocks: 0 },
-            Handle::Iface(_) => FileStat { st_ino: fid, st_mode: 0o020666, st_nlink: 1, st_size: 0, st_blksize: 1514, st_blocks: 0 },
+            Handle::Root => FileStat {
+                st_ino: 0,
+                st_mode: 0o040555,
+                st_nlink: 2,
+                st_size: 0,
+                st_blksize: 1514,
+                st_blocks: 0,
+            },
+            Handle::Iface(_) => FileStat {
+                st_ino: fid,
+                st_mode: 0o020666,
+                st_nlink: 1,
+                st_size: 0,
+                st_blksize: 1514,
+                st_blocks: 0,
+            },
         })
     }
 
     fn readdir(&self, fid: u64) -> Result<Vec<DirEntry>, SyscallError> {
         let h = self.handles.lock();
-        if !matches!(h.get(&fid), Some(Handle::Root)) { return Err(SyscallError::InvalidArgument); }
-        Ok(list_interfaces().into_iter().enumerate()
-            .map(|(i, name)| DirEntry { ino: (i + 1) as u64, file_type: DT_REG, name })
+        if !matches!(h.get(&fid), Some(Handle::Root)) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        Ok(list_interfaces()
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| DirEntry {
+                ino: (i + 1) as u64,
+                file_type: DT_REG,
+                name,
+            })
             .collect())
     }
 }

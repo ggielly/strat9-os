@@ -74,7 +74,9 @@ impl RamFileSystem {
         let parent = self.get_node(parent_ino)?;
         let guard = parent.lock();
         match &*guard {
-            RamNode::Directory { entries, .. } => entries.get(name).copied().ok_or(FsError::NotFound),
+            RamNode::Directory { entries, .. } => {
+                entries.get(name).copied().ok_or(FsError::NotFound)
+            }
             _ => Err(FsError::NotADirectory),
         }
     }
@@ -272,9 +274,7 @@ impl VfsFileSystem for RamFileSystem {
                 data: file_data, ..
             } => {
                 let start = usize::try_from(offset).map_err(|_| FsError::InvalidArgument)?;
-                let end = start
-                    .checked_add(data.len())
-                    .ok_or(FsError::FileTooLarge)?;
+                let end = start.checked_add(data.len()).ok_or(FsError::FileTooLarge)?;
                 if end > file_data.len() {
                     file_data.resize(end, 0);
                 }
@@ -290,8 +290,10 @@ impl VfsFileSystem for RamFileSystem {
         let guard = node.lock();
         match &*guard {
             RamNode::Directory { entries, .. } => {
-                let children: Vec<(String, u64)> =
-                    entries.iter().map(|(name, &ino)| (name.clone(), ino)).collect();
+                let children: Vec<(String, u64)> = entries
+                    .iter()
+                    .map(|(name, &ino)| (name.clone(), ino))
+                    .collect();
                 drop(guard);
 
                 let mut result = Vec::new();
@@ -394,7 +396,9 @@ impl VfsFileSystem for RamFileSystem {
         let child_ino = {
             let guard = parent.lock();
             match &*guard {
-                RamNode::Directory { entries, .. } => *entries.get(name).ok_or(FsError::NotFound)?,
+                RamNode::Directory { entries, .. } => {
+                    *entries.get(name).ok_or(FsError::NotFound)?
+                }
                 _ => return Err(FsError::NotADirectory),
             }
         };
@@ -455,7 +459,9 @@ impl VfsFileSystem for RamFileSystem {
         let moved_ino = {
             let guard = old_parent_node.lock();
             match &*guard {
-                RamNode::Directory { entries, .. } => *entries.get(old_name).ok_or(FsError::NotFound)?,
+                RamNode::Directory { entries, .. } => {
+                    *entries.get(old_name).ok_or(FsError::NotFound)?
+                }
                 _ => return Err(FsError::NotADirectory),
             }
         };

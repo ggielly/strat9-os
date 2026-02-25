@@ -194,7 +194,9 @@ impl Task {
 
     /// Set the scheduling policy of the task
     pub fn set_sched_policy(&self, policy: crate::process::sched::SchedPolicy) {
-        unsafe { *self.sched_policy.get() = policy; }
+        unsafe {
+            *self.sched_policy.get() = policy;
+        }
     }
 
     /// Get virtual runtime

@@ -1,8 +1,7 @@
 #![no_std]
 #![no_main]
 
-use core::arch::asm;
-use core::panic::PanicInfo;
+use core::{arch::asm, panic::PanicInfo};
 use strat9_syscall::{call, error::Error, number};
 
 static mut COW_SENTINEL: u64 = 0x1122_3344_5566_7788;
@@ -157,7 +156,6 @@ fn log_raw_ret(label: &str, ret: usize) {
     log_nl();
 }
 
-
 fn cow_addr() -> u64 {
     core::ptr::addr_of!(COW_SENTINEL) as u64
 }
@@ -182,7 +180,10 @@ fn cow_multi_read(offset: usize) -> u8 {
 
 fn cow_multi_write(offset: usize, value: u8) {
     unsafe {
-        core::ptr::write_volatile((core::ptr::addr_of_mut!(COW_MULTI) as *mut u8).add(offset), value);
+        core::ptr::write_volatile(
+            (core::ptr::addr_of_mut!(COW_MULTI) as *mut u8).add(offset),
+            value,
+        );
     }
 }
 
@@ -234,9 +235,15 @@ pub extern "C" fn _start() -> ! {
     log_nl();
 
     log_section("STEP 2/11: reading identifiers via raw syscalls for cross-check");
-    log_raw_ret("SYS_GETPID", unsafe { raw_syscall(number::SYS_GETPID, 0, 0, 0) });
-    log_raw_ret("SYS_GETPPID", unsafe { raw_syscall(number::SYS_GETPPID, 0, 0, 0) });
-    log_raw_ret("SYS_GETTID", unsafe { raw_syscall(number::SYS_GETTID, 0, 0, 0) });
+    log_raw_ret("SYS_GETPID", unsafe {
+        raw_syscall(number::SYS_GETPID, 0, 0, 0)
+    });
+    log_raw_ret("SYS_GETPPID", unsafe {
+        raw_syscall(number::SYS_GETPPID, 0, 0, 0)
+    });
+    log_raw_ret("SYS_GETTID", unsafe {
+        raw_syscall(number::SYS_GETTID, 0, 0, 0)
+    });
 
     log_section("STEP 3/11: waitpid(-1, WNOHANG) before any fork (expect no child)");
     let mut status_nochild: i32 = -9999;
@@ -346,7 +353,10 @@ pub extern "C" fn _start() -> ! {
     log_u64(child2_pid as u64);
     log_nl();
     let mut child2_status: i32 = 0;
-    let _ = log_result("waitpid(-1, blocking)", call::waitpid_blocking(-1, &mut child2_status));
+    let _ = log_result(
+        "waitpid(-1, blocking)",
+        call::waitpid_blocking(-1, &mut child2_status),
+    );
     decode_wait_status(child2_status);
 
     log_section("STEP 8/11: targeted CoW test (single 64-bit sentinel)");
@@ -412,11 +422,12 @@ pub extern "C" fn _start() -> ! {
 
     let mut cow_status: i32 = -1;
     let waited_cow = call::waitpid_blocking(cow_child_pid as isize, &mut cow_status);
-    let waited_cow_pid = if let Some(done) = log_result("[cow-parent] waitpid(cow-child, blocking)", waited_cow) {
-        done
-    } else {
-        exit_process(13);
-    };
+    let waited_cow_pid =
+        if let Some(done) = log_result("[cow-parent] waitpid(cow-child, blocking)", waited_cow) {
+            done
+        } else {
+            exit_process(13);
+        };
     log("[init-test:cow:parent] wait returned pid=");
     log_u64(waited_cow_pid as u64);
     log_nl();

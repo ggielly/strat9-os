@@ -122,9 +122,8 @@ pub fn sys_execve(
     // 2. Reset all signal handlers to SIG_DFL
     current.reset_signals();
 
-    let old_as = unsafe {
-        core::mem::replace(&mut *current.address_space.get(), new_as_arc.clone())
-    };
+    let old_as =
+        unsafe { core::mem::replace(&mut *current.address_space.get(), new_as_arc.clone()) };
 
     unsafe {
         (&*current.address_space.get()).switch_to();

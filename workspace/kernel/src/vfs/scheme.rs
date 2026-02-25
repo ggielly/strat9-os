@@ -35,7 +35,14 @@ pub struct FileStat {
 
 impl FileStat {
     pub const fn zeroed() -> Self {
-        FileStat { st_ino: 0, st_mode: 0, st_nlink: 1, st_size: 0, st_blksize: 512, st_blocks: 0 }
+        FileStat {
+            st_ino: 0,
+            st_mode: 0,
+            st_nlink: 1,
+            st_size: 0,
+            st_blksize: 512,
+            st_blocks: 0,
+        }
     }
 }
 
@@ -618,7 +625,10 @@ impl Scheme for KernelScheme {
             });
         }
         let files = self.files.lock();
-        let file = files.values().find(|f| f.id == file_id).ok_or(SyscallError::BadHandle)?;
+        let file = files
+            .values()
+            .find(|f| f.id == file_id)
+            .ok_or(SyscallError::BadHandle)?;
         Ok(FileStat {
             st_ino: file_id,
             st_mode: 0o100444,
@@ -636,7 +646,11 @@ impl Scheme for KernelScheme {
         let files = self.files.lock();
         let mut entries = Vec::new();
         for (name, kf) in files.iter() {
-            entries.push(DirEntry { ino: kf.id, file_type: DT_REG, name: name.clone() });
+            entries.push(DirEntry {
+                ino: kf.id,
+                file_type: DT_REG,
+                name: name.clone(),
+            });
         }
         Ok(entries)
     }

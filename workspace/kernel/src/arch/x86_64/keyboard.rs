@@ -27,7 +27,7 @@ const KEYBOARD_BUFFER_SIZE: usize = 256;
 // The ISR already runs with IF=0, so it never needs to disable interrupts.
 
 struct KeyboardBufferInner {
-    buf:  [u8; KEYBOARD_BUFFER_SIZE],
+    buf: [u8; KEYBOARD_BUFFER_SIZE],
     head: usize,
     tail: usize,
 }
@@ -42,7 +42,7 @@ impl KeyboardBuffer {
     const fn new() -> Self {
         Self {
             inner: Mutex::new(KeyboardBufferInner {
-                buf:  [0u8; KEYBOARD_BUFFER_SIZE],
+                buf: [0u8; KEYBOARD_BUFFER_SIZE],
                 head: 0,
                 tail: 0,
             }),

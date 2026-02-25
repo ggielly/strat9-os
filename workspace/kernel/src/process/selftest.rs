@@ -40,8 +40,11 @@ extern "C" fn selftest_orchestrator() -> ! {
 }
 
 pub fn create_selftest_tasks() {
-    match Task::new_kernel_task(selftest_orchestrator, "selftest-orchestrator", TaskPriority::High)
-    {
+    match Task::new_kernel_task(
+        selftest_orchestrator,
+        "selftest-orchestrator",
+        TaskPriority::High,
+    ) {
         Ok(task) => add_task(task),
         Err(_) => crate::serial_println!("[selftest] failed to create orchestrator task"),
     }

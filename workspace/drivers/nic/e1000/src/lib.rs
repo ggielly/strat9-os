@@ -1,7 +1,7 @@
 #![no_std]
 
 use core::ptr;
-use intel_ethernet::{LegacyRxDesc, LegacyTxDesc, regs, ctrl, rctl, tctl, int_bits, eerd};
+use intel_ethernet::{ctrl, eerd, int_bits, rctl, regs, tctl, LegacyRxDesc, LegacyTxDesc};
 use net_core::NetError;
 use nic_buffers::{DmaAllocator, DmaRegion};
 use nic_queues::{RxDescriptor, RxRing, TxRing};
@@ -44,7 +44,9 @@ impl E1000Nic {
             // Reset
             let c = rd(mmio_base, regs::CTRL);
             wr(mmio_base, regs::CTRL, c | ctrl::RST);
-            for _ in 0..10_000_000u64 { core::hint::spin_loop(); }
+            for _ in 0..10_000_000u64 {
+                core::hint::spin_loop();
+            }
 
             // Disable interrupts during setup
             wr(mmio_base, regs::IMC, 0xFFFF_FFFF);
@@ -53,14 +55,17 @@ impl E1000Nic {
             let mac = Self::read_mac(mmio_base);
 
             // RX ring
-            let rx_ring_region = alloc.alloc_dma(NUM_RX * core::mem::size_of::<LegacyRxDesc>())
+            let rx_ring_region = alloc
+                .alloc_dma(NUM_RX * core::mem::size_of::<LegacyRxDesc>())
                 .map_err(|_| NetError::NotReady)?;
             ptr::write_bytes(rx_ring_region.virt, 0, rx_ring_region.size);
             let rx_descs = rx_ring_region.virt as *mut LegacyRxDesc;
 
             let mut rx_bufs = [DmaRegion::ZERO; NUM_RX];
             for i in 0..NUM_RX {
-                let buf = alloc.alloc_dma(RX_BUF_SIZE).map_err(|_| NetError::NotReady)?;
+                let buf = alloc
+                    .alloc_dma(RX_BUF_SIZE)
+                    .map_err(|_| NetError::NotReady)?;
                 ptr::write_bytes(buf.virt, 0, RX_BUF_SIZE);
                 (*rx_descs.add(i)).addr = buf.phys;
                 rx_bufs[i] = buf;
@@ -73,7 +78,8 @@ impl E1000Nic {
             wr(mmio_base, regs::RDT, (NUM_RX - 1) as u32);
 
             // TX ring
-            let tx_ring_region = alloc.alloc_dma(NUM_TX * core::mem::size_of::<LegacyTxDesc>())
+            let tx_ring_region = alloc
+                .alloc_dma(NUM_TX * core::mem::size_of::<LegacyTxDesc>())
                 .map_err(|_| NetError::NotReady)?;
             ptr::write_bytes(tx_ring_region.virt, 0, tx_ring_region.size);
             let tx_descs = tx_ring_region.virt as *mut LegacyTxDesc;
@@ -85,18 +91,27 @@ impl E1000Nic {
             wr(mmio_base, regs::TDT, 0);
 
             // Enable TX
-            wr(mmio_base, regs::TCTL,
-                tctl::EN | tctl::PSP | (0x10 << tctl::CT_SHIFT) | (0x40 << tctl::COLD_SHIFT));
+            wr(
+                mmio_base,
+                regs::TCTL,
+                tctl::EN | tctl::PSP | (0x10 << tctl::CT_SHIFT) | (0x40 << tctl::COLD_SHIFT),
+            );
 
             // Enable RX
-            wr(mmio_base, regs::RCTL,
-                rctl::EN | rctl::BAM | rctl::BSIZE_2048 | rctl::SECRC);
+            wr(
+                mmio_base,
+                regs::RCTL,
+                rctl::EN | rctl::BAM | rctl::BSIZE_2048 | rctl::SECRC,
+            );
 
             // Link up + interrupts
             let c = rd(mmio_base, regs::CTRL);
             wr(mmio_base, regs::CTRL, c | ctrl::SLU);
-            wr(mmio_base, regs::IMS,
-                int_bits::RXT0 | int_bits::LSC | int_bits::RXDMT0 | int_bits::RXO);
+            wr(
+                mmio_base,
+                regs::IMS,
+                int_bits::RXT0 | int_bits::LSC | int_bits::RXDMT0 | int_bits::RXO,
+            );
 
             Ok(Self {
                 mmio: mmio_base,
@@ -120,22 +135,30 @@ impl E1000Nic {
     pub fn receive(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
         let (idx, pkt_len) = self.rx.poll().ok_or(NetError::NoPacket)?;
         let len = pkt_len as usize;
-        if buf.len() < len { return Err(NetError::BufferTooSmall); }
+        if buf.len() < len {
+            return Err(NetError::BufferTooSmall);
+        }
 
         unsafe {
             ptr::copy_nonoverlapping(self.rx_bufs[idx].virt, buf.as_mut_ptr(), len);
         }
 
         self.rx.desc_mut(idx).clear_status();
-        self.rx.desc_mut(idx).set_buffer_addr(self.rx_bufs[idx].phys);
+        self.rx
+            .desc_mut(idx)
+            .set_buffer_addr(self.rx_bufs[idx].phys);
         let new_tail = self.rx.advance();
-        unsafe { wr(self.mmio, regs::RDT, new_tail as u32); }
+        unsafe {
+            wr(self.mmio, regs::RDT, new_tail as u32);
+        }
 
         Ok(len)
     }
 
     pub fn transmit(&mut self, buf: &[u8], alloc: &dyn DmaAllocator) -> Result<(), NetError> {
-        if buf.len() > net_core::MTU { return Err(NetError::BufferTooSmall); }
+        if buf.len() > net_core::MTU {
+            return Err(NetError::BufferTooSmall);
+        }
 
         let idx = self.tx.tail();
         // Wait for previous TX at this slot
@@ -145,15 +168,21 @@ impl E1000Nic {
 
         // Free previous buffer
         if let Some(old) = self.tx_bufs[idx].take() {
-            unsafe { alloc.free_dma(old); }
+            unsafe {
+                alloc.free_dma(old);
+            }
         }
 
         let region = alloc.alloc_dma(buf.len()).map_err(|_| NetError::NotReady)?;
-        unsafe { ptr::copy_nonoverlapping(buf.as_ptr(), region.virt, buf.len()); }
+        unsafe {
+            ptr::copy_nonoverlapping(buf.as_ptr(), region.virt, buf.len());
+        }
 
         self.tx_bufs[idx] = Some(region);
         let submitted = self.tx.submit(region.phys, buf.len() as u16);
-        unsafe { wr(self.mmio, regs::TDT, self.tx.tail() as u32); }
+        unsafe {
+            wr(self.mmio, regs::TDT, self.tx.tail() as u32);
+        }
 
         // Spin-wait for completion
         while !self.tx.is_done(submitted) {
@@ -172,8 +201,12 @@ impl E1000Nic {
         let rah = rd(base, regs::RAH0);
         if ral != 0 || (rah & 0xFFFF) != 0 {
             return [
-                (ral) as u8, (ral >> 8) as u8, (ral >> 16) as u8, (ral >> 24) as u8,
-                (rah) as u8, (rah >> 8) as u8,
+                (ral) as u8,
+                (ral >> 8) as u8,
+                (ral >> 16) as u8,
+                (ral >> 24) as u8,
+                (rah) as u8,
+                (rah >> 8) as u8,
             ];
         }
         // EEPROM fallback
@@ -187,10 +220,16 @@ impl E1000Nic {
     }
 
     unsafe fn eeprom_read(base: u64, addr: u8) -> u16 {
-        wr(base, regs::EERD, eerd::START | ((addr as u32) << eerd::ADDR_SHIFT));
+        wr(
+            base,
+            regs::EERD,
+            eerd::START | ((addr as u32) << eerd::ADDR_SHIFT),
+        );
         loop {
             let v = rd(base, regs::EERD);
-            if v & eerd::DONE != 0 { return ((v >> eerd::DATA_SHIFT) & 0xFFFF) as u16; }
+            if v & eerd::DONE != 0 {
+                return ((v >> eerd::DATA_SHIFT) & 0xFFFF) as u16;
+            }
             core::hint::spin_loop();
         }
     }

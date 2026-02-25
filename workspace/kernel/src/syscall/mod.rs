@@ -21,10 +21,10 @@ pub mod fork;
 pub mod futex;
 pub mod mmap;
 pub mod numbers;
+pub mod process;
 pub mod signal;
 pub mod time;
 pub mod wait;
-pub mod process;
 
 pub use dispatcher::dispatch;
 pub use exec::sys_execve;

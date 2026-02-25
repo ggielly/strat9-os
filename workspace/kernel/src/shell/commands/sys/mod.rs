@@ -1,12 +1,11 @@
 //! System management commands
 use crate::{
-    process::elf::load_and_run_elf,
     process::{
-        log_scheduler_state, scheduler_class_table, scheduler_verbose_enabled, set_scheduler_verbose,
+        elf::load_and_run_elf, log_scheduler_state, scheduler_class_table,
+        scheduler_verbose_enabled, set_scheduler_verbose,
     },
     shell::{output::clear_screen, ShellError},
-    shell_println,
-    vfs,
+    shell_println, vfs,
 };
 use alloc::string::String;
 
@@ -79,7 +78,11 @@ pub fn cmd_scheduler(args: &[String]) -> Result<(), ShellError> {
             let steal = table.steal_order();
             shell_println!(
                 "scheduler debug: {}",
-                if scheduler_verbose_enabled() { "on" } else { "off" }
+                if scheduler_verbose_enabled() {
+                    "on"
+                } else {
+                    "off"
+                }
             );
             shell_println!(
                 "class table: pick=[{},{},{}] steal=[{},{}]",
@@ -136,7 +139,11 @@ pub fn cmd_trace(args: &[String]) -> Result<(), ShellError> {
                 "trace mem: mask={:#x} mode={} serial={} stored={} dropped={}",
                 crate::trace::mask(),
                 crate::trace::mask_human(crate::trace::mask()),
-                if crate::trace::serial_echo() { "on" } else { "off" },
+                if crate::trace::serial_echo() {
+                    "on"
+                } else {
+                    "off"
+                },
                 stats.stored,
                 stats.dropped
             );

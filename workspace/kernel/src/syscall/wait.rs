@@ -159,8 +159,15 @@ fn encode_wstatus(exit_code: i32) -> i32 {
 ///
 /// Returns `Ok(WaitChildResult::Reaped { .. })` or propagates `EINTR` /
 /// `NoChildren`.
-fn wait_blocking(parent_id: TaskId, target: Option<TaskId>) -> Result<(TaskId, u64, i32), SyscallError> {
-    crate::serial_println!("[wait_blocking] start: parent={:?}, target={:?}", parent_id, target);
+fn wait_blocking(
+    parent_id: TaskId,
+    target: Option<TaskId>,
+) -> Result<(TaskId, u64, i32), SyscallError> {
+    crate::serial_println!(
+        "[wait_blocking] start: parent={:?}, target={:?}",
+        parent_id,
+        target
+    );
     loop {
         crate::serial_println!("[wait_blocking] trying wait...");
         match try_wait_child(parent_id, target) {

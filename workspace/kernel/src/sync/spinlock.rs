@@ -39,7 +39,10 @@ impl<T> SpinLock<T> {
             core::hint::spin_loop();
         }
 
-        SpinLockGuard { lock: self, saved_flags }
+        SpinLockGuard {
+            lock: self,
+            saved_flags,
+        }
     }
 
     /// Try to acquire the lock without spinning.
@@ -50,7 +53,10 @@ impl<T> SpinLock<T> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            Some(SpinLockGuard { lock: self, saved_flags })
+            Some(SpinLockGuard {
+                lock: self,
+                saved_flags,
+            })
         } else {
             crate::arch::x86_64::restore_flags(saved_flags);
             None

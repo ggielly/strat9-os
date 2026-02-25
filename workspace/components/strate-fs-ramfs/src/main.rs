@@ -11,8 +11,10 @@ extern crate alloc;
 
 use core::{alloc::Layout, panic::PanicInfo};
 use linked_list_allocator::LockedHeap;
-use strat9_syscall::*;
-use strat9_syscall::error::{EBADF, EINVAL, ENOSYS};
+use strat9_syscall::{
+    error::{EBADF, EINVAL, ENOSYS},
+    *,
+};
 use strate_fs_abstraction::{FsError, VfsFileSystem, VfsFileType};
 use strate_fs_ramfs::{split_path, RamFileSystem};
 
@@ -59,7 +61,9 @@ struct StrateRamServer {
 
 impl StrateRamServer {
     fn new() -> Self {
-        Self { fs: RamFileSystem::new() }
+        Self {
+            fs: RamFileSystem::new(),
+        }
     }
 
     fn ok_reply(sender: u64) -> IpcMessage {

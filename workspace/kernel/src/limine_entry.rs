@@ -314,19 +314,29 @@ pub unsafe extern "C" fn kmain() -> ! {
                     test_mem_stressed_size
                 );
             } else {
-                crate::serial_println!("[limine] WARN: /initfs/test_mem_stressed not found in modules");
+                crate::serial_println!(
+                    "[limine] WARN: /initfs/test_mem_stressed not found in modules"
+                );
             }
 
             // New modules: init + console-admin
             if let Some((base, size)) = find_module_by_path(modules, b"/initfs/init") {
                 unsafe { INIT_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!("[limine] /initfs/init found: base={:#x} size={}", base, size);
+                crate::serial_println!(
+                    "[limine] /initfs/init found: base={:#x} size={}",
+                    base,
+                    size
+                );
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/init not found in modules");
             }
             if let Some((base, size)) = find_module_by_path(modules, b"/initfs/console-admin") {
                 unsafe { CONSOLE_ADMIN_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!("[limine] /initfs/console-admin found: base={:#x} size={}", base, size);
+                crate::serial_println!(
+                    "[limine] /initfs/console-admin found: base={:#x} size={}",
+                    base,
+                    size
+                );
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/console-admin not found in modules");
             }

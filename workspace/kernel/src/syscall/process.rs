@@ -2,24 +2,28 @@
 //!
 //! Implements PID/TID retrieval per the Strat9-OS ABI.
 
+use super::error::SyscallError;
 use crate::process::{
     create_session, current_pgid, current_pid, current_task_id, current_tid, get_parent_pid,
     get_pgid_by_pid, get_sid_by_pid, set_process_group,
 };
-use super::error::SyscallError;
 
 /// SYS_GETPID (311): Return current process ID.
 ///
 /// In Strat9, each task has a unique ID, so getpid returns the TaskId.
 pub fn sys_getpid() -> Result<u64, SyscallError> {
-    current_pid().map(|pid| pid as u64).ok_or(SyscallError::Fault)
+    current_pid()
+        .map(|pid| pid as u64)
+        .ok_or(SyscallError::Fault)
 }
 
 /// SYS_GETTID (312): Return current thread ID.
 ///
 /// In the current single-threaded silo model, TID == PID.
 pub fn sys_gettid() -> Result<u64, SyscallError> {
-    current_tid().map(|tid| tid as u64).ok_or(SyscallError::Fault)
+    current_tid()
+        .map(|tid| tid as u64)
+        .ok_or(SyscallError::Fault)
 }
 
 /// SYS_GETPPID (313): Return parent process ID.

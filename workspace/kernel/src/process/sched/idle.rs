@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::sync::Arc;
-use crate::process::task::Task;
 use super::{CurrentRuntime, SchedClassRq};
+use crate::process::task::Task;
+use alloc::sync::Arc;
 
 pub struct IdleClassRq {
     idle_task: Option<Arc<Task>>,
@@ -22,7 +22,11 @@ impl SchedClassRq for IdleClassRq {
     }
 
     fn len(&self) -> usize {
-        if self.idle_task.is_some() { 1 } else { 0 }
+        if self.idle_task.is_some() {
+            1
+        } else {
+            0
+        }
     }
 
     fn pick_next(&mut self) -> Option<Arc<Task>> {

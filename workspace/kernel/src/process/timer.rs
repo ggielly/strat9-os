@@ -230,8 +230,7 @@ impl ITimers {
 /// and sets pending signals via atomic ops. This avoids Vec/heap allocation
 /// in interrupt context which would deadlock against the buddy allocator.
 pub fn tick_all_timers(current_time_ns: u64) {
-    use crate::process::signal::Signal;
-    use crate::process::scheduler::SCHEDULER;
+    use crate::process::{scheduler::SCHEDULER, signal::Signal};
 
     let scheduler = match SCHEDULER.try_lock() {
         Some(guard) => guard,

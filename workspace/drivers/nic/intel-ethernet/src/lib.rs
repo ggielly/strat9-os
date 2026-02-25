@@ -19,17 +19,34 @@ pub struct LegacyRxDesc {
 
 impl Default for LegacyRxDesc {
     fn default() -> Self {
-        Self { addr: 0, length: 0, checksum: 0, status: 0, errors: 0, special: 0 }
+        Self {
+            addr: 0,
+            length: 0,
+            checksum: 0,
+            status: 0,
+            errors: 0,
+            special: 0,
+        }
     }
 }
 
 const RX_DD: u8 = 1 << 0;
 
 impl RxDescriptor for LegacyRxDesc {
-    fn set_buffer_addr(&mut self, phys: u64) { self.addr = phys; }
-    fn is_done(&self) -> bool { self.status & RX_DD != 0 }
-    fn packet_length(&self) -> u16 { self.length }
-    fn clear_status(&mut self) { self.status = 0; self.length = 0; self.errors = 0; }
+    fn set_buffer_addr(&mut self, phys: u64) {
+        self.addr = phys;
+    }
+    fn is_done(&self) -> bool {
+        self.status & RX_DD != 0
+    }
+    fn packet_length(&self) -> u16 {
+        self.length
+    }
+    fn clear_status(&mut self) {
+        self.status = 0;
+        self.length = 0;
+        self.errors = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -50,7 +67,15 @@ pub struct LegacyTxDesc {
 
 impl Default for LegacyTxDesc {
     fn default() -> Self {
-        Self { addr: 0, length: 0, cso: 0, cmd: 0, status: 0, css: 0, special: 0 }
+        Self {
+            addr: 0,
+            length: 0,
+            cso: 0,
+            cmd: 0,
+            status: 0,
+            css: 0,
+            special: 0,
+        }
     }
 }
 
@@ -67,8 +92,12 @@ impl TxDescriptor for LegacyTxDesc {
     fn set_eop_ifcs_rs(&mut self) {
         self.cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
     }
-    fn is_done(&self) -> bool { self.status & TX_DD != 0 }
-    fn clear(&mut self) { *self = Self::default(); }
+    fn is_done(&self) -> bool {
+        self.status & TX_DD != 0
+    }
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 // ---------------------------------------------------------------------------

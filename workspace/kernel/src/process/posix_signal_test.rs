@@ -50,7 +50,8 @@ fn test_kill_permissions() -> bool {
         None => return false,
     };
 
-    let target = match Task::new_kernel_task(parked_task, "posix-signal-target", TaskPriority::Low) {
+    let target = match Task::new_kernel_task(parked_task, "posix-signal-target", TaskPriority::Low)
+    {
         Ok(t) => t,
         Err(_) => return false,
     };
@@ -130,9 +131,11 @@ extern "C" fn posix_signal_test_main() -> ! {
 }
 
 pub fn create_posix_signal_test_task() {
-    if let Ok(task) =
-        Task::new_kernel_task(posix_signal_test_main, "posix-signal-test", TaskPriority::Normal)
-    {
+    if let Ok(task) = Task::new_kernel_task(
+        posix_signal_test_main,
+        "posix-signal-test",
+        TaskPriority::Normal,
+    ) {
         add_task(task);
     } else {
         crate::serial_println!("[posix-test] failed to create task");

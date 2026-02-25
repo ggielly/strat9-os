@@ -870,7 +870,13 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
         if can_start && within_task_limit {
             silo.state = SiloState::Loading;
         }
-        (module_id, granted_caps, silo_flags, can_start, within_task_limit)
+        (
+            module_id,
+            granted_caps,
+            silo_flags,
+            can_start,
+            within_task_limit,
+        )
     };
 
     if !can_start {
@@ -1396,7 +1402,13 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
     }
 }
 
-pub fn handle_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode: u64, rip: u64) {
+pub fn handle_user_fault(
+    task_id: TaskId,
+    reason: SiloFaultReason,
+    extra: u64,
+    subcode: u64,
+    rip: u64,
+) {
     dump_user_fault(task_id, reason, extra, subcode, rip);
 
     // Best-effort: map task to silo, mark crashed, emit event, kill tasks.

@@ -1,17 +1,16 @@
 //! ACPI (Advanced Configuration and Power Interface) support.
 //! Inspired by Theseus OS and MaestroOS.
 
-pub mod sdt;
-pub mod rsdt;
-pub mod fadt;
-pub mod madt;
-pub mod hpet;
-pub mod waet;
 pub mod dmar;
+pub mod fadt;
+pub mod hpet;
+pub mod madt;
 pub mod mcfg;
+pub mod rsdt;
+pub mod sdt;
+pub mod waet;
 
-use crate::memory;
-use crate::sync::SpinLock;
+use crate::{memory, sync::SpinLock};
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 use sdt::Sdt;
@@ -125,7 +124,7 @@ fn discover_tables(rsdp_vaddr: u64, revision: u8) -> Result<(), &'static str> {
 
     let mut acpi_tables = ACPI_TABLES.lock();
     let mut discovered = 0usize;
-    
+
     for sdt_phys in rxsdt.addresses() {
         if sdt_phys == 0 {
             continue;
@@ -140,7 +139,7 @@ fn discover_tables(rsdp_vaddr: u64, revision: u8) -> Result<(), &'static str> {
             .or_insert_with(Vec::new)
             .push(sdt);
         discovered += 1;
-        
+
         log::debug!(
             "ACPI: Discovered table {:?} at phys {:#x}",
             core::str::from_utf8(&signature).unwrap_or("????"),
@@ -154,7 +153,7 @@ fn discover_tables(rsdp_vaddr: u64, revision: u8) -> Result<(), &'static str> {
         discovered,
         unique
     );
-    
+
     Ok(())
 }
 

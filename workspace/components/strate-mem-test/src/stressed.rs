@@ -84,7 +84,8 @@ fn set_brk(new_brk: usize, ctx: &str) -> usize {
 }
 
 fn pattern_byte(seed: u8, page: usize, pos: usize) -> u8 {
-    seed.wrapping_add((page as u8).wrapping_mul(13)).wrapping_add(pos as u8)
+    seed.wrapping_add((page as u8).wrapping_mul(13))
+        .wrapping_add(pos as u8)
 }
 
 fn touch_pages(base: usize, pages: usize, seed: u8, tag: &str) {
@@ -146,7 +147,12 @@ fn stage_fixed_rounds() {
         log_hex_u64(target as u64);
         log("\n");
         let _ = set_brk(target, "stage_fixed_rounds_grow");
-        touch_pages(base, *pages, (0x20 + i as u8).wrapping_mul(3), "fixed_round");
+        touch_pages(
+            base,
+            *pages,
+            (0x20 + i as u8).wrapping_mul(3),
+            "fixed_round",
+        );
         let _ = set_brk(base, "stage_fixed_rounds_shrink");
     }
 }

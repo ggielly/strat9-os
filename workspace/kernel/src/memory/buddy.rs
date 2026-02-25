@@ -137,7 +137,11 @@ impl BuddyAllocator {
                 };
 
                 let (stolen_start, stolen_end) = self.bitmap_pool[zi];
-                if stolen_start == 0 || stolen_end == 0 || end <= stolen_start || start >= stolen_end {
+                if stolen_start == 0
+                    || stolen_end == 0
+                    || end <= stolen_start
+                    || start >= stolen_end
+                {
                     self.seed_range_as_free(zi, start, end);
                     continue;
                 }

@@ -2750,7 +2750,10 @@ struct StackStr<const N: usize> {
 
 impl<const N: usize> StackStr<N> {
     const fn new() -> Self {
-        Self { buf: [0; N], len: 0 }
+        Self {
+            buf: [0; N],
+            len: 0,
+        }
     }
     fn as_str(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
@@ -2820,7 +2823,12 @@ pub fn maybe_refresh_system_status_line(theme: UiTheme) {
                 let used = ap.saturating_mul(4096);
                 let free = total.saturating_sub(used);
                 let mut buf = StackStr::<32>::new();
-                let _ = write!(buf, "{}/{}", format_size_stack(free), format_size_stack(total));
+                let _ = write!(
+                    buf,
+                    "{}/{}",
+                    format_size_stack(free),
+                    format_size_stack(total)
+                );
                 buf
             } else {
                 let mut buf = StackStr::<32>::new();
@@ -2844,7 +2852,14 @@ pub fn maybe_refresh_system_status_line(theme: UiTheme) {
     let _ = write!(
         right,
         "ip:{}  ver:{}  up:{:02}:{:02}:{:02}  ticks:{}  fps:{}  load:n/a  mem:{} ",
-        ip.as_str(), version, h, m, s, tick, fps, mem_str.as_str()
+        ip.as_str(),
+        version,
+        h,
+        m,
+        s,
+        tick,
+        fps,
+        mem_str.as_str()
     );
 
     if let Some(mut writer) = VGA_WRITER.try_lock() {
@@ -2887,7 +2902,11 @@ pub extern "C" fn status_line_task_main() -> ! {
         }
         diag_counter += 1;
         if diag_counter % 5000 == 0 {
-            crate::serial_println!("[status-line] heartbeat tick={} vga={}", tick, is_available());
+            crate::serial_println!(
+                "[status-line] heartbeat tick={} vga={}",
+                tick,
+                is_available()
+            );
         }
         crate::process::yield_task();
     }

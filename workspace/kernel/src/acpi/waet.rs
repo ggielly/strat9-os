@@ -18,9 +18,7 @@ pub struct Waet {
 impl Waet {
     /// Finds the WAET in the given `AcpiTables` and returns a reference to it.
     pub fn get() -> Option<&'static Waet> {
-        unsafe {
-            super::find_table(WAET_SIGNATURE).map(|ptr| &*(ptr as *const Waet))
-        }
+        unsafe { super::find_table(WAET_SIGNATURE).map(|ptr| &*(ptr as *const Waet)) }
     }
 
     /// Returns whether the RTC has been enhanced not to require

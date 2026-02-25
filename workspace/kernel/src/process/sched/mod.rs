@@ -83,7 +83,11 @@ impl Default for SchedClassTable {
                     rank: 2,
                 },
             ],
-            pick_order: [SchedClassId::RealTime, SchedClassId::Fair, SchedClassId::Idle],
+            pick_order: [
+                SchedClassId::RealTime,
+                SchedClassId::Fair,
+                SchedClassId::Idle,
+            ],
             steal_order: [SchedClassId::Fair, SchedClassId::RealTime],
         }
     }
@@ -157,7 +161,9 @@ impl CurrentRuntime {
 pub trait SchedClassRq {
     fn enqueue(&mut self, task: Arc<Task>);
     fn len(&self) -> usize;
-    fn is_empty(&self) -> bool { self.len() == 0 }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn pick_next(&mut self) -> Option<Arc<Task>>;
     fn update_current(&mut self, rt: &CurrentRuntime, task: &Task, is_yield: bool) -> bool;
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool;

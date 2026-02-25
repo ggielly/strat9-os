@@ -4,8 +4,8 @@ use super::error::SyscallError;
 use crate::{
     memory::{UserSliceRead, UserSliceWrite},
     process::{
-        current_pgid, current_task_clone, current_task_id, get_all_tasks, get_task_id_by_pid,
-        get_task_by_id, get_task_ids_in_pgid,
+        current_pgid, current_task_clone, current_task_id, get_all_tasks, get_task_by_id,
+        get_task_id_by_pid, get_task_ids_in_pgid,
         signal::{SigAction, SigStack, Signal, SignalSet},
         TaskId,
     },
@@ -345,7 +345,10 @@ pub fn sys_kill(pid: i64, signum: u32) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-fn has_kill_permission(sender: &alloc::sync::Arc<crate::process::Task>, target_id: TaskId) -> Result<bool, SyscallError> {
+fn has_kill_permission(
+    sender: &alloc::sync::Arc<crate::process::Task>,
+    target_id: TaskId,
+) -> Result<bool, SyscallError> {
     let target = get_task_by_id(target_id).ok_or(SyscallError::NotFound)?;
 
     let sender_euid = sender.euid.load(core::sync::atomic::Ordering::Relaxed);
@@ -356,7 +359,10 @@ fn has_kill_permission(sender: &alloc::sync::Arc<crate::process::Task>, target_i
     let sender_uid = sender.uid.load(core::sync::atomic::Ordering::Relaxed);
     let target_uid = target.uid.load(core::sync::atomic::Ordering::Relaxed);
     let target_euid = target.euid.load(core::sync::atomic::Ordering::Relaxed);
-    Ok(sender_uid == target_uid || sender_uid == target_euid || sender_euid == target_uid || sender_euid == target_euid)
+    Ok(sender_uid == target_uid
+        || sender_uid == target_euid
+        || sender_euid == target_uid
+        || sender_euid == target_euid)
 }
 
 fn resolve_kill_targets(pid: i64) -> Result<alloc::vec::Vec<TaskId>, SyscallError> {

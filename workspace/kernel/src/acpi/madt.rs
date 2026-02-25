@@ -1,4 +1,4 @@
-//! Support for the MADT ACPI table, 
+//! Support for the MADT ACPI table,
 //! which includes interrupt and multicore info.
 //! Inspired by Theseus OS.
 
