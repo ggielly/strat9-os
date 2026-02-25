@@ -262,14 +262,12 @@ impl IpcScheme {
     /// `sys_ipc_call` exactly so that `sys_ipc_reply` can correctly route the
     /// reply back to us via `reply::deliver_reply`.
     fn call(&self, mut msg: IpcMessage) -> Result<IpcMessage, SyscallError> {
-        let task_id = crate::process::current_task_id()
-            .ok_or(SyscallError::PermissionDenied)?;
+        let task_id = crate::process::current_task_id().ok_or(SyscallError::PermissionDenied)?;
 
         // Stamp our task-id so the server knows where to deliver the reply.
         msg.sender = task_id.as_u64();
 
-        let port =
-            crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
+        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
         port.send(msg).map_err(|_| SyscallError::BadHandle)?;
         // Drop the Arc before blocking so we don't hold the port alive across
         // a potentially long sleep.

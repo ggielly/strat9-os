@@ -153,10 +153,10 @@ fn build_child_task(
         KernelStack::allocate(Task::DEFAULT_STACK_SIZE).map_err(|_| SyscallError::OutOfMemory)?;
     let context = CpuContext::new(fork_child_start as *const () as u64, &kernel_stack);
 
-    let parent_caps = unsafe { (&*parent.capabilities.get()).clone() };
-    let parent_fd = unsafe { (&*parent.fd_table.get()).clone_for_fork() };
+    let parent_caps = unsafe { (&*parent.process.capabilities.get()).clone() };
+    let parent_fd = unsafe { (&*parent.process.fd_table.get()).clone_for_fork() };
     let parent_blocked = unsafe { copy_signal_set(&*parent.blocked_signals.get()) };
-    let parent_actions: [SigAction; 64] = unsafe { *parent.signal_actions.get() };
+    let parent_actions: [SigAction; 64] = unsafe { *parent.process.signal_actions.get() };
     let parent_sigstack: Option<SigStack> = unsafe { *parent.signal_stack.get() };
 
     let (pid, tid, tgid) = Task::allocate_process_ids();
@@ -176,23 +176,28 @@ fn build_child_task(
         context: SyncUnsafeCell::new(context),
         kernel_stack,
         user_stack: None,
+
         name: "fork-child",
-        capabilities: SyncUnsafeCell::new(parent_caps),
-        address_space: SyncUnsafeCell::new(child_as),
-        fd_table: SyncUnsafeCell::new(parent_fd),
+        process: alloc::sync::Arc::new(crate::process::process::Process {
+            pid,
+            address_space: crate::process::task::SyncUnsafeCell::new(child_as),
+            fd_table: crate::process::task::SyncUnsafeCell::new(parent_fd),
+            capabilities: crate::process::task::SyncUnsafeCell::new(parent_caps),
+            signal_actions: crate::process::task::SyncUnsafeCell::new(parent_actions),
+            brk: core::sync::atomic::AtomicU64::new(parent.process.brk.load(core::sync::atomic::Ordering::Relaxed)),
+            mmap_hint: core::sync::atomic::AtomicU64::new(parent.process.mmap_hint.load(core::sync::atomic::Ordering::Relaxed)),
+            cwd: crate::process::task::SyncUnsafeCell::new(unsafe { &*parent.process.cwd.get() }.clone()),
+            umask: core::sync::atomic::AtomicU32::new(parent.process.umask.load(core::sync::atomic::Ordering::Relaxed)),
+        }),
         // POSIX: pending signals are NOT inherited by the child.
+
         pending_signals: SyncUnsafeCell::new(SignalSet::new()),
         // POSIX: signal mask IS inherited.
         blocked_signals: SyncUnsafeCell::new(parent_blocked),
-        // POSIX: signal actions (handlers) ARE inherited.
-        // TODO: support SA_NOCLDWAIT and other complex signal flags.
-        signal_actions: SyncUnsafeCell::new(parent_actions),
         signal_stack: SyncUnsafeCell::new(parent_sigstack),
         itimers: crate::process::timer::ITimers::new(),
         wake_pending: AtomicBool::new(false),
         wake_deadline_ns: AtomicU64::new(0),
-        brk: AtomicU64::new(parent.brk.load(Ordering::Relaxed)),
-        mmap_hint: AtomicU64::new(parent.mmap_hint.load(Ordering::Relaxed)),
         trampoline_entry: AtomicU64::new(0),
         trampoline_stack_top: AtomicU64::new(0),
         trampoline_arg0: AtomicU64::new(0),
@@ -202,12 +207,7 @@ fn build_child_task(
         // POSIX: clear_child_tid is NOT inherited — child starts with 0.
         clear_child_tid: AtomicU64::new(0),
         // POSIX: cwd IS inherited.
-        cwd: {
-            let parent_cwd = unsafe { (&*parent.cwd.get()).clone() };
-            SyncUnsafeCell::new(parent_cwd)
-        },
         // POSIX: umask IS inherited.
-        umask: AtomicU32::new(parent.umask.load(Ordering::Relaxed)),
         // FS.base: child starts with 0 (its own TLS not yet set up).
         user_fs_base: AtomicU64::new(0),
         // FPU state: child inherits parent's FPU state.
@@ -243,7 +243,7 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
     // For now, we allow fork for all user processes unless restricted.
     // TODO: implement ResourceType::Process/Task restricted capabilities.
 
-    let parent_as = unsafe { &*parent.address_space.get() };
+    let parent_as = unsafe { &*parent.process.address_space.get() };
 
     // 3. Memory check: ensure parent has actual user-space mappings.
     if !parent_as.has_user_mappings() {

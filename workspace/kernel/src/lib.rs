@@ -532,7 +532,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                         revoke: true,
                     },
                 );
-                unsafe { (&mut *task.capabilities.get()).insert(cap) };
+                unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
                 serial_println!("[init] Granted volume capability to init");
             }
         }

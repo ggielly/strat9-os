@@ -37,7 +37,7 @@ pub fn sys_sigaction(signum: u64, act_ptr: u64, oact_ptr: u64) -> Result<u64, Sy
 
     // SAFETY: we have a reference to the task.
     unsafe {
-        let actions = &mut *task.signal_actions.get();
+        let actions = &mut *task.process.signal_actions.get();
 
         // If oact_ptr is not null, write the old action.
         if oact_ptr != 0 {

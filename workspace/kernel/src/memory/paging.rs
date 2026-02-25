@@ -33,14 +33,14 @@ unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     }
 }
 
-/// The kernel page mapper using HHDM offset translation.
-static mut MAPPER: Option<OffsetPageTable<'static>> = None;
+/// Paging initialization flag.
+static mut PAGING_READY: bool = false;
 
 /// Physical address of the kernel's level-4 page table (set at init, never changes).
 static mut KERNEL_CR3: PhysAddr = PhysAddr::new_truncate(0);
 
 pub fn is_initialized() -> bool {
-    unsafe { (*(&raw const MAPPER)).is_some() }
+    unsafe { *(&raw const PAGING_READY) }
 }
 
 /// Initialize the paging subsystem.
@@ -54,7 +54,6 @@ pub fn init(hhdm_offset: u64) {
     let (level_4_frame, _flags) = Cr3::read();
     let level_4_phys = level_4_frame.start_address().as_u64();
     let level_4_virt = phys_offset + level_4_phys;
-    let level_4_table_ptr = level_4_virt.as_mut_ptr::<PageTable>();
 
     // SAFETY: Called once during single-threaded init. The HHDM offset correctly
     // maps all physical RAM to virtual addresses. CR3 points to a valid page table
@@ -62,9 +61,8 @@ pub fn init(hhdm_offset: u64) {
     unsafe {
         let kcr3 = &raw mut KERNEL_CR3;
         *kcr3 = level_4_frame.start_address();
-
-        let mapper = &raw mut MAPPER;
-        *mapper = Some(OffsetPageTable::new(&mut *level_4_table_ptr, phys_offset));
+        let ready = &raw mut PAGING_READY;
+        *ready = true;
     }
 
     log::info!(
@@ -83,13 +81,15 @@ pub fn map_page(
     frame: X86PhysFrame<Size4KiB>,
     flags: PageTableFlags,
 ) -> Result<(), &'static str> {
-    // SAFETY: We trust the caller to provide valid page/frame/flags.
-    // The mapper and frame allocator are correctly initialized.
-    let mapper = unsafe {
-        (*(&raw mut MAPPER))
-            .as_mut()
-            .ok_or("Paging not initialized")?
-    };
+    if !is_initialized() {
+        return Err("Paging not initialized");
+    }
+    let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
+    let (level_4_frame, _) = Cr3::read();
+    let level_4_virt = phys_offset + level_4_frame.start_address().as_u64();
+    // SAFETY: level_4_virt points to the active CR3 PML4 via HHDM.
+    let mapper = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
+    let mut mapper = unsafe { OffsetPageTable::new(mapper, phys_offset) };
     let mut allocator = BuddyFrameAllocator;
 
     unsafe {
@@ -103,11 +103,15 @@ pub fn map_page(
 
 /// Unmap a virtual page, returning the physical frame it was mapped to.
 pub fn unmap_page(page: Page<Size4KiB>) -> Result<X86PhysFrame<Size4KiB>, &'static str> {
-    let mapper = unsafe {
-        (*(&raw mut MAPPER))
-            .as_mut()
-            .ok_or("Paging not initialized")?
-    };
+    if !is_initialized() {
+        return Err("Paging not initialized");
+    }
+    let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
+    let (level_4_frame, _) = Cr3::read();
+    let level_4_virt = phys_offset + level_4_frame.start_address().as_u64();
+    // SAFETY: level_4_virt points to the active CR3 PML4 via HHDM.
+    let mapper = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
+    let mut mapper = unsafe { OffsetPageTable::new(mapper, phys_offset) };
     let (frame, flush) = mapper.unmap(page).map_err(|_| "Failed to unmap page")?;
     flush.flush();
     Ok(frame)
@@ -117,7 +121,15 @@ pub fn unmap_page(page: Page<Size4KiB>) -> Result<X86PhysFrame<Size4KiB>, &'stat
 ///
 /// Returns `None` if the address is not mapped.
 pub fn translate(addr: VirtAddr) -> Option<PhysAddr> {
-    let mapper = unsafe { (*(&raw const MAPPER)).as_ref()? };
+    if !is_initialized() {
+        return None;
+    }
+    let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
+    let (level_4_frame, _) = Cr3::read();
+    let level_4_virt = phys_offset + level_4_frame.start_address().as_u64();
+    // SAFETY: level_4_virt points to the active CR3 PML4 via HHDM.
+    let mapper = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
+    let mapper = unsafe { OffsetPageTable::new(mapper, phys_offset) };
     mapper.translate_addr(addr)
 }
 

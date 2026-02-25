@@ -223,7 +223,7 @@ fn sys_null() -> Result<u64, SyscallError> {
 fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(_handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &mut *task.capabilities.get() };
+    let caps = unsafe { &mut *task.process.capabilities.get() };
     if let Some(cap) = caps.remove(CapId::from_raw(_handle)) {
         if cap.resource_type == ResourceType::File {
             if let Ok(fd) = u32::try_from(cap.resource) {
@@ -241,7 +241,7 @@ fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
 fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &mut *task.capabilities.get() };
+    let caps = unsafe { &mut *task.process.capabilities.get() };
     let dup = caps
         .duplicate(CapId::from_raw(handle))
         .ok_or(SyscallError::PermissionDenied)?;
@@ -378,7 +378,7 @@ fn resolve_volume_device(
 ) -> Result<&'static virtio_block::VirtioBlockDevice, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get_with_permissions(CapId::from_raw(handle), required)
         .ok_or(SyscallError::PermissionDenied)?;
@@ -578,14 +578,14 @@ fn sys_ipc_create_port(_flags: u64) -> Result<u64, SyscallError> {
         port_id.as_u64() as usize,
         CapPermissions::all(),
     );
-    let cap_id = unsafe { (&mut *task.capabilities.get()).insert(cap) };
+    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
     Ok(cap_id.as_u64())
 }
 
 fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(port)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let required = CapPermissions {
         read: false,
         write: true,
@@ -631,7 +631,7 @@ fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 fn sys_ipc_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(port)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let required = CapPermissions {
         read: true,
         write: false,
@@ -654,13 +654,13 @@ fn sys_ipc_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     if msg.flags != 0 {
         let sender_id = crate::process::TaskId::from_u64(msg.sender);
         let sender = crate::process::get_task_by_id(sender_id).ok_or(SyscallError::BadHandle)?;
-        let sender_caps = unsafe { &mut *sender.capabilities.get() };
+        let sender_caps = unsafe { &mut *sender.process.capabilities.get() };
         let dup = sender_caps
             .duplicate(CapId::from_raw(msg.flags as u64))
             .ok_or(SyscallError::PermissionDenied)?;
 
         let receiver = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let receiver_caps = unsafe { &mut *receiver.capabilities.get() };
+        let receiver_caps = unsafe { &mut *receiver.process.capabilities.get() };
         let new_id = receiver_caps.insert(dup);
         if new_id.as_u64() > u32::MAX as u64 {
             return Err(SyscallError::InvalidArgument);
@@ -682,7 +682,7 @@ fn sys_ipc_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 fn sys_ipc_try_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(port)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let required = CapPermissions {
         read: true,
         write: false,
@@ -710,13 +710,13 @@ fn sys_ipc_try_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     if msg.flags != 0 {
         let sender_id = crate::process::TaskId::from_u64(msg.sender);
         let sender = crate::process::get_task_by_id(sender_id).ok_or(SyscallError::BadHandle)?;
-        let sender_caps = unsafe { &mut *sender.capabilities.get() };
+        let sender_caps = unsafe { &mut *sender.process.capabilities.get() };
         let dup = sender_caps
             .duplicate(CapId::from_raw(msg.flags as u64))
             .ok_or(SyscallError::PermissionDenied)?;
 
         let receiver = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let receiver_caps = unsafe { &mut *receiver.capabilities.get() };
+        let receiver_caps = unsafe { &mut *receiver.process.capabilities.get() };
         let new_id = receiver_caps.insert(dup);
         if new_id.as_u64() > u32::MAX as u64 {
             return Err(SyscallError::InvalidArgument);
@@ -738,7 +738,7 @@ fn sys_ipc_try_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 fn sys_ipc_call(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(port)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let required = CapPermissions {
         read: false,
         write: true,
@@ -803,13 +803,13 @@ fn sys_ipc_reply(_msg_ptr: u64) -> Result<u64, SyscallError> {
     let mut msg = msg;
     if msg.flags != 0 {
         let sender = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let sender_caps = unsafe { &mut *sender.capabilities.get() };
+        let sender_caps = unsafe { &mut *sender.process.capabilities.get() };
         let dup = sender_caps
             .duplicate(CapId::from_raw(msg.flags as u64))
             .ok_or(SyscallError::PermissionDenied)?;
 
         let receiver = crate::process::get_task_by_id(target).ok_or(SyscallError::BadHandle)?;
-        let receiver_caps = unsafe { &mut *receiver.capabilities.get() };
+        let receiver_caps = unsafe { &mut *receiver.process.capabilities.get() };
         let new_id = receiver_caps.insert(dup);
         if new_id.as_u64() > u32::MAX as u64 {
             return Err(SyscallError::InvalidArgument);
@@ -836,7 +836,7 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
     let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get_with_permissions(
             CapId::from_raw(port),
@@ -876,7 +876,7 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
                     revoke: true,
                 },
             );
-            let task_caps = unsafe { &mut *task.capabilities.get() };
+            let task_caps = unsafe { &mut *task.process.capabilities.get() };
             let id = task_caps.insert(volume_cap);
             log::info!(
                 "ipc_bind_port('/'): seeded volume capability handle={} for task {:?}",
@@ -950,7 +950,7 @@ fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
 
     // Register a Channel capability in the current task's capability table.
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &mut *task.capabilities.get() };
+    let caps = unsafe { &mut *task.process.capabilities.get() };
     let cap_id = caps.insert(crate::capability::Capability {
         id: crate::capability::CapId::new(),
         permissions: crate::capability::CapPermissions {
@@ -995,7 +995,7 @@ fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     msg.sender = task.id.as_u64();
 
     // Look up the channel capability.
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get(crate::capability::CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;
@@ -1017,7 +1017,7 @@ fn sys_chan_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get(crate::capability::CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;
@@ -1049,7 +1049,7 @@ fn sys_chan_try_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get(crate::capability::CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;
@@ -1082,7 +1082,7 @@ fn sys_chan_close(handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &mut *task.capabilities.get() };
+    let caps = unsafe { &mut *task.process.capabilities.get() };
     let cap = caps
         .remove(crate::capability::CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;

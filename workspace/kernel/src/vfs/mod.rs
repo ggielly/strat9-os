@@ -76,7 +76,7 @@ pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
     // Insert into current task's FD table
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: We're in syscall context, have exclusive access to FD table
-    let fd = unsafe { (&mut *task.fd_table.get()).insert(open_file) };
+    let fd = unsafe { (&mut *task.process.fd_table.get()).insert(open_file) };
 
     Ok(fd)
 }
@@ -106,7 +106,7 @@ pub fn unlink(path: &str) -> Result<(), SyscallError> {
 pub fn read(fd: u32, buf: &mut [u8]) -> Result<usize, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Syscall context
-    let fd_table = unsafe { &*task.fd_table.get() };
+    let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.read(buf)
 }
@@ -115,7 +115,7 @@ pub fn read(fd: u32, buf: &mut [u8]) -> Result<usize, SyscallError> {
 pub fn write(fd: u32, buf: &[u8]) -> Result<usize, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Syscall context
-    let fd_table = unsafe { &*task.fd_table.get() };
+    let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.write(buf)
 }
@@ -127,7 +127,7 @@ pub fn write(fd: u32, buf: &[u8]) -> Result<usize, SyscallError> {
 pub fn close(fd: u32) -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Syscall context
-    let fd_table = unsafe { &mut *task.fd_table.get() };
+    let fd_table = unsafe { &mut *task.process.fd_table.get() };
     let _file = fd_table.remove(fd)?;
     Ok(())
     // _file (Arc<OpenFile>) is dropped here; if refcount → 0, Drop fires → scheme.close()
@@ -137,7 +137,7 @@ pub fn close(fd: u32) -> Result<(), SyscallError> {
 pub fn seek(fd: u32, offset: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Syscall context
-    let fd_table = unsafe { &*task.fd_table.get() };
+    let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.seek(offset)
 }
@@ -146,7 +146,7 @@ pub fn seek(fd: u32, offset: u64) -> Result<u64, SyscallError> {
 pub fn tell(fd: u32) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Syscall context
-    let fd_table = unsafe { &*task.fd_table.get() };
+    let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
     Ok(file.tell())
 }
@@ -155,7 +155,7 @@ pub fn tell(fd: u32) -> Result<u64, SyscallError> {
 pub fn fsize(fd: u32) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Syscall context
-    let fd_table = unsafe { &*task.fd_table.get() };
+    let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.size()
 }
@@ -164,7 +164,7 @@ pub fn fsize(fd: u32) -> Result<u64, SyscallError> {
 pub fn fsync(fd: u32) -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Syscall context
-    let fd_table = unsafe { &*task.fd_table.get() };
+    let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.sync()
 }
@@ -172,7 +172,7 @@ pub fn fsync(fd: u32) -> Result<(), SyscallError> {
 /// POSIX lseek on a file descriptor.
 pub fn lseek(fd: u32, offset: i64, whence: u32) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let fd_table = unsafe { &*task.fd_table.get() };
+    let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.lseek(offset, whence)
 }
@@ -180,7 +180,7 @@ pub fn lseek(fd: u32, offset: i64, whence: u32) -> Result<u64, SyscallError> {
 /// fstat on an open file descriptor.
 pub fn fstat(fd: u32) -> Result<FileStat, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let fd_table = unsafe { &*task.fd_table.get() };
+    let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.stat()
 }
@@ -197,7 +197,7 @@ pub fn stat_path(path: &str) -> Result<FileStat, SyscallError> {
 /// Read directory entries from an open directory fd.
 pub fn getdents(fd: u32) -> Result<alloc::vec::Vec<DirEntry>, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let fd_table = unsafe { &*task.fd_table.get() };
+    let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
     file.readdir()
 }
@@ -250,7 +250,7 @@ pub fn pipe() -> Result<(u32, u32), SyscallError> {
     ));
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let fd_table = unsafe { &mut *task.fd_table.get() };
+    let fd_table = unsafe { &mut *task.process.fd_table.get() };
     let read_fd = fd_table.insert(read_file);
     let write_fd = fd_table.insert(write_file);
 
@@ -260,7 +260,7 @@ pub fn pipe() -> Result<(u32, u32), SyscallError> {
 /// Duplicate a file descriptor (POSIX dup).
 pub fn dup(old_fd: u32) -> Result<u32, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let fd_table = unsafe { &mut *task.fd_table.get() };
+    let fd_table = unsafe { &mut *task.process.fd_table.get() };
     fd_table.duplicate(old_fd)
 }
 
@@ -268,12 +268,12 @@ pub fn dup(old_fd: u32) -> Result<u32, SyscallError> {
 pub fn dup2(old_fd: u32, new_fd: u32) -> Result<u32, SyscallError> {
     if old_fd == new_fd {
         let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let fd_table = unsafe { &*task.fd_table.get() };
+        let fd_table = unsafe { &*task.process.fd_table.get() };
         fd_table.get(old_fd)?;
         return Ok(new_fd);
     }
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let fd_table = unsafe { &mut *task.fd_table.get() };
+    let fd_table = unsafe { &mut *task.process.fd_table.get() };
 
     // Close new_fd if it exists (silently ignore errors)
     let _ = fd_table.remove(new_fd);
@@ -578,7 +578,7 @@ fn resolve_path(path: &str, cwd: &str) -> alloc::string::String {
 pub fn sys_chdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     let raw = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let cwd = unsafe { &*task.cwd.get() };
+    let cwd = unsafe { &*task.process.cwd.get() };
     let abs = resolve_path(&raw, cwd);
 
     // Verify the directory exists by trying to open it.
@@ -587,18 +587,18 @@ pub fn sys_chdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     let _ = scheme.close(res.file_id);
 
     // Store the new cwd.
-    unsafe { *task.cwd.get() = abs };
+    unsafe { *task.process.cwd.get() = abs };
     Ok(0)
 }
 
 /// SYS_FCHDIR (441): Change cwd using an open file descriptor.
 pub fn sys_fchdir(fd: u32) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let fd_table = unsafe { &*task.fd_table.get() };
+    let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
     let path = alloc::string::String::from(file.path());
     drop(fd_table);
-    unsafe { *task.cwd.get() = path };
+    unsafe { *task.process.cwd.get() = path };
     Ok(0)
 }
 
@@ -608,7 +608,7 @@ pub fn sys_getcwd(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
         return Err(SyscallError::InvalidArgument);
     }
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let cwd = unsafe { (&*task.cwd.get()).clone() };
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let bytes = cwd.as_bytes();
     let needed = bytes.len() + 1; // include NUL terminator
     if needed > buf_len as usize {
@@ -634,7 +634,7 @@ pub fn sys_ioctl(_fd: u32, _request: u64, _arg: u64) -> Result<u64, SyscallError
 pub fn sys_umask(mask: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let old = task
-        .umask
+        .process.umask
         .swap(mask as u32 & 0o777, core::sync::atomic::Ordering::Relaxed);
     Ok(old as u64)
 }
@@ -643,7 +643,7 @@ pub fn sys_umask(mask: u64) -> Result<u64, SyscallError> {
 pub fn sys_unlink(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     let raw = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let cwd = unsafe { (&*task.cwd.get()).clone() };
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&raw, &cwd);
     unlink(&abs)?;
     Ok(0)
@@ -654,7 +654,7 @@ pub fn sys_rmdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     // Reuse unlink for now — filesystem backends distinguish DIR vs FILE.
     let raw = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let cwd = unsafe { (&*task.cwd.get()).clone() };
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&raw, &cwd);
     unlink(&abs)?;
     Ok(0)
@@ -664,8 +664,8 @@ pub fn sys_rmdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
 pub fn sys_mkdir(path_ptr: u64, path_len: u64, mode: u64) -> Result<u64, SyscallError> {
     let raw = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let umask = task.umask.load(core::sync::atomic::Ordering::Relaxed);
-    let cwd = unsafe { (&*task.cwd.get()).clone() };
+    let umask = task.process.umask.load(core::sync::atomic::Ordering::Relaxed);
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&raw, &cwd);
     let effective_mode = (mode as u32) & !umask;
     mkdir(&abs, effective_mode)?;

@@ -973,7 +973,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // Switch to the user address space stored in the task.
     // SAFETY: The address space was set up during task creation and is valid.
     unsafe {
-        let as_ref = &*task.address_space.get();
+        let as_ref = &*task.process.address_space.get();
         as_ref.switch_to();
     }
 
@@ -1133,18 +1133,13 @@ pub fn load_and_run_elf_with_caps(
         kernel_stack,
         user_stack: None,
         name,
-        capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
-        address_space: SyncUnsafeCell::new(user_as),
-        fd_table: SyncUnsafeCell::new(crate::vfs::FileDescriptorTable::new()),
+        process: Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
         blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
-        signal_actions: SyncUnsafeCell::new([super::signal::SigAction::Default; 64]),
         signal_stack: SyncUnsafeCell::new(None),
         itimers: super::timer::ITimers::new(),
         wake_pending: core::sync::atomic::AtomicBool::new(false),
         wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
-        brk: core::sync::atomic::AtomicU64::new(0),
-        mmap_hint: core::sync::atomic::AtomicU64::new(0x0000_0000_6000_0000),
         trampoline_entry: core::sync::atomic::AtomicU64::new(runtime_entry),
         trampoline_stack_top: core::sync::atomic::AtomicU64::new(USER_STACK_TOP),
         trampoline_arg0: core::sync::atomic::AtomicU64::new(0),
@@ -1154,8 +1149,6 @@ pub fn load_and_run_elf_with_caps(
         )),
         vruntime: core::sync::atomic::AtomicU64::new(0),
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
-        cwd: crate::process::task::SyncUnsafeCell::new(alloc::string::String::from("/")),
-        umask: core::sync::atomic::AtomicU32::new(0o022),
         user_fs_base: core::sync::atomic::AtomicU64::new(0),
         fpu_state: crate::process::task::SyncUnsafeCell::new(crate::process::task::FpuState::new()),
     });
@@ -1163,7 +1156,7 @@ pub fn load_and_run_elf_with_caps(
     // Seed capabilities into the new task (before scheduling).
     let mut bootstrap_handle: Option<u64> = None;
     if !seed_caps.is_empty() {
-        let caps = unsafe { &mut *task.capabilities.get() };
+        let caps = unsafe { &mut *task.process.capabilities.get() };
         for cap in seed_caps {
             let id = caps.insert(cap.clone());
             if bootstrap_handle.is_none()

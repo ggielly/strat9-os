@@ -26,7 +26,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, SyscallError> {
         F_GETFD => {
             // Get file descriptor flags
             unsafe {
-                let fd_table = &*task.fd_table.get();
+                let fd_table = &*task.process.fd_table.get();
                 let cloexec = fd_table.get_cloexec(fd as u32)?;
                 Ok(if cloexec { FD_CLOEXEC } else { 0 })
             }
@@ -34,7 +34,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, SyscallError> {
         F_SETFD => {
             // Set file descriptor flags
             unsafe {
-                let fd_table = &mut *task.fd_table.get();
+                let fd_table = &mut *task.process.fd_table.get();
                 let cloexec = (arg & FD_CLOEXEC) != 0;
                 fd_table.set_cloexec(fd as u32, cloexec)?;
                 Ok(0)
@@ -44,7 +44,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, SyscallError> {
             // Duplicate file descriptor (minimum FD >= arg)
             // TODO: implement proper dup with minimum FD
             unsafe {
-                let fd_table = &mut *task.fd_table.get();
+                let fd_table = &mut *task.process.fd_table.get();
                 let new_fd = fd_table.duplicate(fd as u32)?;
                 Ok(new_fd as u64)
             }

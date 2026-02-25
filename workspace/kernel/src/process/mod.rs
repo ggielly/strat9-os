@@ -16,6 +16,7 @@ pub mod futex_test;
 pub mod mmap_test;
 #[cfg(feature = "selftest")]
 pub mod posix_signal_test;
+pub mod process;
 pub mod sched;
 pub mod scheduler;
 #[cfg(feature = "selftest")]

@@ -458,7 +458,7 @@ fn resolve_export_offset(module: &ModuleImage, ordinal: u64) -> Result<u64, Sysc
 pub fn require_silo_admin() -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Current task owns its capability table during syscall execution.
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let required = CapPermissions {
         read: false,
         write: false,
@@ -476,7 +476,7 @@ pub fn require_silo_admin() -> Result<(), SyscallError> {
 
 fn resolve_silo_handle(handle: u64, required: CapPermissions) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap_id = CapId::from_raw(handle);
     let cap = caps.get(cap_id).ok_or(SyscallError::BadHandle)?;
 
@@ -540,7 +540,7 @@ static MODULE_REGISTRY: SpinLock<ModuleRegistry> = SpinLock::new(ModuleRegistry:
 
 fn resolve_module_handle(handle: u64, required: CapPermissions) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap_id = CapId::from_raw(handle);
     let cap = caps.get(cap_id).ok_or(SyscallError::BadHandle)?;
 
@@ -570,7 +570,7 @@ pub fn grant_silo_admin_to_task(task: &alloc::sync::Arc<Task>) -> CapId {
         CapPermissions::all(),
     );
     // SAFETY: Bootstrapping. Caller must ensure exclusive access.
-    unsafe { (&mut *task.capabilities.get()).insert(cap) }
+    unsafe { (&mut *task.process.capabilities.get()).insert(cap) }
 }
 
 // ============================================================================
@@ -602,7 +602,7 @@ pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
         );
 
         let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let cap_id = unsafe { (&mut *task.capabilities.get()).insert(cap) };
+        let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
 
         return Ok(cap_id.as_u64());
     }
@@ -616,7 +616,7 @@ pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
     // - msg_type = IPC_STREAM_DATA, flags = payload length (0..48)
     // - msg_type = IPC_STREAM_EOF (or DATA with flags=0) ends the stream
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let required = CapPermissions {
         read: true,
         write: false,
@@ -653,7 +653,7 @@ pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
         CapPermissions::all(),
     );
 
-    let cap_id = unsafe { (&mut *task.capabilities.get()).insert(cap) };
+    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
 
     Ok(cap_id.as_u64())
 }
@@ -770,7 +770,7 @@ pub fn sys_silo_create(flags: u64) -> Result<u64, SyscallError> {
     );
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let cap_id = unsafe { (&mut *task.capabilities.get()).insert(cap) };
+    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
 
     Ok(cap_id.as_u64())
 }
@@ -785,7 +785,7 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
     if config.caps_len > 0 {
         let caps_list = read_caps_list(config.caps_ptr, config.caps_len)?;
         let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let caps = unsafe { &*task.capabilities.get() };
+        let caps = unsafe { &*task.process.capabilities.get() };
 
         for cap_handle in caps_list {
             let cap = caps
@@ -890,7 +890,7 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
 
     let seed_caps = {
         let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let caps = unsafe { &mut *task.capabilities.get() };
+        let caps = unsafe { &mut *task.process.capabilities.get() };
         let mut out = Vec::new();
         for handle in granted_caps {
             // Enforce: caller must currently hold the capability.
@@ -936,7 +936,7 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
     // keyboard (which would steal input from the foreground shell).
     if let Some(task) = crate::process::get_task_by_id(task_id) {
         let bg_stdin = crate::vfs::create_background_stdin();
-        let fd_table = unsafe { &mut *task.fd_table.get() };
+        let fd_table = unsafe { &mut *task.process.fd_table.get() };
         fd_table.insert_at(crate::vfs::STDIN, bg_stdin);
     }
 
@@ -1086,7 +1086,7 @@ pub fn sys_silo_kill(handle: u64) -> Result<u64, SyscallError> {
 }
 
 fn silo_has_capability(task: &Task, cap_id: u64) -> bool {
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     caps.get(CapId::from_raw(cap_id)).is_some()
 }
 
@@ -1108,7 +1108,7 @@ fn is_delegated_resource(rt: ResourceType) -> bool {
 }
 
 fn is_admin_task(task: &Task) -> bool {
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let required = CapPermissions {
         read: false,
         write: false,
@@ -1163,7 +1163,7 @@ pub fn enforce_cap_for_current_task(handle: u64) -> Result<(), SyscallError> {
         return Ok(());
     }
 
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get(CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;
@@ -1203,7 +1203,7 @@ pub fn enforce_console_access() -> Result<(), SyscallError> {
     if is_admin_task(&task) {
         return Ok(());
     }
-    let caps = unsafe { &*task.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let required = CapPermissions {
         read: false,
         write: true,
@@ -1327,7 +1327,7 @@ pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
 fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode: u64, rip: u64) {
     let task_meta = crate::process::get_task_by_id(task_id).map(|task| {
         let state = unsafe { *task.state.get() };
-        let as_ref = unsafe { &*task.address_space.get() };
+        let as_ref = unsafe { &*task.process.address_space.get() };
         (
             task.pid,
             task.tid,

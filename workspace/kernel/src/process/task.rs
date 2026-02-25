@@ -150,17 +150,14 @@ pub struct Task {
     /// Task name for debugging purposes
     pub name: &'static str,
     /// Capabilities granted to this task
-    pub capabilities: SyncUnsafeCell<CapabilityTable>,
     /// Address space for this task (kernel tasks share the kernel AS)
-    pub address_space: SyncUnsafeCell<Arc<AddressSpace>>,
+    pub process: Arc<crate::process::process::Process>,
     /// File descriptor table for this task
-    pub fd_table: SyncUnsafeCell<FileDescriptorTable>,
     /// Pending signals for this task
     pub pending_signals: SyncUnsafeCell<super::signal::SignalSet>,
     /// Blocked signals mask for this task
     pub blocked_signals: SyncUnsafeCell<super::signal::SignalSet>,
     /// Signal actions (handlers) for this task
-    pub signal_actions: SyncUnsafeCell<[super::signal::SigAction; 64]>,
     /// Signal alternate stack for this task
     pub signal_stack: SyncUnsafeCell<Option<super::signal::SigStack>>,
     /// Interval timers (ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF)
@@ -175,9 +172,7 @@ pub struct Task {
     pub wake_deadline_ns: AtomicU64,
     /// Program break (end of heap), in bytes. 0 = not yet initialised.
     /// Lazily set to `BRK_BASE` on the first `sys_brk` call.
-    pub brk: AtomicU64,
     /// mmap_hint: next candidate virtual address for anonymous mmap allocations
-    pub mmap_hint: AtomicU64,
     /// User-space entry point for ring3 trampoline (ELF tasks only, 0 otherwise).
     pub trampoline_entry: AtomicU64,
     /// User-space stack top for ring3 trampoline (ELF tasks only, 0 otherwise).
@@ -194,9 +189,7 @@ pub struct Task {
     /// The kernel writes 0 here when the thread exits, then futex_wake.
     pub clear_child_tid: AtomicU64,
     /// Current working directory (POSIX, inherited by children).
-    pub cwd: SyncUnsafeCell<String>,
     /// File creation mask (inherited by children, NOT reset by exec).
-    pub umask: AtomicU32,
     /// User-space FS.base (TLS on x86_64, set via arch_prctl ARCH_SET_FS).
     /// Saved/restored across context switches.
     pub user_fs_base: AtomicU64,
@@ -430,18 +423,13 @@ impl Task {
             kernel_stack,
             user_stack: None,
             name,
-            capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
-            address_space: SyncUnsafeCell::new(crate::memory::kernel_address_space().clone()),
-            fd_table: SyncUnsafeCell::new(FileDescriptorTable::new()),
+            process: Arc::new(crate::process::process::Process::new(pid, crate::memory::kernel_address_space().clone())),
             pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
             blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
-            signal_actions: SyncUnsafeCell::new([super::signal::SigAction::Default; 64]),
             signal_stack: SyncUnsafeCell::new(None),
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),
             wake_deadline_ns: AtomicU64::new(0),
-            brk: AtomicU64::new(0),
-            mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
             trampoline_entry: AtomicU64::new(0),
             trampoline_stack_top: AtomicU64::new(0),
             trampoline_arg0: AtomicU64::new(0),
@@ -449,8 +437,6 @@ impl Task {
             sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
             vruntime: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
-            cwd: SyncUnsafeCell::new(String::from("/")),
-            umask: AtomicU32::new(0o022),
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(FpuState::new()),
         }))
@@ -496,18 +482,13 @@ impl Task {
             kernel_stack,
             user_stack: None,
             name,
-            capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
-            address_space: SyncUnsafeCell::new(address_space),
-            fd_table: SyncUnsafeCell::new(FileDescriptorTable::new()),
+            process: Arc::new(crate::process::process::Process::new(pid, address_space)),
             pending_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
             blocked_signals: SyncUnsafeCell::new(super::signal::SignalSet::new()),
-            signal_actions: SyncUnsafeCell::new([super::signal::SigAction::Default; 64]),
             signal_stack: SyncUnsafeCell::new(None),
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),
             wake_deadline_ns: AtomicU64::new(0),
-            brk: AtomicU64::new(0),
-            mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
             trampoline_entry: AtomicU64::new(0),
             trampoline_stack_top: AtomicU64::new(0),
             trampoline_arg0: AtomicU64::new(0),
@@ -515,8 +496,6 @@ impl Task {
             sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
             vruntime: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
-            cwd: SyncUnsafeCell::new(String::from("/")),
-            umask: AtomicU32::new(0o022),
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(FpuState::new()),
         }))
@@ -530,7 +509,7 @@ impl Task {
     pub fn reset_signals(&self) {
         // SAFETY: We have a valid reference to the task.
         unsafe {
-            let actions = &mut *self.signal_actions.get();
+            let actions = &mut *self.process.signal_actions.get();
             for action in actions.iter_mut() {
                 *action = super::signal::SigAction::Default;
             }
@@ -541,7 +520,7 @@ impl Task {
     pub fn is_kernel(&self) -> bool {
         // SAFETY: address_space is immutable for the lifetime of the Arc?
         // Actually we just updated it to SyncUnsafeCell.
-        unsafe { (*self.address_space.get()).is_kernel() }
+        unsafe { (*self.process.address_space.get()).is_kernel() }
     }
 
     /// Allocate POSIX identifiers for a new process leader.

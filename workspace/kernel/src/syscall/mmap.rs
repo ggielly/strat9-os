@@ -145,7 +145,7 @@ pub fn sys_mmap(
 
     //  Determine the target virtual address
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    let addr_space = unsafe { &*task.address_space.get() };
+    let addr_space = unsafe { &*task.process.address_space.get() };
 
     let target = if flags & MAP_FIXED != 0 {
         // MAP_FIXED: the caller demands this exact page-aligned address.
@@ -172,7 +172,7 @@ pub fn sys_mmap(
         let hint = if addr != 0 {
             addr
         } else {
-            task.mmap_hint.load(Ordering::Relaxed)
+            task.process.mmap_hint.load(Ordering::Relaxed)
         };
 
         // Try the hint first, then fall back to MMAP_BASE.
@@ -192,7 +192,7 @@ pub fn sys_mmap(
     if flags & MAP_FIXED == 0 {
         let new_hint = target.saturating_add(len_aligned);
         // Atomically advance: only update if it moves forward.
-        let _ = task.mmap_hint.fetch_max(new_hint, Ordering::Relaxed);
+        let _ = task.process.mmap_hint.fetch_max(new_hint, Ordering::Relaxed);
     }
 
     log::trace!(
@@ -233,7 +233,7 @@ pub fn sys_munmap(addr: u64, len: u64) -> Result<u64, SyscallError> {
     }
 
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    unsafe { &*task.address_space.get() }
+    unsafe { &*task.process.address_space.get() }
         .unmap_range(addr, len_aligned)
         .map_err(|_| SyscallError::InvalidArgument)?;
 
@@ -267,12 +267,12 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
 
     // ── Lazy initialisation ───────────────────────────────────────────────
-    // `task.brk == 0` means this task has never called brk.  The heap starts
+    // `task.process.brk == 0` means this task has never called brk.  The heap starts
     // empty at BRK_BASE; no pages are mapped yet.
     let current_brk = {
-        let raw = task.brk.load(Ordering::Relaxed);
+        let raw = task.process.brk.load(Ordering::Relaxed);
         if raw == 0 {
-            task.brk.store(BRK_BASE, Ordering::Relaxed);
+            task.process.brk.store(BRK_BASE, Ordering::Relaxed);
             BRK_BASE
         } else {
             raw
@@ -306,7 +306,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             executable: false,
             user_accessible: true,
         };
-        if unsafe { &*task.address_space.get() }
+        if unsafe { &*task.process.address_space.get() }
             .map_region(
                 old_page_end,
                 n_pages,
@@ -328,7 +328,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     } else if new_page_end < old_page_end {
         // ── Shrink: unmap [new_page_end, old_page_end) ───────────────────
         let len = old_page_end - new_page_end;
-        if unsafe { &*task.address_space.get() }
+        if unsafe { &*task.process.address_space.get() }
             .unmap_range(new_page_end, len)
             .is_err()
         {
@@ -345,6 +345,6 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     // no page-table operations are needed.
 
     // ── Commit the new exact-byte program break ───────────────────────────
-    task.brk.store(addr, Ordering::Relaxed);
+    task.process.brk.store(addr, Ordering::Relaxed);
     Ok(addr)
 }
