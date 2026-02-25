@@ -13,8 +13,8 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use spin::{Mutex, RwLock};
 use strate_fs_abstraction::{
     FsCapabilities, FsError, FsResult, RenameFlags, VfsDirEntry, VfsFileInfo, VfsFileSystem,
     VfsFileType, VfsTimestamp, VfsVolumeInfo,
@@ -32,16 +32,29 @@ enum RamNode {
     },
 }
 
+struct RamInode {
+    node: Mutex<RamNode>,
+    open_count: AtomicU32,
+}
+
+impl RamInode {
+    fn new(node: RamNode) -> Self {
+        Self {
+            node: Mutex::new(node),
+            open_count: AtomicU32::new(0),
+        }
+    }
+}
+
 pub struct RamFileSystem {
-    inodes: Mutex<BTreeMap<u64, Arc<Mutex<RamNode>>>>,
-    open_counts: Mutex<BTreeMap<u64, u32>>,
+    inodes: RwLock<BTreeMap<u64, Arc<RamInode>>>,
     next_inode: AtomicU64,
     capabilities: FsCapabilities,
 }
 
 impl RamFileSystem {
     pub fn new() -> Self {
-        let root = Arc::new(Mutex::new(RamNode::Directory {
+        let root = Arc::new(RamInode::new(RamNode::Directory {
             entries: BTreeMap::new(),
             mode: 0o040755,
         }));
@@ -49,16 +62,15 @@ impl RamFileSystem {
         inodes.insert(2, root); // Standard root inode is 2
 
         Self {
-            inodes: Mutex::new(inodes),
-            open_counts: Mutex::new(BTreeMap::new()),
+            inodes: RwLock::new(inodes),
             next_inode: AtomicU64::new(10), // Start user inodes at 10
             capabilities: FsCapabilities::writable_linux(),
         }
     }
 
-    fn get_node(&self, ino: u64) -> FsResult<Arc<Mutex<RamNode>>> {
+    fn get_node(&self, ino: u64) -> FsResult<Arc<RamInode>> {
         self.inodes
-            .lock()
+            .read()
             .get(&ino)
             .cloned()
             .ok_or(FsError::InodeNotFound)
@@ -66,13 +78,13 @@ impl RamFileSystem {
 
     fn allocate_inode(&self, node: RamNode) -> u64 {
         let id = self.next_inode.fetch_add(1, Ordering::SeqCst);
-        self.inodes.lock().insert(id, Arc::new(Mutex::new(node)));
+        self.inodes.write().insert(id, Arc::new(RamInode::new(node)));
         id
     }
 
     fn lookup_child_inode(&self, parent_ino: u64, name: &str) -> FsResult<u64> {
         let parent = self.get_node(parent_ino)?;
-        let guard = parent.lock();
+        let guard = parent.node.lock();
         match &*guard {
             RamNode::Directory { entries, .. } => {
                 entries.get(name).copied().ok_or(FsError::NotFound)
@@ -99,29 +111,42 @@ impl RamFileSystem {
     }
 
     pub fn register_open(&self, ino: u64) -> FsResult<()> {
-        let mut counts = self.open_counts.lock();
-        if !self.inodes.lock().contains_key(&ino) {
-            return Err(FsError::InodeNotFound);
+        let inode = self.get_node(ino)?;
+        let mut current = inode.open_count.load(Ordering::Acquire);
+        loop {
+            if current == u32::MAX {
+                return Err(FsError::TooManyOpenFiles);
+            }
+            match inode.open_count.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => current = actual,
+            }
         }
-        let count = counts.entry(ino).or_insert(0);
-        *count = count.saturating_add(1);
-        Ok(())
     }
 
     pub fn unregister_open(&self, ino: u64) -> FsResult<()> {
-        let mut counts = self.open_counts.lock();
-        let removed_last = match counts.get_mut(&ino) {
-            Some(count) if *count > 1 => {
-                *count -= 1;
-                false
+        let inode = self.get_node(ino)?;
+        let mut current = inode.open_count.load(Ordering::Acquire);
+        let removed_last = loop {
+            if current == 0 {
+                return Err(FsError::InodeNotFound);
             }
-            Some(_) => {
-                counts.remove(&ino);
-                true
+            let next = current - 1;
+            match inode.open_count.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break next == 0,
+                Err(actual) => current = actual,
             }
-            None => return Err(FsError::InodeNotFound),
         };
-        drop(counts);
 
         if removed_last {
             self.collect_if_detached(ino)?;
@@ -130,7 +155,9 @@ impl RamFileSystem {
     }
 
     fn is_open(&self, ino: u64) -> bool {
-        self.open_counts.lock().get(&ino).copied().unwrap_or(0) > 0
+        self.get_node(ino)
+            .map(|inode| inode.open_count.load(Ordering::Acquire) > 0)
+            .unwrap_or(false)
     }
 
     fn directory_contains_inode(&self, root_dir_ino: u64, target_ino: u64) -> FsResult<bool> {
@@ -143,7 +170,7 @@ impl RamFileSystem {
             }
 
             let node = self.get_node(current)?;
-            let guard = node.lock();
+            let guard = node.node.lock();
             if let RamNode::Directory { entries, .. } = &*guard {
                 for &child in entries.values() {
                     stack.push(child);
@@ -171,7 +198,7 @@ impl RamFileSystem {
 
         let children = match self.get_node(ino) {
             Ok(node) => {
-                let guard = node.lock();
+                let guard = node.node.lock();
                 match &*guard {
                     RamNode::Directory { entries, .. } => {
                         let mut out = Vec::new();
@@ -191,8 +218,7 @@ impl RamFileSystem {
         }
 
         if !self.is_open(ino) {
-            self.open_counts.lock().remove(&ino);
-            self.inodes.lock().remove(&ino);
+            self.inodes.write().remove(&ino);
         }
         Ok(())
     }
@@ -221,7 +247,7 @@ impl VfsFileSystem for RamFileSystem {
 
     fn stat(&self, ino: u64) -> FsResult<VfsFileInfo> {
         let node = self.get_node(ino)?;
-        let guard = node.lock();
+        let guard = node.node.lock();
         let mut info = VfsFileInfo::default();
         info.ino = ino;
         match &*guard {
@@ -250,7 +276,7 @@ impl VfsFileSystem for RamFileSystem {
 
     fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
         let node = self.get_node(ino)?;
-        let guard = node.lock();
+        let guard = node.node.lock();
         match &*guard {
             RamNode::File { data, .. } => {
                 let start = usize::try_from(offset).map_err(|_| FsError::InvalidArgument)?;
@@ -268,7 +294,7 @@ impl VfsFileSystem for RamFileSystem {
 
     fn write(&self, ino: u64, offset: u64, data: &[u8]) -> FsResult<usize> {
         let node = self.get_node(ino)?;
-        let mut guard = node.lock();
+        let mut guard = node.node.lock();
         match &mut *guard {
             RamNode::File {
                 data: file_data, ..
@@ -287,7 +313,7 @@ impl VfsFileSystem for RamFileSystem {
 
     fn readdir(&self, ino: u64) -> FsResult<Vec<VfsDirEntry>> {
         let node = self.get_node(ino)?;
-        let guard = node.lock();
+        let guard = node.node.lock();
         match &*guard {
             RamNode::Directory { entries, .. } => {
                 let children: Vec<(String, u64)> = entries
@@ -299,7 +325,7 @@ impl VfsFileSystem for RamFileSystem {
                 let mut result = Vec::new();
                 for (name, child_ino) in children {
                     let child_node = self.get_node(child_ino)?;
-                    let child_guard = child_node.lock();
+                    let child_guard = child_node.node.lock();
                     let file_type = match &*child_guard {
                         RamNode::File { .. } => VfsFileType::RegularFile,
                         RamNode::Directory { .. } => VfsFileType::Directory,
@@ -320,7 +346,7 @@ impl VfsFileSystem for RamFileSystem {
     fn create_file(&self, parent_ino: u64, name: &str, mode: u32) -> FsResult<VfsFileInfo> {
         let parent = self.get_node(parent_ino)?;
         {
-            let guard = parent.lock();
+            let guard = parent.node.lock();
             match &*guard {
                 RamNode::Directory { entries, .. } => {
                     if entries.contains_key(name) {
@@ -336,11 +362,11 @@ impl VfsFileSystem for RamFileSystem {
             mode: Self::to_file_mode(mode),
         });
 
-        let mut guard = parent.lock();
+        let mut guard = parent.node.lock();
         match &mut *guard {
             RamNode::Directory { entries, .. } => {
                 if entries.contains_key(name) {
-                    self.inodes.lock().remove(&new_ino);
+                    self.inodes.write().remove(&new_ino);
                     return Err(FsError::AlreadyExists);
                 }
                 entries.insert(name.to_string(), new_ino);
@@ -348,7 +374,7 @@ impl VfsFileSystem for RamFileSystem {
                 self.stat(new_ino)
             }
             _ => {
-                self.inodes.lock().remove(&new_ino);
+                self.inodes.write().remove(&new_ino);
                 Err(FsError::NotADirectory)
             }
         }
@@ -357,7 +383,7 @@ impl VfsFileSystem for RamFileSystem {
     fn create_directory(&self, parent_ino: u64, name: &str, mode: u32) -> FsResult<VfsFileInfo> {
         let parent = self.get_node(parent_ino)?;
         {
-            let guard = parent.lock();
+            let guard = parent.node.lock();
             match &*guard {
                 RamNode::Directory { entries, .. } => {
                     if entries.contains_key(name) {
@@ -373,11 +399,11 @@ impl VfsFileSystem for RamFileSystem {
             mode: Self::to_dir_mode(mode),
         });
 
-        let mut guard = parent.lock();
+        let mut guard = parent.node.lock();
         match &mut *guard {
             RamNode::Directory { entries, .. } => {
                 if entries.contains_key(name) {
-                    self.inodes.lock().remove(&new_ino);
+                    self.inodes.write().remove(&new_ino);
                     return Err(FsError::AlreadyExists);
                 }
                 entries.insert(name.to_string(), new_ino);
@@ -385,7 +411,7 @@ impl VfsFileSystem for RamFileSystem {
                 self.stat(new_ino)
             }
             _ => {
-                self.inodes.lock().remove(&new_ino);
+                self.inodes.write().remove(&new_ino);
                 Err(FsError::NotADirectory)
             }
         }
@@ -394,7 +420,7 @@ impl VfsFileSystem for RamFileSystem {
     fn unlink(&self, parent_ino: u64, name: &str, target_ino: u64) -> FsResult<()> {
         let parent = self.get_node(parent_ino)?;
         let child_ino = {
-            let guard = parent.lock();
+            let guard = parent.node.lock();
             match &*guard {
                 RamNode::Directory { entries, .. } => {
                     *entries.get(name).ok_or(FsError::NotFound)?
@@ -409,7 +435,7 @@ impl VfsFileSystem for RamFileSystem {
 
         let node = self.get_node(child_ino)?;
         {
-            let node_guard = node.lock();
+            let node_guard = node.node.lock();
             if let RamNode::Directory {
                 entries: child_entries,
                 ..
@@ -421,7 +447,7 @@ impl VfsFileSystem for RamFileSystem {
             }
         }
 
-        let mut guard = parent.lock();
+        let mut guard = parent.node.lock();
         match &mut *guard {
             RamNode::Directory { entries, .. } => {
                 let current = *entries.get(name).ok_or(FsError::NotFound)?;
@@ -457,7 +483,7 @@ impl VfsFileSystem for RamFileSystem {
 
         let old_parent_node = self.get_node(old_parent)?;
         let moved_ino = {
-            let guard = old_parent_node.lock();
+            let guard = old_parent_node.node.lock();
             match &*guard {
                 RamNode::Directory { entries, .. } => {
                     *entries.get(old_name).ok_or(FsError::NotFound)?
@@ -468,7 +494,7 @@ impl VfsFileSystem for RamFileSystem {
 
         {
             let moved_node = self.get_node(moved_ino)?;
-            let moved_guard = moved_node.lock();
+            let moved_guard = moved_node.node.lock();
             if let RamNode::Directory { .. } = &*moved_guard {
                 if self.directory_contains_inode(moved_ino, new_parent)? {
                     return Err(FsError::InvalidArgument);
@@ -477,7 +503,7 @@ impl VfsFileSystem for RamFileSystem {
         }
 
         let new_parent_node = self.get_node(new_parent)?;
-        let mut new_guard = new_parent_node.lock();
+        let mut new_guard = new_parent_node.node.lock();
         let replaced_ino = match &mut *new_guard {
             RamNode::Directory { entries, .. } => {
                 if let Some(&existing) = entries.get(new_name) {
@@ -498,7 +524,7 @@ impl VfsFileSystem for RamFileSystem {
 
         if let Some(existing_ino) = replaced_ino {
             let existing_node = self.get_node(existing_ino)?;
-            let existing_guard = existing_node.lock();
+            let existing_guard = existing_node.node.lock();
             if let RamNode::Directory {
                 entries: child_entries,
                 ..
@@ -511,7 +537,7 @@ impl VfsFileSystem for RamFileSystem {
         }
 
         {
-            let mut guard = old_parent_node.lock();
+            let mut guard = old_parent_node.node.lock();
             match &mut *guard {
                 RamNode::Directory { entries, .. } => {
                     let current = *entries.get(old_name).ok_or(FsError::NotFound)?;
@@ -524,7 +550,7 @@ impl VfsFileSystem for RamFileSystem {
             }
         }
 
-        let mut guard = new_parent_node.lock();
+        let mut guard = new_parent_node.node.lock();
         match &mut *guard {
             RamNode::Directory { entries, .. } => {
                 let mut replaced_for_gc: Option<u64> = None;
@@ -545,7 +571,7 @@ impl VfsFileSystem for RamFileSystem {
 
     fn set_size(&self, ino: u64, size: u64) -> FsResult<()> {
         let node = self.get_node(ino)?;
-        let mut guard = node.lock();
+        let mut guard = node.node.lock();
         match &mut *guard {
             RamNode::File { data, .. } => {
                 let new_size = usize::try_from(size).map_err(|_| FsError::FileTooLarge)?;
