@@ -338,7 +338,7 @@ args = [
 
 [tasks.dhcp-client]
 description = "Build the DHCP client monitor (debug profile)"
-cwd = "workspace/components/netutils/dhcpd"
+cwd = "workspace/components/netutils/dhcp-client"
 command = "cargo"
 args = [
     "build",
@@ -473,7 +473,7 @@ args = [
 
 [tasks.dhcp-client-release]
 description = "Build the DHCP client monitor (release profile)"
-cwd = "workspace/components/netutils/dhcpd"
+cwd = "workspace/components/netutils/dhcp-client"
 command = "cargo"
 args = [
     "build",
@@ -613,7 +613,7 @@ args = [
 
 [tasks.dhcp-client-dev-opt]
 description = "Build the DHCP client monitor (dev-opt profile)"
-cwd = "workspace/components/netutils/dhcpd"
+cwd = "workspace/components/netutils/dhcp-client"
 command = "cargo"
 args = [
     "build",
