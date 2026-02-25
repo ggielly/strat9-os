@@ -8,7 +8,12 @@ use crate::{
     sync::SpinLock,
     syscall::error::SyscallError,
 };
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 
 /// File type constants (matching Linux DT_* values).
 pub const DT_UNKNOWN: u8 = 0;
@@ -193,7 +198,8 @@ impl IpcScheme {
         msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
         msg.payload[8..16].copy_from_slice(&offset.to_le_bytes());
 
-        let len = core::cmp::min(data.len(), 32);
+        // payload[18..48] leaves 30 bytes for data.
+        let len = core::cmp::min(data.len(), 30);
         msg.payload[16..18].copy_from_slice(&(len as u16).to_le_bytes());
         msg.payload[18..18 + len].copy_from_slice(&data[..len]);
         msg
@@ -205,6 +211,41 @@ impl IpcScheme {
         let mut msg = IpcMessage::new(OPCODE_CLOSE);
         msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
         msg
+    }
+
+    fn build_readdir_msg(file_id: u64, cursor: u16) -> IpcMessage {
+        const OPCODE_READDIR: u32 = 0x08;
+        let mut msg = IpcMessage::new(OPCODE_READDIR);
+        msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
+        msg.payload[8..10].copy_from_slice(&cursor.to_le_bytes());
+        msg
+    }
+
+    fn parse_status(reply: &IpcMessage) -> Result<(), SyscallError> {
+        if reply.msg_type != 0x80 {
+            return Err(SyscallError::IoError);
+        }
+
+        let status = u32::from_le_bytes([
+            reply.payload[0],
+            reply.payload[1],
+            reply.payload[2],
+            reply.payload[3],
+        ]);
+        if status == 0 {
+            return Ok(());
+        }
+
+        // Accept both forms:
+        // - positive errno (2 => ENOENT)
+        // - raw signed -errno encoded in u32
+        let signed = status as i32;
+        let code = if signed < 0 {
+            signed as i64
+        } else {
+            -(signed as i64)
+        };
+        Err(SyscallError::from_code(code))
     }
 }
 
@@ -218,20 +259,7 @@ impl Scheme for IpcScheme {
         let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
 
         // Parse reply: [status: u32][file_id: u64][size: u64][flags: u32]
-        if reply.msg_type != 0x80 {
-            // 0x80 = generic success reply
-            return Err(SyscallError::IoError);
-        }
-
-        let status = u32::from_le_bytes([
-            reply.payload[0],
-            reply.payload[1],
-            reply.payload[2],
-            reply.payload[3],
-        ]);
-        if status != 0 {
-            return Err(SyscallError::from_code(status as i64));
-        }
+        Self::parse_status(&reply)?;
 
         let file_id = u64::from_le_bytes([
             reply.payload[4],
@@ -277,15 +305,7 @@ impl Scheme for IpcScheme {
         let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
 
         // Parse reply: [status: u32][bytes_read: u32][data...]
-        let status = u32::from_le_bytes([
-            reply.payload[0],
-            reply.payload[1],
-            reply.payload[2],
-            reply.payload[3],
-        ]);
-        if status != 0 {
-            return Err(SyscallError::from_code(status as i64));
-        }
+        Self::parse_status(&reply)?;
 
         let bytes_read = u32::from_le_bytes([
             reply.payload[4],
@@ -309,15 +329,7 @@ impl Scheme for IpcScheme {
         let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
 
         // Parse reply: [status: u32][bytes_written: u32]
-        let status = u32::from_le_bytes([
-            reply.payload[0],
-            reply.payload[1],
-            reply.payload[2],
-            reply.payload[3],
-        ]);
-        if status != 0 {
-            return Err(SyscallError::from_code(status as i64));
-        }
+        Self::parse_status(&reply)?;
 
         let bytes_written = u32::from_le_bytes([
             reply.payload[4],
@@ -336,15 +348,7 @@ impl Scheme for IpcScheme {
         port.send(msg).map_err(|_| SyscallError::BadHandle)?;
         let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
 
-        let status = u32::from_le_bytes([
-            reply.payload[0],
-            reply.payload[1],
-            reply.payload[2],
-            reply.payload[3],
-        ]);
-        if status != 0 {
-            return Err(SyscallError::from_code(status as i64));
-        }
+        Self::parse_status(&reply)?;
 
         Ok(())
     }
@@ -374,20 +378,73 @@ impl Scheme for IpcScheme {
         port.send(msg).map_err(|_| SyscallError::BadHandle)?;
         let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
 
-        if reply.msg_type != 0x80 {
-            return Err(SyscallError::IoError);
-        }
-        let status = u32::from_le_bytes([
-            reply.payload[0],
-            reply.payload[1],
-            reply.payload[2],
-            reply.payload[3],
-        ]);
-        if status != 0 {
-            return Err(SyscallError::from_code(status as i64));
-        }
+        Self::parse_status(&reply)?;
 
         Ok(())
+    }
+
+    fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
+        let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
+        let mut cursor: u16 = 0;
+        let mut entries = Vec::new();
+
+        loop {
+            let msg = Self::build_readdir_msg(file_id, cursor);
+            port.send(msg).map_err(|_| SyscallError::BadHandle)?;
+            let reply = port.recv().map_err(|_| SyscallError::BadHandle)?;
+            Self::parse_status(&reply)?;
+
+            let next_cursor = u16::from_le_bytes([reply.payload[4], reply.payload[5]]);
+            let entry_count = reply.payload[6] as usize;
+            let used_bytes = reply.payload[7] as usize;
+            if used_bytes > reply.payload.len() - 8 {
+                return Err(SyscallError::IoError);
+            }
+
+            let mut offset = 8usize;
+            for _ in 0..entry_count {
+                if offset + 10 > 8 + used_bytes {
+                    return Err(SyscallError::IoError);
+                }
+
+                let ino = u64::from_le_bytes([
+                    reply.payload[offset],
+                    reply.payload[offset + 1],
+                    reply.payload[offset + 2],
+                    reply.payload[offset + 3],
+                    reply.payload[offset + 4],
+                    reply.payload[offset + 5],
+                    reply.payload[offset + 6],
+                    reply.payload[offset + 7],
+                ]);
+                let file_type = reply.payload[offset + 8];
+                let name_len = reply.payload[offset + 9] as usize;
+                if offset + 10 + name_len > 8 + used_bytes {
+                    return Err(SyscallError::IoError);
+                }
+                let name_bytes = &reply.payload[offset + 10..offset + 10 + name_len];
+                let name = core::str::from_utf8(name_bytes)
+                    .map_err(|_| SyscallError::IoError)?
+                    .to_string();
+
+                entries.push(DirEntry {
+                    ino,
+                    file_type,
+                    name,
+                });
+                offset += 10 + name_len;
+            }
+
+            if next_cursor == u16::MAX {
+                break;
+            }
+            if next_cursor <= cursor {
+                return Err(SyscallError::IoError);
+            }
+            cursor = next_cursor;
+        }
+
+        Ok(entries)
     }
 }
 
@@ -416,15 +473,7 @@ impl IpcScheme {
             return Err(SyscallError::IoError);
         }
 
-        let status = u32::from_le_bytes([
-            reply.payload[0],
-            reply.payload[1],
-            reply.payload[2],
-            reply.payload[3],
-        ]);
-        if status != 0 {
-            return Err(SyscallError::from_code(status as i64));
-        }
+        Self::parse_status(&reply)?;
 
         let file_id = u64::from_le_bytes([
             reply.payload[4],

@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+use alloc::{collections::BTreeMap, string::String};
 use core::{
     alloc::Layout,
     panic::PanicInfo,
@@ -65,11 +66,41 @@ fn alloc_error(_layout: Layout) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    debug_log("[strate-net] PANIC!\n");
-    if let Some(s) = info.payload().downcast_ref::<&str>() {
-        debug_log(s);
+    debug_log("[strate-net] PANIC: ");
+    // info.message() is stable since Rust 1.73
+    let msg = info.message();
+    let mut buf = [0u8; 256];
+    use core::fmt::Write;
+    let mut cursor = BufWriter {
+        buf: &mut buf,
+        pos: 0,
+    };
+    let _ = write!(cursor, "{}", msg);
+    let written = cursor.pos;
+    if written > 0 {
+        if let Ok(s) = core::str::from_utf8(&buf[..written]) {
+            debug_log(s);
+        }
     }
+    debug_log("\n");
     exit(255);
+}
+
+/// Minimal fmt::Write adapter over a fixed byte buffer.
+struct BufWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl core::fmt::Write for BufWriter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let avail = self.buf.len().saturating_sub(self.pos);
+        let n = bytes.len().min(avail);
+        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
+        self.pos += n;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -77,8 +108,11 @@ fn panic(info: &PanicInfo) -> ! {
 // ---------------------------------------------------------------------------
 
 use smoltcp::{
+    iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{self, Device, DeviceCapabilities, Medium},
+    socket::dhcpv4,
     time::Instant,
+    wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address},
 };
 
 const MAX_FRAME_SIZE: usize = 1514;
@@ -165,59 +199,313 @@ impl phy::TxToken for Strat9TxToken {
     }
 }
 
-use smoltcp::{
-    iface::{Config, Interface, SocketSet},
-    wire::{EthernetAddress, IpCidr},
-};
+// ---------------------------------------------------------------------------
+// IP configuration obtained via DHCP
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct IpConfig {
+    /// Assigned address + prefix length (e.g. 192.168.1.100/24)
+    address: smoltcp::wire::Ipv4Cidr,
+    /// Default gateway (optional)
+    gateway: Option<Ipv4Address>,
+    /// Up to 3 DNS servers
+    dns: [Option<Ipv4Address>; 3],
+}
+
+/// Encode an IPv4Cidr as a human-readable string ("a.b.c.d/p\n").
+fn ipv4_cidr_to_str(cidr: &smoltcp::wire::Ipv4Cidr, buf: &mut [u8]) -> usize {
+    use core::fmt::Write;
+    let mut w = BufWriter { buf, pos: 0 };
+    let a = cidr.address().as_bytes();
+    let _ = write!(
+        w,
+        "{}.{}.{}.{}/{}\n",
+        a[0],
+        a[1],
+        a[2],
+        a[3],
+        cidr.prefix_len()
+    );
+    w.pos
+}
+
+/// Encode an Ipv4Address as a human-readable string ("a.b.c.d\n").
+fn ipv4_addr_to_str(addr: &Ipv4Address, buf: &mut [u8]) -> usize {
+    use core::fmt::Write;
+    let mut w = BufWriter { buf, pos: 0 };
+    let a = addr.as_bytes();
+    let _ = write!(w, "{}.{}.{}.{}\n", a[0], a[1], a[2], a[3]);
+    w.pos
+}
+
+// ---------------------------------------------------------------------------
+// IPC reply builders  (match the layout expected by kernel IpcScheme)
+// ---------------------------------------------------------------------------
+//
+// OPEN success reply  (msg_type = 0x80):
+//   payload[0..4]  = status : u32 LE  (0 = OK)
+//   payload[4..12] = file_id: u64 LE
+//   payload[12..20]= size   : u64 LE  (u64::MAX ⇒ unknown)
+//   payload[20..24]= flags  : u32 LE  (FileFlags bits)
+//
+// READ success reply  (msg_type = 0x80):
+//   payload[0..4]  = status     : u32 LE (0 = OK)
+//   payload[4..8]  = bytes_read : u32 LE
+//   payload[8..48] = data (up to 40 bytes inline)
+//
+// CLOSE / generic OK reply (msg_type = 0x80):
+//   payload[0..4] = status : u32 LE (0 = OK)
+
+fn reply_open(sender: u64, file_id: u64, size: u64, flags: u32) -> IpcMessage {
+    let mut msg = IpcMessage::new(0x80);
+    msg.sender = sender;
+    msg.payload[0..4].copy_from_slice(&0u32.to_le_bytes());
+    msg.payload[4..12].copy_from_slice(&file_id.to_le_bytes());
+    msg.payload[12..20].copy_from_slice(&size.to_le_bytes());
+    msg.payload[20..24].copy_from_slice(&flags.to_le_bytes());
+    msg
+}
+
+fn reply_read(sender: u64, data: &[u8]) -> IpcMessage {
+    let mut msg = IpcMessage::new(0x80);
+    msg.sender = sender;
+    msg.payload[0..4].copy_from_slice(&0u32.to_le_bytes());
+    // Max inline data: 48 - 8 = 40 bytes
+    let n = data.len().min(40);
+    msg.payload[4..8].copy_from_slice(&(n as u32).to_le_bytes());
+    msg.payload[8..8 + n].copy_from_slice(&data[..n]);
+    msg
+}
+
+fn reply_ok(sender: u64) -> IpcMessage {
+    let mut msg = IpcMessage::new(0x80);
+    msg.sender = sender;
+    msg.payload[0..4].copy_from_slice(&0u32.to_le_bytes());
+    msg
+}
+
+// ---------------------------------------------------------------------------
+// NetworkStrate  – main state machine
+// ---------------------------------------------------------------------------
 
 struct NetworkStrate {
     device: Strat9NetDevice,
     interface: Interface,
     sockets: SocketSet<'static>,
+    /// Handle to the smoltcp DHCP socket
+    dhcp_handle: SocketHandle,
+    /// Populated once DHCP handshake completes
+    ip_config: Option<IpConfig>,
+    /// VFS handles: file_id → virtual path ("ip", "gateway", "dns", "" = root dir)
+    open_handles: BTreeMap<u64, String>,
+    /// Monotonically-increasing file handle allocator
+    next_fid: u64,
 }
 
 impl NetworkStrate {
     fn new(mac: [u8; 6]) -> Self {
         let mut device = Strat9NetDevice;
         let config = Config::new(EthernetAddress(mac).into());
-
         let interface = Interface::new(config, &mut device, Instant::from_micros(0));
-        let sockets = SocketSet::new(alloc::vec![]);
+        let mut sockets = SocketSet::new(alloc::vec![]);
+
+        // Create the DHCP socket – smoltcp will handle the full DORA sequence
+        let dhcp_socket = dhcpv4::Socket::new();
+        let dhcp_handle = sockets.add(dhcp_socket);
 
         Self {
             device,
             interface,
             sockets,
+            dhcp_handle,
+            ip_config: None,
+            open_handles: BTreeMap::new(),
+            next_fid: 1,
         }
     }
 
+    // -----------------------------------------------------------------------
+    // DHCP event processing
+    // -----------------------------------------------------------------------
+
+    fn process_dhcp(&mut self) {
+        let event = self
+            .sockets
+            .get_mut::<dhcpv4::Socket>(self.dhcp_handle)
+            .poll();
+
+        match event {
+            Some(dhcpv4::Event::Configured(config)) => {
+                debug_log("[strate-net] DHCP: address acquired\n");
+
+                // Apply address to the interface
+                self.interface.update_ip_addrs(|addrs| {
+                    let cidr = IpCidr::new(
+                        IpAddress::Ipv4(config.address.address()),
+                        config.address.prefix_len(),
+                    );
+                    if let Some(slot) = addrs.iter_mut().next() {
+                        *slot = cidr;
+                    } else {
+                        // Ignore error: heap alloc failure is a hard stop
+                        let _ = addrs.push(cidr);
+                    }
+                });
+
+                // Apply default route
+                if let Some(gw) = config.router {
+                    self.interface.routes_mut().add_default_ipv4_route(gw).ok();
+                }
+
+                // Collect up to 3 DNS servers
+                let mut dns = [None::<Ipv4Address>; 3];
+                for (slot, &server) in dns.iter_mut().zip(config.dns_servers.iter()) {
+                    *slot = Some(server);
+                }
+
+                self.ip_config = Some(IpConfig {
+                    address: config.address,
+                    gateway: config.router,
+                    dns,
+                });
+            }
+            Some(dhcpv4::Event::Deconfigured) => {
+                debug_log("[strate-net] DHCP: deconfigured (lease expired?)\n");
+                self.ip_config = None;
+                // Clear interface addresses
+                self.interface.update_ip_addrs(|addrs| addrs.clear());
+            }
+            None => {}
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // VFS / IPC handlers  (Plan 9 style, mounted at /net)
+    //
+    //  /net            — directory: lists available virtual files
+    //  /net/ip         — read: "a.b.c.d/prefix\n"  (from DHCP)
+    //  /net/gateway    — read: "a.b.c.d\n"          (from DHCP)
+    //  /net/dns        — read: "a.b.c.d\n"          (first DNS)
+    //  /net/ethX       — read/write: raw Ethernet frames (future)
+    // -----------------------------------------------------------------------
+
     fn handle_open(&mut self, msg: &IpcMessage) -> IpcMessage {
-        debug_log("[strate-net] Handling OPEN\n");
-        // Plan 9 style: /net/tcp/0, /net/udp/0, etc.
-        IpcMessage::error_reply(msg.sender, -38) // ENOSYS/ENOTSUP
+        // Decode path from payload: [flags:u32][path_len:u16][path bytes…]
+        let path_len = u16::from_le_bytes([msg.payload[4], msg.payload[5]]) as usize;
+        if path_len > 42 {
+            return IpcMessage::error_reply(msg.sender, -22); // EINVAL
+        }
+        let path_bytes = &msg.payload[6..6 + path_len];
+        let path = match core::str::from_utf8(path_bytes) {
+            Ok(p) => p.trim_start_matches('/'),
+            Err(_) => return IpcMessage::error_reply(msg.sender, -22),
+        };
+
+        match path {
+            // Root directory
+            "" => {
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(""));
+                // FileFlags::DIRECTORY = 1
+                reply_open(msg.sender, fid, u64::MAX, 1)
+            }
+            "ip" | "gateway" | "dns" => {
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            _ => IpcMessage::error_reply(msg.sender, -2), // ENOENT
+        }
     }
 
     fn handle_read(&mut self, msg: &IpcMessage) -> IpcMessage {
-        IpcMessage::error_reply(msg.sender, -38)
+        let file_id = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap_or([0u8; 8]));
+        let offset = u64::from_le_bytes(msg.payload[8..16].try_into().unwrap_or([0u8; 8]));
+
+        let path = match self.open_handles.get(&file_id) {
+            Some(p) => p.clone(),
+            None => return IpcMessage::error_reply(msg.sender, -9), // EBADF
+        };
+
+        let mut tmp = [0u8; 48];
+
+        match path.as_str() {
+            // Root listing
+            "" => {
+                let listing = b"ip\ngateway\ndns\n";
+                let start = (offset as usize).min(listing.len());
+                let data = &listing[start..];
+                reply_read(msg.sender, data)
+            }
+            "ip" => {
+                if let Some(ref cfg) = self.ip_config {
+                    let n = ipv4_cidr_to_str(&cfg.address, &mut tmp);
+                    let start = (offset as usize).min(n);
+                    reply_read(msg.sender, &tmp[start..n])
+                } else {
+                    reply_read(msg.sender, b"0.0.0.0/0\n")
+                }
+            }
+            "gateway" => {
+                if let Some(ref cfg) = self.ip_config {
+                    if let Some(gw) = cfg.gateway {
+                        let n = ipv4_addr_to_str(&gw, &mut tmp);
+                        let start = (offset as usize).min(n);
+                        return reply_read(msg.sender, &tmp[start..n]);
+                    }
+                }
+                reply_read(msg.sender, b"0.0.0.0\n")
+            }
+            "dns" => {
+                if let Some(ref cfg) = self.ip_config {
+                    if let Some(dns0) = cfg.dns[0] {
+                        let n = ipv4_addr_to_str(&dns0, &mut tmp);
+                        let start = (offset as usize).min(n);
+                        return reply_read(msg.sender, &tmp[start..n]);
+                    }
+                }
+                reply_read(msg.sender, b"0.0.0.0\n")
+            }
+            _ => IpcMessage::error_reply(msg.sender, -9), // EBADF
+        }
     }
 
     fn handle_write(&mut self, msg: &IpcMessage) -> IpcMessage {
-        IpcMessage::error_reply(msg.sender, -38)
+        // Write not supported on virtual status files
+        IpcMessage::error_reply(msg.sender, -1) // EPERM
     }
 
     fn handle_close(&mut self, msg: &IpcMessage) -> IpcMessage {
-        IpcMessage::error_reply(msg.sender, -38)
+        let file_id = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap_or([0u8; 8]));
+        self.open_handles.remove(&file_id);
+        reply_ok(msg.sender)
     }
 
+    fn alloc_fid(&mut self) -> u64 {
+        let id = self.next_fid;
+        self.next_fid += 1;
+        id
+    }
+
+    // -----------------------------------------------------------------------
+    // Main event loop
+    // -----------------------------------------------------------------------
+
     fn serve(&mut self, port: u64) -> ! {
+        debug_log("[strate-net] Starting DHCP...\n");
+
         loop {
-            // 1. Process network packets
+            // 1. Drive the smoltcp stack (transmits queued packets, processes received ones)
             let now = now_instant();
             let poll_result = self
                 .interface
                 .poll(now, &mut self.device, &mut self.sockets);
 
-            // 2. Check for IPC messages (non-blocking)
+            // 2. Check DHCP state machine for new events
+            self.process_dhcp();
+
+            // 3. Handle IPC messages from other strates / VFS callers (non-blocking)
             let mut msg = IpcMessage::new(0);
             let mut got_ipc = false;
             if ipc_try_recv(port, &mut msg).is_ok() {
@@ -227,11 +515,12 @@ impl NetworkStrate {
                     OPCODE_READ => self.handle_read(&msg),
                     OPCODE_WRITE => self.handle_write(&msg),
                     OPCODE_CLOSE => self.handle_close(&msg),
-                    _ => IpcMessage::error_reply(msg.sender, -22),
+                    _ => IpcMessage::error_reply(msg.sender, -22), // EINVAL
                 };
                 let _ = call::ipc_reply(&reply);
             }
 
+            // 4. Sleep until the next smoltcp deadline if there is nothing to do
             if !got_ipc && poll_result == smoltcp::iface::PollResult::None {
                 if let Some(delay) = self.interface.poll_delay(now, &self.sockets) {
                     let micros = delay.total_micros();
@@ -267,7 +556,7 @@ pub extern "C" fn _start() -> ! {
 
     debug_log("[strate-net] Bound to /net\n");
 
-    // 3. Get MAC address from kernel
+    // Get MAC address from kernel (fallback to a QEMU-safe address if unavailable)
     let mut mac = [0u8; 6];
     if net_info(0, &mut mac).is_err() {
         debug_log("[strate-net] Failed to get MAC address, using fallback\n");
@@ -275,8 +564,6 @@ pub extern "C" fn _start() -> ! {
     } else {
         debug_log("[strate-net] MAC acquired from kernel\n");
     }
-
-    debug_log("[strate-net] Serving...\n");
 
     let mut strate = NetworkStrate::new(mac);
     strate.serve(port);

@@ -16,17 +16,19 @@ use alloc::{
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use strate_fs_abstraction::{
-    FsCapabilities, FsError, FsResult, VfsDirEntry, VfsFileInfo, VfsFileSystem, VfsFileType,
-    VfsVolumeInfo,
+    FsCapabilities, FsError, FsResult, RenameFlags, VfsDirEntry, VfsFileInfo, VfsFileSystem,
+    VfsFileType, VfsTimestamp, VfsVolumeInfo,
 };
 
 /// Internal node type for RamFS
 enum RamNode {
     File {
         data: Vec<u8>,
+        mode: u32,
     },
     Directory {
         entries: BTreeMap<String, u64>, // Maps name to Inode ID
+        mode: u32,
     },
 }
 
@@ -40,6 +42,7 @@ impl RamFileSystem {
     pub fn new() -> Self {
         let root = Arc::new(Mutex::new(RamNode::Directory {
             entries: BTreeMap::new(),
+            mode: 0o040755,
         }));
         let mut inodes = BTreeMap::new();
         inodes.insert(2, root); // Standard root inode is 2
@@ -65,14 +68,22 @@ impl RamFileSystem {
         id
     }
 
-    /// Internal helper to resolve path to Inode (used by IPC server)
-    pub fn resolve_path(&self, path: &str) -> FsResult<u64> {
+    /// Internal helper to resolve path to inode (used by IPC server)
+    pub fn resolve_path_internal(&self, path: &str) -> FsResult<u64> {
         let mut current_ino = self.root_inode();
         for part in path.split('/').filter(|s| !s.is_empty()) {
             let info = self.lookup(current_ino, part)?;
             current_ino = info.ino;
         }
         Ok(current_ino)
+    }
+
+    fn to_file_mode(mode: u32) -> u32 {
+        0o100000 | (mode & 0o7777)
+    }
+
+    fn to_dir_mode(mode: u32) -> u32 {
+        0o040000 | (mode & 0o7777)
     }
 }
 
@@ -103,15 +114,15 @@ impl VfsFileSystem for RamFileSystem {
         let mut info = VfsFileInfo::default();
         info.ino = ino;
         match &*guard {
-            RamNode::File { data } => {
+            RamNode::File { data, mode } => {
                 info.size = data.len() as u64;
                 info.file_type = VfsFileType::RegularFile;
-                info.mode = 0o100644;
+                info.mode = *mode;
             }
-            RamNode::Directory { .. } => {
+            RamNode::Directory { mode, .. } => {
                 info.size = 0;
                 info.file_type = VfsFileType::Directory;
-                info.mode = 0o040755;
+                info.mode = *mode;
             }
         }
         Ok(info)
@@ -121,7 +132,7 @@ impl VfsFileSystem for RamFileSystem {
         let parent = self.get_node(parent_ino)?;
         let guard = parent.lock();
         match &*guard {
-            RamNode::Directory { entries } => {
+            RamNode::Directory { entries, .. } => {
                 let ino = *entries.get(name).ok_or(FsError::NotFound)?;
                 drop(guard);
                 self.stat(ino)
@@ -131,14 +142,14 @@ impl VfsFileSystem for RamFileSystem {
     }
 
     fn resolve_path(&self, path: &str) -> FsResult<u64> {
-        self.resolve_path(path)
+        self.resolve_path_internal(path)
     }
 
     fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
         let node = self.get_node(ino)?;
         let guard = node.lock();
         match &*guard {
-            RamNode::File { data } => {
+            RamNode::File { data, .. } => {
                 if offset >= data.len() as u64 {
                     return Ok(0);
                 }
@@ -156,7 +167,9 @@ impl VfsFileSystem for RamFileSystem {
         let node = self.get_node(ino)?;
         let mut guard = node.lock();
         match &mut *guard {
-            RamNode::File { data: file_data } => {
+            RamNode::File {
+                data: file_data, ..
+            } => {
                 let start = offset as usize;
                 let end = start + data.len();
                 if end > file_data.len() {
@@ -173,12 +186,16 @@ impl VfsFileSystem for RamFileSystem {
         let node = self.get_node(ino)?;
         let guard = node.lock();
         match &*guard {
-            RamNode::Directory { entries } => {
+            RamNode::Directory { entries, .. } => {
+                let children: Vec<(String, u64)> =
+                    entries.iter().map(|(name, &ino)| (name.clone(), ino)).collect();
+                drop(guard);
+
                 let mut result = Vec::new();
-                for (name, &child_ino) in entries {
+                for (name, child_ino) in children {
                     let info = self.stat(child_ino)?;
                     result.push(VfsDirEntry {
-                        name: name.clone(),
+                        name,
                         ino: child_ino,
                         file_type: info.file_type,
                         offset: 0,
@@ -190,72 +207,233 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
-    fn create_file(&self, parent_ino: u64, name: &str, _mode: u32) -> FsResult<VfsFileInfo> {
+    fn create_file(&self, parent_ino: u64, name: &str, mode: u32) -> FsResult<VfsFileInfo> {
         let parent = self.get_node(parent_ino)?;
+        {
+            let guard = parent.lock();
+            match &*guard {
+                RamNode::Directory { entries, .. } => {
+                    if entries.contains_key(name) {
+                        return Err(FsError::AlreadyExists);
+                    }
+                }
+                _ => return Err(FsError::NotADirectory),
+            }
+        }
+
+        let new_ino = self.allocate_inode(RamNode::File {
+            data: Vec::new(),
+            mode: Self::to_file_mode(mode),
+        });
+
         let mut guard = parent.lock();
         match &mut *guard {
-            RamNode::Directory { entries } => {
+            RamNode::Directory { entries, .. } => {
                 if entries.contains_key(name) {
+                    self.inodes.lock().remove(&new_ino);
                     return Err(FsError::AlreadyExists);
                 }
-                let new_ino = self.allocate_inode(RamNode::File { data: Vec::new() });
                 entries.insert(name.to_string(), new_ino);
                 drop(guard);
                 self.stat(new_ino)
             }
-            _ => Err(FsError::NotADirectory),
+            _ => {
+                self.inodes.lock().remove(&new_ino);
+                Err(FsError::NotADirectory)
+            }
         }
     }
 
-    fn create_directory(&self, parent_ino: u64, name: &str, _mode: u32) -> FsResult<VfsFileInfo> {
+    fn create_directory(&self, parent_ino: u64, name: &str, mode: u32) -> FsResult<VfsFileInfo> {
         let parent = self.get_node(parent_ino)?;
+        {
+            let guard = parent.lock();
+            match &*guard {
+                RamNode::Directory { entries, .. } => {
+                    if entries.contains_key(name) {
+                        return Err(FsError::AlreadyExists);
+                    }
+                }
+                _ => return Err(FsError::NotADirectory),
+            }
+        }
+
+        let new_ino = self.allocate_inode(RamNode::Directory {
+            entries: BTreeMap::new(),
+            mode: Self::to_dir_mode(mode),
+        });
+
         let mut guard = parent.lock();
         match &mut *guard {
-            RamNode::Directory { entries } => {
+            RamNode::Directory { entries, .. } => {
                 if entries.contains_key(name) {
+                    self.inodes.lock().remove(&new_ino);
                     return Err(FsError::AlreadyExists);
                 }
-                let new_ino = self.allocate_inode(RamNode::Directory {
-                    entries: BTreeMap::new(),
-                });
                 entries.insert(name.to_string(), new_ino);
                 drop(guard);
                 self.stat(new_ino)
             }
-            _ => Err(FsError::NotADirectory),
+            _ => {
+                self.inodes.lock().remove(&new_ino);
+                Err(FsError::NotADirectory)
+            }
         }
     }
 
     fn unlink(&self, parent_ino: u64, name: &str, target_ino: u64) -> FsResult<()> {
         let parent = self.get_node(parent_ino)?;
+        let child_ino = {
+            let guard = parent.lock();
+            match &*guard {
+                RamNode::Directory { entries, .. } => *entries.get(name).ok_or(FsError::NotFound)?,
+                _ => return Err(FsError::NotADirectory),
+            }
+        };
+
+        if child_ino != target_ino {
+            return Err(FsError::InvalidArgument);
+        }
+
+        let node = self.get_node(child_ino)?;
+        {
+            let node_guard = node.lock();
+            if let RamNode::Directory {
+                entries: child_entries,
+                ..
+            } = &*node_guard
+            {
+                if !child_entries.is_empty() {
+                    return Err(FsError::NotEmpty);
+                }
+            }
+        }
+
         let mut guard = parent.lock();
         match &mut *guard {
-            RamNode::Directory { entries } => {
-                let ino = *entries.get(name).ok_or(FsError::NotFound)?;
-                if ino != target_ino {
+            RamNode::Directory { entries, .. } => {
+                let current = *entries.get(name).ok_or(FsError::NotFound)?;
+                if current != child_ino {
                     return Err(FsError::InvalidArgument);
                 }
-
-                let node = self.get_node(ino)?;
-                let node_guard = node.lock();
-
-                if let RamNode::Directory {
-                    entries: child_entries,
-                } = &*node_guard
-                {
-                    if !child_entries.is_empty() {
-                        return Err(FsError::NotEmpty);
-                    }
-                }
-
-                drop(node_guard);
                 entries.remove(name);
                 drop(guard);
-                self.inodes.lock().remove(&ino);
+                self.inodes.lock().remove(&child_ino);
                 Ok(())
             }
             _ => Err(FsError::NotADirectory),
         }
+    }
+
+    fn rename(
+        &self,
+        old_parent: u64,
+        old_name: &str,
+        new_parent: u64,
+        new_name: &str,
+        flags: RenameFlags,
+    ) -> FsResult<()> {
+        if old_parent == new_parent && old_name == new_name {
+            return Ok(());
+        }
+        if flags.exchange {
+            return Err(FsError::NotSupported);
+        }
+        if flags.no_replace && flags.replace_if_exists {
+            return Err(FsError::InvalidArgument);
+        }
+
+        let old_parent_node = self.get_node(old_parent)?;
+        let moved_ino = {
+            let guard = old_parent_node.lock();
+            match &*guard {
+                RamNode::Directory { entries, .. } => *entries.get(old_name).ok_or(FsError::NotFound)?,
+                _ => return Err(FsError::NotADirectory),
+            }
+        };
+
+        let new_parent_node = self.get_node(new_parent)?;
+        let mut new_guard = new_parent_node.lock();
+        let replaced_ino = match &mut *new_guard {
+            RamNode::Directory { entries, .. } => {
+                if let Some(&existing) = entries.get(new_name) {
+                    if flags.no_replace {
+                        return Err(FsError::AlreadyExists);
+                    }
+                    if !flags.replace_if_exists && existing != moved_ino {
+                        return Err(FsError::AlreadyExists);
+                    }
+                    Some(existing)
+                } else {
+                    None
+                }
+            }
+            _ => return Err(FsError::NotADirectory),
+        };
+        drop(new_guard);
+
+        if let Some(existing_ino) = replaced_ino {
+            let existing_node = self.get_node(existing_ino)?;
+            let existing_guard = existing_node.lock();
+            if let RamNode::Directory {
+                entries: child_entries,
+                ..
+            } = &*existing_guard
+            {
+                if !child_entries.is_empty() {
+                    return Err(FsError::NotEmpty);
+                }
+            }
+        }
+
+        {
+            let mut guard = old_parent_node.lock();
+            match &mut *guard {
+                RamNode::Directory { entries, .. } => {
+                    let current = *entries.get(old_name).ok_or(FsError::NotFound)?;
+                    if current != moved_ino {
+                        return Err(FsError::InvalidArgument);
+                    }
+                    entries.remove(old_name);
+                }
+                _ => return Err(FsError::NotADirectory),
+            }
+        }
+
+        let mut guard = new_parent_node.lock();
+        match &mut *guard {
+            RamNode::Directory { entries, .. } => {
+                if let Some(existing_ino) = entries.insert(new_name.to_string(), moved_ino) {
+                    if existing_ino != moved_ino {
+                        self.inodes.lock().remove(&existing_ino);
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(FsError::NotADirectory),
+        }
+    }
+
+    fn set_size(&self, ino: u64, size: u64) -> FsResult<()> {
+        let node = self.get_node(ino)?;
+        let mut guard = node.lock();
+        match &mut *guard {
+            RamNode::File { data, .. } => {
+                data.resize(size as usize, 0);
+                Ok(())
+            }
+            _ => Err(FsError::IsADirectory),
+        }
+    }
+
+    fn set_times(
+        &self,
+        ino: u64,
+        _atime: Option<VfsTimestamp>,
+        _mtime: Option<VfsTimestamp>,
+    ) -> FsResult<()> {
+        let _ = self.get_node(ino)?;
+        Ok(())
     }
 
     fn readlink(&self, _ino: u64) -> FsResult<String> {
