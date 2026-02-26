@@ -80,55 +80,61 @@ pub fn init() {
         return;
     }
 
-    for &dev_id in e1000::E1000_DEVICE_IDS {
-        if let Some(pci_dev) = pci::find_device(pci::vendor::INTEL, dev_id) {
-            log::info!(
-                "E1000: PCI {:04x}:{:04x} at {:?}",
-                pci_dev.vendor_id,
-                pci_dev.device_id,
-                pci_dev.address
-            );
-            pci_dev.enable_bus_master();
-            pci_dev.enable_memory_space();
+    // Single-pass PCI scan: avoids re-scanning the entire bus for each
+    // supported Intel device ID.
+    for pci_dev in pci::all_devices().into_iter() {
+        if pci_dev.vendor_id != pci::vendor::INTEL
+            || !e1000::E1000_DEVICE_IDS.contains(&pci_dev.device_id)
+        {
+            continue;
+        }
 
-            let mmio_phys = match pci_dev.read_bar(0) {
-                Some(Bar::Memory32 { addr, .. }) => addr as u64,
-                Some(Bar::Memory64 { addr, .. }) => addr,
-                _ => {
-                    log::error!("E1000: BAR0 not memory-mapped");
-                    continue;
-                }
-            };
+        log::info!(
+            "E1000: PCI {:04x}:{:04x} at {:?}",
+            pci_dev.vendor_id,
+            pci_dev.device_id,
+            pci_dev.address
+        );
+        pci_dev.enable_bus_master();
+        pci_dev.enable_memory_space();
 
-            memory::paging::ensure_identity_map_range(mmio_phys, 0x2_0000);
-            let mmio_virt = memory::phys_to_virt(mmio_phys);
-            let mmio_page_phys = mmio_phys & !0xFFF;
-            let mmio_page_virt = mmio_virt & !0xFFF;
-            let mapped = memory::paging::translate(VirtAddr::new(mmio_page_virt))
-                .map(|p| p.as_u64())
-                .unwrap_or(0);
-            if mapped != mmio_page_phys {
-                log::error!(
-                    "E1000: MMIO not mapped after ensure_identity_map_range phys={:#x} virt={:#x} mapped={:#x}; skipping device",
-                    mmio_phys,
-                    mmio_virt,
-                    mapped
-                );
+        let mmio_phys = match pci_dev.read_bar(0) {
+            Some(Bar::Memory32 { addr, .. }) => addr as u64,
+            Some(Bar::Memory64 { addr, .. }) => addr,
+            _ => {
+                log::error!("E1000: BAR0 not memory-mapped");
                 continue;
             }
+        };
 
-            match E1000Nic::init(mmio_virt, &KernelDma) {
-                Ok(nic) => {
-                    let mac = nic.mac_address();
-                    let dev = Arc::new(KernelE1000 {
-                        mac,
-                        inner: SpinLock::new(nic),
-                    });
-                    register_device(dev);
-                    return;
-                }
-                Err(e) => log::error!("E1000: init failed: {}", e),
+        memory::paging::ensure_identity_map_range(mmio_phys, 0x2_0000);
+        let mmio_virt = memory::phys_to_virt(mmio_phys);
+        let mmio_page_phys = mmio_phys & !0xFFF;
+        let mmio_page_virt = mmio_virt & !0xFFF;
+        let mapped = memory::paging::translate(VirtAddr::new(mmio_page_virt))
+            .map(|p| p.as_u64())
+            .unwrap_or(0);
+        if mapped != mmio_page_phys {
+            log::error!(
+                "E1000: MMIO not mapped after ensure_identity_map_range phys={:#x} virt={:#x} mapped={:#x}; skipping device",
+                mmio_phys,
+                mmio_virt,
+                mapped
+            );
+            continue;
+        }
+
+        match E1000Nic::init(mmio_virt, &KernelDma) {
+            Ok(nic) => {
+                let mac = nic.mac_address();
+                let dev = Arc::new(KernelE1000 {
+                    mac,
+                    inner: SpinLock::new(nic),
+                });
+                register_device(dev);
+                return;
             }
+            Err(e) => log::error!("E1000: init failed: {}", e),
         }
     }
     log::info!("E1000: no compatible device found");

@@ -7,6 +7,8 @@
 
 use super::io::{inl, outl};
 use crate::serial_println;
+use crate::sync::SpinLock;
+use alloc::vec::Vec;
 use core::fmt;
 
 /// PCI Configuration Address Port
@@ -437,17 +439,57 @@ fn probe_device(address: PciAddress, vendor_id: u16) -> Option<PciDevice> {
 
 /// Helper to find a device by vendor and device ID
 pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
-    PciScanner::new().find(|dev| dev.vendor_id == vendor_id && dev.device_id == device_id)
+    let mut cache = PCI_DEVICE_CACHE.lock();
+    if cache.is_none() {
+        *cache = Some(PciScanner::new().collect());
+    }
+    cache
+        .as_ref()
+        .and_then(|devs| {
+            devs.iter()
+                .copied()
+                .find(|dev| dev.vendor_id == vendor_id && dev.device_id == device_id)
+        })
 }
 
 /// Find all VirtIO devices on the PCI bus
-pub fn find_virtio_devices() -> alloc::vec::Vec<PciDevice> {
-    PciScanner::new()
-        .filter(|dev| dev.vendor_id == vendor::VIRTIO)
-        .collect()
+pub fn find_virtio_devices() -> Vec<PciDevice> {
+    find_devices_by_vendor(vendor::VIRTIO)
 }
 
 /// Find a specific VirtIO device by device ID
 pub fn find_virtio_device(device_id: u16) -> Option<PciDevice> {
     find_device(vendor::VIRTIO, device_id)
+}
+
+/// Cached PCI device inventory.
+///
+/// The first lookup performs a full bus scan, then all subsequent lookups reuse
+/// this snapshot. This is ideal during boot when multiple controllers probe PCI.
+static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
+
+/// Return a snapshot of all discovered PCI devices.
+///
+/// This uses a cached bus scan to avoid repeated O(bus*device*function) probes.
+pub fn all_devices() -> Vec<PciDevice> {
+    let mut cache = PCI_DEVICE_CACHE.lock();
+    if cache.is_none() {
+        *cache = Some(PciScanner::new().collect());
+    }
+    cache.as_ref().cloned().unwrap_or_default()
+}
+
+/// Return all devices for a given vendor from the cached PCI inventory.
+pub fn find_devices_by_vendor(vendor_id: u16) -> Vec<PciDevice> {
+    all_devices()
+        .into_iter()
+        .filter(|dev| dev.vendor_id == vendor_id)
+        .collect()
+}
+
+/// Invalidate PCI cache.
+///
+/// Useful when hotplug/re-enumeration support is added in the future.
+pub fn invalidate_cache() {
+    *PCI_DEVICE_CACHE.lock() = None;
 }

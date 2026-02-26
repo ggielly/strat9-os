@@ -28,21 +28,20 @@ static REPLIES: SpinLock<ReplyRegistry> = SpinLock::new(ReplyRegistry::new());
 
 /// Block the current task waiting for a reply message.
 pub fn wait_for_reply(task_id: TaskId) -> IpcMessage {
-    loop {
-        let waitq = {
-            let mut registry = REPLIES.lock();
-            let slot = registry.slots.entry(task_id).or_insert_with(|| ReplySlot {
-                msg: None,
-                waitq: Arc::new(WaitQueue::new()),
-            });
-            if let Some(msg) = slot.msg.take() {
-                return msg;
-            }
-            slot.waitq.clone()
-        };
+    let waitq = {
+        let mut registry = REPLIES.lock();
+        let slot = registry.slots.entry(task_id).or_insert_with(|| ReplySlot {
+            msg: None,
+            waitq: Arc::new(WaitQueue::new()),
+        });
+        slot.waitq.clone()
+    };
 
-        waitq.wait();
-    }
+    waitq.wait_until(|| {
+        let mut registry = REPLIES.lock();
+        let slot = registry.slots.get_mut(&task_id).unwrap();
+        slot.msg.take()
+    })
 }
 
 /// Deliver a reply message to the given task (wakes it if blocked).
