@@ -96,11 +96,17 @@ impl MountTable {
                 self.cache.lock().put(String::from(path), res.clone());
                 return Ok(res);
             } else if path.starts_with(&mount.prefix) {
-                // Check prefix boundary
+                // Check prefix boundary.
+                // Special case: the root "/" mount matches every absolute path.
+                let is_root = mount.prefix == "/";
                 let next_byte = path.as_bytes().get(mount.prefix.len());
-                if next_byte == Some(&b'/') {
-                    // Valid prefix match
-                    let relative = &path[mount.prefix.len() + 1..];
+                if is_root || next_byte == Some(&b'/') {
+                    // Strip the mount prefix (and the trailing slash for non-root).
+                    let relative = if is_root {
+                        &path[1..] // strip leading "/"
+                    } else {
+                        &path[mount.prefix.len() + 1..]
+                    };
                     let res = (mount.scheme.clone(), String::from(relative));
                     self.cache.lock().put(String::from(path), res.clone());
                     return Ok(res);

@@ -82,6 +82,25 @@ pub fn register_lapic_timer_vector(vector: u8) {
     }
 }
 
+/// Register the AHCI storage controller IRQ handler.
+///
+/// Called after AHCI initialisation once the PCI interrupt line is known.
+pub fn register_ahci_irq(irq: u8) {
+    let vector = if irq < 16 {
+        super::pic::PIC1_OFFSET + irq
+    } else {
+        irq
+    };
+
+    // SAFETY: called during kernel init, before the scheduler starts
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[vector].set_handler_fn(ahci_handler);
+        (*idt).load_unsafe();
+    }
+    log::info!("AHCI IRQ {} registered on vector {:#x}", irq, vector);
+}
+
 /// Register the VirtIO block device IRQ handler
 ///
 /// Called after VirtIO block device initialization to route the device's
@@ -469,6 +488,22 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 /// Per Intel SDM: do NOT send EOI for spurious interrupts.
 extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {
     // Intentionally empty — no EOI per Intel SDM
+}
+
+/// AHCI storage controller IRQ handler.
+///
+/// Reads `HBA_IS`, processes per-port completions, wakes waiting tasks, then
+/// sends EOI.  Must not call any function that may block or allocate.
+extern "x86-interrupt" fn ahci_handler(_stack_frame: InterruptStackFrame) {
+    crate::hardware::storage::ahci::handle_interrupt();
+
+    if super::apic::is_initialized() {
+        super::apic::eoi();
+    } else {
+        let irq = crate::hardware::storage::ahci::AHCI_IRQ_LINE
+            .load(core::sync::atomic::Ordering::Relaxed);
+        pic::end_of_interrupt(irq);
+    }
 }
 
 /// VirtIO Block device IRQ handler

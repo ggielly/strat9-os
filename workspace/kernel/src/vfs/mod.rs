@@ -24,12 +24,14 @@
 //! Returns FD to userspace
 //! ```
 
+pub mod blkdev_scheme;
 pub mod fd;
 pub mod file;
 pub mod ipcfs;
 pub mod mount;
 pub mod pipe;
 pub mod procfs;
+pub mod ramfs_scheme;
 pub mod scheme;
 pub mod scheme_router;
 
@@ -41,6 +43,8 @@ pub use file::OpenFile;
 pub use mount::{list_mounts, mount, resolve, unmount, Namespace};
 pub use pipe::PipeScheme;
 pub use procfs::ProcScheme;
+pub use blkdev_scheme::BlkDevScheme;
+pub use ramfs_scheme::RamfsScheme;
 pub use scheme::{
     DirEntry, DynScheme, FileFlags, FileStat, IpcScheme, KernelScheme, OpenFlags, Scheme,
 };
@@ -765,6 +769,31 @@ fn get_pipe_scheme() -> Arc<PipeScheme> {
 pub fn init() {
     log::info!("[VFS] Initializing virtual file system");
 
+    // ── Root filesystem (RamFS on "/") ────────────────────────────────────
+    // Must be mounted before any other scheme so that longest-prefix resolution
+    // falls back to "/" for paths not covered by a more specific mount point.
+    let rootfs = alloc::sync::Arc::new(RamfsScheme::new());
+    if let Err(e) = mount::mount("/", rootfs.clone()) {
+        log::error!("[VFS] Failed to mount /: {:?}", e);
+    } else {
+        // Populate the standard POSIX directory skeleton.
+        for dir in &[
+            "bin", "sbin", "etc", "tmp", "usr", "lib", "lib64",
+            "home", "root", "run", "var", "mnt", "opt", "srv",
+            "dev", "proc", "sys",
+        ] {
+            rootfs.ensure_dir(dir);
+        }
+        // Nested standard directories
+        rootfs.ensure_dir("usr/bin");
+        rootfs.ensure_dir("usr/sbin");
+        rootfs.ensure_dir("usr/lib");
+        rootfs.ensure_dir("var/log");
+        rootfs.ensure_dir("var/tmp");
+        rootfs.ensure_dir("run/lock");
+        log::info!("[VFS] Mounted / (ramfs) with standard directory tree");
+    }
+
     // Initialize scheme router
     if let Err(e) = scheme_router::init_builtin_schemes() {
         log::error!("[VFS] Failed to init builtin schemes: {:?}", e);
@@ -808,6 +837,16 @@ pub fn init() {
         log::error!("[VFS] Failed to mount /ipc: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /ipc (kernel ipc control scheme)");
+    }
+
+    // Mount /dev — raw block-device scheme backed by AHCI.
+    // The scheme is registered regardless of whether a disk is present:
+    // device files appear dynamically when the hardware is available.
+    let dev_scheme = Arc::new(BlkDevScheme::new());
+    if let Err(e) = mount::mount("/dev", dev_scheme) {
+        log::error!("[VFS] Failed to mount /dev: {:?}", e);
+    } else {
+        log::info!("[VFS] Mounted /dev (block-device scheme)");
     }
 
     log::info!("[VFS] VFS ready");

@@ -7,14 +7,31 @@
 //!   [0x000..0x3FF]  Command List   (1024 B, 32 × 32-byte headers)
 //!   [0x400..0x4FF]  FIS receive    (256 B)
 //!   [0x500..0x5FF]  Command table  (128 B header + 1 × 16-byte PRDT)
+//!
+//! ## IRQ-driven completion (DRV-02 v2)
+//!
+//! When a task context exists (`current_task_id()` is `Some`), commands are
+//! completed via interrupt + `WaitQueue::wait_until()` so the issuing task
+//! blocks without busy-spinning.  During early boot (no task yet) the legacy
+//! polling path is used as a fallback.
+//!
+//! Per-port statics (indexed by `port_num 0..32`) are used so the IRQ handler
+//! can signal completion without acquiring any slow lock:
+//!   - `PORT_VIRT[n]`       — MMIO virtual address of port n registers
+//!   - `PORT_SLOT0_DONE[n]` — set by IRQ handler when slot-0 completes
+//!   - `PORT_SLOT0_ERROR[n]`— set by IRQ handler when a task-file error fires
+//!   - `PORT_WQ[n]`         — WaitQueue; issuing task blocks here
 
 use crate::{
     arch::x86_64::pci::{self, ProbeCriteria},
     memory::{buddy::get_allocator, phys_to_virt, FrameAllocator, PhysFrame},
-    sync::SpinLock,
+    sync::{SpinLock, WaitQueue},
 };
 use alloc::{boxed::Box, vec::Vec};
-use core::ptr;
+use core::{
+    ptr,
+    sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+};
 
 pub use super::virtio_block::{BlockDevice, BlockError, SECTOR_SIZE};
 
@@ -24,6 +41,7 @@ const HBA_IS: u64 = 0x08;
 const HBA_PI: u64 = 0x0C;
 
 const GHC_AE: u32 = 1 << 31; // AHCI Enable
+const GHC_IE: u32 = 1 << 1; // Global Interrupt Enable
 const GHC_HR: u32 = 1 << 0; // HBA Reset
 
 // ─── Port register offsets (relative to port base = ABAR + 0x100 + n*0x80) ──
@@ -32,6 +50,7 @@ const PORT_CLBU: u64 = 0x04;
 const PORT_FB: u64 = 0x08;
 const PORT_FBU: u64 = 0x0C;
 const PORT_IS: u64 = 0x10;
+const PORT_IE: u64 = 0x14; // PxIE — port interrupt enable
 const PORT_CMD: u64 = 0x18;
 const PORT_TFD: u64 = 0x20;
 const PORT_SIG: u64 = 0x24;
@@ -51,6 +70,10 @@ const SSTS_DET_COMM: u32 = 3;
 const SSTS_DET_MASK: u32 = 0xF;
 
 const SIG_SATA: u32 = 0x0000_0101;
+
+// PxIE bits
+const PXIE_DHRE: u32 = 1 << 0; // D2H Register FIS Received Enable (normal DMA completion)
+const PXIE_TFEE: u32 = 1 << 30; // Task File Error Enable
 
 // ─── Per-port memory layout offsets ──────────────────────────────────────────
 const CLB_OFF: u64 = 0x000; // Command List (1024 B)
@@ -138,6 +161,40 @@ pub struct AhciController {
 unsafe impl Send for AhciController {}
 unsafe impl Sync for AhciController {}
 
+// ─── Per-port IRQ completion state ───────────────────────────────────────────
+// These statics are accessed from the IRQ handler without locks.
+// Indexed by port_num (0..32).
+
+/// AHCI ABAR virtual address — written once during init, read by IRQ handler.
+static AHCI_ABAR_VIRT: AtomicU64 = AtomicU64::new(0);
+
+/// PCI interrupt line used by this controller.
+pub static AHCI_IRQ_LINE: AtomicU8 = AtomicU8::new(0xFF);
+
+/// Per-port MMIO virtual addresses — written once during init.
+static PORT_VIRT: [AtomicU64; 32] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; 32]
+};
+
+/// Per-port slot-0 completion flags — set by IRQ handler, cleared by consumer.
+static PORT_SLOT0_DONE: [AtomicBool; 32] = {
+    const INIT: AtomicBool = AtomicBool::new(false);
+    [INIT; 32]
+};
+
+/// Per-port slot-0 error flags — set by IRQ handler on task-file error.
+static PORT_SLOT0_ERROR: [AtomicBool; 32] = {
+    const INIT: AtomicBool = AtomicBool::new(false);
+    [INIT; 32]
+};
+
+/// Per-port wait queues — tasks block here while waiting for IRQ completion.
+static PORT_WQ: [WaitQueue; 32] = {
+    const INIT: WaitQueue = WaitQueue::new();
+    [INIT; 32]
+};
+
 // ─── MMIO helpers ─────────────────────────────────────────────────────────────
 
 #[inline]
@@ -200,6 +257,14 @@ fn port_rebase(pvirt: u64, phys: u64) {
     port_start(pvirt);
 }
 
+/// Enable interrupts for a port (DHRE = DMA completion, TFEE = errors).
+fn port_enable_irq(pvirt: u64) {
+    // SAFETY: pvirt is a valid MMIO port register address
+    unsafe {
+        wr32(pvirt, PORT_IE, PXIE_DHRE | PXIE_TFEE);
+    }
+}
+
 // ─── Bounce-buffer management ─────────────────────────────────────────────────
 
 struct Bounce {
@@ -236,7 +301,12 @@ impl Bounce {
     }
 }
 
-// ─── Command submission (polled, single slot 0) ───────────────────────────────
+// ─── Command submission ───────────────────────────────────────────────────────
+//
+// Two completion strategies:
+//   1. Task context (current_task_id() is Some): IRQ + WaitQueue — the issuing
+//      task is blocked by the scheduler until the IRQ fires and wakes it.
+//   2. Boot context (no task yet): legacy busy-poll with timeout.
 
 fn submit_cmd(
     port: &AhciPort,
@@ -316,41 +386,70 @@ fn submit_cmd(
         ptr::write_unaligned(p.add(12) as *mut u32, dbc);
     }
 
+    let idx = port.port_num as usize;
+
+    // Clear any stale completion state before issuing the command
+    PORT_SLOT0_DONE[idx].store(false, Ordering::Release);
+    PORT_SLOT0_ERROR[idx].store(false, Ordering::Release);
+
     // Issue command in slot 0
     // SAFETY: MMIO write to PxCI
     unsafe { wr32(port.port_virt, PORT_CI, 1) };
 
-    // Busy-poll until slot 0 clears or an error fires (≤ ~5 s at ~1 M spins)
-    let mut tries = 5_000_000u32;
-    loop {
-        // SAFETY: MMIO reads
-        let ci = unsafe { rd32(port.port_virt, PORT_CI) };
-        let is = unsafe { rd32(port.port_virt, PORT_IS) };
-
-        if is & PxIS_TFES != 0 {
-            // SAFETY: MMIO writes to clear error status
-            unsafe {
-                wr32(port.port_virt, PORT_IS, 0xFFFF_FFFF);
-                wr32(port.port_virt, PORT_SERR, 0xFFFF_FFFF);
+    // ── Completion strategy ────────────────────────────────────────────────────
+    if crate::process::current_task_id().is_some() {
+        // Task context: block until the IRQ handler signals DONE.
+        // WaitQueue::wait_until() atomically checks the condition under the
+        // waiters SpinLock (which disables IRQs via CLI), so the completion
+        // interrupt cannot be lost between the check and the block.
+        PORT_WQ[idx].wait_until(|| {
+            if PORT_SLOT0_DONE[idx].load(Ordering::Acquire) {
+                // Consume the flag atomically before returning
+                PORT_SLOT0_DONE[idx].store(false, Ordering::Release);
+                Some(())
+            } else {
+                None
             }
+        });
+
+        // Check whether the IRQ reported an error
+        if PORT_SLOT0_ERROR[idx].load(Ordering::Acquire) {
             bounce.free();
             return Err(AhciError::DeviceError);
         }
+    } else {
+        // Boot context (no task): fall back to busy-poll with ≈5 s timeout.
+        let mut tries = 5_000_000u32;
+        loop {
+            // SAFETY: MMIO reads
+            let ci = unsafe { rd32(port.port_virt, PORT_CI) };
+            let is = unsafe { rd32(port.port_virt, PORT_IS) };
 
-        if ci & 1 == 0 {
-            break; // slot 0 completed
+            if is & PxIS_TFES != 0 {
+                // SAFETY: MMIO writes to clear error status
+                unsafe {
+                    wr32(port.port_virt, PORT_IS, 0xFFFF_FFFF);
+                    wr32(port.port_virt, PORT_SERR, 0xFFFF_FFFF);
+                }
+                bounce.free();
+                return Err(AhciError::DeviceError);
+            }
+
+            if ci & 1 == 0 {
+                break; // slot 0 completed
+            }
+
+            tries = tries.saturating_sub(1);
+            if tries == 0 {
+                bounce.free();
+                return Err(AhciError::Timeout);
+            }
+            core::hint::spin_loop();
         }
 
-        tries = tries.saturating_sub(1);
-        if tries == 0 {
-            bounce.free();
-            return Err(AhciError::Timeout);
-        }
-        core::hint::spin_loop();
+        // SAFETY: MMIO write to clear port interrupt status
+        unsafe { wr32(port.port_virt, PORT_IS, 0xFFFF_FFFF) };
     }
-
-    // SAFETY: MMIO write to clear port interrupt status
-    unsafe { wr32(port.port_virt, PORT_IS, 0xFFFF_FFFF) };
 
     if !write {
         // SAFETY: bounce.virt valid, nbytes ≤ allocated
@@ -361,6 +460,68 @@ fn submit_cmd(
 
     bounce.free();
     Ok(())
+}
+
+// ─── IRQ handler ─────────────────────────────────────────────────────────────
+
+/// Called from the IDT AHCI IRQ handler.
+///
+/// Reads `HBA_IS` to find which ports raised an interrupt, reads and clears
+/// `PxIS` per port, then signals the per-port `WaitQueue` so that any task
+/// blocked in `submit_cmd` can resume.
+///
+/// # Safety of concurrent access
+/// All per-port statics (`PORT_SLOT0_DONE`, `PORT_SLOT0_ERROR`, `PORT_WQ`) are
+/// accessed via atomics or briefly-held SpinLocks (which disable IRQs).  The
+/// IRQ handler itself is not re-entrant (x86 APIC level-triggered delivery
+/// ensures this for the same vector).
+pub fn handle_interrupt() {
+    let abar = AHCI_ABAR_VIRT.load(Ordering::Relaxed);
+    if abar == 0 {
+        return; // controller not yet initialised
+    }
+
+    // SAFETY: abar is the MMIO-mapped AHCI base set during init
+    let global_is = unsafe { rd32(abar, HBA_IS) };
+    if global_is == 0 {
+        return; // spurious
+    }
+
+    for port_num in 0..32u8 {
+        if global_is & (1 << port_num) == 0 {
+            continue;
+        }
+
+        let pvirt = PORT_VIRT[port_num as usize].load(Ordering::Relaxed);
+        if pvirt == 0 {
+            continue; // port not in use
+        }
+
+        // SAFETY: pvirt is the valid MMIO address for this port, set during init
+        let pxis = unsafe { rd32(pvirt, PORT_IS) };
+
+        // Determine outcome and record in the error flag
+        if pxis & PxIS_TFES != 0 {
+            PORT_SLOT0_ERROR[port_num as usize].store(true, Ordering::Release);
+            // SAFETY: MMIO writes to clear error state
+            unsafe {
+                wr32(pvirt, PORT_IS, pxis);
+                wr32(pvirt, PORT_SERR, 0xFFFF_FFFF);
+            }
+        } else {
+            PORT_SLOT0_ERROR[port_num as usize].store(false, Ordering::Release);
+            // SAFETY: W1C — write back PxIS to clear all set bits
+            unsafe { wr32(pvirt, PORT_IS, pxis) };
+        }
+
+        // Clear this port's bit in global IS (W1C)
+        // SAFETY: MMIO write to HBA_IS
+        unsafe { wr32(abar, HBA_IS, 1 << port_num) };
+
+        // Signal command completion
+        PORT_SLOT0_DONE[port_num as usize].store(true, Ordering::Release);
+        PORT_WQ[port_num as usize].wake_one();
+    }
 }
 
 // ─── BlockDevice impl for AhciController ─────────────────────────────────────
@@ -385,6 +546,9 @@ impl AhciController {
         // Enable bus-mastering and memory-space access (required for DMA)
         pci_dev.enable_bus_master();
         pci_dev.enable_memory_space();
+
+        // Read PCI interrupt line before we need it later
+        let irq_line = pci_dev.read_config_u8(pci::config::INTERRUPT_LINE);
 
         // BAR5 = ABAR (AHCI Base Memory Register)
         let abar_phys = pci_dev.read_bar_raw(5).ok_or(AhciError::BadAbar)?;
@@ -459,6 +623,13 @@ impl AhciController {
 
             port_rebase(pvirt, mem_phys);
 
+            // Enable per-port interrupts (DHRE + TFEE)
+            port_enable_irq(pvirt);
+
+            // Register this port's MMIO address in the per-port static table
+            // so the IRQ handler can access it without holding the controller lock.
+            PORT_VIRT[port_num as usize].store(pvirt, Ordering::Relaxed);
+
             // Identify device to read sector count
             let mut port = AhciPort {
                 port_num,
@@ -495,6 +666,21 @@ impl AhciController {
         if ports.is_empty() {
             return Err(AhciError::NoPort);
         }
+
+        // Store the ABAR virtual address and IRQ line in statics so the
+        // interrupt handler can reach them without going through the controller lock.
+        AHCI_ABAR_VIRT.store(abar_virt, Ordering::Relaxed);
+        AHCI_IRQ_LINE.store(irq_line, Ordering::Relaxed);
+
+        // Enable global HBA interrupts (GHC.IE)
+        // SAFETY: MMIO write — all port interrupts already enabled above
+        let ghc = rd32(abar_virt, HBA_GHC);
+        wr32(abar_virt, HBA_GHC, ghc | GHC_IE);
+
+        log::info!(
+            "AHCI: global interrupts enabled (IRQ line {})",
+            irq_line
+        );
 
         Ok(AhciController { abar_virt, ports })
     }
@@ -555,6 +741,10 @@ pub fn init() {
         Ok(ctrl) => {
             *AHCI.lock() = Some(Box::new(ctrl));
             log::info!("AHCI: controller ready");
+
+            // Register IRQ handler in the IDT now that the controller is live.
+            let irq = AHCI_IRQ_LINE.load(Ordering::Relaxed);
+            crate::arch::x86_64::idt::register_ahci_irq(irq);
         }
         Err(AhciError::NoController) => {
             log::info!("AHCI: no controller found (not a SATA system?)");
