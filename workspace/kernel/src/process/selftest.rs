@@ -35,6 +35,19 @@ extern "C" fn selftest_orchestrator() -> ! {
     crate::process::posix_signal_test::create_posix_signal_test_task();
     let _ = wait_task_exit("posix-signal-test", 2_000);
 
+    crate::ipc::test::create_ipc_test_tasks();
+    let _ = wait_task_exit("ipc-sender", 2_000);
+    let _ = wait_task_exit("ipc-recv", 2_000);
+
+    crate::ipc::test::create_channel_test_tasks();
+    let _ = wait_task_exit("chan-prod-1", 2_000);
+    let _ = wait_task_exit("chan-prod-2", 2_000);
+    let _ = wait_task_exit("chan-consumer", 3_000);
+
+    crate::ipc::test::create_ipc_04_05_test_task();
+    let _ = wait_task_exit("ipc-sem-poster", 2_000);
+    let _ = wait_task_exit("ipc-04-05-test", 3_000);
+
     crate::serial_println!("[selftest] orchestrator done");
     crate::process::scheduler::exit_current_task(0);
 }

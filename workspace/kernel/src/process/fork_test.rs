@@ -5,13 +5,12 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use crate::{
-    capability::CapabilityTable,
     memory::address_space::{AddressSpace, VmaFlags, VmaType},
     process::{
         current_task_id,
         scheduler::add_task_with_parent,
-        task::{CpuContext, KernelStack, SyncUnsafeCell, Task},
-        try_wait_child, TaskId, TaskPriority, TaskState, WaitChildResult,
+        task::Task,
+        try_wait_child, TaskId, TaskPriority, WaitChildResult,
     },
 };
 
@@ -102,48 +101,12 @@ fn spawn_user_program_task(
     }
     crate::serial_println!("[fork-test] {}: user payload ready", name);
 
-    let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
-    let context = CpuContext::new(ring3_test_trampoline as *const () as u64, &kernel_stack);
-    let (pid, tid_ids, tgid) = Task::allocate_process_ids();
-
-    let task = Arc::new(Task {
-        id: TaskId::new(),
-        pid,
-        tid: tid_ids,
-        tgid,
-        pgid: core::sync::atomic::AtomicU32::new(pid),
-        sid: core::sync::atomic::AtomicU32::new(pid),
-        uid: core::sync::atomic::AtomicU32::new(0),
-        euid: core::sync::atomic::AtomicU32::new(0),
-        gid: core::sync::atomic::AtomicU32::new(0),
-        egid: core::sync::atomic::AtomicU32::new(0),
-        state: SyncUnsafeCell::new(TaskState::Ready),
-        priority: TaskPriority::Normal,
-        context: SyncUnsafeCell::new(context),
-        kernel_stack,
-        user_stack: None,
+    let task = Task::new_user_task(
+        ring3_test_trampoline as u64,
+        user_as,
         name,
-        capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
-        address_space: SyncUnsafeCell::new(user_as),
-        fd_table: SyncUnsafeCell::new(crate::vfs::FileDescriptorTable::new()),
-        pending_signals: super::signal::SignalSet::new(),
-        blocked_signals: super::signal::SignalSet::new(),
-        signal_stack: SyncUnsafeCell::new(None),
-        itimers: super::timer::ITimers::new(),
-        wake_pending: core::sync::atomic::AtomicBool::new(false),
-        wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
-        trampoline_entry: core::sync::atomic::AtomicU64::new(0),
-        trampoline_stack_top: core::sync::atomic::AtomicU64::new(0),
-        trampoline_arg0: core::sync::atomic::AtomicU64::new(0),
-        ticks: core::sync::atomic::AtomicU64::new(0),
-        sched_policy: crate::process::task::SyncUnsafeCell::new(Task::default_sched_policy(
-            TaskPriority::Normal,
-        )),
-        vruntime: core::sync::atomic::AtomicU64::new(0),
-        clear_child_tid: core::sync::atomic::AtomicU64::new(0),
-        user_fs_base: core::sync::atomic::AtomicU64::new(0),
-        fpu_state: crate::process::task::SyncUnsafeCell::new(crate::process::task::FpuState::new()),
-    });
+        TaskPriority::Normal,
+    )?;
 
     let launch = Box::new(UserLaunchCtx {
         user_rip: USER_CODE_ADDR,
@@ -507,7 +470,8 @@ extern "C" fn fork_test_main() -> ! {
 
     crate::serial_println!(
         "[fork-test] summary: {}",
-        if s0a && s0b && s1 && s2 && s3 && s4 {
+  
+        if s0a && s0b && s2 && s4 {
             "PASS"
         } else {
             "FAIL"

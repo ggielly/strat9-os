@@ -223,3 +223,105 @@ extern "C" fn chan_consumer_main() -> ! {
 
     crate::process::scheduler::exit_current_task(0);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IPC-04/05 tests: shared ring + POSIX semaphore
+// ─────────────────────────────────────────────────────────────────────────────
+
+static SEM_TEST_ID: AtomicU64 = AtomicU64::new(0);
+static SEM_TEST_RESULT: SpinLock<Option<bool>> = SpinLock::new(None);
+
+pub fn create_ipc_04_05_test_task() {
+    let task = Task::new_kernel_task(
+        ipc_04_05_main,
+        "ipc-04-05-test",
+        TaskPriority::Normal,
+    )
+    .expect("Failed to create ipc-04-05-test task");
+    add_task(task);
+}
+
+extern "C" fn ipc_04_05_main() -> ! {
+    crate::serial_println!("[ipc-04-05] start");
+
+    let ring_id = match ipc::shared_ring::create_ring(8192) {
+        Ok(id) => id,
+        Err(e) => {
+            crate::serial_println!("[ipc-04-05] FAIL ring create: {:?}", e);
+            crate::process::scheduler::exit_current_task(1);
+        }
+    };
+
+    let ring = match ipc::shared_ring::get_ring(ring_id) {
+        Some(r) => r,
+        None => {
+            crate::serial_println!("[ipc-04-05] FAIL ring lookup");
+            crate::process::scheduler::exit_current_task(1);
+        }
+    };
+    let pages = ring.page_count();
+    let addrs = ring.frame_phys_addrs();
+    if pages < 2 || addrs.len() != pages {
+        crate::serial_println!(
+            "[ipc-04-05] FAIL ring layout pages={} addrs={}",
+            pages,
+            addrs.len()
+        );
+        let _ = ipc::shared_ring::destroy_ring(ring_id);
+        crate::process::scheduler::exit_current_task(1);
+    }
+
+    if ipc::shared_ring::destroy_ring(ring_id).is_err() || ipc::shared_ring::get_ring(ring_id).is_some() {
+        crate::serial_println!("[ipc-04-05] FAIL ring destroy");
+        crate::process::scheduler::exit_current_task(1);
+    }
+
+    let sem_id = match ipc::semaphore::create_semaphore(0) {
+        Ok(id) => id,
+        Err(e) => {
+            crate::serial_println!("[ipc-04-05] FAIL sem create: {:?}", e);
+            crate::process::scheduler::exit_current_task(1);
+        }
+    };
+    SEM_TEST_ID.store(sem_id.as_u64(), Ordering::Release);
+
+    let poster = Task::new_kernel_task(sem_poster_main, "ipc-sem-poster", TaskPriority::Normal)
+        .expect("Failed to create ipc-sem-poster task");
+    add_task(poster);
+
+    let sem = ipc::semaphore::get_semaphore(sem_id).expect("sem should exist");
+
+    if !matches!(sem.try_wait(), Err(ipc::semaphore::SemaphoreError::WouldBlock)) {
+        crate::serial_println!("[ipc-04-05] FAIL sem try_wait should block");
+        let _ = ipc::semaphore::destroy_semaphore(sem_id);
+        crate::process::scheduler::exit_current_task(1);
+    }
+
+    let wait_ok = sem.wait().is_ok();
+    *SEM_TEST_RESULT.lock() = Some(wait_ok);
+
+    if !wait_ok {
+        crate::serial_println!("[ipc-04-05] FAIL sem wait");
+        let _ = ipc::semaphore::destroy_semaphore(sem_id);
+        crate::process::scheduler::exit_current_task(1);
+    }
+
+    if ipc::semaphore::destroy_semaphore(sem_id).is_err() {
+        crate::serial_println!("[ipc-04-05] FAIL sem destroy");
+        crate::process::scheduler::exit_current_task(1);
+    }
+
+    crate::serial_println!("[ipc-04-05] PASSED");
+    crate::process::scheduler::exit_current_task(0);
+}
+
+extern "C" fn sem_poster_main() -> ! {
+    for _ in 0..4 {
+        crate::process::yield_task();
+    }
+    let sem_id = ipc::semaphore::SemId::from_u64(SEM_TEST_ID.load(Ordering::Acquire));
+    if let Some(sem) = ipc::semaphore::get_semaphore(sem_id) {
+        let _ = sem.post();
+    }
+    crate::process::scheduler::exit_current_task(0);
+}
