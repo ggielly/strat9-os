@@ -94,6 +94,10 @@ impl PosixSemaphore {
         self.destroyed.store(true, Ordering::Release);
         self.waitq.wake_all();
     }
+
+    pub fn count(&self) -> i32 {
+        self.count.load(Ordering::Acquire)
+    }
 }
 
 static NEXT_SEM_ID: AtomicU64 = AtomicU64::new(1);

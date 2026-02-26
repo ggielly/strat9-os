@@ -26,6 +26,7 @@
 
 pub mod fd;
 pub mod file;
+pub mod ipcfs;
 pub mod mount;
 pub mod pipe;
 pub mod procfs;
@@ -800,6 +801,13 @@ pub fn init() {
         log::error!("[VFS] Failed to mount /proc: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /proc (procfs)");
+    }
+
+    let ipc_scheme = Arc::new(ipcfs::IpcControlScheme::new());
+    if let Err(e) = mount::mount("/ipc", ipc_scheme) {
+        log::error!("[VFS] Failed to mount /ipc: {:?}", e);
+    } else {
+        log::info!("[VFS] Mounted /ipc (kernel ipc control scheme)");
     }
 
     log::info!("[VFS] VFS ready");
