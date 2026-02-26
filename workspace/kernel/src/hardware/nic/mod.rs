@@ -9,8 +9,8 @@ pub mod virtio_net;
 
 pub use net_core::{NetError, NetworkDevice, MTU};
 
-use spin::RwLock;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
+use spin::RwLock;
 
 struct NetDeviceEntry {
     iface: String,

@@ -21,6 +21,7 @@ use crate::{
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::{mem, ptr};
 use net_core::{NetError, NetworkDevice};
+use spin::RwLock as SpinRwLock;
 
 /// VirtIO net header size
 const NET_HDR_SIZE: usize = mem::size_of::<VirtioNetHeader>();
@@ -159,11 +160,12 @@ impl VirtioNetDevice {
     /// Fill the RX queue with receive buffers
     fn refill_rx_queue(&self) -> Result<(), &'static str> {
         let mut rx_queue = self.rx_queue.lock();
+        let mut rx_frames = self.rx_frames.lock();
         let mut lock = get_allocator().lock();
         let allocator = lock.as_mut().ok_or("Allocator not initialized")?;
 
         // We want to keep some buffers in the RX queue
-        let current_filled = self.rx_frames.lock().len();
+        let current_filled = rx_frames.len();
         let target_filled = 64;
 
         if current_filled >= target_filled {
@@ -192,7 +194,7 @@ impl VirtioNetDevice {
             // Add buffer to RX queue (device Writable)
             match rx_queue.add_buffer(&[(buf_addr, buf_size as u32, true)]) {
                 Ok(_) => {
-                    self.rx_frames.lock().push_back((buf_frame, buf_order));
+                    rx_frames.push_back((buf_frame, buf_order));
                 }
                 Err(_) => {
                     // Queue full, free the buffer
@@ -369,7 +371,7 @@ impl NetworkDevice for VirtioNetDevice {
 }
 
 /// Global VirtIO network device
-static VIRTIO_NET: SpinLock<Option<Arc<VirtioNetDevice>>> = SpinLock::new(None);
+static VIRTIO_NET: SpinRwLock<Option<Arc<VirtioNetDevice>>> = SpinRwLock::new(None);
 
 /// Initialize VirtIO network device and register it in the global net registry.
 pub fn init() {
@@ -396,7 +398,7 @@ pub fn init() {
     match unsafe { VirtioNetDevice::new(pci_dev) } {
         Ok(device) => {
             let arc = Arc::new(device);
-            *VIRTIO_NET.lock() = Some(arc.clone());
+            *VIRTIO_NET.write() = Some(arc.clone());
             net::register_device(arc);
         }
         Err(e) => {
@@ -407,5 +409,5 @@ pub fn init() {
 
 /// Get the VirtIO network device instance (if present).
 pub fn get_device() -> Option<Arc<VirtioNetDevice>> {
-    VIRTIO_NET.lock().clone()
+    VIRTIO_NET.read().clone()
 }
