@@ -54,6 +54,14 @@ pub mod storage_subclass {
     pub const OTHER: u8 = 0x80;
 }
 
+/// Programming interface codes for mass-storage SATA controllers
+pub mod sata_progif {
+    /// AHCI 1.0 (Advanced Host Controller Interface) — the standard modern mode
+    pub const AHCI: u8 = 0x01;
+    /// Vendor-specific / legacy IDE emulation
+    pub const VENDOR: u8 = 0x00;
+}
+
 /// PCI subclasses for network controllers
 pub mod net_subclass {
     pub const ETHERNET: u8 = 0x00;

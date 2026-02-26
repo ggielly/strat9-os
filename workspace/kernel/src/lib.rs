@@ -425,6 +425,12 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         serial_println!("[init] VirtIO block initialized.");
         vga_println!("[OK] VirtIO block driver initialized");
 
+        serial_println!("[init] Initializing AHCI...");
+        vga_println!("[..] Looking for AHCI SATA controller...");
+        hardware::storage::ahci::init();
+        serial_println!("[init] AHCI probe done.");
+        vga_println!("[OK] AHCI probe done");
+
         serial_println!("[init] Initializing VirtIO net...");
         vga_println!("[..] Looking for VirtIO net device...");
         hardware::nic::virtio_net::init();
@@ -444,6 +450,18 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         } else {
             serial_println!("[WARN] No VirtIO block device found");
             vga_println!("[WARN] No VirtIO block device found");
+        }
+
+        if let Some(ahci) = hardware::storage::ahci::get_device() {
+            use hardware::storage::ahci::BlockDevice;
+            serial_println!(
+                "[INFO] AHCI SATA device found. Capacity: {} sectors ({} MiB)",
+                ahci.sector_count(),
+                (ahci.sector_count() * 512) / (1024 * 1024),
+            );
+            vga_println!("[OK] AHCI SATA driver loaded");
+        } else {
+            serial_println!("[INFO] No AHCI SATA device found");
         }
 
         // Report all registered network interfaces (E1000 + VirtIO)
