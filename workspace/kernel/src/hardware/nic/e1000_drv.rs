@@ -80,12 +80,15 @@ pub fn init() {
         return;
     }
 
-    // Single-pass PCI scan: avoids re-scanning the entire bus for each
-    // supported Intel device ID.
-    for pci_dev in pci::all_devices().into_iter() {
-        if pci_dev.vendor_id != pci::vendor::INTEL
-            || !e1000::E1000_DEVICE_IDS.contains(&pci_dev.device_id)
-        {
+    let candidates = pci::probe_all(pci::ProbeCriteria {
+        vendor_id: Some(pci::vendor::INTEL),
+        device_id: None,
+        class_code: Some(pci::class::NETWORK),
+        subclass: Some(pci::net_subclass::ETHERNET),
+        prog_if: None,
+    });
+    for pci_dev in candidates.into_iter() {
+        if !e1000::E1000_DEVICE_IDS.contains(&pci_dev.device_id) {
             continue;
         }
 

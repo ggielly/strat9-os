@@ -34,6 +34,32 @@ pub mod device {
     pub const VIRTIO_INPUT: u16 = 0x1052;
 }
 
+/// PCI base class codes
+pub mod class {
+    pub const MASS_STORAGE: u8 = 0x01;
+    pub const NETWORK: u8 = 0x02;
+}
+
+/// PCI subclasses for mass storage controllers
+pub mod storage_subclass {
+    pub const SCSI: u8 = 0x00;
+    pub const IDE: u8 = 0x01;
+    pub const FLOPPY: u8 = 0x02;
+    pub const IPI: u8 = 0x03;
+    pub const RAID: u8 = 0x04;
+    pub const ATA: u8 = 0x05;
+    pub const SATA: u8 = 0x06;
+    pub const SAS: u8 = 0x07;
+    pub const NVM: u8 = 0x08;
+    pub const OTHER: u8 = 0x80;
+}
+
+/// PCI subclasses for network controllers
+pub mod net_subclass {
+    pub const ETHERNET: u8 = 0x00;
+    pub const OTHER: u8 = 0x80;
+}
+
 /// Intel Ethernet device IDs
 pub mod intel_eth {
     pub const E1000_82540EM: u16 = 0x100E; // QEMU default e1000
@@ -485,6 +511,73 @@ pub fn find_devices_by_vendor(vendor_id: u16) -> Vec<PciDevice> {
         .into_iter()
         .filter(|dev| dev.vendor_id == vendor_id)
         .collect()
+}
+
+/// Return all devices matching a PCI class/subclass pair.
+///
+/// This is useful for future controller families (storage, USB, display, etc.)
+/// where matching by class is more stable than matching specific device IDs.
+pub fn find_devices_by_class(class_code: u8, subclass: u8) -> Vec<PciDevice> {
+    all_devices()
+        .into_iter()
+        .filter(|dev| dev.class_code == class_code && dev.subclass == subclass)
+        .collect()
+}
+
+/// Full PCI probe criteria.
+///
+/// Any field left as `None` is treated as a wildcard.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProbeCriteria {
+    pub vendor_id: Option<u16>,
+    pub device_id: Option<u16>,
+    pub class_code: Option<u8>,
+    pub subclass: Option<u8>,
+    pub prog_if: Option<u8>,
+}
+
+impl ProbeCriteria {
+    pub const fn any() -> Self {
+        Self {
+            vendor_id: None,
+            device_id: None,
+            class_code: None,
+            subclass: None,
+            prog_if: None,
+        }
+    }
+
+    fn matches(&self, dev: &PciDevice) -> bool {
+        if self.vendor_id.is_some_and(|v| dev.vendor_id != v) {
+            return false;
+        }
+        if self.device_id.is_some_and(|d| dev.device_id != d) {
+            return false;
+        }
+        if self.class_code.is_some_and(|c| dev.class_code != c) {
+            return false;
+        }
+        if self.subclass.is_some_and(|s| dev.subclass != s) {
+            return false;
+        }
+        if self.prog_if.is_some_and(|p| dev.prog_if != p) {
+            return false;
+        }
+        true
+    }
+}
+
+/// Return all devices matching `criteria`.
+pub fn probe_all(criteria: ProbeCriteria) -> Vec<PciDevice> {
+    all_devices()
+        .into_iter()
+        .filter(|dev| criteria.matches(dev))
+        .collect()
+}
+
+/// Return the first device matching `criteria`.
+pub fn probe_first(criteria: ProbeCriteria) -> Option<PciDevice> {
+    all_devices().into_iter().find(|dev| criteria.matches(dev))
 }
 
 /// Invalidate PCI cache.

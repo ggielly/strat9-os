@@ -375,7 +375,17 @@ static VIRTIO_NET: SpinLock<Option<Arc<VirtioNetDevice>>> = SpinLock::new(None);
 pub fn init() {
     log::info!("VirtIO-net: Scanning for devices...");
 
-    let pci_dev = match pci::find_virtio_device(pci::device::VIRTIO_NET) {
+    // Prefer strict class-based probe (network/ethernet), with fallback to
+    // vendor+device for odd firmware/virtual setups.
+    let pci_dev = match pci::probe_first(pci::ProbeCriteria {
+        vendor_id: Some(pci::vendor::VIRTIO),
+        device_id: Some(pci::device::VIRTIO_NET),
+        class_code: Some(pci::class::NETWORK),
+        subclass: Some(pci::net_subclass::ETHERNET),
+        prog_if: None,
+    })
+    .or_else(|| pci::find_virtio_device(pci::device::VIRTIO_NET))
+    {
         Some(dev) => dev,
         None => {
             log::warn!("VirtIO-net: No network device found");

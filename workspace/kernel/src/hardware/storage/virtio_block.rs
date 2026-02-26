@@ -427,8 +427,17 @@ static mut VIRTIO_BLOCK_IRQ: u8 = 0;
 pub fn init() {
     log::info!("VirtIO-blk: Scanning for devices...");
 
-    // Find VirtIO block device
-    let pci_dev = match pci::find_virtio_device(pci::device::VIRTIO_BLOCK) {
+    // Prefer strict class-based probe (mass storage), with fallback to
+    // vendor+device for odd firmware/virtual setups.
+    let pci_dev = match pci::probe_first(pci::ProbeCriteria {
+        vendor_id: Some(pci::vendor::VIRTIO),
+        device_id: Some(pci::device::VIRTIO_BLOCK),
+        class_code: Some(pci::class::MASS_STORAGE),
+        subclass: None,
+        prog_if: None,
+    })
+    .or_else(|| pci::find_virtio_device(pci::device::VIRTIO_BLOCK))
+    {
         Some(dev) => dev,
         None => {
             log::warn!("VirtIO-blk: No block device found");

@@ -9,7 +9,7 @@ pub mod virtio_net;
 
 pub use net_core::{NetError, NetworkDevice, MTU};
 
-use crate::sync::SpinLock;
+use spin::RwLock;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 
 struct NetDeviceEntry {
@@ -17,7 +17,7 @@ struct NetDeviceEntry {
     device: Arc<dyn NetworkDevice>,
 }
 
-static NET_DEVICES: SpinLock<Vec<NetDeviceEntry>> = SpinLock::new(Vec::new());
+static NET_DEVICES: RwLock<Vec<NetDeviceEntry>> = RwLock::new(Vec::new());
 
 /// Map a driver name to a FreeBSD-style interface prefix.
 ///
@@ -51,10 +51,10 @@ fn bsd_prefix(driver_name: &str) -> &'static str {
 }
 
 /// Counters per-prefix so that `em0`, `em1`, `vtnet0` are independent.
-static PREFIX_COUNTERS: SpinLock<Vec<(String, usize)>> = SpinLock::new(Vec::new());
+static PREFIX_COUNTERS: RwLock<Vec<(String, usize)>> = RwLock::new(Vec::new());
 
 fn next_index_for(prefix: &str) -> usize {
-    let mut counters = PREFIX_COUNTERS.lock();
+    let mut counters = PREFIX_COUNTERS.write();
     for entry in counters.iter_mut() {
         if entry.0 == prefix {
             let idx = entry.1;
@@ -82,7 +82,7 @@ pub fn register_device(device: Arc<dyn NetworkDevice>) -> String {
         mac[4],
         mac[5],
     );
-    let mut devs = NET_DEVICES.lock();
+    let mut devs = NET_DEVICES.write();
     devs.push(NetDeviceEntry {
         iface: iface.clone(),
         device,
@@ -92,18 +92,18 @@ pub fn register_device(device: Arc<dyn NetworkDevice>) -> String {
 
 pub fn get_device(name: &str) -> Option<Arc<dyn NetworkDevice>> {
     NET_DEVICES
-        .lock()
+        .read()
         .iter()
         .find(|e| e.iface == name)
         .map(|e| e.device.clone())
 }
 
 pub fn get_default_device() -> Option<Arc<dyn NetworkDevice>> {
-    NET_DEVICES.lock().first().map(|e| e.device.clone())
+    NET_DEVICES.read().first().map(|e| e.device.clone())
 }
 
 pub fn list_interfaces() -> Vec<String> {
-    NET_DEVICES.lock().iter().map(|e| e.iface.clone()).collect()
+    NET_DEVICES.read().iter().map(|e| e.iface.clone()).collect()
 }
 
 pub fn init() {

@@ -4,7 +4,6 @@
 
 use super::{get_device, list_interfaces};
 use crate::{
-    sync::SpinLock,
     syscall::error::SyscallError,
     vfs::{
         scheme::{DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_REG},
@@ -14,6 +13,7 @@ use crate::{
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 use net_core::NetError;
+use spin::RwLock;
 
 #[derive(Clone)]
 enum Handle {
@@ -22,14 +22,14 @@ enum Handle {
 }
 
 pub struct NetScheme {
-    handles: SpinLock<BTreeMap<u64, Handle>>,
+    handles: RwLock<BTreeMap<u64, Handle>>,
     next: AtomicU64,
 }
 
 impl NetScheme {
     fn new() -> Self {
         Self {
-            handles: SpinLock::new(BTreeMap::new()),
+            handles: RwLock::new(BTreeMap::new()),
             next: AtomicU64::new(1),
         }
     }
@@ -43,7 +43,7 @@ impl Scheme for NetScheme {
         let path = path.trim_start_matches('/');
         let id = self.alloc_id();
         if path.is_empty() {
-            self.handles.lock().insert(id, Handle::Root);
+            self.handles.write().insert(id, Handle::Root);
             return Ok(OpenResult {
                 file_id: id,
                 size: None,
@@ -54,7 +54,7 @@ impl Scheme for NetScheme {
             return Err(SyscallError::BadHandle);
         }
         self.handles
-            .lock()
+            .write()
             .insert(id, Handle::Iface(String::from(path)));
         Ok(OpenResult {
             file_id: id,
@@ -64,7 +64,7 @@ impl Scheme for NetScheme {
     }
 
     fn read(&self, fid: u64, _off: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let h = self.handles.lock();
+        let h = self.handles.read();
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
         match handle {
             Handle::Root => {
@@ -86,7 +86,7 @@ impl Scheme for NetScheme {
     }
 
     fn write(&self, fid: u64, _off: u64, buf: &[u8]) -> Result<usize, SyscallError> {
-        let h = self.handles.lock();
+        let h = self.handles.read();
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
         match handle {
             Handle::Root => Err(SyscallError::PermissionDenied),
@@ -103,12 +103,12 @@ impl Scheme for NetScheme {
     }
 
     fn close(&self, fid: u64) -> Result<(), SyscallError> {
-        self.handles.lock().remove(&fid);
+        self.handles.write().remove(&fid);
         Ok(())
     }
 
     fn stat(&self, fid: u64) -> Result<FileStat, SyscallError> {
-        let h = self.handles.lock();
+        let h = self.handles.read();
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
         Ok(match handle {
             Handle::Root => FileStat {
@@ -131,7 +131,7 @@ impl Scheme for NetScheme {
     }
 
     fn readdir(&self, fid: u64) -> Result<Vec<DirEntry>, SyscallError> {
-        let h = self.handles.lock();
+        let h = self.handles.read();
         if !matches!(h.get(&fid), Some(Handle::Root)) {
             return Err(SyscallError::InvalidArgument);
         }
