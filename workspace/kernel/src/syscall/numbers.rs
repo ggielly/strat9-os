@@ -78,6 +78,21 @@ pub const SYS_IPC_RING_CREATE: u64 = 210;
 /// Map a ring buffer. arg1 = ring handle, arg2 = out_ptr
 pub const SYS_IPC_RING_MAP: u64 = 211;
 
+/// Create a POSIX-like counting semaphore. arg1 = initial_count
+pub const SYS_SEM_CREATE: u64 = 230;
+
+/// Wait (P) on semaphore. arg1 = semaphore handle
+pub const SYS_SEM_WAIT: u64 = 231;
+
+/// Try-wait (non-blocking) on semaphore. arg1 = semaphore handle
+pub const SYS_SEM_TRYWAIT: u64 = 232;
+
+/// Post (V) semaphore. arg1 = semaphore handle
+pub const SYS_SEM_POST: u64 = 233;
+
+/// Close/destroy semaphore. arg1 = semaphore handle
+pub const SYS_SEM_CLOSE: u64 = 234;
+
 /// create a typed sync-channel.
 /// arg1 = capacity (number of IpcMessages). Returns channel handle.
 pub const SYS_CHAN_CREATE: u64 = 220;

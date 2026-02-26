@@ -14,6 +14,8 @@ use crate::{
         message::IpcMessage,
         port::{self, PortId},
         reply,
+        semaphore::{self, SemId},
+        shared_ring::{self, RingId},
     },
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
@@ -117,6 +119,11 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_IPC_UNBIND_PORT => sys_ipc_unbind_port(arg1, arg2),
         SYS_IPC_RING_CREATE => sys_ipc_ring_create(arg1),
         SYS_IPC_RING_MAP => sys_ipc_ring_map(arg1, arg2),
+        SYS_SEM_CREATE => sys_sem_create(arg1),
+        SYS_SEM_WAIT => sys_sem_wait(arg1),
+        SYS_SEM_TRYWAIT => sys_sem_trywait(arg1),
+        SYS_SEM_POST => sys_sem_post(arg1),
+        SYS_SEM_CLOSE => sys_sem_close(arg1),
 
         // Typed MPMC sync-channel (IPC-02)
         SYS_CHAN_CREATE => sys_chan_create(arg1),
@@ -225,10 +232,19 @@ fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &mut *task.process.capabilities.get() };
     if let Some(cap) = caps.remove(CapId::from_raw(_handle)) {
-        if cap.resource_type == ResourceType::File {
-            if let Ok(fd) = u32::try_from(cap.resource) {
-                let _ = crate::vfs::close(fd);
+        match cap.resource_type {
+            ResourceType::File => {
+                if let Ok(fd) = u32::try_from(cap.resource) {
+                    let _ = crate::vfs::close(fd);
+                }
             }
+            ResourceType::SharedRing => {
+                let _ = shared_ring::destroy_ring(RingId::from_u64(cap.resource as u64));
+            }
+            ResourceType::Semaphore => {
+                let _ = semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64));
+            }
+            _ => {}
         }
         log::trace!("syscall: HANDLE_CLOSE({})", _handle);
         Ok(0)
@@ -278,34 +294,29 @@ fn sys_sigprocmask(how: i32, set_ptr: u64, oldset_ptr: u64) -> Result<u64, Sysca
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
-    // SAFETY: We have a reference to the task.
-    unsafe {
-        let blocked = &task.blocked_signals;
+    let blocked = &task.blocked_signals;
 
-        // If oldset_ptr is not null, write the old mask.
-        if oldset_ptr != 0 {
-            let old_mask = blocked.get_mask();
-            let user = UserSliceWrite::new(oldset_ptr, 8)?;
-            user.copy_from(&old_mask.to_ne_bytes());
-        }
+    if oldset_ptr != 0 {
+        let old_mask = blocked.get_mask();
+        let user = UserSliceWrite::new(oldset_ptr, 8)?;
+        user.copy_from(&old_mask.to_ne_bytes());
+    }
 
-        // If set_ptr is not null, update the mask.
-        if set_ptr != 0 {
-            let user = UserSliceRead::new(set_ptr, 8)?;
-            let mut buf = [0u8; 8];
-            user.copy_to(&mut buf);
-            let new_mask = u64::from_ne_bytes(buf);
+    if set_ptr != 0 {
+        let user = UserSliceRead::new(set_ptr, 8)?;
+        let mut buf = [0u8; 8];
+        user.copy_to(&mut buf);
+        let new_mask = u64::from_ne_bytes(buf);
 
-            let old_mask = blocked.get_mask();
-            let updated_mask = match how {
-                SIG_BLOCK => old_mask | new_mask,
-                SIG_UNBLOCK => old_mask & !new_mask,
-                SIG_SETMASK => new_mask,
-                _ => return Err(SyscallError::InvalidArgument),
-            };
+        let old_mask = blocked.get_mask();
+        let updated_mask = match how {
+            SIG_BLOCK => old_mask | new_mask,
+            SIG_UNBLOCK => old_mask & !new_mask,
+            SIG_SETMASK => new_mask,
+            _ => return Err(SyscallError::InvalidArgument),
+        };
 
-            blocked.set_mask(updated_mask);
-        }
+        blocked.set_mask(updated_mask);
     }
 
     Ok(0)
@@ -930,12 +941,199 @@ fn sys_ipc_unbind_port(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError
 }
 
 fn sys_ipc_ring_create(_size: u64) -> Result<u64, SyscallError> {
-    Err(SyscallError::NotImplemented)
+    let size = usize::try_from(_size).map_err(|_| SyscallError::InvalidArgument)?;
+    let ring_id = shared_ring::create_ring(size).map_err(|e| match e {
+        shared_ring::RingError::InvalidSize => SyscallError::InvalidArgument,
+        shared_ring::RingError::Alloc => SyscallError::OutOfMemory,
+        shared_ring::RingError::NotFound => SyscallError::NotFound,
+    })?;
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cap = get_capability_manager().create_capability(
+        ResourceType::SharedRing,
+        ring_id.as_u64() as usize,
+        CapPermissions {
+            read: true,
+            write: true,
+            execute: false,
+            grant: true,
+            revoke: true,
+        },
+    );
+    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+    Ok(cap_id.as_u64())
 }
 
 fn sys_ipc_ring_map(ring: u64, _out_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(ring)?;
-    Err(SyscallError::NotImplemented)
+    if _out_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &*task.process.capabilities.get() };
+    let required = CapPermissions {
+        read: true,
+        write: true,
+        execute: false,
+        grant: false,
+        revoke: false,
+    };
+    let cap = caps
+        .get_with_permissions(CapId::from_raw(ring), required)
+        .ok_or(SyscallError::PermissionDenied)?;
+    if cap.resource_type != ResourceType::SharedRing {
+        return Err(SyscallError::BadHandle);
+    }
+
+    let ring_id = RingId::from_u64(cap.resource as u64);
+    let ring_obj = shared_ring::get_ring(ring_id).ok_or(SyscallError::BadHandle)?;
+    let frame_phys_addrs = ring_obj.frame_phys_addrs();
+    let page_count = ring_obj.page_count();
+    let map_size = page_count
+        .checked_mul(4096)
+        .ok_or(SyscallError::InvalidArgument)? as u64;
+
+    let addr_space = unsafe { &*task.process.address_space.get() };
+    let base = addr_space
+        .find_free_vma_range(super::mmap::MMAP_BASE, page_count, crate::memory::address_space::VmaPageSize::Small)
+        .ok_or(SyscallError::OutOfMemory)?;
+
+    addr_space
+        .map_shared_frames(
+            base,
+            &frame_phys_addrs,
+            crate::memory::address_space::VmaFlags {
+                readable: true,
+                writable: true,
+                executable: false,
+                user_accessible: true,
+            },
+            crate::memory::address_space::VmaType::Anonymous,
+        )
+        .map_err(|_| SyscallError::OutOfMemory)?;
+
+    let out = UserSliceWrite::new(_out_ptr, core::mem::size_of::<u64>())?;
+    out.copy_from(&base.to_ne_bytes());
+    Ok(map_size)
+}
+
+fn sys_sem_create(initial: u64) -> Result<u64, SyscallError> {
+    let initial = u32::try_from(initial).map_err(|_| SyscallError::InvalidArgument)?;
+    let sem_id = semaphore::create_semaphore(initial).map_err(|e| match e {
+        semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
+        semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+        semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
+        semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
+    })?;
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cap = get_capability_manager().create_capability(
+        ResourceType::Semaphore,
+        sem_id.as_u64() as usize,
+        CapPermissions {
+            read: true,
+            write: true,
+            execute: false,
+            grant: true,
+            revoke: true,
+        },
+    );
+    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+    Ok(cap_id.as_u64())
+}
+
+fn resolve_sem(handle: u64, required: CapPermissions) -> Result<alloc::sync::Arc<semaphore::PosixSemaphore>, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &*task.process.capabilities.get() };
+    let cap = caps
+        .get_with_permissions(CapId::from_raw(handle), required)
+        .ok_or(SyscallError::PermissionDenied)?;
+    if cap.resource_type != ResourceType::Semaphore {
+        return Err(SyscallError::BadHandle);
+    }
+    let id = SemId::from_u64(cap.resource as u64);
+    semaphore::get_semaphore(id).ok_or(SyscallError::BadHandle)
+}
+
+fn sys_sem_wait(handle: u64) -> Result<u64, SyscallError> {
+    let sem = resolve_sem(
+        handle,
+        CapPermissions {
+            read: true,
+            write: false,
+            execute: false,
+            grant: false,
+            revoke: false,
+        },
+    )?;
+    sem.wait().map_err(|e| match e {
+        semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+        semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
+        semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
+        semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
+    })?;
+    Ok(0)
+}
+
+fn sys_sem_trywait(handle: u64) -> Result<u64, SyscallError> {
+    let sem = resolve_sem(
+        handle,
+        CapPermissions {
+            read: true,
+            write: false,
+            execute: false,
+            grant: false,
+            revoke: false,
+        },
+    )?;
+    sem.try_wait().map_err(|e| match e {
+        semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+        semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
+        semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
+        semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
+    })?;
+    Ok(0)
+}
+
+fn sys_sem_post(handle: u64) -> Result<u64, SyscallError> {
+    let sem = resolve_sem(
+        handle,
+        CapPermissions {
+            read: false,
+            write: true,
+            execute: false,
+            grant: false,
+            revoke: false,
+        },
+    )?;
+    sem.post().map_err(|e| match e {
+        semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+        semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
+        semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
+        semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
+    })?;
+    Ok(0)
+}
+
+fn sys_sem_close(handle: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &mut *task.process.capabilities.get() };
+    let cap = caps
+        .remove(CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
+    if cap.resource_type != ResourceType::Semaphore {
+        return Err(SyscallError::BadHandle);
+    }
+    semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64)).map_err(|e| match e {
+        semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+        semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
+        semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
+        semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
+    })?;
+    Ok(0)
 }
 
 // ── Typed MPMC sync-channel syscall handlers (IPC-02) ─────────────────────────

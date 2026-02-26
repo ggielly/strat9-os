@@ -29,6 +29,11 @@ pub const SYS_CHAN_SEND: usize = 221;
 pub const SYS_CHAN_RECV: usize = 222;
 pub const SYS_CHAN_TRY_RECV: usize = 223;
 pub const SYS_CHAN_CLOSE: usize = 224;
+pub const SYS_SEM_CREATE: usize = 230;
+pub const SYS_SEM_WAIT: usize = 231;
+pub const SYS_SEM_TRYWAIT: usize = 232;
+pub const SYS_SEM_POST: usize = 233;
+pub const SYS_SEM_CLOSE: usize = 234;
 
 // Block 300-399: process / thread
 pub const SYS_PROC_EXIT: usize = 300;

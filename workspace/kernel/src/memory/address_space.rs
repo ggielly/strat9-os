@@ -14,7 +14,7 @@ use spin::Once;
 use x86_64::{
     registers::control::{Cr3, Cr3Flags},
     structures::paging::{
-        mapper::TranslateResult, FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable,
+        mapper::TranslateResult, Mapper, OffsetPageTable,
         Page, PageTable, PageTableFlags, PhysFrame as X86PhysFrame, Size2MiB, Size4KiB, Translate,
     },
     PhysAddr, VirtAddr,
@@ -636,6 +636,94 @@ impl AddressSpace {
             page_count as u64
         );
 
+        Ok(())
+    }
+
+    pub fn map_shared_frames(
+        &self,
+        start: u64,
+        frame_phys_addrs: &[u64],
+        flags: VmaFlags,
+        vma_type: VmaType,
+    ) -> Result<(), &'static str> {
+        let page_count = frame_phys_addrs.len();
+        if page_count == 0 || start % 4096 != 0 {
+            return Err("Invalid shared region arguments");
+        }
+        let len = (page_count as u64)
+            .checked_mul(4096)
+            .ok_or("Shared region length overflow")?;
+        let end = start
+            .checked_add(len)
+            .ok_or("Shared region end overflow")?;
+        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        if end > USER_SPACE_END {
+            return Err("Shared region out of user-space range");
+        }
+
+        {
+            let regions = self.regions.lock();
+            if regions.iter().any(|(&vma_start, vma)| {
+                let vma_end = vma_start
+                    .saturating_add((vma.page_count as u64).saturating_mul(vma.page_size.bytes()));
+                vma_start < end && vma_end > start
+            }) {
+                return Err("Shared region overlaps existing mapping");
+            }
+        }
+
+        let page_flags = flags.to_page_flags();
+        let mut frame_allocator = BuddyFrameAllocator;
+        let mut mapper = unsafe { self.mapper() };
+        let mut mapped_pages = 0usize;
+
+        for (i, phys_addr) in frame_phys_addrs.iter().copied().enumerate() {
+            let page_addr = start
+                .checked_add((i as u64) * 4096)
+                .ok_or("Shared page address overflow")?;
+            let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                .map_err(|_| "Map shared: invalid page address")?;
+            let frame = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys_addr));
+
+            let map_ok = unsafe {
+                mapper
+                    .map_to(page, frame, page_flags, &mut frame_allocator)
+                    .map(|flush| flush.flush())
+                    .is_ok()
+            };
+
+            if !map_ok {
+                for j in (0..mapped_pages).rev() {
+                    let rb_addr = start + (j as u64) * 4096;
+                    if let Ok(rb_page) = Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr)) {
+                        if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                            rb_flush.flush();
+                            crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
+                                start_address: rb_frame.start_address(),
+                            });
+                        }
+                    }
+                }
+                return Err("Failed to map shared page");
+            }
+
+            crate::memory::cow::frame_inc_ref(crate::memory::PhysFrame {
+                start_address: PhysAddr::new(phys_addr),
+            });
+            mapped_pages += 1;
+        }
+
+        let mut regions = self.regions.lock();
+        regions.insert(
+            start,
+            VirtualMemoryRegion {
+                start,
+                page_count,
+                flags,
+                vma_type,
+                page_size: VmaPageSize::Small,
+            },
+        );
         Ok(())
     }
 

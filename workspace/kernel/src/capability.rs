@@ -38,6 +38,10 @@ pub enum ResourceType {
     IpcPort,
     /// A typed MPMC sync-channel (SyncChan), accessed via SYS_CHAN_* syscalls.
     Channel,
+    /// Shared-memory ring buffer for bulk IPC (SYS_IPC_RING_*).
+    SharedRing,
+    /// POSIX-like counting semaphore (SYS_SEM_*).
+    Semaphore,
     Device,
     AddressSpace,
     Silo,
