@@ -5,12 +5,11 @@ use crate::{
     arch::x86_64::pci::{self, Bar, ProbeCriteria},
     memory::{allocate_dma_frame, phys_to_virt},
 };
-use alloc::string::String;
-use alloc::format;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use core::ptr;
-use core::sync::atomic::{AtomicU8, Ordering};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
+use core::{
+    ptr,
+    sync::atomic::{AtomicU8, Ordering},
+};
 use spin::Mutex;
 
 const NVME_PAGE_SIZE: usize = 4096;
@@ -21,7 +20,10 @@ struct VolatileCell<T> {
 }
 
 impl<T> VolatileCell<T> {
-    fn read(&self) -> T where T: Copy {
+    fn read(&self) -> T
+    where
+        T: Copy,
+    {
         unsafe { ptr::read_volatile(&self.value) }
     }
     fn write(&self, val: T) {
@@ -33,18 +35,28 @@ unsafe impl<T: Send> Send for VolatileCell<T> {}
 unsafe impl<T: Sync> Sync for VolatileCell<T> {}
 
 #[repr(C)]
-struct Capability { value: VolatileCell<u64> }
+struct Capability {
+    value: VolatileCell<u64>,
+}
 
 impl Capability {
-    fn max_queue_entries(&self) -> u16 { (self.value.read() & 0xFFFF) as u16 }
-    fn doorbell_stride(&self) -> u64 { (self.value.read() >> 32) & 0xF }
+    fn max_queue_entries(&self) -> u16 {
+        (self.value.read() & 0xFFFF) as u16
+    }
+    fn doorbell_stride(&self) -> u64 {
+        (self.value.read() >> 32) & 0xF
+    }
 }
 
 #[repr(transparent)]
-struct Version { value: VolatileCell<u32> }
+struct Version {
+    value: VolatileCell<u32>,
+}
 
 #[repr(C)]
-struct ControllerConfig { value: VolatileCell<u32> }
+struct ControllerConfig {
+    value: VolatileCell<u32>,
+}
 
 impl ControllerConfig {
     fn set_iosqes(&mut self, size: u32) {
@@ -64,18 +76,30 @@ impl ControllerConfig {
     }
     fn set_enable(&mut self, enable: bool) {
         let mut val = self.value.read();
-        if enable { val |= 1; } else { val &= !1; }
+        if enable {
+            val |= 1;
+        } else {
+            val &= !1;
+        }
         self.value.write(val);
     }
-    fn is_enabled(&self) -> bool { (self.value.read() & 1) != 0 }
+    fn is_enabled(&self) -> bool {
+        (self.value.read() & 1) != 0
+    }
 }
 
 #[repr(transparent)]
-struct ControllerStatus { value: VolatileCell<u32> }
+struct ControllerStatus {
+    value: VolatileCell<u32>,
+}
 
 impl ControllerStatus {
-    fn is_ready(&self) -> bool { (self.value.read() & 1) != 0 }
-    fn is_fatal(&self) -> bool { (self.value.read() >> 1) & 1 != 0 }
+    fn is_ready(&self) -> bool {
+        (self.value.read() & 1) != 0
+    }
+    fn is_fatal(&self) -> bool {
+        (self.value.read() >> 1) & 1 != 0
+    }
 }
 
 #[repr(C)]
@@ -94,7 +118,12 @@ struct Registers {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum NvmeError { ControllerFatal, Timeout, InvalidNamespace, IoError }
+enum NvmeError {
+    ControllerFatal,
+    Timeout,
+    InvalidNamespace,
+    IoError,
+}
 
 #[derive(Debug, Clone)]
 pub struct NvmeNamespace {
@@ -157,10 +186,14 @@ impl NvmeController {
         while !regs.csts.is_ready() {
             core::hint::spin_loop();
             timeout -= 1;
-            if timeout == 0 { return Err(NvmeError::Timeout); }
+            if timeout == 0 {
+                return Err(NvmeError::Timeout);
+            }
         }
 
-        if regs.csts.is_fatal() { return Err(NvmeError::ControllerFatal); }
+        if regs.csts.is_fatal() {
+            return Err(NvmeError::ControllerFatal);
+        }
 
         log::info!(
             "NVMe: Controller v{}.{}.{} ready",
@@ -175,7 +208,9 @@ impl NvmeController {
         let frame = allocate_dma_frame().ok_or(NvmeError::IoError)?;
         let phys = frame.start_address.as_u64();
         let virt = phys_to_virt(phys) as *mut u8;
-        unsafe { ptr::write_bytes(virt, 0, NVME_PAGE_SIZE); }
+        unsafe {
+            ptr::write_bytes(virt, 0, NVME_PAGE_SIZE);
+        }
 
         let cmd = Command {
             opcode: 0x06,
@@ -186,14 +221,18 @@ impl NvmeController {
         };
 
         let completion = self.submit_admin_command(cmd)?;
-        if completion.status_code() != 0 { return Err(NvmeError::IoError); }
+        if completion.status_code() != 0 {
+            return Err(NvmeError::IoError);
+        }
         Ok(virt)
     }
 
     fn identify_namespaces(&mut self) -> Result<(), NvmeError> {
         let ctrl_data = self.identify(0x01, 0)?;
         let nn = unsafe { ptr::read(ctrl_data.add(520) as *const u32) };
-        if nn == 0 { return Err(NvmeError::InvalidNamespace); }
+        if nn == 0 {
+            return Err(NvmeError::InvalidNamespace);
+        }
 
         for nsid in 1..=nn {
             if let Ok(ns_data) = self.identify(0x00, nsid) {
@@ -205,35 +244,65 @@ impl NvmeController {
                     let lbaf_data = ptr::read(ns_data.add(lbaf_offset) as *const u16);
                     let block_size = (1 << lbaf_data) as u32;
 
-                    self.namespaces.push(NvmeNamespace { nsid, size: nsze, block_size });
-                    log::info!("NVMe: Namespace {} - {} blocks @ {} bytes", nsid, nsze, block_size);
+                    self.namespaces.push(NvmeNamespace {
+                        nsid,
+                        size: nsze,
+                        block_size,
+                    });
+                    log::info!(
+                        "NVMe: Namespace {} - {} blocks @ {} bytes",
+                        nsid,
+                        nsze,
+                        block_size
+                    );
                 }
             }
         }
         Ok(())
     }
 
-    pub fn namespace_count(&self) -> usize { self.namespaces.len() }
-    pub fn get_namespace(&self, index: usize) -> Option<&NvmeNamespace> { self.namespaces.get(index) }
+    pub fn namespace_count(&self) -> usize {
+        self.namespaces.len()
+    }
+    pub fn get_namespace(&self, index: usize) -> Option<&NvmeNamespace> {
+        self.namespaces.get(index)
+    }
 }
 
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 struct Command {
-    opcode: u8, flags: u8, command_id: u16, nsid: u32,
-    cdw2: u32, cdw3: u32, prp1: u64, prp2: u64,
-    cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32, cdw14: u32, cdw15: u32,
+    opcode: u8,
+    flags: u8,
+    command_id: u16,
+    nsid: u32,
+    cdw2: u32,
+    cdw3: u32,
+    prp1: u64,
+    prp2: u64,
+    cdw10: u32,
+    cdw11: u32,
+    cdw12: u32,
+    cdw13: u32,
+    cdw14: u32,
+    cdw15: u32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct CompletionEntry {
-    dw0: u32, dw1: u32, sq_head: u16, sq_id: u16,
-    command_id: u16, status: u16,
+    dw0: u32,
+    dw1: u32,
+    sq_head: u16,
+    sq_id: u16,
+    command_id: u16,
+    status: u16,
 }
 
 impl CompletionEntry {
-    fn status_code(&self) -> u8 { ((self.status >> 1) & 0xFF) as u8 }
+    fn status_code(&self) -> u8 {
+        ((self.status >> 1) & 0xFF) as u8
+    }
 }
 
 struct QueuePair {
@@ -266,25 +335,43 @@ struct Queue<T: QueueType> {
     doorbell: *const VolatileCell<u32>,
     entries: *mut T::EntryType,
     size: usize,
+    index: usize,
     phase: bool,
     phys_addr: u64,
 }
 
 impl<T: QueueType> Queue<T> {
     fn new(registers_base: usize, size: usize, queue_id: u16, dstrd: usize) -> Self {
-        let doorbell_offset = 0x1000 + ((((queue_id as usize) * 2) + T::DOORBELL_OFFSET) * (4 << dstrd));
-        let doorbell = unsafe { &*((registers_base + doorbell_offset) as *const VolatileCell<u32>) };
+        let doorbell_offset =
+            0x1000 + ((((queue_id as usize) * 2) + T::DOORBELL_OFFSET) * (4 << dstrd));
+        let doorbell =
+            unsafe { &*((registers_base + doorbell_offset) as *const VolatileCell<u32>) };
 
         let frame = allocate_dma_frame().expect("NVMe: failed to allocate queue frame");
         let phys_addr = frame.start_address.as_u64();
         let virt_addr = phys_to_virt(phys_addr);
 
-        unsafe { ptr::write_bytes(virt_addr as *mut u8, 0, size * core::mem::size_of::<T::EntryType>()); }
+        unsafe {
+            ptr::write_bytes(
+                virt_addr as *mut u8,
+                0,
+                size * core::mem::size_of::<T::EntryType>(),
+            );
+        }
 
-        Self { doorbell, entries: virt_addr as *mut T::EntryType, size, phase: true, phys_addr }
+        Self {
+            doorbell,
+            entries: virt_addr as *mut T::EntryType,
+            size,
+            index: 0,
+            phase: true,
+            phys_addr,
+        }
     }
 
-    fn phys_addr(&self) -> u64 { self.phys_addr }
+    fn phys_addr(&self) -> u64 {
+        self.phys_addr
+    }
 }
 
 impl Queue<Completion> {
@@ -299,17 +386,23 @@ impl Queue<Completion> {
                     return None;
                 }
                 self.index = (self.index + 1) % self.size;
-                if self.index == 0 { self.phase = !self.phase; }
+                if self.index == 0 {
+                    self.phase = !self.phase;
+                }
                 (*self.doorbell).write(self.index as u32);
                 Some(completion)
-            } else { None }
+            } else {
+                None
+            }
         }
     }
 }
 
 impl Queue<Submission> {
     fn submit_command(&mut self, command: Command, idx: usize) {
-        unsafe { ptr::write(self.entries.add(idx), command); }
+        unsafe {
+            ptr::write(self.entries.add(idx), command);
+        }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         (*self.doorbell).write(((idx + 1) % self.size) as u32);
     }
@@ -320,23 +413,33 @@ impl QueuePair {
         static NEXT_ID: AtomicU8 = AtomicU8::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst) as u16;
         Self {
-            id, size, command_id: 0,
+            id,
+            size,
+            command_id: 0,
             submission: Queue::new(registers_base, size, id, dstrd),
             completion: Queue::new(registers_base, size, id, dstrd),
         }
     }
 
-    fn submission_phys(&self) -> u64 { self.submission.phys_addr() }
-    fn completion_phys(&self) -> u64 { self.completion.phys_addr() }
+    fn submission_phys(&self) -> u64 {
+        self.submission.phys_addr()
+    }
+    fn completion_phys(&self) -> u64 {
+        self.completion.phys_addr()
+    }
 
     fn submit_command(&mut self, command: Command) -> Option<CompletionEntry> {
         let slot = self.command_id as usize % self.size;
         let mut cmd = command;
-        unsafe { ptr::write(&mut cmd.command_id as *mut u16, self.command_id); }
+        unsafe {
+            ptr::write(&mut cmd.command_id as *mut u16, self.command_id);
+        }
         self.command_id = self.command_id.wrapping_add(1);
         self.submission.submit_command(cmd, slot);
         loop {
-            if let Some(c) = self.completion.poll_completion() { return Some(c); }
+            if let Some(c) = self.completion.poll_completion() {
+                return Some(c);
+            }
             core::hint::spin_loop();
         }
     }
@@ -356,15 +459,22 @@ pub fn init() {
     });
 
     for (i, pci_dev) in candidates.into_iter().enumerate() {
-        log::info!("NVMe: Found controller at {:?} (VEN:{:04x} DEV:{:04x})",
-            pci_dev.address, pci_dev.vendor_id, pci_dev.device_id);
+        log::info!(
+            "NVMe: Found controller at {:?} (VEN:{:04x} DEV:{:04x})",
+            pci_dev.address,
+            pci_dev.vendor_id,
+            pci_dev.device_id
+        );
 
         pci_dev.enable_bus_master();
         pci_dev.enable_memory_space();
 
         let bar = match pci_dev.read_bar(0) {
             Some(Bar::Memory64 { addr, .. }) => addr,
-            _ => { log::warn!("NVMe: Invalid BAR0"); continue; }
+            _ => {
+                log::warn!("NVMe: Invalid BAR0");
+                continue;
+            }
         };
 
         let registers = phys_to_virt(bar) as usize;
@@ -374,11 +484,16 @@ pub fn init() {
             Ok(controller) => {
                 NVME_CONTROLLERS.lock().push(Arc::new(controller));
             }
-            Err(e) => { log::warn!("NVMe: Failed to initialize controller: {:?}", e); }
+            Err(e) => {
+                log::warn!("NVMe: Failed to initialize controller: {:?}", e);
+            }
         }
     }
 
-    log::info!("[NVMe] Found {} controller(s)", NVME_CONTROLLERS.lock().len());
+    log::info!(
+        "[NVMe] Found {} controller(s)",
+        NVME_CONTROLLERS.lock().len()
+    );
 }
 
 pub fn get_first_controller() -> Option<Arc<NvmeController>> {
@@ -386,5 +501,9 @@ pub fn get_first_controller() -> Option<Arc<NvmeController>> {
 }
 
 pub fn list_controllers() -> Vec<String> {
-    NVME_CONTROLLERS.lock().iter().map(|c| c.name.clone()).collect()
+    NVME_CONTROLLERS
+        .lock()
+        .iter()
+        .map(|c| c.name.clone())
+        .collect()
 }

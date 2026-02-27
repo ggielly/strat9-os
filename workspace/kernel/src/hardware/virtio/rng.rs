@@ -72,7 +72,7 @@ const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
 impl VirtioRng {
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let bar = match pci_dev.read_bar(0) {
-            Some(Bar::Memory64(addr)) => addr,
+            Some(Bar::Memory64 { addr, .. }) => addr,
             _ => return Err("Invalid BAR"),
         };
 
@@ -216,7 +216,11 @@ impl Virtqueue {
             let avail_virt = phys_to_virt(avail_phys) as *mut VirtqAvail;
             let used_virt = phys_to_virt(used_phys) as *mut VirtqUsed;
 
-            core::ptr::write_bytes(desc_virt, 0, VIRTIO_RING_SIZE * core::mem::size_of::<VirtqDesc>());
+            core::ptr::write_bytes(
+                desc_virt,
+                0,
+                VIRTIO_RING_SIZE * core::mem::size_of::<VirtqDesc>(),
+            );
             core::ptr::write_bytes(avail_virt, 0, core::mem::size_of::<VirtqAvail>());
             core::ptr::write_bytes(used_virt, 0, core::mem::size_of::<VirtqUsed>());
 

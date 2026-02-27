@@ -15,6 +15,7 @@ KERNEL_ELF="target/x86_64-unknown-none/${PROFILE}/kernel"
 FS_EXT4_ELF="target/x86_64-unknown-none/${PROFILE}/fs-ext4-strate"
 FS_RAM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-fs-ramfs"
 INIT_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_pid"
+SYSCALL_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_syscalls"
 MEM_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem"
 MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/init"
@@ -61,6 +62,12 @@ if [ -f "$INIT_TEST_ELF" ]; then
     echo "    init-test   : $init_size bytes"
 else
     echo "    init-test   : (missing)"
+fi
+if [ -f "$SYSCALL_TEST_ELF" ]; then
+    syscall_test_size=$(stat -c%s "$SYSCALL_TEST_ELF")
+    echo "    syscall-test: $syscall_test_size bytes"
+else
+    echo "    syscall-test: (missing)"
 fi
 if [ -f "$MEM_TEST_ELF" ]; then
     mem_test_size=$(stat -c%s "$MEM_TEST_ELF")
@@ -149,6 +156,13 @@ else
     echo "  ERROR: init-test binary not found at $INIT_TEST_ELF"
     echo "  Build it first (e.g. cargo make strate-silo-test or strate-silo-test-release)"
     exit 1
+fi
+
+if [ -f "$SYSCALL_TEST_ELF" ]; then
+    cp "$SYSCALL_TEST_ELF" "$ISO_ROOT/initfs/test_syscalls"
+    echo "  [OK] Copied syscall-test binary: /initfs/test_syscalls"
+else
+    echo "  [WARN] syscall-test binary not found at $SYSCALL_TEST_ELF"
 fi
 
 if [ -f "$MEM_TEST_ELF" ]; then

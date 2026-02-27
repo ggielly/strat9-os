@@ -372,6 +372,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         };
         let initfs_modules = [
             ("test_pid", boot_test_pid),
+            ("test_syscalls", crate::boot::limine::test_syscalls_module()),
             ("test_mem", crate::boot::limine::test_mem_module()),
             (
                 "test_mem_stressed",
@@ -418,6 +419,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
         let initfs_modules = [
             ("test_pid", boot_test_pid),
+            ("test_syscalls", crate::boot::limine::test_syscalls_module()),
             ("test_mem", crate::boot::limine::test_mem_module()),
             (
                 "test_mem_stressed",
@@ -495,6 +497,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         crate::hardware::virtio::console::init();
         serial_println!("[init] VirtIO Console initialized.");
         vga_println!("[OK] VirtIO Console driver initialized");
+
+        serial_println!("[init] Initializing VirtIO GPU...");
+        vga_println!("[..] Looking for VirtIO GPU device...");
+        crate::hardware::virtio::gpu::init();
+        serial_println!("[init] VirtIO GPU initialized.");
+        vga_println!("[OK] VirtIO GPU driver initialized");
 
         serial_println!("[init] Checking for devices...");
         vga_println!("[..] Checking for devices...");

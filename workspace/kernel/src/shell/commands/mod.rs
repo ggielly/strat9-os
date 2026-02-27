@@ -44,6 +44,7 @@ impl CommandRegistry {
         registry.register("write", vfs::cmd_write);
         registry.register("cpuinfo", sys::cmd_cpuinfo);
         registry.register("test_pid", sys::cmd_test_pid);
+        registry.register("test_syscalls", sys::cmd_test_syscalls);
         registry.register("test_mem", sys::cmd_test_mem);
         registry.register("test_mem_stressed", sys::cmd_test_mem_stressed);
         registry.register("reboot", sys::cmd_reboot);

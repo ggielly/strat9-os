@@ -9,6 +9,7 @@
 
 pub mod common;
 pub mod console;
+pub mod gpu;
 pub mod rng;
 
 /// VirtIO device status flags

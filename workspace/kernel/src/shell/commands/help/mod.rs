@@ -32,6 +32,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  strate rename ... - Rename a strate label (stopped/ready)");
     shell_println!("  cpuinfo           - Display CPU information");
     shell_println!("  test_pid          - Launch /initfs/test_pid userspace binary");
+    shell_println!("  test_syscalls     - Launch /initfs/test_syscalls verbose syscall suite");
     shell_println!("  test_mem          - Launch /initfs/test_mem verbose memory test");
     shell_println!("  test_mem_stressed - Launch /initfs/test_mem_stressed stress test");
     shell_println!("  reboot            - Reboot the system");

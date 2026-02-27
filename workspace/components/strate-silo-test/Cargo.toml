@@ -9,5 +9,9 @@ authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 name = "test_pid"
 path = "src/main.rs"
 
+[[bin]]
+name = "test_syscalls"
+path = "src/syscalls.rs"
+
 [dependencies]
 strat9-syscall = { path = "../syscall", features = ["userspace"] }

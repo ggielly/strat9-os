@@ -47,6 +47,9 @@ static STACK_SIZE: StackSizeRequest = StackSizeRequest::new().with_size(0x10000)
 
 /// Internal module: request Limine to load /initfs/test_pid (first userspace PID test binary)
 static TEST_PID_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_pid");
+/// Internal module: request Limine to load /initfs/test_syscalls (verbose syscall test binary)
+static TEST_SYSCALLS_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/test_syscalls");
 /// Internal module: request Limine to load /initfs/test_mem (userspace memory test binary)
 static TEST_MEM_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_mem");
 /// Internal module: request Limine to load /initfs/test_mem_stressed (userspace stressed memory test)
@@ -74,6 +77,7 @@ static PING_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/b
 #[link_section = ".requests"]
 static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
     &TEST_PID_MODULE,
+    &TEST_SYSCALLS_MODULE,
     &TEST_MEM_MODULE,
     &TEST_MEM_STRESSED_MODULE,
     &EXT4_MODULE,
@@ -89,6 +93,8 @@ static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
 static mut FS_EXT4_MODULE: Option<(u64, u64)> = None;
 /// Optional test_mem module info (set during Limine entry).
 static mut TEST_MEM_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional test_syscalls module info (set during Limine entry).
+static mut TEST_SYSCALLS_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional test_mem_stressed module info (set during Limine entry).
 static mut TEST_MEM_STRESSED_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional strate-fs-ramfs module info (set during Limine entry).
@@ -123,6 +129,12 @@ pub fn fs_ext4_module() -> Option<(u64, u64)> {
 pub fn test_mem_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
     unsafe { TEST_MEM_ELF_MODULE }
+}
+
+/// Return the test_syscalls module (addr, size) if present.
+pub fn test_syscalls_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { TEST_SYSCALLS_ELF_MODULE }
 }
 
 /// Return the test_mem_stressed module (addr, size) if present.
@@ -178,6 +190,7 @@ fn path_matches(module_path: &[u8], expected_path: &[u8]) -> bool {
 #[derive(Default, Clone, Copy)]
 struct ResolvedModules {
     test_pid: Option<(u64, u64)>,
+    test_syscalls: Option<(u64, u64)>,
     test_mem: Option<(u64, u64)>,
     test_mem_stressed: Option<(u64, u64)>,
     fs_ext4: Option<(u64, u64)>,
@@ -196,6 +209,8 @@ fn resolve_modules_once(modules: &[&limine::file::File]) -> ResolvedModules {
         let info = (module.addr() as u64, module.size());
         if path_matches(path, b"/initfs/test_pid") {
             resolved.test_pid = Some(info);
+        } else if path_matches(path, b"/initfs/test_syscalls") {
+            resolved.test_syscalls = Some(info);
         } else if path_matches(path, b"/initfs/test_mem") {
             resolved.test_mem = Some(info);
         } else if path_matches(path, b"/initfs/test_mem_stressed") {
@@ -351,6 +366,8 @@ pub unsafe extern "C" fn kmain() -> ! {
             }
             let resolved = resolve_modules_once(modules);
             let (init_base, init_size) = resolved.test_pid.unwrap_or((0, 0));
+            let (test_syscalls_base, test_syscalls_size) =
+                resolved.test_syscalls.unwrap_or((0, 0));
             let (test_mem_base, test_mem_size) = resolved.test_mem.unwrap_or((0, 0));
             let (test_mem_stressed_base, test_mem_stressed_size) =
                 resolved.test_mem_stressed.unwrap_or((0, 0));
@@ -366,6 +383,16 @@ pub unsafe extern "C" fn kmain() -> ! {
                 );
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/test_mem not found in modules");
+            }
+            if test_syscalls_base != 0 && test_syscalls_size != 0 {
+                unsafe { TEST_SYSCALLS_ELF_MODULE = Some((test_syscalls_base, test_syscalls_size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/test_syscalls found: base={:#x} size={}",
+                    test_syscalls_base,
+                    test_syscalls_size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/test_syscalls not found in modules");
             }
             if test_mem_stressed_base != 0 && test_mem_stressed_size != 0 {
                 unsafe {
