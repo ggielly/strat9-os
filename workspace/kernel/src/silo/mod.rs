@@ -556,7 +556,7 @@ fn extract_strate_label(path: &str) -> Option<String> {
     let mut parts = rest.split('/').filter(|p| !p.is_empty());
     let _strate_type = parts.next()?;
     let label = parts.next()?;
-    if label.is_empty() {
+    if label.is_empty() || parts.next().is_some() {
         return None;
     }
     Some(String::from(label))
@@ -575,6 +575,14 @@ fn sanitize_label(raw: &str) -> String {
     }
 }
 
+fn is_valid_label(raw: &str) -> bool {
+    if raw.is_empty() || raw.len() > 31 {
+        return false;
+    }
+    raw.bytes()
+        .all(|b| (b as char).is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
 pub fn set_current_silo_label_from_path(path: &str) -> Result<(), SyscallError> {
     let Some(label) = extract_strate_label(path) else {
         return Ok(());
@@ -587,6 +595,14 @@ pub fn set_current_silo_label_from_path(path: &str) -> Result<(), SyscallError> 
     let silo = mgr.get_mut(silo_id)?;
     silo.strate_label = Some(label);
     Ok(())
+}
+
+pub fn current_task_silo_label() -> Option<String> {
+    let task = current_task_clone()?;
+    let mgr = SILO_MANAGER.lock();
+    let silo_id = mgr.silo_for_task(task.id)?;
+    let silo = mgr.get(silo_id).ok()?;
+    silo.strate_label.clone()
 }
 
 pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
@@ -627,18 +643,26 @@ pub fn kernel_spawn_strate(
         registry.register(elf_data.to_vec())?
     };
 
-    let silo_id = {
-        let mut mgr = SILO_MANAGER.lock();
-        let id = mgr.create_silo(SILO_FLAG_ADMIN as u32)?;
-        let silo = mgr.get_mut(id.0)?;
-        silo.module_id = Some(module_id);
-        silo.state = SiloState::Ready;
-        silo.config.flags = SILO_FLAG_ADMIN;
-        if let Some(l) = label {
-            silo.strate_label = Some(sanitize_label(l));
-        }
-        id.0
-    };
+    let silo_id =
+        {
+            let mut mgr = SILO_MANAGER.lock();
+            let id = mgr.create_silo(SILO_FLAG_ADMIN as u32)?;
+            let requested_label = label
+                .map(sanitize_label)
+                .unwrap_or_else(|| alloc::format!("inst-{}", id.0));
+            if mgr.silos.values().any(|s| {
+                s.id.0 != id.0 && s.strate_label.as_deref() == Some(requested_label.as_str())
+            }) {
+                let _ = mgr.silos.remove(&id.0);
+                return Err(SyscallError::AlreadyExists);
+            }
+            let silo = mgr.get_mut(id.0)?;
+            silo.module_id = Some(module_id);
+            silo.state = SiloState::Ready;
+            silo.config.flags = SILO_FLAG_ADMIN;
+            silo.strate_label = Some(requested_label);
+            id.0
+        };
 
     let module_data = {
         let registry = MODULE_REGISTRY.lock();
@@ -682,6 +706,148 @@ pub fn kernel_spawn_strate(
         tick: crate::process::scheduler::ticks(),
     });
     Ok(silo_id)
+}
+
+fn resolve_selector_to_silo_id(selector: &str, mgr: &SiloManager) -> Result<u64, SyscallError> {
+    if let Ok(id) = selector.parse::<u64>() {
+        if mgr.silos.contains_key(&id) {
+            return Ok(id);
+        }
+        return Err(SyscallError::NotFound);
+    }
+    let mut found: Option<u64> = None;
+    for s in mgr.silos.values() {
+        if s.strate_label.as_deref() == Some(selector) {
+            if found.is_some() {
+                return Err(SyscallError::InvalidArgument);
+            }
+            found = Some(s.id.0);
+        }
+    }
+    found.ok_or(SyscallError::NotFound)
+}
+
+pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+    let (silo_id, tasks) = {
+        let mut mgr = SILO_MANAGER.lock();
+        let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+        let mut tasks = Vec::new();
+        {
+            let silo = mgr.get_mut(silo_id)?;
+            match silo.state {
+                SiloState::Running | SiloState::Paused => {
+                    if !force_kill {
+                        silo.state = SiloState::Stopping;
+                    }
+                    tasks = silo.tasks.clone();
+                    silo.tasks.clear();
+                    silo.state = SiloState::Stopped;
+                }
+                SiloState::Stopped | SiloState::Created | SiloState::Ready => {}
+                _ => return Err(SyscallError::InvalidArgument),
+            }
+        }
+        for tid in &tasks {
+            mgr.unmap_task(*tid);
+        }
+        mgr.push_event(SiloEvent {
+            silo_id,
+            kind: if force_kill {
+                SiloEventKind::Killed
+            } else {
+                SiloEventKind::Stopped
+            },
+            data0: 0,
+            data1: 0,
+            tick: crate::process::scheduler::ticks(),
+        });
+        (silo_id, tasks)
+    };
+    for tid in tasks {
+        crate::process::kill_task(tid);
+    }
+    Ok(silo_id)
+}
+
+pub fn kernel_destroy_silo(selector: &str) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+    let (silo_id, module_id) = {
+        let mut mgr = SILO_MANAGER.lock();
+        let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+        let module_id = {
+            let silo = mgr.get(silo_id)?;
+            if !silo.tasks.is_empty() {
+                return Err(SyscallError::InvalidArgument);
+            }
+            match silo.state {
+                SiloState::Stopped | SiloState::Created | SiloState::Ready | SiloState::Crashed => {
+                }
+                _ => return Err(SyscallError::InvalidArgument),
+            }
+            silo.module_id
+        };
+        let _ = mgr.silos.remove(&silo_id);
+        (silo_id, module_id)
+    };
+    if let Some(mid) = module_id {
+        let mut reg = MODULE_REGISTRY.lock();
+        let _ = reg.remove(mid);
+    }
+    Ok(silo_id)
+}
+
+pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+    if !is_valid_label(new_label) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut mgr = SILO_MANAGER.lock();
+    let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    if mgr
+        .silos
+        .values()
+        .any(|s| s.id.0 != silo_id && s.strate_label.as_deref() == Some(new_label))
+    {
+        return Err(SyscallError::AlreadyExists);
+    }
+    let silo = mgr.get_mut(silo_id)?;
+    match silo.state {
+        SiloState::Stopped | SiloState::Created | SiloState::Ready | SiloState::Crashed => {
+            silo.strate_label = Some(String::from(new_label));
+            Ok(silo_id)
+        }
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u64, SyscallError> {
+    let mut mgr = SILO_MANAGER.lock();
+    let id = mgr.create_silo(SILO_FLAG_ADMIN as u32)?;
+    let sanitized = sanitize_label(label);
+    if mgr
+        .silos
+        .values()
+        .any(|s| s.id.0 != id.0 && s.strate_label.as_deref() == Some(sanitized.as_str()))
+    {
+        let _ = mgr.silos.remove(&id.0);
+        return Err(SyscallError::AlreadyExists);
+    }
+    {
+        let silo = mgr.get_mut(id.0)?;
+        silo.state = SiloState::Running;
+        silo.strate_label = Some(sanitized);
+        silo.tasks.push(task_id);
+    }
+    mgr.map_task(task_id, id.0);
+    mgr.push_event(SiloEvent {
+        silo_id: id.0,
+        kind: SiloEventKind::Started,
+        data0: 0,
+        data1: 0,
+        tick: crate::process::scheduler::ticks(),
+    });
+    Ok(id.0)
 }
 
 fn resolve_module_handle(handle: u64, required: CapPermissions) -> Result<u64, SyscallError> {

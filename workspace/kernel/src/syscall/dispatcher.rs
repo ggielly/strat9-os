@@ -955,14 +955,18 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
                 // duplicate `flags` from a valid capability table.
                 boot_msg.sender = task.id.as_u64();
                 boot_msg.flags = id.as_u64() as u32;
-                let label = if path == "/" {
-                    "root"
-                } else {
-                    path.rsplit('/')
-                        .find(|part| !part.is_empty())
-                        .unwrap_or("default")
-                };
-                let label_bytes = label.as_bytes();
+                let label_owned = crate::silo::current_task_silo_label().unwrap_or_else(|| {
+                    if path == "/" {
+                        alloc::string::String::from("root")
+                    } else {
+                        alloc::string::String::from(
+                            path.rsplit('/')
+                                .find(|part| !part.is_empty())
+                                .unwrap_or("default"),
+                        )
+                    }
+                });
+                let label_bytes = label_owned.as_bytes();
                 let max_len = boot_msg.payload.len().saturating_sub(1);
                 let copy_len = core::cmp::min(label_bytes.len(), max_len);
                 boot_msg.payload[0] = copy_len as u8;
@@ -977,7 +981,7 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
                             "ipc_bind_port('{}'): queued bootstrap message (handle={}, label={})",
                             path,
                             id.as_u64(),
-                            label
+                            label_owned
                         );
                     } else {
                         log::warn!(

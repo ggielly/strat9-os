@@ -330,13 +330,16 @@ pub fn cmd_test_mem_stressed(_args: &[String]) -> Result<(), ShellError> {
 /// strate ls
 pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
-        shell_println!("Usage: strate ls | strate spawn <type> [--as <label>] [--dev <path>]");
+        shell_println!("Usage: strate ls [all] | strate spawn <type> [--as <label>] [--dev <path>] | strate stop|kill|destroy <id|label> | strate rename <id|label> <new_label>");
         return Err(ShellError::InvalidArguments);
     }
 
     match args[0].as_str() {
         "ls" => {
             let mut silos = silo::list_silos_snapshot();
+            if args.get(1).map(|s| s.as_str()) != Some("all") {
+                silos.retain(|s| s.strate_label.is_some());
+            }
             silos.sort_by_key(|s| s.id);
 
             shell_println!(
@@ -432,8 +435,53 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
                 }
             }
         }
+        "stop" | "kill" | "destroy" => {
+            if args.len() != 2 {
+                shell_println!("Usage: strate stop|kill|destroy <id|label>");
+                return Err(ShellError::InvalidArguments);
+            }
+            let selector = args[1].as_str();
+            let result = match args[0].as_str() {
+                "stop" => silo::kernel_stop_silo(selector, false),
+                "kill" => silo::kernel_stop_silo(selector, true),
+                "destroy" => silo::kernel_destroy_silo(selector),
+                _ => unreachable!(),
+            };
+            match result {
+                Ok(silo_id) => {
+                    shell_println!("strate {}: ok (silo_id={})", args[0], silo_id);
+                    Ok(())
+                }
+                Err(e) => {
+                    shell_println!("strate {} failed: {:?}", args[0], e);
+                    Err(ShellError::ExecutionFailed)
+                }
+            }
+        }
+        "rename" => {
+            if args.len() != 3 {
+                shell_println!("Usage: strate rename <id|label> <new_label>");
+                return Err(ShellError::InvalidArguments);
+            }
+            let selector = args[1].as_str();
+            let new_label = args[2].as_str();
+            match silo::kernel_rename_silo_label(selector, new_label) {
+                Ok(silo_id) => {
+                    shell_println!(
+                        "strate rename: ok (silo_id={}, new_label={})",
+                        silo_id,
+                        new_label
+                    );
+                    Ok(())
+                }
+                Err(e) => {
+                    shell_println!("strate rename failed: {:?}", e);
+                    Err(ShellError::ExecutionFailed)
+                }
+            }
+        }
         _ => {
-            shell_println!("Usage: strate ls | strate spawn <type> [--as <label>] [--dev <path>]");
+            shell_println!("Usage: strate ls [all] | strate spawn <type> [--as <label>] [--dev <path>] | strate stop|kill|destroy <id|label> | strate rename <id|label> <new_label>");
             Err(ShellError::InvalidArguments)
         }
     }

@@ -27,17 +27,17 @@ use crate::{
         virtio_block::{BlockDevice, BlockError, SECTOR_SIZE},
     },
     syscall::error::SyscallError,
-    vfs::scheme::{
-        DirEntry, DT_BLK, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
-    },
+    vfs::scheme::{DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_BLK},
 };
 
 // ─── File-ID constants ────────────────────────────────────────────────────────
 
-/// file_id = 0 → the `/dev` directory itself
+/// file_id = 0 => the `/dev` directory itself
 const FID_ROOT: u64 = 0;
-/// file_id = 1 → `/dev/sda` (first AHCI device)
+/// file_id = 1 => `/dev/sda` (first AHCI device)
 const FID_SDA: u64 = 1;
+/// file_id = 2 => `/dev/vda` (first VirtIO block device)
+const FID_VDA: u64 = 2;
 
 // ─── BlkDevScheme ─────────────────────────────────────────────────────────────
 
@@ -71,6 +71,15 @@ impl Scheme for BlkDevScheme {
                     flags: FileFlags::DEVICE,
                 })
             }
+            "vda" => {
+                let dev = crate::hardware::storage::virtio_block::get_device()
+                    .ok_or(SyscallError::NotFound)?;
+                Ok(OpenResult {
+                    file_id: FID_VDA,
+                    size: Some(dev.sector_count() * SECTOR_SIZE as u64),
+                    flags: FileFlags::DEVICE,
+                })
+            }
             _ => Err(SyscallError::NotFound),
         }
     }
@@ -94,6 +103,11 @@ impl Scheme for BlkDevScheme {
                 let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
                 sector_read(dev, offset, buf).map_err(|_| SyscallError::IoError)
             }
+            FID_VDA => {
+                let dev = crate::hardware::storage::virtio_block::get_device()
+                    .ok_or(SyscallError::BadHandle)?;
+                sector_read(dev, offset, buf).map_err(|_| SyscallError::IoError)
+            }
             _ => Err(SyscallError::BadHandle),
         }
     }
@@ -103,6 +117,11 @@ impl Scheme for BlkDevScheme {
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         if file_id == FID_SDA {
             let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
+            return sector_write(dev, offset, buf).map_err(|_| SyscallError::IoError);
+        }
+        if file_id == FID_VDA {
+            let dev = crate::hardware::storage::virtio_block::get_device()
+                .ok_or(SyscallError::BadHandle)?;
             return sector_write(dev, offset, buf).map_err(|_| SyscallError::IoError);
         }
         Err(SyscallError::PermissionDenied)
@@ -119,6 +138,11 @@ impl Scheme for BlkDevScheme {
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
         if file_id == FID_SDA {
             let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
+            return Ok(dev.sector_count() * SECTOR_SIZE as u64);
+        }
+        if file_id == FID_VDA {
+            let dev = crate::hardware::storage::virtio_block::get_device()
+                .ok_or(SyscallError::BadHandle)?;
             return Ok(dev.sector_count() * SECTOR_SIZE as u64);
         }
         Err(SyscallError::BadHandle)
@@ -148,6 +172,19 @@ impl Scheme for BlkDevScheme {
                     st_blocks: dev.sector_count(),
                 })
             }
+            FID_VDA => {
+                let dev = crate::hardware::storage::virtio_block::get_device()
+                    .ok_or(SyscallError::BadHandle)?;
+                let size = dev.sector_count() * SECTOR_SIZE as u64;
+                Ok(FileStat {
+                    st_ino: FID_VDA,
+                    st_mode: 0o060_660,
+                    st_nlink: 1,
+                    st_size: size,
+                    st_blksize: SECTOR_SIZE as u64,
+                    st_blocks: dev.sector_count(),
+                })
+            }
             _ => Err(SyscallError::BadHandle),
         }
     }
@@ -166,27 +203,30 @@ impl Scheme for BlkDevScheme {
                 name: String::from("sda"),
             });
         }
+        if crate::hardware::storage::virtio_block::get_device().is_some() {
+            entries.push(DirEntry {
+                ino: FID_VDA,
+                file_type: DT_BLK,
+                name: String::from("vda"),
+            });
+        }
         Ok(entries)
     }
 }
 
-// ─── Byte-offset ↔ sector I/O helpers ────────────────────────────────────────
+// ─── Byte-offset <==> sector I/O helpers ────────────────────────────────────────
 
 /// Read `buf.len()` bytes from the block device starting at byte `offset`.
 ///
 /// Handles unaligned starts and ends by reading the affected sectors into a
 /// 512-byte stack buffer and copying only the requested range.
-fn sector_read(
-    dev: &ahci::AhciController,
-    offset: u64,
-    buf: &mut [u8],
-) -> Result<usize, BlockError> {
+fn sector_read<D: BlockDevice>(dev: &D, offset: u64, buf: &mut [u8]) -> Result<usize, BlockError> {
     let total = buf.len();
     if total == 0 {
         return Ok(0);
     }
 
-    let disk_size = dev.sector_count() * SECTOR_SIZE as u64;
+    let disk_size = BlockDevice::sector_count(dev) * SECTOR_SIZE as u64;
     if offset >= disk_size {
         return Ok(0); // EOF
     }
@@ -204,8 +244,7 @@ fn sector_read(
         let mut tmp = [0u8; SECTOR_SIZE];
         dev.read_sector(sector, &mut tmp)?;
 
-        buf[buf_pos..buf_pos + available]
-            .copy_from_slice(&tmp[sector_off..sector_off + available]);
+        buf[buf_pos..buf_pos + available].copy_from_slice(&tmp[sector_off..sector_off + available]);
 
         buf_pos += available;
         byte_off += available as u64;
@@ -218,11 +257,7 @@ fn sector_read(
 ///
 /// For partial-sector writes the affected sector is first read, patched in
 /// memory, then written back (read-modify-write).
-fn sector_write(
-    dev: &ahci::AhciController,
-    offset: u64,
-    data: &[u8],
-) -> Result<usize, BlockError> {
+fn sector_write<D: BlockDevice>(dev: &D, offset: u64, data: &[u8]) -> Result<usize, BlockError> {
     let total = data.len();
     if total == 0 {
         return Ok(0);

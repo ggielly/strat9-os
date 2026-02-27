@@ -539,7 +539,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         if let Some((base, size)) = crate::boot::limine::strate_fs_ramfs_module() {
             let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
             match process::elf::load_and_run_elf(ram_data, "strate-fs-ramfs") {
-                Ok(_) => serial_println!("[init] Component 'strate-fs-ramfs' loaded."),
+                Ok(task_id) => {
+                    let _ = crate::silo::register_boot_strate_task(task_id, "ramfs-default");
+                    serial_println!("[init] Component 'strate-fs-ramfs' loaded.");
+                }
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
             }
         }
@@ -547,7 +550,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             let ext4_data =
                 unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
             match process::elf::load_and_run_elf(ext4_data, "strate-fs-ext4") {
-                Ok(_) => serial_println!("[init] Component 'strate-fs-ext4' loaded."),
+                Ok(task_id) => {
+                    let _ = crate::silo::register_boot_strate_task(task_id, "ext4-default");
+                    serial_println!("[init] Component 'strate-fs-ext4' loaded.");
+                }
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ext4 component: {}", e),
             }
         }
