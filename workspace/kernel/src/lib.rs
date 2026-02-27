@@ -364,6 +364,33 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     #[cfg(feature = "selftest")]
     {
+        // Register initfs modules for selftest runtime tasks.
+        let boot_test_pid = if args.initfs_base != 0 && args.initfs_size != 0 {
+            Some((args.initfs_base, args.initfs_size))
+        } else {
+            None
+        };
+        let initfs_modules = [
+            ("test_pid", boot_test_pid),
+            ("test_mem", crate::boot::limine::test_mem_module()),
+            (
+                "test_mem_stressed",
+                crate::boot::limine::test_mem_stressed_module(),
+            ),
+            ("fs-ext4", crate::boot::limine::fs_ext4_module()),
+            (
+                "strate-fs-ramfs",
+                crate::boot::limine::strate_fs_ramfs_module(),
+            ),
+            ("init", crate::boot::limine::init_module()),
+            ("console-admin", crate::boot::limine::console_admin_module()),
+            ("strate-net", crate::boot::limine::strate_net_module()),
+            ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
+            ("bin/ping", crate::boot::limine::ping_module()),
+        ];
+        for (path, module) in initfs_modules {
+            register_initfs_module(path, module);
+        }
         // =============================================
         // Phase 8a: runtime self-tests
         // =============================================

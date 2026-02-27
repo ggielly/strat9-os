@@ -636,8 +636,6 @@ pub fn kernel_spawn_strate(
     label: Option<&str>,
     dev_path: Option<&str>,
 ) -> Result<u64, SyscallError> {
-    require_silo_admin()?;
-
     let module_id = {
         let mut registry = MODULE_REGISTRY.lock();
         registry.register(elf_data.to_vec())?
@@ -728,7 +726,6 @@ fn resolve_selector_to_silo_id(selector: &str, mgr: &SiloManager) -> Result<u64,
 }
 
 pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u64, SyscallError> {
-    require_silo_admin()?;
     let (silo_id, tasks) = {
         let mut mgr = SILO_MANAGER.lock();
         let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
@@ -771,7 +768,6 @@ pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u64, Syscall
 }
 
 pub fn kernel_destroy_silo(selector: &str) -> Result<u64, SyscallError> {
-    require_silo_admin()?;
     let (silo_id, module_id) = {
         let mut mgr = SILO_MANAGER.lock();
         let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
@@ -798,7 +794,6 @@ pub fn kernel_destroy_silo(selector: &str) -> Result<u64, SyscallError> {
 }
 
 pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u64, SyscallError> {
-    require_silo_admin()?;
     if !is_valid_label(new_label) {
         return Err(SyscallError::InvalidArgument);
     }
