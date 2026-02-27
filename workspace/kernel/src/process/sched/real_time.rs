@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{CurrentRuntime, SchedClassRq};
-use crate::process::task::Task;
+use crate::{arch::x86_64::timer::TIMER_HZ, process::task::Task};
 use alloc::{collections::VecDeque, sync::Arc};
+
+/// RT Round-Robin quantum in ticks.
+///
+/// POSIX specifies a minimum of 100ms for SCHED_RR (Linux default: 100ms).
+/// At TIMER_HZ=100: 10 ticks × 10 ms/tick = 100 ms.
+const RT_RR_QUANTUM_TICKS: u64 = TIMER_HZ; // 100 ms
 
 /// Real-time priority (0-99). Higher value means higher priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -80,8 +86,8 @@ impl SchedClassRq for RealTimeClassRq {
         let policy = task.sched_policy();
         match policy {
             super::SchedPolicy::RealTimeRR { .. } => {
-                // Round Robin: Preempt after a certain quantum (e.g., 10 ticks = 100ms)
-                rt.period_delta_ticks >= 10
+                // Round Robin: preempt after RT_RR_QUANTUM_TICKS (POSIX ≥ 100 ms).
+                rt.period_delta_ticks >= RT_RR_QUANTUM_TICKS
             }
             super::SchedPolicy::RealTimeFifo { .. } => {
                 // FIFO: Run until blocked or yielded

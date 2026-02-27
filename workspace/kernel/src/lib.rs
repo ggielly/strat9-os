@@ -611,6 +611,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
 /// On failure at any step, logs a warning and returns `false`.
 fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     use arch::x86_64::{apic, ioapic, pic, timer};
+    use timer::TIMER_HZ;
 
     // Step 6a: check CPUID for APIC support
     if !apic::is_present() {
@@ -709,14 +710,14 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
         // Re-enable PIC since APIC timer failed
         // (Note: I/O APIC routing is still active for keyboard/timer via PIC vectors)
         serial_println!("[timer] APIC calibration failed, initializing PIT fallback...");
-        timer::init_pit(100); // 100Hz = 10ms per tick
-        serial_println!("[timer] PIT initialized at 100Hz (10ms interval)");
+        timer::init_pit(TIMER_HZ as u32);
+        serial_println!("[timer] PIT initialized at {}Hz ({} ms/tick)", TIMER_HZ, 1_000 / TIMER_HZ);
         serial_println!("[init]   6h. PIT timer initialized (fallback)");
 
         serial_println!("[timer] ============================= TIMER INIT COMPLETE ============================");
         serial_println!("[timer] Mode: PIT (legacy fallback)");
-        serial_println!("[timer] Frequency: 100Hz");
-        serial_println!("[timer] Interval: 10ms per tick");
+        serial_println!("[timer] Frequency: {}Hz", TIMER_HZ);
+        serial_println!("[timer] Interval: {} ms per tick", 1_000 / TIMER_HZ);
         serial_println!(
             "[timer] =========================================================================="
         );
@@ -728,7 +729,7 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
 
         // Step 6i: start APIC timer in periodic mode
         timer::start_apic_timer(ticks_per_10ms);
-        serial_println!("[init]   6i. APIC timer started (100Hz)");
+        serial_println!("[init]   6i. APIC timer started ({}Hz)", TIMER_HZ);
 
         // Step 6i+: quench legacy PIT to prevent phantom timer interrupts.
         // The Limine bootloader leaves PIT channel 0 running (~100Hz).
@@ -740,8 +741,8 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
 
         serial_println!("[timer] ============================= TIMER INIT COMPLETE ============================");
         serial_println!("[timer] Mode: APIC (native)");
-        serial_println!("[timer] Frequency: 100Hz");
-        serial_println!("[timer] Interval: 10ms per tick");
+        serial_println!("[timer] Frequency: {}Hz", TIMER_HZ);
+        serial_println!("[timer] Interval: {} ms per tick", 1_000 / TIMER_HZ);
         serial_println!("[timer] Ticks per 10ms: {}", ticks_per_10ms);
         serial_println!(
             "[timer] =========================================================================="

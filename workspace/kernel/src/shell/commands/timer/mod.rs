@@ -2,7 +2,7 @@
 //!
 //! Provides shell commands for debugging and verifying timer accuracy.
 
-use crate::{shell::ShellError, shell_println};
+use crate::{arch::x86_64::timer::TIMER_HZ, shell::ShellError, shell_println};
 use alloc::string::String;
 
 /// Timer debug command
@@ -47,7 +47,7 @@ pub fn cmd_timer(args: &[String]) -> Result<(), ShellError> {
                 );
             } else {
                 shell_println!("Timer mode: PIT (fallback)");
-                shell_println!("Frequency: 100 Hz");
+                shell_println!("Frequency: {} Hz", TIMER_HZ);
             }
 
             Ok(())

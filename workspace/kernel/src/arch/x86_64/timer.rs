@@ -7,10 +7,19 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use x86_64::instructions::port::Port;
 
+/// Kernel timer frequency in Hz.
+///
+/// All tick-to-time conversions must use this constant.
+/// 100 Hz → 10 ms per tick, good balance between latency and overhead.
+pub const TIMER_HZ: u64 = 100;
+
+/// Nanoseconds per timer tick (derived from TIMER_HZ).
+pub const NS_PER_TICK: u64 = 1_000_000_000 / TIMER_HZ;
+
 /// Programmable Interval Timer (PIT) constants
 const PIT_CHANNEL0_PORT: u16 = 0x40;
 const PIT_COMMAND_PORT: u16 = 0x43;
-const PIT_FREQUENCY: u32 = 1193182; // Hz
+const PIT_FREQUENCY: u32 = 1_193_182; // Hz (NTSC crystal / 12)
 
 /// Whether the APIC timer is currently active
 static APIC_TIMER_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -43,19 +52,29 @@ pub fn init_pit(frequency_hz: u32) {
         }
     );
 
-    // Send command byte to configure PIT
+    // Send command byte to configure PIT channel 0.
+    // 0x34 = 0b00_11_010_0:
+    //   Bits [7:6] = 00  → Channel 0
+    //   Bits [5:4] = 11  → Access mode: lobyte then hibyte
+    //   Bits [3:1] = 010 → Mode 2 (Rate Generator): one IRQ per divisor clocks,
+    //                      automatic reload, correct for periodic IRQ generation.
+    //   Bit  [0]   = 0   → Binary counting
+    //
+    // Mode 2 (Rate Generator) is preferred over Mode 3 (Square Wave, 0x36):
+    // Mode 3 halves the effective frequency when routed through IOAPIC because it
+    // triggers on the falling edge of the square wave, not every count cycle.
     let mut cmd_port = Port::new(PIT_COMMAND_PORT);
     unsafe {
-        cmd_port.write(0x36u8); // Channel 0, low/high byte, rate generator
+        cmd_port.write(0x34u8); // Channel 0, lobyte/hibyte, Mode 2 (Rate Generator)
     }
     log::info!(
         "PIT command port (0x{:X}) wrote: 0x{:02X}",
         PIT_COMMAND_PORT,
-        0x36u8
+        0x34u8
     );
     log::info!("  Channel: 0");
     log::info!("  Access: low byte then high byte");
-    log::info!("  Mode: 3 (square wave generator / rate generator)");
+    log::info!("  Mode: 2 (Rate Generator)");
 
     // Send divisor (low byte, then high byte)
     let mut ch0_port = Port::new(PIT_CHANNEL0_PORT);
@@ -74,7 +93,7 @@ pub fn init_pit(frequency_hz: u32) {
     log::info!("========================================");
     log::info!("PIT INITIALIZED SUCCESSFULLY");
     log::info!("  Frequency: {} Hz", frequency_hz);
-    log::info!("  Interval: {} ms", 1000 / frequency_hz);
+    log::info!("  Interval: {} ms", 1_000 / frequency_hz);
     log::info!("========================================");
 }
 
@@ -384,9 +403,10 @@ pub fn start_apic_timer(ticks_per_10ms: u32) {
     APIC_TIMER_ACTIVE.store(true, Ordering::Relaxed);
 
     log::info!(
-        "APIC timer: started periodic mode, vector={:#x}, count={} (~100Hz)",
+        "APIC timer: started periodic mode, vector={:#x}, count={} ({}Hz)",
         apic::LVT_TIMER_VECTOR,
         ticks_per_10ms,
+        TIMER_HZ,
     );
     log::info!("========================================");
 }
@@ -422,8 +442,8 @@ pub fn debug_measure_time(seconds: u32) {
 
     log::info!("Start: tick={}, TSC={}", start_tick, start_tsc);
 
-    // Wait for the specified number of ticks (100 ticks = 1 second at 100Hz)
-    let target_ticks = start_tick + (seconds as u64 * 100);
+    // Wait for the specified number of ticks (TIMER_HZ ticks = 1 second)
+    let target_ticks = start_tick + (seconds as u64 * TIMER_HZ);
 
     while crate::process::scheduler::ticks() < target_ticks {
         core::hint::spin_loop();
@@ -450,7 +470,7 @@ pub fn debug_measure_time(seconds: u32) {
 
     // Calculate actual tick frequency
     // If we waited 100 ticks expecting 1 second, but it was actually different
-    let expected_ticks = seconds as u64 * 100;
+    let expected_ticks = seconds as u64 * TIMER_HZ;
     if elapsed_ticks != expected_ticks {
         log::warn!(
             "TICK MISMATCH: expected {} ticks, got {} ticks",

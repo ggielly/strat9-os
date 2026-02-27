@@ -48,6 +48,7 @@ use super::task::{
 };
 use crate::{
     arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer},
+    arch::x86_64::timer::NS_PER_TICK,
     sync::SpinLock,
 };
 use alloc::{collections::BTreeMap, sync::Arc};
@@ -261,8 +262,6 @@ pub struct Scheduler {
     children_of: BTreeMap<TaskId, alloc::vec::Vec<TaskId>>,
     /// Zombie exit statuses: child -> exit code
     zombies: BTreeMap<TaskId, i32>,
-    /// Timer interval for preemption (in milliseconds)
-    quantum_ms: u64,
     /// Scheduler class table (pick order, steal order, class metadata)
     class_table: crate::process::sched::SchedClassTable,
 }
@@ -315,7 +314,6 @@ impl Scheduler {
             parent_of: BTreeMap::new(),
             children_of: BTreeMap::new(),
             zombies: BTreeMap::new(),
-            quantum_ms: 10, // 10ms time slice
             class_table: crate::process::sched::SchedClassTable::default(),
         }
     }
@@ -1712,6 +1710,11 @@ fn cleanup_task_resources(task: &Arc<Task>) {
 /// time never drifts even when the scheduler lock is contended. Secondary
 /// bookkeeping (interval timers, wake deadlines, per-task accounting) is
 /// deferred when the lock is unavailable.
+///
+/// Lock discipline: `tick_all_timers` and `check_wake_deadlines` each acquire
+/// the scheduler lock themselves via `try_lock`. The per-task block below uses
+/// its own `try_lock`. These are separate acquisitions by design — the inner
+/// functions must not be called while the outer lock is held (that would deadlock).
 pub fn timer_tick() {
     let cpu_idx = if let Some(idx) = percpu::cpu_index_from_gs() {
         idx
@@ -1733,24 +1736,18 @@ pub fn timer_tick() {
         TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
-    // Probe: if the scheduler is not reachable yet, skip secondary work.
-    // The probe is dropped immediately; called functions re-acquire as needed.
-    {
-        let probe = SCHEDULER.try_lock();
-        if probe.is_none() {
-            return;
-        }
-    }
-
+    // BSP-only secondary bookkeeping: interval timers and sleep wakeups.
+    // NS_PER_TICK = 1_000_000_000 / TIMER_HZ (10_000_000 ns at 100 Hz).
+    // Both helpers acquire the scheduler lock internally via try_lock and
+    // skip silently when contended — no probe needed.
     if cpu_idx == 0 {
         let tick = TICK_COUNT.load(Ordering::Relaxed);
-        let current_time_ns = tick * 10_000_000; // 100 Hz → 10 ms per tick
-
+        let current_time_ns = tick * NS_PER_TICK;
         super::timer::tick_all_timers(current_time_ns);
         check_wake_deadlines(current_time_ns);
     }
 
-    // Per-task accounting on this CPU
+    // Per-task accounting on this CPU.
     if let Some(mut guard) = SCHEDULER.try_lock() {
         if let Some(ref mut sched) = *guard {
             if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {

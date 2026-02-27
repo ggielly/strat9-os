@@ -7,6 +7,17 @@ use core::cmp::{self, Reverse};
 
 const WEIGHT_0: u64 = 1024;
 
+/// Base time slice per task in ticks for the CFS fair scheduler.
+///
+/// At TIMER_HZ=100 (10 ms/tick):
+///   BASE_SLICE_TICKS = 1 → 1 tick = 10 ms per task (matches `quantum_ms: 10`)
+///
+/// Previously this was mistakenly 10, giving 10 ticks = 100 ms slices and
+/// effectively disabling preemption for lightly loaded workloads.
+///
+/// Derivation: target_ms = 10 ms, tick_ms = 1000 / TIMER_HZ = 10 ms → 1 tick.
+const BASE_SLICE_TICKS: u64 = 1;
+
 pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {
     const FACTOR_NUMERATOR: u64 = 5;
     const FACTOR_DENOMINATOR: u64 = 4;
@@ -87,13 +98,11 @@ impl FairClassRq {
     }
 
     fn period(&self) -> u64 {
-        // 10ms base slice, minimum 1ms
-        let base_slice: u64 = 10;
-        let min_period: u64 = 1;
+        // Total scheduling period (ticks) = BASE_SLICE_TICKS * nr_runnable.
+        // Ensures each runnable task gets at least BASE_SLICE_TICKS per round.
+        // Minimum = BASE_SLICE_TICKS to avoid division-by-zero in time_slice().
         let count = (self.entities.len() + 1) as u64;
-        let period_single: u64 = (base_slice * count).max(min_period);
-        // Simplified: ignore CPU count for single core mostly
-        period_single
+        (BASE_SLICE_TICKS * count).max(BASE_SLICE_TICKS)
     }
 
     fn vtime_slice(&self) -> u64 {
