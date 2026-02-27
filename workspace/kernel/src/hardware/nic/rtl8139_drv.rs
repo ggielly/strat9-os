@@ -6,9 +6,7 @@ use crate::{
     hardware::nic::NetworkDevice,
     memory::{allocate_dma_frame, phys_to_virt},
 };
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use alloc::{format, string::String};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -161,7 +159,10 @@ impl Rtl8139Device {
             core::hint::spin_loop();
         }
 
-        ports.write32(0x44, RCR_WRAP | RCR_AB | RCR_AM | RCR_APM | RCR_AAP | RCR_RBLEN);
+        ports.write32(
+            0x44,
+            RCR_WRAP | RCR_AB | RCR_AM | RCR_APM | RCR_AAP | RCR_RBLEN,
+        );
         ports.write32(0x40, TCR_IFG | TCR_MXDMA);
         ports.write32(0x30, self.rx_phys as u32);
 
@@ -174,8 +175,12 @@ impl Rtl8139Device {
 
         log::info!(
             "RTL8139: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            self.mac[0], self.mac[1], self.mac[2],
-            self.mac[3], self.mac[4], self.mac[5]
+            self.mac[0],
+            self.mac[1],
+            self.mac[2],
+            self.mac[3],
+            self.mac[4],
+            self.mac[5]
         );
     }
 
@@ -190,9 +195,7 @@ impl Rtl8139Device {
     fn receive_inner(&self) -> Option<Vec<u8>> {
         let ports = self.ports.lock();
 
-        let status = unsafe {
-            (self.rx_buffer.add(self.rx_offset) as *const u32).read_volatile()
-        };
+        let status = unsafe { (self.rx_buffer.add(self.rx_offset) as *const u32).read_volatile() };
 
         if (status & OWN) != 0 {
             return None;
@@ -208,7 +211,9 @@ impl Rtl8139Device {
                     buf.set_len(length);
                 }
 
-                let new_offset = ((self.rx_offset + length + 4 + RX_BUFFER_PAD) & !(RX_BUFFER_PAD - 1)) % RX_BUFFER_SIZE;
+                let new_offset = ((self.rx_offset + length + 4 + RX_BUFFER_PAD)
+                    & !(RX_BUFFER_PAD - 1))
+                    % RX_BUFFER_SIZE;
                 self.rx_offset = new_offset;
                 ports.write16(0x38, (new_offset - RX_BUFFER_PAD) as u16);
 
@@ -267,7 +272,7 @@ impl NetworkDevice for Rtl8139Device {
     }
 
     fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
-        if let Some(packet) = self.receive_packet() {
+        if let Some(packet) = self.receive_inner() {
             let len = core::cmp::min(packet.len(), buf.len());
             buf[..len].copy_from_slice(&packet[..len]);
             Ok(len)
@@ -277,7 +282,7 @@ impl NetworkDevice for Rtl8139Device {
     }
 
     fn transmit(&self, data: &[u8]) -> Result<(), NetError> {
-        self.transmit_packet(data)
+        self.transmit_inner(data)
     }
 }
 

@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# WebAssembly runtime for no_std
-wasmi = { version = "0.36", default-features = false, features = ["no-hash-maps"] }
+# WebAssembly runtime for no_std (alloc is implicit when std is disabled)
+wasmi = { version = "0.36", default-features = false }
 
 # Modern and fast no_std allocator
 talc = { version = "4.4", default-features = false, features = ["allocator"] }

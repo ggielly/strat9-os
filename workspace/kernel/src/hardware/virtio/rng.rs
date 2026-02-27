@@ -89,7 +89,7 @@ impl VirtioRng {
             return Err("Features negotiation failed");
         }
 
-        let queue = Virtqueue::new(&mut device, 0, VIRTIO_RING_SIZE)?;
+        let queue = Virtqueue::new(&mut device, 0)?;
         device.add_status(VIRTIO_STATUS_DRIVER_OK);
 
         Ok(Self {
@@ -159,19 +159,19 @@ impl VirtioDevice {
 
     fn add_status(&mut self, status: u8) {
         unsafe {
-            let current = (self.mmio.add(0x14) as *const u8).read_volatile();
-            (self.mmio.add(0x14) as *mut u8).write_volatile(current | status);
+            let current = ((self.mmio as *const u8).add(0x14)).read_volatile();
+            ((self.mmio as *mut u8).add(0x14)).write_volatile(current | status);
         }
     }
 
     fn read_status(&self) -> u8 {
-        unsafe { (self.mmio.add(0x14) as *const u8).read_volatile() }
+        unsafe { ((self.mmio as *const u8).add(0x14)).read_volatile() }
     }
 
     fn read_features(&self) -> u64 {
         unsafe {
             let lo = (self.mmio as *const u32).read_volatile() as u64;
-            let hi = (self.mmio.add(4) as *const u32).read_volatile() as u64;
+            let hi = ((self.mmio as *const u32).add(1)).read_volatile() as u64;
             (hi << 32) | lo
         }
     }
@@ -179,15 +179,15 @@ impl VirtioDevice {
     fn write_features(&mut self, features: u64) {
         unsafe {
             (self.mmio as *mut u32).write_volatile((features & 0xFFFFFFFF) as u32);
-            (self.mmio.add(4) as *mut u32).write_volatile(((features >> 32) & 0xFFFFFFFF) as u32);
+            ((self.mmio as *mut u32).add(1)).write_volatile(((features >> 32) & 0xFFFFFFFF) as u32);
         }
     }
 
     fn notify_queue(&self, queue: u16) {
         unsafe {
-            let offset = (self.mmio.add(0x20) as *const u16).read_volatile() as usize;
-            let queue_notify = self.mmio.add(0x50 + offset * 4);
-            (queue_notify as *mut u32).write_volatile(queue as u32);
+            let offset = ((self.mmio as *const u16).add(0x10)).read_volatile() as usize;
+            let queue_notify = (self.mmio as *mut u32).add(0x14 + offset);
+            queue_notify.write_volatile(queue as u32);
         }
     }
 }
@@ -206,9 +206,9 @@ impl Virtqueue {
             let avail_frame = allocate_dma_frame().ok_or("Failed to allocate avail")?;
             let used_frame = allocate_dma_frame().ok_or("Failed to allocate used")?;
 
-            let desc_phys = desc_frame.start_address();
-            let avail_phys = avail_frame.start_address();
-            let used_phys = used_frame.start_address();
+            let desc_phys = desc_frame.start_address;
+            let avail_phys = avail_frame.start_address;
+            let used_phys = used_frame.start_address;
 
             let desc_virt = phys_to_virt(desc_phys) as *mut VirtqDesc;
             let avail_virt = phys_to_virt(avail_phys) as *mut VirtqAvail;
@@ -222,7 +222,7 @@ impl Virtqueue {
             (device.mmio.add(0x1A) as *mut u16).write_volatile(0xFFFF);
 
             let buffer_frame = allocate_dma_frame().ok_or("Failed to allocate entropy buffer")?;
-            let entropy_phys = buffer_frame.start_address();
+            let entropy_phys = buffer_frame.start_address;
             let entropy_virt = phys_to_virt(entropy_phys) as *mut u8;
             core::ptr::write_bytes(entropy_virt, 0, 4096);
 
