@@ -1,10 +1,10 @@
 // VirtIO Random Number Generator Driver
 // Reference: VirtIO spec v1.2, Section 5.6 (Entropy Device)
 
-#![no_std]
-
-extern crate alloc;
-
+use crate::{
+    arch::x86_64::pci::{self, Bar, ProbeCriteria},
+    memory::{allocate_dma_frame, phys_to_virt},
+};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
@@ -61,7 +61,6 @@ struct VirtqUsedElem {
 }
 
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
-
 const VIRTIO_STATUS_RESET: u8 = 0;
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
@@ -69,14 +68,13 @@ const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
 
 impl VirtioRng {
-    pub unsafe fn new(pci_dev: crate::arch::x86_64::pci::PciDevice) -> Result<Self, &'static str> {
+    pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let bar = match pci_dev.read_bar(0) {
-            Some(crate::arch::x86_64::pci::Bar::Memory64(addr)) => addr,
+            Some(Bar::Memory64(addr)) => addr,
             _ => return Err("Invalid BAR"),
         };
 
-        let mmio = crate::memory::phys_to_virt(bar) as usize;
-
+        let mmio = phys_to_virt(bar) as usize;
         let mut device = VirtioDevice { mmio };
 
         device.reset();
@@ -92,7 +90,6 @@ impl VirtioRng {
         }
 
         let queue = Virtqueue::new(&mut device, 0, VIRTIO_RING_SIZE)?;
-
         device.add_status(VIRTIO_STATUS_DRIVER_OK);
 
         Ok(Self {
@@ -196,42 +193,41 @@ impl VirtioDevice {
 }
 
 impl Virtqueue {
-    fn new(device: &mut VirtioDevice, queue_idx: u16, size: usize) -> Result<Self, &'static str> {
+    fn new(device: &mut VirtioDevice, queue_idx: u16) -> Result<Self, &'static str> {
         unsafe {
             (device.mmio.add(0x16) as *mut u16).write_volatile(queue_idx);
             let max_size = (device.mmio.add(0x18) as *const u16).read_volatile();
-            if max_size < size as u16 {
-                return Err("Queue size too large");
+            if max_size < VIRTIO_RING_SIZE as u16 {
+                return Err("Queue size too small");
             }
-            (device.mmio.add(0x16) as *mut u16).write_volatile(size as u16);
+            (device.mmio.add(0x16) as *mut u16).write_volatile(VIRTIO_RING_SIZE as u16);
 
-            let desc_frame = crate::memory::allocate_dma_frame().ok_or("Failed to allocate desc")?;
-            let avail_frame = crate::memory::allocate_dma_frame().ok_or("Failed to allocate avail")?;
-            let used_frame = crate::memory::allocate_dma_frame().ok_or("Failed to allocate used")?;
+            let desc_frame = allocate_dma_frame().ok_or("Failed to allocate desc")?;
+            let avail_frame = allocate_dma_frame().ok_or("Failed to allocate avail")?;
+            let used_frame = allocate_dma_frame().ok_or("Failed to allocate used")?;
 
             let desc_phys = desc_frame.start_address();
             let avail_phys = avail_frame.start_address();
             let used_phys = used_frame.start_address();
 
-            let desc_virt = crate::memory::phys_to_virt(desc_phys) as *mut VirtqDesc;
-            let avail_virt = crate::memory::phys_to_virt(avail_phys) as *mut VirtqAvail;
-            let used_virt = crate::memory::phys_to_virt(used_phys) as *mut VirtqUsed;
+            let desc_virt = phys_to_virt(desc_phys) as *mut VirtqDesc;
+            let avail_virt = phys_to_virt(avail_phys) as *mut VirtqAvail;
+            let used_virt = phys_to_virt(used_phys) as *mut VirtqUsed;
 
-            core::ptr::write_bytes(desc_virt, 0, size * core::mem::size_of::<VirtqDesc>());
+            core::ptr::write_bytes(desc_virt, 0, VIRTIO_RING_SIZE * core::mem::size_of::<VirtqDesc>());
             core::ptr::write_bytes(avail_virt, 0, core::mem::size_of::<VirtqAvail>());
             core::ptr::write_bytes(used_virt, 0, core::mem::size_of::<VirtqUsed>());
 
             (device.mmio.add(0x10) as *mut u32).write_volatile((desc_phys & 0xFFFFFFFF) as u32);
-
             (device.mmio.add(0x1A) as *mut u16).write_volatile(0xFFFF);
 
-            let entropy_frame = crate::memory::allocate_dma_frame().ok_or("Failed to allocate entropy buffer")?;
-            let entropy_phys = entropy_frame.start_address();
-            let entropy_virt = crate::memory::phys_to_virt(entropy_phys) as *mut u8;
+            let buffer_frame = allocate_dma_frame().ok_or("Failed to allocate entropy buffer")?;
+            let entropy_phys = buffer_frame.start_address();
+            let entropy_virt = phys_to_virt(entropy_phys) as *mut u8;
             core::ptr::write_bytes(entropy_virt, 0, 4096);
 
-            let mut free = Vec::with_capacity(size);
-            for i in 0..size {
+            let mut free = Vec::with_capacity(VIRTIO_RING_SIZE);
+            for i in 0..VIRTIO_RING_SIZE {
                 free.push(i as u16);
             }
 
@@ -254,9 +250,9 @@ static RNG_INITIALIZED: AtomicBool = AtomicBool::new(false);
 pub fn init() {
     log::info!("[VirtIO-RNG] Scanning for VirtIO RNG devices...");
 
-    let candidates = crate::arch::x86_64::pci::probe_all(crate::arch::x86_64::pci::ProbeCriteria {
-        vendor_id: Some(crate::arch::x86_64::pci::vendor::VIRTIO),
-        device_id: Some(crate::arch::x86_64::pci::device::VIRTIO_RNG),
+    let candidates = pci::probe_all(ProbeCriteria {
+        vendor_id: Some(pci::vendor::VIRTIO),
+        device_id: Some(pci::device::VIRTIO_RNG),
         class_code: None,
         subclass: None,
         prog_if: None,

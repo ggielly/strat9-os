@@ -1,10 +1,10 @@
 // VirtIO Console Driver
 // Reference: VirtIO spec v1.2, Section 5.3 (Console Device)
 
-#![no_std]
-
-extern crate alloc;
-
+use crate::{
+    arch::x86_64::pci::{self, Bar, ProbeCriteria},
+    memory::{allocate_dma_frame, phys_to_virt},
+};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::{Mutex, Once};
@@ -35,10 +35,10 @@ struct Virtqueue {
     desc_phys: u64,
     avail_phys: u64,
     used_phys: u64,
-    free: Vec<u16>,
-    last_used_idx: u16,
     buffer_phys: u64,
     buffer_virt: *mut u8,
+    free: Vec<u16>,
+    last_used_idx: u16,
 }
 
 #[repr(C)]
@@ -72,7 +72,6 @@ struct VirtqUsedElem {
 }
 
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
-const VIRTIO_CONSOLE_F_SIZE: u32 = 0;
 const VIRTIO_CONSOLE_F_MULTIPORT: u32 = 1;
 
 const VIRTIO_STATUS_RESET: u8 = 0;
@@ -81,16 +80,14 @@ const VIRTIO_STATUS_DRIVER: u8 = 2;
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
 
-const VIRTIO_CONSOLE_READY: u16 = 0;
-
 impl VirtioConsole {
-    pub unsafe fn new(pci_dev: crate::arch::x86_64::pci::PciDevice) -> Result<Self, &'static str> {
+    pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let bar = match pci_dev.read_bar(0) {
-            Some(crate::arch::x86_64::pci::Bar::Memory64(addr)) => addr,
+            Some(Bar::Memory64(addr)) => addr,
             _ => return Err("Invalid BAR"),
         };
 
-        let mmio = crate::memory::phys_to_virt(bar) as usize;
+        let mmio = phys_to_virt(bar) as usize;
         let mut device = VirtioDevice { mmio };
 
         device.reset();
@@ -207,17 +204,17 @@ impl Virtqueue {
             }
             (device.mmio.add(0x16) as *mut u16).write_volatile(VIRTIO_RING_SIZE as u16);
 
-            let desc_frame = crate::memory::allocate_dma_frame().ok_or("Failed to allocate desc")?;
-            let avail_frame = crate::memory::allocate_dma_frame().ok_or("Failed to allocate avail")?;
-            let used_frame = crate::memory::allocate_dma_frame().ok_or("Failed to allocate used")?;
+            let desc_frame = allocate_dma_frame().ok_or("Failed to allocate desc")?;
+            let avail_frame = allocate_dma_frame().ok_or("Failed to allocate avail")?;
+            let used_frame = allocate_dma_frame().ok_or("Failed to allocate used")?;
 
             let desc_phys = desc_frame.start_address();
             let avail_phys = avail_frame.start_address();
             let used_phys = used_frame.start_address();
 
-            let desc_virt = crate::memory::phys_to_virt(desc_phys) as *mut VirtqDesc;
-            let avail_virt = crate::memory::phys_to_virt(avail_phys) as *mut VirtqAvail;
-            let used_virt = crate::memory::phys_to_virt(used_phys) as *mut VirtqUsed;
+            let desc_virt = phys_to_virt(desc_phys) as *mut VirtqDesc;
+            let avail_virt = phys_to_virt(avail_phys) as *mut VirtqAvail;
+            let used_virt = phys_to_virt(used_phys) as *mut VirtqUsed;
 
             core::ptr::write_bytes(desc_virt, 0, VIRTIO_RING_SIZE * core::mem::size_of::<VirtqDesc>());
             core::ptr::write_bytes(avail_virt, 0, core::mem::size_of::<VirtqAvail>());
@@ -226,9 +223,9 @@ impl Virtqueue {
             (device.mmio.add(0x10) as *mut u32).write_volatile((desc_phys & 0xFFFFFFFF) as u32);
             (device.mmio.add(0x1A) as *mut u16).write_volatile(0xFFFF);
 
-            let buffer_frame = crate::memory::allocate_dma_frame().ok_or("Failed to allocate buffer")?;
+            let buffer_frame = allocate_dma_frame().ok_or("Failed to allocate buffer")?;
             let buffer_phys = buffer_frame.start_address();
-            let buffer_virt = crate::memory::phys_to_virt(buffer_phys) as *mut u8;
+            let buffer_virt = phys_to_virt(buffer_phys) as *mut u8;
             core::ptr::write_bytes(buffer_virt, 0, 4096);
 
             let mut free = Vec::with_capacity(VIRTIO_RING_SIZE);
@@ -291,9 +288,7 @@ impl Virtqueue {
     }
 
     fn poll_used(&self) -> bool {
-        unsafe {
-            self.last_used_idx != (*self.used).idx
-        }
+        unsafe { self.last_used_idx != (*self.used).idx }
     }
 }
 
@@ -303,9 +298,9 @@ static CONSOLE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 pub fn init() {
     log::info!("[VirtIO-Console] Scanning for VirtIO Console devices...");
 
-    let candidates = crate::arch::x86_64::pci::probe_all(crate::arch::x86_64::pci::ProbeCriteria {
-        vendor_id: Some(crate::arch::x86_64::pci::vendor::VIRTIO),
-        device_id: Some(crate::arch::x86_64::pci::device::VIRTIO_CONSOLE),
+    let candidates = pci::probe_all(ProbeCriteria {
+        vendor_id: Some(pci::vendor::VIRTIO),
+        device_id: Some(pci::device::VIRTIO_CONSOLE),
         class_code: None,
         subclass: None,
         prog_if: None,

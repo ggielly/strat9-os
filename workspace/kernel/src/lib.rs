@@ -466,6 +466,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         serial_println!("[init] AHCI probe done.");
         vga_println!("[OK] AHCI probe done");
 
+        serial_println!("[init] Initializing ATA/IDE...");
+        vga_println!("[..] Looking for ATA/IDE devices...");
+        hardware::storage::ata_legacy::init();
+        serial_println!("[init] ATA/IDE probe done.");
+        vga_println!("[OK] ATA/IDE probe done");
+
         serial_println!("[init] Initializing NVMe...");
         vga_println!("[..] Looking for NVMe controllers...");
         hardware::storage::nvme::init();
@@ -480,13 +486,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
         serial_println!("[init] Initializing VirtIO RNG...");
         vga_println!("[..] Looking for VirtIO RNG device...");
-        crate::hardware::rng::virtio_rng::init();
+        crate::hardware::virtio::rng::init();
         serial_println!("[init] VirtIO RNG initialized.");
         vga_println!("[OK] VirtIO RNG driver initialized");
 
         serial_println!("[init] Initializing VirtIO Console...");
         vga_println!("[..] Looking for VirtIO Console device...");
-        crate::hardware::rng::virtio_console::init();
+        crate::hardware::virtio::console::init();
         serial_println!("[init] VirtIO Console initialized.");
         vga_println!("[OK] VirtIO Console driver initialized");
 

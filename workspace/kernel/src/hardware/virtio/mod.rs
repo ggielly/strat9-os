@@ -8,6 +8,8 @@
 //! - RedoxOS drivers: https://gitlab.redox-os.org/redox-os/drivers
 
 pub mod common;
+pub mod console;
+pub mod rng;
 
 /// VirtIO device status flags
 #[allow(dead_code)]

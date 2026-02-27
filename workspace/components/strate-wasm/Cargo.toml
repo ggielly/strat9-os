@@ -1,0 +1,20 @@
+[package]
+name = "strate-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[[bin]]
+name = "strate-wasm"
+path = "src/main.rs"
+
+[dependencies]
+spin = { workspace = true }
+log = { workspace = true }
+strat9-syscall = { path = "../syscall", features = ["userspace"] }
+wasmi = { version = "1.0.9", default-features = false }
+linked_list_allocator = "0.10.5"
+
+[features]
+default = []
