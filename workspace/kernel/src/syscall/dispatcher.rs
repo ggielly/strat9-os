@@ -53,6 +53,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_HANDLE_DUPLICATE => sys_handle_duplicate(arg1),
         SYS_HANDLE_CLOSE => sys_handle_close(arg1),
         SYS_HANDLE_WAIT => sys_handle_wait(arg1, arg2),
+        SYS_HANDLE_GRANT => sys_handle_grant(arg1, arg2),
 
         // Memory management (block 100-199)
         SYS_MMAP => super::mmap::sys_mmap(arg1, arg2, arg3 as u32, arg4 as u32, frame.r8, frame.r9),
@@ -398,6 +399,30 @@ fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
             task.wake_deadline_ns.store(0, Ordering::Relaxed);
         }
     }
+}
+
+fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+    let pid = u32::try_from(target_pid).map_err(|_| SyscallError::InvalidArgument)?;
+
+    let source = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let granted = {
+        let source_caps = unsafe { &*source.process.capabilities.get() };
+        let cap = source_caps
+            .get(CapId::from_raw(handle))
+            .ok_or(SyscallError::BadHandle)?;
+        if !cap.permissions.grant {
+            return Err(SyscallError::PermissionDenied);
+        }
+        let mut dup = cap.clone();
+        dup.id = CapId::new();
+        dup
+    };
+
+    let target = crate::process::get_task_by_pid(pid).ok_or(SyscallError::NotFound)?;
+    let target_caps = unsafe { &mut *target.process.capabilities.get() };
+    let new_id = target_caps.insert(granted);
+    Ok(new_id.as_u64())
 }
 
 /// SYS_PROC_EXIT (300): Exit the current task.

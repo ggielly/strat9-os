@@ -37,6 +37,8 @@ nic-queues = { path = "../drivers/nic/nic-queues" }
 intel-ethernet = { path = "../drivers/nic/intel-ethernet" }
 e1000 = { path = "../drivers/nic/e1000" }
 driver-net-proto = { path = "../drivers/nic/driver-net-proto" }
+rtl8139 = { path = "../drivers/nic/rtl8139" }
+nvme = { path = "../drivers/storage/nvme" }
 ###
 [build-dependencies]
 cc = "1.0"

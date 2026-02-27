@@ -18,6 +18,15 @@ pub const SYS_HANDLE_CLOSE: u64 = 2;
 /// Wait on a handle for an event.
 pub const SYS_HANDLE_WAIT: u64 = 3;
 
+/// Grant a handle to another process. arg1=handle, arg2=target_pid
+pub const SYS_HANDLE_GRANT: u64 = 4;
+
+/// Revoke a previously granted handle.
+pub const SYS_HANDLE_REVOKE: u64 = 5;
+
+/// Query information about a handle.
+pub const SYS_HANDLE_INFO: u64 = 6;
+
 // ============================================================
 // Block 100-199: memory management
 // ============================================================

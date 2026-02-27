@@ -466,6 +466,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         serial_println!("[init] AHCI probe done.");
         vga_println!("[OK] AHCI probe done");
 
+        serial_println!("[init] Initializing NVMe...");
+        vga_println!("[..] Looking for NVMe controllers...");
+        hardware::storage::nvme::init();
+        serial_println!("[init] NVMe probe done.");
+        vga_println!("[OK] NVMe probe done");
+
         serial_println!("[init] Initializing VirtIO net...");
         vga_println!("[..] Looking for VirtIO net device...");
         hardware::nic::virtio_net::init();
@@ -497,6 +503,21 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             vga_println!("[OK] AHCI SATA driver loaded");
         } else {
             serial_println!("[INFO] No AHCI SATA device found");
+        }
+
+        if let Some(nvme) = hardware::storage::nvme::get_first_controller() {
+            if let Some(ns) = nvme.get_namespace(0) {
+                serial_println!(
+                    "[INFO] NVMe device found. Namespace {} - {} blocks @ {} bytes ({} MiB)",
+                    ns.nsid,
+                    ns.size,
+                    ns.block_size,
+                    (ns.size * ns.block_size as u64) / (1024 * 1024),
+                );
+                vga_println!("[OK] NVMe driver loaded");
+            }
+        } else {
+            serial_println!("[INFO] No NVMe device found");
         }
 
         // Report all registered network interfaces (E1000 + VirtIO)

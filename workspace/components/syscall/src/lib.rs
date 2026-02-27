@@ -674,7 +674,17 @@ pub mod call {
 
     /// Wait on a capability handle until it becomes signaled.
     pub fn handle_wait(handle: usize) -> error::Result<usize> {
-        unsafe { syscall1(number::SYS_HANDLE_WAIT, handle) }
+        unsafe { syscall2(number::SYS_HANDLE_WAIT, handle, usize::MAX) }
+    }
+
+    /// Wait on a capability handle with a timeout (nanoseconds).
+    pub fn handle_wait_timeout(handle: usize, timeout_ns: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_HANDLE_WAIT, handle, timeout_ns) }
+    }
+
+    /// Grant a capability handle to another process.
+    pub fn handle_grant(handle: usize, target_pid: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_HANDLE_GRANT, handle, target_pid) }
     }
 
     // -----------------------------------------------------------------------

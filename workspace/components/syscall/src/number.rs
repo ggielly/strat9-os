@@ -5,6 +5,9 @@ pub const SYS_NULL: usize = 0;
 pub const SYS_HANDLE_DUPLICATE: usize = 1;
 pub const SYS_HANDLE_CLOSE: usize = 2;
 pub const SYS_HANDLE_WAIT: usize = 3;
+pub const SYS_HANDLE_GRANT: usize = 4;
+pub const SYS_HANDLE_REVOKE: usize = 5;
+pub const SYS_HANDLE_INFO: usize = 6;
 
 // Block 100-199: memory management
 pub const SYS_MMAP: usize = 100;

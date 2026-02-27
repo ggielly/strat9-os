@@ -230,7 +230,7 @@ impl NvmeController {
             .ok_or(NvmeError::IoError)?;
 
         let phys = frame.start_address() as u64;
-        let virt = crate::memory::phys_to_virt(phys as usize) as *mut u8;
+        let virt = crate::memory::phys_to_virt(phys) as *mut u8;
 
         unsafe {
             ptr::write_bytes(virt, 0, NVME_PAGE_SIZE);
@@ -311,7 +311,7 @@ impl NvmeController {
             .ok_or(NvmeError::IoError)?;
 
         let phys = frame.start_address() as u64;
-        let virt = crate::memory::phys_to_virt(phys as usize) as *mut u8;
+        let virt = crate::memory::phys_to_virt(phys) as *mut u8;
 
         let blocks = (buffer.len() / 512) as u32;
 
@@ -350,7 +350,7 @@ impl NvmeController {
             .ok_or(NvmeError::IoError)?;
 
         let phys = frame.start_address() as u64;
-        let virt = crate::memory::phys_to_virt(phys as usize) as *mut u8;
+        let virt = crate::memory::phys_to_virt(phys) as *mut u8;
 
         unsafe {
             ptr::copy_nonoverlapping(buffer.as_ptr(), virt, buffer.len());

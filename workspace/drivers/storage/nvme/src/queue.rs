@@ -2,7 +2,6 @@
 // Reference: NVM Express Base Specification 2.0, Section 6
 
 use super::command::{Command, CompletionEntry};
-use crate::memory::{get_allocator, FrameAllocator, PhysFrame};
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicU16, Ordering};
@@ -70,13 +69,11 @@ impl<T: QueueType> Queue<T> {
             &*((registers_base + doorbell_offset) as *const DoorbellRegister)
         };
 
-        let frame = get_allocator()
-            .lock()
-            .allocate_frame()
+        let frame = crate::memory::allocate_dma_frame()
             .expect("NVMe: failed to allocate queue frame");
 
-        let phys_addr = frame.start_address() as u64;
-        let virt_addr = crate::memory::phys_to_virt(phys_addr as usize);
+        let phys_addr = frame.start_address();
+        let virt_addr = crate::memory::phys_to_virt(phys_addr);
 
         unsafe {
             core::ptr::write_bytes(

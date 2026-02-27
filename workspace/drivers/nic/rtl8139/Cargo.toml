@@ -1,0 +1,11 @@
+[package]
+name = "rtl8139"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+bitflags = { workspace = true }
+log = { workspace = true }
+spin = { workspace = true }
+net-core = { path = "../../nic/net-core" }
