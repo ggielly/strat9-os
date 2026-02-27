@@ -1,7 +1,7 @@
 // Buddy allocator implementation
 
 use crate::{
-    entry::{MemoryKind, MemoryRegion},
+    boot::entry::{MemoryKind, MemoryRegion},
     memory::{
         frame::{AllocError, FrameAllocator, PhysFrame},
         hhdm_offset, phys_to_virt,

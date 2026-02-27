@@ -24,13 +24,10 @@ pub mod arch;
 pub mod boot;
 pub mod capability;
 pub mod components;
-pub mod entry;
 pub mod hardware;
 pub mod ipc;
-pub mod logger;
 pub mod memory;
 pub mod namespace;
-pub mod panic;
 pub mod process;
 pub mod shell;
 pub mod silo;
@@ -39,11 +36,8 @@ pub mod syscall;
 pub mod trace;
 pub mod vfs;
 
-// Limine entry point module
-pub mod limine_entry;
-
-// Re-export limine_entry::kmain as the main entry point
-pub use limine_entry::kmain;
+// Re-export boot::limine::kmain as the main entry point
+pub use boot::limine::kmain;
 
 // serial_print! and serial_println! macros are #[macro_export]'ed
 // from arch::x86_64::serial and available at crate root automatically.
@@ -55,7 +49,7 @@ pub fn init_serial() {
 
 /// Initialize the logger (uses serial)
 pub fn init_logger() {
-    logger::init();
+    boot::logger::init();
 }
 
 /// Initialize kernel components using the component system
@@ -71,7 +65,7 @@ use core::panic::PanicInfo;
 /// Kernel panic handler
 #[panic_handler]
 fn panic_handler(info: &PanicInfo) -> ! {
-    panic::panic_handler(info)
+    boot::panic::panic_handler(info)
 }
 
 fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
@@ -91,7 +85,7 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
 }
 
 /// Main kernel initialization - called by bootloader entry points
-pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
+pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     use core::fmt::Write;
 
     // =============================================
@@ -105,7 +99,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
 
     // Puts default panic hooks early to ensure
     //we get useful info on any panics during init.
-    panic::install_default_panic_hooks();
+    boot::panic::install_default_panic_hooks();
 
     // Nice logo :D
     serial_println!(r"          __                 __   ________                         ");
@@ -158,8 +152,9 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
     // Phase 2 : memory management (Buddy Allocator)
     // =============================================
     serial_println!("[init] Memory manager...");
-    let mmap_ptr = args.memory_map_base as *const entry::MemoryRegion;
-    let mmap_len = args.memory_map_size as usize / core::mem::size_of::<entry::MemoryRegion>();
+    let mmap_ptr = args.memory_map_base as *const boot::entry::MemoryRegion;
+    let mmap_len =
+        args.memory_map_size as usize / core::mem::size_of::<boot::entry::MemoryRegion>();
     let mmap = core::slice::from_raw_parts(mmap_ptr, mmap_len);
 
     memory::init_memory_manager(mmap);
@@ -383,21 +378,21 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
 
         let initfs_modules = [
             ("test_pid", boot_test_pid),
-            ("test_mem", crate::limine_entry::test_mem_module()),
+            ("test_mem", crate::boot::limine::test_mem_module()),
             (
                 "test_mem_stressed",
-                crate::limine_entry::test_mem_stressed_module(),
+                crate::boot::limine::test_mem_stressed_module(),
             ),
-            ("fs-ext4", crate::limine_entry::fs_ext4_module()),
+            ("fs-ext4", crate::boot::limine::fs_ext4_module()),
             (
                 "strate-fs-ramfs",
-                crate::limine_entry::strate_fs_ramfs_module(),
+                crate::boot::limine::strate_fs_ramfs_module(),
             ),
-            ("init", crate::limine_entry::init_module()),
-            ("console-admin", crate::limine_entry::console_admin_module()),
-            ("strate-net", crate::limine_entry::strate_net_module()),
-            ("bin/dhcp-client", crate::limine_entry::dhcp_client_module()),
-            ("bin/ping", crate::limine_entry::ping_module()),
+            ("init", crate::boot::limine::init_module()),
+            ("console-admin", crate::boot::limine::console_admin_module()),
+            ("strate-net", crate::boot::limine::strate_net_module()),
+            ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
+            ("bin/ping", crate::boot::limine::ping_module()),
         ];
 
         for (path, module) in initfs_modules {
@@ -495,7 +490,7 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
         // is present but contains an invalid ELF (corrupt / wrong arch).
         let mut init_loaded = false;
 
-        if let Some((base, size)) = crate::limine_entry::init_module() {
+        if let Some((base, size)) = crate::boot::limine::init_module() {
             let elf_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
             match process::elf::load_and_run_elf(elf_data, "init") {
                 Ok(task_id) => {
@@ -528,11 +523,19 @@ pub unsafe fn kernel_main(args: *const entry::KernelArgs) -> ! {
                 }
             }
         }
-        if let Some((base, size)) = crate::limine_entry::strate_fs_ramfs_module() {
+        if let Some((base, size)) = crate::boot::limine::strate_fs_ramfs_module() {
             let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
             match process::elf::load_and_run_elf(ram_data, "strate-fs-ramfs") {
                 Ok(_) => serial_println!("[init] Component 'strate-fs-ramfs' loaded."),
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
+            }
+        }
+        if let Some((base, size)) = crate::boot::limine::fs_ext4_module() {
+            let ext4_data =
+                unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            match process::elf::load_and_run_elf(ext4_data, "strate-fs-ext4") {
+                Ok(_) => serial_println!("[init] Component 'strate-fs-ext4' loaded."),
+                Err(e) => serial_println!("[init] Failed to load strate-fs-ext4 component: {}", e),
             }
         }
         if let (Some(task_id), Some(device)) =
@@ -711,7 +714,11 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
         // (Note: I/O APIC routing is still active for keyboard/timer via PIC vectors)
         serial_println!("[timer] APIC calibration failed, initializing PIT fallback...");
         timer::init_pit(TIMER_HZ as u32);
-        serial_println!("[timer] PIT initialized at {}Hz ({} ms/tick)", TIMER_HZ, 1_000 / TIMER_HZ);
+        serial_println!(
+            "[timer] PIT initialized at {}Hz ({} ms/tick)",
+            TIMER_HZ,
+            1_000 / TIMER_HZ
+        );
         serial_println!("[init]   6h. PIT timer initialized (fallback)");
 
         serial_println!("[timer] ============================= TIMER INIT COMPLETE ============================");

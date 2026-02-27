@@ -9,7 +9,7 @@ pub mod paging;
 pub mod userslice;
 pub mod zone;
 
-use crate::entry::MemoryRegion;
+use crate::boot::entry::MemoryRegion;
 use alloc::{boxed::Box, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -47,7 +47,7 @@ pub fn init_memory_manager(memory_regions: &[MemoryRegion]) {
 }
 
 fn init_cow_metadata(memory_regions: &[MemoryRegion]) {
-    use crate::entry::MemoryKind;
+    use crate::boot::entry::MemoryKind;
 
     let max_end = memory_regions
         .iter()

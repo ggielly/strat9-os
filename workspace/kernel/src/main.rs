@@ -8,7 +8,7 @@
 
 extern crate alloc;
 
-use strat9_kernel::entry::KernelArgs;
+use strat9_kernel::boot::entry::KernelArgs;
 
 /// Legacy kernel entry point - forwards to lib.rs implementation
 #[no_mangle]

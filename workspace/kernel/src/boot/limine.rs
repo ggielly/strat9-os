@@ -105,11 +105,11 @@ static mut DHCP_CLIENT_ELF_MODULE: Option<(u64, u64)> = None;
 static mut PING_ELF_MODULE: Option<(u64, u64)> = None;
 
 const MAX_BOOT_MEMORY_REGIONS: usize = 256;
-static mut BOOT_MEMORY_MAP: [crate::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
-    [crate::entry::MemoryRegion {
+static mut BOOT_MEMORY_MAP: [super::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
+    [super::entry::MemoryRegion {
         base: 0,
         size: 0,
-        kind: crate::entry::MemoryKind::Reserved,
+        kind: super::entry::MemoryKind::Reserved,
     }; MAX_BOOT_MEMORY_REGIONS];
 static mut BOOT_MEMORY_MAP_LEN: usize = 0;
 
@@ -219,15 +219,15 @@ fn resolve_modules_once(modules: &[&limine::file::File]) -> ResolvedModules {
     resolved
 }
 
-fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> crate::entry::MemoryKind {
+fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> super::entry::MemoryKind {
     if kind == limine::memory_map::EntryType::USABLE {
-        crate::entry::MemoryKind::Free
+        super::entry::MemoryKind::Free
     } else if kind == limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE
         || kind == limine::memory_map::EntryType::ACPI_RECLAIMABLE
     {
-        crate::entry::MemoryKind::Reclaim
+        super::entry::MemoryKind::Reclaim
     } else {
-        crate::entry::MemoryKind::Reserved
+        super::entry::MemoryKind::Reserved
     }
 }
 
@@ -320,7 +320,7 @@ pub unsafe extern "C" fn kmain() -> ! {
         unsafe {
             BOOT_MEMORY_MAP_LEN = count;
             for (i, entry) in entries.iter().take(count).enumerate() {
-                BOOT_MEMORY_MAP[i] = crate::entry::MemoryRegion {
+                BOOT_MEMORY_MAP[i] = super::entry::MemoryRegion {
                     base: entry.base,
                     size: entry.length,
                     kind: map_limine_region_kind(entry.entry_type),
@@ -328,7 +328,7 @@ pub unsafe extern "C" fn kmain() -> ! {
             }
             (
                 BOOT_MEMORY_MAP.as_ptr() as u64,
-                (BOOT_MEMORY_MAP_LEN * core::mem::size_of::<crate::entry::MemoryRegion>()) as u64,
+                (BOOT_MEMORY_MAP_LEN * core::mem::size_of::<super::entry::MemoryRegion>()) as u64,
             )
         }
     } else {
@@ -469,7 +469,7 @@ pub unsafe extern "C" fn kmain() -> ! {
         }
     }
 
-    let args = crate::entry::KernelArgs {
+    let args = super::entry::KernelArgs {
         kernel_base: EXECUTABLE_ADDRESS
             .get_response()
             .map(|r| r.physical_base())

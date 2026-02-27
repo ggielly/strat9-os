@@ -33,6 +33,8 @@ impl CommandRegistry {
         registry.register("mem", mem::cmd_mem);
         registry.register("ps", ps::cmd_ps);
         registry.register("scheme", vfs::cmd_scheme);
+        registry.register("mount", vfs::cmd_mount);
+        registry.register("umount", vfs::cmd_umount);
         registry.register("cd", vfs::cmd_cd);
         registry.register("ls", vfs::cmd_ls);
         registry.register("cat", vfs::cmd_cat);

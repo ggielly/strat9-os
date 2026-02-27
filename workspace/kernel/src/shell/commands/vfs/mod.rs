@@ -205,6 +205,91 @@ pub fn cmd_scheme(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+struct FsDriver {
+    name: &'static str,
+    source_mount: &'static str,
+}
+
+const FS_DRIVERS: &[FsDriver] = &[
+    FsDriver {
+        name: "strate-fs-ext4",
+        source_mount: "/fs/ext4",
+    },
+    FsDriver {
+        name: "ramfs",
+        source_mount: "/ram",
+    },
+];
+
+fn find_fs_driver(name: &str) -> Option<&'static FsDriver> {
+    FS_DRIVERS.iter().find(|driver| driver.name == name)
+}
+
+pub fn cmd_mount(args: &[String]) -> Result<(), ShellError> {
+    if args.is_empty() || args[0] == "ls" {
+        shell_println!("Mount points:");
+        for m in vfs::list_mounts() {
+            shell_println!("  {}", m);
+        }
+        shell_println!("");
+        shell_println!("Supported filesystems:");
+        for driver in FS_DRIVERS {
+            shell_println!("  {:<8} (source: {})", driver.name, driver.source_mount);
+        }
+        shell_println!("");
+        shell_println!("Usage: mount <strate-fs-ext4|ramfs> <target>");
+        return Ok(());
+    }
+    if args.len() != 2 {
+        shell_println!("Usage: mount <strate-fs-ext4|ramfs> <target>");
+        return Ok(());
+    }
+
+    let fs_type = args[0].as_str();
+    let target = resolve_shell_path(&args[1]);
+    let Some(driver) = find_fs_driver(fs_type) else {
+        shell_println!("mount: unsupported filesystem '{}'", fs_type);
+        return Ok(());
+    };
+
+    let (scheme, rel) = match vfs::resolve(driver.source_mount) {
+        Ok(v) => v,
+        Err(e) => {
+            shell_println!(
+                "mount: source {} unavailable ({}): {:?}",
+                driver.source_mount,
+                driver.name,
+                e
+            );
+            return Ok(());
+        }
+    };
+    if !rel.is_empty() {
+        shell_println!("mount: invalid source mount '{}'", driver.source_mount);
+        return Ok(());
+    }
+
+    match vfs::mount(&target, scheme) {
+        Ok(()) => shell_println!("mount: {} mounted on {}", driver.name, target),
+        Err(e) => shell_println!("mount: {} -> {} failed: {:?}", driver.name, target, e),
+    }
+    Ok(())
+}
+
+pub fn cmd_umount(args: &[String]) -> Result<(), ShellError> {
+    if args.len() != 1 {
+        shell_println!("Usage: umount <target>");
+        return Ok(());
+    }
+
+    let target = resolve_shell_path(&args[0]);
+    match vfs::unmount(&target) {
+        Ok(()) => shell_println!("umount: {}", target),
+        Err(e) => shell_println!("umount: {}: {:?}", target, e),
+    }
+    Ok(())
+}
+
 // ─── mkdir ───────────────────────────────────────────────────────────────────
 
 /// Create a new directory.
