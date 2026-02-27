@@ -4,6 +4,7 @@
 //!  - [`sys_mmap`]   – map anonymous virtual memory (SYS_MMAP = 100)
 //!  - [`sys_munmap`] – unmap a virtual memory range (SYS_MUNMAP = 101)
 //!  - [`sys_brk`]    – set / query the program break / heap top (SYS_BRK = 102)
+//!  - [`sys_mremap`] – resize/remap an existing region (SYS_MREMAP = 103)
 
 use crate::{
     memory::address_space::{VmaFlags, VmaType},
@@ -43,6 +44,8 @@ const MAP_FIXED: u32 = 1 << 4;
 const MAP_ANONYMOUS: u32 = 1 << 5;
 const MAP_HUGETLB: u32 = 1 << 11; // Standard Linux flag for huge pages
 const MAP_FIXED_NOREPLACE: u32 = 1 << 20; // Linux-compatible extension bit.
+
+const MREMAP_MAYMOVE: u64 = 1 << 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -244,6 +247,106 @@ pub fn sys_munmap(addr: u64, len: u64) -> Result<u64, SyscallError> {
     );
 
     Ok(0)
+}
+
+/// SYS_MREMAP (103): resize an existing mapping.
+///
+/// Current support:
+/// - Shrink in place.
+/// - Grow in place when the following range is free.
+/// - If `MREMAP_MAYMOVE` is set and growth in place fails, relocate only when
+///   the source mapping is still fully lazy (no present pages yet).
+pub fn sys_mremap(old_addr: u64, old_size: u64, new_size: u64, flags: u64) -> Result<u64, SyscallError> {
+    if old_size == 0 || new_size == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if flags & !MREMAP_MAYMOVE != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let task = current_task_clone().ok_or(SyscallError::Fault)?;
+    let addr_space = unsafe { &*task.process.address_space.get() };
+    let vma = addr_space
+        .region_by_start(old_addr)
+        .ok_or(SyscallError::Fault)?;
+
+    let page_bytes = vma.page_size.bytes();
+    if old_addr % page_bytes != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let old_len_aligned = if vma.page_size == crate::memory::address_space::VmaPageSize::Huge {
+        huge_page_align_up(old_size)
+    } else {
+        page_align_up(old_size)
+    };
+    let new_len_aligned = if vma.page_size == crate::memory::address_space::VmaPageSize::Huge {
+        huge_page_align_up(new_size)
+    } else {
+        page_align_up(new_size)
+    };
+    if old_len_aligned == 0 || new_len_aligned == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let tracked_len = (vma.page_count as u64)
+        .checked_mul(page_bytes)
+        .ok_or(SyscallError::InvalidArgument)?;
+    if old_len_aligned != tracked_len {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    if new_len_aligned == old_len_aligned {
+        return Ok(old_addr);
+    }
+
+    if new_len_aligned < old_len_aligned {
+        let tail_addr = old_addr
+            .checked_add(new_len_aligned)
+            .ok_or(SyscallError::InvalidArgument)?;
+        let tail_len = old_len_aligned - new_len_aligned;
+        addr_space
+            .unmap_range(tail_addr, tail_len)
+            .map_err(|_| SyscallError::InvalidArgument)?;
+        return Ok(old_addr);
+    }
+
+    let grow_len = new_len_aligned - old_len_aligned;
+    let grow_start = old_addr
+        .checked_add(old_len_aligned)
+        .ok_or(SyscallError::InvalidArgument)?;
+
+    if !addr_space.has_mapping_in_range(grow_start, grow_len) {
+        let grow_pages = (grow_len / page_bytes) as usize;
+        addr_space
+            .reserve_region(grow_start, grow_pages, vma.flags, vma.vma_type, vma.page_size)
+            .map_err(|_| SyscallError::OutOfMemory)?;
+        return Ok(old_addr);
+    }
+
+    if flags & MREMAP_MAYMOVE == 0 {
+        return Err(SyscallError::OutOfMemory);
+    }
+
+    let has_present_pages = addr_space
+        .any_mapped_in_range(old_addr, old_len_aligned, vma.page_size)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+    if has_present_pages {
+        return Err(SyscallError::OutOfMemory);
+    }
+
+    let new_pages = (new_len_aligned / page_bytes) as usize;
+    let new_addr = addr_space
+        .find_free_vma_range(MMAP_BASE, new_pages, vma.page_size)
+        .ok_or(SyscallError::OutOfMemory)?;
+
+    addr_space
+        .unmap_range(old_addr, old_len_aligned)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+    addr_space
+        .reserve_region(new_addr, new_pages, vma.flags, vma.vma_type, vma.page_size)
+        .map_err(|_| SyscallError::OutOfMemory)?;
+    Ok(new_addr)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

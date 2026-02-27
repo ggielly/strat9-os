@@ -867,6 +867,36 @@ impl AddressSpace {
         })
     }
 
+    /// Return the tracked VMA that starts exactly at `start`.
+    pub fn region_by_start(&self, start: u64) -> Option<VirtualMemoryRegion> {
+        let regions = self.regions.lock();
+        regions.get(&start).cloned()
+    }
+
+    /// Returns true if any page in `[addr, addr + len)` is currently mapped.
+    pub fn any_mapped_in_range(
+        &self,
+        addr: u64,
+        len: u64,
+        page_size: VmaPageSize,
+    ) -> Result<bool, &'static str> {
+        if len == 0 {
+            return Ok(false);
+        }
+        let end = addr.checked_add(len).ok_or("any_mapped_in_range: address overflow")?;
+        let step = page_size.bytes();
+        let mut cur = addr;
+        while cur < end {
+            if self.translate(VirtAddr::new(cur)).is_some() {
+                return Ok(true);
+            }
+            cur = cur
+                .checked_add(step)
+                .ok_or("any_mapped_in_range: loop overflow")?;
+        }
+        Ok(false)
+    }
+
     pub fn unmap_range(&self, addr: u64, len: u64) -> Result<(), &'static str> {
         if len == 0 {
             return Ok(());
