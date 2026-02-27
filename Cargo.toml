@@ -8,8 +8,6 @@ members = [
     "workspace/drivers/nic/intel-ethernet",
     "workspace/drivers/nic/e1000",
     "workspace/drivers/nic/driver-net-proto",
-    "workspace/drivers/nic/rtl8139",
-    "workspace/drivers/nic/pcnet",
     "workspace/components/api",
     "workspace/components/strate-fs-abstraction",
     "workspace/components/strate-fs-ext4",
