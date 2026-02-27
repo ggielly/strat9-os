@@ -1,14 +1,11 @@
 [package]
 name = "strate-init"
 version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-or-later"
-authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
-description = "Init process for strat9-os. Creates and manages the console-admin silo."
-
-[[bin]]
-name = "init"
-path = "src/main.rs"
+edition = "2024"
 
 [dependencies]
+# Strat9 Kernel integration
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
+
+[features]
+default = []

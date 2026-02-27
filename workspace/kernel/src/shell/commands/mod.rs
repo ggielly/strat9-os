@@ -57,6 +57,7 @@ impl CommandRegistry {
         registry.register("ping", net::cmd_ping);
         registry.register("ifconfig", net::cmd_ifconfig);
         registry.register("strate", sys::cmd_strate);
+        registry.register("wasm-run", sys::cmd_wasm_run);
 
         registry
     }

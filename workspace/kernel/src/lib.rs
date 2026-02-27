@@ -456,6 +456,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         vga_println!("[..] Initializing hardware drivers...");
         hardware::init();
 
+        serial_println!("[init] Initializing timers...");
+        vga_println!("[..] Initializing HPET and RTC...");
+        hardware::timer::init();
+        serial_println!("[init] Timers initialized.");
+        vga_println!("[OK] HPET/RTC initialized");
+
         serial_println!("[init] Initializing USB...");
         vga_println!("[..] Looking for USB controllers...");
         hardware::usb::init();

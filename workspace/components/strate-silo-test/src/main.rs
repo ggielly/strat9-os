@@ -1,11 +1,40 @@
 #![no_std]
 #![no_main]
 
-use core::{arch::asm, panic::PanicInfo};
+use core::{
+    arch::asm,
+    panic::PanicInfo,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use strat9_syscall::{call, error::Error, number};
 
 static mut COW_SENTINEL: u64 = 0x1122_3344_5566_7788;
 static mut COW_MULTI: [u8; 4096 * 4] = [0; 4096 * 4];
+static mut THREAD_STACK_A: [u8; 4096 * 2] = [0; 4096 * 2];
+static mut THREAD_STACK_B: [u8; 4096 * 2] = [0; 4096 * 2];
+static THREAD_STARTED: AtomicUsize = AtomicUsize::new(0);
+static THREAD_TID_SLOT_0: AtomicUsize = AtomicUsize::new(0);
+static THREAD_TID_SLOT_1: AtomicUsize = AtomicUsize::new(0);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ThreadCase {
+    slot: usize,
+    expected_exit: i32,
+    spin_loops: usize,
+}
+
+static THREAD_CASE_A: ThreadCase = ThreadCase {
+    slot: 0,
+    expected_exit: 33,
+    spin_loops: 64,
+};
+
+static THREAD_CASE_B: ThreadCase = ThreadCase {
+    slot: 1,
+    expected_exit: 44,
+    spin_loops: 128,
+};
 
 fn write_fd(fd: usize, msg: &str) {
     let _ = call::write(fd, msg.as_bytes());
@@ -208,6 +237,28 @@ fn exit_process(code: usize) -> ! {
     call::exit(code)
 }
 
+fn stack_top_for(buf: *mut u8, len: usize) -> usize {
+    (buf as usize + len) & !0xFusize
+}
+
+extern "C" fn userspace_thread_entry(arg0: usize) -> ! {
+    let case = unsafe { &*(arg0 as *const ThreadCase) };
+
+    let tid = call::gettid().unwrap_or(0);
+    if case.slot == 0 {
+        THREAD_TID_SLOT_0.store(tid, Ordering::SeqCst);
+    } else {
+        THREAD_TID_SLOT_1.store(tid, Ordering::SeqCst);
+    }
+    THREAD_STARTED.fetch_add(1, Ordering::SeqCst);
+
+    for _ in 0..case.spin_loops {
+        let _ = call::sched_yield();
+    }
+
+    call::thread_exit(case.expected_exit)
+}
+
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     log_err("[init-test] PANIC detected, exiting with code 222\n");
@@ -334,7 +385,127 @@ pub extern "C" fn _start() -> ! {
     let _ = log_result("setsid()", call::setsid());
     let _ = log_result("getsid(0) after setsid", call::getsid(0));
 
-    log_section("STEP 7/11: second fork/wait any-child path (child exits 7)");
+    log_section("STEP 7/12: userspace thread_create/thread_join validation");
+    THREAD_STARTED.store(0, Ordering::SeqCst);
+    THREAD_TID_SLOT_0.store(0, Ordering::SeqCst);
+    THREAD_TID_SLOT_1.store(0, Ordering::SeqCst);
+
+    let thread_entry_ptr = userspace_thread_entry as *const () as usize;
+    let invalid_create = call::thread_create(thread_entry_ptr, 0x12345, 0, 0);
+    log_result("thread_create(invalid stack align)", invalid_create);
+    if !matches!(invalid_create, Err(Error::InvalidArgument)) {
+        log("[init-test:thread] ERROR: expected EINVAL for misaligned stack\n");
+        exit_process(19);
+    }
+
+    let stack_a_top = stack_top_for(
+        core::ptr::addr_of_mut!(THREAD_STACK_A) as *mut u8,
+        core::mem::size_of::<[u8; 4096 * 2]>(),
+    );
+    let stack_b_top = stack_top_for(
+        core::ptr::addr_of_mut!(THREAD_STACK_B) as *mut u8,
+        core::mem::size_of::<[u8; 4096 * 2]>(),
+    );
+
+    let arg_a = core::ptr::addr_of!(THREAD_CASE_A) as usize;
+    let arg_b = core::ptr::addr_of!(THREAD_CASE_B) as usize;
+
+    let tid_a = if let Some(tid_created) =
+        log_result("thread_create(thread A)", call::thread_create(thread_entry_ptr, stack_a_top, arg_a, 0))
+    {
+        tid_created
+    } else {
+        exit_process(20);
+    };
+
+    let tid_b = if let Some(tid_created) =
+        log_result("thread_create(thread B)", call::thread_create(thread_entry_ptr, stack_b_top, arg_b, 0))
+    {
+        tid_created
+    } else {
+        exit_process(21);
+    };
+
+    let mut join_status_a: i32 = -1;
+    let joined_a = if let Some(joined_tid) =
+        log_result("thread_join(thread A)", call::thread_join(tid_a, Some(&mut join_status_a)))
+    {
+        joined_tid
+    } else {
+        exit_process(22);
+    };
+    if joined_a != tid_a {
+        log("[init-test:thread] ERROR: joined tid mismatch for thread A\n");
+        exit_process(23);
+    }
+    log("[init-test:thread] join status for A=");
+    log_i64(join_status_a as i64);
+    log_nl();
+    if join_status_a != THREAD_CASE_A.expected_exit {
+        log("[init-test:thread] ERROR: unexpected join status for thread A\n");
+        exit_process(24);
+    }
+
+    let mut join_status_b: i32 = -1;
+    let joined_b = if let Some(joined_tid) =
+        log_result("thread_join(thread B)", call::thread_join(tid_b, Some(&mut join_status_b)))
+    {
+        joined_tid
+    } else {
+        exit_process(25);
+    };
+    if joined_b != tid_b {
+        log("[init-test:thread] ERROR: joined tid mismatch for thread B\n");
+        exit_process(26);
+    }
+    log("[init-test:thread] join status for B=");
+    log_i64(join_status_b as i64);
+    log_nl();
+    if join_status_b != THREAD_CASE_B.expected_exit {
+        log("[init-test:thread] ERROR: unexpected join status for thread B\n");
+        exit_process(27);
+    }
+
+    let started_count = THREAD_STARTED.load(Ordering::SeqCst);
+    log("[init-test:thread] started_count=");
+    log_u64(started_count as u64);
+    log(" slot0_tid=");
+    log_u64(THREAD_TID_SLOT_0.load(Ordering::SeqCst) as u64);
+    log(" slot1_tid=");
+    log_u64(THREAD_TID_SLOT_1.load(Ordering::SeqCst) as u64);
+    log_nl();
+    if started_count != 2
+        || THREAD_TID_SLOT_0.load(Ordering::SeqCst) == 0
+        || THREAD_TID_SLOT_1.load(Ordering::SeqCst) == 0
+    {
+        log("[init-test:thread] ERROR: not all thread start markers are set\n");
+        exit_process(28);
+    }
+
+    let self_tid = call::gettid().unwrap_or(0);
+    let join_self = call::thread_join(self_tid, None);
+    log_result("thread_join(self)", join_self);
+    if !matches!(join_self, Err(Error::InvalidArgument)) {
+        log("[init-test:thread] ERROR: expected EINVAL for join(self)\n");
+        exit_process(29);
+    }
+
+    let join_missing = call::thread_join(u32::MAX as usize, None);
+    log_result("thread_join(nonexistent tid)", join_missing);
+    if !matches!(join_missing, Err(Error::NotFound)) {
+        log("[init-test:thread] ERROR: expected ENOENT for missing tid\n");
+        exit_process(30);
+    }
+
+    let join_twice = call::thread_join(tid_a, None);
+    log_result("thread_join(already joined thread A)", join_twice);
+    if !matches!(join_twice, Err(Error::NotFound)) {
+        log("[init-test:thread] ERROR: expected ENOENT for second join\n");
+        exit_process(31);
+    }
+    log("[init-test:thread] SUCCESS: thread lifecycle + error paths validated\n");
+
+    log_section("STEP 8/12: second fork/wait any-child path (child exits 7)");
     let second = call::fork();
     let child2_pid = match second {
         Ok(v) => v,
@@ -359,7 +530,7 @@ pub extern "C" fn _start() -> ! {
     );
     decode_wait_status(child2_status);
 
-    log_section("STEP 8/11: targeted CoW test (single 64-bit sentinel)");
+    log_section("STEP 9/12: targeted CoW test (single 64-bit sentinel)");
     let cow_initial = 0x1122_3344_5566_7788u64;
     let cow_child_value = 0xdead_beef_cafe_babeu64;
     let cow_parent_value = 0xa1a2_a3a4_a5a6_a7a8u64;
@@ -454,7 +625,7 @@ pub extern "C" fn _start() -> ! {
     }
     log("[init-test:cow] SUCCESS: CoW isolation validated for parent/child writes\n");
 
-    log_section("STEP 9/11: targeted CoW multi-page test (4 pages)");
+    log_section("STEP 10/12: targeted CoW multi-page test (4 pages)");
     log("[init-test:cow4k] buffer address=");
     log_hex_u64(cow_multi_addr());
     log(" size=");
@@ -569,7 +740,7 @@ pub extern "C" fn _start() -> ! {
     }
     log("[init-test:cow4k] SUCCESS: 4-page CoW isolation validated\n");
 
-    log_section("STEP 10/11: raw syscall sanity check for waitpid on no child again");
+    log_section("STEP 11/12: raw syscall sanity check for waitpid on no child again");
     let mut st: i32 = 0;
     let raw = unsafe {
         raw_syscall(
@@ -584,7 +755,7 @@ pub extern "C" fn _start() -> ! {
     log_i64(st as i64);
     log_nl();
 
-    log_section("STEP 11/11: completed. exiting init-test with code 0");
+    log_section("STEP 12/12: completed. exiting init-test with code 0");
     log_sep_eq();
     exit_process(0)
 }

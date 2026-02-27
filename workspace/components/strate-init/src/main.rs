@@ -1,273 +1,231 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::alloc::Layout;
 use core::panic::PanicInfo;
-use strat9_syscall::{call, data::TimeSpec, number};
+use core::sync::atomic::{AtomicUsize, Ordering};
+use strat9_syscall::{call, number};
+
+// ---------------------------------------------------------------------------
+// GLOBAL ALLOCATOR (BUMP + BRK)
+// ---------------------------------------------------------------------------
+
+struct BumpAllocator;
+
+static HEAP_START: AtomicUsize = AtomicUsize::new(0);
+static HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
+const HEAP_MAX: usize = 16 * 1024 * 1024; // 16 MB heap for init
+
+unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let mut start = HEAP_START.load(Ordering::Relaxed);
+        if start == 0 {
+            match call::brk(0) {
+                Ok(cur) => {
+                    if let Ok(_new) = call::brk(cur + HEAP_MAX) {
+                        HEAP_START.store(cur, Ordering::SeqCst);
+                        start = cur;
+                    } else { return core::ptr::null_mut(); }
+                }
+                Err(_) => return core::ptr::null_mut(),
+            }
+        }
+
+        let align = layout.align().max(1);
+        let size = layout.size();
+        let mut offset = HEAP_OFFSET.load(Ordering::Relaxed);
+        loop {
+            let aligned = (offset + align - 1) & !(align - 1);
+            let next = aligned + size;
+            if next > HEAP_MAX { return core::ptr::null_mut(); }
+            
+            match HEAP_OFFSET.compare_exchange(offset, next, Ordering::SeqCst, Ordering::Relaxed) {
+                Ok(_) => return (start + aligned) as *mut u8,
+                Err(prev) => offset = prev,
+            }
+        }
+    }
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+}
+
+#[global_allocator]
+static ALLOCATOR: BumpAllocator = BumpAllocator;
+
+#[alloc_error_handler]
+fn alloc_error(_layout: Layout) -> ! {
+    let _ = call::write(1, b"[init] OOM Fatal\n");
+    call::exit(12);
+}
+
+// ---------------------------------------------------------------------------
+// UTILS
+// ---------------------------------------------------------------------------
 
 fn log(msg: &str) {
     let _ = call::write(1, msg.as_bytes());
 }
 
-fn log_u64(mut value: u64) {
-    let mut buf = [0u8; 21];
-    if value == 0 {
-        log("0");
-        return;
+/// Simple file reader
+fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
+    let fd = call::openat(0, path, 0x1, 0).map_err(|_| "open failed")?;
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match call::read(fd as usize, &mut chunk) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(_) => { let _ = call::close(fd as usize); return Err("read failed"); }
+        }
     }
-    let mut i = buf.len();
-    while value > 0 {
-        i -= 1;
-        buf[i] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-    let s = unsafe { core::str::from_utf8_unchecked(&buf[i..]) };
-    log(s);
+    let _ = call::close(fd as usize);
+    Ok(out)
 }
 
-/// Read an entire file into a heap-allocated buffer using brk().
-/// Returns (ptr, len) on success.
-fn read_file_to_heap(path: &str) -> Result<(*const u8, usize), &'static str> {
-    let fd = call::openat(0, path, 0x1, 0) // O_READ = 0x1
-        .map_err(|_| "open failed")?;
+// ---------------------------------------------------------------------------
+// MANUAL TOML-LIKE PARSER
+// ---------------------------------------------------------------------------
 
-    // Use brk to allocate a read buffer (up to 2MB)
-    const MAX_FILE_SIZE: usize = 2 * 1024 * 1024;
-    let heap_start = call::brk(0).map_err(|_| "brk query failed")?;
-    let heap_end = call::brk(heap_start + MAX_FILE_SIZE).map_err(|_| "brk alloc failed")?;
-    if heap_end < heap_start + MAX_FILE_SIZE {
-        return Err("brk: not enough memory");
-    }
+struct SiloDef {
+    name: String,
+    stype: String,
+    binary: String,
+    admin: bool,
+    target: String,
+}
 
-    let buf_ptr = heap_start as *mut u8;
-    let mut total = 0usize;
-
-    loop {
-        let remaining = MAX_FILE_SIZE - total;
-        if remaining == 0 {
-            break;
+impl Default for SiloDef {
+    fn default() -> Self {
+        Self {
+            name: String::from("default"),
+            stype: String::from("elf"),
+            binary: String::new(),
+            admin: false,
+            target: String::from("default"),
         }
-        let chunk_size = if remaining > 4096 { 4096 } else { remaining };
-        let chunk = unsafe { core::slice::from_raw_parts_mut(buf_ptr.add(total), chunk_size) };
-        match call::read(fd as usize, chunk) {
-            Ok(0) => break,
-            Ok(n) => total += n,
-            Err(_) => {
-                let _ = call::close(fd as usize);
-                return Err("read failed");
+    }
+}
+
+fn parse_config(data: &str) -> Vec<SiloDef> {
+    let mut silos = Vec::new();
+    let mut current = SiloDef::default();
+    let mut in_silo = false;
+
+    for line in data.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+
+        if line == "[[silos]]" {
+            if in_silo { silos.push(current); }
+            current = SiloDef::default();
+            in_silo = true;
+            continue;
+        }
+
+        if let Some(idx) = line.find('=') {
+            let key = line[..idx].trim();
+            let val = line[idx+1..].trim().trim_matches('"');
+            match key {
+                "name" => current.name = String::from(val),
+                "type" => current.stype = String::from(val),
+                "binary" => current.binary = String::from(val),
+                "admin" => current.admin = val == "true",
+                "target_strate" => current.target = String::from(val),
+                _ => {}
             }
         }
     }
-
-    let _ = call::close(fd as usize);
-
-    // Shrink the heap to actual size
-    let _ = call::brk(heap_start + total);
-
-    Ok((buf_ptr as *const u8, total))
+    if in_silo { silos.push(current); }
+    silos
 }
 
-fn create_console_admin_silo() -> Result<(), &'static str> {
-    log("[init] Loading /initfs/console-admin...\n");
-
-    let (data_ptr, data_len) = read_file_to_heap("/initfs/console-admin")?;
-
-    // Load as a module blob
-    let module_handle =
-        unsafe { strat9_syscall::syscall2(number::SYS_MODULE_LOAD, data_ptr as usize, data_len) }
-            .map_err(|_| "module_load failed")?;
-
-    log("[init] Module loaded, handle=");
-    log_u64(module_handle as u64);
-    log("\n");
-
-    // Create the silo
-    let silo_handle = call::silo_create(0).map_err(|_| "silo_create failed")?;
-    log("[init] Silo created, handle=");
-    log_u64(silo_handle as u64);
-    log("\n");
-
-    // Attach the module
-    call::silo_attach_module(silo_handle, module_handle).map_err(|_| "silo_attach failed")?;
-
-    let config = SiloConfigUser::admin();
-    let config_ptr = &config as *const SiloConfigUser as usize;
-    call::silo_config(silo_handle, config_ptr).map_err(|_| "silo_config failed")?;
-
-    // Start the silo
-    call::silo_start(silo_handle).map_err(|_| "silo_start failed")?;
-    log("[init] Console-admin silo started.\n");
-
-    Ok(())
-}
-
-fn create_net_silo() -> Result<(), &'static str> {
-    log("[init] Loading /initfs/strate-net...\n");
-
-    let (data_ptr, data_len) = read_file_to_heap("/initfs/strate-net")?;
-
-    // Load as a module blob
-    let module_handle =
-        unsafe { strat9_syscall::syscall2(number::SYS_MODULE_LOAD, data_ptr as usize, data_len) }
-            .map_err(|_| "module_load failed")?;
-
-    log("[init] Module loaded, handle=");
-    log_u64(module_handle as u64);
-    log("\n");
-
-    // Create the silo
-    let silo_handle = call::silo_create(0).map_err(|_| "silo_create failed")?;
-    log("[init] Silo created, handle=");
-    log_u64(silo_handle as u64);
-    log("\n");
-
-    // Attach the module
-    call::silo_attach_module(silo_handle, module_handle).map_err(|_| "silo_attach failed")?;
-
-    let config = SiloConfigUser::admin(); // Network needs admin privileges for now to access NIC
-    let config_ptr = &config as *const SiloConfigUser as usize;
-    call::silo_config(silo_handle, config_ptr).map_err(|_| "silo_config failed")?;
-
-    // Start the silo
-    call::silo_start(silo_handle).map_err(|_| "silo_start failed")?;
-    log("[init] Network silo started.\n");
-
-    Ok(())
-}
-
-fn create_dhcp_client_silo() -> Result<(), &'static str> {
-    log("[init] Loading /initfs/bin/dhcp-client...\n");
-
-    let (data_ptr, data_len) = read_file_to_heap("/initfs/bin/dhcp-client")?;
-
-    let module_handle =
-        unsafe { strat9_syscall::syscall2(number::SYS_MODULE_LOAD, data_ptr as usize, data_len) }
-            .map_err(|_| "module_load failed")?;
-
-    log("[init] dhcp-client module loaded, handle=");
-    log_u64(module_handle as u64);
-    log("\n");
-
-    let silo_handle = call::silo_create(0).map_err(|_| "silo_create failed")?;
-    log("[init] dhcp-client silo created, handle=");
-    log_u64(silo_handle as u64);
-    log("\n");
-
-    call::silo_attach_module(silo_handle, module_handle).map_err(|_| "silo_attach failed")?;
-
-    // dhcp-client only needs read access to /net – no admin privileges needed
-    let config = SiloConfigUser::admin(); // TODO: reduce to unprivileged once caps allow reading /net
-    let config_ptr = &config as *const SiloConfigUser as usize;
-    call::silo_config(silo_handle, config_ptr).map_err(|_| "silo_config failed")?;
-
-    call::silo_start(silo_handle).map_err(|_| "silo_start failed")?;
-    log("[init] dhcp-client silo started (polling /net for DHCP).\n");
-
-    Ok(())
-}
-
-/// Monitor the console-admin silo and restart it if it crashes.
-fn monitor_loop() -> ! {
-    log("[init] Entering monitor loop (background task).\n");
-    log("[init] System ready. Use Chevron shell for interaction.\n");
-    let req = TimeSpec {
-        tv_sec: 1,
-        tv_nsec: 0,
-    };
-    let mut rem = TimeSpec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    loop {
-        let _ = call::nanosleep(&req, &mut rem);
-
-        // TODO: poll silo_event_next to detect crashes and restart
-    }
-}
-
-const SILO_FLAG_ADMIN: u64 = 1 << 0;
+// ---------------------------------------------------------------------------
+// SILO OPERATIONS
+// ---------------------------------------------------------------------------
 
 #[repr(C)]
-struct SiloConfigUser {
-    mem_min: u64,
-    mem_max: u64,
-    cpu_shares: u32,
-    cpu_quota_us: u64,
-    cpu_period_us: u64,
-    cpu_affinity_mask: u64,
-    max_tasks: u32,
-    io_bw_read: u64,
-    io_bw_write: u64,
-    caps_ptr: u64,
-    caps_len: u64,
-    flags: u64,
+struct SiloConfig {
+    mem_min: u64, mem_max: u64, cpu_shares: u32, cpu_quota_us: u64,
+    cpu_period_us: u64, cpu_affinity_mask: u64, max_tasks: u32,
+    io_bw_read: u64, io_bw_write: u64, caps_ptr: u64, caps_len: u64, flags: u64,
 }
 
-impl SiloConfigUser {
-    const fn admin() -> Self {
-        SiloConfigUser {
-            mem_min: 0,
-            mem_max: 0,
-            cpu_shares: 0,
-            cpu_quota_us: 0,
-            cpu_period_us: 0,
-            cpu_affinity_mask: 0,
-            max_tasks: 0,
-            io_bw_read: 0,
-            io_bw_write: 0,
-            caps_ptr: 0,
-            caps_len: 0,
-            flags: SILO_FLAG_ADMIN,
+fn spawn_elf(path: &str, is_admin: bool) -> Result<usize, &'static str> {
+    log("[init] spawning ELF silo: "); log(path); log("\n");
+    let data = read_file(path)?;
+    
+    let mod_handle = unsafe { strat9_syscall::syscall2(number::SYS_MODULE_LOAD, data.as_ptr() as usize, data.len()) }
+        .map_err(|_| "module load failed")?;
+    
+    let silo_handle = call::silo_create(0).map_err(|_| "silo create failed")?;
+    
+    let mut config = unsafe { core::mem::zeroed::<SiloConfig>() };
+    if is_admin { config.flags = 1; } // SILO_FLAG_ADMIN
+    call::silo_config(silo_handle, &config as *const _ as usize).map_err(|_| "silo config failed")?;
+    
+    call::silo_attach_module(silo_handle, mod_handle).map_err(|_| "attach failed")?;
+    call::silo_start(silo_handle).map_err(|_| "start failed")?;
+    
+    Ok(silo_handle)
+}
+
+fn wasm_run(strate_label: &str) -> Result<(), &'static str> {
+    let service_path = format!("/srv/strate-wasm/{}", strate_label);
+    log("[init] wasm-run: waiting for "); log(&service_path); log("\n");
+
+    let mut found = false;
+    for _ in 0..100 {
+        if let Ok(fd) = call::openat(0, &service_path, 0x1, 0) {
+            let _ = call::close(fd as usize);
+            found = true; break;
         }
+        let _ = call::sched_yield();
     }
+    if !found { return Err("strate-wasm timeout"); }
+
+    log("[init] wasm-run: strate ready\n");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// MAIN
+// ---------------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _start() -> ! {
+    log("[init] boot sequence starting\n");
+
+    match read_file("/initfs/silo.toml") {
+        Ok(data_vec) => {
+            if let Ok(data_str) = core::str::from_utf8(&data_vec) {
+                let silos = parse_config(data_str);
+                for silo in silos {
+                    match silo.stype.as_str() {
+                        "elf" | "wasm-runtime" => {
+                            let _ = spawn_elf(&silo.binary, silo.admin);
+                        }
+                        "wasm-app" => {
+                            let _ = wasm_run(&silo.target);
+                        }
+                        _ => { log("[init] unknown type\n"); }
+                    }
+                }
+            }
+        }
+        Err(_) => { log("[init] /initfs/silo.toml not found\n"); }
+    }
+
+    log("[init] boot complete, entering idle loop\n");
+    loop { let _ = call::sched_yield(); }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    log("[init] PANIC! Exiting with code 255.\n");
+    let _ = call::write(1, b"[init] PANIC!\n");
     call::exit(255)
-}
-
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    log("\n");
-    log("============================================================\n");
-    log("[init] strat9-os init process starting\n");
-    log("============================================================\n");
-
-    match create_console_admin_silo() {
-        Ok(()) => {
-            log("[init] Console-admin silo launched successfully.\n");
-        }
-        Err(msg) => {
-            log("[init] Failed to launch console-admin: ");
-            log(msg);
-            log("\n");
-            log("[init] Falling back to idle loop.\n");
-        }
-    }
-
-    match create_net_silo() {
-        Ok(()) => {
-            log("[init] Network silo launched successfully.\n");
-        }
-        Err(msg) => {
-            log("[init] Failed to launch network silo: ");
-            log(msg);
-            log("\n");
-        }
-    }
-
-    // Launch dhcp-client after the network stack – it polls /net/ip until DHCP completes
-    match create_dhcp_client_silo() {
-        Ok(()) => {
-            log("[init] dhcp-client launched (will report when DHCP completes).\n");
-        }
-        Err(msg) => {
-            log("[init] Failed to launch dhcp-client: ");
-            log(msg);
-            log("\n");
-        }
-    }
-
-    monitor_loop()
 }

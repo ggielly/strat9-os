@@ -1,5 +1,6 @@
 //! System management commands
 use crate::{
+    ipc::PortId,
     process::{
         elf::load_and_run_elf, log_scheduler_state, scheduler_class_table,
         scheduler_verbose_enabled, set_scheduler_verbose,
@@ -8,7 +9,9 @@ use crate::{
         output::{clear_screen, format_bytes},
         ShellError,
     },
-    shell_println, silo, vfs,
+    shell_println, silo,
+    silo::SiloId,
+    vfs,
 };
 use alloc::string::String;
 
@@ -391,7 +394,9 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
                 "Memory",
                 "Label"
             );
-            shell_println!("────────────────────────────────────────────────────────────────────────────────");
+            shell_println!(
+                "────────────────────────────────────────────────────────────────────────────────"
+            );
             for s in silos {
                 let label = s.strate_label.unwrap_or_else(|| String::from("-"));
                 let (used_val, used_unit) = format_bytes(s.mem_usage_bytes as usize);
@@ -534,4 +539,82 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
             Err(ShellError::InvalidArguments)
         }
     }
+}
+
+/// wasm-run /path/to/app.wasm
+pub fn cmd_wasm_run(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 1 {
+        shell_println!("Usage: wasm-run <path>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let wasm_path = &args[0];
+
+    // 1. Spawn the wasm interpreter strate
+    shell_println!("wasm-run: spawning interpreter silo...");
+    let interpreter_path = "/initfs/strate-wasm";
+    let fd = vfs::open(interpreter_path, vfs::OpenFlags::READ)
+        .map_err(|_| ShellError::ExecutionFailed)?;
+    let elf_data = match vfs::read_all(fd) {
+        Ok(d) => d,
+        Err(_) => {
+            let _ = vfs::close(fd);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+    let _ = vfs::close(fd);
+
+    // Spawn with a unique label to avoid conflicts
+    let silo_id = SiloId::new();
+    let label = alloc::format!("wasm-{}", silo_id.0);
+
+    silo::kernel_spawn_strate(&elf_data, Some(&label), None)
+        .map_err(|_| ShellError::ExecutionFailed)?;
+
+    // 2. Wait for the service to appear in /srv (poll)
+    let service_path = alloc::format!("/srv/strate-wasm/{}", label);
+    shell_println!("wasm-run: waiting for service {} ...", service_path);
+
+    let mut found = false;
+    for _ in 0..100 {
+        if vfs::stat_path(&service_path).is_ok() {
+            found = true;
+            break;
+        }
+        crate::process::yield_task();
+    }
+
+    if !found {
+        shell_println!("wasm-run: timed out waiting for strate-wasm");
+        return Err(ShellError::ExecutionFailed);
+    }
+
+    // 3. Connect and send LOAD then RUN
+    let (scheme, rel) = vfs::resolve(&service_path).map_err(|_| ShellError::ExecutionFailed)?;
+    let open_res = scheme
+        .open(&rel, vfs::OpenFlags::READ)
+        .map_err(|_| ShellError::ExecutionFailed)?;
+    let port_id = PortId::from_u64(open_res.file_id);
+    let port = crate::ipc::port::get_port(port_id).ok_or(ShellError::ExecutionFailed)?;
+
+    // OP_WASM_LOAD_PATH = 0x100
+    let mut load_msg = crate::ipc::IpcMessage::new(0x100);
+    let path_bytes = wasm_path.as_bytes();
+    let copy_len = core::cmp::min(path_bytes.len(), 62);
+    load_msg.payload[1] = copy_len as u8;
+    load_msg.payload[2..2 + copy_len].copy_from_slice(&path_bytes[..copy_len]);
+
+    shell_println!("wasm-run: loading {} ...", wasm_path);
+    port.send(load_msg)
+        .map_err(|_| ShellError::ExecutionFailed)?;
+
+    // Wait for ACK (simplistic)
+    let _ = port.recv().map_err(|_| ShellError::ExecutionFailed)?;
+
+    // OP_WASM_RUN_MAIN = 0x102
+    let mut run_msg = crate::ipc::IpcMessage::new(0x102);
+    shell_println!("wasm-run: starting execution...");
+    port.send(run_msg)
+        .map_err(|_| ShellError::ExecutionFailed)?;
+
+    Ok(())
 }
