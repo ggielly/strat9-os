@@ -35,7 +35,7 @@
 use crate::{
     memory::UserSliceWrite,
     process::{
-        block_current_task, current_task_id, get_task_id_by_pid, has_pending_signals,
+        block_current_task, current_task_clone, current_task_id, get_task_id_by_pid, has_pending_signals,
         scheduler::{try_wait_child, WaitChildResult},
         TaskId,
     },
@@ -271,14 +271,14 @@ pub fn sys_wait(waitmsg_ptr: u64) -> Result<u64, SyscallError> {
 
     if waitmsg_ptr != 0 {
         let wmsg = Waitmsg::new(child_pid, status);
-        let user = UserSliceWrite::new(waitmsg_ptr, core::mem::size_of::<Waitmsg>())?;
         // SAFETY: Waitmsg is repr(C) and fully initialised above.
-        user.copy_from(unsafe {
+        let bytes = unsafe {
             core::slice::from_raw_parts(
                 &wmsg as *const Waitmsg as *const u8,
                 core::mem::size_of::<Waitmsg>(),
             )
-        });
+        };
+        write_user_with_cow(waitmsg_ptr, bytes)?;
     }
 
     log::debug!("sys_wait: reaped pid={} exit_code={}", child_pid, status);
@@ -301,8 +301,42 @@ pub fn sys_getppid() -> Result<u64, SyscallError> {
 fn write_wstatus(status_ptr: u64, exit_code: i32) -> Result<(), SyscallError> {
     if status_ptr != 0 {
         let wstatus = encode_wstatus(exit_code);
-        let user = UserSliceWrite::new(status_ptr, 4)?;
-        user.copy_from(&wstatus.to_ne_bytes());
+        write_user_with_cow(status_ptr, &wstatus.to_ne_bytes())?;
     }
     Ok(())
+}
+
+fn resolve_cow_for_range(ptr: u64, len: usize) -> Result<(), SyscallError> {
+    if len == 0 {
+        return Ok(());
+    }
+    let task = current_task_clone().ok_or(SyscallError::Fault)?;
+    let address_space = unsafe { &*task.process.address_space.get() };
+    let start = ptr & !0xfff;
+    let end = (ptr + (len as u64).saturating_sub(1)) & !0xfff;
+    let mut page = start;
+    loop {
+        crate::syscall::fork::handle_cow_fault(page, address_space).map_err(|_| SyscallError::Fault)?;
+        if page == end {
+            break;
+        }
+        page = page.saturating_add(4096);
+    }
+    Ok(())
+}
+
+fn write_user_with_cow(ptr: u64, data: &[u8]) -> Result<(), SyscallError> {
+    match UserSliceWrite::new(ptr, data.len()) {
+        Ok(user) => {
+            user.copy_from(data);
+            Ok(())
+        }
+        Err(crate::memory::UserSliceError::PermissionDenied) => {
+            resolve_cow_for_range(ptr, data.len())?;
+            let user = UserSliceWrite::new(ptr, data.len())?;
+            user.copy_from(data);
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }

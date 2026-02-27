@@ -13,6 +13,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  mem zones         - Display detailed zone information");
     shell_println!("  ps                - List all tasks");
     shell_println!("  top               - Graphical task manager (interactive)");
+    shell_println!("  cd [path]         - Change current shell directory");
     shell_println!("  ls [path]         - List mount points or directory contents");
     shell_println!("  cat <path>        - Display file contents");
     shell_println!("  mkdir <path>      - Create a new directory");

@@ -13,7 +13,7 @@ pub mod top;
 pub mod vfs;
 
 use super::ShellError;
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String};
 
 /// Registry for all shell commands
 pub struct CommandRegistry {
@@ -33,6 +33,7 @@ impl CommandRegistry {
         registry.register("mem", mem::cmd_mem);
         registry.register("ps", ps::cmd_ps);
         registry.register("scheme", vfs::cmd_scheme);
+        registry.register("cd", vfs::cmd_cd);
         registry.register("ls", vfs::cmd_ls);
         registry.register("cat", vfs::cmd_cat);
         registry.register("mkdir", vfs::cmd_mkdir);
