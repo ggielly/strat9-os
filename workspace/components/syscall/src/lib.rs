@@ -687,6 +687,16 @@ pub mod call {
         unsafe { syscall2(number::SYS_HANDLE_GRANT, handle, target_pid) }
     }
 
+    /// Revoke a capability handle.
+    pub fn handle_revoke(handle: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_HANDLE_REVOKE, handle) }
+    }
+
+    /// Query metadata about a capability handle.
+    pub fn handle_info(handle: usize, out: &mut data::HandleInfo) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_HANDLE_INFO, handle, out as *mut data::HandleInfo as usize) }
+    }
+
     // -----------------------------------------------------------------------
     // Memory management (block 100-199)
     // -----------------------------------------------------------------------

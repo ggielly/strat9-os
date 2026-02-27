@@ -54,6 +54,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_HANDLE_CLOSE => sys_handle_close(arg1),
         SYS_HANDLE_WAIT => sys_handle_wait(arg1, arg2),
         SYS_HANDLE_GRANT => sys_handle_grant(arg1, arg2),
+        SYS_HANDLE_REVOKE => sys_handle_revoke(arg1),
+        SYS_HANDLE_INFO => sys_handle_info(arg1, arg2),
 
         // Memory management (block 100-199)
         SYS_MMAP => super::mmap::sys_mmap(arg1, arg2, arg3 as u32, arg4 as u32, frame.r8, frame.r9),
@@ -240,24 +242,28 @@ fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &mut *task.process.capabilities.get() };
     if let Some(cap) = caps.remove(CapId::from_raw(_handle)) {
-        match cap.resource_type {
-            ResourceType::File => {
-                if let Ok(fd) = u32::try_from(cap.resource) {
-                    let _ = crate::vfs::close(fd);
-                }
-            }
-            ResourceType::SharedRing => {
-                let _ = shared_ring::destroy_ring(RingId::from_u64(cap.resource as u64));
-            }
-            ResourceType::Semaphore => {
-                let _ = semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64));
-            }
-            _ => {}
-        }
+        cleanup_cap_resource(&cap);
         log::trace!("syscall: HANDLE_CLOSE({})", _handle);
         Ok(0)
     } else {
         Err(SyscallError::BadHandle)
+    }
+}
+
+fn cleanup_cap_resource(cap: &crate::capability::Capability) {
+    match cap.resource_type {
+        ResourceType::File => {
+            if let Ok(fd) = u32::try_from(cap.resource) {
+                let _ = crate::vfs::close(fd);
+            }
+        }
+        ResourceType::SharedRing => {
+            let _ = shared_ring::destroy_ring(RingId::from_u64(cap.resource as u64));
+        }
+        ResourceType::Semaphore => {
+            let _ = semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64));
+        }
+        _ => {}
     }
 }
 
@@ -423,6 +429,87 @@ fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
     let target_caps = unsafe { &mut *target.process.capabilities.get() };
     let new_id = target_caps.insert(granted);
     Ok(new_id.as_u64())
+}
+
+fn sys_handle_revoke(handle: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &mut *task.process.capabilities.get() };
+
+    {
+        let cap = caps.get(CapId::from_raw(handle)).ok_or(SyscallError::BadHandle)?;
+        if !cap.permissions.revoke {
+            return Err(SyscallError::PermissionDenied);
+        }
+    }
+
+    let cap = caps.remove(CapId::from_raw(handle)).ok_or(SyscallError::BadHandle)?;
+    cleanup_cap_resource(&cap);
+    Ok(0)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HandleInfoAbi {
+    resource_type: u32,
+    permissions: u32,
+    resource: u64,
+}
+
+fn cap_perm_bits(p: CapPermissions) -> u32 {
+    (if p.read { 1 } else { 0 })
+        | (if p.write { 1 << 1 } else { 0 })
+        | (if p.execute { 1 << 2 } else { 0 })
+        | (if p.grant { 1 << 3 } else { 0 })
+        | (if p.revoke { 1 << 4 } else { 0 })
+}
+
+fn resource_type_code(rt: ResourceType) -> u32 {
+    match rt {
+        ResourceType::MemoryRegion => 1,
+        ResourceType::IoPortRange => 2,
+        ResourceType::InterruptLine => 3,
+        ResourceType::IpcPort => 4,
+        ResourceType::Channel => 5,
+        ResourceType::SharedRing => 6,
+        ResourceType::Semaphore => 7,
+        ResourceType::Device => 8,
+        ResourceType::AddressSpace => 9,
+        ResourceType::Silo => 10,
+        ResourceType::Module => 11,
+        ResourceType::File => 12,
+        ResourceType::Nic => 13,
+        ResourceType::FileSystem => 14,
+        ResourceType::Console => 15,
+        ResourceType::Keyboard => 16,
+        ResourceType::Volume => 17,
+        ResourceType::Namespace => 18,
+    }
+}
+
+fn sys_handle_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+    if out_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &*task.process.capabilities.get() };
+    let cap = caps.get(CapId::from_raw(handle)).ok_or(SyscallError::BadHandle)?;
+
+    let info = HandleInfoAbi {
+        resource_type: resource_type_code(cap.resource_type),
+        permissions: cap_perm_bits(cap.permissions),
+        resource: cap.resource as u64,
+    };
+    let user = UserSliceWrite::new(out_ptr, core::mem::size_of::<HandleInfoAbi>())?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &info as *const HandleInfoAbi as *const u8,
+            core::mem::size_of::<HandleInfoAbi>(),
+        )
+    };
+    user.copy_from(bytes);
+    Ok(0)
 }
 
 /// SYS_PROC_EXIT (300): Exit the current task.

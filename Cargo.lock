@@ -321,6 +321,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcnet"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.11.0",
+ "log",
+ "net-core",
+ "spin",
+]
+
+[[package]]
 name = "ping"
 version = "0.1.0"
 dependencies = [
@@ -492,6 +502,7 @@ dependencies = [
  "nic-queues",
  "num_enum",
  "nvme",
+ "pcnet",
  "rtl8139",
  "spin",
  "static_assertions",
@@ -614,6 +625,14 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "virtio-rng"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "spin",
+]
 
 [[package]]
 name = "volatile"

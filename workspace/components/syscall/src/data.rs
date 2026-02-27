@@ -50,6 +50,14 @@ pub struct Map {
     pub addr: usize,
 }
 
+#[derive(Debug, Clone, Copy, FromZeroes, FromBytes, AsBytes)]
+#[repr(C)]
+pub struct HandleInfo {
+    pub resource_type: u32,
+    pub permissions: u32,
+    pub resource: u64,
+}
+
 /// Kernel-level file metadata returned by fstat/stat syscalls.
 ///
 /// Matches kernel `vfs::scheme::FileStat` layout exactly.

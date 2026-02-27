@@ -4,6 +4,8 @@
 //! to kernel services (PCI, DMA allocator, VFS schemes).
 
 pub mod e1000_drv;
+pub mod pcnet_drv;
+pub mod rtl8139_drv;
 pub mod scheme;
 pub mod virtio_net;
 
@@ -109,6 +111,9 @@ pub fn list_interfaces() -> Vec<String> {
 pub fn init() {
     log::info!("[net] Scanning for network devices...");
     e1000_drv::init();
+    pcnet_drv::init();
+    rtl8139_drv::init();
+    virtio_net::init();
     if let Err(e) = scheme::register_net_scheme() {
         log::warn!("[net] Failed to register net scheme: {:?}", e);
     }
