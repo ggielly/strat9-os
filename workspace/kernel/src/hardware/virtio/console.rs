@@ -42,6 +42,8 @@ struct Virtqueue {
     last_used_idx: u16,
 }
 
+unsafe impl Send for Virtqueue {}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtqDesc {
@@ -209,9 +211,9 @@ impl Virtqueue {
             let avail_frame = allocate_dma_frame().ok_or("Failed to allocate avail")?;
             let used_frame = allocate_dma_frame().ok_or("Failed to allocate used")?;
 
-            let desc_phys = desc_frame.start_address();
-            let avail_phys = avail_frame.start_address();
-            let used_phys = used_frame.start_address();
+            let desc_phys = desc_frame.start_address.as_u64();
+            let avail_phys = avail_frame.start_address.as_u64();
+            let used_phys = used_frame.start_address.as_u64();
 
             let desc_virt = phys_to_virt(desc_phys) as *mut VirtqDesc;
             let avail_virt = phys_to_virt(avail_phys) as *mut VirtqAvail;
@@ -225,7 +227,7 @@ impl Virtqueue {
             (device.mmio.add(0x1A) as *mut u16).write_volatile(0xFFFF);
 
             let buffer_frame = allocate_dma_frame().ok_or("Failed to allocate buffer")?;
-            let buffer_phys = buffer_frame.start_address();
+            let buffer_phys = buffer_frame.start_address.as_u64();
             let buffer_virt = phys_to_virt(buffer_phys) as *mut u8;
             core::ptr::write_bytes(buffer_virt, 0, 4096);
 

@@ -108,7 +108,7 @@ unsafe impl Sync for Rtl8139Device {}
 impl Rtl8139Device {
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let io_base = match pci_dev.read_bar(0) {
-            Some(Bar::Io(addr)) => addr as u16,
+            Some(Bar::Io { port }) => port as u16,
             _ => return Err("Invalid BAR"),
         };
 
@@ -117,7 +117,7 @@ impl Rtl8139Device {
         let name = format!("rtl8139_{:02x}{:02x}{:02x}", mac[3], mac[4], mac[5]);
 
         let rx_frame = allocate_dma_frame().ok_or("Failed to allocate RX buffer")?;
-        let rx_phys = rx_frame.start_address();
+        let rx_phys = rx_frame.start_address.as_u64();
         let rx_buffer = phys_to_virt(rx_phys) as *mut u8;
         core::ptr::write_bytes(rx_buffer, 0, RX_BUFFER_SIZE + RX_BUFFER_PAD + MTU);
 
@@ -125,7 +125,7 @@ impl Rtl8139Device {
         let mut tx_phys = [0u64; TX_BUFFERS_COUNT];
         for i in 0..TX_BUFFERS_COUNT {
             let frame = allocate_dma_frame().ok_or("Failed to allocate TX buffer")?;
-            tx_phys[i] = frame.start_address();
+            tx_phys[i] = frame.start_address.as_u64();
             tx_buffers[i] = phys_to_virt(tx_phys[i]) as *mut u8;
             core::ptr::write_bytes(tx_buffers[i], 0, TX_BUFFER_SIZE);
         }
@@ -228,7 +228,7 @@ impl Rtl8139Device {
 
     fn transmit_inner(&self, data: &[u8]) -> Result<(), NetError> {
         if data.len() > MTU {
-            return Err(NetError::BufferTooLarge);
+            return Err(NetError::BufferTooSmall);
         }
 
         let id = self.tx_id.fetch_add(1, Ordering::SeqCst) % TX_BUFFERS_COUNT;
@@ -241,7 +241,7 @@ impl Rtl8139Device {
                 core::hint::spin_loop();
                 timeout -= 1;
                 if timeout == 0 {
-                    return Err(NetError::Timeout);
+                    return Err(NetError::NotReady);
                 }
             }
         }

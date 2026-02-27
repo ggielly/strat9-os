@@ -138,11 +138,13 @@ impl AtaChannel {
         for i in start..end {
             if i < buffer.len() {
                 let c = buffer[i];
-                s.push((c >> 8) as char);
-                s.push((c & 0xFF) as char);
+                let hi = (c >> 8) as u8;
+                let lo = (c & 0xFF) as u8;
+                if hi != 0 { s.push(hi as char); }
+                if lo != 0 { s.push(lo as char); }
             }
         }
-        s.trim().to_string()
+        s
     }
 
     fn read_sector_pio(&self, device: u8, lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {

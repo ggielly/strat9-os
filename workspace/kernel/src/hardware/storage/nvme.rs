@@ -173,7 +173,7 @@ impl NvmeController {
 
     fn identify(&self, cns: u8, nsid: u32) -> Result<*mut u8, NvmeError> {
         let frame = allocate_dma_frame().ok_or(NvmeError::IoError)?;
-        let phys = frame.start_address();
+        let phys = frame.start_address.as_u64();
         let virt = phys_to_virt(phys) as *mut u8;
         unsafe { ptr::write_bytes(virt, 0, NVME_PAGE_SIZE); }
 
@@ -181,7 +181,7 @@ impl NvmeController {
             opcode: 0x06,
             nsid,
             prp1: phys,
-            cns,
+            cdw10: cns as u32,
             ..Default::default()
         };
 
@@ -276,7 +276,7 @@ impl<T: QueueType> Queue<T> {
         let doorbell = unsafe { &*((registers_base + doorbell_offset) as *const VolatileCell<u32>) };
 
         let frame = allocate_dma_frame().expect("NVMe: failed to allocate queue frame");
-        let phys_addr = frame.start_address();
+        let phys_addr = frame.start_address.as_u64();
         let virt_addr = phys_to_virt(phys_addr);
 
         unsafe { ptr::write_bytes(virt_addr as *mut u8, 0, size * core::mem::size_of::<T::EntryType>()); }
@@ -363,7 +363,7 @@ pub fn init() {
         pci_dev.enable_memory_space();
 
         let bar = match pci_dev.read_bar(0) {
-            Some(Bar::Memory64(addr)) => addr,
+            Some(Bar::Memory64 { addr, .. }) => addr,
             _ => { log::warn!("NVMe: Invalid BAR0"); continue; }
         };
 

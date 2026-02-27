@@ -134,7 +134,7 @@ impl Ports {
 impl PcnetDevice {
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let io_base = match pci_dev.read_bar(0) {
-            Some(Bar::Io(addr)) => addr as u16,
+            Some(Bar::Io { port }) => port as u16,
             _ => return Err("Invalid BAR"),
         };
 
@@ -146,7 +146,7 @@ impl PcnetDevice {
         let mut rx_phys = [0u64; RX_BUFFERS_COUNT];
         for i in 0..RX_BUFFERS_COUNT {
             let frame = allocate_dma_frame().ok_or("Failed to allocate RX buffer")?;
-            rx_phys[i] = frame.start_address();
+            rx_phys[i] = frame.start_address.as_u64();
             rx_buffers[i] = phys_to_virt(rx_phys[i]) as *mut u8;
         }
 
@@ -154,17 +154,17 @@ impl PcnetDevice {
         let mut tx_phys = [0u64; TX_BUFFERS_COUNT];
         for i in 0..TX_BUFFERS_COUNT {
             let frame = allocate_dma_frame().ok_or("Failed to allocate TX buffer")?;
-            tx_phys[i] = frame.start_address();
+            tx_phys[i] = frame.start_address.as_u64();
             tx_buffers[i] = phys_to_virt(tx_phys[i]) as *mut u8;
         }
 
         let rx_des_frame = allocate_dma_frame().ok_or("Failed to allocate RX descriptors")?;
-        let rx_des_phys = rx_des_frame.start_address();
+        let rx_des_phys = rx_des_frame.start_address.as_u64();
         let rx_des = phys_to_virt(rx_des_phys) as *mut u8;
         core::ptr::write_bytes(rx_des, 0, RX_BUFFERS_COUNT * DESC_LEN);
 
         let tx_des_frame = allocate_dma_frame().ok_or("Failed to allocate TX descriptors")?;
-        let tx_des_phys = tx_des_frame.start_address();
+        let tx_des_phys = tx_des_frame.start_address.as_u64();
         let tx_des = phys_to_virt(tx_des_phys) as *mut u8;
         core::ptr::write_bytes(tx_des, 0, TX_BUFFERS_COUNT * DESC_LEN);
 
@@ -211,7 +211,7 @@ impl PcnetDevice {
         }
 
         let init_struct_frame = allocate_dma_frame().unwrap();
-        let init_phys = init_struct_frame.start_address();
+        let init_phys = init_struct_frame.start_address.as_u64();
         let init_virt = phys_to_virt(init_phys) as *mut u8;
         core::ptr::write_bytes(init_virt, 0, 28);
 
@@ -333,7 +333,7 @@ impl PcnetDevice {
 
     fn transmit_inner(&self, data: &[u8]) -> Result<(), NetError> {
         if data.len() > MTU {
-            return Err(NetError::BufferTooLarge);
+            return Err(NetError::BufferTooSmall);
         }
 
         let tx_id = self.tx_id.load(Ordering::Relaxed);
@@ -348,7 +348,7 @@ impl PcnetDevice {
                     core::hint::spin_loop();
                     timeout -= 1;
                     if timeout == 0 {
-                        return Err(NetError::Timeout);
+                        return Err(NetError::NotReady);
                     }
                 }
             }

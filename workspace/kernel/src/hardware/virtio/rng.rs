@@ -30,6 +30,8 @@ struct Virtqueue {
     last_used_idx: u16,
 }
 
+unsafe impl Send for Virtqueue {}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtqDesc {
