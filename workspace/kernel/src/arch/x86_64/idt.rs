@@ -12,6 +12,7 @@ pub mod irq {
     pub const TIMER: u8 = super::pic::PIC1_OFFSET; // IRQ0 = 0x20
     pub const KEYBOARD: u8 = super::pic::PIC1_OFFSET + 1; // IRQ1 = 0x21
     pub const CASCADE: u8 = super::pic::PIC1_OFFSET + 2; // IRQ2 = 0x22
+    pub const MOUSE: u8 = super::pic::PIC1_OFFSET + 12; // IRQ12 = 0x2C
     pub const COM2: u8 = super::pic::PIC1_OFFSET + 3; // IRQ3 = 0x23
     pub const COM1: u8 = super::pic::PIC1_OFFSET + 4; // IRQ4 = 0x24
     pub const FLOPPY: u8 = super::pic::PIC1_OFFSET + 6; // IRQ6 = 0x26
@@ -44,6 +45,7 @@ pub fn init() {
         let idt_ref = &mut *idt;
         idt_ref[irq::TIMER as u8].set_handler_fn(legacy_timer_handler);
         idt_ref[irq::KEYBOARD as u8].set_handler_fn(keyboard_handler);
+        idt_ref[irq::MOUSE as u8].set_handler_fn(mouse_handler);
 
         // Spurious interrupt handler at vector 0xFF (APIC spurious vector)
         idt_ref[0xFF_u8].set_handler_fn(spurious_handler);
@@ -464,6 +466,16 @@ extern "x86-interrupt" fn lapic_timer_handler(_stack_frame: InterruptStackFrame)
     crate::process::scheduler::timer_tick();
     super::apic::eoi();
     crate::process::scheduler::maybe_preempt();
+}
+
+/// PS/2 Mouse IRQ12 handler.
+extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
+    crate::arch::x86_64::mouse::handle_irq();
+    if super::apic::is_initialized() {
+        super::apic::eoi();
+    } else {
+        pic::end_of_interrupt(12);
+    }
 }
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {

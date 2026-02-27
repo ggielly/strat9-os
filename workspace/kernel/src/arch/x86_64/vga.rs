@@ -651,6 +651,19 @@ fn parse_psf2_unicode_map(font: &[u8], info: &FontInfo) -> Vec<(u32, usize)> {
     map
 }
 
+/// Width of the scrollbar strip on the right edge of the text console.
+const SCROLLBAR_W: usize = 12;
+/// Maximum number of completed lines kept in the scrollback history.
+const MAX_SCROLLBACK: usize = 500;
+
+/// A single character cell stored in the scrollback buffer.
+#[derive(Clone, Copy)]
+struct SbCell {
+    ch: char,
+    fg: u32, // packed pixel color
+    bg: u32, // packed pixel color
+}
+
 pub struct VgaWriter {
     enabled: bool,
     fb_addr: *mut u8,
@@ -676,6 +689,14 @@ pub struct VgaWriter {
     draw_to_back: bool,
     dirty_rect: Option<ClipRect>,
     track_dirty: bool,
+
+    // ── Scrollback buffer ────────────────────────────────────────────────────
+    /// Completed screen rows kept for history scrolling.
+    sb_rows: VecDeque<Vec<SbCell>>,
+    /// Current (incomplete) row being assembled by write_char.
+    sb_cur_row: Vec<SbCell>,
+    /// Lines scrolled back from the bottom (0 = live view).
+    scroll_offset: usize,
 }
 
 unsafe impl Send for VgaWriter {}
@@ -724,6 +745,9 @@ impl VgaWriter {
             draw_to_back: false,
             dirty_rect: None,
             track_dirty: false,
+            sb_rows: VecDeque::new(),
+            sb_cur_row: Vec::new(),
+            scroll_offset: 0,
         }
     }
 
@@ -774,6 +798,9 @@ impl VgaWriter {
         self.draw_to_back = false;
         self.dirty_rect = None;
         self.track_dirty = false;
+        self.sb_rows = VecDeque::new();
+        self.sb_cur_row = Vec::new();
+        self.scroll_offset = 0;
         true
     }
 
@@ -1677,6 +1704,15 @@ impl VgaWriter {
             return;
         }
         let c = normalize_console_char(c);
+
+        // ── Mirror into scrollback (always, even when scrolled back) ──────────────
+        self.sb_mirror_char(c);
+        // If the user is viewing history, suppress live rendering.
+        if self.scroll_offset > 0 {
+            return;
+        }
+        // ──────────────────────────────────────────────────────────────
+
         match c {
             '\n' => {
                 self.col = 0;
@@ -1725,6 +1761,236 @@ impl VgaWriter {
             }
             self.write_char(ch);
         }
+        // Refresh scrollbar after each batch of output.
+        self.draw_scrollbar_inner();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Scrollback buffer + scrollbar
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Mirror a normalized character into the scrollback model.
+    /// Called by `write_char` before any live rendering.
+    fn sb_mirror_char(&mut self, c: char) {
+        let cols = self.cols;
+        let fg = self.fg;
+        let bg = self.bg;
+        match c {
+            '\n' => {
+                let row = core::mem::take(&mut self.sb_cur_row);
+                self.sb_rows.push_back(row);
+                self.sb_trim();
+            }
+            '\r' => {
+                self.sb_cur_row.clear();
+            }
+            '\t' => {
+                let stop = (self.sb_cur_row.len() + 4) & !3;
+                let end = stop.min(cols);
+                while self.sb_cur_row.len() < end {
+                    self.sb_cur_row.push(SbCell { ch: ' ', fg, bg });
+                }
+                if self.sb_cur_row.len() >= cols {
+                    let row = core::mem::take(&mut self.sb_cur_row);
+                    self.sb_rows.push_back(row);
+                    self.sb_trim();
+                }
+            }
+            '\u{8}' => {
+                self.sb_cur_row.pop();
+            }
+            '\0' => {}
+            ch => {
+                self.sb_cur_row.push(SbCell { ch, fg, bg });
+                if self.sb_cur_row.len() >= cols {
+                    let row = core::mem::take(&mut self.sb_cur_row);
+                    self.sb_rows.push_back(row);
+                    self.sb_trim();
+                }
+            }
+        }
+    }
+
+    /// Keep the scrollback buffer within MAX_SCROLLBACK + rows.
+    #[inline]
+    fn sb_trim(&mut self) {
+        let cap = MAX_SCROLLBACK + self.rows + 1;
+        while self.sb_rows.len() > cap {
+            self.sb_rows.pop_front();
+        }
+    }
+
+    /// Draw (or refresh) the scrollbar strip on the right edge of the text area.
+    fn draw_scrollbar_inner(&mut self) {
+        if !self.enabled || self.fb_width == 0 {
+            return;
+        }
+        let text_h = self.text_area_height();
+        if text_h == 0 {
+            return;
+        }
+        let sb_x = self.fb_width.saturating_sub(SCROLLBAR_W);
+        let total = self.sb_rows.len() + 1; // +1 accounts for current partial row
+        let track_packed = self.fmt.pack_rgb(0x22, 0x28, 0x38);
+        let thumb_packed = self.fmt.pack_rgb(0x58, 0x72, 0xA0);
+        let thumb_hi = self.fmt.pack_rgb(0x80, 0xA0, 0xC8);
+
+        if total <= self.rows {
+            // Not enough content to scroll: full-height thumb.
+            for y in 0..text_h {
+                for x in sb_x..self.fb_width {
+                    let c = if x == sb_x || x == self.fb_width - 1 || y == 0 || y == text_h - 1 {
+                        track_packed
+                    } else {
+                        thumb_hi
+                    };
+                    self.put_pixel_raw(x, y, c);
+                }
+            }
+            return;
+        }
+
+        let max_offset = total.saturating_sub(self.rows);
+        let thumb_h = ((text_h * self.rows) / total).max(6);
+        let avail = text_h.saturating_sub(thumb_h);
+        // offset 0 = thumb at bottom; max_offset = thumb at top
+        let thumb_y = if self.scroll_offset == 0 || avail == 0 {
+            avail // = text_h - thumb_h (bottom)
+        } else {
+            avail - (avail * self.scroll_offset / max_offset)
+        };
+
+        for y in 0..text_h {
+            let in_thumb = y >= thumb_y && y < thumb_y + thumb_h;
+            let packed = if in_thumb { thumb_packed } else { track_packed };
+            for x in sb_x..self.fb_width {
+                self.put_pixel_raw(x, y, packed);
+            }
+        }
+    }
+
+    /// Redraw the entire text area from the scrollback buffer.
+    /// Called when scroll_offset changes.
+    fn redraw_from_scrollback(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        let text_h = self.text_area_height();
+        let total_complete = self.sb_rows.len();
+        let has_partial = !self.sb_cur_row.is_empty();
+        let total_virtual = total_complete + if has_partial { 1 } else { 0 };
+        let view_end = total_virtual.saturating_sub(self.scroll_offset);
+        let view_start = view_end.saturating_sub(self.rows);
+
+        // Collect rows to render (resolves borrow conflicts with draw calls).
+        let mut display: alloc::vec::Vec<alloc::vec::Vec<SbCell>> =
+            alloc::vec::Vec::with_capacity(self.rows);
+        for virt in view_start..view_end {
+            if virt < total_complete {
+                display.push(self.sb_rows[virt].clone());
+            } else if has_partial && virt == total_complete {
+                display.push(self.sb_cur_row.clone());
+            } else {
+                display.push(alloc::vec::Vec::new());
+            }
+        }
+
+        // Clear text area (leave scrollbar column for draw_scrollbar_inner).
+        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
+        let bg = self.bg;
+        for y in 0..text_h {
+            for x in 0..text_w {
+                self.put_pixel_raw(x, y, bg);
+            }
+        }
+
+        // Render the collected rows.
+        let glyph_h = self.font_info.glyph_h;
+        let glyph_w = self.font_info.glyph_w;
+        let max_col = self.cols;
+        for (vis_row, cells) in display.iter().enumerate() {
+            let py = vis_row * glyph_h;
+            for (col, cell) in cells.iter().enumerate() {
+                if col >= max_col {
+                    break;
+                }
+                let px = col * glyph_w;
+                self.draw_glyph_at_pixel(px, py, cell.ch, cell.fg, cell.bg);
+            }
+        }
+
+        // If returning to live view, sync the cursor position.
+        if self.scroll_offset == 0 {
+            let n = display.len();
+            self.row = if n > 0 { n - 1 } else { 0 };
+            self.col = display.last().map(|r| r.len()).unwrap_or(0).min(self.cols);
+        }
+
+        self.draw_scrollbar_inner();
+    }
+
+    /// Scroll the view up (backward in history) by `lines` lines.
+    pub fn scroll_view_up(&mut self, lines: usize) {
+        if !self.enabled {
+            return;
+        }
+        let total = self.sb_rows.len() + 1;
+        let max_off = total.saturating_sub(self.rows);
+        self.scroll_offset = (self.scroll_offset + lines).min(max_off);
+        self.redraw_from_scrollback();
+    }
+
+    /// Scroll the view down (forward, toward live) by `lines` lines.
+    pub fn scroll_view_down(&mut self, lines: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.redraw_from_scrollback();
+    }
+
+    /// Immediately return to the live (bottom) view.
+    pub fn scroll_to_live(&mut self) {
+        if self.scroll_offset == 0 {
+            return;
+        }
+        self.scroll_offset = 0;
+        self.redraw_from_scrollback();
+    }
+
+    /// Handle a click at pixel `(px_x, px_y)` — if it falls in the scrollbar,
+    /// jump the view to the corresponding scroll position.
+    pub fn scrollbar_click(&mut self, px_x: usize, px_y: usize) {
+        if !self.enabled {
+            return;
+        }
+        let sb_x = self.fb_width.saturating_sub(SCROLLBAR_W);
+        if px_x < sb_x {
+            return;
+        }
+        let text_h = self.text_area_height();
+        if text_h == 0 {
+            return;
+        }
+        let total = self.sb_rows.len() + 1;
+        let max_off = total.saturating_sub(self.rows);
+        if max_off == 0 {
+            return;
+        }
+        // py = 0 → top = oldest = max_offset; py = text_h - 1 → bottom = 0
+        let py = px_y.min(text_h - 1);
+        let offset = max_off * (text_h - 1 - py) / (text_h - 1);
+        self.scroll_offset = offset.min(max_off);
+        self.redraw_from_scrollback();
+    }
+
+    /// Returns `true` if the pixel coordinates fall within the scrollbar strip.
+    pub fn scrollbar_hit_test(&self, px_x: usize, px_y: usize) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let sb_x = self.fb_width.saturating_sub(SCROLLBAR_W);
+        px_x >= sb_x && px_y < self.text_area_height()
     }
 }
 
@@ -2919,4 +3185,52 @@ pub fn draw_strata_stack(origin_x: usize, origin_y: usize, layer_w: usize, layer
     VGA_WRITER
         .lock()
         .draw_strata_stack(origin_x, origin_y, layer_w, layer_h);
+}
+// ── Scrollback / scrollbar public API ────────────────────────────────────────
+
+/// Scroll the console view up (backward in history) by `lines` lines.
+pub fn scroll_view_up(lines: usize) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().scroll_view_up(lines);
+}
+
+/// Scroll the console view down (forward, toward live output) by `lines` lines.
+pub fn scroll_view_down(lines: usize) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().scroll_view_down(lines);
+}
+
+/// Return immediately to the live (bottom) view.
+pub fn scroll_to_live() {
+    if !is_available() {
+        return;
+    }
+    if let Some(mut w) = VGA_WRITER.try_lock() {
+        w.scroll_to_live();
+    }
+}
+
+/// Handle a click at framebuffer pixel `(px_x, px_y)`.
+/// If the click lands on the scrollbar, jump the view accordingly.
+pub fn scrollbar_click(px_x: usize, px_y: usize) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().scrollbar_click(px_x, px_y);
+}
+
+/// Returns `true` if `(px_x, px_y)` falls within the scrollbar strip.
+pub fn scrollbar_hit_test(px_x: usize, px_y: usize) -> bool {
+    if !is_available() {
+        return false;
+    }
+    if let Some(w) = VGA_WRITER.try_lock() {
+        w.scrollbar_hit_test(px_x, px_y)
+    } else {
+        false
+    }
 }

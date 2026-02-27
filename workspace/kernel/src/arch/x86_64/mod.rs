@@ -10,6 +10,7 @@ pub mod ioapic;
 pub mod keyboard;
 pub mod keyboard_layout;
 pub mod keyboard_us;
+pub mod mouse;
 pub mod pci;
 pub mod percpu;
 pub mod pic;

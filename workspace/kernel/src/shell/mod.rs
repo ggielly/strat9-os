@@ -102,6 +102,11 @@ pub extern "C" fn shell_main() -> ! {
 
         // Read from keyboard buffer
         if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
+            // Any keypress returns the view to live output.
+            if crate::arch::x86_64::vga::is_available() {
+                crate::arch::x86_64::vga::scroll_to_live();
+            }
+
             // Hide cursor before any action
             if crate::arch::x86_64::vga::is_available() {
                 crate::arch::x86_64::vga::draw_text_cursor(
@@ -269,6 +274,24 @@ pub extern "C" fn shell_main() -> ! {
             last_blink_tick = ticks / 50;
             cursor_visible = true;
         } else {
+            // Poll mouse events while waiting for keyboard input.
+            if crate::arch::x86_64::mouse::MOUSE_READY.load(core::sync::atomic::Ordering::Relaxed) {
+                while let Some(ev) = crate::arch::x86_64::mouse::read_event() {
+                    // Scroll wheel: rotate up/down 3 lines at a time.
+                    if ev.dz != 0 && crate::arch::x86_64::vga::is_available() {
+                        if ev.dz > 0 {
+                            crate::arch::x86_64::vga::scroll_view_up(3);
+                        } else {
+                            crate::arch::x86_64::vga::scroll_view_down(3);
+                        }
+                    }
+                    // Left click on scrollbar: jump view to clicked position.
+                    if ev.left && crate::arch::x86_64::vga::is_available() {
+                        let (mx, my) = crate::arch::x86_64::mouse::mouse_pos();
+                        crate::arch::x86_64::vga::scrollbar_click(mx as usize, my as usize);
+                    }
+                }
+            }
             crate::process::yield_task();
         }
     }

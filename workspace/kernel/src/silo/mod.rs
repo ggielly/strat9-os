@@ -1,10 +1,11 @@
-//! Silo Manager (kernel-side, minimal mechanisms only)
+//! Silo manager (kernel-side, minimal mechanisms only)
 //!
 //! This module provides the core kernel structures and syscalls
 //! to create and manage silos. Policy lives in userspace (Silo Admin).
 
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
+    hardware::storage::{ahci, virtio_block},
     ipc::port::{self, PortId},
     memory::{UserSliceRead, UserSliceWrite},
     process::{current_task_clone, task::Task, TaskId},
@@ -602,7 +603,23 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
         .collect()
 }
 
-pub fn kernel_spawn_strate(elf_data: &[u8], label: Option<&str>) -> Result<u64, SyscallError> {
+fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, SyscallError> {
+    match dev_path {
+        "/dev/sda" => ahci::get_device()
+            .map(|d| d as *const _ as usize)
+            .ok_or(SyscallError::NotFound),
+        "/dev/vda" => virtio_block::get_device()
+            .map(|d| d as *const _ as usize)
+            .ok_or(SyscallError::NotFound),
+        _ => Err(SyscallError::NotFound),
+    }
+}
+
+pub fn kernel_spawn_strate(
+    elf_data: &[u8],
+    label: Option<&str>,
+    dev_path: Option<&str>,
+) -> Result<u64, SyscallError> {
     require_silo_admin()?;
 
     let module_id = {
@@ -629,8 +646,25 @@ pub fn kernel_spawn_strate(elf_data: &[u8], label: Option<&str>) -> Result<u64, 
         module.data.clone()
     };
 
+    let mut seed_caps = Vec::new();
+    if let Some(path) = dev_path {
+        let resource = resolve_volume_resource_from_dev_path(path)?;
+        let cap = get_capability_manager().create_capability(
+            ResourceType::Volume,
+            resource,
+            CapPermissions {
+                read: true,
+                write: true,
+                execute: false,
+                grant: true,
+                revoke: true,
+            },
+        );
+        seed_caps.push(cap);
+    }
+
     let task_id =
-        crate::process::elf::load_and_run_elf_with_caps(&module_data, "silo-admin", &[])
+        crate::process::elf::load_and_run_elf_with_caps(&module_data, "silo-admin", &seed_caps)
             .map_err(|_| SyscallError::InvalidArgument)?;
 
     let mut mgr = SILO_MANAGER.lock();

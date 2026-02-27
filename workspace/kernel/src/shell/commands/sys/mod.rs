@@ -4,9 +4,8 @@ use crate::{
         elf::load_and_run_elf, log_scheduler_state, scheduler_class_table,
         scheduler_verbose_enabled, set_scheduler_verbose,
     },
-    silo,
     shell::{output::clear_screen, ShellError},
-    shell_println, vfs,
+    shell_println, silo, vfs,
 };
 use alloc::string::String;
 
@@ -405,13 +404,6 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
                 }
             }
 
-            if let Some(dev_path) = dev {
-                shell_println!(
-                    "strate spawn: --dev={} accepted (volume selection fine-grained: TODO)",
-                    dev_path
-                );
-            }
-
             let fd = vfs::open(module_path, vfs::OpenFlags::READ)
                 .map_err(|_| ShellError::ExecutionFailed)?;
             let data = match vfs::read_all(fd) {
@@ -423,13 +415,14 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
             };
             let _ = vfs::close(fd);
 
-            match silo::kernel_spawn_strate(&data, label) {
+            match silo::kernel_spawn_strate(&data, label, dev) {
                 Ok(silo_id) => {
                     shell_println!(
-                        "strate spawn: {} started (silo_id={}, label={})",
+                        "strate spawn: {} started (silo_id={}, label={}, dev={})",
                         strate_type,
                         silo_id,
-                        label.unwrap_or("default")
+                        label.unwrap_or("default"),
+                        dev.unwrap_or("auto")
                     );
                     Ok(())
                 }

@@ -8,7 +8,10 @@ use super::{
 };
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
-    hardware::storage::virtio_block::{self, BlockDevice, SECTOR_SIZE},
+    hardware::storage::{
+        ahci,
+        virtio_block::{self, BlockDevice, SECTOR_SIZE},
+    },
     ipc::{
         channel::{self, ChanId},
         message::IpcMessage,
@@ -378,15 +381,51 @@ fn sys_dup2(old_fd: u64, new_fd: u64) -> Result<u64, SyscallError> {
 }
 
 // ============================================================
-// Volume / Block device syscalls (VirtIO blk)
+// Volume / Block device syscalls
 // ============================================================
 
 const MAX_SECTORS_PER_CALL: u64 = 256;
 
+enum VolumeDeviceRef {
+    Virtio(&'static virtio_block::VirtioBlockDevice),
+    Ahci(&'static ahci::AhciController),
+}
+
+impl VolumeDeviceRef {
+    fn sector_count(&self) -> u64 {
+        match self {
+            VolumeDeviceRef::Virtio(dev) => BlockDevice::sector_count(*dev),
+            VolumeDeviceRef::Ahci(dev) => BlockDevice::sector_count(*dev),
+        }
+    }
+
+    fn read_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), SyscallError> {
+        match self {
+            VolumeDeviceRef::Virtio(dev) => {
+                BlockDevice::read_sector(*dev, sector, buf).map_err(SyscallError::from)
+            }
+            VolumeDeviceRef::Ahci(dev) => {
+                BlockDevice::read_sector(*dev, sector, buf).map_err(SyscallError::from)
+            }
+        }
+    }
+
+    fn write_sector(&self, sector: u64, buf: &[u8]) -> Result<(), SyscallError> {
+        match self {
+            VolumeDeviceRef::Virtio(dev) => {
+                BlockDevice::write_sector(*dev, sector, buf).map_err(SyscallError::from)
+            }
+            VolumeDeviceRef::Ahci(dev) => {
+                BlockDevice::write_sector(*dev, sector, buf).map_err(SyscallError::from)
+            }
+        }
+    }
+}
+
 fn resolve_volume_device(
     handle: u64,
     required: CapPermissions,
-) -> Result<&'static virtio_block::VirtioBlockDevice, SyscallError> {
+) -> Result<VolumeDeviceRef, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
@@ -397,13 +436,19 @@ fn resolve_volume_device(
         return Err(SyscallError::BadHandle);
     }
 
-    let device = virtio_block::get_device().ok_or(SyscallError::BadHandle)?;
-    let device_ptr = device as *const virtio_block::VirtioBlockDevice as usize;
-    if cap.resource != device_ptr {
-        return Err(SyscallError::BadHandle);
+    if let Some(device) = virtio_block::get_device() {
+        let device_ptr = device as *const virtio_block::VirtioBlockDevice as usize;
+        if cap.resource == device_ptr {
+            return Ok(VolumeDeviceRef::Virtio(device));
+        }
     }
-
-    Ok(device)
+    if let Some(device) = ahci::get_device() {
+        let device_ptr = device as *const ahci::AhciController as usize;
+        if cap.resource == device_ptr {
+            return Ok(VolumeDeviceRef::Ahci(device));
+        }
+    }
+    Err(SyscallError::BadHandle)
 }
 
 fn sys_volume_read(
@@ -427,7 +472,7 @@ fn sys_volume_read(
         revoke: false,
     };
     let device = resolve_volume_device(handle, required)?;
-    let total_sectors = BlockDevice::sector_count(device);
+    let total_sectors = device.sector_count();
     if sector >= total_sectors || sector.saturating_add(sector_count) > total_sectors {
         return Err(SyscallError::InvalidArgument);
     }
@@ -435,7 +480,7 @@ fn sys_volume_read(
     let mut kbuf = [0u8; SECTOR_SIZE];
     for i in 0..sector_count {
         let cur_sector = sector.checked_add(i).ok_or(SyscallError::InvalidArgument)?;
-        BlockDevice::read_sector(device, cur_sector, &mut kbuf).map_err(SyscallError::from)?;
+        device.read_sector(cur_sector, &mut kbuf)?;
         let offset = (i as usize)
             .checked_mul(SECTOR_SIZE)
             .ok_or(SyscallError::InvalidArgument)?;
@@ -470,7 +515,7 @@ fn sys_volume_write(
         revoke: false,
     };
     let device = resolve_volume_device(handle, required)?;
-    let total_sectors = BlockDevice::sector_count(device);
+    let total_sectors = device.sector_count();
     if sector >= total_sectors || sector.saturating_add(sector_count) > total_sectors {
         return Err(SyscallError::InvalidArgument);
     }
@@ -490,7 +535,7 @@ fn sys_volume_write(
             return Err(SyscallError::InvalidArgument);
         }
         kbuf.copy_from_slice(&data);
-        BlockDevice::write_sector(device, cur_sector, &kbuf).map_err(SyscallError::from)?;
+        device.write_sector(cur_sector, &kbuf)?;
     }
 
     Ok(sector_count)
@@ -505,7 +550,7 @@ fn sys_volume_info(handle: u64) -> Result<u64, SyscallError> {
         revoke: false,
     };
     let device = resolve_volume_device(handle, required)?;
-    Ok(BlockDevice::sector_count(device))
+    Ok(device.sector_count())
 }
 
 /// SYS_DEBUG_LOG (600): Write a debug message to serial output.
@@ -922,8 +967,7 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
                 let copy_len = core::cmp::min(label_bytes.len(), max_len);
                 boot_msg.payload[0] = copy_len as u8;
                 if copy_len > 0 {
-                    boot_msg.payload[1..1 + copy_len]
-                        .copy_from_slice(&label_bytes[..copy_len]);
+                    boot_msg.payload[1..1 + copy_len].copy_from_slice(&label_bytes[..copy_len]);
                 }
 
                 let port_id = PortId::from_u64(cap.resource as u64);
@@ -936,7 +980,10 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
                             label
                         );
                     } else {
-                        log::warn!("ipc_bind_port('{}'): failed to queue bootstrap message", path);
+                        log::warn!(
+                            "ipc_bind_port('{}'): failed to queue bootstrap message",
+                            path
+                        );
                     }
                 } else {
                     log::warn!(
@@ -1022,7 +1069,11 @@ fn sys_ipc_ring_map(ring: u64, _out_ptr: u64) -> Result<u64, SyscallError> {
 
     let addr_space = unsafe { &*task.process.address_space.get() };
     let base = addr_space
-        .find_free_vma_range(super::mmap::MMAP_BASE, page_count, crate::memory::address_space::VmaPageSize::Small)
+        .find_free_vma_range(
+            super::mmap::MMAP_BASE,
+            page_count,
+            crate::memory::address_space::VmaPageSize::Small,
+        )
         .ok_or(SyscallError::OutOfMemory)?;
 
     addr_space
@@ -1069,7 +1120,10 @@ fn sys_sem_create(initial: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
-fn resolve_sem(handle: u64, required: CapPermissions) -> Result<alloc::sync::Arc<semaphore::PosixSemaphore>, SyscallError> {
+fn resolve_sem(
+    handle: u64,
+    required: CapPermissions,
+) -> Result<alloc::sync::Arc<semaphore::PosixSemaphore>, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };

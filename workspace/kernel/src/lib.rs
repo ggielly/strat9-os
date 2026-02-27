@@ -330,6 +330,19 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
 
     // =============================================
+    // Phase 6k: PS/2 mouse driver
+    // =============================================
+    if apic_active {
+        let mouse_ok = arch::x86_64::mouse::init();
+        if mouse_ok {
+            serial_println!("[init] PS/2 mouse initialized.");
+            vga_println!("[OK] PS/2 mouse ready");
+        } else {
+            serial_println!("[init] PS/2 mouse not found (optional).");
+        }
+    }
+
+    // =============================================
     // Phase 7: initialize scheduler
     // =============================================
     serial_println!("[init] Initializing scheduler...");
@@ -696,7 +709,8 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     let lapic_id = apic::lapic_id();
     ioapic::route_legacy_irq(0, lapic_id, 0x20, &madt_info.overrides);
     ioapic::route_legacy_irq(1, lapic_id, 0x21, &madt_info.overrides);
-    serial_println!("[init]   6g. IRQ0->vec 0x20, IRQ1->vec 0x21 routed");
+    ioapic::route_legacy_irq(12, lapic_id, 0x2C, &madt_info.overrides);
+    serial_println!("[init]   6g. IRQ0->vec 0x20, IRQ1->vec 0x21, IRQ12->vec 0x2C routed");
 
     // Step 6h: calibrate APIC timer using PIT channel 2
     serial_println!("[init]   6h. Calibrating APIC timer using PIT channel 2...");
