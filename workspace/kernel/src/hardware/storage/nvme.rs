@@ -6,6 +6,7 @@ use crate::{
     memory::{allocate_dma_frame, phys_to_virt},
 };
 use alloc::string::String;
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ptr;

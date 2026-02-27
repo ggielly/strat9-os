@@ -2,6 +2,7 @@
 // Reference: ATA/ATAPI-7 Specification
 
 use alloc::string::String;
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};

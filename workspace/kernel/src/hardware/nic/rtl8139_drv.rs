@@ -8,7 +8,7 @@ use crate::{
 };
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::String;
+use alloc::{format, string::String};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -179,7 +179,15 @@ impl Rtl8139Device {
         );
     }
 
-    fn receive(&self) -> Option<Vec<u8>> {
+    fn receive_packet(&self) -> Option<Vec<u8>> {
+        self.receive_inner()
+    }
+
+    fn transmit_packet(&self, data: &[u8]) -> Result<(), NetError> {
+        self.transmit_inner(data)
+    }
+
+    fn receive_inner(&self) -> Option<Vec<u8>> {
         let ports = self.ports.lock();
 
         let status = unsafe {
@@ -213,7 +221,7 @@ impl Rtl8139Device {
         None
     }
 
-    fn transmit(&self, data: &[u8]) -> Result<(), NetError> {
+    fn transmit_inner(&self, data: &[u8]) -> Result<(), NetError> {
         if data.len() > MTU {
             return Err(NetError::BufferTooLarge);
         }
@@ -258,12 +266,18 @@ impl NetworkDevice for Rtl8139Device {
         (ports.read8(0x58) & 0x80) != 0
     }
 
-    fn recv(&self) -> Option<Vec<u8>> {
-        self.receive()
+    fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
+        if let Some(packet) = self.receive_packet() {
+            let len = core::cmp::min(packet.len(), buf.len());
+            buf[..len].copy_from_slice(&packet[..len]);
+            Ok(len)
+        } else {
+            Err(NetError::NoPacket)
+        }
     }
 
-    fn send(&self, data: &[u8]) -> Result<(), NetError> {
-        self.transmit(data)
+    fn transmit(&self, data: &[u8]) -> Result<(), NetError> {
+        self.transmit_packet(data)
     }
 }
 

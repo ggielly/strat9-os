@@ -8,7 +8,7 @@ use crate::{
 };
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::String;
+use alloc::{format, string::String};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -290,7 +290,7 @@ impl PcnetDevice {
         }
     }
 
-    fn receive(&self) -> Option<Vec<u8>> {
+    fn receive_inner(&self) -> Option<Vec<u8>> {
         let rx_id = self.rx_id.load(Ordering::Relaxed);
 
         unsafe {
@@ -331,7 +331,7 @@ impl PcnetDevice {
         None
     }
 
-    fn transmit(&self, data: &[u8]) -> Result<(), NetError> {
+    fn transmit_inner(&self, data: &[u8]) -> Result<(), NetError> {
         if data.len() > MTU {
             return Err(NetError::BufferTooLarge);
         }
@@ -388,12 +388,18 @@ impl NetworkDevice for PcnetDevice {
         (csr_4 & 0x20) != 0
     }
 
-    fn recv(&self) -> Option<Vec<u8>> {
-        self.receive()
+    fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
+        if let Some(packet) = self.receive_inner() {
+            let len = core::cmp::min(packet.len(), buf.len());
+            buf[..len].copy_from_slice(&packet[..len]);
+            Ok(len)
+        } else {
+            Err(NetError::NoPacket)
+        }
     }
 
-    fn send(&self, data: &[u8]) -> Result<(), NetError> {
-        self.transmit(data)
+    fn transmit(&self, data: &[u8]) -> Result<(), NetError> {
+        self.transmit_inner(data)
     }
 }
 

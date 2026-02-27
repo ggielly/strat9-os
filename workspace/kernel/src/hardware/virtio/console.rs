@@ -6,6 +6,7 @@ use crate::{
     memory::{allocate_dma_frame, phys_to_virt},
 };
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::{Mutex, Once};
 
