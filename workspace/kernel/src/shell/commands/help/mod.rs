@@ -25,6 +25,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  mount <src> <dst> - Mount an existing source mount onto dst");
     shell_println!("  umount <path>     - Unmount a mount point");
     shell_println!("  strate ls         - List silos/strates and labels");
+    shell_println!("  strate spawn ...  - Spawn a strate (type, --as, --dev)");
     shell_println!("  cpuinfo           - Display CPU information");
     shell_println!("  test_pid          - Launch /initfs/test_pid userspace binary");
     shell_println!("  test_mem          - Launch /initfs/test_mem verbose memory test");

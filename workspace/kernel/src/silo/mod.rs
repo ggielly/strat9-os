@@ -561,6 +561,19 @@ fn extract_strate_label(path: &str) -> Option<String> {
     Some(String::from(label))
 }
 
+fn sanitize_label(raw: &str) -> String {
+    let mut out = String::new();
+    for b in raw.bytes().take(31) {
+        let ok = (b as char).is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.';
+        out.push(if ok { b as char } else { '_' });
+    }
+    if out.is_empty() {
+        String::from("default")
+    } else {
+        out
+    }
+}
+
 pub fn set_current_silo_label_from_path(path: &str) -> Result<(), SyscallError> {
     let Some(label) = extract_strate_label(path) else {
         return Ok(());
@@ -587,6 +600,54 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
             task_count: s.tasks.len(),
         })
         .collect()
+}
+
+pub fn kernel_spawn_strate(elf_data: &[u8], label: Option<&str>) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+
+    let module_id = {
+        let mut registry = MODULE_REGISTRY.lock();
+        registry.register(elf_data.to_vec())?
+    };
+
+    let silo_id = {
+        let mut mgr = SILO_MANAGER.lock();
+        let id = mgr.create_silo(SILO_FLAG_ADMIN as u32)?;
+        let silo = mgr.get_mut(id.0)?;
+        silo.module_id = Some(module_id);
+        silo.state = SiloState::Ready;
+        silo.config.flags = SILO_FLAG_ADMIN;
+        if let Some(l) = label {
+            silo.strate_label = Some(sanitize_label(l));
+        }
+        id.0
+    };
+
+    let module_data = {
+        let registry = MODULE_REGISTRY.lock();
+        let module = registry.get(module_id).ok_or(SyscallError::BadHandle)?;
+        module.data.clone()
+    };
+
+    let task_id =
+        crate::process::elf::load_and_run_elf_with_caps(&module_data, "silo-admin", &[])
+            .map_err(|_| SyscallError::InvalidArgument)?;
+
+    let mut mgr = SILO_MANAGER.lock();
+    {
+        let silo = mgr.get_mut(silo_id)?;
+        silo.tasks.push(task_id);
+        silo.state = SiloState::Running;
+    }
+    mgr.map_task(task_id, silo_id);
+    mgr.push_event(SiloEvent {
+        silo_id,
+        kind: SiloEventKind::Started,
+        data0: 0,
+        data1: 0,
+        tick: crate::process::scheduler::ticks(),
+    });
+    Ok(silo_id)
 }
 
 fn resolve_module_handle(handle: u64, required: CapPermissions) -> Result<u64, SyscallError> {

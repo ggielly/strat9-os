@@ -330,33 +330,118 @@ pub fn cmd_test_mem_stressed(_args: &[String]) -> Result<(), ShellError> {
 
 /// strate ls
 pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
-    if args.len() != 1 || args[0].as_str() != "ls" {
-        shell_println!("Usage: strate ls");
+    if args.is_empty() {
+        shell_println!("Usage: strate ls | strate spawn <type> [--as <label>] [--dev <path>]");
         return Err(ShellError::InvalidArguments);
     }
 
-    let mut silos = silo::list_silos_snapshot();
-    silos.sort_by_key(|s| s.id);
+    match args[0].as_str() {
+        "ls" => {
+            let mut silos = silo::list_silos_snapshot();
+            silos.sort_by_key(|s| s.id);
 
-    shell_println!(
-        "{:<6} {:<12} {:<10} {:<7} {}",
-        "ID",
-        "Name",
-        "State",
-        "Tasks",
-        "Label"
-    );
-    shell_println!("────────────────────────────────────────────────────────────");
-    for s in silos {
-        let label = s.strate_label.unwrap_or_else(|| String::from("-"));
-        shell_println!(
-            "{:<6} {:<12} {:<10?} {:<7} {}",
-            s.id,
-            s.name,
-            s.state,
-            s.task_count,
-            label
-        );
+            shell_println!(
+                "{:<6} {:<12} {:<10} {:<7} {}",
+                "ID",
+                "Name",
+                "State",
+                "Tasks",
+                "Label"
+            );
+            shell_println!("────────────────────────────────────────────────────────────");
+            for s in silos {
+                let label = s.strate_label.unwrap_or_else(|| String::from("-"));
+                shell_println!(
+                    "{:<6} {:<12} {:<10?} {:<7} {}",
+                    s.id,
+                    s.name,
+                    s.state,
+                    s.task_count,
+                    label
+                );
+            }
+            Ok(())
+        }
+        "spawn" => {
+            if args.len() < 2 {
+                shell_println!("Usage: strate spawn <type> [--as <label>] [--dev <path>]");
+                return Err(ShellError::InvalidArguments);
+            }
+            let strate_type = args[1].as_str();
+            let module_path = match strate_type {
+                "strate-fs-ext4" => "/initfs/fs-ext4",
+                "ramfs" | "strate-fs-ramfs" => "/initfs/strate-fs-ramfs",
+                _ => {
+                    shell_println!("strate spawn: unsupported type '{}'", strate_type);
+                    return Err(ShellError::InvalidArguments);
+                }
+            };
+
+            let mut label: Option<&str> = None;
+            let mut dev: Option<&str> = None;
+            let mut i = 2usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--as" => {
+                        if i + 1 >= args.len() {
+                            shell_println!("strate spawn: missing value for --as");
+                            return Err(ShellError::InvalidArguments);
+                        }
+                        label = Some(args[i + 1].as_str());
+                        i += 2;
+                    }
+                    "--dev" => {
+                        if i + 1 >= args.len() {
+                            shell_println!("strate spawn: missing value for --dev");
+                            return Err(ShellError::InvalidArguments);
+                        }
+                        dev = Some(args[i + 1].as_str());
+                        i += 2;
+                    }
+                    other => {
+                        shell_println!("strate spawn: unknown option '{}'", other);
+                        return Err(ShellError::InvalidArguments);
+                    }
+                }
+            }
+
+            if let Some(dev_path) = dev {
+                shell_println!(
+                    "strate spawn: --dev={} accepted (volume selection fine-grained: TODO)",
+                    dev_path
+                );
+            }
+
+            let fd = vfs::open(module_path, vfs::OpenFlags::READ)
+                .map_err(|_| ShellError::ExecutionFailed)?;
+            let data = match vfs::read_all(fd) {
+                Ok(d) => d,
+                Err(_) => {
+                    let _ = vfs::close(fd);
+                    return Err(ShellError::ExecutionFailed);
+                }
+            };
+            let _ = vfs::close(fd);
+
+            match silo::kernel_spawn_strate(&data, label) {
+                Ok(silo_id) => {
+                    shell_println!(
+                        "strate spawn: {} started (silo_id={}, label={})",
+                        strate_type,
+                        silo_id,
+                        label.unwrap_or("default")
+                    );
+                    Ok(())
+                }
+                Err(e) => {
+                    shell_println!("strate spawn failed: {:?}", e);
+                    Err(ShellError::ExecutionFailed)
+                }
+            }
+        }
+        _ => {
+            shell_println!("Usage: strate ls | strate spawn <type> [--as <label>] [--dev <path>]");
+            Err(ShellError::InvalidArguments)
+        }
     }
-    Ok(())
 }
