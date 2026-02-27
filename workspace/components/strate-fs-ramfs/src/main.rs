@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+use alloc::{format, string::String};
 use core::{alloc::Layout, panic::PanicInfo};
 use linked_list_allocator::LockedHeap;
 use strat9_syscall::{
@@ -42,6 +43,7 @@ const OPCODE_CREATE_FILE: u32 = 0x05;
 const OPCODE_CREATE_DIR: u32 = 0x06;
 const OPCODE_UNLINK: u32 = 0x07;
 const OPCODE_READDIR: u32 = 0x08;
+const OPCODE_BOOTSTRAP: u32 = 0x10;
 const REPLY_MSG_TYPE: u32 = 0x80;
 const STATUS_OK: u32 = 0;
 const MAX_OPEN_PATH: usize = 42;
@@ -57,12 +59,52 @@ use strat9_syscall::data::IpcMessage;
 
 struct StrateRamServer {
     fs: RamFileSystem,
+    alias_label: Option<String>,
 }
 
 impl StrateRamServer {
     fn new() -> Self {
         Self {
             fs: RamFileSystem::new(),
+            alias_label: None,
+        }
+    }
+
+    fn sanitize_label(raw: &str) -> String {
+        let mut out = String::new();
+        for b in raw.bytes().take(31) {
+            let ok = (b as char).is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.';
+            out.push(if ok { b as char } else { '_' });
+        }
+        if out.is_empty() {
+            String::from("default")
+        } else {
+            out
+        }
+    }
+
+    fn parse_bootstrap_label(payload: &[u8]) -> String {
+        let len = payload.first().copied().unwrap_or(0) as usize;
+        if len == 0 {
+            return String::from("default");
+        }
+        let end = 1usize.saturating_add(len);
+        let Some(bytes) = payload.get(1..end) else {
+            return String::from("default");
+        };
+        match core::str::from_utf8(bytes) {
+            Ok(s) => Self::sanitize_label(s),
+            Err(_) => String::from("default"),
+        }
+    }
+
+    fn bind_srv_alias(&mut self, port: u64, label: &str) {
+        if self.alias_label.as_deref() == Some(label) {
+            return;
+        }
+        let path = format!("/srv/strate-fs-ramfs/{}", label);
+        if call::ipc_bind_port(port as usize, path.as_bytes()).is_ok() {
+            self.alias_label = Some(String::from(label));
         }
     }
 
@@ -398,6 +440,11 @@ impl StrateRamServer {
             let mut msg = IpcMessage::new(0);
             if call::ipc_recv(port as usize, &mut msg).is_ok() {
                 let reply = match msg.msg_type {
+                    OPCODE_BOOTSTRAP => {
+                        let label = Self::parse_bootstrap_label(&msg.payload);
+                        self.bind_srv_alias(port, &label);
+                        Self::ok_reply(msg.sender)
+                    }
                     OPCODE_OPEN => self.handle_open(msg.sender, &msg.payload),
                     OPCODE_READ => self.handle_read(msg.sender, &msg.payload),
                     OPCODE_WRITE => self.handle_write(msg.sender, &msg.payload),
@@ -426,8 +473,9 @@ pub extern "C" fn _start() -> ! {
     };
 
     let _ = call::ipc_bind_port(port as usize, b"/ram");
-
     let mut server = StrateRamServer::new();
+    server.bind_srv_alias(port, "default");
+
     server.serve(port)
 }
 

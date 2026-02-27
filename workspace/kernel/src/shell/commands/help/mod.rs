@@ -21,8 +21,8 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  rm <path>         - Remove a file or directory");
     shell_println!("  write <path> <t>  - Write text to a file");
     shell_println!("  scheme ls         - List registered schemes");
-    shell_println!("  mount ls          - List mounts and supported filesystems");
-    shell_println!("  mount <fs> <path> - Mount strate-fs-ext4/ramfs at path");
+    shell_println!("  mount ls          - List current mount points");
+    shell_println!("  mount <src> <dst> - Mount an existing source mount onto dst");
     shell_println!("  umount <path>     - Unmount a mount point");
     shell_println!("  cpuinfo           - Display CPU information");
     shell_println!("  test_pid          - Launch /initfs/test_pid userspace binary");
