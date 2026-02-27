@@ -1023,6 +1023,28 @@ pub fn load_and_run_elf_with_caps(
     name: &'static str,
     seed_caps: &[Capability],
 ) -> Result<TaskId, &'static str> {
+    let task = load_elf_task_with_caps(elf_data, name, seed_caps)?;
+    let task_id = task.id;
+    let runtime_entry = task
+        .trampoline_entry
+        .load(core::sync::atomic::Ordering::Acquire);
+    crate::process::add_task(task);
+
+    log::info!(
+        "[elf] Task '{}' created: entry={:#x}, stack_top={:#x}",
+        name,
+        runtime_entry,
+        USER_STACK_TOP,
+    );
+
+    Ok(task_id)
+}
+
+pub fn load_elf_task_with_caps(
+    elf_data: &[u8],
+    name: &'static str,
+    seed_caps: &[Capability],
+) -> Result<Arc<Task>, &'static str> {
     log::info!("[elf] Loading ELF '{}'...", name);
 
     // Step 1: Parse and validate ELF header
@@ -1178,17 +1200,14 @@ pub fn load_and_run_elf_with_caps(
         let _ = crate::silo::grant_silo_admin_to_task(&task);
     }
 
-    let task_id = task.id;
-    crate::process::add_task(task);
-
     log::info!(
-        "[elf] Task '{}' created: entry={:#x}, stack_top={:#x}",
+        "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x}",
         name,
         runtime_entry,
         USER_STACK_TOP,
     );
 
-    Ok(task_id)
+    Ok(task)
 }
 
 /// Load an ELF binary into the provided address space.

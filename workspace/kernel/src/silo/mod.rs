@@ -593,7 +593,11 @@ pub fn set_current_silo_label_from_path(path: &str) -> Result<(), SyscallError> 
         return Ok(());
     };
     let silo = mgr.get_mut(silo_id)?;
-    silo.strate_label = Some(label);
+    // Do not overwrite a label that was already set (e.g. by kernel_spawn_strate).
+    // The spawner's requested label takes precedence over the default path-derived one.
+    if silo.strate_label.is_none() {
+        silo.strate_label = Some(label);
+    }
     Ok(())
 }
 
@@ -685,9 +689,9 @@ pub fn kernel_spawn_strate(
         seed_caps.push(cap);
     }
 
-    let task_id =
-        crate::process::elf::load_and_run_elf_with_caps(&module_data, "silo-admin", &seed_caps)
-            .map_err(|_| SyscallError::InvalidArgument)?;
+    let task = crate::process::elf::load_elf_task_with_caps(&module_data, "silo-admin", &seed_caps)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+    let task_id = task.id;
 
     let mut mgr = SILO_MANAGER.lock();
     {
@@ -703,6 +707,8 @@ pub fn kernel_spawn_strate(
         data1: 0,
         tick: crate::process::scheduler::ticks(),
     });
+    drop(mgr);
+    crate::process::add_task(task);
     Ok(silo_id)
 }
 
