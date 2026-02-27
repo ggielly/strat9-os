@@ -12,6 +12,7 @@ members = [
     "workspace/drivers/nic/pcnet",
     "workspace/drivers/storage/nvme",
     "workspace/drivers/misc/virtio-rng",
+    "workspace/drivers/misc/virtio-console",
     "workspace/components/api",
     "workspace/components/strate-fs-abstraction",
     "workspace/components/strate-fs-ext4",

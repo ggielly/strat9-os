@@ -478,6 +478,18 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         serial_println!("[init] VirtIO net initialized.");
         vga_println!("[OK] VirtIO net driver initialized");
 
+        serial_println!("[init] Initializing VirtIO RNG...");
+        vga_println!("[..] Looking for VirtIO RNG device...");
+        crate::hardware::rng::virtio_rng::init();
+        serial_println!("[init] VirtIO RNG initialized.");
+        vga_println!("[OK] VirtIO RNG driver initialized");
+
+        serial_println!("[init] Initializing VirtIO Console...");
+        vga_println!("[..] Looking for VirtIO Console device...");
+        crate::hardware::rng::virtio_console::init();
+        serial_println!("[init] VirtIO Console initialized.");
+        vga_println!("[OK] VirtIO Console driver initialized");
+
         serial_println!("[init] Checking for devices...");
         vga_println!("[..] Checking for devices...");
 

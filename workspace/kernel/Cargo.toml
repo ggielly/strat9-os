@@ -41,6 +41,7 @@ rtl8139 = { path = "../drivers/nic/rtl8139" }
 pcnet = { path = "../drivers/nic/pcnet" }
 nvme = { path = "../drivers/storage/nvme" }
 virtio_rng = { path = "../drivers/misc/virtio-rng" }
+virtio_console = { path = "../drivers/misc/virtio-console" }
 ###
 [build-dependencies]
 cc = "1.0"
