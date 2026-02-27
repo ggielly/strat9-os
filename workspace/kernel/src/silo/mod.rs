@@ -191,6 +191,7 @@ pub fn pack_fault(reason: SiloFaultReason, subcode: u64) -> u64 {
 struct Silo {
     id: SiloId,
     name: String,
+    strate_label: Option<String>,
     state: SiloState,
     config: SiloConfig,
     flags: u32,
@@ -199,6 +200,15 @@ struct Silo {
     granted_caps: Vec<u64>,
     granted_resources: Vec<GrantedResource>,
     event_seq: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SiloSnapshot {
+    pub id: u64,
+    pub name: String,
+    pub strate_label: Option<String>,
+    pub state: SiloState,
+    pub task_count: usize,
 }
 
 struct SiloManager {
@@ -224,6 +234,7 @@ impl SiloManager {
         let silo = Silo {
             id,
             name,
+            strate_label: None,
             state: SiloState::Created,
             config: SiloConfig::default(),
             flags,
@@ -537,6 +548,46 @@ impl ModuleRegistry {
 }
 
 static MODULE_REGISTRY: SpinLock<ModuleRegistry> = SpinLock::new(ModuleRegistry::new());
+
+fn extract_strate_label(path: &str) -> Option<String> {
+    let prefix = "/srv/strate-fs-";
+    let rest = path.strip_prefix(prefix)?;
+    let mut parts = rest.split('/').filter(|p| !p.is_empty());
+    let _strate_type = parts.next()?;
+    let label = parts.next()?;
+    if label.is_empty() {
+        return None;
+    }
+    Some(String::from(label))
+}
+
+pub fn set_current_silo_label_from_path(path: &str) -> Result<(), SyscallError> {
+    let Some(label) = extract_strate_label(path) else {
+        return Ok(());
+    };
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let mut mgr = SILO_MANAGER.lock();
+    let Some(silo_id) = mgr.silo_for_task(task.id) else {
+        return Ok(());
+    };
+    let silo = mgr.get_mut(silo_id)?;
+    silo.strate_label = Some(label);
+    Ok(())
+}
+
+pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
+    let mgr = SILO_MANAGER.lock();
+    mgr.silos
+        .values()
+        .map(|s| SiloSnapshot {
+            id: s.id.0,
+            name: s.name.clone(),
+            strate_label: s.strate_label.clone(),
+            state: s.state,
+            task_count: s.tasks.len(),
+        })
+        .collect()
+}
 
 fn resolve_module_handle(handle: u64, required: CapPermissions) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;

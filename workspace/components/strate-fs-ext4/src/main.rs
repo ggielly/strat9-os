@@ -78,6 +78,7 @@ const OPCODE_READ: u32 = 0x02;
 const OPCODE_WRITE: u32 = 0x03;
 const OPCODE_CLOSE: u32 = 0x04;
 const OPCODE_BOOTSTRAP: u32 = 0x10;
+const INITIAL_BIND_PATH: &[u8] = b"/srv/strate-fs-ext4/default";
 
 const MAX_OPEN_FILES: usize = 256;
 
@@ -459,12 +460,12 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
 
     debug_log("[fs-ext4] IPC port created\n");
 
-    if call::ipc_bind_port(port_handle as usize, b"/fs/ext4").is_err() {
-        debug_log("[fs-ext4] Failed to bind port to /fs/ext4\n");
+    if call::ipc_bind_port(port_handle as usize, INITIAL_BIND_PATH).is_err() {
+        debug_log("[fs-ext4] Failed to bind initial port alias\n");
         exit(2);
     }
 
-    debug_log("[fs-ext4] Port bound to /fs/ext4\n");
+    debug_log("[fs-ext4] Port bound to /srv/strate-fs-ext4/default\n");
 
     let mut volume_handle = bootstrap_handle;
     let mut bootstrap_label = String::from("default");

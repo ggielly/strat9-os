@@ -4,6 +4,7 @@ use crate::{
         elf::load_and_run_elf, log_scheduler_state, scheduler_class_table,
         scheduler_verbose_enabled, set_scheduler_verbose,
     },
+    silo,
     shell::{output::clear_screen, ShellError},
     shell_println, vfs,
 };
@@ -325,4 +326,37 @@ pub fn cmd_test_mem_stressed(_args: &[String]) -> Result<(), ShellError> {
             Err(ShellError::ExecutionFailed)
         }
     }
+}
+
+/// strate ls
+pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
+    if args.len() != 1 || args[0].as_str() != "ls" {
+        shell_println!("Usage: strate ls");
+        return Err(ShellError::InvalidArguments);
+    }
+
+    let mut silos = silo::list_silos_snapshot();
+    silos.sort_by_key(|s| s.id);
+
+    shell_println!(
+        "{:<6} {:<12} {:<10} {:<7} {}",
+        "ID",
+        "Name",
+        "State",
+        "Tasks",
+        "Label"
+    );
+    shell_println!("────────────────────────────────────────────────────────────");
+    for s in silos {
+        let label = s.strate_label.unwrap_or_else(|| String::from("-"));
+        shell_println!(
+            "{:<6} {:<12} {:<10?} {:<7} {}",
+            s.id,
+            s.name,
+            s.state,
+            s.task_count,
+            label
+        );
+    }
+    Ok(())
 }

@@ -55,6 +55,7 @@ impl CommandRegistry {
         registry.register("trace", sys::cmd_trace);
         registry.register("ping", net::cmd_ping);
         registry.register("ifconfig", net::cmd_ifconfig);
+        registry.register("strate", sys::cmd_strate);
 
         registry
     }

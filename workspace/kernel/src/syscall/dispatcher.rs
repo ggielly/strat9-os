@@ -870,11 +870,13 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
             cap.resource as u64,
         ))),
     )?;
+    let _ = crate::silo::set_current_silo_label_from_path(path);
 
     // Bootstrap convenience: if a privileged userspace server binds root `/`,
     // seed it with the primary volume capability so it can mount storage
     // without waiting for an explicit bootstrap message.
-    if path == "/" || path == "/fs/ext4" {
+    let should_seed_volume = path == "/" || path.starts_with("/srv/strate-fs-");
+    if should_seed_volume {
         if let Some(device) = crate::hardware::storage::virtio_block::get_device() {
             let volume_cap = crate::capability::get_capability_manager().create_capability(
                 ResourceType::Volume,
