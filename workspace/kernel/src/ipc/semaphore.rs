@@ -98,6 +98,10 @@ impl PosixSemaphore {
     pub fn count(&self) -> i32 {
         self.count.load(Ordering::Acquire)
     }
+
+    pub fn is_destroyed(&self) -> bool {
+        self.destroyed.load(Ordering::Acquire)
+    }
 }
 
 static NEXT_SEM_ID: AtomicU64 = AtomicU64::new(1);

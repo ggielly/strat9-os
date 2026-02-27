@@ -25,6 +25,7 @@ use crate::{
     silo,
 };
 use alloc::{sync::Arc, vec};
+use core::sync::atomic::Ordering;
 
 /// Main dispatch function called from `syscall_entry` assembly.
 ///
@@ -51,6 +52,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NULL => sys_null(),
         SYS_HANDLE_DUPLICATE => sys_handle_duplicate(arg1),
         SYS_HANDLE_CLOSE => sys_handle_close(arg1),
+        SYS_HANDLE_WAIT => sys_handle_wait(arg1, arg2),
 
         // Memory management (block 100-199)
         SYS_MMAP => super::mmap::sys_mmap(arg1, arg2, arg3 as u32, arg4 as u32, frame.r8, frame.r9),
@@ -266,6 +268,134 @@ fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
         .ok_or(SyscallError::PermissionDenied)?;
     let id = caps.insert(dup);
     Ok(id.as_u64())
+}
+
+const HANDLE_EVENT_READABLE: u64 = 1 << 0;
+const HANDLE_EVENT_WRITABLE: u64 = 1 << 1;
+
+fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &*task.process.capabilities.get() };
+    let cap = caps.get(CapId::from_raw(handle)).ok_or(SyscallError::BadHandle)?;
+
+    match cap.resource_type {
+        ResourceType::Semaphore => {
+            if !cap.permissions.read {
+                return Err(SyscallError::PermissionDenied);
+            }
+            let sem = semaphore::get_semaphore(SemId::from_u64(cap.resource as u64))
+                .ok_or(SyscallError::BadHandle)?;
+            if sem.is_destroyed() {
+                return Err(SyscallError::Pipe);
+            }
+            if sem.count() > 0 {
+                Ok(HANDLE_EVENT_READABLE)
+            } else {
+                Ok(0)
+            }
+        }
+        ResourceType::IpcPort => {
+            let port = port::get_port(PortId::from_u64(cap.resource as u64)).ok_or(SyscallError::BadHandle)?;
+            if port.is_destroyed() {
+                return Err(SyscallError::Pipe);
+            }
+            let mut events = 0u64;
+            if cap.permissions.read && port.has_messages() {
+                events |= HANDLE_EVENT_READABLE;
+            }
+            if cap.permissions.write && port.can_send() {
+                events |= HANDLE_EVENT_WRITABLE;
+            }
+            if events == 0 && !cap.permissions.read && !cap.permissions.write {
+                return Err(SyscallError::PermissionDenied);
+            }
+            Ok(events)
+        }
+        ResourceType::Channel => {
+            let chan =
+                channel::get_channel(ChanId::from_u64(cap.resource as u64)).ok_or(SyscallError::BadHandle)?;
+            if chan.is_destroyed() {
+                return Err(SyscallError::Pipe);
+            }
+            let mut events = 0u64;
+            if cap.permissions.read && !chan.is_empty() {
+                events |= HANDLE_EVENT_READABLE;
+            }
+            if cap.permissions.write && chan.can_send() {
+                events |= HANDLE_EVENT_WRITABLE;
+            }
+            if events == 0 && !cap.permissions.read && !cap.permissions.write {
+                return Err(SyscallError::PermissionDenied);
+            }
+            Ok(events)
+        }
+        ResourceType::SharedRing => {
+            let _ = shared_ring::get_ring(RingId::from_u64(cap.resource as u64)).ok_or(SyscallError::BadHandle)?;
+            let mut events = 0u64;
+            if cap.permissions.read {
+                events |= HANDLE_EVENT_READABLE;
+            }
+            if cap.permissions.write {
+                events |= HANDLE_EVENT_WRITABLE;
+            }
+            if events == 0 {
+                return Err(SyscallError::PermissionDenied);
+            }
+            Ok(events)
+        }
+        _ => Err(SyscallError::NotSupported),
+    }
+}
+
+fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+
+    let check_ready = || -> Result<u64, SyscallError> {
+        let events = poll_handle_events(handle)?;
+        if events != 0 {
+            Ok(events)
+        } else {
+            Err(SyscallError::Again)
+        }
+    };
+
+    if timeout_ns == 0 {
+        return check_ready();
+    }
+
+    let deadline = if timeout_ns == u64::MAX {
+        None
+    } else {
+        Some(crate::syscall::time::current_time_ns().saturating_add(timeout_ns))
+    };
+
+    loop {
+        if let Ok(events) = check_ready() {
+            return Ok(events);
+        }
+
+        if crate::process::has_pending_signals() {
+            return Err(SyscallError::Interrupted);
+        }
+
+        let now = crate::syscall::time::current_time_ns();
+        let wake_ns = if let Some(deadline_ns) = deadline {
+            if now >= deadline_ns {
+                return Err(SyscallError::TimedOut);
+            }
+            core::cmp::min(deadline_ns, now.saturating_add(10_000_000))
+        } else {
+            now.saturating_add(10_000_000)
+        };
+
+        if let Some(task) = current_task_clone() {
+            task.wake_deadline_ns.store(wake_ns, Ordering::Relaxed);
+        }
+        crate::process::block_current_task();
+        if let Some(task) = current_task_clone() {
+            task.wake_deadline_ns.store(0, Ordering::Relaxed);
+        }
+    }
 }
 
 /// SYS_PROC_EXIT (300): Exit the current task.

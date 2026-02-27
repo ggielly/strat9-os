@@ -454,6 +454,14 @@ impl SyncChan {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    pub fn is_full(&self) -> bool {
+        self.queue.is_full()
+    }
+
+    pub fn can_send(&self) -> bool {
+        !self.destroyed.load(Ordering::Acquire) && !self.queue.is_full()
+    }
 }
 
 // Global channel registry — userspace syscall surface

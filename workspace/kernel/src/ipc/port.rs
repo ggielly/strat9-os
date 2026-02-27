@@ -136,6 +136,18 @@ impl Port {
         self.send_waitq.wake_all();
         self.recv_waitq.wake_all();
     }
+
+    pub fn has_messages(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    pub fn can_send(&self) -> bool {
+        !self.destroyed.load(Ordering::Acquire) && !self.queue.is_full()
+    }
+
+    pub fn is_destroyed(&self) -> bool {
+        self.destroyed.load(Ordering::Acquire)
+    }
 }
 
 // ===========================================================================
