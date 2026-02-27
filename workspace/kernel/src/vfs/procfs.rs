@@ -18,9 +18,10 @@
 
 use crate::{
     process::{current_pid, get_all_tasks, get_parent_pid},
+    silo,
     syscall::error::SyscallError,
     vfs::scheme::{
-        DirEntry, DynScheme, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_DIR, DT_REG,
+        DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_DIR, DT_REG,
     },
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
@@ -65,7 +66,7 @@ impl ProcScheme {
         }
 
         // Handle /proc/<pid> (directory listing)
-        if let Ok(pid) = path.parse::<u64>() {
+        if path.parse::<u64>().is_ok() {
             return Ok(ProcEntry::Directory);
         }
 
@@ -75,6 +76,7 @@ impl ProcScheme {
             "cpuinfo" => Ok(ProcEntry::File(self.get_cpuinfo())),
             "meminfo" => Ok(ProcEntry::File(self.get_meminfo())),
             "version" => Ok(ProcEntry::File(self.get_version())),
+            "silos" => Ok(ProcEntry::File(self.get_silos())),
             _ => Err(SyscallError::NotFound),
         }
     }
@@ -150,6 +152,38 @@ impl ProcScheme {
         format!("Strat9-OS version 0.1.0 (Bedrock) #1 SMP x86_64 Strat9\n")
     }
 
+    /// Generate /proc/silos content
+    fn get_silos(&self) -> String {
+        let mut output = String::new();
+        let mut silos = silo::list_silos_snapshot();
+        silos.sort_by_key(|s| s.id);
+        let _ = writeln!(
+            output,
+            "id\tstate\ttasks\tmem_used\tmem_min\tmem_max\tlabel\tname"
+        );
+        for s in silos {
+            let label = s.strate_label.unwrap_or_else(|| String::from("-"));
+            let max = if s.mem_max_bytes == 0 {
+                String::from("unlimited")
+            } else {
+                format!("{}", s.mem_max_bytes)
+            };
+            let _ = writeln!(
+                output,
+                "{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}",
+                s.id,
+                s.state,
+                s.task_count,
+                s.mem_usage_bytes,
+                s.mem_min_bytes,
+                max,
+                label,
+                s.name
+            );
+        }
+        output
+    }
+
     /// Generate process status
     fn get_process_status(&self, task: &Arc<crate::process::task::Task>) -> String {
         let mut output = String::new();
@@ -180,6 +214,18 @@ impl ProcScheme {
         let _ = writeln!(output, "Uid:\t{}\t{}\t{}\t{}", uid, euid, euid, euid);
         let _ = writeln!(output, "Gid:\t{}\t{}\t{}\t{}", gid, egid, egid, egid);
         let _ = writeln!(output, "Threads:\t1");
+        if let Some((silo_id, label, mem_used, mem_min, mem_max)) = silo::silo_info_for_task(task.id) {
+            let label = label.unwrap_or_else(|| String::from("-"));
+            let _ = writeln!(output, "SiloId:\t{}", silo_id);
+            let _ = writeln!(output, "SiloLabel:\t{}", label);
+            let _ = writeln!(output, "SiloMemUsed:\t{}", mem_used);
+            let _ = writeln!(output, "SiloMemMin:\t{}", mem_min);
+            if mem_max == 0 {
+                let _ = writeln!(output, "SiloMemMax:\tunlimited");
+            } else {
+                let _ = writeln!(output, "SiloMemMax:\t{}", mem_max);
+            }
+        }
 
         output
     }
@@ -222,6 +268,7 @@ impl Scheme for ProcScheme {
                     "cpuinfo" => 10,
                     "meminfo" => 11,
                     "version" => 12,
+                    "silos" => 13,
                     "self/status" => Self::encode_id(
                         KIND_PROC_STATUS,
                         current_pid().map(|p| p as u64).unwrap_or(0),
@@ -297,6 +344,7 @@ impl Scheme for ProcScheme {
                 (0, 10) => self.get_cpuinfo(),
                 (0, 11) => self.get_meminfo(),
                 (0, 12) => self.get_version(),
+                (0, 13) => self.get_silos(),
                 (KIND_PROC_STATUS, _) => {
                     let tasks = get_all_tasks().ok_or(SyscallError::NotFound)?;
                     let task = tasks
@@ -384,6 +432,11 @@ impl Scheme for ProcScheme {
                 ino: 12,
                 file_type: DT_REG,
                 name: String::from("version"),
+            });
+            entries.push(DirEntry {
+                ino: 13,
+                file_type: DT_REG,
+                name: String::from("silos"),
             });
             if let Some(tasks) = get_all_tasks() {
                 for task in tasks {

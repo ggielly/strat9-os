@@ -195,6 +195,9 @@ struct Silo {
     strate_label: Option<String>,
     state: SiloState,
     config: SiloConfig,
+    /// Current memory usage accounted to this silo (bytes).
+    /// This tracks user-space virtual regions reserved/mapped via AddressSpace APIs.
+    mem_usage_bytes: u64,
     flags: u32,
     module_id: Option<u64>,
     tasks: Vec<TaskId>,
@@ -210,6 +213,9 @@ pub struct SiloSnapshot {
     pub strate_label: Option<String>,
     pub state: SiloState,
     pub task_count: usize,
+    pub mem_usage_bytes: u64,
+    pub mem_min_bytes: u64,
+    pub mem_max_bytes: u64,
 }
 
 struct SiloManager {
@@ -238,6 +244,7 @@ impl SiloManager {
             strate_label: None,
             state: SiloState::Created,
             config: SiloConfig::default(),
+            mem_usage_bytes: 0,
             flags,
             module_id: None,
             tasks: Vec::new(),
@@ -550,6 +557,61 @@ impl ModuleRegistry {
 
 static MODULE_REGISTRY: SpinLock<ModuleRegistry> = SpinLock::new(ModuleRegistry::new());
 
+fn charge_task_silo_memory(task_id: TaskId, bytes: u64) -> Result<(), SyscallError> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    let mut mgr = SILO_MANAGER.lock();
+    let Some(silo_id) = mgr.silo_for_task(task_id) else {
+        return Ok(());
+    };
+    let silo = mgr.get_mut(silo_id)?;
+    let next = silo
+        .mem_usage_bytes
+        .checked_add(bytes)
+        .ok_or(SyscallError::OutOfMemory)?;
+    if silo.config.mem_max != 0 && next > silo.config.mem_max {
+        return Err(SyscallError::OutOfMemory);
+    }
+    silo.mem_usage_bytes = next;
+    Ok(())
+}
+
+fn release_task_silo_memory(task_id: TaskId, bytes: u64) {
+    if bytes == 0 {
+        return;
+    }
+    let mut mgr = SILO_MANAGER.lock();
+    let Some(silo_id) = mgr.silo_for_task(task_id) else {
+        return;
+    };
+    if let Ok(silo) = mgr.get_mut(silo_id) {
+        silo.mem_usage_bytes = silo.mem_usage_bytes.saturating_sub(bytes);
+    }
+}
+
+/// Charge memory usage against the current task's silo quota (if any).
+///
+/// Returns `OutOfMemory` when charging would exceed `SiloConfig.mem_max`.
+/// Tasks that are not part of a silo are ignored.
+pub fn charge_current_task_memory(bytes: u64) -> Result<(), SyscallError> {
+    let Some(task) = crate::process::scheduler::current_task_clone_try() else {
+        // Boot-time/kernel contexts may have no current task.
+        // Also avoid deadlock when scheduler lock is already held in cleanup paths.
+        return Ok(());
+    };
+    charge_task_silo_memory(task.id, bytes)
+}
+
+/// Release memory usage from the current task's silo quota (if any).
+///
+/// Tasks that are not part of a silo are ignored.
+pub fn release_current_task_memory(bytes: u64) {
+    if let Some(task) = crate::process::scheduler::current_task_clone_try() {
+        release_task_silo_memory(task.id, bytes);
+    }
+}
+
 fn extract_strate_label(path: &str) -> Option<String> {
     let prefix = "/srv/strate-fs-";
     let rest = path.strip_prefix(prefix)?;
@@ -619,8 +681,32 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
             strate_label: s.strate_label.clone(),
             state: s.state,
             task_count: s.tasks.len(),
+            mem_usage_bytes: s.mem_usage_bytes,
+            mem_min_bytes: s.config.mem_min,
+            mem_max_bytes: s.config.mem_max,
         })
         .collect()
+}
+
+/// Return silo identity + memory accounting for a task, if the task belongs to a silo.
+///
+/// Tuple layout:
+/// - silo id
+/// - optional label
+/// - current usage bytes
+/// - configured minimum bytes
+/// - configured maximum bytes (0 = unlimited)
+pub fn silo_info_for_task(task_id: TaskId) -> Option<(u64, Option<String>, u64, u64, u64)> {
+    let mgr = SILO_MANAGER.lock();
+    let silo_id = mgr.silo_for_task(task_id)?;
+    let silo = mgr.get(silo_id).ok()?;
+    Some((
+        silo.id.0,
+        silo.strate_label.clone(),
+        silo.mem_usage_bytes,
+        silo.config.mem_min,
+        silo.config.mem_max,
+    ))
 }
 
 fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, SyscallError> {

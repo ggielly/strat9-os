@@ -4,7 +4,10 @@ use crate::{
         elf::load_and_run_elf, log_scheduler_state, scheduler_class_table,
         scheduler_verbose_enabled, set_scheduler_verbose,
     },
-    shell::{output::clear_screen, ShellError},
+    shell::{
+        output::{clear_screen, format_bytes},
+        ShellError,
+    },
     shell_println, silo, vfs,
 };
 use alloc::string::String;
@@ -343,22 +346,31 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
             silos.sort_by_key(|s| s.id);
 
             shell_println!(
-                "{:<6} {:<12} {:<10} {:<7} {}",
+                "{:<6} {:<12} {:<10} {:<7} {:<18} {}",
                 "ID",
                 "Name",
                 "State",
                 "Tasks",
+                "Memory",
                 "Label"
             );
-            shell_println!("────────────────────────────────────────────────────────────");
+            shell_println!("────────────────────────────────────────────────────────────────────────────────");
             for s in silos {
                 let label = s.strate_label.unwrap_or_else(|| String::from("-"));
+                let (used_val, used_unit) = format_bytes(s.mem_usage_bytes as usize);
+                let mem_cell = if s.mem_max_bytes == 0 {
+                    alloc::format!("{} {} / unlimited", used_val, used_unit)
+                } else {
+                    let (max_val, max_unit) = format_bytes(s.mem_max_bytes as usize);
+                    alloc::format!("{} {} / {} {}", used_val, used_unit, max_val, max_unit)
+                };
                 shell_println!(
-                    "{:<6} {:<12} {:<10?} {:<7} {}",
+                    "{:<6} {:<12} {:<10?} {:<7} {:<18} {}",
                     s.id,
                     s.name,
                     s.state,
                     s.task_count,
+                    mem_cell,
                     label
                 );
             }

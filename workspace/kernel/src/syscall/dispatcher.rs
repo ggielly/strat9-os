@@ -917,11 +917,15 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
     )?;
     let _ = crate::silo::set_current_silo_label_from_path(path);
 
-    // Bootstrap convenience: if a privileged userspace server binds root `/`,
-    // seed it with the primary volume capability so it can mount storage
-    // without waiting for an explicit bootstrap message.
-    let should_seed_volume = path == "/" || path.starts_with("/srv/strate-fs-");
-    if should_seed_volume {
+    // Bootstrap convenience: if a privileged userspace server binds root `/`
+    // or a strate mountpoint, queue a bootstrap message.
+    //
+    // Volume capability seeding is optional (depends on a block device), but
+    // bootstrap delivery must still happen so strate servers can bind their
+    // label alias (`/srv/strate-fs-*/<label>`).
+    let should_bootstrap = path == "/" || path.starts_with("/srv/strate-fs-");
+    if should_bootstrap {
+        let mut seeded_handle: u32 = 0;
         if let Some(device) = crate::hardware::storage::virtio_block::get_device() {
             let volume_cap = crate::capability::get_capability_manager().create_capability(
                 ResourceType::Volume,
@@ -936,66 +940,64 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
             );
             let task_caps = unsafe { &mut *task.process.capabilities.get() };
             let id = task_caps.insert(volume_cap);
+            if id.as_u64() <= u32::MAX as u64 {
+                seeded_handle = id.as_u64() as u32;
+            }
             log::info!(
                 "ipc_bind_port('/'): seeded volume capability handle={} for task {:?}",
                 id.as_u64(),
                 task.id
             );
+        }
 
-            // Send a bootstrap message to the just-bound filesystem server.
-            // Message format:
-            // - msg_type = 0x10
-            // - flags = volume capability handle
-            // - payload[0] = label length (u8)
-            // - payload[1..] = UTF-8 label bytes (truncated to fit)
-            const BOOTSTRAP_MSG_TYPE: u32 = 0x10;
-            if id.as_u64() <= u32::MAX as u64 {
-                let mut boot_msg = IpcMessage::new(BOOTSTRAP_MSG_TYPE);
-                // Use the bound task as sender so capability transfer path can
-                // duplicate `flags` from a valid capability table.
-                boot_msg.sender = task.id.as_u64();
-                boot_msg.flags = id.as_u64() as u32;
-                let label_owned = crate::silo::current_task_silo_label().unwrap_or_else(|| {
-                    if path == "/" {
-                        alloc::string::String::from("root")
-                    } else {
-                        alloc::string::String::from(
-                            path.rsplit('/')
-                                .find(|part| !part.is_empty())
-                                .unwrap_or("default"),
-                        )
-                    }
-                });
-                let label_bytes = label_owned.as_bytes();
-                let max_len = boot_msg.payload.len().saturating_sub(1);
-                let copy_len = core::cmp::min(label_bytes.len(), max_len);
-                boot_msg.payload[0] = copy_len as u8;
-                if copy_len > 0 {
-                    boot_msg.payload[1..1 + copy_len].copy_from_slice(&label_bytes[..copy_len]);
-                }
-
-                let port_id = PortId::from_u64(cap.resource as u64);
-                if let Some(p) = port::get_port(port_id) {
-                    if p.send(boot_msg).is_ok() {
-                        log::info!(
-                            "ipc_bind_port('{}'): queued bootstrap message (handle={}, label={})",
-                            path,
-                            id.as_u64(),
-                            label_owned
-                        );
-                    } else {
-                        log::warn!(
-                            "ipc_bind_port('{}'): failed to queue bootstrap message",
-                            path
-                        );
-                    }
-                } else {
-                    log::warn!(
-                        "ipc_bind_port('{}'): bound port disappeared before bootstrap",
-                        path
-                    );
-                }
+        // Send a bootstrap message to the just-bound filesystem server.
+        // Message format:
+        // - msg_type = 0x10
+        // - flags = optional volume capability handle (0 if none)
+        // - payload[0] = label length (u8)
+        // - payload[1..] = UTF-8 label bytes (truncated to fit)
+        const BOOTSTRAP_MSG_TYPE: u32 = 0x10;
+        let mut boot_msg = IpcMessage::new(BOOTSTRAP_MSG_TYPE);
+        // Use the bound task as sender so capability transfer path can
+        // duplicate `flags` from a valid capability table when present.
+        boot_msg.sender = task.id.as_u64();
+        boot_msg.flags = seeded_handle;
+        let label_owned = crate::silo::current_task_silo_label().unwrap_or_else(|| {
+            if path == "/" {
+                alloc::string::String::from("root")
+            } else {
+                alloc::string::String::from(
+                    path.rsplit('/')
+                        .find(|part| !part.is_empty())
+                        .unwrap_or("default"),
+                )
             }
+        });
+        let label_bytes = label_owned.as_bytes();
+        let max_len = boot_msg.payload.len().saturating_sub(1);
+        let copy_len = core::cmp::min(label_bytes.len(), max_len);
+        boot_msg.payload[0] = copy_len as u8;
+        if copy_len > 0 {
+            boot_msg.payload[1..1 + copy_len].copy_from_slice(&label_bytes[..copy_len]);
+        }
+
+        let port_id = PortId::from_u64(cap.resource as u64);
+        if let Some(p) = port::get_port(port_id) {
+            if p.send(boot_msg).is_ok() {
+                log::info!(
+                    "ipc_bind_port('{}'): queued bootstrap message (handle={}, label={})",
+                    path,
+                    seeded_handle,
+                    label_owned
+                );
+            } else {
+                log::warn!("ipc_bind_port('{}'): failed to queue bootstrap message", path);
+            }
+        } else {
+            log::warn!(
+                "ipc_bind_port('{}'): bound port disappeared before bootstrap",
+                path
+            );
         }
     }
     Ok(0)

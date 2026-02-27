@@ -15,7 +15,10 @@ static SWITCH_WORKER_DONE: AtomicBool = AtomicBool::new(false);
 
 fn wait_exit(id: TaskId, timeout_ticks: u64) -> bool {
     let start = ticks();
-    let mut spin_budget: u64 = 200_000;
+    // Budget proportionnel au timeout pour éviter de l'épuiser avant les ticks
+    // (sur machine rapide, yield_task peut revenir bien avant qu'un tick s'écoule)
+    let spin_budget = timeout_ticks.saturating_mul(100_000).max(10_000_000);
+    let mut iterations: u64 = 0;
     loop {
         if get_task_by_id(id).is_none() {
             return true;
@@ -24,11 +27,11 @@ fn wait_exit(id: TaskId, timeout_ticks: u64) -> bool {
             let _ = kill_task(id);
             return false;
         }
-        if spin_budget == 0 {
+        if iterations >= spin_budget {
             let _ = kill_task(id);
             return false;
         }
-        spin_budget = spin_budget.saturating_sub(1);
+        iterations = iterations.saturating_add(1);
         crate::process::yield_task();
     }
 }
@@ -77,6 +80,7 @@ fn test_rt_preempts_fair() -> bool {
     add_task(fair);
     add_task(rt);
     log_scheduler_state("rt-preempt-start");
+    crate::process::yield_task(); // laisser le scheduler démarrer les probes
 
     let fair_ok = wait_exit(fair_id, 1500);
     let rt_ok = wait_exit(rt_id, 1500);
@@ -104,6 +108,7 @@ fn test_dynamic_policy_switch() -> bool {
     };
     let id = worker.id;
     add_task(worker);
+    crate::process::yield_task(); // laisser le worker démarrer
 
     let p1 = set_task_sched_policy(
         id,

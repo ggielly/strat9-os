@@ -247,6 +247,9 @@ impl AddressSpace {
             }
         }
 
+        // Enforce per-silo memory quota (best effort; non-silo tasks are ignored).
+        crate::silo::charge_current_task_memory(len).map_err(|_| "Silo memory quota exceeded")?;
+
         // Track the region, attempting to merge with previous.
         let mut regions = self.regions.lock();
         let mut merged = false;
@@ -483,6 +486,9 @@ impl AddressSpace {
             }
         }
 
+        // Enforce per-silo memory quota for eagerly mapped regions.
+        crate::silo::charge_current_task_memory(len).map_err(|_| "Silo memory quota exceeded")?;
+
         let page_flags = flags.to_page_flags();
         let mut frame_allocator = BuddyFrameAllocator;
 
@@ -597,6 +603,7 @@ impl AddressSpace {
                     }
                 }
 
+                crate::silo::release_current_task_memory(len);
                 return Err("Failed to map page");
             }
 
@@ -797,6 +804,9 @@ impl AddressSpace {
             page_count as u64
         );
 
+        let released = (page_count as u64).saturating_mul(page_bytes);
+        crate::silo::release_current_task_memory(released);
+
         Ok(())
     }
 
@@ -887,6 +897,7 @@ impl AddressSpace {
         }
 
         // Process regions one by one to avoid heap allocation (Vec)
+        let mut released_bytes = 0u64;
         loop {
             // Find the first overlapping region
             let region_info = {
@@ -907,6 +918,7 @@ impl AddressSpace {
             let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
             let range_start = core::cmp::max(vma_start, addr);
             let range_end = core::cmp::min(vma_end, end);
+            released_bytes = released_bytes.saturating_add(range_end.saturating_sub(range_start));
 
             // 1. Hardware unmap
             // SAFETY: Logical ownership of address space.
@@ -987,6 +999,7 @@ impl AddressSpace {
             }
         }
 
+        crate::silo::release_current_task_memory(released_bytes);
         Ok(())
     }
 

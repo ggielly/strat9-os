@@ -1087,6 +1087,29 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
     task
 }
 
+/// Best-effort, non-blocking variant of [`current_task_clone`].
+///
+/// Returns `None` when the scheduler lock is contended.
+/// Useful in cleanup paths where blocking on `SCHEDULER.lock()` could deadlock.
+pub fn current_task_clone_try() -> Option<Arc<Task>> {
+    let saved_flags = save_flags_and_cli();
+    let cpu_index = current_cpu_index();
+    let task = if let Some(scheduler) = SCHEDULER.try_lock() {
+        if let Some(ref sched) = *scheduler {
+            sched
+                .cpus
+                .get(cpu_index)
+                .and_then(|cpu| cpu.current_task.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    restore_flags(saved_flags);
+    task
+}
+
 /// Resolve a POSIX pid to internal TaskId.
 pub fn get_task_id_by_pid(pid: Pid) -> Option<TaskId> {
     let saved_flags = save_flags_and_cli();

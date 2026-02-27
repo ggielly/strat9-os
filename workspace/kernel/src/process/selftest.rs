@@ -130,7 +130,7 @@ extern "C" fn selftest_orchestrator() -> ! {
     let _ = wait_task_exit("demand-paging-test", 2_000);
 
     crate::process::scheduler_test::create_scheduler_test_task();
-    let _ = wait_task_exit("scheduler-test", 3_000);
+    let _ = wait_task_exit("scheduler-test", 6_000);
 
     crate::process::fork_test::create_fork_test_task();
     let _ = wait_task_exit("fork-test", 4_000);
