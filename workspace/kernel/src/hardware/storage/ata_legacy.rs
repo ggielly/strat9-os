@@ -34,6 +34,7 @@ const ATA_DEVICE_MASTER: u8 = 0xA0;
 const ATA_DEVICE_SLAVE: u8 = 0xB0;
 const ATA_DEVICE_LBA: u8 = 0x40;
 
+#[derive(Clone, Copy)]
 pub struct AtaChannel {
     io_base: u16,
     control_base: u16,

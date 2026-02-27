@@ -2,7 +2,7 @@
 #![no_main]
 
 use core::panic::PanicInfo;
-use strat9_syscall::{call, number};
+use strat9_syscall::{call, data::TimeSpec, number};
 
 fn log(msg: &str) {
     let _ = call::write(1, msg.as_bytes());
@@ -167,10 +167,18 @@ fn create_dhcp_client_silo() -> Result<(), &'static str> {
 
 /// Monitor the console-admin silo and restart it if it crashes.
 fn monitor_loop() -> ! {
-    log("[init] Entering monitor loop.\n");
+    log("[init] Entering monitor loop (background task).\n");
+    log("[init] System ready. Use Chevron shell for interaction.\n");
+    let req = TimeSpec {
+        tv_sec: 1,
+        tv_nsec: 0,
+    };
+    let mut rem = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     loop {
-        // Yield to let other tasks run
-        let _ = call::sched_yield();
+        let _ = call::nanosleep(&req, &mut rem);
 
         // TODO: poll silo_event_next to detect crashes and restart
     }

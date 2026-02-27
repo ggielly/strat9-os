@@ -52,6 +52,7 @@ pub unsafe fn syscall0(mut a: usize) -> error::Result<usize> {
         inout("rax") a,
         out("rcx") _,
         out("r11") _,
+        clobber_abi("C"),
         options(nostack),
     );
     error::Error::demux(a)
@@ -65,6 +66,7 @@ pub unsafe fn syscall1(mut a: usize, b: usize) -> error::Result<usize> {
         in("rdi") b,
         out("rcx") _,
         out("r11") _,
+        clobber_abi("C"),
         options(nostack),
     );
     error::Error::demux(a)
@@ -79,6 +81,7 @@ pub unsafe fn syscall2(mut a: usize, b: usize, c: usize) -> error::Result<usize>
         in("rsi") c,
         out("rcx") _,
         out("r11") _,
+        clobber_abi("C"),
         options(nostack),
     );
     error::Error::demux(a)
@@ -94,6 +97,7 @@ pub unsafe fn syscall3(mut a: usize, b: usize, c: usize, d: usize) -> error::Res
         in("rdx") d,
         out("rcx") _,
         out("r11") _,
+        clobber_abi("C"),
         options(nostack),
     );
     error::Error::demux(a)
@@ -116,6 +120,7 @@ pub unsafe fn syscall4(
         in("r10") e,
         out("rcx") _,
         out("r11") _,
+        clobber_abi("C"),
         options(nostack),
     );
     error::Error::demux(a)
@@ -140,6 +145,7 @@ pub unsafe fn syscall5(
         in("r8") f,
         out("rcx") _,
         out("r11") _,
+        clobber_abi("C"),
         options(nostack),
     );
     error::Error::demux(a)
@@ -166,6 +172,7 @@ pub unsafe fn syscall6(
         in("r9") g,
         out("rcx") _,
         out("r11") _,
+        clobber_abi("C"),
         options(nostack),
     );
     error::Error::demux(a)
@@ -552,6 +559,53 @@ pub mod call {
     /// Return current thread ID.
     pub fn gettid() -> error::Result<usize> {
         unsafe { syscall0(number::SYS_GETTID) }
+    }
+
+    /// Create a new userspace thread in the current process.
+    ///
+    /// - `entry`: user function address (RIP)
+    /// - `stack_top`: user stack top (RSP), 16-byte aligned
+    /// - `arg0`: first argument passed in RDI
+    /// - `tls_base`: optional FS base for thread-local storage
+    ///
+    /// Returns the new thread TID.
+    pub fn thread_create(
+        entry: usize,
+        stack_top: usize,
+        arg0: usize,
+        tls_base: usize,
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall5(
+                number::SYS_THREAD_CREATE,
+                entry,
+                stack_top,
+                arg0,
+                0,
+                tls_base,
+            )
+        }
+    }
+
+    /// Join a thread previously created by the current task.
+    ///
+    /// Returns the joined thread TID.
+    pub fn thread_join(tid: usize, status: Option<&mut i32>) -> error::Result<usize> {
+        let status_ptr = status.map_or(0usize, |s| s as *mut i32 as usize);
+        unsafe { syscall3(number::SYS_THREAD_JOIN, tid, status_ptr, 0) }
+    }
+
+    /// Exit the current thread with `code`.
+    ///
+    /// This function never returns.
+    pub fn thread_exit(code: i32) -> ! {
+        unsafe {
+            syscall1(number::SYS_THREAD_EXIT, code as usize).ok();
+        }
+        #[allow(clippy::empty_loop)]
+        loop {
+            core::hint::spin_loop();
+        }
     }
 
     /// Return parent process ID.

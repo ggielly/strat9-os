@@ -94,7 +94,7 @@ pub struct Rtl8139Device {
     ports: Mutex<Ports>,
     rx_buffer: *mut u8,
     rx_phys: u64,
-    rx_offset: usize,
+    rx_offset: AtomicUsize,
     tx_buffers: [*mut u8; TX_BUFFERS_COUNT],
     tx_phys: [u64; TX_BUFFERS_COUNT],
     tx_id: AtomicUsize,
@@ -134,7 +134,7 @@ impl Rtl8139Device {
             ports: Mutex::new(ports),
             rx_buffer,
             rx_phys,
-            rx_offset: 0,
+            rx_offset: AtomicUsize::new(0),
             tx_buffers,
             tx_phys,
             tx_id: AtomicUsize::new(TX_BUFFERS_COUNT - 1),
@@ -193,9 +193,10 @@ impl Rtl8139Device {
     }
 
     fn receive_inner(&self) -> Option<Vec<u8>> {
-        let ports = self.ports.lock();
+        let mut ports = self.ports.lock();
+        let rx_offset = self.rx_offset.load(Ordering::Relaxed);
 
-        let status = unsafe { (self.rx_buffer.add(self.rx_offset) as *const u32).read_volatile() };
+        let status = unsafe { (self.rx_buffer.add(rx_offset) as *const u32).read_volatile() };
 
         if (status & OWN) != 0 {
             return None;
@@ -204,17 +205,17 @@ impl Rtl8139Device {
         if (status & 0x0001) == 0 {
             let length = ((status >> 16) & 0x1FFF) as usize - 4;
             if length <= MTU {
-                let packet_start = unsafe { self.rx_buffer.add(self.rx_offset + 4) };
+                let packet_start = unsafe { self.rx_buffer.add(rx_offset + 4) };
                 let mut buf = Vec::with_capacity(length);
                 unsafe {
                     core::ptr::copy_nonoverlapping(packet_start, buf.as_mut_ptr(), length);
                     buf.set_len(length);
                 }
 
-                let new_offset = ((self.rx_offset + length + 4 + RX_BUFFER_PAD)
+                let new_offset = ((rx_offset + length + 4 + RX_BUFFER_PAD)
                     & !(RX_BUFFER_PAD - 1))
                     % RX_BUFFER_SIZE;
-                self.rx_offset = new_offset;
+                self.rx_offset.store(new_offset, Ordering::Relaxed);
                 ports.write16(0x38, (new_offset - RX_BUFFER_PAD) as u16);
 
                 return Some(buf);
@@ -222,7 +223,7 @@ impl Rtl8139Device {
         }
 
         ports.write8(0x37, CR_RE | CR_TE);
-        self.rx_offset = 0;
+        self.rx_offset.store(0, Ordering::Relaxed);
         None
     }
 
@@ -232,7 +233,7 @@ impl Rtl8139Device {
         }
 
         let id = self.tx_id.fetch_add(1, Ordering::SeqCst) % TX_BUFFERS_COUNT;
-        let ports = self.ports.lock();
+        let mut ports = self.ports.lock();
 
         let tx_status = ports.read32(0x10 + (id as u16) * 4);
         if (tx_status & OWN) != 0 {

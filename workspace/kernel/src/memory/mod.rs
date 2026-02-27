@@ -85,9 +85,9 @@ pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSlice
 /// Allocate a zeroed 4KB frame suitable for DMA operations
 pub fn allocate_dma_frame() -> Option<PhysFrame> {
     let mut allocator = get_allocator().lock();
-    let frame = allocator.allocate_frame().ok()?;
+    let frame = allocator.as_mut()?.alloc_frame().ok()?;
     // Zero the frame
-    let virt = phys_to_virt(frame.start_address() as u64) as *mut u8;
+    let virt = phys_to_virt(frame.start_address.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(virt, 0, 4096);
     }

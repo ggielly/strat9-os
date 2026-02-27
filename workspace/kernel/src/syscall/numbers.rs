@@ -259,6 +259,19 @@ pub const SYS_SETUID: u64 = 339;
 /// Set real group id. arg1 = gid.
 pub const SYS_SETGID: u64 = 340;
 
+/// Create a new userspace thread in the current process.
+/// arg1 = entry (user RIP), arg2 = stack_top (user RSP), arg3 = arg0 (user RDI),
+/// arg4 = flags (reserved, must be 0), arg5 = tls_base (optional FS.base)
+pub const SYS_THREAD_CREATE: u64 = 341;
+
+/// Join a userspace thread created by the current task.
+/// arg1 = tid, arg2 = status_ptr (nullable *i32), arg3 = flags (reserved, must be 0)
+pub const SYS_THREAD_JOIN: u64 = 342;
+
+/// Exit current userspace thread.
+/// arg1 = exit_code
+pub const SYS_THREAD_EXIT: u64 = 343;
+
 /// Architecture-specific process info (x86_64: FS/GS base).
 /// arg1 = code (ARCH_SET_FS=0x1002, ARCH_GET_FS=0x1003, etc.), arg2 = addr.
 pub const SYS_ARCH_PRCTL: u64 = 350;

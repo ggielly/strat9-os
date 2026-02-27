@@ -456,6 +456,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         vga_println!("[..] Initializing hardware drivers...");
         hardware::init();
 
+        serial_println!("[init] Initializing USB...");
+        vga_println!("[..] Looking for USB controllers...");
+        hardware::usb::init();
+        serial_println!("[init] USB initialized.");
+        vga_println!("[OK] USB xHCI/EHCI/UHCI initialized");
+
         serial_println!("[init] Initializing VirtIO block...");
         vga_println!("[..] Looking for VirtIO block device...");
         hardware::storage::virtio_block::init();

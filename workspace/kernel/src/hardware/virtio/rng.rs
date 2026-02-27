@@ -187,8 +187,8 @@ impl VirtioDevice {
 
     fn notify_queue(&self, queue: u16) {
         unsafe {
-            let offset = ((self.mmio as *const u16).add(0x10)).read_volatile() as usize;
-            let queue_notify = (self.mmio as *mut u32).add(0x14 + offset);
+            let offset = ((self.mmio + 0x20) as *const u16).read_volatile() as usize;
+            let queue_notify = (self.mmio + 0x50 + offset * 4) as *mut u32;
             queue_notify.write_volatile(queue as u32);
         }
     }
@@ -197,20 +197,20 @@ impl VirtioDevice {
 impl Virtqueue {
     fn new(device: &mut VirtioDevice, queue_idx: u16) -> Result<Self, &'static str> {
         unsafe {
-            (device.mmio.add(0x16) as *mut u16).write_volatile(queue_idx);
-            let max_size = (device.mmio.add(0x18) as *const u16).read_volatile();
+            ((device.mmio + 0x16) as *mut u16).write_volatile(queue_idx);
+            let max_size = ((device.mmio + 0x18) as *const u16).read_volatile();
             if max_size < VIRTIO_RING_SIZE as u16 {
                 return Err("Queue size too small");
             }
-            (device.mmio.add(0x16) as *mut u16).write_volatile(VIRTIO_RING_SIZE as u16);
+            ((device.mmio + 0x16) as *mut u16).write_volatile(VIRTIO_RING_SIZE as u16);
 
             let desc_frame = allocate_dma_frame().ok_or("Failed to allocate desc")?;
             let avail_frame = allocate_dma_frame().ok_or("Failed to allocate avail")?;
             let used_frame = allocate_dma_frame().ok_or("Failed to allocate used")?;
 
-            let desc_phys = desc_frame.start_address;
-            let avail_phys = avail_frame.start_address;
-            let used_phys = used_frame.start_address;
+            let desc_phys = desc_frame.start_address.as_u64();
+            let avail_phys = avail_frame.start_address.as_u64();
+            let used_phys = used_frame.start_address.as_u64();
 
             let desc_virt = phys_to_virt(desc_phys) as *mut VirtqDesc;
             let avail_virt = phys_to_virt(avail_phys) as *mut VirtqAvail;
@@ -224,11 +224,11 @@ impl Virtqueue {
             core::ptr::write_bytes(avail_virt, 0, core::mem::size_of::<VirtqAvail>());
             core::ptr::write_bytes(used_virt, 0, core::mem::size_of::<VirtqUsed>());
 
-            (device.mmio.add(0x10) as *mut u32).write_volatile((desc_phys & 0xFFFFFFFF) as u32);
-            (device.mmio.add(0x1A) as *mut u16).write_volatile(0xFFFF);
+            ((device.mmio + 0x10) as *mut u32).write_volatile((desc_phys & 0xFFFFFFFF) as u32);
+            ((device.mmio + 0x1A) as *mut u16).write_volatile(0xFFFF);
 
             let buffer_frame = allocate_dma_frame().ok_or("Failed to allocate entropy buffer")?;
-            let entropy_phys = buffer_frame.start_address;
+            let entropy_phys = buffer_frame.start_address.as_u64();
             let entropy_virt = phys_to_virt(entropy_phys) as *mut u8;
             core::ptr::write_bytes(entropy_virt, 0, 4096);
 

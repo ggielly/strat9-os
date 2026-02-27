@@ -161,12 +161,16 @@ impl PcnetDevice {
         let rx_des_frame = allocate_dma_frame().ok_or("Failed to allocate RX descriptors")?;
         let rx_des_phys = rx_des_frame.start_address.as_u64();
         let rx_des = phys_to_virt(rx_des_phys) as *mut u8;
-        core::ptr::write_bytes(rx_des, 0, RX_BUFFERS_COUNT * DESC_LEN);
+        unsafe {
+            core::ptr::write_bytes(rx_des, 0, RX_BUFFERS_COUNT * DESC_LEN);
+        }
 
         let tx_des_frame = allocate_dma_frame().ok_or("Failed to allocate TX descriptors")?;
         let tx_des_phys = tx_des_frame.start_address.as_u64();
         let tx_des = phys_to_virt(tx_des_phys) as *mut u8;
-        core::ptr::write_bytes(tx_des, 0, TX_BUFFERS_COUNT * DESC_LEN);
+        unsafe {
+            core::ptr::write_bytes(tx_des, 0, TX_BUFFERS_COUNT * DESC_LEN);
+        }
 
         let mut device = Self {
             ports: Mutex::new(ports),
@@ -213,7 +217,9 @@ impl PcnetDevice {
         let init_struct_frame = allocate_dma_frame().unwrap();
         let init_phys = init_struct_frame.start_address.as_u64();
         let init_virt = phys_to_virt(init_phys) as *mut u8;
-        core::ptr::write_bytes(init_virt, 0, 28);
+        unsafe {
+            core::ptr::write_bytes(init_virt, 0, 28);
+        }
 
         unsafe {
             init_virt.write(0);
@@ -270,7 +276,8 @@ impl PcnetDevice {
             desc.write_bytes(0, DESC_LEN);
 
             let buf_addr = self.rx_phys[i];
-            desc.add(0).write((buf_addr & 0xFFFF) as u16);
+            desc.add(0).write((buf_addr & 0xFF) as u8);
+            desc.add(1).write(((buf_addr >> 8) & 0xFF) as u8);
             desc.add(2).write(((buf_addr >> 16) & 0xFF) as u8);
             desc.add(3).write(0x80);
             desc.add(4).write((!MTU & 0xFFF) as u8);
@@ -284,7 +291,8 @@ impl PcnetDevice {
             desc.write_bytes(0, DESC_LEN);
 
             let buf_addr = self.tx_phys[i];
-            desc.add(0).write((buf_addr & 0xFFFF) as u16);
+            desc.add(0).write((buf_addr & 0xFF) as u8);
+            desc.add(1).write(((buf_addr >> 8) & 0xFF) as u8);
             desc.add(2).write(((buf_addr >> 16) & 0xFF) as u8);
             desc.add(3).write(0x83);
         }

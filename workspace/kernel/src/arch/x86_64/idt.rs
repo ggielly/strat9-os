@@ -381,13 +381,10 @@ fn dump_user_pf_context(as_ref: &crate::memory::AddressSpace, rip: u64, rsp: u64
     }
 
     if let Some(phys) = as_ref.translate(VirtAddr::new(rsp)) {
-        // SAFETY: Read two u64 words from the mapped stack location.
-        unsafe {
-            let p = (phys.as_u64() + hhdm) as *const u64;
-            let w0 = core::ptr::read_unaligned(p);
-            let w1 = core::ptr::read_unaligned(p.add(1));
-            crate::serial_println!("[pagefault] stack-top: [{:#x}, {:#x}]", w0, w1);
-        }
+        crate::serial_println!(
+            "[pagefault] stack-top: rsp mapped (phys={:#x})",
+            phys.as_u64()
+        );
     } else {
         crate::serial_println!("[pagefault] stack-top: rsp unmapped");
     }

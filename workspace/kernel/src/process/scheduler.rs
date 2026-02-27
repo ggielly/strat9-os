@@ -1131,6 +1131,25 @@ pub fn get_task_by_pid(pid: Pid) -> Option<Arc<Task>> {
     get_task_by_id(tid)
 }
 
+/// Resolve a POSIX tid to the corresponding internal task id.
+pub fn get_task_id_by_tid(tid: Tid) -> Option<TaskId> {
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = SCHEDULER.lock();
+        if let Some(ref sched) = *scheduler {
+            sched
+                .all_tasks
+                .iter()
+                .find_map(|(task_id, task)| if task.tid == tid { Some(*task_id) } else { None })
+                .or_else(|| sched.pid_to_task.get(&(tid as Pid)).copied())
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
 /// Resolve a PID to the current process group id.
 pub fn get_pgid_by_pid(pid: Pid) -> Option<Pid> {
     let task = get_task_by_pid(pid)?;

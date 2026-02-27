@@ -27,7 +27,7 @@ impl<T> VolatileCell<T> {
         unsafe { ptr::read_volatile(&self.value) }
     }
     fn write(&self, val: T) {
-        unsafe { ptr::write_volatile(&mut self.value, val) }
+        unsafe { ptr::write_volatile(core::ptr::addr_of!(self.value) as *mut T, val) }
     }
 }
 
@@ -59,22 +59,22 @@ struct ControllerConfig {
 }
 
 impl ControllerConfig {
-    fn set_iosqes(&mut self, size: u32) {
+    fn set_iosqes(&self, size: u32) {
         let mut val = self.value.read();
         val |= (size & 0xF) << 16;
         self.value.write(val);
     }
-    fn set_iocqes(&mut self, size: u32) {
+    fn set_iocqes(&self, size: u32) {
         let mut val = self.value.read();
         val |= (size & 0xF) << 20;
         self.value.write(val);
     }
-    fn set_css(&mut self, css: u32) {
+    fn set_css(&self, css: u32) {
         let mut val = self.value.read();
         val |= (css & 0x7) << 4;
         self.value.write(val);
     }
-    fn set_enable(&mut self, enable: bool) {
+    fn set_enable(&self, enable: bool) {
         let mut val = self.value.read();
         if enable {
             val |= 1;
@@ -176,11 +176,10 @@ impl NvmeController {
         regs.asq.write(admin_sq_phys);
         regs.acq.write(admin_cq_phys);
 
-        let mut cc = regs.cc;
-        cc.set_css(0);
-        cc.set_iosqes(6);
-        cc.set_iocqes(6);
-        cc.set_enable(true);
+        regs.cc.set_css(0);
+        regs.cc.set_iosqes(6);
+        regs.cc.set_iocqes(6);
+        regs.cc.set_enable(true);
 
         let mut timeout = 1_000_000;
         while !regs.csts.is_ready() {
@@ -402,9 +401,9 @@ impl Queue<Submission> {
     fn submit_command(&mut self, command: Command, idx: usize) {
         unsafe {
             ptr::write(self.entries.add(idx), command);
+            (*self.doorbell).write(((idx + 1) % self.size) as u32);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        (*self.doorbell).write(((idx + 1) % self.size) as u32);
     }
 }
 

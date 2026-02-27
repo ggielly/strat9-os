@@ -88,6 +88,9 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_GETEGID => proc_sys::sys_getegid(),
         SYS_SETUID => proc_sys::sys_setuid(arg1),
         SYS_SETGID => proc_sys::sys_setgid(arg1),
+        SYS_THREAD_CREATE => proc_sys::sys_thread_create(frame, arg1, arg2, arg3, arg4, frame.r8),
+        SYS_THREAD_JOIN => proc_sys::sys_thread_join(arg1, arg2, arg3),
+        SYS_THREAD_EXIT => proc_sys::sys_thread_exit(arg1),
         // ── Thread lifecycle (333-334) ────────────────────────────────────────
         SYS_SET_TID_ADDRESS => proc_sys::sys_set_tid_address(arg1),
         SYS_EXIT_GROUP => proc_sys::sys_exit_group(arg1),

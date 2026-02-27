@@ -109,6 +109,7 @@ struct GpuRect {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CtrlHeader {
     cmd_and_flags: u32,
     fence_id: u64,
@@ -117,6 +118,7 @@ struct CtrlHeader {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CmdGetDisplayInfo {
     hdr: CtrlHeader,
     scanout_id: u32,
@@ -124,6 +126,7 @@ struct CmdGetDisplayInfo {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct RespDisplayInfo {
     hdr: CtrlHeader,
     rect: GpuRect,
@@ -132,6 +135,7 @@ struct RespDisplayInfo {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CmdResourceCreate2d {
     hdr: CtrlHeader,
     resource_id: u32,
@@ -141,6 +145,7 @@ struct CmdResourceCreate2d {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CmdResourceAttachBacking {
     hdr: CtrlHeader,
     resource_id: u32,
@@ -148,6 +153,7 @@ struct CmdResourceAttachBacking {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct MemEntry {
     addr: u64,
     length: u32,
@@ -155,6 +161,7 @@ struct MemEntry {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CmdSetScanout {
     hdr: CtrlHeader,
     rect: GpuRect,
@@ -163,6 +170,7 @@ struct CmdSetScanout {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CmdSetFramebuffer {
     hdr: CtrlHeader,
     resource_id: u32,
@@ -170,6 +178,7 @@ struct CmdSetFramebuffer {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CmdResourceFlush {
     hdr: CtrlHeader,
     rect: GpuRect,
@@ -244,7 +253,9 @@ impl VirtioGpu {
                 framebuffer_virt = page_virt;
             }
 
-            core::ptr::write_bytes(page_virt, 0, 4096);
+            unsafe {
+                core::ptr::write_bytes(page_virt, 0, 4096);
+            }
         }
 
         self.info.framebuffer_phys = framebuffer_phys;
@@ -369,7 +380,7 @@ impl VirtioGpu {
         Ok(())
     }
 
-    fn send_command(&self, cmd: &dyn Copy, cmd_size: usize) -> Result<*mut u8, &'static str> {
+    fn send_command<T: Copy>(&self, cmd: &T, cmd_size: usize) -> Result<*mut u8, &'static str> {
         let mut ctrl_queue = self.ctrl_queue.lock();
 
         if ctrl_queue.free.is_empty() {
@@ -415,7 +426,13 @@ impl VirtioGpu {
         }
     }
 
-    fn send_command_with_data(&self, cmd: &dyn Copy, cmd_size: usize, data: &dyn Copy, data_size: usize) -> Result<(), &'static str> {
+    fn send_command_with_data<T: Copy, U: Copy>(
+        &self,
+        cmd: &T,
+        cmd_size: usize,
+        data: &U,
+        data_size: usize,
+    ) -> Result<(), &'static str> {
         let mut ctrl_queue = self.ctrl_queue.lock();
 
         if ctrl_queue.free.len() < 2 {
@@ -501,19 +518,19 @@ impl VirtioDevice {
 
     fn add_status(&mut self, status: u8) {
         unsafe {
-            let current = (self.mmio.add(0x14) as *const u8).read_volatile();
-            (self.mmio.add(0x14) as *mut u8).write_volatile(current | status);
+            let current = ((self.mmio + 0x14) as *const u8).read_volatile();
+            ((self.mmio + 0x14) as *mut u8).write_volatile(current | status);
         }
     }
 
     fn read_status(&self) -> u8 {
-        unsafe { (self.mmio.add(0x14) as *const u8).read_volatile() }
+        unsafe { ((self.mmio + 0x14) as *const u8).read_volatile() }
     }
 
     fn read_features(&self) -> u64 {
         unsafe {
             let lo = (self.mmio as *const u32).read_volatile() as u64;
-            let hi = (self.mmio.add(4) as *const u32).read_volatile() as u64;
+            let hi = ((self.mmio + 4) as *const u32).read_volatile() as u64;
             (hi << 32) | lo
         }
     }
@@ -521,14 +538,14 @@ impl VirtioDevice {
     fn write_features(&mut self, features: u64) {
         unsafe {
             (self.mmio as *mut u32).write_volatile((features & 0xFFFFFFFF) as u32);
-            (self.mmio.add(4) as *mut u32).write_volatile(((features >> 32) & 0xFFFFFFFF) as u32);
+            ((self.mmio + 4) as *mut u32).write_volatile(((features >> 32) & 0xFFFFFFFF) as u32);
         }
     }
 
     fn notify_queue(&self, queue: u16) {
         unsafe {
-            let offset = (self.mmio.add(0x20) as *const u16).read_volatile() as usize;
-            let queue_notify = self.mmio.add(0x50 + offset * 4);
+            let offset = ((self.mmio + 0x20) as *const u16).read_volatile() as usize;
+            let queue_notify = self.mmio + 0x50 + offset * 4;
             (queue_notify as *mut u32).write_volatile(queue as u32);
         }
     }
@@ -537,12 +554,12 @@ impl VirtioDevice {
 impl Virtqueue {
     fn new(device: &mut VirtioDevice, queue_idx: u16) -> Result<Self, &'static str> {
         unsafe {
-            (device.mmio.add(0x16) as *mut u16).write_volatile(queue_idx);
-            let max_size = (device.mmio.add(0x18) as *const u16).read_volatile();
+            ((device.mmio + 0x16) as *mut u16).write_volatile(queue_idx);
+            let max_size = ((device.mmio + 0x18) as *const u16).read_volatile();
             if max_size < VIRTIO_RING_SIZE as u16 {
                 return Err("Queue size too small");
             }
-            (device.mmio.add(0x16) as *mut u16).write_volatile(VIRTIO_RING_SIZE as u16);
+            ((device.mmio + 0x16) as *mut u16).write_volatile(VIRTIO_RING_SIZE as u16);
 
             let desc_frame = allocate_dma_frame().ok_or("Failed to allocate desc")?;
             let avail_frame = allocate_dma_frame().ok_or("Failed to allocate avail")?;
@@ -560,8 +577,8 @@ impl Virtqueue {
             core::ptr::write_bytes(avail_virt, 0, core::mem::size_of::<VirtqAvail>());
             core::ptr::write_bytes(used_virt, 0, core::mem::size_of::<VirtqUsed>());
 
-            (device.mmio.add(0x10) as *mut u32).write_volatile((desc_phys & 0xFFFFFFFF) as u32);
-            (device.mmio.add(0x1A) as *mut u16).write_volatile(0xFFFF);
+            ((device.mmio + 0x10) as *mut u32).write_volatile((desc_phys & 0xFFFFFFFF) as u32);
+            ((device.mmio + 0x1A) as *mut u16).write_volatile(0xFFFF);
 
             let mut free = Vec::with_capacity(VIRTIO_RING_SIZE);
             for i in 0..VIRTIO_RING_SIZE {

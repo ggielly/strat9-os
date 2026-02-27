@@ -74,6 +74,19 @@ pub const SYS_GETITIMER: usize = 329;
 pub const SYS_SETITIMER: usize = 330;
 pub const SYS_GETPGRP: usize = 331;
 pub const SYS_GETSID: usize = 332;
+pub const SYS_SET_TID_ADDRESS: usize = 333;
+pub const SYS_EXIT_GROUP: usize = 334;
+pub const SYS_GETUID: usize = 335;
+pub const SYS_GETEUID: usize = 336;
+pub const SYS_GETGID: usize = 337;
+pub const SYS_GETEGID: usize = 338;
+pub const SYS_SETUID: usize = 339;
+pub const SYS_SETGID: usize = 340;
+pub const SYS_THREAD_CREATE: usize = 341;
+pub const SYS_THREAD_JOIN: usize = 342;
+pub const SYS_THREAD_EXIT: usize = 343;
+pub const SYS_ARCH_PRCTL: usize = 350;
+pub const SYS_TGKILL: usize = 352;
 
 // Block 400-499: filesystem / VFS
 pub const SYS_OPEN: usize = 403;

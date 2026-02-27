@@ -128,8 +128,8 @@ impl VirtioConsole {
     }
 
     pub fn write(&self, data: &[u8]) -> Result<usize, &'static str> {
-        let ports = self.ports.lock();
-        let port = ports.first().ok_or("No console port")?;
+        let mut ports = self.ports.lock();
+        let port = ports.first_mut().ok_or("No console port")?;
 
         for chunk in data.chunks(VIRTIO_CONSOLE_PORT_SIZE) {
             port.tx_queue.write(chunk)?;
@@ -147,8 +147,8 @@ impl VirtioConsole {
     }
 
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
-        let ports = self.ports.lock();
-        let port = ports.first().ok_or("No console port")?;
+        let mut ports = self.ports.lock();
+        let port = ports.first_mut().ok_or("No console port")?;
         port.rx_queue.read(buf)
     }
 }
@@ -163,19 +163,19 @@ impl VirtioDevice {
 
     fn add_status(&mut self, status: u8) {
         unsafe {
-            let current = (self.mmio.add(0x14) as *const u8).read_volatile();
-            (self.mmio.add(0x14) as *mut u8).write_volatile(current | status);
+            let current = ((self.mmio + 0x14) as *const u8).read_volatile();
+            ((self.mmio + 0x14) as *mut u8).write_volatile(current | status);
         }
     }
 
     fn read_status(&self) -> u8 {
-        unsafe { (self.mmio.add(0x14) as *const u8).read_volatile() }
+        unsafe { ((self.mmio + 0x14) as *const u8).read_volatile() }
     }
 
     fn read_features(&self) -> u64 {
         unsafe {
             let lo = (self.mmio as *const u32).read_volatile() as u64;
-            let hi = (self.mmio.add(4) as *const u32).read_volatile() as u64;
+            let hi = ((self.mmio + 4) as *const u32).read_volatile() as u64;
             (hi << 32) | lo
         }
     }
@@ -183,14 +183,14 @@ impl VirtioDevice {
     fn write_features(&mut self, features: u64) {
         unsafe {
             (self.mmio as *mut u32).write_volatile((features & 0xFFFFFFFF) as u32);
-            (self.mmio.add(4) as *mut u32).write_volatile(((features >> 32) & 0xFFFFFFFF) as u32);
+            ((self.mmio + 4) as *mut u32).write_volatile(((features >> 32) & 0xFFFFFFFF) as u32);
         }
     }
 
     fn notify_queue(&self, queue: u16) {
         unsafe {
-            let offset = (self.mmio.add(0x20) as *const u16).read_volatile() as usize;
-            let queue_notify = self.mmio.add(0x50 + offset * 4);
+            let offset = ((self.mmio + 0x20) as *const u16).read_volatile() as usize;
+            let queue_notify = self.mmio + 0x50 + offset * 4;
             (queue_notify as *mut u32).write_volatile(queue as u32);
         }
     }
@@ -199,12 +199,12 @@ impl VirtioDevice {
 impl Virtqueue {
     fn new(device: &mut VirtioDevice, queue_idx: u16) -> Result<Self, &'static str> {
         unsafe {
-            (device.mmio.add(0x16) as *mut u16).write_volatile(queue_idx);
-            let max_size = (device.mmio.add(0x18) as *const u16).read_volatile();
+            ((device.mmio + 0x16) as *mut u16).write_volatile(queue_idx);
+            let max_size = ((device.mmio + 0x18) as *const u16).read_volatile();
             if max_size < VIRTIO_RING_SIZE as u16 {
                 return Err("Queue size too small");
             }
-            (device.mmio.add(0x16) as *mut u16).write_volatile(VIRTIO_RING_SIZE as u16);
+            ((device.mmio + 0x16) as *mut u16).write_volatile(VIRTIO_RING_SIZE as u16);
 
             let desc_frame = allocate_dma_frame().ok_or("Failed to allocate desc")?;
             let avail_frame = allocate_dma_frame().ok_or("Failed to allocate avail")?;
@@ -226,8 +226,8 @@ impl Virtqueue {
             core::ptr::write_bytes(avail_virt, 0, core::mem::size_of::<VirtqAvail>());
             core::ptr::write_bytes(used_virt, 0, core::mem::size_of::<VirtqUsed>());
 
-            (device.mmio.add(0x10) as *mut u32).write_volatile((desc_phys & 0xFFFFFFFF) as u32);
-            (device.mmio.add(0x1A) as *mut u16).write_volatile(0xFFFF);
+            ((device.mmio + 0x10) as *mut u32).write_volatile((desc_phys & 0xFFFFFFFF) as u32);
+            ((device.mmio + 0x1A) as *mut u16).write_volatile(0xFFFF);
 
             let buffer_frame = allocate_dma_frame().ok_or("Failed to allocate buffer")?;
             let buffer_phys = buffer_frame.start_address.as_u64();
@@ -254,7 +254,7 @@ impl Virtqueue {
         }
     }
 
-    fn write(&self, data: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, data: &[u8]) -> Result<(), &'static str> {
         unsafe {
             if self.free.is_empty() {
                 return Err("No free descriptors");
@@ -276,7 +276,7 @@ impl Virtqueue {
         Ok(())
     }
 
-    fn read(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, &'static str> {
         unsafe {
             if self.last_used_idx == (*self.used).idx {
                 return Ok(0);
@@ -293,7 +293,7 @@ impl Virtqueue {
         }
     }
 
-    fn poll_used(&self) -> bool {
+    fn poll_used(&mut self) -> bool {
         unsafe { self.last_used_idx != (*self.used).idx }
     }
 }
