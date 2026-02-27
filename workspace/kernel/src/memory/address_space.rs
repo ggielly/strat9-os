@@ -897,6 +897,143 @@ impl AddressSpace {
         Ok(false)
     }
 
+    pub fn protect_range(&self, addr: u64, len: u64, flags: VmaFlags) -> Result<(), &'static str> {
+        if len == 0 {
+            return Ok(());
+        }
+        let end = addr
+            .checked_add(len)
+            .ok_or("protect_range: address overflow")?;
+
+        {
+            let regions = self.regions.lock();
+            for (&vma_start, vma) in regions.iter() {
+                let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
+                if vma_start >= end || vma_end <= addr {
+                    continue;
+                }
+                if vma.page_size == VmaPageSize::Huge {
+                    let range_start = core::cmp::max(vma_start, addr);
+                    let range_end = core::cmp::min(vma_end, end);
+                    if range_start % vma.page_size.bytes() != 0
+                        || range_end % vma.page_size.bytes() != 0
+                    {
+                        return Err("protect_range: partial mprotect of 2MiB pages is not supported");
+                    }
+                }
+            }
+        }
+
+        let mut touched = false;
+        loop {
+            let region_info = {
+                let regions = self.regions.lock();
+                regions
+                    .iter()
+                    .find(|(&vma_start, vma)| {
+                        let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
+                        vma_start < end && vma_end > addr
+                    })
+                    .map(|(&k, v)| (k, v.clone()))
+            };
+
+            let Some((vma_start, vma)) = region_info else {
+                break;
+            };
+            touched = true;
+
+            let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
+            let range_start = core::cmp::max(vma_start, addr);
+            let range_end = core::cmp::min(vma_end, end);
+            let page_bytes = vma.page_size.bytes();
+            let new_pt_flags = flags.to_page_flags();
+
+            let mut mapper = unsafe { self.mapper() };
+            let mut page_addr = range_start;
+            while page_addr < range_end {
+                if mapper.translate_addr(VirtAddr::new(page_addr)).is_none() {
+                    page_addr += page_bytes;
+                    continue;
+                }
+                unsafe {
+                    match vma.page_size {
+                        VmaPageSize::Small => {
+                            let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                                .map_err(|_| "protect_range: invalid 4K page address")?;
+                            mapper
+                                .update_flags(page, new_pt_flags)
+                                .map(|f| f.ignore())
+                                .map_err(|_| "protect_range: update 4K flags failed")?;
+                        }
+                        VmaPageSize::Huge => {
+                            let mut huge_flags = new_pt_flags;
+                            huge_flags |= PageTableFlags::HUGE_PAGE;
+                            let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
+                                .map_err(|_| "protect_range: invalid 2M page address")?;
+                            mapper
+                                .update_flags(page, huge_flags)
+                                .map(|f| f.ignore())
+                                .map_err(|_| "protect_range: update 2M flags failed")?;
+                        }
+                    }
+                }
+                page_addr += page_bytes;
+            }
+
+            {
+                let mut regions = self.regions.lock();
+                regions.remove(&vma_start);
+
+                if range_start > vma_start {
+                    let leading_pages = ((range_start - vma_start) / page_bytes) as usize;
+                    regions.insert(
+                        vma_start,
+                        VirtualMemoryRegion {
+                            start: vma_start,
+                            page_count: leading_pages,
+                            flags: vma.flags,
+                            vma_type: vma.vma_type,
+                            page_size: vma.page_size,
+                        },
+                    );
+                }
+
+                let middle_pages = ((range_end - range_start) / page_bytes) as usize;
+                if middle_pages > 0 {
+                    regions.insert(
+                        range_start,
+                        VirtualMemoryRegion {
+                            start: range_start,
+                            page_count: middle_pages,
+                            flags,
+                            vma_type: vma.vma_type,
+                            page_size: vma.page_size,
+                        },
+                    );
+                }
+
+                if range_end < vma_end {
+                    let trailing_pages = ((vma_end - range_end) / page_bytes) as usize;
+                    regions.insert(
+                        range_end,
+                        VirtualMemoryRegion {
+                            start: range_end,
+                            page_count: trailing_pages,
+                            flags: vma.flags,
+                            vma_type: vma.vma_type,
+                            page_size: vma.page_size,
+                        },
+                    );
+                }
+            }
+        }
+
+        if !touched {
+            return Err("protect_range: no mapped region in range");
+        }
+        Ok(())
+    }
+
     pub fn unmap_range(&self, addr: u64, len: u64) -> Result<(), &'static str> {
         if len == 0 {
             return Ok(());

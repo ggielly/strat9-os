@@ -5,6 +5,7 @@
 //!  - [`sys_munmap`] – unmap a virtual memory range (SYS_MUNMAP = 101)
 //!  - [`sys_brk`]    – set / query the program break / heap top (SYS_BRK = 102)
 //!  - [`sys_mremap`] – resize/remap an existing region (SYS_MREMAP = 103)
+//!  - [`sys_mprotect`] – change page permissions (SYS_MPROTECT = 104)
 
 use crate::{
     memory::address_space::{VmaFlags, VmaType},
@@ -347,6 +348,35 @@ pub fn sys_mremap(old_addr: u64, old_size: u64, new_size: u64, flags: u64) -> Re
         .reserve_region(new_addr, new_pages, vma.flags, vma.vma_type, vma.page_size)
         .map_err(|_| SyscallError::OutOfMemory)?;
     Ok(new_addr)
+}
+
+/// SYS_MPROTECT (104): change permissions in an existing mapping range.
+pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, SyscallError> {
+    if len == 0 || addr == 0 || addr & 0xFFF != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let prot_u32 = u32::try_from(prot).map_err(|_| SyscallError::InvalidArgument)?;
+    if prot_u32 & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let len_aligned = page_align_up(len);
+    if len_aligned == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if addr.saturating_add(len_aligned) > USER_SPACE_END {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let task = current_task_clone().ok_or(SyscallError::Fault)?;
+    let addr_space = unsafe { &*task.process.address_space.get() };
+    let flags = prot_to_vma_flags(prot_u32);
+
+    addr_space
+        .protect_range(addr, len_aligned, flags)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+
+    Ok(0)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

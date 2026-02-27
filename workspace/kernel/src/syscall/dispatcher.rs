@@ -59,6 +59,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_MUNMAP => super::mmap::sys_munmap(arg1, arg2),
         SYS_BRK => super::mmap::sys_brk(arg1),
         SYS_MREMAP => super::mmap::sys_mremap(arg1, arg2, arg3, arg4),
+        SYS_MPROTECT => super::mmap::sys_mprotect(arg1, arg2, arg3),
 
         SYS_PROC_EXIT => sys_proc_exit(arg1),
         SYS_PROC_YIELD => sys_proc_yield(),
