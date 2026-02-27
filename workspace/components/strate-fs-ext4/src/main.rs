@@ -11,7 +11,7 @@ extern crate alloc;
 
 mod syscalls;
 
-use alloc::{collections::BTreeMap, format, vec, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 use core::{
     alloc::Layout,
     panic::PanicInfo,
@@ -80,6 +80,53 @@ const OPCODE_CLOSE: u32 = 0x04;
 const OPCODE_BOOTSTRAP: u32 = 0x10;
 
 const MAX_OPEN_FILES: usize = 256;
+
+struct BootstrapInfo {
+    handle: u64,
+    label: String,
+}
+
+fn sanitize_label(raw: &str) -> String {
+    let mut out = String::new();
+    for b in raw.bytes().take(31) {
+        let ok = (b as char).is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.';
+        out.push(if ok { b as char } else { '_' });
+    }
+    if out.is_empty() {
+        String::from("default")
+    } else {
+        out
+    }
+}
+
+fn parse_bootstrap_label(payload: &[u8]) -> String {
+    let len = payload.first().copied().unwrap_or(0) as usize;
+    if len == 0 {
+        return String::from("default");
+    }
+    let end = 1usize.saturating_add(len);
+    let Some(bytes) = payload.get(1..end) else {
+        return String::from("default");
+    };
+    match core::str::from_utf8(bytes) {
+        Ok(s) => sanitize_label(s),
+        Err(_) => String::from("default"),
+    }
+}
+
+fn bind_srv_alias(port_handle: u64, label: &str) {
+    let path = format!("/srv/strate-fs-ext4/{}", label);
+    match call::ipc_bind_port(port_handle as usize, path.as_bytes()) {
+        Ok(_) => {
+            let msg = format!("[fs-ext4] Port alias bound to {}\n", path);
+            debug_log(&msg);
+        }
+        Err(e) => {
+            let msg = format!("[fs-ext4] Failed to bind port alias {}: {}\n", path, e.name());
+            debug_log(&msg);
+        }
+    }
+}
 
 fn error_reply_simple(sender: u64) -> IpcMessage {
     let mut msg = IpcMessage::new(1);
@@ -345,7 +392,7 @@ impl BlockDevice for VolumeBlockDevice {
     }
 }
 
-fn wait_for_bootstrap(port_handle: u64) -> u64 {
+fn wait_for_bootstrap(port_handle: u64) -> BootstrapInfo {
     debug_log("[fs-ext4] Waiting for volume bootstrap...\n");
     loop {
         let mut msg = IpcMessage::new(0);
@@ -357,7 +404,10 @@ fn wait_for_bootstrap(port_handle: u64) -> u64 {
             let mut reply = IpcMessage::new(0);
             reply.sender = msg.sender;
             let _ = call::ipc_reply(&reply);
-            return msg.flags as u64;
+            return BootstrapInfo {
+                handle: msg.flags as u64,
+                label: parse_bootstrap_label(&msg.payload),
+            };
         }
 
         let reply = error_reply_simple(msg.sender);
@@ -365,7 +415,7 @@ fn wait_for_bootstrap(port_handle: u64) -> u64 {
     }
 }
 
-fn try_wait_for_bootstrap(port_handle: u64, attempts: usize) -> Option<u64> {
+fn try_wait_for_bootstrap(port_handle: u64, attempts: usize) -> Option<BootstrapInfo> {
     for _ in 0..attempts {
         let mut msg = IpcMessage::new(0);
         match call::ipc_try_recv(port_handle as usize, &mut msg) {
@@ -374,7 +424,10 @@ fn try_wait_for_bootstrap(port_handle: u64, attempts: usize) -> Option<u64> {
                     let mut reply = IpcMessage::new(0);
                     reply.sender = msg.sender;
                     let _ = call::ipc_reply(&reply);
-                    return Some(msg.flags as u64);
+                    return Some(BootstrapInfo {
+                        handle: msg.flags as u64,
+                        label: parse_bootstrap_label(&msg.payload),
+                    });
                 }
                 let reply = error_reply_simple(msg.sender);
                 let _ = call::ipc_reply(&reply);
@@ -414,24 +467,35 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
     debug_log("[fs-ext4] Port bound to /fs/ext4\n");
 
     let mut volume_handle = bootstrap_handle;
+    let mut bootstrap_label = String::from("default");
     if volume_handle == 0 {
         debug_log("[fs-ext4] Waiting for early bootstrap message...\n");
-        if let Some(h) = try_wait_for_bootstrap(port_handle, 2048) {
-            let msg = format!("[fs-ext4] Received bootstrap handle: {}\n", h);
+        if let Some(info) = try_wait_for_bootstrap(port_handle, 2048) {
+            let msg = format!(
+                "[fs-ext4] Received bootstrap handle: {} label: {}\n",
+                info.handle, info.label
+            );
             debug_log(&msg);
-            volume_handle = h;
+            volume_handle = info.handle;
+            bootstrap_label = info.label;
         } else if let Some(h) = discover_volume_handle_local() {
             debug_log("[fs-ext4] Bootstrap message timeout, using local discovery fallback\n");
             volume_handle = h;
         } else {
             debug_log("[fs-ext4] Bootstrap message timeout, switching to blocking wait\n");
-            volume_handle = wait_for_bootstrap(port_handle);
+            let info = wait_for_bootstrap(port_handle);
+            volume_handle = info.handle;
+            bootstrap_label = info.label;
         }
     }
     {
-        let msg = format!("[fs-ext4] Volume handle ready: {}\n", volume_handle);
+        let msg = format!(
+            "[fs-ext4] Volume handle ready: {} label: {}\n",
+            volume_handle, bootstrap_label
+        );
         debug_log(&msg);
     }
+    bind_srv_alias(port_handle, &bootstrap_label);
 
     // Mount EXT4 with retry/backoff instead of hard exit.
     let mut attempts: u64 = 0;
@@ -450,8 +514,13 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
                 // If we started without bootstrap capability, wait for a fresh handle periodically.
                 if bootstrap_handle == 0 && attempts % 8 == 0 {
                     debug_log("[fs-ext4] Waiting for refreshed bootstrap handle...\n");
-                    volume_handle = wait_for_bootstrap(port_handle);
-                    let msg = format!("[fs-ext4] Refreshed volume handle: {}\n", volume_handle);
+                    let info = wait_for_bootstrap(port_handle);
+                    volume_handle = info.handle;
+                    bootstrap_label = info.label;
+                    let msg = format!(
+                        "[fs-ext4] Refreshed volume handle: {} label: {}\n",
+                        volume_handle, bootstrap_label
+                    );
                     debug_log(&msg);
                 }
                 for _ in 0..2048 {

@@ -895,8 +895,12 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
                 task.id
             );
 
-            // Send a bootstrap message to the just-bound root filesystem server.
-            // The server expects msg_type=0x10 and handle in flags.
+            // Send a bootstrap message to the just-bound filesystem server.
+            // Message format:
+            // - msg_type = 0x10
+            // - flags = volume capability handle
+            // - payload[0] = label length (u8)
+            // - payload[1..] = UTF-8 label bytes (truncated to fit)
             const BOOTSTRAP_MSG_TYPE: u32 = 0x10;
             if id.as_u64() <= u32::MAX as u64 {
                 let mut boot_msg = IpcMessage::new(BOOTSTRAP_MSG_TYPE);
@@ -904,19 +908,39 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
                 // duplicate `flags` from a valid capability table.
                 boot_msg.sender = task.id.as_u64();
                 boot_msg.flags = id.as_u64() as u32;
+                let label = if path == "/" {
+                    "root"
+                } else {
+                    path.rsplit('/')
+                        .find(|part| !part.is_empty())
+                        .unwrap_or("default")
+                };
+                let label_bytes = label.as_bytes();
+                let max_len = boot_msg.payload.len().saturating_sub(1);
+                let copy_len = core::cmp::min(label_bytes.len(), max_len);
+                boot_msg.payload[0] = copy_len as u8;
+                if copy_len > 0 {
+                    boot_msg.payload[1..1 + copy_len]
+                        .copy_from_slice(&label_bytes[..copy_len]);
+                }
 
                 let port_id = PortId::from_u64(cap.resource as u64);
                 if let Some(p) = port::get_port(port_id) {
                     if p.send(boot_msg).is_ok() {
                         log::info!(
-                            "ipc_bind_port('/'): queued bootstrap message (handle={})",
-                            id.as_u64()
+                            "ipc_bind_port('{}'): queued bootstrap message (handle={}, label={})",
+                            path,
+                            id.as_u64(),
+                            label
                         );
                     } else {
-                        log::warn!("ipc_bind_port('/'): failed to queue bootstrap message");
+                        log::warn!("ipc_bind_port('{}'): failed to queue bootstrap message", path);
                     }
                 } else {
-                    log::warn!("ipc_bind_port('/'): bound port disappeared before bootstrap");
+                    log::warn!(
+                        "ipc_bind_port('{}'): bound port disappeared before bootstrap",
+                        path
+                    );
                 }
             }
         }
