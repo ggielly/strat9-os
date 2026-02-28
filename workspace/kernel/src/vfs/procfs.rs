@@ -449,15 +449,19 @@ impl Scheme for ProcScheme {
             }
             Ok(entries)
         } else if file_id == 1 || kind == KIND_PROC_DIR {
-            // self dir or /proc/<pid>: list status + cmdline with correct inos
+            let effective_pid = if file_id == 1 {
+                current_pid().map(|p| p as u64).unwrap_or(0)
+            } else {
+                pid
+            };
             Ok(alloc::vec![
                 DirEntry {
-                    ino: Self::encode_id(KIND_PROC_STATUS, pid),
+                    ino: Self::encode_id(KIND_PROC_STATUS, effective_pid),
                     file_type: DT_REG,
                     name: String::from("status"),
                 },
                 DirEntry {
-                    ino: Self::encode_id(KIND_PROC_CMDLINE, pid),
+                    ino: Self::encode_id(KIND_PROC_CMDLINE, effective_pid),
                     file_type: DT_REG,
                     name: String::from("cmdline"),
                 },

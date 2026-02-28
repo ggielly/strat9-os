@@ -3,10 +3,8 @@
 //! Maps path prefixes to schemes (like Plan 9 namespaces).
 
 use super::scheme::DynScheme;
-use crate::{sync::SpinLock, syscall::error::SyscallError};
+use crate::syscall::error::SyscallError;
 use spin::{RwLock, Lazy};
-use lru::LruCache;
-use core::num::NonZeroUsize;
 use alloc::{string::String, vec::Vec};
 
 /// A mount point binding a path prefix to a scheme.
@@ -21,14 +19,12 @@ struct Mount {
 /// Global mount table.
 pub struct MountTable {
     mounts: Vec<Mount>,
-    cache: SpinLock<LruCache<String, (DynScheme, String)>>,
 }
 
 impl MountTable {
     pub fn new() -> Self {
         MountTable {
             mounts: Vec::new(),
-            cache: SpinLock::new(LruCache::new(NonZeroUsize::new(128).unwrap())),
         }
     }
 
@@ -61,7 +57,6 @@ impl MountTable {
         self.mounts
             .sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
 
-        self.cache.lock().clear();
         Ok(())
     }
 
@@ -73,7 +68,6 @@ impl MountTable {
             .position(|m| m.prefix == prefix)
             .ok_or(SyscallError::BadHandle)?;
         self.mounts.remove(pos);
-        self.cache.lock().clear();
         Ok(())
     }
 
@@ -85,31 +79,19 @@ impl MountTable {
             return Err(SyscallError::InvalidArgument);
         }
 
-        if let Some(cached) = self.cache.lock().get(path) {
-            return Ok(cached.clone());
-        }
-
         for mount in &self.mounts {
             if path == mount.prefix {
-                // Exact match
-                let res = (mount.scheme.clone(), String::new());
-                self.cache.lock().put(String::from(path), res.clone());
-                return Ok(res);
+                return Ok((mount.scheme.clone(), String::new()));
             } else if path.starts_with(&mount.prefix) {
-                // Check prefix boundary.
-                // Special case: the root "/" mount matches every absolute path.
                 let is_root = mount.prefix == "/";
                 let next_byte = path.as_bytes().get(mount.prefix.len());
                 if is_root || next_byte == Some(&b'/') {
-                    // Strip the mount prefix (and the trailing slash for non-root).
                     let relative = if is_root {
-                        &path[1..] // strip leading "/"
+                        &path[1..]
                     } else {
                         &path[mount.prefix.len() + 1..]
                     };
-                    let res = (mount.scheme.clone(), String::from(relative));
-                    self.cache.lock().put(String::from(path), res.clone());
-                    return Ok(res);
+                    return Ok((mount.scheme.clone(), String::from(relative)));
                 }
             }
         }
@@ -169,7 +151,6 @@ impl Namespace {
         Namespace {
             mounts: MountTable {
                 mounts: global.mounts.clone(),
-                cache: SpinLock::new(LruCache::new(NonZeroUsize::new(128).unwrap())),
             },
         }
     }

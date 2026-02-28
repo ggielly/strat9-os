@@ -169,6 +169,22 @@ fn reserve_range_in_map(
     }
 }
 
+fn region_kind_for_addr(
+    map: &[boot::entry::MemoryRegion],
+    len: usize,
+    addr: u64,
+) -> Option<boot::entry::MemoryKind> {
+    map.iter().take(len).find_map(|r| {
+        let start = r.base;
+        let end = r.base.saturating_add(r.size);
+        if addr >= start && addr < end {
+            Some(r.kind)
+        } else {
+            None
+        }
+    })
+}
+
 /// Kernel panic handler
 #[panic_handler]
 fn panic_handler(info: &PanicInfo) -> ! {
@@ -243,6 +259,40 @@ fn boot_module_slice(base: u64, size: u64) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(base_virt as *const u8, size as usize) }
 }
 
+fn log_boot_module_magics(stage: &str) {
+    let modules = [
+        ("init", crate::boot::limine::init_module()),
+        ("console-admin", crate::boot::limine::console_admin_module()),
+        ("strate-net", crate::boot::limine::strate_net_module()),
+        ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
+        ("bin/ping", crate::boot::limine::ping_module()),
+    ];
+    for (name, module) in modules {
+        let Some((base, size)) = module else {
+            continue;
+        };
+        if size < 4 {
+            continue;
+        }
+        let ptr = memory::phys_to_virt(base) as *const u8;
+        let m0 = unsafe { core::ptr::read_volatile(ptr) };
+        let m1 = unsafe { core::ptr::read_volatile(ptr.add(1)) };
+        let m2 = unsafe { core::ptr::read_volatile(ptr.add(2)) };
+        let m3 = unsafe { core::ptr::read_volatile(ptr.add(3)) };
+        serial_println!(
+            "[init] Module magic [{}]: {} phys=0x{:x} magic={:02x}{:02x}{:02x}{:02x} size={}",
+            stage,
+            name,
+            base,
+            m0,
+            m1,
+            m2,
+            m3,
+            size
+        );
+    }
+}
+
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     use core::fmt::Write;
@@ -307,6 +357,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         args.memory_map_size
     );
 
+    log_boot_module_magics("pre-mm");
+
     // =============================================
     // Phase 2 : memory management (Buddy Allocator)
     // =============================================
@@ -367,10 +419,18 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             reserve_start,
             reserve_end
         );
+        let kind = region_kind_for_addr(&mmap_work, mmap_work_len, reserve_start);
+        serial_println!(
+            "[init] Module map kind: {} @0x{:x} => {:?}",
+            name,
+            reserve_start,
+            kind
+        );
     }
 
     memory::init_memory_manager(&mmap_work[..mmap_work_len]);
     serial_println!("[init] Buddy allocator ready.");
+    log_boot_module_magics("post-mm");
 
     // =============================================
     // Phase 3: console output (VGA or serial fallback)
@@ -464,6 +524,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
     serial_println!("[init] Paging initialized.");
     vga_println!("[OK] Paging initialized");
+    log_boot_module_magics("post-paging");
 
     // =============================================
     // Phase 5c: kernel address space
@@ -473,6 +534,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     memory::address_space::init_kernel_address_space();
     serial_println!("[init] Kernel address space initialized.");
     vga_println!("[OK] Kernel address space initialized");
+    log_boot_module_magics("post-kas");
 
     // =============================================
     // Phase 5d: virtual file system

@@ -115,6 +115,13 @@ impl BuddyAllocator {
             let (pool_start, pool_end) =
                 self.steal_contiguous_pool(memory_regions, zi, needed_pages as u64);
             self.bitmap_pool[zi] = (pool_start, pool_end);
+            serial_println!(
+                "  Zone {:?}: bitmap pool phys=0x{:x}..0x{:x} ({} pages)",
+                self.zones[zi].zone_type,
+                pool_start,
+                pool_end,
+                needed_pages
+            );
 
             // Zero stolen pages to initialize all bitmaps to 0.
             unsafe {
@@ -210,6 +217,10 @@ impl BuddyAllocator {
         let zone = &mut self.zones[zone_idx];
         let mut addr = start;
         while addr < end {
+            if Self::is_protected_module_page(addr) {
+                addr += PAGE_SIZE;
+                continue;
+            }
             Self::insert_free_block(zone, addr, 0);
             zone.page_count += 1;
             addr += PAGE_SIZE;
@@ -475,14 +486,74 @@ impl BuddyAllocator {
             let Some((start, end)) = Self::zone_intersection_aligned(region, zone_idx) else {
                 continue;
             };
-            if end - start >= needed_bytes {
-                return (start, start + needed_bytes);
+            if end - start < needed_bytes {
+                continue;
+            }
+            let mut candidate = start;
+            while candidate + needed_bytes <= end {
+                let candidate_end = candidate + needed_bytes;
+                if let Some(overlap_end) = Self::protected_overlap_end(candidate, candidate_end) {
+                    candidate = Self::align_up(overlap_end, PAGE_SIZE);
+                    continue;
+                }
+                serial_println!(
+                    "  Zone {:?}: steal candidate accepted 0x{:x}..0x{:x}",
+                    self.zones[zone_idx].zone_type,
+                    candidate,
+                    candidate_end
+                );
+                return (candidate, candidate_end);
             }
         }
         panic!(
             "Buddy allocator: cannot reserve {} pages for zone {:?} bitmaps",
             needed_pages, self.zones[zone_idx].zone_type
         );
+    }
+
+    fn protected_overlap_end(start: u64, end: u64) -> Option<u64> {
+        for (base, size) in Self::protected_module_ranges().into_iter().flatten() {
+            if size == 0 {
+                continue;
+            }
+            let pstart = Self::align_down(base, PAGE_SIZE);
+            let pend = Self::align_up(base.saturating_add(size), PAGE_SIZE);
+            if end <= pstart || start >= pend {
+                continue;
+            }
+            return Some(pend);
+        }
+        None
+    }
+
+    fn is_protected_module_page(phys: u64) -> bool {
+        let page = Self::align_down(phys, PAGE_SIZE);
+        for (base, size) in Self::protected_module_ranges().into_iter().flatten() {
+            if size == 0 {
+                continue;
+            }
+            let pstart = Self::align_down(base, PAGE_SIZE);
+            let pend = Self::align_up(base.saturating_add(size), PAGE_SIZE);
+            if page >= pstart && page < pend {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn protected_module_ranges() -> [Option<(u64, u64)>; 10] {
+        [
+            crate::boot::limine::fs_ext4_module(),
+            crate::boot::limine::strate_fs_ramfs_module(),
+            crate::boot::limine::init_module(),
+            crate::boot::limine::console_admin_module(),
+            crate::boot::limine::strate_net_module(),
+            crate::boot::limine::dhcp_client_module(),
+            crate::boot::limine::ping_module(),
+            crate::boot::limine::test_syscalls_module(),
+            crate::boot::limine::test_mem_module(),
+            crate::boot::limine::test_mem_stressed_module(),
+        ]
     }
 
     #[inline]

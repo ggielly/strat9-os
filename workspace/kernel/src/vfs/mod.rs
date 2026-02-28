@@ -400,12 +400,12 @@ pub fn sys_write(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallErro
         if use_console {
             crate::silo::enforce_console_access()?;
             let len = core::cmp::min(buf_len as usize, 16 * 1024);
-            let user_buf = UserSliceRead::new(buf_ptr, len)?;
             let mut kbuf = [0u8; 4096];
             let mut total_written = 0;
             while total_written < len {
                 let to_write = core::cmp::min(kbuf.len(), len - total_written);
-                let n = user_buf.copy_to(&mut kbuf[..to_write]);
+                let chunk = UserSliceRead::new(buf_ptr + total_written as u64, to_write)?;
+                let n = chunk.copy_to(&mut kbuf[..to_write]);
                 if crate::arch::x86_64::vga::is_available() {
                     if let Ok(s) = core::str::from_utf8(&kbuf[..n]) {
                         crate::serial_print!("{}", s);

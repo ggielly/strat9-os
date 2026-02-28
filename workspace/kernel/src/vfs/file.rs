@@ -128,10 +128,12 @@ impl OpenFile {
 
     /// Get file size.
     pub fn size(&self) -> Result<u64, SyscallError> {
-        if let Some(size) = self.size {
-            Ok(size)
+        if let Ok(sz) = self.scheme.size(self.file_id) {
+            Ok(sz)
+        } else if let Some(sz) = self.size {
+            Ok(sz)
         } else {
-            self.scheme.size(self.file_id)
+            Err(SyscallError::NotImplemented)
         }
     }
 

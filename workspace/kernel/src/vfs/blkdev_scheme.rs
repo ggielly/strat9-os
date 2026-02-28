@@ -89,14 +89,20 @@ impl Scheme for BlkDevScheme {
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         match file_id {
             FID_ROOT => {
-                // Directory listing: newline-separated names
-                const LISTING: &[u8] = b"sda\n";
+                let mut listing = String::new();
+                if ahci::get_device().is_some() {
+                    listing.push_str("sda\n");
+                }
+                if crate::hardware::storage::virtio_block::get_device().is_some() {
+                    listing.push_str("vda\n");
+                }
+                let bytes = listing.as_bytes();
                 let start = offset as usize;
-                if start >= LISTING.len() {
+                if start >= bytes.len() {
                     return Ok(0);
                 }
-                let n = (LISTING.len() - start).min(buf.len());
-                buf[..n].copy_from_slice(&LISTING[start..start + n]);
+                let n = (bytes.len() - start).min(buf.len());
+                buf[..n].copy_from_slice(&bytes[start..start + n]);
                 Ok(n)
             }
             FID_SDA => {

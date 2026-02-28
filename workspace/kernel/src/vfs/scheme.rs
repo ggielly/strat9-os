@@ -484,10 +484,6 @@ impl IpcScheme {
 
         let reply = self.call(msg)?;
 
-        if reply.msg_type != 0x80 {
-            return Err(SyscallError::IoError);
-        }
-
         Self::parse_status(&reply)?;
 
         let file_id = u64::from_le_bytes([
