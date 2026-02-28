@@ -915,14 +915,14 @@ fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     // Stamp structured security label (Coloration)
     if let Some((sid, _label, _mem_used, _mem_min, _mem_max)) = crate::silo::silo_info_for_task(task.id) {
         // Recover full silo info to get tier and family
-        if let Ok(snapshot) = crate::silo::list_silos_snapshot().into_iter().find(|s| s.id == sid) {
+        if let Some(snapshot) = crate::silo::list_silos_snapshot().into_iter().find(|s| s.id == sid) {
             let structured_label = crate::ipc::message::IpcLabel {
                 tier: snapshot.tier as u8,
                 family: 5, // Default to USR for now, need proper family tracking
                 compartment: sid as u16,
             };
             // Pack into u32 (simple cast for now as layout is 1+1+2 bytes)
-            msg.label = unsafe { core::mem::transmute(structured_label) };
+            msg.flags = unsafe { core::mem::transmute(structured_label) };
         }
     }
 

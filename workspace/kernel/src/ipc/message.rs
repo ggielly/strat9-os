@@ -23,7 +23,7 @@ pub struct IpcLabel {
 /// ```text
 ///  0..  8  sender   (u64, filled by kernel)
 ///  8.. 12  msg_type (u32, opcode chosen by sender)
-/// 12.. 16  label    (u32, security tag filled by kernel)
+/// 12.. 16  flags    (u32, security tag or handle transfer)
 /// 16.. 64  payload  (48 bytes, opaque data)
 /// ```
 #[repr(C, align(64))]
@@ -31,7 +31,7 @@ pub struct IpcLabel {
 pub struct IpcMessage {
     pub sender: u64,
     pub msg_type: u32,
-    pub label: u32, // Replaces flags with security label
+    pub flags: u32, // Re-renamed to flags for compatibility
     pub payload: [u8; 48],
 }
 
@@ -43,7 +43,7 @@ impl IpcMessage {
         IpcMessage {
             sender: 0,
             msg_type,
-            label: 0,
+            flags: 0,
             payload: [0u8; 48],
         }
     }

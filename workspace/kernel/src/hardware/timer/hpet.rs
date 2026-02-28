@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use crate::memory::{self, phys_to_virt};
+use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
@@ -55,12 +56,12 @@ pub fn init() -> Result<(), &'static str> {
     let hpet_acpi = crate::acpi::hpet::HpetAcpiTable::get()
         .ok_or("HPET ACPI table not found")?;
 
-    // Read packed fields safely.
-    let gas = hpet_acpi.gen_addr_struct;
+    // Read packed fields safely using unaligned loads.
+    let gas = unsafe { ptr::read_unaligned(core::ptr::addr_of!(hpet_acpi.gen_addr_struct)) };
     let base_addr = gas.phys_addr;
     let address_space = gas.address_space;
-    let comparator_desc = hpet_acpi.comparator_descriptor;
-    let min_tick = hpet_acpi.min_periodic_clock_tick;
+    let comparator_desc = unsafe { ptr::read_unaligned(core::ptr::addr_of!(hpet_acpi.comparator_descriptor)) };
+    let min_tick = unsafe { ptr::read_unaligned(core::ptr::addr_of!(hpet_acpi.min_periodic_clock_tick)) };
 
     log::info!(
         "[HPET] Found HPET: base=0x{:x}, comparators={}, min_tick={}",

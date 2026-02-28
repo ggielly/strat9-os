@@ -120,6 +120,23 @@ pub enum StrateFamily {
     USR  = 5,
 }
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiloState {
+    Created = 0,
+    Loading = 1,
+    Ready = 2,
+    Running = 3,
+    Paused = 4,
+    Stopping = 5,
+    Stopped = 6,
+    Crashed = 7,
+    Zombie = 8,
+    Destroyed = 9,
+}
+
+pub const SILO_FLAG_ADMIN: u64 = 1 << 0;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SiloConfig {
@@ -139,6 +156,46 @@ pub struct SiloConfig {
     pub sid: u32,
     pub mode: u16,      // Octal mode packed
     pub family: u8,
+}
+
+impl Default for SiloConfig {
+    fn default() -> Self {
+        SiloConfig {
+            mem_min: 0,
+            mem_max: 0,
+            cpu_shares: 0,
+            cpu_quota_us: 0,
+            cpu_period_us: 0,
+            cpu_affinity_mask: 0,
+            max_tasks: 0,
+            io_bw_read: 0,
+            io_bw_write: 0,
+            caps_ptr: 0,
+            caps_len: 0,
+            flags: 0,
+            sid: 42,
+            mode: 0,
+            family: StrateFamily::USR as u8,
+        }
+    }
+}
+
+impl SiloConfig {
+    fn validate(&self) -> Result<(), SyscallError> {
+        if self.mem_min > self.mem_max && self.mem_max != 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if self.cpu_quota_us > 0 && self.cpu_period_us == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if self.caps_len > MAX_SILO_CAPS as u64 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if self.caps_len > 0 && self.caps_ptr == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        Ok(())
+    }
 }
 
 #[repr(C, packed)]
@@ -176,43 +233,6 @@ pub struct ModuleInfo {
     pub bss_size: u64,
     pub entry_point: u64,
     pub total_size: u64,
-}
-
-impl Default for SiloConfig {
-    fn default() -> Self {
-        SiloConfig {
-            mem_min: 0,
-            mem_max: 0,
-            cpu_shares: 0,
-            cpu_quota_us: 0,
-            cpu_period_us: 0,
-            cpu_affinity_mask: 0,
-            max_tasks: 0,
-            io_bw_read: 0,
-            io_bw_write: 0,
-            caps_ptr: 0,
-            caps_len: 0,
-            flags: 0,
-        }
-    }
-}
-
-impl SiloConfig {
-    fn validate(&self) -> Result<(), SyscallError> {
-        if self.mem_min > self.mem_max {
-            return Err(SyscallError::InvalidArgument);
-        }
-        if self.cpu_quota_us > 0 && self.cpu_period_us == 0 {
-            return Err(SyscallError::InvalidArgument);
-        }
-        if self.caps_len > MAX_SILO_CAPS as u64 {
-            return Err(SyscallError::InvalidArgument);
-        }
-        if self.caps_len > 0 && self.caps_ptr == 0 {
-            return Err(SyscallError::InvalidArgument);
-        }
-        Ok(())
-    }
 }
 
 #[repr(u32)]
@@ -597,7 +617,7 @@ pub fn require_silo_admin() -> Result<(), SyscallError> {
     }
 }
 
-fn resolve_silo_handle(handle: u64, required: CapPermissions) -> Result<u64, SyscallError> {
+fn resolve_silo_handle(handle: u64, required: CapPermissions) -> Result<u32, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
     let cap_id = CapId::from_raw(handle);
@@ -614,7 +634,7 @@ fn resolve_silo_handle(handle: u64, required: CapPermissions) -> Result<u64, Sys
         && (!required.grant || cap.permissions.grant)
         && (!required.revoke || cap.permissions.revoke)
     {
-        Ok(cap.resource as u64)
+        Ok(cap.resource as u32)
     } else {
         Err(SyscallError::PermissionDenied)
     }
@@ -914,7 +934,7 @@ pub fn kernel_spawn_strate(
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
-        silo_id: silo_id as u64,
+        silo_id: silo_id.into(),
         kind: SiloEventKind::Started,
         data0: 0,
         data1: 0,
@@ -1076,7 +1096,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
     }
     mgr.map_task(task_id, id.sid);
     mgr.push_event(SiloEvent {
-        silo_id: id.sid as u64,
+        silo_id: id.sid.into(),
         kind: SiloEventKind::Started,
         data0: 0,
         data1: 0,
@@ -1498,7 +1518,7 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
-        silo_id,
+        silo_id: silo_id.into(),
         kind: SiloEventKind::Started,
         data0: 0,
         data1: 0,
@@ -1538,7 +1558,7 @@ pub fn on_task_terminated(task_id: TaskId) {
 
     if emit_stopped {
         mgr.push_event(SiloEvent {
-            silo_id,
+            silo_id: silo_id.into(),
             kind: SiloEventKind::Stopped,
             data0: 0,
             data1: 0,
@@ -1581,7 +1601,7 @@ pub fn sys_silo_stop(handle: u64) -> Result<u64, SyscallError> {
                 silo.state = SiloState::Stopped;
             }
             mgr.push_event(SiloEvent {
-                silo_id,
+                silo_id: silo_id.into(),
                 kind: SiloEventKind::Stopped,
                 data0: 0,
                 data1: 0,
@@ -1620,7 +1640,7 @@ pub fn sys_silo_kill(handle: u64) -> Result<u64, SyscallError> {
             mgr.unmap_task(*tid);
         }
         mgr.push_event(SiloEvent {
-            silo_id,
+            silo_id: silo_id.into(),
             kind: SiloEventKind::Killed,
             data0: 0,
             data1: 0,
@@ -1821,7 +1841,7 @@ pub fn sys_silo_suspend(handle: u64) -> Result<u64, SyscallError> {
 
     let mut mgr = SILO_MANAGER.lock();
     mgr.push_event(SiloEvent {
-        silo_id,
+        silo_id: silo_id.into(),
         kind: SiloEventKind::Paused,
         data0: 0,
         data1: 0,
@@ -1860,7 +1880,7 @@ pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
 
     let mut mgr = SILO_MANAGER.lock();
     mgr.push_event(SiloEvent {
-        silo_id,
+        silo_id: silo_id.into(),
         kind: SiloEventKind::Resumed,
         data0: 0,
         data1: 0,
@@ -1990,7 +2010,7 @@ pub fn handle_user_fault(
             mgr.unmap_task(*tid);
         }
         mgr.push_event(SiloEvent {
-            silo_id,
+            silo_id: silo_id.into(),
             kind: SiloEventKind::Crashed,
             data0: pack_fault(reason, subcode),
             data1: extra,

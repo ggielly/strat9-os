@@ -1,18 +1,31 @@
 //! ACPI (Advanced Configuration and Power Interface) support.
-//! Inspired by Theseus OS and MaestroOS.
+//! Inspired by Theseus OS, MaestroOS, Aero, and Redox.
+//!
+//! Features:
+//! - RSDP/RSDT/XSDT parsing
+//! - MADT (interrupts, APICs)
+//! - FADT (power management, DSDT)
+//! - HPET (timers)
+//! - MCFG (PCIe MMCONFIG)
+//! - DMAR (IOMMU)
+//! - WAET (VM optimization hints)
+//! - BGRT (boot graphics)
+//! - SLIT (NUMA distances)
 
+pub mod bgrt;
 pub mod dmar;
 pub mod fadt;
 pub mod hpet;
 pub mod madt;
 pub mod mcfg;
 pub mod rsdt;
+pub mod slit;
 pub mod sdt;
 pub mod waet;
 
 use crate::{memory, sync::SpinLock};
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use sdt::Sdt;
 
 /// Stored RSDP virtual address (set during init)
@@ -53,6 +66,54 @@ static ACPI_TABLES: SpinLock<AcpiTables> = SpinLock::new(AcpiTables {
     tables: BTreeMap::new(),
 });
 
+/// ACPI initialization status
+static ACPI_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Get ACPI revision
+pub fn revision() -> u8 {
+    RSDP_REVISION.load(Ordering::Relaxed) as u8
+}
+
+/// Check if ACPI is initialized
+pub fn is_available() -> bool {
+    ACPI_INITIALIZED.load(Ordering::Relaxed)
+}
+
+/// Get RSDP address
+pub fn rsdp_address() -> u64 {
+    RSDP_VADDR.load(Ordering::Relaxed)
+}
+
+/// Get BGRT table (boot graphics)
+pub fn get_bgrt() -> Option<&'static bgrt::Bgrt> {
+    bgrt::Bgrt::get()
+}
+
+/// Get SLIT table (NUMA distances)
+pub fn get_slit() -> Option<&'static slit::Slit> {
+    slit::Slit::get()
+}
+
+/// Get HPET table
+pub fn get_hpet() -> Option<&'static hpet::HpetAcpiTable> {
+    hpet::HpetAcpiTable::get()
+}
+
+/// Get FADT table
+pub fn get_fadt() -> Option<&'static fadt::Fadt> {
+    fadt::Fadt::get()
+}
+
+/// Get MADT table
+pub fn get_madt() -> Option<&'static madt::MadtAcpiTable> {
+    madt::MadtAcpiTable::get()
+}
+
+/// Get MCFG table
+pub fn get_mcfg() -> Option<&'static mcfg::Mcfg> {
+    mcfg::Mcfg::get()
+}
+
 /// Initialize the ACPI subsystem.
 pub fn init(rsdp_vaddr: u64) -> Result<bool, &'static str> {
     if rsdp_vaddr == 0 {
@@ -91,6 +152,9 @@ pub fn init(rsdp_vaddr: u64) -> Result<bool, &'static str> {
 
     // Discover all tables via root RSDT/XSDT pointed by RSDP.
     discover_tables(rsdp_vaddr, revision)?;
+
+    // Mark ACPI as initialized
+    ACPI_INITIALIZED.store(true, Ordering::SeqCst);
 
     Ok(true)
 }

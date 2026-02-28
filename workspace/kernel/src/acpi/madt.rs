@@ -10,10 +10,17 @@ pub const MADT_SIGNATURE: &[u8; 4] = b"APIC";
 /// The fixed-size components of the MADT ACPI table.
 #[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
 #[repr(C, packed)]
-struct MadtAcpiTable {
-    header: Sdt,
-    local_apic_phys_addr: u32,
-    flags: u32,
+pub struct MadtAcpiTable {
+    pub header: Sdt,
+    pub local_apic_phys_addr: u32,
+    pub flags: u32,
+}
+
+impl MadtAcpiTable {
+    /// Finds the MADT and returns a reference to it.
+    pub fn get() -> Option<&'static MadtAcpiTable> {
+        unsafe { super::find_table(MADT_SIGNATURE).map(|ptr| &*(ptr as *const MadtAcpiTable)) }
+    }
 }
 
 /// A MADT entry record, which precedes each actual MADT entry.
