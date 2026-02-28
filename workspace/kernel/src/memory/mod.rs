@@ -10,7 +10,6 @@ pub mod userslice;
 pub mod zone;
 
 use crate::boot::entry::MemoryRegion;
-use alloc::{boxed::Box, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Higher Half Direct Map offset.
@@ -66,17 +65,10 @@ fn init_cow_metadata(memory_regions: &[MemoryRegion]) {
     }
 
     let max_pfn = ((max_end.saturating_add(4095)) / 4096) as usize;
-    let mut metas = Vec::with_capacity(max_pfn);
-    for _ in 0..max_pfn {
-        metas.push(cow::FrameMeta::new());
-    }
 
-    let boxed = metas.into_boxed_slice();
-    let ptr = Box::into_raw(boxed) as *mut cow::FrameMeta;
-
-    // SAFETY: `ptr` points to a leaked boxed slice of exactly `max_pfn` entries.
+    // SAFETY: Called once during boot.
     unsafe {
-        cow::init_frame_metadata(max_pfn, ptr);
+        cow::init_frame_metadata(max_pfn);
     }
 }
 

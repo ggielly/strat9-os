@@ -38,6 +38,7 @@ use crate::{
     memory::frame::{FrameAllocator, PhysFrame},
     sync::SpinLock,
 };
+use alloc::{boxed::Box, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Global lock protecting COW metadata flag operations and frame free.
@@ -135,24 +136,47 @@ impl FrameMeta {
 
 /// Global frame metadata array pointer
 /// Initialized during boot with the number of available frames
-static mut FRAME_METAS_PTR: *mut FrameMeta = core::ptr::null_mut();
+static mut FRAME_META_CHUNKS_PTR: *mut *mut FrameMeta = core::ptr::null_mut();
+static mut FRAME_META_CHUNKS_LEN: usize = 0;
 static mut FRAME_METAS_LEN: usize = 0;
+const FRAME_META_CHUNK_SHIFT: usize = 12;
+const FRAME_META_CHUNK_ENTRIES: usize = 1 << FRAME_META_CHUNK_SHIFT;
+const FRAME_META_CHUNK_MASK: usize = FRAME_META_CHUNK_ENTRIES - 1;
 
 /// Initialize the frame metadata manager
 ///
 /// # Arguments
 /// * `max_pfn` - Maximum physical frame number (total RAM / 4KB)
-/// * `metas_ptr` - Pointer to pre-allocated metadata array
+/// Allocates metadata in fixed-size chunks to avoid requiring one huge contiguous
+/// heap allocation during early boot.
 ///
 /// # Safety
-/// - `metas_ptr` must point to a valid array of `max_pfn` FrameMeta entries
 /// - Must be called once during boot, before any memory allocations
-pub unsafe fn init_frame_metadata(max_pfn: usize, metas_ptr: *mut FrameMeta) {
-    FRAME_METAS_PTR = metas_ptr;
+pub unsafe fn init_frame_metadata(max_pfn: usize) {
+    let chunk_count = max_pfn.div_ceil(FRAME_META_CHUNK_ENTRIES);
+    let mut chunks: Vec<*mut FrameMeta> = Vec::with_capacity(chunk_count);
+
+    for ci in 0..chunk_count {
+        let start = ci * FRAME_META_CHUNK_ENTRIES;
+        let remaining = max_pfn.saturating_sub(start);
+        let entries = core::cmp::min(remaining, FRAME_META_CHUNK_ENTRIES);
+        let mut metas = Vec::with_capacity(entries);
+        for _ in 0..entries {
+            metas.push(FrameMeta::new());
+        }
+        let boxed = metas.into_boxed_slice();
+        let ptr = Box::into_raw(boxed) as *mut FrameMeta;
+        chunks.push(ptr);
+    }
+
+    let chunk_ptrs = chunks.into_boxed_slice();
+    FRAME_META_CHUNKS_LEN = chunk_ptrs.len();
+    FRAME_META_CHUNKS_PTR = Box::into_raw(chunk_ptrs) as *mut *mut FrameMeta;
     FRAME_METAS_LEN = max_pfn;
     log::info!(
-        "Frame metadata initialized for {} frames ({:.2} GB max)",
+        "Frame metadata initialized for {} frames in {} chunk(s) ({:.2} GB max)",
         max_pfn,
+        chunk_count,
         (max_pfn as u64 * 4096) / (1024 * 1024 * 1024)
     );
 }
@@ -160,20 +184,34 @@ pub unsafe fn init_frame_metadata(max_pfn: usize, metas_ptr: *mut FrameMeta) {
 /// Get metadata for a physical frame
 fn get_frame_meta(pfn: u64) -> Option<&'static FrameMeta> {
     unsafe {
-        if FRAME_METAS_PTR.is_null() || pfn as usize >= FRAME_METAS_LEN {
+        if FRAME_META_CHUNKS_PTR.is_null() || pfn as usize >= FRAME_METAS_LEN {
             return None;
         }
-        Some(&*FRAME_METAS_PTR.add(pfn as usize))
+        let p = pfn as usize;
+        let chunk_idx = p >> FRAME_META_CHUNK_SHIFT;
+        if chunk_idx >= FRAME_META_CHUNKS_LEN {
+            return None;
+        }
+        let offset = p & FRAME_META_CHUNK_MASK;
+        let chunk = *FRAME_META_CHUNKS_PTR.add(chunk_idx);
+        Some(&*chunk.add(offset))
     }
 }
 
 /// Get mutable metadata for a physical frame
 fn get_frame_meta_mut(pfn: u64) -> Option<&'static mut FrameMeta> {
     unsafe {
-        if FRAME_METAS_PTR.is_null() || pfn as usize >= FRAME_METAS_LEN {
+        if FRAME_META_CHUNKS_PTR.is_null() || pfn as usize >= FRAME_METAS_LEN {
             return None;
         }
-        Some(&mut *FRAME_METAS_PTR.add(pfn as usize))
+        let p = pfn as usize;
+        let chunk_idx = p >> FRAME_META_CHUNK_SHIFT;
+        if chunk_idx >= FRAME_META_CHUNKS_LEN {
+            return None;
+        }
+        let offset = p & FRAME_META_CHUNK_MASK;
+        let chunk = *FRAME_META_CHUNKS_PTR.add(chunk_idx);
+        Some(&mut *chunk.add(offset))
     }
 }
 

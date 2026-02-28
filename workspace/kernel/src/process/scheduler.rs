@@ -1030,6 +1030,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 cleanup_task_resources(current);
                 sched.all_tasks.remove(&current_id);
                 sched.task_cpu.remove(&current_id);
+                sched.parent_of.remove(&current_id);
 
                 reparent_children(sched, current_id);
 
@@ -1670,13 +1671,14 @@ pub fn kill_task(id: TaskId) -> bool {
             for (ci, cpu) in sched.cpus.iter_mut().enumerate() {
                 if let Some(ref current) = cpu.current_task {
                     if current.id == id {
+                        let task_pid = current.pid;
                         unsafe {
                             *current.state.get() = TaskState::Dead;
                         }
                         cleanup_task_resources(current);
                         sched.all_tasks.remove(&id);
                         sched.task_cpu.remove(&id);
-                        parent_to_signal = finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
+                        parent_to_signal = finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
                         killed = true;
                         if ci == my_cpu {
                             switch_target = sched.yield_cpu(ci);
@@ -1694,13 +1696,14 @@ pub fn kill_task(id: TaskId) -> bool {
                 for cpu in &mut sched.cpus {
                     if cpu.class_rqs.remove(id) {
                         if let Some(task) = sched.all_tasks.remove(&id) {
+                            let task_pid = task.pid;
                             unsafe {
                                 *task.state.get() = TaskState::Dead;
                             }
                             cleanup_task_resources(&task);
                             sched.task_cpu.remove(&id);
                             parent_to_signal =
-                                finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
+                                finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
                         }
                         killed = true;
                         break;
@@ -1711,6 +1714,7 @@ pub fn kill_task(id: TaskId) -> bool {
             // Remove from blocked map.
             if !killed {
                 if let Some(task) = sched.blocked_tasks.remove(&id) {
+                    let task_pid = task.pid;
                     // SAFETY: scheduler lock held.
                     unsafe {
                         *task.state.get() = TaskState::Dead;
@@ -1718,7 +1722,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     cleanup_task_resources(&task);
                     sched.all_tasks.remove(&id);
                     sched.task_cpu.remove(&id);
-                    parent_to_signal = finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE);
+                    parent_to_signal = finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
                     killed = true;
                 }
             }
@@ -1753,12 +1757,7 @@ pub fn kill_task(id: TaskId) -> bool {
     killed
 }
 
-fn finalize_forced_death(sched: &mut Scheduler, task_id: TaskId, exit_code: i32) -> Option<TaskId> {
-    let task_pid = sched
-        .pid_to_task
-        .iter()
-        .find_map(|(pid, tid)| if *tid == task_id { Some(*pid) } else { None })
-        .unwrap_or(0);
+fn finalize_forced_death(sched: &mut Scheduler, task_id: TaskId, exit_code: i32, task_pid: Pid) -> Option<TaskId> {
 
     reparent_children(sched, task_id);
 
@@ -1795,16 +1794,26 @@ fn reparent_children(sched: &mut Scheduler, dying: TaskId) {
         }
         return;
     }
+    let mut has_zombie = false;
     let init_children = sched.children_of.entry(init_id).or_default();
     for child in children {
+        if !has_zombie && sched.zombies.contains_key(&child) {
+            has_zombie = true;
+        }
         sched.parent_of.insert(child, init_id);
         init_children.push(child);
+    }
+    if has_zombie {
+        let _ = sched.wake_task_locked(init_id);
     }
 }
 
 fn cleanup_task_resources(task: &Arc<Task>) {
     crate::silo::on_task_terminated(task.id);
 
+    // SAFETY: strong_count is racy (a concurrent get_task_by_id may temporarily
+    // hold an extra Arc ref). Worst case: cleanup is deferred until the last ref
+    // drops elsewhere — no resource leak, just delayed release.
     let is_last_process_ref = Arc::strong_count(&task.process) == 1;
     if !is_last_process_ref {
         return;
@@ -1909,10 +1918,9 @@ fn check_wake_deadlines(current_time_ns: u64) {
     if let Some(ref mut sched) = *scheduler {
         const BATCH: usize = 64;
         let mut to_wake = [TaskId::from_u64(0); BATCH];
-        let mut count = 0;
 
         loop {
-            count = 0;
+            let mut count = 0;
             for (id, task) in sched.all_tasks.iter() {
                 let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
                 if deadline != 0 && current_time_ns >= deadline {

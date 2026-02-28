@@ -392,33 +392,45 @@ pub unsafe extern "C" fn kmain() -> ! {
             let modules = module_response.modules();
             crate::serial_println!("[limine] modules reported: {}", modules.len());
             for (idx, module) in modules.iter().enumerate() {
-                let raw_addr = module.addr() as u64;
-                let phys_addr = module_addr_to_phys(raw_addr, hhdm_offset);
-                let (m0, m1, m2, m3) = if module.size() >= 4 {
-                    unsafe {
-                        let p = raw_addr as *const u8;
-                        (
-                            core::ptr::read_volatile(p),
-                            core::ptr::read_volatile(p.add(1)),
-                            core::ptr::read_volatile(p.add(2)),
-                            core::ptr::read_volatile(p.add(3)),
-                        )
-                    }
-                } else {
-                    (0, 0, 0, 0)
-                };
-                crate::serial_println!(
-                    "[limine] module[{}]: path='{}' addr={:#x} phys={:#x} magic={:02x}{:02x}{:02x}{:02x} size={}",
-                    idx,
-                    module.path().to_string_lossy(),
-                    raw_addr,
-                    phys_addr,
-                    m0,
-                    m1,
-                    m2,
-                    m3,
-                    module.size()
-                );
+                #[cfg(feature = "selftest")]
+                {
+                    let raw_addr = module.addr() as u64;
+                    let phys_addr = module_addr_to_phys(raw_addr, hhdm_offset);
+                    let (m0, m1, m2, m3) = if module.size() >= 4 {
+                        unsafe {
+                            let p = raw_addr as *const u8;
+                            (
+                                core::ptr::read_volatile(p),
+                                core::ptr::read_volatile(p.add(1)),
+                                core::ptr::read_volatile(p.add(2)),
+                                core::ptr::read_volatile(p.add(3)),
+                            )
+                        }
+                    } else {
+                        (0, 0, 0, 0)
+                    };
+                    crate::serial_println!(
+                        "[limine] module[{}]: path='{}' addr={:#x} phys={:#x} magic={:02x}{:02x}{:02x}{:02x} size={}",
+                        idx,
+                        module.path().to_string_lossy(),
+                        raw_addr,
+                        phys_addr,
+                        m0,
+                        m1,
+                        m2,
+                        m3,
+                        module.size()
+                    );
+                }
+                #[cfg(not(feature = "selftest"))]
+                {
+                    crate::serial_println!(
+                        "[limine] module[{}]: path='{}' size={}",
+                        idx,
+                        module.path().to_string_lossy(),
+                        module.size()
+                    );
+                }
             }
             let resolved = resolve_modules_once(modules, hhdm_offset);
             let (init_base, init_size) = resolved.test_pid.unwrap_or((0, 0));

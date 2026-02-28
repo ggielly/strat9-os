@@ -16,6 +16,18 @@ const PAGE_SIZE: u64 = 4096;
 const DMA_MAX: u64 = 16 * 1024 * 1024;
 const NORMAL_MAX: u64 = 896 * 1024 * 1024;
 
+#[cfg(feature = "selftest")]
+macro_rules! buddy_dbg {
+    ($($arg:tt)*) => {
+        serial_println!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "selftest"))]
+macro_rules! buddy_dbg {
+    ($($arg:tt)*) => {};
+}
+
 pub struct BuddyAllocator {
     zones: [Zone; ZoneType::COUNT],
     /// Per-zone bitmap pool reserved from free memory: [start, end).
@@ -46,7 +58,7 @@ impl BuddyAllocator {
             memory_regions.len()
         );
         for (base, size) in Self::protected_module_ranges().into_iter().flatten() {
-            serial_println!(
+            buddy_dbg!(
                 "  Protected module range: phys=0x{:x}..0x{:x}",
                 Self::align_down(base, PAGE_SIZE),
                 Self::align_up(base.saturating_add(size), PAGE_SIZE)
@@ -122,7 +134,7 @@ impl BuddyAllocator {
             let (pool_start, pool_end) =
                 self.steal_contiguous_pool(memory_regions, zi, needed_pages as u64);
             self.bitmap_pool[zi] = (pool_start, pool_end);
-            serial_println!(
+            buddy_dbg!(
                 "  Zone {:?}: bitmap pool phys=0x{:x}..0x{:x} ({} pages)",
                 self.zones[zi].zone_type,
                 pool_start,
@@ -225,7 +237,7 @@ impl BuddyAllocator {
         let mut addr = start;
         while addr < end {
             if Self::is_protected_module_page(addr) {
-                serial_println!(
+                buddy_dbg!(
                     "  Zone {:?}: skip protected page 0x{:x}",
                     zone.zone_type,
                     addr
@@ -244,11 +256,14 @@ impl BuddyAllocator {
             let Some(frame_phys) = Self::free_list_pop(zone, cur_order) else {
                 continue;
             };
-            if Self::is_protected_module_page(frame_phys) {
-                serial_println!(
-                    "  Zone {:?}: dropped protected free block 0x{:x} order={}",
+            let block_size = PAGE_SIZE << cur_order;
+            let block_end = frame_phys.saturating_add(block_size);
+            if Self::protected_overlap_end(frame_phys, block_end).is_some() {
+                buddy_dbg!(
+                    "  Zone {:?}: dropped protected free block 0x{:x}..0x{:x} order={}",
                     zone.zone_type,
                     frame_phys,
+                    block_end,
                     cur_order
                 );
                 continue;
@@ -279,10 +294,23 @@ impl BuddyAllocator {
 
     fn free_to_zone(zone: &mut Zone, frame: PhysFrame, order: u8) {
         let frame_phys = frame.start_address.as_u64();
+        let block_size = PAGE_SIZE << order;
+        let block_end = frame_phys.saturating_add(block_size);
 
         debug_assert!(order <= MAX_ORDER as u8);
         debug_assert!(frame.start_address.is_aligned(PAGE_SIZE << order));
         debug_assert!(zone.contains_address(frame.start_address));
+
+        if Self::protected_overlap_end(frame_phys, block_end).is_some() {
+            buddy_dbg!(
+                "  Zone {:?}: drop free overlap-protected 0x{:x}..0x{:x} order={}",
+                zone.zone_type,
+                frame_phys,
+                block_end,
+                order
+            );
+            return;
+        }
 
         #[cfg(debug_assertions)]
         Self::mark_allocated(zone, frame_phys, order, false);
@@ -517,7 +545,7 @@ impl BuddyAllocator {
                     candidate = Self::align_up(overlap_end, PAGE_SIZE);
                     continue;
                 }
-                serial_println!(
+                buddy_dbg!(
                     "  Zone {:?}: steal candidate accepted 0x{:x}..0x{:x}",
                     self.zones[zone_idx].zone_type,
                     candidate,

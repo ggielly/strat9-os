@@ -360,6 +360,22 @@ impl KernelStack {
     }
 }
 
+impl Drop for KernelStack {
+    fn drop(&mut self) {
+        use crate::memory::{frame::PhysFrame, get_allocator, FrameAllocator};
+
+        let pages = (self.size + 4095) / 4096;
+        let order = pages.next_power_of_two().trailing_zeros() as u8;
+        let frame = PhysFrame {
+            start_address: self.base,
+        };
+
+        if let Some(ref mut allocator) = *get_allocator().lock() {
+            allocator.free(frame, order);
+        }
+    }
+}
+
 /// User stack for a task (when running in userspace)
 pub struct UserStack {
     /// Virtual address of the user stack

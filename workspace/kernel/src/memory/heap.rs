@@ -17,6 +17,7 @@ use crate::{
     memory::{
         buddy::get_allocator,
         frame::{FrameAllocator, PhysFrame},
+        zone::MAX_ORDER,
     },
     sync::SpinLock,
 };
@@ -154,7 +155,11 @@ unsafe impl GlobalAlloc for LockedHeap {
         } else {
             // --- buddy path (large allocation) ---
             let pages_needed = (effective + 4095) / 4096;
-            let order = (pages_needed.next_power_of_two().trailing_zeros() as u8).min(11);
+            let max_pages = 1usize << MAX_ORDER;
+            if pages_needed > max_pages {
+                return ptr::null_mut();
+            }
+            let order = pages_needed.next_power_of_two().trailing_zeros() as u8;
 
             let buddy_lock = get_allocator();
             let mut guard = buddy_lock.lock();
@@ -180,7 +185,11 @@ unsafe impl GlobalAlloc for LockedHeap {
         } else {
             // --- buddy path: return page(s) to buddy ---
             let pages_needed = (effective + 4095) / 4096;
-            let order = (pages_needed.next_power_of_two().trailing_zeros() as u8).min(11);
+            let max_pages = 1usize << MAX_ORDER;
+            if pages_needed > max_pages {
+                return;
+            }
+            let order = pages_needed.next_power_of_two().trailing_zeros() as u8;
 
             let hhdm = super::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
             let phys_addr = (ptr as u64).wrapping_sub(hhdm);

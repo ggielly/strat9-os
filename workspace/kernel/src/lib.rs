@@ -169,6 +169,7 @@ fn reserve_range_in_map(
     }
 }
 
+#[cfg(feature = "selftest")]
 fn region_kind_for_addr(
     map: &[boot::entry::MemoryRegion],
     len: usize,
@@ -201,6 +202,7 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
 
     let base_virt = memory::phys_to_virt(base);
     let data = unsafe { core::slice::from_raw_parts(base_virt as *const u8, size as usize) };
+    #[cfg(feature = "selftest")]
     if data.len() >= 4 {
         serial_println!(
             "[init] /initfs/{} source magic={:02x}{:02x}{:02x}{:02x} size={}",
@@ -259,6 +261,7 @@ fn boot_module_slice(base: u64, size: u64) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(base_virt as *const u8, size as usize) }
 }
 
+#[cfg(feature = "selftest")]
 fn log_boot_module_magics(stage: &str) {
     let modules = [
         ("init", crate::boot::limine::init_module()),
@@ -292,6 +295,9 @@ fn log_boot_module_magics(stage: &str) {
         );
     }
 }
+
+#[cfg(not(feature = "selftest"))]
+fn log_boot_module_magics(_stage: &str) {}
 
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
@@ -413,19 +419,22 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             reserve_start,
             reserve_end,
         );
-        serial_println!(
-            "[init] Reserved module pages: {} phys=0x{:x}..0x{:x}",
-            name,
-            reserve_start,
-            reserve_end
-        );
-        let kind = region_kind_for_addr(&mmap_work, mmap_work_len, reserve_start);
-        serial_println!(
-            "[init] Module map kind: {} @0x{:x} => {:?}",
-            name,
-            reserve_start,
-            kind
-        );
+        #[cfg(feature = "selftest")]
+        {
+            serial_println!(
+                "[init] Reserved module pages: {} phys=0x{:x}..0x{:x}",
+                name,
+                reserve_start,
+                reserve_end
+            );
+            let kind = region_kind_for_addr(&mmap_work, mmap_work_len, reserve_start);
+            serial_println!(
+                "[init] Module map kind: {} @0x{:x} => {:?}",
+                name,
+                reserve_start,
+                kind
+            );
+        }
     }
 
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
@@ -545,8 +554,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] VFS initialized.");
     vga_println!("[OK] VFS initialized");
     register_boot_initfs_modules(args.initfs_base, args.initfs_size);
+    #[cfg(feature = "selftest")]
     serial_println!("[init] Initializing COW metadata...");
     memory::init_cow_subsystem(&mmap_work[..mmap_work_len]);
+    #[cfg(feature = "selftest")]
     serial_println!("[init] COW metadata initialized.");
     log_boot_module_magics("post-cow");
 
