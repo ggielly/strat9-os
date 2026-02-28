@@ -150,6 +150,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_ARCH_PRCTL => proc_sys::sys_arch_prctl(arg1, arg2),
         // ── tgkill (352) ──────────────────────────────────────────────────────
         SYS_TGKILL => proc_sys::sys_tgkill(arg1, arg2, arg3),
+        SYS_RT_SIGRETURN => super::signal::sys_rt_sigreturn(frame),
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),
@@ -265,7 +266,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             } else if syscall_num == SYS_PROC_WAITPID {
                 crate::serial_println!("[syscall] WAITPID returning Ok({})", val);
             }
-            val
+            frame.rax = val;
         }
         Err(e) => {
             if syscall_num == SYS_PROC_FORK {
@@ -273,9 +274,13 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             } else if syscall_num == SYS_PROC_WAITPID {
                 crate::serial_println!("[syscall] WAITPID returning err {:?}", e);
             }
-            e.to_raw()
+            frame.rax = e.to_raw();
         }
     }
+
+    crate::process::signal::deliver_pending_signal(frame);
+
+    frame.rax
 }
 
 /// Alias used by the `call {dispatch}` in syscall_entry.

@@ -250,6 +250,9 @@ fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
+        ("strate-wasm", crate::boot::limine::strate_wasm_module()),
+        ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
+        ("wasm-test.toml", crate::boot::limine::wasm_test_toml_module()),
     ];
     for (path, module) in initfs_modules {
         register_initfs_module(path, module);
@@ -271,6 +274,9 @@ fn log_boot_module_magics(stage: &str) {
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
+        ("strate-wasm", crate::boot::limine::strate_wasm_module()),
+        ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
+        ("wasm-test.toml", crate::boot::limine::wasm_test_toml_module()),
     ];
     for (name, module) in modules {
         let Some((base, size)) = module else {
@@ -404,6 +410,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
+        ("strate-wasm", crate::boot::limine::strate_wasm_module()),
+        ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
+        ("wasm-test.toml", crate::boot::limine::wasm_test_toml_module()),
     ];
 
     for (name, module) in reserve_modules {

@@ -226,6 +226,9 @@ pub const SYS_GETITIMER: u64 = 329;
 /// Set interval timer value. arg1=which, arg2=new_value_ptr, arg3=old_value_ptr
 pub const SYS_SETITIMER: u64 = 330;
 
+/// Restore context after signal handler. No args — reads SignalFrame from user stack.
+pub const SYS_RT_SIGRETURN: u64 = 353;
+
 /// Get process group id of current process (getpgrp).
 pub const SYS_GETPGRP: u64 = 331;
 

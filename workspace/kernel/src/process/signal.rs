@@ -257,22 +257,212 @@ pub const SA_RESTART: u32 = 1 << 5;
 pub const SA_NODEFER: u32 = 1 << 6;
 pub const SA_RESETHAND: u32 = 1 << 7;
 
-/// Signal handler type
+pub const SIG_DFL: u64 = 0;
+pub const SIG_IGN: u64 = 1;
+
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub enum SigAction {
-    /// Use default handler
-    Default,
-    /// Ignore the signal
-    Ignore,
-    /// Call handler at this address
-    Handler(u64),
+pub struct SigActionData {
+    pub handler: u64,
+    pub flags: u64,
+    pub restorer: u64,
+    pub mask: u64,
 }
 
-impl Default for SigAction {
-    fn default() -> Self {
-        SigAction::Default
+impl SigActionData {
+    pub const fn default() -> Self {
+        Self { handler: SIG_DFL, flags: 0, restorer: 0, mask: 0 }
     }
+
+    pub fn is_default(&self) -> bool { self.handler == SIG_DFL }
+    pub fn is_ignore(&self) -> bool { self.handler == SIG_IGN }
+    pub fn is_user_handler(&self) -> bool { self.handler > 1 }
+}
+
+impl Default for SigActionData {
+    fn default() -> Self { Self::default() }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultAction {
+    Term,
+    Core,
+    Stop,
+    Cont,
+    Ign,
+}
+
+impl Signal {
+    pub fn default_action(self) -> DefaultAction {
+        match self {
+            Signal::SIGHUP | Signal::SIGINT | Signal::SIGPIPE |
+            Signal::SIGALRM | Signal::SIGTERM | Signal::SIGUSR1 |
+            Signal::SIGUSR2 | Signal::SIGPROF | Signal::SIGVTALRM |
+            Signal::SIGIO | Signal::SIGPWR | Signal::SIGSYS => DefaultAction::Term,
+
+            Signal::SIGQUIT | Signal::SIGILL | Signal::SIGABRT |
+            Signal::SIGFPE | Signal::SIGSEGV | Signal::SIGBUS |
+            Signal::SIGTRAP | Signal::SIGXCPU | Signal::SIGXFSZ => DefaultAction::Core,
+
+            Signal::SIGSTOP | Signal::SIGTSTP |
+            Signal::SIGTTIN | Signal::SIGTTOU => DefaultAction::Stop,
+
+            Signal::SIGCONT => DefaultAction::Cont,
+
+            Signal::SIGCHLD | Signal::SIGURG |
+            Signal::SIGWINCH => DefaultAction::Ign,
+
+            Signal::SIGKILL => DefaultAction::Term,
+        }
+    }
+}
+
+pub const SIGNAL_FRAME_MAGIC: u64 = 0x5354_5239_5349_4700;
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SignalFrame {
+    pub restorer: u64,
+    pub signo: u64,
+    pub saved_mask: u64,
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub rax: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub magic: u64,
+}
+
+pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool {
+    let task = match crate::process::current_task_clone() {
+        Some(t) => t,
+        None => return false,
+    };
+
+    if task.is_kernel() {
+        return false;
+    }
+
+    let signal = match task.pending_signals.consume_one_unblocked(&task.blocked_signals) {
+        Some(s) => s,
+        None => return false,
+    };
+
+    let action = unsafe {
+        let actions = &*task.process.signal_actions.get();
+        actions[signal.as_u32() as usize]
+    };
+
+    if action.is_ignore() {
+        return true;
+    }
+
+    if action.is_default() {
+        match signal.default_action() {
+            DefaultAction::Ign => return true,
+            DefaultAction::Cont => return true,
+            DefaultAction::Stop => {
+                return true;
+            }
+            DefaultAction::Term | DefaultAction::Core => {
+                log::info!("[signal] killing pid {} on SIG{}", task.pid, signal.as_u32());
+                crate::process::kill_task(task.id);
+                return true;
+            }
+        }
+    }
+
+    let handler = action.handler;
+    let restorer = action.restorer;
+    let sig_mask = action.mask;
+    let flags = action.flags;
+
+    if restorer == 0 {
+        log::warn!("[signal] no restorer for SIG{}, killing", signal.as_u32());
+        crate::process::kill_task(task.id);
+        return true;
+    }
+
+    let user_rsp = frame.iret_rsp;
+    let frame_size = core::mem::size_of::<SignalFrame>() as u64;
+    let new_rsp = ((user_rsp - frame_size) & !0xF) - 8;
+
+    let sig_frame = SignalFrame {
+        restorer,
+        signo: signal.as_u32() as u64,
+        saved_mask: task.blocked_signals.get_mask(),
+        rip: frame.iret_rip,
+        rsp: frame.iret_rsp,
+        rflags: frame.iret_rflags,
+        rax: frame.rax,
+        rcx: frame.rcx,
+        rdx: frame.rdx,
+        rbx: frame.rbx,
+        rbp: frame.rbp,
+        rsi: frame.rsi,
+        rdi: frame.rdi,
+        r8: frame.r8,
+        r9: frame.r9,
+        r10: frame.r10,
+        r11: frame.r11,
+        r12: frame.r12,
+        r13: frame.r13,
+        r14: frame.r14,
+        r15: frame.r15,
+        magic: SIGNAL_FRAME_MAGIC,
+    };
+
+    let bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            &sig_frame as *const SignalFrame as *const u8,
+            core::mem::size_of::<SignalFrame>(),
+        )
+    };
+
+    match crate::memory::UserSliceWrite::new(new_rsp, bytes.len()) {
+        Ok(slice) => { slice.copy_from(bytes); }
+        Err(_) => {
+            log::warn!("[signal] fault writing signal frame, killing");
+            crate::process::kill_task(task.id);
+            return true;
+        }
+    }
+
+    // Block signals specified in sa_mask, plus the signal itself (unless SA_NODEFER)
+    let mut new_mask = task.blocked_signals.get_mask() | sig_mask;
+    if flags & (SA_NODEFER as u64) == 0 {
+        new_mask |= signal.bit();
+    }
+    task.blocked_signals.set_mask(new_mask);
+
+    // SA_RESETHAND: reset handler to SIG_DFL after delivery
+    if flags & (SA_RESETHAND as u64) != 0 {
+        unsafe {
+            let actions = &mut *task.process.signal_actions.get();
+            actions[signal.as_u32() as usize] = SigActionData::default();
+        }
+    }
+
+    frame.iret_rip = handler;
+    frame.iret_rsp = new_rsp;
+    frame.rdi = signal.as_u32() as u64;
+    frame.rsi = 0;
+    frame.rdx = 0;
+
+    true
 }
 
 /// Signal alternate stack

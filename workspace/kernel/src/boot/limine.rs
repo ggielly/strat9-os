@@ -75,6 +75,15 @@ static DHCP_CLIENT_MODULE: InternalModule =
 static PING_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/ping");
 /// Internal module: request Limine to load /initfs/bin/telnetd (Telnet server utility)
 static TELNETD_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/telnetd");
+/// Internal module: request Limine to load /initfs/strate-wasm (WASM runtime)
+static STRATE_WASM_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/strate-wasm");
+/// Internal module: request Limine to load /initfs/bin/hello.wasm (WASM hello test)
+static HELLO_WASM_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/bin/hello.wasm");
+/// Internal module: request Limine to load /initfs/wasm-test.toml (WASM test config)
+static WASM_TEST_TOML_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/wasm-test.toml");
 
 /// Request modules (files loaded alongside the kernel)
 #[used]
@@ -92,6 +101,9 @@ static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
     &DHCP_CLIENT_MODULE,
     &PING_MODULE,
     &TELNETD_MODULE,
+    &STRATE_WASM_MODULE,
+    &HELLO_WASM_MODULE,
+    &WASM_TEST_TOML_MODULE,
 ]);
 
 /// Optional fs-ext4 module info (set during Limine entry).
@@ -116,6 +128,12 @@ static mut DHCP_CLIENT_ELF_MODULE: Option<(u64, u64)> = None;
 static mut PING_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional telnetd module info (set during Limine entry).
 static mut TELNETD_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional strate-wasm module info (set during Limine entry).
+static mut STRATE_WASM_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional hello.wasm module info (set during Limine entry).
+static mut HELLO_WASM_FILE_MODULE: Option<(u64, u64)> = None;
+/// Optional wasm-test.toml module info (set during Limine entry).
+static mut WASM_TEST_TOML_FILE_MODULE: Option<(u64, u64)> = None;
 
 const MAX_BOOT_MEMORY_REGIONS: usize = 256;
 static mut BOOT_MEMORY_MAP: [super::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
@@ -192,6 +210,24 @@ pub fn telnetd_module() -> Option<(u64, u64)> {
     unsafe { TELNETD_ELF_MODULE }
 }
 
+/// Return the strate-wasm module (addr, size) if present.
+pub fn strate_wasm_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { STRATE_WASM_ELF_MODULE }
+}
+
+/// Return the hello.wasm module (addr, size) if present.
+pub fn hello_wasm_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { HELLO_WASM_FILE_MODULE }
+}
+
+/// Return the wasm-test.toml module (addr, size) if present.
+pub fn wasm_test_toml_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { WASM_TEST_TOML_FILE_MODULE }
+}
+
 fn path_matches(module_path: &[u8], expected_path: &[u8]) -> bool {
     let expected_no_leading = expected_path.strip_prefix(b"/").unwrap_or(expected_path);
     module_path == expected_path
@@ -223,6 +259,9 @@ struct ResolvedModules {
     dhcp_client: Option<(u64, u64)>,
     ping: Option<(u64, u64)>,
     telnetd: Option<(u64, u64)>,
+    strate_wasm: Option<(u64, u64)>,
+    hello_wasm: Option<(u64, u64)>,
+    wasm_test_toml: Option<(u64, u64)>,
 }
 
 fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> ResolvedModules {
@@ -257,6 +296,12 @@ fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> Re
             resolved.ping = Some(info);
         } else if path_matches(path, b"/initfs/bin/telnetd") {
             resolved.telnetd = Some(info);
+        } else if path_matches(path, b"/initfs/strate-wasm") {
+            resolved.strate_wasm = Some(info);
+        } else if path_matches(path, b"/initfs/bin/hello.wasm") {
+            resolved.hello_wasm = Some(info);
+        } else if path_matches(path, b"/initfs/wasm-test.toml") {
+            resolved.wasm_test_toml = Some(info);
         }
     }
     resolved
@@ -554,6 +599,36 @@ pub unsafe extern "C" fn kmain() -> ! {
                 );
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/bin/telnetd not found in modules");
+            }
+            if let Some((base, size)) = resolved.strate_wasm {
+                unsafe { STRATE_WASM_ELF_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/strate-wasm found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/strate-wasm not found in modules");
+            }
+            if let Some((base, size)) = resolved.hello_wasm {
+                unsafe { HELLO_WASM_FILE_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/bin/hello.wasm found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/bin/hello.wasm not found in modules");
+            }
+            if let Some((base, size)) = resolved.wasm_test_toml {
+                unsafe { WASM_TEST_TOML_FILE_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/wasm-test.toml found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/wasm-test.toml not found in modules");
             }
 
             if init_base == 0 {

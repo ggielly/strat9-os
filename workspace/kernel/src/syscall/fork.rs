@@ -5,7 +5,7 @@ use crate::{
     process::{
         current_task_clone,
         scheduler::add_task_with_parent,
-        signal::{SigAction, SigStack, SignalSet},
+        signal::{SigActionData, SigStack, SignalSet},
         task::{CpuContext, KernelStack, Pid, SyncUnsafeCell, Task},
         TaskId, TaskState,
     },
@@ -153,7 +153,7 @@ fn build_child_task(
     let parent_caps = unsafe { (&*parent.process.capabilities.get()).clone() };
     let parent_fd = unsafe { (&*parent.process.fd_table.get()).clone_for_fork() };
     let parent_blocked = parent.blocked_signals.clone();
-    let parent_actions: [SigAction; 64] = unsafe { *parent.process.signal_actions.get() };
+    let parent_actions: [SigActionData; 64] = unsafe { *parent.process.signal_actions.get() };
     let parent_sigstack: Option<SigStack> = unsafe { *parent.signal_stack.get() };
 
     let (pid, tid, tgid) = Task::allocate_process_ids();

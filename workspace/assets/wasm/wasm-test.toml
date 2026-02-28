@@ -1,0 +1,17 @@
+[[silos]]
+name = "wasm"
+family = "WASM"
+mode = "006"
+sid = 42
+
+[[silos.strates]]
+name = "strate-wasm"
+binary = "/initfs/strate-wasm"
+type = "wasm-runtime"
+target_strate = "default"
+
+[[silos.strates]]
+name = "hello-world"
+binary = "/initfs/bin/hello.wasm"
+type = "wasm-app"
+target_strate = "strate-wasm"

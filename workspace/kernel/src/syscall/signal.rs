@@ -6,69 +6,36 @@ use crate::{
     process::{
         current_pgid, current_task_clone, current_task_id, get_all_tasks, get_task_by_id,
         get_task_id_by_pid, get_task_ids_in_pgid,
-        signal::{SigAction, SigStack, Signal, SignalSet},
+        signal::{SigActionData, SigStack, Signal, SignalSet},
         TaskId,
     },
 };
 
-/// SYS_SIGACTION (322): set up a signal handler.
-///
-/// arg1 = signum, arg2 = act_ptr (new action), arg3 = oact_ptr (old action out)
 pub fn sys_sigaction(signum: u64, act_ptr: u64, oact_ptr: u64) -> Result<u64, SyscallError> {
     use core::mem;
 
-    const SA_NOCLDSTOP: u64 = 1 << 0;
-    const SA_NOCLDWAIT: u64 = 1 << 1;
-    const SA_SIGINFO: u64 = 1 << 2;
-    const SA_RESTORER: u64 = 1 << 3;
-    const SA_ONSTACK: u64 = 1 << 4;
-    const SA_RESTART: u64 = 1 << 5;
-    const SA_NODEFER: u64 = 1 << 6;
-    const SA_RESETHAND: u64 = 1 << 7;
-
     let signal = Signal::from_u32(signum as u32).ok_or(SyscallError::InvalidArgument)?;
-
-    // Cannot set handler for SIGKILL or SIGSTOP
     if signal.is_uncatchable() {
         return Err(SyscallError::InvalidArgument);
     }
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
-    // SAFETY: we have a reference to the task.
     unsafe {
         let actions = &mut *task.process.signal_actions.get();
 
-        // If oact_ptr is not null, write the old action.
         if oact_ptr != 0 {
-            let old_action = actions[signum as usize];
-            let user = UserSliceWrite::new(oact_ptr, mem::size_of::<SigActionRaw>())?;
-
-            // Convert SigAction to raw representation
-            let raw = match old_action {
-                SigAction::Default => SigActionRaw {
-                    sa_handler: 0, // SIG_DFL
-                    sa_flags: 0,
-                    sa_restorer: 0,
-                    sa_mask: 0,
-                },
-                SigAction::Ignore => SigActionRaw {
-                    sa_handler: 1, // SIG_IGN
-                    sa_flags: 0,
-                    sa_restorer: 0,
-                    sa_mask: 0,
-                },
-                SigAction::Handler(addr) => SigActionRaw {
-                    sa_handler: addr,
-                    sa_flags: 0,
-                    sa_restorer: 0,
-                    sa_mask: 0,
-                },
+            let old = actions[signum as usize];
+            let raw = SigActionRaw {
+                sa_handler: old.handler,
+                sa_flags: old.flags,
+                sa_restorer: old.restorer,
+                sa_mask: old.mask,
             };
+            let user = UserSliceWrite::new(oact_ptr, mem::size_of::<SigActionRaw>())?;
             user.copy_from(&raw.to_bytes());
         }
 
-        // If act_ptr is not null, update the action.
         if act_ptr != 0 {
             let user = UserSliceRead::new(act_ptr, mem::size_of::<SigActionRaw>())?;
             let bytes = user.read_to_vec();
@@ -76,16 +43,12 @@ pub fn sys_sigaction(signum: u64, act_ptr: u64, oact_ptr: u64) -> Result<u64, Sy
                 return Err(SyscallError::InvalidArgument);
             }
             let raw = SigActionRaw::from_bytes(&bytes);
-
-            let new_action = if raw.sa_handler == 0 {
-                SigAction::Default
-            } else if raw.sa_handler == 1 {
-                SigAction::Ignore
-            } else {
-                SigAction::Handler(raw.sa_handler)
+            actions[signum as usize] = SigActionData {
+                handler: raw.sa_handler,
+                flags: raw.sa_flags,
+                restorer: raw.sa_restorer,
+                mask: raw.sa_mask,
             };
-
-            actions[signum as usize] = new_action;
         }
     }
 
@@ -489,4 +452,54 @@ fn itimerval_from_bytes(bytes: &[u8]) -> crate::process::timer::ITimerVal {
             tv_usec: i64::from_ne_bytes(bytes[24..32].try_into().unwrap()),
         },
     }
+}
+
+pub fn sys_rt_sigreturn(frame: &mut super::SyscallFrame) -> Result<u64, SyscallError> {
+    use crate::process::signal::{SignalFrame, SIGNAL_FRAME_MAGIC};
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let user_rsp = frame.iret_rsp;
+
+    let frame_size = core::mem::size_of::<SignalFrame>();
+    let sig_frame_addr = user_rsp - 8; // RET popped the restorer, back up to frame start
+
+    let user = UserSliceRead::new(sig_frame_addr, frame_size)?;
+    let bytes = user.read_to_vec();
+    if bytes.len() != frame_size {
+        return Err(SyscallError::Fault);
+    }
+
+    // SAFETY: SignalFrame is repr(C) and matches the byte layout
+    let sig_frame: SignalFrame = unsafe {
+        core::ptr::read_unaligned(bytes.as_ptr() as *const SignalFrame)
+    };
+
+    if sig_frame.magic != SIGNAL_FRAME_MAGIC {
+        log::warn!("[sigreturn] bad magic, killing");
+        crate::process::kill_task(task.id);
+        return Err(SyscallError::Fault);
+    }
+
+    task.blocked_signals.set_mask(sig_frame.saved_mask);
+
+    frame.iret_rip = sig_frame.rip;
+    frame.iret_rsp = sig_frame.rsp;
+    frame.iret_rflags = sig_frame.rflags;
+    frame.rax = sig_frame.rax;
+    frame.rcx = sig_frame.rcx;
+    frame.rdx = sig_frame.rdx;
+    frame.rbx = sig_frame.rbx;
+    frame.rbp = sig_frame.rbp;
+    frame.rsi = sig_frame.rsi;
+    frame.rdi = sig_frame.rdi;
+    frame.r8 = sig_frame.r8;
+    frame.r9 = sig_frame.r9;
+    frame.r10 = sig_frame.r10;
+    frame.r11 = sig_frame.r11;
+    frame.r12 = sig_frame.r12;
+    frame.r13 = sig_frame.r13;
+    frame.r14 = sig_frame.r14;
+    frame.r15 = sig_frame.r15;
+
+    Ok(frame.rax)
 }

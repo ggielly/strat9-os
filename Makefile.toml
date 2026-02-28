@@ -322,6 +322,20 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-wasm]
+description = "Build the wasm runtime silo (debug profile)"
+cwd = "workspace/components/strate-wasm"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-console-admin]
 
 
@@ -458,6 +472,21 @@ args = [
 [tasks.strate-net-release]
 description = "Build the network silo (release profile)"
 cwd = "workspace/components/strate-net"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-wasm-release]
+description = "Build the wasm runtime silo (release profile)"
+cwd = "workspace/components/strate-wasm"
 command = "cargo"
 args = [
     "build",
@@ -626,6 +655,22 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-wasm-dev-opt]
+description = "Build the wasm runtime silo (dev-opt profile)"
+cwd = "workspace/components/strate-wasm"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-console-admin-dev-opt]
 description = "Build the console-admin silo (dev-opt profile)"
 cwd = "workspace/components/strate-console-admin"
@@ -701,6 +746,7 @@ dependencies = [
     "strate-init",
     "strate-console-admin",
     "strate-net",
+    "strate-wasm",
     "dhcp-client",
     "ping",
     "telnetd",
@@ -724,6 +770,7 @@ dependencies = [
     "strate-init",
     "strate-console-admin",
     "strate-net",
+    "strate-wasm",
     "dhcp-client",
     "ping",
     "telnetd",
@@ -745,6 +792,7 @@ dependencies = [
     "strate-init-dev-opt",
     "strate-console-admin-dev-opt",
     "strate-net-dev-opt",
+    "strate-wasm-dev-opt",
     "dhcp-client-dev-opt",
     "ping-dev-opt",
     "telnetd-dev-opt",
@@ -766,6 +814,7 @@ dependencies = [
     "strate-init-release",
     "strate-console-admin-release",
     "strate-net-release",
+    "strate-wasm-release",
     "dhcp-client-release",
     "ping-release",
     "telnetd-release",

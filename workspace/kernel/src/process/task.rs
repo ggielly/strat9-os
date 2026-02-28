@@ -527,7 +527,7 @@ impl Task {
         unsafe {
             let actions = &mut *self.process.signal_actions.get();
             for action in actions.iter_mut() {
-                *action = super::signal::SigAction::Default;
+                *action = super::signal::SigActionData::default();
             }
         }
     }

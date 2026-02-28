@@ -22,9 +22,12 @@ MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/strate-init"
 CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
+STRATE_WASM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-wasm"
 DHCP_CLIENT_ELF="target/x86_64-unknown-none/${PROFILE}/dhcp-client"
 PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
 TELNETD_ELF="target/x86_64-unknown-none/${PROFILE}/telnetd"
+HELLO_WASM_FILE="workspace/assets/wasm/hello.wasm"
+WASM_TEST_TOML_FILE="workspace/assets/wasm/wasm-test.toml"
 
 echo ""
 echo "=== Creating Limine bootable image ==="
@@ -102,6 +105,12 @@ if [ -f "$NET_ELF" ]; then
     echo "    strate-net   : $net_size bytes"
 else
     echo "    strate-net   : (missing)"
+fi
+if [ -f "$STRATE_WASM_ELF" ]; then
+    wasm_size=$(stat -c%s "$STRATE_WASM_ELF")
+    echo "    strate-wasm  : $wasm_size bytes"
+else
+    echo "    strate-wasm  : (missing)"
 fi
 if [ -f "$DHCP_CLIENT_ELF" ]; then
     dhcp_client_size=$(stat -c%s "$DHCP_CLIENT_ELF")
@@ -212,6 +221,13 @@ else
     echo "  [WARN] strate-net binary not found at $NET_ELF"
 fi
 
+if [ -f "$STRATE_WASM_ELF" ]; then
+    cp "$STRATE_WASM_ELF" "$ISO_ROOT/initfs/strate-wasm"
+    echo "  [OK] Copied strate-wasm: /initfs/strate-wasm"
+else
+    echo "  [WARN] strate-wasm binary not found at $STRATE_WASM_ELF"
+fi
+
 if [ -f "$DHCP_CLIENT_ELF" ]; then
     cp "$DHCP_CLIENT_ELF" "$ISO_ROOT/initfs/bin/dhcp-client"
     echo "  [OK] Copied dhcp-client: /initfs/bin/dhcp-client"
@@ -231,6 +247,20 @@ if [ -f "$TELNETD_ELF" ]; then
     echo "  [OK] Copied telnetd: /initfs/bin/telnetd"
 else
     echo "  [WARN] telnetd binary not found at $TELNETD_ELF"
+fi
+
+if [ -f "$HELLO_WASM_FILE" ]; then
+    cp "$HELLO_WASM_FILE" "$ISO_ROOT/initfs/bin/hello.wasm"
+    echo "  [OK] Copied hello.wasm: /initfs/bin/hello.wasm"
+else
+    echo "  [WARN] hello.wasm not found at $HELLO_WASM_FILE"
+fi
+
+if [ -f "$WASM_TEST_TOML_FILE" ]; then
+    cp "$WASM_TEST_TOML_FILE" "$ISO_ROOT/initfs/wasm-test.toml"
+    echo "  [OK] Copied wasm-test config: /initfs/wasm-test.toml"
+else
+    echo "  [WARN] wasm-test config not found at $WASM_TEST_TOML_FILE"
 fi
 
 # Create ISO using xorriso

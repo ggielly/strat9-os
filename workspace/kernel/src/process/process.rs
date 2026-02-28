@@ -5,7 +5,7 @@ use crate::memory::AddressSpace;
 use crate::vfs::FileDescriptorTable;
 use crate::capability::CapabilityTable;
 use crate::process::task::SyncUnsafeCell;
-use crate::process::signal::SigAction;
+use crate::process::signal::SigActionData;
 
 /// Represents a process (a group of threads sharing resources).
 pub struct Process {
@@ -20,7 +20,7 @@ pub struct Process {
     pub capabilities: SyncUnsafeCell<CapabilityTable>,
     
     /// Signal actions (handlers) for this process
-    pub signal_actions: SyncUnsafeCell<[SigAction; 64]>,
+    pub signal_actions: SyncUnsafeCell<[SigActionData; 64]>,
     
     /// Program break (end of heap), in bytes. 0 = not yet initialised.
     pub brk: AtomicU64,
@@ -43,7 +43,7 @@ impl Process {
             address_space: SyncUnsafeCell::new(address_space),
             fd_table: SyncUnsafeCell::new(FileDescriptorTable::new()),
             capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
-            signal_actions: SyncUnsafeCell::new([SigAction::Default; 64]),
+            signal_actions: SyncUnsafeCell::new([SigActionData::default(); 64]),
             brk: AtomicU64::new(0),
             mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
             cwd: SyncUnsafeCell::new(String::from("/")),

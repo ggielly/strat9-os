@@ -22,7 +22,7 @@ use wasmi::{Caller, Config, Engine, Linker, Module, Store, Instance, StoreLimits
 
 struct BrkGrower;
 
-unsafe impl OomHandler for BrkGrower {
+impl OomHandler for BrkGrower {
     fn handle_oom(talc: &mut Talc<Self>, layout: Layout) -> Result<(), ()> {
         let current_brk = call::brk(0).map_err(|_| ())?;
         let growth = (layout.size().max(layout.align()) + 65536) & !4095;

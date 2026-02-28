@@ -87,6 +87,7 @@ pub const SYS_THREAD_JOIN: usize = 342;
 pub const SYS_THREAD_EXIT: usize = 343;
 pub const SYS_ARCH_PRCTL: usize = 350;
 pub const SYS_TGKILL: usize = 352;
+pub const SYS_RT_SIGRETURN: usize = 353;
 
 // Block 400-499: filesystem / VFS
 pub const SYS_OPEN: usize = 403;

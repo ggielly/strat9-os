@@ -144,7 +144,7 @@ fn cidr_to_netmask(prefix_str: &str) -> Option<[u8; 20]> {
 // Main
 // ---------------------------------------------------------------------------
 
-const MAX_RETRIES: usize = 60;
+const BOOT_RETRIES: usize = 10;
 const POLL_INTERVAL_MS: u64 = 500;
 
 #[unsafe(no_mangle)]
@@ -166,9 +166,9 @@ pub extern "C" fn _start() -> ! {
                     log("[dhcp-client] /net not available yet, retrying...\n");
                 }
                 retries += 1;
-                if retries >= MAX_RETRIES {
-                    log("[dhcp-client] Timeout waiting for /net scheme\n");
-                    call::exit(1);
+                if retries >= BOOT_RETRIES {
+                    log("[dhcp-client] /net not ready yet; continuing boot without DHCP\n");
+                    call::exit(0);
                 }
                 sleep_ms(POLL_INTERVAL_MS);
                 continue;
@@ -177,9 +177,9 @@ pub extern "C" fn _start() -> ! {
 
         if ip_n == 0 || is_unconfigured(&ip_buf[..ip_n]) {
             retries += 1;
-            if retries >= MAX_RETRIES {
-                log("[dhcp-client] Timeout: DHCP did not complete within 30s\n");
-                call::exit(1);
+            if retries >= BOOT_RETRIES {
+                log("[dhcp-client] DHCP not ready during boot window; leaving background probe\n");
+                call::exit(0);
             }
             sleep_ms(POLL_INTERVAL_MS);
             continue;
