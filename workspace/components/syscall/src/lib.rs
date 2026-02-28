@@ -1156,4 +1156,23 @@ pub mod call {
     pub fn silo_resume(silo_id: usize) -> error::Result<usize> {
         unsafe { syscall1(number::SYS_SILO_RESUME, silo_id) }
     }
+
+    pub fn silo_pledge(new_mode: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SILO_PLEDGE, new_mode) }
+    }
+
+    pub fn silo_unveil(path: &[u8], rights_bits: usize) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_SILO_UNVEIL,
+                path.as_ptr() as usize,
+                path.len(),
+                rights_bits,
+            )
+        }
+    }
+
+    pub fn silo_enter_sandbox() -> error::Result<usize> {
+        unsafe { syscall0(number::SYS_SILO_ENTER_SANDBOX) }
+    }
 }

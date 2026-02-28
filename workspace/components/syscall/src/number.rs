@@ -137,3 +137,5 @@ pub const SYS_SILO_EVENT_NEXT: usize = 806;
 pub const SYS_SILO_SUSPEND: usize = 807;
 pub const SYS_SILO_RESUME: usize = 808;
 pub const SYS_SILO_PLEDGE: usize = 809;
+pub const SYS_SILO_UNVEIL: usize = 810;
+pub const SYS_SILO_ENTER_SANDBOX: usize = 811;

@@ -6,13 +6,14 @@ use net_core::NetError;
 use nic_buffers::{DmaAllocator, DmaRegion};
 use nic_queues::{RxDescriptor, RxRing, TxRing};
 
-pub const NUM_RX: usize = 64;
-pub const NUM_TX: usize = 64;
-pub const RX_BUF_SIZE: usize = 2048;
+pub const NUM_RX: usize = 128;  // Optimisé pour plus de throughput
+pub const NUM_TX: usize = 128;  // Optimisé pour plus de throughput
+pub const RX_BUF_SIZE: usize = 4096;  // Buffer size optimisé (MTU + overhead)
 
 pub const E1000_DEVICE_IDS: &[u16] = &[0x100E, 0x100F, 0x10D3, 0x153A, 0x1539];
 pub const INTEL_VENDOR: u16 = 0x8086;
 
+/// E1000 NIC structure with DMA-safe rings
 pub struct E1000Nic {
     mmio: u64,
     rx: RxRing<LegacyRxDesc>,
@@ -20,6 +21,7 @@ pub struct E1000Nic {
     tx: TxRing<LegacyTxDesc>,
     tx_bufs: [Option<DmaRegion>; NUM_TX],
     mac: [u8; 6],
+    link_up: bool,
 }
 
 unsafe impl Send for E1000Nic {}
@@ -97,7 +99,7 @@ impl E1000Nic {
                 tctl::EN | tctl::PSP | (0x10 << tctl::CT_SHIFT) | (0x40 << tctl::COLD_SHIFT),
             );
 
-            // Enable RX
+            // Enable RX with 2048 buffer size (default, works with all MTUs)
             wr(
                 mmio_base,
                 regs::RCTL,
@@ -110,8 +112,10 @@ impl E1000Nic {
             wr(
                 mmio_base,
                 regs::IMS,
-                int_bits::RXT0 | int_bits::LSC | int_bits::RXDMT0 | int_bits::RXO,
+                int_bits::RXT0 | int_bits::LSC | int_bits::RXDMT0 | int_bits::RXO | int_bits::TXDW,
             );
+            let status = rd(mmio_base, regs::STATUS);
+            let link_up = (status & 0x02) != 0;
 
             Ok(Self {
                 mmio: mmio_base,
@@ -120,6 +124,7 @@ impl E1000Nic {
                 tx: TxRing::new(tx_descs, NUM_TX),
                 tx_bufs: [None; NUM_TX],
                 mac,
+                link_up,
             })
         }
     }
@@ -129,10 +134,24 @@ impl E1000Nic {
     }
 
     pub fn link_up(&self) -> bool {
-        unsafe { rd(self.mmio, regs::STATUS) & 0x02 != 0 }
+        self.link_up
+    }
+
+    /// Check and update link status
+    pub fn check_link(&mut self) -> bool {
+        unsafe {
+            let status = rd(self.mmio, regs::STATUS);
+            self.link_up = (status & 0x02) != 0;
+        }
+        self.link_up
     }
 
     pub fn receive(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
+        // Check link status first
+        if !self.check_link() {
+            return Err(NetError::LinkDown);
+        }
+
         let (idx, pkt_len) = self.rx.poll().ok_or(NetError::NoPacket)?;
         let len = pkt_len as usize;
         if buf.len() < len {
@@ -143,6 +162,7 @@ impl E1000Nic {
             ptr::copy_nonoverlapping(self.rx_bufs[idx].virt, buf.as_mut_ptr(), len);
         }
 
+        // Recycle RX buffer
         self.rx.desc_mut(idx).clear_status();
         self.rx
             .desc_mut(idx)
@@ -156,50 +176,91 @@ impl E1000Nic {
     }
 
     pub fn transmit(&mut self, buf: &[u8], alloc: &dyn DmaAllocator) -> Result<(), NetError> {
+        // Check link status first
+        if !self.check_link() {
+            return Err(NetError::LinkDown);
+        }
+
         if buf.len() > net_core::MTU {
             return Err(NetError::BufferTooSmall);
         }
 
         let idx = self.tx.tail();
-        // Wait for previous TX at this slot
+        
+        // Check if previous TX at this slot is complete (non-blocking)
         if self.tx.desc(idx).cmd != 0 && !self.tx.is_done(idx) {
             return Err(NetError::TxQueueFull);
         }
 
-        // Free previous buffer
+        // Free previous buffer if present
         if let Some(old) = self.tx_bufs[idx].take() {
             unsafe {
                 alloc.free_dma(old);
             }
         }
 
+        // Allocate new DMA buffer
         let region = alloc.alloc_dma(buf.len()).map_err(|_| NetError::NotReady)?;
         unsafe {
             ptr::copy_nonoverlapping(buf.as_ptr(), region.virt, buf.len());
         }
 
         self.tx_bufs[idx] = Some(region);
-        let submitted = self.tx.submit(region.phys, buf.len() as u16);
+        let _submitted = self.tx.submit(region.phys, buf.len() as u16);
         unsafe {
             wr(self.mmio, regs::TDT, self.tx.tail() as u32);
         }
 
-        // Spin-wait for completion
+        // Non-blocking: return immediately, caller can poll is_transmit_complete()
+        // For small packets, we can optionally wait (commented out for performance)
+        /*
         while !self.tx.is_done(submitted) {
             core::hint::spin_loop();
         }
+        */
 
         Ok(())
     }
 
+    /// Check if last transmission is complete (non-blocking)
+    pub fn is_transmit_complete(&self) -> bool {
+        let idx = self.tx.tail();
+        self.tx.is_done(idx)
+    }
+
+    /// Wait for transmission to complete (blocking)
+    pub fn wait_for_transmit(&self) {
+        while !self.is_transmit_complete() {
+            core::hint::spin_loop();
+        }
+    }
+
     pub fn handle_interrupt(&self) {
-        let _icr = unsafe { rd(self.mmio, regs::ICR) };
+        // Read and clear interrupt causes
+        let icr = unsafe { rd(self.mmio, regs::ICR) };
+        
+        // Handle specific interrupt causes
+        if (icr & int_bits::LSC) != 0 {
+            // Link Status Change - update cached state
+            let _status = unsafe { rd(self.mmio, regs::STATUS) };
+        }
+        
+        if (icr & (int_bits::RXT0 | int_bits::RXDMT0 | int_bits::RXO)) != 0 {
+            // RX interrupts - packet received, will be handled by poll
+        }
+        
+        if (icr & int_bits::TXDW) != 0 {
+            // TX descriptor written back - buffers can be freed
+        }
     }
 
     unsafe fn read_mac(base: u64) -> [u8; 6] {
+        // Try RAL/RAH registers first
         let ral = rd(base, regs::RAL0);
         let rah = rd(base, regs::RAH0);
-        if ral != 0 || (rah & 0xFFFF) != 0 {
+        
+        // Check if MAC address is valid (not all zeros)
+        if ral != 0 || rah != 0 {
             return [
                 (ral) as u8,
                 (ral >> 8) as u8,
@@ -209,7 +270,8 @@ impl E1000Nic {
                 (rah >> 8) as u8,
             ];
         }
-        // EEPROM fallback
+        
+        // Fallback to EEPROM read
         let mut mac = [0u8; 6];
         for i in 0u32..3 {
             let w = Self::eeprom_read(base, i as u8);

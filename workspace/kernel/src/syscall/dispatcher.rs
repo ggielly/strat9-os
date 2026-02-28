@@ -198,6 +198,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SILO_SUSPEND => silo::sys_silo_suspend(arg1),
         SYS_SILO_RESUME => silo::sys_silo_resume(arg1),
         SYS_SILO_PLEDGE => silo::sys_silo_pledge(arg1),
+        SYS_SILO_UNVEIL => silo::sys_silo_unveil(arg1, arg2, arg3),
+        SYS_SILO_ENTER_SANDBOX => silo::sys_silo_enter_sandbox(),
         _ => {
             log::warn!("Unknown syscall: {} (0x{:x})", syscall_num, syscall_num);
             Err(SyscallError::NotImplemented)
@@ -413,6 +415,7 @@ fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
 
 fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
+    crate::silo::enforce_silo_may_grant()?;
     let pid = u32::try_from(target_pid).map_err(|_| SyscallError::InvalidArgument)?;
 
     let source = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
