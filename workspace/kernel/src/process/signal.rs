@@ -168,57 +168,82 @@ impl SignalSet {
     /// Add a signal to the set.
     pub fn add(&self, signal: Signal) {
         let bit = signal.bit();
-        self.mask.fetch_or(bit, Ordering::SeqCst);
+        self.mask.fetch_or(bit, Ordering::Release);
     }
 
     /// Remove a signal from the set.
     pub fn remove(&self, signal: Signal) {
         let bit = !signal.bit();
-        self.mask.fetch_and(bit, Ordering::SeqCst);
+        self.mask.fetch_and(bit, Ordering::AcqRel);
     }
 
     /// Check if a signal is in the set.
     pub fn contains(&self, signal: Signal) -> bool {
         let bit = signal.bit();
-        (self.mask.load(Ordering::SeqCst) & bit) != 0
+        (self.mask.load(Ordering::Acquire) & bit) != 0
     }
 
     /// Check if the set is empty.
     pub fn is_empty(&self) -> bool {
-        self.mask.load(Ordering::SeqCst) == 0
+        self.mask.load(Ordering::Acquire) == 0
     }
 
     /// Get the raw mask value.
     pub fn get_mask(&self) -> u64 {
-        self.mask.load(Ordering::SeqCst)
+        self.mask.load(Ordering::Acquire)
     }
 
     /// Set the raw mask value.
     pub fn set_mask(&self, mask: u64) {
-        self.mask.store(mask, Ordering::SeqCst);
+        self.mask.store(mask, Ordering::Release);
     }
 
     /// Clear all signals.
     pub fn clear(&self) {
-        self.mask.store(0, Ordering::SeqCst);
+        self.mask.store(0, Ordering::Release);
     }
 
     /// Get the next pending signal (lowest numbered).
     pub fn next_pending(&self) -> Option<Signal> {
-        let pending = self.mask.load(Ordering::SeqCst);
+        let pending = self.mask.load(Ordering::Acquire);
         if pending == 0 {
             return None;
         }
-        // Find the lowest set bit (lowest signal number).
         let signal_num = pending.trailing_zeros() + 1;
         Signal::from_u32(signal_num)
     }
 
     /// Get signals that are in self but not in blocked.
     pub fn unblocked(&self, blocked: &SignalSet) -> u64 {
-        let pending = self.mask.load(Ordering::SeqCst);
-        let blocked_mask = blocked.mask.load(Ordering::SeqCst);
+        let pending = self.mask.load(Ordering::Acquire);
+        let blocked_mask = blocked.mask.load(Ordering::Acquire);
         pending & !blocked_mask
+    }
+
+    /// Atomically consume one pending unblocked signal (CAS loop).
+    pub fn consume_one_unblocked(&self, blocked: &SignalSet) -> Option<Signal> {
+        loop {
+            let pending = self.mask.load(Ordering::Acquire);
+            let blocked_mask = blocked.mask.load(Ordering::Acquire);
+            let unblocked = pending & !blocked_mask;
+            if unblocked == 0 {
+                return None;
+            }
+            let lowest_bit = unblocked & unblocked.wrapping_neg();
+            let new_pending = pending & !lowest_bit;
+            match self.mask.compare_exchange_weak(
+                pending,
+                new_pending,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    let signal_num = lowest_bit.trailing_zeros() + 1;
+                    return Signal::from_u32(signal_num);
+                }
+                Err(_) => continue,
+            }
+        }
     }
 }
 
@@ -292,6 +317,10 @@ pub fn send_signal(
     pending.add(signal);
 
     // If the task is blocked and the signal is not blocked, wake it.
+    // SAFETY: Best-effort read of task.state without the scheduler lock.
+    // The state may change concurrently, but wake_task is idempotent —
+    // a spurious wake is harmless and a missed wake will be caught on
+    // the next scheduling point when pending_signals is checked.
     unsafe {
         let state = &*task.state.get();
         if *state == crate::process::TaskState::Blocked {
@@ -323,21 +352,14 @@ pub fn has_pending_signals() -> bool {
 
 /// Consume the next pending signal.
 ///
-/// Removes the signal from the pending set and returns it.
+/// Atomically removes the signal from the pending set and returns it.
 pub fn consume_next_signal() -> Option<Signal> {
     use crate::process::current_task_clone;
 
     if let Some(task) = current_task_clone() {
-        let pending = &task.pending_signals;
-        let blocked = &task.blocked_signals;
-        let unblocked = pending.unblocked(blocked);
-        if unblocked != 0 {
-            let signal_num = unblocked.trailing_zeros() + 1;
-            if let Some(signal) = Signal::from_u32(signal_num) {
-                pending.remove(signal);
-                return Some(signal);
-            }
-        }
+        task.pending_signals
+            .consume_one_unblocked(&task.blocked_signals)
+    } else {
+        None
     }
-    None
 }

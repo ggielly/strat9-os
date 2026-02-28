@@ -132,37 +132,38 @@ impl ITimerState {
     pub fn set(&self, value: &ITimerVal, current_time_ns: u64) {
         let (interval_ns, value_ns) = value.to_nanos();
 
-        self.interval_ns.store(interval_ns, Ordering::Relaxed);
-
         if value_ns == 0 {
-            // Disarm timer
-            self.armed.store(false, Ordering::Relaxed);
+            self.armed.store(false, Ordering::Release);
             self.next_expiration.store(0, Ordering::Relaxed);
+            self.interval_ns.store(interval_ns, Ordering::Relaxed);
         } else {
-            // Arm timer
+            self.interval_ns.store(interval_ns, Ordering::Relaxed);
             let next = current_time_ns.saturating_add(value_ns);
             self.next_expiration.store(next, Ordering::Relaxed);
-            self.armed.store(true, Ordering::Relaxed);
+            self.armed.store(true, Ordering::Release);
         }
     }
 
     /// Check if timer has expired and needs to fire
     pub fn check_expired(&self, current_time_ns: u64) -> bool {
-        if !self.armed.load(Ordering::Relaxed) {
+        if !self.armed.load(Ordering::Acquire) {
             return false;
         }
 
         let next = self.next_expiration.load(Ordering::Relaxed);
         if current_time_ns >= next && next != 0 {
-            // Timer expired
             let interval = self.interval_ns.load(Ordering::Relaxed);
             if interval == 0 {
-                // One-shot timer: disarm
-                self.armed.store(false, Ordering::Relaxed);
+                self.armed.store(false, Ordering::Release);
                 self.next_expiration.store(0, Ordering::Relaxed);
             } else {
-                // Periodic timer: reset to next interval
-                let new_next = current_time_ns.saturating_add(interval);
+                // Anchor to previous expiration to avoid drift accumulation.
+                let new_next = next.saturating_add(interval);
+                let new_next = if new_next <= current_time_ns {
+                    current_time_ns.saturating_add(interval)
+                } else {
+                    new_next
+                };
                 self.next_expiration.store(new_next, Ordering::Relaxed);
             }
             true
@@ -173,7 +174,7 @@ impl ITimerState {
 
     /// Disarm the timer
     pub fn disarm(&self) {
-        self.armed.store(false, Ordering::Relaxed);
+        self.armed.store(false, Ordering::Release);
         self.next_expiration.store(0, Ordering::Relaxed);
         self.interval_ns.store(0, Ordering::Relaxed);
     }

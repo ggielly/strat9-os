@@ -179,15 +179,20 @@ impl SchedClassRq for FairClassRq {
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool {
         let mut vec = self.entities.drain().collect::<alloc::vec::Vec<_>>();
         let old_len = vec.len();
-        vec.retain(|Reverse(item)| item.0.id != task_id);
+        let mut removed_weight = 0u64;
+        vec.retain(|Reverse(item)| {
+            if item.0.id == task_id {
+                if let super::SchedPolicy::Fair(nice) = item.0.sched_policy() {
+                    removed_weight += nice_to_weight(nice);
+                }
+                false
+            } else {
+                true
+            }
+        });
         let removed = vec.len() < old_len;
         if removed {
-            self.total_weight = 0;
-            for Reverse(item) in &vec {
-                if let super::SchedPolicy::Fair(nice) = item.0.sched_policy() {
-                    self.total_weight += nice_to_weight(nice);
-                }
-            }
+            self.total_weight = self.total_weight.saturating_sub(removed_weight);
         }
         self.entities = alloc::collections::BinaryHeap::from(vec);
         removed

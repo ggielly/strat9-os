@@ -43,6 +43,10 @@ pub fn virt_to_phys(virt: u64) -> u64 {
 /// Initialize the memory management subsystem
 pub fn init_memory_manager(memory_regions: &[MemoryRegion]) {
     buddy::init_buddy_allocator(memory_regions);
+}
+
+/// Initialize copy-on-write metadata.
+pub fn init_cow_subsystem(memory_regions: &[MemoryRegion]) {
     init_cow_metadata(memory_regions);
 }
 

@@ -296,8 +296,8 @@ pub struct Scheduler {
     parent_of: BTreeMap<TaskId, TaskId>,
     /// Children list: parent -> children
     children_of: BTreeMap<TaskId, alloc::vec::Vec<TaskId>>,
-    /// Zombie exit statuses: child -> exit code
-    zombies: BTreeMap<TaskId, i32>,
+    /// Zombie exit statuses: child -> (exit_code, pid)
+    zombies: BTreeMap<TaskId, (i32, Pid)>,
     /// Scheduler class table (pick order, steal order, class metadata)
     class_table: crate::process::sched::SchedClassTable,
 }
@@ -439,12 +439,7 @@ impl Scheduler {
             .find(|id| target.map_or(true, |t| t == *id) && self.zombies.contains_key(id));
 
         if let Some(child) = zombie {
-            let status = self.zombies.remove(&child).unwrap_or(0);
-            let child_pid = self
-                .pid_to_task
-                .iter()
-                .find_map(|(pid, tid)| if *tid == child { Some(*pid) } else { None })
-                .unwrap_or(0);
+            let (status, child_pid) = self.zombies.remove(&child).unwrap_or((0, 0));
             if child_pid != 0 {
                 self.pid_to_task.remove(&child_pid);
             }
@@ -1026,6 +1021,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
         if let Some(ref mut sched) = *scheduler {
             if let Some(ref current) = sched.cpus[cpu_index].current_task {
                 let current_id = current.id;
+                let current_pid = current.pid;
                 let parent = sched.parent_of.get(&current_id).copied();
                 // SAFETY: We hold the scheduler lock and interrupts are disabled.
                 unsafe {
@@ -1035,10 +1031,12 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 sched.all_tasks.remove(&current_id);
                 sched.task_cpu.remove(&current_id);
 
+                reparent_children(sched, current_id);
+
                 if parent.is_some() {
-                    sched.zombies.insert(current_id, exit_code);
+                    sched.zombies.insert(current_id, (exit_code, current_pid));
                 } else {
-                    sched.pid_to_task.retain(|_, tid| *tid != current_id);
+                    sched.pid_to_task.remove(&current_pid);
                 }
                 if let Some(parent_id) = parent {
                     let _ = sched.wake_task_locked(parent_id);
@@ -1756,14 +1754,51 @@ pub fn kill_task(id: TaskId) -> bool {
 }
 
 fn finalize_forced_death(sched: &mut Scheduler, task_id: TaskId, exit_code: i32) -> Option<TaskId> {
+    let task_pid = sched
+        .pid_to_task
+        .iter()
+        .find_map(|(pid, tid)| if *tid == task_id { Some(*pid) } else { None })
+        .unwrap_or(0);
+
+    reparent_children(sched, task_id);
+
     let parent = sched.parent_of.get(&task_id).copied();
     if let Some(parent_id) = parent {
-        sched.zombies.insert(task_id, exit_code);
+        sched.zombies.insert(task_id, (exit_code, task_pid));
         let _ = sched.wake_task_locked(parent_id);
         Some(parent_id)
     } else {
-        sched.pid_to_task.retain(|_, tid| *tid != task_id);
+        sched.pid_to_task.remove(&task_pid);
         None
+    }
+}
+
+fn reparent_children(sched: &mut Scheduler, dying: TaskId) {
+    let children = match sched.children_of.remove(&dying) {
+        Some(c) => c,
+        None => return,
+    };
+    let init_id = sched
+        .pid_to_task
+        .get(&1)
+        .copied()
+        .or_else(|| sched.all_tasks.keys().next().copied());
+    let Some(init_id) = init_id else {
+        for child in &children {
+            sched.parent_of.remove(child);
+        }
+        return;
+    };
+    if init_id == dying {
+        for child in &children {
+            sched.parent_of.remove(child);
+        }
+        return;
+    }
+    let init_children = sched.children_of.entry(init_id).or_default();
+    for child in children {
+        sched.parent_of.insert(child, init_id);
+        init_children.push(child);
     }
 }
 
@@ -1836,7 +1871,7 @@ pub fn timer_tick() {
     if let Some(mut guard) = SCHEDULER.try_lock() {
         if let Some(ref mut sched) = *guard {
             if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
-                if let Some(ref current_task) = cpu.current_task.clone() {
+                let should_resched = if let Some(ref current_task) = cpu.current_task {
                     if cpu_idx < crate::arch::x86_64::percpu::MAX_CPUS
                         && Arc::ptr_eq(current_task, &cpu.idle_task)
                     {
@@ -1844,14 +1879,17 @@ pub fn timer_tick() {
                     }
                     current_task.ticks.fetch_add(1, Ordering::Relaxed);
                     cpu.current_runtime.update();
-                    if cpu.class_rqs.update_current(
+                    cpu.class_rqs.update_current(
                         &cpu.current_runtime,
-                        &current_task,
+                        current_task,
                         false,
                         &sched.class_table,
-                    ) {
-                        cpu.need_resched = true;
-                    }
+                    )
+                } else {
+                    false
+                };
+                if should_resched {
+                    cpu.need_resched = true;
                 }
             }
         }
@@ -1869,34 +1907,45 @@ fn check_wake_deadlines(current_time_ns: u64) {
     };
 
     if let Some(ref mut sched) = *scheduler {
-        const MAX_WAKE: usize = 32;
-        let mut to_wake = [TaskId::from_u64(0); MAX_WAKE];
+        const BATCH: usize = 64;
+        let mut to_wake = [TaskId::from_u64(0); BATCH];
         let mut count = 0;
 
-        for (id, task) in sched.all_tasks.iter() {
-            let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
-            if deadline != 0 && current_time_ns >= deadline {
-                if count < MAX_WAKE {
-                    to_wake[count] = *id;
-                    count += 1;
-                } else {
-                    break;
-                }
-            }
-        }
-
-        for i in 0..count {
-            let id = to_wake[i];
-            if let Some(task) = sched.all_tasks.get(&id) {
-                task.wake_deadline_ns.store(0, Ordering::Relaxed);
-                if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
-                    unsafe { *blocked_task.state.get() = TaskState::Ready };
-                    let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
-                    let class = sched.class_table.class_for_task(&blocked_task);
-                    if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
-                        cpu_sched.class_rqs.enqueue(class, blocked_task);
+        loop {
+            count = 0;
+            for (id, task) in sched.all_tasks.iter() {
+                let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
+                if deadline != 0 && current_time_ns >= deadline {
+                    if count < BATCH {
+                        to_wake[count] = *id;
+                        count += 1;
+                    } else {
+                        break;
                     }
                 }
+            }
+
+            if count == 0 {
+                break;
+            }
+
+            for i in 0..count {
+                let id = to_wake[i];
+                if let Some(task) = sched.all_tasks.get(&id) {
+                    task.wake_deadline_ns.store(0, Ordering::Relaxed);
+                    if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
+                        unsafe { *blocked_task.state.get() = TaskState::Ready };
+                        let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
+                        let class = sched.class_table.class_for_task(&blocked_task);
+                        if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
+                            cpu_sched.class_rqs.enqueue(class, blocked_task);
+                        }
+                    }
+                }
+            }
+
+            if count < BATCH {
+                break;
             }
         }
     }
@@ -1911,10 +1960,9 @@ pub fn ticks() -> u64 {
 /// Returns None if scheduler is not initialized or currently locked.
 pub fn get_all_tasks() -> Option<alloc::vec::Vec<Arc<Task>>> {
     use alloc::vec::Vec;
-    // Use try_lock to avoid deadlock in interrupt context
     let scheduler = SCHEDULER.try_lock()?;
     if let Some(ref sched) = *scheduler {
-        let mut tasks = Vec::new();
+        let mut tasks = Vec::with_capacity(sched.all_tasks.len());
         for (_, task) in sched.all_tasks.iter() {
             tasks.push(task.clone());
         }

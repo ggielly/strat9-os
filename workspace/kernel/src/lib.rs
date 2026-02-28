@@ -428,9 +428,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         );
     }
 
-    memory::init_memory_manager(&mmap_work[..mmap_work_len]);
+    memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
     serial_println!("[init] Buddy allocator ready.");
-    log_boot_module_magics("post-mm");
+    log_boot_module_magics("post-buddy");
 
     // =============================================
     // Phase 3: console output (VGA or serial fallback)
@@ -545,6 +545,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] VFS initialized.");
     vga_println!("[OK] VFS initialized");
     register_boot_initfs_modules(args.initfs_base, args.initfs_size);
+    serial_println!("[init] Initializing COW metadata...");
+    memory::init_cow_subsystem(&mmap_work[..mmap_work_len]);
+    serial_println!("[init] COW metadata initialized.");
+    log_boot_module_magics("post-cow");
 
     // =============================================
     // Phase 6: ACPI + APIC (with PIC fallback)

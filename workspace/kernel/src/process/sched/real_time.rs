@@ -8,7 +8,7 @@ use alloc::{collections::VecDeque, sync::Arc};
 ///
 /// POSIX specifies a minimum of 100ms for SCHED_RR (Linux default: 100ms).
 /// At TIMER_HZ=100: 10 ticks × 10 ms/tick = 100 ms.
-const RT_RR_QUANTUM_TICKS: u64 = TIMER_HZ; // 100 ms
+const RT_RR_QUANTUM_TICKS: u64 = TIMER_HZ / 10;
 
 /// Real-time priority (0-99). Higher value means higher priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -99,7 +99,9 @@ impl SchedClassRq for RealTimeClassRq {
 
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool {
         let mut removed = false;
-        for i in 0..100 {
+        let mut bits = self.bitmap;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
             let q = &mut self.queues[i];
             let old_len = q.len();
             q.retain(|t| t.id != task_id);
@@ -109,6 +111,7 @@ impl SchedClassRq for RealTimeClassRq {
                     self.clear_bit(i as u8);
                 }
             }
+            bits &= !(1u128 << i);
         }
         removed
     }

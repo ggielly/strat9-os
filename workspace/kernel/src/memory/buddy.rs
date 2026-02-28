@@ -45,6 +45,13 @@ impl BuddyAllocator {
             "Buddy allocator: initializing with {} memory regions",
             memory_regions.len()
         );
+        for (base, size) in Self::protected_module_ranges().into_iter().flatten() {
+            serial_println!(
+                "  Protected module range: phys=0x{:x}..0x{:x}",
+                Self::align_down(base, PAGE_SIZE),
+                Self::align_up(base.saturating_add(size), PAGE_SIZE)
+            );
+        }
 
         // Pass 1: compute per-zone address span (base + span_pages)
         self.pass_count(memory_regions);
@@ -218,6 +225,11 @@ impl BuddyAllocator {
         let mut addr = start;
         while addr < end {
             if Self::is_protected_module_page(addr) {
+                serial_println!(
+                    "  Zone {:?}: skip protected page 0x{:x}",
+                    zone.zone_type,
+                    addr
+                );
                 addr += PAGE_SIZE;
                 continue;
             }
@@ -232,6 +244,15 @@ impl BuddyAllocator {
             let Some(frame_phys) = Self::free_list_pop(zone, cur_order) else {
                 continue;
             };
+            if Self::is_protected_module_page(frame_phys) {
+                serial_println!(
+                    "  Zone {:?}: dropped protected free block 0x{:x} order={}",
+                    zone.zone_type,
+                    frame_phys,
+                    cur_order
+                );
+                continue;
+            }
 
             // One block of this order transitions free -> allocated.
             let _ = Self::toggle_pair(zone, frame_phys, cur_order);
