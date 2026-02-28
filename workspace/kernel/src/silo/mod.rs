@@ -1922,6 +1922,56 @@ pub fn on_task_terminated(task_id: TaskId) {
     }
 }
 
+fn stop_or_kill_silo_by_id(
+    silo_id: u32,
+    force_kill: bool,
+    require_running: bool,
+) -> Result<Vec<TaskId>, SyscallError> {
+    let mut mgr = SILO_MANAGER.lock();
+    let tasks = {
+        let silo = mgr.get_mut(silo_id)?;
+        if force_kill {
+            silo.state = SiloState::Stopped;
+            let tasks = silo.tasks.clone();
+            silo.tasks.clear();
+            tasks
+        } else {
+            match silo.state {
+                SiloState::Running | SiloState::Paused => {
+                    silo.state = SiloState::Stopping;
+                    let tasks = silo.tasks.clone();
+                    silo.tasks.clear();
+                    tasks
+                }
+                _ if require_running => return Err(SyscallError::InvalidArgument),
+                _ => Vec::new(),
+            }
+        }
+    };
+
+    for tid in &tasks {
+        mgr.unmap_task(*tid);
+    }
+    if !force_kill {
+        if let Ok(silo) = mgr.get_mut(silo_id) {
+            silo.state = SiloState::Stopped;
+        }
+    }
+    mgr.push_event(SiloEvent {
+        silo_id: silo_id.into(),
+        kind: if force_kill {
+            SiloEventKind::Killed
+        } else {
+            SiloEventKind::Stopped
+        },
+        data0: 0,
+        data1: 0,
+        tick: crate::process::scheduler::ticks(),
+    });
+
+    Ok(tasks)
+}
+
 pub fn sys_silo_stop(handle: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let required = CapPermissions {
@@ -1932,35 +1982,7 @@ pub fn sys_silo_stop(handle: u64) -> Result<u64, SyscallError> {
         revoke: false,
     };
     let silo_id = resolve_silo_handle(handle, required)?;
-    let tasks = {
-        let mut mgr = SILO_MANAGER.lock();
-        let tasks = {
-            let silo = mgr.get_mut(silo_id)?;
-            match silo.state {
-                SiloState::Running | SiloState::Paused => {
-                    silo.state = SiloState::Stopping;
-                    let tasks = silo.tasks.clone();
-                    silo.tasks.clear();
-                    tasks
-                }
-                _ => return Err(SyscallError::InvalidArgument),
-            }
-        };
-        for tid in &tasks {
-            mgr.unmap_task(*tid);
-        }
-        if let Ok(silo) = mgr.get_mut(silo_id) {
-            silo.state = SiloState::Stopped;
-        }
-        mgr.push_event(SiloEvent {
-            silo_id: silo_id.into(),
-            kind: SiloEventKind::Stopped,
-            data0: 0,
-            data1: 0,
-            tick: crate::process::scheduler::ticks(),
-        });
-        tasks
-    };
+    let tasks = stop_or_kill_silo_by_id(silo_id, false, true)?;
 
     for tid in tasks {
         crate::process::kill_task(tid);
@@ -1978,27 +2000,7 @@ pub fn sys_silo_kill(handle: u64) -> Result<u64, SyscallError> {
         revoke: false,
     };
     let silo_id = resolve_silo_handle(handle, required)?;
-    let tasks = {
-        let mut mgr = SILO_MANAGER.lock();
-        let tasks = {
-            let silo = mgr.get_mut(silo_id)?;
-            silo.state = SiloState::Stopped;
-            let tasks = silo.tasks.clone();
-            silo.tasks.clear();
-            tasks
-        };
-        for tid in &tasks {
-            mgr.unmap_task(*tid);
-        }
-        mgr.push_event(SiloEvent {
-            silo_id: silo_id.into(),
-            kind: SiloEventKind::Killed,
-            data0: 0,
-            data1: 0,
-            tick: crate::process::scheduler::ticks(),
-        });
-        tasks
-    };
+    let tasks = stop_or_kill_silo_by_id(silo_id, true, false)?;
 
     for tid in tasks {
         crate::process::kill_task(tid);
