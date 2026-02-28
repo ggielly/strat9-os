@@ -23,33 +23,102 @@ use core::sync::atomic::{AtomicU64, Ordering};
 // Public ABI structs (repr(C) for syscall boundary)
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum SiloTier {
+    Critical = 0,
+    System   = 1,
+    User     = 2,
+}
+
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SiloId(pub u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SiloId {
+    pub sid: u32,
+    pub tier: SiloTier,
+}
 
 impl SiloId {
-    pub fn new() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-        SiloId(NEXT_ID.fetch_add(1, Ordering::SeqCst))
+    pub const fn new(sid: u32) -> Self {
+        let tier = match sid {
+            1..=9     => SiloTier::Critical,
+            10..=999  => SiloTier::System,
+            _         => SiloTier::User,
+        };
+        Self { sid, tier }
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.sid as u64
     }
 }
 
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SiloState {
-    Created = 0,
-    Loading = 1,
-    Ready = 2,
-    Running = 3,
-    Paused = 4,
-    Stopping = 5,
-    Stopped = 6,
-    Crashed = 7,
-    Zombie = 8,
-    Destroyed = 9,
+use bitflags::bitflags;
+
+bitflags! {
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ControlMode: u8 {
+        const LIST  = 0b100;
+        const STOP  = 0b010;
+        const SPAWN = 0b001;
+    }
 }
 
-pub const SILO_FLAG_ADMIN: u64 = 1 << 0;
+bitflags! {
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct HardwareMode: u8 {
+        const INTERRUPT = 0b100;
+        const IO        = 0b010;
+        const DMA       = 0b001;
+    }
+}
+
+bitflags! {
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RegistryMode: u8 {
+        const LOOKUP = 0b100;
+        const BIND   = 0b010;
+        const PROXY  = 0b001;
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OctalMode {
+    pub control:  ControlMode,
+    pub hardware: HardwareMode,
+    pub registry: RegistryMode,
+}
+
+impl OctalMode {
+    pub const fn from_octal(val: u16) -> Self {
+        Self {
+            control:  ControlMode::from_bits_truncate(((val >> 6) & 0o7) as u8),
+            hardware: HardwareMode::from_bits_truncate(((val >> 3) & 0o7) as u8),
+            registry: RegistryMode::from_bits_truncate((val & 0o7) as u8),
+        }
+    }
+
+    pub const fn is_subset_of(&self, other: &OctalMode) -> bool {
+        (self.control.bits()  & !other.control.bits()  == 0)
+        && (self.hardware.bits() & !other.hardware.bits() == 0)
+        && (self.registry.bits() & !other.registry.bits() == 0)
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrateFamily {
+    SYS  = 0,
+    DRV  = 1,
+    FS   = 2,
+    NET  = 3,
+    WASM = 4,
+    USR  = 5,
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -63,12 +132,13 @@ pub struct SiloConfig {
     pub max_tasks: u32,
     pub io_bw_read: u64,
     pub io_bw_write: u64,
-    /// Pointer to an array of capability handles (u64).
     pub caps_ptr: u64,
-    /// Number of entries in the capability array.
     pub caps_len: u64,
-    /// Silo flags (see SILO_FLAG_*).
     pub flags: u64,
+    // Security Model Extensions
+    pub sid: u32,
+    pub mode: u16,      // Octal mode packed
+    pub family: u8,
 }
 
 #[repr(C, packed)]
@@ -195,6 +265,8 @@ struct Silo {
     strate_label: Option<String>,
     state: SiloState,
     config: SiloConfig,
+    mode: OctalMode,
+    family: StrateFamily,
     /// Current memory usage accounted to this silo (bytes).
     /// This tracks user-space virtual regions reserved/mapped via AddressSpace APIs.
     mem_usage_bytes: u64,
@@ -208,7 +280,8 @@ struct Silo {
 
 #[derive(Debug, Clone)]
 pub struct SiloSnapshot {
-    pub id: u64,
+    pub id: u32,
+    pub tier: SiloTier,
     pub name: String,
     pub strate_label: Option<String>,
     pub state: SiloState,
@@ -216,12 +289,13 @@ pub struct SiloSnapshot {
     pub mem_usage_bytes: u64,
     pub mem_min_bytes: u64,
     pub mem_max_bytes: u64,
+    pub mode: u16,
 }
 
 struct SiloManager {
-    silos: BTreeMap<u64, Silo>,
+    silos: BTreeMap<u32, Silo>,
     events: VecDeque<SiloEvent>,
-    task_to_silo: BTreeMap<TaskId, u64>,
+    task_to_silo: BTreeMap<TaskId, u32>,
 }
 
 impl SiloManager {
@@ -233,19 +307,36 @@ impl SiloManager {
         }
     }
 
-    fn create_silo(&mut self, flags: u32) -> Result<SiloId, SyscallError> {
-        let id = SiloId::new();
+    fn create_silo(&mut self, config: &SiloConfig) -> Result<SiloId, SyscallError> {
+        let id = SiloId::new(config.sid);
+        if self.silos.contains_key(&id.sid) {
+            return Err(SyscallError::AlreadyExists);
+        }
+
+        kernel_check_spawn_invariants(&id, &OctalMode::from_octal(config.mode))?;
+
         let mut name = String::from("silo-");
-        name.push_str(&id.0.to_string());
+        name.push_str(&id.sid.to_string());
+
+        let family = match config.family {
+            0 => StrateFamily::SYS,
+            1 => StrateFamily::DRV,
+            2 => StrateFamily::FS,
+            3 => StrateFamily::NET,
+            4 => StrateFamily::WASM,
+            _ => StrateFamily::USR,
+        };
 
         let silo = Silo {
             id,
             name,
             strate_label: None,
             state: SiloState::Created,
-            config: SiloConfig::default(),
+            config: *config,
+            mode: OctalMode::from_octal(config.mode),
+            family,
             mem_usage_bytes: 0,
-            flags,
+            flags: config.flags as u32,
             module_id: None,
             tasks: Vec::new(),
             granted_caps: Vec::new(),
@@ -253,15 +344,15 @@ impl SiloManager {
             event_seq: 0,
         };
 
-        self.silos.insert(id.0, silo);
+        self.silos.insert(id.sid, silo);
         Ok(id)
     }
 
-    fn get_mut(&mut self, id: u64) -> Result<&mut Silo, SyscallError> {
+    fn get_mut(&mut self, id: u32) -> Result<&mut Silo, SyscallError> {
         self.silos.get_mut(&id).ok_or(SyscallError::BadHandle)
     }
 
-    fn get(&self, id: u64) -> Result<&Silo, SyscallError> {
+    fn get(&self, id: u32) -> Result<&Silo, SyscallError> {
         self.silos.get(&id).ok_or(SyscallError::BadHandle)
     }
 
@@ -273,7 +364,7 @@ impl SiloManager {
         self.events.push_back(ev);
     }
 
-    fn map_task(&mut self, task_id: TaskId, silo_id: u64) {
+    fn map_task(&mut self, task_id: TaskId, silo_id: u32) {
         self.task_to_silo.insert(task_id, silo_id);
     }
 
@@ -281,9 +372,22 @@ impl SiloManager {
         self.task_to_silo.remove(&task_id);
     }
 
-    fn silo_for_task(&self, task_id: TaskId) -> Option<u64> {
+    fn silo_for_task(&self, task_id: TaskId) -> Option<u32> {
         self.task_to_silo.get(&task_id).copied()
     }
+}
+
+pub fn kernel_check_spawn_invariants(
+    id: &SiloId,
+    mode: &OctalMode,
+) -> Result<(), SyscallError> {
+    if id.tier == SiloTier::User && !mode.hardware.is_empty() {
+        return Err(SyscallError::PermissionDenied);
+    }
+    if id.tier == SiloTier::User && !mode.control.is_empty() {
+        return Err(SyscallError::PermissionDenied);
+    }
+    Ok(())
 }
 
 static SILO_MANAGER: SpinLock<SiloManager> = SpinLock::new(SiloManager::new());
@@ -676,7 +780,8 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
     mgr.silos
         .values()
         .map(|s| SiloSnapshot {
-            id: s.id.0,
+            id: s.id.sid,
+            tier: s.id.tier,
             name: s.name.clone(),
             strate_label: s.strate_label.clone(),
             state: s.state,
@@ -684,6 +789,7 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
             mem_usage_bytes: s.mem_usage_bytes,
             mem_min_bytes: s.config.mem_min,
             mem_max_bytes: s.config.mem_max,
+            mode: s.config.mode,
         })
         .collect()
 }
@@ -691,17 +797,17 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
 /// Return silo identity + memory accounting for a task, if the task belongs to a silo.
 ///
 /// Tuple layout:
-/// - silo id
+/// - silo id (u32)
 /// - optional label
 /// - current usage bytes
 /// - configured minimum bytes
 /// - configured maximum bytes (0 = unlimited)
-pub fn silo_info_for_task(task_id: TaskId) -> Option<(u64, Option<String>, u64, u64, u64)> {
+pub fn silo_info_for_task(task_id: TaskId) -> Option<(u32, Option<String>, u64, u64, u64)> {
     let mgr = SILO_MANAGER.lock();
     let silo_id = mgr.silo_for_task(task_id)?;
     let silo = mgr.get(silo_id).ok()?;
     Some((
-        silo.id.0,
+        silo.id.sid,
         silo.strate_label.clone(),
         silo.mem_usage_bytes,
         silo.config.mem_min,

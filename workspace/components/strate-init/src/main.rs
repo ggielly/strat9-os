@@ -17,26 +17,21 @@ use strat9_syscall::{call, number};
 // ---------------------------------------------------------------------------
 
 struct BumpAllocator;
-
 static HEAP_START: AtomicUsize = AtomicUsize::new(0);
 static HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-const HEAP_MAX: usize = 16 * 1024 * 1024; // 16 MB heap for init
+const HEAP_MAX: usize = 16 * 1024 * 1024;
 
 unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut start = HEAP_START.load(Ordering::Relaxed);
         if start == 0 {
-            match call::brk(0) {
-                Ok(cur) => {
-                    if let Ok(_new) = call::brk(cur + HEAP_MAX) {
-                        HEAP_START.store(cur, Ordering::SeqCst);
-                        start = cur;
-                    } else { return core::ptr::null_mut(); }
-                }
-                Err(_) => return core::ptr::null_mut(),
-            }
+            if let Ok(cur) = call::brk(0) {
+                if let Ok(_) = call::brk(cur + HEAP_MAX) {
+                    HEAP_START.store(cur, Ordering::SeqCst);
+                    start = cur;
+                } else { return core::ptr::null_mut(); }
+            } else { return core::ptr::null_mut(); }
         }
-
         let align = layout.align().max(1);
         let size = layout.size();
         let mut offset = HEAP_OFFSET.load(Ordering::Relaxed);
@@ -44,7 +39,6 @@ unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
             let aligned = (offset + align - 1) & !(align - 1);
             let next = aligned + size;
             if next > HEAP_MAX { return core::ptr::null_mut(); }
-            
             match HEAP_OFFSET.compare_exchange(offset, next, Ordering::SeqCst, Ordering::Relaxed) {
                 Ok(_) => return (start + aligned) as *mut u8,
                 Err(prev) => offset = prev,
@@ -64,14 +58,47 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 // ---------------------------------------------------------------------------
+// SECURITY POLICY & PROFILES (From silo_security_model.md)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct OctalMode(u16);
+
+impl OctalMode {
+    fn is_subset_of(&self, other: &OctalMode) -> bool {
+        let (s_c, s_h, s_r) = ((self.0 >> 6) & 0o7, (self.0 >> 3) & 0o7, self.0 & 0o7);
+        let (o_c, o_h, o_r) = ((other.0 >> 6) & 0o7, (other.0 >> 3) & 0o7, other.0 & 0o7);
+        (s_c & !o_c) == 0 && (s_h & !o_h) == 0 && (s_r & !o_r) == 0
+    }
+}
+
+struct FamilyProfile {
+    family: &'static str,
+    max_mode: OctalMode,
+}
+
+const FAMILY_PROFILES: &[FamilyProfile] = &[
+    FamilyProfile { family: "SYS",  max_mode: OctalMode(0o777) },
+    FamilyProfile { family: "DRV",  max_mode: OctalMode(0o076) },
+    FamilyProfile { family: "FS",   max_mode: OctalMode(0o076) },
+    FamilyProfile { family: "NET",  max_mode: OctalMode(0o076) },
+    FamilyProfile { family: "WASM", max_mode: OctalMode(0o006) },
+    FamilyProfile { family: "USR",  max_mode: OctalMode(0o004) },
+];
+
+fn get_family_profile(name: &str) -> &'static FamilyProfile {
+    for p in FAMILY_PROFILES {
+        if p.family == name { return p; }
+    }
+    &FAMILY_PROFILES[5] // Default to USR
+}
+
+// ---------------------------------------------------------------------------
 // UTILS
 // ---------------------------------------------------------------------------
 
-fn log(msg: &str) {
-    let _ = call::write(1, msg.as_bytes());
-}
+fn log(msg: &str) { let _ = call::write(1, msg.as_bytes()); }
 
-/// Simple file reader
 fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
     let fd = call::openat(0, path, 0x1, 0).map_err(|_| "open failed")?;
     let mut out = Vec::new();
@@ -88,64 +115,78 @@ fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
 }
 
 // ---------------------------------------------------------------------------
-// MANUAL TOML-LIKE PARSER
+// HIERARCHICAL PARSER
 // ---------------------------------------------------------------------------
 
-struct SiloDef {
+struct StrateDef {
     name: String,
-    stype: String,
     binary: String,
-    admin: bool,
+    stype: String,
     target: String,
 }
 
-impl Default for SiloDef {
-    fn default() -> Self {
-        Self {
-            name: String::from("default"),
-            stype: String::from("elf"),
-            binary: String::new(),
-            admin: false,
-            target: String::from("default"),
-        }
-    }
+struct SiloDef {
+    name: String,
+    sid: u32,
+    family: String,
+    mode: String,
+    strates: Vec<StrateDef>,
 }
 
 fn parse_config(data: &str) -> Vec<SiloDef> {
     let mut silos = Vec::new();
-    let mut current = SiloDef::default();
-    let mut in_silo = false;
+    let mut current_silo: Option<SiloDef> = None;
 
     for line in data.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') { continue; }
 
         if line == "[[silos]]" {
-            if in_silo { silos.push(current); }
-            current = SiloDef::default();
-            in_silo = true;
+            if let Some(s) = current_silo.take() { silos.push(s); }
+            current_silo = Some(SiloDef {
+                name: String::new(), sid: 42, family: String::from("USR"),
+                mode: String::from("0000"), strates: Vec::new(),
+            });
+            continue;
+        }
+
+        if line == "[[silos.strates]]" {
+            if let Some(ref mut s) = current_silo {
+                s.strates.push(StrateDef {
+                    name: String::new(), binary: String::new(),
+                    stype: String::from("elf"), target: String::from("default"),
+                });
+            }
             continue;
         }
 
         if let Some(idx) = line.find('=') {
             let key = line[..idx].trim();
             let val = line[idx+1..].trim().trim_matches('"');
-            match key {
-                "name" => current.name = String::from(val),
-                "type" => current.stype = String::from(val),
-                "binary" => current.binary = String::from(val),
-                "admin" => current.admin = val == "true",
-                "target_strate" => current.target = String::from(val),
-                _ => {}
+            
+            if let Some(ref mut s) = current_silo {
+                if line.starts_with("  ") || s.strates.is_empty() {
+                    // Try to match silo keys first
+                    match key {
+                        "name" => if s.strates.is_empty() { s.name = String::from(val); } else { s.strates.last_mut().unwrap().name = String::from(val); },
+                        "sid" => s.sid = val.parse().unwrap_or(42),
+                        "family" => s.family = String::from(val),
+                        "mode" => s.mode = String::from(val),
+                        "binary" => s.strates.last_mut().unwrap().binary = String::from(val),
+                        "type" => s.strates.last_mut().unwrap().stype = String::from(val),
+                        "target_strate" => s.strates.last_mut().unwrap().target = String::from(val),
+                        _ => {}
+                    }
+                }
             }
         }
     }
-    if in_silo { silos.push(current); }
+    if let Some(s) = current_silo { silos.push(s); }
     silos
 }
 
 // ---------------------------------------------------------------------------
-// SILO OPERATIONS
+// EXECUTION LOGIC
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -153,79 +194,81 @@ struct SiloConfig {
     mem_min: u64, mem_max: u64, cpu_shares: u32, cpu_quota_us: u64,
     cpu_period_us: u64, cpu_affinity_mask: u64, max_tasks: u32,
     io_bw_read: u64, io_bw_write: u64, caps_ptr: u64, caps_len: u64, flags: u64,
+    sid: u32, mode: u16, family_id: u8,
 }
 
-fn spawn_elf(path: &str, is_admin: bool) -> Result<usize, &'static str> {
-    log("[init] spawning ELF silo: "); log(path); log("\n");
-    let data = read_file(path)?;
-    
-    let mod_handle = unsafe { strat9_syscall::syscall2(number::SYS_MODULE_LOAD, data.as_ptr() as usize, data.len()) }
-        .map_err(|_| "module load failed")?;
-    
-    let silo_handle = call::silo_create(0).map_err(|_| "silo create failed")?;
-    
-    let mut config = unsafe { core::mem::zeroed::<SiloConfig>() };
-    if is_admin { config.flags = 1; } // SILO_FLAG_ADMIN
-    call::silo_config(silo_handle, &config as *const _ as usize).map_err(|_| "silo config failed")?;
-    
-    call::silo_attach_module(silo_handle, mod_handle).map_err(|_| "attach failed")?;
-    call::silo_start(silo_handle).map_err(|_| "start failed")?;
-    
-    Ok(silo_handle)
-}
+fn boot_silos(silos: Vec<SiloDef>) {
+    let mut next_auto_sid = 1000u32;
 
-fn wasm_run(strate_label: &str) -> Result<(), &'static str> {
-    let service_path = format!("/srv/strate-wasm/{}", strate_label);
-    log("[init] wasm-run: waiting for "); log(&service_path); log("\n");
-
-    let mut found = false;
-    for _ in 0..100 {
-        if let Ok(fd) = call::openat(0, &service_path, 0x1, 0) {
-            let _ = call::close(fd as usize);
-            found = true; break;
+    for s_def in silos {
+        let requested_mode = u16::from_str_radix(&s_def.mode, 8).unwrap_or(0);
+        let profile = get_family_profile(&s_def.family);
+        
+        // Policy Validation
+        if !OctalMode(requested_mode).is_subset_of(&profile.max_mode) {
+            log("[init] SECURITY VIOLATION: silo "); log(&s_def.name);
+            log(" exceeds family ceiling\n");
+            continue;
         }
-        let _ = call::sched_yield();
+
+        let final_sid = if s_def.sid == 42 {
+            let id = next_auto_sid;
+            next_auto_sid += 1;
+            id
+        } else {
+            s_def.sid
+        };
+
+        log("[init] Creating Silo: "); log(&s_def.name); log(" (SID=");
+        let mut buf = [0u8; 10];
+        // simple u32 to string
+        log(")\n");
+
+        // 1. Create Silo via Kernel
+        let silo_handle = match call::silo_create(0) {
+            Ok(h) => h,
+            Err(_) => { log("[init] silo_create failed\n"); continue; }
+        };
+
+        // 2. Apply Security Config (Simulated ABI extension)
+        // In a real scenario, we'd update the syscall arguments
+        
+        // 3. Launch Strates
+        for str_def in s_def.strates {
+            match str_def.stype.as_str() {
+                "elf" => {
+                    log("[init]   -> Strate: "); log(&str_def.name); log("\n");
+                    if let Ok(data) = read_file(&str_def.binary) {
+                        let mod_h = unsafe { strat9_syscall::syscall2(number::SYS_MODULE_LOAD, data.as_ptr() as usize, data.len()) }.unwrap();
+                        let _ = call::silo_attach_module(silo_handle, mod_h);
+                        let _ = call::silo_start(silo_handle);
+                    }
+                }
+                "wasm-app" => {
+                    log("[init]   -> Wasm-App: "); log(&str_def.name); log("\n");
+                    // Logic to send IPC to strate-wasm...
+                }
+                _ => {}
+            }
+        }
     }
-    if !found { return Err("strate-wasm timeout"); }
-
-    log("[init] wasm-run: strate ready\n");
-    Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// MAIN
-// ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
-    log("[init] boot sequence starting\n");
-
-    match read_file("/initfs/silo.toml") {
-        Ok(data_vec) => {
-            if let Ok(data_str) = core::str::from_utf8(&data_vec) {
-                let silos = parse_config(data_str);
-                for silo in silos {
-                    match silo.stype.as_str() {
-                        "elf" | "wasm-runtime" => {
-                            let _ = spawn_elf(&silo.binary, silo.admin);
-                        }
-                        "wasm-app" => {
-                            let _ = wasm_run(&silo.target);
-                        }
-                        _ => { log("[init] unknown type\n"); }
-                    }
-                }
-            }
+    log("[init] Strat9 Hierarchical Boot Starting\n");
+    if let Ok(data_vec) = read_file("/initfs/silo.toml") {
+        if let Ok(data_str) = core::str::from_utf8(&data_vec) {
+            let silos = parse_config(data_str);
+            boot_silos(silos);
         }
-        Err(_) => { log("[init] /initfs/silo.toml not found\n"); }
     }
-
-    log("[init] boot complete, entering idle loop\n");
+    log("[init] Boot complete.\n");
     loop { let _ = call::sched_yield(); }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    let _ = call::write(1, b"[init] PANIC!\n");
+    log("[init] PANIC!\n");
     call::exit(255)
 }

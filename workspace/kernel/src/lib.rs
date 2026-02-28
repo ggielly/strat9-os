@@ -113,7 +113,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("");
     serial_println!("=======================================================================================================");
     serial_println!("  strat9-OS kernel v0.1.0 (Bedrock)");
-    serial_println!("  Copyright (c) 2026 Guillaume Gielly - GPLv3 License");
+    serial_println!("  Copyright (c) 2025-26 Guillaume Gielly - GPLv3 License");
     serial_println!("");
     //serial_println!("  GNU General Public License as published by the Free Software Foundation, either version 3 of the ");
     //serial_println!("  License, or (at your option) any later version.");
