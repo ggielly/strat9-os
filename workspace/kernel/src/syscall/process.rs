@@ -208,7 +208,7 @@ pub fn sys_thread_join(tid: u64, status_ptr: u64, flags: u64) -> Result<u64, Sys
     let parent_id = current_task_id().ok_or(SyscallError::Fault)?;
     let child_id = get_task_id_by_tid(wait_tid).ok_or(SyscallError::NotFound)?;
     if get_parent_id(child_id) != Some(parent_id) {
-        return Err(SyscallError::PermissionDenied);
+        return Err(SyscallError::NotFound);
     }
 
     loop {

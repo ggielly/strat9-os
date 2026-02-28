@@ -454,3 +454,7 @@ pub const SYS_SILO_SUSPEND: u64 = 807;
 
 /// Resume a silo. arg1 = silo handle
 pub const SYS_SILO_RESUME: u64 = 808;
+
+pub const SYS_SILO_PLEDGE: u64 = 809;
+pub const SYS_SILO_UNVEIL: u64 = 810;
+pub const SYS_SILO_ENTER_SANDBOX: u64 = 811;

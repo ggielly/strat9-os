@@ -2,7 +2,10 @@
 #![no_main]
 #![allow(dead_code)]
 
-use core::panic::PanicInfo;
+use core::{
+    panic::PanicInfo,
+    sync::atomic::{AtomicU32, Ordering},
+};
 use strat9_syscall::{call, number};
 
 // ---------------------------------------------------------------------------
@@ -183,6 +186,49 @@ fn parse_usize(s: &str) -> Option<usize> {
 // Commands
 // ---------------------------------------------------------------------------
 
+#[repr(C)]
+struct SiloConfig {
+    mem_min: u64,
+    mem_max: u64,
+    cpu_shares: u32,
+    cpu_quota_us: u64,
+    cpu_period_us: u64,
+    cpu_affinity_mask: u64,
+    max_tasks: u32,
+    io_bw_read: u64,
+    io_bw_write: u64,
+    caps_ptr: u64,
+    caps_len: u64,
+    flags: u64,
+    sid: u32,
+    mode: u16,
+    family: u8,
+}
+
+impl SiloConfig {
+    const fn user_default(sid: u32) -> Self {
+        Self {
+            mem_min: 0,
+            mem_max: 0,
+            cpu_shares: 0,
+            cpu_quota_us: 0,
+            cpu_period_us: 0,
+            cpu_affinity_mask: 0,
+            max_tasks: 0,
+            io_bw_read: 0,
+            io_bw_write: 0,
+            caps_ptr: 0,
+            caps_len: 0,
+            flags: 0,
+            sid,
+            mode: 0o000,
+            family: 5,
+        }
+    }
+}
+
+static NEXT_SID: AtomicU32 = AtomicU32::new(1000);
+
 fn cmd_help() {
     write_str("Available commands:\n");
     write_str("  help              - Show this help\n");
@@ -214,18 +260,28 @@ fn cmd_pid() {
 }
 
 fn cmd_silo_create() {
-    match call::silo_create(0) {
-        Ok(handle) => {
-            write_str("Silo created, handle=");
-            write_u64(handle as u64);
-            write_str("\n");
-        }
-        Err(e) => {
-            write_str("silo_create failed: ");
-            write_str(e.name());
-            write_str("\n");
+    for _ in 0..32 {
+        let sid = NEXT_SID.fetch_add(1, Ordering::Relaxed);
+        let cfg = SiloConfig::user_default(sid);
+        match call::silo_create((&cfg as *const SiloConfig) as usize) {
+            Ok(handle) => {
+                write_str("Silo created, handle=");
+                write_u64(handle as u64);
+                write_str(" sid=");
+                write_u64(sid as u64);
+                write_str("\n");
+                return;
+            }
+            Err(strat9_syscall::error::Error::AlreadyExists) => continue,
+            Err(e) => {
+                write_str("silo_create failed: ");
+                write_str(e.name());
+                write_str("\n");
+                return;
+            }
         }
     }
+    write_str("silo_create failed: no free SID range\n");
 }
 
 fn cmd_silo_start(args: &str) {
@@ -447,7 +503,7 @@ fn panic(_info: &PanicInfo) -> ! {
 pub extern "C" fn _start() -> ! {
     write_str("\n");
     write_str("============================================================\n");
-    write_str("[console-admin] strat9-os Console Admin Silo\n");
+    write_str("[console-admin] strat9-os: silo console admin\n");
     write_str("[console-admin] Ready (IPC mode — use chevron shell to interact).\n");
     write_str("============================================================\n");
 

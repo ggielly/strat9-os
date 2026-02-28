@@ -9,6 +9,7 @@ LIMINE_DIR="$BUILD_DIR/limine"
 ISO_ROOT="$BUILD_DIR/iso_root"
 IMAGE_BASENAME="${STRAT9_IMAGE_BASENAME:-strat9-os}"
 PROFILE="${STRAT9_PROFILE:-debug}"
+INCLUDE_TESTS="${STRAT9_INCLUDE_TESTS:-0}"
 IMAGE_FILE="$BUILD_DIR/${IMAGE_BASENAME}.img"
 ISO_FILE="$BUILD_DIR/${IMAGE_BASENAME}.iso"
 KERNEL_ELF="target/x86_64-unknown-none/${PROFILE}/kernel"
@@ -57,29 +58,31 @@ if [ -f "$FS_RAM_ELF" ]; then
 else
     echo "    strate-fs-ramfs : (missing)"
 fi
-if [ -f "$INIT_TEST_ELF" ]; then
-    init_size=$(stat -c%s "$INIT_TEST_ELF")
-    echo "    init-test   : $init_size bytes"
-else
-    echo "    init-test   : (missing)"
-fi
-if [ -f "$SYSCALL_TEST_ELF" ]; then
-    syscall_test_size=$(stat -c%s "$SYSCALL_TEST_ELF")
-    echo "    syscall-test: $syscall_test_size bytes"
-else
-    echo "    syscall-test: (missing)"
-fi
-if [ -f "$MEM_TEST_ELF" ]; then
-    mem_test_size=$(stat -c%s "$MEM_TEST_ELF")
-    echo "    mem-test    : $mem_test_size bytes"
-else
-    echo "    mem-test    : (missing)"
-fi
-if [ -f "$MEM_STRESSED_ELF" ]; then
-    mem_stressed_size=$(stat -c%s "$MEM_STRESSED_ELF")
-    echo "    mem-stressed: $mem_stressed_size bytes"
-else
-    echo "    mem-stressed: (missing)"
+if [ "$INCLUDE_TESTS" = "1" ]; then
+    if [ -f "$INIT_TEST_ELF" ]; then
+        init_size=$(stat -c%s "$INIT_TEST_ELF")
+        echo "    init-test   : $init_size bytes"
+    else
+        echo "    init-test   : (missing)"
+    fi
+    if [ -f "$SYSCALL_TEST_ELF" ]; then
+        syscall_test_size=$(stat -c%s "$SYSCALL_TEST_ELF")
+        echo "    syscall-test: $syscall_test_size bytes"
+    else
+        echo "    syscall-test: (missing)"
+    fi
+    if [ -f "$MEM_TEST_ELF" ]; then
+        mem_test_size=$(stat -c%s "$MEM_TEST_ELF")
+        echo "    mem-test    : $mem_test_size bytes"
+    else
+        echo "    mem-test    : (missing)"
+    fi
+    if [ -f "$MEM_STRESSED_ELF" ]; then
+        mem_stressed_size=$(stat -c%s "$MEM_STRESSED_ELF")
+        echo "    mem-stressed: $mem_stressed_size bytes"
+    else
+        echo "    mem-stressed: (missing)"
+    fi
 fi
 if [ -f "$INIT_ELF" ]; then
     init_real_size=$(stat -c%s "$INIT_ELF")
@@ -149,34 +152,36 @@ else
     echo "  [WARN] strate-fs-ramfs not found at $FS_RAM_ELF"
 fi
 
-if [ -f "$INIT_TEST_ELF" ]; then
-    cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
-    echo "  [OK] Copied init-test binary: /initfs/test_pid"
-else
-    echo "  ERROR: init-test binary not found at $INIT_TEST_ELF"
-    echo "  Build it first (e.g. cargo make strate-silo-test or strate-silo-test-release)"
-    exit 1
-fi
+if [ "$INCLUDE_TESTS" = "1" ]; then
+    if [ -f "$INIT_TEST_ELF" ]; then
+        cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
+        echo "  [OK] Copied init-test binary: /initfs/test_pid"
+    else
+        echo "  ERROR: init-test binary not found at $INIT_TEST_ELF"
+        echo "  Build it first (e.g. cargo make strate-silo-test or strate-silo-test-release)"
+        exit 1
+    fi
 
-if [ -f "$SYSCALL_TEST_ELF" ]; then
-    cp "$SYSCALL_TEST_ELF" "$ISO_ROOT/initfs/test_syscalls"
-    echo "  [OK] Copied syscall-test binary: /initfs/test_syscalls"
-else
-    echo "  [WARN] syscall-test binary not found at $SYSCALL_TEST_ELF"
-fi
+    if [ -f "$SYSCALL_TEST_ELF" ]; then
+        cp "$SYSCALL_TEST_ELF" "$ISO_ROOT/initfs/test_syscalls"
+        echo "  [OK] Copied syscall-test binary: /initfs/test_syscalls"
+    else
+        echo "  [WARN] syscall-test binary not found at $SYSCALL_TEST_ELF"
+    fi
 
-if [ -f "$MEM_TEST_ELF" ]; then
-    cp "$MEM_TEST_ELF" "$ISO_ROOT/initfs/test_mem"
-    echo "  [OK] Copied mem-test binary: /initfs/test_mem"
-else
-    echo "  [WARN] mem-test binary not found at $MEM_TEST_ELF"
-fi
+    if [ -f "$MEM_TEST_ELF" ]; then
+        cp "$MEM_TEST_ELF" "$ISO_ROOT/initfs/test_mem"
+        echo "  [OK] Copied mem-test binary: /initfs/test_mem"
+    else
+        echo "  [WARN] mem-test binary not found at $MEM_TEST_ELF"
+    fi
 
-if [ -f "$MEM_STRESSED_ELF" ]; then
-    cp "$MEM_STRESSED_ELF" "$ISO_ROOT/initfs/test_mem_stressed"
-    echo "  [OK] Copied mem-stressed binary: /initfs/test_mem_stressed"
-else
-    echo "  [WARN] mem-stressed binary not found at $MEM_STRESSED_ELF"
+    if [ -f "$MEM_STRESSED_ELF" ]; then
+        cp "$MEM_STRESSED_ELF" "$ISO_ROOT/initfs/test_mem_stressed"
+        echo "  [OK] Copied mem-stressed binary: /initfs/test_mem_stressed"
+    else
+        echo "  [WARN] mem-stressed binary not found at $MEM_STRESSED_ELF"
+    fi
 fi
 
 if [ -f "$INIT_ELF" ]; then

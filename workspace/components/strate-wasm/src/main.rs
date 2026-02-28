@@ -20,26 +20,22 @@ use wasmi::{Caller, Config, Engine, Linker, Module, Store, Instance, StoreLimits
 // MEMORY MANAGEMENT (TALC + BRK)
 // ---------------------------------------------------------------------------
 
-static TALC_MUTEX: Mutex<Talc> = Mutex::new(Talc::new(unsafe {
-    Span::from_slice(&mut [])
-}));
-
 #[global_allocator]
-static ALLOCATOR: TalcRuntime = TalcRuntime::new_lock(&TALC_MUTEX);
+static ALLOCATOR: Talck<spin::Mutex<()>, ErrOnOom> = Talck::new(Talc::new(ErrOnOom));
 
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {
-    let mut talc = TALC_MUTEX.lock();
+    let mut talc = ALLOCATOR.lock();
     let current_brk = call::brk(0).expect("failed to get brk");
     let growth = (layout.size() + 8192) & !4095; 
     
-    if let Ok(new_brk) = call::brk(current_brk + growth as u64) {
+    if let Ok(_new_brk) = call::brk(current_brk + growth) {
         unsafe {
-            let span = Span::from_raw_parts(current_brk as *mut u8, growth);
-            talc.claim(span).expect("failed to claim memory");
+            let span = Span::from_base_size(current_brk as *mut u8, growth);
+            let _ = talc.claim(span);
         }
     } else {
-        debug_log("[strate-wasm] Fatal: OOM at brk\n");
+        let _ = call::write(1, b"[strate-wasm] Fatal: OOM at brk\n");
         call::exit(12);
     }
     loop {}
@@ -59,13 +55,11 @@ fn panic(_info: &PanicInfo) -> ! {
     call::exit(1);
 }
 
-/// Safely extract a string from the IPC payload
 fn extract_string(payload: &[u8], offset: usize, len: usize) -> String {
     if len == 0 || offset + len > payload.len() {
         return String::from("invalid");
     }
     let slice = &payload[offset..(offset + len)];
-    // Fallback to ASCII-lossy for safety in no_std
     let mut s = String::with_capacity(len);
     for &b in slice {
         if b.is_ascii() && !b.is_ascii_control() {
@@ -77,10 +71,9 @@ fn extract_string(payload: &[u8], offset: usize, len: usize) -> String {
     s
 }
 
-/// Send a simple status response back to the IPC caller
-fn send_response(target: u64, status: u32) {
-    let mut msg = IpcMessage::default();
-    msg.payload[0] = status;
+fn send_response(target: usize, status: u32) {
+    let mut msg = IpcMessage::new(0);
+    msg.payload[0] = status as u8;
     let _ = call::ipc_send(target, &msg);
 }
 
@@ -136,8 +129,8 @@ const RESP_ERR: u32 = 0x1;
 // MAIN
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _start() -> ! {
     let mut config = Config::default();
     config.consume_fuel(true);
 
@@ -147,22 +140,26 @@ pub extern "C" fn _start() -> ! {
     let mut store = Store::new(&engine, HostState { limits });
     store.limiter(|state| &mut state.limits);
 
-    linker.define("wasi_snapshot_preview1", "fd_write", wasmi::Func::wrap(&mut store, wasi_fd_write)).unwrap();
-    linker.define("wasi_snapshot_preview1", "proc_exit", wasmi::Func::wrap(&mut store, wasi_proc_exit)).unwrap();
-    linker.define("wasi_snapshot_preview1", "environ_get", wasmi::Func::wrap(&mut store, wasi_environ_get)).unwrap();
-    linker.define("wasi_snapshot_preview1", "environ_sizes_get", wasmi::Func::wrap(&mut store, wasi_environ_sizes_get)).unwrap();
+    let _ = linker.define("wasi_snapshot_preview1", "fd_write", wasmi::Func::wrap(&mut store, wasi_fd_write));
+    let _ = linker.define("wasi_snapshot_preview1", "proc_exit", wasmi::Func::wrap(&mut store, wasi_proc_exit));
+    let _ = linker.define("wasi_snapshot_preview1", "environ_get", wasmi::Func::wrap(&mut store, wasi_environ_get));
+    let _ = linker.define("wasi_snapshot_preview1", "environ_sizes_get", wasmi::Func::wrap(&mut store, wasi_environ_sizes_get));
 
     let mut label = String::from("default");
-    let _ = call::ipc_bind_port("/srv/strate-wasm/bootstrap");
-    let mut b_msg = IpcMessage::default();
-    if let Ok(_) = call::ipc_recv(0, &mut b_msg) {
-        if b_msg.payload[0] == OP_BOOTSTRAP {
-            label = extract_string(&b_msg.payload, 2, b_msg.payload[1] as usize);
+    
+    // We need a port to bind to
+    let port_h = call::ipc_create_port(0).expect("failed to create port");
+    let _ = call::ipc_bind_port(port_h, b"/srv/strate-wasm/bootstrap");
+    
+    let mut b_msg = IpcMessage::new(0);
+    if let Ok(_) = call::ipc_recv(port_h, &mut b_msg) {
+        if b_msg.msg_type == OP_BOOTSTRAP {
+            label = extract_string(&b_msg.payload, 1, b_msg.payload[0] as usize);
         }
     }
 
     let final_path = format!("/srv/strate-wasm/{}", label);
-    call::ipc_bind_port(&final_path).unwrap();
+    let _ = call::ipc_bind_port(port_h, final_path.as_bytes());
     debug_log("[strate-wasm] running: ");
     debug_log(&final_path);
     debug_log("\n");
@@ -170,12 +167,13 @@ pub extern "C" fn _start() -> ! {
     let mut current_instance: Option<Instance> = None;
 
     loop {
-        let mut msg = IpcMessage::default();
-        match call::ipc_recv(0, &mut msg) {
-            Ok(src) => {
-                match msg.payload[0] {
+        let mut msg = IpcMessage::new(0);
+        match call::ipc_recv(port_h, &mut msg) {
+            Ok(_) => {
+                let src = msg.sender as usize;
+                match msg.msg_type {
                     OP_WASM_LOAD_PATH => {
-                        let path = extract_string(&msg.payload, 2, msg.payload[1] as usize);
+                        let path = extract_string(&msg.payload, 1, msg.payload[0] as usize);
                         let mut wasm_bytes = Vec::new();
                         if let Ok(fd) = call::openat(0, &path, 0x1, 0) {
                             let mut chunk = [0u8; 4096];

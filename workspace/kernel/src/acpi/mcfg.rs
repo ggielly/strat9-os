@@ -8,9 +8,16 @@ pub const MCFG_SIGNATURE: &[u8; 4] = b"MCFG";
 
 #[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
 #[repr(C, packed)]
-struct McfgTable {
-    header: Sdt,
-    _reserved: u64,
+pub struct Mcfg {
+    pub header: Sdt,
+    pub _reserved: u64,
+}
+
+impl Mcfg {
+    /// Finds the MCFG and returns a reference to it.
+    pub fn get() -> Option<&'static Mcfg> {
+        unsafe { super::find_table(MCFG_SIGNATURE).map(|ptr| &*(ptr as *const Mcfg)) }
+    }
 }
 
 #[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
@@ -51,11 +58,11 @@ impl McfgInfo {
 }
 
 pub fn parse_mcfg() -> Option<McfgInfo> {
-    let mcfg_ptr = super::find_table(MCFG_SIGNATURE)? as *const McfgTable;
+    let mcfg_ptr = super::find_table(MCFG_SIGNATURE)? as *const Mcfg;
     let mcfg = unsafe { &*mcfg_ptr };
 
     let header_len = mcfg.header.length as usize;
-    let min_len = core::mem::size_of::<McfgTable>();
+    let min_len = core::mem::size_of::<Mcfg>();
     if header_len < min_len {
         log::error!("ACPI: MCFG length too small: {}", header_len);
         return None;

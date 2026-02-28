@@ -197,6 +197,9 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SILO_EVENT_NEXT => silo::sys_silo_event_next(arg1),
         SYS_SILO_SUSPEND => silo::sys_silo_suspend(arg1),
         SYS_SILO_RESUME => silo::sys_silo_resume(arg1),
+        SYS_SILO_PLEDGE => silo::sys_silo_pledge(arg1),
+        SYS_SILO_UNVEIL => silo::sys_silo_unveil(arg1, arg2, arg3),
+        SYS_SILO_ENTER_SANDBOX => silo::sys_silo_enter_sandbox(),
         _ => {
             log::warn!("Unknown syscall: {} (0x{:x})", syscall_num, syscall_num);
             Err(SyscallError::NotImplemented)
@@ -412,6 +415,7 @@ fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
 
 fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
+    crate::silo::enforce_silo_may_grant()?;
     let pid = u32::try_from(target_pid).map_err(|_| SyscallError::InvalidArgument)?;
 
     let source = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -908,20 +912,21 @@ fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     let mut buf = [0u8; MSG_SIZE];
     user.copy_to(&mut buf);
     let mut msg = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const IpcMessage) };
+    
+    // Stamp identity
     msg.sender = task.id.as_u64();
-    if msg.flags != 0 {
-        let transfer_required = CapPermissions {
-            read: false,
-            write: false,
-            execute: false,
-            grant: true,
-            revoke: false,
-        };
-        if caps
-            .get_with_permissions(CapId::from_raw(msg.flags as u64), transfer_required)
-            .is_none()
-        {
-            return Err(SyscallError::PermissionDenied);
+    
+    // Stamp structured security label (Coloration)
+    if let Some((sid, _label, _mem_used, _mem_min, _mem_max)) = crate::silo::silo_info_for_task(task.id) {
+        // Recover full silo info to get tier and family
+        if let Some(snapshot) = crate::silo::list_silos_snapshot().into_iter().find(|s| s.id == sid) {
+            let structured_label = crate::ipc::message::IpcLabel {
+                tier: snapshot.tier as u8,
+                family: 5, // Default to USR for now, need proper family tracking
+                compartment: sid as u16,
+            };
+            // Pack into u32 (simple cast for now as layout is 1+1+2 bytes)
+            msg.flags = unsafe { core::mem::transmute(structured_label) };
         }
     }
 

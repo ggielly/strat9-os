@@ -54,6 +54,42 @@ use crate::{
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+/// Per-CPU scheduler tick counters used for CPU usage estimation.
+///
+/// - `CPU_TOTAL_TICKS[cpu]`: all timer ticks observed on `cpu`.
+/// - `CPU_IDLE_TICKS[cpu]`: ticks where the idle task was running on `cpu`.
+///
+/// CPU usage over a time window:
+/// `usage = 1 - (delta_idle / delta_total)`.
+static CPU_TOTAL_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_IDLE_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+
+#[derive(Clone, Copy)]
+pub struct CpuUsageSnapshot {
+    pub cpu_count: usize,
+    pub total_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub idle_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+}
+
+pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
+    let cpu_count = crate::arch::x86_64::percpu::cpu_count()
+        .max(1)
+        .min(crate::arch::x86_64::percpu::MAX_CPUS);
+    let mut total_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut idle_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    for i in 0..cpu_count {
+        total_ticks[i] = CPU_TOTAL_TICKS[i].load(Ordering::Relaxed);
+        idle_ticks[i] = CPU_IDLE_TICKS[i].load(Ordering::Relaxed);
+    }
+    CpuUsageSnapshot {
+        cpu_count,
+        total_ticks,
+        idle_ticks,
+    }
+}
+
 // ─── Cross-CPU IPI helpers ────────────────────────────────────────────────────
 
 /// Send a reschedule IPI to `cpu_index`.
@@ -1734,12 +1770,15 @@ fn finalize_forced_death(sched: &mut Scheduler, task_id: TaskId, exit_code: i32)
 fn cleanup_task_resources(task: &Arc<Task>) {
     crate::silo::on_task_terminated(task.id);
 
-    // Revoke all capabilities for this task (allocation-free)
+    let is_last_process_ref = Arc::strong_count(&task.process) == 1;
+    if !is_last_process_ref {
+        return;
+    }
+
     unsafe {
         (&mut *task.process.capabilities.get()).revoke_all();
     }
 
-    // Best-effort cleanup of user address space if uniquely owned.
     let as_ref = unsafe { &*task.process.address_space.get() };
     if !as_ref.is_kernel() && Arc::strong_count(as_ref) == 1 {
         as_ref.unmap_all_user_regions();
@@ -1773,6 +1812,10 @@ pub fn timer_tick() {
         0
     };
 
+    if cpu_idx < crate::arch::x86_64::percpu::MAX_CPUS {
+        CPU_TOTAL_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+    }
+
     // BSP wall-clock: ALWAYS advance, regardless of any lock state.
     if cpu_idx == 0 {
         TICK_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -1794,6 +1837,11 @@ pub fn timer_tick() {
         if let Some(ref mut sched) = *guard {
             if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
                 if let Some(ref current_task) = cpu.current_task.clone() {
+                    if cpu_idx < crate::arch::x86_64::percpu::MAX_CPUS
+                        && Arc::ptr_eq(current_task, &cpu.idle_task)
+                    {
+                        CPU_IDLE_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+                    }
                     current_task.ticks.fetch_add(1, Ordering::Relaxed);
                     cpu.current_runtime.update();
                     if cpu.class_rqs.update_current(

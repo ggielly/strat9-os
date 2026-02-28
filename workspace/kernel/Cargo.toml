@@ -37,6 +37,7 @@ nic-queues = { path = "../drivers/nic/nic-queues" }
 intel-ethernet = { path = "../drivers/nic/intel-ethernet" }
 e1000 = { path = "../drivers/nic/e1000" }
 driver-net-proto = { path = "../drivers/nic/driver-net-proto" }
+ratatui = { version = "0.30.0", default-features = false }
 ###
 [build-dependencies]
 cc = "1.0"
