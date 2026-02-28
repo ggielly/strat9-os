@@ -144,7 +144,6 @@ pub struct SignalSet {
     mask: AtomicU64,
 }
 
-
 impl Clone for SignalSet {
     fn clone(&self) -> Self {
         Self::from_mask(self.get_mask())
@@ -288,11 +287,9 @@ pub fn send_signal(
     let task = get_task_by_id(target).ok_or(SyscallError::InvalidArgument)?;
 
     // Add signal to the task's pending set.
-    // SAFETY: We have a reference to the task, so it's safe to access its fields.
-    unsafe {
-        let pending = &task.pending_signals;
-        pending.add(signal);
-    }
+    // We have a reference to the task, so it's safe to access its fields.
+    let pending = &task.pending_signals;
+    pending.add(signal);
 
     // If the task is blocked and the signal is not blocked, wake it.
     unsafe {
@@ -316,11 +313,9 @@ pub fn has_pending_signals() -> bool {
     use crate::process::current_task_clone;
 
     if let Some(task) = current_task_clone() {
-        unsafe {
-            let pending = &task.pending_signals;
-            let blocked = &task.blocked_signals;
-            pending.unblocked(blocked) != 0
-        }
+        let pending = &task.pending_signals;
+        let blocked = &task.blocked_signals;
+        pending.unblocked(blocked) != 0
     } else {
         false
     }
@@ -333,16 +328,14 @@ pub fn consume_next_signal() -> Option<Signal> {
     use crate::process::current_task_clone;
 
     if let Some(task) = current_task_clone() {
-        unsafe {
-            let pending = &task.pending_signals;
-            let blocked = &task.blocked_signals;
-            let unblocked = pending.unblocked(blocked);
-            if unblocked != 0 {
-                let signal_num = unblocked.trailing_zeros() + 1;
-                if let Some(signal) = Signal::from_u32(signal_num) {
-                    pending.remove(signal);
-                    return Some(signal);
-                }
+        let pending = &task.pending_signals;
+        let blocked = &task.blocked_signals;
+        let unblocked = pending.unblocked(blocked);
+        if unblocked != 0 {
+            let signal_num = unblocked.trailing_zeros() + 1;
+            if let Some(signal) = Signal::from_u32(signal_num) {
+                pending.remove(signal);
+                return Some(signal);
             }
         }
     }

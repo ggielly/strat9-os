@@ -899,8 +899,8 @@ pub fn maybe_preempt() {
 pub fn set_verbose(enabled: bool) {
     SCHED_VERBOSE.store(enabled, Ordering::Relaxed);
     log::info!(
-        "scheduler verbose tracing {}",
-        if enabled { "enabled" } else { "disabled" }
+        "[sched][trace] verbose={}",
+        if enabled { "on" } else { "off" }
     );
 }
 
@@ -948,7 +948,7 @@ pub fn log_state(label: &str) {
         let pick = sched.class_table.pick_order();
         let steal = sched.class_table.steal_order();
         log::info!(
-            "[sched:{}] class-table pick=[{},{},{}] steal=[{},{}]",
+            "[sched][state] label={} class_table.pick=[{},{},{}] class_table.steal=[{},{}]",
             label,
             pick[0].as_str(),
             pick[1].as_str(),
@@ -964,7 +964,7 @@ pub fn log_state(label: &str) {
                 .map(|t| t.id.as_u64())
                 .unwrap_or(u64::MAX);
             log::info!(
-                "[sched:{}] cpu={} current={} rq_rt={} rq_fair={} rq_idle={} blocked={} need_resched={}",
+                "[sched][state] label={} cpu={} current={} rq_rt={} rq_fair={} rq_idle={} blocked={} need_resched={}",
                 label,
                 cpu_id,
                 current,
@@ -982,7 +982,7 @@ pub fn log_state(label: &str) {
 
 /// The main function for the idle task
 extern "C" fn idle_task_main() -> ! {
-    log::info!("Idle task started");
+    log::info!("[sched][idle] started");
     loop {
         // Be explicit on SMP: never rely on inherited IF state.
         // If IF=0, HLT can deadlock that CPU forever.

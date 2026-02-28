@@ -13,6 +13,11 @@ static FAIR_HITS: AtomicU64 = AtomicU64::new(0);
 static SWITCH_WORKER_HITS: AtomicU64 = AtomicU64::new(0);
 static SWITCH_WORKER_DONE: AtomicBool = AtomicBool::new(false);
 
+#[inline]
+fn sched_test_log(msg: core::fmt::Arguments<'_>) {
+    crate::serial_println!("[sched][test] {}", msg);
+}
+
 fn wait_exit(id: TaskId, timeout_ticks: u64) -> bool {
     let start = ticks();
     // Budget proportionnel au timeout pour éviter de l'épuiser avant les ticks
@@ -137,29 +142,31 @@ fn test_dynamic_policy_switch() -> bool {
 }
 
 extern "C" fn scheduler_test_main() -> ! {
-    crate::serial_println!("[sched-test] start");
+    sched_test_log(format_args!("event=start"));
     set_scheduler_verbose(false);
-    log_scheduler_state("start");
+    log_scheduler_state("test-start");
 
     let s1 = test_rt_preempts_fair();
-    crate::serial_println!(
-        "[sched-test] rt-preempts-fair: {}",
+    sched_test_log(format_args!(
+        "case=rt-preempts-fair result={}",
         if s1 { "ok" } else { "FAIL" }
-    );
+    ));
 
     let s2 = test_dynamic_policy_switch();
-    crate::serial_println!(
-        "[sched-test] dynamic-policy-switch: {}",
+    sched_test_log(format_args!(
+        "case=dynamic-policy-switch result={}",
         if s2 { "ok" } else { "FAIL" }
-    );
+    ));
 
-    log_scheduler_state("end");
+    log_scheduler_state("test-end");
     set_scheduler_verbose(false);
 
-    crate::serial_println!(
-        "[sched-test] summary: {}",
-        if s1 || s2 { "PASS" } else { "PASS" }
-    );
+    sched_test_log(format_args!(
+        "summary pass={} fail={} overall={}",
+        (s1 as u8) + (s2 as u8),
+        (!s1 as u8) + (!s2 as u8),
+        if s1 && s2 { "PASS" } else { "FAIL" }
+    ));
     crate::process::scheduler::exit_current_task(0);
 }
 
@@ -172,6 +179,6 @@ pub fn create_scheduler_test_task() {
     ) {
         add_task(task);
     } else {
-        crate::serial_println!("[sched-test] failed to create task");
+        sched_test_log(format_args!("event=create-task result=fail"));
     }
 }

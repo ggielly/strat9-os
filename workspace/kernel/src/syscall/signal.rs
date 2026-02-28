@@ -207,15 +207,13 @@ impl SigStackRaw {
 pub fn sys_sigpending(set_ptr: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
-    // SAFETY: We have a reference to the task.
-    unsafe {
-        let pending = &task.pending_signals;
-        let mask = pending.get_mask();
+    // We have a reference to the task.
+    let pending = &task.pending_signals;
+    let mask = pending.get_mask();
 
-        if set_ptr != 0 {
-            let user = UserSliceWrite::new(set_ptr, 8)?;
-            user.copy_from(&mask.to_ne_bytes());
-        }
+    if set_ptr != 0 {
+        let user = UserSliceWrite::new(set_ptr, 8)?;
+        user.copy_from(&mask.to_ne_bytes());
     }
 
     Ok(0)
@@ -228,28 +226,26 @@ pub fn sys_sigpending(set_ptr: u64) -> Result<u64, SyscallError> {
 pub fn sys_sigsuspend(mask_ptr: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
-    // SAFETY: We have a reference to the task.
-    unsafe {
-        // Save the old mask
-        let blocked = &task.blocked_signals;
-        let old_mask = blocked.get_mask();
+    // We have a reference to the task.
+    // Save the old mask
+    let blocked = &task.blocked_signals;
+    let old_mask = blocked.get_mask();
 
-        // Set the new mask
-        if mask_ptr != 0 {
-            let user = UserSliceRead::new(mask_ptr, 8)?;
-            let mut buf = [0u8; 8];
-            user.copy_to(&mut buf);
-            let new_mask = u64::from_ne_bytes(buf);
-            blocked.set_mask(new_mask);
-        }
-
-        // Block the task until a signal arrives
-        // The task will be woken by send_signal() if an unblocked signal is pending
-        crate::process::block_current_task();
-
-        // Restore the old mask
-        blocked.set_mask(old_mask);
+    // Set the new mask
+    if mask_ptr != 0 {
+        let user = UserSliceRead::new(mask_ptr, 8)?;
+        let mut buf = [0u8; 8];
+        user.copy_to(&mut buf);
+        let new_mask = u64::from_ne_bytes(buf);
+        blocked.set_mask(new_mask);
     }
+
+    // Block the task until a signal arrives
+    // The task will be woken by send_signal() if an unblocked signal is pending
+    crate::process::block_current_task();
+
+    // Restore the old mask
+    blocked.set_mask(old_mask);
 
     // If we get here, we were woken by a signal
     Err(SyscallError::Interrupted)
@@ -268,29 +264,27 @@ pub fn sys_sigtimedwait(
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
-    // SAFETY: We have a reference to the task.
-    unsafe {
-        let pending = &task.pending_signals;
-        let blocked = &task.blocked_signals;
+    // We have a reference to the task.
+    let pending = &task.pending_signals;
+    let blocked = &task.blocked_signals;
 
-        // Read the signal set to wait for
-        if set_ptr != 0 {
-            let user = UserSliceRead::new(set_ptr, 8)?;
-            let mut buf = [0u8; 8];
-            user.copy_to(&mut buf);
-            let wait_mask = u64::from_ne_bytes(buf);
+    // Read the signal set to wait for
+    if set_ptr != 0 {
+        let user = UserSliceRead::new(set_ptr, 8)?;
+        let mut buf = [0u8; 8];
+        user.copy_to(&mut buf);
+        let wait_mask = u64::from_ne_bytes(buf);
 
-            // Check if any signal in wait_mask is pending and not blocked
-            let pending_mask = pending.get_mask();
-            let blocked_mask = blocked.get_mask();
-            let deliverable = pending_mask & wait_mask & !blocked_mask;
+        // Check if any signal in wait_mask is pending and not blocked
+        let pending_mask = pending.get_mask();
+        let blocked_mask = blocked.get_mask();
+        let deliverable = pending_mask & wait_mask & !blocked_mask;
 
-            if deliverable != 0 {
-                // Return the lowest signal number
-                let signal_num = deliverable.trailing_zeros() + 1;
-                pending.remove(Signal::from_u32(signal_num).unwrap());
-                return Ok(signal_num as u64);
-            }
+        if deliverable != 0 {
+            // Return the lowest signal number
+            let signal_num = deliverable.trailing_zeros() + 1;
+            pending.remove(Signal::from_u32(signal_num).unwrap());
+            return Ok(signal_num as u64);
         }
     }
 

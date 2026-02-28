@@ -4,7 +4,7 @@
 //! The read end blocks when empty; the write end returns EPIPE when
 //! the read end is closed.
 
-use crate::{sync::SpinLock, syscall::error::SyscallError};
+use crate::{sync::{SpinLock, waitqueue::WaitQueue}, syscall::error::SyscallError};
 use alloc::sync::Arc;
 
 const PIPE_BUF_SIZE: usize = 4096;
@@ -59,38 +59,44 @@ impl PipeInner {
 /// Shared pipe handle.
 pub struct Pipe {
     inner: SpinLock<PipeInner>,
+    /// Woken when data becomes available (or write end is closed).
+    readers: WaitQueue,
+    /// Woken when space becomes available (or read end is closed).
+    writers: WaitQueue,
 }
 
 impl Pipe {
     pub fn new() -> Arc<Self> {
         Arc::new(Pipe {
             inner: SpinLock::new(PipeInner::new()),
+            readers: WaitQueue::new(),
+            writers: WaitQueue::new(),
         })
     }
 
     /// Read from the pipe. Returns 0 on EOF (write end closed + empty).
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        loop {
-            {
-                let mut inner = self.inner.lock();
+        let result = self.readers.wait_until(|| {
+            let mut inner = self.inner.lock();
 
-                if inner.available_read() > 0 {
-                    let to_read = core::cmp::min(buf.len(), inner.available_read());
-                    for i in 0..to_read {
-                        buf[i] = inner.buf[inner.read_pos];
-                        inner.read_pos = (inner.read_pos + 1) % PIPE_BUF_SIZE;
-                    }
-                    inner.len -= to_read;
-                    return Ok(to_read);
+            if inner.available_read() > 0 {
+                let to_read = core::cmp::min(buf.len(), inner.available_read());
+                for i in 0..to_read {
+                    buf[i] = inner.buf[inner.read_pos];
+                    inner.read_pos = (inner.read_pos + 1) % PIPE_BUF_SIZE;
                 }
-
-                if inner.write_closed {
-                    return Ok(0); // EOF
-                }
+                inner.len -= to_read;
+                return Some(Ok(to_read));
             }
-            // Yield and retry (simple polling — could be improved with wait queues)
-            crate::process::yield_task();
-        }
+
+            if inner.write_closed {
+                return Some(Ok(0)); // EOF
+            }
+
+            None // block
+        });
+        self.writers.wake_one();
+        result
     }
 
     /// Write to the pipe. Returns EPIPE if read end is closed.
@@ -101,14 +107,14 @@ impl Pipe {
 
         let mut total = 0;
         while total < buf.len() {
-            {
+            let wrote_some = self.writers.wait_until(|| {
                 let mut inner = self.inner.lock();
 
                 if inner.read_closed {
                     if total > 0 {
-                        return Ok(total);
+                        return Some(Ok(0)); // return what we have
                     }
-                    return Err(SyscallError::Pipe);
+                    return Some(Err(SyscallError::Pipe));
                 }
 
                 if inner.available_write() > 0 {
@@ -119,12 +125,17 @@ impl Pipe {
                         inner.write_pos = (wp + 1) % PIPE_BUF_SIZE;
                     }
                     inner.len += to_write;
-                    total += to_write;
-                    continue;
+                    return Some(Ok(to_write));
                 }
+
+                None // block
+            });
+            self.readers.wake_one();
+            let n = wrote_some?;
+            if n == 0 {
+                break; // read_closed mid-write, return partial
             }
-            // Buffer full — yield and retry
-            crate::process::yield_task();
+            total += n;
         }
 
         Ok(total)
@@ -150,6 +161,8 @@ impl Pipe {
         inner.read_refs -= 1;
         if inner.read_refs == 0 {
             inner.read_closed = true;
+            drop(inner);
+            self.writers.wake_all();
             true
         } else {
             false
@@ -166,6 +179,8 @@ impl Pipe {
         inner.write_refs -= 1;
         if inner.write_refs == 0 {
             inner.write_closed = true;
+            drop(inner);
+            self.readers.wake_all();
             true
         } else {
             false

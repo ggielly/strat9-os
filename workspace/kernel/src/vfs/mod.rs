@@ -382,46 +382,48 @@ pub fn sys_read(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError
 
 /// Syscall handler for writing to a file.
 pub fn sys_write(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    // Special case for stdout/stderr (legacy redirect for bootstrap)
+    if buf_len == 0 {
+        return Ok(0);
+    }
+
+    // For stdout/stderr, fall back to direct console output only when no
+    // FD entry exists (early boot).  Once the FD table is populated (or
+    // after dup2 redirection) the normal VFS path is used.
     if fd == 1 || fd == 2 {
-        crate::silo::enforce_console_access()?;
-
-        if buf_len == 0 {
-            return Ok(0);
-        }
-
-        let len = core::cmp::min(buf_len as usize, 16 * 1024); // Cap at 16KB for console
-        let user_buf = UserSliceRead::new(buf_ptr, len)?;
-        let mut kbuf = [0u8; 4096];
-        let mut total_written = 0;
-
-        while total_written < len {
-            let to_write = core::cmp::min(kbuf.len(), len - total_written);
-            let n = user_buf.copy_to(&mut kbuf[..to_write]);
-
-            if crate::arch::x86_64::vga::is_available() {
-                if let Ok(s) = core::str::from_utf8(&kbuf[..n]) {
-                    crate::serial_print!("{}", s);
-                    crate::vga_print!("{}", s);
+        let use_console = match current_task_clone() {
+            Some(t) => {
+                let fd_table = unsafe { &*t.process.fd_table.get() };
+                !fd_table.contains(fd)
+            }
+            None => true,
+        };
+        if use_console {
+            crate::silo::enforce_console_access()?;
+            let len = core::cmp::min(buf_len as usize, 16 * 1024);
+            let user_buf = UserSliceRead::new(buf_ptr, len)?;
+            let mut kbuf = [0u8; 4096];
+            let mut total_written = 0;
+            while total_written < len {
+                let to_write = core::cmp::min(kbuf.len(), len - total_written);
+                let n = user_buf.copy_to(&mut kbuf[..to_write]);
+                if crate::arch::x86_64::vga::is_available() {
+                    if let Ok(s) = core::str::from_utf8(&kbuf[..n]) {
+                        crate::serial_print!("{}", s);
+                        crate::vga_print!("{}", s);
+                    } else {
+                        for &byte in &kbuf[..n] {
+                            crate::serial_print!("{}", byte as char);
+                        }
+                    }
                 } else {
                     for &byte in &kbuf[..n] {
                         crate::serial_print!("{}", byte as char);
                     }
                 }
-            } else {
-                for &byte in &kbuf[..n] {
-                    crate::serial_print!("{}", byte as char);
-                }
+                total_written += n;
             }
-
-            total_written += n;
+            return Ok(total_written as u64);
         }
-
-        return Ok(total_written as u64);
-    }
-
-    if buf_len == 0 {
-        return Ok(0);
     }
 
     let mut kbuf = [0u8; 4096];
@@ -574,17 +576,38 @@ fn read_user_path(path_ptr: u64, path_len: u64) -> Result<alloc::string::String,
 }
 
 /// Resolve `path` relative to the current working directory when it is not
-/// absolute. Returns the absolute path to use with the VFS.
+/// absolute. Returns the normalized absolute path.
 fn resolve_path(path: &str, cwd: &str) -> alloc::string::String {
-    if path.starts_with('/') {
-        return alloc::string::String::from(path);
-    }
-    // Relative path: concatenate cwd + "/" + path.
-    if cwd.ends_with('/') {
+    let raw = if path.starts_with('/') {
+        alloc::string::String::from(path)
+    } else if cwd.ends_with('/') {
         alloc::format!("{}{}", cwd, path)
     } else {
         alloc::format!("{}/{}", cwd, path)
+    };
+    normalize_path(&raw)
+}
+
+/// Collapse `.`, `..` and duplicate `/` in an absolute path.
+fn normalize_path(path: &str) -> alloc::string::String {
+    let mut parts: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => { parts.pop(); }
+            other => parts.push(other),
+        }
     }
+    let mut out = alloc::string::String::with_capacity(path.len());
+    if parts.is_empty() {
+        out.push('/');
+    } else {
+        for p in &parts {
+            out.push('/');
+            out.push_str(p);
+        }
+    }
+    out
 }
 
 // ─── New VFS syscall handlers ─────────────────────────────────────────────────

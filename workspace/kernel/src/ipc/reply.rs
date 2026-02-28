@@ -37,11 +37,17 @@ pub fn wait_for_reply(task_id: TaskId) -> IpcMessage {
         slot.waitq.clone()
     };
 
-    waitq.wait_until(|| {
+    let msg = waitq.wait_until(|| {
         let mut registry = REPLIES.lock();
-        let slot = registry.slots.get_mut(&task_id).unwrap();
+        let slot = registry.slots.get_mut(&task_id)
+            .expect("reply slot removed while waiting");
         slot.msg.take()
-    })
+    });
+
+    let mut registry = REPLIES.lock();
+    registry.slots.remove(&task_id);
+
+    msg
 }
 
 /// Deliver a reply message to the given task (wakes it if blocked).

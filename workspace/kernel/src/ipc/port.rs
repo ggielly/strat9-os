@@ -83,18 +83,19 @@ impl Port {
     /// Returns `Err(IpcError::PortDestroyed)` if the port is destroyed while
     /// the sender is blocked.
     pub fn send(&self, msg: IpcMessage) -> Result<(), IpcError> {
-        self.send_waitq.wait_until(|| {
+        let result = self.send_waitq.wait_until(|| {
             if self.destroyed.load(Ordering::Acquire) {
                 return Some(Err(IpcError::PortDestroyed));
             }
             match self.queue.push(msg) {
-                Ok(()) => {
-                    self.recv_waitq.wake_one();
-                    Some(Ok(()))
-                }
+                Ok(()) => Some(Ok(())),
                 Err(_) => None,
             }
-        })
+        });
+        if result.is_ok() {
+            self.recv_waitq.wake_one();
+        }
+        result
     }
 
     /// Receive a message from this port.
@@ -103,16 +104,19 @@ impl Port {
     /// Returns `Err(IpcError::PortDestroyed)` if the port is destroyed while
     /// the receiver is blocked.
     pub fn recv(&self) -> Result<IpcMessage, IpcError> {
-        self.recv_waitq.wait_until(|| {
+        let result = self.recv_waitq.wait_until(|| {
             if let Some(msg) = self.queue.pop() {
-                self.send_waitq.wake_one();
                 return Some(Ok(msg));
             }
             if self.destroyed.load(Ordering::Acquire) {
                 return Some(Err(IpcError::PortDestroyed));
             }
             None
-        })
+        });
+        if result.is_ok() {
+            self.send_waitq.wake_one();
+        }
+        result
     }
 
     /// Try to receive a message from this port without blocking.

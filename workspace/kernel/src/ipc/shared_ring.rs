@@ -76,17 +76,16 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
     }
 
     let mut frames = Vec::with_capacity(page_count);
-    {
+    let alloc_failed = {
         let mut guard = get_allocator().lock();
         let alloc = guard.as_mut().ok_or(RingError::Alloc)?;
+        let mut failed = false;
         for _ in 0..page_count {
             let frame = match alloc.alloc_frame() {
                 Ok(f) => f,
                 Err(_) => {
-                    for rollback in frames.drain(..) {
-                        alloc.free(rollback, 0);
-                    }
-                    return Err(RingError::Alloc);
+                    failed = true;
+                    break;
                 }
             };
             let v = crate::memory::phys_to_virt(frame.start_address.as_u64());
@@ -94,6 +93,13 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
             crate::memory::cow::frame_inc_ref(frame);
             frames.push(frame);
         }
+        failed
+    };
+    if alloc_failed {
+        for rollback in frames.drain(..) {
+            crate::memory::cow::frame_dec_ref(rollback);
+        }
+        return Err(RingError::Alloc);
     }
 
     let id = RingId(NEXT_RING_ID.fetch_add(1, Ordering::Relaxed));

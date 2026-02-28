@@ -203,17 +203,19 @@ impl IpcScheme {
     }
 
     /// Build an IPC message for write operation.
-    fn build_write_msg(file_id: u64, offset: u64, data: &[u8]) -> IpcMessage {
+    ///
+    /// Returns the message and the number of bytes actually packed.
+    fn build_write_msg(file_id: u64, offset: u64, data: &[u8]) -> (IpcMessage, usize) {
         const OPCODE_WRITE: u32 = 0x03;
         let mut msg = IpcMessage::new(OPCODE_WRITE);
         msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
         msg.payload[8..16].copy_from_slice(&offset.to_le_bytes());
 
         // payload[18..48] leaves 30 bytes for data.
-        let len = core::cmp::min(data.len(), 30);
-        msg.payload[16..18].copy_from_slice(&(len as u16).to_le_bytes());
-        msg.payload[18..18 + len].copy_from_slice(&data[..len]);
-        msg
+        let packed = core::cmp::min(data.len(), 30);
+        msg.payload[16..18].copy_from_slice(&(packed as u16).to_le_bytes());
+        msg.payload[18..18 + packed].copy_from_slice(&data[..packed]);
+        (msg, packed)
     }
 
     /// Build an IPC message for close operation.
@@ -347,7 +349,7 @@ impl Scheme for IpcScheme {
     }
 
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
-        let msg = Self::build_write_msg(file_id, offset, buf);
+        let (msg, packed) = Self::build_write_msg(file_id, offset, buf);
         let reply = self.call(msg)?;
 
         // Parse reply: [status: u32][bytes_written: u32]
@@ -360,7 +362,8 @@ impl Scheme for IpcScheme {
             reply.payload[7],
         ]) as usize;
 
-        Ok(bytes_written)
+        // Never report more bytes than we actually sent.
+        Ok(bytes_written.min(packed))
     }
 
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
@@ -509,6 +512,7 @@ impl IpcScheme {
 /// Kernel-backed scheme: serves files from kernel memory (read-only).
 pub struct KernelScheme {
     files: SpinLock<BTreeMap<String, KernelFile>>,
+    by_id: SpinLock<BTreeMap<u64, String>>,
 }
 
 #[derive(Clone)]
@@ -526,6 +530,7 @@ impl KernelScheme {
     pub fn new() -> Self {
         KernelScheme {
             files: SpinLock::new(BTreeMap::new()),
+            by_id: SpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -536,6 +541,12 @@ impl KernelScheme {
         self.files
             .lock()
             .insert(String::from(path), KernelFile { id, base, len });
+        self.by_id.lock().insert(id, String::from(path));
+    }
+
+    fn get_by_id(&self, file_id: u64) -> Option<KernelFile> {
+        let name = self.by_id.lock().get(&file_id)?.clone();
+        self.files.lock().get(&name).cloned()
     }
 }
 
@@ -579,11 +590,7 @@ impl Scheme for KernelScheme {
             return Ok(to_copy);
         }
 
-        let files = self.files.lock();
-        let file = files
-            .values()
-            .find(|f| f.id == file_id)
-            .ok_or(SyscallError::BadHandle)?;
+        let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
 
         if offset >= file.len as u64 {
             return Ok(0);
@@ -610,11 +617,7 @@ impl Scheme for KernelScheme {
     }
 
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
-        let files = self.files.lock();
-        let file = files
-            .values()
-            .find(|f| f.id == file_id)
-            .ok_or(SyscallError::BadHandle)?;
+        let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
         Ok(file.len as u64)
     }
 
@@ -629,11 +632,7 @@ impl Scheme for KernelScheme {
                 st_blocks: 0,
             });
         }
-        let files = self.files.lock();
-        let file = files
-            .values()
-            .find(|f| f.id == file_id)
-            .ok_or(SyscallError::BadHandle)?;
+        let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
         Ok(FileStat {
             st_ino: file_id,
             st_mode: 0o100444,

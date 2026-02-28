@@ -196,7 +196,7 @@ impl PcnetDevice {
         let mut ports = self.ports.lock();
 
         ports.read8(0x18);
-        unsafe { ports.read32(0x18); }
+        let _ = ports.read32(0x18);
 
         let mut csr_58 = ports.read_csr(58);
         csr_58 &= 0xFF00;

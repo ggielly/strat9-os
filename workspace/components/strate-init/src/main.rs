@@ -332,8 +332,16 @@ fn log_u32(mut value: u32) {
     log(s);
 }
 
+fn log_u8_hex(v: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let b = [HEX[(v >> 4) as usize], HEX[(v & 0x0f) as usize]];
+    let s = unsafe { core::str::from_utf8_unchecked(&b) };
+    log(s);
+}
+
 fn boot_silos(silos: Vec<SiloDef>) {
-    let mut next_auto_sid = 1000u32;
+    let mut next_sys_sid = 100u32;
+    let mut next_usr_sid = 1000u32;
 
     for s_def in silos {
         let requested_mode = parse_mode_octal(&s_def.mode).unwrap_or(0);
@@ -357,9 +365,18 @@ fn boot_silos(silos: Vec<SiloDef>) {
         };
 
         let final_sid = if s_def.sid == 42 {
-            let id = next_auto_sid;
-            next_auto_sid += 1;
-            id
+            match family_id {
+                0 | 1 | 2 | 3 => {
+                    let id = next_sys_sid;
+                    next_sys_sid += 1;
+                    id
+                }
+                _ => {
+                    let id = next_usr_sid;
+                    next_usr_sid += 1;
+                    id
+                }
+            }
         } else {
             s_def.sid
         };
@@ -396,6 +413,20 @@ fn boot_silos(silos: Vec<SiloDef>) {
                     log(&str_def.name);
                     log("\n");
                     if let Ok(data) = read_file(&str_def.binary) {
+                        if data.len() >= 4 {
+                            log("[init]     module magic ");
+                            log_u8_hex(data[0]);
+                            log_u8_hex(data[1]);
+                            log_u8_hex(data[2]);
+                            log_u8_hex(data[3]);
+                            log(" size=");
+                            log_u32(data.len() as u32);
+                            log("\n");
+                        } else {
+                            log("[init]     module too small size=");
+                            log_u32(data.len() as u32);
+                            log("\n");
+                        }
                         let mod_h = match unsafe {
                             strat9_syscall::syscall2(
                                 number::SYS_MODULE_LOAD,
@@ -440,15 +471,63 @@ fn boot_silos(silos: Vec<SiloDef>) {
     }
 }
 
+const DEFAULT_SILO_TOML: &str = r#"
+[[silos]]
+name = "console-admin"
+family = "SYS"
+mode = "700"
+sid = 42
+[[silos.strates]]
+name = "console-admin"
+binary = "/initfs/console-admin"
+type = "elf"
+
+[[silos]]
+name = "network"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-net"
+binary = "/initfs/strate-net"
+type = "elf"
+
+[[silos]]
+name = "dhcp-client"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "dhcp-client"
+binary = "/initfs/bin/dhcp-client"
+type = "elf"
+"#;
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     log("[init] Strat9 Hierarchical Boot Starting\n");
-    if let Ok(data_vec) = read_file("/initfs/silo.toml") {
-        if let Ok(data_str) = core::str::from_utf8(&data_vec) {
-            let silos = parse_config(data_str);
-            boot_silos(silos);
+    let silos = match read_file("/initfs/silo.toml") {
+        Ok(data_vec) => match core::str::from_utf8(&data_vec) {
+            Ok(data_str) => {
+                let parsed = parse_config(data_str);
+                if parsed.is_empty() {
+                    log("[init] Empty /initfs/silo.toml, using embedded defaults\n");
+                    parse_config(DEFAULT_SILO_TOML)
+                } else {
+                    parsed
+                }
+            }
+            Err(_) => {
+                log("[init] Invalid UTF-8 in /initfs/silo.toml, using embedded defaults\n");
+                parse_config(DEFAULT_SILO_TOML)
+            }
+        },
+        Err(_) => {
+            log("[init] Missing /initfs/silo.toml, using embedded defaults\n");
+            parse_config(DEFAULT_SILO_TOML)
         }
-    }
+    };
+    boot_silos(silos);
     log("[init] Boot complete.\n");
     loop {
         let _ = call::sched_yield();

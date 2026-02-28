@@ -1399,6 +1399,18 @@ pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
 
         let user = UserSliceRead::new(fd_or_ptr, len)?;
         let data = user.read_to_vec();
+        if data.len() >= 4 {
+            log::debug!(
+                "module_load: len={} magic={:02x}{:02x}{:02x}{:02x}",
+                data.len(),
+                data[0],
+                data[1],
+                data[2],
+                data[3]
+            );
+        } else {
+            log::debug!("module_load: len={} (too small)", data.len());
+        }
 
         let mut registry = MODULE_REGISTRY.lock();
         let id = registry.register(data)?;
@@ -1766,10 +1778,21 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
     let load_result = {
         let registry = MODULE_REGISTRY.lock();
         match registry.get(module_id) {
-            Some(module) => {
-                crate::process::elf::load_and_run_elf_with_caps(&module.data, task_name, &seed_caps)
-                    .map_err(|_| SyscallError::InvalidArgument)
-            }
+            Some(module) => crate::process::elf::load_and_run_elf_with_caps(
+                &module.data,
+                task_name,
+                &seed_caps,
+            )
+            .map_err(|err| {
+                log::warn!(
+                    "silo_start: sid={} module={} task='{}' load failed: {}",
+                    silo_id,
+                    module_id,
+                    task_name,
+                    err
+                );
+                map_elf_start_error(err)
+            }),
             None => Err(SyscallError::BadHandle),
         }
     };
@@ -1971,6 +1994,27 @@ fn is_admin_task(task: &Task) -> bool {
         revoke: false,
     };
     caps.has_resource_with_permissions(ResourceType::Silo, SILO_ADMIN_RESOURCE, required)
+}
+
+fn map_elf_start_error(err: &'static str) -> SyscallError {
+    if err.contains("allocate")
+        || err.contains("Out of memory")
+        || err.contains("No virtual range")
+        || err.contains("Failed to map page")
+    {
+        return SyscallError::OutOfMemory;
+    }
+    if err.contains("ELF")
+        || err.contains("PT_")
+        || err.contains("entry")
+        || err.contains("relocation")
+        || err.contains("Program header")
+        || err.contains("x86_64")
+        || err.contains("Unsupported")
+    {
+        return SyscallError::ExecFormatError;
+    }
+    SyscallError::InvalidArgument
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

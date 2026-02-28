@@ -316,16 +316,14 @@ impl Drop for MappedPages {
         if self.owned {
             // Calculate page count
             let page_count = (self.size + PAGE_SIZE - 1) / PAGE_SIZE;
-            // SAFETY: We own the mapping and are responsible for unmapping
-            unsafe {
-                crate::memory::address_space::kernel_address_space()
-                    .unmap_region(
-                        self.start_vaddr.as_u64(),
-                        page_count,
-                        crate::memory::address_space::VmaPageSize::Small,
-                    )
-                    .ok();
-            }
+            // We own the mapping and are responsible for unmapping
+            crate::memory::address_space::kernel_address_space()
+                .unmap_region(
+                    self.start_vaddr.as_u64(),
+                    page_count,
+                    crate::memory::address_space::VmaPageSize::Small,
+                )
+                .ok();
         }
     }
 }

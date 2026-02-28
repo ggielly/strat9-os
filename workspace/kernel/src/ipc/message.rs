@@ -50,12 +50,17 @@ impl IpcMessage {
 
     /// Create a message from a raw 64-byte buffer (e.g. copied from userspace).
     ///
+    /// Handles unaligned source buffers via bytewise copy.
+    ///
     /// # Safety
     ///
     /// The caller must ensure `buf` points to at least 64 readable bytes.
     pub unsafe fn from_raw(buf: *const u8) -> Self {
-        let slice = unsafe { core::slice::from_raw_parts(buf, 64) };
-        *Self::ref_from(slice).unwrap()
+        let mut msg = Self::new_zeroed();
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf, msg.as_bytes_mut().as_mut_ptr(), 64);
+        }
+        msg
     }
 
     /// Write this message to a raw 64-byte buffer.

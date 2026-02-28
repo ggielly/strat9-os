@@ -108,7 +108,7 @@ pub struct Sender<T: Send> {
 
 impl<T: Send> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.inner.sender_count.fetch_add(1, Ordering::Relaxed);
+        self.inner.sender_count.fetch_add(1, Ordering::AcqRel);
         Sender {
             inner: self.inner.clone(),
         }
@@ -195,10 +195,13 @@ impl<T: Send> Sender<T> {
 
     /// Create a new [`Receiver`] endpoint connected to the same channel.
     pub fn receiver(&self) -> Receiver<T> {
-        self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
-        if self.inner.status.load(Ordering::Acquire) == STATUS_RECEIVER_GONE {
-            self.inner.status.store(STATUS_CONNECTED, Ordering::Release);
-        }
+        self.inner.receiver_count.fetch_add(1, Ordering::AcqRel);
+        let _ = self.inner.status.compare_exchange(
+            STATUS_RECEIVER_GONE,
+            STATUS_CONNECTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         Receiver {
             inner: self.inner.clone(),
         }
@@ -216,7 +219,7 @@ pub struct Receiver<T: Send> {
 
 impl<T: Send> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
+        self.inner.receiver_count.fetch_add(1, Ordering::AcqRel);
         Receiver {
             inner: self.inner.clone(),
         }
@@ -284,10 +287,13 @@ impl<T: Send> Receiver<T> {
 
     /// Create a new [`Sender`] endpoint connected to the same channel.
     pub fn sender(&self) -> Sender<T> {
-        self.inner.sender_count.fetch_add(1, Ordering::Relaxed);
-        if self.inner.status.load(Ordering::Acquire) == STATUS_SENDER_GONE {
-            self.inner.status.store(STATUS_CONNECTED, Ordering::Release);
-        }
+        self.inner.sender_count.fetch_add(1, Ordering::AcqRel);
+        let _ = self.inner.status.compare_exchange(
+            STATUS_SENDER_GONE,
+            STATUS_CONNECTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         Sender {
             inner: self.inner.clone(),
         }

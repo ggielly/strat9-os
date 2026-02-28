@@ -156,25 +156,14 @@ impl FileDescriptorTable {
         }
     }
 
-    /// Clone this FD table (fork semantics), excluding CLOEXEC descriptors.
+    /// Clone this FD table (fork semantics).
+    ///
+    /// All descriptors are copied, including those with CLOEXEC.
+    /// CLOEXEC only takes effect at exec-time via `close_cloexec()`.
     pub fn clone_for_fork(&self) -> Self {
-        let mut new_table = FileDescriptorTable {
-            fds: Vec::with_capacity(self.fds.len()),
-        };
-
-        for fd in &self.fds {
-            if let Some(desc) = fd {
-                if !desc.cloexec {
-                    new_table.fds.push(Some(desc.clone()));
-                } else {
-                    new_table.fds.push(None);
-                }
-            } else {
-                new_table.fds.push(None);
-            }
+        FileDescriptorTable {
+            fds: self.fds.clone(),
         }
-
-        new_table
     }
 }
 

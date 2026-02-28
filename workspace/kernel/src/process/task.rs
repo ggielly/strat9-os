@@ -397,9 +397,9 @@ impl Task {
         let (pid, tid, tgid) = Self::allocate_process_ids();
 
         log::debug!(
-            "Created task '{}' (id={:?}, pid={}, tid={}) with stack @ {:?} (size={}KB)",
+            "[task][create] name={} id={} pid={} tid={} kstack={:?} kstack_kib={}",
             name,
-            id,
+            id.as_u64(),
             pid,
             tid,
             kernel_stack.virt_base,
@@ -457,9 +457,9 @@ impl Task {
         let (pid, tid, tgid) = Self::allocate_process_ids();
 
         log::debug!(
-            "Created user task '{}' (id={:?}, pid={}, tid={}) with CR3={:#x}",
+            "[task][create] name={} id={} pid={} tid={} user_as_cr3={:#x}",
             name,
-            id,
+            id.as_u64(),
             pid,
             tid,
             address_space.cr3().as_u64()

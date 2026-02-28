@@ -189,6 +189,15 @@ fn path_matches(module_path: &[u8], expected_path: &[u8]) -> bool {
         || module_path.ends_with(expected_no_leading)
 }
 
+#[inline]
+const fn module_addr_to_phys(addr: u64, hhdm_offset: u64) -> u64 {
+    if hhdm_offset != 0 && addr >= hhdm_offset {
+        addr - hhdm_offset
+    } else {
+        addr
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 struct ResolvedModules {
     test_pid: Option<(u64, u64)>,
@@ -204,11 +213,14 @@ struct ResolvedModules {
     ping: Option<(u64, u64)>,
 }
 
-fn resolve_modules_once(modules: &[&limine::file::File]) -> ResolvedModules {
+fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> ResolvedModules {
     let mut resolved = ResolvedModules::default();
     for module in modules {
         let path = module.path().to_bytes();
-        let info = (module.addr() as u64, module.size());
+        let info = (
+            module_addr_to_phys(module.addr() as u64, hhdm_offset),
+            module.size(),
+        );
         if path_matches(path, b"/initfs/test_pid") {
             resolved.test_pid = Some(info);
         } else if path_matches(path, b"/initfs/test_syscalls") {
@@ -239,9 +251,7 @@ fn resolve_modules_once(modules: &[&limine::file::File]) -> ResolvedModules {
 fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> super::entry::MemoryKind {
     if kind == limine::memory_map::EntryType::USABLE {
         super::entry::MemoryKind::Free
-    } else if kind == limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE
-        || kind == limine::memory_map::EntryType::ACPI_RECLAIMABLE
-    {
+    } else if kind == limine::memory_map::EntryType::ACPI_RECLAIMABLE {
         super::entry::MemoryKind::Reclaim
     } else {
         super::entry::MemoryKind::Reserved
@@ -382,14 +392,35 @@ pub unsafe extern "C" fn kmain() -> ! {
             let modules = module_response.modules();
             crate::serial_println!("[limine] modules reported: {}", modules.len());
             for (idx, module) in modules.iter().enumerate() {
+                let raw_addr = module.addr() as u64;
+                let phys_addr = module_addr_to_phys(raw_addr, hhdm_offset);
+                let (m0, m1, m2, m3) = if module.size() >= 4 {
+                    unsafe {
+                        let p = raw_addr as *const u8;
+                        (
+                            core::ptr::read_volatile(p),
+                            core::ptr::read_volatile(p.add(1)),
+                            core::ptr::read_volatile(p.add(2)),
+                            core::ptr::read_volatile(p.add(3)),
+                        )
+                    }
+                } else {
+                    (0, 0, 0, 0)
+                };
                 crate::serial_println!(
-                    "[limine] module[{}]: path='{}' size={}",
+                    "[limine] module[{}]: path='{}' addr={:#x} phys={:#x} magic={:02x}{:02x}{:02x}{:02x} size={}",
                     idx,
                     module.path().to_string_lossy(),
+                    raw_addr,
+                    phys_addr,
+                    m0,
+                    m1,
+                    m2,
+                    m3,
                     module.size()
                 );
             }
-            let resolved = resolve_modules_once(modules);
+            let resolved = resolve_modules_once(modules, hhdm_offset);
             let (init_base, init_size) = resolved.test_pid.unwrap_or((0, 0));
             let (test_syscalls_base, test_syscalls_size) =
                 resolved.test_syscalls.unwrap_or((0, 0));

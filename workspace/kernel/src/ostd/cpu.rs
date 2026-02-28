@@ -46,10 +46,10 @@ impl CpuId {
     /// It requires that per-CPU data has been initialized for this CPU.
     #[inline]
     pub fn current_racy() -> Self {
-        // SAFETY: This is safe if per-CPU data has been set up via
+        // This is safe if per-CPU data has been set up via
         // arch::x86_64::percpu::init_gs_base(). The "racy" suffix indicates
         // that no additional synchronization is performed.
-        let apic_id = unsafe { crate::arch::x86_64::apic::lapic_id() };
+        let apic_id = crate::arch::x86_64::apic::lapic_id();
         Self::new(apic_id as usize)
     }
 
@@ -110,32 +110,26 @@ impl Iterator for CpuIter {
 /// Halts the CPU until the next interrupt arrives.
 #[inline]
 pub fn halt_cpu() {
-    // SAFETY: hlt is a privileged instruction that halts the CPU until
+    // hlt is a privileged instruction that halts the CPU until
     // the next interrupt. This is safe to call in kernel mode.
-    unsafe {
-        crate::arch::x86_64::hlt();
-    }
+    crate::arch::x86_64::hlt();
 }
 
 /// Disable interrupts on the current CPU
 #[inline]
 pub fn disable_irqs() {
-    // SAFETY: cli is a privileged instruction that disables interrupts.
+    // cli is a privileged instruction that disables interrupts.
     // This is safe to call in kernel mode and is commonly used to
     // protect critical sections.
-    unsafe {
-        crate::arch::x86_64::cli();
-    }
+    crate::arch::x86_64::cli();
 }
 
 /// Enable interrupts on the current CPU
 #[inline]
 pub fn enable_irqs() {
-    // SAFETY: sti is a privileged instruction that enables interrupts.
+    // sti is a privileged instruction that enables interrupts.
     // This is safe to call in kernel mode.
-    unsafe {
-        crate::arch::x86_64::sti();
-    }
+    crate::arch::x86_64::sti();
 }
 
 /// Check if interrupts are enabled on the current CPU

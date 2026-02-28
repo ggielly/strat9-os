@@ -46,18 +46,13 @@ impl PosixSemaphore {
             if self.destroyed.load(Ordering::Acquire) {
                 return Some(Err(SemaphoreError::Destroyed));
             }
-            loop {
-                let cur = self.count.load(Ordering::Acquire);
-                if cur <= 0 {
-                    return None;
-                }
-                if self
-                    .count
-                    .compare_exchange(cur, cur - 1, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    return Some(Ok(()));
-                }
+            let cur = self.count.load(Ordering::Acquire);
+            if cur <= 0 {
+                return None;
+            }
+            match self.count.compare_exchange_weak(cur, cur - 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => Some(Ok(())),
+                Err(_) => None,
             }
         })
     }
@@ -73,7 +68,7 @@ impl PosixSemaphore {
             }
             if self
                 .count
-                .compare_exchange(cur, cur - 1, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange_weak(cur, cur - 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 return Ok(());
@@ -85,7 +80,15 @@ impl PosixSemaphore {
         if self.destroyed.load(Ordering::Acquire) {
             return Err(SemaphoreError::Destroyed);
         }
-        self.count.fetch_add(1, Ordering::Release);
+        loop {
+            let cur = self.count.load(Ordering::Acquire);
+            if cur >= i32::MAX {
+                return Err(SemaphoreError::InvalidValue);
+            }
+            if self.count.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                break;
+            }
+        }
         self.waitq.wake_one();
         Ok(())
     }

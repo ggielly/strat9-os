@@ -263,13 +263,20 @@ fn sector_write<D: BlockDevice>(dev: &D, offset: u64, data: &[u8]) -> Result<usi
         return Ok(0);
     }
 
+    let disk_size = BlockDevice::sector_count(dev) * SECTOR_SIZE as u64;
+    if offset >= disk_size {
+        return Err(BlockError::InvalidSector);
+    }
+    let end = (offset + total as u64).min(disk_size);
+
     let mut data_pos: usize = 0;
     let mut byte_off: u64 = offset;
 
-    while data_pos < total {
+    while data_pos < total && byte_off < end {
         let sector = byte_off / SECTOR_SIZE as u64;
         let sector_off = (byte_off % SECTOR_SIZE as u64) as usize;
-        let to_write = (SECTOR_SIZE - sector_off).min(total - data_pos);
+        let remaining = (end - byte_off) as usize;
+        let to_write = (SECTOR_SIZE - sector_off).min(remaining);
 
         // Read-modify-write for partial sectors; full-sector writes skip the read
         let mut tmp = [0u8; SECTOR_SIZE];

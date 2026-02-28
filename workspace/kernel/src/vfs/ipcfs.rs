@@ -203,6 +203,12 @@ impl Scheme for IpcControlScheme {
 
                 let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
                 let addr_space = unsafe { &*task.process.address_space.get() };
+
+                // Unmap the previous mapping if any, to avoid leaking VMA space.
+                if let Some((old_base, old_size)) = state.last_map.take() {
+                    let _ = addr_space.unmap_range(old_base, old_size);
+                }
+
                 let base = addr_space
                     .find_free_vma_range(
                         crate::syscall::mmap::MMAP_BASE,
@@ -233,11 +239,20 @@ impl Scheme for IpcControlScheme {
     }
 
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
-        self.handles
+        let state = self
+            .handles
             .lock()
             .remove(&file_id)
-            .map(|_| ())
-            .ok_or(SyscallError::BadHandle)
+            .ok_or(SyscallError::BadHandle)?;
+
+        // Unmap shared memory that was mapped into the caller's address space.
+        if let Some((base, size)) = state.last_map {
+            if let Some(task) = current_task_clone() {
+                let addr_space = unsafe { &*task.process.address_space.get() };
+                let _ = addr_space.unmap_range(base, size);
+            }
+        }
+        Ok(())
     }
 
     fn unlink(&self, path: &str) -> Result<(), SyscallError> {

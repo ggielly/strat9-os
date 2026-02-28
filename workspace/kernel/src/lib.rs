@@ -62,6 +62,113 @@ pub fn init_components(stage: component::InitStage) -> Result<(), component::Com
 
 use core::panic::PanicInfo;
 
+const PAGE_SIZE: u64 = 4096;
+const MAX_BOOT_MMAP_REGIONS_WORK: usize = 1024;
+
+const fn null_region() -> boot::entry::MemoryRegion {
+    boot::entry::MemoryRegion {
+        base: 0,
+        size: 0,
+        kind: boot::entry::MemoryKind::Reserved,
+    }
+}
+
+#[inline]
+const fn align_down(value: u64, align: u64) -> u64 {
+    value & !(align - 1)
+}
+
+#[inline]
+const fn align_up(value: u64, align: u64) -> u64 {
+    (value + align - 1) & !(align - 1)
+}
+
+#[inline]
+const fn virt_or_phys_to_phys(addr: u64, hhdm: u64) -> u64 {
+    if hhdm != 0 && addr >= hhdm {
+        addr - hhdm
+    } else {
+        addr
+    }
+}
+
+fn reserve_range_in_map(
+    map: &mut [boot::entry::MemoryRegion],
+    len: &mut usize,
+    reserve_start: u64,
+    reserve_end: u64,
+) {
+    if reserve_start >= reserve_end {
+        return;
+    }
+
+    let mut i = 0usize;
+    while i < *len {
+        let region = map[i];
+        if !matches!(
+            region.kind,
+            boot::entry::MemoryKind::Free | boot::entry::MemoryKind::Reclaim
+        ) {
+            i += 1;
+            continue;
+        }
+
+        let region_start = region.base;
+        let region_end = region.base.saturating_add(region.size);
+        if reserve_end <= region_start || reserve_start >= region_end {
+            i += 1;
+            continue;
+        }
+
+        let overlap_start = core::cmp::max(region_start, reserve_start);
+        let overlap_end = core::cmp::min(region_end, reserve_end);
+
+        if overlap_start <= region_start && overlap_end >= region_end {
+            map[i].kind = boot::entry::MemoryKind::Reserved;
+            i += 1;
+            continue;
+        }
+
+        if overlap_start <= region_start {
+            map[i].base = overlap_end;
+            map[i].size = region_end.saturating_sub(overlap_end);
+            i += 1;
+            continue;
+        }
+
+        if overlap_end >= region_end {
+            map[i].size = overlap_start.saturating_sub(region_start);
+            i += 1;
+            continue;
+        }
+
+        let left = boot::entry::MemoryRegion {
+            base: region_start,
+            size: overlap_start.saturating_sub(region_start),
+            kind: region.kind,
+        };
+        let right = boot::entry::MemoryRegion {
+            base: overlap_end,
+            size: region_end.saturating_sub(overlap_end),
+            kind: region.kind,
+        };
+
+        if *len + 1 > map.len() {
+            map[i] = left;
+            i += 1;
+            continue;
+        }
+
+        for j in (i + 1..*len).rev() {
+            map[j + 1] = map[j];
+        }
+        map[i] = left;
+        map[i + 1] = right;
+        *len += 1;
+        i += 2;
+    }
+}
+
 /// Kernel panic handler
 #[panic_handler]
 fn panic_handler(info: &PanicInfo) -> ! {
@@ -76,12 +183,64 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
         return;
     }
 
-    let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-    if let Err(e) = vfs::register_initfs_file(path, data.as_ptr(), data.len()) {
+    let base_virt = memory::phys_to_virt(base);
+    let data = unsafe { core::slice::from_raw_parts(base_virt as *const u8, size as usize) };
+    if data.len() >= 4 {
+        serial_println!(
+            "[init] /initfs/{} source magic={:02x}{:02x}{:02x}{:02x} size={}",
+            path,
+            data[0],
+            data[1],
+            data[2],
+            data[3],
+            size
+        );
+    }
+    let mut owned = alloc::vec::Vec::with_capacity(data.len());
+    owned.extend_from_slice(data);
+    let leaked: &'static [u8] = alloc::boxed::Box::leak(owned.into_boxed_slice());
+
+    if let Err(e) = vfs::register_initfs_file(path, leaked.as_ptr(), leaked.len()) {
         serial_println!("[init] Failed to register /initfs/{}: {:?}", path, e);
     } else {
         serial_println!("[init] Registered /initfs/{} ({} bytes)", path, size);
     }
+}
+
+fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
+    let boot_test_pid = if initfs_base != 0 && initfs_size != 0 {
+        Some((initfs_base, initfs_size))
+    } else {
+        None
+    };
+    let initfs_modules = [
+        ("test_pid", boot_test_pid),
+        ("test_syscalls", crate::boot::limine::test_syscalls_module()),
+        ("test_mem", crate::boot::limine::test_mem_module()),
+        (
+            "test_mem_stressed",
+            crate::boot::limine::test_mem_stressed_module(),
+        ),
+        ("fs-ext4", crate::boot::limine::fs_ext4_module()),
+        (
+            "strate-fs-ramfs",
+            crate::boot::limine::strate_fs_ramfs_module(),
+        ),
+        ("init", crate::boot::limine::init_module()),
+        ("console-admin", crate::boot::limine::console_admin_module()),
+        ("strate-net", crate::boot::limine::strate_net_module()),
+        ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
+        ("bin/ping", crate::boot::limine::ping_module()),
+    ];
+    for (path, module) in initfs_modules {
+        register_initfs_module(path, module);
+    }
+}
+
+#[inline]
+fn boot_module_slice(base: u64, size: u64) -> &'static [u8] {
+    let base_virt = memory::phys_to_virt(base);
+    unsafe { core::slice::from_raw_parts(base_virt as *const u8, size as usize) }
 }
 
 /// Main kernel initialization - called by bootloader entry points
@@ -156,8 +315,61 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     let mmap_len =
         args.memory_map_size as usize / core::mem::size_of::<boot::entry::MemoryRegion>();
     let mmap = core::slice::from_raw_parts(mmap_ptr, mmap_len);
+    let mut mmap_work = [null_region(); MAX_BOOT_MMAP_REGIONS_WORK];
+    let mut mmap_work_len = core::cmp::min(mmap.len(), mmap_work.len());
+    for (dst, src) in mmap_work
+        .iter_mut()
+        .zip(mmap.iter())
+        .take(mmap_work_len)
+    {
+        *dst = *src;
+    }
 
-    memory::init_memory_manager(mmap);
+    let reserve_modules = [
+        ("test_pid", if args.initfs_base != 0 && args.initfs_size != 0 { Some((args.initfs_base, args.initfs_size)) } else { None }),
+        ("test_syscalls", crate::boot::limine::test_syscalls_module()),
+        ("test_mem", crate::boot::limine::test_mem_module()),
+        (
+            "test_mem_stressed",
+            crate::boot::limine::test_mem_stressed_module(),
+        ),
+        ("fs-ext4", crate::boot::limine::fs_ext4_module()),
+        (
+            "strate-fs-ramfs",
+            crate::boot::limine::strate_fs_ramfs_module(),
+        ),
+        ("init", crate::boot::limine::init_module()),
+        ("console-admin", crate::boot::limine::console_admin_module()),
+        ("strate-net", crate::boot::limine::strate_net_module()),
+        ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
+        ("bin/ping", crate::boot::limine::ping_module()),
+    ];
+
+    for (name, module) in reserve_modules {
+        let Some((base, size)) = module else {
+            continue;
+        };
+        if size == 0 {
+            continue;
+        }
+        let phys = virt_or_phys_to_phys(base, hhdm);
+        let reserve_start = align_down(phys, PAGE_SIZE);
+        let reserve_end = align_up(phys.saturating_add(size), PAGE_SIZE);
+        reserve_range_in_map(
+            &mut mmap_work,
+            &mut mmap_work_len,
+            reserve_start,
+            reserve_end,
+        );
+        serial_println!(
+            "[init] Reserved module pages: {} phys=0x{:x}..0x{:x}",
+            name,
+            reserve_start,
+            reserve_end
+        );
+    }
+
+    memory::init_memory_manager(&mmap_work[..mmap_work_len]);
     serial_println!("[init] Buddy allocator ready.");
 
     // =============================================
@@ -270,6 +482,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     vfs::init();
     serial_println!("[init] VFS initialized.");
     vga_println!("[OK] VFS initialized");
+    register_boot_initfs_modules(args.initfs_base, args.initfs_size);
 
     // =============================================
     // Phase 6: ACPI + APIC (with PIC fallback)
@@ -364,34 +577,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     #[cfg(feature = "selftest")]
     {
-        // Register initfs modules for selftest runtime tasks.
-        let boot_test_pid = if args.initfs_base != 0 && args.initfs_size != 0 {
-            Some((args.initfs_base, args.initfs_size))
-        } else {
-            None
-        };
-        let initfs_modules = [
-            ("test_pid", boot_test_pid),
-            ("test_syscalls", crate::boot::limine::test_syscalls_module()),
-            ("test_mem", crate::boot::limine::test_mem_module()),
-            (
-                "test_mem_stressed",
-                crate::boot::limine::test_mem_stressed_module(),
-            ),
-            ("fs-ext4", crate::boot::limine::fs_ext4_module()),
-            (
-                "strate-fs-ramfs",
-                crate::boot::limine::strate_fs_ramfs_module(),
-            ),
-            ("init", crate::boot::limine::init_module()),
-            ("console-admin", crate::boot::limine::console_admin_module()),
-            ("strate-net", crate::boot::limine::strate_net_module()),
-            ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
-            ("bin/ping", crate::boot::limine::ping_module()),
-        ];
-        for (path, module) in initfs_modules {
-            register_initfs_module(path, module);
-        }
         // =============================================
         // Phase 8a: runtime self-tests
         // =============================================
@@ -408,38 +593,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     #[cfg(not(feature = "selftest"))]
     {
         // =============================================
-        // Phase 8c: register modules in VFS
+        // Phase 8c: process components
         // =============================================
         let mut init_task_id: Option<crate::process::TaskId> = None;
-        let boot_test_pid = if args.initfs_base != 0 && args.initfs_size != 0 {
-            Some((args.initfs_base, args.initfs_size))
-        } else {
-            None
-        };
-
-        let initfs_modules = [
-            ("test_pid", boot_test_pid),
-            ("test_syscalls", crate::boot::limine::test_syscalls_module()),
-            ("test_mem", crate::boot::limine::test_mem_module()),
-            (
-                "test_mem_stressed",
-                crate::boot::limine::test_mem_stressed_module(),
-            ),
-            ("fs-ext4", crate::boot::limine::fs_ext4_module()),
-            (
-                "strate-fs-ramfs",
-                crate::boot::limine::strate_fs_ramfs_module(),
-            ),
-            ("init", crate::boot::limine::init_module()),
-            ("console-admin", crate::boot::limine::console_admin_module()),
-            ("strate-net", crate::boot::limine::strate_net_module()),
-            ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
-            ("bin/ping", crate::boot::limine::ping_module()),
-        ];
-
-        for (path, module) in initfs_modules {
-            register_initfs_module(path, module);
-        }
 
         serial_println!("[init] Components (process)...");
         vga_println!("[..] Initializing process components...");
@@ -586,7 +742,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let mut init_loaded = false;
 
         if let Some((base, size)) = crate::boot::limine::init_module() {
-            let elf_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            let elf_data = boot_module_slice(base, size);
             match process::elf::load_and_run_elf(elf_data, "init") {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
@@ -600,12 +756,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
 
         if !init_loaded && args.initfs_base != 0 && args.initfs_size != 0 {
-            let elf_data = unsafe {
-                core::slice::from_raw_parts(
-                    args.initfs_base as *const u8,
-                    args.initfs_size as usize,
-                )
-            };
+            let elf_data = boot_module_slice(args.initfs_base, args.initfs_size);
             match process::elf::load_and_run_elf(elf_data, "init") {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
@@ -619,7 +770,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             }
         }
         if let Some((base, size)) = crate::boot::limine::strate_fs_ramfs_module() {
-            let ram_data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            let ram_data = boot_module_slice(base, size);
             match process::elf::load_and_run_elf(ram_data, "strate-fs-ramfs") {
                 Ok(task_id) => {
                     let _ = crate::silo::register_boot_strate_task(task_id, "ramfs-default");
@@ -629,8 +780,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             }
         }
         if let Some((base, size)) = crate::boot::limine::fs_ext4_module() {
-            let ext4_data =
-                unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
+            let ext4_data = boot_module_slice(base, size);
             match process::elf::load_and_run_elf(ext4_data, "strate-fs-ext4") {
                 Ok(task_id) => {
                     let _ = crate::silo::register_boot_strate_task(task_id, "ext4-default");

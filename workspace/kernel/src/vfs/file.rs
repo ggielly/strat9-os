@@ -65,9 +65,10 @@ impl OpenFile {
 
         let mut offset = self.offset.lock();
         if self.open_flags.contains(OpenFlags::APPEND) {
-            // For append mode, always write at end
-            if let Some(size) = self.size {
-                *offset = size;
+            if let Ok(sz) = self.scheme.size(self.file_id) {
+                *offset = sz;
+            } else if let Some(sz) = self.size {
+                *offset = sz;
             }
         }
 
