@@ -163,31 +163,19 @@ fn wait_blocking(
     parent_id: TaskId,
     target: Option<TaskId>,
 ) -> Result<(TaskId, u64, i32), SyscallError> {
-    crate::serial_println!(
-        "[wait_blocking] start: parent={:?}, target={:?}",
-        parent_id,
-        target
-    );
     loop {
-        crate::serial_println!("[wait_blocking] trying wait...");
         match try_wait_child(parent_id, target) {
             WaitChildResult::Reaped { child, pid, status } => {
-                crate::serial_println!("[wait_blocking] reaped child pid={}", pid);
                 return Ok((child, pid as u64, status));
             }
             WaitChildResult::NoChildren => {
-                crate::serial_println!("[wait_blocking] no children");
                 return Err(SyscallError::NoChildren);
             }
             WaitChildResult::StillRunning => {
                 if has_pending_signals() {
-                    crate::serial_println!("[wait_blocking] interrupted");
                     return Err(SyscallError::Interrupted);
                 }
-
-                crate::serial_println!("[wait_blocking] blocking current task");
                 block_current_task();
-                crate::serial_println!("[wait_blocking] woken up");
             }
         }
     }

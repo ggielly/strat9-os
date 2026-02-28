@@ -38,12 +38,12 @@ pub mod scheme_router;
 use crate::{process::current_task_clone, sync::SpinLock, syscall::error::SyscallError};
 use alloc::{string::String, sync::Arc};
 
+pub use blkdev_scheme::BlkDevScheme;
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
 pub use mount::{list_mounts, mount, resolve, unmount, Namespace};
 pub use pipe::PipeScheme;
 pub use procfs::ProcScheme;
-pub use blkdev_scheme::BlkDevScheme;
 pub use ramfs_scheme::RamfsScheme;
 pub use scheme::{
     DirEntry, DynScheme, FileFlags, FileStat, IpcScheme, KernelScheme, OpenFlags, Scheme,
@@ -314,11 +314,11 @@ pub fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, Syscall
         return Err(SyscallError::InvalidArgument);
     }
 
-    let user = UserSliceRead::new(path_ptr, path_len as usize)?;
-    let bytes = user.read_to_vec();
-    let path = core::str::from_utf8(&bytes).map_err(|_| SyscallError::InvalidArgument)?;
+    let raw = read_user_path(path_ptr, path_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let path = resolve_path(&raw, &cwd);
 
-    // Convert flags to OpenFlags
     let mut open_flags = OpenFlags::empty();
     if flags & 0x1 != 0 {
         open_flags |= OpenFlags::READ;
@@ -339,7 +339,15 @@ pub fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, Syscall
         open_flags |= OpenFlags::DIRECTORY;
     }
 
-    let fd = open(path, open_flags)?;
+    let want_read =
+        open_flags.contains(OpenFlags::READ) || open_flags.contains(OpenFlags::DIRECTORY);
+    let want_write = open_flags.contains(OpenFlags::WRITE)
+        || open_flags.contains(OpenFlags::CREATE)
+        || open_flags.contains(OpenFlags::TRUNCATE)
+        || open_flags.contains(OpenFlags::APPEND);
+    crate::silo::enforce_path_for_current_task(&path, want_read, want_write, false)?;
+
+    let fd = open(&path, open_flags)?;
     Ok(fd as u64)
 }
 
@@ -465,11 +473,13 @@ pub fn sys_stat(path_ptr: u64, path_len: u64, stat_ptr: u64) -> Result<u64, Sysc
     if path_len == 0 || path_len as usize > MAX_PATH_LEN {
         return Err(SyscallError::InvalidArgument);
     }
-    let user = UserSliceRead::new(path_ptr, path_len as usize)?;
-    let bytes = user.read_to_vec();
-    let path = core::str::from_utf8(&bytes).map_err(|_| SyscallError::InvalidArgument)?;
+    let raw = read_user_path(path_ptr, path_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let path = resolve_path(&raw, &cwd);
+    crate::silo::enforce_path_for_current_task(&path, true, false, false)?;
 
-    let st = stat_path(path)?;
+    let st = stat_path(&path)?;
     let user_out = UserSliceWrite::new(stat_ptr, core::mem::size_of::<FileStat>())?;
     let out_bytes = unsafe {
         core::slice::from_raw_parts(
@@ -585,13 +595,12 @@ pub fn sys_chdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { &*task.process.cwd.get() };
     let abs = resolve_path(&raw, cwd);
+    crate::silo::enforce_path_for_current_task(&abs, true, false, false)?;
 
-    // Verify the directory exists by trying to open it.
     let (scheme, rel) = mount::resolve(&abs)?;
     let res = scheme.open(&rel, OpenFlags::READ | OpenFlags::DIRECTORY)?;
     let _ = scheme.close(res.file_id);
 
-    // Store the new cwd.
     unsafe { *task.process.cwd.get() = abs };
     Ok(0)
 }
@@ -639,7 +648,8 @@ pub fn sys_ioctl(_fd: u32, _request: u64, _arg: u64) -> Result<u64, SyscallError
 pub fn sys_umask(mask: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let old = task
-        .process.umask
+        .process
+        .umask
         .swap(mask as u32 & 0o777, core::sync::atomic::Ordering::Relaxed);
     Ok(old as u64)
 }
@@ -650,17 +660,18 @@ pub fn sys_unlink(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&raw, &cwd);
+    crate::silo::enforce_path_for_current_task(&abs, false, true, false)?;
     unlink(&abs)?;
     Ok(0)
 }
 
 /// SYS_RMDIR (446): Remove an empty directory.
 pub fn sys_rmdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
-    // Reuse unlink for now — filesystem backends distinguish DIR vs FILE.
     let raw = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&raw, &cwd);
+    crate::silo::enforce_path_for_current_task(&abs, false, true, false)?;
     unlink(&abs)?;
     Ok(0)
 }
@@ -669,9 +680,13 @@ pub fn sys_rmdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
 pub fn sys_mkdir(path_ptr: u64, path_len: u64, mode: u64) -> Result<u64, SyscallError> {
     let raw = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let umask = task.process.umask.load(core::sync::atomic::Ordering::Relaxed);
+    let umask = task
+        .process
+        .umask
+        .load(core::sync::atomic::Ordering::Relaxed);
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&raw, &cwd);
+    crate::silo::enforce_path_for_current_task(&abs, false, true, false)?;
     let effective_mode = (mode as u32) & !umask;
     mkdir(&abs, effective_mode)?;
     Ok(0)
@@ -686,9 +701,14 @@ pub fn sys_rename(
     new_ptr: u64,
     new_len: u64,
 ) -> Result<u64, SyscallError> {
-    // Read both paths (for validation / future use).
-    let _old = read_user_path(old_ptr, old_len)?;
-    let _new = read_user_path(new_ptr, new_len)?;
+    let old = read_user_path(old_ptr, old_len)?;
+    let new = read_user_path(new_ptr, new_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let old_abs = resolve_path(&old, &cwd);
+    let new_abs = resolve_path(&new, &cwd);
+    crate::silo::enforce_path_for_current_task(&old_abs, true, true, false)?;
+    crate::silo::enforce_path_for_current_task(&new_abs, false, true, false)?;
     Err(SyscallError::NotImplemented)
 }
 
@@ -699,6 +719,14 @@ pub fn sys_link(
     _new_ptr: u64,
     _new_len: u64,
 ) -> Result<u64, SyscallError> {
+    let old = read_user_path(_old_ptr, _old_len)?;
+    let new = read_user_path(_new_ptr, _new_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let old_abs = resolve_path(&old, &cwd);
+    let new_abs = resolve_path(&new, &cwd);
+    crate::silo::enforce_path_for_current_task(&old_abs, true, false, false)?;
+    crate::silo::enforce_path_for_current_task(&new_abs, false, true, false)?;
     Err(SyscallError::NotImplemented)
 }
 
@@ -709,6 +737,14 @@ pub fn sys_symlink(
     _linkpath_ptr: u64,
     _linkpath_len: u64,
 ) -> Result<u64, SyscallError> {
+    let target = read_user_path(_target_ptr, _target_len)?;
+    let linkpath = read_user_path(_linkpath_ptr, _linkpath_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let target_abs = resolve_path(&target, &cwd);
+    let link_abs = resolve_path(&linkpath, &cwd);
+    crate::silo::enforce_path_for_current_task(&target_abs, true, false, false)?;
+    crate::silo::enforce_path_for_current_task(&link_abs, false, true, false)?;
     Err(SyscallError::NotImplemented)
 }
 
@@ -719,13 +755,21 @@ pub fn sys_readlink(
     _buf_ptr: u64,
     _buf_len: u64,
 ) -> Result<u64, SyscallError> {
+    let path = read_user_path(_path_ptr, _path_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let abs = resolve_path(&path, &cwd);
+    crate::silo::enforce_path_for_current_task(&abs, true, false, false)?;
     Err(SyscallError::NotImplemented)
 }
 
 /// SYS_CHMOD (452): Change file mode bits.
 pub fn sys_chmod(path_ptr: u64, path_len: u64, _mode: u64) -> Result<u64, SyscallError> {
-    let _path = read_user_path(path_ptr, path_len)?;
-    // Not implemented in scheme abstraction yet.
+    let path = read_user_path(path_ptr, path_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let abs = resolve_path(&path, &cwd);
+    crate::silo::enforce_path_for_current_task(&abs, false, true, false)?;
     Err(SyscallError::NotImplemented)
 }
 
@@ -736,7 +780,11 @@ pub fn sys_fchmod(_fd: u32, _mode: u64) -> Result<u64, SyscallError> {
 
 /// SYS_TRUNCATE (454): Truncate file to given length.
 pub fn sys_truncate(path_ptr: u64, path_len: u64, _length: u64) -> Result<u64, SyscallError> {
-    let _path = read_user_path(path_ptr, path_len)?;
+    let path = read_user_path(path_ptr, path_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let abs = resolve_path(&path, &cwd);
+    crate::silo::enforce_path_for_current_task(&abs, false, true, false)?;
     Err(SyscallError::NotImplemented)
 }
 
@@ -778,9 +826,8 @@ pub fn init() {
     } else {
         // Populate the standard POSIX directory skeleton.
         for dir in &[
-            "bin", "sbin", "etc", "tmp", "usr", "lib", "lib64",
-            "home", "root", "run", "var", "mnt", "opt", "srv",
-            "dev", "proc", "sys",
+            "bin", "sbin", "etc", "tmp", "usr", "lib", "lib64", "home", "root", "run", "var",
+            "mnt", "opt", "srv", "dev", "proc", "sys",
         ] {
             rootfs.ensure_dir(dir);
         }

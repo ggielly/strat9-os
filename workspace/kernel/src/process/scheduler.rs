@@ -1770,12 +1770,15 @@ fn finalize_forced_death(sched: &mut Scheduler, task_id: TaskId, exit_code: i32)
 fn cleanup_task_resources(task: &Arc<Task>) {
     crate::silo::on_task_terminated(task.id);
 
-    // Revoke all capabilities for this task (allocation-free)
+    let is_last_process_ref = Arc::strong_count(&task.process) == 1;
+    if !is_last_process_ref {
+        return;
+    }
+
     unsafe {
         (&mut *task.process.capabilities.get()).revoke_all();
     }
 
-    // Best-effort cleanup of user address space if uniquely owned.
     let as_ref = unsafe { &*task.process.address_space.get() };
     if !as_ref.is_kernel() && Arc::strong_count(as_ref) == 1 {
         as_ref.unmap_all_user_regions();

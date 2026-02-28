@@ -1,7 +1,7 @@
 //! Silo manager (kernel-side, minimal mechanisms only)
 //!
 //! This module provides the core kernel structures and syscalls
-//! to create and manage silos. Policy lives in userspace (Silo Admin).
+//! to create and manage silos. Policy lives in userspace (silo admin).
 
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
@@ -140,7 +140,11 @@ pub fn sys_silo_pledge(mode_val: u64) -> Result<u64, SyscallError> {
     Err(SyscallError::BadHandle)
 }
 
-pub fn sys_silo_unveil(path_ptr: u64, path_len: u64, rights_bits: u64) -> Result<u64, SyscallError> {
+pub fn sys_silo_unveil(
+    path_ptr: u64,
+    path_len: u64,
+    rights_bits: u64,
+) -> Result<u64, SyscallError> {
     const MAX_UNVEIL_PATH: usize = 1024;
     const MAX_UNVEIL_RULES: usize = 128;
 
@@ -154,9 +158,10 @@ pub fn sys_silo_unveil(path_ptr: u64, path_len: u64, rights_bits: u64) -> Result
     let user = UserSliceRead::new(path_ptr, len)?;
     let raw = user.read_to_vec();
     let path = core::str::from_utf8(&raw).map_err(|_| SyscallError::InvalidArgument)?;
-    if path.is_empty() || !path.starts_with('/') {
+    if path.is_empty() || !path.starts_with('/') || path.as_bytes().iter().any(|b| *b == 0) {
         return Err(SyscallError::InvalidArgument);
     }
+    let path = normalize_unveil_path(path)?;
     let rights = UnveilRights::from_bits(rights_bits)?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -171,10 +176,7 @@ pub fn sys_silo_unveil(path_ptr: u64, path_len: u64, rights_bits: u64) -> Result
     if silo.unveil_rules.len() >= MAX_UNVEIL_RULES {
         return Err(SyscallError::QueueFull);
     }
-    silo.unveil_rules.push(UnveilRule {
-        path: String::from(path),
-        rights,
-    });
+    silo.unveil_rules.push(UnveilRule { path, rights });
     Ok(0)
 }
 
@@ -188,7 +190,8 @@ pub fn sys_silo_enter_sandbox() -> Result<u64, SyscallError> {
     }
     silo.sandboxed = true;
     silo.mode.registry = RegistryMode::empty();
-    silo.config.mode = ((silo.mode.control.bits() as u16) << 6) | ((silo.mode.hardware.bits() as u16) << 3);
+    silo.config.mode =
+        ((silo.mode.control.bits() as u16) << 6) | ((silo.mode.hardware.bits() as u16) << 3);
     Ok(0)
 }
 
@@ -206,6 +209,86 @@ pub fn enforce_silo_may_grant() -> Result<(), SyscallError> {
         return Err(SyscallError::PermissionDenied);
     }
     Ok(())
+}
+
+fn normalize_unveil_path(path: &str) -> Result<String, SyscallError> {
+    if !path.starts_with('/') {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut out = String::new();
+    let mut prev_slash = false;
+    for ch in path.chars() {
+        if ch == '/' {
+            if !prev_slash {
+                out.push('/');
+            }
+            prev_slash = true;
+            continue;
+        }
+        if ch == '\0' {
+            return Err(SyscallError::InvalidArgument);
+        }
+        prev_slash = false;
+        out.push(ch);
+    }
+    while out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    Ok(out)
+}
+
+fn path_rule_matches(rule: &str, path: &str) -> bool {
+    if rule == "/" {
+        return true;
+    }
+    if path == rule {
+        return true;
+    }
+    if !path.starts_with(rule) {
+        return false;
+    }
+    let bytes = path.as_bytes();
+    let idx = rule.len();
+    idx < bytes.len() && bytes[idx] == b'/'
+}
+
+pub fn enforce_path_for_current_task(
+    path: &str,
+    want_read: bool,
+    want_write: bool,
+    want_execute: bool,
+) -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    if is_admin_task(&task) {
+        return Ok(());
+    }
+    let path = normalize_unveil_path(path)?;
+    let mgr = SILO_MANAGER.lock();
+    let Some(silo_id) = mgr.silo_for_task(task.id) else {
+        return Ok(());
+    };
+    let silo = mgr.get(silo_id)?;
+    if silo.sandboxed {
+        return Err(SyscallError::PermissionDenied);
+    }
+    if silo.unveil_rules.is_empty() {
+        return Ok(());
+    }
+    for rule in &silo.unveil_rules {
+        if !path_rule_matches(&rule.path, &path) {
+            continue;
+        }
+        if (!want_read || rule.rights.read)
+            && (!want_write || rule.rights.write)
+            && (!want_execute || rule.rights.execute)
+        {
+            return Ok(());
+        }
+    }
+    Err(SyscallError::PermissionDenied)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1537,11 +1620,17 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
     let mut mgr = SILO_MANAGER.lock();
     let silo = mgr.get_mut(sid as u32)?;
 
-    // Validate potential mode change
-    kernel_check_spawn_invariants(&silo.id, &OctalMode::from_octal(config.mode))?;
+    let requested_mode = OctalMode::from_octal(config.mode);
+    kernel_check_spawn_invariants(&silo.id, &requested_mode)?;
+    if silo.sandboxed && !requested_mode.is_subset_of(&silo.mode) {
+        return Err(SyscallError::PermissionDenied);
+    }
+    if silo.sandboxed && !requested_mode.registry.is_empty() {
+        return Err(SyscallError::PermissionDenied);
+    }
 
     silo.config = config;
-    silo.mode = OctalMode::from_octal(config.mode);
+    silo.mode = requested_mode;
     silo.family = family;
     silo.flags = config.flags as u32;
     silo.granted_caps = granted_caps;
@@ -1778,35 +1867,31 @@ pub fn sys_silo_stop(handle: u64) -> Result<u64, SyscallError> {
     let silo_id = resolve_silo_handle(handle, required)?;
     let tasks = {
         let mut mgr = SILO_MANAGER.lock();
-        let mut tasks = Vec::new();
-        let mut emit = false;
-        {
+        let tasks = {
             let silo = mgr.get_mut(silo_id)?;
             match silo.state {
                 SiloState::Running | SiloState::Paused => {
                     silo.state = SiloState::Stopping;
-                    tasks = silo.tasks.clone();
+                    let tasks = silo.tasks.clone();
                     silo.tasks.clear();
-                    emit = true;
+                    tasks
                 }
                 _ => return Err(SyscallError::InvalidArgument),
             }
-        }
+        };
         for tid in &tasks {
             mgr.unmap_task(*tid);
         }
-        if emit {
-            if let Ok(silo) = mgr.get_mut(silo_id) {
-                silo.state = SiloState::Stopped;
-            }
-            mgr.push_event(SiloEvent {
-                silo_id: silo_id.into(),
-                kind: SiloEventKind::Stopped,
-                data0: 0,
-                data1: 0,
-                tick: crate::process::scheduler::ticks(),
-            });
+        if let Ok(silo) = mgr.get_mut(silo_id) {
+            silo.state = SiloState::Stopped;
         }
+        mgr.push_event(SiloEvent {
+            silo_id: silo_id.into(),
+            kind: SiloEventKind::Stopped,
+            data0: 0,
+            data1: 0,
+            tick: crate::process::scheduler::ticks(),
+        });
         tasks
     };
 
@@ -1828,13 +1913,13 @@ pub fn sys_silo_kill(handle: u64) -> Result<u64, SyscallError> {
     let silo_id = resolve_silo_handle(handle, required)?;
     let tasks = {
         let mut mgr = SILO_MANAGER.lock();
-        let mut tasks = Vec::new();
-        {
+        let tasks = {
             let silo = mgr.get_mut(silo_id)?;
             silo.state = SiloState::Stopped;
-            tasks = silo.tasks.clone();
+            let tasks = silo.tasks.clone();
             silo.tasks.clear();
-        }
+            tasks
+        };
         for tid in &tasks {
             mgr.unmap_task(*tid);
         }
