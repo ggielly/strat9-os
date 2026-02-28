@@ -386,16 +386,17 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
             silos.sort_by_key(|s| s.id);
 
             shell_println!(
-                "{:<6} {:<12} {:<10} {:<7} {:<18} {}",
-                "ID",
+                "{:<6} {:<12} {:<10} {:<7} {:<18} {:<6} {}",
+                "SID",
                 "Name",
                 "State",
                 "Tasks",
                 "Memory",
+                "Mode",
                 "Label"
             );
             shell_println!(
-                "────────────────────────────────────────────────────────────────────────────────"
+                "────────────────────────────────────────────────────────────────────────────────────────"
             );
             for s in silos {
                 let label = s.strate_label.unwrap_or_else(|| String::from("-"));
@@ -407,12 +408,13 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
                     alloc::format!("{} {} / {} {}", used_val, used_unit, max_val, max_unit)
                 };
                 shell_println!(
-                    "{:<6} {:<12} {:<10?} {:<7} {:<18} {}",
+                    "{:<6} {:<12} {:<10?} {:<7} {:<18} {:<6o} {}",
                     s.id,
                     s.name,
                     s.state,
                     s.task_count,
                     mem_cell,
+                    s.mode,
                     label
                 );
             }
@@ -473,11 +475,11 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
             let _ = vfs::close(fd);
 
             match silo::kernel_spawn_strate(&data, label, dev) {
-                Ok(silo_id) => {
+                Ok(sid) => {
                     shell_println!(
-                        "strate spawn: {} started (silo_id={}, label={}, dev={})",
+                        "strate spawn: {} started (sid={}, label={}, dev={})",
                         strate_type,
-                        silo_id,
+                        sid,
                         label.unwrap_or("default"),
                         dev.unwrap_or("auto")
                     );
@@ -502,8 +504,8 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
                 _ => unreachable!(),
             };
             match result {
-                Ok(silo_id) => {
-                    shell_println!("strate {}: ok (silo_id={})", args[0], silo_id);
+                Ok(sid) => {
+                    shell_println!("strate {}: ok (sid={})", args[0], sid);
                     Ok(())
                 }
                 Err(e) => {
@@ -520,10 +522,10 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
             let selector = args[1].as_str();
             let new_label = args[2].as_str();
             match silo::kernel_rename_silo_label(selector, new_label) {
-                Ok(silo_id) => {
+                Ok(sid) => {
                     shell_println!(
-                        "strate rename: ok (silo_id={}, new_label={})",
-                        silo_id,
+                        "strate rename: ok (sid={}, new_label={})",
+                        sid,
                         new_label
                     );
                     Ok(())
@@ -564,11 +566,14 @@ pub fn cmd_wasm_run(args: &[String]) -> Result<(), ShellError> {
     let _ = vfs::close(fd);
 
     // Spawn with a unique label to avoid conflicts
-    let silo_id = SiloId::new();
-    let label = alloc::format!("wasm-{}", silo_id.0);
-
-    silo::kernel_spawn_strate(&elf_data, Some(&label), None)
-        .map_err(|_| ShellError::ExecutionFailed)?;
+    let sid = match silo::kernel_spawn_strate(&elf_data, None, None) {
+        Ok(id) => id,
+        Err(e) => {
+            shell_println!("wasm-run: failed to spawn interpreter: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+    let label = alloc::format!("inst-{}", sid);
 
     // 2. Wait for the service to appear in /srv (poll)
     let service_path = alloc::format!("/srv/strate-wasm/{}", label);
@@ -593,7 +598,7 @@ pub fn cmd_wasm_run(args: &[String]) -> Result<(), ShellError> {
     let open_res = scheme
         .open(&rel, vfs::OpenFlags::READ)
         .map_err(|_| ShellError::ExecutionFailed)?;
-    let port_id = PortId::from_u64(open_res.file_id);
+    let port_id = crate::ipc::PortId::from_u64(open_res.file_id);
     let port = crate::ipc::port::get_port(port_id).ok_or(ShellError::ExecutionFailed)?;
 
     // OP_WASM_LOAD_PATH = 0x100

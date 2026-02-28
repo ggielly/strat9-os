@@ -831,32 +831,53 @@ pub fn kernel_spawn_strate(
     elf_data: &[u8],
     label: Option<&str>,
     dev_path: Option<&str>,
-) -> Result<u64, SyscallError> {
+) -> Result<u32, SyscallError> {
     let module_id = {
         let mut registry = MODULE_REGISTRY.lock();
         registry.register(elf_data.to_vec())?
     };
 
-    let silo_id =
-        {
-            let mut mgr = SILO_MANAGER.lock();
-            let id = mgr.create_silo(SILO_FLAG_ADMIN as u32)?;
-            let requested_label = label
-                .map(sanitize_label)
-                .unwrap_or_else(|| alloc::format!("inst-{}", id.0));
-            if mgr.silos.values().any(|s| {
-                s.id.0 != id.0 && s.strate_label.as_deref() == Some(requested_label.as_str())
-            }) {
-                let _ = mgr.silos.remove(&id.0);
-                return Err(SyscallError::AlreadyExists);
-            }
-            let silo = mgr.get_mut(id.0)?;
-            silo.module_id = Some(module_id);
-            silo.state = SiloState::Ready;
-            silo.config.flags = SILO_FLAG_ADMIN;
-            silo.strate_label = Some(requested_label);
-            id.0
+    let silo_id = {
+        let mut mgr = SILO_MANAGER.lock();
+        // For kernel_spawn_strate (manual command), we auto-assign SID > 1000.
+        // In a production system, this would follow the "42" rule from Init.
+        let mut sid = 1000u32;
+        while mgr.silos.contains_key(&sid) { sid += 1; }
+
+        let id = SiloId::new(sid);
+        let requested_label = label
+            .map(sanitize_label)
+            .unwrap_or_else(|| alloc::format!("inst-{}", id.sid));
+        
+        if mgr.silos.values().any(|s| s.strate_label.as_deref() == Some(requested_label.as_str())) {
+            return Err(SyscallError::AlreadyExists);
+        }
+
+        let silo = Silo {
+            id,
+            name: alloc::format!("silo-{}", id.sid),
+            strate_label: Some(requested_label),
+            state: SiloState::Ready,
+            config: SiloConfig {
+                sid: id.sid,
+                mode: 0o000, // Minimal mode for manual spawn
+                family: StrateFamily::USR as u8,
+                ..SiloConfig::default()
+            },
+            mode: OctalMode::from_octal(0),
+            family: StrateFamily::USR,
+            mem_usage_bytes: 0,
+            flags: 0,
+            module_id: Some(module_id),
+            tasks: Vec::new(),
+            granted_caps: Vec::new(),
+            granted_resources: Vec::new(),
+            event_seq: 0,
         };
+
+        mgr.silos.insert(id.sid, silo);
+        id.sid
+    };
 
     let module_data = {
         let registry = MODULE_REGISTRY.lock();
@@ -893,7 +914,7 @@ pub fn kernel_spawn_strate(
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
-        silo_id,
+        silo_id: silo_id as u64,
         kind: SiloEventKind::Started,
         data0: 0,
         data1: 0,
@@ -904,26 +925,26 @@ pub fn kernel_spawn_strate(
     Ok(silo_id)
 }
 
-fn resolve_selector_to_silo_id(selector: &str, mgr: &SiloManager) -> Result<u64, SyscallError> {
-    if let Ok(id) = selector.parse::<u64>() {
+fn resolve_selector_to_silo_id(selector: &str, mgr: &SiloManager) -> Result<u32, SyscallError> {
+    if let Ok(id) = selector.parse::<u32>() {
         if mgr.silos.contains_key(&id) {
             return Ok(id);
         }
         return Err(SyscallError::NotFound);
     }
-    let mut found: Option<u64> = None;
+    let mut found: Option<u32> = None;
     for s in mgr.silos.values() {
         if s.strate_label.as_deref() == Some(selector) {
             if found.is_some() {
                 return Err(SyscallError::InvalidArgument);
             }
-            found = Some(s.id.0);
+            found = Some(s.id.sid);
         }
     }
     found.ok_or(SyscallError::NotFound)
 }
 
-pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u64, SyscallError> {
+pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u32, SyscallError> {
     let (silo_id, tasks) = {
         let mut mgr = SILO_MANAGER.lock();
         let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
@@ -947,7 +968,7 @@ pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u64, Syscall
             mgr.unmap_task(*tid);
         }
         mgr.push_event(SiloEvent {
-            silo_id,
+            silo_id: silo_id as u64,
             kind: if force_kill {
                 SiloEventKind::Killed
             } else {
@@ -965,7 +986,7 @@ pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u64, Syscall
     Ok(silo_id)
 }
 
-pub fn kernel_destroy_silo(selector: &str) -> Result<u64, SyscallError> {
+pub fn kernel_destroy_silo(selector: &str) -> Result<u32, SyscallError> {
     let (silo_id, module_id) = {
         let mut mgr = SILO_MANAGER.lock();
         let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
@@ -991,7 +1012,7 @@ pub fn kernel_destroy_silo(selector: &str) -> Result<u64, SyscallError> {
     Ok(silo_id)
 }
 
-pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u64, SyscallError> {
+pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u32, SyscallError> {
     if !is_valid_label(new_label) {
         return Err(SyscallError::InvalidArgument);
     }
@@ -1000,7 +1021,7 @@ pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u64, 
     if mgr
         .silos
         .values()
-        .any(|s| s.id.0 != silo_id && s.strate_label.as_deref() == Some(new_label))
+        .any(|s| s.id.sid != silo_id && s.strate_label.as_deref() == Some(new_label))
     {
         return Err(SyscallError::AlreadyExists);
     }
@@ -1014,33 +1035,54 @@ pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u64, 
     }
 }
 
-pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u64, SyscallError> {
+pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, SyscallError> {
     let mut mgr = SILO_MANAGER.lock();
-    let id = mgr.create_silo(SILO_FLAG_ADMIN as u32)?;
+    // Default boot tasks get SID 1, 2, ...
+    let mut sid = 1u32;
+    while mgr.silos.contains_key(&sid) { sid += 1; }
+
+    let id = SiloId::new(sid);
     let sanitized = sanitize_label(label);
     if mgr
         .silos
         .values()
-        .any(|s| s.id.0 != id.0 && s.strate_label.as_deref() == Some(sanitized.as_str()))
+        .any(|s| s.strate_label.as_deref() == Some(sanitized.as_str()))
     {
-        let _ = mgr.silos.remove(&id.0);
         return Err(SyscallError::AlreadyExists);
     }
     {
-        let silo = mgr.get_mut(id.0)?;
-        silo.state = SiloState::Running;
-        silo.strate_label = Some(sanitized);
-        silo.tasks.push(task_id);
+        let silo = Silo {
+            id,
+            name: alloc::format!("silo-{}", id.sid),
+            strate_label: Some(sanitized),
+            state: SiloState::Running,
+            config: SiloConfig {
+                sid: id.sid,
+                mode: 0o777, // Boot tasks are fully privileged
+                family: StrateFamily::SYS as u8,
+                ..SiloConfig::default()
+            },
+            mode: OctalMode::from_octal(0o777),
+            family: StrateFamily::SYS,
+            mem_usage_bytes: 0,
+            flags: 0,
+            module_id: None,
+            tasks: alloc::vec![task_id],
+            granted_caps: Vec::new(),
+            granted_resources: Vec::new(),
+            event_seq: 0,
+        };
+        mgr.silos.insert(id.sid, silo);
     }
-    mgr.map_task(task_id, id.0);
+    mgr.map_task(task_id, id.sid);
     mgr.push_event(SiloEvent {
-        silo_id: id.0,
+        silo_id: id.sid as u64,
         kind: SiloEventKind::Started,
         data0: 0,
         data1: 0,
         tick: crate::process::scheduler::ticks(),
     });
-    Ok(id.0)
+    Ok(id.sid)
 }
 
 fn resolve_module_handle(handle: u64, required: CapPermissions) -> Result<u64, SyscallError> {
@@ -1257,20 +1299,18 @@ pub fn sys_module_query(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> 
 // Syscall handlers (kernel entry points)
 // ============================================================================
 
-pub fn sys_silo_create(flags: u64) -> Result<u64, SyscallError> {
+pub fn sys_silo_create(config_ptr: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
-    if flags > u32::MAX as u64 {
-        return Err(SyscallError::InvalidArgument);
-    }
+    let config = read_user_config(config_ptr)?;
+    config.validate()?;
 
     let mut mgr = SILO_MANAGER.lock();
-    let id = mgr.create_silo(flags as u32)?;
+    let id = mgr.create_silo(&config)?;
     drop(mgr);
 
-    // Create a per-silo capability for the caller.
     let cap = get_capability_manager().create_capability(
         ResourceType::Silo,
-        id.0 as usize,
+        id.sid as usize,
         CapPermissions::all(),
     );
 
@@ -1316,10 +1356,15 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
         }
     }
 
-    let silo_id = resolve_silo_handle(handle, CapPermissions::read_write())?;
+    let sid = resolve_silo_handle(handle, CapPermissions::read_write())?;
     let mut mgr = SILO_MANAGER.lock();
-    let silo = mgr.get_mut(silo_id)?;
+    let silo = mgr.get_mut(sid as u32)?;
+    
+    // Validate potential mode change
+    kernel_check_spawn_invariants(&silo.id, &OctalMode::from_octal(config.mode))?;
+
     silo.config = config;
+    silo.mode = OctalMode::from_octal(config.mode);
     silo.granted_caps = granted_caps;
     silo.granted_resources = granted_resources;
     Ok(0)

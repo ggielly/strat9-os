@@ -5,13 +5,25 @@
 
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
+/// Structured IPC security label.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromZeroes, FromBytes, AsBytes)]
+pub struct IpcLabel {
+    /// Trust tier: Critical(0), System(1), User(2).
+    pub tier: u8,
+    /// Strate family tag.
+    pub family: u8,
+    /// Sub-compartment within the family.
+    pub compartment: u16,
+}
+
 /// A 64-byte inline IPC message.
 ///
 /// Layout:
 /// ```text
 ///  0..  8  sender   (u64, filled by kernel)
 ///  8.. 12  msg_type (u32, opcode chosen by sender)
-/// 12.. 16  flags    (u32, reserved)
+/// 12.. 16  label    (u32, security tag filled by kernel)
 /// 16.. 64  payload  (48 bytes, opaque data)
 /// ```
 #[repr(C, align(64))]
@@ -19,7 +31,7 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 pub struct IpcMessage {
     pub sender: u64,
     pub msg_type: u32,
-    pub flags: u32,
+    pub label: u32, // Replaces flags with security label
     pub payload: [u8; 48],
 }
 
@@ -31,7 +43,7 @@ impl IpcMessage {
         IpcMessage {
             sender: 0,
             msg_type,
-            flags: 0,
+            label: 0,
             payload: [0u8; 48],
         }
     }
