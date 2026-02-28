@@ -363,6 +363,20 @@ args = [
     "-Z",
     "build-std-features=compiler-builtins-mem",
 ]
+
+[tasks.telnetd]
+description = "Build the telnet server utility (debug profile)"
+cwd = "workspace/components/netutils/telnetd"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 [tasks.strate-ext4-release]
 description = "Build the EXT4 userspace filesystem component (release profile)"
 cwd = "workspace/components/strate-fs-ext4"
@@ -489,6 +503,21 @@ args = [
 [tasks.ping-release]
 description = "Build the ping utility (release profile)"
 cwd = "workspace/components/netutils/ping"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.telnetd-release]
+description = "Build the telnet server utility (release profile)"
+cwd = "workspace/components/netutils/telnetd"
 command = "cargo"
 args = [
     "build",
@@ -643,6 +672,22 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.telnetd-dev-opt]
+description = "Build the telnet server utility (dev-opt profile)"
+cwd = "workspace/components/netutils/telnetd"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.limine-image]
 
 description = "Create bootable ISO/IMG with Limine + kernel"
@@ -656,6 +701,7 @@ dependencies = [
     "strate-net",
     "dhcp-client",
     "ping",
+    "telnetd",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_INCLUDE_TESTS = "0" }
 script_runner = "@shell"
@@ -678,6 +724,7 @@ dependencies = [
     "strate-net",
     "dhcp-client",
     "ping",
+    "telnetd",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os-test", STRAT9_INCLUDE_TESTS = "1" }
 script_runner = "@shell"
@@ -698,6 +745,7 @@ dependencies = [
     "strate-net-dev-opt",
     "dhcp-client-dev-opt",
     "ping-dev-opt",
+    "telnetd-dev-opt",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "dev-opt", STRAT9_INCLUDE_TESTS = "0" }
 script_runner = "@shell"
@@ -718,6 +766,7 @@ dependencies = [
     "strate-net-release",
     "dhcp-client-release",
     "ping-release",
+    "telnetd-release",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release", STRAT9_INCLUDE_TESTS = "0" }
 script_runner = "@shell"

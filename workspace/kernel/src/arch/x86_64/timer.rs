@@ -206,11 +206,12 @@ pub fn calibrate_apic_timer() -> u32 {
 
     // Step 3: Set APIC timer initial count to maximum
     // SAFETY: APIC is initialized
+    // NOTE: No log::info! between APIC write and PIT gate — the APIC timer
+    // starts counting immediately, so any delay here inflates the calibrated
+    // value and skews the resulting periodic frequency.
     unsafe {
         apic::write_reg(apic::REG_TIMER_INIT, 0xFFFF_FFFF);
     }
-    log::info!("APIC timer initial count set to MAX (0xFFFFFFFF)");
-    log::info!("Enabling PIT gate NOW — measurement starts...");
 
     // Step 4: Enable PIT channel 2 gate — starts PIT counting
     // APIC timer is already counting from step 3, so the measurement

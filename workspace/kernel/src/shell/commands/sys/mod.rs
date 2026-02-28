@@ -588,6 +588,415 @@ pub fn cmd_test_mem_stressed(_args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+fn cmd_strate_list(args: &[String]) -> Result<(), ShellError> {
+    let mut silos = silo::list_silos_snapshot();
+    if args.get(1).map(|s| s.as_str()) != Some("--all") {
+        silos.retain(|s| s.strate_label.is_some());
+    }
+    silos.sort_by_key(|s| s.id);
+
+    shell_println!(
+        "{:<6} {:<12} {:<10} {:<7} {:<18} {:<6} {}",
+        "SID",
+        "Name",
+        "State",
+        "Tasks",
+        "Memory",
+        "Mode",
+        "Label"
+    );
+    shell_println!("────────────────────────────────────────────────────────────────────────────────────────");
+    for s in silos {
+        let label = s.strate_label.unwrap_or_else(|| String::from("-"));
+        let (used_val, used_unit) = format_bytes(s.mem_usage_bytes as usize);
+        let mem_cell = if s.mem_max_bytes == 0 {
+            alloc::format!("{} {} / unlimited", used_val, used_unit)
+        } else {
+            let (max_val, max_unit) = format_bytes(s.mem_max_bytes as usize);
+            alloc::format!("{} {} / {} {}", used_val, used_unit, max_val, max_unit)
+        };
+        shell_println!(
+            "{:<6} {:<12} {:<10?} {:<7} {:<18} {:<6o} {}",
+            s.id,
+            s.name,
+            s.state,
+            s.task_count,
+            mem_cell,
+            s.mode,
+            label
+        );
+    }
+    Ok(())
+}
+
+fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 2 {
+        shell_println!("Usage: strate spawn <type> [--label <label>] [--dev <path>]");
+        return Err(ShellError::InvalidArguments);
+    }
+    let strate_type = args[1].as_str();
+    let module_path = match strate_type {
+        "strate-fs-ext4" => "/initfs/fs-ext4",
+        "ramfs" | "strate-fs-ramfs" => "/initfs/strate-fs-ramfs",
+        _ => {
+            shell_println!("strate spawn: unsupported type '{}'", strate_type);
+            return Err(ShellError::InvalidArguments);
+        }
+    };
+
+    let mut label: Option<&str> = None;
+    let mut dev: Option<&str> = None;
+    let mut i = 2usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--label" => {
+                if i + 1 >= args.len() {
+                    shell_println!("strate spawn: missing value for --label");
+                    return Err(ShellError::InvalidArguments);
+                }
+                label = Some(args[i + 1].as_str());
+                i += 2;
+            }
+            "--dev" => {
+                if i + 1 >= args.len() {
+                    shell_println!("strate spawn: missing value for --dev");
+                    return Err(ShellError::InvalidArguments);
+                }
+                dev = Some(args[i + 1].as_str());
+                i += 2;
+            }
+            other => {
+                shell_println!("strate spawn: unknown option '{}'", other);
+                return Err(ShellError::InvalidArguments);
+            }
+        }
+    }
+
+    let fd = vfs::open(module_path, vfs::OpenFlags::READ).map_err(|_| ShellError::ExecutionFailed)?;
+    let data = match vfs::read_all(fd) {
+        Ok(d) => d,
+        Err(_) => {
+            let _ = vfs::close(fd);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+    let _ = vfs::close(fd);
+
+    match silo::kernel_spawn_strate(&data, label, dev) {
+        Ok(sid) => {
+            shell_println!(
+                "strate spawn: {} started (sid={}, label={}, dev={})",
+                strate_type,
+                sid,
+                label.unwrap_or("default"),
+                dev.unwrap_or("auto")
+            );
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("strate spawn failed: {:?}", e);
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
+fn cmd_strate_config_show(args: &[String]) -> Result<(), ShellError> {
+    let existing = read_silo_toml_from_initfs()?;
+    let silos = parse_silo_toml(&existing);
+    if silos.is_empty() {
+        shell_println!("strate config show: /initfs/silo.toml empty or missing");
+        return Ok(());
+    }
+
+    if args.len() == 3 {
+        let name = args[2].as_str();
+        let Some(s) = silos.iter().find(|s| s.name == name) else {
+            shell_println!("strate config show: silo '{}' not found", name);
+            return Err(ShellError::ExecutionFailed);
+        };
+        shell_println!(
+            "silo '{}' sid={} family={} mode={} strates={}",
+            s.name,
+            s.sid,
+            s.family,
+            s.mode,
+            s.strates.len()
+        );
+        for st in &s.strates {
+            shell_println!(
+                "  - {}: binary={} type={} target={}",
+                st.name,
+                st.binary,
+                st.stype,
+                st.target
+            );
+        }
+        return Ok(());
+    }
+
+    for s in &silos {
+        shell_println!(
+            "silo '{}' sid={} family={} mode={} strates={}",
+            s.name,
+            s.sid,
+            s.family,
+            s.mode,
+            s.strates.len()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 5 {
+        shell_println!("Usage: strate config add <silo> <name> <binary> [--type <t>] [--target <x>] [--family <F>] [--mode <ooo>] [--sid <n>]");
+        return Err(ShellError::InvalidArguments);
+    }
+    let silo_name = args[2].as_str();
+    let strate_name = args[3].as_str();
+    let binary = args[4].as_str();
+    if silo_name.is_empty() || strate_name.is_empty() || binary.is_empty() {
+        shell_println!("strate config add: invalid empty argument");
+        return Err(ShellError::InvalidArguments);
+    }
+
+    let mut stype = String::from("elf");
+    let mut target = String::from("default");
+    let mut family: Option<String> = None;
+    let mut mode: Option<String> = None;
+    let mut sid: Option<u32> = None;
+    let mut i = 5usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--type" => {
+                if i + 1 >= args.len() {
+                    shell_println!("strate config add: missing value for --type");
+                    return Err(ShellError::InvalidArguments);
+                }
+                stype = args[i + 1].clone();
+                i += 2;
+            }
+            "--target" => {
+                if i + 1 >= args.len() {
+                    shell_println!("strate config add: missing value for --target");
+                    return Err(ShellError::InvalidArguments);
+                }
+                target = args[i + 1].clone();
+                i += 2;
+            }
+            "--family" => {
+                if i + 1 >= args.len() {
+                    shell_println!("strate config add: missing value for --family");
+                    return Err(ShellError::InvalidArguments);
+                }
+                family = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--mode" => {
+                if i + 1 >= args.len() {
+                    shell_println!("strate config add: missing value for --mode");
+                    return Err(ShellError::InvalidArguments);
+                }
+                mode = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--sid" => {
+                if i + 1 >= args.len() {
+                    shell_println!("strate config add: missing value for --sid");
+                    return Err(ShellError::InvalidArguments);
+                }
+                sid = args[i + 1].parse::<u32>().ok();
+                if sid.is_none() {
+                    shell_println!("strate config add: invalid --sid");
+                    return Err(ShellError::InvalidArguments);
+                }
+                i += 2;
+            }
+            other => {
+                shell_println!("strate config add: unknown option '{}'", other);
+                return Err(ShellError::InvalidArguments);
+            }
+        }
+    }
+
+    let existing = read_silo_toml_from_initfs()?;
+    let mut silos = parse_silo_toml(&existing);
+    let idx = match silos.iter().position(|s| s.name == silo_name) {
+        Some(p) => p,
+        None => {
+            silos.push(ManagedSiloDef {
+                name: String::from(silo_name),
+                sid: sid.unwrap_or(42),
+                family: family.clone().unwrap_or_else(|| String::from("USR")),
+                mode: mode.clone().unwrap_or_else(|| String::from("000")),
+                strates: Vec::new(),
+            });
+            silos.len() - 1
+        }
+    };
+
+    if let Some(f) = family {
+        silos[idx].family = f;
+    }
+    if let Some(m) = mode {
+        silos[idx].mode = m;
+    }
+    if let Some(s) = sid {
+        silos[idx].sid = s;
+    }
+
+    if let Some(st) = silos[idx].strates.iter_mut().find(|st| st.name == strate_name) {
+        st.binary = String::from(binary);
+        st.stype = stype;
+        st.target = target;
+    } else {
+        silos[idx].strates.push(ManagedStrateDef {
+            name: String::from(strate_name),
+            binary: String::from(binary),
+            stype,
+            target,
+        });
+    }
+
+    let rendered = render_silo_toml(&silos);
+    write_silo_toml_to_initfs(&rendered)?;
+    shell_println!(
+        "strate config add: wrote /initfs/silo.toml (silo='{}', strate='{}')",
+        silo_name,
+        strate_name
+    );
+    Ok(())
+}
+
+fn cmd_strate_config_remove(args: &[String]) -> Result<(), ShellError> {
+    if args.len() != 4 {
+        shell_println!("Usage: strate config remove <silo> <name>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let silo_name = args[2].as_str();
+    let strate_name = args[3].as_str();
+    let existing = read_silo_toml_from_initfs()?;
+    let mut silos = parse_silo_toml(&existing);
+
+    let Some(silo_idx) = silos.iter().position(|s| s.name == silo_name) else {
+        shell_println!("strate config remove: silo '{}' not found", silo_name);
+        return Err(ShellError::ExecutionFailed);
+    };
+    let Some(strate_idx) = silos[silo_idx]
+        .strates
+        .iter()
+        .position(|st| st.name == strate_name) else {
+        shell_println!(
+            "strate config remove: strate '{}' not found in silo '{}'",
+            strate_name,
+            silo_name
+        );
+        return Err(ShellError::ExecutionFailed);
+    };
+
+    silos[silo_idx].strates.remove(strate_idx);
+    if silos[silo_idx].strates.is_empty() {
+        silos.remove(silo_idx);
+    }
+
+    let rendered = render_silo_toml(&silos);
+    write_silo_toml_to_initfs(&rendered)?;
+    shell_println!(
+        "strate config remove: updated /initfs/silo.toml (silo='{}', strate='{}')",
+        silo_name,
+        strate_name
+    );
+    Ok(())
+}
+
+fn cmd_strate_config(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 2 {
+        shell_println!("Usage: strate config <show|add|remove> ...");
+        return Err(ShellError::InvalidArguments);
+    }
+    match args[1].as_str() {
+        "show" => cmd_strate_config_show(args),
+        "add" => cmd_strate_config_add(args),
+        "remove" => cmd_strate_config_remove(args),
+        _ => {
+            shell_println!("Usage: strate config <show|add|remove> ...");
+            Err(ShellError::InvalidArguments)
+        }
+    }
+}
+
+fn cmd_strate_start(args: &[String]) -> Result<(), ShellError> {
+    if args.len() != 2 {
+        shell_println!("Usage: strate start <id|label>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let selector = args[1].as_str();
+    match silo::kernel_start_silo(selector) {
+        Ok(sid) => {
+            shell_println!("strate start: ok (sid={})", sid);
+            print_strate_state_for_sid(sid);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("strate start failed: {:?}", e);
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
+fn cmd_strate_lifecycle(args: &[String]) -> Result<(), ShellError> {
+    if args.len() != 2 {
+        shell_println!("Usage: strate start|stop|kill|destroy <id|label>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let selector = args[1].as_str();
+    let action = args[0].as_str();
+    let result = match action {
+        "stop" => silo::kernel_stop_silo(selector, false),
+        "kill" => silo::kernel_stop_silo(selector, true),
+        "destroy" => silo::kernel_destroy_silo(selector),
+        _ => unreachable!(),
+    };
+    match result {
+        Ok(sid) => {
+            shell_println!("strate {}: ok (sid={})", action, sid);
+            if action == "stop" {
+                print_strate_state_for_sid(sid);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("strate {} failed: {:?}", action, e);
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
+fn cmd_strate_rename(args: &[String]) -> Result<(), ShellError> {
+    if args.len() != 3 {
+        shell_println!("Usage: strate rename <id|label> <new_label>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let selector = args[1].as_str();
+    let new_label = args[2].as_str();
+    match silo::kernel_rename_silo_label(selector, new_label) {
+        Ok(sid) => {
+            shell_println!("strate rename: ok (sid={}, new_label={})", sid, new_label);
+            Ok(())
+        }
+        Err(e) => {
+            if matches!(e, crate::syscall::error::SyscallError::InvalidArgument) {
+                shell_println!(
+                    "strate rename failed: strate is running or not in a renamable state (stop it first)"
+                );
+            } else {
+                shell_println!("strate rename failed: {:?}", e);
+            }
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
 /// strate command suite
 pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
@@ -596,408 +1005,12 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
     }
 
     match args[0].as_str() {
-        "list" => {
-            let mut silos = silo::list_silos_snapshot();
-            if args.get(1).map(|s| s.as_str()) != Some("--all") {
-                silos.retain(|s| s.strate_label.is_some());
-            }
-            silos.sort_by_key(|s| s.id);
-
-            shell_println!(
-                "{:<6} {:<12} {:<10} {:<7} {:<18} {:<6} {}",
-                "SID",
-                "Name",
-                "State",
-                "Tasks",
-                "Memory",
-                "Mode",
-                "Label"
-            );
-            shell_println!(
-                "────────────────────────────────────────────────────────────────────────────────────────"
-            );
-            for s in silos {
-                let label = s.strate_label.unwrap_or_else(|| String::from("-"));
-                let (used_val, used_unit) = format_bytes(s.mem_usage_bytes as usize);
-                let mem_cell = if s.mem_max_bytes == 0 {
-                    alloc::format!("{} {} / unlimited", used_val, used_unit)
-                } else {
-                    let (max_val, max_unit) = format_bytes(s.mem_max_bytes as usize);
-                    alloc::format!("{} {} / {} {}", used_val, used_unit, max_val, max_unit)
-                };
-                shell_println!(
-                    "{:<6} {:<12} {:<10?} {:<7} {:<18} {:<6o} {}",
-                    s.id,
-                    s.name,
-                    s.state,
-                    s.task_count,
-                    mem_cell,
-                    s.mode,
-                    label
-                );
-            }
-            Ok(())
-        }
-        "spawn" => {
-            if args.len() < 2 {
-                shell_println!("Usage: strate spawn <type> [--label <label>] [--dev <path>]");
-                return Err(ShellError::InvalidArguments);
-            }
-            let strate_type = args[1].as_str();
-            let module_path = match strate_type {
-                "strate-fs-ext4" => "/initfs/fs-ext4",
-                "ramfs" | "strate-fs-ramfs" => "/initfs/strate-fs-ramfs",
-                _ => {
-                    shell_println!("strate spawn: unsupported type '{}'", strate_type);
-                    return Err(ShellError::InvalidArguments);
-                }
-            };
-
-            let mut label: Option<&str> = None;
-            let mut dev: Option<&str> = None;
-            let mut i = 2usize;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--label" => {
-                        if i + 1 >= args.len() {
-                            shell_println!("strate spawn: missing value for --label");
-                            return Err(ShellError::InvalidArguments);
-                        }
-                        label = Some(args[i + 1].as_str());
-                        i += 2;
-                    }
-                    "--dev" => {
-                        if i + 1 >= args.len() {
-                            shell_println!("strate spawn: missing value for --dev");
-                            return Err(ShellError::InvalidArguments);
-                        }
-                        dev = Some(args[i + 1].as_str());
-                        i += 2;
-                    }
-                    other => {
-                        shell_println!("strate spawn: unknown option '{}'", other);
-                        return Err(ShellError::InvalidArguments);
-                    }
-                }
-            }
-
-            let fd = vfs::open(module_path, vfs::OpenFlags::READ)
-                .map_err(|_| ShellError::ExecutionFailed)?;
-            let data = match vfs::read_all(fd) {
-                Ok(d) => d,
-                Err(_) => {
-                    let _ = vfs::close(fd);
-                    return Err(ShellError::ExecutionFailed);
-                }
-            };
-            let _ = vfs::close(fd);
-
-            match silo::kernel_spawn_strate(&data, label, dev) {
-                Ok(sid) => {
-                    shell_println!(
-                        "strate spawn: {} started (sid={}, label={}, dev={})",
-                        strate_type,
-                        sid,
-                        label.unwrap_or("default"),
-                        dev.unwrap_or("auto")
-                    );
-                    Ok(())
-                }
-                Err(e) => {
-                    shell_println!("strate spawn failed: {:?}", e);
-                    Err(ShellError::ExecutionFailed)
-                }
-            }
-        }
-        "config" => {
-            if args.len() < 2 {
-                shell_println!("Usage: strate config <show|add|remove> ...");
-                return Err(ShellError::InvalidArguments);
-            }
-            match args[1].as_str() {
-                "show" => {
-                    let existing = read_silo_toml_from_initfs()?;
-                    let silos = parse_silo_toml(&existing);
-                    if silos.is_empty() {
-                        shell_println!("strate config show: /initfs/silo.toml empty or missing");
-                        return Ok(());
-                    }
-                    if args.len() == 3 {
-                        let name = args[2].as_str();
-                        let Some(s) = silos.iter().find(|s| s.name == name) else {
-                            shell_println!("strate config show: silo '{}' not found", name);
-                            return Err(ShellError::ExecutionFailed);
-                        };
-                        shell_println!(
-                            "silo '{}' sid={} family={} mode={} strates={}",
-                            s.name,
-                            s.sid,
-                            s.family,
-                            s.mode,
-                            s.strates.len()
-                        );
-                        for st in &s.strates {
-                            shell_println!(
-                                "  - {}: binary={} type={} target={}",
-                                st.name,
-                                st.binary,
-                                st.stype,
-                                st.target
-                            );
-                        }
-                        return Ok(());
-                    }
-                    for s in &silos {
-                        shell_println!(
-                            "silo '{}' sid={} family={} mode={} strates={}",
-                            s.name,
-                            s.sid,
-                            s.family,
-                            s.mode,
-                            s.strates.len()
-                        );
-                    }
-                    Ok(())
-                }
-                "add" => {
-                    if args.len() < 5 {
-                        shell_println!("Usage: strate config add <silo> <name> <binary> [--type <t>] [--target <x>] [--family <F>] [--mode <ooo>] [--sid <n>]");
-                        return Err(ShellError::InvalidArguments);
-                    }
-                    let silo_name = args[2].as_str();
-                    let strate_name = args[3].as_str();
-                    let binary = args[4].as_str();
-                    if silo_name.is_empty() || strate_name.is_empty() || binary.is_empty() {
-                        shell_println!("strate config add: invalid empty argument");
-                        return Err(ShellError::InvalidArguments);
-                    }
-
-                    let mut stype = String::from("elf");
-                    let mut target = String::from("default");
-                    let mut family: Option<String> = None;
-                    let mut mode: Option<String> = None;
-                    let mut sid: Option<u32> = None;
-                    let mut i = 5usize;
-                    while i < args.len() {
-                        match args[i].as_str() {
-                            "--type" => {
-                                if i + 1 >= args.len() {
-                                    shell_println!("strate config add: missing value for --type");
-                                    return Err(ShellError::InvalidArguments);
-                                }
-                                stype = args[i + 1].clone();
-                                i += 2;
-                            }
-                            "--target" => {
-                                if i + 1 >= args.len() {
-                                    shell_println!("strate config add: missing value for --target");
-                                    return Err(ShellError::InvalidArguments);
-                                }
-                                target = args[i + 1].clone();
-                                i += 2;
-                            }
-                            "--family" => {
-                                if i + 1 >= args.len() {
-                                    shell_println!("strate config add: missing value for --family");
-                                    return Err(ShellError::InvalidArguments);
-                                }
-                                family = Some(args[i + 1].clone());
-                                i += 2;
-                            }
-                            "--mode" => {
-                                if i + 1 >= args.len() {
-                                    shell_println!("strate config add: missing value for --mode");
-                                    return Err(ShellError::InvalidArguments);
-                                }
-                                mode = Some(args[i + 1].clone());
-                                i += 2;
-                            }
-                            "--sid" => {
-                                if i + 1 >= args.len() {
-                                    shell_println!("strate config add: missing value for --sid");
-                                    return Err(ShellError::InvalidArguments);
-                                }
-                                sid = args[i + 1].parse::<u32>().ok();
-                                if sid.is_none() {
-                                    shell_println!("strate config add: invalid --sid");
-                                    return Err(ShellError::InvalidArguments);
-                                }
-                                i += 2;
-                            }
-                            other => {
-                                shell_println!("strate config add: unknown option '{}'", other);
-                                return Err(ShellError::InvalidArguments);
-                            }
-                        }
-                    }
-
-                    let existing = read_silo_toml_from_initfs()?;
-                    let mut silos = parse_silo_toml(&existing);
-                    let idx = match silos.iter().position(|s| s.name == silo_name) {
-                        Some(p) => p,
-                        None => {
-                            silos.push(ManagedSiloDef {
-                                name: String::from(silo_name),
-                                sid: sid.unwrap_or(42),
-                                family: family.clone().unwrap_or_else(|| String::from("USR")),
-                                mode: mode.clone().unwrap_or_else(|| String::from("000")),
-                                strates: Vec::new(),
-                            });
-                            silos.len() - 1
-                        }
-                    };
-
-                    if let Some(f) = family {
-                        silos[idx].family = f;
-                    }
-                    if let Some(m) = mode {
-                        silos[idx].mode = m;
-                    }
-                    if let Some(s) = sid {
-                        silos[idx].sid = s;
-                    }
-
-                    if let Some(st) = silos[idx].strates.iter_mut().find(|st| st.name == strate_name)
-                    {
-                        st.binary = String::from(binary);
-                        st.stype = stype;
-                        st.target = target;
-                    } else {
-                        silos[idx].strates.push(ManagedStrateDef {
-                            name: String::from(strate_name),
-                            binary: String::from(binary),
-                            stype,
-                            target,
-                        });
-                    }
-
-                    let rendered = render_silo_toml(&silos);
-                    write_silo_toml_to_initfs(&rendered)?;
-                    shell_println!(
-                        "strate config add: wrote /initfs/silo.toml (silo='{}', strate='{}')",
-                        silo_name,
-                        strate_name
-                    );
-                    Ok(())
-                }
-                "remove" => {
-                    if args.len() != 4 {
-                        shell_println!("Usage: strate config remove <silo> <name>");
-                        return Err(ShellError::InvalidArguments);
-                    }
-                    let silo_name = args[2].as_str();
-                    let strate_name = args[3].as_str();
-                    let existing = read_silo_toml_from_initfs()?;
-                    let mut silos = parse_silo_toml(&existing);
-
-                    let Some(silo_idx) = silos.iter().position(|s| s.name == silo_name) else {
-                        shell_println!("strate config remove: silo '{}' not found", silo_name);
-                        return Err(ShellError::ExecutionFailed);
-                    };
-                    let Some(strate_idx) = silos[silo_idx]
-                        .strates
-                        .iter()
-                        .position(|st| st.name == strate_name) else {
-                        shell_println!(
-                            "strate config remove: strate '{}' not found in silo '{}'",
-                            strate_name,
-                            silo_name
-                        );
-                        return Err(ShellError::ExecutionFailed);
-                    };
-
-                    silos[silo_idx].strates.remove(strate_idx);
-                    if silos[silo_idx].strates.is_empty() {
-                        silos.remove(silo_idx);
-                    }
-
-                    let rendered = render_silo_toml(&silos);
-                    write_silo_toml_to_initfs(&rendered)?;
-                    shell_println!(
-                        "strate config remove: updated /initfs/silo.toml (silo='{}', strate='{}')",
-                        silo_name,
-                        strate_name
-                    );
-                    Ok(())
-                }
-                _ => {
-                    shell_println!("Usage: strate config <show|add|remove> ...");
-                    Err(ShellError::InvalidArguments)
-                }
-            }
-        }
-        "start" => {
-            if args.len() != 2 {
-                shell_println!("Usage: strate start <id|label>");
-                return Err(ShellError::InvalidArguments);
-            }
-            let selector = args[1].as_str();
-            match silo::kernel_start_silo(selector) {
-                Ok(sid) => {
-                    shell_println!("strate start: ok (sid={})", sid);
-                    print_strate_state_for_sid(sid);
-                    Ok(())
-                }
-                Err(e) => {
-                    shell_println!("strate start failed: {:?}", e);
-                    Err(ShellError::ExecutionFailed)
-                }
-            }
-        }
-        "stop" | "kill" | "destroy" => {
-            if args.len() != 2 {
-                shell_println!("Usage: strate start|stop|kill|destroy <id|label>");
-                return Err(ShellError::InvalidArguments);
-            }
-            let selector = args[1].as_str();
-            let result = match args[0].as_str() {
-                "stop" => silo::kernel_stop_silo(selector, false),
-                "kill" => silo::kernel_stop_silo(selector, true),
-                "destroy" => silo::kernel_destroy_silo(selector),
-                _ => unreachable!(),
-            };
-            match result {
-                Ok(sid) => {
-                    shell_println!("strate {}: ok (sid={})", args[0], sid);
-                    if args[0].as_str() == "stop" {
-                        print_strate_state_for_sid(sid);
-                    }
-                    Ok(())
-                }
-                Err(e) => {
-                    shell_println!("strate {} failed: {:?}", args[0], e);
-                    Err(ShellError::ExecutionFailed)
-                }
-            }
-        }
-        "rename" => {
-            if args.len() != 3 {
-                shell_println!("Usage: strate rename <id|label> <new_label>");
-                return Err(ShellError::InvalidArguments);
-            }
-            let selector = args[1].as_str();
-            let new_label = args[2].as_str();
-            match silo::kernel_rename_silo_label(selector, new_label) {
-                Ok(sid) => {
-                    shell_println!(
-                        "strate rename: ok (sid={}, new_label={})",
-                        sid,
-                        new_label
-                    );
-                    Ok(())
-                }
-                Err(e) => {
-                    if matches!(e, crate::syscall::error::SyscallError::InvalidArgument) {
-                        shell_println!(
-                            "strate rename failed: strate is running or not in a renamable state (stop it first)"
-                        );
-                    } else {
-                        shell_println!("strate rename failed: {:?}", e);
-                    }
-                    Err(ShellError::ExecutionFailed)
-                }
-            }
-        }
+        "list" => cmd_strate_list(args),
+        "spawn" => cmd_strate_spawn(args),
+        "config" => cmd_strate_config(args),
+        "start" => cmd_strate_start(args),
+        "stop" | "kill" | "destroy" => cmd_strate_lifecycle(args),
+        "rename" => cmd_strate_rename(args),
         _ => {
             print_strate_usage();
             Err(ShellError::InvalidArguments)

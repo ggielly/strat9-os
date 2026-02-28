@@ -22,6 +22,7 @@ members = [
     "workspace/components/strate-console-admin",
     "workspace/components/netutils/dhcp-client",
     "workspace/components/netutils/ping",
+    "workspace/components/netutils/telnetd",
 ]
 exclude = [
     "workspace/components/relibc",        # External dependency, built separately

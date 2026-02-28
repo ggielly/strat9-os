@@ -24,6 +24,7 @@ CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
 DHCP_CLIENT_ELF="target/x86_64-unknown-none/${PROFILE}/dhcp-client"
 PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
+TELNETD_ELF="target/x86_64-unknown-none/${PROFILE}/telnetd"
 
 echo ""
 echo "=== Creating Limine bootable image ==="
@@ -113,6 +114,12 @@ if [ -f "$PING_ELF" ]; then
     echo "    ping         : $ping_size bytes"
 else
     echo "    ping         : (missing)"
+fi
+if [ -f "$TELNETD_ELF" ]; then
+    telnetd_size=$(stat -c%s "$TELNETD_ELF")
+    echo "    telnetd      : $telnetd_size bytes"
+else
+    echo "    telnetd      : (missing)"
 fi
 echo ""
 
@@ -217,6 +224,13 @@ if [ -f "$PING_ELF" ]; then
     echo "  [OK] Copied ping: /initfs/bin/ping"
 else
     echo "  [WARN] ping binary not found at $PING_ELF"
+fi
+
+if [ -f "$TELNETD_ELF" ]; then
+    cp "$TELNETD_ELF" "$ISO_ROOT/initfs/bin/telnetd"
+    echo "  [OK] Copied telnetd: /initfs/bin/telnetd"
+else
+    echo "  [WARN] telnetd binary not found at $TELNETD_ELF"
 fi
 
 # Create ISO using xorriso

@@ -1853,7 +1853,7 @@ pub fn timer_tick() {
             }
         }
     } else {
-        0
+        return;
     };
 
     if cpu_idx < crate::arch::x86_64::percpu::MAX_CPUS {

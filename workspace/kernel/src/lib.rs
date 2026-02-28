@@ -249,6 +249,7 @@ fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
         ("strate-net", crate::boot::limine::strate_net_module()),
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
+        ("bin/telnetd", crate::boot::limine::telnetd_module()),
     ];
     for (path, module) in initfs_modules {
         register_initfs_module(path, module);
@@ -269,6 +270,7 @@ fn log_boot_module_magics(stage: &str) {
         ("strate-net", crate::boot::limine::strate_net_module()),
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
+        ("bin/telnetd", crate::boot::limine::telnetd_module()),
     ];
     for (name, module) in modules {
         let Some((base, size)) = module else {
@@ -401,6 +403,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         ("strate-net", crate::boot::limine::strate_net_module()),
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
+        ("bin/telnetd", crate::boot::limine::telnetd_module()),
     ];
 
     for (name, module) in reserve_modules {

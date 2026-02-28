@@ -507,6 +507,16 @@ sid = 42
 name = "dhcp-client"
 binary = "/initfs/bin/dhcp-client"
 type = "elf"
+
+[[silos]]
+name = "telnet"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "telnetd"
+binary = "/initfs/bin/telnetd"
+type = "elf"
 "#;
 
 #[unsafe(no_mangle)]

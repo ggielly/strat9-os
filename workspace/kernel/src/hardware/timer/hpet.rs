@@ -107,6 +107,7 @@ pub fn init() -> Result<(), &'static str> {
         *HPET_INFO.lock() = Some(info);
 
         let mut config = hpet_read(mmio_base, HPET_GENERAL_CONFIG);
+        config &= !0x02;
         config |= HPET_CONFIG_ENABLE;
         hpet_write(mmio_base, HPET_GENERAL_CONFIG, config);
 

@@ -73,6 +73,8 @@ static DHCP_CLIENT_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/bin/dhcp-client");
 /// Internal module: request Limine to load /initfs/bin/ping (ICMP utility)
 static PING_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/ping");
+/// Internal module: request Limine to load /initfs/bin/telnetd (Telnet server utility)
+static TELNETD_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/telnetd");
 
 /// Request modules (files loaded alongside the kernel)
 #[used]
@@ -89,6 +91,7 @@ static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
     &STRATE_NET_MODULE,
     &DHCP_CLIENT_MODULE,
     &PING_MODULE,
+    &TELNETD_MODULE,
 ]);
 
 /// Optional fs-ext4 module info (set during Limine entry).
@@ -111,6 +114,8 @@ static mut STRATE_NET_ELF_MODULE: Option<(u64, u64)> = None;
 static mut DHCP_CLIENT_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional ping module info (set during Limine entry).
 static mut PING_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional telnetd module info (set during Limine entry).
+static mut TELNETD_ELF_MODULE: Option<(u64, u64)> = None;
 
 const MAX_BOOT_MEMORY_REGIONS: usize = 256;
 static mut BOOT_MEMORY_MAP: [super::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
@@ -181,6 +186,12 @@ pub fn ping_module() -> Option<(u64, u64)> {
     unsafe { PING_ELF_MODULE }
 }
 
+/// Return the telnetd module (addr, size) if present.
+pub fn telnetd_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { TELNETD_ELF_MODULE }
+}
+
 fn path_matches(module_path: &[u8], expected_path: &[u8]) -> bool {
     let expected_no_leading = expected_path.strip_prefix(b"/").unwrap_or(expected_path);
     module_path == expected_path
@@ -211,6 +222,7 @@ struct ResolvedModules {
     strate_net: Option<(u64, u64)>,
     dhcp_client: Option<(u64, u64)>,
     ping: Option<(u64, u64)>,
+    telnetd: Option<(u64, u64)>,
 }
 
 fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> ResolvedModules {
@@ -243,6 +255,8 @@ fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> Re
             resolved.dhcp_client = Some(info);
         } else if path_matches(path, b"/initfs/bin/ping") {
             resolved.ping = Some(info);
+        } else if path_matches(path, b"/initfs/bin/telnetd") {
+            resolved.telnetd = Some(info);
         }
     }
     resolved
@@ -530,6 +544,16 @@ pub unsafe extern "C" fn kmain() -> ! {
                 );
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/bin/ping not found in modules");
+            }
+            if let Some((base, size)) = resolved.telnetd {
+                unsafe { TELNETD_ELF_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/bin/telnetd found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/bin/telnetd not found in modules");
             }
 
             if init_base == 0 {

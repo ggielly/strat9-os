@@ -961,6 +961,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "telnetd"
+version = "0.1.0"
+dependencies = [
+ "alloc-freelist",
+ "strat9-syscall",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

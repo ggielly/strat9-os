@@ -71,7 +71,7 @@ impl core::fmt::Write for BufWriter<'_> {
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{self, Device, DeviceCapabilities, Medium},
-    socket::{dhcpv4, dns, icmp},
+    socket::{dhcpv4, dns, icmp, tcp},
     time::Instant,
     wire::{DnsQueryType, EthernetAddress, IpAddress, IpCidr, Ipv4Address},
 };
@@ -400,6 +400,12 @@ struct PendingPing {
     send_ts_ns: u64,
 }
 
+#[derive(Clone, Copy)]
+struct TcpListenerState {
+    socket: SocketHandle,
+    port: u16,
+}
+
 struct NetworkStrate {
     device: Strat9NetDevice,
     interface: Interface,
@@ -410,6 +416,7 @@ struct NetworkStrate {
     ip_config: Option<IpConfig>,
     /// VFS handles: file_id → virtual path ("/net/*")
     open_handles: BTreeMap<u64, String>,
+    tcp_listeners: BTreeMap<u64, TcpListenerState>,
     next_fid: u64,
     /// Last ping that was sent, waiting for reply
     pending_ping: Option<PendingPing>,
@@ -451,6 +458,7 @@ impl NetworkStrate {
             icmp_handle,
             ip_config: None,
             open_handles: BTreeMap::new(),
+            tcp_listeners: BTreeMap::new(),
             next_fid: 1,
             pending_ping: None,
             ping_reply: None,
@@ -696,7 +704,7 @@ impl NetworkStrate {
                 reply_open(msg.sender, fid, u64::MAX, 1)
             }
             "ip" | "address" | "prefix" | "netmask" | "broadcast" | "gateway" | "route"
-            | "dns" | "resolve" => {
+            | "dns" | "resolve" | "tcp" => {
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
@@ -714,13 +722,81 @@ impl NetworkStrate {
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
+            p if p.starts_with("tcp/listen/") => {
+                let port_str = &p[11..];
+                let Some(port) = port_str.parse::<u16>().ok() else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                if port == 0 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+
+                let rx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
+                let tx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
+                let mut sock = tcp::Socket::new(rx_buf, tx_buf);
+                if sock.listen(port).is_err() {
+                    return IpcMessage::error_reply(msg.sender, -98);
+                }
+                let socket = self.sockets.add(sock);
+
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                self.tcp_listeners
+                    .insert(fid, TcpListenerState { socket, port });
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
             _ => IpcMessage::error_reply(msg.sender, -2),
+        }
+    }
+
+    fn handle_tcp_read(&mut self, sender: u64, listener: TcpListenerState) -> IpcMessage {
+        let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
+        if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
+            let _ = socket.listen(listener.port);
+        }
+
+        let mut data = [0u8; 40];
+        if socket.can_recv() {
+            match socket.recv_slice(&mut data) {
+                Ok(n) => return reply_read(sender, &data[..n]),
+                Err(_) => return IpcMessage::error_reply(sender, -5),
+            }
+        }
+
+        if socket.is_open() && !socket.may_recv() && !socket.may_send() {
+            socket.abort();
+            let _ = socket.listen(listener.port);
+        }
+        IpcMessage::error_reply(sender, -11)
+    }
+
+    fn handle_tcp_write(&mut self, sender: u64, listener: TcpListenerState, msg: &IpcMessage) -> IpcMessage {
+        let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
+        if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
+            let _ = socket.listen(listener.port);
+        }
+
+        let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+        let data_len = core::cmp::min(data_len, msg.payload.len().saturating_sub(18));
+        let data = &msg.payload[18..18 + data_len];
+
+        if !socket.can_send() {
+            return IpcMessage::error_reply(sender, -11);
+        }
+
+        match socket.send_slice(data) {
+            Ok(n) => reply_write(sender, n),
+            Err(_) => IpcMessage::error_reply(sender, -11),
         }
     }
 
     fn handle_read(&mut self, msg: &IpcMessage) -> IpcMessage {
         let file_id = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap_or([0u8; 8]));
         let offset = u64::from_le_bytes(msg.payload[8..16].try_into().unwrap_or([0u8; 8]));
+
+        if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
+            return self.handle_tcp_read(msg.sender, listener);
+        }
 
         let path = match self.open_handles.get(&file_id) {
             Some(p) => p.clone(),
@@ -732,7 +808,7 @@ impl NetworkStrate {
         match path.as_str() {
             "" => {
                 let listing =
-                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\ndns\nresolve\nping\n";
+                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\ndns\nresolve\nping\ntcp\n";
                 let start = (offset as usize).min(listing.len());
                 reply_read(msg.sender, &listing[start..])
             }
@@ -810,6 +886,7 @@ impl NetworkStrate {
                 reply_read(msg.sender, b"none\n")
             }
             "resolve" => reply_read(msg.sender, b"use /net/resolve/<hostname>\n"),
+            "tcp" => reply_read(msg.sender, b"use /net/tcp/listen/<port>\n"),
             p if p.starts_with("resolve/") => {
                 let name = &p[8..];
                 match self.resolve_hostname_blocking(name) {
@@ -838,6 +915,10 @@ impl NetworkStrate {
 
     fn handle_write(&mut self, msg: &IpcMessage) -> IpcMessage {
         let file_id = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap_or([0u8; 8]));
+
+        if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
+            return self.handle_tcp_write(msg.sender, listener, msg);
+        }
 
         let path = match self.open_handles.get(&file_id) {
             Some(p) => p.clone(),
@@ -868,6 +949,9 @@ impl NetworkStrate {
     fn handle_close(&mut self, msg: &IpcMessage) -> IpcMessage {
         let file_id = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap_or([0u8; 8]));
         self.open_handles.remove(&file_id);
+        if let Some(listener) = self.tcp_listeners.remove(&file_id) {
+            let _ = self.sockets.remove(listener.socket);
+        }
         reply_ok(msg.sender)
     }
 
