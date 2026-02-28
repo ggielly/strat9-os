@@ -13,7 +13,10 @@
 
 #![allow(dead_code)]
 
-use crate::{hardware::virtio::gpu, memory::phys_to_virt};
+use crate::{
+    hardware::virtio::gpu,
+    memory::{get_allocator, phys_to_virt, FrameAllocator},
+};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -154,9 +157,26 @@ impl Framebuffer {
 
         // Allocate double buffer for VirtIO GPU
         let db_size = (info.stride as usize) * (info.height as usize);
-        let db_frame =
-            crate::memory::allocate_dma_frame().ok_or("Failed to allocate double buffer")?;
+        if db_size == 0 {
+            return Err("Invalid VirtIO framebuffer size");
+        }
+        let db_pages = (db_size + 4095) / 4096;
+        let db_order = db_pages.next_power_of_two().trailing_zeros() as u8;
+        let db_frame = {
+            let mut alloc_guard = get_allocator().lock();
+            let allocator = alloc_guard
+                .as_mut()
+                .ok_or("Allocator unavailable for double buffer")?;
+            allocator
+                .alloc(db_order)
+                .map_err(|_| "Failed to allocate double buffer")?
+        };
         let db_virt = phys_to_virt(db_frame.start_address.as_u64()) as *mut u8;
+        unsafe {
+            // SAFETY: `db_virt` is a freshly allocated contiguous buffer of at
+            // least `db_size` bytes.
+            core::ptr::write_bytes(db_virt, 0, db_size);
+        }
 
         let fb = Framebuffer {
             info,
@@ -240,8 +260,8 @@ impl Framebuffer {
             | ((g as u32) << fb.info.format.green_shift)
             | ((b as u32) << fb.info.format.blue_shift);
 
-        let offset = if fb.use_double_buffer && fb.double_buffer.is_some() {
-            unsafe { fb.double_buffer.unwrap() }
+        let offset = if fb.use_double_buffer {
+            fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
         } else {
             fb.info.base_virt as *mut u8
         };
@@ -252,7 +272,7 @@ impl Framebuffer {
         }
 
         // Flush if using VirtIO GPU
-        if fb.info.source == FramebufferSource::VirtioGpu {
+        if fb.info.source == FramebufferSource::VirtioGpu && !fb.use_double_buffer {
             if let Some(gpu) = gpu::get_gpu() {
                 gpu.flush(x, y, 1, 1);
             }
@@ -298,7 +318,7 @@ impl Framebuffer {
             return;
         }
 
-        let db = unsafe { fb.double_buffer.unwrap() };
+        let db = fb.double_buffer.unwrap();
         let fb_base = fb.info.base_virt as *mut u8;
         let size = (fb.info.stride as usize) * (fb.info.height as usize);
 

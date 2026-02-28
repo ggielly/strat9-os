@@ -11,5 +11,6 @@ pub fn init() {
     nic::init();
     timer::init();
     usb::init();
+    virtio::gpu::init();
     video::framebuffer::init();
 }

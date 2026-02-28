@@ -3,7 +3,7 @@
 
 use crate::{
     arch::x86_64::pci::{self, Bar, ProbeCriteria},
-    memory::{allocate_dma_frame, phys_to_virt},
+    memory::{allocate_dma_frame, get_allocator, phys_to_virt, FrameAllocator, PhysFrame},
 };
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -17,6 +17,7 @@ pub struct VirtioGpu {
     ctrl_queue: Mutex<Virtqueue>,
     cursor_queue: Mutex<Virtqueue>,
     info: GpuInfo,
+    framebuffer_allocation: Option<(PhysFrame, u8)>,
 }
 
 struct VirtioDevice {
@@ -91,10 +92,18 @@ const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
 // VirtIO GPU commands
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
-const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0104;
 const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
-const VIRTIO_GPU_CMD_SET_FRAMEBUFFER: u32 = 0x0105;
-const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0106;
+const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
+const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
+const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+
+// VirtIO GPU responses
+const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
+const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+
+// Virtqueue descriptor flags
+const VIRTQ_DESC_F_NEXT: u16 = 1;
+const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 // VirtIO GPU formats
 const VIRTIO_GPU_FORMAT_X8R8G8B8: u32 = 1;
@@ -171,17 +180,19 @@ struct CmdSetScanout {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct CmdSetFramebuffer {
+struct CmdResourceFlush {
     hdr: CtrlHeader,
+    rect: GpuRect,
     resource_id: u32,
-    scanout_id: u32,
+    _padding: u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct CmdResourceFlush {
+struct CmdTransferToHost2d {
     hdr: CtrlHeader,
     rect: GpuRect,
+    offset: u64,
     resource_id: u32,
     _padding: u32,
 }
@@ -228,6 +239,7 @@ impl VirtioGpu {
                 framebuffer_phys: 0,
                 framebuffer_virt: core::ptr::null_mut(),
             },
+            framebuffer_allocation: None,
         };
 
         gpu.init_display()?;
@@ -238,34 +250,42 @@ impl VirtioGpu {
         self.get_display_info()?;
 
         let framebuffer_size = self.info.stride as usize * self.info.height as usize;
+        if framebuffer_size == 0 {
+            return Err("Display reports zero-sized framebuffer");
+        }
         let framebuffer_pages = (framebuffer_size + 4095) / 4096;
+        let framebuffer_order = framebuffer_pages
+            .next_power_of_two()
+            .trailing_zeros() as u8;
 
-        let mut framebuffer_phys = 0u64;
-        let mut framebuffer_virt = core::ptr::null_mut::<u8>();
+        let framebuffer_frame = {
+            let mut alloc_guard = get_allocator().lock();
+            let allocator = alloc_guard
+                .as_mut()
+                .ok_or("Allocator unavailable for framebuffer")?;
+            allocator
+                .alloc(framebuffer_order)
+                .map_err(|_| "Failed to allocate contiguous framebuffer")?
+        };
+        let framebuffer_phys = framebuffer_frame.start_address.as_u64();
+        let framebuffer_virt = phys_to_virt(framebuffer_phys) as *mut u8;
 
-        for i in 0..framebuffer_pages {
-            let frame = allocate_dma_frame().ok_or("Failed to allocate framebuffer")?;
-            let page_phys = frame.start_address.as_u64();
-            let page_virt = phys_to_virt(page_phys) as *mut u8;
-
-            if i == 0 {
-                framebuffer_phys = page_phys;
-                framebuffer_virt = page_virt;
-            }
-
-            unsafe {
-                core::ptr::write_bytes(page_virt, 0, 4096);
-            }
+        // SAFETY: `framebuffer_virt` points to a freshly allocated DMA buffer
+        // that we own for at least `framebuffer_size` bytes.
+        unsafe {
+            core::ptr::write_bytes(framebuffer_virt, 0, framebuffer_size);
         }
 
         self.info.framebuffer_phys = framebuffer_phys;
         self.info.framebuffer_virt = framebuffer_virt;
+        self.framebuffer_allocation = Some((framebuffer_frame, framebuffer_order));
 
         let resource_id = 1;
         self.resource_create_2d(resource_id, self.info.width, self.info.height)?;
         self.resource_attach_backing(resource_id, framebuffer_phys, framebuffer_size as u32)?;
         self.set_scanout(0, resource_id)?;
-        self.set_framebuffer(resource_id, 0)?;
+        self.transfer_to_host_2d(resource_id, 0, 0, self.info.width, self.info.height)?;
+        self.resource_flush(resource_id, 0, 0, self.info.width, self.info.height)?;
 
         log::info!(
             "VirtIO GPU: {}x{} @ {} bpp, framebuffer at 0x{:x}",
@@ -290,8 +310,10 @@ impl VirtioGpu {
             _padding: [0; 3],
         };
 
-        let response = self.send_command(&cmd, core::mem::size_of::<CmdGetDisplayInfo>())?;
-        let resp = unsafe { &*(response as *const RespDisplayInfo) };
+        let resp: RespDisplayInfo = self.send_command(&cmd)?;
+        if resp.hdr.cmd_and_flags != VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
+            return Err("GET_DISPLAY_INFO failed");
+        }
 
         if resp.enabled != 0 {
             self.info.width = resp.rect.width;
@@ -316,7 +338,10 @@ impl VirtioGpu {
             height,
         };
 
-        self.send_command(&cmd, core::mem::size_of::<CmdResourceCreate2d>())?;
+        let resp: CtrlHeader = self.send_command(&cmd)?;
+        if resp.cmd_and_flags != VIRTIO_GPU_RESP_OK_NODATA {
+            return Err("RESOURCE_CREATE_2D failed");
+        }
         Ok(())
     }
 
@@ -338,7 +363,18 @@ impl VirtioGpu {
             _padding: 0,
         };
 
-        self.send_command_with_data(&cmd, core::mem::size_of::<CmdResourceAttachBacking>(), &entry, core::mem::size_of::<MemEntry>())?;
+        let entry_bytes = unsafe {
+            // SAFETY: `entry` is a POD `#[repr(C)]` struct and we convert it to
+            // a byte view for DMA submission.
+            core::slice::from_raw_parts(
+                (&entry as *const MemEntry) as *const u8,
+                core::mem::size_of::<MemEntry>(),
+            )
+        };
+        let resp: CtrlHeader = self.send_command_with_payload(&cmd, Some(entry_bytes))?;
+        if resp.cmd_and_flags != VIRTIO_GPU_RESP_OK_NODATA {
+            return Err("RESOURCE_ATTACH_BACKING failed");
+        }
         Ok(())
     }
 
@@ -360,130 +396,219 @@ impl VirtioGpu {
             resource_id,
         };
 
-        self.send_command(&cmd, core::mem::size_of::<CmdSetScanout>())?;
+        let resp: CtrlHeader = self.send_command(&cmd)?;
+        if resp.cmd_and_flags != VIRTIO_GPU_RESP_OK_NODATA {
+            return Err("SET_SCANOUT failed");
+        }
         Ok(())
     }
 
-    fn set_framebuffer(&self, resource_id: u32, scanout_id: u32) -> Result<(), &'static str> {
-        let cmd = CmdSetFramebuffer {
+    fn transfer_to_host_2d(
+        &self,
+        resource_id: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), &'static str> {
+        let cmd = CmdTransferToHost2d {
             hdr: CtrlHeader {
-                cmd_and_flags: VIRTIO_GPU_CMD_SET_FRAMEBUFFER,
+                cmd_and_flags: VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
                 fence_id: 0,
                 ctx_id: 0,
                 _padding: 0,
             },
+            rect: GpuRect {
+                x,
+                y,
+                width,
+                height,
+            },
+            offset: 0,
             resource_id,
-            scanout_id,
+            _padding: 0,
         };
 
-        self.send_command(&cmd, core::mem::size_of::<CmdSetFramebuffer>())?;
+        let resp: CtrlHeader = self.send_command(&cmd)?;
+        if resp.cmd_and_flags != VIRTIO_GPU_RESP_OK_NODATA {
+            return Err("TRANSFER_TO_HOST_2D failed");
+        }
         Ok(())
     }
 
-    fn send_command<T: Copy>(&self, cmd: &T, cmd_size: usize) -> Result<*mut u8, &'static str> {
-        let mut ctrl_queue = self.ctrl_queue.lock();
+    fn resource_flush(
+        &self,
+        resource_id: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), &'static str> {
+        let cmd = CmdResourceFlush {
+            hdr: CtrlHeader {
+                cmd_and_flags: VIRTIO_GPU_CMD_RESOURCE_FLUSH,
+                fence_id: 0,
+                ctx_id: 0,
+                _padding: 0,
+            },
+            rect: GpuRect {
+                x,
+                y,
+                width,
+                height,
+            },
+            resource_id,
+            _padding: 0,
+        };
 
-        if ctrl_queue.free.is_empty() {
-            return Err("No free descriptors");
+        let resp: CtrlHeader = self.send_command(&cmd)?;
+        if resp.cmd_and_flags != VIRTIO_GPU_RESP_OK_NODATA {
+            return Err("RESOURCE_FLUSH failed");
         }
-        let desc_idx = ctrl_queue.free.pop().unwrap();
+        Ok(())
+    }
+
+    fn send_command<T: Copy, R: Copy>(&self, cmd: &T) -> Result<R, &'static str> {
+        self.send_command_with_payload::<T, R>(cmd, None)
+    }
+
+    fn send_command_with_payload<T: Copy, R: Copy>(
+        &self,
+        cmd: &T,
+        payload: Option<&[u8]>,
+    ) -> Result<R, &'static str> {
+        let cmd_size = core::mem::size_of::<T>();
+        let resp_size = core::mem::size_of::<R>();
+
+        if cmd_size > 4096 || resp_size > 4096 {
+            return Err("Command or response too large");
+        }
+        if payload.map(|p| p.len()).unwrap_or(0) > 4096 {
+            return Err("Payload too large");
+        }
 
         let cmd_frame = allocate_dma_frame().ok_or("Failed to allocate command buffer")?;
+        let payload_frame = if payload.is_some() {
+            Some(allocate_dma_frame().ok_or("Failed to allocate payload buffer")?)
+        } else {
+            None
+        };
+        let resp_frame = allocate_dma_frame().ok_or("Failed to allocate response buffer")?;
+
         let cmd_phys = cmd_frame.start_address.as_u64();
         let cmd_virt = phys_to_virt(cmd_phys) as *mut u8;
+        let payload_phys = payload_frame
+            .as_ref()
+            .map(|f| f.start_address.as_u64())
+            .unwrap_or(0);
+        let payload_virt = if payload.is_some() {
+            Some(phys_to_virt(payload_phys) as *mut u8)
+        } else {
+            None
+        };
+        let resp_phys = resp_frame.start_address.as_u64();
+        let resp_virt = phys_to_virt(resp_phys) as *mut u8;
+
+        let mut ctrl_queue = self.ctrl_queue.lock();
+        let needed_desc = if payload.is_some() { 3 } else { 2 };
+        if ctrl_queue.free.len() < needed_desc {
+            drop(ctrl_queue);
+            self.free_dma_frame(cmd_frame);
+            if let Some(frame) = payload_frame {
+                self.free_dma_frame(frame);
+            }
+            self.free_dma_frame(resp_frame);
+            return Err("Not enough free descriptors");
+        }
+
+        let head_idx = ctrl_queue.free.pop().ok_or("Missing descriptor")?;
+        let middle_idx = if payload.is_some() {
+            Some(ctrl_queue.free.pop().ok_or("Missing payload descriptor")?)
+        } else {
+            None
+        };
+        let resp_idx = ctrl_queue.free.pop().ok_or("Missing response descriptor")?;
 
         unsafe {
+            // SAFETY: DMA command/response buffers are freshly allocated and
+            // valid for the copied sizes.
             core::ptr::copy_nonoverlapping(cmd as *const _ as *const u8, cmd_virt, cmd_size);
+            if let (Some(data), Some(data_virt)) = (payload, payload_virt) {
+                core::ptr::copy_nonoverlapping(data.as_ptr(), data_virt, data.len());
+            }
 
-            let desc = &mut *ctrl_queue.desc.add(desc_idx as usize);
-            desc.addr = cmd_phys;
-            desc.len = cmd_size as u32;
-            desc.flags = 1;
-            desc.next = 0;
+            let head_desc = &mut *ctrl_queue.desc.add(head_idx as usize);
+            head_desc.addr = cmd_phys;
+            head_desc.len = cmd_size as u32;
+            head_desc.flags = VIRTQ_DESC_F_NEXT;
+            head_desc.next = middle_idx.unwrap_or(resp_idx);
+
+            if let Some(middle) = middle_idx {
+                let data = payload.expect("payload descriptor without payload");
+                let data_desc = &mut *ctrl_queue.desc.add(middle as usize);
+                data_desc.addr = payload_phys;
+                data_desc.len = data.len() as u32;
+                data_desc.flags = VIRTQ_DESC_F_NEXT;
+                data_desc.next = resp_idx;
+            }
+
+            let resp_desc = &mut *ctrl_queue.desc.add(resp_idx as usize);
+            resp_desc.addr = resp_phys;
+            resp_desc.len = resp_size as u32;
+            resp_desc.flags = VIRTQ_DESC_F_WRITE;
+            resp_desc.next = 0;
 
             let avail = &mut *ctrl_queue.avail;
-            let idx = avail.idx as usize % VIRTIO_RING_SIZE;
-            avail.ring[idx] = desc_idx;
+            let ring_idx = avail.idx as usize % VIRTIO_RING_SIZE;
+            avail.ring[ring_idx] = head_idx;
             avail.idx = avail.idx.wrapping_add(1);
         }
 
         self.device.notify_queue(0);
 
-        loop {
+        let mut completed = false;
+        while !completed {
             unsafe {
+                // SAFETY: `ctrl_queue.used` points to a valid shared vring page.
                 let used = &*ctrl_queue.used;
                 if ctrl_queue.last_used_idx != used.idx {
                     let idx = ctrl_queue.last_used_idx as usize % VIRTIO_RING_SIZE;
                     let elem = used.ring[idx];
-
-                    ctrl_queue.free.push(desc_idx);
                     ctrl_queue.last_used_idx = ctrl_queue.last_used_idx.wrapping_add(1);
-
-                    return Ok(cmd_virt);
+                    completed = elem.id as u16 == head_idx;
                 }
             }
-            core::hint::spin_loop();
+            if !completed {
+                core::hint::spin_loop();
+            }
         }
+
+        let response = unsafe {
+            // SAFETY: The device has completed the command and wrote `resp_size`
+            // bytes in `resp_virt`. Reading as `R` is valid by construction.
+            core::ptr::read_unaligned(resp_virt as *const R)
+        };
+
+        ctrl_queue.free.push(head_idx);
+        if let Some(middle) = middle_idx {
+            ctrl_queue.free.push(middle);
+        }
+        ctrl_queue.free.push(resp_idx);
+        drop(ctrl_queue);
+
+        self.free_dma_frame(cmd_frame);
+        if let Some(frame) = payload_frame {
+            self.free_dma_frame(frame);
+        }
+        self.free_dma_frame(resp_frame);
+
+        Ok(response)
     }
 
-    fn send_command_with_data<T: Copy, U: Copy>(
-        &self,
-        cmd: &T,
-        cmd_size: usize,
-        data: &U,
-        data_size: usize,
-    ) -> Result<(), &'static str> {
-        let mut ctrl_queue = self.ctrl_queue.lock();
-
-        if ctrl_queue.free.len() < 2 {
-            return Err("Not enough free descriptors");
-        }
-        let cmd_desc_idx = ctrl_queue.free.pop().unwrap();
-        let data_desc_idx = ctrl_queue.free.pop().unwrap();
-
-        let cmd_frame = allocate_dma_frame().ok_or("Failed to allocate command buffer")?;
-        let cmd_phys = cmd_frame.start_address.as_u64();
-        let cmd_virt = phys_to_virt(cmd_phys) as *mut u8;
-
-        let data_frame = allocate_dma_frame().ok_or("Failed to allocate data buffer")?;
-        let data_phys = data_frame.start_address.as_u64();
-        let data_virt = phys_to_virt(data_phys) as *mut u8;
-
-        unsafe {
-            core::ptr::copy_nonoverlapping(cmd as *const _ as *const u8, cmd_virt, cmd_size);
-            core::ptr::copy_nonoverlapping(data as *const _ as *const u8, data_virt, data_size);
-
-            let cmd_desc = &mut *ctrl_queue.desc.add(cmd_desc_idx as usize);
-            cmd_desc.addr = cmd_phys;
-            cmd_desc.len = cmd_size as u32;
-            cmd_desc.flags = 1 | 2;
-            cmd_desc.next = data_desc_idx;
-
-            let data_desc = &mut *ctrl_queue.desc.add(data_desc_idx as usize);
-            data_desc.addr = data_phys;
-            data_desc.len = data_size as u32;
-            data_desc.flags = 1 | 2;
-            data_desc.next = 0;
-
-            let avail = &mut *ctrl_queue.avail;
-            let idx = avail.idx as usize % VIRTIO_RING_SIZE;
-            avail.ring[idx] = cmd_desc_idx;
-            avail.idx = avail.idx.wrapping_add(1);
-        }
-
-        self.device.notify_queue(0);
-
-        loop {
-            unsafe {
-                let used = &*ctrl_queue.used;
-                if ctrl_queue.last_used_idx != used.idx {
-                    ctrl_queue.free.push(cmd_desc_idx);
-                    ctrl_queue.free.push(data_desc_idx);
-                    ctrl_queue.last_used_idx = ctrl_queue.last_used_idx.wrapping_add(1);
-                    return Ok(());
-                }
-            }
-            core::hint::spin_loop();
+    fn free_dma_frame(&self, frame: PhysFrame) {
+        let mut alloc_guard = get_allocator().lock();
+        if let Some(allocator) = alloc_guard.as_mut() {
+            allocator.free(frame, 0);
         }
     }
 
@@ -492,19 +617,8 @@ impl VirtioGpu {
     }
 
     pub fn flush(&self, x: u32, y: u32, width: u32, height: u32) {
-        let cmd = CmdResourceFlush {
-            hdr: CtrlHeader {
-                cmd_and_flags: VIRTIO_GPU_CMD_RESOURCE_FLUSH,
-                fence_id: 0,
-                ctx_id: 0,
-                _padding: 0,
-            },
-            rect: GpuRect { x, y, width, height },
-            resource_id: 1,
-            _padding: 0,
-        };
-
-        let _ = self.send_command(&cmd, core::mem::size_of::<CmdResourceFlush>());
+        let _ = self.transfer_to_host_2d(1, x, y, width, height);
+        let _ = self.resource_flush(1, x, y, width, height);
     }
 }
 
