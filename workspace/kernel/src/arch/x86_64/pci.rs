@@ -6,8 +6,7 @@
 //! Reference: PCI Local Bus Specification 3.0
 
 use super::io::{inl, outl};
-use crate::serial_println;
-use crate::sync::SpinLock;
+use crate::{serial_println, sync::SpinLock};
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -15,6 +14,12 @@ use core::fmt;
 const CONFIG_ADDRESS: u16 = 0xCF8;
 /// PCI Configuration Data Port
 const CONFIG_DATA: u16 = 0xCFC;
+
+/// Global lock for PCI configuration space I/O.
+///
+/// CONFIG_ADDRESS and CONFIG_DATA form a two-step transaction that must be
+/// atomic w.r.t. other CPUs. Every config read/write must hold this lock.
+static PCI_IO_LOCK: SpinLock<()> = SpinLock::new(());
 
 /// PCI Vendor IDs
 pub mod vendor {
@@ -197,8 +202,7 @@ impl PciDevice {
         let addr = self.address.config_address(offset & !0x03);
         let shift = (offset & 0x03) * 8;
 
-        // SAFETY: PCI configuration space access via standard I/O ports
-        // We ensure atomic 32-bit access which is standard for PCI config
+        let _lock = PCI_IO_LOCK.lock();
         unsafe {
             outl(CONFIG_ADDRESS, addr);
             ((inl(CONFIG_DATA) >> shift) & 0xFF) as u8
@@ -210,7 +214,7 @@ impl PciDevice {
         let addr = self.address.config_address(offset & !0x03);
         let shift = (offset & 0x02) * 8;
 
-        // SAFETY: PCI configuration space access via standard I/O ports
+        let _lock = PCI_IO_LOCK.lock();
         unsafe {
             outl(CONFIG_ADDRESS, addr);
             ((inl(CONFIG_DATA) >> shift) & 0xFFFF) as u16
@@ -221,7 +225,7 @@ impl PciDevice {
     pub fn read_config_u32(&self, offset: u8) -> u32 {
         let addr = self.address.config_address(offset);
 
-        // SAFETY: PCI configuration space access via standard I/O ports
+        let _lock = PCI_IO_LOCK.lock();
         unsafe {
             outl(CONFIG_ADDRESS, addr);
             inl(CONFIG_DATA)
@@ -233,8 +237,7 @@ impl PciDevice {
         let addr = self.address.config_address(offset & !0x03);
         let shift = (offset & 0x03) * 8;
 
-        // SAFETY: PCI configuration space access via standard I/O ports
-        // Read-modify-write cycle to preserve other bytes in the 32-bit word
+        let _lock = PCI_IO_LOCK.lock();
         unsafe {
             outl(CONFIG_ADDRESS, addr);
             let old = inl(CONFIG_DATA);
@@ -250,7 +253,7 @@ impl PciDevice {
         let addr = self.address.config_address(offset & !0x03);
         let shift = (offset & 0x02) * 8;
 
-        // SAFETY: PCI configuration space access via standard I/O ports
+        let _lock = PCI_IO_LOCK.lock();
         unsafe {
             outl(CONFIG_ADDRESS, addr);
             let old = inl(CONFIG_DATA);
@@ -265,7 +268,7 @@ impl PciDevice {
     pub fn write_config_u32(&self, offset: u8, value: u32) {
         let addr = self.address.config_address(offset);
 
-        // SAFETY: PCI configuration space access via standard I/O ports
+        let _lock = PCI_IO_LOCK.lock();
         unsafe {
             outl(CONFIG_ADDRESS, addr);
             outl(CONFIG_DATA, value);
@@ -430,7 +433,7 @@ impl Iterator for PciScanner {
 fn read_vendor_id(address: PciAddress) -> u16 {
     let addr = address.config_address(config::VENDOR_ID);
 
-    // SAFETY: PCI configuration space access via standard I/O ports
+    let _lock = PCI_IO_LOCK.lock();
     unsafe {
         outl(CONFIG_ADDRESS, addr);
         (inl(CONFIG_DATA) & 0xFFFF) as u16
@@ -477,13 +480,11 @@ pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
     if cache.is_none() {
         *cache = Some(PciScanner::new().collect());
     }
-    cache
-        .as_ref()
-        .and_then(|devs| {
-            devs.iter()
-                .copied()
-                .find(|dev| dev.vendor_id == vendor_id && dev.device_id == device_id)
-        })
+    cache.as_ref().and_then(|devs| {
+        devs.iter()
+            .copied()
+            .find(|dev| dev.vendor_id == vendor_id && dev.device_id == device_id)
+    })
 }
 
 /// Find all VirtIO devices on the PCI bus

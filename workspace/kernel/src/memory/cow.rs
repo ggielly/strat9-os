@@ -12,52 +12,24 @@
 //!   1. If refcount > 1: allocate new frame, copy content, update PTE
 //!   2. If refcount == 1: just mark page as writable (no copy needed)
 //!
-//! # SMP Safety (Per-CPU Optimization)
+//! # SMP Safety
 //!
-//! - Frame metadata uses per-CPU reference counters to minimize lock contention
-//! - Each CPU maintains its own atomic refcount for each frame
-//! - inc_ref/dec_ref operate lock-free on the local CPU counter
-//! - Global refcount is computed by summing all per-CPU counters
-//! - Flag operations still use COW_LOCK but are much less frequent
+//! - Atomic refcount per frame (lock-free inc/dec)
+//! - COW_LOCK protects flag changes and frame free
 //! - TLB shootdown is performed after modifying page table flags
-//!
-//! # Performance
-//!
-//! - Lock contention reduced from O(CPUs × operations) to O(flags_ops)
-//! - Typical fork workload: 99% of operations are inc/dec (now lock-free)
-//! - Only flag changes and final frame free require the global lock
-//!
-//! # References
-//!
-//! - MIT 6.828 xv6 COW Lab: https://pdos.csail.mit.edu/6.828/2021/labs/cow.html
-//! - Philipp Oppermann Paging Guide: https://os.phil-opp.com/paging-introduction/
-//! - Linux kernel: mm/memory.c (do_wp_page), include/linux/percpu-refcount.h
 
 use crate::{
-    arch::x86_64::{percpu, smp},
     memory::frame::{FrameAllocator, PhysFrame},
     sync::SpinLock,
 };
 use alloc::{boxed::Box, vec::Vec};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering, fence};
 
-/// Global lock protecting COW metadata flag operations and frame free.
-///
-/// This lock is only held for:
-/// - Updating COW/DLL flags in frame metadata
-/// - Final frame deallocation when refcount reaches zero
-///
-/// Reference count inc/dec operations are lock-free per-CPU.
 static COW_LOCK: SpinLock<()> = SpinLock::new(());
 
-/// Metadata for each physical frame with per-CPU refcounting
 #[repr(C)]
 pub struct FrameMeta {
-    /// Per-CPU reference counters for this frame.
-    /// Using per-CPU counters eliminates lock contention on refcount operations.
-    /// The global refcount is the sum of all per-CPU counters.
-    per_cpu_refcounts: [AtomicU32; percpu::MAX_CPUS],
-    /// Flags for the frame (COW, DLL, etc.)
+    refcount: AtomicU32,
     flags: AtomicU32,
 }
 
@@ -73,44 +45,24 @@ pub mod frame_flags {
 
 impl FrameMeta {
     pub const fn new() -> Self {
-        // Initialize all per-CPU refcounts to 0
-        const ZERO_ATOMIC: AtomicU32 = AtomicU32::new(0);
         FrameMeta {
-            per_cpu_refcounts: [ZERO_ATOMIC; percpu::MAX_CPUS],
+            refcount: AtomicU32::new(0),
             flags: AtomicU32::new(0),
         }
     }
 
-    /// Increment reference count on the current CPU (lock-free).
     #[inline]
-    pub fn inc_ref_local(&self, cpu_id: usize) {
-        if cpu_id < percpu::MAX_CPUS {
-            self.per_cpu_refcounts[cpu_id].fetch_add(1, Ordering::Release);
-        }
+    pub fn inc_ref(&self) {
+        self.refcount.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Decrement reference count on the current CPU and return old value (lock-free).
     #[inline]
-    pub fn dec_ref_local(&self, cpu_id: usize) -> u32 {
-        if cpu_id < percpu::MAX_CPUS {
-            self.per_cpu_refcounts[cpu_id].fetch_sub(1, Ordering::Acquire)
-        } else {
-            0
-        }
+    pub fn dec_ref(&self) -> u32 {
+        self.refcount.fetch_sub(1, Ordering::Release)
     }
 
-    /// Get total reference count by summing all per-CPU counters.
-    ///
-    /// This operation is more expensive than the old global atomic read,
-    /// but it's only needed when making decisions (COW resolution, free).
-    /// The trade-off is: frequent lock-free inc/dec vs occasional aggregation.
     pub fn get_refcount(&self) -> u32 {
-        let mut total = 0u32;
-        let num_cpus = smp::cpu_count().min(percpu::MAX_CPUS);
-        for i in 0..num_cpus {
-            total = total.saturating_add(self.per_cpu_refcounts[i].load(Ordering::Acquire));
-        }
-        total
+        self.refcount.load(Ordering::Acquire)
     }
 
     /// Set frame flags (requires COW_LOCK held by caller).
@@ -220,60 +172,27 @@ fn frame_to_pfn(frame: PhysFrame) -> u64 {
     frame.start_address.as_u64() >> 12
 }
 
-/// Get current CPU index efficiently for per-CPU operations.
-///
-/// Returns 0 if per-CPU data is not yet initialized (boot phase).
-#[inline]
-fn current_cpu_id() -> usize {
-    // SAFETY: lapic_id() is safe to call after APIC initialization
-    let apic_id = crate::arch::x86_64::apic::lapic_id();
-    percpu::cpu_index_by_apic(apic_id).unwrap_or(0)
-}
-
-/// Increment reference count for a physical frame (lock-free per-CPU).
-///
-/// This operation is now lock-free by using per-CPU counters.
-/// Each CPU maintains its own atomic refcount, eliminating contention.
 pub fn frame_inc_ref(frame: PhysFrame) {
-    let cpu_id = current_cpu_id();
     let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta(pfn) {
-        meta.inc_ref_local(cpu_id);
+        meta.inc_ref();
     }
 }
 
-/// Decrement reference count and free if zero (mostly lock-free).
-///
-/// The decrement itself is lock-free on the local CPU counter.
-/// If the total refcount drops to zero, we acquire COW_LOCK to free the frame.
 pub fn frame_dec_ref(frame: PhysFrame) {
-    let cpu_id = current_cpu_id();
     let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta(pfn) {
-        let old_local = meta.dec_ref_local(cpu_id);
-
-        // Optimization: only check total refcount if our local counter was the last one
-        if old_local == 1 {
-            // Possible last reference: check global count with lock
-            let _lock = COW_LOCK.lock();
-            let total_refs = meta.get_refcount();
-
-            if total_refs == 0 {
-                // Last reference: free the frame
-                drop(_lock); // Release COW_LOCK before acquiring allocator lock
-                let mut allocator = crate::memory::get_allocator().lock();
-                if let Some(alloc) = allocator.as_mut() {
-                    alloc.free(frame, 0); // Order 0 = single page
-                }
+        let old = meta.dec_ref();
+        if old == 1 {
+            fence(Ordering::Acquire);
+            let mut allocator = crate::memory::get_allocator().lock();
+            if let Some(alloc) = allocator.as_mut() {
+                alloc.free(frame, 0);
             }
         }
     }
 }
 
-/// Get reference count for a frame (aggregates all per-CPU counters).
-///
-/// Note: This is more expensive than the old atomic read, but inc/dec
-/// are now lock-free which is the common case (99% of operations).
 pub fn frame_get_refcount(frame: PhysFrame) -> u32 {
     let pfn = frame_to_pfn(frame);
     get_frame_meta(pfn).map(|m| m.get_refcount()).unwrap_or(0)

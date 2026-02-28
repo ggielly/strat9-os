@@ -140,6 +140,24 @@ impl FileDescriptorTable {
         Ok(self.insert(file))
     }
 
+    /// Duplicate an FD with a minimum target FD number (F_DUPFD semantics).
+    pub fn duplicate_from(&mut self, old_fd: u32, min_fd: u32) -> Result<u32, SyscallError> {
+        let file = self.get(old_fd)?;
+        let min = min_fd as usize;
+        if min >= self.fds.len() {
+            self.fds.resize(min + 1, None);
+        }
+        for i in min..self.fds.len() {
+            if self.fds[i].is_none() {
+                self.fds[i] = Some(FileDescriptor::new(file));
+                return Ok(i as u32);
+            }
+        }
+        let fd = self.fds.len() as u32;
+        self.fds.push(Some(FileDescriptor::new(file)));
+        Ok(fd)
+    }
+
     /// Close all file descriptors (process exit).
     pub fn close_all(&mut self) {
         self.fds.clear();

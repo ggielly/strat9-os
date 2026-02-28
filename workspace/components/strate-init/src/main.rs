@@ -250,6 +250,45 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
     silos
 }
 
+fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
+    let has_network = silos.iter().any(|s| s.name == "network");
+    let has_dhcp = silos.iter().any(|s| s.name == "dhcp-client");
+
+    if !has_network {
+        log("[init] Missing mandatory silo 'network' in config, adding fallback\n");
+        silos.push(SiloDef {
+            name: String::from("network"),
+            sid: 42,
+            family: String::from("NET"),
+            mode: String::from("076"),
+            strates: alloc::vec![StrateDef {
+                name: String::from("strate-net"),
+                binary: String::from("/initfs/strate-net"),
+                stype: String::from("elf"),
+                target: String::from("default"),
+            }],
+        });
+    }
+
+    if !has_dhcp {
+        log("[init] Missing mandatory silo 'dhcp-client' in config, adding fallback\n");
+        silos.push(SiloDef {
+            name: String::from("dhcp-client"),
+            sid: 42,
+            family: String::from("NET"),
+            mode: String::from("076"),
+            strates: alloc::vec![StrateDef {
+                name: String::from("dhcp-client"),
+                binary: String::from("/initfs/bin/dhcp-client"),
+                stype: String::from("elf"),
+                target: String::from("default"),
+            }],
+        });
+    }
+
+    silos
+}
+
 // ---------------------------------------------------------------------------
 // EXECUTION LOGIC
 // ---------------------------------------------------------------------------
@@ -527,6 +566,7 @@ pub unsafe extern "C" fn _start() -> ! {
             parse_config(DEFAULT_SILO_TOML)
         }
     };
+    let silos = ensure_required_silos(silos);
     boot_silos(silos);
     log("[init] Boot complete.\n");
     loop {

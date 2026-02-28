@@ -416,7 +416,7 @@ impl SiloConfig {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Strat9ModuleHeader {
     pub magic: [u8; 4], // "CMOD"
     pub version: u16,
@@ -434,6 +434,26 @@ pub struct Strat9ModuleHeader {
     pub key_id: [u8; 8],
     pub signature: [u8; 64],
     pub reserved: [u8; 56],
+}
+
+impl core::fmt::Debug for Strat9ModuleHeader {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // SAFETY: read fields via read_unaligned to avoid UB on packed struct.
+        let version = unsafe { core::ptr::addr_of!(self.version).read_unaligned() };
+        let flags = unsafe { core::ptr::addr_of!(self.flags).read_unaligned() };
+        let entry = unsafe { core::ptr::addr_of!(self.entry_point).read_unaligned() };
+        let code_sz = unsafe { core::ptr::addr_of!(self.code_size).read_unaligned() };
+        let data_sz = unsafe { core::ptr::addr_of!(self.data_size).read_unaligned() };
+        f.debug_struct("Strat9ModuleHeader")
+            .field("magic", &self.magic)
+            .field("version", &version)
+            .field("cpu_arch", &self.cpu_arch)
+            .field("flags", &flags)
+            .field("entry_point", &entry)
+            .field("code_size", &code_sz)
+            .field("data_size", &data_sz)
+            .finish_non_exhaustive()
+    }
 }
 
 #[repr(C)]
@@ -670,7 +690,7 @@ fn read_caps_list(ptr: u64, len: u64) -> Result<Vec<u64>, SyscallError> {
     for chunk in bytes.chunks_exact(8) {
         let mut arr = [0u8; 8];
         arr.copy_from_slice(chunk);
-        out.push(u64::from_ne_bytes(arr));
+        out.push(u64::from_le_bytes(arr));
     }
     Ok(out)
 }
@@ -815,6 +835,7 @@ fn resolve_export_offset(module: &ModuleImage, ordinal: u64) -> Result<u64, Sysc
     if ordinal >= count {
         return Err(SyscallError::InvalidArgument);
     }
+    // Layout: u32 count + u32 reserved, then u64 entries.
     let entries_off = table_off + 8;
     let entry_off = entries_off + (ordinal as usize * 8);
     let rva = read_u64_le(&module.data, entry_off)?;
@@ -888,7 +909,7 @@ impl ModuleRegistry {
     fn register(&mut self, data: Vec<u8>) -> Result<u64, SyscallError> {
         let header = parse_module_header(&data)?;
         static NEXT_MOD: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT_MOD.fetch_add(1, Ordering::SeqCst);
+        let id = NEXT_MOD.fetch_add(1, Ordering::Relaxed);
         self.modules.insert(
             id,
             ModuleImage {
@@ -1093,7 +1114,7 @@ pub fn kernel_spawn_strate(
         // In a production system, this would follow the "42" rule from Init.
         let mut sid = 1000u32;
         while mgr.silos.contains_key(&sid) {
-            sid += 1;
+            sid = sid.checked_add(1).ok_or(SyscallError::OutOfMemory)?;
         }
 
         let id = SiloId::new(sid);
@@ -1211,12 +1232,13 @@ pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u32, Syscall
             let silo = mgr.get_mut(silo_id)?;
             match silo.state {
                 SiloState::Running | SiloState::Paused => {
-                    if !force_kill {
-                        silo.state = SiloState::Stopping;
-                    }
                     tasks = silo.tasks.clone();
                     silo.tasks.clear();
-                    silo.state = SiloState::Stopped;
+                    silo.state = if force_kill {
+                        SiloState::Stopped
+                    } else {
+                        SiloState::Stopping
+                    };
                 }
                 SiloState::Stopped | SiloState::Created | SiloState::Ready => {}
                 _ => return Err(SyscallError::InvalidArgument),
@@ -1298,7 +1320,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
     // Default boot tasks get SID 1, 2, ...
     let mut sid = 1u32;
     while mgr.silos.contains_key(&sid) {
-        sid += 1;
+        sid = sid.checked_add(1).ok_or(SyscallError::OutOfMemory)?;
     }
 
     let id = SiloId::new(sid);
@@ -1774,53 +1796,54 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
         "silo"
     };
 
-    // Load the module entry without holding the manager lock.
-    let load_result = {
+    let module_data = {
         let registry = MODULE_REGISTRY.lock();
         match registry.get(module_id) {
-            Some(module) => crate::process::elf::load_and_run_elf_with_caps(
-                &module.data,
-                task_name,
-                &seed_caps,
-            )
-            .map_err(|err| {
-                log::warn!(
-                    "silo_start: sid={} module={} task='{}' load failed: {}",
-                    silo_id,
-                    module_id,
-                    task_name,
-                    err
-                );
-                map_elf_start_error(err)
-            }),
-            None => Err(SyscallError::BadHandle),
+            Some(module) => module.data.clone(),
+            None => {
+                rollback_loading(previous_state);
+                return Err(SyscallError::BadHandle);
+            }
         }
     };
 
-    let task_id = match load_result {
-        Ok(id) => id,
+    let load_result = crate::process::elf::load_elf_task_with_caps(
+        &module_data,
+        task_name,
+        &seed_caps,
+    )
+    .map_err(|err| {
+        log::warn!(
+            "silo_start: sid={} module={} task='{}' load failed: {}",
+            silo_id,
+            module_id,
+            task_name,
+            err
+        );
+        map_elf_start_error(err)
+    });
+
+    let task = match load_result {
+        Ok(task) => task,
         Err(e) => {
             rollback_loading(previous_state);
             return Err(e);
         }
     };
+    let task_id = task.id;
 
     // Give the silo an EOF stdin so that any read(0, …) returns 0 immediately
     // instead of EBADF (which can cause busy-loops) or blocking on the
     // keyboard (which would steal input from the foreground shell).
-    if let Some(task) = crate::process::get_task_by_id(task_id) {
-        let bg_stdin = crate::vfs::create_background_stdin();
-        let fd_table = unsafe { &mut *task.process.fd_table.get() };
-        fd_table.insert_at(crate::vfs::STDIN, bg_stdin);
-    }
+    let bg_stdin = crate::vfs::create_background_stdin();
+    let fd_table = unsafe { &mut *task.process.fd_table.get() };
+    fd_table.insert_at(crate::vfs::STDIN, bg_stdin);
 
     let mut mgr = SILO_MANAGER.lock();
     {
         let silo = match mgr.get_mut(silo_id) {
             Ok(silo) => silo,
             Err(e) => {
-                drop(mgr);
-                let _ = crate::process::kill_task(task_id);
                 return Err(e);
             }
         };
@@ -1835,6 +1858,8 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
         data1: 0,
         tick: crate::process::scheduler::ticks(),
     });
+    drop(mgr);
+    crate::process::add_task(task);
     Ok(0)
 }
 
@@ -1978,7 +2003,6 @@ fn is_delegated_resource(rt: ResourceType) -> bool {
             | ResourceType::Namespace
             | ResourceType::Device
             | ResourceType::File
-            | ResourceType::IpcPort
             | ResourceType::IoPortRange
             | ResourceType::InterruptLine
     )
@@ -2052,6 +2076,26 @@ fn add_or_merge_granted_resource(list: &mut Vec<GrantedResource>, grant: Granted
     list.push(grant);
 }
 
+pub fn register_current_task_granted_resource(
+    resource_type: ResourceType,
+    resource: usize,
+    permissions: CapPermissions,
+) -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let mut mgr = SILO_MANAGER.lock();
+    let silo_id = mgr.silo_for_task(task.id).ok_or(SyscallError::PermissionDenied)?;
+    let silo = mgr.get_mut(silo_id)?;
+    add_or_merge_granted_resource(
+        &mut silo.granted_resources,
+        GrantedResource {
+            resource_type,
+            resource,
+            permissions,
+        },
+    );
+    Ok(())
+}
+
 /// Enforce that the current task may use a delegated capability.
 pub fn enforce_cap_for_current_task(handle: u64) -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -2087,6 +2131,24 @@ pub fn enforce_cap_for_current_task(handle: u64) -> Result<(), SyscallError> {
     Err(SyscallError::PermissionDenied)
 }
 
+pub fn enforce_registry_bind_for_current_task() -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    if is_admin_task(&task) {
+        return Ok(());
+    }
+    let mgr = SILO_MANAGER.lock();
+    let silo_id = mgr.silo_for_task(task.id).ok_or(SyscallError::PermissionDenied)?;
+    let silo = mgr.get(silo_id)?;
+    if silo.sandboxed {
+        return Err(SyscallError::PermissionDenied);
+    }
+    if silo.mode.registry.contains(RegistryMode::BIND) {
+        Ok(())
+    } else {
+        Err(SyscallError::PermissionDenied)
+    }
+}
+
 /// Enforce console access for the current task.
 ///
 /// Only admin tasks or tasks holding a Console capability with write permission
@@ -2096,6 +2158,15 @@ pub fn enforce_console_access() -> Result<(), SyscallError> {
     if is_admin_task(&task) {
         return Ok(());
     }
+    let mgr = SILO_MANAGER.lock();
+    if let Some(silo_id) = mgr.silo_for_task(task.id) {
+        if let Ok(silo) = mgr.get(silo_id) {
+            if matches!(silo.family, StrateFamily::SYS | StrateFamily::NET) {
+                return Ok(());
+            }
+        }
+    }
+    drop(mgr);
     let caps = unsafe { &*task.process.capabilities.get() };
     let required = CapPermissions {
         read: false,
@@ -2146,6 +2217,9 @@ pub fn sys_silo_suspend(handle: u64) -> Result<u64, SyscallError> {
     };
     let silo_id = resolve_silo_handle(handle, required)?;
 
+    // Lock is released before suspend_task (which takes the scheduler lock)
+    // to avoid lock-ordering deadlock. Tasks added between the two locks
+    // won't be suspended — acceptable best-effort trade-off.
     let tasks = {
         let mut mgr = SILO_MANAGER.lock();
         let silo = mgr.get_mut(silo_id)?;
@@ -2197,6 +2271,7 @@ pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
         }
     };
 
+    // Same lock-ordering pattern as sys_silo_suspend (see note there).
     for tid in &tasks {
         crate::process::resume_task(*tid);
     }
@@ -2342,10 +2417,10 @@ pub fn handle_user_fault(
         tasks
     };
 
-    // Kill all tasks in the silo (including current).
-    for tid in tasks {
-        crate::process::kill_task(tid);
+    for tid in &tasks {
+        crate::process::kill_task(*tid);
     }
-    // If task_id wasn't in the task list (stale mapping), kill it anyway.
-    crate::process::kill_task(task_id);
+    if !tasks.contains(&task_id) {
+        crate::process::kill_task(task_id);
+    }
 }

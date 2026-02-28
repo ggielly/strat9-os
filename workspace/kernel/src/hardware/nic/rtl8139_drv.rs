@@ -202,7 +202,7 @@ impl Rtl8139Device {
             return None;
         }
 
-        if (status & 0x0001) == 0 {
+        if (status & 0x0001) != 0 {
             let length = ((status >> 16) & 0x1FFF) as usize - 4;
             if length <= MTU {
                 let packet_start = unsafe { self.rx_buffer.add(rx_offset + 4) };
@@ -236,9 +236,9 @@ impl Rtl8139Device {
         let mut ports = self.ports.lock();
 
         let tx_status = ports.read32(0x10 + (id as u16) * 4);
-        if (tx_status & OWN) != 0 {
+        if (tx_status & OWN) == 0 {
             let mut timeout = 10000;
-            while (ports.read32(0x10 + (id as u16) * 4) & OWN) != 0 {
+            while (ports.read32(0x10 + (id as u16) * 4) & OWN) == 0 {
                 core::hint::spin_loop();
                 timeout -= 1;
                 if timeout == 0 {
@@ -251,8 +251,7 @@ impl Rtl8139Device {
             core::ptr::copy_nonoverlapping(data.as_ptr(), self.tx_buffers[id], data.len());
         }
 
-        let tx_cmd = (data.len() as u32) | TOK | OWN;
-        ports.write32(0x10 + (id as u16) * 4, tx_cmd);
+        ports.write32(0x10 + (id as u16) * 4, data.len() as u32);
 
         Ok(())
     }

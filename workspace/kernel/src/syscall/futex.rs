@@ -59,9 +59,12 @@ fn read_u32(addr: u64) -> Result<u32, SyscallError> {
 fn atomic_cmpxchg_u32(ptr: *mut u32, expected: u32, desired: u32) -> u32 {
     use core::sync::atomic::{AtomicU32, Ordering};
 
+    // SAFETY: ptr validated by UserSliceReadWrite in caller. Creating a
+    // shared &AtomicU32 from user memory is sound as long as the mapping
+    // stays live (guaranteed by the UserSlice guard held above).
     let atomic = unsafe { &*ptr.cast::<AtomicU32>() };
     atomic
-        .compare_exchange_weak(expected, desired, Ordering::SeqCst, Ordering::SeqCst)
+        .compare_exchange_weak(expected, desired, Ordering::AcqRel, Ordering::Acquire)
         .unwrap_or_else(|x| x)
 }
 
@@ -95,7 +98,8 @@ fn lock_two_queues<'a>(
     SpinLockGuard<'a, VecDeque<crate::process::TaskId>>,
     SpinLockGuard<'a, VecDeque<crate::process::TaskId>>,
 ) {
-    if addr1 <= addr2 {
+    debug_assert_ne!(addr1, addr2, "lock_two_queues: same address would deadlock");
+    if addr1 < addr2 {
         let g1 = q1.waiters.lock();
         let g2 = q2.waiters.lock();
         (g1, g2)
@@ -104,20 +108,6 @@ fn lock_two_queues<'a>(
         let g1 = q1.waiters.lock();
         (g1, g2)
     }
-}
-
-fn wake_from_queue(queue: &FutexQueue, max_wake: u32) -> u64 {
-    let mut woke = 0u64;
-    while woke < max_wake as u64 {
-        if let Some(id) = queue.pop_waiter() {
-            if wake_task(id) {
-                woke += 1;
-            }
-        } else {
-            break;
-        }
-    }
-    woke
 }
 
 fn wake_from_waiters(waiters: &mut VecDeque<crate::process::TaskId>, max_wake: u32) -> u64 {
@@ -180,17 +170,23 @@ fn do_requeue(
         }
     }
 
-    if queue1.is_empty() {
-        let mut map = FUTEX_QUEUES.lock();
-        map.remove(&addr1);
-    }
-
-    if queue2.is_empty() {
-        let mut map = FUTEX_QUEUES.lock();
-        map.remove(&addr2);
-    }
+    try_gc_queue(addr1, &queue1);
+    try_gc_queue(addr2, &queue2);
 
     Ok(woke + requeued)
+}
+
+fn try_gc_queue(addr: u64, queue: &Arc<FutexQueue>) {
+    let waiters = queue.waiters.lock();
+    if waiters.is_empty() {
+        drop(waiters);
+        let mut map = FUTEX_QUEUES.lock();
+        if let Some(q) = map.get(&addr) {
+            if q.is_empty() {
+                map.remove(&addr);
+            }
+        }
+    }
 }
 
 struct FutexWakeOpEncode {
@@ -234,10 +230,10 @@ impl FutexWakeOpEncode {
         let oparg = self.effective_oparg();
         match self.op {
             0 => oparg,
-            1 => oparg.wrapping_add(old_val),
-            2 => oparg | old_val,
-            3 => oparg & !old_val,
-            4 => oparg ^ old_val,
+            1 => old_val.wrapping_add(oparg),
+            2 => old_val | oparg,
+            3 => old_val & !oparg,
+            4 => old_val ^ oparg,
             _ => old_val,
         }
     }
@@ -260,41 +256,49 @@ pub fn sys_futex_wait(_addr: u64, _val: u32, _timeout_ns: u64) -> Result<u64, Sy
     let addr = _addr;
     let val = _val;
     let timeout_ns = _timeout_ns;
+
+    if (addr & 0x3) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
     let id = current_task_id().ok_or(SyscallError::PermissionDenied)?;
     let queue = get_queue(addr);
 
-    if timeout_ns != 0 {
+    let saved_deadline = if timeout_ns != 0 {
         let deadline = crate::syscall::time::current_time_ns().saturating_add(timeout_ns);
         if let Some(task) = crate::process::get_task_by_id(id) {
             task.wake_deadline_ns.store(deadline, Ordering::Relaxed);
         }
-    }
+        deadline
+    } else {
+        0
+    };
 
-    // Lost-wakeup hardening:
     // Hold the futex queue lock while validating the futex word and enqueuing.
-    // This closes the race window between `check value` and `enqueue`.
     {
         let mut waiters = queue.waiters.lock();
         let cur = read_u32(addr)?;
         if cur != val {
-            return Err(SyscallError::Again); // EAGAIN
+            if let Some(task) = crate::process::get_task_by_id(id) {
+                task.wake_deadline_ns.store(0, Ordering::Relaxed);
+            }
+            return Err(SyscallError::Again);
         }
         waiters.push_back(id);
     }
 
     block_current_task();
 
-    // Remove ourselves if still queued (timeout or spurious wake).
     queue.remove_waiter(id);
+    try_gc_queue(addr, &queue);
 
     if let Some(task) = crate::process::get_task_by_id(id) {
-        let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
         task.wake_deadline_ns.store(0, Ordering::Relaxed);
-        if timeout_ns != 0 && deadline != 0 {
-            let now = crate::syscall::time::current_time_ns();
-            if now >= deadline {
-                return Err(SyscallError::TimedOut);
-            }
+    }
+    if timeout_ns != 0 && saved_deadline != 0 {
+        let now = crate::syscall::time::current_time_ns();
+        if now >= saved_deadline {
+            return Err(SyscallError::TimedOut);
         }
     }
 
@@ -325,10 +329,7 @@ pub fn sys_futex_wake(_addr: u64, _max_wake: u32) -> Result<u64, SyscallError> {
         }
     }
 
-    if queue.is_empty() {
-        let mut map = FUTEX_QUEUES.lock();
-        map.remove(&addr);
-    }
+    try_gc_queue(addr, &queue);
 
     Ok(woke)
 }
@@ -351,13 +352,59 @@ pub fn sys_futex_cmp_requeue(
     _addr2: u64,
     _expected_val: u32,
 ) -> Result<u64, SyscallError> {
-    // Linux/Asterinas model: validate current value first, then perform the same
-    // wake+requeue operation as FUTEX_REQUEUE.
-    let cur = read_u32(_addr1)?;
-    if cur != _expected_val {
-        return Err(SyscallError::Again); // EAGAIN
+    if _addr1 == _addr2 {
+        let cur = read_u32(_addr1)?;
+        if cur != _expected_val {
+            return Err(SyscallError::Again);
+        }
+        return sys_futex_wake(_addr1, _max_wake);
     }
-    do_requeue(_addr1, _max_wake, _max_requeue, _addr2)
+
+    let queue1 = {
+        let map = FUTEX_QUEUES.lock();
+        map.get(&_addr1).cloned()
+    };
+    let Some(queue1) = queue1 else {
+        let cur = read_u32(_addr1)?;
+        if cur != _expected_val {
+            return Err(SyscallError::Again);
+        }
+        return Ok(0);
+    };
+
+    let queue2 = get_queue(_addr2);
+    let mut woke = 0u64;
+    let mut requeued = 0u64;
+
+    {
+        let (mut w1, mut w2) = lock_two_queues(_addr1, &queue1, _addr2, &queue2);
+        let cur = read_u32(_addr1)?;
+        if cur != _expected_val {
+            return Err(SyscallError::Again);
+        }
+        while woke < _max_wake as u64 {
+            if let Some(id) = w1.pop_front() {
+                if wake_task(id) {
+                    woke += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        while requeued < _max_requeue as u64 {
+            if let Some(id) = w1.pop_front() {
+                w2.push_back(id);
+                requeued += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    try_gc_queue(_addr1, &queue1);
+    try_gc_queue(_addr2, &queue2);
+
+    Ok(woke + requeued)
 }
 
 /// SYS_FUTEX_WAKE_OP: Wake with atomic operation
@@ -395,13 +442,7 @@ pub fn sys_futex_wake_op(
         }
         woke
     };
-    if q1.is_empty() {
-        let mut map = FUTEX_QUEUES.lock();
-        map.remove(&addr1);
-    }
-    if q2.is_empty() {
-        let mut map = FUTEX_QUEUES.lock();
-        map.remove(&addr2);
-    }
+    try_gc_queue(addr1, &q1);
+    try_gc_queue(addr2, &q2);
     Ok(woke)
 }

@@ -187,7 +187,7 @@ impl SigStackRaw {
         bytes[0..8].copy_from_slice(&self.ss_sp.to_ne_bytes());
         bytes[8..12].copy_from_slice(&self.ss_flags.to_ne_bytes());
         bytes[12..16].copy_from_slice(&(self.ss_size as u32).to_ne_bytes());
-        bytes[16..24].copy_from_slice(&(self.ss_size >> 32).to_ne_bytes());
+        bytes[16..20].copy_from_slice(&((self.ss_size >> 32) as u32).to_ne_bytes());
         bytes
     }
 
@@ -196,7 +196,7 @@ impl SigStackRaw {
             ss_sp: u64::from_ne_bytes(bytes[0..8].try_into().unwrap()),
             ss_flags: i32::from_ne_bytes(bytes[8..12].try_into().unwrap()),
             ss_size: (u32::from_ne_bytes(bytes[12..16].try_into().unwrap()) as usize)
-                | ((u32::from_ne_bytes(bytes[16..24].try_into().unwrap()) as usize) << 32),
+                | ((u32::from_ne_bytes(bytes[16..20].try_into().unwrap()) as usize) << 32),
         }
     }
 }

@@ -114,35 +114,34 @@ pub fn sys_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, SyscallError> {
         }
     }
 
-    // Block until woken by timer or signal
-    block_current_task();
+    loop {
+        block_current_task();
 
-    // We've been woken - check if it was due to deadline or signal
-    if let Some(task) = crate::process::get_task_by_id(task_id) {
-        let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
-        let current_ns = current_time_ns();
+        if let Some(task) = crate::process::get_task_by_id(task_id) {
+            let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
+            let now = current_time_ns();
 
-        // Clear the deadline
-        task.wake_deadline_ns.store(0, Ordering::Relaxed);
-
-        // Check if we were interrupted by a signal (deadline not yet reached)
-        if deadline != 0 && current_ns < deadline {
-            // Signal interrupted - calculate remaining time
-            if rem_ptr != 0 {
-                let remaining_ns = deadline - current_ns;
-                let remaining = TimeSpec::from_nanos(remaining_ns);
-
-                let rem_slice =
-                    UserSliceReadWrite::new(rem_ptr, core::mem::size_of::<TimeSpec>() as usize)
-                        .map_err(|_| SyscallError::Fault)?;
-
-                rem_slice
-                    .write_val(&remaining)
-                    .map_err(|_| SyscallError::Fault)?;
+            if deadline == 0 || now >= deadline {
+                task.wake_deadline_ns.store(0, Ordering::Relaxed);
+                return Ok(0);
             }
-            return Err(SyscallError::Interrupted); // EINTR
+
+            if crate::process::has_pending_signals() {
+                task.wake_deadline_ns.store(0, Ordering::Relaxed);
+                if rem_ptr != 0 {
+                    let remaining_ns = deadline - now;
+                    let remaining = TimeSpec::from_nanos(remaining_ns);
+                    let rem_slice =
+                        UserSliceReadWrite::new(rem_ptr, core::mem::size_of::<TimeSpec>() as usize)
+                            .map_err(|_| SyscallError::Fault)?;
+                    rem_slice
+                        .write_val(&remaining)
+                        .map_err(|_| SyscallError::Fault)?;
+                }
+                return Err(SyscallError::Interrupted);
+            }
+        } else {
+            return Err(SyscallError::Fault);
         }
     }
-
-    Ok(0)
 }

@@ -20,25 +20,32 @@ use wasmi::{Caller, Config, Engine, Linker, Module, Store, Instance, StoreLimits
 // MEMORY MANAGEMENT (TALC + BRK)
 // ---------------------------------------------------------------------------
 
+struct BrkGrower;
+
+unsafe impl OomHandler for BrkGrower {
+    fn handle_oom(talc: &mut Talc<Self>, layout: Layout) -> Result<(), ()> {
+        let current_brk = call::brk(0).map_err(|_| ())?;
+        let growth = (layout.size().max(layout.align()) + 65536) & !4095;
+        let new_brk = call::brk(current_brk + growth).map_err(|_| ())?;
+        let actual = new_brk.saturating_sub(current_brk);
+        if actual == 0 {
+            return Err(());
+        }
+        unsafe {
+            talc.claim(Span::from_base_size(current_brk as *mut u8, actual))
+                .map_err(|_| ())?;
+        }
+        Ok(())
+    }
+}
+
 #[global_allocator]
-static ALLOCATOR: Talck<spin::Mutex<()>, ErrOnOom> = Talck::new(Talc::new(ErrOnOom));
+static ALLOCATOR: Talck<spin::Mutex<()>, BrkGrower> = Talck::new(Talc::new(BrkGrower));
 
 #[alloc_error_handler]
-fn alloc_error(layout: Layout) -> ! {
-    let mut talc = ALLOCATOR.lock();
-    let current_brk = call::brk(0).expect("failed to get brk");
-    let growth = (layout.size() + 8192) & !4095; 
-    
-    if let Ok(_new_brk) = call::brk(current_brk + growth) {
-        unsafe {
-            let span = Span::from_base_size(current_brk as *mut u8, growth);
-            let _ = talc.claim(span);
-        }
-    } else {
-        let _ = call::write(1, b"[strate-wasm] Fatal: OOM at brk\n");
-        call::exit(12);
-    }
-    loop {}
+fn alloc_error(_layout: Layout) -> ! {
+    let _ = call::write(1, b"[strate-wasm] Fatal: OOM\n");
+    call::exit(12);
 }
 
 // ---------------------------------------------------------------------------
@@ -71,10 +78,11 @@ fn extract_string(payload: &[u8], offset: usize, len: usize) -> String {
     s
 }
 
-fn send_response(target: usize, status: u32) {
-    let mut msg = IpcMessage::new(0);
-    msg.payload[0] = status as u8;
-    let _ = call::ipc_send(target, &msg);
+fn send_response(original_sender: u64, status: u32) {
+    let mut msg = IpcMessage::new(0x80);
+    msg.sender = original_sender;
+    msg.payload[0..4].copy_from_slice(&status.to_le_bytes());
+    let _ = call::ipc_reply(&msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +178,7 @@ pub unsafe extern "C" fn _start() -> ! {
         let mut msg = IpcMessage::new(0);
         match call::ipc_recv(port_h, &mut msg) {
             Ok(_) => {
-                let src = msg.sender as usize;
+                let src = msg.sender;
                 match msg.msg_type {
                     OP_WASM_LOAD_PATH => {
                         let path = extract_string(&msg.payload, 1, msg.payload[0] as usize);
@@ -202,7 +210,7 @@ pub unsafe extern "C" fn _start() -> ! {
                     }
 
                     OP_WASM_RUN_MAIN => {
-                        if let Some(instance) = current_instance {
+                        if let Some(ref instance) = current_instance {
                             let _ = store.set_fuel(10_000_000);
                             if let Ok(func) = instance.get_typed_func::<(), ()>(&store, "_start") {
                                 match func.call(&mut store, ()) {

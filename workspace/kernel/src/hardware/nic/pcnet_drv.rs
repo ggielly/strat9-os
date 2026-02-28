@@ -234,12 +234,7 @@ impl PcnetDevice {
             init_virt.add(8).write(self.mac[4]);
             init_virt.add(9).write(self.mac[5]);
 
-            init_virt.add(12).write((init_phys & 0xFFFF) as u8);
-            init_virt.add(13).write(((init_phys >> 8) & 0xFF) as u8);
-            init_virt.add(14).write(((init_phys >> 16) & 0xFF) as u8);
-            init_virt.add(15).write(((init_phys >> 24) & 0xFF) as u8);
-
-            init_virt.add(20).write((self.rx_des_phys & 0xFFFF) as u8);
+            init_virt.add(20).write((self.rx_des_phys & 0xFF) as u8);
             init_virt.add(21).write(((self.rx_des_phys >> 8) & 0xFF) as u8);
             init_virt.add(22).write(((self.rx_des_phys >> 16) & 0xFF) as u8);
             init_virt.add(23).write(((self.rx_des_phys >> 24) & 0xFF) as u8);
@@ -250,8 +245,8 @@ impl PcnetDevice {
             init_virt.add(27).write(((self.tx_des_phys >> 24) & 0xFF) as u8);
         }
 
-        ports.write_csr(1, (init_phys & 0xFFFFFFFF) as u32);
-        ports.write_csr(2, (init_phys >> 32) as u32);
+        ports.write_csr(1, (init_phys & 0xFFFF) as u32);
+        ports.write_csr(2, ((init_phys >> 16) & 0xFFFF) as u32);
 
         let mut csr_0 = ports.read_csr(0);
         csr_0 |= 1 << CSR0_INIT;
@@ -279,9 +274,11 @@ impl PcnetDevice {
             desc.add(0).write((buf_addr & 0xFF) as u8);
             desc.add(1).write(((buf_addr >> 8) & 0xFF) as u8);
             desc.add(2).write(((buf_addr >> 16) & 0xFF) as u8);
-            desc.add(3).write(0x80);
-            desc.add(4).write((!MTU & 0xFFF) as u8);
-            desc.add(5).write(((!MTU >> 8) & 0xF) as u8);
+            desc.add(3).write(((buf_addr >> 24) & 0xFF) as u8);
+            let bcnt = (!(MTU as u16)).wrapping_add(1) & 0x0FFF;
+            desc.add(4).write((bcnt & 0xFF) as u8);
+            desc.add(5).write(((bcnt >> 8) as u8) | 0xF0);
+            desc.add(7).write(0x80);
         }
     }
 
@@ -294,7 +291,7 @@ impl PcnetDevice {
             desc.add(0).write((buf_addr & 0xFF) as u8);
             desc.add(1).write(((buf_addr >> 8) & 0xFF) as u8);
             desc.add(2).write(((buf_addr >> 16) & 0xFF) as u8);
-            desc.add(3).write(0x83);
+            desc.add(3).write(((buf_addr >> 24) & 0xFF) as u8);
         }
     }
 
@@ -313,7 +310,7 @@ impl PcnetDevice {
             let enp = (status & (1 << DE_ENP)) != 0;
 
             if stp && enp {
-                let len_offset = rx_id * DESC_LEN + 4;
+                let len_offset = rx_id * DESC_LEN + 8;
                 let len_lo = self.rx_des.add(len_offset).read() as usize;
                 let len_hi = self.rx_des.add(len_offset + 1).read() as usize & 0xF;
                 let len = ((len_hi << 8) | len_lo) & 0xFFF;
@@ -364,8 +361,9 @@ impl PcnetDevice {
             core::ptr::copy_nonoverlapping(data.as_ptr(), self.tx_buffers[tx_id], data.len());
 
             let desc = self.tx_des.add(tx_id * DESC_LEN);
-            desc.add(4).write((data.len() & 0xFFF) as u8);
-            desc.add(5).write(((data.len() >> 8) & 0xF) as u8);
+            let bcnt = (!(data.len() as u16)).wrapping_add(1) & 0x0FFF;
+            desc.add(4).write((bcnt & 0xFF) as u8);
+            desc.add(5).write(((bcnt >> 8) as u8) | 0xF0);
             desc.add(6).write(0);
             desc.add(7).write(0x83);
 

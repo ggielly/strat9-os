@@ -131,6 +131,24 @@ fn icmp_checksum(data: &[u8]) -> u16 {
 const MAX_FRAME_SIZE: usize = 1514;
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 const NANOS_PER_MICRO: u64 = 1_000;
+static RX_ERR_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
+static TX_ERR_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
+
+fn log_errno(prefix: &str, err: strate_net::syscalls::Error) {
+    use core::fmt::Write;
+    let mut buf = [0u8; 96];
+    let len = {
+        let mut w = BufWriter {
+            buf: &mut buf,
+            pos: 0,
+        };
+        let _ = write!(w, "{}{}\n", prefix, err.to_errno());
+        w.pos
+    };
+    if let Ok(s) = core::str::from_utf8(&buf[..len]) {
+        debug_log(s);
+    }
+}
 
 fn now_instant() -> Instant {
     match clock_gettime_ns() {
@@ -163,6 +181,15 @@ impl Device for Strat9NetDevice {
             Ok(n) if n > 0 => {
                 let len = core::cmp::min(n, MAX_FRAME_SIZE);
                 Some((Strat9RxToken { buf, len }, Strat9TxToken))
+            }
+            Err(e) => {
+                if e.to_errno() != 11 {
+                    if RX_ERR_LOG_BUDGET.load(Ordering::Relaxed) > 0 {
+                        RX_ERR_LOG_BUDGET.fetch_sub(1, Ordering::Relaxed);
+                        log_errno("[strate-net] net_recv errno=", e);
+                    }
+                }
+                None
             }
             _ => None,
         }
@@ -207,7 +234,12 @@ impl phy::TxToken for Strat9TxToken {
         }
         let mut buf = [0u8; MAX_FRAME_SIZE];
         let ret = f(&mut buf[..len]);
-        let _ = net_send(&buf[..len]);
+        if let Err(e) = net_send(&buf[..len]) {
+            if TX_ERR_LOG_BUDGET.load(Ordering::Relaxed) > 0 {
+                TX_ERR_LOG_BUDGET.fetch_sub(1, Ordering::Relaxed);
+                log_errno("[strate-net] net_send errno=", e);
+            }
+        }
         ret
     }
 }
@@ -220,6 +252,14 @@ impl phy::TxToken for Strat9TxToken {
 struct IpConfig {
     /// Assigned address + prefix length (e.g. 192.168.1.100/24)
     address: smoltcp::wire::Ipv4Cidr,
+    /// Host address only (e.g. 192.168.1.100)
+    host: Ipv4Address,
+    /// Prefix length (e.g. 24)
+    prefix_len: u8,
+    /// Netmask derived from prefix (e.g. 255.255.255.0)
+    netmask: Ipv4Address,
+    /// Broadcast derived from host+prefix (e.g. 192.168.1.255)
+    broadcast: Ipv4Address,
     /// Default gateway (optional)
     gateway: Option<Ipv4Address>,
     /// Up to 3 DNS servers
@@ -250,6 +290,33 @@ fn ipv4_addr_to_str(addr: &Ipv4Address, buf: &mut [u8]) -> usize {
     let a = addr.octets();
     let _ = write!(w, "{}.{}.{}.{}\n", a[0], a[1], a[2], a[3]);
     w.pos
+}
+
+fn u8_to_str(v: u8, buf: &mut [u8]) -> usize {
+    use core::fmt::Write;
+    let mut w = BufWriter { buf, pos: 0 };
+    let _ = write!(w, "{}\n", v);
+    w.pos
+}
+
+fn mask_from_prefix(prefix: u8) -> Ipv4Address {
+    let mask: u32 = if prefix == 0 {
+        0
+    } else if prefix >= 32 {
+        u32::MAX
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    let b = mask.to_be_bytes();
+    Ipv4Address::new(b[0], b[1], b[2], b[3])
+}
+
+fn broadcast_from_host_prefix(host: Ipv4Address, prefix: u8) -> Ipv4Address {
+    let h = u32::from_be_bytes(host.octets());
+    let m = u32::from_be_bytes(mask_from_prefix(prefix).octets());
+    let b = (h & m) | (!m);
+    let o = b.to_be_bytes();
+    Ipv4Address::new(o[0], o[1], o[2], o[3])
 }
 
 fn route_to_str(gateway: &Ipv4Address, buf: &mut [u8]) -> usize {
@@ -376,7 +443,7 @@ struct NetworkStrate {
     dhcp_handle: SocketHandle,
     icmp_handle: SocketHandle,
     ip_config: Option<IpConfig>,
-    /// VFS handles: file_id → virtual path ("ip", "gateway", "route", "dns", "ping/<ip>", "" = root dir)
+    /// VFS handles: file_id → virtual path ("/net/*")
     open_handles: BTreeMap<u64, String>,
     next_fid: u64,
     /// Last ping that was sent, waiting for reply
@@ -462,8 +529,16 @@ impl NetworkStrate {
                     *slot = Some(server);
                 }
 
+                let host = config.address.address();
+                let prefix_len = config.address.prefix_len();
+                let netmask = mask_from_prefix(prefix_len);
+                let broadcast = broadcast_from_host_prefix(host, prefix_len);
                 self.ip_config = Some(IpConfig {
                     address: config.address,
+                    host,
+                    prefix_len,
+                    netmask,
+                    broadcast,
                     gateway: config.router,
                     dns,
                 });
@@ -576,7 +651,8 @@ impl NetworkStrate {
                 self.open_handles.insert(fid, String::from(""));
                 reply_open(msg.sender, fid, u64::MAX, 1)
             }
-            "ip" | "gateway" | "route" | "dns" => {
+            "ip" | "address" | "prefix" | "netmask" | "broadcast" | "gateway" | "route"
+            | "dns" => {
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
@@ -603,7 +679,8 @@ impl NetworkStrate {
 
         match path.as_str() {
             "" => {
-                let listing = b"ip\ngateway\nroute\ndns\nping\n";
+                let listing =
+                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\ndns\nping\n";
                 let start = (offset as usize).min(listing.len());
                 reply_read(msg.sender, &listing[start..])
             }
@@ -614,6 +691,42 @@ impl NetworkStrate {
                     reply_read(msg.sender, &tmp[start..n])
                 } else {
                     reply_read(msg.sender, b"0.0.0.0/0\n")
+                }
+            }
+            "address" => {
+                if let Some(ref cfg) = self.ip_config {
+                    let n = ipv4_addr_to_str(&cfg.host, &mut tmp);
+                    let start = (offset as usize).min(n);
+                    reply_read(msg.sender, &tmp[start..n])
+                } else {
+                    reply_read(msg.sender, b"0.0.0.0\n")
+                }
+            }
+            "prefix" => {
+                if let Some(ref cfg) = self.ip_config {
+                    let n = u8_to_str(cfg.prefix_len, &mut tmp);
+                    let start = (offset as usize).min(n);
+                    reply_read(msg.sender, &tmp[start..n])
+                } else {
+                    reply_read(msg.sender, b"0\n")
+                }
+            }
+            "netmask" => {
+                if let Some(ref cfg) = self.ip_config {
+                    let n = ipv4_addr_to_str(&cfg.netmask, &mut tmp);
+                    let start = (offset as usize).min(n);
+                    reply_read(msg.sender, &tmp[start..n])
+                } else {
+                    reply_read(msg.sender, b"0.0.0.0\n")
+                }
+            }
+            "broadcast" => {
+                if let Some(ref cfg) = self.ip_config {
+                    let n = ipv4_addr_to_str(&cfg.broadcast, &mut tmp);
+                    let start = (offset as usize).min(n);
+                    reply_read(msg.sender, &tmp[start..n])
+                } else {
+                    reply_read(msg.sender, b"0.0.0.0\n")
                 }
             }
             "gateway" => {

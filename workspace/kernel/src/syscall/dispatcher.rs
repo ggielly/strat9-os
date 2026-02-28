@@ -25,7 +25,59 @@ use crate::{
     silo,
 };
 use alloc::{sync::Arc, vec};
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+static NET_SEND_ERR_LOG_BUDGET: AtomicU32 = AtomicU32::new(32);
+static NET_RECV_ERR_LOG_BUDGET: AtomicU32 = AtomicU32::new(32);
+static DHCP_TRACE_LOG_BUDGET: AtomicU32 = AtomicU32::new(64);
+
+fn trace_dhcp_frame(tag: &str, frame: &[u8]) {
+    if DHCP_TRACE_LOG_BUDGET.fetch_sub(1, Ordering::Relaxed) == 0 {
+        return;
+    }
+    if frame.len() < 14 {
+        return;
+    }
+    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+    if ethertype != 0x0800 {
+        return;
+    }
+    if frame.len() < 34 {
+        return;
+    }
+    let ip_hlen = ((frame[14] & 0x0f) as usize) * 4;
+    if ip_hlen < 20 || frame.len() < 14 + ip_hlen + 8 {
+        return;
+    }
+    if frame[23] != 17 {
+        return;
+    }
+    let udp = 14 + ip_hlen;
+    let src_port = u16::from_be_bytes([frame[udp], frame[udp + 1]]);
+    let dst_port = u16::from_be_bytes([frame[udp + 2], frame[udp + 3]]);
+    let is_dhcp = (src_port == 68 && dst_port == 67) || (src_port == 67 && dst_port == 68);
+    if !is_dhcp {
+        return;
+    }
+    let mut xid: u32 = 0;
+    let bootp = udp + 8;
+    if frame.len() >= bootp + 8 {
+        xid = u32::from_be_bytes([
+            frame[bootp + 4],
+            frame[bootp + 5],
+            frame[bootp + 6],
+            frame[bootp + 7],
+        ]);
+    }
+    crate::serial_println!(
+        "[dhcp-trace] {} src_port={} dst_port={} len={} xid=0x{:08x}",
+        tag,
+        src_port,
+        dst_port,
+        frame.len(),
+        xid
+    );
+}
 
 /// Main dispatch function called from `syscall_entry` assembly.
 ///
@@ -842,7 +894,19 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
     let mut kbuf = vec![0u8; buf_len as usize];
 
-    let n = device.receive(&mut kbuf).map_err(SyscallError::from)?;
+    let n = match device.receive(&mut kbuf) {
+        Ok(n) => n,
+        Err(e) => {
+            let se = SyscallError::from(e);
+            if se != SyscallError::Again
+                && NET_RECV_ERR_LOG_BUDGET.fetch_sub(1, Ordering::Relaxed) > 0
+            {
+                crate::serial_println!("[net-sys] recv error: {:?} -> {}", e, se.name());
+            }
+            return Err(se);
+        }
+    };
+    trace_dhcp_frame("rx", &kbuf[..n]);
 
     let user = UserSliceWrite::new(buf_ptr, n)?;
     user.copy_from(&kbuf[..n]);
@@ -853,8 +917,15 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
     let user = UserSliceRead::new(buf_ptr, buf_len as usize)?;
     let kbuf = user.read_to_vec();
+    trace_dhcp_frame("tx", &kbuf);
 
-    device.transmit(&kbuf).map_err(SyscallError::from)?;
+    if let Err(e) = device.transmit(&kbuf) {
+        let se = SyscallError::from(e);
+        if NET_SEND_ERR_LOG_BUDGET.fetch_sub(1, Ordering::Relaxed) > 0 {
+            crate::serial_println!("[net-sys] send error: {:?} -> {}", e, se.name());
+        }
+        return Err(se);
+    }
 
     Ok(buf_len)
 }
@@ -916,17 +987,16 @@ fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     // Stamp identity
     msg.sender = task.id.as_u64();
     
-    // Stamp structured security label (Coloration)
-    if let Some((sid, _label, _mem_used, _mem_min, _mem_max)) = crate::silo::silo_info_for_task(task.id) {
-        // Recover full silo info to get tier and family
-        if let Some(snapshot) = crate::silo::list_silos_snapshot().into_iter().find(|s| s.id == sid) {
-            let structured_label = crate::ipc::message::IpcLabel {
-                tier: snapshot.tier as u8,
-                family: 5, // Default to USR for now, need proper family tracking
-                compartment: sid as u16,
-            };
-            // Pack into u32 (simple cast for now as layout is 1+1+2 bytes)
-            msg.flags = unsafe { core::mem::transmute(structured_label) };
+    if msg.flags == 0 {
+        if let Some((sid, _label, _mem_used, _mem_min, _mem_max)) = crate::silo::silo_info_for_task(task.id) {
+            if let Some(snapshot) = crate::silo::list_silos_snapshot().into_iter().find(|s| s.id == sid) {
+                let structured_label = crate::ipc::message::IpcLabel {
+                    tier: snapshot.tier as u8,
+                    family: 5,
+                    compartment: sid as u16,
+                };
+                msg.flags = unsafe { core::mem::transmute(structured_label) };
+            }
         }
     }
 
@@ -1130,7 +1200,7 @@ fn sys_ipc_reply(_msg_ptr: u64) -> Result<u64, SyscallError> {
 }
 
 fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, SyscallError> {
-    crate::silo::require_silo_admin()?;
+    crate::silo::enforce_registry_bind_for_current_task()?;
     crate::silo::enforce_cap_for_current_task(port)?;
     if _path_ptr == 0 || _path_len == 0 {
         return Err(SyscallError::Fault);
@@ -1179,19 +1249,26 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
     if should_bootstrap {
         let mut seeded_handle: u32 = 0;
         if let Some(device) = crate::hardware::storage::virtio_block::get_device() {
+            let volume_resource = device as *const _ as usize;
+            let volume_perms = CapPermissions {
+                read: true,
+                write: true,
+                execute: false,
+                grant: true,
+                revoke: true,
+            };
             let volume_cap = crate::capability::get_capability_manager().create_capability(
                 ResourceType::Volume,
-                device as *const _ as usize,
-                CapPermissions {
-                    read: true,
-                    write: true,
-                    execute: false,
-                    grant: true,
-                    revoke: true,
-                },
+                volume_resource,
+                volume_perms,
             );
             let task_caps = unsafe { &mut *task.process.capabilities.get() };
             let id = task_caps.insert(volume_cap);
+            let _ = crate::silo::register_current_task_granted_resource(
+                ResourceType::Volume,
+                volume_resource,
+                volume_perms,
+            );
             if id.as_u64() <= u32::MAX as u64 {
                 seeded_handle = id.as_u64() as u32;
             }
