@@ -12,12 +12,11 @@ use core::{
 };
 use strate_net::{syscalls::*, IpcMessage, OPCODE_CLOSE, OPCODE_OPEN, OPCODE_READ, OPCODE_WRITE};
 
-// TODO - implement a proper userspace heap and remove the bump allocator
-// ---------------------------------------------------------------------------
-// Minimal bump allocator (shared with other silos until userspace heap is ready)
-// ---------------------------------------------------------------------------
-
-alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 1024 * 1024;);
+alloc_freelist::define_freelist_brk_allocator!(
+    pub struct BumpAllocator;
+    brk = strat9_syscall::call::brk;
+    heap_max = 16 * 1024 * 1024;
+);
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
@@ -306,6 +305,16 @@ fn dns_list_to_str(dns: &[Option<Ipv4Address>; 3], buf: &mut [u8]) -> usize {
     w.pos
 }
 
+fn parse_ipv4_cidr(s: &str) -> Option<smoltcp::wire::Ipv4Cidr> {
+    let slash = s.find('/')?;
+    let ip = parse_ipv4(&s[..slash])?;
+    let prefix = s[slash + 1..].parse::<u8>().ok()?;
+    if prefix > 32 {
+        return None;
+    }
+    Some(smoltcp::wire::Ipv4Cidr::new(ip, prefix))
+}
+
 // ---------------------------------------------------------------------------
 // IPC reply builders  (match the layout expected by kernel IpcScheme)
 // ---------------------------------------------------------------------------
@@ -423,6 +432,7 @@ struct NetworkStrate {
     /// Received reply: (seq, rtt_us)
     ping_reply: Option<(u16, u64)>,
     ping_ident: u16,
+    dhcp_enabled: bool,
 }
 
 impl NetworkStrate {
@@ -463,6 +473,7 @@ impl NetworkStrate {
             pending_ping: None,
             ping_reply: None,
             ping_ident: 0x9001,
+            dhcp_enabled: true,
         }
     }
 
@@ -471,6 +482,9 @@ impl NetworkStrate {
     // -----------------------------------------------------------------------
 
     fn process_dhcp(&mut self) {
+        if !self.dhcp_enabled {
+            return;
+        }
         let event = self
             .sockets
             .get_mut::<dhcpv4::Socket>(self.dhcp_handle)
@@ -554,6 +568,43 @@ impl NetworkStrate {
 
         let socket = self.sockets.get_mut::<dns::Socket>(self.dns_handle);
         socket.update_servers(&servers[..count]);
+    }
+
+    fn apply_ipv4_config(
+        &mut self,
+        address: smoltcp::wire::Ipv4Cidr,
+        gateway: Option<Ipv4Address>,
+        dns: [Option<Ipv4Address>; 3],
+    ) {
+        let host = address.address();
+        let prefix_len = address.prefix_len();
+        let netmask = mask_from_prefix(prefix_len);
+        let broadcast = broadcast_from_host_prefix(host, prefix_len);
+
+        self.interface.update_ip_addrs(|addrs| {
+            let cidr = IpCidr::new(IpAddress::Ipv4(host), prefix_len);
+            if let Some(slot) = addrs.iter_mut().next() {
+                *slot = cidr;
+            } else {
+                let _ = addrs.push(cidr);
+            }
+        });
+
+        let _ = self.interface.routes_mut().remove_default_ipv4_route();
+        if let Some(gw) = gateway {
+            let _ = self.interface.routes_mut().add_default_ipv4_route(gw);
+        }
+
+        self.ip_config = Some(IpConfig {
+            address,
+            host,
+            prefix_len,
+            netmask,
+            broadcast,
+            gateway,
+            dns,
+        });
+        self.refresh_dns_servers();
     }
 
     fn resolve_hostname_blocking(&mut self, name: &str) -> core::result::Result<Ipv4Address, i32> {
@@ -704,7 +755,7 @@ impl NetworkStrate {
                 reply_open(msg.sender, fid, u64::MAX, 1)
             }
             "ip" | "address" | "prefix" | "netmask" | "broadcast" | "gateway" | "route"
-            | "dns" | "resolve" | "tcp" => {
+            | "routes" | "dns" | "resolve" | "tcp" | "dhcp" => {
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
@@ -743,6 +794,22 @@ impl NetworkStrate {
                 self.open_handles.insert(fid, String::from(path));
                 self.tcp_listeners
                     .insert(fid, TcpListenerState { socket, port });
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("route/add/") || p.starts_with("route/del/")
+                || p.starts_with("route/default/set/") || p == "route/default/clear" =>
+            {
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("ip/set/")
+                || p.starts_with("dns/set/")
+                || p == "dhcp/enable"
+                || p == "dhcp/disable" =>
+            {
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
             _ => IpcMessage::error_reply(msg.sender, -2),
@@ -808,7 +875,7 @@ impl NetworkStrate {
         match path.as_str() {
             "" => {
                 let listing =
-                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\ndns\nresolve\nping\ntcp\n";
+                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\nroutes\ndns\ndhcp\nresolve\nping\ntcp\n";
                 let start = (offset as usize).min(listing.len());
                 reply_read(msg.sender, &listing[start..])
             }
@@ -875,6 +942,13 @@ impl NetworkStrate {
                 }
                 reply_read(msg.sender, b"0.0.0.0\n")
             }
+            "dhcp" => {
+                if self.dhcp_enabled {
+                    reply_read(msg.sender, b"on\n")
+                } else {
+                    reply_read(msg.sender, b"off\n")
+                }
+            }
             "route" => {
                 if let Some(ref cfg) = self.ip_config {
                     if let Some(gw) = cfg.gateway {
@@ -884,6 +958,45 @@ impl NetworkStrate {
                     }
                 }
                 reply_read(msg.sender, b"none\n")
+            }
+            "routes" => {
+                use core::fmt::Write;
+                let mut out = [0u8; 256];
+                let n = {
+                    let mut w = BufWriter {
+                        buf: &mut out,
+                        pos: 0,
+                    };
+                    let mut any = false;
+                    self.interface.routes_mut().update(|table| {
+                        for r in table.iter() {
+                            if let (IpCidr::Ipv4(c), IpAddress::Ipv4(gw)) = (r.cidr, r.via_router) {
+                                let ca = c.address().octets();
+                                let ga = gw.octets();
+                                let _ = write!(
+                                    w,
+                                    "{}.{}.{}.{}/{} via {}.{}.{}.{}\n",
+                                    ca[0],
+                                    ca[1],
+                                    ca[2],
+                                    ca[3],
+                                    c.prefix_len(),
+                                    ga[0],
+                                    ga[1],
+                                    ga[2],
+                                    ga[3]
+                                );
+                                any = true;
+                            }
+                        }
+                    });
+                    if !any {
+                        let _ = write!(w, "none\n");
+                    }
+                    w.pos
+                };
+                let start = (offset as usize).min(n);
+                reply_read(msg.sender, &out[start..n])
             }
             "resolve" => reply_read(msg.sender, b"use /net/resolve/<hostname>\n"),
             "tcp" => reply_read(msg.sender, b"use /net/tcp/listen/<port>\n"),
@@ -941,6 +1054,162 @@ impl NetworkStrate {
                 return IpcMessage::error_reply(msg.sender, -11); // EAGAIN
             }
             return IpcMessage::error_reply(msg.sender, -22);
+        }
+
+        if let Some(cidr_s) = path.strip_prefix("ip/set/") {
+            let Some(cidr) = parse_ipv4_cidr(cidr_s) else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            self.dhcp_enabled = false;
+            let (gateway, dns) = if let Some(ref cfg) = self.ip_config {
+                (cfg.gateway, cfg.dns)
+            } else {
+                (None, [None; 3])
+            };
+            self.apply_ipv4_config(cidr, gateway, dns);
+            let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+            return reply_write(msg.sender, data_len);
+        }
+
+        if let Some(rest) = path.strip_prefix("dns/set/") {
+            let mut parts = rest.split('/');
+            let Some(idx_s) = parts.next() else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            let Some(ip_s) = parts.next() else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            if parts.next().is_some() {
+                return IpcMessage::error_reply(msg.sender, -22);
+            }
+            let Some(idx) = idx_s.parse::<usize>().ok() else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            if idx >= 3 {
+                return IpcMessage::error_reply(msg.sender, -22);
+            }
+            let Some(ip) = parse_ipv4(ip_s) else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            let Some(ref mut cfg) = self.ip_config else {
+                return IpcMessage::error_reply(msg.sender, -11);
+            };
+            self.dhcp_enabled = false;
+            cfg.dns[idx] = if ip == Ipv4Address::new(0, 0, 0, 0) {
+                None
+            } else {
+                Some(ip)
+            };
+            self.refresh_dns_servers();
+            let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+            return reply_write(msg.sender, data_len);
+        }
+
+        if path == "dhcp/enable" {
+            self.dhcp_enabled = true;
+            let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+            return reply_write(msg.sender, data_len);
+        }
+
+        if path == "dhcp/disable" {
+            self.dhcp_enabled = false;
+            let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+            return reply_write(msg.sender, data_len);
+        }
+
+        if let Some(rest) = path.strip_prefix("route/add/") {
+            let mut parts = rest.split('/');
+            let Some(cidr_s) = parts.next() else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            let Some(gw_s) = parts.next() else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            if parts.next().is_some() {
+                return IpcMessage::error_reply(msg.sender, -22);
+            }
+            let Some(cidr) = parse_ipv4_cidr(cidr_s) else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            let Some(gw) = parse_ipv4(gw_s) else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            let mut full = false;
+            self.interface.routes_mut().update(|table| {
+                if let Some((idx, _)) = table
+                    .iter()
+                    .enumerate()
+                    .find(|(_, r)| r.cidr == IpCidr::Ipv4(cidr))
+                {
+                    let _ = table.remove(idx);
+                }
+                if table
+                    .push(smoltcp::iface::Route {
+                        cidr: IpCidr::Ipv4(cidr),
+                        via_router: IpAddress::Ipv4(gw),
+                        preferred_until: None,
+                        expires_at: None,
+                    })
+                    .is_err()
+                {
+                    full = true;
+                }
+            });
+            if full {
+                return IpcMessage::error_reply(msg.sender, -28);
+            }
+            let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+            return reply_write(msg.sender, data_len);
+        }
+
+        if let Some(rest) = path.strip_prefix("route/del/") {
+            let Some(cidr) = parse_ipv4_cidr(rest) else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            let mut removed = false;
+            self.interface.routes_mut().update(|table| {
+                if let Some((idx, _)) = table
+                    .iter()
+                    .enumerate()
+                    .find(|(_, r)| r.cidr == IpCidr::Ipv4(cidr))
+                {
+                    let _ = table.remove(idx);
+                    removed = true;
+                }
+            });
+            if !removed {
+                return IpcMessage::error_reply(msg.sender, -2);
+            }
+            let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+            return reply_write(msg.sender, data_len);
+        }
+
+        if let Some(gw_s) = path.strip_prefix("route/default/set/") {
+            let Some(gw) = parse_ipv4(gw_s) else {
+                return IpcMessage::error_reply(msg.sender, -22);
+            };
+            if self
+                .interface
+                .routes_mut()
+                .add_default_ipv4_route(gw)
+                .is_err()
+            {
+                return IpcMessage::error_reply(msg.sender, -28);
+            }
+            if let Some(ref mut cfg) = self.ip_config {
+                cfg.gateway = Some(gw);
+            }
+            let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+            return reply_write(msg.sender, data_len);
+        }
+
+        if path == "route/default/clear" {
+            let _ = self.interface.routes_mut().remove_default_ipv4_route();
+            if let Some(ref mut cfg) = self.ip_config {
+                cfg.gateway = None;
+            }
+            let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+            return reply_write(msg.sender, data_len);
         }
 
         IpcMessage::error_reply(msg.sender, -1) // EPERM

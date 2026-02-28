@@ -10,6 +10,8 @@ QEMU = "qemu-system-x86_64"
 GDB = "gdb"
 QEMU_GDB_PORT = "1234"
 STRAT9_PROFILE = "debug"
+STRAT9_TAP_IFACE = "strat9tap0"
+STRAT9_UPLINK_IFACE = "eth0"
 
 # =============================================================================
 # Build Tasks - limine bootloader
@@ -1046,6 +1048,81 @@ args = [
     "e1000,netdev=net0,mac=52:54:00:12:34:56",
     "-D",
     "build/qemu.log",
+]
+
+[tasks.net-setup-routed]
+description = "Setup routed TAP network on host (requires sudo): DHCP + NAT forwarding"
+script_runner = "@shell"
+script = ['''
+sudo bash tools/scripts/net/setup-tap-routed.sh "${STRAT9_UPLINK_IFACE}" "${STRAT9_TAP_IFACE}"
+''']
+
+[tasks.net-teardown-routed]
+description = "Teardown routed TAP network on host (requires sudo)"
+script_runner = "@shell"
+script = ['''
+sudo bash tools/scripts/net/teardown-tap-routed.sh "${STRAT9_TAP_IFACE}" "${STRAT9_UPLINK_IFACE}"
+''']
+
+[tasks.run-net-tap]
+description = "Load QEMU in text mode using TAP passthrough (requires net-setup-routed)"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-nographic",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-netdev",
+    "tap,id=net0,ifname=${STRAT9_TAP_IFACE},script=no,downscript=no",
+    "-device",
+    "e1000,netdev=net0,mac=52:54:00:12:34:56",
+    "-D",
+    "build/qemu.log",
+]
+
+[tasks.run-gui-net-tap]
+description = "Load QEMU in GUI mode using TAP passthrough (requires net-setup-routed)"
+dependencies = ["limine-image"]
+command = "${QEMU}"
+args = [
+    "-cdrom",
+    "build/strat9-os.iso",
+    "-drive",
+    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
+    "-device",
+    "virtio-blk-pci,drive=drv0",
+    "-machine",
+    "q35",
+    "-cpu",
+    "qemu64",
+    "-m",
+    "256M",
+    "-no-reboot",
+    "-no-shutdown",
+    "-serial",
+    "mon:stdio",
+    "-netdev",
+    "tap,id=net0,ifname=${STRAT9_TAP_IFACE},script=no,downscript=no",
+    "-device",
+    "e1000,netdev=net0,mac=52:54:00:12:34:56",
+    "-D",
+    "build/qemu.log",
+    "-d",
+    "guest_errors",
 ]
 
 [tasks.run-qemu]

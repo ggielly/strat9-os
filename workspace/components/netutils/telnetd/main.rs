@@ -24,7 +24,7 @@ fn alloc_error(_layout: Layout) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    log("[telnetd] PANIC: ");
+    log("[telnetd] PANiK: ");
     let mut buf = [0u8; 256];
     let n = {
         let mut w = BufWriter {
@@ -90,7 +90,7 @@ fn write_all(fd: usize, data: &[u8]) -> bool {
 }
 
 fn read_text_file(path: &str, out: &mut [u8]) -> usize {
-    let fd = match call::openat(0, path, 0x1, 0) {
+    let fd = match call::openat(0, path, 0x0, 0) {
         Ok(fd) => fd as usize,
         Err(_) => return 0,
     };
@@ -101,7 +101,7 @@ fn read_text_file(path: &str, out: &mut [u8]) -> usize {
 
 fn open_listener() -> usize {
     loop {
-        match call::openat(0, "/net/tcp/listen/23", 0x3, 0) {
+        match call::openat(0, "/net/tcp/listen/23", 0x2, 0) {
             Ok(fd) => return fd as usize,
             Err(_) => sleep_ms(200),
         }
@@ -257,9 +257,12 @@ pub extern "C" fn _start() -> ! {
         match call::read(fd, &mut buf) {
             Ok(0) => {
                 if session.connected {
+                    let _ = call::close(fd);
                     session.reset();
+                    fd = open_listener();
+                } else {
+                    sleep_ms(20);
                 }
-                sleep_ms(20);
             }
             Ok(n) => {
                 if !session.connected {

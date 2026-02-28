@@ -53,6 +53,16 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  gfx-demo          - Draw a graphics console UI demo");
     shell_println!("  ping [ip] [count] - ICMP echo request (default: gateway, 4)");
     shell_println!("  ifconfig          - Display network configuration");
+    shell_println!("  ifconfig inet <ip/prefix> - Set static IPv4 address");
+    shell_println!("  ifconfig gateway <ip|clear> - Set/clear default gateway");
+    shell_println!("  ifconfig dns <ip> [ip] [ip] - Set DNS servers");
+    shell_println!("  ifconfig dns clear - Clear DNS servers");
+    shell_println!("  ifconfig dhcp <on|off> - Enable/disable DHCP client state");
+    shell_println!("  net route show    - Show IPv4 routes from /net/routes");
+    shell_println!("  net route add <cidr> <gw> - Add/replace an IPv4 route");
+    shell_println!("  net route del <cidr> - Remove an IPv4 route");
+    shell_println!("  net route default set <gw> - Set default gateway route");
+    shell_println!("  net route default clear - Clear default gateway route");
     shell_println!("");
     Ok(())
 }
