@@ -197,6 +197,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SILO_EVENT_NEXT => silo::sys_silo_event_next(arg1),
         SYS_SILO_SUSPEND => silo::sys_silo_suspend(arg1),
         SYS_SILO_RESUME => silo::sys_silo_resume(arg1),
+        SYS_SILO_PLEDGE => silo::sys_silo_pledge(arg1),
         _ => {
             log::warn!("Unknown syscall: {} (0x{:x})", syscall_num, syscall_num);
             Err(SyscallError::NotImplemented)

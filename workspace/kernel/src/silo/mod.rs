@@ -107,6 +107,36 @@ impl OctalMode {
         && (self.hardware.bits() & !other.hardware.bits() == 0)
         && (self.registry.bits() & !other.registry.bits() == 0)
     }
+
+    pub fn pledge(&mut self, new_mode: OctalMode) -> Result<(), SyscallError> {
+        if !new_mode.is_subset_of(self) {
+            return Err(SyscallError::PermissionDenied); // Escalation attempt
+        }
+        *self = new_mode;
+        Ok(())
+    }
+}
+
+pub fn sys_silo_pledge(mode_val: u64) -> Result<u64, SyscallError> {
+    let new_mode = OctalMode::from_octal(mode_val as u16);
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    
+    let mut mgr = SILO_MANAGER.lock();
+    if let Some(silo_id) = mgr.silo_for_task(task.id) {
+        if let Ok(silo) = mgr.get_mut(silo_id) {
+            silo.mode.pledge(new_mode)?;
+            
+            mgr.push_event(SiloEvent {
+                silo_id: silo_id as u64,
+                kind: SiloEventKind::Started, // Re-using Started as "Updated" for now
+                data0: mode_val,
+                data1: 0,
+                tick: crate::process::scheduler::ticks(),
+            });
+            return Ok(0);
+        }
+    }
+    Err(SyscallError::BadHandle)
 }
 
 #[repr(u8)]

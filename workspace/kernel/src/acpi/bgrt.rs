@@ -40,7 +40,7 @@ impl Bgrt {
 
     /// Get image format (0 = BMP)
     pub fn image_format(&self) -> u16 {
-        self.image_type
+        self.image_type.into()
     }
 
     /// Get image base address

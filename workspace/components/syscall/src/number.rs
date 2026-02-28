@@ -136,3 +136,4 @@ pub const SYS_SILO_KILL: usize = 805;
 pub const SYS_SILO_EVENT_NEXT: usize = 806;
 pub const SYS_SILO_SUSPEND: usize = 807;
 pub const SYS_SILO_RESUME: usize = 808;
+pub const SYS_SILO_PLEDGE: usize = 809;

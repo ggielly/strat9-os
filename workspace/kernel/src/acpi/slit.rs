@@ -37,7 +37,7 @@ impl Slit {
 
         let offset = core::mem::size_of::<Slit>();
         let index = (from * self.locality_count + to) as usize;
-        let ptr = (self as *const Slit as *const u8).add(offset + index);
+        let ptr = unsafe { (self as *const Slit as *const u8).add(offset + index) };
 
         unsafe { core::ptr::read_volatile(ptr) }
     }
@@ -52,7 +52,7 @@ impl Slit {
         let start = offset + (from * self.locality_count) as usize;
         let len = self.locality_count as usize;
 
-        let ptr = (self as *const Slit as *const u8).add(start);
+        let ptr = unsafe { (self as *const Slit as *const u8).add(start) };
 
         Some(unsafe { core::slice::from_raw_parts(ptr, len) })
     }
