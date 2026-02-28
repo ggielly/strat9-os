@@ -23,6 +23,7 @@ spin = { workspace = true }
 bitflags = { workspace = true }
 log = { workspace = true }
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
+alloc-freelist = { path = "../alloc-freelist" }
 
 [features]
 default = []

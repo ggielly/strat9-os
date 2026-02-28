@@ -17,43 +17,7 @@ use strate_net::{syscalls::*, IpcMessage, OPCODE_CLOSE, OPCODE_OPEN, OPCODE_READ
 // Minimal bump allocator (shared with other silos until userspace heap is ready)
 // ---------------------------------------------------------------------------
 
-struct BumpAllocator;
-
-const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB heap for now
-static mut HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
-static HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let align = layout.align().max(1);
-        let size = layout.size();
-        let mut offset = HEAP_OFFSET.load(Ordering::Relaxed);
-        loop {
-            let aligned = (offset + align - 1) & !(align - 1);
-            let new_offset = match aligned.checked_add(size) {
-                Some(v) => v,
-                None => return core::ptr::null_mut(),
-            };
-            if new_offset > HEAP_SIZE {
-                return core::ptr::null_mut();
-            }
-            match HEAP_OFFSET.compare_exchange(
-                offset,
-                new_offset,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-                    return unsafe { heap_ptr.add(aligned) };
-                }
-                Err(prev) => offset = prev,
-            }
-        }
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
-}
+alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 1024 * 1024;);
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
@@ -107,9 +71,9 @@ impl core::fmt::Write for BufWriter<'_> {
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{self, Device, DeviceCapabilities, Medium},
-    socket::{dhcpv4, icmp},
+    socket::{dhcpv4, dns, icmp},
     time::Instant,
-    wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address},
+    wire::{DnsQueryType, EthernetAddress, IpAddress, IpCidr, Ipv4Address},
 };
 
 fn icmp_checksum(data: &[u8]) -> u16 {
@@ -441,6 +405,7 @@ struct NetworkStrate {
     interface: Interface,
     sockets: SocketSet<'static>,
     dhcp_handle: SocketHandle,
+    dns_handle: SocketHandle,
     icmp_handle: SocketHandle,
     ip_config: Option<IpConfig>,
     /// VFS handles: file_id → virtual path ("/net/*")
@@ -463,6 +428,9 @@ impl NetworkStrate {
         let dhcp_socket = dhcpv4::Socket::new();
         let dhcp_handle = sockets.add(dhcp_socket);
 
+        let dns_socket = dns::Socket::new(&[], alloc::vec![]);
+        let dns_handle = sockets.add(dns_socket);
+
         let icmp_rx_buf = icmp::PacketBuffer::new(
             alloc::vec![icmp::PacketMetadata::EMPTY; 4],
             alloc::vec![0u8; 1024],
@@ -479,6 +447,7 @@ impl NetworkStrate {
             interface,
             sockets,
             dhcp_handle,
+            dns_handle,
             icmp_handle,
             ip_config: None,
             open_handles: BTreeMap::new(),
@@ -542,6 +511,7 @@ impl NetworkStrate {
                     gateway: config.router,
                     dns,
                 });
+                self.refresh_dns_servers();
             }
             Some(dhcpv4::Event::Deconfigured) => {
                 log("[strate-net] DHCP: deconfigured (lease expired?)\n");
@@ -549,8 +519,82 @@ impl NetworkStrate {
                 // Clear interface addresses
                 self.interface.update_ip_addrs(|addrs| addrs.clear());
                 let _ = self.interface.routes_mut().remove_default_ipv4_route();
+                self.refresh_dns_servers();
             }
             None => {}
+        }
+    }
+
+    fn refresh_dns_servers(&mut self) {
+        let mut servers = [IpAddress::Ipv4(Ipv4Address::new(0, 0, 0, 0)); 3];
+        let mut count = 0usize;
+
+        if let Some(ref cfg) = self.ip_config {
+            for s in cfg.dns.iter().flatten() {
+                if *s != Ipv4Address::new(0, 0, 0, 0) && count < servers.len() {
+                    servers[count] = IpAddress::Ipv4(*s);
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                if let Some(gw) = cfg.gateway {
+                    servers[0] = IpAddress::Ipv4(gw);
+                    count = 1;
+                }
+            }
+        }
+
+        let socket = self.sockets.get_mut::<dns::Socket>(self.dns_handle);
+        socket.update_servers(&servers[..count]);
+    }
+
+    fn resolve_hostname_blocking(&mut self, name: &str) -> core::result::Result<Ipv4Address, i32> {
+        if let Some(ip) = parse_ipv4(name) {
+            return Ok(ip);
+        }
+        if self.ip_config.is_none() {
+            return Err(-11);
+        }
+
+        let query = {
+            let cx = self.interface.context();
+            let socket = self.sockets.get_mut::<dns::Socket>(self.dns_handle);
+            match socket.start_query(cx, name, DnsQueryType::A) {
+                Ok(q) => q,
+                Err(_) => return Err(-22),
+            }
+        };
+
+        let deadline_ns = clock_gettime_ns().unwrap_or(0).saturating_add(3_000_000_000);
+        loop {
+            let now = now_instant();
+            let _ = self
+                .interface
+                .poll(now, &mut self.device, &mut self.sockets);
+            self.process_dhcp();
+            self.process_icmp();
+
+            let res = self
+                .sockets
+                .get_mut::<dns::Socket>(self.dns_handle)
+                .get_query_result(query);
+            match res {
+                Ok(addrs) => {
+                    for addr in addrs {
+                        if let IpAddress::Ipv4(v4) = addr {
+                            return Ok(v4);
+                        }
+                    }
+                    return Err(-2);
+                }
+                Err(dns::GetQueryResultError::Failed) => return Err(-2),
+                Err(dns::GetQueryResultError::Pending) => {
+                    if clock_gettime_ns().unwrap_or(0) >= deadline_ns {
+                        return Err(-110);
+                    }
+                    sleep_micros(10_000);
+                }
+            }
         }
     }
 
@@ -652,7 +696,15 @@ impl NetworkStrate {
                 reply_open(msg.sender, fid, u64::MAX, 1)
             }
             "ip" | "address" | "prefix" | "netmask" | "broadcast" | "gateway" | "route"
-            | "dns" => {
+            | "dns" | "resolve" => {
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("resolve/") => {
+                if p.len() <= 8 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
@@ -680,7 +732,7 @@ impl NetworkStrate {
         match path.as_str() {
             "" => {
                 let listing =
-                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\ndns\nping\n";
+                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\ndns\nresolve\nping\n";
                 let start = (offset as usize).min(listing.len());
                 reply_read(msg.sender, &listing[start..])
             }
@@ -756,6 +808,18 @@ impl NetworkStrate {
                     }
                 }
                 reply_read(msg.sender, b"none\n")
+            }
+            "resolve" => reply_read(msg.sender, b"use /net/resolve/<hostname>\n"),
+            p if p.starts_with("resolve/") => {
+                let name = &p[8..];
+                match self.resolve_hostname_blocking(name) {
+                    Ok(addr) => {
+                        let n = ipv4_addr_to_str(&addr, &mut tmp);
+                        let start = (offset as usize).min(n);
+                        reply_read(msg.sender, &tmp[start..n])
+                    }
+                    Err(e) => IpcMessage::error_reply(msg.sender, e),
+                }
             }
             p if p.starts_with("ping/") => {
                 if let Some((seq, rtt_us)) = self.ping_reply.take() {

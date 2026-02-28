@@ -15,7 +15,6 @@ use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 use core::{
     alloc::Layout,
     panic::PanicInfo,
-    sync::atomic::{AtomicUsize, Ordering},
 };
 use fs_ext4::{BlockDevice, BlockDeviceError, Ext4FileSystem};
 use syscalls::*;
@@ -24,43 +23,7 @@ use syscalls::*;
 // Minimal bump allocator (temporary until userspace heap is wired).
 // ---------------------------------------------------------------------------
 
-struct BumpAllocator;
-
-const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB heap for now.
-static mut HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
-static HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let align = layout.align().max(1);
-        let size = layout.size();
-        let mut offset = HEAP_OFFSET.load(Ordering::Relaxed);
-        loop {
-            let aligned = (offset + align - 1) & !(align - 1);
-            let new_offset = match aligned.checked_add(size) {
-                Some(v) => v,
-                None => return core::ptr::null_mut(),
-            };
-            if new_offset > HEAP_SIZE {
-                return core::ptr::null_mut();
-            }
-            match HEAP_OFFSET.compare_exchange(
-                offset,
-                new_offset,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-                    return unsafe { heap_ptr.add(aligned) };
-                }
-                Err(prev) => offset = prev,
-            }
-        }
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
-}
+alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 1024 * 1024;);
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;

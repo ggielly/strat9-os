@@ -1240,6 +1240,11 @@ pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u32, Syscall
                         SiloState::Stopping
                     };
                 }
+                SiloState::Stopping => {
+                    if force_kill {
+                        silo.state = SiloState::Stopped;
+                    }
+                }
                 SiloState::Stopped | SiloState::Created | SiloState::Ready => {}
                 _ => return Err(SyscallError::InvalidArgument),
             }
@@ -1263,6 +1268,15 @@ pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u32, Syscall
     for tid in tasks {
         crate::process::kill_task(tid);
     }
+    Ok(silo_id)
+}
+
+pub fn kernel_start_silo(selector: &str) -> Result<u32, SyscallError> {
+    let silo_id = {
+        let mgr = SILO_MANAGER.lock();
+        resolve_selector_to_silo_id(selector, &mgr)?
+    };
+    start_silo_by_id(silo_id)?;
     Ok(silo_id)
 }
 
@@ -1702,16 +1716,7 @@ pub fn sys_silo_attach_module(handle: u64, module_handle: u64) -> Result<u64, Sy
     }
 }
 
-pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
-    require_silo_admin()?;
-    let required = CapPermissions {
-        read: false,
-        write: false,
-        execute: true,
-        grant: false,
-        revoke: false,
-    };
-    let silo_id = resolve_silo_handle(handle, required)?;
+fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
     let (module_id, granted_caps, silo_flags, previous_state, can_start, within_task_limit) = {
         let mut mgr = SILO_MANAGER.lock();
         let silo = mgr.get_mut(silo_id)?;
@@ -1860,6 +1865,20 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
     });
     drop(mgr);
     crate::process::add_task(task);
+    Ok(())
+}
+
+pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+    let required = CapPermissions {
+        read: false,
+        write: false,
+        execute: true,
+        grant: false,
+        revoke: false,
+    };
+    let silo_id = resolve_silo_handle(handle, required)?;
+    start_silo_by_id(silo_id)?;
     Ok(0)
 }
 

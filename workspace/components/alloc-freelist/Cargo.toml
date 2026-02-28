@@ -1,0 +1,9 @@
+[package]
+name = "alloc-freelist"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "alloc_freelist"
+path = "src/lib.rs"

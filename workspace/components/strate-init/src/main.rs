@@ -8,7 +8,6 @@ use alloc::{string::String, vec::Vec};
 use core::{
     alloc::Layout,
     panic::PanicInfo,
-    sync::atomic::{AtomicUsize, Ordering},
 };
 use strat9_syscall::{call, number};
 
@@ -16,43 +15,11 @@ use strat9_syscall::{call, number};
 // GLOBAL ALLOCATOR (BUMP + BRK)
 // ---------------------------------------------------------------------------
 
-struct BumpAllocator;
-static HEAP_START: AtomicUsize = AtomicUsize::new(0);
-static HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-const HEAP_MAX: usize = 16 * 1024 * 1024;
-
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let mut start = HEAP_START.load(Ordering::Relaxed);
-        if start == 0 {
-            if let Ok(cur) = call::brk(0) {
-                if let Ok(_) = call::brk(cur + HEAP_MAX) {
-                    HEAP_START.store(cur, Ordering::SeqCst);
-                    start = cur;
-                } else {
-                    return core::ptr::null_mut();
-                }
-            } else {
-                return core::ptr::null_mut();
-            }
-        }
-        let align = layout.align().max(1);
-        let size = layout.size();
-        let mut offset = HEAP_OFFSET.load(Ordering::Relaxed);
-        loop {
-            let aligned = (offset + align - 1) & !(align - 1);
-            let next = aligned + size;
-            if next > HEAP_MAX {
-                return core::ptr::null_mut();
-            }
-            match HEAP_OFFSET.compare_exchange(offset, next, Ordering::SeqCst, Ordering::Relaxed) {
-                Ok(_) => return (start + aligned) as *mut u8,
-                Err(prev) => offset = prev,
-            }
-        }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
-}
+alloc_freelist::define_freelist_brk_allocator!(
+    pub struct BumpAllocator;
+    brk = strat9_syscall::call::brk;
+    heap_max = 16 * 1024 * 1024;
+);
 
 #[global_allocator]
 static ALLOCATOR: BumpAllocator = BumpAllocator;

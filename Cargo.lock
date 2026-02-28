@@ -15,6 +15,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-freelist"
+version = "0.1.0"
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -222,6 +226,7 @@ dependencies = [
 name = "dhcp-client"
 version = "0.1.0"
 dependencies = [
+ "alloc-freelist",
  "strat9-syscall",
 ]
 
@@ -575,6 +580,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "ping"
 version = "0.1.0"
 dependencies = [
+ "alloc-freelist",
  "strat9-syscall",
 ]
 
@@ -848,6 +854,7 @@ dependencies = [
 name = "strate-fs-ext4"
 version = "0.1.0"
 dependencies = [
+ "alloc-freelist",
  "bitflags 2.11.0",
  "ext4_rs",
  "log",
@@ -870,6 +877,7 @@ dependencies = [
 name = "strate-init"
 version = "0.1.0"
 dependencies = [
+ "alloc-freelist",
  "strat9-syscall",
 ]
 
@@ -877,6 +885,7 @@ dependencies = [
 name = "strate-net"
 version = "0.1.0"
 dependencies = [
+ "alloc-freelist",
  "bitflags 2.11.0",
  "log",
  "smoltcp",

@@ -9,6 +9,7 @@ members = [
     "workspace/drivers/nic/e1000",
     "workspace/drivers/nic/driver-net-proto",
     "workspace/components/api",
+    "workspace/components/alloc-freelist",
     "workspace/components/strate-fs-abstraction",
     "workspace/components/strate-fs-ext4",
     "workspace/components/syscall",

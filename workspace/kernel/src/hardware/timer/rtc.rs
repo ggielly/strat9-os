@@ -89,9 +89,9 @@ impl RtcDateTime {
             month += 12;
         }
         
-        // Calculate days since epoch
+        // Calculate days since epoch (Howard Hinnant algorithm)
         let days = 365 * year + year / 4 - year / 100 + year / 400
-            + 153 * (month - 3) / 5 + day - 719561;
+            + (153 * (month - 3) + 2) / 5 + day - 1 - 719468;
         
         // Convert to seconds
         ((days * 86400 + hour * 3600 + minute * 60 + second) as u64)
@@ -220,6 +220,7 @@ fn read_rtc_time() -> RtcDateTime {
     };
 
     let use_binary = if raw.status_b == 0 { default_binary } else { (raw.status_b & STATUS_B_DM) != 0 };
+    let pm_bit = raw.hour & 0x80;
     if !use_binary {
         raw.second = bcd_to_binary(raw.second);
         raw.minute = bcd_to_binary(raw.minute);
@@ -235,7 +236,7 @@ fn read_rtc_time() -> RtcDateTime {
 
     let is_24h = (raw.status_b & STATUS_B_24H) != 0;
     if !is_24h {
-        let pm = (raw.hour & 0x80) != 0;
+        let pm = pm_bit != 0;
         raw.hour &= 0x7F;
         if pm {
             if raw.hour != 12 {
@@ -277,12 +278,13 @@ pub fn init() -> Result<(), &'static str> {
     // Detect century register (ACPI FADT would tell us, but we try common values)
     let cmos_century_reg = 0x32; // Common value
     
-    // Verify century register works
-    let century_test = cmos_read(cmos_century_reg);
-    let cmos_century_reg = if century_test >= 19 && century_test <= 21 {
+    // Verify century register works (convert from BCD if needed)
+    let century_raw = cmos_read(cmos_century_reg);
+    let century_val = if use_binary { century_raw } else { bcd_to_binary(century_raw) };
+    let cmos_century_reg = if century_val >= 19 && century_val <= 21 {
         cmos_century_reg
     } else {
-        0 // No century register
+        0
     };
     
     let driver = RtcDriver {

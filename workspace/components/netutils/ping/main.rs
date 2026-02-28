@@ -18,7 +18,6 @@ use core::{
     alloc::Layout,
     fmt::Write,
     panic::PanicInfo,
-    sync::atomic::{AtomicUsize, Ordering},
 };
 use strat9_syscall::{call, data::TimeSpec, number};
 
@@ -26,42 +25,7 @@ use strat9_syscall::{call, data::TimeSpec, number};
 // Minimal bump allocator
 // ---------------------------------------------------------------------------
 
-struct BumpAllocator;
-
-const HEAP_SIZE: usize = 64 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
-static HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let align = layout.align().max(1);
-        let size = layout.size();
-        let mut offset = HEAP_OFFSET.load(Ordering::Relaxed);
-        loop {
-            let aligned = (offset + align - 1) & !(align - 1);
-            let new_offset = match aligned.checked_add(size) {
-                Some(v) => v,
-                None => return core::ptr::null_mut(),
-            };
-            if new_offset > HEAP_SIZE {
-                return core::ptr::null_mut();
-            }
-            match HEAP_OFFSET.compare_exchange(
-                offset,
-                new_offset,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-                    return unsafe { heap_ptr.add(aligned) };
-                }
-                Err(prev) => offset = prev,
-            }
-        }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
-}
+alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 64 * 1024;);
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
@@ -170,6 +134,63 @@ fn scheme_write(path: &str, data: &[u8]) -> Result<usize, ()> {
     Ok(n)
 }
 
+fn parse_ipv4_literal(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut dots = 0usize;
+    let mut val: u16 = 0;
+    let mut has_digit = false;
+    for &b in bytes {
+        if b == b'.' {
+            if !has_digit || val > 255 || dots >= 3 {
+                return false;
+            }
+            dots += 1;
+            val = 0;
+            has_digit = false;
+            continue;
+        }
+        if !b.is_ascii_digit() {
+            return false;
+        }
+        val = val * 10 + (b - b'0') as u16;
+        has_digit = true;
+    }
+    has_digit && val <= 255 && dots == 3
+}
+
+fn resolve_target<'a>(target: &'a str, resolved_buf: &'a mut [u8; 64]) -> Option<&'a str> {
+    if parse_ipv4_literal(target) {
+        return Some(target);
+    }
+    let mut path_buf = [0u8; 128];
+    let path_len = {
+        let mut pw = BufWriter {
+            buf: &mut path_buf,
+            pos: 0,
+        };
+        let _ = write!(pw, "/net/resolve/{}", target);
+        pw.pos
+    };
+    let path = core::str::from_utf8(&path_buf[..path_len]).ok()?;
+    let n = scheme_read(path, resolved_buf).ok()?;
+    if n == 0 {
+        return None;
+    }
+    let end = resolved_buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
+    if end == 0 {
+        return None;
+    }
+    let resolved = core::str::from_utf8(&resolved_buf[..end]).ok()?;
+    if parse_ipv4_literal(resolved) {
+        Some(resolved)
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Minimal argument parsing (no clap – we are no_std)
 // ---------------------------------------------------------------------------
@@ -238,7 +259,17 @@ struct PingReply {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let args = parse_args();
-    let target = unsafe { core::str::from_utf8_unchecked(&args.target[..args.target_len]) };
+    let raw_target = unsafe { core::str::from_utf8_unchecked(&args.target[..args.target_len]) };
+    let mut resolved_buf = [0u8; 64];
+    let target = match resolve_target(raw_target, &mut resolved_buf) {
+        Some(ip) => ip,
+        None => {
+            log("ping: cannot resolve target ");
+            log(raw_target);
+            log("\n");
+            call::exit(2);
+        }
+    };
 
     log("PING ");
     log(target);

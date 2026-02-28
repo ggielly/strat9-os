@@ -13,8 +13,7 @@ use crate::{
     arch::x86_64::pci::{self, Bar, ProbeCriteria},
     memory::{allocate_dma_frame, phys_to_virt},
 };
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use x86_64::instructions::port::Port;
@@ -122,23 +121,31 @@ impl UhciController {
 
     fn init(&mut self) -> Result<(), &'static str> {
         unsafe {
-            // Stop the controller
             let mut cmd = self.usbcmd.read();
             cmd &= !USBCMD_RUN_STOP;
             self.usbcmd.write(cmd);
+            let mut timeout = 10000;
             while self.usbsts.read() & USBSTS_HCH == 0 {
                 core::hint::spin_loop();
+                timeout -= 1;
+                if timeout == 0 {
+                    return Err("UHCI: controller did not halt");
+                }
             }
 
-            // Reset the controller
             cmd = self.usbcmd.read();
             cmd |= USBCMD_HCRESET;
             self.usbcmd.write(cmd);
-            for _ in 0..1000 {
+            let mut reset_ok = false;
+            for _ in 0..10000 {
                 if self.usbcmd.read() & USBCMD_HCRESET == 0 {
+                    reset_ok = true;
                     break;
                 }
                 core::hint::spin_loop();
+            }
+            if !reset_ok {
+                return Err("UHCI: controller reset timed out");
             }
 
             // Initialize ports
@@ -156,11 +163,12 @@ impl UhciController {
             self.init_frame_list()?;
 
             // Enable interrupts
-            self.usbintr.write(USBSTS_USBINT | USBSTS_USBERR | USBSTS_RD);
+            self.usbintr
+                .write(USBSTS_USBINT | USBSTS_USBERR | USBSTS_RD);
 
             // Start the controller
             cmd = self.usbcmd.read();
-            cmd |= USBCMD_RUN_STOP | USBCMD_EGSM | USBCMD_CONFIGURE | USBCMD_MAX_PACKET;
+            cmd |= USBCMD_RUN_STOP | USBCMD_CONFIGURE | USBCMD_MAX_PACKET;
             self.usbcmd.write(cmd);
         }
         Ok(())
@@ -178,7 +186,8 @@ impl UhciController {
             *self.frame_list.add(i) = 0x0001; // Terminate bit
         }
 
-        self.frbaseaddr.write((self.frame_list_phys & 0xFFFFF000) as u32);
+        self.frbaseaddr
+            .write((self.frame_list_phys & 0xFFFFF000) as u32);
 
         Ok(())
     }
@@ -248,7 +257,10 @@ pub fn init() {
     }
 
     UHCI_INITIALIZED.store(true, Ordering::SeqCst);
-    log::info!("[UHCI] Found {} controller(s)", UHCI_CONTROLLERS.lock().len());
+    log::info!(
+        "[UHCI] Found {} controller(s)",
+        UHCI_CONTROLLERS.lock().len()
+    );
 }
 
 pub fn get_controller(index: usize) -> Option<Arc<UhciController>> {

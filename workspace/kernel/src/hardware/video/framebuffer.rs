@@ -153,7 +153,7 @@ impl Framebuffer {
             return Err("Invalid framebuffer parameters");
         }
 
-        let base_virt = phys_to_virt(addr) as usize;
+        let base_virt = addr as usize;
 
         let info = FramebufferInfo {
             base: addr,
@@ -478,11 +478,7 @@ impl Framebuffer {
     pub fn set_double_buffering(enable: bool) {
         let mut fb = FRAMEBUFFER.lock();
         if let Some(ref mut f) = fb.as_mut() {
-            if f.info.source == FramebufferSource::VirtioGpu {
-                f.use_double_buffer = f.double_buffer.is_some();
-            } else {
-                f.use_double_buffer = enable && f.double_buffer.is_some();
-            }
+            f.use_double_buffer = enable && f.double_buffer.is_some();
         }
     }
 }

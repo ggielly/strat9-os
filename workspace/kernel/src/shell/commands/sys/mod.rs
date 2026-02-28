@@ -10,10 +10,17 @@ use crate::{
         ShellError,
     },
     shell_println, silo,
-    silo::SiloId,
     vfs,
 };
 use alloc::string::String;
+
+fn print_strate_state_for_sid(sid: u32) {
+    if let Some(s) = silo::list_silos_snapshot().into_iter().find(|s| s.id == sid) {
+        shell_println!("state: {:?}", s.state);
+    } else {
+        shell_println!("state: <unknown>");
+    }
+}
 
 /// Display kernel version
 pub fn cmd_version(_args: &[String]) -> Result<(), ShellError> {
@@ -373,7 +380,7 @@ pub fn cmd_test_mem_stressed(_args: &[String]) -> Result<(), ShellError> {
 /// strate ls
 pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
-        shell_println!("Usage: strate ls [all] | strate spawn <type> [--as <label>] [--dev <path>] | strate stop|kill|destroy <id|label> | strate rename <id|label> <new_label>");
+        shell_println!("Usage: strate ls [all] | strate spawn <type> [--as <label>] [--dev <path>] | strate start|stop|kill|destroy <id|label> | strate rename <id|label> <new_label>");
         return Err(ShellError::InvalidArguments);
     }
 
@@ -491,9 +498,27 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
                 }
             }
         }
+        "start" => {
+            if args.len() != 2 {
+                shell_println!("Usage: strate start <id|label>");
+                return Err(ShellError::InvalidArguments);
+            }
+            let selector = args[1].as_str();
+            match silo::kernel_start_silo(selector) {
+                Ok(sid) => {
+                    shell_println!("strate start: ok (sid={})", sid);
+                    print_strate_state_for_sid(sid);
+                    Ok(())
+                }
+                Err(e) => {
+                    shell_println!("strate start failed: {:?}", e);
+                    Err(ShellError::ExecutionFailed)
+                }
+            }
+        }
         "stop" | "kill" | "destroy" => {
             if args.len() != 2 {
-                shell_println!("Usage: strate stop|kill|destroy <id|label>");
+                shell_println!("Usage: strate start|stop|kill|destroy <id|label>");
                 return Err(ShellError::InvalidArguments);
             }
             let selector = args[1].as_str();
@@ -506,6 +531,9 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
             match result {
                 Ok(sid) => {
                     shell_println!("strate {}: ok (sid={})", args[0], sid);
+                    if args[0].as_str() == "stop" {
+                        print_strate_state_for_sid(sid);
+                    }
                     Ok(())
                 }
                 Err(e) => {
@@ -531,13 +559,19 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
                     Ok(())
                 }
                 Err(e) => {
-                    shell_println!("strate rename failed: {:?}", e);
+                    if matches!(e, crate::syscall::error::SyscallError::InvalidArgument) {
+                        shell_println!(
+                            "strate rename failed: strate is running or not in a renamable state (stop it first)"
+                        );
+                    } else {
+                        shell_println!("strate rename failed: {:?}", e);
+                    }
                     Err(ShellError::ExecutionFailed)
                 }
             }
         }
         _ => {
-            shell_println!("Usage: strate ls [all] | strate spawn <type> [--as <label>] [--dev <path>] | strate stop|kill|destroy <id|label> | strate rename <id|label> <new_label>");
+            shell_println!("Usage: strate ls [all] | strate spawn <type> [--as <label>] [--dev <path>] | strate start|stop|kill|destroy <id|label> | strate rename <id|label> <new_label>");
             Err(ShellError::InvalidArguments)
         }
     }

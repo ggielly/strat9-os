@@ -1418,27 +1418,22 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
-
-        let saved_col = self.col;
-        let saved_row = self.row;
-        let saved_fg = self.fg;
-        let saved_bg = self.bg;
-
-        self.col = pixel_x / self.font_info.glyph_w;
-        self.row = pixel_y / self.font_info.glyph_h;
-        self.set_rgb_color(fg, bg);
-
+        let gw = self.font_info.glyph_w;
+        let gh = self.font_info.glyph_h;
+        let fg_packed = self.pack_color(fg);
+        let bg_packed = self.pack_color(bg);
+        let mut cx = pixel_x;
+        let cy = pixel_y;
         for ch in text.chars() {
-            self.write_char(ch);
-            if self.row >= self.rows {
+            if ch == '\n' {
                 break;
             }
+            if cx + gw > self.fb_width || cy + gh > self.fb_height {
+                break;
+            }
+            self.draw_glyph_at_pixel(cx, cy, ch, fg_packed, bg_packed);
+            cx += gw;
         }
-
-        self.col = saved_col;
-        self.row = saved_row;
-        self.fg = saved_fg;
-        self.bg = saved_bg;
     }
 
     fn glyph_index_for_char(&self, ch: char) -> usize {
@@ -3008,6 +3003,40 @@ fn draw_boot_status_line(theme: UiTheme) {
     });
 }
 
+fn refresh_status_ip_from_net_scheme() {
+    let paths = ["/net/address", "/net/ip"];
+    for path in paths {
+        let fd = match crate::vfs::open(path, crate::vfs::OpenFlags::READ) {
+            Ok(fd) => fd,
+            Err(_) => continue,
+        };
+        let mut buf = [0u8; 64];
+        let read_res = crate::vfs::read(fd, &mut buf);
+        let _ = crate::vfs::close(fd);
+        let n = match read_res {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if n == 0 {
+            continue;
+        }
+        let Ok(text) = core::str::from_utf8(&buf[..n]) else {
+            continue;
+        };
+        let mut ip = text.trim();
+        if let Some(slash) = ip.find('/') {
+            ip = &ip[..slash];
+        }
+        if ip.is_empty() || ip == "0.0.0.0" || ip == "169.254.0.0" {
+            continue;
+        }
+        set_status_ip(ip);
+        return;
+    }
+
+    set_status_ip("n/a");
+}
+
 /// Stack-only string buffer to avoid heap allocation in the status-line path.
 struct StackStr<const N: usize> {
     buf: [u8; N],
@@ -3053,6 +3082,7 @@ pub fn maybe_refresh_system_status_line(theme: UiTheme) {
     {
         return;
     }
+    refresh_status_ip_from_net_scheme();
 
     let (hostname, ip) = if let Some(guard) = STATUS_LINE_INFO.try_lock() {
         if let Some(info) = guard.as_ref() {

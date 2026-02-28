@@ -221,7 +221,7 @@ impl XhciController {
         let rtsoff = (*cap_regs).rtsoff;
         let rt_regs = (mmio_base + rtsoff as usize) as *mut RuntimeRegisters;
 
-        let max_ports = ((*cap_regs).hcsparams1 as usize) & 0xFF;
+        let max_ports = (((*cap_regs).hcsparams1 >> 24) & 0xFF) as usize;
 
         let mut controller = Self {
             mmio_base,
@@ -253,17 +253,32 @@ impl XhciController {
         unsafe {
             let op = &mut *self.op_regs;
 
+            for _ in 0..100_000 {
+                if op.usbsts & USBSTS_CNR == 0 { break; }
+                core::hint::spin_loop();
+            }
             if op.usbsts & USBSTS_CNR != 0 {
-                return Err("Controller needs reset");
+                return Err("xHCI: controller not ready (CNR)");
             }
 
             op.usbcmd &= !USBCMD_RUN_STOP;
-            while op.usbsts & USBSTS_HCH == 0 {
+            for _ in 0..100_000 {
+                if op.usbsts & USBSTS_HCH != 0 { break; }
                 core::hint::spin_loop();
+            }
+            if op.usbsts & USBSTS_HCH == 0 {
+                return Err("xHCI: controller did not halt");
             }
 
             op.usbcmd |= USBCMD_HCRST;
-            while op.usbcmd & USBCMD_HCRST != 0 {
+            for _ in 0..100_000 {
+                if op.usbcmd & USBCMD_HCRST == 0 { break; }
+                core::hint::spin_loop();
+            }
+            if op.usbcmd & USBCMD_HCRST != 0 {
+                return Err("xHCI: controller reset timed out");
+            }
+            while op.usbsts & USBSTS_CNR != 0 {
                 core::hint::spin_loop();
             }
 
@@ -281,7 +296,8 @@ impl XhciController {
             self.init_interrupter()?;
 
             op.usbcmd |= USBCMD_RUN_STOP | USBCMD_INTE;
-            op.config = 1;
+            let max_slots = (*self.cap_regs).hcsparams1 & 0xFF;
+            op.config = max_slots;
 
             self.enable_slot()?;
         }
@@ -316,11 +332,17 @@ impl XhciController {
         let erst_virt = phys_to_virt(erst_phys) as *mut u64;
         core::ptr::write_bytes(erst_virt as *mut u8, 0, 4096);
 
-        *erst_virt = self.event_ring_phys;
+        let erst_entry = erst_virt as *mut u8;
+        let addr_bytes = self.event_ring_phys.to_le_bytes();
+        core::ptr::copy_nonoverlapping(addr_bytes.as_ptr(), erst_entry, 8);
+        let seg_size: u32 = 64;
+        let size_bytes = seg_size.to_le_bytes();
+        core::ptr::copy_nonoverlapping(size_bytes.as_ptr(), erst_entry.add(8), 4);
 
         let ir = &mut (*self.rt_regs).ir[0];
-        ir.erstba = erst_phys;
         ir.erstsz = 1;
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        ir.erstba = erst_phys;
         ir.iman = 3;
         ir.erdp = self.event_ring_phys;
 
@@ -342,22 +364,23 @@ impl XhciController {
     }
 
     unsafe fn enable_slot(&mut self) -> Result<(), &'static str> {
-        let slot_id = self.slot_id.fetch_add(1, Ordering::SeqCst) + 1;
-        if slot_id == 0 {
-            return Err("No slot available");
-        }
-
         self.cmd_ring_enqueue(Trb {
             d0: 0,
             d1: 0,
             d2: 0,
-            d3: (TRB_TYPE_ENABLE_SLOT << TRB_TYPE_SHIFT) as u32 | TRB_CYCLE | TRB_IOC,
+            d3: (TRB_TYPE_ENABLE_SLOT << TRB_TYPE_SHIFT) as u32 | TRB_CYCLE,
         });
 
         let event = self.wait_for_event()?;
-        if event.d3 & 0xFF != 0 {
+        let completion_code = (event.d2 >> 24) & 0xFF;
+        if completion_code != 1 {
             return Err("Enable slot failed");
         }
+        let slot_id = ((event.d3 >> 24) & 0xFF) as u8;
+        if slot_id == 0 {
+            return Err("No slot available");
+        }
+        self.slot_id.store(slot_id, Ordering::SeqCst);
 
         Ok(())
     }
@@ -365,16 +388,26 @@ impl XhciController {
     unsafe fn cmd_ring_enqueue(&mut self, trb: Trb) {
         let idx = self.cmd_ring_deq;
         let mut trb = trb;
-        if !self.cmd_ring_cycle {
-            trb.d3 ^= TRB_CYCLE;
+        if self.cmd_ring_cycle {
+            trb.d3 |= TRB_CYCLE;
+        } else {
+            trb.d3 &= !TRB_CYCLE;
         }
         core::ptr::write_volatile(self.cmd_ring.add(idx), trb);
+        self.cmd_ring_deq = idx + 1;
 
-        let next = (idx + 1) % 64;
-        if next == 0 {
+        if self.cmd_ring_deq >= 63 {
+            let link = Trb::link(self.cmd_ring_phys, true);
+            let mut link_trb = link;
+            if self.cmd_ring_cycle {
+                link_trb.d3 |= TRB_CYCLE;
+            } else {
+                link_trb.d3 &= !TRB_CYCLE;
+            }
+            core::ptr::write_volatile(self.cmd_ring.add(63), link_trb);
+            self.cmd_ring_deq = 0;
             self.cmd_ring_cycle = !self.cmd_ring_cycle;
         }
-        self.cmd_ring_deq = next;
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         core::ptr::write_volatile(self.db_regs.add(0), 0);
@@ -385,14 +418,15 @@ impl XhciController {
             let idx = self.event_ring_deq;
             let trb = core::ptr::read_volatile(self.event_ring.add(idx));
             
-            if (trb.d3 & TRB_CYCLE) == (if self.event_ring_cycle { TRB_CYCLE } else { 0 }) {
-                if (trb.d3 >> TRB_TYPE_SHIFT) & 0x3F == TRB_TYPE_TRANSFER_EVENT as u32 {
-                    self.event_ring_deq = (idx + 1) % 64;
-                    if self.event_ring_deq == 0 {
-                        self.event_ring_cycle = !self.event_ring_cycle;
-                    }
-                    return Ok(trb);
+            let expected_c = if self.event_ring_cycle { TRB_CYCLE } else { 0 };
+            if (trb.d3 & TRB_CYCLE) == expected_c {
+                self.event_ring_deq = (idx + 1) % 64;
+                if self.event_ring_deq == 0 {
+                    self.event_ring_cycle = !self.event_ring_cycle;
                 }
+                let ir = &mut (*self.rt_regs).ir[0];
+                ir.erdp = self.event_ring_phys + (self.event_ring_deq as u64) * 16 | (1 << 3);
+                return Ok(trb);
             }
             core::hint::spin_loop();
         }

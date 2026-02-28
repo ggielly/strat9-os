@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 # Strat9 Kernel integration
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
+alloc-freelist = { path = "../alloc-freelist" }
 
 [features]
 default = []

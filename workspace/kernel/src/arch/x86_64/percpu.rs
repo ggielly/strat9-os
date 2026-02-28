@@ -78,8 +78,7 @@ pub fn init_boot_cpu(apic_id: u32) -> usize {
 /// Register a new CPU by APIC ID, returning its CPU index.
 pub fn register_cpu(apic_id: u32) -> Option<usize> {
     for (idx, cpu) in PERCPU.iter().enumerate() {
-        if !cpu.present.load(Ordering::Acquire) {
-            cpu.present.store(true, Ordering::Release);
+        if cpu.present.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
             cpu.online.store(false, Ordering::Release);
             cpu.apic_id.store(apic_id, Ordering::Release);
             cpu.cpu_index.store(idx as u32, Ordering::Release);

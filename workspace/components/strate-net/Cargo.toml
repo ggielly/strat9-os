@@ -22,8 +22,10 @@ smoltcp = { git = "https://github.com/smoltcp-rs/smoltcp.git", default-features 
     "socket-udp",
     "socket-icmp",
     "socket-dhcpv4",
+    "socket-dns",
 ] }
 spin = { workspace = true }
 log = { workspace = true }
 bitflags = { workspace = true }
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
+alloc-freelist = { path = "../alloc-freelist" }

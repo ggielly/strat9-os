@@ -26,6 +26,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  umount <path>     - Unmount a mount point");
     shell_println!("  strate ls [all]   - List strates (or all silos)");
     shell_println!("  strate spawn ...  - Spawn a strate (type, --as, --dev)");
+    shell_println!("  strate start <x>  - Start a strate by id/label");
     shell_println!("  strate stop <x>   - Stop a strate by id/label");
     shell_println!("  strate kill <x>   - Kill a strate by id/label");
     shell_println!("  strate destroy <x>- Destroy metadata + module by id/label");
