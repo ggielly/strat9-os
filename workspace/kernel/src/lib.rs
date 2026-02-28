@@ -516,6 +516,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         serial_println!("[init] VirtIO GPU initialized.");
         vga_println!("[OK] VirtIO GPU driver initialized");
 
+        // Framebuffer is initialized in hardware::init() after VirtIO GPU
+
         serial_println!("[init] Checking for devices...");
         vga_println!("[..] Checking for devices...");
 

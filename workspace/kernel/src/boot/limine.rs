@@ -5,6 +5,8 @@
 
 use limine::{modules::InternalModule, request::*, BaseRevision};
 
+use crate::serial_println;
+
 /// Sets the base revision to the latest revision supported by the crate.
 #[used]
 #[link_section = ".requests"]
@@ -321,6 +323,29 @@ pub unsafe extern "C" fn kmain() -> ! {
 
     // Get RSDP for ACPI
     let rsdp_addr = RSDP.get_response().map(|r| r.address() as u64).unwrap_or(0);
+
+    // Initialize framebuffer abstraction with Limine-provided buffer
+    if fb_addr != 0 && fb_width != 0 && fb_height != 0 {
+        let format = crate::hardware::video::framebuffer::PixelFormat {
+            red_mask: ((1 << fb_red_mask_size) - 1) << fb_red_mask_shift,
+            red_shift: fb_red_mask_shift as u8,
+            green_mask: ((1 << fb_green_mask_size) - 1) << fb_green_mask_shift,
+            green_shift: fb_green_mask_shift as u8,
+            blue_mask: ((1 << fb_blue_mask_size) - 1) << fb_blue_mask_shift,
+            blue_shift: fb_blue_mask_shift as u8,
+            bits_per_pixel: fb_bpp as u8,
+        };
+
+        if let Err(e) = crate::hardware::video::framebuffer::Framebuffer::init_limine(
+            fb_addr,
+            fb_width,
+            fb_height,
+            fb_stride,
+            format,
+        ) {
+            serial_println!("[limine] Framebuffer init failed: {}", e);
+        }
+    }
 
     // Get HHDM offset — critical for accessing physical memory
     let hhdm_offset = HHDM.get_response().map(|r| r.offset()).unwrap_or(0);

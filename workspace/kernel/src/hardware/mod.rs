@@ -11,4 +11,5 @@ pub fn init() {
     nic::init();
     timer::init();
     usb::init();
+    video::framebuffer::init();
 }
