@@ -1,4 +1,4 @@
-// Framebuffer Abstraction Layer
+// Framebuffer abstraction layer
 //
 // Provides a unified framebuffer interface that can use:
 // - Limine framebuffer (bootloader-provided)
@@ -17,7 +17,7 @@ use crate::{
     hardware::virtio::gpu,
     memory::{get_allocator, phys_to_virt, FrameAllocator},
 };
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 /// Maximum supported resolution
@@ -78,6 +78,7 @@ pub struct Framebuffer {
     info: FramebufferInfo,
     double_buffer: Option<*mut u8>,
     use_double_buffer: bool,
+    dirty: DirtyRect,
 }
 
 unsafe impl Send for Framebuffer {}
@@ -85,6 +86,59 @@ unsafe impl Sync for Framebuffer {}
 
 static FRAMEBUFFER: Mutex<Option<Framebuffer>> = Mutex::new(None);
 static FRAMEBUFFER_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy)]
+struct DirtyRect {
+    valid: bool,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+impl DirtyRect {
+    const fn empty() -> Self {
+        Self {
+            valid: false,
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+        }
+    }
+
+    fn include(&mut self, x: u32, y: u32, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let x1 = x.saturating_add(width);
+        let y1 = y.saturating_add(height);
+        if !self.valid {
+            self.valid = true;
+            self.x0 = x;
+            self.y0 = y;
+            self.x1 = x1;
+            self.y1 = y1;
+        } else {
+            self.x0 = self.x0.min(x);
+            self.y0 = self.y0.min(y);
+            self.x1 = self.x1.max(x1);
+            self.y1 = self.y1.max(y1);
+        }
+    }
+
+    fn take(&mut self) -> Option<(u32, u32, u32, u32)> {
+        if !self.valid {
+            return None;
+        }
+        let x = self.x0;
+        let y = self.y0;
+        let width = self.x1.saturating_sub(self.x0);
+        let height = self.y1.saturating_sub(self.y0);
+        *self = Self::empty();
+        Some((x, y, width, height))
+    }
+}
 
 impl Framebuffer {
     /// Initialize framebuffer with Limine-provided buffer
@@ -115,6 +169,7 @@ impl Framebuffer {
             info,
             double_buffer: None,
             use_double_buffer: false,
+            dirty: DirtyRect::empty(),
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
@@ -182,6 +237,7 @@ impl Framebuffer {
             info,
             double_buffer: Some(db_virt),
             use_double_buffer: true,
+            dirty: DirtyRect::empty(),
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
@@ -246,44 +302,104 @@ impl Framebuffer {
 
     /// Set a pixel at (x, y) with RGB color
     pub fn set_pixel(x: u32, y: u32, r: u8, g: u8, b: u8) {
-        let mut fb = FRAMEBUFFER.lock();
-        let fb = match fb.as_mut() {
-            Some(f) => f,
-            None => return,
-        };
+        let mut flush_region = None;
+        {
+            let mut guard = FRAMEBUFFER.lock();
+            let fb = match guard.as_mut() {
+                Some(f) => f,
+                None => return,
+            };
 
-        if x >= fb.info.width || y >= fb.info.height {
-            return;
+            if x >= fb.info.width || y >= fb.info.height {
+                return;
+            }
+
+            let pixel = ((r as u32) << fb.info.format.red_shift)
+                | ((g as u32) << fb.info.format.green_shift)
+                | ((b as u32) << fb.info.format.blue_shift);
+
+            let offset = if fb.use_double_buffer {
+                fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
+            } else {
+                fb.info.base_virt as *mut u8
+            };
+
+            unsafe {
+                let pixel_ptr = offset.add((y * fb.info.stride + x * 4) as usize);
+                core::ptr::write(pixel_ptr as *mut u32, pixel);
+            }
+
+            fb.dirty.include(x, y, 1, 1);
+            if fb.info.source == FramebufferSource::VirtioGpu && !fb.use_double_buffer {
+                flush_region = Some((x, y, 1, 1));
+            }
         }
 
-        let pixel = ((r as u32) << fb.info.format.red_shift)
-            | ((g as u32) << fb.info.format.green_shift)
-            | ((b as u32) << fb.info.format.blue_shift);
-
-        let offset = if fb.use_double_buffer {
-            fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
-        } else {
-            fb.info.base_virt as *mut u8
-        };
-
-        unsafe {
-            let pixel_ptr = offset.add((y * fb.info.stride + x * 4) as usize);
-            core::ptr::write_volatile(pixel_ptr as *mut u32, pixel);
-        }
-
-        // Flush if using VirtIO GPU
-        if fb.info.source == FramebufferSource::VirtioGpu && !fb.use_double_buffer {
+        if let Some((fx, fy, fw, fh)) = flush_region {
             if let Some(gpu) = gpu::get_gpu() {
-                gpu.flush(x, y, 1, 1);
+                gpu.flush(fx, fy, fw, fh);
+                gpu.flush_now();
             }
         }
     }
 
     /// Fill rectangle with color
     pub fn fill_rect(x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8) {
-        for dy in 0..height {
-            for dx in 0..width {
-                Self::set_pixel(x + dx, y + dy, r, g, b);
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let mut flush_region = None;
+        {
+            let mut guard = FRAMEBUFFER.lock();
+            let fb = match guard.as_mut() {
+                Some(f) => f,
+                None => return,
+            };
+
+            if x >= fb.info.width || y >= fb.info.height {
+                return;
+            }
+
+            let max_w = fb.info.width - x;
+            let max_h = fb.info.height - y;
+            let width = width.min(max_w);
+            let height = height.min(max_h);
+            if width == 0 || height == 0 {
+                return;
+            }
+
+            let pixel = ((r as u32) << fb.info.format.red_shift)
+                | ((g as u32) << fb.info.format.green_shift)
+                | ((b as u32) << fb.info.format.blue_shift);
+
+            let offset = if fb.use_double_buffer {
+                fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
+            } else {
+                fb.info.base_virt as *mut u8
+            };
+
+            let stride = fb.info.stride as usize;
+            for dy in 0..height as usize {
+                let row_ptr =
+                    unsafe { offset.add((y as usize + dy) * stride + x as usize * 4) as *mut u32 };
+                for dx in 0..width as usize {
+                    unsafe {
+                        core::ptr::write(row_ptr.add(dx), pixel);
+                    }
+                }
+            }
+
+            fb.dirty.include(x, y, width, height);
+            if fb.info.source == FramebufferSource::VirtioGpu && !fb.use_double_buffer {
+                flush_region = Some((x, y, width, height));
+            }
+        }
+
+        if let Some((fx, fy, fw, fh)) = flush_region {
+            if let Some(gpu) = gpu::get_gpu() {
+                gpu.flush(fx, fy, fw, fh);
+                gpu.flush_now();
             }
         }
     }
@@ -308,28 +424,52 @@ impl Framebuffer {
 
     /// Swap buffers (for double buffering)
     pub fn swap_buffers() {
-        let mut fb = FRAMEBUFFER.lock();
-        let fb = match fb.as_mut() {
-            Some(f) => f,
-            None => return,
-        };
+        let mut virtio_present = None;
+        {
+            let mut guard = FRAMEBUFFER.lock();
+            let fb = match guard.as_mut() {
+                Some(f) => f,
+                None => return,
+            };
 
-        if !fb.use_double_buffer || fb.double_buffer.is_none() {
-            return;
+            if !fb.use_double_buffer || fb.double_buffer.is_none() {
+                return;
+            }
+
+            let db = fb.double_buffer.unwrap();
+            let dirty = match fb.dirty.take() {
+                Some(d) => d,
+                None => return,
+            };
+            let (x, y, width, height) = dirty;
+            if width == 0 || height == 0 {
+                return;
+            }
+
+            if fb.info.source == FramebufferSource::VirtioGpu {
+                virtio_present = Some((db as *const u8, fb.info.stride, x, y, width, height));
+            } else {
+                let dst = fb.info.base_virt as *mut u8;
+                let row_bytes = width as usize * 4;
+                let stride = fb.info.stride as usize;
+                for row in 0..height as usize {
+                    let row_y = y as usize + row;
+                    let src_off = row_y * stride + x as usize * 4;
+                    let dst_off = src_off;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            db.add(src_off),
+                            dst.add(dst_off),
+                            row_bytes,
+                        );
+                    }
+                }
+            }
         }
 
-        let db = fb.double_buffer.unwrap();
-        let fb_base = fb.info.base_virt as *mut u8;
-        let size = (fb.info.stride as usize) * (fb.info.height as usize);
-
-        unsafe {
-            core::ptr::copy_nonoverlapping(db, fb_base, size);
-        }
-
-        // Flush entire screen for VirtIO GPU
-        if fb.info.source == FramebufferSource::VirtioGpu {
+        if let Some((src, src_stride, px, py, pw, ph)) = virtio_present {
             if let Some(gpu) = gpu::get_gpu() {
-                gpu.flush(0, 0, fb.info.width, fb.info.height);
+                let _ = gpu.present_from_linear(src, src_stride, px, py, pw, ph);
             }
         }
     }
@@ -338,7 +478,11 @@ impl Framebuffer {
     pub fn set_double_buffering(enable: bool) {
         let mut fb = FRAMEBUFFER.lock();
         if let Some(ref mut f) = fb.as_mut() {
-            f.use_double_buffer = enable && f.double_buffer.is_some();
+            if f.info.source == FramebufferSource::VirtioGpu {
+                f.use_double_buffer = f.double_buffer.is_some();
+            } else {
+                f.use_double_buffer = enable && f.double_buffer.is_some();
+            }
         }
     }
 }

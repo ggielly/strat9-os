@@ -1,41 +1,107 @@
-// VirtIO GPU Driver
+// VirtIO GPU driver
 // Reference: VirtIO spec v1.2, Section 5.4 (GPU Device)
 
 use crate::{
     arch::x86_64::pci::{self, Bar, ProbeCriteria},
     memory::{allocate_dma_frame, get_allocator, phys_to_virt, FrameAllocator, PhysFrame},
 };
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::{Mutex, Once};
 
-const VIRTIO_RING_SIZE: usize = 8;
+const VIRTIO_RING_SIZE: usize = 64;
+const PAGE_SIZE: usize = 4096;
+const VIRTQ_PAYLOAD_ORDER: u8 = 6;
+const FLUSH_OPS_THRESHOLD: u32 = 64;
 
 pub struct VirtioGpu {
-    device: VirtioDevice,
     ctrl_queue: Mutex<Virtqueue>,
-    cursor_queue: Mutex<Virtqueue>,
+    _cursor_queue: Mutex<Option<Virtqueue>>,
     info: GpuInfo,
-    framebuffer_allocation: Option<(PhysFrame, u8)>,
+    _framebuffer_pages: Vec<PhysFrame>,
+    framebuffer_segments: Vec<FramebufferSegment>,
+    framebuffer_size: usize,
+    dirty: Mutex<DirtyRect>,
 }
 
 struct VirtioDevice {
     mmio: usize,
+    queue_notify_addr: usize,
 }
 
 struct Virtqueue {
     desc: *mut VirtqDesc,
     avail: *mut VirtqAvail,
     used: *mut VirtqUsed,
-    desc_phys: u64,
-    avail_phys: u64,
-    used_phys: u64,
-    free: Vec<u16>,
+    queue_idx: u16,
+    queue_size: u16,
+    notify_addr: usize,
+    free_stack: [u16; VIRTIO_RING_SIZE],
+    free_len: usize,
     last_used_idx: u16,
+    cmd_phys: u64,
+    cmd_virt: *mut u8,
+    payload_phys: u64,
+    payload_virt: *mut u8,
+    payload_capacity: usize,
+    resp_phys: u64,
+    resp_virt: *mut u8,
 }
 
 unsafe impl Send for Virtqueue {}
+
+#[derive(Clone, Copy)]
+struct FramebufferSegment {
+    virt: *mut u8,
+    len: usize,
+}
+
+unsafe impl Send for FramebufferSegment {}
+unsafe impl Sync for FramebufferSegment {}
+
+#[derive(Clone, Copy)]
+struct DirtyRect {
+    valid: bool,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    pending_ops: u32,
+}
+
+impl DirtyRect {
+    const fn empty() -> Self {
+        Self {
+            valid: false,
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+            pending_ops: 0,
+        }
+    }
+
+    fn include(&mut self, x: u32, y: u32, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let x1 = x.saturating_add(width);
+        let y1 = y.saturating_add(height);
+        if !self.valid {
+            self.valid = true;
+            self.x0 = x;
+            self.y0 = y;
+            self.x1 = x1;
+            self.y1 = y1;
+        } else {
+            self.x0 = self.x0.min(x);
+            self.y0 = self.y0.min(y);
+            self.x1 = self.x1.max(x1);
+            self.y1 = self.y1.max(y1);
+        }
+        self.pending_ops = self.pending_ops.saturating_add(1);
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -80,16 +146,13 @@ unsafe impl Send for GpuInfo {}
 unsafe impl Sync for GpuInfo {}
 
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
-const VIRTIO_GPU_F_VIRGL: u32 = 0;
 const VIRTIO_GPU_F_EDID: u32 = 1;
 
-const VIRTIO_STATUS_RESET: u8 = 0;
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
 
-// VirtIO GPU commands
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
 const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
@@ -97,15 +160,12 @@ const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 
-// VirtIO GPU responses
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 
-// Virtqueue descriptor flags
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-// VirtIO GPU formats
 const VIRTIO_GPU_FORMAT_X8R8G8B8: u32 = 1;
 
 #[repr(C)]
@@ -205,7 +265,12 @@ impl VirtioGpu {
         };
 
         let mmio = phys_to_virt(bar) as usize;
-        let mut device = VirtioDevice { mmio };
+        let notify_mult = unsafe { ((mmio + 0x20) as *const u16).read_volatile() as usize };
+        let queue_notify_addr = mmio + 0x50 + notify_mult * 4;
+        let mut device = VirtioDevice {
+            mmio,
+            queue_notify_addr,
+        };
 
         device.reset();
         device.add_status(VIRTIO_STATUS_ACKNOWLEDGE);
@@ -224,14 +289,12 @@ impl VirtioGpu {
         }
 
         let ctrl_queue = Virtqueue::new(&mut device, 0)?;
-        let cursor_queue = Virtqueue::new(&mut device, 1)?;
 
         device.add_status(VIRTIO_STATUS_DRIVER_OK);
 
         let mut gpu = Self {
-            device,
             ctrl_queue: Mutex::new(ctrl_queue),
-            cursor_queue: Mutex::new(cursor_queue),
+            _cursor_queue: Mutex::new(None),
             info: GpuInfo {
                 width: 1024,
                 height: 768,
@@ -239,7 +302,10 @@ impl VirtioGpu {
                 framebuffer_phys: 0,
                 framebuffer_virt: core::ptr::null_mut(),
             },
-            framebuffer_allocation: None,
+            _framebuffer_pages: Vec::new(),
+            framebuffer_segments: Vec::new(),
+            framebuffer_size: 0,
+            dirty: Mutex::new(DirtyRect::empty()),
         };
 
         gpu.init_display()?;
@@ -253,46 +319,61 @@ impl VirtioGpu {
         if framebuffer_size == 0 {
             return Err("Display reports zero-sized framebuffer");
         }
-        let framebuffer_pages = (framebuffer_size + 4095) / 4096;
-        let framebuffer_order = framebuffer_pages
-            .next_power_of_two()
-            .trailing_zeros() as u8;
+        let page_count = (framebuffer_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let mut pages = Vec::with_capacity(page_count);
+        let mut entries = Vec::with_capacity(page_count);
+        let mut segments = Vec::with_capacity(page_count);
 
-        let framebuffer_frame = {
-            let mut alloc_guard = get_allocator().lock();
-            let allocator = alloc_guard
-                .as_mut()
-                .ok_or("Allocator unavailable for framebuffer")?;
-            allocator
-                .alloc(framebuffer_order)
-                .map_err(|_| "Failed to allocate contiguous framebuffer")?
-        };
-        let framebuffer_phys = framebuffer_frame.start_address.as_u64();
-        let framebuffer_virt = phys_to_virt(framebuffer_phys) as *mut u8;
-
-        // SAFETY: `framebuffer_virt` points to a freshly allocated DMA buffer
-        // that we own for at least `framebuffer_size` bytes.
-        unsafe {
-            core::ptr::write_bytes(framebuffer_virt, 0, framebuffer_size);
+        for _ in 0..page_count {
+            let frame = allocate_dma_frame().ok_or("Failed to allocate framebuffer page")?;
+            let phys = frame.start_address.as_u64();
+            pages.push(frame);
+            entries.push(MemEntry {
+                addr: phys,
+                length: PAGE_SIZE as u32,
+                _padding: 0,
+            });
+            segments.push(FramebufferSegment {
+                virt: phys_to_virt(phys) as *mut u8,
+                len: PAGE_SIZE,
+            });
         }
 
-        self.info.framebuffer_phys = framebuffer_phys;
-        self.info.framebuffer_virt = framebuffer_virt;
-        self.framebuffer_allocation = Some((framebuffer_frame, framebuffer_order));
+        if let Some(last) = entries.last_mut() {
+            let rem = framebuffer_size % PAGE_SIZE;
+            if rem != 0 {
+                last.length = rem as u32;
+            }
+        }
+        if let Some(last) = segments.last_mut() {
+            let rem = framebuffer_size % PAGE_SIZE;
+            if rem != 0 {
+                last.len = rem;
+            }
+        }
+
+        self.info.framebuffer_phys = entries.first().map(|e| e.addr).unwrap_or(0);
+        self.info.framebuffer_virt = segments
+            .first()
+            .map(|s| s.virt)
+            .unwrap_or(core::ptr::null_mut());
+        self.framebuffer_size = framebuffer_size;
+        self._framebuffer_pages = pages;
+        self.framebuffer_segments = segments;
 
         let resource_id = 1;
         self.resource_create_2d(resource_id, self.info.width, self.info.height)?;
-        self.resource_attach_backing(resource_id, framebuffer_phys, framebuffer_size as u32)?;
+        self.resource_attach_backing(resource_id, &entries)?;
         self.set_scanout(0, resource_id)?;
         self.transfer_to_host_2d(resource_id, 0, 0, self.info.width, self.info.height)?;
         self.resource_flush(resource_id, 0, 0, self.info.width, self.info.height)?;
 
         log::info!(
-            "VirtIO GPU: {}x{} @ {} bpp, framebuffer at 0x{:x}",
+            "VirtIO GPU: {}x{} @ {} bpp, framebuffer {} pages",
             self.info.width,
             self.info.height,
             32,
-            framebuffer_phys
+            page_count
         );
 
         Ok(())
@@ -324,7 +405,12 @@ impl VirtioGpu {
         Ok(())
     }
 
-    fn resource_create_2d(&self, resource_id: u32, width: u32, height: u32) -> Result<(), &'static str> {
+    fn resource_create_2d(
+        &self,
+        resource_id: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), &'static str> {
         let cmd = CmdResourceCreate2d {
             hdr: CtrlHeader {
                 cmd_and_flags: VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
@@ -345,7 +431,14 @@ impl VirtioGpu {
         Ok(())
     }
 
-    fn resource_attach_backing(&self, resource_id: u32, addr: u64, length: u32) -> Result<(), &'static str> {
+    fn resource_attach_backing(
+        &self,
+        resource_id: u32,
+        entries: &[MemEntry],
+    ) -> Result<(), &'static str> {
+        if entries.is_empty() {
+            return Err("No backing entries");
+        }
         let cmd = CmdResourceAttachBacking {
             hdr: CtrlHeader {
                 cmd_and_flags: VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
@@ -354,24 +447,16 @@ impl VirtioGpu {
                 _padding: 0,
             },
             resource_id,
-            nr_entries: 1,
+            nr_entries: entries.len() as u32,
         };
 
-        let entry = MemEntry {
-            addr,
-            length,
-            _padding: 0,
-        };
-
-        let entry_bytes = unsafe {
-            // SAFETY: `entry` is a POD `#[repr(C)]` struct and we convert it to
-            // a byte view for DMA submission.
+        let payload = unsafe {
             core::slice::from_raw_parts(
-                (&entry as *const MemEntry) as *const u8,
-                core::mem::size_of::<MemEntry>(),
+                entries.as_ptr() as *const u8,
+                entries.len() * core::mem::size_of::<MemEntry>(),
             )
         };
-        let resp: CtrlHeader = self.send_command_with_payload(&cmd, Some(entry_bytes))?;
+        let resp: CtrlHeader = self.send_command_with_payload(&cmd, Some(payload))?;
         if resp.cmd_and_flags != VIRTIO_GPU_RESP_OK_NODATA {
             return Err("RESOURCE_ATTACH_BACKING failed");
         }
@@ -479,137 +564,177 @@ impl VirtioGpu {
     ) -> Result<R, &'static str> {
         let cmd_size = core::mem::size_of::<T>();
         let resp_size = core::mem::size_of::<R>();
-
-        if cmd_size > 4096 || resp_size > 4096 {
+        if cmd_size > PAGE_SIZE || resp_size > PAGE_SIZE {
             return Err("Command or response too large");
         }
-        if payload.map(|p| p.len()).unwrap_or(0) > 4096 {
+
+        let payload_len = payload.map_or(0, |p| p.len());
+        let mut ctrl_queue = self.ctrl_queue.lock();
+        if payload_len > ctrl_queue.payload_capacity {
             return Err("Payload too large");
         }
 
-        let cmd_frame = allocate_dma_frame().ok_or("Failed to allocate command buffer")?;
-        let payload_frame = if payload.is_some() {
-            Some(allocate_dma_frame().ok_or("Failed to allocate payload buffer")?)
-        } else {
-            None
-        };
-        let resp_frame = allocate_dma_frame().ok_or("Failed to allocate response buffer")?;
-
-        let cmd_phys = cmd_frame.start_address.as_u64();
-        let cmd_virt = phys_to_virt(cmd_phys) as *mut u8;
-        let payload_phys = payload_frame
-            .as_ref()
-            .map(|f| f.start_address.as_u64())
-            .unwrap_or(0);
-        let payload_virt = if payload.is_some() {
-            Some(phys_to_virt(payload_phys) as *mut u8)
-        } else {
-            None
-        };
-        let resp_phys = resp_frame.start_address.as_u64();
-        let resp_virt = phys_to_virt(resp_phys) as *mut u8;
-
-        let mut ctrl_queue = self.ctrl_queue.lock();
-        let needed_desc = if payload.is_some() { 3 } else { 2 };
-        if ctrl_queue.free.len() < needed_desc {
-            drop(ctrl_queue);
-            self.free_dma_frame(cmd_frame);
-            if let Some(frame) = payload_frame {
-                self.free_dma_frame(frame);
-            }
-            self.free_dma_frame(resp_frame);
+        let needed_desc = if payload_len > 0 { 3 } else { 2 };
+        if ctrl_queue.free_len < needed_desc {
             return Err("Not enough free descriptors");
         }
 
-        let head_idx = ctrl_queue.free.pop().ok_or("Missing descriptor")?;
-        let middle_idx = if payload.is_some() {
-            Some(ctrl_queue.free.pop().ok_or("Missing payload descriptor")?)
+        let head_idx = ctrl_queue.pop_desc().ok_or("Missing descriptor")?;
+        let middle_idx = if payload_len > 0 {
+            Some(ctrl_queue.pop_desc().ok_or("Missing payload descriptor")?)
         } else {
             None
         };
-        let resp_idx = ctrl_queue.free.pop().ok_or("Missing response descriptor")?;
+        let resp_idx = ctrl_queue.pop_desc().ok_or("Missing response descriptor")?;
 
         unsafe {
-            // SAFETY: DMA command/response buffers are freshly allocated and
-            // valid for the copied sizes.
-            core::ptr::copy_nonoverlapping(cmd as *const _ as *const u8, cmd_virt, cmd_size);
-            if let (Some(data), Some(data_virt)) = (payload, payload_virt) {
-                core::ptr::copy_nonoverlapping(data.as_ptr(), data_virt, data.len());
+            core::ptr::copy_nonoverlapping(
+                cmd as *const _ as *const u8,
+                ctrl_queue.cmd_virt,
+                cmd_size,
+            );
+            if let Some(data) = payload {
+                core::ptr::copy_nonoverlapping(data.as_ptr(), ctrl_queue.payload_virt, data.len());
             }
 
             let head_desc = &mut *ctrl_queue.desc.add(head_idx as usize);
-            head_desc.addr = cmd_phys;
+            head_desc.addr = ctrl_queue.cmd_phys;
             head_desc.len = cmd_size as u32;
             head_desc.flags = VIRTQ_DESC_F_NEXT;
             head_desc.next = middle_idx.unwrap_or(resp_idx);
 
-            if let Some(middle) = middle_idx {
-                let data = payload.expect("payload descriptor without payload");
-                let data_desc = &mut *ctrl_queue.desc.add(middle as usize);
-                data_desc.addr = payload_phys;
-                data_desc.len = data.len() as u32;
+            if let Some(mid) = middle_idx {
+                let data_desc = &mut *ctrl_queue.desc.add(mid as usize);
+                data_desc.addr = ctrl_queue.payload_phys;
+                data_desc.len = payload_len as u32;
                 data_desc.flags = VIRTQ_DESC_F_NEXT;
                 data_desc.next = resp_idx;
             }
 
             let resp_desc = &mut *ctrl_queue.desc.add(resp_idx as usize);
-            resp_desc.addr = resp_phys;
+            resp_desc.addr = ctrl_queue.resp_phys;
             resp_desc.len = resp_size as u32;
             resp_desc.flags = VIRTQ_DESC_F_WRITE;
             resp_desc.next = 0;
 
             let avail = &mut *ctrl_queue.avail;
-            let ring_idx = avail.idx as usize % VIRTIO_RING_SIZE;
+            let ring_idx = (avail.idx as usize) % (ctrl_queue.queue_size as usize);
             avail.ring[ring_idx] = head_idx;
             avail.idx = avail.idx.wrapping_add(1);
         }
 
-        self.device.notify_queue(0);
+        unsafe {
+            (ctrl_queue.notify_addr as *mut u32).write_volatile(ctrl_queue.queue_idx as u32);
+        }
 
-        let mut completed = false;
-        while !completed {
+        let mut spins: u32 = 0;
+        loop {
             unsafe {
-                // SAFETY: `ctrl_queue.used` points to a valid shared vring page.
                 let used = &*ctrl_queue.used;
                 if ctrl_queue.last_used_idx != used.idx {
-                    let idx = ctrl_queue.last_used_idx as usize % VIRTIO_RING_SIZE;
+                    let idx =
+                        (ctrl_queue.last_used_idx as usize) % (ctrl_queue.queue_size as usize);
                     let elem = used.ring[idx];
                     ctrl_queue.last_used_idx = ctrl_queue.last_used_idx.wrapping_add(1);
-                    completed = elem.id as u16 == head_idx;
+                    if elem.id as u16 == head_idx {
+                        break;
+                    }
                 }
             }
-            if !completed {
+
+            spins = spins.wrapping_add(1);
+            if (spins & 0x3ff) == 0 {
+                crate::process::yield_task();
+            } else {
                 core::hint::spin_loop();
             }
         }
 
-        let response = unsafe {
-            // SAFETY: The device has completed the command and wrote `resp_size`
-            // bytes in `resp_virt`. Reading as `R` is valid by construction.
-            core::ptr::read_unaligned(resp_virt as *const R)
-        };
+        let response = unsafe { core::ptr::read_unaligned(ctrl_queue.resp_virt as *const R) };
 
-        ctrl_queue.free.push(head_idx);
-        if let Some(middle) = middle_idx {
-            ctrl_queue.free.push(middle);
+        ctrl_queue.push_desc(head_idx);
+        if let Some(mid) = middle_idx {
+            ctrl_queue.push_desc(mid);
         }
-        ctrl_queue.free.push(resp_idx);
-        drop(ctrl_queue);
-
-        self.free_dma_frame(cmd_frame);
-        if let Some(frame) = payload_frame {
-            self.free_dma_frame(frame);
-        }
-        self.free_dma_frame(resp_frame);
+        ctrl_queue.push_desc(resp_idx);
 
         Ok(response)
     }
 
-    fn free_dma_frame(&self, frame: PhysFrame) {
-        let mut alloc_guard = get_allocator().lock();
-        if let Some(allocator) = alloc_guard.as_mut() {
-            allocator.free(frame, 0);
+    fn copy_to_backing(
+        &self,
+        mut src: *const u8,
+        mut dst_offset: usize,
+        mut len: usize,
+    ) -> Result<(), &'static str> {
+        let end = dst_offset.checked_add(len).ok_or("Copy overflow")?;
+        if end > self.framebuffer_size {
+            return Err("Copy out of bounds");
         }
+        while len > 0 {
+            let seg_idx = dst_offset / PAGE_SIZE;
+            let seg_off = dst_offset % PAGE_SIZE;
+            let seg = self
+                .framebuffer_segments
+                .get(seg_idx)
+                .ok_or("Segment out of bounds")?;
+            if seg_off >= seg.len {
+                return Err("Segment offset out of bounds");
+            }
+            let chunk = core::cmp::min(len, seg.len - seg_off);
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, seg.virt.add(seg_off), chunk);
+            }
+            unsafe {
+                src = src.add(chunk);
+            }
+            dst_offset += chunk;
+            len -= chunk;
+        }
+        Ok(())
+    }
+
+    pub fn present_from_linear(
+        &self,
+        src: *const u8,
+        src_stride: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), &'static str> {
+        if src.is_null() {
+            return Err("Invalid source pointer");
+        }
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        if x >= self.info.width || y >= self.info.height {
+            return Ok(());
+        }
+
+        let width = width.min(self.info.width - x);
+        let height = height.min(self.info.height - y);
+        let src_stride = src_stride as usize;
+        let dst_stride = self.info.stride as usize;
+        let row_bytes = (width as usize).checked_mul(4).ok_or("Row overflow")?;
+
+        for row in 0..height as usize {
+            let src_off = (y as usize + row)
+                .checked_mul(src_stride)
+                .and_then(|o| o.checked_add(x as usize * 4))
+                .ok_or("Source offset overflow")?;
+            let dst_off = (y as usize + row)
+                .checked_mul(dst_stride)
+                .and_then(|o| o.checked_add(x as usize * 4))
+                .ok_or("Destination offset overflow")?;
+            let src_row = unsafe { src.add(src_off) };
+            self.copy_to_backing(src_row, dst_off, row_bytes)?;
+        }
+
+        self.transfer_to_host_2d(1, x, y, width, height)?;
+        self.resource_flush(1, x, y, width, height)?;
+        Ok(())
     }
 
     pub fn info(&self) -> GpuInfo {
@@ -617,8 +742,39 @@ impl VirtioGpu {
     }
 
     pub fn flush(&self, x: u32, y: u32, width: u32, height: u32) {
-        let _ = self.transfer_to_host_2d(1, x, y, width, height);
-        let _ = self.resource_flush(1, x, y, width, height);
+        if width == 0 || height == 0 {
+            return;
+        }
+        let mut dirty = self.dirty.lock();
+        dirty.include(x, y, width, height);
+        if dirty.pending_ops < FLUSH_OPS_THRESHOLD {
+            return;
+        }
+        let x0 = dirty.x0;
+        let y0 = dirty.y0;
+        let w = dirty.x1.saturating_sub(dirty.x0);
+        let h = dirty.y1.saturating_sub(dirty.y0);
+        *dirty = DirtyRect::empty();
+        drop(dirty);
+        let _ = self.transfer_to_host_2d(1, x0, y0, w, h);
+        let _ = self.resource_flush(1, x0, y0, w, h);
+    }
+
+    pub fn flush_now(&self) {
+        let (x0, y0, w, h) = {
+            let mut dirty = self.dirty.lock();
+            if !dirty.valid {
+                return;
+            }
+            let x0 = dirty.x0;
+            let y0 = dirty.y0;
+            let w = dirty.x1.saturating_sub(dirty.x0);
+            let h = dirty.y1.saturating_sub(dirty.y0);
+            *dirty = DirtyRect::empty();
+            (x0, y0, w, h)
+        };
+        let _ = self.transfer_to_host_2d(1, x0, y0, w, h);
+        let _ = self.resource_flush(1, x0, y0, w, h);
     }
 }
 
@@ -651,16 +807,8 @@ impl VirtioDevice {
 
     fn write_features(&mut self, features: u64) {
         unsafe {
-            (self.mmio as *mut u32).write_volatile((features & 0xFFFFFFFF) as u32);
-            ((self.mmio + 4) as *mut u32).write_volatile(((features >> 32) & 0xFFFFFFFF) as u32);
-        }
-    }
-
-    fn notify_queue(&self, queue: u16) {
-        unsafe {
-            let offset = ((self.mmio + 0x20) as *const u16).read_volatile() as usize;
-            let queue_notify = self.mmio + 0x50 + offset * 4;
-            (queue_notify as *mut u32).write_volatile(queue as u32);
+            (self.mmio as *mut u32).write_volatile((features & 0xFFFF_FFFF) as u32);
+            ((self.mmio + 4) as *mut u32).write_volatile(((features >> 32) & 0xFFFF_FFFF) as u32);
         }
     }
 }
@@ -669,46 +817,95 @@ impl Virtqueue {
     fn new(device: &mut VirtioDevice, queue_idx: u16) -> Result<Self, &'static str> {
         unsafe {
             ((device.mmio + 0x16) as *mut u16).write_volatile(queue_idx);
-            let max_size = ((device.mmio + 0x18) as *const u16).read_volatile();
-            if max_size < VIRTIO_RING_SIZE as u16 {
-                return Err("Queue size too small");
+            let max_size = ((device.mmio + 0x18) as *const u16).read_volatile() as usize;
+            if max_size == 0 {
+                return Err("Queue size is zero");
             }
-            ((device.mmio + 0x16) as *mut u16).write_volatile(VIRTIO_RING_SIZE as u16);
+
+            let queue_size = core::cmp::min(max_size, VIRTIO_RING_SIZE) as u16;
+            ((device.mmio + 0x16) as *mut u16).write_volatile(queue_size);
 
             let desc_frame = allocate_dma_frame().ok_or("Failed to allocate desc")?;
             let avail_frame = allocate_dma_frame().ok_or("Failed to allocate avail")?;
             let used_frame = allocate_dma_frame().ok_or("Failed to allocate used")?;
+            let cmd_frame = allocate_dma_frame().ok_or("Failed to allocate command buffer")?;
+            let resp_frame = allocate_dma_frame().ok_or("Failed to allocate response buffer")?;
+
+            let payload_frame = {
+                let mut alloc_guard = get_allocator().lock();
+                let allocator = alloc_guard
+                    .as_mut()
+                    .ok_or("Allocator unavailable for payload buffer")?;
+                allocator
+                    .alloc(VIRTQ_PAYLOAD_ORDER)
+                    .map_err(|_| "Failed to allocate payload buffer")?
+            };
 
             let desc_phys = desc_frame.start_address.as_u64();
             let avail_phys = avail_frame.start_address.as_u64();
             let used_phys = used_frame.start_address.as_u64();
+            let cmd_phys = cmd_frame.start_address.as_u64();
+            let payload_phys = payload_frame.start_address.as_u64();
+            let resp_phys = resp_frame.start_address.as_u64();
 
             let desc_virt = phys_to_virt(desc_phys) as *mut VirtqDesc;
             let avail_virt = phys_to_virt(avail_phys) as *mut VirtqAvail;
             let used_virt = phys_to_virt(used_phys) as *mut VirtqUsed;
+            let cmd_virt = phys_to_virt(cmd_phys) as *mut u8;
+            let payload_virt = phys_to_virt(payload_phys) as *mut u8;
+            let resp_virt = phys_to_virt(resp_phys) as *mut u8;
 
-            core::ptr::write_bytes(desc_virt, 0, VIRTIO_RING_SIZE * core::mem::size_of::<VirtqDesc>());
-            core::ptr::write_bytes(avail_virt, 0, core::mem::size_of::<VirtqAvail>());
-            core::ptr::write_bytes(used_virt, 0, core::mem::size_of::<VirtqUsed>());
+            core::ptr::write_bytes(
+                desc_virt as *mut u8,
+                0,
+                core::mem::size_of::<VirtqDesc>() * VIRTIO_RING_SIZE,
+            );
+            core::ptr::write_bytes(avail_virt as *mut u8, 0, core::mem::size_of::<VirtqAvail>());
+            core::ptr::write_bytes(used_virt as *mut u8, 0, core::mem::size_of::<VirtqUsed>());
+            core::ptr::write_bytes(payload_virt, 0, PAGE_SIZE << (VIRTQ_PAYLOAD_ORDER as usize));
 
-            ((device.mmio + 0x10) as *mut u32).write_volatile((desc_phys & 0xFFFFFFFF) as u32);
+            ((device.mmio + 0x10) as *mut u32).write_volatile((desc_phys & 0xFFFF_FFFF) as u32);
             ((device.mmio + 0x1A) as *mut u16).write_volatile(0xFFFF);
 
-            let mut free = Vec::with_capacity(VIRTIO_RING_SIZE);
-            for i in 0..VIRTIO_RING_SIZE {
-                free.push(i as u16);
+            let mut free_stack = [0u16; VIRTIO_RING_SIZE];
+            for i in 0..(queue_size as usize) {
+                free_stack[i] = i as u16;
             }
 
             Ok(Self {
                 desc: desc_virt,
                 avail: avail_virt,
                 used: used_virt,
-                desc_phys,
-                avail_phys,
-                used_phys,
-                free,
+                queue_idx,
+                queue_size,
+                notify_addr: device.queue_notify_addr,
+                free_stack,
+                free_len: queue_size as usize,
                 last_used_idx: 0,
+                cmd_phys,
+                cmd_virt,
+                payload_phys,
+                payload_virt,
+                payload_capacity: PAGE_SIZE << (VIRTQ_PAYLOAD_ORDER as usize),
+                resp_phys,
+                resp_virt,
             })
+        }
+    }
+
+    fn pop_desc(&mut self) -> Option<u16> {
+        if self.free_len == 0 {
+            None
+        } else {
+            self.free_len -= 1;
+            Some(self.free_stack[self.free_len])
+        }
+    }
+
+    fn push_desc(&mut self, idx: u16) {
+        if self.free_len < self.free_stack.len() {
+            self.free_stack[self.free_len] = idx;
+            self.free_len += 1;
         }
     }
 }
