@@ -44,6 +44,13 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  test_mem_stressed - Launch /initfs/test_mem_stressed stress test");
     shell_println!("  reboot            - Reboot the system");
     shell_println!("  scheduler debug   - Scheduler debug on|off|dump");
+    shell_println!("  scheduler class   - Show scheduler class table + ranks");
+    shell_println!("  scheduler class order set <c1> <c2> <c3> - Set pick order");
+    shell_println!("  scheduler class steal set <c1> <c2> - Set steal order");
+    shell_println!("  scheduler policy map show - Show policy->class mapping");
+    shell_println!("  scheduler policy map set <k> <c> - Set mapping (k=fair|rt|idle)");
+    shell_println!("  scheduler metrics - Show per-CPU scheduler counters");
+    shell_println!("  scheduler metrics reset - Reset scheduler counters");
     shell_println!("  trace mem ...     - Memory trace on|off|dump|clear|serial|mask");
     shell_println!("  gfx help          - Show gfx command help");
     shell_println!("  gfx info          - Display framebuffer/console info");

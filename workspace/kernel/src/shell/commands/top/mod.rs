@@ -58,6 +58,17 @@ struct CpuUsageWindow {
     avg_ratio: f64,
 }
 
+#[derive(Clone, Copy)]
+struct SchedulerMetricsWindow {
+    rt_ratio: f64,
+    fair_ratio: f64,
+    idle_ratio: f64,
+    switch_delta: u64,
+    preempt_delta: u64,
+    steal_in_delta: u64,
+    steal_out_delta: u64,
+}
+
 fn collect_snapshot() -> TopSnapshot {
     let cpu_count = crate::arch::x86_64::percpu::cpu_count();
     let (total_pages, used_pages) = {
@@ -176,6 +187,56 @@ fn compute_cpu_usage_window(
     }
 }
 
+fn compute_scheduler_metrics_window(
+    prev: &crate::process::SchedulerMetricsSnapshot,
+    now: &crate::process::SchedulerMetricsSnapshot,
+) -> SchedulerMetricsWindow {
+    let cpu_count = now.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS);
+    let mut rt_delta = 0u64;
+    let mut fair_delta = 0u64;
+    let mut idle_delta = 0u64;
+    let mut switch_delta = 0u64;
+    let mut preempt_delta = 0u64;
+    let mut steal_in_delta = 0u64;
+    let mut steal_out_delta = 0u64;
+    for i in 0..cpu_count {
+        rt_delta = rt_delta.saturating_add(
+            now.rt_runtime_ticks[i].saturating_sub(prev.rt_runtime_ticks[i]),
+        );
+        fair_delta = fair_delta.saturating_add(
+            now.fair_runtime_ticks[i].saturating_sub(prev.fair_runtime_ticks[i]),
+        );
+        idle_delta = idle_delta.saturating_add(
+            now.idle_runtime_ticks[i].saturating_sub(prev.idle_runtime_ticks[i]),
+        );
+        switch_delta = switch_delta
+            .saturating_add(now.switch_count[i].saturating_sub(prev.switch_count[i]));
+        preempt_delta = preempt_delta
+            .saturating_add(now.preempt_count[i].saturating_sub(prev.preempt_count[i]));
+        steal_in_delta = steal_in_delta
+            .saturating_add(now.steal_in_count[i].saturating_sub(prev.steal_in_count[i]));
+        steal_out_delta = steal_out_delta
+            .saturating_add(now.steal_out_count[i].saturating_sub(prev.steal_out_count[i]));
+    }
+    let total = rt_delta.saturating_add(fair_delta).saturating_add(idle_delta);
+    let to_ratio = |v: u64| {
+        if total == 0 {
+            0.0
+        } else {
+            (v as f64 / total as f64).clamp(0.0, 1.0)
+        }
+    };
+    SchedulerMetricsWindow {
+        rt_ratio: to_ratio(rt_delta),
+        fair_ratio: to_ratio(fair_delta),
+        idle_ratio: to_ratio(idle_delta),
+        switch_delta,
+        preempt_delta,
+        steal_in_delta,
+        steal_out_delta,
+    }
+}
+
 /// Top command main loop
 pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
     if !vga::is_available() {
@@ -193,6 +254,7 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
     let mut last_refresh_tick = crate::process::scheduler::ticks();
     let boot_tick = last_refresh_tick;
     let mut prev_cpu_sample = crate::process::cpu_usage_snapshot();
+    let mut prev_sched_sample = crate::process::scheduler_metrics_snapshot();
     let mut selected_task: usize = 0;
 
     loop {
@@ -222,6 +284,9 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
         let cpu_sample = crate::process::cpu_usage_snapshot();
         let cpu_window = compute_cpu_usage_window(&prev_cpu_sample, &cpu_sample);
         prev_cpu_sample = cpu_sample;
+        let sched_sample = crate::process::scheduler_metrics_snapshot();
+        let sched_window = compute_scheduler_metrics_window(&prev_sched_sample, &sched_sample);
+        prev_sched_sample = sched_sample;
         let mem_ratio = if snapshot.total_pages > 0 {
             (snapshot.used_pages as f64) / (snapshot.total_pages as f64)
         } else {
@@ -268,6 +333,7 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                     .constraints([
                         Constraint::Length(2),
                         Constraint::Length(3),
+                        Constraint::Length(3),
                         Constraint::Length(6),
                         Constraint::Min(10),
                         Constraint::Length(1),
@@ -292,10 +358,24 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                 .block(Block::default().borders(Borders::BOTTOM).title("Stats"));
                 frame.render_widget(stats_line, vertical[1]);
 
+                let sched_line = Paragraph::new(format!(
+                    "Sched(win): RT {:>3}% | FAIR {:>3}% | IDLE {:>3}% | sw {} | pre {} | st+ {} | st- {}",
+                    (sched_window.rt_ratio * 100.0) as u16,
+                    (sched_window.fair_ratio * 100.0) as u16,
+                    (sched_window.idle_ratio * 100.0) as u16,
+                    sched_window.switch_delta,
+                    sched_window.preempt_delta,
+                    sched_window.steal_in_delta,
+                    sched_window.steal_out_delta
+                ))
+                .style(primary_text)
+                .block(Block::default().borders(Borders::BOTTOM).title("Scheduler"));
+                frame.render_widget(sched_line, vertical[2]);
+
                 let cpu_split = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(vertical[2]);
+                    .split(vertical[3]);
 
                 let mem_gauge = Gauge::default()
                     .block(
@@ -338,7 +418,7 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                 let main_split = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
-                    .split(vertical[3]);
+                    .split(vertical[4]);
 
                 let task_table = Table::new(
                     rows.iter().cloned(),
@@ -428,7 +508,7 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                 let footer = Paragraph::new("[Up/Down] Select process | [q|Esc] Exit")
                     .style(muted_text)
                     .block(Block::default().borders(Borders::TOP));
-                frame.render_widget(footer, vertical[4]);
+                frame.render_widget(footer, vertical[5]);
             })
             .map_err(|_| ShellError::ExecutionFailed)?;
 

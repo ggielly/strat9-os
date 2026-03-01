@@ -15,33 +15,25 @@
 //! Each task has its own 16KB kernel stack. Callee-saved registers are
 //! pushed/popped by `switch_context()`. `CpuContext` only stores `saved_rsp`.
 //!
-//! TODO(v2 scheduler):
-//! - formalize a full scheduling-classes framework with runtime-pluggable policy mapping.
-//! - replace fixed policy->class routing with a configurable registry:
-//!   - class id, class ops, policy matcher, priority rank, preempt rules.
-//!   - support dynamic add/remove/reorder of classes with validation.
-//! - add atomic class-table reconfiguration:
-//!   - stop-the-world or RCU-style swap for class table pointer.
-//!   - migrate queued tasks across classes safely without dropping runnable tasks.
-//!   - preserve per-task accounting (vruntime, rt budget, deadlines) during migration.
-//! - split scheduling decisions into explicit hooks:
-//!   - enqueue/dequeue/select/update_tick/should_preempt/yield/steal_candidate.
-//!   - optional class-local state serialization for debug dump and hot-reload.
-//! - isolate balancing into a dedicated module:
-//!   - per-class steal policy, NUMA-aware balancing (future), CPU affinity masks.
-//!   - anti-thrashing hysteresis and migration rate limiting.
-//! - expose kernel config + shell controls:
-//!   - `scheduler class list`, `scheduler class order set`, `scheduler policy map set`.
-//!   - runtime-safe reject path when requested config is inconsistent.
-//! - harden SMP behavior:
-//!   - explicit lock hierarchy for class-rq + global metadata.
-//!   - resched IPI batching and reduced cross-cpu ping-pong.
-//! - observability:
-//!   - per-class metrics (latency, wait time, runtime, preempt count, steal count).
-//!   - structured dump for post-mortem traces and selftest assertions.
+//! TODO(v3 scheduler):
+//! - class registry v2:
+//!   - dynamic add/remove/reorder with validation and safe reject path.
+//!   - policy->class mapping as runtime registry (not only static enum mapping).
+//! - atomic class-table migration:
+//!   - RCU/STW swap + migration of queued tasks across classes.
+//!   - preserve per-task accounting (vruntime, rt budget, wake deadlines).
+//! - balancing v2:
+//!   - dedicated balancer module, per-class steal policy, CPU affinity masks.
+//!   - NUMA-aware placement (future) and stronger anti-thrashing controls.
+//! - SMP hardening:
+//!   - explicit lock hierarchy doc + assertions.
+//!   - improved resched IPI batching/coalescing policy tuning.
+//! - observability v2:
+//!   - latency/wait-time histograms per class + structured trace dump.
+//!   - shell/top integration over stable snapshot API.
 //! - tests:
-//!   - deterministic class migration tests, policy remap tests, SMP steal tests.
-//!   - starvation/fairness regression suite and long-running stress suite in test ISO.
+//!   - deterministic migration/policy-remap/SMP-steal suites.
+//!   - fairness/starvation long-run regression in test ISO.
 
 use super::task::{
     restore_first_task, switch_context, Pid, Task, TaskId, TaskPriority, TaskState, Tid,
@@ -51,7 +43,7 @@ use crate::{
     arch::x86_64::timer::NS_PER_TICK,
     sync::SpinLock,
 };
-use alloc::{collections::BTreeMap, sync::Arc};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Per-CPU scheduler tick counters used for CPU usage estimation.
@@ -65,12 +57,43 @@ static CPU_TOTAL_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
 static CPU_IDLE_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_RT_RUNTIME_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_FAIR_RUNTIME_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_SWITCH_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_PREEMPT_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_STEAL_IN_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_STEAL_OUT_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static RESCHED_IPI_PENDING: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static LAST_STEAL_TICK: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+
+const STEAL_IMBALANCE_MIN: usize = 2;
+const STEAL_COOLDOWN_TICKS: u64 = 2;
 
 #[derive(Clone, Copy)]
 pub struct CpuUsageSnapshot {
     pub cpu_count: usize,
     pub total_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
     pub idle_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+}
+
+#[derive(Clone, Copy)]
+pub struct SchedulerMetricsSnapshot {
+    pub cpu_count: usize,
+    pub rt_runtime_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub fair_runtime_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub idle_runtime_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub switch_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub preempt_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub steal_in_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub steal_out_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
 }
 
 pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
@@ -90,18 +113,71 @@ pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
     }
 }
 
+pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
+    let cpu_count = crate::arch::x86_64::percpu::cpu_count()
+        .max(1)
+        .min(crate::arch::x86_64::percpu::MAX_CPUS);
+    let mut rt_runtime_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut fair_runtime_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut idle_runtime_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut switch_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut preempt_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut steal_in_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut steal_out_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    for i in 0..cpu_count {
+        rt_runtime_ticks[i] = CPU_RT_RUNTIME_TICKS[i].load(Ordering::Relaxed);
+        fair_runtime_ticks[i] = CPU_FAIR_RUNTIME_TICKS[i].load(Ordering::Relaxed);
+        idle_runtime_ticks[i] = CPU_IDLE_TICKS[i].load(Ordering::Relaxed);
+        switch_count[i] = CPU_SWITCH_COUNT[i].load(Ordering::Relaxed);
+        preempt_count[i] = CPU_PREEMPT_COUNT[i].load(Ordering::Relaxed);
+        steal_in_count[i] = CPU_STEAL_IN_COUNT[i].load(Ordering::Relaxed);
+        steal_out_count[i] = CPU_STEAL_OUT_COUNT[i].load(Ordering::Relaxed);
+    }
+    SchedulerMetricsSnapshot {
+        cpu_count,
+        rt_runtime_ticks,
+        fair_runtime_ticks,
+        idle_runtime_ticks,
+        switch_count,
+        preempt_count,
+        steal_in_count,
+        steal_out_count,
+    }
+}
+
+pub fn reset_scheduler_metrics() {
+    let cpu_count = crate::arch::x86_64::percpu::cpu_count()
+        .max(1)
+        .min(crate::arch::x86_64::percpu::MAX_CPUS);
+    for i in 0..cpu_count {
+        CPU_RT_RUNTIME_TICKS[i].store(0, Ordering::Relaxed);
+        CPU_FAIR_RUNTIME_TICKS[i].store(0, Ordering::Relaxed);
+        CPU_IDLE_TICKS[i].store(0, Ordering::Relaxed);
+        CPU_SWITCH_COUNT[i].store(0, Ordering::Relaxed);
+        CPU_PREEMPT_COUNT[i].store(0, Ordering::Relaxed);
+        CPU_STEAL_IN_COUNT[i].store(0, Ordering::Relaxed);
+        CPU_STEAL_OUT_COUNT[i].store(0, Ordering::Relaxed);
+    }
+}
+
 // ─── Cross-CPU IPI helpers ────────────────────────────────────────────────────
 
 /// Send a reschedule IPI to `cpu_index`.
 /// No-op if APIC is not initialized, or if `cpu_index` is the current CPU
 /// (the caller already handles the local-CPU case via `yield_cpu`).
 fn send_resched_ipi_to_cpu(cpu_index: usize) {
+    if cpu_index >= crate::arch::x86_64::percpu::MAX_CPUS {
+        return;
+    }
     if !apic::is_initialized() {
         return;
     }
     let my_apic = apic::lapic_id();
     if let Some(target_apic) = percpu::apic_id_by_cpu_index(cpu_index) {
         if target_apic != my_apic {
+            if RESCHED_IPI_PENDING[cpu_index].swap(true, Ordering::AcqRel) {
+                return;
+            }
             apic::send_resched_ipi(target_apic);
         }
     }
@@ -498,7 +574,7 @@ impl Scheduler {
         let next_task =
             if let Some(task) = self.cpus[cpu_index].class_rqs.pick_next(&self.class_table) {
                 task
-            } else if let Some(task) = self.steal_task(cpu_index) {
+            } else if let Some(task) = self.steal_task(cpu_index, TICK_COUNT.load(Ordering::Relaxed)) {
                 task
             } else {
                 self.cpus[cpu_index].idle_task.clone()
@@ -525,11 +601,33 @@ impl Scheduler {
     /// We steal from the **back** of the source queue (the task added most
     /// recently — least likely to have warm cache data on that CPU).
     /// We only steal when the source has ≥ 2 tasks, so it keeps at least one.
-    fn steal_task(&mut self, dst_cpu: usize) -> Option<Arc<Task>> {
+    fn steal_task(&mut self, dst_cpu: usize, now_tick: u64) -> Option<Arc<Task>> {
+        if dst_cpu >= crate::arch::x86_64::percpu::MAX_CPUS {
+            return None;
+        }
+        let last = LAST_STEAL_TICK[dst_cpu].load(Ordering::Relaxed);
+        if now_tick.saturating_sub(last) < STEAL_COOLDOWN_TICKS {
+            return None;
+        }
+
+        let dst_load = {
+            let cpu = &self.cpus[dst_cpu];
+            cpu.class_rqs.runnable_len() + usize::from(cpu.current_task.is_some())
+        };
+
         // Find the busiest CPU that isn't ourselves.
-        let best_src = (0..self.cpus.len())
+        let (best_src, best_src_load) = (0..self.cpus.len())
             .filter(|&i| i != dst_cpu)
-            .max_by_key(|&i| self.cpus[i].class_rqs.runnable_len())?;
+            .map(|i| {
+                let cpu = &self.cpus[i];
+                let load = cpu.class_rqs.runnable_len() + usize::from(cpu.current_task.is_some());
+                (i, load)
+            })
+            .max_by_key(|(_, load)| *load)?;
+
+        if best_src_load < dst_load.saturating_add(STEAL_IMBALANCE_MIN) {
+            return None;
+        }
 
         // Only steal if source will still have work left.
         if self.cpus[best_src].class_rqs.runnable_len() < 2 {
@@ -554,6 +652,13 @@ impl Scheduler {
             best_src,
             task.id.as_u64()
         ));
+        if dst_cpu < crate::arch::x86_64::percpu::MAX_CPUS {
+            CPU_STEAL_IN_COUNT[dst_cpu].fetch_add(1, Ordering::Relaxed);
+        }
+        if best_src < crate::arch::x86_64::percpu::MAX_CPUS {
+            CPU_STEAL_OUT_COUNT[best_src].fetch_add(1, Ordering::Relaxed);
+        }
+        LAST_STEAL_TICK[dst_cpu].store(now_tick, Ordering::Relaxed);
         Some(task)
     }
 
@@ -572,6 +677,9 @@ impl Scheduler {
         // Don't switch to ourselves
         if Arc::ptr_eq(&current, &next) {
             return None;
+        }
+        if cpu_index < crate::arch::x86_64::percpu::MAX_CPUS {
+            CPU_SWITCH_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
         }
 
         if let Err(e) = validate_task_context(&next) {
@@ -617,6 +725,30 @@ impl Scheduler {
             }
         }
         best
+    }
+
+    fn migrate_ready_tasks_for_new_class_table(&mut self) {
+        let mut ready: Vec<(TaskId, Arc<Task>, usize)> = Vec::new();
+        for (id, task) in self.all_tasks.iter() {
+            // SAFETY: scheduler lock is held by caller; task state is synchronized by scheduler.
+            let state = unsafe { *task.state.get() };
+            if state != TaskState::Ready {
+                continue;
+            }
+            let cpu = self.task_cpu.get(id).copied().unwrap_or(0);
+            ready.push((*id, task.clone(), cpu));
+        }
+
+        for (id, task, cpu_idx) in ready.into_iter() {
+            let Some(cpu) = self.cpus.get_mut(cpu_idx) else {
+                continue;
+            };
+            if cpu.class_rqs.remove(id) {
+                let class = self.class_table.class_for_task(&task);
+                cpu.class_rqs.enqueue(class, task);
+                cpu.need_resched = true;
+            }
+        }
     }
 }
 
@@ -829,12 +961,16 @@ pub fn yield_task() {
 ///    for this tick.
 /// 3. We honour the `PreemptGuard`: if preemption is disabled, we return.
 pub fn maybe_preempt() {
+    let cpu_index = current_cpu_index();
+    if cpu_index < crate::arch::x86_64::percpu::MAX_CPUS {
+        RESCHED_IPI_PENDING[cpu_index].store(false, Ordering::Release);
+    }
+
     // Honour the preemption guard — never preempt a section that asked for it.
     if !percpu::is_preemptible() {
         return;
     }
 
-    let cpu_index = current_cpu_index();
     // Try to lock the scheduler. If it's already locked (yield_task in
     // progress), just skip this tick — we'll preempt on the next one.
     let switch_target = {
@@ -871,6 +1007,9 @@ pub fn maybe_preempt() {
     }; // Lock released here
 
     if let Some(target) = switch_target {
+        if cpu_index < crate::arch::x86_64::percpu::MAX_CPUS {
+            CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
+        }
         // SAFETY: Pointers are valid. IF is cleared by the CPU on interrupt entry.
         // When the new task resumes from its last switch_context call, it will
         // eventually return through its own interrupt handler → iretq (if preempted)
@@ -921,17 +1060,38 @@ pub fn class_table() -> crate::process::sched::SchedClassTable {
 
 /// Configure scheduler class pick/steal order at runtime.
 pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> bool {
+    if !table.validate() {
+        return false;
+    }
     let saved_flags = save_flags_and_cli();
+    let mut ipi_targets = [false; crate::arch::x86_64::percpu::MAX_CPUS];
     let applied = {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
+            let prev = sched.class_table;
             sched.class_table = table;
+            if prev.policy_map() != sched.class_table.policy_map() {
+                sched.migrate_ready_tasks_for_new_class_table();
+            }
+            for (cpu_idx, cpu) in sched.cpus.iter_mut().enumerate() {
+                cpu.need_resched = true;
+                if cpu_idx != current_cpu_index()
+                    && cpu_idx < crate::arch::x86_64::percpu::MAX_CPUS
+                {
+                    ipi_targets[cpu_idx] = true;
+                }
+            }
             true
         } else {
             false
         }
     };
     restore_flags(saved_flags);
+    for (cpu, send) in ipi_targets.iter().copied().enumerate() {
+        if send {
+            send_resched_ipi_to_cpu(cpu);
+        }
+    }
     applied
 }
 
@@ -1881,10 +2041,18 @@ pub fn timer_tick() {
         if let Some(ref mut sched) = *guard {
             if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
                 let should_resched = if let Some(ref current_task) = cpu.current_task {
-                    if cpu_idx < crate::arch::x86_64::percpu::MAX_CPUS
-                        && Arc::ptr_eq(current_task, &cpu.idle_task)
-                    {
-                        CPU_IDLE_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+                    if cpu_idx < crate::arch::x86_64::percpu::MAX_CPUS {
+                        match sched.class_table.class_for_task(current_task) {
+                            crate::process::sched::SchedClassId::RealTime => {
+                                CPU_RT_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+                            }
+                            crate::process::sched::SchedClassId::Fair => {
+                                CPU_FAIR_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+                            }
+                            crate::process::sched::SchedClassId::Idle => {
+                                CPU_IDLE_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
                     }
                     current_task.ticks.fetch_add(1, Ordering::Relaxed);
                     cpu.current_runtime.update();
@@ -1910,6 +2078,8 @@ pub fn timer_tick() {
 /// Called from timer_tick() with interrupts disabled.
 /// Uses try_lock() to avoid deadlock if called while scheduler lock is held.
 fn check_wake_deadlines(current_time_ns: u64) {
+    let mut ipi_targets = [false; crate::arch::x86_64::percpu::MAX_CPUS];
+    let my_cpu = current_cpu_index();
     let mut scheduler = match SCHEDULER.try_lock() {
         Some(guard) => guard,
         None => return,
@@ -1947,6 +2117,10 @@ fn check_wake_deadlines(current_time_ns: u64) {
                         let class = sched.class_table.class_for_task(&blocked_task);
                         if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
                             cpu_sched.class_rqs.enqueue(class, blocked_task);
+                            cpu_sched.need_resched = true;
+                            if cpu != my_cpu && cpu < crate::arch::x86_64::percpu::MAX_CPUS {
+                                ipi_targets[cpu] = true;
+                            }
                         }
                     }
                 }
@@ -1955,6 +2129,13 @@ fn check_wake_deadlines(current_time_ns: u64) {
             if count < BATCH {
                 break;
             }
+        }
+    }
+
+    drop(scheduler);
+    for (cpu, send) in ipi_targets.iter().copied().enumerate() {
+        if send {
+            send_resched_ipi_to_cpu(cpu);
         }
     }
 }

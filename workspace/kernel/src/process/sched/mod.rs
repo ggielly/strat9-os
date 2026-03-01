@@ -47,6 +47,21 @@ impl SchedClassId {
             Self::Idle => "idle",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        if s.eq_ignore_ascii_case("rt")
+            || s.eq_ignore_ascii_case("real-time")
+            || s.eq_ignore_ascii_case("realtime")
+        {
+            Some(Self::RealTime)
+        } else if s.eq_ignore_ascii_case("fair") {
+            Some(Self::Fair)
+        } else if s.eq_ignore_ascii_case("idle") {
+            Some(Self::Idle)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +76,7 @@ pub struct SchedClassTable {
     entries: [SchedClassEntry; 3],
     pick_order: [SchedClassId; 3],
     steal_order: [SchedClassId; 2],
+    policy_map: [SchedClassId; 3], // index by SchedPolicyKind
 }
 
 impl Default for SchedClassTable {
@@ -89,6 +105,11 @@ impl Default for SchedClassTable {
                 SchedClassId::Idle,
             ],
             steal_order: [SchedClassId::Fair, SchedClassId::RealTime],
+            policy_map: [
+                SchedClassId::Fair,
+                SchedClassId::RealTime,
+                SchedClassId::Idle,
+            ],
         }
     }
 }
@@ -96,9 +117,69 @@ impl Default for SchedClassTable {
 impl SchedClassTable {
     pub fn new(pick_order: [SchedClassId; 3], steal_order: [SchedClassId; 2]) -> Self {
         let mut out = Self::default();
-        out.pick_order = pick_order;
-        out.steal_order = steal_order;
+        let _ = out.set_pick_order(pick_order);
+        let _ = out.set_steal_order(steal_order);
         out
+    }
+
+    fn kind_index(kind: SchedPolicyKind) -> usize {
+        match kind {
+            SchedPolicyKind::Fair => 0,
+            SchedPolicyKind::RealTime => 1,
+            SchedPolicyKind::Idle => 2,
+        }
+    }
+
+    fn refresh_ranks(&mut self) {
+        for entry in self.entries.iter_mut() {
+            entry.rank = match entry.id {
+                SchedClassId::RealTime => 255,
+                SchedClassId::Fair => 255,
+                SchedClassId::Idle => 255,
+            };
+        }
+        for (idx, class) in self.pick_order.iter().copied().enumerate() {
+            for entry in self.entries.iter_mut() {
+                if entry.id == class {
+                    entry.rank = idx as u8;
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn validate(&self) -> bool {
+        let mut seen_rt = false;
+        let mut seen_fair = false;
+        let mut seen_idle = false;
+        for class in self.pick_order.iter().copied() {
+            match class {
+                SchedClassId::RealTime => seen_rt = true,
+                SchedClassId::Fair => seen_fair = true,
+                SchedClassId::Idle => seen_idle = true,
+            }
+        }
+        if !(seen_rt && seen_fair && seen_idle) {
+            return false;
+        }
+
+        if self.steal_order[0] == self.steal_order[1] {
+            return false;
+        }
+        if self.steal_order.iter().any(|c| *c == SchedClassId::Idle) {
+            return false;
+        }
+
+        if self.policy_map[Self::kind_index(SchedPolicyKind::Idle)] != SchedClassId::Idle {
+            return false;
+        }
+        if self.policy_map[Self::kind_index(SchedPolicyKind::Fair)] == SchedClassId::Idle {
+            return false;
+        }
+        if self.policy_map[Self::kind_index(SchedPolicyKind::RealTime)] == SchedClassId::Idle {
+            return false;
+        }
+        true
     }
 
     pub fn entries(&self) -> &[SchedClassEntry; 3] {
@@ -113,12 +194,48 @@ impl SchedClassTable {
         &self.steal_order
     }
 
-    pub fn class_for_policy(&self, policy: SchedPolicy) -> SchedClassId {
-        match policy.kind() {
-            SchedPolicyKind::Fair => SchedClassId::Fair,
-            SchedPolicyKind::RealTime => SchedClassId::RealTime,
-            SchedPolicyKind::Idle => SchedClassId::Idle,
+    pub fn policy_class(&self, kind: SchedPolicyKind) -> SchedClassId {
+        self.policy_map[Self::kind_index(kind)]
+    }
+
+    pub fn policy_map(&self) -> &[SchedClassId; 3] {
+        &self.policy_map
+    }
+
+    pub fn set_pick_order(&mut self, pick_order: [SchedClassId; 3]) -> bool {
+        let prev = self.pick_order;
+        self.pick_order = pick_order;
+        if !self.validate() {
+            self.pick_order = prev;
+            return false;
         }
+        self.refresh_ranks();
+        true
+    }
+
+    pub fn set_steal_order(&mut self, steal_order: [SchedClassId; 2]) -> bool {
+        let prev = self.steal_order;
+        self.steal_order = steal_order;
+        if !self.validate() {
+            self.steal_order = prev;
+            return false;
+        }
+        true
+    }
+
+    pub fn set_policy_class(&mut self, kind: SchedPolicyKind, class: SchedClassId) -> bool {
+        let idx = Self::kind_index(kind);
+        let prev = self.policy_map[idx];
+        self.policy_map[idx] = class;
+        if !self.validate() {
+            self.policy_map[idx] = prev;
+            return false;
+        }
+        true
+    }
+
+    pub fn class_for_policy(&self, policy: SchedPolicy) -> SchedClassId {
+        self.policy_class(policy.kind())
     }
 
     pub fn class_for_task(&self, task: &Task) -> SchedClassId {
@@ -132,6 +249,31 @@ impl SchedPolicy {
             Self::Fair(_) => SchedPolicyKind::Fair,
             Self::RealTimeRR { .. } | Self::RealTimeFifo { .. } => SchedPolicyKind::RealTime,
             Self::Idle => SchedPolicyKind::Idle,
+        }
+    }
+}
+
+impl SchedPolicyKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fair => "fair",
+            Self::RealTime => "rt",
+            Self::Idle => "idle",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        if s.eq_ignore_ascii_case("fair") {
+            Some(Self::Fair)
+        } else if s.eq_ignore_ascii_case("rt")
+            || s.eq_ignore_ascii_case("realtime")
+            || s.eq_ignore_ascii_case("real-time")
+        {
+            Some(Self::RealTime)
+        } else if s.eq_ignore_ascii_case("idle") {
+            Some(Self::Idle)
+        } else {
+            None
         }
     }
 }
