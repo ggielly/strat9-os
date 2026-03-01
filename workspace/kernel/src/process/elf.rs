@@ -37,6 +37,7 @@ const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
+const PT_TLS: u32 = 7;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
@@ -56,8 +57,11 @@ const DT_RELRSZ: i64 = 35;
 const DT_RELRENT: i64 = 37;
 const R_X86_64_RELATIVE: u32 = 8;
 const R_X86_64_64: u32 = 1;
+const R_X86_64_COPY: u32 = 5;
 const R_X86_64_GLOB_DAT: u32 = 6;
 const R_X86_64_JUMP_SLOT: u32 = 7;
+const R_X86_64_TPOFF64: u32 = 18;
+const R_X86_64_IRELATIVE: u32 = 37;
 
 /// Maximum virtual address we accept for user-space mappings.
 pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
@@ -74,18 +78,16 @@ pub const USER_STACK_TOP: u64 = USER_STACK_BASE + (USER_STACK_PAGES as u64) * 40
 /// Result of loading an ELF image into an address space.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadedElfInfo {
-    /// Entry point to jump to (ld.so entry if PT_INTERP, otherwise program entry).
     pub runtime_entry: u64,
-    /// Program entry point from the main executable after relocation.
     pub program_entry: u64,
-    /// Relocated virtual address of the main executable program header table.
     pub phdr_vaddr: u64,
-    /// Program header entry size.
     pub phent: u16,
-    /// Program header count.
     pub phnum: u16,
-    /// Dynamic loader base address when PT_INTERP is present.
     pub interp_base: Option<u64>,
+    pub tls_vaddr: u64,
+    pub tls_filesz: u64,
+    pub tls_memsz: u64,
+    pub tls_align: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -724,25 +726,39 @@ fn apply_dynamic_relocations(
         return Err("Only DT_PLTREL=DT_RELA is supported");
     }
 
-    let resolve_symbol = |sym_idx: u32| -> Result<u64, &'static str> {
-        if sym_idx == 0 {
-            return Ok(0);
-        }
+    let read_sym_entry = |sym_idx: u32| -> Result<Elf64Sym, &'static str> {
         let symtab = symtab_addr.ok_or("Missing DT_SYMTAB for symbol relocations")?;
-        let _ = strtab_addr.ok_or("Missing DT_STRTAB for symbol relocations")?;
         let sym_addr = symtab
             .checked_add((sym_idx as u64) * (sym_ent as u64))
             .ok_or("Symbol table address overflow")?;
         let mut raw = [0u8; core::mem::size_of::<Elf64Sym>()];
         read_user_mapped_bytes(user_as, sym_addr, &mut raw)?;
-        // SAFETY: raw has exact size of Elf64Sym.
-        let sym = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Sym) };
+        Ok(unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Sym) })
+    };
+
+    let resolve_symbol = |sym_idx: u32| -> Result<u64, &'static str> {
+        if sym_idx == 0 {
+            return Ok(0);
+        }
+        let sym = read_sym_entry(sym_idx)?;
         if sym.st_shndx == 0 {
             return Err("Undefined symbol relocation not supported");
         }
         sym.st_value
             .checked_add(load_bias)
             .ok_or("Symbol value relocation overflow")
+    };
+
+    let resolve_symbol_raw = |sym_idx: u32| -> Result<u64, &'static str> {
+        if sym_idx == 0 { return Ok(0); }
+        let sym = read_sym_entry(sym_idx)?;
+        Ok(sym.st_value)
+    };
+
+    let resolve_symbol_size = |sym_idx: u32| -> Result<u64, &'static str> {
+        if sym_idx == 0 { return Ok(0); }
+        let sym = read_sym_entry(sym_idx)?;
+        Ok(sym.st_size)
     };
 
     let apply_rela_table = |table_base: u64,
@@ -791,7 +807,44 @@ fn apply_dynamic_relocations(
                         .checked_add(rela.r_addend as i128)
                         .ok_or("Relocation value overflow")?
                 }
-                _ => return Err("Unsupported dynamic relocation type"),
+                R_X86_64_COPY => {
+                    let sym_val = resolve_symbol(r_sym)?;
+                    if sym_val == 0 {
+                        continue;
+                    }
+                    let sym_sz = resolve_symbol_size(r_sym)?;
+                    if sym_sz > 0 && sym_val < USER_ADDR_MAX {
+                        let mut tmp = [0u8; 256];
+                        let mut off = 0usize;
+                        while off < sym_sz as usize {
+                            let chunk = core::cmp::min(256, sym_sz as usize - off);
+                            read_user_mapped_bytes(user_as, sym_val + off as u64, &mut tmp[..chunk])?;
+                            write_user_mapped_bytes(user_as, target + off as u64, &tmp[..chunk])?;
+                            off += chunk;
+                        }
+                    }
+                    applied += 1;
+                    continue;
+                }
+                R_X86_64_TPOFF64 => {
+                    let sym_val = if r_sym != 0 {
+                        resolve_symbol_raw(r_sym)? as i128
+                    } else {
+                        0i128
+                    };
+                    sym_val
+                        .checked_add(rela.r_addend as i128)
+                        .ok_or("TPOFF64 value overflow")?
+                }
+                R_X86_64_IRELATIVE => {
+                    (load_bias as i128)
+                        .checked_add(rela.r_addend as i128)
+                        .ok_or("IRELATIVE value overflow")?
+                }
+                _ => {
+                    log::warn!("[elf] Unsupported relocation type {}", r_type);
+                    continue;
+                }
             };
             if value < 0 || value > u64::MAX as i128 {
                 return Err("Relocation value out of range");
@@ -1040,6 +1093,73 @@ pub fn load_and_run_elf_with_caps(
     Ok(task_id)
 }
 
+const AT_PHDR: u64 = 3;
+const AT_PHENT: u64 = 4;
+const AT_PHNUM: u64 = 5;
+const AT_PAGESZ: u64 = 6;
+const AT_BASE: u64 = 7;
+const AT_ENTRY: u64 = 9;
+const AT_RANDOM: u64 = 25;
+
+fn push_auxv(
+    user_as: &AddressSpace,
+    sp: &mut u64,
+    tag: u64,
+    val: u64,
+) -> Result<(), &'static str> {
+    *sp -= 8; write_user_u64(user_as, *sp, val)?;
+    *sp -= 8; write_user_u64(user_as, *sp, tag)?;
+    Ok(())
+}
+
+fn setup_boot_user_stack(
+    user_as: &AddressSpace,
+    name: &str,
+    phdr_vaddr: u64,
+    phent: u16,
+    phnum: u16,
+    program_entry: u64,
+    interp_base: Option<u64>,
+) -> Result<u64, &'static str> {
+    let mut sp = USER_STACK_TOP;
+
+    let name_nul_len = (name.len() + 1) as u64;
+    sp -= name_nul_len;
+    let argv0_ptr = sp;
+    write_user_mapped_bytes(user_as, sp, name.as_bytes())?;
+    write_user_mapped_bytes(user_as, sp + name.len() as u64, &[0])?;
+
+    sp -= 16;
+    let random_ptr = sp;
+    write_user_mapped_bytes(user_as, sp, &[0x42u8; 16])?;
+
+    sp &= !0xF;
+
+    // AT_NULL
+    push_auxv(user_as, &mut sp, 0, 0)?;
+    push_auxv(user_as, &mut sp, AT_RANDOM, random_ptr)?;
+    push_auxv(user_as, &mut sp, AT_ENTRY, program_entry)?;
+    if let Some(base) = interp_base {
+        push_auxv(user_as, &mut sp, AT_BASE, base)?;
+    }
+    push_auxv(user_as, &mut sp, AT_PAGESZ, 4096)?;
+    push_auxv(user_as, &mut sp, AT_PHNUM, phnum as u64)?;
+    push_auxv(user_as, &mut sp, AT_PHENT, phent as u64)?;
+    push_auxv(user_as, &mut sp, AT_PHDR, phdr_vaddr)?;
+
+    // envp NULL terminator
+    sp -= 8; write_user_u64(user_as, sp, 0)?;
+    // argv[0], argv NULL terminator
+    sp -= 8; write_user_u64(user_as, sp, 0)?;
+    sp -= 8; write_user_u64(user_as, sp, argv0_ptr)?;
+    // argc
+    sp -= 8; write_user_u64(user_as, sp, 1)?;
+
+    // System V ABI: %rsp % 16 == 0 at process entry
+    sp &= !0xF;
+    Ok(sp)
+}
+
 pub fn load_elf_task_with_caps(
     elf_data: &[u8],
     name: &'static str,
@@ -1055,6 +1175,7 @@ pub fn load_elf_task_with_caps(
     let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(&user_as, &header, &phdrs)?;
+    let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
 
     let phnum = header.e_phnum;
     log::info!(
@@ -1085,6 +1206,7 @@ pub fn load_elf_task_with_caps(
     log::info!("[elf] Loaded {} PT_LOAD segment(s)", load_count);
 
     let mut runtime_entry = entry;
+    let mut interp_base: Option<u64> = None;
     if let Some(path) = interp_path {
         let interp_data = read_elf_from_vfs(path)?;
         let interp_header = parse_header(&interp_data)?;
@@ -1094,6 +1216,7 @@ pub fn load_elf_task_with_caps(
         }
         let (interp_bias, interp_entry) =
             compute_load_bias_and_entry(&user_as, &interp_header, &interp_phdrs)?;
+        let (interp_min_vaddr, _) = compute_load_bounds(&interp_phdrs)?;
         let mut interp_load_count = 0u32;
         for phdr in interp_phdrs.iter() {
             if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
@@ -1103,12 +1226,50 @@ pub fn load_elf_task_with_caps(
         }
         apply_dynamic_relocations(&user_as, &interp_phdrs, interp_header.e_type, interp_bias)?;
         runtime_entry = interp_entry;
+        interp_base = Some(interp_min_vaddr.saturating_add(interp_bias));
         log::info!(
             "[elf] PT_INTERP '{}' loaded: {} PT_LOAD, entry={:#x}",
             path,
             interp_load_count,
             runtime_entry
         );
+    }
+
+    // TLS setup (Variant II: data at negative offsets from FS:0)
+    let mut user_fs_base_val = 0u64;
+    if let Some(tls) = phdrs.iter().find(|p| p.p_type == PT_TLS) {
+        let tls_memsz = tls.p_memsz;
+        let tls_filesz = tls.p_filesz;
+        let tls_align = core::cmp::max(tls.p_align, 8).next_power_of_two();
+        let aligned_memsz = (tls_memsz + tls_align - 1) & !(tls_align - 1);
+        let total_size = aligned_memsz + 8;
+        let n_tls_pages = ((total_size + 4095) / 4096) as usize;
+        let tls_flags = VmaFlags {
+            readable: true,
+            writable: true,
+            executable: false,
+            user_accessible: true,
+        };
+        let tls_base = user_as
+            .find_free_vma_range(0x7FFF_E000_0000, n_tls_pages, VmaPageSize::Small)
+            .ok_or("No space for TLS block")?;
+        user_as.map_region(
+            tls_base,
+            n_tls_pages,
+            tls_flags,
+            VmaType::Anonymous,
+            VmaPageSize::Small,
+        )?;
+        if tls_filesz > 0 {
+            let src_off = tls.p_offset as usize;
+            let src_end = src_off + tls_filesz as usize;
+            if src_end <= elf_data.len() {
+                write_user_mapped_bytes(&user_as, tls_base, &elf_data[src_off..src_end])?;
+            }
+        }
+        let tp = tls_base + aligned_memsz;
+        write_user_u64(&user_as, tp, tp)?;
+        user_fs_base_val = tp;
     }
 
     // Step 4: Map user stack
@@ -1131,6 +1292,16 @@ pub fn load_elf_task_with_caps(
         USER_STACK_TOP,
         USER_STACK_PAGES,
     );
+
+    let boot_sp = setup_boot_user_stack(
+        &user_as,
+        name,
+        phdr_vaddr,
+        header.e_phentsize,
+        header.e_phnum,
+        entry,
+        interp_base,
+    )?;
 
     // Step 5: Create kernel task — trampoline params are stored inside the task
     // itself so that concurrent SMP execution of multiple trampolines is safe.
@@ -1163,7 +1334,7 @@ pub fn load_elf_task_with_caps(
         wake_pending: core::sync::atomic::AtomicBool::new(false),
         wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
         trampoline_entry: core::sync::atomic::AtomicU64::new(runtime_entry),
-        trampoline_stack_top: core::sync::atomic::AtomicU64::new(USER_STACK_TOP),
+        trampoline_stack_top: core::sync::atomic::AtomicU64::new(boot_sp),
         trampoline_arg0: core::sync::atomic::AtomicU64::new(0),
         ticks: core::sync::atomic::AtomicU64::new(0),
         sched_policy: crate::process::task::SyncUnsafeCell::new(Task::default_sched_policy(
@@ -1171,7 +1342,7 @@ pub fn load_elf_task_with_caps(
         )),
         vruntime: core::sync::atomic::AtomicU64::new(0),
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
-        user_fs_base: core::sync::atomic::AtomicU64::new(0),
+        user_fs_base: core::sync::atomic::AtomicU64::new(user_fs_base_val),
         fpu_state: crate::process::task::SyncUnsafeCell::new(crate::process::task::FpuState::new()),
     });
 
@@ -1189,6 +1360,13 @@ pub fn load_elf_task_with_caps(
         }
     }
 
+    // Setup stdin/stdout/stderr (fd 0/1/2) pointing to /dev/console
+    // SAFETY: task is not yet scheduled, exclusive access to fd_table
+    {
+        let fd_table = unsafe { &mut *task.process.fd_table.get() };
+        crate::vfs::console_scheme::setup_stdio(fd_table);
+    }
+
     if let Some(h) = bootstrap_handle {
         // Program entry will see this in its first argument register (RDI).
         task.trampoline_arg0
@@ -1204,7 +1382,7 @@ pub fn load_elf_task_with_caps(
         "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x}",
         name,
         runtime_entry,
-        USER_STACK_TOP,
+        boot_sp,
     );
 
     Ok(task)
@@ -1230,6 +1408,19 @@ pub fn load_elf_image(
     if interp_path.is_none() {
         apply_dynamic_relocations(user_as, &phdrs, header.e_type, load_bias)?;
     }
+
+    let (tls_vaddr, tls_filesz, tls_memsz, tls_align) =
+        if let Some(tls) = phdrs.iter().find(|ph| ph.p_type == PT_TLS) {
+            let align = core::cmp::max(tls.p_align, 1).next_power_of_two();
+            (
+                tls.p_vaddr.saturating_add(load_bias),
+                tls.p_filesz,
+                tls.p_memsz,
+                align,
+            )
+        } else {
+            (0, 0, 0, 1)
+        };
 
     let mut runtime_entry = entry;
     let mut interp_base = None;
@@ -1260,5 +1451,33 @@ pub fn load_elf_image(
         phent: header.e_phentsize,
         phnum: header.e_phnum,
         interp_base,
+        tls_vaddr,
+        tls_filesz,
+        tls_memsz,
+        tls_align,
     })
+}
+
+pub fn read_user_mapped_bytes_pub(
+    user_as: &AddressSpace,
+    vaddr: u64,
+    out: &mut [u8],
+) -> Result<(), &'static str> {
+    read_user_mapped_bytes(user_as, vaddr, out)
+}
+
+pub fn write_user_mapped_bytes_pub(
+    user_as: &AddressSpace,
+    vaddr: u64,
+    src: &[u8],
+) -> Result<(), &'static str> {
+    write_user_mapped_bytes(user_as, vaddr, src)
+}
+
+pub fn write_user_u64_pub(
+    user_as: &AddressSpace,
+    vaddr: u64,
+    value: u64,
+) -> Result<(), &'static str> {
+    write_user_u64(user_as, vaddr, value)
 }

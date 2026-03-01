@@ -110,6 +110,44 @@ pub fn sys_execve(
         path_str.as_bytes(),
     )?;
 
+    // TLS setup (Variant II) if the ELF has a PT_TLS segment.
+    let mut new_fs_base = 0u64;
+    if load_info.tls_memsz > 0 {
+        let tls_align = core::cmp::max(load_info.tls_align, 8).next_power_of_two();
+        let aligned_memsz = (load_info.tls_memsz + tls_align - 1) & !(tls_align - 1);
+        let total_size = aligned_memsz + 8;
+        let n_pages = ((total_size + 4095) / 4096) as usize;
+        let tls_flags = VmaFlags {
+            readable: true,
+            writable: true,
+            executable: false,
+            user_accessible: true,
+        };
+        let tls_base = new_as_arc
+            .find_free_vma_range(0x7FFF_E000_0000, n_pages, VmaPageSize::Small)
+            .ok_or(SyscallError::OutOfMemory)?;
+        new_as_arc
+            .map_region(tls_base, n_pages, tls_flags, VmaType::Anonymous, VmaPageSize::Small)
+            .map_err(|_| SyscallError::OutOfMemory)?;
+        if load_info.tls_filesz > 0 && load_info.tls_vaddr != 0 {
+            let src_vaddr = load_info.tls_vaddr;
+            let mut off = 0u64;
+            let mut tmp = [0u8; 256];
+            while off < load_info.tls_filesz {
+                let chunk = core::cmp::min(256, (load_info.tls_filesz - off) as usize);
+                crate::process::elf::read_user_mapped_bytes_pub(&new_as_arc, src_vaddr + off, &mut tmp[..chunk])
+                    .map_err(|_| SyscallError::Fault)?;
+                crate::process::elf::write_user_mapped_bytes_pub(&new_as_arc, tls_base + off, &tmp[..chunk])
+                    .map_err(|_| SyscallError::Fault)?;
+                off += chunk as u64;
+            }
+        }
+        let tp = tls_base + aligned_memsz;
+        crate::process::elf::write_user_u64_pub(&new_as_arc, tp, tp)
+            .map_err(|_| SyscallError::Fault)?;
+        new_fs_base = tp;
+    }
+
     // === EXECVE CLEANUP (POSIX semantics) ===
     // Now that ELF is valid and loaded, perform cleanup before switching address space.
 
@@ -128,14 +166,16 @@ pub fn sys_execve(
         .store(0, core::sync::atomic::Ordering::Relaxed);
     current
         .user_fs_base
-        .store(0, core::sync::atomic::Ordering::Relaxed);
-    // Reset FS.base MSR to 0 so the new image starts with a clean TLS pointer.
+        .store(new_fs_base, core::sync::atomic::Ordering::Relaxed);
+    // Set FS.base MSR for the new image TLS (or 0 if no PT_TLS).
     unsafe {
+        let lo = new_fs_base as u32;
+        let hi = (new_fs_base >> 32) as u32;
         core::arch::asm!(
-            "xor eax, eax",
-            "xor edx, edx",
             "mov ecx, 0xC0000100", // MSR_FS_BASE
             "wrmsr",
+            in("eax") lo,
+            in("edx") hi,
             options(nostack, preserves_flags),
         );
     }

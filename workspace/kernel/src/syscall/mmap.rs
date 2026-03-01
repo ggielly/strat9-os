@@ -8,11 +8,12 @@
 //!  - [`sys_mprotect`] – change page permissions (SYS_MPROTECT = 104)
 
 use crate::{
-    memory::address_space::{VmaFlags, VmaType},
+    memory::address_space::{VmaFlags, VmaPageSize, VmaType},
     process::current_task_clone,
     syscall::error::SyscallError,
 };
 use core::sync::atomic::Ordering;
+use x86_64::VirtAddr;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Virtual address layout constants
@@ -90,8 +91,8 @@ pub fn sys_mmap(
     len: u64,
     prot: u32,
     flags: u32,
-    _fd: u64,
-    _offset: u64,
+    fd_raw: u64,
+    offset: u64,
 ) -> Result<u64, SyscallError> {
     //  Validate arguments
     if len == 0 {
@@ -112,10 +113,127 @@ pub fn sys_mmap(
     };
     let page_bytes = page_size.bytes();
 
-    // File-backed mappings are not yet implemented.
+    // File-backed mappings: MAP_PRIVATE + fd → copy file data into anonymous pages.
     if flags & MAP_ANONYMOUS == 0 {
-        log::warn!("sys_mmap: file-backed mmap not yet supported");
-        return Err(SyscallError::NotImplemented);
+        let fd = fd_raw as u32;
+        let file_offset = offset;
+
+        let is_private = flags & MAP_PRIVATE != 0;
+        let is_shared = flags & MAP_SHARED != 0;
+        if is_private == is_shared {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if !is_private {
+            log::warn!("sys_mmap: file-backed MAP_SHARED not yet supported");
+            return Err(SyscallError::NotImplemented);
+        }
+        if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        let len_aligned = if is_huge {
+            huge_page_align_up(len)
+        } else {
+            page_align_up(len)
+        };
+        if len_aligned == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let n_pages = (len_aligned / page_bytes) as usize;
+
+        let task = current_task_clone().ok_or(SyscallError::Fault)?;
+        let open_file = {
+            let fd_table = unsafe { &*task.process.fd_table.get() };
+            fd_table.get(fd)?
+        };
+        let addr_space = unsafe { &*task.process.address_space.get() };
+
+        let target = if flags & MAP_FIXED != 0 {
+            if addr % page_bytes != 0 || addr == 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if addr.saturating_add(len_aligned) > USER_SPACE_END {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if flags & MAP_FIXED_NOREPLACE != 0 {
+                if addr_space.has_mapping_in_range(addr, len_aligned) {
+                    return Err(SyscallError::AlreadyExists);
+                }
+            } else {
+                addr_space
+                    .unmap_range(addr, len_aligned)
+                    .map_err(|_| SyscallError::InvalidArgument)?;
+            }
+            addr
+        } else {
+            let hint = if addr != 0 {
+                addr
+            } else {
+                task.process.mmap_hint.load(Ordering::Relaxed)
+            };
+            addr_space
+                .find_free_vma_range(hint, n_pages, page_size)
+                .or_else(|| addr_space.find_free_vma_range(MMAP_BASE, n_pages, page_size))
+                .ok_or(SyscallError::OutOfMemory)?
+        };
+
+        let vma_flags = prot_to_vma_flags(prot);
+        addr_space
+            .map_region(
+                target,
+                n_pages,
+                vma_flags,
+                VmaType::Anonymous,
+                page_size,
+            )
+            .map_err(|_| SyscallError::OutOfMemory)?;
+
+        // Copy file content into the mapped pages via HHDM.
+        let read_len = len as usize;
+        let mut kbuf = [0u8; 4096];
+        let mut file_off = file_offset;
+        let mut dst_off = 0usize;
+        while dst_off < read_len {
+            let chunk = core::cmp::min(4096, read_len - dst_off);
+            let n = open_file.pread(file_off, &mut kbuf[..chunk]).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            let mut written = 0;
+            while written < n {
+                let vaddr = target + (dst_off + written) as u64;
+                let page_off = (vaddr & 0xFFF) as usize;
+                let to_write = core::cmp::min(n - written, 4096 - page_off);
+                let phys = addr_space
+                    .translate(VirtAddr::new(vaddr))
+                    .ok_or(SyscallError::Fault)?;
+                let hhdm_ptr = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        kbuf.as_ptr().add(written),
+                        hhdm_ptr,
+                        to_write,
+                    );
+                }
+                written += to_write;
+            }
+            file_off += n as u64;
+            dst_off += n;
+        }
+
+        if flags & MAP_FIXED == 0 {
+            let new_hint = target.saturating_add(len_aligned);
+            let _ = task.process.mmap_hint.fetch_max(new_hint, Ordering::Relaxed);
+        }
+
+        log::trace!(
+            "sys_mmap: file-backed {:#x}..{:#x} (fd={}, off={:#x})",
+            target,
+            target + len_aligned,
+            fd,
+            file_offset,
+        );
+        return Ok(target);
     }
 
     let is_private = flags & MAP_PRIVATE != 0;
@@ -126,7 +244,7 @@ pub fn sys_mmap(
     }
 
     // Anonymous mapping currently requires page-aligned zero offset.
-    if _offset != 0 {
+    if offset != 0 {
         return Err(SyscallError::InvalidArgument);
     }
 

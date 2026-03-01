@@ -1026,49 +1026,30 @@ pub fn cmd_wasm_run(args: &[String]) -> Result<(), ShellError> {
     }
     let wasm_path = &args[0];
 
-    // 1. Spawn the wasm interpreter strate
-    shell_println!("wasm-run: spawning interpreter silo...");
-    let interpreter_path = "/initfs/strate-wasm";
-    let fd = vfs::open(interpreter_path, vfs::OpenFlags::READ)
-        .map_err(|_| ShellError::ExecutionFailed)?;
-    let elf_data = match vfs::read_all(fd) {
-        Ok(d) => d,
-        Err(_) => {
-            let _ = vfs::close(fd);
-            return Err(ShellError::ExecutionFailed);
-        }
-    };
-    let _ = vfs::close(fd);
+    shell_println!("wasm-run: using running strate-wasm service...");
+    let default_service_path = String::from("/srv/strate-wasm/default");
+    let bootstrap_service_path = String::from("/srv/strate-wasm/bootstrap");
+    shell_println!("wasm-run: waiting for service {} ...", default_service_path);
 
-    // Spawn with a unique label to avoid conflicts
-    let sid = match silo::kernel_spawn_strate(&elf_data, None, None) {
-        Ok(id) => id,
-        Err(e) => {
-            shell_println!("wasm-run: failed to spawn interpreter: {:?}", e);
-            return Err(ShellError::ExecutionFailed);
-        }
-    };
-    let label = alloc::format!("inst-{}", sid);
-
-    // 2. Wait for the service to appear in /srv (poll)
-    let service_path = alloc::format!("/srv/strate-wasm/{}", label);
-    shell_println!("wasm-run: waiting for service {} ...", service_path);
-
-    let mut found = false;
+    let mut selected_service_path: Option<String> = None;
     for _ in 0..100 {
-        if vfs::stat_path(&service_path).is_ok() {
-            found = true;
+        if vfs::stat_path(&default_service_path).is_ok() {
+            selected_service_path = Some(default_service_path.clone());
+            break;
+        }
+        if vfs::stat_path(&bootstrap_service_path).is_ok() {
+            selected_service_path = Some(bootstrap_service_path.clone());
             break;
         }
         crate::process::yield_task();
     }
 
-    if !found {
-        shell_println!("wasm-run: timed out waiting for strate-wasm");
+    let Some(service_path) = selected_service_path else {
+        shell_println!("wasm-run: timed out waiting for /srv/strate-wasm/default");
         return Err(ShellError::ExecutionFailed);
-    }
+    };
 
-    // 3. Connect and send LOAD then RUN
+    // Connect and send LOAD then RUN
     let (scheme, rel) = vfs::resolve(&service_path).map_err(|_| ShellError::ExecutionFailed)?;
     let open_res = scheme
         .open(&rel, vfs::OpenFlags::READ)
@@ -1076,25 +1057,44 @@ pub fn cmd_wasm_run(args: &[String]) -> Result<(), ShellError> {
     let port_id = crate::ipc::PortId::from_u64(open_res.file_id);
     let port = crate::ipc::port::get_port(port_id).ok_or(ShellError::ExecutionFailed)?;
 
-    // OP_WASM_LOAD_PATH = 0x100
     let mut load_msg = crate::ipc::IpcMessage::new(0x100);
     let path_bytes = wasm_path.as_bytes();
-    let copy_len = core::cmp::min(path_bytes.len(), 62);
-    load_msg.payload[1] = copy_len as u8;
-    load_msg.payload[2..2 + copy_len].copy_from_slice(&path_bytes[..copy_len]);
+    let copy_len = core::cmp::min(path_bytes.len(), 63);
+    load_msg.payload[0] = copy_len as u8;
+    load_msg.payload[1..1 + copy_len].copy_from_slice(&path_bytes[..copy_len]);
 
     shell_println!("wasm-run: loading {} ...", wasm_path);
     port.send(load_msg)
         .map_err(|_| ShellError::ExecutionFailed)?;
 
-    // Wait for ACK (simplistic)
-    let _ = port.recv().map_err(|_| ShellError::ExecutionFailed)?;
+    let load_ack = port.recv().map_err(|_| ShellError::ExecutionFailed)?;
+    let load_status = u32::from_le_bytes([
+        load_ack.payload[0],
+        load_ack.payload[1],
+        load_ack.payload[2],
+        load_ack.payload[3],
+    ]);
+    if load_status != 0 {
+        shell_println!("wasm-run: load failed (status={})", load_status);
+        return Err(ShellError::ExecutionFailed);
+    }
 
-    // OP_WASM_RUN_MAIN = 0x102
-    let mut run_msg = crate::ipc::IpcMessage::new(0x102);
+    let run_msg = crate::ipc::IpcMessage::new(0x102);
     shell_println!("wasm-run: starting execution...");
     port.send(run_msg)
         .map_err(|_| ShellError::ExecutionFailed)?;
+    let run_ack = port.recv().map_err(|_| ShellError::ExecutionFailed)?;
+    let run_status = u32::from_le_bytes([
+        run_ack.payload[0],
+        run_ack.payload[1],
+        run_ack.payload[2],
+        run_ack.payload[3],
+    ]);
+    if run_status != 0 {
+        shell_println!("wasm-run: execution failed (status={})", run_status);
+        return Err(ShellError::ExecutionFailed);
+    }
+    shell_println!("wasm-run: done");
 
     Ok(())
 }

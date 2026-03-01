@@ -10,7 +10,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::panic::PanicInfo;
-use spin::Mutex;
 use strat9_syscall::call;
 use strat9_syscall::data::IpcMessage;
 use talc::*;
@@ -85,6 +84,54 @@ fn send_response(original_sender: u64, status: u32) {
     let _ = call::ipc_reply(&msg);
 }
 
+fn read_leb_u32(bytes: &[u8], mut idx: usize) -> Option<(u32, usize)> {
+    let mut result: u32 = 0;
+    let mut shift = 0u32;
+    for _ in 0..5 {
+        let b = *bytes.get(idx)?;
+        idx += 1;
+        result |= ((b & 0x7f) as u32) << shift;
+        if (b & 0x80) == 0 {
+            return Some((result, idx));
+        }
+        shift += 7;
+    }
+    None
+}
+
+fn wasm_effective_len(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    if bytes[0] != 0x00
+        || bytes[1] != b'a'
+        || bytes[2] != b's'
+        || bytes[3] != b'm'
+        || bytes[4] != 0x01
+        || bytes[5] != 0x00
+        || bytes[6] != 0x00
+        || bytes[7] != 0x00
+    {
+        return None;
+    }
+    let mut i = 8usize;
+    while i < bytes.len() {
+        let id = bytes[i];
+        if id > 12 {
+            return Some(i);
+        }
+        i += 1;
+        let (section_len, next) = read_leb_u32(bytes, i)?;
+        i = next;
+        let end = i.checked_add(section_len as usize)?;
+        if end > bytes.len() {
+            return None;
+        }
+        i = end;
+    }
+    Some(i)
+}
+
 // ---------------------------------------------------------------------------
 // WASI / HOST FUNCTIONS
 // ---------------------------------------------------------------------------
@@ -95,7 +142,10 @@ struct HostState {
 
 fn wasi_fd_write(mut caller: Caller<'_, HostState>, fd: u32, iovs_ptr: u32, iovs_len: u32, nwritten_ptr: u32) -> u32 {
     let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else { return 1; };
-    let mut total_written = 0;
+    if fd != 1 && fd != 2 {
+        return 8; // WASI EBADF
+    }
+    let mut total_written: u32 = 0;
     for i in 0..iovs_len {
         let base_addr = (iovs_ptr + i * 8) as usize;
         let mut iov_desc = [0u8; 8];
@@ -104,9 +154,9 @@ fn wasi_fd_write(mut caller: Caller<'_, HostState>, fd: u32, iovs_ptr: u32, iovs
         let buf_len = u32::from_le_bytes([iov_desc[4], iov_desc[5], iov_desc[6], iov_desc[7]]) as usize;
         let mut buffer = vec![0u8; buf_len];
         if memory.read(&caller, buf_ptr, &mut buffer).is_err() { break; }
-        if fd == 1 || fd == 2 {
-            let _ = call::write(1, &buffer);
-            total_written += buf_len as u32;
+        match call::write(fd as usize, &buffer) {
+            Ok(n) => total_written += n as u32,
+            Err(_) => break,
         }
     }
     let _ = memory.write(&mut caller, nwritten_ptr as usize, &total_written.to_le_bytes());
@@ -131,7 +181,17 @@ const OP_WASM_RUN_MAIN: u32  = 0x102;
 const OP_BOOTSTRAP: u32      = 0x10;
 
 const RESP_OK: u32  = 0x0;
-const RESP_ERR: u32 = 0x1;
+const RESP_ERR_OPEN: u32 = 0x10;
+const RESP_ERR_READ: u32 = 0x11;
+const RESP_ERR_MODULE: u32 = 0x12;
+const RESP_ERR_INSTANTIATE: u32 = 0x13;
+const RESP_ERR_START: u32 = 0x14;
+const RESP_ERR_NO_INSTANCE: u32 = 0x20;
+const RESP_ERR_NO_ENTRY: u32 = 0x21;
+const RESP_ERR_RUN: u32 = 0x22;
+const RESP_ERR_TOO_LARGE: u32 = 0x23;
+
+const MAX_WASM_SIZE: usize = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // MAIN
@@ -154,15 +214,18 @@ pub unsafe extern "C" fn _start() -> ! {
     let _ = linker.define("wasi_snapshot_preview1", "environ_sizes_get", wasmi::Func::wrap(&mut store, wasi_environ_sizes_get));
 
     let mut label = String::from("default");
+    let mut queued_msg: Option<IpcMessage> = None;
     
     // We need a port to bind to
     let port_h = call::ipc_create_port(0).expect("failed to create port");
     let _ = call::ipc_bind_port(port_h, b"/srv/strate-wasm/bootstrap");
     
     let mut b_msg = IpcMessage::new(0);
-    if let Ok(_) = call::ipc_recv(port_h, &mut b_msg) {
+    if let Ok(_) = call::ipc_try_recv(port_h, &mut b_msg) {
         if b_msg.msg_type == OP_BOOTSTRAP {
             label = extract_string(&b_msg.payload, 1, b_msg.payload[0] as usize);
+        } else {
+            queued_msg = Some(b_msg);
         }
     }
 
@@ -175,60 +238,130 @@ pub unsafe extern "C" fn _start() -> ! {
     let mut current_instance: Option<Instance> = None;
 
     loop {
-        let mut msg = IpcMessage::new(0);
-        match call::ipc_recv(port_h, &mut msg) {
-            Ok(_) => {
-                let src = msg.sender;
-                match msg.msg_type {
-                    OP_WASM_LOAD_PATH => {
-                        let path = extract_string(&msg.payload, 1, msg.payload[0] as usize);
-                        let mut wasm_bytes = Vec::new();
-                        if let Ok(fd) = call::openat(0, &path, 0x1, 0) {
-                            let mut chunk = [0u8; 4096];
-                            while let Ok(n) = call::read(fd as usize, &mut chunk) {
-                                if n == 0 { break; }
+        let msg = if let Some(m) = queued_msg.take() {
+            m
+        } else {
+            let mut m = IpcMessage::new(0);
+            if call::ipc_recv(port_h, &mut m).is_err() {
+                continue;
+            }
+            m
+        };
+        let src = msg.sender;
+        match msg.msg_type {
+            OP_WASM_LOAD_PATH => {
+                let path = extract_string(&msg.payload, 1, msg.payload[0] as usize);
+                let mut wasm_bytes = Vec::new();
+                if let Ok(fd) = call::openat(0, &path, 0x1, 0) {
+                    let mut chunk = [0u8; 4096];
+                    let mut read_failed = false;
+                    loop {
+                        match call::read(fd as usize, &mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => {
                                 wasm_bytes.extend_from_slice(&chunk[..n]);
-                            }
-                            let _ = call::close(fd as usize);
-
-                            match Module::new(&engine, &wasm_bytes[..]) {
-                                Ok(module) => match linker.instantiate(&mut store, &module) {
-                                    Ok(pre) => match pre.start(&mut store) {
-                                        Ok(inst) => {
-                                            current_instance = Some(inst);
-                                            send_response(src, RESP_OK);
-                                        }
-                                        Err(_) => send_response(src, RESP_ERR),
-                                    },
-                                    Err(_) => send_response(src, RESP_ERR),
-                                },
-                                Err(_) => send_response(src, RESP_ERR),
-                            }
-                        } else {
-                            send_response(src, RESP_ERR);
-                        }
-                    }
-
-                    OP_WASM_RUN_MAIN => {
-                        if let Some(ref instance) = current_instance {
-                            let _ = store.set_fuel(10_000_000);
-                            if let Ok(func) = instance.get_typed_func::<(), ()>(&store, "_start") {
-                                match func.call(&mut store, ()) {
-                                    Ok(_) => send_response(src, RESP_OK),
-                                    Err(_) => send_response(src, RESP_ERR),
+                                if wasm_bytes.len() > MAX_WASM_SIZE {
+                                    read_failed = true;
+                                    break;
                                 }
-                            } else {
-                                send_response(src, RESP_ERR);
                             }
-                        } else {
-                            send_response(src, RESP_ERR);
+                            Err(_) => {
+                                read_failed = true;
+                                break;
+                            }
                         }
                     }
+                    let _ = call::close(fd as usize);
 
-                    _ => {}
+                    if read_failed {
+                        if wasm_bytes.len() > MAX_WASM_SIZE {
+                            debug_log("[strate-wasm] load error: too large\n");
+                            send_response(src, RESP_ERR_TOO_LARGE);
+                        } else {
+                            debug_log("[strate-wasm] load error: read\n");
+                            send_response(src, RESP_ERR_READ);
+                        }
+                        continue;
+                    }
+
+                    if wasm_bytes.is_empty() {
+                        debug_log("[strate-wasm] load error: empty\n");
+                        send_response(src, RESP_ERR_READ);
+                        continue;
+                    }
+
+                    let trimmed_len = wasm_bytes
+                        .iter()
+                        .rposition(|&b| b != 0)
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
+                    if trimmed_len == 0 {
+                        debug_log("[strate-wasm] load error: all-zero image\n");
+                        send_response(src, RESP_ERR_MODULE);
+                        continue;
+                    }
+                    let trimmed = &wasm_bytes[..trimmed_len];
+                    let Some(effective_len) = wasm_effective_len(trimmed) else {
+                        debug_log("[strate-wasm] load error: bad magic\n");
+                        send_response(src, RESP_ERR_MODULE);
+                        continue;
+                    };
+                    let module_bytes = &trimmed[..effective_len];
+
+                    match Module::new(&engine, module_bytes) {
+                        Ok(module) => match linker.instantiate(&mut store, &module) {
+                            Ok(pre) => match pre.start(&mut store) {
+                                Ok(inst) => {
+                                    current_instance = Some(inst);
+                                    send_response(src, RESP_OK);
+                                }
+                                Err(_) => {
+                                    debug_log("[strate-wasm] load error: start\n");
+                                    send_response(src, RESP_ERR_START)
+                                }
+                            },
+                            Err(_) => {
+                                debug_log("[strate-wasm] load error: instantiate\n");
+                                send_response(src, RESP_ERR_INSTANTIATE)
+                            }
+                        },
+                        Err(_) => {
+                            let line = format!(
+                                "[strate-wasm] load error: module parse failed (len={})\n",
+                                module_bytes.len()
+                            );
+                            debug_log(&line);
+                            send_response(src, RESP_ERR_MODULE)
+                        }
+                    }
+                } else {
+                    debug_log("[strate-wasm] load error: open\n");
+                    send_response(src, RESP_ERR_OPEN);
                 }
             }
-            Err(_) => {}
+
+            OP_WASM_RUN_MAIN => {
+                if let Some(ref instance) = current_instance {
+                    let _ = store.set_fuel(10_000_000);
+                    if let Ok(func) = instance.get_typed_func::<(), ()>(&store, "_start") {
+                        match func.call(&mut store, ()) {
+                            Ok(_) => send_response(src, RESP_OK),
+                            Err(_) => {
+                                debug_log("[strate-wasm] run error: trap\n");
+                                send_response(src, RESP_ERR_RUN)
+                            }
+                        }
+                    } else {
+                        debug_log("[strate-wasm] run error: no _start\n");
+                        send_response(src, RESP_ERR_NO_ENTRY);
+                    }
+                } else {
+                    debug_log("[strate-wasm] run error: no instance\n");
+                    send_response(src, RESP_ERR_NO_INSTANCE);
+                }
+            }
+
+            _ => {}
         }
     }
 }

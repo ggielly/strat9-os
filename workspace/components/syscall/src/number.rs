@@ -25,6 +25,7 @@ pub const SYS_IPC_REPLY: usize = 204;
 pub const SYS_IPC_BIND_PORT: usize = 205;
 pub const SYS_IPC_UNBIND_PORT: usize = 206;
 pub const SYS_IPC_TRY_RECV: usize = 207;
+pub const SYS_IPC_CONNECT: usize = 208;
 pub const SYS_IPC_RING_CREATE: usize = 210;
 pub const SYS_IPC_RING_MAP: usize = 211;
 pub const SYS_CHAN_CREATE: usize = 220;
@@ -103,6 +104,9 @@ pub const SYS_GETDENTS: usize = 430;
 pub const SYS_PIPE: usize = 431;
 pub const SYS_DUP: usize = 432;
 pub const SYS_DUP2: usize = 433;
+
+pub const SYS_POLL: usize = 460;
+pub const SYS_PPOLL: usize = 461;
 
 // Block 410-419: network
 pub const SYS_NET_RECV: usize = 410;

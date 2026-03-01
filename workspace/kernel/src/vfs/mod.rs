@@ -25,6 +25,7 @@
 //! ```
 
 pub mod blkdev_scheme;
+pub mod console_scheme;
 pub mod fd;
 pub mod file;
 pub mod ipcfs;
@@ -917,6 +918,14 @@ pub fn init() {
         log::error!("[VFS] Failed to mount /dev: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /dev (block-device scheme)");
+    }
+
+    // Console scheme (/dev/console) — backs stdin/stdout/stderr for ELF processes
+    let console = console_scheme::init_console_scheme();
+    if let Err(e) = mount::mount("/dev/console", console) {
+        log::error!("[VFS] Failed to mount /dev/console: {:?}", e);
+    } else {
+        log::info!("[VFS] Mounted /dev/console (serial + keyboard)");
     }
 
     log::info!("[VFS] VFS ready");

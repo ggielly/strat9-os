@@ -179,6 +179,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_IPC_SEND => sys_ipc_send(arg1, arg2),
         SYS_IPC_RECV => sys_ipc_recv(arg1, arg2),
         SYS_IPC_TRY_RECV => sys_ipc_try_recv(arg1, arg2),
+        SYS_IPC_CONNECT => sys_ipc_connect(arg1, arg2),
         SYS_IPC_CALL => sys_ipc_call(arg1, arg2),
         SYS_IPC_REPLY => sys_ipc_reply(arg1),
         SYS_IPC_BIND_PORT => sys_ipc_bind_port(arg1, arg2, arg3),
@@ -229,6 +230,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_FCHMOD => crate::vfs::sys_fchmod(arg1 as u32, arg2),
         SYS_TRUNCATE => crate::vfs::sys_truncate(arg1, arg2, arg3),
         SYS_FTRUNCATE => crate::vfs::sys_ftruncate(arg1 as u32, arg2),
+        SYS_POLL => super::poll::sys_poll(arg1, arg2, arg3),
+        SYS_PPOLL => super::poll::sys_poll(arg1, arg2, 0),
 
         // Network
         SYS_NET_RECV => sys_net_recv(arg1, arg2),
@@ -1118,6 +1121,40 @@ fn sys_ipc_try_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+fn sys_ipc_connect(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
+    if path_ptr == 0 || path_len == 0 {
+        return Err(SyscallError::Fault);
+    }
+    const MAX_PATH_LEN: usize = 4096;
+    if path_len as usize > MAX_PATH_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let user = UserSliceRead::new(path_ptr, path_len as usize)?;
+    let bytes = user.read_to_vec();
+    let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
+
+    let (port_raw, _remaining) = crate::namespace::resolve(path).ok_or(SyscallError::NotFound)?;
+    let port_id = PortId::from_u64(port_raw);
+    if port::get_port(port_id).is_none() {
+        return Err(SyscallError::BadHandle);
+    }
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cap = get_capability_manager().create_capability(
+        ResourceType::IpcPort,
+        port_raw as usize,
+        CapPermissions {
+            read: true,
+            write: true,
+            execute: false,
+            grant: false,
+            revoke: false,
+        },
+    );
+    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+    Ok(cap_id.as_u64())
+}
+
 fn sys_ipc_call(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(port)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -1242,6 +1279,7 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
             cap.resource as u64,
         ))),
     )?;
+    let _ = crate::namespace::bind(path, cap.resource as u64);
     let _ = crate::silo::set_current_silo_label_from_path(path);
 
     // Bootstrap convenience: if a privileged userspace server binds root `/`
@@ -1349,6 +1387,7 @@ fn sys_ipc_unbind_port(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError
     let user = UserSliceRead::new(path_ptr, path_len as usize)?;
     let bytes = user.read_to_vec();
     let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
+    let _ = crate::namespace::unbind(path);
     crate::vfs::unmount(path)?;
     Ok(0)
 }

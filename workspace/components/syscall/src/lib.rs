@@ -819,6 +819,13 @@ pub mod call {
         }
     }
 
+    /// Connect to an IPC service bound in the namespace.
+    ///
+    /// Returns a port handle that can be used with `ipc_call`/`ipc_send`.
+    pub fn ipc_connect(path: &[u8]) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_CONNECT, path.as_ptr() as usize, path.len()) }
+    }
+
     /// Send a message and block until a reply arrives (RPC-style).
     ///
     /// On return the message buffer is overwritten with the reply.

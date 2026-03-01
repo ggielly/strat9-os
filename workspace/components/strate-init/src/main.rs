@@ -9,7 +9,7 @@ use core::{
     alloc::Layout,
     panic::PanicInfo,
 };
-use strat9_syscall::{call, number};
+use strat9_syscall::{call, data::IpcMessage, number};
 
 // ---------------------------------------------------------------------------
 // GLOBAL ALLOCATOR (BUMP + BRK)
@@ -256,6 +256,63 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
     silos
 }
 
+fn load_primary_silos() -> Vec<SiloDef> {
+    match read_file("/initfs/silo.toml") {
+        Ok(data_vec) => match core::str::from_utf8(&data_vec) {
+            Ok(data_str) => {
+                let parsed = parse_config(data_str);
+                if parsed.is_empty() {
+                    log("[init] Empty /initfs/silo.toml, using embedded defaults\n");
+                    parse_config(DEFAULT_SILO_TOML)
+                } else {
+                    parsed
+                }
+            }
+            Err(_) => {
+                log("[init] Invalid UTF-8 in /initfs/silo.toml, using embedded defaults\n");
+                parse_config(DEFAULT_SILO_TOML)
+            }
+        },
+        Err(_) => {
+            log("[init] Missing /initfs/silo.toml, using embedded defaults\n");
+            parse_config(DEFAULT_SILO_TOML)
+        }
+    }
+}
+
+fn merge_wasm_test_overlay(silos: &mut Vec<SiloDef>) {
+    let data = match read_file("/initfs/wasm-test.toml") {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let text = match core::str::from_utf8(&data) {
+        Ok(t) => t,
+        Err(_) => {
+            log("[init] Invalid UTF-8 in /initfs/wasm-test.toml, skipping overlay\n");
+            return;
+        }
+    };
+    let overlay = parse_config(text);
+    if overlay.is_empty() {
+        return;
+    }
+
+    let mut added = 0u32;
+    for o in overlay {
+        let exists = silos.iter().any(|s| s.name == o.name);
+        if exists {
+            continue;
+        }
+        silos.push(o);
+        added += 1;
+    }
+    if added > 0 {
+        log("[init] Applied wasm-test overlay silos: ");
+        log_u32(added);
+        log("\n");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // EXECUTION LOGIC
 // ---------------------------------------------------------------------------
@@ -345,6 +402,51 @@ fn log_u8_hex(v: u8) {
     log(s);
 }
 
+fn ipc_call_status(port: usize, msg: &mut IpcMessage) -> Result<u32, &'static str> {
+    call::ipc_call(port, msg).map_err(|_| "ipc_call failed")?;
+    Ok(u32::from_le_bytes([
+        msg.payload[0],
+        msg.payload[1],
+        msg.payload[2],
+        msg.payload[3],
+    ]))
+}
+
+fn connect_wasm_service(path: &str) -> Result<usize, &'static str> {
+    for _ in 0..256 {
+        if let Ok(h) = call::ipc_connect(path.as_bytes()) {
+            return Ok(h);
+        }
+        let _ = call::sched_yield();
+    }
+    Err("ipc_connect timeout")
+}
+
+fn run_wasm_app(service_path: &str, wasm_path: &str) -> Result<(), u32> {
+    let port = connect_wasm_service(service_path).map_err(|_| 0xffff0000u32)?;
+
+    let mut load = IpcMessage::new(0x100);
+    let bytes = wasm_path.as_bytes();
+    let n = core::cmp::min(bytes.len(), load.payload.len().saturating_sub(1));
+    load.payload[0] = n as u8;
+    if n > 0 {
+        load.payload[1..1 + n].copy_from_slice(&bytes[..n]);
+    }
+    let load_status = ipc_call_status(port, &mut load).map_err(|_| 0xffff0001u32)?;
+    if load_status != 0 {
+        let _ = call::handle_close(port);
+        return Err(load_status);
+    }
+
+    let mut run = IpcMessage::new(0x102);
+    let run_status = ipc_call_status(port, &mut run).map_err(|_| 0xffff0002u32)?;
+    let _ = call::handle_close(port);
+    if run_status != 0 {
+        return Err(run_status);
+    }
+    Ok(())
+}
+
 fn boot_silos(silos: Vec<SiloDef>) {
     let mut next_sys_sid = 100u32;
     let mut next_usr_sid = 1000u32;
@@ -412,6 +514,8 @@ fn boot_silos(silos: Vec<SiloDef>) {
             continue;
         }
 
+        let mut runtime_targets: Vec<(String, String)> = Vec::new();
+
         for str_def in s_def.strates {
             match str_def.stype.as_str() {
                 "elf" | "wasm-runtime" => {
@@ -458,6 +562,8 @@ fn boot_silos(silos: Vec<SiloDef>) {
                             log("[init] silo_start failed: ");
                             log(e.name());
                             log("\n");
+                        } else if str_def.stype == "wasm-runtime" {
+                            runtime_targets.push((str_def.name.clone(), str_def.target.clone()));
                         }
                     } else {
                         log("[init] failed to read binary ");
@@ -469,7 +575,41 @@ fn boot_silos(silos: Vec<SiloDef>) {
                     log("[init]   -> Wasm-App: ");
                     log(&str_def.name);
                     log("\n");
-                    // Logic to send IPC to strate-wasm...
+                    let mut target_label = String::new();
+                    if !str_def.target.is_empty() {
+                        let mut found = false;
+                        for (runtime_name, runtime_label) in runtime_targets.iter() {
+                            if runtime_name == &str_def.target {
+                                target_label = runtime_label.clone();
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            target_label = str_def.target.clone();
+                        }
+                    }
+                    if target_label.is_empty() {
+                        target_label = String::from("default");
+                    }
+
+                    let service_path = alloc::format!("/srv/strate-wasm/{}", target_label);
+                    match run_wasm_app(&service_path, &str_def.binary) {
+                        Ok(()) => {
+                            log("[init]     wasm app started: ");
+                            log(&str_def.binary);
+                            log("\n");
+                        }
+                        Err(code) => {
+                            let line = alloc::format!(
+                                "[init]     wasm app failed: status=0x{:08x} (service={}, path={})\n",
+                                code,
+                                service_path,
+                                str_def.binary
+                            );
+                            log(&line);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -522,27 +662,8 @@ type = "elf"
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     log("[init] Strat9 Hierarchical Boot Starting\n");
-    let silos = match read_file("/initfs/silo.toml") {
-        Ok(data_vec) => match core::str::from_utf8(&data_vec) {
-            Ok(data_str) => {
-                let parsed = parse_config(data_str);
-                if parsed.is_empty() {
-                    log("[init] Empty /initfs/silo.toml, using embedded defaults\n");
-                    parse_config(DEFAULT_SILO_TOML)
-                } else {
-                    parsed
-                }
-            }
-            Err(_) => {
-                log("[init] Invalid UTF-8 in /initfs/silo.toml, using embedded defaults\n");
-                parse_config(DEFAULT_SILO_TOML)
-            }
-        },
-        Err(_) => {
-            log("[init] Missing /initfs/silo.toml, using embedded defaults\n");
-            parse_config(DEFAULT_SILO_TOML)
-        }
-    };
+    let mut silos = load_primary_silos();
+    merge_wasm_test_overlay(&mut silos);
     let silos = ensure_required_silos(silos);
     boot_silos(silos);
     log("[init] Boot complete.\n");

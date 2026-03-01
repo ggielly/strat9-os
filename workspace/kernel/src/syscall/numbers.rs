@@ -81,6 +81,10 @@ pub const SYS_IPC_UNBIND_PORT: u64 = 206;
 /// Returns 0 on success, negative error if empty or invalid.
 pub const SYS_IPC_TRY_RECV: u64 = 207;
 
+/// Connect to a bound IPC namespace path and return a port handle.
+/// arg1 = path_ptr, arg2 = path_len
+pub const SYS_IPC_CONNECT: u64 = 208;
+
 /// Create a shared ring buffer. arg1 = size
 pub const SYS_IPC_RING_CREATE: u64 = 210;
 
@@ -368,6 +372,12 @@ pub const SYS_TRUNCATE: u64 = 454;
 
 /// Truncate open fd to length. arg1=fd, arg2=length.
 pub const SYS_FTRUNCATE: u64 = 455;
+
+/// Poll file descriptors. arg1=fds_ptr, arg2=nfds, arg3=timeout_ms.
+pub const SYS_POLL: u64 = 460;
+
+/// Poll with signal mask. arg1=fds_ptr, arg2=nfds, arg3=tmo_ptr, arg4=sigmask_ptr.
+pub const SYS_PPOLL: u64 = 461;
 
 // ============================================================
 // Block 410-419: network

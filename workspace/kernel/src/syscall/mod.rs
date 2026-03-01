@@ -21,6 +21,7 @@ pub mod fork;
 pub mod futex;
 pub mod mmap;
 pub mod numbers;
+pub mod poll;
 pub mod process;
 pub mod signal;
 pub mod time;
