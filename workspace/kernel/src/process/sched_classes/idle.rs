@@ -22,11 +22,7 @@ impl SchedClassRq for IdleClassRq {
     }
 
     fn len(&self) -> usize {
-        if self.idle_task.is_some() {
-            1
-        } else {
-            0
-        }
+        if self.idle_task.is_some() { 1 } else { 0 }
     }
 
     fn pick_next(&mut self) -> Option<Arc<Task>> {

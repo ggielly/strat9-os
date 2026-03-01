@@ -130,6 +130,14 @@ impl SchedClassTable {
         }
     }
 
+    fn class_index(class: SchedClassId) -> usize {
+        match class {
+            SchedClassId::RealTime => 0,
+            SchedClassId::Fair => 1,
+            SchedClassId::Idle => 2,
+        }
+    }
+
     fn refresh_ranks(&mut self) {
         for entry in self.entries.iter_mut() {
             entry.rank = match entry.id {
@@ -149,18 +157,14 @@ impl SchedClassTable {
     }
 
     pub fn validate(&self) -> bool {
-        let mut seen_rt = false;
-        let mut seen_fair = false;
-        let mut seen_idle = false;
+        let mut seen = [false; 3];
         for class in self.pick_order.iter().copied() {
-            match class {
-                SchedClassId::RealTime => seen_rt = true,
-                SchedClassId::Fair => seen_fair = true,
-                SchedClassId::Idle => seen_idle = true,
-            }
+            seen[Self::class_index(class)] = true;
         }
-        if !(seen_rt && seen_fair && seen_idle) {
-            return false;
+        for class in SchedClassId::ALL.iter().copied() {
+            if !seen[Self::class_index(class)] {
+                return false;
+            }
         }
 
         if self.steal_order[0] == self.steal_order[1] {

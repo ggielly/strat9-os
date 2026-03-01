@@ -17,7 +17,7 @@ pub mod mmap_test;
 #[cfg(feature = "selftest")]
 pub mod posix_signal_test;
 pub mod process;
-pub mod sched;
+pub mod sched_classes;
 pub mod scheduler;
 #[cfg(feature = "selftest")]
 pub mod scheduler_test;
@@ -28,6 +28,9 @@ pub mod task;
 pub mod test;
 pub mod timer;
 pub mod usertest;
+
+// Backward-compatible alias while references migrate from `sched` to `sched_classes`.
+pub use sched_classes as sched;
 
 pub use scheduler::{
     add_task, block_current_task, class_table as scheduler_class_table, configure_class_table,

@@ -477,13 +477,9 @@ extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     let raw = unsafe { super::io::inb(0x60) };
-    crate::serial_print!("[K:{:02x}]", raw);
-
-    // Put byte back for handle_scancode by peeking — but PS/2 is consumed on read.
-    // We must NOT re-read: feed the scancode directly.
+    // Port 0x60 is consumed on read: feed the raw scancode directly.
     if let Some(ch) = super::keyboard_layout::handle_scancode_raw(raw) {
         crate::arch::x86_64::keyboard::add_to_buffer(ch);
-        crate::serial_print!("{}", ch as char);
     }
 
     if super::apic::is_initialized() {

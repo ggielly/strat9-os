@@ -10,12 +10,12 @@ const WEIGHT_0: u64 = 1024;
 /// Base time slice per task in ticks for the CFS fair scheduler.
 ///
 /// At TIMER_HZ=100 (10 ms/tick):
-///   BASE_SLICE_TICKS = 1 → 1 tick = 10 ms per task (matches `quantum_ms: 10`)
+///   BASE_SLICE_TICKS = 1 -> 1 tick = 10 ms per task (matches `quantum_ms: 10`)
 ///
 /// Previously this was mistakenly 10, giving 10 ticks = 100 ms slices and
 /// effectively disabling preemption for lightly loaded workloads.
 ///
-/// Derivation: target_ms = 10 ms, tick_ms = 1000 / TIMER_HZ = 10 ms → 1 tick.
+/// Derivation: target_ms = 10 ms, tick_ms = 1000 / TIMER_HZ = 10 ms -> 1 tick.
 const BASE_SLICE_TICKS: u64 = 1;
 
 pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {

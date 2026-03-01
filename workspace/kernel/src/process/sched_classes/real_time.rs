@@ -7,7 +7,7 @@ use alloc::{collections::VecDeque, sync::Arc};
 /// RT Round-Robin quantum in ticks.
 ///
 /// POSIX specifies a minimum of 100ms for SCHED_RR (Linux default: 100ms).
-/// At TIMER_HZ=100: 10 ticks × 10 ms/tick = 100 ms.
+/// At TIMER_HZ=100: 10 ticks x 10 ms/tick = 100 ms.
 const RT_RR_QUANTUM_TICKS: u64 = TIMER_HZ / 10;
 
 /// Real-time priority (0-99). Higher value means higher priority.
@@ -86,7 +86,7 @@ impl SchedClassRq for RealTimeClassRq {
         let policy = task.sched_policy();
         match policy {
             super::SchedPolicy::RealTimeRR { .. } => {
-                // Round Robin: preempt after RT_RR_QUANTUM_TICKS (POSIX ≥ 100 ms).
+                // Round Robin: preempt after RT_RR_QUANTUM_TICKS (POSIX >= 100 ms).
                 rt.period_delta_ticks >= RT_RR_QUANTUM_TICKS
             }
             super::SchedPolicy::RealTimeFifo { .. } => {

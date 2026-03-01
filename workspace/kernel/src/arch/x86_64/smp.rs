@@ -328,7 +328,7 @@ pub extern "C" fn smp_main() -> ! {
     timer::start_apic_timer_cached();
 
     // Start per-CPU scheduler (never returns).
-    crate::process::scheduler::schedule_on_cpu(cpu_index);
+    crate::process::scheduler::schedule_on_cpu(cpu_index)
 }
 
 /// Return the number of online CPUs.
