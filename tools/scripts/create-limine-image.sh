@@ -26,6 +26,7 @@ STRATE_WASM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-wasm"
 DHCP_CLIENT_ELF="target/x86_64-unknown-none/${PROFILE}/dhcp-client"
 PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
 TELNETD_ELF="target/x86_64-unknown-none/${PROFILE}/telnetd"
+STRATE_SSHD_ELF="target/x86_64-unknown-none/${PROFILE}/strate-sshd"
 HELLO_WASM_FILE="workspace/assets/wasm/hello.wasm"
 WASM_TEST_TOML_FILE="workspace/assets/wasm/wasm-test.toml"
 
@@ -129,6 +130,12 @@ if [ -f "$TELNETD_ELF" ]; then
     echo "    telnetd      : $telnetd_size bytes"
 else
     echo "    telnetd      : (missing)"
+fi
+if [ -f "$STRATE_SSHD_ELF" ]; then
+    sshd_size=$(stat -c%s "$STRATE_SSHD_ELF")
+    echo "    strate-sshd  : $sshd_size bytes"
+else
+    echo "    strate-sshd  : (missing)"
 fi
 echo ""
 
@@ -247,6 +254,13 @@ if [ -f "$TELNETD_ELF" ]; then
     echo "  [OK] Copied telnetd: /initfs/bin/telnetd"
 else
     echo "  [WARN] telnetd binary not found at $TELNETD_ELF"
+fi
+
+if [ -f "$STRATE_SSHD_ELF" ]; then
+    cp "$STRATE_SSHD_ELF" "$ISO_ROOT/initfs/bin/sshd"
+    echo "  [OK] Copied strate-sshd: /initfs/bin/sshd"
+else
+    echo "  [WARN] strate-sshd binary not found at $STRATE_SSHD_ELF"
 fi
 
 if [ -f "$HELLO_WASM_FILE" ]; then

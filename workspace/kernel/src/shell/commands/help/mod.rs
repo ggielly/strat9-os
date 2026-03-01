@@ -24,7 +24,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  mount ls          - List current mount points");
     shell_println!("  mount <src> <dst> - Mount an existing source mount onto dst");
     shell_println!("  umount <path>     - Unmount a mount point");
-    shell_println!("  strate list [--all] - List strates (or all silos)");
+    shell_println!("  strate list      - List strates + membership");
     shell_println!("  strate spawn ...  - Spawn a strate (type, --label, --dev)");
     shell_println!("  strate config ... - Manage /initfs/silo.toml (show/add/remove)");
     shell_println!("  strate start <x>  - Start a strate by id/label");
@@ -32,11 +32,11 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  strate kill <x>   - Kill a strate by id/label");
     shell_println!("  strate destroy <x>- Destroy metadata + module by id/label");
     shell_println!("  strate rename ... - Rename a strate label (stopped/ready)");
-    shell_println!("  silo list [--all] - List silos/strates");
+    shell_println!("  silo list        - List silos + contained strates");
     shell_println!("  silo spawn ...    - Spawn a silo strate (--label, --dev)");
     shell_println!("  silo config ...   - Manage /initfs/silo.toml (show/add/remove)");
     shell_println!("  silo start|stop|kill|destroy|rename ... - Silo lifecycle");
-    shell_println!("  silos             - Shortcut for 'strate list'");
+    shell_println!("  silos             - Shortcut for 'silo list'");
     shell_println!("  cpuinfo           - Display CPU information");
     shell_println!("  test_pid          - Launch /initfs/test_pid userspace binary");
     shell_println!("  test_syscalls     - Launch /initfs/test_syscalls verbose syscall suite");

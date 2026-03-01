@@ -1,11 +1,13 @@
 //! System management commands
 use crate::{
+    arch::x86_64::vga,
     ipc::PortId,
     process::{
         elf::load_and_run_elf, log_scheduler_state, scheduler_class_table,
         scheduler_verbose_enabled, set_scheduler_verbose,
     },
     shell::{
+        commands::top::Strat9RatatuiBackend,
         output::{clear_screen, format_bytes},
         ShellError,
     },
@@ -13,9 +15,66 @@ use crate::{
     vfs,
 };
 use alloc::{string::String, vec::Vec};
+use ratatui::{
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    Terminal,
+};
 
 const STRATE_USAGE: &str = "Usage: strate <list|spawn|start|stop|kill|destroy|rename|config> ...";
 const SILO_USAGE: &str = "Usage: silo <list|spawn|start|stop|kill|destroy|rename|config> ...";
+const DEFAULT_MANAGED_SILO_TOML: &str = r#"
+[[silos]]
+name = "console-admin"
+family = "SYS"
+mode = "700"
+sid = 42
+[[silos.strates]]
+name = "console-admin"
+binary = "/initfs/console-admin"
+type = "elf"
+
+[[silos]]
+name = "network"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-net"
+binary = "/initfs/strate-net"
+type = "elf"
+
+[[silos]]
+name = "dhcp-client"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "dhcp-client"
+binary = "/initfs/bin/dhcp-client"
+type = "elf"
+
+[[silos]]
+name = "telnet"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "telnetd"
+binary = "/initfs/bin/telnetd"
+type = "elf"
+
+[[silos]]
+name = "ssh"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "sshd"
+binary = "/initfs/bin/sshd"
+type = "elf"
+"#;
 
 #[derive(Clone)]
 struct ManagedStrateDef {
@@ -155,6 +214,323 @@ fn read_silo_toml_from_initfs() -> Result<String, ShellError> {
     }
 }
 
+fn load_managed_silos_with_source() -> (Vec<ManagedSiloDef>, &'static str) {
+    match read_silo_toml_from_initfs() {
+        Ok(text) => {
+            let parsed = parse_silo_toml(&text);
+            if parsed.is_empty() {
+                (
+                    parse_silo_toml(DEFAULT_MANAGED_SILO_TOML),
+                    "embedded-default",
+                )
+            } else {
+                (parsed, "/initfs/silo.toml")
+            }
+        }
+        Err(_) => (
+            parse_silo_toml(DEFAULT_MANAGED_SILO_TOML),
+            "embedded-default",
+        ),
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, item: &str) {
+    if !values.iter().any(|v| v == item) {
+        values.push(String::from(item));
+    }
+}
+
+fn join_csv(values: &[String]) -> String {
+    if values.is_empty() {
+        return String::from("-");
+    }
+    let mut out = String::new();
+    for (i, v) in values.iter().enumerate() {
+        if i != 0 {
+            out.push_str(", ");
+        }
+        out.push_str(v);
+    }
+    out
+}
+
+struct SiloListRow {
+    sid: u32,
+    name: String,
+    state: String,
+    tasks: usize,
+    memory: String,
+    mode: u16,
+    label: String,
+    strates: String,
+}
+
+struct RuntimeStrateRow {
+    strate: String,
+    belongs_to: String,
+    status: String,
+}
+
+struct ConfigStrateRow {
+    strate: String,
+    belongs_to: String,
+}
+
+struct ConfigListRow {
+    sid: u32,
+    name: String,
+    family: String,
+    mode: String,
+    strates: String,
+}
+
+fn render_silo_table_ratatui(
+    runtime_rows: &[SiloListRow],
+    config_rows: &[ConfigListRow],
+    config_source: &str,
+) -> Result<bool, ShellError> {
+    if !vga::is_available() {
+        return Ok(false);
+    }
+
+    let backend = Strat9RatatuiBackend::new().map_err(|_| ShellError::ExecutionFailed)?;
+    let mut terminal = Terminal::new(backend).map_err(|_| ShellError::ExecutionFailed)?;
+    terminal.clear().map_err(|_| ShellError::ExecutionFailed)?;
+
+    let runtime_table_rows: Vec<Row> = runtime_rows
+        .iter()
+        .map(|r| {
+            let mut style = Style::default().fg(Color::White);
+            if r.strates == "-" {
+                style = style.fg(Color::LightRed);
+            } else {
+                style = style.fg(Color::LightGreen);
+            }
+            Row::new(alloc::vec![
+                Cell::from(alloc::format!("{}", r.sid)),
+                Cell::from(r.name.as_str()),
+                Cell::from(r.state.as_str()),
+                Cell::from(alloc::format!("{}", r.tasks)),
+                Cell::from(r.memory.as_str()),
+                Cell::from(alloc::format!("{:o}", r.mode)),
+                Cell::from(r.label.as_str()),
+                Cell::from(r.strates.as_str()),
+            ])
+            .style(style)
+        })
+        .collect();
+    let config_table_rows: Vec<Row> = config_rows
+        .iter()
+        .map(|r| {
+            Row::new(alloc::vec![
+                Cell::from(alloc::format!("{}", r.sid)),
+                Cell::from(r.name.as_str()),
+                Cell::from(r.family.as_str()),
+                Cell::from(r.mode.as_str()),
+                Cell::from(r.strates.as_str()),
+            ])
+            .style(Style::default().fg(Color::LightCyan))
+        })
+        .collect();
+
+    let frame_started = vga::begin_frame();
+    terminal
+        .draw(|f| {
+            let area = f.area();
+            let vertical = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Min(10),
+                    Constraint::Length(10),
+                    Constraint::Length(1),
+                ])
+                .split(area);
+
+            let title = Paragraph::new("Silo List")
+                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .block(Block::default().borders(Borders::BOTTOM).title("Strat9"));
+            f.render_widget(title, vertical[0]);
+
+            let widths = [
+                Constraint::Length(6),
+                Constraint::Length(12),
+                Constraint::Length(10),
+                Constraint::Length(7),
+                Constraint::Length(18),
+                Constraint::Length(6),
+                Constraint::Length(12),
+                Constraint::Min(20),
+            ];
+            let runtime_table = Table::new(runtime_table_rows, widths)
+                .header(
+                    Row::new(alloc::vec![
+                        Cell::from("SID"),
+                        Cell::from("Name"),
+                        Cell::from("State"),
+                        Cell::from("Tasks"),
+                        Cell::from("Memory"),
+                        Cell::from("Mode"),
+                        Cell::from("Label"),
+                        Cell::from("Strates"),
+                    ])
+                    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                )
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Runtime")
+                        .border_style(Style::default().fg(Color::Green)),
+                )
+                .column_spacing(1);
+            f.render_widget(runtime_table, vertical[1]);
+
+            let config_widths = [
+                Constraint::Length(6),
+                Constraint::Length(14),
+                Constraint::Length(8),
+                Constraint::Length(8),
+                Constraint::Min(20),
+            ];
+            let config_table = Table::new(config_table_rows, config_widths)
+                .header(
+                    Row::new(alloc::vec![
+                        Cell::from("SID"),
+                        Cell::from("Name"),
+                        Cell::from("Family"),
+                        Cell::from("Mode"),
+                        Cell::from("Strates"),
+                    ])
+                    .style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                )
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(alloc::format!("Config ({})", config_source))
+                        .border_style(Style::default().fg(Color::Magenta)),
+                )
+                .column_spacing(1);
+            f.render_widget(config_table, vertical[2]);
+
+            let footer = Paragraph::new("runtime vert=associe | runtime rouge=incomplet")
+                .style(Style::default().fg(Color::DarkGray));
+            f.render_widget(footer, vertical[3]);
+        })
+        .map_err(|_| ShellError::ExecutionFailed)?;
+    if frame_started {
+        vga::end_frame();
+    }
+    Ok(true)
+}
+
+fn render_strate_table_ratatui(
+    runtime_rows: &[RuntimeStrateRow],
+    config_rows: &[ConfigStrateRow],
+    config_source: &str,
+) -> Result<bool, ShellError> {
+    if !vga::is_available() {
+        return Ok(false);
+    }
+
+    let backend = Strat9RatatuiBackend::new().map_err(|_| ShellError::ExecutionFailed)?;
+    let mut terminal = Terminal::new(backend).map_err(|_| ShellError::ExecutionFailed)?;
+    terminal.clear().map_err(|_| ShellError::ExecutionFailed)?;
+
+    let runtime_table_rows: Vec<Row> = runtime_rows
+        .iter()
+        .map(|r| {
+            let style = if r.status == "config+runtime" {
+                Style::default().fg(Color::LightGreen)
+            } else {
+                Style::default().fg(Color::LightYellow)
+            };
+            Row::new(alloc::vec![
+                Cell::from(r.strate.as_str()),
+                Cell::from(r.belongs_to.as_str()),
+                Cell::from(r.status.as_str()),
+            ])
+            .style(style)
+        })
+        .collect();
+    let config_table_rows: Vec<Row> = config_rows
+        .iter()
+        .map(|r| {
+            Row::new(alloc::vec![
+                Cell::from(r.strate.as_str()),
+                Cell::from(r.belongs_to.as_str()),
+            ])
+            .style(Style::default().fg(Color::LightCyan))
+        })
+        .collect();
+
+    let frame_started = vga::begin_frame();
+    terminal
+        .draw(|f| {
+            let area = f.area();
+            let vertical = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Min(8),
+                    Constraint::Length(8),
+                    Constraint::Length(1),
+                ])
+                .split(area);
+
+            let title = Paragraph::new("Strate List")
+                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .block(Block::default().borders(Borders::BOTTOM).title("Strat9"));
+            f.render_widget(title, vertical[0]);
+
+            let runtime_widths = [
+                Constraint::Length(22),
+                Constraint::Min(24),
+                Constraint::Length(16),
+            ];
+            let runtime_table = Table::new(runtime_table_rows, runtime_widths)
+                .header(
+                    Row::new(alloc::vec![
+                        Cell::from("Strate"),
+                        Cell::from("BelongsTo"),
+                        Cell::from("Status"),
+                    ])
+                    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                )
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Runtime")
+                        .border_style(Style::default().fg(Color::Green)),
+                )
+                .column_spacing(2);
+            f.render_widget(runtime_table, vertical[1]);
+
+            let config_widths = [Constraint::Length(22), Constraint::Min(24)];
+            let config_table = Table::new(config_table_rows, config_widths)
+                .header(
+                    Row::new(alloc::vec![Cell::from("Strate"), Cell::from("BelongsTo")])
+                        .style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                )
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(alloc::format!("Config ({})", config_source))
+                        .border_style(Style::default().fg(Color::Magenta)),
+                )
+                .column_spacing(2);
+            f.render_widget(config_table, vertical[2]);
+
+            let footer = Paragraph::new("vert=config+runtime, jaune=runtime-only")
+                .style(Style::default().fg(Color::DarkGray));
+            f.render_widget(footer, vertical[3]);
+        })
+        .map_err(|_| ShellError::ExecutionFailed)?;
+    if frame_started {
+        vga::end_frame();
+    }
+    Ok(true)
+}
+
 fn write_silo_toml_to_initfs(text: &str) -> Result<(), ShellError> {
     let path = "/initfs/silo.toml";
     let fd = vfs::open(
@@ -186,7 +562,7 @@ fn print_strate_state_for_sid(sid: u32) {
 
 fn print_strate_usage() {
     shell_println!("{}", STRATE_USAGE);
-    shell_println!("  strate list [--all]");
+    shell_println!("  strate list");
     shell_println!("  strate spawn <type> [--label <label>] [--dev <path>]");
     shell_println!("  strate start <id|label>");
     shell_println!("  strate stop <id|label>");
@@ -200,7 +576,7 @@ fn print_strate_usage() {
 
 fn print_silo_usage() {
     shell_println!("{}", SILO_USAGE);
-    shell_println!("  silo list [--all]");
+    shell_println!("  silo list");
     shell_println!("  silo spawn <type> [--label <label>] [--dev <path>]");
     shell_println!("  silo start <id|label>");
     shell_println!("  silo stop <id|label>");
@@ -218,7 +594,8 @@ pub fn cmd_silo(args: &[String]) -> Result<(), ShellError> {
         return Err(ShellError::InvalidArguments);
     }
     match args[0].as_str() {
-        "list" | "spawn" | "start" | "stop" | "kill" | "destroy" | "rename" | "config" => {
+        "list" => cmd_silo_list(args),
+        "spawn" | "start" | "stop" | "kill" | "destroy" | "rename" | "config" => {
             cmd_strate(args)
         }
         _ => {
@@ -230,7 +607,7 @@ pub fn cmd_silo(args: &[String]) -> Result<(), ShellError> {
 
 pub fn cmd_silos(_args: &[String]) -> Result<(), ShellError> {
     let args = [String::from("list")];
-    cmd_strate(&args)
+    cmd_silo(&args)
 }
 
 /// Display kernel version
@@ -588,26 +965,46 @@ pub fn cmd_test_mem_stressed(_args: &[String]) -> Result<(), ShellError> {
     }
 }
 
-fn cmd_strate_list(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_list(_args: &[String]) -> Result<(), ShellError> {
+    let (managed, managed_source) = load_managed_silos_with_source();
     let mut silos = silo::list_silos_snapshot();
-    if args.get(1).map(|s| s.as_str()) != Some("--all") {
-        silos.retain(|s| s.strate_label.is_some());
-    }
     silos.sort_by_key(|s| s.id);
 
-    shell_println!(
-        "{:<6} {:<12} {:<10} {:<7} {:<18} {:<6} {}",
-        "SID",
-        "Name",
-        "State",
-        "Tasks",
-        "Memory",
-        "Mode",
-        "Label"
-    );
-    shell_println!("────────────────────────────────────────────────────────────────────────────────────────");
-    for s in silos {
-        let label = s.strate_label.unwrap_or_else(|| String::from("-"));
+    let mut rows: Vec<SiloListRow> = Vec::new();
+    let mut config_rows: Vec<ConfigListRow> = Vec::new();
+
+    for m in &managed {
+        let mut strates = Vec::new();
+        for st in &m.strates {
+            if !st.name.is_empty() {
+                push_unique(&mut strates, &st.name);
+            }
+        }
+        config_rows.push(ConfigListRow {
+            sid: m.sid,
+            name: m.name.clone(),
+            family: m.family.clone(),
+            mode: m.mode.clone(),
+            strates: join_csv(&strates),
+        });
+    }
+
+    for s in silos.iter() {
+        let label = s.strate_label.clone().unwrap_or_else(|| String::from("-"));
+        let mut strates = Vec::new();
+        for m in &managed {
+            if m.name == s.name || m.sid == s.id {
+                for st in &m.strates {
+                    if !st.name.is_empty() {
+                        push_unique(&mut strates, &st.name);
+                    }
+                }
+            }
+        }
+        if strates.is_empty() && label != "-" {
+            strates.push(alloc::format!("{} (kernel)", label));
+        }
+        let strates_cell = join_csv(&strates);
         let (used_val, used_unit) = format_bytes(s.mem_usage_bytes as usize);
         let mem_cell = if s.mem_max_bytes == 0 {
             alloc::format!("{} {} / unlimited", used_val, used_unit)
@@ -615,16 +1012,149 @@ fn cmd_strate_list(args: &[String]) -> Result<(), ShellError> {
             let (max_val, max_unit) = format_bytes(s.mem_max_bytes as usize);
             alloc::format!("{} {} / {} {}", used_val, used_unit, max_val, max_unit)
         };
+        rows.push(SiloListRow {
+            sid: s.id,
+            name: s.name.clone(),
+            state: alloc::format!("{:?}", s.state),
+            tasks: s.task_count,
+            memory: mem_cell,
+            mode: s.mode,
+            label,
+            strates: strates_cell,
+        });
+    }
+    if render_silo_table_ratatui(&rows, &config_rows, managed_source).unwrap_or(false) {
+        return Ok(());
+    }
+
+    shell_println!(
+        "{:<6} {:<14} {:<10} {:<7} {:<18} {:<6} {:<12} {}",
+        "SID",
+        "Name",
+        "State",
+        "Tasks",
+        "Memory",
+        "Mode",
+        "Label",
+        "Strates"
+    );
+    shell_println!("────────────────────────────────────────────────────────────────────────────────────────────────────────────");
+    for r in rows {
         shell_println!(
-            "{:<6} {:<12} {:<10?} {:<7} {:<18} {:<6o} {}",
-            s.id,
-            s.name,
-            s.state,
-            s.task_count,
-            mem_cell,
-            s.mode,
-            label
+            "{:<6} {:<12} {:<10} {:<7} {:<18} {:<6o} {:<12} {}",
+            r.sid,
+            r.name,
+            r.state,
+            r.tasks,
+            r.memory,
+            r.mode,
+            r.label,
+            r.strates
         );
+    }
+    Ok(())
+}
+
+fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
+    struct StrateEntry {
+        name: String,
+        belongs_to: Vec<String>,
+    }
+
+    let (managed, managed_source) = load_managed_silos_with_source();
+    let mut entries: Vec<StrateEntry> = Vec::new();
+
+    for s in &managed {
+        for st in &s.strates {
+            if st.name.is_empty() {
+                continue;
+            }
+            if let Some(e) = entries.iter_mut().find(|e| e.name == st.name) {
+                push_unique(&mut e.belongs_to, &s.name);
+            } else {
+                entries.push(StrateEntry {
+                    name: st.name.clone(),
+                    belongs_to: alloc::vec![s.name.clone()],
+                });
+            }
+        }
+    }
+
+    let mut runtime_entries: Vec<StrateEntry> = Vec::new();
+    for runtime in silo::list_silos_snapshot() {
+        let mut names: Vec<String> = Vec::new();
+        for m in &managed {
+            if m.name == runtime.name || m.sid == runtime.id {
+                for st in &m.strates {
+                    if !st.name.is_empty() {
+                        push_unique(&mut names, &st.name);
+                    }
+                }
+            }
+        }
+        if names.is_empty() {
+            if let Some(label) = runtime.strate_label {
+                names.push(label);
+            } else {
+                continue;
+            }
+        }
+
+        for name in names {
+            if let Some(e) = runtime_entries.iter_mut().find(|e| e.name == name) {
+                push_unique(&mut e.belongs_to, &runtime.name);
+            } else {
+                runtime_entries.push(StrateEntry {
+                    name,
+                    belongs_to: alloc::vec![runtime.name.clone()],
+                });
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    runtime_entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let config_rows: Vec<ConfigStrateRow> = entries
+        .iter()
+        .map(|e| ConfigStrateRow {
+            strate: e.name.clone(),
+            belongs_to: join_csv(&e.belongs_to),
+        })
+        .collect();
+
+    let runtime_rows: Vec<RuntimeStrateRow> = runtime_entries
+        .iter()
+        .map(|e| {
+            let in_cfg = entries.iter().any(|cfg| cfg.name == e.name);
+            RuntimeStrateRow {
+                strate: e.name.clone(),
+                belongs_to: join_csv(&e.belongs_to),
+                status: if in_cfg {
+                    String::from("config+runtime")
+                } else {
+                    String::from("runtime-only")
+                },
+            }
+        })
+        .collect();
+
+    if render_strate_table_ratatui(&runtime_rows, &config_rows, managed_source).unwrap_or(false) {
+        return Ok(());
+    }
+
+    shell_println!("Runtime:");
+    shell_println!("{:<20} {:<24} {}", "Strate", "BelongsTo", "Status");
+    shell_println!("────────────────────────────────────────────────────────────");
+    for r in runtime_rows {
+        shell_println!("{:<20} {:<24} {}", r.strate, r.belongs_to, r.status);
+    }
+    shell_println!("");
+    shell_println!("Config ({}):", managed_source);
+    shell_println!("{:<20} {}", "Strate", "BelongsTo");
+    shell_println!("────────────────────────────────────────────────────────────");
+    for r in config_rows {
+        shell_println!("{:<20} {}", r.strate, r.belongs_to);
     }
     Ok(())
 }

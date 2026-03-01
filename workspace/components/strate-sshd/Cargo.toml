@@ -1,0 +1,17 @@
+[package]
+name = "strate-sshd"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[[bin]]
+name = "strate-sshd"
+path = "src/main.rs"
+
+[dependencies]
+strat9-syscall = { path = "../syscall", features = ["userspace"] }
+alloc-freelist = { path = "../alloc-freelist" }
+ssh-core = { path = "../ssh-core" }
+libssh-strat9 = { path = "../libssh-strat9" }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }

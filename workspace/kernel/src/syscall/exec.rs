@@ -22,7 +22,7 @@ const AT_ENTRY: u64 = 9;
 const AT_RANDOM: u64 = 25;
 const AT_EXECFN: u64 = 31;
 
-/// SYS_PROC_EXECVE (301): Replace current process image.
+/// SYS_PROC_EXECVE (301): replace current process image.
 pub fn sys_execve(
     frame: &mut SyscallFrame,
     path_ptr: u64,
@@ -160,13 +160,23 @@ pub fn sys_execve(
     // 2. Reset all signal handlers to SIG_DFL
     current.reset_signals();
 
-    // 3. Clear thread-local storage address and TID pointer — POSIX exec semantics.
+    // 3. Clear thread-local storage address and TID pointer : POSIX exec semantics.
     current
         .clear_child_tid
         .store(0, core::sync::atomic::Ordering::Relaxed);
     current
         .user_fs_base
         .store(new_fs_base, core::sync::atomic::Ordering::Relaxed);
+
+    // 4. Reset memory layout: brk and mmap_hint belong to the old image.
+    current
+        .process
+        .brk
+        .store(0, core::sync::atomic::Ordering::Relaxed);
+    current
+        .process
+        .mmap_hint
+        .store(0x0000_0000_6000_0000, core::sync::atomic::Ordering::Relaxed);
     // Set FS.base MSR for the new image TLS (or 0 if no PT_TLS).
     unsafe {
         let lo = new_fs_base as u32;
@@ -189,6 +199,7 @@ pub fn sys_execve(
 
     frame.iret_rip = load_info.runtime_entry;
     frame.iret_rsp = sp;
+    frame.iret_rflags = 0x200; // IF=1, clean slate for the new image
 
     frame.rdi = 0;
     frame.rsi = 0;
@@ -397,6 +408,7 @@ fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(
     // `AddressSpace` is usually public. `translate` is on `Mapper` trait?
     // `AddressSpace` in `strat9` likely implements `Mapper` or has it.
     // `elf.rs` used `user_as.translate(...)`.
+    
     // I need to import Translate? `AddressSpace` usually has `translate`.
 
     while written < data.len() {

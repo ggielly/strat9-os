@@ -3,7 +3,7 @@
 //! This command keeps Chevron shell as default UX and only uses Ratatui while `top`
 //! is running.
 
-mod ratatui_backend;
+pub(crate) mod ratatui_backend;
 
 use crate::{arch::x86_64::vga, shell::ShellError, shell_println};
 use alloc::{format, string::String, vec, vec::Vec};
@@ -14,7 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, TableState},
     Terminal,
 };
-use ratatui_backend::Strat9RatatuiBackend;
+pub(crate) use ratatui_backend::Strat9RatatuiBackend;
 
 const TOP_REFRESH_TICKS: u64 = 10; // 100ms at 100Hz
 const MAX_CPU_GAUGES: usize = 8;
@@ -28,11 +28,28 @@ struct TaskRowData {
     ticks: u64,
 }
 
+#[derive(Clone)]
+struct SiloRowData {
+    sid: String,
+    name: String,
+    state: String,
+    tasks: String,
+    label: String,
+}
+
+#[derive(Clone)]
+struct StrateRowData {
+    name: String,
+    silos: String,
+}
+
 struct TopSnapshot {
     cpu_count: usize,
     total_pages: usize,
     used_pages: usize,
     tasks: Vec<TaskRowData>,
+    silos: Vec<SiloRowData>,
+    strates: Vec<StrateRowData>,
 }
 
 #[derive(Clone, Copy)]
@@ -71,11 +88,60 @@ fn collect_snapshot() -> TopSnapshot {
     // Top-like behavior: most CPU-consumed tasks first.
     tasks.sort_by(|a, b| b.ticks.cmp(&a.ticks));
 
+    let mut silos = Vec::new();
+    let mut strate_index: Vec<(String, Vec<String>)> = Vec::new();
+    let mut silo_snapshots = crate::silo::list_silos_snapshot();
+    silo_snapshots.sort_by_key(|s| s.id);
+    for s in silo_snapshots {
+        let label = s.strate_label.unwrap_or_default();
+        let strate_name = if !label.is_empty() {
+            label.clone()
+        } else {
+            s.name.clone()
+        };
+        if let Some((_, belongs)) = strate_index.iter_mut().find(|(name, _)| *name == strate_name) {
+            if !belongs.iter().any(|x| x == &s.name) {
+                belongs.push(s.name.clone());
+            }
+        } else {
+            strate_index.push((strate_name, vec![s.name.clone()]));
+        }
+        silos.push(SiloRowData {
+            sid: format!("{}", s.id),
+            name: s.name,
+            state: format!("{:?}", s.state),
+            tasks: format!("{}", s.task_count),
+            label: if label.is_empty() {
+                String::from("-")
+            } else {
+                label
+            },
+        });
+    }
+
+    strate_index.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut strates = Vec::with_capacity(strate_index.len());
+    for (name, belongs) in strate_index {
+        let mut silos_csv = String::new();
+        for (i, silo_name) in belongs.iter().enumerate() {
+            if i != 0 {
+                silos_csv.push_str(", ");
+            }
+            silos_csv.push_str(silo_name);
+        }
+        strates.push(StrateRowData {
+            name,
+            silos: silos_csv,
+        });
+    }
+
     TopSnapshot {
         cpu_count,
         total_pages,
         used_pages,
         tasks,
+        silos,
+        strates,
     }
 }
 
@@ -189,9 +255,6 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
         let uptime_secs = ticks.saturating_sub(boot_tick) / 100;
 
         let frame_started = vga::begin_frame();
-        // Our custom backend is intentionally simple; forcing full redraw avoids
-        // stale-cell artifacts from terminal diffing on no_std VGA backends.
-        terminal.clear().map_err(|_| ShellError::ExecutionFailed)?;
         terminal
             .draw(|frame| {
                 let title_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
@@ -217,9 +280,11 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                 frame.render_widget(title, vertical[0]);
 
                 let stats_line = Paragraph::new(format!(
-                    "CPUs: {} | Tasks: {} | CPU(avg): {:>3}% | Uptime: {}s",
+                    "CPUs: {} | Tasks: {} | Silos: {} | Strates: {} | CPU(avg): {:>3}% | Uptime: {}s",
                     snapshot.cpu_count,
                     snapshot.tasks.len(),
+                    snapshot.silos.len(),
+                    snapshot.strates.len(),
                     (cpu_window.avg_ratio * 100.0) as u16,
                     uptime_secs
                 ))
@@ -270,7 +335,12 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                     }
                 }
 
-                let table = Table::new(
+                let main_split = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
+                    .split(vertical[3]);
+
+                let task_table = Table::new(
                     rows.iter().cloned(),
                     [
                         Constraint::Length(5),  // PID
@@ -296,7 +366,64 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                         .borders(Borders::TOP)
                         .title("Tasks (sorted by ticks)"),
                 );
-                frame.render_stateful_widget(table, vertical[3], &mut table_state);
+                frame.render_stateful_widget(task_table, main_split[0], &mut table_state);
+
+                let right_split = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+                    .split(main_split[1]);
+
+                let silo_rows: Vec<Row> = snapshot
+                    .silos
+                    .iter()
+                    .map(|s| {
+                        Row::new(vec![
+                            Cell::from(s.sid.as_str()),
+                            Cell::from(s.name.as_str()),
+                            Cell::from(s.state.as_str()),
+                            Cell::from(s.tasks.as_str()),
+                            Cell::from(s.label.as_str()),
+                        ])
+                    })
+                    .collect();
+                let silo_table = Table::new(
+                    silo_rows,
+                    [
+                        Constraint::Length(5),
+                        Constraint::Length(10),
+                        Constraint::Length(8),
+                        Constraint::Length(5),
+                        Constraint::Min(8),
+                    ],
+                )
+                .header(
+                    Row::new(vec!["SID", "Name", "State", "T", "Label"]).style(
+                        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+                    ),
+                )
+                .column_spacing(1)
+                .style(primary_text)
+                .block(Block::default().borders(Borders::TOP).title("Silos"));
+                frame.render_widget(silo_table, right_split[0]);
+
+                let strate_rows: Vec<Row> = snapshot
+                    .strates
+                    .iter()
+                    .map(|s| Row::new(vec![Cell::from(s.name.as_str()), Cell::from(s.silos.as_str())]))
+                    .collect();
+                let strate_table = Table::new(
+                    strate_rows,
+                    [Constraint::Length(12), Constraint::Min(10)],
+                )
+                .header(
+                    Row::new(vec!["Strate", "BelongsTo"]).style(
+                        Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                    ),
+                )
+                .column_spacing(1)
+                .style(primary_text)
+                .block(Block::default().borders(Borders::TOP).title("Strates"));
+                frame.render_widget(strate_table, right_split[1]);
 
                 let footer = Paragraph::new("[Up/Down] Select process | [q|Esc] Exit")
                     .style(muted_text)

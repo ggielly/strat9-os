@@ -1,0 +1,17 @@
+[package]
+name = "ssh-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[lib]
+name = "ssh_core"
+path = "src/lib.rs"
+
+[dependencies]
+zssh = { version = "0.4", default-features = false, optional = true }
+
+[features]
+default = ["backend-zssh"]
+backend-zssh = ["dep:zssh"]

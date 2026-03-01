@@ -6,6 +6,8 @@ The goal is to run various native binaries (ELF, JS, WASM..) inside the silo env
 
 The Chevron shell can manage silos and strates.
 
+Architecture concept summary: Bedrock is the microkernel, Silos are isolated Ring 3 execution units, Strates are functional layers hosted inside Silos.
+
 ## Architecture
 
 - Kernel (Bedrock) in Ring 0 : minimal, `#![no_std]`.
@@ -41,7 +43,6 @@ This project is in active development and not production-ready.
     - ELF loader and Ring 3 execution
     - POSIX interval timers + signal infrastructure
     - ACPI support
-
 
 #### Userspace components
 
@@ -127,6 +128,10 @@ cargo make
 - `workspace/bootloader/` : limine-based bootloader
 - `doc/` : specifications and design docs
 - `tools/` : build and helper scripts
+
+### Related specifications
+
+todo...
 
 ## License
 

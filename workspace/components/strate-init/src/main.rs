@@ -657,6 +657,16 @@ sid = 42
 name = "telnetd"
 binary = "/initfs/bin/telnetd"
 type = "elf"
+
+[[silos]]
+name = "ssh"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "sshd"
+binary = "/initfs/bin/sshd"
+type = "elf"
 "#;
 
 #[unsafe(no_mangle)]

@@ -64,6 +64,12 @@ pub extern "C" fn shell_main() -> ! {
     let mut history_idx: isize = -1;
     let mut current_input_saved = String::new();
 
+    // Mouse state
+    let mut prev_left = false;
+    let mut selecting = false;
+    let mut mouse_x: i32 = 0;
+    let mut mouse_y: i32 = 0;
+
     // Display welcome message using Unicode box-drawing characters
     shell_println!("");
     shell_println!("┌──────────────────────────────────────────────────────────────┐");
@@ -274,21 +280,56 @@ pub extern "C" fn shell_main() -> ! {
             last_blink_tick = ticks / 50;
             cursor_visible = true;
         } else {
-            // Poll mouse events while waiting for keyboard input.
             if crate::arch::x86_64::mouse::MOUSE_READY.load(core::sync::atomic::Ordering::Relaxed) {
+                let mut scroll_delta: i32 = 0;
+                let mut left_pressed = false;
+                let mut left_released = false;
+                let mut left_held = false;
+                let mut had_events = false;
+
                 while let Some(ev) = crate::arch::x86_64::mouse::read_event() {
-                    // Scroll wheel: rotate up/down 3 lines at a time.
-                    if ev.dz != 0 && crate::arch::x86_64::vga::is_available() {
-                        if ev.dz > 0 {
-                            crate::arch::x86_64::vga::scroll_view_up(3);
-                        } else {
-                            crate::arch::x86_64::vga::scroll_view_down(3);
+                    had_events = true;
+                    scroll_delta += ev.dz as i32;
+                    if ev.left && !prev_left { left_pressed = true; }
+                    if !ev.left && prev_left { left_released = true; }
+                    if ev.left && prev_left { left_held = true; }
+                    prev_left = ev.left;
+                }
+
+                if had_events || left_held {
+                    let (new_mx, new_my) = crate::arch::x86_64::mouse::mouse_pos();
+                    let moved = new_mx != mouse_x || new_my != mouse_y;
+                    mouse_x = new_mx;
+                    mouse_y = new_my;
+
+                    if crate::arch::x86_64::vga::is_available() {
+                        // Inverted wheel: wheel up (dz>0) → scroll down (history forward)
+                        if scroll_delta > 0 {
+                            crate::arch::x86_64::vga::scroll_view_down((scroll_delta as usize) * 3);
+                        } else if scroll_delta < 0 {
+                            crate::arch::x86_64::vga::scroll_view_up((-scroll_delta as usize) * 3);
                         }
-                    }
-                    // Left click on scrollbar: jump view to clicked position.
-                    if ev.left && crate::arch::x86_64::vga::is_available() {
-                        let (mx, my) = crate::arch::x86_64::mouse::mouse_pos();
-                        crate::arch::x86_64::vga::scrollbar_click(mx as usize, my as usize);
+
+                        if left_pressed {
+                            let (mx, my) = (new_mx as usize, new_my as usize);
+                            if crate::arch::x86_64::vga::scrollbar_hit_test(mx, my) {
+                                crate::arch::x86_64::vga::scrollbar_click(mx, my);
+                                crate::arch::x86_64::vga::clear_selection();
+                                selecting = false;
+                            } else {
+                                crate::arch::x86_64::vga::start_selection(mx, my);
+                                selecting = true;
+                            }
+                        } else if left_held && selecting && moved {
+                            crate::arch::x86_64::vga::update_selection(new_mx as usize, new_my as usize);
+                        } else if left_released && selecting {
+                            crate::arch::x86_64::vga::end_selection();
+                            selecting = false;
+                        }
+
+                        if moved {
+                            crate::arch::x86_64::vga::update_mouse_cursor(new_mx, new_my);
+                        }
                     }
                 }
             }

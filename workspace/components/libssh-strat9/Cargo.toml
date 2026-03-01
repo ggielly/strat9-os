@@ -1,0 +1,13 @@
+[package]
+name = "libssh-strat9"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[lib]
+name = "libssh_strat9"
+path = "src/lib.rs"
+
+[dependencies]
+ssh-core = { path = "../ssh-core" }

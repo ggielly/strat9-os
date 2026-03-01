@@ -656,6 +656,35 @@ const SCROLLBAR_W: usize = 12;
 /// Maximum number of completed lines kept in the scrollback history.
 const MAX_SCROLLBACK: usize = 500;
 
+// ── Mouse cursor (X arrow, 12×16) ─────────────────────────────────────────
+const CURSOR_W: usize = 12;
+const CURSOR_H: usize = 16;
+// 0=transparent, 1=black outline, 2=white fill
+#[rustfmt::skip]
+const CURSOR_PIXELS: [u8; CURSOR_W * CURSOR_H] = [
+    1,0,0,0,0,0,0,0,0,0,0,0,
+    1,1,0,0,0,0,0,0,0,0,0,0,
+    1,2,1,0,0,0,0,0,0,0,0,0,
+    1,2,2,1,0,0,0,0,0,0,0,0,
+    1,2,2,2,1,0,0,0,0,0,0,0,
+    1,2,2,2,2,1,0,0,0,0,0,0,
+    1,2,2,2,2,2,1,0,0,0,0,0,
+    1,2,2,2,2,2,2,1,0,0,0,0,
+    1,2,2,2,2,2,2,2,1,0,0,0,
+    1,2,2,2,2,2,1,1,0,0,0,0,
+    1,2,2,2,1,0,0,0,0,0,0,0,
+    1,2,1,1,2,2,1,0,0,0,0,0,
+    1,1,0,0,1,2,2,1,0,0,0,0,
+    0,0,0,0,0,1,2,1,0,0,0,0,
+    0,0,0,0,0,0,1,1,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,
+];
+
+// ── Selection clipboard ────────────────────────────────────────────────────
+const CLIPBOARD_CAP: usize = 8192;
+static CLIPBOARD: spin::Mutex<([u8; CLIPBOARD_CAP], usize)> =
+    spin::Mutex::new(([0u8; CLIPBOARD_CAP], 0));
+
 /// A single character cell stored in the scrollback buffer.
 #[derive(Clone, Copy)]
 struct SbCell {
@@ -697,6 +726,19 @@ pub struct VgaWriter {
     sb_cur_row: Vec<SbCell>,
     /// Lines scrolled back from the bottom (0 = live view).
     scroll_offset: usize,
+
+    // ── Mouse cursor ──────────────────────────────────────────────────────────
+    mc_x: i32,
+    mc_y: i32,
+    mc_visible: bool,
+    mc_save: [u32; CURSOR_W * CURSOR_H],
+
+    // ── Text selection ────────────────────────────────────────────────────────
+    sel_active: bool,
+    sel_start_row: usize,
+    sel_start_col: usize,
+    sel_end_row: usize,
+    sel_end_col: usize,
 }
 
 unsafe impl Send for VgaWriter {}
@@ -748,6 +790,15 @@ impl VgaWriter {
             sb_rows: VecDeque::new(),
             sb_cur_row: Vec::new(),
             scroll_offset: 0,
+            mc_x: 0,
+            mc_y: 0,
+            mc_visible: false,
+            mc_save: [0u32; CURSOR_W * CURSOR_H],
+            sel_active: false,
+            sel_start_row: 0,
+            sel_start_col: 0,
+            sel_end_row: 0,
+            sel_end_col: 0,
         }
     }
 
@@ -801,6 +852,8 @@ impl VgaWriter {
         self.sb_rows = VecDeque::new();
         self.sb_cur_row = Vec::new();
         self.scroll_offset = 0;
+        self.mc_visible = false;
+        self.sel_active = false;
         true
     }
 
@@ -1031,7 +1084,6 @@ impl VgaWriter {
         let Some(buf) = self.back_buffer.as_ref() else {
             return;
         };
-        let buf_ptr = buf.as_ptr();
         let (sx, sy, sw, sh) = if self.track_dirty {
             let Some(dirty) = self.dirty_rect else {
                 return;
@@ -1040,16 +1092,219 @@ impl VgaWriter {
         } else {
             (0, 0, self.fb_width, self.fb_height)
         };
+        if sw == 0 || sh == 0 {
+            return;
+        }
 
-        for y in sy..(sy + sh) {
-            for x in sx..(sx + sw) {
-                let idx = y * self.fb_width + x;
-                let packed = unsafe { *buf_ptr.add(idx) };
-                self.write_hw_pixel_packed(x, y, packed);
+        let buf_ptr = buf.as_ptr();
+        let bpp = self.fmt.bpp;
+        let fb_addr = self.fb_addr;
+        let pitch = self.pitch;
+        let fb_width = self.fb_width;
+
+        if bpp == 32 {
+            let row_bytes = sw * 4;
+            for y in sy..(sy + sh) {
+                // SAFETY: back buffer has fb_width * fb_height elements; y < fb_height, sx + sw <= fb_width.
+                let src = unsafe { buf_ptr.add(y * fb_width + sx) as *const u8 };
+                let dst_off = y * pitch + sx * 4;
+                // SAFETY: fb_addr points to the mapped framebuffer; dst_off is within bounds for same reason.
+                unsafe { core::ptr::copy_nonoverlapping(src, fb_addr.add(dst_off), row_bytes); }
+            }
+        } else {
+            for y in sy..(sy + sh) {
+                for x in sx..(sx + sw) {
+                    let packed = unsafe { *buf_ptr.add(y * fb_width + x) };
+                    self.write_hw_pixel_packed(x, y, packed);
+                }
             }
         }
+
         PRESENTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         self.clear_dirty();
+
+        if crate::hardware::virtio::gpu::is_available() {
+            if let Some(gpu) = crate::hardware::virtio::gpu::get_gpu() {
+                gpu.flush_now();
+            }
+        }
+
+        if self.mc_visible {
+            self.mc_save_hw();
+            self.mc_draw_hw();
+        }
+    }
+
+    // ── Mouse cursor ──────────────────────────────────────────────────────────
+
+    fn mc_save_hw(&mut self) {
+        let x = self.mc_x;
+        let y = self.mc_y;
+        let fw = self.fb_width;
+        let fh = self.fb_height;
+        for cy in 0..CURSOR_H {
+            for cx in 0..CURSOR_W {
+                let px = x + cx as i32;
+                let py = y + cy as i32;
+                if px < 0 || py < 0 || px as usize >= fw || py as usize >= fh {
+                    self.mc_save[cy * CURSOR_W + cx] = 0;
+                    continue;
+                }
+                self.mc_save[cy * CURSOR_W + cx] =
+                    self.read_hw_pixel_packed(px as usize, py as usize);
+            }
+        }
+    }
+
+    fn mc_draw_hw(&mut self) {
+        let x = self.mc_x;
+        let y = self.mc_y;
+        let black = self.pack_color(RgbColor::BLACK);
+        let white = self.pack_color(RgbColor::WHITE);
+        for cy in 0..CURSOR_H {
+            for cx in 0..CURSOR_W {
+                let p = CURSOR_PIXELS[cy * CURSOR_W + cx];
+                if p == 0 { continue; }
+                let px = x + cx as i32;
+                let py = y + cy as i32;
+                if px < 0 || py < 0 || px as usize >= self.fb_width || py as usize >= self.fb_height {
+                    continue;
+                }
+                let color = if p == 1 { black } else { white };
+                self.write_hw_pixel_packed(px as usize, py as usize, color);
+            }
+        }
+    }
+
+    fn mc_erase_hw(&mut self) {
+        let x = self.mc_x;
+        let y = self.mc_y;
+        for cy in 0..CURSOR_H {
+            for cx in 0..CURSOR_W {
+                if CURSOR_PIXELS[cy * CURSOR_W + cx] == 0 { continue; }
+                let px = x + cx as i32;
+                let py = y + cy as i32;
+                if px < 0 || py < 0 || px as usize >= self.fb_width || py as usize >= self.fb_height {
+                    continue;
+                }
+                self.write_hw_pixel_packed(px as usize, py as usize, self.mc_save[cy * CURSOR_W + cx]);
+            }
+        }
+    }
+
+    pub fn update_mouse_cursor(&mut self, x: i32, y: i32) {
+        if !self.enabled { return; }
+        if self.mc_visible && self.mc_x == x && self.mc_y == y { return; }
+        if self.mc_visible {
+            self.mc_erase_hw();
+        }
+        self.mc_x = x;
+        self.mc_y = y;
+        self.mc_save_hw();
+        self.mc_draw_hw();
+        self.mc_visible = true;
+    }
+
+    pub fn hide_mouse_cursor(&mut self) {
+        if self.mc_visible {
+            self.mc_erase_hw();
+            self.mc_visible = false;
+        }
+    }
+
+    // ── Text selection ────────────────────────────────────────────────────────
+
+    fn sel_normalized(&self) -> (usize, usize, usize, usize) {
+        let (sr, sc, er, ec) = (self.sel_start_row, self.sel_start_col, self.sel_end_row, self.sel_end_col);
+        if sr < er || (sr == er && sc <= ec) { (sr, sc, er, ec) } else { (er, ec, sr, sc) }
+    }
+
+    pub fn pixel_to_sb_pos(&self, px: usize, py: usize) -> Option<(usize, usize)> {
+        if !self.enabled { return None; }
+        let gw = self.font_info.glyph_w;
+        let gh = self.font_info.glyph_h;
+        if gw == 0 || gh == 0 { return None; }
+        let text_h = self.text_area_height();
+        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
+        if px >= text_w || py >= text_h { return None; }
+        let vis_row = py / gh;
+        let vis_col = px / gw;
+        if vis_col >= self.cols {
+            return None;
+        }
+        let total_complete = self.sb_rows.len();
+        let has_partial = !self.sb_cur_row.is_empty();
+        let total_virtual = total_complete + if has_partial { 1 } else { 0 };
+        if total_virtual == 0 {
+            return None;
+        }
+        let view_end = total_virtual.saturating_sub(self.scroll_offset);
+        let view_start = view_end.saturating_sub(self.rows);
+        let display_len = view_end.saturating_sub(view_start);
+        if vis_row >= display_len {
+            return None;
+        }
+        Some((view_start + vis_row, vis_col))
+    }
+
+    pub fn start_selection(&mut self, px: usize, py: usize) {
+        if let Some((row, col)) = self.pixel_to_sb_pos(px, py) {
+            self.sel_start_row = row;
+            self.sel_start_col = col;
+            self.sel_end_row = row;
+            self.sel_end_col = col;
+            self.sel_active = true;
+            self.redraw_from_scrollback();
+        }
+    }
+
+    pub fn update_selection(&mut self, px: usize, py: usize) {
+        if !self.sel_active { return; }
+        if let Some((row, col)) = self.pixel_to_sb_pos(px, py) {
+            if row == self.sel_end_row && col == self.sel_end_col { return; }
+            self.sel_end_row = row;
+            self.sel_end_col = col;
+            self.redraw_from_scrollback();
+        }
+    }
+
+    pub fn end_selection(&mut self) {
+        if !self.sel_active { return; }
+        let (start_row, start_col, end_row, end_col) = self.sel_normalized();
+        let mut bytes: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        for row in start_row..=end_row {
+            let len = if row < self.sb_rows.len() {
+                self.sb_rows[row].len()
+            } else if row == self.sb_rows.len() {
+                self.sb_cur_row.len()
+            } else {
+                break;
+            };
+            let c0 = if row == start_row { start_col.min(len) } else { 0 };
+            let c1 = if row == end_row { end_col.min(len) } else { len };
+            for col in c0..c1 {
+                let ch = if row < self.sb_rows.len() {
+                    self.sb_rows[row][col].ch
+                } else {
+                    self.sb_cur_row[col].ch
+                };
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
+            if row < end_row { bytes.push(b'\n'); }
+        }
+        if let Some(mut clip) = CLIPBOARD.try_lock() {
+            let n = bytes.len().min(CLIPBOARD_CAP);
+            clip.0[..n].copy_from_slice(&bytes[..n]);
+            clip.1 = n;
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        if self.sel_active {
+            self.sel_active = false;
+            self.redraw_from_scrollback();
+        }
     }
 
     pub fn clear_with(&mut self, color: RgbColor) {
@@ -1072,6 +1327,7 @@ impl VgaWriter {
 
     #[inline]
     fn pixel_offset(&self, x: usize, y: usize) -> Option<usize> {
+        if x >= self.fb_width || y >= self.fb_height { return None; }
         let bytes_pp = self.fmt.bpp as usize / 8;
         let row = y.checked_mul(self.pitch)?;
         let col = x.checked_mul(bytes_pp)?;
@@ -1475,15 +1731,38 @@ impl VgaWriter {
         {
             return;
         }
-        let glyph = &self.font[start..start + self.font_info.bytes_per_glyph];
+        // Extract raw pointer so self can be mutably borrowed below.
+        // SAFETY: self.font is &'static [u8]; pointer is valid for the program lifetime.
+        let glyph_ptr = self.font[start..start + self.font_info.bytes_per_glyph].as_ptr();
         let row_bytes = self.font_info.glyph_w.div_ceil(8);
+        let gw = self.font_info.glyph_w;
+        let gh = self.font_info.glyph_h;
 
-        for gy in 0..self.font_info.glyph_h {
-            for gx in 0..self.font_info.glyph_w {
-                let byte = glyph[gy * row_bytes + gx / 8];
-                let mask = 0x80 >> (gx % 8);
-                let color = if (byte & mask) != 0 { fg } else { bg };
-                self.put_pixel_raw(pixel_x + gx, pixel_y + gy, color);
+        if self.draw_to_back_buffer()
+            && pixel_x + gw <= self.fb_width
+            && pixel_y + gh <= self.fb_height
+        {
+            let fb_width = self.fb_width;
+            if let Some(buf) = self.back_buffer.as_mut() {
+                for gy in 0..gh {
+                    let row_start = (pixel_y + gy) * fb_width + pixel_x;
+                    for gx in 0..gw {
+                        // SAFETY: glyph_ptr valid (static font data), index within bytes_per_glyph.
+                        let byte = unsafe { *glyph_ptr.add(gy * row_bytes + gx / 8) };
+                        let mask = 0x80u8 >> (gx % 8);
+                        buf[row_start + gx] = if (byte & mask) != 0 { fg } else { bg };
+                    }
+                }
+            }
+            self.mark_dirty_rect(pixel_x, pixel_y, gw, gh);
+        } else {
+            for gy in 0..gh {
+                for gx in 0..gw {
+                    let byte = unsafe { *glyph_ptr.add(gy * row_bytes + gx / 8) };
+                    let mask = 0x80u8 >> (gx % 8);
+                    let color = if (byte & mask) != 0 { fg } else { bg };
+                    self.put_pixel_raw(pixel_x + gx, pixel_y + gy, color);
+                }
             }
         }
     }
@@ -1877,51 +2156,115 @@ impl VgaWriter {
         let view_end = total_virtual.saturating_sub(self.scroll_offset);
         let view_start = view_end.saturating_sub(self.rows);
 
-        // Collect rows to render (resolves borrow conflicts with draw calls).
-        let mut display: alloc::vec::Vec<alloc::vec::Vec<SbCell>> =
-            alloc::vec::Vec::with_capacity(self.rows);
-        for virt in view_start..view_end {
-            if virt < total_complete {
-                display.push(self.sb_rows[virt].clone());
-            } else if has_partial && virt == total_complete {
-                display.push(self.sb_cur_row.clone());
-            } else {
-                display.push(alloc::vec::Vec::new());
+        if self.back_buffer.is_none() {
+            let total = self.fb_width.saturating_mul(self.fb_height);
+            if total > 0 {
+                self.back_buffer = Some(alloc::vec![0u32; total]);
             }
         }
 
-        // Clear text area (leave scrollbar column for draw_scrollbar_inner).
+        let prev_draw_to_back = self.draw_to_back;
+        let prev_track_dirty = self.track_dirty;
+        let using_back = self.back_buffer.is_some();
+        if using_back {
+            self.draw_to_back = true;
+            self.track_dirty = true;
+            self.clear_dirty();
+        }
+
         let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
         let bg = self.bg;
-        for y in 0..text_h {
-            for x in 0..text_w {
-                self.put_pixel_raw(x, y, bg);
+        if self.draw_to_back_buffer() {
+            let fb_width = self.fb_width;
+            if let Some(buf) = self.back_buffer.as_mut() {
+                for y in 0..text_h {
+                    let row = y * fb_width;
+                    buf[row..row + text_w].fill(bg);
+                }
+            }
+            self.mark_dirty_rect(0, 0, text_w, text_h);
+        } else {
+            for y in 0..text_h {
+                for x in 0..text_w {
+                    self.put_pixel_raw(x, y, bg);
+                }
             }
         }
 
-        // Render the collected rows.
         let glyph_h = self.font_info.glyph_h;
         let glyph_w = self.font_info.glyph_w;
         let max_col = self.cols;
-        for (vis_row, cells) in display.iter().enumerate() {
+        let (sel_active, sel_sr, sel_sc, sel_er, sel_ec) = if self.sel_active {
+            let (sr, sc, er, ec) = self.sel_normalized();
+            (true, sr, sc, er, ec)
+        } else {
+            (false, 0, 0, 0, 0)
+        };
+        let sel_bg = self.pack_color(RgbColor::new(0x26, 0x5F, 0xCC));
+        let sel_fg = self.pack_color(RgbColor::WHITE);
+        let display_len = view_end - view_start;
+        for vis_row in 0..display_len {
+            let virt_row = view_start + vis_row;
+            // Get a raw pointer to the row slice to avoid borrow conflicts with draw calls.
+            // SAFETY: sb_rows and sb_cur_row are not modified during this loop; pointer
+            // remains valid for the duration of the iteration.
+            let (row_ptr, row_len) = if virt_row < total_complete {
+                let row = &self.sb_rows[virt_row];
+                (row.as_ptr(), row.len())
+            } else if has_partial && virt_row == total_complete {
+                (self.sb_cur_row.as_ptr(), self.sb_cur_row.len())
+            } else {
+                (core::ptr::null(), 0)
+            };
             let py = vis_row * glyph_h;
-            for (col, cell) in cells.iter().enumerate() {
-                if col >= max_col {
-                    break;
-                }
+            let cell_count = row_len.min(max_col);
+            for col in 0..cell_count {
                 let px = col * glyph_w;
-                self.draw_glyph_at_pixel(px, py, cell.ch, cell.fg, cell.bg);
+                // SAFETY: col < cell_count <= row_len, row_ptr is valid for row_len elements.
+                let cell = unsafe { &*row_ptr.add(col) };
+                let (draw_fg, draw_bg) = if sel_active {
+                    let in_sel = if virt_row < sel_sr || virt_row > sel_er {
+                        false
+                    } else if sel_sr == sel_er {
+                        col >= sel_sc && col < sel_ec
+                    } else if virt_row == sel_sr {
+                        col >= sel_sc
+                    } else if virt_row == sel_er {
+                        col < sel_ec
+                    } else {
+                        true
+                    };
+                    if in_sel { (sel_fg, sel_bg) } else { (cell.fg, cell.bg) }
+                } else {
+                    (cell.fg, cell.bg)
+                };
+                self.draw_glyph_at_pixel(px, py, cell.ch, draw_fg, draw_bg);
             }
         }
 
-        // If returning to live view, sync the cursor position.
         if self.scroll_offset == 0 {
-            let n = display.len();
-            self.row = if n > 0 { n - 1 } else { 0 };
-            self.col = display.last().map(|r| r.len()).unwrap_or(0).min(self.cols);
+            self.row = if display_len > 0 { display_len - 1 } else { 0 };
+            let last_virt = view_start + display_len.saturating_sub(1);
+            let last_len = if last_virt < total_complete {
+                self.sb_rows[last_virt].len()
+            } else if has_partial && last_virt == total_complete {
+                self.sb_cur_row.len()
+            } else {
+                0
+            };
+            self.col = last_len.min(self.cols);
         }
 
         self.draw_scrollbar_inner();
+
+        if using_back {
+            self.present();
+            self.draw_to_back = prev_draw_to_back;
+            self.track_dirty = prev_track_dirty;
+            if !prev_track_dirty {
+                self.clear_dirty();
+            }
+        }
     }
 
     /// Scroll the view up (backward in history) by `lines` lines.
@@ -1964,7 +2307,7 @@ impl VgaWriter {
             return;
         }
         let text_h = self.text_area_height();
-        if text_h == 0 {
+        if text_h <= 1 {
             return;
         }
         let total = self.sb_rows.len() + 1;
@@ -3250,7 +3593,9 @@ pub fn scrollbar_click(px_x: usize, px_y: usize) {
     if !is_available() {
         return;
     }
-    VGA_WRITER.lock().scrollbar_click(px_x, px_y);
+    if let Some(mut w) = VGA_WRITER.try_lock() {
+        w.scrollbar_click(px_x, px_y);
+    }
 }
 
 /// Returns `true` if `(px_x, px_y)` falls within the scrollbar strip.
@@ -3262,5 +3607,57 @@ pub fn scrollbar_hit_test(px_x: usize, px_y: usize) -> bool {
         w.scrollbar_hit_test(px_x, px_y)
     } else {
         false
+    }
+}
+
+pub fn update_mouse_cursor(x: i32, y: i32) {
+    if !is_available() { return; }
+    if let Some(mut w) = VGA_WRITER.try_lock() {
+        w.update_mouse_cursor(x, y);
+    }
+}
+
+pub fn hide_mouse_cursor() {
+    if !is_available() { return; }
+    if let Some(mut w) = VGA_WRITER.try_lock() {
+        w.hide_mouse_cursor();
+    }
+}
+
+pub fn start_selection(px: usize, py: usize) {
+    if !is_available() { return; }
+    if let Some(mut w) = VGA_WRITER.try_lock() {
+        w.start_selection(px, py);
+    }
+}
+
+pub fn update_selection(px: usize, py: usize) {
+    if !is_available() { return; }
+    if let Some(mut w) = VGA_WRITER.try_lock() {
+        w.update_selection(px, py);
+    }
+}
+
+pub fn end_selection() {
+    if !is_available() { return; }
+    if let Some(mut w) = VGA_WRITER.try_lock() {
+        w.end_selection();
+    }
+}
+
+pub fn clear_selection() {
+    if !is_available() { return; }
+    if let Some(mut w) = VGA_WRITER.try_lock() {
+        w.clear_selection();
+    }
+}
+
+pub fn get_clipboard_text(buf: &mut [u8]) -> usize {
+    if let Some(clip) = CLIPBOARD.try_lock() {
+        let n = clip.1.min(buf.len());
+        buf[..n].copy_from_slice(&clip.0[..n]);
+        n
+    } else {
+        0
     }
 }
