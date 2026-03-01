@@ -8,7 +8,7 @@
 //!  - [`sys_mprotect`] – change page permissions (SYS_MPROTECT = 104)
 
 use crate::{
-    memory::address_space::{VmaFlags, VmaPageSize, VmaType},
+    memory::address_space::{VmaFlags, VmaType},
     process::current_task_clone,
     syscall::error::SyscallError,
 };

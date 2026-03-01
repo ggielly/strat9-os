@@ -10,7 +10,6 @@ use alloc::sync::Arc;
 use x86_64::VirtAddr;
 
 use crate::{
-    capability::CapabilityTable,
     memory::address_space::{AddressSpace, VmaFlags, VmaType},
     process::{
         task::{CpuContext, KernelStack, SyncUnsafeCell, Task, TaskPriority},

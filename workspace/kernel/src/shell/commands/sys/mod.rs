@@ -4,7 +4,6 @@ pub use scheduler::cmd_scheduler;
 
 use crate::{
     arch::x86_64::vga,
-    ipc::PortId,
     process::elf::load_and_run_elf,
     shell::{
         commands::top::Strat9RatatuiBackend,

@@ -192,7 +192,7 @@ impl Pipe {
 // Pipe as a VFS Scheme
 // ============================================================================
 
-use super::scheme::{DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme};
+use super::scheme::{DirEntry, FileStat, OpenFlags, OpenResult, Scheme};
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 

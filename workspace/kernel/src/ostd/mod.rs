@@ -10,7 +10,6 @@
 //! - **Hardware Traits**: platform-independent interfaces
 //! - **Confined Unsafe**: all `unsafe` blocks are justified with SAFETY comments
 
-#![no_std]
 #![allow(unsafe_code)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -57,7 +56,6 @@ pub mod early_print {
         fn write_str(&mut self, s: &str) -> Result {
             // SAFETY: serial port is initialized early in boot and is a shared resource.
             // We accept potential race conditions during early boot for debug output.
-            use core::fmt::Write;
             crate::arch::x86_64::serial::_print(format_args!("{}", s));
             Ok(())
         }

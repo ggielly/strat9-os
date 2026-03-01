@@ -2,10 +2,10 @@
 use crate::{
     shell::ShellError,
     shell_println,
-    vfs::{self, scheme::DT_DIR, DirEntry, OpenFlags},
+    vfs::{self, scheme::DT_DIR, OpenFlags},
 };
 use alloc::{
-    string::{String, ToString},
+    string::String,
     vec::Vec,
 };
 use spin::Lazy;

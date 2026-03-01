@@ -6,7 +6,7 @@
 //! Reference: PCI Local Bus Specification 3.0
 
 use super::io::{inl, outl};
-use crate::{serial_println, sync::SpinLock};
+use crate::sync::SpinLock;
 use alloc::vec::Vec;
 use core::fmt;
 

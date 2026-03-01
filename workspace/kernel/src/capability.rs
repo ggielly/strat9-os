@@ -4,7 +4,7 @@
 //! All kernel resources are accessed through unforgeable tokens (capabilities).
 
 use crate::sync::SpinLock;
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Unique identifier for a capability

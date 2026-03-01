@@ -7,7 +7,6 @@
 //!
 //! Inspired by Theseus Task and Asterinas thread abstractions.
 
-#![no_std]
 #![allow(unsafe_code)]
 
 extern crate alloc;

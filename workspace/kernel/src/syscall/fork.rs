@@ -11,7 +11,7 @@ use crate::{
     },
     syscall::{error::SyscallError, SyscallFrame},
 };
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{boxed::Box, sync::Arc};
 use core::{
     mem::offset_of,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},

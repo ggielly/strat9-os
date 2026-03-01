@@ -37,7 +37,7 @@ pub fn init_fpu() {
         let mut cr0: u64;
         asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
         cr0 &= !(1 << 2);
-        cr0 |= (1 << 1);
+        cr0 |= 1 << 1;
         asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack));
 
         // Initialize FPU state

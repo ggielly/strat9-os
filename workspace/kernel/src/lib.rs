@@ -309,7 +309,6 @@ fn log_boot_module_magics(_stage: &str) {}
 
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
-    use core::fmt::Write;
 
     // =============================================
     // Phase 1: serial output (earliest debug output)
@@ -773,7 +772,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
 
         if let Some(ahci) = hardware::storage::ahci::get_device() {
-            use hardware::storage::ahci::BlockDevice;
             serial_println!(
                 "[INFO] AHCI SATA device found. Capacity: {} sectors ({} MiB)",
                 ahci.sector_count(),
@@ -801,7 +799,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
         // Report all registered network interfaces (E1000 + VirtIO)
         {
-            use hardware::nic::NetworkDevice;
             let ifaces = hardware::nic::list_interfaces();
             if ifaces.is_empty() {
                 serial_println!("[WARN] No network devices found");

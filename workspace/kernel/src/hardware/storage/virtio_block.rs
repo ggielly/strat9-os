@@ -11,7 +11,7 @@ use crate::{
         common::{VirtioDevice, Virtqueue},
         status,
     },
-    memory::{get_allocator, FrameAllocator, PhysFrame},
+    memory::{get_allocator, FrameAllocator},
     sync::SpinLock,
 };
 use alloc::{boxed::Box, vec::Vec};

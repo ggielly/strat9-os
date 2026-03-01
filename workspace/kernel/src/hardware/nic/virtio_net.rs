@@ -18,7 +18,7 @@ use crate::{
     memory::{get_allocator, FrameAllocator, PhysFrame},
     sync::SpinLock,
 };
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use alloc::{collections::VecDeque, sync::Arc};
 use core::{mem, ptr};
 use net_core::{NetError, NetworkDevice};
 use spin::RwLock as SpinRwLock;
@@ -143,7 +143,7 @@ impl VirtioNetDevice {
         // Driver ready
         device.add_status(status::DRIVER_OK as u8);
 
-        let mut net_device = Self {
+        let net_device = Self {
             device,
             rx_queue: SpinLock::new(rx_queue),
             tx_queue: SpinLock::new(tx_queue),

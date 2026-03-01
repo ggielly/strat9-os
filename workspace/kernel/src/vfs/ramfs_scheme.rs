@@ -20,7 +20,7 @@
 
 use alloc::{
     collections::BTreeMap,
-    string::{String, ToString},
+    string::String,
     vec::Vec,
 };
 use core::sync::atomic::{AtomicU64, Ordering};

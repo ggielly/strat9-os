@@ -94,7 +94,7 @@ impl RtcDateTime {
             + (153 * (month - 3) + 2) / 5 + day - 1 - 719468;
         
         // Convert to seconds
-        ((days * 86400 + hour * 3600 + minute * 60 + second) as u64)
+        (days * 86400 + hour * 3600 + minute * 60 + second) as u64
     }
     
     /// Format as ISO 8601 string (simplified)

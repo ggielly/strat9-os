@@ -21,6 +21,7 @@ echo "  Image: $disk_image"
 echo "  Sortie serie: build/serial.txt"
 echo ""
 echo "  Appuyez sur Ctrl+C pour quitter QEMU"
+echo "  Souris: mode GTK sans grab-on-hover"
 echo ""
 echo "============================================"
 echo ""
@@ -30,7 +31,7 @@ echo ""
     -machine q35 \
     -cpu qemu64 \
     -m 256M \
-    -display gtk,zoom-to-fit=on \
+    -display gtk,grab-on-hover=off,zoom-to-fit=on \
     -serial file:build/serial.txt \
     -no-reboot \
     -no-shutdown \

@@ -13,7 +13,7 @@
 
 use crate::{
     arch::x86_64::pci::{self, Bar, ProbeCriteria},
-    memory::{allocate_dma_frame, phys_to_virt},
+    memory::{allocate_dma_frame, paging, phys_to_virt},
 };
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -209,6 +209,7 @@ impl XhciController {
             Some(Bar::Memory64 { addr, .. }) => addr,
             _ => return Err("Invalid BAR"),
         };
+        paging::ensure_identity_map_range(bar, XHCI_MMIO_SIZE as u64);
 
         let mmio_base = phys_to_virt(bar) as usize;
         let cap_regs = mmio_base as *const CapRegisters;

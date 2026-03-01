@@ -15,7 +15,7 @@ use x86_64::{
 };
 
 use crate::{
-    capability::{Capability, CapabilityTable},
+    capability::Capability,
     memory::address_space::{AddressSpace, VmaFlags, VmaPageSize, VmaType},
     process::{
         task::{CpuContext, KernelStack, SyncUnsafeCell, Task},

@@ -7,7 +7,6 @@
 //!
 //! Inspired by Asterinas and Theseus boot info abstractions.
 
-#![no_std]
 #![deny(unsafe_code)]
 
 extern crate alloc;

@@ -6,7 +6,7 @@ use crate::{
     process::{
         current_pgid, current_task_clone, current_task_id, get_all_tasks, get_task_by_id,
         get_task_id_by_pid, get_task_ids_in_pgid,
-        signal::{SigActionData, SigStack, Signal, SignalSet},
+        signal::{SigActionData, SigStack, Signal},
         TaskId,
     },
 };

@@ -2,8 +2,8 @@
 //!
 //! Defines the Task structure and related types for the Strat9-OS scheduler.
 
-use crate::{capability::CapabilityTable, memory::AddressSpace, vfs::FileDescriptorTable};
-use alloc::{string::String, sync::Arc};
+use crate::memory::AddressSpace;
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use x86_64::{PhysAddr, VirtAddr};
 

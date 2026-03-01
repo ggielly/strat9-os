@@ -1,4 +1,4 @@
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sync::SpinLock;
@@ -6,7 +6,7 @@ use crate::syscall::error::SyscallError;
 
 use super::fd::FileDescriptorTable;
 use super::file::OpenFile;
-use super::scheme::{DirEntry, FileStat, FileFlags, OpenFlags, OpenResult, Scheme, DynScheme};
+use super::scheme::{DynScheme, FileFlags, FileStat, OpenFlags, OpenResult, Scheme};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static CONSOLE: SpinLock<Option<Arc<ConsoleScheme>>> = SpinLock::new(None);

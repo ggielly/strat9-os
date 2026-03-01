@@ -1,15 +1,19 @@
 #!/bin/bash
 set -e
 
-# Start QEMU in graphical mode by providing a VNC display (:1 -> TCP 5901)
+# Start QEMU in graphical mode (GTK).
+# Mouse is configured as absolute pointer to avoid grab/capture.
 # Usage: start-qemu-gui.sh [--foreground] [extra qemu args]
 
 foreground=false
+xhci=false
 EXTRA_ARGS=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --foreground|-f)
             foreground=true; shift ;;
+        --xhci|--usb)
+            xhci=true; shift ;;
         --)
             shift; while [ "$#" -gt 0 ]; do EXTRA_ARGS+=("$1"); shift; done ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
@@ -40,12 +44,20 @@ QEMU_CMD=(qemu-system-x86_64
     -machine q35
     -cpu qemu64
     -m 256M
-    -vnc :1
+    -display gtk,grab-on-hover=off,zoom-to-fit=on
     -no-reboot
     -no-shutdown
     -serial mon:stdio
     -D "$LOG"
 )
+
+if [ "$xhci" = true ]; then
+    QEMU_CMD+=(
+        -device qemu-xhci
+        -device usb-kbd
+        -device usb-tablet
+    )
+fi
 
 if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
     QEMU_CMD+=("${EXTRA_ARGS[@]}")
@@ -58,6 +70,6 @@ if [ "$foreground" = true ]; then
 else
     nohup bash -lc "\"${QEMU_CMD[@]}\"" >/dev/null 2>&1 &
     echo $! > "$PIDFILE"
-    echo "QEMU (GUI/VNC) started (detached) with PID $(cat $PIDFILE)"
-    echo "VNC: connect to container:5901; logs: $LOG"
+    echo "QEMU (GUI/GTK) started (detached) with PID $(cat $PIDFILE)"
+    echo "Logs: $LOG"
 fi

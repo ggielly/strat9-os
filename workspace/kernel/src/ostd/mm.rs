@@ -7,7 +7,6 @@
 //!
 //! Inspired by OSes Theseus MappedPages and Asterinas VM modules.
 
-#![no_std]
 #![allow(unsafe_code)]
 #![allow(unsafe_op_in_unsafe_fn)]
 

@@ -7,10 +7,8 @@
 //!
 //! Inspired by Asterinas OSTD CPU module.
 
-#![no_std]
 #![allow(unsafe_code)]
 
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// CPU identifier
 ///
