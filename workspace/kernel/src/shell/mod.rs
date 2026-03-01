@@ -3,6 +3,10 @@
 //! Provides a simple interactive command-line interface for kernel management.
 //! Prompt: >>>
 
+// TODO UTF8
+//- clavier/layout renvoie des codepoints Unicode (pas seulement u8), puis conversion UTF‑8 pour l’édition.
+//- plus tard seulement, gestion graphemes/combinaisons complexes.
+
 pub mod commands;
 pub mod output;
 pub mod parser;
@@ -31,22 +35,100 @@ use alloc::{
     string::{String, ToString},
 };
 
+#[inline]
+fn is_continuation_byte(b: u8) -> bool {
+    (b & 0b1100_0000) == 0b1000_0000
+}
+
+fn prev_char_boundary(input: &[u8], mut idx: usize) -> usize {
+    if idx == 0 {
+        return 0;
+    }
+    idx -= 1;
+    while idx > 0 && is_continuation_byte(input[idx]) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn next_char_boundary(input: &[u8], mut idx: usize) -> usize {
+    if idx >= input.len() {
+        return input.len();
+    }
+    idx += 1;
+    while idx < input.len() && is_continuation_byte(input[idx]) {
+        idx += 1;
+    }
+    idx
+}
+
+fn char_count(input: &[u8]) -> usize {
+    core::str::from_utf8(input)
+        .map(|s| s.chars().count())
+        .unwrap_or(input.len())
+}
+
+fn print_bytes(input: &[u8]) {
+    if let Ok(s) = core::str::from_utf8(input) {
+        for ch in s.chars() {
+            print_char(ch);
+        }
+    } else {
+        for &b in input {
+            print_char(if b.is_ascii() { b as char } else { '?' });
+        }
+    }
+}
+
 /// Redraw the current shell input line after the prompt
 fn redraw_line(input: &[u8], cursor_pos: usize) {
-    // Print current buffer from current position
-    for &b in input {
-        print_char(b as char);
-    }
+    print_bytes(input);
 
     // Print a trailing space to clear any leftover char from a longer previous line
     print_char(' ');
     print_char('\x08');
 
     // Move visual cursor back to its logical position
-    let back_moves = input.len() - cursor_pos;
+    let back_moves = if cursor_pos <= input.len() {
+        if let (Ok(full), Ok(prefix)) = (
+            core::str::from_utf8(input),
+            core::str::from_utf8(&input[..cursor_pos]),
+        ) {
+            full.chars().count().saturating_sub(prefix.chars().count())
+        } else {
+            input.len().saturating_sub(cursor_pos)
+        }
+    } else {
+        0
+    };
     for _ in 0..back_moves {
         print_char('\x08');
     }
+}
+
+fn insert_bytes_at_cursor(
+    input_buf: &mut [u8],
+    input_len: &mut usize,
+    cursor_pos: &mut usize,
+    bytes: &[u8],
+) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    if *input_len + bytes.len() > input_buf.len() {
+        return false;
+    }
+    let old_cursor = *cursor_pos;
+    if old_cursor < *input_len {
+        for i in (old_cursor..*input_len).rev() {
+            input_buf[i + bytes.len()] = input_buf[i];
+        }
+    }
+    input_buf[old_cursor..old_cursor + bytes.len()].copy_from_slice(bytes);
+    *input_len += bytes.len();
+    *cursor_pos += bytes.len();
+    redraw_line(&input_buf[old_cursor..*input_len], bytes.len());
+    true
 }
 
 /// Main shell loop
@@ -63,6 +145,8 @@ pub extern "C" fn shell_main() -> ! {
     let mut history = VecDeque::new();
     let mut history_idx: isize = -1;
     let mut current_input_saved = String::new();
+    let mut utf8_pending = [0u8; 4];
+    let mut utf8_pending_len = 0usize;
 
     // Mouse state
     let mut prev_left = false;
@@ -117,6 +201,7 @@ pub extern "C" fn shell_main() -> ! {
 
             match ch {
                 b'\r' | b'\n' => {
+                    utf8_pending_len = 0;
                     shell_println!();
 
                     if input_len > 0 {
@@ -156,43 +241,51 @@ pub extern "C" fn shell_main() -> ! {
                     print_prompt();
                 }
                 b'\x08' | b'\x7f' => {
+                    utf8_pending_len = 0;
                     if cursor_pos > 0 {
+                        let prev = prev_char_boundary(&input_buf[..input_len], cursor_pos);
+                        let removed = cursor_pos - prev;
                         print_char('\x08');
-                        for i in (cursor_pos - 1)..(input_len - 1) {
-                            input_buf[i] = input_buf[i + 1];
+                        for i in cursor_pos..input_len {
+                            input_buf[i - removed] = input_buf[i];
                         }
-                        input_len -= 1;
-                        cursor_pos -= 1;
+                        input_len -= removed;
+                        cursor_pos = prev;
                         redraw_line(&input_buf[cursor_pos..input_len], 0);
                     }
                 }
                 KEY_LEFT => {
+                    utf8_pending_len = 0;
                     if cursor_pos > 0 {
-                        cursor_pos -= 1;
+                        cursor_pos = prev_char_boundary(&input_buf[..input_len], cursor_pos);
                         print_char('\x08');
                     }
                 }
                 KEY_RIGHT => {
+                    utf8_pending_len = 0;
                     if cursor_pos < input_len {
-                        let ch = input_buf[cursor_pos] as char;
-                        print_char(ch);
-                        cursor_pos += 1;
+                        let next = next_char_boundary(&input_buf[..input_len], cursor_pos);
+                        print_bytes(&input_buf[cursor_pos..next]);
+                        cursor_pos = next;
                     }
                 }
                 KEY_HOME => {
+                    utf8_pending_len = 0;
                     while cursor_pos > 0 {
-                        cursor_pos -= 1;
+                        cursor_pos = prev_char_boundary(&input_buf[..input_len], cursor_pos);
                         print_char('\x08');
                     }
                 }
                 KEY_END => {
+                    utf8_pending_len = 0;
                     while cursor_pos < input_len {
-                        let ch = input_buf[cursor_pos] as char;
-                        print_char(ch);
-                        cursor_pos += 1;
+                        let next = next_char_boundary(&input_buf[..input_len], cursor_pos);
+                        print_bytes(&input_buf[cursor_pos..next]);
+                        cursor_pos = next;
                     }
                 }
                 KEY_UP => {
+                    utf8_pending_len = 0;
                     if !history.is_empty() && history_idx < (history.len() as isize - 1) {
                         if history_idx == -1 {
                             current_input_saved = core::str::from_utf8(&input_buf[..input_len])
@@ -201,10 +294,11 @@ pub extern "C" fn shell_main() -> ! {
                         }
 
                         while cursor_pos < input_len {
-                            print_char(input_buf[cursor_pos] as char);
-                            cursor_pos += 1;
+                            let next = next_char_boundary(&input_buf[..input_len], cursor_pos);
+                            print_bytes(&input_buf[cursor_pos..next]);
+                            cursor_pos = next;
                         }
-                        for _ in 0..input_len {
+                        for _ in 0..char_count(&input_buf[..input_len]) {
                             print_char('\x08');
                             print_char(' ');
                             print_char('\x08');
@@ -218,18 +312,18 @@ pub extern "C" fn shell_main() -> ! {
                         input_len = copy_len;
                         cursor_pos = input_len;
 
-                        for &b in &input_buf[..input_len] {
-                            print_char(b as char);
-                        }
+                        print_bytes(&input_buf[..input_len]);
                     }
                 }
                 KEY_DOWN => {
+                    utf8_pending_len = 0;
                     if history_idx >= 0 {
                         while cursor_pos < input_len {
-                            print_char(input_buf[cursor_pos] as char);
-                            cursor_pos += 1;
+                            let next = next_char_boundary(&input_buf[..input_len], cursor_pos);
+                            print_bytes(&input_buf[cursor_pos..next]);
+                            cursor_pos = next;
                         }
-                        for _ in 0..input_len {
+                        for _ in 0..char_count(&input_buf[..input_len]) {
                             print_char('\x08');
                             print_char(' ');
                             print_char('\x08');
@@ -250,26 +344,49 @@ pub extern "C" fn shell_main() -> ! {
                         }
                         cursor_pos = input_len;
 
-                        for &b in &input_buf[..input_len] {
-                            print_char(b as char);
-                        }
+                        print_bytes(&input_buf[..input_len]);
                     }
                 }
-                _ if ch >= 0x20 && ch < 0x7f => {
-                    if input_len < input_buf.len() {
-                        if cursor_pos < input_len {
-                            for i in (cursor_pos + 1..=input_len).rev() {
-                                input_buf[i] = input_buf[i - 1];
+                _ if ch >= 0x20 => {
+                    if ch < 0x80 {
+                        utf8_pending_len = 0;
+                        if insert_bytes_at_cursor(
+                            &mut input_buf,
+                            &mut input_len,
+                            &mut cursor_pos,
+                            core::slice::from_ref(&ch),
+                        ) {
+                            history_idx = -1;
+                        }
+                    } else {
+                        if utf8_pending_len >= utf8_pending.len() {
+                            utf8_pending_len = 0;
+                        }
+                        utf8_pending[utf8_pending_len] = ch;
+                        utf8_pending_len += 1;
+                        match core::str::from_utf8(&utf8_pending[..utf8_pending_len]) {
+                            Ok(s) => {
+                                if insert_bytes_at_cursor(
+                                    &mut input_buf,
+                                    &mut input_len,
+                                    &mut cursor_pos,
+                                    s.as_bytes(),
+                                ) {
+                                    history_idx = -1;
+                                }
+                                utf8_pending_len = 0;
+                            }
+                            Err(err) => {
+                                if err.error_len().is_some() {
+                                    utf8_pending_len = 0;
+                                }
                             }
                         }
-                        input_buf[cursor_pos] = ch;
-                        input_len += 1;
-                        redraw_line(&input_buf[cursor_pos..input_len], 1);
-                        cursor_pos += 1;
-                        history_idx = -1;
                     }
                 }
-                _ => {}
+                _ => {
+                    utf8_pending_len = 0;
+                }
             }
             // Reset blink state on input
             last_blink_tick = ticks / 50;
@@ -285,9 +402,15 @@ pub extern "C" fn shell_main() -> ! {
                 while let Some(ev) = crate::arch::x86_64::mouse::read_event() {
                     had_events = true;
                     scroll_delta += ev.dz as i32;
-                    if ev.left && !prev_left { left_pressed = true; }
-                    if !ev.left && prev_left { left_released = true; }
-                    if ev.left && prev_left { left_held = true; }
+                    if ev.left && !prev_left {
+                        left_pressed = true;
+                    }
+                    if !ev.left && prev_left {
+                        left_released = true;
+                    }
+                    if ev.left && prev_left {
+                        left_held = true;
+                    }
                     prev_left = ev.left;
                 }
 
@@ -316,7 +439,10 @@ pub extern "C" fn shell_main() -> ! {
                                 selecting = true;
                             }
                         } else if left_held && selecting && moved {
-                            crate::arch::x86_64::vga::update_selection(new_mx as usize, new_my as usize);
+                            crate::arch::x86_64::vga::update_selection(
+                                new_mx as usize,
+                                new_my as usize,
+                            );
                         } else if left_released && selecting {
                             crate::arch::x86_64::vga::end_selection();
                             selecting = false;

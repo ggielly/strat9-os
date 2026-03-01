@@ -41,7 +41,12 @@ pub fn print_prompt() {
 
 /// Print a character (no newline)
 pub fn print_char(ch: char) {
-    shell_print!("{}", ch);
+    if crate::arch::x86_64::vga::is_available() {
+        use core::fmt::Write;
+        let _ = write!(crate::arch::x86_64::vga::VGA_WRITER.lock(), "{}", ch);
+    } else {
+        crate::serial_print!("{}", ch);
+    }
 }
 
 /// Format bytes as human-readable size
