@@ -2,11 +2,11 @@
 //! Inspired by Theseus OS.
 
 use super::sdt::Sdt;
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::FromBytes;
 
 pub const DMAR_SIGNATURE: &[u8; 4] = b"DMAR";
 
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 #[repr(C, packed)]
 struct DmarReporting {
     header: Sdt,

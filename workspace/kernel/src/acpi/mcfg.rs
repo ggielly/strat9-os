@@ -2,11 +2,11 @@
 
 use super::sdt::Sdt;
 use alloc::vec::Vec;
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::FromBytes;
 
 pub const MCFG_SIGNATURE: &[u8; 4] = b"MCFG";
 
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 #[repr(C, packed)]
 pub struct Mcfg {
     pub header: Sdt,
@@ -20,7 +20,7 @@ impl Mcfg {
     }
 }
 
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 #[repr(C, packed)]
 struct McfgAllocation {
     base_address: u64,

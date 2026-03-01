@@ -42,7 +42,7 @@ impl Scheduler {
         }
     }
 
-    pub(super) fn member_add(
+    pub(crate) fn member_add(
         map: &mut BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
         key: Pid,
         task_id: TaskId,
@@ -53,7 +53,7 @@ impl Scheduler {
         }
     }
 
-    pub(super) fn member_remove(
+    pub(crate) fn member_remove(
         map: &mut BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
         key: Pid,
         task_id: TaskId,
@@ -68,7 +68,7 @@ impl Scheduler {
         }
     }
 
-    pub(super) fn register_identity_locked(&mut self, task: &Arc<Task>) {
+    pub(crate) fn register_identity_locked(&mut self, task: &Arc<Task>) {
         let task_id = task.id;
         let pid = task.pid;
         let pgid = task.pgid.load(Ordering::Relaxed);
@@ -79,7 +79,7 @@ impl Scheduler {
         Self::member_add(&mut self.sid_members, sid, task_id);
     }
 
-    pub(super) fn unregister_identity_locked(&mut self, task_id: TaskId, pid: Pid, tid: Tid) {
+    pub(crate) fn unregister_identity_locked(&mut self, task_id: TaskId, pid: Pid, tid: Tid) {
         self.pid_to_task.remove(&pid);
         self.tid_to_task.remove(&tid);
         if let Some(pgid) = self.pid_to_pgid.remove(&pid) {
@@ -183,38 +183,40 @@ impl Scheduler {
         parent: TaskId,
         target: Option<TaskId>,
     ) -> WaitChildResult {
-        let Some(children) = self.children_of.get_mut(&parent) else {
+        let Some(children_view) = self.children_of.get(&parent) else {
             return WaitChildResult::NoChildren;
         };
 
-        if children.is_empty() {
+        if children_view.is_empty() {
             return WaitChildResult::NoChildren;
         }
 
         if let Some(target_id) = target {
-            if !children.iter().any(|&id| id == target_id) {
+            if !children_view.iter().any(|&id| id == target_id) {
                 return WaitChildResult::NoChildren;
             }
         }
 
-        let zombie = children
+        let zombie = children_view
             .iter()
             .copied()
             .find(|id| target.map_or(true, |t| t == *id) && self.zombies.contains_key(id));
 
         if let Some(child) = zombie {
             let (status, child_pid) = self.zombies.remove(&child).unwrap_or((0, 0));
+            let child_tid = self.all_tasks.get(&child).map(|task| task.tid);
             if child_pid != 0 {
-                if let Some(task) = self.all_tasks.get(&child) {
-                    let tid = task.tid;
+                if let Some(tid) = child_tid {
                     self.unregister_identity_locked(child, child_pid, tid);
                 }
             }
-            children.retain(|&id| id != child);
-            self.parent_of.remove(&child);
-            if children.is_empty() {
-                self.children_of.remove(&parent);
+            if let Some(children) = self.children_of.get_mut(&parent) {
+                children.retain(|&id| id != child);
+                if children.is_empty() {
+                    self.children_of.remove(&parent);
+                }
             }
+            self.parent_of.remove(&child);
             return WaitChildResult::Reaped {
                 child,
                 pid: child_pid,

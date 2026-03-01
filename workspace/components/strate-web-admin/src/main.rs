@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
+#![recursion_limit = "512"]
 
 extern crate alloc;
 
@@ -30,24 +31,24 @@ static ALLOCATOR: WebAdminAllocator = WebAdminAllocator;
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {
     let mut buf = [0u8; 80];
-    let msg = {
+    let n = {
         let mut w = BufWriter::new(&mut buf);
         let _ = write!(w, "[web-admin] OOM: {} bytes align {}\n", layout.size(), layout.align());
-        w.as_str()
+        w.len()
     };
-    let _ = call::write(2, msg.as_bytes());
+    let _ = call::write(2, &buf[..n]);
     call::exit(12)
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let mut buf = [0u8; 256];
-    let msg = {
+    let n = {
         let mut w = BufWriter::new(&mut buf);
         let _ = write!(w, "[web-admin] PANIC: {}\n", info.message());
-        w.as_str()
+        w.len()
     };
-    let _ = call::write(2, msg.as_bytes());
+    let _ = call::write(2, &buf[..n]);
     call::exit(255)
 }
 
@@ -60,8 +61,8 @@ impl<'a> BufWriter<'a> {
     fn new(buf: &'a mut [u8]) -> Self {
         Self { buf, pos: 0 }
     }
-    fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.buf[..self.pos]).unwrap_or("[web-admin] <fmt error>\n")
+    fn len(&self) -> usize {
+        self.pos
     }
 }
 
@@ -80,12 +81,7 @@ pub fn log(msg: &str) {
     let _ = call::write(1, msg.as_bytes());
 }
 
-static CONFIG: picoserve::Config = picoserve::Config::new(picoserve::Timeouts {
-    start_read_request: None,
-    read_request: None,
-    write: None,
-})
-.close_connection_after_response();
+static CONFIG: picoserve::Config = picoserve::Config::const_default().close_connection_after_response();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {

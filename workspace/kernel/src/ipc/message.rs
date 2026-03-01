@@ -3,11 +3,11 @@
 //! Messages are 64 bytes (one cache line). The kernel fills in the `sender`
 //! field before delivering the message to the receiver.
 
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::FromBytes;
 
 /// Structured IPC security label.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromBytes)]
 pub struct IpcLabel {
     /// Trust tier: Critical(0), System(1), User(2).
     pub tier: u8,
@@ -27,7 +27,7 @@ pub struct IpcLabel {
 /// 16.. 64  payload  (48 bytes, opaque data)
 /// ```
 #[repr(C, align(64))]
-#[derive(Clone, Copy, FromZeroes, FromBytes, AsBytes)]
+#[derive(Clone, Copy, FromBytes)]
 pub struct IpcMessage {
     pub sender: u64,
     pub msg_type: u32,
@@ -56,9 +56,12 @@ impl IpcMessage {
     ///
     /// The caller must ensure `buf` points to at least 64 readable bytes.
     pub unsafe fn from_raw(buf: *const u8) -> Self {
-        let mut msg = Self::new_zeroed();
+        // SAFETY: `IpcMessage` is POD and fully initialized by the copy below.
+        let mut msg: Self = unsafe { core::mem::zeroed() };
+        // SAFETY: caller guarantees `buf` points to at least 64 readable bytes,
+        // and `msg` points to a valid 64-byte destination.
         unsafe {
-            core::ptr::copy_nonoverlapping(buf, msg.as_bytes_mut().as_mut_ptr(), 64);
+            core::ptr::copy_nonoverlapping(buf, &mut msg as *mut _ as *mut u8, 64);
         }
         msg
     }
@@ -69,8 +72,11 @@ impl IpcMessage {
     ///
     /// The caller must ensure `buf` points to at least 64 writable bytes.
     pub unsafe fn to_raw(&self, buf: *mut u8) {
-        let slice = unsafe { core::slice::from_raw_parts_mut(buf, 64) };
-        slice.copy_from_slice(self.as_bytes());
+        // SAFETY: caller guarantees `buf` points to at least 64 writable bytes,
+        // and `self` points to a valid 64-byte source.
+        unsafe {
+            core::ptr::copy_nonoverlapping(self as *const _ as *const u8, buf, 64);
+        }
     }
 }
 

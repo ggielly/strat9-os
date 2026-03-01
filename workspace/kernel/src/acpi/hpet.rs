@@ -2,12 +2,12 @@
 //! Inspired by Theseus OS.
 
 use super::sdt::{GenericAddressStructure, Sdt};
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::FromBytes;
 
 pub const HPET_SIGNATURE: &[u8; 4] = b"HPET";
 
 /// The structure of the HPET ACPI table.
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 #[repr(C, packed)]
 pub struct HpetAcpiTable {
     pub header: Sdt,

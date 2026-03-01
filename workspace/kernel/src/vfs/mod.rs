@@ -272,22 +272,9 @@ pub fn dup(old_fd: u32) -> Result<u32, SyscallError> {
 
 /// Duplicate a file descriptor to a specific number (POSIX dup2).
 pub fn dup2(old_fd: u32, new_fd: u32) -> Result<u32, SyscallError> {
-    if old_fd == new_fd {
-        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let fd_table = unsafe { &*task.process.fd_table.get() };
-        fd_table.get(old_fd)?;
-        return Ok(new_fd);
-    }
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let fd_table = unsafe { &mut *task.process.fd_table.get() };
-
-    // Close new_fd if it exists (silently ignore errors)
-    let _ = fd_table.remove(new_fd);
-
-    // Get the file from old_fd and insert at new_fd
-    let file = fd_table.get(old_fd)?;
-    fd_table.insert_at(new_fd, file);
-    Ok(new_fd)
+    fd_table.duplicate_to(old_fd, new_fd)
 }
 
 /// Read all remaining bytes from a file descriptor.

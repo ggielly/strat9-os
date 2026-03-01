@@ -20,6 +20,9 @@ pub const FD_CLOEXEC: u64 = 1;
 /// - F_GETFD (1): Get file descriptor flags
 /// - F_SETFD (2): Set file descriptor flags (FD_CLOEXEC)
 pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, SyscallError> {
+    if fd > u32::MAX as u64 {
+        return Err(SyscallError::BadHandle);
+    }
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
     match cmd {
@@ -41,6 +44,9 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, SyscallError> {
             }
         }
         F_DUPFD => {
+            if arg > u32::MAX as u64 {
+                return Err(SyscallError::InvalidArgument);
+            }
             unsafe {
                 let fd_table = &mut *task.process.fd_table.get();
                 let new_fd = fd_table.duplicate_from(fd as u32, arg as u32)?;

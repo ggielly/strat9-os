@@ -1,7 +1,7 @@
 use core::future::Future;
 use strat9_syscall::call;
 
-const EAGAIN: i32 = 11;
+const EAGAIN: usize = 11;
 
 pub struct Strat9Runtime;
 
@@ -10,13 +10,15 @@ pub struct Strat9Runtime;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub struct IoError(pub i32);
+pub struct IoError(pub usize);
 
 impl core::fmt::Display for IoError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "IoError({})", self.0)
     }
 }
+
+impl core::error::Error for IoError {}
 
 impl embedded_io_async::Error for IoError {
     fn kind(&self) -> embedded_io_async::ErrorKind {
@@ -128,7 +130,7 @@ pub struct Strat9Timer;
 
 impl picoserve::time::Timer<Strat9Runtime> for Strat9Timer {
     async fn delay(&self, duration: picoserve::time::Duration) {
-        crate::net::sleep_ms(duration.millis());
+        crate::net::sleep_ms(duration.as_millis());
     }
 
     async fn run_with_timeout<F: Future>(

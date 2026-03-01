@@ -4,12 +4,12 @@
 //! Reference: ACPI spec 2.0+
 
 use super::sdt::Sdt;
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::FromBytes;
 
 pub const SLIT_SIGNATURE: &[u8; 4] = b"SLIT";
 
 /// SLIT ACPI table structure
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 #[repr(C, packed)]
 pub struct Slit {
     pub header: Sdt,

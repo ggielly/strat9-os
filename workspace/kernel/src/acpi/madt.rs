@@ -3,12 +3,12 @@
 //! Inspired by Theseus OS.
 
 use super::sdt::Sdt;
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::FromBytes;
 
 pub const MADT_SIGNATURE: &[u8; 4] = b"APIC";
 
 /// The fixed-size components of the MADT ACPI table.
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 #[repr(C, packed)]
 pub struct MadtAcpiTable {
     pub header: Sdt,
@@ -24,7 +24,7 @@ impl MadtAcpiTable {
 }
 
 /// A MADT entry record, which precedes each actual MADT entry.
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 #[repr(C, packed)]
 struct EntryRecord {
     typ: u8,
@@ -32,7 +32,7 @@ struct EntryRecord {
 }
 
 /// MADT Local APIC entry (Type 0)
-#[derive(Copy, Clone, Debug, FromBytes, FromZeroes)]
+#[derive(Copy, Clone, Debug, FromBytes)]
 #[repr(C, packed)]
 pub struct MadtLocalApic {
     _header: EntryRecord,
@@ -42,7 +42,7 @@ pub struct MadtLocalApic {
 }
 
 /// MADT I/O APIC entry (Type 1)
-#[derive(Copy, Clone, Debug, FromBytes, FromZeroes)]
+#[derive(Copy, Clone, Debug, FromBytes)]
 #[repr(C, packed)]
 pub struct MadtIoApic {
     _header: EntryRecord,
@@ -53,7 +53,7 @@ pub struct MadtIoApic {
 }
 
 /// MADT Interrupt Source Override (Type 2)
-#[derive(Copy, Clone, Debug, FromBytes, FromZeroes)]
+#[derive(Copy, Clone, Debug, FromBytes)]
 #[repr(C, packed)]
 pub struct MadtIntSrcOverride {
     _header: EntryRecord,

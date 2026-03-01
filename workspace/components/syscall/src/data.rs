@@ -1,6 +1,6 @@
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{FromBytes, IntoBytes};
 
-#[derive(Debug, Clone, Copy, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
 #[repr(C)]
 pub struct TimeSpec {
     pub tv_sec: i64,
@@ -50,7 +50,7 @@ pub struct Map {
     pub addr: usize,
 }
 
-#[derive(Debug, Clone, Copy, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
 #[repr(C)]
 pub struct HandleInfo {
     pub resource_type: u32,
@@ -110,7 +110,7 @@ pub const SEEK_END: usize = 2;
 ///
 /// Derives `FromBytes`/`IntoBytes` via zerocopy so that conversions
 /// to/from `&[u8; 64]` are safe and zero-cost.
-#[derive(Clone, Copy, FromZeroes, FromBytes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes)]
 #[repr(C, align(64))]
 pub struct IpcMessage {
     pub sender: u64,

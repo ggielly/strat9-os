@@ -2,14 +2,14 @@
 //! Inspired by Theseus OS.
 
 use super::sdt::Sdt;
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::FromBytes;
 
 pub const WAET_SIGNATURE: &[u8; 4] = b"WAET";
 
 /// The Windows ACPI Emulated devices Table (WAET) allows virtualized OSes
 /// to avoid workarounds for errata on physical devices.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 pub struct Waet {
     pub header: Sdt,
     pub emulated_device_flags: u32,

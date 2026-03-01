@@ -2,12 +2,12 @@
 //! Inspired by Theseus OS.
 
 use super::sdt::{GenericAddressStructure, Sdt};
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::FromBytes;
 
 pub const FADT_SIGNATURE: &[u8; 4] = b"FACP";
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 pub struct Fadt {
     pub header: Sdt,
     pub firmware_ctrl: u32,

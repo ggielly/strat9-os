@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use strat9_syscall::{call, data::TimeSpec, flag, number};
 
-const EAGAIN: i32 = 11;
+const EAGAIN: usize = 11;
 const MAX_EAGAIN_RETRIES: usize = 50;
 
 pub fn sleep_ms(ms: u64) {

@@ -4,7 +4,7 @@
 //! Reference: ACPI spec 5.0+
 
 use super::sdt::Sdt;
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::FromBytes;
 
 pub const BGRT_SIGNATURE: &[u8; 4] = b"BGRT";
 
@@ -15,7 +15,7 @@ pub const BGRT_STATUS_DISPLAYED: u8 = 1;
 pub const BGRT_FORMAT_BMP: u16 = 0;
 
 /// BGRT ACPI table structure
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 #[repr(C, packed)]
 pub struct Bgrt {
     pub header: Sdt,

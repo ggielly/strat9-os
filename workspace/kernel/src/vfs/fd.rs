@@ -42,6 +42,12 @@ pub struct FileDescriptorTable {
 }
 
 impl FileDescriptorTable {
+    fn advance_next_fd_hint(&mut self) {
+        while self.next_fd_hint < self.fds.len() && self.fds[self.next_fd_hint].is_some() {
+            self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+        }
+    }
+
     /// Create a new empty FD table.
     pub fn new() -> Self {
         let mut fds = Vec::with_capacity(64);
@@ -57,12 +63,14 @@ impl FileDescriptorTable {
         for i in self.next_fd_hint..self.fds.len() {
             if self.fds[i].is_none() {
                 self.next_fd_hint = i.saturating_add(1);
+                self.advance_next_fd_hint();
                 return i as u32;
             }
         }
         for i in 0..self.next_fd_hint.min(self.fds.len()) {
             if self.fds[i].is_none() {
                 self.next_fd_hint = i.saturating_add(1);
+                self.advance_next_fd_hint();
                 return i as u32;
             }
         }
@@ -84,6 +92,7 @@ impl FileDescriptorTable {
         self.fds[fd_usize] = Some(FileDescriptor::new(file));
         if fd_usize == self.next_fd_hint {
             self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+            self.advance_next_fd_hint();
         }
     }
 
@@ -97,6 +106,7 @@ impl FileDescriptorTable {
         self.fds[fd_usize] = Some(FileDescriptor::new_cloexec(file, cloexec));
         if fd_usize == self.next_fd_hint {
             self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+            self.advance_next_fd_hint();
         }
         fd
     }
@@ -168,11 +178,23 @@ impl FileDescriptorTable {
         if min >= self.fds.len() {
             self.fds.resize(min + 1, None);
         }
-        for i in min..self.fds.len() {
+        let start = core::cmp::max(min, self.next_fd_hint);
+        for i in start..self.fds.len() {
             if self.fds[i].is_none() {
                 self.fds[i] = Some(FileDescriptor::new(file));
                 if i == self.next_fd_hint {
                     self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+                    self.advance_next_fd_hint();
+                }
+                return Ok(i as u32);
+            }
+        }
+        for i in min..start.min(self.fds.len()) {
+            if self.fds[i].is_none() {
+                self.fds[i] = Some(FileDescriptor::new(file));
+                if i == self.next_fd_hint {
+                    self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+                    self.advance_next_fd_hint();
                 }
                 return Ok(i as u32);
             }
@@ -181,8 +203,27 @@ impl FileDescriptorTable {
         self.fds.push(Some(FileDescriptor::new(file)));
         if (fd as usize) == self.next_fd_hint {
             self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+            self.advance_next_fd_hint();
         }
         Ok(fd)
+    }
+
+    /// Duplicate `old_fd` onto `new_fd` (dup2 semantics).
+    pub fn duplicate_to(&mut self, old_fd: u32, new_fd: u32) -> Result<u32, SyscallError> {
+        let file = self.get(old_fd)?;
+        if old_fd == new_fd {
+            return Ok(new_fd);
+        }
+        let new_idx = new_fd as usize;
+        if new_idx >= self.fds.len() {
+            self.fds.resize(new_idx + 1, None);
+        }
+        self.fds[new_idx] = Some(FileDescriptor::new(file));
+        if new_idx == self.next_fd_hint {
+            self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+            self.advance_next_fd_hint();
+        }
+        Ok(new_fd)
     }
 
     /// Close all file descriptors (process exit).

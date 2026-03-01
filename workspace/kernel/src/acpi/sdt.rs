@@ -1,14 +1,14 @@
 //! ACPI table definitions and basic SDT structures.
 //! Inspired by Theseus OS.
 
-use zerocopy::{FromBytes, FromZeroes};
+use zerocopy::FromBytes;
 
 /// The size in bytes of the ACPI SDT Header (`Sdt` struct).
 pub const SDT_SIZE_IN_BYTES: usize = core::mem::size_of::<Sdt>();
 
 /// An ACPI System Descriptor Table.
 /// This is the header (the first part) of every ACPI table.
-#[derive(Copy, Clone, Debug, FromBytes, FromZeroes)]
+#[derive(Copy, Clone, Debug, FromBytes)]
 #[repr(C, packed)]
 pub struct Sdt {
     pub signature: [u8; 4],
@@ -24,7 +24,7 @@ pub struct Sdt {
 
 /// A struct used to describe the position and layout of registers
 /// related to ACPI tables.
-#[derive(Clone, Copy, Debug, FromBytes, FromZeroes)]
+#[derive(Clone, Copy, Debug, FromBytes)]
 #[repr(C, packed)]
 pub struct GenericAddressStructure {
     pub address_space: u8,

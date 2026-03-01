@@ -13,5 +13,5 @@ path = "src/lib.rs"
 zssh = { version = "0.4", default-features = false, optional = true }
 
 [features]
-default = ["backend-zssh"]
+default = []
 backend-zssh = ["dep:zssh"]
