@@ -38,6 +38,7 @@ impl FileDescriptor {
 /// Per-process file descriptor table.
 pub struct FileDescriptorTable {
     fds: Vec<Option<FileDescriptor>>,
+    next_fd_hint: usize,
 }
 
 impl FileDescriptorTable {
@@ -45,16 +46,27 @@ impl FileDescriptorTable {
     pub fn new() -> Self {
         let mut fds = Vec::with_capacity(64);
         fds.resize(3, None); // Reserve 0, 1, 2
-        FileDescriptorTable { fds }
+        FileDescriptorTable {
+            fds,
+            next_fd_hint: 3,
+        }
     }
 
     /// Find the lowest available file descriptor number.
-    fn find_free_fd(&self) -> u32 {
-        for (i, fd) in self.fds.iter().enumerate() {
-            if fd.is_none() {
+    fn find_free_fd(&mut self) -> u32 {
+        for i in self.next_fd_hint..self.fds.len() {
+            if self.fds[i].is_none() {
+                self.next_fd_hint = i.saturating_add(1);
                 return i as u32;
             }
         }
+        for i in 0..self.next_fd_hint.min(self.fds.len()) {
+            if self.fds[i].is_none() {
+                self.next_fd_hint = i.saturating_add(1);
+                return i as u32;
+            }
+        }
+        self.next_fd_hint = self.fds.len().saturating_add(1);
         self.fds.len() as u32
     }
 
@@ -70,6 +82,9 @@ impl FileDescriptorTable {
             self.fds.resize(fd_usize + 1, None);
         }
         self.fds[fd_usize] = Some(FileDescriptor::new(file));
+        if fd_usize == self.next_fd_hint {
+            self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+        }
     }
 
     /// Insert a file with explicit CLOEXEC flag.
@@ -80,6 +95,9 @@ impl FileDescriptorTable {
             self.fds.resize(fd_usize + 1, None);
         }
         self.fds[fd_usize] = Some(FileDescriptor::new_cloexec(file, cloexec));
+        if fd_usize == self.next_fd_hint {
+            self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+        }
         fd
     }
 
@@ -122,6 +140,9 @@ impl FileDescriptorTable {
         let fd_usize = fd as usize;
         if fd_usize < self.fds.len() {
             if let Some(desc) = self.fds[fd_usize].take() {
+                if fd_usize < self.next_fd_hint {
+                    self.next_fd_hint = fd_usize;
+                }
                 return Ok(desc.file);
             }
         }
@@ -150,25 +171,35 @@ impl FileDescriptorTable {
         for i in min..self.fds.len() {
             if self.fds[i].is_none() {
                 self.fds[i] = Some(FileDescriptor::new(file));
+                if i == self.next_fd_hint {
+                    self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+                }
                 return Ok(i as u32);
             }
         }
         let fd = self.fds.len() as u32;
         self.fds.push(Some(FileDescriptor::new(file)));
+        if (fd as usize) == self.next_fd_hint {
+            self.next_fd_hint = self.next_fd_hint.saturating_add(1);
+        }
         Ok(fd)
     }
 
     /// Close all file descriptors (process exit).
     pub fn close_all(&mut self) {
         self.fds.clear();
+        self.next_fd_hint = 0;
     }
 
     /// Close all file descriptors with CLOEXEC flag (execve cleanup).
     pub fn close_cloexec(&mut self) {
-        for fd in &mut self.fds {
+        for (i, fd) in self.fds.iter_mut().enumerate() {
             if let Some(desc) = fd {
                 if desc.cloexec {
                     *fd = None;
+                    if i < self.next_fd_hint {
+                        self.next_fd_hint = i;
+                    }
                 }
             }
         }
@@ -181,6 +212,7 @@ impl FileDescriptorTable {
     pub fn clone_for_fork(&self) -> Self {
         FileDescriptorTable {
             fds: self.fds.clone(),
+            next_fd_hint: self.next_fd_hint,
         }
     }
 }

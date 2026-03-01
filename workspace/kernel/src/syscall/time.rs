@@ -4,10 +4,7 @@ use core::sync::atomic::Ordering;
 
 use crate::{
     memory::userslice::{UserSliceRead, UserSliceReadWrite},
-    process::{
-        block_current_task, clear_task_wake_deadline, current_task_id, set_task_wake_deadline,
-        yield_task,
-    },
+    process::{block_current_task, current_task_id, yield_task},
     syscall::error::SyscallError,
 };
 
@@ -96,7 +93,10 @@ pub fn sys_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, SyscallError> {
     let task_id = current_task_id().ok_or_else(|| SyscallError::PermissionDenied)?; // EPERM
 
     // Set the wake deadline on the task
-    let _ = set_task_wake_deadline(task_id, wake_deadline_ns);
+    if let Some(task) = crate::process::get_task_by_id(task_id) {
+        task.wake_deadline_ns
+            .store(wake_deadline_ns, Ordering::Relaxed);
+    }
 
     // Block the current task - it will be woken by:
     // 1. timer_tick() when the deadline expires (check_wake_deadlines)
@@ -109,7 +109,7 @@ pub fn sys_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, SyscallError> {
         let unblocked_pending = pending & !blocked;
         if unblocked_pending != 0 {
             // Clear the deadline since we're not sleeping
-            let _ = clear_task_wake_deadline(task_id);
+            task.wake_deadline_ns.store(0, Ordering::Relaxed);
             return Err(SyscallError::Interrupted); // EINTR
         }
     }
@@ -122,12 +122,12 @@ pub fn sys_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, SyscallError> {
             let now = current_time_ns();
 
             if deadline == 0 || now >= deadline {
-                let _ = clear_task_wake_deadline(task_id);
+                task.wake_deadline_ns.store(0, Ordering::Relaxed);
                 return Ok(0);
             }
 
             if crate::process::has_pending_signals() {
-                let _ = clear_task_wake_deadline(task_id);
+                task.wake_deadline_ns.store(0, Ordering::Relaxed);
                 if rem_ptr != 0 {
                     let remaining_ns = deadline - now;
                     let remaining = TimeSpec::from_nanos(remaining_ns);

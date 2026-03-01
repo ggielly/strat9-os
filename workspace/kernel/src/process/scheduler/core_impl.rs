@@ -29,12 +29,64 @@ impl Scheduler {
             task_cpu: BTreeMap::new(),
             pid_to_task: BTreeMap::new(),
             tid_to_task: BTreeMap::new(),
+            pid_to_pgid: BTreeMap::new(),
+            pid_to_sid: BTreeMap::new(),
+            pgid_members: BTreeMap::new(),
+            sid_members: BTreeMap::new(),
             wake_deadlines: BTreeMap::new(),
             wake_deadline_of: BTreeMap::new(),
             parent_of: BTreeMap::new(),
             children_of: BTreeMap::new(),
             zombies: BTreeMap::new(),
             class_table: crate::process::sched::SchedClassTable::default(),
+        }
+    }
+
+    pub(super) fn member_add(
+        map: &mut BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
+        key: Pid,
+        task_id: TaskId,
+    ) {
+        let members = map.entry(key).or_default();
+        if !members.iter().any(|id| *id == task_id) {
+            members.push(task_id);
+        }
+    }
+
+    pub(super) fn member_remove(
+        map: &mut BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
+        key: Pid,
+        task_id: TaskId,
+    ) {
+        let mut clear = false;
+        if let Some(members) = map.get_mut(&key) {
+            members.retain(|id| *id != task_id);
+            clear = members.is_empty();
+        }
+        if clear {
+            map.remove(&key);
+        }
+    }
+
+    pub(super) fn register_identity_locked(&mut self, task: &Arc<Task>) {
+        let task_id = task.id;
+        let pid = task.pid;
+        let pgid = task.pgid.load(Ordering::Relaxed);
+        let sid = task.sid.load(Ordering::Relaxed);
+        self.pid_to_pgid.insert(pid, pgid);
+        self.pid_to_sid.insert(pid, sid);
+        Self::member_add(&mut self.pgid_members, pgid, task_id);
+        Self::member_add(&mut self.sid_members, sid, task_id);
+    }
+
+    pub(super) fn unregister_identity_locked(&mut self, task_id: TaskId, pid: Pid, tid: Tid) {
+        self.pid_to_task.remove(&pid);
+        self.tid_to_task.remove(&tid);
+        if let Some(pgid) = self.pid_to_pgid.remove(&pid) {
+            Self::member_remove(&mut self.pgid_members, pgid, task_id);
+        }
+        if let Some(sid) = self.pid_to_sid.remove(&pid) {
+            Self::member_remove(&mut self.sid_members, sid, task_id);
         }
     }
 
@@ -63,6 +115,7 @@ impl Scheduler {
         self.task_cpu.insert(task_id, cpu_index);
         self.pid_to_task.insert(task.pid, task_id);
         self.tid_to_task.insert(task.tid, task_id);
+        self.register_identity_locked(&task);
         if let Some(cpu) = self.cpus.get_mut(cpu_index) {
             let class = self.class_table.class_for_task(&task);
             cpu.class_rqs.enqueue(class, task);
@@ -152,7 +205,10 @@ impl Scheduler {
         if let Some(child) = zombie {
             let (status, child_pid) = self.zombies.remove(&child).unwrap_or((0, 0));
             if child_pid != 0 {
-                self.pid_to_task.remove(&child_pid);
+                if let Some(task) = self.all_tasks.get(&child) {
+                    let tid = task.tid;
+                    self.unregister_identity_locked(child, child_pid, tid);
+                }
             }
             children.retain(|&id| id != child);
             self.parent_of.remove(&child);

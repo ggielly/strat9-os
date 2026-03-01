@@ -289,6 +289,7 @@ pub fn cmd_scheduler(args: &[String]) -> Result<(), ShellError> {
             let s = scheduler_state_snapshot();
             if kv {
                 shell_println!("scheduler.initialized={}", if s.initialized { 1 } else { 0 });
+                shell_println!("scheduler.boot_phase={}", s.boot_phase);
                 shell_println!("scheduler.cpu_count={}", s.cpu_count);
                 shell_println!("scheduler.pick.0={}", s.pick_order[0].as_str());
                 shell_println!("scheduler.pick.1={}", s.pick_order[1].as_str());
@@ -309,8 +310,9 @@ pub fn cmd_scheduler(args: &[String]) -> Result<(), ShellError> {
                 }
             } else {
                 shell_println!(
-                    "scheduler dump: initialized={} cpus={} blocked={} pick=[{},{},{}] steal=[{},{}]",
+                    "scheduler dump: initialized={} phase={} cpus={} blocked={} pick=[{},{},{}] steal=[{},{}]",
                     s.initialized,
+                    s.boot_phase,
                     s.cpu_count,
                     s.blocked_tasks,
                     s.pick_order[0].as_str(),

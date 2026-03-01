@@ -1,0 +1,16 @@
+[package]
+name = "strate-web-admin"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[[bin]]
+name = "web-admin"
+path = "src/main.rs"
+
+[dependencies]
+strat9-syscall = { path = "../syscall", features = ["userspace"] }
+alloc-freelist = { path = "../alloc-freelist" }
+picoserve = { version = "0.18", default-features = false, features = ["alloc"] }
+embedded-io-async = "0.7"

@@ -48,15 +48,13 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 cleanup_task_resources(&current);
                 sched.all_tasks.remove(&current_id);
                 sched.task_cpu.remove(&current_id);
-                sched.tid_to_task.remove(&current.tid);
+                sched.unregister_identity_locked(current_id, current_pid, current.tid);
                 sched.parent_of.remove(&current_id);
 
                 reparent_children(sched, current_id);
 
                 if parent.is_some() {
                     sched.zombies.insert(current_id, (exit_code, current_pid));
-                } else {
-                    sched.pid_to_task.remove(&current_pid);
                 }
                 if let Some(parent_id) = parent {
                     let _ = sched.wake_task_locked(parent_id);
@@ -206,31 +204,46 @@ pub fn get_task_id_by_tid(tid: Tid) -> Option<TaskId> {
 
 /// Resolve a PID to the current process group id.
 pub fn get_pgid_by_pid(pid: Pid) -> Option<Pid> {
-    let task = get_task_by_pid(pid)?;
-    Some(task.pgid.load(Ordering::Relaxed))
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = SCHEDULER.lock();
+        if let Some(ref sched) = *scheduler {
+            sched.pid_to_pgid.get(&pid).copied()
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
 }
 
 /// Resolve a PID to the current session id.
 pub fn get_sid_by_pid(pid: Pid) -> Option<Pid> {
-    let task = get_task_by_pid(pid)?;
-    Some(task.sid.load(Ordering::Relaxed))
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = SCHEDULER.lock();
+        if let Some(ref sched) = *scheduler {
+            sched.pid_to_sid.get(&pid).copied()
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
 }
 
 /// Collect task IDs that currently belong to process group `pgid`.
 pub fn get_task_ids_in_pgid(pgid: Pid) -> alloc::vec::Vec<TaskId> {
     use alloc::vec::Vec;
     let saved_flags = save_flags_and_cli();
-    let mut out = Vec::new();
-    {
+    let out = {
         let scheduler = SCHEDULER.lock();
         if let Some(ref sched) = *scheduler {
-            for task in sched.all_tasks.values() {
-                if task.pgid.load(Ordering::Relaxed) == pgid {
-                    out.push(task.id);
-                }
-            }
+            sched.pgid_members.get(&pgid).cloned().unwrap_or_else(Vec::new)
+        } else {
+            Vec::new()
         }
-    }
+    };
     restore_flags(saved_flags);
     out
 }
@@ -298,17 +311,19 @@ pub fn set_process_group(
                 .get(&desired_pgid)
                 .copied()
                 .ok_or(SyscallError::NotFound)?;
-            let group_leader = sched
-                .all_tasks
-                .get(&group_leader_tid)
-                .cloned()
-                .ok_or(SyscallError::NotFound)?;
+            let group_leader = sched.all_tasks.get(&group_leader_tid).ok_or(SyscallError::NotFound)?;
             if group_leader.sid.load(Ordering::Relaxed) != target_sid {
                 return Err(SyscallError::PermissionDenied);
             }
         }
 
+        let old_pgid = target_task.pgid.load(Ordering::Relaxed);
         target_task.pgid.store(desired_pgid, Ordering::Relaxed);
+        if old_pgid != desired_pgid {
+            Scheduler::member_remove(&mut sched.pgid_members, old_pgid, target_id);
+            Scheduler::member_add(&mut sched.pgid_members, desired_pgid, target_id);
+            sched.pid_to_pgid.insert(target_pid_value, desired_pgid);
+        }
         Ok(desired_pgid)
     })();
     restore_flags(saved_flags);
@@ -334,8 +349,16 @@ pub fn create_session(requester: TaskId) -> Result<Pid, crate::syscall::error::S
             return Err(SyscallError::PermissionDenied);
         }
 
+        let old_sid = requester_task.sid.load(Ordering::Relaxed);
+        let old_pgid = requester_task.pgid.load(Ordering::Relaxed);
         requester_task.sid.store(pid, Ordering::Relaxed);
         requester_task.pgid.store(pid, Ordering::Relaxed);
+        Scheduler::member_remove(&mut sched.sid_members, old_sid, requester);
+        Scheduler::member_remove(&mut sched.pgid_members, old_pgid, requester);
+        Scheduler::member_add(&mut sched.sid_members, pid, requester);
+        Scheduler::member_add(&mut sched.pgid_members, pid, requester);
+        sched.pid_to_sid.insert(pid, pid);
+        sched.pid_to_pgid.insert(pid, pid);
         Ok(pid)
     })();
     restore_flags(saved_flags);
@@ -724,7 +747,7 @@ pub fn kill_task(id: TaskId) -> bool {
                 cleanup_task_resources(&current);
                 sched.all_tasks.remove(&id);
                 sched.task_cpu.remove(&id);
-                sched.tid_to_task.remove(&current.tid);
+                sched.unregister_identity_locked(id, task_pid, current.tid);
                 parent_to_signal =
                     finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
                 killed = true;
@@ -756,7 +779,7 @@ pub fn kill_task(id: TaskId) -> bool {
                         }
                         cleanup_task_resources(&task);
                         sched.task_cpu.remove(&id);
-                        sched.tid_to_task.remove(&task.tid);
+                        sched.unregister_identity_locked(id, task_pid, task.tid);
                         parent_to_signal =
                             finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
                     }
@@ -776,7 +799,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     cleanup_task_resources(&task);
                     sched.all_tasks.remove(&id);
                     sched.task_cpu.remove(&id);
-                    sched.tid_to_task.remove(&task.tid);
+                    sched.unregister_identity_locked(id, task_pid, task.tid);
                     parent_to_signal =
                         finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
                     killed = true;
@@ -827,7 +850,6 @@ fn finalize_forced_death(
         let _ = sched.wake_task_locked(parent_id);
         Some(parent_id)
     } else {
-        sched.pid_to_task.remove(&task_pid);
         None
     }
 }

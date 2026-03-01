@@ -47,6 +47,35 @@
 //! - tests:
 //!   - deterministic migration/policy-remap/SMP-steal suites.
 //!   - fairness/starvation long-run regression in test ISO.
+//!
+//! Optimization roadmap (stability-first, incremental):
+//! 1) Lock contention reduction (highest ROI, low risk)
+//!    - keep scheduler critical sections minimal: compute decisions under lock,
+//!      execute expensive side effects (IPI, signal delivery, cleanup) after unlock.
+//!    - split hot paths into tiny helpers with explicit "lock held / lock free" contract.
+//!    - add/track contention counters in every try_lock fallback path.
+//! 2) Wakeup path scalability (only after strong guards)
+//!    - re-introduce deadline index behind a runtime feature flag (default OFF).
+//!    - enforce single writer API for wake deadlines (no direct field stores in syscalls).
+//!    - add strict invariants:
+//!      - if task has deadline != 0, index contains task exactly once.
+//!      - on wake/kill/exit/resume, deadline is removed from index and field cleared.
+//!    - keep safe fallback scan path available and switchable at runtime.
+//! 3) Scheduler observability for regressions
+//!    - keep stable key=value output for scripts (`scheduler metrics kv`, `scheduler dump kv`).
+//!    - expose blocked-task ids and per-cpu preempt causes to diagnose stalls quickly.
+//!    - include boot-phase and lock-miss counters in all dump modes.
+//! 4) Balancing/pick optimizations
+//!    - tune steal hysteresis/cooldown with metrics, avoid ping-pong migration.
+//!    - avoid counting idle task as runnable load for CPU selection.
+//!    - add bounded per-tick work budgets to prevent long interrupt latency tails.
+//! 5) Safety rails before each optimization lands
+//!    - ship each optimization in one isolated patchset with rollback switch.
+//!    - validate with targeted scenarios:
+//!      - boot + shell responsiveness,
+//!      - timeout-heavy workload (poll/futex/nanosleep),
+//!      - SMP preempt/steal stress.
+//!    - if any regression appears, disable feature first, debug second.
 
 use super::task::{
     restore_first_task, switch_context, Pid, Task, TaskId, TaskPriority, TaskState, Tid,
@@ -127,6 +156,7 @@ pub struct SchedulerMetricsSnapshot {
 #[derive(Clone, Copy)]
 pub struct SchedulerStateSnapshot {
     pub initialized: bool,
+    pub boot_phase: u8,
     pub cpu_count: usize,
     pub pick_order: [crate::process::sched::SchedClassId; 3],
     pub steal_order: [crate::process::sched::SchedClassId; 2],
@@ -249,6 +279,7 @@ fn sched_trace(args: core::fmt::Arguments<'_>) {
         log::debug!("[sched] {}", args);
     }
 }
+
 
 /// Information needed to perform a context switch after releasing the lock.
 struct SwitchTarget {
@@ -422,6 +453,14 @@ pub struct Scheduler {
     pid_to_task: BTreeMap<Pid, TaskId>,
     /// Map userspace TID -> internal TaskId (fast thread lookup).
     tid_to_task: BTreeMap<Tid, TaskId>,
+    /// Map PID -> process group id.
+    pid_to_pgid: BTreeMap<Pid, Pid>,
+    /// Map PID -> session id.
+    pid_to_sid: BTreeMap<Pid, Pid>,
+    /// Group membership index: pgid -> task ids.
+    pgid_members: BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
+    /// Session membership index: sid -> task ids.
+    sid_members: BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
     /// Deadline -> task ids map for sleeping tasks (ordered wakeups).
     wake_deadlines: BTreeMap<u64, alloc::vec::Vec<TaskId>>,
     /// Task -> deadline reverse index.

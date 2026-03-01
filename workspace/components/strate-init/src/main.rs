@@ -667,6 +667,16 @@ sid = 42
 name = "sshd"
 binary = "/initfs/bin/sshd"
 type = "elf"
+
+[[silos]]
+name = "web-admin"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "web-admin"
+binary = "/initfs/bin/web-admin"
+type = "elf"
 "#;
 
 #[unsafe(no_mangle)]

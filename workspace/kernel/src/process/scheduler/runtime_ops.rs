@@ -397,6 +397,7 @@ pub fn log_state(label: &str) {
 pub fn state_snapshot() -> SchedulerStateSnapshot {
     let mut out = SchedulerStateSnapshot {
         initialized: false,
+        boot_phase: 0,
         cpu_count: 0,
         pick_order: [
             crate::process::sched::SchedClassId::RealTime,
@@ -425,6 +426,7 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
                 .len()
                 .min(crate::arch::x86_64::percpu::MAX_CPUS);
             out.initialized = true;
+            out.boot_phase = if cpu_count > 0 { 2 } else { 1 };
             out.cpu_count = cpu_count;
             out.pick_order = *sched.class_table.pick_order();
             out.steal_order = *sched.class_table.steal_order();
