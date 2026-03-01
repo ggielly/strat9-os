@@ -32,17 +32,23 @@ pub fn exit_current_task(exit_code: i32) -> ! {
         let saved_flags = save_flags_and_cli();
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
-            if let Some(ref current) = sched.cpus[cpu_index].current_task {
+            if let Some(current) = sched
+                .cpus
+                .get(cpu_index)
+                .and_then(|cpu| cpu.current_task.clone())
+            {
                 let current_id = current.id;
                 let current_pid = current.pid;
                 let parent = sched.parent_of.get(&current_id).copied();
+                let _ = sched.clear_task_wake_deadline_locked(current_id);
                 // SAFETY: We hold the scheduler lock and interrupts are disabled.
                 unsafe {
                     *current.state.get() = TaskState::Dead;
                 }
-                cleanup_task_resources(current);
+                cleanup_task_resources(&current);
                 sched.all_tasks.remove(&current_id);
                 sched.task_cpu.remove(&current_id);
+                sched.tid_to_task.remove(&current.tid);
                 sched.parent_of.remove(&current_id);
 
                 reparent_children(sched, current_id);
@@ -186,9 +192,9 @@ pub fn get_task_id_by_tid(tid: Tid) -> Option<TaskId> {
         let scheduler = SCHEDULER.lock();
         if let Some(ref sched) = *scheduler {
             sched
-                .all_tasks
-                .iter()
-                .find_map(|(task_id, task)| if task.tid == tid { Some(*task_id) } else { None })
+                .tid_to_task
+                .get(&tid)
+                .copied()
                 .or_else(|| sched.pid_to_task.get(&(tid as Pid)).copied())
         } else {
             None
@@ -238,11 +244,9 @@ pub fn set_process_group(
     use crate::syscall::error::SyscallError;
 
     let saved_flags = save_flags_and_cli();
-    let result = {
+    let result = (|| -> Result<Pid, SyscallError> {
         let mut scheduler = SCHEDULER.lock();
-        let Some(ref mut sched) = *scheduler else {
-            return Err(SyscallError::Fault);
-        };
+        let sched = scheduler.as_mut().ok_or(SyscallError::Fault)?;
 
         let requester_task = sched
             .all_tasks
@@ -306,7 +310,7 @@ pub fn set_process_group(
 
         target_task.pgid.store(desired_pgid, Ordering::Relaxed);
         Ok(desired_pgid)
-    };
+    })();
     restore_flags(saved_flags);
     result
 }
@@ -316,11 +320,9 @@ pub fn create_session(requester: TaskId) -> Result<Pid, crate::syscall::error::S
     use crate::syscall::error::SyscallError;
 
     let saved_flags = save_flags_and_cli();
-    let result = {
+    let result = (|| -> Result<Pid, SyscallError> {
         let mut scheduler = SCHEDULER.lock();
-        let Some(ref mut sched) = *scheduler else {
-            return Err(SyscallError::Fault);
-        };
+        let sched = scheduler.as_mut().ok_or(SyscallError::Fault)?;
 
         let requester_task = sched
             .all_tasks
@@ -335,7 +337,7 @@ pub fn create_session(requester: TaskId) -> Result<Pid, crate::syscall::error::S
         requester_task.sid.store(pid, Ordering::Relaxed);
         requester_task.pgid.store(pid, Ordering::Relaxed);
         Ok(pid)
-    };
+    })();
     restore_flags(saved_flags);
     result
 }
@@ -459,30 +461,34 @@ pub fn block_current_task() {
     let switch_target = {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
-            if let Some(ref current) = sched.cpus[cpu_index].current_task {
-                // Check for a pending wakeup that raced with us before we
-                // entered the scheduler lock. If set, clear it and skip
-                // blocking - the task carries on as if it was woken normally.
-                // SAFETY: AtomicBool::swap is safe to call from any context.
-                if current
-                    .wake_pending
-                    .swap(false, core::sync::atomic::Ordering::AcqRel)
-                {
-                    // Pending wakeup consumed - do not block.
-                    None
-                } else {
-                    // SAFETY: We hold the scheduler lock and interrupts are disabled.
-                    unsafe {
-                        *current.state.get() = TaskState::Blocked;
+            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                if let Some(ref current) = cpu.current_task {
+                    // Check for a pending wakeup that raced with us before we
+                    // entered the scheduler lock. If set, clear it and skip
+                    // blocking - the task carries on as if it was woken normally.
+                    // SAFETY: AtomicBool::swap is safe to call from any context.
+                    if current
+                        .wake_pending
+                        .swap(false, core::sync::atomic::Ordering::AcqRel)
+                    {
+                        // Pending wakeup consumed - do not block.
+                        None
+                    } else {
+                        // SAFETY: We hold the scheduler lock and interrupts are disabled.
+                        unsafe {
+                            *current.state.get() = TaskState::Blocked;
+                        }
+                        // Move it to the blocked map
+                        sched.blocked_tasks.insert(current.id, current.clone());
+                        // Now pick the next task (the blocked task won't be re-queued
+                        // because pick_next_task only re-queues Running tasks)
+                        sched.yield_cpu(cpu_index)
                     }
-                    // Move it to the blocked map
-                    sched.blocked_tasks.insert(current.id, current.clone());
-                    // Now pick the next task (the blocked task won't be re-queued
-                    // because pick_next_task only re-queues Running tasks)
+                } else {
                     sched.yield_cpu(cpu_index)
                 }
             } else {
-                sched.yield_cpu(cpu_index)
+                None
             }
         } else {
             None
@@ -529,6 +535,24 @@ pub fn wake_task(id: TaskId) -> bool {
     };
     restore_flags(saved_flags);
     woken
+}
+
+pub fn set_task_wake_deadline(id: TaskId, deadline_ns: u64) -> bool {
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
+            sched.set_task_wake_deadline_locked(id, deadline_ns)
+        } else {
+            false
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
+pub fn clear_task_wake_deadline(id: TaskId) -> bool {
+    set_task_wake_deadline(id, 0)
 }
 
 /// Suspend a task by ID (best-effort).
@@ -626,6 +650,7 @@ pub fn resume_task(id: TaskId) -> bool {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
             if let Some(task) = sched.blocked_tasks.remove(&id) {
+                let _ = sched.clear_task_wake_deadline_locked(id);
                 // SAFETY: scheduler lock held.
                 unsafe {
                     *task.state.get() = TaskState::Ready;
@@ -681,47 +706,61 @@ pub fn kill_task(id: TaskId) -> bool {
             let my_cpu = current_cpu_index();
 
             // Check if the task is the current task on any CPU.
-            for (ci, cpu) in sched.cpus.iter_mut().enumerate() {
-                if let Some(ref current) = cpu.current_task {
+            let mut running_hit: Option<(usize, Arc<Task>)> = None;
+            for (ci, cpu) in sched.cpus.iter().enumerate() {
+                if let Some(current) = cpu.current_task.as_ref() {
                     if current.id == id {
-                        let task_pid = current.pid;
-                        unsafe {
-                            *current.state.get() = TaskState::Dead;
-                        }
-                        cleanup_task_resources(current);
-                        sched.all_tasks.remove(&id);
-                        sched.task_cpu.remove(&id);
-                        parent_to_signal =
-                            finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
-                        killed = true;
-                        if ci == my_cpu {
-                            switch_target = sched.yield_cpu(ci);
-                        } else {
-                            // Cross-CPU: IPI makes the remote CPU preempt.
-                            ipi_to_cpu = Some(ci);
-                        }
+                        running_hit = Some((ci, current.clone()));
                         break;
                     }
+                }
+            }
+            if let Some((ci, current)) = running_hit {
+                let task_pid = current.pid;
+                let _ = sched.clear_task_wake_deadline_locked(id);
+                unsafe {
+                    *current.state.get() = TaskState::Dead;
+                }
+                cleanup_task_resources(&current);
+                sched.all_tasks.remove(&id);
+                sched.task_cpu.remove(&id);
+                sched.tid_to_task.remove(&current.tid);
+                parent_to_signal =
+                    finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
+                killed = true;
+                if ci == my_cpu {
+                    switch_target = sched.yield_cpu(ci);
+                } else {
+                    // Cross-CPU: IPI makes the remote CPU preempt.
+                    ipi_to_cpu = Some(ci);
                 }
             }
 
             // Remove from ready queues.
             if !killed {
-                for cpu in &mut sched.cpus {
-                    if cpu.class_rqs.remove(id) {
-                        if let Some(task) = sched.all_tasks.remove(&id) {
-                            let task_pid = task.pid;
-                            unsafe {
-                                *task.state.get() = TaskState::Dead;
-                            }
-                            cleanup_task_resources(&task);
-                            sched.task_cpu.remove(&id);
-                            parent_to_signal =
-                                finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
+                let mut removed_from_ready = false;
+                for ci in 0..sched.cpus.len() {
+                    if let Some(cpu) = sched.cpus.get_mut(ci) {
+                        if cpu.class_rqs.remove(id) {
+                            removed_from_ready = true;
+                            break;
                         }
-                        killed = true;
-                        break;
                     }
+                }
+                if removed_from_ready {
+                    let _ = sched.clear_task_wake_deadline_locked(id);
+                    if let Some(task) = sched.all_tasks.remove(&id) {
+                        let task_pid = task.pid;
+                        unsafe {
+                            *task.state.get() = TaskState::Dead;
+                        }
+                        cleanup_task_resources(&task);
+                        sched.task_cpu.remove(&id);
+                        sched.tid_to_task.remove(&task.tid);
+                        parent_to_signal =
+                            finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
+                    }
+                    killed = true;
                 }
             }
 
@@ -729,6 +768,7 @@ pub fn kill_task(id: TaskId) -> bool {
             if !killed {
                 if let Some(task) = sched.blocked_tasks.remove(&id) {
                     let task_pid = task.pid;
+                    let _ = sched.clear_task_wake_deadline_locked(id);
                     // SAFETY: scheduler lock held.
                     unsafe {
                         *task.state.get() = TaskState::Dead;
@@ -736,6 +776,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     cleanup_task_resources(&task);
                     sched.all_tasks.remove(&id);
                     sched.task_cpu.remove(&id);
+                    sched.tid_to_task.remove(&task.tid);
                     parent_to_signal =
                         finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
                     killed = true;

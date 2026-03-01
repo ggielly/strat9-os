@@ -16,6 +16,19 @@
 //! pushed/popped by `switch_context()`. `CpuContext` only stores `saved_rsp`.
 //!
 //! TODO(v3 scheduler):
+//! - API stabilization before adding more features:
+//!   - freeze scheduler command syntax.
+//!   - add a small machine-friendly output format (key=value) for scripts/debug.
+//! - observability v2:
+//!   - per-class latency/wait histograms.
+//!   - one structured dump format (instead of free-form text logs) for top/debug.
+//! - targeted scheduler tests (high priority):
+//!   - config validation/reject paths (class/policy map).
+//!   - ready-task migration on class-table updates.
+//!   - SMP steal/preempt non-regression.
+//! - only then: CPU affinity (first truly useful advanced scheduler feature).
+//!
+//! Legacy backlog:
 //! - class registry v2:
 //!   - dynamic add/remove/reorder with validation and safe reject path.
 //!   - policy->class mapping as runtime registry (not only static enum mapping).
@@ -69,6 +82,8 @@ static CPU_STEAL_IN_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
 static CPU_STEAL_OUT_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_TRY_LOCK_FAIL_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
 static RESCHED_IPI_PENDING: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
 static LAST_STEAL_TICK: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
@@ -106,6 +121,21 @@ pub struct SchedulerMetricsSnapshot {
     pub preempt_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
     pub steal_in_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
     pub steal_out_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub try_lock_fail_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+}
+
+#[derive(Clone, Copy)]
+pub struct SchedulerStateSnapshot {
+    pub initialized: bool,
+    pub cpu_count: usize,
+    pub pick_order: [crate::process::sched::SchedClassId; 3],
+    pub steal_order: [crate::process::sched::SchedClassId; 2],
+    pub blocked_tasks: usize,
+    pub current_task: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub rq_rt: [usize; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub rq_fair: [usize; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub rq_idle: [usize; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub need_resched: [bool; crate::arch::x86_64::percpu::MAX_CPUS],
 }
 
 pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
@@ -132,6 +162,7 @@ pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
     let mut preempt_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
     let mut steal_in_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
     let mut steal_out_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut try_lock_fail_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
     for i in 0..cpu_count {
         rt_runtime_ticks[i] = CPU_RT_RUNTIME_TICKS[i].load(Ordering::Relaxed);
         fair_runtime_ticks[i] = CPU_FAIR_RUNTIME_TICKS[i].load(Ordering::Relaxed);
@@ -140,6 +171,7 @@ pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
         preempt_count[i] = CPU_PREEMPT_COUNT[i].load(Ordering::Relaxed);
         steal_in_count[i] = CPU_STEAL_IN_COUNT[i].load(Ordering::Relaxed);
         steal_out_count[i] = CPU_STEAL_OUT_COUNT[i].load(Ordering::Relaxed);
+        try_lock_fail_count[i] = CPU_TRY_LOCK_FAIL_COUNT[i].load(Ordering::Relaxed);
     }
     SchedulerMetricsSnapshot {
         cpu_count,
@@ -150,6 +182,7 @@ pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
         preempt_count,
         steal_in_count,
         steal_out_count,
+        try_lock_fail_count,
     }
 }
 
@@ -163,7 +196,20 @@ pub fn reset_scheduler_metrics() {
         CPU_PREEMPT_COUNT[i].store(0, Ordering::Relaxed);
         CPU_STEAL_IN_COUNT[i].store(0, Ordering::Relaxed);
         CPU_STEAL_OUT_COUNT[i].store(0, Ordering::Relaxed);
+        CPU_TRY_LOCK_FAIL_COUNT[i].store(0, Ordering::Relaxed);
     }
+}
+
+#[inline]
+pub(crate) fn note_try_lock_fail_on_cpu(cpu: usize) {
+    if cpu_is_valid(cpu) {
+        CPU_TRY_LOCK_FAIL_COUNT[cpu].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[inline]
+pub fn note_try_lock_fail() {
+    note_try_lock_fail_on_cpu(current_cpu_index());
 }
 
 // ─── Cross-CPU IPI helpers ────────────────────────────────────────────────────
@@ -374,6 +420,12 @@ pub struct Scheduler {
     task_cpu: BTreeMap<TaskId, usize>,
     /// Map userspace PID -> internal TaskId (process leader in current model).
     pid_to_task: BTreeMap<Pid, TaskId>,
+    /// Map userspace TID -> internal TaskId (fast thread lookup).
+    tid_to_task: BTreeMap<Tid, TaskId>,
+    /// Deadline -> task ids map for sleeping tasks (ordered wakeups).
+    wake_deadlines: BTreeMap<u64, alloc::vec::Vec<TaskId>>,
+    /// Task -> deadline reverse index.
+    wake_deadline_of: BTreeMap<TaskId, u64>,
     /// Parent relationship: child -> parent
     parent_of: BTreeMap<TaskId, TaskId>,
     /// Children list: parent -> children

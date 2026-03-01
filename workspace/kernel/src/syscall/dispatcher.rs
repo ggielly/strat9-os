@@ -21,7 +21,7 @@ use crate::{
         shared_ring::{self, RingId},
     },
     memory::{UserSliceRead, UserSliceWrite},
-    process::current_task_clone,
+    process::{clear_task_wake_deadline, current_task_clone, current_task_id, set_task_wake_deadline},
     silo,
 };
 use alloc::{sync::Arc, vec};
@@ -463,12 +463,12 @@ fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
             now.saturating_add(10_000_000)
         };
 
-        if let Some(task) = current_task_clone() {
-            task.wake_deadline_ns.store(wake_ns, Ordering::Relaxed);
+        if let Some(task_id) = current_task_id() {
+            let _ = set_task_wake_deadline(task_id, wake_ns);
         }
         crate::process::block_current_task();
-        if let Some(task) = current_task_clone() {
-            task.wake_deadline_ns.store(0, Ordering::Relaxed);
+        if let Some(task_id) = current_task_id() {
+            let _ = clear_task_wake_deadline(task_id);
         }
     }
 }

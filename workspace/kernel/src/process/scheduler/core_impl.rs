@@ -28,6 +28,9 @@ impl Scheduler {
             all_tasks: BTreeMap::new(),
             task_cpu: BTreeMap::new(),
             pid_to_task: BTreeMap::new(),
+            tid_to_task: BTreeMap::new(),
+            wake_deadlines: BTreeMap::new(),
+            wake_deadline_of: BTreeMap::new(),
             parent_of: BTreeMap::new(),
             children_of: BTreeMap::new(),
             zombies: BTreeMap::new(),
@@ -59,6 +62,7 @@ impl Scheduler {
         self.all_tasks.insert(task_id, task.clone());
         self.task_cpu.insert(task_id, cpu_index);
         self.pid_to_task.insert(task.pid, task_id);
+        self.tid_to_task.insert(task.tid, task_id);
         if let Some(cpu) = self.cpus.get_mut(cpu_index) {
             let class = self.class_table.class_for_task(&task);
             cpu.class_rqs.enqueue(class, task);
@@ -74,7 +78,29 @@ impl Scheduler {
         }
     }
 
+    pub fn clear_task_wake_deadline_locked(&mut self, id: TaskId) -> bool {
+        if let Some(task) = self.all_tasks.get(&id) {
+            task.wake_deadline_ns.store(0, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_task_wake_deadline_locked(&mut self, id: TaskId, deadline: u64) -> bool {
+        if deadline == 0 {
+            return self.clear_task_wake_deadline_locked(id);
+        }
+        if let Some(task) = self.all_tasks.get(&id) {
+            task.wake_deadline_ns.store(deadline, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn wake_task_locked(&mut self, id: TaskId) -> bool {
+        self.clear_task_wake_deadline_locked(id);
         if let Some(task) = self.blocked_tasks.remove(&id) {
             // SAFETY: scheduler lock held.
             unsafe {
@@ -212,7 +238,7 @@ impl Scheduler {
     /// recently — least likely to have warm cache data on that CPU).
     /// We only steal when the source has ≥ 2 tasks, so it keeps at least one.
     pub fn steal_task(&mut self, dst_cpu: usize, now_tick: u64) -> Option<Arc<Task>> {
-        if !cpu_is_valid(dst_cpu) {
+        if !cpu_is_valid(dst_cpu) || dst_cpu >= self.cpus.len() {
             return None;
         }
         let last = LAST_STEAL_TICK[dst_cpu].load(Ordering::Relaxed);
@@ -278,6 +304,9 @@ impl Scheduler {
     /// Returns `None` if there's nothing to switch to (same task selected,
     /// or no current task).
     pub fn yield_cpu(&mut self, cpu_index: usize) -> Option<SwitchTarget> {
+        if cpu_index >= self.cpus.len() {
+            return None;
+        }
         // Must have a current task to yield from
         let current = self.cpus[cpu_index].current_task.as_ref()?.clone();
 
@@ -326,8 +355,12 @@ impl Scheduler {
         let mut best_load = usize::MAX;
         for (idx, cpu) in self.cpus.iter().enumerate() {
             let mut load = cpu.class_rqs.runnable_len();
-            if cpu.current_task.is_some() {
-                load += 1;
+            if let Some(current) = cpu.current_task.as_ref() {
+                if self.class_table.class_for_task(current)
+                    != crate::process::sched::SchedClassId::Idle
+                {
+                    load += 1;
+                }
             }
             if load < best_load {
                 best = idx;

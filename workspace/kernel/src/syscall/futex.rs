@@ -8,7 +8,10 @@ use core::sync::atomic::Ordering;
 use super::error::SyscallError;
 use crate::{
     memory::userslice::{UserSliceRead, UserSliceReadWrite},
-    process::{block_current_task, current_task_id, wake_task},
+    process::{
+        block_current_task, clear_task_wake_deadline, current_task_id, set_task_wake_deadline,
+        wake_task,
+    },
     sync::{SpinLock, SpinLockGuard},
 };
 
@@ -266,9 +269,7 @@ pub fn sys_futex_wait(_addr: u64, _val: u32, _timeout_ns: u64) -> Result<u64, Sy
 
     let saved_deadline = if timeout_ns != 0 {
         let deadline = crate::syscall::time::current_time_ns().saturating_add(timeout_ns);
-        if let Some(task) = crate::process::get_task_by_id(id) {
-            task.wake_deadline_ns.store(deadline, Ordering::Relaxed);
-        }
+        let _ = set_task_wake_deadline(id, deadline);
         deadline
     } else {
         0
@@ -279,9 +280,7 @@ pub fn sys_futex_wait(_addr: u64, _val: u32, _timeout_ns: u64) -> Result<u64, Sy
         let mut waiters = queue.waiters.lock();
         let cur = read_u32(addr)?;
         if cur != val {
-            if let Some(task) = crate::process::get_task_by_id(id) {
-                task.wake_deadline_ns.store(0, Ordering::Relaxed);
-            }
+            let _ = clear_task_wake_deadline(id);
             return Err(SyscallError::Again);
         }
         waiters.push_back(id);
@@ -292,9 +291,7 @@ pub fn sys_futex_wait(_addr: u64, _val: u32, _timeout_ns: u64) -> Result<u64, Sy
     queue.remove_waiter(id);
     try_gc_queue(addr, &queue);
 
-    if let Some(task) = crate::process::get_task_by_id(id) {
-        task.wake_deadline_ns.store(0, Ordering::Relaxed);
-    }
+    let _ = clear_task_wake_deadline(id);
     if timeout_ns != 0 && saved_deadline != 0 {
         let now = crate::syscall::time::current_time_ns();
         if now >= saved_deadline {

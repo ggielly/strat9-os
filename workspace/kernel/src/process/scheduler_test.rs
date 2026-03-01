@@ -3,8 +3,9 @@
 //! runs only in test iso (`feature = "selftest"`).
 
 use crate::process::{
-    add_task, get_task_by_id, kill_task, log_scheduler_state, scheduler::ticks,
-    set_scheduler_verbose, set_task_sched_policy, Task, TaskId, TaskPriority,
+    add_task, configure_class_table, get_task_by_id, kill_task, log_scheduler_state,
+    scheduler::ticks, scheduler_class_table, set_scheduler_verbose, set_task_sched_policy, Task,
+    TaskId, TaskPriority,
 };
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -12,6 +13,7 @@ static RT_HITS: AtomicU64 = AtomicU64::new(0);
 static FAIR_HITS: AtomicU64 = AtomicU64::new(0);
 static SWITCH_WORKER_HITS: AtomicU64 = AtomicU64::new(0);
 static SWITCH_WORKER_DONE: AtomicBool = AtomicBool::new(false);
+static MIGRATION_READY_HITS: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 fn sched_test_log(msg: core::fmt::Arguments<'_>) {
@@ -63,6 +65,11 @@ extern "C" fn switch_probe_main() -> ! {
         SWITCH_WORKER_HITS.fetch_add(1, Ordering::Relaxed);
         crate::process::yield_task();
     }
+    crate::process::scheduler::exit_current_task(0);
+}
+
+extern "C" fn migration_ready_probe_main() -> ! {
+    MIGRATION_READY_HITS.fetch_add(1, Ordering::Relaxed);
     crate::process::scheduler::exit_current_task(0);
 }
 
@@ -141,6 +148,61 @@ fn test_dynamic_policy_switch() -> bool {
     done && SWITCH_WORKER_HITS.load(Ordering::Relaxed) > 0
 }
 
+fn test_config_validation_reject() -> bool {
+    let mut t1 = scheduler_class_table();
+    let bad_pick = t1.set_pick_order([
+        crate::process::sched::SchedClassId::RealTime,
+        crate::process::sched::SchedClassId::RealTime,
+        crate::process::sched::SchedClassId::Idle,
+    ]);
+
+    let mut t2 = scheduler_class_table();
+    let bad_steal = t2.set_steal_order([
+        crate::process::sched::SchedClassId::Idle,
+        crate::process::sched::SchedClassId::Fair,
+    ]);
+
+    let mut t3 = scheduler_class_table();
+    let bad_policy = t3.set_policy_class(
+        crate::process::sched::SchedPolicyKind::Idle,
+        crate::process::sched::SchedClassId::Fair,
+    );
+
+    !bad_pick && !bad_steal && !bad_policy
+}
+
+fn test_ready_task_migration_on_policy_map_update() -> bool {
+    MIGRATION_READY_HITS.store(0, Ordering::Relaxed);
+    let task = match Task::new_kernel_task(
+        migration_ready_probe_main,
+        "sched-ready-migrate-probe",
+        TaskPriority::Normal,
+    ) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let id = task.id;
+    add_task(task);
+
+    let mut table = scheduler_class_table();
+    let changed = table.set_policy_class(
+        crate::process::sched::SchedPolicyKind::Fair,
+        crate::process::sched::SchedClassId::RealTime,
+    );
+    let applied = configure_class_table(table);
+    crate::process::yield_task();
+    let finished = wait_exit(id, 500);
+
+    let mut restore = scheduler_class_table();
+    let _ = restore.set_policy_class(
+        crate::process::sched::SchedPolicyKind::Fair,
+        crate::process::sched::SchedClassId::Fair,
+    );
+    let _ = configure_class_table(restore);
+
+    changed && applied && finished && MIGRATION_READY_HITS.load(Ordering::Relaxed) > 0
+}
+
 extern "C" fn scheduler_test_main() -> ! {
     sched_test_log(format_args!("event=start"));
     set_scheduler_verbose(false);
@@ -158,14 +220,26 @@ extern "C" fn scheduler_test_main() -> ! {
         if s2 { "ok" } else { "FAIL" }
     ));
 
+    let s3 = test_config_validation_reject();
+    sched_test_log(format_args!(
+        "case=config-validation-reject result={}",
+        if s3 { "ok" } else { "FAIL" }
+    ));
+
+    let s4 = test_ready_task_migration_on_policy_map_update();
+    sched_test_log(format_args!(
+        "case=ready-task-migration result={}",
+        if s4 { "ok" } else { "FAIL" }
+    ));
+
     log_scheduler_state("test-end");
     set_scheduler_verbose(false);
 
     sched_test_log(format_args!(
         "summary pass={} fail={} overall={}",
-        (s1 as u8) + (s2 as u8),
-        (!s1 as u8) + (!s2 as u8),
-        if s1 && s2 { "PASS" } else { "FAIL" }
+        (s1 as u8) + (s2 as u8) + (s3 as u8) + (s4 as u8),
+        (!s1 as u8) + (!s2 as u8) + (!s3 as u8) + (!s4 as u8),
+        if s1 && s2 && s3 && s4 { "PASS" } else { "FAIL" }
     ));
     crate::process::scheduler::exit_current_task(0);
 }

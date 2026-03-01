@@ -81,6 +81,8 @@ pub fn timer_tick() {
                 }
             }
         }
+    } else {
+        note_try_lock_fail_on_cpu(cpu_idx);
     }
 }
 
@@ -97,47 +99,34 @@ fn check_wake_deadlines(current_time_ns: u64) {
     };
 
     if let Some(ref mut sched) = *scheduler {
-        const BATCH: usize = 64;
+        const BATCH: usize = 128;
         let mut to_wake = [TaskId::from_u64(0); BATCH];
-
-        loop {
-            let mut count = 0;
-            for (id, task) in sched.all_tasks.iter() {
-                let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
-                if deadline != 0 && current_time_ns >= deadline {
-                    if count < BATCH {
-                        to_wake[count] = *id;
-                        count += 1;
-                    } else {
-                        break;
-                    }
+        let mut count = 0usize;
+        for (id, task) in sched.blocked_tasks.iter() {
+            let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
+            if deadline != 0 && current_time_ns >= deadline {
+                if count < BATCH {
+                    to_wake[count] = *id;
+                    count += 1;
+                } else {
+                    break;
                 }
             }
+        }
 
-            if count == 0 {
-                break;
-            }
-
-            for id in to_wake.iter().copied().take(count) {
-                if let Some(task) = sched.all_tasks.get(&id) {
-                    task.wake_deadline_ns.store(0, Ordering::Relaxed);
-                    if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
-                        unsafe { *blocked_task.state.get() = TaskState::Ready };
-                        let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
-                        let class = sched.class_table.class_for_task(&blocked_task);
-                        if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
-                            cpu_sched.class_rqs.enqueue(class, blocked_task);
-                            cpu_sched.need_resched = true;
-                            if cpu != my_cpu && cpu_is_valid(cpu) {
-                                ipi_targets[cpu] = true;
-                            }
-                        }
+        for id in to_wake.iter().copied().take(count) {
+            if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
+                blocked_task.wake_deadline_ns.store(0, Ordering::Relaxed);
+                unsafe { *blocked_task.state.get() = TaskState::Ready };
+                let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
+                let class = sched.class_table.class_for_task(&blocked_task);
+                if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
+                    cpu_sched.class_rqs.enqueue(class, blocked_task);
+                    cpu_sched.need_resched = true;
+                    if cpu != my_cpu && cpu_is_valid(cpu) {
+                        ipi_targets[cpu] = true;
                     }
                 }
-            }
-
-            if count < BATCH {
-                break;
             }
         }
     }
@@ -159,7 +148,13 @@ pub fn ticks() -> u64 {
 /// Returns None if scheduler is not initialized or currently locked.
 pub fn get_all_tasks() -> Option<alloc::vec::Vec<Arc<Task>>> {
     use alloc::vec::Vec;
-    let scheduler = SCHEDULER.try_lock()?;
+    let scheduler = match SCHEDULER.try_lock() {
+        Some(guard) => guard,
+        None => {
+            note_try_lock_fail();
+            return None;
+        }
+    };
     if let Some(ref sched) = *scheduler {
         let mut tasks = Vec::with_capacity(sched.all_tasks.len());
         for (_, task) in sched.all_tasks.iter() {

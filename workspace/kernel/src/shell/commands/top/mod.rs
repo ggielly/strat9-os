@@ -50,6 +50,7 @@ struct TopSnapshot {
     tasks: Vec<TaskRowData>,
     silos: Vec<SiloRowData>,
     strates: Vec<StrateRowData>,
+    scheduler: crate::process::SchedulerStateSnapshot,
 }
 
 #[derive(Clone, Copy)]
@@ -153,6 +154,7 @@ fn collect_snapshot() -> TopSnapshot {
         tasks,
         silos,
         strates,
+        scheduler: crate::process::scheduler_state_snapshot(),
     }
 }
 
@@ -235,6 +237,55 @@ fn compute_scheduler_metrics_window(
         steal_in_delta,
         steal_out_delta,
     }
+}
+
+fn scheduler_runtime_lines(
+    s: &crate::process::SchedulerStateSnapshot,
+    w: &SchedulerMetricsWindow,
+) -> (String, String, String) {
+    let line1 = format!(
+        "Win: RT {:>3}% | FAIR {:>3}% | IDLE {:>3}% | sw {} | pre {} | st+ {} | st- {}",
+        (w.rt_ratio * 100.0) as u16,
+        (w.fair_ratio * 100.0) as u16,
+        (w.idle_ratio * 100.0) as u16,
+        w.switch_delta,
+        w.preempt_delta,
+        w.steal_in_delta,
+        w.steal_out_delta
+    );
+    let line2 = format!(
+        "Cfg: init={} blocked={} pick=[{},{},{}] steal=[{},{}]",
+        s.initialized,
+        s.blocked_tasks,
+        s.pick_order[0].as_str(),
+        s.pick_order[1].as_str(),
+        s.pick_order[2].as_str(),
+        s.steal_order[0].as_str(),
+        s.steal_order[1].as_str()
+    );
+    let cpu_count = s.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS);
+    let line3 = if cpu_count == 0 {
+        String::from("CPU: n/a")
+    } else {
+        let c0 = format!(
+            "cpu0 cur={} rq={}/{}/{} nr={}",
+            s.current_task[0], s.rq_rt[0], s.rq_fair[0], s.rq_idle[0], s.need_resched[0]
+        );
+        if cpu_count == 1 {
+            format!("CPU: {}", c0)
+        } else {
+            let c1 = format!(
+                "cpu1 cur={} rq={}/{}/{} nr={}",
+                s.current_task[1],
+                s.rq_rt[1],
+                s.rq_fair[1],
+                s.rq_idle[1],
+                s.need_resched[1]
+            );
+            format!("CPU: {} | {}", c0, c1)
+        }
+    };
+    (line1, line2, line3)
 }
 
 /// Top command main loop
@@ -333,9 +384,9 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                     .constraints([
                         Constraint::Length(2),
                         Constraint::Length(3),
-                        Constraint::Length(3),
+                        Constraint::Length(5),
                         Constraint::Length(6),
-                        Constraint::Min(10),
+                        Constraint::Min(8),
                         Constraint::Length(1),
                     ])
                     .split(area);
@@ -358,15 +409,11 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                 .block(Block::default().borders(Borders::BOTTOM).title("Stats"));
                 frame.render_widget(stats_line, vertical[1]);
 
+                let (sched_line1, sched_line2, sched_line3) =
+                    scheduler_runtime_lines(&snapshot.scheduler, &sched_window);
                 let sched_line = Paragraph::new(format!(
-                    "Sched(win): RT {:>3}% | FAIR {:>3}% | IDLE {:>3}% | sw {} | pre {} | st+ {} | st- {}",
-                    (sched_window.rt_ratio * 100.0) as u16,
-                    (sched_window.fair_ratio * 100.0) as u16,
-                    (sched_window.idle_ratio * 100.0) as u16,
-                    sched_window.switch_delta,
-                    sched_window.preempt_delta,
-                    sched_window.steal_in_delta,
-                    sched_window.steal_out_delta
+                    "{}\n{}\n{}",
+                    sched_line1, sched_line2, sched_line3
                 ))
                 .style(primary_text)
                 .block(Block::default().borders(Borders::BOTTOM).title("Scheduler"));

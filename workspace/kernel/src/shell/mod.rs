@@ -80,6 +80,21 @@ fn print_bytes(input: &[u8]) {
     }
 }
 
+fn move_cursor_left_chars(n: usize) {
+    for _ in 0..n {
+        print_char('\x08');
+    }
+}
+
+fn clear_visible_line(line: &[u8]) {
+    let n = char_count(line);
+    move_cursor_left_chars(n);
+    for _ in 0..n {
+        print_char(' ');
+    }
+    move_cursor_left_chars(n);
+}
+
 /// Redraw the current shell input line after the prompt
 fn redraw_line(input: &[u8], cursor_pos: usize) {
     print_bytes(input);
@@ -103,6 +118,18 @@ fn redraw_line(input: &[u8], cursor_pos: usize) {
     };
     for _ in 0..back_moves {
         print_char('\x08');
+    }
+}
+
+fn redraw_full_line(input: &[u8], cursor_pos: usize) {
+    clear_visible_line(input);
+    print_bytes(input);
+    if cursor_pos <= input.len() {
+        if let Ok(sfx) = core::str::from_utf8(&input[cursor_pos..]) {
+            move_cursor_left_chars(sfx.chars().count());
+        } else {
+            move_cursor_left_chars(input.len().saturating_sub(cursor_pos));
+        }
     }
 }
 
@@ -131,6 +158,50 @@ fn insert_bytes_at_cursor(
     true
 }
 
+fn delete_prev_char_at_cursor(
+    input_buf: &mut [u8],
+    input_len: &mut usize,
+    cursor_pos: &mut usize,
+) -> bool {
+    if *cursor_pos == 0 {
+        return false;
+    }
+
+    let prev = prev_char_boundary(&input_buf[..*input_len], *cursor_pos);
+    let removed = *cursor_pos - prev;
+    for i in *cursor_pos..*input_len {
+        input_buf[i - removed] = input_buf[i];
+    }
+    *input_len -= removed;
+    *cursor_pos = prev;
+
+    // Backspace behavior: visual cursor moves left by one character first.
+    move_cursor_left_chars(1);
+    redraw_line(&input_buf[*cursor_pos..*input_len], 0);
+    true
+}
+
+fn delete_next_char_at_cursor(
+    input_buf: &mut [u8],
+    input_len: &mut usize,
+    cursor_pos: &mut usize,
+) -> bool {
+    if *cursor_pos >= *input_len {
+        return false;
+    }
+
+    let next = next_char_boundary(&input_buf[..*input_len], *cursor_pos);
+    let removed = next - *cursor_pos;
+    for i in next..*input_len {
+        input_buf[i - removed] = input_buf[i];
+    }
+    *input_len -= removed;
+
+    // Delete behavior: cursor stays at the same logical position.
+    redraw_line(&input_buf[*cursor_pos..*input_len], 0);
+    true
+}
+
 /// Main shell loop
 ///
 /// This function never returns. It continuously reads keyboard input,
@@ -147,25 +218,31 @@ pub extern "C" fn shell_main() -> ! {
     let mut current_input_saved = String::new();
     let mut utf8_pending = [0u8; 4];
     let mut utf8_pending_len = 0usize;
+    let mut in_escape_seq = false;
 
     // Mouse state
     let mut prev_left = false;
     let mut selecting = false;
+    let mut scrollbar_dragging = false;
+    let mut last_scrollbar_drag_tick = 0u64;
+    let mut pending_scrollbar_drag_y: Option<usize> = None;
     let mut mouse_x: i32 = 0;
     let mut mouse_y: i32 = 0;
 
-    // Display welcome message using Unicode box-drawing characters
+    // Display welcome message using ASCII for robust terminal rendering.
     shell_println!("");
-    shell_println!("┌──────────────────────────────────────────────────────────────┐");
-    shell_println!("│         Strat9-OS chevron shell v0.1.0 (Bedrock)             │");
-    shell_println!("│         Type 'help' for available commands                   │");
-    shell_println!("└──────────────────────────────────────────────────────────────┘");
+    shell_println!("+--------------------------------------------------------------+");
+    shell_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)            |");
+    shell_println!("|         Type 'help' for available commands                  |");
+    shell_println!("+--------------------------------------------------------------+");
     shell_println!("");
 
     print_prompt();
 
     let mut last_blink_tick = 0;
     let mut cursor_visible = false;
+    const MAX_MOUSE_EVENTS_PER_TURN: usize = 64;
+    const SCROLLBAR_DRAG_MIN_TICKS: u64 = 1;
 
     loop {
         // Handle cursor blinking (graphics only)
@@ -201,6 +278,7 @@ pub extern "C" fn shell_main() -> ! {
 
             match ch {
                 b'\r' | b'\n' => {
+                    in_escape_seq = false;
                     utf8_pending_len = 0;
                     shell_println!();
 
@@ -241,20 +319,26 @@ pub extern "C" fn shell_main() -> ! {
                     print_prompt();
                 }
                 b'\x08' | b'\x7f' => {
+                    in_escape_seq = false;
                     utf8_pending_len = 0;
-                    if cursor_pos > 0 {
-                        let prev = prev_char_boundary(&input_buf[..input_len], cursor_pos);
-                        let removed = cursor_pos - prev;
-                        print_char('\x08');
-                        for i in cursor_pos..input_len {
-                            input_buf[i - removed] = input_buf[i];
-                        }
-                        input_len -= removed;
-                        cursor_pos = prev;
-                        redraw_line(&input_buf[cursor_pos..input_len], 0);
-                    }
+                    let _ = delete_prev_char_at_cursor(
+                        &mut input_buf,
+                        &mut input_len,
+                        &mut cursor_pos,
+                    );
+                }
+                b'\x04' => {
+                    // Ctrl+D: forward-delete one character at cursor.
+                    in_escape_seq = false;
+                    utf8_pending_len = 0;
+                    let _ = delete_next_char_at_cursor(
+                        &mut input_buf,
+                        &mut input_len,
+                        &mut cursor_pos,
+                    );
                 }
                 KEY_LEFT => {
+                    in_escape_seq = false;
                     utf8_pending_len = 0;
                     if cursor_pos > 0 {
                         cursor_pos = prev_char_boundary(&input_buf[..input_len], cursor_pos);
@@ -262,6 +346,7 @@ pub extern "C" fn shell_main() -> ! {
                     }
                 }
                 KEY_RIGHT => {
+                    in_escape_seq = false;
                     utf8_pending_len = 0;
                     if cursor_pos < input_len {
                         let next = next_char_boundary(&input_buf[..input_len], cursor_pos);
@@ -270,6 +355,7 @@ pub extern "C" fn shell_main() -> ! {
                     }
                 }
                 KEY_HOME => {
+                    in_escape_seq = false;
                     utf8_pending_len = 0;
                     while cursor_pos > 0 {
                         cursor_pos = prev_char_boundary(&input_buf[..input_len], cursor_pos);
@@ -277,6 +363,7 @@ pub extern "C" fn shell_main() -> ! {
                     }
                 }
                 KEY_END => {
+                    in_escape_seq = false;
                     utf8_pending_len = 0;
                     while cursor_pos < input_len {
                         let next = next_char_boundary(&input_buf[..input_len], cursor_pos);
@@ -285,6 +372,7 @@ pub extern "C" fn shell_main() -> ! {
                     }
                 }
                 KEY_UP => {
+                    in_escape_seq = false;
                     utf8_pending_len = 0;
                     if !history.is_empty() && history_idx < (history.len() as isize - 1) {
                         if history_idx == -1 {
@@ -298,11 +386,7 @@ pub extern "C" fn shell_main() -> ! {
                             print_bytes(&input_buf[cursor_pos..next]);
                             cursor_pos = next;
                         }
-                        for _ in 0..char_count(&input_buf[..input_len]) {
-                            print_char('\x08');
-                            print_char(' ');
-                            print_char('\x08');
-                        }
+                        clear_visible_line(&input_buf[..input_len]);
 
                         history_idx += 1;
                         let hist_str = &history[history.len() - 1 - history_idx as usize];
@@ -312,10 +396,11 @@ pub extern "C" fn shell_main() -> ! {
                         input_len = copy_len;
                         cursor_pos = input_len;
 
-                        print_bytes(&input_buf[..input_len]);
+                        redraw_full_line(&input_buf[..input_len], cursor_pos);
                     }
                 }
                 KEY_DOWN => {
+                    in_escape_seq = false;
                     utf8_pending_len = 0;
                     if history_idx >= 0 {
                         while cursor_pos < input_len {
@@ -323,11 +408,7 @@ pub extern "C" fn shell_main() -> ! {
                             print_bytes(&input_buf[cursor_pos..next]);
                             cursor_pos = next;
                         }
-                        for _ in 0..char_count(&input_buf[..input_len]) {
-                            print_char('\x08');
-                            print_char(' ');
-                            print_char('\x08');
-                        }
+                        clear_visible_line(&input_buf[..input_len]);
 
                         history_idx -= 1;
                         if history_idx == -1 {
@@ -344,10 +425,24 @@ pub extern "C" fn shell_main() -> ! {
                         }
                         cursor_pos = input_len;
 
-                        print_bytes(&input_buf[..input_len]);
+                        redraw_full_line(&input_buf[..input_len], cursor_pos);
+                    }
+                }
+                b'\x1b' => {
+                    utf8_pending_len = 0;
+                    in_escape_seq = true;
+                }
+                _ if in_escape_seq => {
+                    if (0x40..=0x7E).contains(&ch) {
+                        in_escape_seq = false;
+                    } else if ch == b'[' || ch == b';' || ch == b'?' || ch.is_ascii_digit() {
+                        // stay in escape sequence
+                    } else {
+                        in_escape_seq = false;
                     }
                 }
                 _ if ch >= 0x20 => {
+                    in_escape_seq = false;
                     if ch < 0x80 {
                         utf8_pending_len = 0;
                         if insert_bytes_at_cursor(
@@ -385,6 +480,7 @@ pub extern "C" fn shell_main() -> ! {
                     }
                 }
                 _ => {
+                    in_escape_seq = false;
                     utf8_pending_len = 0;
                 }
             }
@@ -399,6 +495,7 @@ pub extern "C" fn shell_main() -> ! {
                 let mut left_held = false;
                 let mut had_events = false;
 
+                let mut mouse_events_seen = 0usize;
                 while let Some(ev) = crate::arch::x86_64::mouse::read_event() {
                     had_events = true;
                     scroll_delta += ev.dz as i32;
@@ -412,6 +509,13 @@ pub extern "C" fn shell_main() -> ! {
                         left_held = true;
                     }
                     prev_left = ev.left;
+                    mouse_events_seen += 1;
+                    if mouse_events_seen >= MAX_MOUSE_EVENTS_PER_TURN {
+                        // Prevent monopolizing the CPU under heavy mouse input
+                        // (e.g. rapid drag on scrollbar). Remaining events are
+                        // processed on next loop iteration after yield_task().
+                        break;
+                    }
                 }
 
                 if had_events || left_held {
@@ -434,18 +538,38 @@ pub extern "C" fn shell_main() -> ! {
                                 crate::arch::x86_64::vga::scrollbar_click(mx, my);
                                 crate::arch::x86_64::vga::clear_selection();
                                 selecting = false;
+                                scrollbar_dragging = true;
                             } else {
                                 crate::arch::x86_64::vga::start_selection(mx, my);
                                 selecting = true;
+                                scrollbar_dragging = false;
+                            }
+                        } else if left_held && scrollbar_dragging && moved {
+                            pending_scrollbar_drag_y = Some(new_my as usize);
+                            if ticks.saturating_sub(last_scrollbar_drag_tick)
+                                >= SCROLLBAR_DRAG_MIN_TICKS
+                            {
+                                if let Some(py) = pending_scrollbar_drag_y.take() {
+                                    crate::arch::x86_64::vga::scrollbar_drag_to(py);
+                                    last_scrollbar_drag_tick = ticks;
+                                }
                             }
                         } else if left_held && selecting && moved {
                             crate::arch::x86_64::vga::update_selection(
                                 new_mx as usize,
                                 new_my as usize,
                             );
-                        } else if left_released && selecting {
-                            crate::arch::x86_64::vga::end_selection();
-                            selecting = false;
+                        } else if left_released {
+                            if selecting {
+                                crate::arch::x86_64::vga::end_selection();
+                                selecting = false;
+                            }
+                            if scrollbar_dragging {
+                                if let Some(py) = pending_scrollbar_drag_y.take() {
+                                    crate::arch::x86_64::vga::scrollbar_drag_to(py);
+                                }
+                            }
+                            scrollbar_dragging = false;
                         }
 
                         if moved {

@@ -115,8 +115,10 @@ pub fn finish_switch() {
     {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
-            task_to_requeue = sched.cpus[cpu_index].task_to_requeue.take();
-            task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
+            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                task_to_requeue = cpu.task_to_requeue.take();
+                task_to_drop = cpu.task_to_drop.take();
+            }
         }
     }
 
@@ -128,7 +130,9 @@ pub fn finish_switch() {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
             let class = sched.class_table.class_for_task(&task);
-            sched.cpus[cpu_index].class_rqs.enqueue(class, task);
+            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                cpu.class_rqs.enqueue(class, task);
+            }
         }
     }
 
@@ -172,7 +176,11 @@ pub fn yield_task() {
     let switch_target = {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
-            sched.yield_cpu(cpu_index)
+            if cpu_index < sched.cpus.len() {
+                sched.yield_cpu(cpu_index)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -224,7 +232,10 @@ pub fn maybe_preempt() {
     let switch_target = {
         let mut scheduler = match SCHEDULER.try_lock() {
             Some(guard) => guard,
-            None => return, // Lock contended, skip this tick
+            None => {
+                note_try_lock_fail_on_cpu(cpu_index);
+                return;
+            } // Lock contended, skip this tick
         };
 
         if let Some(ref mut sched) = *scheduler {
@@ -380,6 +391,60 @@ pub fn log_state(label: &str) {
     }
     drop(scheduler);
     restore_flags(saved_flags);
+}
+
+/// Structured scheduler state snapshot for shell/top/debug tooling.
+pub fn state_snapshot() -> SchedulerStateSnapshot {
+    let mut out = SchedulerStateSnapshot {
+        initialized: false,
+        cpu_count: 0,
+        pick_order: [
+            crate::process::sched::SchedClassId::RealTime,
+            crate::process::sched::SchedClassId::Fair,
+            crate::process::sched::SchedClassId::Idle,
+        ],
+        steal_order: [
+            crate::process::sched::SchedClassId::Fair,
+            crate::process::sched::SchedClassId::RealTime,
+        ],
+        blocked_tasks: 0,
+        current_task: [u64::MAX; crate::arch::x86_64::percpu::MAX_CPUS],
+        rq_rt: [0; crate::arch::x86_64::percpu::MAX_CPUS],
+        rq_fair: [0; crate::arch::x86_64::percpu::MAX_CPUS],
+        rq_idle: [0; crate::arch::x86_64::percpu::MAX_CPUS],
+        need_resched: [false; crate::arch::x86_64::percpu::MAX_CPUS],
+    };
+
+    let saved_flags = save_flags_and_cli();
+    {
+        let scheduler = SCHEDULER.lock();
+        if let Some(ref sched) = *scheduler {
+            use crate::process::sched::SchedClassRq;
+            let cpu_count = sched
+                .cpus
+                .len()
+                .min(crate::arch::x86_64::percpu::MAX_CPUS);
+            out.initialized = true;
+            out.cpu_count = cpu_count;
+            out.pick_order = *sched.class_table.pick_order();
+            out.steal_order = *sched.class_table.steal_order();
+            out.blocked_tasks = sched.blocked_tasks.len();
+            for i in 0..cpu_count {
+                let cpu = &sched.cpus[i];
+                out.current_task[i] = cpu
+                    .current_task
+                    .as_ref()
+                    .map(|t| t.id.as_u64())
+                    .unwrap_or(u64::MAX);
+                out.rq_rt[i] = cpu.class_rqs.real_time.len();
+                out.rq_fair[i] = cpu.class_rqs.fair.len();
+                out.rq_idle[i] = cpu.class_rqs.idle.len();
+                out.need_resched[i] = cpu.need_resched;
+            }
+        }
+    }
+    restore_flags(saved_flags);
+    out
 }
 
 /// The main function for the idle task

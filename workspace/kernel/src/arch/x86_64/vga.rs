@@ -2322,6 +2322,31 @@ impl VgaWriter {
         self.redraw_from_scrollback();
     }
 
+    /// Drag the scrollbar thumb to vertical pixel `px_y`.
+    ///
+    /// Unlike `scrollbar_click`, this only depends on Y and is intended for
+    /// click-and-drag interactions where the pointer may slightly leave the
+    /// scrollbar strip horizontally.
+    pub fn scrollbar_drag_to(&mut self, px_y: usize) {
+        if !self.enabled {
+            return;
+        }
+        let text_h = self.text_area_height();
+        if text_h <= 1 {
+            return;
+        }
+        let total = self.sb_rows.len() + 1;
+        let max_off = total.saturating_sub(self.rows);
+        if max_off == 0 {
+            return;
+        }
+        // py = 0 -> top = oldest = max_offset; py = text_h - 1 -> bottom = 0
+        let py = px_y.min(text_h - 1);
+        let offset = max_off * (text_h - 1 - py) / (text_h - 1);
+        self.scroll_offset = offset.min(max_off);
+        self.redraw_from_scrollback();
+    }
+
     /// Returns `true` if the pixel coordinates fall within the scrollbar strip.
     pub fn scrollbar_hit_test(&self, px_x: usize, px_y: usize) -> bool {
         if !self.enabled {
@@ -3595,6 +3620,16 @@ pub fn scrollbar_click(px_x: usize, px_y: usize) {
     }
     if let Some(mut w) = VGA_WRITER.try_lock() {
         w.scrollbar_click(px_x, px_y);
+    }
+}
+
+/// Drag the scrollbar to a given Y pixel coordinate.
+pub fn scrollbar_drag_to(px_y: usize) {
+    if !is_available() {
+        return;
+    }
+    if let Some(mut w) = VGA_WRITER.try_lock() {
+        w.scrollbar_drag_to(px_y);
     }
 }
 
