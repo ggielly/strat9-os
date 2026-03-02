@@ -874,6 +874,7 @@ args = [
 
 description = "Create bootable ISO/IMG with Limine + kernel"
 dependencies = [
+    "build-relibc",
     "setup-limine",
     "kernel",
     "strate-ext4",
@@ -899,6 +900,7 @@ bash tools/scripts/create-limine-image.sh
 
 description = "Create bootable ISO/IMG with Limine + kernel (self-tests enabled)"
 dependencies = [
+    "build-relibc",
     "setup-limine",
     "kernel-test",
     "strate-ext4",
@@ -926,6 +928,7 @@ bash tools/scripts/create-limine-image.sh
 
 description = "Create bootable ISO/IMG with Limine + kernel (dev-opt profile)"
 dependencies = [
+    "build-relibc",
     "setup-limine",
     "kernel-dev-opt",
     "strate-ext4-dev-opt",
@@ -951,6 +954,7 @@ bash tools/scripts/create-limine-image.sh
 
 description = "Create bootable ISO/IMG with Limine + kernel (release profile)"
 dependencies = [
+    "build-relibc",
     "setup-limine",
     "kernel-release",
     "strate-ext4-release",

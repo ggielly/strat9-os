@@ -2,8 +2,8 @@
 // Reference: AMD PCnet-PCI II Data Sheet
 
 use crate::{
-    arch::x86_64::pci::{self, Bar, ProbeCriteria},
     hardware::nic::NetworkDevice,
+    hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_dma_frame, phys_to_virt},
 };
 use alloc::sync::Arc;

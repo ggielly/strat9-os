@@ -23,7 +23,7 @@
 //!   - `PORT_WQ[n]`         — WaitQueue; issuing task blocks here
 
 use crate::{
-    arch::x86_64::pci::{self, ProbeCriteria},
+    hardware::pci_client::{self as pci, ProbeCriteria},
     memory::{buddy::get_allocator, phys_to_virt, FrameAllocator, PhysFrame},
     sync::{SpinLock, WaitQueue},
 };

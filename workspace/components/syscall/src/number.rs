@@ -38,6 +38,9 @@ pub const SYS_SEM_WAIT: usize = 231;
 pub const SYS_SEM_TRYWAIT: usize = 232;
 pub const SYS_SEM_POST: usize = 233;
 pub const SYS_SEM_CLOSE: usize = 234;
+pub const SYS_PCI_ENUM: usize = 240;
+pub const SYS_PCI_CFG_READ: usize = 241;
+pub const SYS_PCI_CFG_WRITE: usize = 242;
 
 // Block 300-399: process / thread
 pub const SYS_PROC_EXIT: usize = 300;
@@ -86,6 +89,7 @@ pub const SYS_SETGID: usize = 340;
 pub const SYS_THREAD_CREATE: usize = 341;
 pub const SYS_THREAD_JOIN: usize = 342;
 pub const SYS_THREAD_EXIT: usize = 343;
+pub const SYS_UNAME: usize = 344;
 pub const SYS_ARCH_PRCTL: usize = 350;
 pub const SYS_TGKILL: usize = 352;
 pub const SYS_RT_SIGRETURN: usize = 353;

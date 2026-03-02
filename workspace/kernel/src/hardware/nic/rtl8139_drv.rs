@@ -2,8 +2,8 @@
 // Reference: RTL8139/RTL8100 Series Data Sheet
 
 use crate::{
-    arch::x86_64::pci::{self, Bar, ProbeCriteria},
     hardware::nic::NetworkDevice,
+    hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_dma_frame, phys_to_virt},
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};

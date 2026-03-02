@@ -1,6 +1,6 @@
 use super::register_device;
 use crate::{
-    arch::x86_64::pci::{self, Bar},
+    hardware::pci_client::{self as pci, Bar},
     memory::{self, get_allocator, FrameAllocator},
     sync::SpinLock,
 };

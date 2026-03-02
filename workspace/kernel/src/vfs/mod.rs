@@ -824,7 +824,7 @@ fn get_pipe_scheme() -> Arc<PipeScheme> {
 fn build_pci_inventory_text() -> String {
     #[cfg(target_arch = "x86_64")]
     {
-        let devices = crate::arch::x86_64::pci::all_devices();
+        let devices = crate::hardware::pci_client::all_devices();
         let mut out = String::new();
         out.push_str("bus dev fn vendor device class subclass prog_if irq\n");
         for dev in devices.iter() {
