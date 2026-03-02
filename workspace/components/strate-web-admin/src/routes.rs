@@ -1,8 +1,16 @@
 use alloc::string::String;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use picoserve::extract::FromRequestParts;
+use picoserve::request::RequestParts;
 use picoserve::response::Response;
-use picoserve::routing::{get, parse_path_segment};
+use picoserve::routing::{get, parse_path_segment, post};
 
-use crate::sysinfo;
+use crate::{net, sysinfo};
+const ADMIN_TOKEN_PATH: &str = "/initfs/web-admin.token";
+const KILL_RATE_LIMIT_WINDOW_NS: u64 = 10_000_000_000;
+const KILL_RATE_LIMIT_MAX_PER_WINDOW: u32 = 8;
+static KILL_WINDOW_START_NS: AtomicU64 = AtomicU64::new(0);
+static KILL_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
 // Content types for picoserve responses
@@ -44,6 +52,64 @@ fn json_ok(
     body: String,
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     Response::ok(JsonContent(body)).with_header("Access-Control-Allow-Origin", "*")
+}
+
+fn json_admin(
+    body: String,
+) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
+    Response::ok(JsonContent(body))
+}
+
+fn admin_token() -> String {
+    let token = net::read_file_text(ADMIN_TOKEN_PATH);
+    let trimmed = token.trim();
+    String::from(trimmed)
+}
+
+fn allow_kill_now() -> bool {
+    let now = net::clock_gettime_ns();
+    let start = KILL_WINDOW_START_NS.load(Ordering::Relaxed);
+    if now.saturating_sub(start) > KILL_RATE_LIMIT_WINDOW_NS {
+        KILL_WINDOW_START_NS.store(now, Ordering::Relaxed);
+        KILL_WINDOW_COUNT.store(0, Ordering::Relaxed);
+    }
+    let prev = KILL_WINDOW_COUNT.fetch_add(1, Ordering::Relaxed);
+    prev < KILL_RATE_LIMIT_MAX_PER_WINDOW
+}
+
+struct AdminAuth;
+
+impl<'r, State> FromRequestParts<'r, State> for AdminAuth {
+    type Rejection = String;
+
+    async fn from_request_parts(
+        _state: &'r State,
+        request_parts: &RequestParts<'r>,
+    ) -> Result<Self, Self::Rejection> {
+        let expected = admin_token();
+        if expected.is_empty() {
+            return Err(String::from(
+                r#"{"killed":false,"error":"admin token not configured"}"#,
+            ));
+        }
+        let provided = request_parts
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.as_str().ok())
+            .unwrap_or("");
+        let ok = if let Some(bearer) = provided.strip_prefix("Bearer ") {
+            bearer == expected
+        } else {
+            provided == expected
+        };
+        if ok {
+            Ok(Self)
+        } else {
+            Err(String::from(
+                r#"{"killed":false,"error":"unauthorized"}"#,
+            ))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -107,8 +173,14 @@ async fn api_all(
 
 async fn api_kill(
     pid: u32,
+    _auth: AdminAuth,
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
-    json_ok(sysinfo::json_kill_result(pid))
+    if !allow_kill_now() {
+        return json_admin(String::from(
+            r#"{"killed":false,"error":"rate limit"}"#,
+        ));
+    }
+    json_admin(sysinfo::json_kill_result(pid))
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +202,7 @@ pub fn build_router() -> picoserve::Router<impl picoserve::routing::PathRouter> 
         .route("/api/all", get(api_all))
         .route(
             ("/api/kill", parse_path_segment::<u32>()),
-            get(|pid| async move { api_kill(pid).await }),
+            post(|pid, auth| async move { api_kill(pid, auth).await }),
         )
 }
 
@@ -305,7 +377,13 @@ function esc(s){const d=document.createElement('div');d.textContent=s;return d.i
 
 async function killProc(pid){
   if(!confirm('Kill process '+pid+'?'))return;
-  const r=await api('/api/kill/'+pid);
+  const token=prompt('Admin token required')||'';
+  if(!token){toast('Kill cancelled');return;}
+  let r=null;
+  try{
+    const resp=await fetch('/api/kill/'+pid,{method:'POST',headers:{'Authorization':'Bearer '+token}});
+    if(resp.ok)r=await resp.json();
+  }catch(e){}
   if(r&&r.killed)toast('Process '+pid+' killed');
   else toast('Kill failed: '+(r?r.error:'no response'));
   setTimeout(refresh,500);

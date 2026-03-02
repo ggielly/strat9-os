@@ -1,9 +1,20 @@
 use core::future::Future;
+use core::pin::pin;
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use strat9_syscall::call;
 
 const EAGAIN: usize = 11;
 
 pub struct Strat9Runtime;
+
+fn noop_raw_waker() -> RawWaker {
+    fn noop(_: *const ()) {}
+    fn clone(_: *const ()) -> RawWaker {
+        noop_raw_waker()
+    }
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+    RawWaker::new(core::ptr::null(), &VTABLE)
+}
 
 // ---------------------------------------------------------------------------
 // Error type compatible with embedded-io
@@ -48,10 +59,15 @@ impl embedded_io_async::ErrorType for TcpWriteHalf {
 
 impl embedded_io_async::Read for TcpReadHalf {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+        let mut eagain_spins = 0usize;
         loop {
             match call::read(self.fd, buf) {
                 Ok(n) => return Ok(n),
                 Err(e) if e.to_errno() == EAGAIN => {
+                    eagain_spins = eagain_spins.saturating_add(1);
+                    if eagain_spins % 32 == 0 {
+                        crate::net::sleep_ms(1);
+                    }
                     let _ = call::sched_yield();
                     continue;
                 }
@@ -63,10 +79,15 @@ impl embedded_io_async::Read for TcpReadHalf {
 
 impl embedded_io_async::Write for TcpWriteHalf {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, IoError> {
+        let mut eagain_spins = 0usize;
         loop {
             match call::write(self.fd, buf) {
                 Ok(n) => return Ok(n),
                 Err(e) if e.to_errno() == EAGAIN => {
+                    eagain_spins = eagain_spins.saturating_add(1);
+                    if eagain_spins % 32 == 0 {
+                        crate::net::sleep_ms(1);
+                    }
                     let _ = call::sched_yield();
                     continue;
                 }
@@ -135,10 +156,28 @@ impl picoserve::time::Timer<Strat9Runtime> for Strat9Timer {
 
     async fn run_with_timeout<F: Future>(
         &self,
-        _duration: picoserve::time::Duration,
+        duration: picoserve::time::Duration,
         future: F,
     ) -> Result<F::Output, picoserve::time::TimeoutError> {
-        Ok(future.await)
+        let timeout_ns = duration.as_millis().saturating_mul(1_000_000);
+        let start = crate::net::clock_gettime_ns();
+        let deadline = start.saturating_add(timeout_ns);
+        let mut fut = pin!(future);
+
+        // SAFETY: no-op raw waker is valid for manual cooperative polling.
+        let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
+        let mut cx = Context::from_waker(&waker);
+
+        loop {
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return Ok(v),
+                Poll::Pending => {
+                    if crate::net::clock_gettime_ns() >= deadline {
+                        return Err(picoserve::time::TimeoutError);
+                    }
+                    let _ = call::sched_yield();
+                }
+            }
+        }
     }
 }
-

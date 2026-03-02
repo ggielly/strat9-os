@@ -2,7 +2,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
-use strat9_syscall::{call, flag, Dirent};
+use strat9_syscall::{call, flag};
 
 use crate::net;
 
@@ -111,7 +111,7 @@ pub fn process_list() -> Vec<ProcInfo> {
 
     let mut pids = Vec::new();
     let mut raw = [0u8; 4096];
-    let dirent_size = core::mem::size_of::<Dirent>();
+    const K_DIRENT_HDR: usize = 11; // ino(8) + type(1) + name_len(2)
 
     loop {
         let n = match call::getdents(fd, &mut raw) {
@@ -121,20 +121,20 @@ pub fn process_list() -> Vec<ProcInfo> {
         };
 
         let mut offset = 0usize;
-        while offset + dirent_size <= n {
-            // SAFETY: Dirent is repr(C), kernel packs entries correctly.
-            let entry = unsafe { &*(raw.as_ptr().add(offset) as *const Dirent) };
-            if let Ok(name_str) = core::str::from_utf8(entry.name()) {
+        while offset + K_DIRENT_HDR <= n {
+            let name_len = u16::from_le_bytes([raw[offset + 9], raw[offset + 10]]) as usize;
+            let entry_size = K_DIRENT_HDR.saturating_add(name_len).saturating_add(1);
+            if entry_size == 0 || offset + entry_size > n {
+                break;
+            }
+            let name_start = offset + K_DIRENT_HDR;
+            let name_end = name_start + name_len;
+            if let Ok(name_str) = core::str::from_utf8(&raw[name_start..name_end]) {
                 if let Ok(pid) = name_str.parse::<u32>() {
                     pids.push(pid);
                 }
             }
-            let advance = if entry.next > 0 {
-                entry.next
-            } else {
-                dirent_size
-            };
-            offset += advance;
+            offset += entry_size;
         }
     }
     let _ = call::close(fd);
@@ -158,6 +158,9 @@ pub fn uptime_secs() -> u64 {
 // ---------------------------------------------------------------------------
 
 pub fn kill_process(pid: u32) -> bool {
+    if pid <= 2 {
+        return false;
+    }
     call::kill(pid as isize, 9).is_ok()
 }
 

@@ -31,6 +31,9 @@ const USBCMD_INTE: u32 = 1 << 2;
 const USBSTS_HCH: u32 = 1 << 0;
 const USBSTS_CNR: u32 = 1 << 11;
 
+// Until full IRQ/event-ring handling is wired, keep xHCI in safe probe mode.
+const XHCI_SAFE_PROBE_ONLY: bool = true;
+
 const PORTSC_CCS: u32 = 1 << 0;
 const PORTSC_PED: u32 = 1 << 1;
 const PORTSC_PR: u32 = 1 << 4;
@@ -279,7 +282,12 @@ impl XhciController {
             if op.usbcmd & USBCMD_HCRST != 0 {
                 return Err("xHCI: controller reset timed out");
             }
+            let mut cnr_timeout = 1_000_000u32;
             while op.usbsts & USBSTS_CNR != 0 {
+                if cnr_timeout == 0 {
+                    return Err("xHCI: CNR did not clear after reset");
+                }
+                cnr_timeout -= 1;
                 core::hint::spin_loop();
             }
 
@@ -293,10 +301,17 @@ impl XhciController {
                 });
             }
 
+            if XHCI_SAFE_PROBE_ONLY {
+                op.usbcmd |= USBCMD_RUN_STOP;
+                op.usbcmd &= !USBCMD_INTE;
+                return Ok(());
+            }
+
             self.init_rings()?;
             self.init_interrupter()?;
 
-            op.usbcmd |= USBCMD_RUN_STOP | USBCMD_INTE;
+            op.usbcmd |= USBCMD_RUN_STOP;
+            op.usbcmd &= !USBCMD_INTE;
             let max_slots = (*self.cap_regs).hcsparams1 & 0xFF;
             op.config = max_slots;
 

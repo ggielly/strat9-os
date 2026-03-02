@@ -11,6 +11,11 @@ use core::{
 };
 use strat9_syscall::{call, data::IpcMessage, number};
 
+const EAGAIN: usize = 11;
+const MAX_READ_BYTES: usize = 512 * 1024;
+const MAX_READ_ITERS: usize = 4096;
+const MAX_READ_EAGAIN: usize = 256;
+
 // ---------------------------------------------------------------------------
 // GLOBAL ALLOCATOR (BUMP + BRK)
 // ---------------------------------------------------------------------------
@@ -26,7 +31,7 @@ static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::write(1, b"[init] OOM Fatal\n");
+    let _ = call::debug_log(b"[init] OOM Fatal\n");
     call::exit(12);
 }
 
@@ -91,17 +96,39 @@ fn get_family_profile(name: &str) -> &'static FamilyProfile {
 // ---------------------------------------------------------------------------
 
 fn log(msg: &str) {
-    let _ = call::write(1, msg.as_bytes());
+    let _ = call::debug_log(msg.as_bytes());
 }
 
 fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
     let fd = call::openat(0, path, 0x1, 0).map_err(|_| "open failed")?;
     let mut out = Vec::new();
     let mut chunk = [0u8; 4096];
+    let mut iters = 0usize;
+    let mut eagain = 0usize;
     loop {
+        if out.len() >= MAX_READ_BYTES || iters >= MAX_READ_ITERS {
+            break;
+        }
+        iters += 1;
         match call::read(fd as usize, &mut chunk) {
             Ok(0) => break,
-            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Ok(n) => {
+                let remain = MAX_READ_BYTES.saturating_sub(out.len());
+                let take = core::cmp::min(n, remain);
+                out.extend_from_slice(&chunk[..take]);
+                eagain = 0;
+                if take < n {
+                    break;
+                }
+            }
+            Err(e) if e.to_errno() == EAGAIN => {
+                eagain += 1;
+                if eagain > MAX_READ_EAGAIN {
+                    let _ = call::close(fd as usize);
+                    return Err("read timeout");
+                }
+                let _ = call::sched_yield();
+            }
             Err(_) => {
                 let _ = call::close(fd as usize);
                 return Err("read failed");
@@ -257,25 +284,45 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
 }
 
 fn load_primary_silos() -> Vec<SiloDef> {
+    log("[init] load_primary_silos: begin\n");
     match read_file("/initfs/silo.toml") {
         Ok(data_vec) => match core::str::from_utf8(&data_vec) {
             Ok(data_str) => {
+                log("[init] load_primary_silos: parse /initfs/silo.toml\n");
                 let parsed = parse_config(data_str);
                 if parsed.is_empty() {
                     log("[init] Empty /initfs/silo.toml, using embedded defaults\n");
-                    parse_config(DEFAULT_SILO_TOML)
+                    log("[init] load_primary_silos: parse embedded defaults\n");
+                    let parsed = parse_config(DEFAULT_SILO_TOML);
+                    log("[init] load_primary_silos: parsed embedded defaults count=");
+                    log_u32(parsed.len() as u32);
+                    log("\n");
+                    parsed
                 } else {
+                    log("[init] load_primary_silos: parsed file count=");
+                    log_u32(parsed.len() as u32);
+                    log("\n");
                     parsed
                 }
             }
             Err(_) => {
                 log("[init] Invalid UTF-8 in /initfs/silo.toml, using embedded defaults\n");
-                parse_config(DEFAULT_SILO_TOML)
+                log("[init] load_primary_silos: parse embedded defaults\n");
+                let parsed = parse_config(DEFAULT_SILO_TOML);
+                log("[init] load_primary_silos: parsed embedded defaults count=");
+                log_u32(parsed.len() as u32);
+                log("\n");
+                parsed
             }
         },
         Err(_) => {
             log("[init] Missing /initfs/silo.toml, using embedded defaults\n");
-            parse_config(DEFAULT_SILO_TOML)
+            log("[init] load_primary_silos: parse embedded defaults\n");
+            let parsed = parse_config(DEFAULT_SILO_TOML);
+            log("[init] load_primary_silos: parsed embedded defaults count=");
+            log_u32(parsed.len() as u32);
+            log("\n");
+            parsed
         }
     }
 }
@@ -682,9 +729,13 @@ type = "elf"
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     log("[init] Strat9 Hierarchical Boot Starting\n");
+    log("[init] Stage: load primary silos\n");
     let mut silos = load_primary_silos();
+    log("[init] Stage: merge wasm overlay\n");
     merge_wasm_test_overlay(&mut silos);
+    log("[init] Stage: ensure required silos\n");
     let silos = ensure_required_silos(silos);
+    log("[init] Stage: boot silos\n");
     boot_silos(silos);
     log("[init] Boot complete.\n");
     loop {
@@ -694,6 +745,6 @@ pub unsafe extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    log("[init] PANIC!\n");
+    let _ = call::debug_log(b"[init] PANIC!\n");
     call::exit(255)
 }

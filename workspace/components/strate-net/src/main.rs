@@ -23,13 +23,13 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::write(1, b"[strate-net] OOM\n");
+    let _ = call::debug_log(b"[strate-net] OOM\n");
     exit(12);
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    let _ = call::write(1, b"[strate-net] PANIC: ");
+    let _ = call::debug_log(b"[strate-net] PANIC: ");
     let msg = info.message();
     let mut buf = [0u8; 256];
     use core::fmt::Write;
@@ -40,9 +40,9 @@ fn panic(info: &PanicInfo) -> ! {
     let _ = write!(cursor, "{}", msg);
     let written = cursor.pos;
     if written > 0 {
-        let _ = call::write(1, &buf[..written]);
+        let _ = call::debug_log(&buf[..written]);
     }
-    let _ = call::write(1, b"\n");
+    let _ = call::debug_log(b"\n");
     exit(255);
 }
 
@@ -1282,7 +1282,7 @@ impl NetworkStrate {
 }
 
 fn log(msg: &str) {
-    let _ = call::write(1, msg.as_bytes());
+    let _ = call::debug_log(msg.as_bytes());
 }
 
 #[unsafe(no_mangle)]

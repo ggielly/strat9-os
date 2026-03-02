@@ -4,6 +4,7 @@ use strat9_syscall::{call, data::TimeSpec, flag, number};
 
 const EAGAIN: usize = 11;
 const MAX_EAGAIN_RETRIES: usize = 50;
+const MAX_FILE_READ_BYTES: usize = 128 * 1024;
 
 pub fn sleep_ms(ms: u64) {
     let req = TimeSpec {
@@ -82,10 +83,18 @@ pub fn read_file_string(path: &str) -> Vec<u8> {
     let mut chunk = [0u8; 1024];
     let mut retries = 0;
     loop {
+        if out.len() >= MAX_FILE_READ_BYTES {
+            break;
+        }
         match call::read(fd, &mut chunk) {
             Ok(0) => break,
             Ok(n) => {
-                out.extend_from_slice(&chunk[..n]);
+                let remain = MAX_FILE_READ_BYTES.saturating_sub(out.len());
+                let take = core::cmp::min(n, remain);
+                out.extend_from_slice(&chunk[..take]);
+                if take < n {
+                    break;
+                }
                 retries = 0;
             }
             Err(e) if e.to_errno() == EAGAIN => {
