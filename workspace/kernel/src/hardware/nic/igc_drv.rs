@@ -1,8 +1,3 @@
-//! Kernel adapter for the `e1000` crate.
-//!
-//! Implements `DmaAllocator` via the buddy allocator and wraps
-//! `e1000::E1000Nic` behind a `SpinLock` to satisfy `NetworkDevice`.
-
 use super::register_device;
 use crate::{
     arch::x86_64::pci::{self, Bar},
@@ -15,7 +10,12 @@ use net_core::{NetError, NetworkDevice};
 use nic_buffers::{DmaAllocator, DmaRegion};
 use x86_64::VirtAddr;
 
-const LEGACY_E1000_IDS: &[u16] = &[pci::intel_eth::E1000_82540EM, pci::intel_eth::E1000_82545EM];
+const IGC_IDS: &[u16] = &[
+    pci::intel_eth::I225_LM,
+    pci::intel_eth::I225_V,
+    pci::intel_eth::I226_LM,
+    pci::intel_eth::I226_V,
+];
 
 struct KernelDma;
 
@@ -47,14 +47,14 @@ impl DmaAllocator for KernelDma {
     }
 }
 
-pub struct KernelE1000 {
+pub struct KernelIgc {
     inner: SpinLock<E1000Nic>,
     mac: [u8; 6],
 }
 
-impl NetworkDevice for KernelE1000 {
+impl NetworkDevice for KernelIgc {
     fn name(&self) -> &str {
-        "e1000"
+        "igc"
     }
     fn mac_address(&self) -> [u8; 6] {
         self.mac
@@ -62,15 +62,12 @@ impl NetworkDevice for KernelE1000 {
     fn link_up(&self) -> bool {
         self.inner.lock().link_up()
     }
-
     fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
         self.inner.lock().receive(buf)
     }
-
     fn transmit(&self, buf: &[u8]) -> Result<(), NetError> {
         self.inner.lock().transmit(buf, &KernelDma)
     }
-
     fn handle_interrupt(&self) {
         self.inner.lock().handle_interrupt();
     }
@@ -78,7 +75,7 @@ impl NetworkDevice for KernelE1000 {
 
 pub fn init() {
     if !memory::paging::is_initialized() {
-        log::warn!("E1000: paging not initialized, deferring probe");
+        log::warn!("IGC: paging not initialized, deferring probe");
         return;
     }
 
@@ -89,45 +86,21 @@ pub fn init() {
         subclass: None,
         prog_if: None,
     });
-    let mut found_intel_nic = false;
-    let mut warned_modern_intel = false;
+
     for pci_dev in candidates.into_iter() {
-        // Accept standard Ethernet class and vendor-specific network subclass.
-        if pci_dev.subclass != pci::net_subclass::ETHERNET
-            && pci_dev.subclass != pci::net_subclass::OTHER
-        {
-            continue;
-        }
-        found_intel_nic = true;
-        if !LEGACY_E1000_IDS.contains(&pci_dev.device_id) {
-            if matches!(
-                pci_dev.device_id,
-                pci::intel_eth::I219_LM
-                    | pci::intel_eth::I219_V
-                    | pci::intel_eth::I225_LM
-                    | pci::intel_eth::I225_V
-                    | pci::intel_eth::I226_LM
-                    | pci::intel_eth::I226_V
-            ) {
-                if !warned_modern_intel {
-                    log::warn!(
-                        "E1000: modern Intel NIC detected; add e1000e/igc for full laptop support"
-                    );
-                    warned_modern_intel = true;
-                }
-            }
+        if !IGC_IDS.contains(&pci_dev.device_id) {
             continue;
         }
 
         log::info!(
-            "E1000: PCI {:04x}:{:04x} at {:?}",
+            "IGC: PCI {:04x}:{:04x} at {:?}",
             pci_dev.vendor_id,
             pci_dev.device_id,
             pci_dev.address
         );
+
         pci_dev.enable_bus_master();
         pci_dev.enable_memory_space();
-        // Firmware may leave PCI interrupt disabled; clear bit 10.
         let mut cmd = pci_dev.read_config_u16(pci::config::COMMAND);
         cmd &= !pci::command::INTERRUPT_DISABLE;
         pci_dev.write_config_u16(pci::config::COMMAND, cmd);
@@ -136,7 +109,7 @@ pub fn init() {
             Some(Bar::Memory32 { addr, .. }) => addr as u64,
             Some(Bar::Memory64 { addr, .. }) => addr,
             _ => {
-                log::error!("E1000: no MMIO BAR (BAR0/BAR1)");
+                log::error!("IGC: no MMIO BAR (BAR0/BAR1)");
                 continue;
             }
         };
@@ -150,7 +123,7 @@ pub fn init() {
             .unwrap_or(0);
         if mapped != mmio_page_phys {
             log::error!(
-                "E1000: MMIO not mapped after ensure_identity_map_range phys={:#x} virt={:#x} mapped={:#x}; skipping device",
+                "IGC: MMIO map mismatch phys={:#x} virt={:#x} mapped={:#x}",
                 mmio_phys,
                 mmio_virt,
                 mapped
@@ -158,39 +131,33 @@ pub fn init() {
             continue;
         }
 
-        // Some firmware leaves NIC in a stale power/reset state; retry once.
+        // Linux-like step: probe attempted with retries; if core init fails, keep going.
         let mut init_ok = None;
-        for attempt in 0..2 {
-            match E1000Nic::init(mmio_virt, &KernelDma) {
-                Ok(nic) => {
-                    init_ok = Some(nic);
-                    break;
-                }
-                Err(e) => {
-                    if attempt == 0 {
-                        let mut cmd_retry = pci_dev.read_config_u16(pci::config::COMMAND);
-                        cmd_retry |= pci::command::BUS_MASTER | pci::command::MEMORY_SPACE;
-                        cmd_retry &= !pci::command::INTERRUPT_DISABLE;
-                        pci_dev.write_config_u16(pci::config::COMMAND, cmd_retry);
-                        continue;
-                    }
-                    log::error!("E1000: init failed: {}", e);
-                }
+        for _ in 0..3 {
+            if let Ok(nic) = E1000Nic::init(mmio_virt, &KernelDma) {
+                init_ok = Some(nic);
+                break;
             }
+            let mut cmd_retry = pci_dev.read_config_u16(pci::config::COMMAND);
+            cmd_retry |= pci::command::BUS_MASTER | pci::command::MEMORY_SPACE;
+            cmd_retry &= !pci::command::INTERRUPT_DISABLE;
+            pci_dev.write_config_u16(pci::config::COMMAND, cmd_retry);
+            core::hint::spin_loop();
         }
 
-        if let Some(nic) = init_ok {
-            let mac = nic.mac_address();
-            let dev = Arc::new(KernelE1000 {
-                mac,
-                inner: SpinLock::new(nic),
-            });
-            register_device(dev);
-            return;
+        match init_ok {
+            Some(nic) => {
+                let mac = nic.mac_address();
+                let dev = Arc::new(KernelIgc {
+                    mac,
+                    inner: SpinLock::new(nic),
+                });
+                register_device(dev);
+                return;
+            }
+            None => {
+                log::warn!("IGC: core init failed (likely requires dedicated igc register path)");
+            }
         }
     }
-    if found_intel_nic {
-        log::warn!("E1000: Intel NIC(s) found but no supported e1000 device initialized");
-    }
-    log::info!("E1000: no compatible device found");
 }

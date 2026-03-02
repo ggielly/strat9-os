@@ -4,6 +4,8 @@
 //! to kernel services (PCI, DMA allocator, VFS schemes).
 
 pub mod e1000_drv;
+pub mod e1000e_drv;
+pub mod igc_drv;
 pub mod pcnet_drv;
 pub mod rtl8139_drv;
 pub mod scheme;
@@ -110,6 +112,9 @@ pub fn list_interfaces() -> Vec<String> {
 
 pub fn init() {
     log::info!("[net] Scanning for network devices...");
+    // Probe modern Intel first, then legacy fallback.
+    e1000e_drv::init();
+    igc_drv::init();
     e1000_drv::init();
     pcnet_drv::init();
     rtl8139_drv::init();
