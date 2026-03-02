@@ -36,7 +36,7 @@ fn alloc_error(layout: Layout) -> ! {
         let _ = write!(w, "[web-admin] OOM: {} bytes align {}\n", layout.size(), layout.align());
         w.len()
     };
-    let _ = call::write(2, &buf[..n]);
+    let _ = call::debug_log(&buf[..n]);
     call::exit(12)
 }
 
@@ -48,7 +48,7 @@ fn panic(info: &PanicInfo) -> ! {
         let _ = write!(w, "[web-admin] PANIC: {}\n", info.message());
         w.len()
     };
-    let _ = call::write(2, &buf[..n]);
+    let _ = call::debug_log(&buf[..n]);
     call::exit(255)
 }
 
@@ -78,7 +78,7 @@ impl core::fmt::Write for BufWriter<'_> {
 }
 
 pub fn log(msg: &str) {
-    let _ = call::write(1, msg.as_bytes());
+    let _ = call::debug_log(msg.as_bytes());
 }
 
 static CONFIG: picoserve::Config = picoserve::Config::const_default().close_connection_after_response();

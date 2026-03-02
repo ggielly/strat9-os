@@ -58,7 +58,7 @@ impl core::fmt::Write for BufWriter<'_> {
 }
 
 fn log(msg: &str) {
-    let _ = call::write(1, msg.as_bytes());
+    let _ = call::debug_log(msg.as_bytes());
 }
 
 fn sleep_ms(ms: u64) {

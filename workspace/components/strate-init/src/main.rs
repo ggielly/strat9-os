@@ -442,13 +442,6 @@ fn log_u32(mut value: u32) {
     log(s);
 }
 
-fn log_u8_hex(v: u8) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let b = [HEX[(v >> 4) as usize], HEX[(v & 0x0f) as usize]];
-    let s = unsafe { core::str::from_utf8_unchecked(&b) };
-    log(s);
-}
-
 fn ipc_call_status(port: usize, msg: &mut IpcMessage) -> Result<u32, &'static str> {
     call::ipc_call(port, msg).map_err(|_| "ipc_call failed")?;
     Ok(u32::from_le_bytes([
@@ -536,11 +529,10 @@ fn boot_silos(silos: Vec<SiloDef>) {
             s_def.sid
         };
 
-        log("[init] Creating Silo: ");
-        log(&s_def.name);
-        log(" (SID=");
-        log_u32(final_sid);
-        log(")\n");
+        log(&alloc::format!(
+            "[init] Creating Silo: {} (SID={})\n",
+            s_def.name, final_sid
+        ));
 
         let config = SiloConfig::new(final_sid, requested_mode, family_id, 0);
 
@@ -566,23 +558,22 @@ fn boot_silos(silos: Vec<SiloDef>) {
         for str_def in s_def.strates {
             match str_def.stype.as_str() {
                 "elf" | "wasm-runtime" => {
-                    log("[init]   -> Strate: ");
-                    log(&str_def.name);
-                    log("\n");
+                    log(&alloc::format!("[init]   -> Strate: {}\n", str_def.name));
                     if let Ok(data) = read_file(&str_def.binary) {
                         if data.len() >= 4 {
-                            log("[init]     module magic ");
-                            log_u8_hex(data[0]);
-                            log_u8_hex(data[1]);
-                            log_u8_hex(data[2]);
-                            log_u8_hex(data[3]);
-                            log(" size=");
-                            log_u32(data.len() as u32);
-                            log("\n");
+                            log(&alloc::format!(
+                                "[init]     module magic {:02x}{:02x}{:02x}{:02x} size={}\n",
+                                data[0],
+                                data[1],
+                                data[2],
+                                data[3],
+                                data.len()
+                            ));
                         } else {
-                            log("[init]     module too small size=");
-                            log_u32(data.len() as u32);
-                            log("\n");
+                            log(&alloc::format!(
+                                "[init]     module too small size={}\n",
+                                data.len()
+                            ));
                         }
                         let mod_h = match unsafe {
                             strat9_syscall::syscall2(
@@ -593,35 +584,34 @@ fn boot_silos(silos: Vec<SiloDef>) {
                         } {
                             Ok(h) => h,
                             Err(_) => {
-                                log("[init] module_load failed for ");
-                                log(&str_def.binary);
-                                log("\n");
+                                log(&alloc::format!(
+                                    "[init] module_load failed for {}\n",
+                                    str_def.binary
+                                ));
                                 continue;
                             }
                         };
                         if let Err(e) = call::silo_attach_module(silo_handle, mod_h) {
-                            log("[init] silo_attach_module failed: ");
-                            log(e.name());
-                            log("\n");
+                            log(&alloc::format!(
+                                "[init] silo_attach_module failed: {}\n",
+                                e.name()
+                            ));
                             continue;
                         }
                         if let Err(e) = call::silo_start(silo_handle) {
-                            log("[init] silo_start failed: ");
-                            log(e.name());
-                            log("\n");
+                            log(&alloc::format!("[init] silo_start failed: {}\n", e.name()));
                         } else if str_def.stype == "wasm-runtime" {
                             runtime_targets.push((str_def.name.clone(), str_def.target.clone()));
                         }
                     } else {
-                        log("[init] failed to read binary ");
-                        log(&str_def.binary);
-                        log("\n");
+                        log(&alloc::format!(
+                            "[init] failed to read binary {}\n",
+                            str_def.binary
+                        ));
                     }
                 }
                 "wasm-app" => {
-                    log("[init]   -> Wasm-App: ");
-                    log(&str_def.name);
-                    log("\n");
+                    log(&alloc::format!("[init]   -> Wasm-App: {}\n", str_def.name));
                     let mut target_label = String::new();
                     if !str_def.target.is_empty() {
                         let mut found = false;
@@ -643,9 +633,10 @@ fn boot_silos(silos: Vec<SiloDef>) {
                     let service_path = alloc::format!("/srv/strate-wasm/{}", target_label);
                     match run_wasm_app(&service_path, &str_def.binary) {
                         Ok(()) => {
-                            log("[init]     wasm app started: ");
-                            log(&str_def.binary);
-                            log("\n");
+                            log(&alloc::format!(
+                                "[init]     wasm app started: {}\n",
+                                str_def.binary
+                            ));
                         }
                         Err(code) => {
                             let line = alloc::format!(

@@ -60,7 +60,7 @@ fn panic(info: &PanicInfo) -> ! {
 // ---------------------------------------------------------------------------
 
 fn log(msg: &str) {
-    let _ = call::write(1, msg.as_bytes());
+    let _ = call::debug_log(msg.as_bytes());
 }
 
 struct BufWriter<'a> {

@@ -48,13 +48,13 @@ static ALLOCATOR: SshdAllocator = SshdAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::write(2, b"[sshd] OOM\n");
+    let _ = call::debug_log(b"[sshd] OOM\n");
     call::exit(12)
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    let _ = call::write(2, b"[sshd] panic\n");
+    let _ = call::debug_log(b"[sshd] panic\n");
     call::exit(255)
 }
 
@@ -67,7 +67,7 @@ fn log_with_fd(log_fd: Option<usize>, msg: &str) {
     if let Some(fd) = log_fd {
         let _ = call::write(fd, msg.as_bytes());
     }
-    let _ = call::write(1, msg.as_bytes());
+    let _ = call::debug_log(msg.as_bytes());
 }
 
 fn read_file(path: &str) -> Option<Vec<u8>> {

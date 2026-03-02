@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Strat9 Web Admin</title>
+<style>
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--accent:#7eb8ff;--green:#22c55e;--red:#ef4444;--orange:#f59e0b;--text:#e0e0e0;--muted:#888;--dim:#555}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}
+a{color:var(--accent);text-decoration:none}
+.hdr{background:var(--card);padding:14px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.hdr h1{font-size:1.25rem;font-weight:600;color:var(--accent)}
+.badge{font-size:.7rem;padding:2px 8px;border-radius:9999px;font-weight:600}
+.badge-ok{background:var(--green);color:#000}
+.badge-err{background:var(--red);color:#fff}
+.badge-warn{background:var(--orange);color:#000}
+.hdr .meta{margin-left:auto;font-size:.72rem;color:var(--muted)}
+.tabs{display:flex;gap:0;background:var(--card);border-bottom:1px solid var(--border);padding:0 24px}
+.tab{padding:10px 18px;font-size:.8rem;cursor:pointer;border-bottom:2px solid transparent;color:var(--muted);transition:all .15s}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.page{display:none;padding:20px 24px}
+.page.active{display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px}
+.card h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;color:var(--accent);margin-bottom:8px}
+.card pre{font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#b0b8c8;max-height:280px;overflow-y:auto}
+.val{font-size:1.5rem;font-weight:700;color:#fff}
+.label{font-size:.72rem;color:var(--muted);margin-top:2px}
+.stat-row{display:flex;gap:14px;flex-wrap:wrap}
+.stat-item{flex:1;min-width:90px}
+table{width:100%;border-collapse:collapse;font-size:.75rem}
+th{text-align:left;color:var(--accent);padding:6px 8px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--card)}
+td{padding:5px 8px;border-bottom:1px solid #1e2130}
+tr:hover td{background:#1e2233}
+.btn{display:inline-block;padding:3px 10px;font-size:.7rem;border:1px solid var(--border);border-radius:4px;cursor:pointer;background:transparent;color:var(--text);transition:all .15s}
+.btn:hover{background:var(--border)}
+.btn-danger{border-color:var(--red);color:var(--red)}
+.btn-danger:hover{background:var(--red);color:#fff}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.toast{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--border);padding:10px 16px;border-radius:6px;font-size:.78rem;opacity:0;transition:opacity .3s;pointer-events:none;z-index:99}
+.toast.show{opacity:1;pointer-events:auto}
+.footer{padding:8px 24px;font-size:.7rem;color:var(--dim);text-align:right;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <h1>Strat9 Web Admin</h1>
+  <span class="badge badge-warn" id="badge">Connecting...</span>
+  <span class="meta">PID <span id="srv-pid">-</span> | Uptime <span id="srv-up">-</span></span>
+</div>
+<div class="tabs">
+  <div class="tab active" data-page="overview">Overview</div>
+  <div class="tab" data-page="procs">Processes</div>
+  <div class="tab" data-page="net">Network</div>
+  <div class="tab" data-page="system">System</div>
+</div>
+
+<!-- OVERVIEW -->
+<div class="page active" id="page-overview">
+<div class="grid">
+  <div class="card">
+    <h2>Uptime</h2>
+    <div class="val" id="up-val">--</div>
+    <div class="label" id="up-detail"></div>
+  </div>
+  <div class="card">
+    <h2>Network</h2>
+    <div class="stat-row">
+      <div class="stat-item"><div class="label">IP</div><div id="o-ip">--</div></div>
+      <div class="stat-item"><div class="label">Gateway</div><div id="o-gw">--</div></div>
+      <div class="stat-item"><div class="label">DNS</div><div id="o-dns">--</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Processes</h2>
+    <div class="val" id="proc-count">--</div>
+    <div class="label">running tasks</div>
+  </div>
+  <div class="card">
+    <h2>Memory</h2>
+    <pre id="o-mem">--</pre>
+  </div>
+  <div class="card">
+    <h2>Silos</h2>
+    <pre id="o-silos">--</pre>
+  </div>
+  <div class="card">
+    <h2>Kernel</h2>
+    <pre id="o-ver">--</pre>
+  </div>
+</div>
+</div>
+
+<!-- PROCESSES -->
+<div class="page" id="page-procs">
+<div class="card" style="overflow-x:auto;max-height:70vh;overflow-y:auto">
+  <h2>Process Table <span class="spinner" id="proc-spin" style="display:none"></span></h2>
+  <table>
+    <thead><tr><th>PID</th><th>PPID</th><th>Name</th><th>State</th><th>Silo</th><th>Mem</th><th></th></tr></thead>
+    <tbody id="proc-body"><tr><td colspan="7">Loading...</td></tr></tbody>
+  </table>
+</div>
+</div>
+
+<!-- NETWORK -->
+<div class="page" id="page-net">
+<div class="grid">
+  <div class="card">
+    <h2>Addresses</h2>
+    <div class="stat-row">
+      <div class="stat-item"><div class="label">IP / CIDR</div><div id="n-ip">--</div></div>
+      <div class="stat-item"><div class="label">Netmask</div><div id="n-mask">--</div></div>
+      <div class="stat-item"><div class="label">Gateway</div><div id="n-gw">--</div></div>
+      <div class="stat-item"><div class="label">DNS</div><div id="n-dns">--</div></div>
+    </div>
+  </div>
+  <div class="card" style="grid-column:1/-1">
+    <h2>Routing Table</h2>
+    <pre id="n-routes">--</pre>
+  </div>
+</div>
+</div>
+
+<!-- SYSTEM -->
+<div class="page" id="page-system">
+<div class="grid">
+  <div class="card">
+    <h2>Kernel Version</h2>
+    <pre id="s-ver">--</pre>
+  </div>
+  <div class="card">
+    <h2>CPU Info</h2>
+    <pre id="s-cpu">--</pre>
+  </div>
+  <div class="card">
+    <h2>Memory Info</h2>
+    <pre id="s-mem">--</pre>
+  </div>
+  <div class="card" style="grid-column:1/-1">
+    <h2>Silos</h2>
+    <pre id="s-silos">--</pre>
+  </div>
+</div>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="footer">Auto-refresh 5s | <span id="ts"></span></div>
+
+<script>
+const $=id=>document.getElementById(id);
+function toast(msg,ms){const t=$('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),ms||2500)}
+async function api(p){try{const r=await fetch(p);if(!r.ok)throw r;return await r.json()}catch(e){return null}}
+
+// tabs
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');$('page-'+t.dataset.page).classList.add('active');
+});
+
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+
+async function killProc(pid){
+  if(!confirm('Kill process '+pid+'?'))return;
+  const token=prompt('Admin token required')||'';
+  if(!token){toast('Kill cancelled');return;}
+  let r=null;
+  try{
+    const resp=await fetch('/api/kill/'+pid,{method:'POST',headers:{'Authorization':'Bearer '+token}});
+    if(resp.ok)r=await resp.json();
+  }catch(e){}
+  if(r&&r.killed)toast('Process '+pid+' killed');
+  else toast('Kill failed: '+(r?r.error:'no response'));
+  setTimeout(refresh,500);
+}
+
+async function refresh(){
+  const d=await api('/api/all');
+  if(!d){$('badge').className='badge badge-err';$('badge').textContent='Offline';return}
+  const h=d.health,u=d.uptime,v=d.version,c=d.cpuinfo,m=d.meminfo,s=d.silos,n=d.network,rt=d.routes,p=d.processes;
+
+  // badge
+  if(h&&h.status==='ok'){$('badge').className='badge badge-ok';$('badge').textContent='Online';$('srv-pid').textContent=h.pid;$('srv-up').textContent=u?u.human:'?'}
+  else{$('badge').className='badge badge-err';$('badge').textContent='Error'}
+
+  // overview
+  if(u){$('up-val').textContent=u.human;$('up-detail').textContent=u.secs+' seconds'}
+  if(n){$('o-ip').textContent=n.address||n.ip||'n/a';$('o-gw').textContent=n.gateway||'n/a';$('o-dns').textContent=n.dns||'n/a'}
+  if(m)$('o-mem').textContent=m.meminfo||'n/a';
+  if(s)$('o-silos').textContent=s.silos||'n/a';
+  if(v)$('o-ver').textContent=v.version||'n/a';
+  if(p)$('proc-count').textContent=p.count||p.processes.length;
+
+  // process table
+  if(p&&p.processes){
+    let h='';
+    for(const pr of p.processes){
+      h+='<tr><td>'+pr.pid+'</td><td>'+pr.ppid+'</td><td>'+esc(pr.name)+'</td><td>'+esc(pr.state)+'</td><td>'+esc(pr.silo||'-')+'</td><td>'+esc(pr.mem||'-')+'</td>';
+      h+='<td><button class="btn btn-danger" onclick="killProc('+pr.pid+')">Kill</button></td></tr>';
+    }
+    $('proc-body').innerHTML=h||'<tr><td colspan="7">No processes</td></tr>';
+  }
+
+  // network
+  if(n){$('n-ip').textContent=(n.ip||n.address||'n/a');$('n-mask').textContent=n.netmask||'n/a';$('n-gw').textContent=n.gateway||'n/a';$('n-dns').textContent=n.dns||'n/a'}
+  if(rt)$('n-routes').textContent=rt.routes||'n/a';
+
+  // system
+  if(v)$('s-ver').textContent=v.version||'n/a';
+  if(c)$('s-cpu').textContent=c.cpuinfo||'n/a';
+  if(m)$('s-mem').textContent=m.meminfo||'n/a';
+  if(s)$('s-silos').textContent=s.silos||'n/a';
+
+  $('ts').textContent=new Date().toLocaleTimeString();
+}
+refresh();setInterval(refresh,5000);
+</script>
+</body>
+</html>

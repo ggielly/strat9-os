@@ -43,7 +43,7 @@ static ALLOCATOR: Talck<spin::Mutex<()>, BrkGrower> = Talck::new(Talc::new(BrkGr
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::write(1, b"[strate-wasm] Fatal: OOM\n");
+    let _ = call::debug_log(b"[strate-wasm] Fatal: OOM\n");
     call::exit(12);
 }
 
@@ -52,7 +52,7 @@ fn alloc_error(_layout: Layout) -> ! {
 // ---------------------------------------------------------------------------
 
 fn debug_log(msg: &str) {
-    let _ = call::write(1, msg.as_bytes());
+    let _ = call::debug_log(msg.as_bytes());
 }
 
 #[panic_handler]
