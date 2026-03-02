@@ -31,6 +31,7 @@ STRATE_SSHD_ELF="target/x86_64-unknown-none/${PROFILE}/strate-sshd"
 WEB_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/web-admin"
 HELLO_WASM_FILE="workspace/assets/wasm/hello.wasm"
 WASM_TEST_TOML_FILE="workspace/assets/wasm/wasm-test.toml"
+SILO_TOML_FILE="workspace/assets/boot/silo.toml"
 
 echo ""
 echo "=== Creating Limine bootable image ==="
@@ -303,6 +304,13 @@ if [ -f "$WASM_TEST_TOML_FILE" ]; then
     echo "  [OK] Copied wasm-test config: /initfs/wasm-test.toml"
 else
     echo "  [WARN] wasm-test config not found at $WASM_TEST_TOML_FILE"
+fi
+
+if [ -f "$SILO_TOML_FILE" ]; then
+    cp "$SILO_TOML_FILE" "$ISO_ROOT/initfs/silo.toml"
+    echo "  [OK] Copied boot config: /initfs/silo.toml"
+else
+    echo "  [WARN] boot config not found at $SILO_TOML_FILE"
 fi
 
 # Create ISO using xorriso

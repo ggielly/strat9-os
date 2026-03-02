@@ -37,7 +37,8 @@ pub mod scheme;
 pub mod scheme_router;
 
 use crate::{process::current_task_clone, sync::SpinLock, syscall::error::SyscallError};
-use alloc::{string::String, sync::Arc};
+use alloc::{boxed::Box, string::String, sync::Arc};
+use core::fmt::Write;
 
 pub use blkdev_scheme::BlkDevScheme;
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
@@ -820,6 +821,36 @@ fn get_pipe_scheme() -> Arc<PipeScheme> {
     scheme
 }
 
+fn build_pci_inventory_text() -> String {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let devices = crate::arch::x86_64::pci::all_devices();
+        let mut out = String::new();
+        out.push_str("bus dev fn vendor device class subclass prog_if irq\n");
+        for dev in devices.iter() {
+            let _ = writeln!(
+                out,
+                "{:02x} {:02x} {} {:04x} {:04x} {:02x} {:02x} {:02x} {}",
+                dev.address.bus,
+                dev.address.device,
+                dev.address.function,
+                dev.vendor_id,
+                dev.device_id,
+                dev.class_code,
+                dev.subclass,
+                dev.prog_if,
+                dev.interrupt_line
+            );
+        }
+        return out;
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        String::from("unsupported-arch\n")
+    }
+}
+
 // ============================================================================
 // Initialization
 // ============================================================================
@@ -866,6 +897,20 @@ pub fn init() {
 
     static CMDLINE: &[u8] = b"quiet loglevel=debug\n";
     kernel_scheme.register("cmdline", CMDLINE.as_ptr(), CMDLINE.len());
+
+    let pci_inventory = build_pci_inventory_text().into_bytes().into_boxed_slice();
+    let pci_inventory = Box::leak(pci_inventory);
+    kernel_scheme.register("pci/inventory", pci_inventory.as_ptr(), pci_inventory.len());
+
+    let pci_count = pci_inventory
+        .split(|b| *b == b'\n')
+        .skip(1)
+        .filter(|line| !line.is_empty())
+        .count();
+    let mut pci_count_str = String::new();
+    let _ = writeln!(pci_count_str, "{}", pci_count);
+    let pci_count = Box::leak(pci_count_str.into_bytes().into_boxed_slice());
+    kernel_scheme.register("pci/count", pci_count.as_ptr(), pci_count.len());
 
     let kernel_scheme = Arc::new(kernel_scheme);
 

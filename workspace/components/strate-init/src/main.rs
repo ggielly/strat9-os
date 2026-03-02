@@ -692,6 +692,7 @@ sid = 42
 name = "strate-bus"
 binary = "/initfs/strate-bus"
 type = "elf"
+probe_mode = "full"
 
 [[silos]]
 name = "network"

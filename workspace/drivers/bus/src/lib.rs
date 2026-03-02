@@ -5,6 +5,7 @@ extern crate alloc;
 
 pub mod mmio;
 pub mod scheme;
+pub mod probe;
 
 pub mod simple_pm_bus;
 pub mod bt1_axi;

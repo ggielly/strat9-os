@@ -1,0 +1,70 @@
+[[silos]]
+name = "console-admin"
+family = "SYS"
+mode = "700"
+sid = 42
+[[silos.strates]]
+name = "console-admin"
+binary = "/initfs/console-admin"
+type = "elf"
+
+[[silos]]
+name = "bus"
+family = "DRV"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-bus"
+binary = "/initfs/strate-bus"
+type = "elf"
+probe_mode = "full"
+
+[[silos]]
+name = "network"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-net"
+binary = "/initfs/strate-net"
+type = "elf"
+
+[[silos]]
+name = "dhcp-client"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "dhcp-client"
+binary = "/initfs/bin/dhcp-client"
+type = "elf"
+
+[[silos]]
+name = "telnet"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "telnetd"
+binary = "/initfs/bin/telnetd"
+type = "elf"
+
+[[silos]]
+name = "ssh"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "sshd"
+binary = "/initfs/bin/sshd"
+type = "elf"
+
+[[silos]]
+name = "web-admin"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "web-admin"
+binary = "/initfs/bin/web-admin"
+type = "elf"
