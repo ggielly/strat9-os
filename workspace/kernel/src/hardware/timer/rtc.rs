@@ -47,6 +47,8 @@ const RTC_FREQ_16: u8 = 12;   // 16 Hz
 const RTC_FREQ_4: u8 = 14;    // 4 Hz
 const RTC_FREQ_1: u8 = 15;    // 1 Hz
 
+const CENTURY_REG_CANDIDATES: &[u8] = &[0x32, 0x37];
+
 /// RTC date/time structure
 #[derive(Clone, Copy, Debug)]
 pub struct RtcDateTime {
@@ -162,6 +164,29 @@ fn bcd_to_binary(bcd: u8) -> u8 {
     (bcd & 0x0F) + ((bcd / 16) * 10)
 }
 
+fn detect_century_register(use_binary: bool) -> u8 {
+    if let Some(fadt) = crate::acpi::get_fadt() {
+        let reg = fadt.century;
+        if reg != 0 {
+            let raw = cmos_read(reg);
+            let val = if use_binary { raw } else { bcd_to_binary(raw) };
+            if (19..=21).contains(&val) {
+                return reg;
+            }
+        }
+    }
+
+    for &reg in CENTURY_REG_CANDIDATES {
+        let raw = cmos_read(reg);
+        let val = if use_binary { raw } else { bcd_to_binary(raw) };
+        if (19..=21).contains(&val) {
+            return reg;
+        }
+    }
+
+    0
+}
+
 /// Check if RTC update is in progress
 fn is_update_in_progress() -> bool {
     cmos_read(CMOS_REG_STATUS_A) & STATUS_A_UIP != 0
@@ -275,17 +300,7 @@ pub fn init() -> Result<(), &'static str> {
     let status_b = cmos_read(CMOS_REG_STATUS_B);
     let use_binary = (status_b & STATUS_B_DM) != 0;
     
-    // Detect century register (ACPI FADT would tell us, but we try common values)
-    let cmos_century_reg = 0x32; // Common value
-    
-    // Verify century register works (convert from BCD if needed)
-    let century_raw = cmos_read(cmos_century_reg);
-    let century_val = if use_binary { century_raw } else { bcd_to_binary(century_raw) };
-    let cmos_century_reg = if century_val >= 19 && century_val <= 21 {
-        cmos_century_reg
-    } else {
-        0
-    };
+    let cmos_century_reg = detect_century_register(use_binary);
     
     let driver = RtcDriver {
         cmos_century_reg,

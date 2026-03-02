@@ -57,6 +57,30 @@ impl McfgInfo {
     }
 }
 
+fn is_aligned_1m(addr: u64) -> bool {
+    (addr & ((1 << 20) - 1)) == 0
+}
+
+fn should_skip_entry(entry: &McfgEntry) -> bool {
+    if entry.base_address == 0 {
+        return true;
+    }
+    if entry.start_bus > entry.end_bus {
+        return true;
+    }
+    if !is_aligned_1m(entry.base_address) {
+        return true;
+    }
+    false
+}
+
+fn overlaps(a: &McfgEntry, b: &McfgEntry) -> bool {
+    if a.segment_group != b.segment_group {
+        return false;
+    }
+    !(a.end_bus < b.start_bus || b.end_bus < a.start_bus)
+}
+
 pub fn parse_mcfg() -> Option<McfgInfo> {
     let mcfg_ptr = super::find_table(MCFG_SIGNATURE)? as *const Mcfg;
     let mcfg = unsafe { &*mcfg_ptr };
@@ -84,13 +108,41 @@ pub fn parse_mcfg() -> Option<McfgInfo> {
 
     while offset + alloc_len <= end {
         let alloc = unsafe { core::ptr::read_unaligned(offset as *const McfgAllocation) };
-        entries.push(McfgEntry {
+        let candidate = McfgEntry {
             base_address: alloc.base_address,
             segment_group: alloc.segment_group,
             start_bus: alloc.start_bus,
             end_bus: alloc.end_bus,
-        });
+        };
+        if should_skip_entry(&candidate) {
+            log::warn!(
+                "ACPI: MCFG entry skipped (seg={} ecam={:#x} buses={}..{})",
+                candidate.segment_group,
+                candidate.base_address,
+                candidate.start_bus,
+                candidate.end_bus
+            );
+            offset += alloc_len;
+            continue;
+        }
+        if entries.iter().any(|e| overlaps(e, &candidate)) {
+            log::warn!(
+                "ACPI: MCFG overlapping entry skipped (seg={} ecam={:#x} buses={}..{})",
+                candidate.segment_group,
+                candidate.base_address,
+                candidate.start_bus,
+                candidate.end_bus
+            );
+            offset += alloc_len;
+            continue;
+        }
+        entries.push(candidate);
         offset += alloc_len;
+    }
+
+    if entries.is_empty() {
+        log::warn!("ACPI: MCFG present but no usable allocation entries");
+        return None;
     }
 
     Some(McfgInfo { entries })

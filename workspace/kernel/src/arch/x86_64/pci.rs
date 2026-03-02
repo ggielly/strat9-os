@@ -21,6 +21,35 @@ const CONFIG_DATA: u16 = 0xCFC;
 /// atomic w.r.t. other CPUs. Every config read/write must hold this lock.
 static PCI_IO_LOCK: SpinLock<()> = SpinLock::new(());
 
+#[derive(Clone, Copy)]
+struct PciLineQuirk {
+    vendor_id: u16,
+    device_id: u16,
+}
+
+const PCI_IRQ_LINE_ZERO_IF_FF: &[PciLineQuirk] = &[
+    PciLineQuirk {
+        vendor_id: vendor::INTEL,
+        device_id: intel_eth::E1000_82540EM,
+    },
+    PciLineQuirk {
+        vendor_id: vendor::INTEL,
+        device_id: intel_eth::E1000_82545EM,
+    },
+    PciLineQuirk {
+        vendor_id: vendor::INTEL,
+        device_id: intel_eth::E1000E_82574L,
+    },
+    PciLineQuirk {
+        vendor_id: vendor::VIRTIO,
+        device_id: device::VIRTIO_NET,
+    },
+    PciLineQuirk {
+        vendor_id: vendor::VIRTIO,
+        device_id: device::VIRTIO_BLOCK,
+    },
+];
+
 /// PCI Vendor IDs
 pub mod vendor {
     pub const VIRTIO: u16 = 0x1AF4;
@@ -398,7 +427,7 @@ impl Iterator for PciScanner {
 
             // Check if device exists at current address (before increment)
             let vendor_id = read_vendor_id(address);
-            if vendor_id == 0xFFFF {
+            if is_absent_vendor(vendor_id) {
                 // If function 0 doesn't exist, skip the rest of the functions for this device
                 if current_function == 0 {
                     self.function = 0;
@@ -440,6 +469,31 @@ fn read_vendor_id(address: PciAddress) -> u16 {
     }
 }
 
+fn is_absent_vendor(vendor_id: u16) -> bool {
+    vendor_id == 0xFFFF || vendor_id == 0x0000
+}
+
+fn quirk_zero_irq_line(vendor_id: u16, device_id: u16, irq_line: u8) -> u8 {
+    if irq_line != 0xFF {
+        return irq_line;
+    }
+    if PCI_IRQ_LINE_ZERO_IF_FF
+        .iter()
+        .any(|q| q.vendor_id == vendor_id && q.device_id == device_id)
+    {
+        return 0;
+    }
+    0
+}
+
+fn valid_header_type(header_type: u8) -> bool {
+    matches!(header_type & 0x7F, 0x00..=0x02)
+}
+
+fn is_ghost_device(class_code: u8, subclass: u8, prog_if: u8) -> bool {
+    class_code == 0xFF && subclass == 0xFF && prog_if == 0xFF
+}
+
 /// Probe a specific PCI address and return device info if present
 fn probe_device(address: PciAddress, vendor_id: u16) -> Option<PciDevice> {
     let dev = PciDevice {
@@ -456,20 +510,34 @@ fn probe_device(address: PciAddress, vendor_id: u16) -> Option<PciDevice> {
     };
 
     let device_id = dev.read_config_u16(config::DEVICE_ID);
+    if device_id == 0xFFFF || device_id == 0x0000 {
+        return None;
+    }
     let class_rev_grp = dev.read_config_u32(config::REVISION_ID);
     let header_type = dev.read_config_u8(config::HEADER_TYPE);
+    if !valid_header_type(header_type) {
+        return None;
+    }
     let int_grp = dev.read_config_u32(config::INTERRUPT_LINE);
+
+    let class_code = ((class_rev_grp >> 24) & 0xFF) as u8;
+    let subclass = ((class_rev_grp >> 16) & 0xFF) as u8;
+    let prog_if = ((class_rev_grp >> 8) & 0xFF) as u8;
+    if is_ghost_device(class_code, subclass, prog_if) {
+        return None;
+    }
+    let interrupt_line = quirk_zero_irq_line(vendor_id, device_id, (int_grp & 0xFF) as u8);
 
     Some(PciDevice {
         address,
         vendor_id,
         device_id,
-        class_code: ((class_rev_grp >> 24) & 0xFF) as u8,
-        subclass: ((class_rev_grp >> 16) & 0xFF) as u8,
-        prog_if: ((class_rev_grp >> 8) & 0xFF) as u8,
+        class_code,
+        subclass,
+        prog_if,
         revision: (class_rev_grp & 0xFF) as u8,
         header_type,
-        interrupt_line: (int_grp & 0xFF) as u8,
+        interrupt_line,
         interrupt_pin: ((int_grp >> 8) & 0xFF) as u8,
     })
 }
