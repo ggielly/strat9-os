@@ -1374,7 +1374,7 @@ pub fn load_elf_task_with_caps(
     }
 
     // Bootstrapping: grant Silo Admin capability to the initial userspace task.
-    if name == "init" || name == "silo-admin" {
+    if name == "init" || name == "silo-admin" || name.starts_with("strate-admin:") {
         let _ = crate::silo::grant_silo_admin_to_task(&task);
     }
 
