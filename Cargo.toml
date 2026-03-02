@@ -2,6 +2,7 @@
 members = [
     "workspace/kernel",
     "workspace/bootloader",
+    "workspace/drivers/bus",
     "workspace/drivers/nic/net-core",
     "workspace/drivers/nic/nic-buffers",
     "workspace/drivers/nic/nic-queues",
@@ -16,6 +17,7 @@ members = [
     "workspace/components/strate-silo-test",
     "workspace/components/strate-mem-test",
     "workspace/components/strate-net",
+    "workspace/components/strate-bus",
     "workspace/components/strate-wasm",
     "workspace/components/strate-fs-ramfs",
     "workspace/components/strate-init",

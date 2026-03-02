@@ -68,6 +68,8 @@ static CONSOLE_ADMIN_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/console-admin");
 /// Internal module: request Limine to load /initfs/strate-net (network silo)
 static STRATE_NET_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-net");
+/// Internal module: request Limine to load /initfs/strate-bus (bus silo)
+static STRATE_BUS_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-bus");
 /// Internal module: request Limine to load /initfs/bin/dhcp-client (DHCP monitor)
 static DHCP_CLIENT_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/bin/dhcp-client");
@@ -98,6 +100,7 @@ static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
     &INIT_MODULE,
     &CONSOLE_ADMIN_MODULE,
     &STRATE_NET_MODULE,
+    &STRATE_BUS_MODULE,
     &DHCP_CLIENT_MODULE,
     &PING_MODULE,
     &TELNETD_MODULE,
@@ -122,6 +125,8 @@ static mut INIT_ELF_MODULE: Option<(u64, u64)> = None;
 static mut CONSOLE_ADMIN_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional strate-net module info (set during Limine entry).
 static mut STRATE_NET_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional strate-bus module info (set during Limine entry).
+static mut STRATE_BUS_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional dhcp-client module info (set during Limine entry).
 static mut DHCP_CLIENT_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional ping module info (set during Limine entry).
@@ -192,6 +197,12 @@ pub fn strate_net_module() -> Option<(u64, u64)> {
     unsafe { STRATE_NET_ELF_MODULE }
 }
 
+/// Return the strate-bus module (addr, size) if present.
+pub fn strate_bus_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { STRATE_BUS_ELF_MODULE }
+}
+
 /// Return the dhcp-client module (addr, size) if present.
 pub fn dhcp_client_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
@@ -256,6 +267,7 @@ struct ResolvedModules {
     init: Option<(u64, u64)>,
     console_admin: Option<(u64, u64)>,
     strate_net: Option<(u64, u64)>,
+    strate_bus: Option<(u64, u64)>,
     dhcp_client: Option<(u64, u64)>,
     ping: Option<(u64, u64)>,
     telnetd: Option<(u64, u64)>,
@@ -290,6 +302,8 @@ fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> Re
             resolved.console_admin = Some(info);
         } else if path_matches(path, b"/initfs/strate-net") {
             resolved.strate_net = Some(info);
+        } else if path_matches(path, b"/initfs/strate-bus") {
+            resolved.strate_bus = Some(info);
         } else if path_matches(path, b"/initfs/bin/dhcp-client") {
             resolved.dhcp_client = Some(info);
         } else if path_matches(path, b"/initfs/bin/ping") {
@@ -567,6 +581,16 @@ pub unsafe extern "C" fn kmain() -> ! {
                 );
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/strate-net not found in modules");
+            }
+            if let Some((base, size)) = resolved.strate_bus {
+                unsafe { STRATE_BUS_ELF_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/strate-bus found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/strate-bus not found in modules");
             }
             if let Some((base, size)) = resolved.dhcp_client {
                 unsafe { DHCP_CLIENT_ELF_MODULE = Some((base, size)) };

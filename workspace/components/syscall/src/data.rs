@@ -132,7 +132,7 @@ impl IpcMessage {
 
     /// Build a generic error reply.
     pub fn error_reply(sender: u64, status: i32) -> Self {
-        let mut msg = IpcMessage::new(0x81);
+        let mut msg = IpcMessage::new(0x80);
         msg.sender = sender;
         msg.payload[0..4].copy_from_slice(&(status as u32).to_le_bytes());
         msg

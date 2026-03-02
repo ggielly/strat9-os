@@ -171,6 +171,17 @@ impl StrateRamServer {
         }
     }
 
+    fn split_nonempty_leaf<'a>(path: &'a str) -> core::result::Result<(&'a str, &'a str), u32> {
+        if path.is_empty() || path == "/" {
+            return Err(EINVAL as u32);
+        }
+        let (parent_path, name) = split_path(path);
+        if name.is_empty() {
+            return Err(EINVAL as u32);
+        }
+        Ok((parent_path, name))
+    }
+
     fn handle_open(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let flags = match Self::read_u32(payload, 0) {
             Ok(v) => v,
@@ -187,10 +198,10 @@ impl StrateRamServer {
                 if (flags & OPEN_DIRECTORY) != 0 {
                     return Self::err_reply(sender, EINVAL as u32);
                 }
-                if path.is_empty() || path == "/" {
-                    return Self::err_reply(sender, EINVAL as u32);
-                }
-                let (parent_path, name) = split_path(path);
+                let (parent_path, name) = match Self::split_nonempty_leaf(path) {
+                    Ok(v) => v,
+                    Err(code) => return Self::err_reply(sender, code),
+                };
                 let parent_ino = match self.fs.resolve_path_internal(parent_path) {
                     Ok(v) => v,
                     Err(err) => return Self::err_reply(sender, Self::fs_status(err)),
@@ -209,7 +220,7 @@ impl StrateRamServer {
         };
 
         if (flags & OPEN_DIRECTORY) != 0 && !info.is_dir() {
-            return Self::err_reply(sender, EINVAL as u32);
+            return Self::err_reply(sender, Self::fs_status(FsError::NotADirectory));
         }
 
         if (flags & OPEN_TRUNCATE) != 0 && !info.is_dir() {
@@ -273,11 +284,10 @@ impl StrateRamServer {
             Err(code) => return Self::err_reply(sender, code),
         };
 
-        if path.is_empty() || path == "/" {
-            return Self::err_reply(sender, EINVAL as u32);
-        }
-
-        let (parent_path, name) = split_path(path);
+        let (parent_path, name) = match Self::split_nonempty_leaf(path) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
+        };
         let result = match self.fs.resolve_path_internal(parent_path) {
             Ok(parent_ino) => {
                 if is_dir {
@@ -351,11 +361,10 @@ impl StrateRamServer {
             Ok(path) => path,
             Err(code) => return Self::err_reply(sender, code),
         };
-        if path.is_empty() || path == "/" {
-            return Self::err_reply(sender, EINVAL as u32);
-        }
-
-        let (parent_path, name) = split_path(path);
+        let (parent_path, name) = match Self::split_nonempty_leaf(path) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
+        };
         let res = match self.fs.resolve_path_internal(parent_path) {
             Ok(parent_ino) => match self.fs.lookup(parent_ino, name) {
                 Ok(info) => self.fs.unlink(parent_ino, name, info.ino),
@@ -438,25 +447,27 @@ impl StrateRamServer {
     fn serve(&mut self, port: u64) -> ! {
         loop {
             let mut msg = IpcMessage::new(0);
-            if call::ipc_recv(port as usize, &mut msg).is_ok() {
-                let reply = match msg.msg_type {
-                    OPCODE_BOOTSTRAP => {
-                        let label = Self::parse_bootstrap_label(&msg.payload);
-                        self.bind_srv_alias(port, &label);
-                        Self::ok_reply(msg.sender)
-                    }
-                    OPCODE_OPEN => self.handle_open(msg.sender, &msg.payload),
-                    OPCODE_READ => self.handle_read(msg.sender, &msg.payload),
-                    OPCODE_WRITE => self.handle_write(msg.sender, &msg.payload),
-                    OPCODE_CLOSE => self.handle_close(msg.sender, &msg.payload),
-                    OPCODE_UNLINK => self.handle_unlink(msg.sender, &msg.payload),
-                    OPCODE_CREATE_FILE => self.handle_create(msg.sender, &msg.payload, false),
-                    OPCODE_CREATE_DIR => self.handle_create(msg.sender, &msg.payload, true),
-                    OPCODE_READDIR => self.handle_readdir(msg.sender, &msg.payload),
-                    _ => Self::err_reply(msg.sender, ENOSYS as u32),
-                };
-                let _ = call::ipc_reply(&reply);
+            if call::ipc_recv(port as usize, &mut msg).is_err() {
+                let _ = call::sched_yield();
+                continue;
             }
+            let reply = match msg.msg_type {
+                OPCODE_BOOTSTRAP => {
+                    let label = Self::parse_bootstrap_label(&msg.payload);
+                    self.bind_srv_alias(port, &label);
+                    Self::ok_reply(msg.sender)
+                }
+                OPCODE_OPEN => self.handle_open(msg.sender, &msg.payload),
+                OPCODE_READ => self.handle_read(msg.sender, &msg.payload),
+                OPCODE_WRITE => self.handle_write(msg.sender, &msg.payload),
+                OPCODE_CLOSE => self.handle_close(msg.sender, &msg.payload),
+                OPCODE_UNLINK => self.handle_unlink(msg.sender, &msg.payload),
+                OPCODE_CREATE_FILE => self.handle_create(msg.sender, &msg.payload, false),
+                OPCODE_CREATE_DIR => self.handle_create(msg.sender, &msg.payload, true),
+                OPCODE_READDIR => self.handle_readdir(msg.sender, &msg.payload),
+                _ => Self::err_reply(msg.sender, ENOSYS as u32),
+            };
+            let _ = call::ipc_reply(&reply);
         }
     }
 }

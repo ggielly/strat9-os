@@ -74,28 +74,20 @@ impl Ext4FileSystem {
 impl Ext4FileSystem {
     /// List entries in a directory
     pub fn read_dir(&self, _path: &str) -> Result<Vec<DirEntry>, ()> {
-        // TODO: Implement using ext4_rs directory iteration
-        Ok(Vec::new())
+        // Not implemented yet: avoid returning fake successful data.
+        Err(())
     }
 
     /// Open a file for reading
     pub fn open(&self, _path: &str) -> Result<File, ()> {
-        // TODO: Implement file opening
-        Ok(File {
-            inode: 0,
-            size: 0,
-            offset: 0,
-        })
+        // Not implemented yet: avoid returning a fake file handle.
+        Err(())
     }
 
     /// Create a new file
     pub fn create(&mut self, _path: &str) -> Result<File, ()> {
-        // TODO: Implement file creation
-        Ok(File {
-            inode: 0,
-            size: 0,
-            offset: 0,
-        })
+        // Not implemented yet: avoid reporting a fake successful create.
+        Err(())
     }
 }
 
@@ -123,7 +115,7 @@ pub enum FileType {
 /// File handle
 #[derive(Debug)]
 pub struct File {
-    inode: u64,
+    _inode: u64,
     size: u64,
     offset: u64,
 }
@@ -131,14 +123,12 @@ pub struct File {
 impl File {
     /// Read data from the file
     pub fn read(&mut self, _buf: &mut [u8]) -> Result<usize, ()> {
-        // TODO: Implement file reading
-        Ok(0)
+        Err(())
     }
 
     /// Write data to the file
     pub fn write(&mut self, _buf: &[u8]) -> Result<usize, ()> {
-        // TODO: Implement file writing
-        Ok(0)
+        Err(())
     }
 
     /// Seek to a position in the file

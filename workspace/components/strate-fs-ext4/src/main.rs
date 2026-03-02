@@ -11,12 +11,13 @@ extern crate alloc;
 
 mod syscalls;
 
-use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
+use alloc::{format, string::String, vec, vec::Vec};
 use core::{
     alloc::Layout,
     panic::PanicInfo,
 };
 use fs_ext4::{BlockDevice, BlockDeviceError, Ext4FileSystem};
+use strat9_syscall::error::{EINVAL, ENOSYS};
 use syscalls::*;
 
 // ---------------------------------------------------------------------------
@@ -40,10 +41,17 @@ const OPCODE_OPEN: u32 = 0x01;
 const OPCODE_READ: u32 = 0x02;
 const OPCODE_WRITE: u32 = 0x03;
 const OPCODE_CLOSE: u32 = 0x04;
+const OPCODE_CREATE_FILE: u32 = 0x05;
+const OPCODE_CREATE_DIR: u32 = 0x06;
+const OPCODE_UNLINK: u32 = 0x07;
+const OPCODE_READDIR: u32 = 0x08;
 const OPCODE_BOOTSTRAP: u32 = 0x10;
+const REPLY_MSG_TYPE: u32 = 0x80;
+const STATUS_OK: u32 = 0;
 const INITIAL_BIND_PATH: &[u8] = b"/srv/strate-fs-ext4/default";
 
-const MAX_OPEN_FILES: usize = 256;
+const MAX_OPEN_PATH: usize = 42;
+const MAX_WRITE_DATA: usize = 30;
 
 struct BootstrapInfo {
     handle: u64,
@@ -92,132 +100,125 @@ fn bind_srv_alias(port_handle: u64, label: &str) {
     }
 }
 
-fn error_reply_simple(sender: u64) -> IpcMessage {
-    let mut msg = IpcMessage::new(1);
-    msg.sender = sender;
-    msg
-}
-
-/// Open file handle
-struct OpenFileHandle {
-    inode: u64,
-    offset: u64,
-    size: u64,
-    flags: u32,
-}
-
 /// EXT4 Strate state
 struct Ext4Strate {
-    fs: Ext4FileSystem,
-    open_files: BTreeMap<u64, OpenFileHandle>,
+    _fs: Ext4FileSystem,
 }
 
 impl Ext4Strate {
     fn new(fs: Ext4FileSystem) -> Self {
         Ext4Strate {
-            fs,
-            open_files: BTreeMap::new(),
+            _fs: fs,
         }
     }
 
-    /// Handle OPEN request
-    fn handle_open(&mut self, sender: u64, payload: &[u8], port_handle: u64) -> IpcMessage {
-        // Kernel format: [path_len: u16][path bytes...]
-        if payload.len() < 2 {
-            return error_reply_simple(sender);
-        }
+    fn ok_reply(sender: u64) -> IpcMessage {
+        let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
+        reply.sender = sender;
+        reply.payload[0..4].copy_from_slice(&STATUS_OK.to_le_bytes());
+        reply
+    }
 
-        let path_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
-        if path_len > 46 || payload.len() < 2 + path_len {
-            return error_reply_simple(sender);
-        }
+    fn err_reply(sender: u64, status: u32) -> IpcMessage {
+        let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
+        reply.sender = sender;
+        reply.payload[0..4].copy_from_slice(&status.to_le_bytes());
+        reply
+    }
 
-        let path_bytes = &payload[2..2 + path_len];
-        let path = match core::str::from_utf8(path_bytes) {
-            Ok(p) => p,
-            Err(_) => return error_reply_simple(sender),
+    fn read_u16(payload: &[u8], start: usize) -> core::result::Result<u16, u32> {
+        let end = start.checked_add(2).ok_or(EINVAL as u32)?;
+        let bytes = payload.get(start..end).ok_or(EINVAL as u32)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_u32(payload: &[u8], start: usize) -> core::result::Result<u32, u32> {
+        let end = start.checked_add(4).ok_or(EINVAL as u32)?;
+        let bytes = payload.get(start..end).ok_or(EINVAL as u32)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn read_u64(payload: &[u8], start: usize) -> core::result::Result<u64, u32> {
+        let end = start.checked_add(8).ok_or(EINVAL as u32)?;
+        let bytes = payload.get(start..end).ok_or(EINVAL as u32)?;
+        Ok(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    fn parse_path<'a>(
+        payload: &'a [u8],
+        len_offset: usize,
+        data_offset: usize,
+        max_len: usize,
+    ) -> core::result::Result<&'a str, u32> {
+        let path_len = Self::read_u16(payload, len_offset)? as usize;
+        if path_len > max_len {
+            return Err(EINVAL as u32);
+        }
+        let end = data_offset.checked_add(path_len).ok_or(EINVAL as u32)?;
+        let path_bytes = payload.get(data_offset..end).ok_or(EINVAL as u32)?;
+        core::str::from_utf8(path_bytes).map_err(|_| EINVAL as u32)
+    }
+
+    fn handle_open(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
+        let _flags = match Self::read_u32(payload, 0) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
         };
-
-        // TODO: Actually open the file via ext4_rs
-        // For now, keep a single open file per sender.
-        self.open_files.insert(
-            sender,
-            OpenFileHandle {
-                inode: 0,
-                offset: 0,
-                size: 0,
-                flags: 0,
-            },
-        );
-
-        if port_handle > u32::MAX as u64 {
-            return error_reply_simple(sender);
-        }
-
-        // Success reply: msg_type=0, flags = handle to transfer.
-        let mut msg = IpcMessage::new(0);
-        msg.sender = sender;
-        msg.flags = port_handle as u32;
-        let _ = path;
-        msg
+        let _path = match Self::parse_path(payload, 4, 6, MAX_OPEN_PATH) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
+        };
+        Self::err_reply(sender, ENOSYS as u32)
     }
 
-    /// Handle READ request
     fn handle_read(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
-        // Kernel format: [count: u16]
-        if payload.len() < 2 {
-            return error_reply_simple(sender);
-        }
-        let mut count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
-        if count > 46 {
-            count = 46;
-        }
-
-        let file = match self.open_files.get_mut(&sender) {
-            Some(f) => f,
-            None => return error_reply_simple(sender),
+        let _file_id = match Self::read_u64(payload, 0) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
         };
-
-        // TODO: Actually read from ext4_rs
-        let read_len = 0usize.min(count);
-
-        let mut msg = IpcMessage::new(0);
-        msg.sender = sender;
-        let len_bytes = (read_len as u16).to_le_bytes();
-        msg.payload[0] = len_bytes[0];
-        msg.payload[1] = len_bytes[1];
-        let _ = file;
-        msg
+        let _offset = match Self::read_u64(payload, 8) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
+        };
+        let _requested = match Self::read_u32(payload, 16) {
+            Ok(v) => v as usize,
+            Err(code) => return Self::err_reply(sender, code),
+        };
+        Self::err_reply(sender, ENOSYS as u32)
     }
 
-    /// Handle WRITE request
-    fn handle_write(&mut self, sender: u64, payload: &[u8]) -> core::result::Result<(), ()> {
-        if payload.len() < 2 {
-            return Err(());
-        }
-        let len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
-        if payload.len() < 2 + len {
-            return Err(());
-        }
-        let data = &payload[2..2 + len];
-
-        let file = match self.open_files.get_mut(&sender) {
-            Some(f) => f,
-            None => return Err(()),
+    fn handle_write(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
+        let _file_id = match Self::read_u64(payload, 0) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
         };
-
-        // TODO: Actually write to ext4_rs
-        let _ = data;
-        let _ = file;
-        Ok(())
+        let _offset = match Self::read_u64(payload, 8) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
+        };
+        let len = match Self::read_u16(payload, 16) {
+            Ok(v) => v as usize,
+            Err(code) => return Self::err_reply(sender, code),
+        };
+        if len > MAX_WRITE_DATA {
+            return Self::err_reply(sender, EINVAL as u32);
+        }
+        let end = 18 + len;
+        let _data = match payload.get(18..end) {
+            Some(s) => s,
+            None => return Self::err_reply(sender, EINVAL as u32),
+        };
+        Self::err_reply(sender, ENOSYS as u32)
     }
 
-    /// Handle CLOSE request
-    fn handle_close(&mut self, sender: u64) -> IpcMessage {
-        let _ = self.open_files.remove(&sender);
-        let mut msg = IpcMessage::new(0);
-        msg.sender = sender;
-        msg
+    fn handle_close(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
+        let _file_id = match Self::read_u64(payload, 0) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
+        };
+        Self::err_reply(sender, ENOSYS as u32)
     }
 
     /// Main strate loop
@@ -225,34 +226,26 @@ impl Ext4Strate {
         loop {
             let mut msg = IpcMessage::new(0);
             if call::ipc_recv(port_handle as usize, &mut msg).is_err() {
+                let _ = call::sched_yield();
                 continue;
             }
 
-            match msg.msg_type {
+            let reply = match msg.msg_type {
                 OPCODE_BOOTSTRAP => {
-                    let reply = error_reply_simple(msg.sender);
-                    let _ = call::ipc_reply(&reply);
+                    let label = parse_bootstrap_label(&msg.payload);
+                    bind_srv_alias(port_handle, &label);
+                    Self::ok_reply(msg.sender)
                 }
-                OPCODE_OPEN => {
-                    let reply = self.handle_open(msg.sender, &msg.payload, port_handle);
-                    let _ = call::ipc_reply(&reply);
+                OPCODE_OPEN => self.handle_open(msg.sender, &msg.payload),
+                OPCODE_READ => self.handle_read(msg.sender, &msg.payload),
+                OPCODE_WRITE => self.handle_write(msg.sender, &msg.payload),
+                OPCODE_CLOSE => self.handle_close(msg.sender, &msg.payload),
+                OPCODE_CREATE_FILE | OPCODE_CREATE_DIR | OPCODE_UNLINK | OPCODE_READDIR => {
+                    Self::err_reply(msg.sender, ENOSYS as u32)
                 }
-                OPCODE_READ => {
-                    let reply = self.handle_read(msg.sender, &msg.payload);
-                    let _ = call::ipc_reply(&reply);
-                }
-                OPCODE_WRITE => {
-                    let _ = self.handle_write(msg.sender, &msg.payload);
-                }
-                OPCODE_CLOSE => {
-                    let reply = self.handle_close(msg.sender);
-                    let _ = call::ipc_reply(&reply);
-                }
-                _ => {
-                    let reply = error_reply_simple(msg.sender);
-                    let _ = call::ipc_reply(&reply);
-                }
-            }
+                _ => Self::err_reply(msg.sender, ENOSYS as u32),
+            };
+            let _ = call::ipc_reply(&reply);
         }
     }
 }
@@ -361,12 +354,12 @@ fn wait_for_bootstrap(port_handle: u64) -> BootstrapInfo {
     loop {
         let mut msg = IpcMessage::new(0);
         if call::ipc_recv(port_handle as usize, &mut msg).is_err() {
+            let _ = call::sched_yield();
             continue;
         }
 
         if msg.msg_type == OPCODE_BOOTSTRAP && msg.flags != 0 {
-            let mut reply = IpcMessage::new(0);
-            reply.sender = msg.sender;
+            let reply = Ext4Strate::ok_reply(msg.sender);
             let _ = call::ipc_reply(&reply);
             return BootstrapInfo {
                 handle: msg.flags as u64,
@@ -374,7 +367,7 @@ fn wait_for_bootstrap(port_handle: u64) -> BootstrapInfo {
             };
         }
 
-        let reply = error_reply_simple(msg.sender);
+        let reply = Ext4Strate::err_reply(msg.sender, ENOSYS as u32);
         let _ = call::ipc_reply(&reply);
     }
 }
@@ -385,15 +378,14 @@ fn try_wait_for_bootstrap(port_handle: u64, attempts: usize) -> Option<Bootstrap
         match call::ipc_try_recv(port_handle as usize, &mut msg) {
             Ok(_) => {
                 if msg.msg_type == OPCODE_BOOTSTRAP && msg.flags != 0 {
-                    let mut reply = IpcMessage::new(0);
-                    reply.sender = msg.sender;
+                    let reply = Ext4Strate::ok_reply(msg.sender);
                     let _ = call::ipc_reply(&reply);
                     return Some(BootstrapInfo {
                         handle: msg.flags as u64,
                         label: parse_bootstrap_label(&msg.payload),
                     });
                 }
-                let reply = error_reply_simple(msg.sender);
+                let reply = Ext4Strate::err_reply(msg.sender, ENOSYS as u32);
                 let _ = call::ipc_reply(&reply);
             }
             Err(Error::Again) => {}

@@ -283,7 +283,10 @@ impl VfsFileSystem for RamFileSystem {
                 if offset >= data.len() as u64 {
                     return Ok(0);
                 }
-                let end = (start + buf.len()).min(data.len());
+                let end = start
+                    .checked_add(buf.len())
+                    .ok_or(FsError::FileTooLarge)?
+                    .min(data.len());
                 let count = end - start;
                 buf[..count].copy_from_slice(&data[start..end]);
                 Ok(count)

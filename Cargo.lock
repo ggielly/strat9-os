@@ -1141,6 +1141,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "strat9-bus-drivers"
+version = "0.1.0"
+dependencies = [
+ "alloc-freelist",
+ "bitflags 2.11.0",
+ "spin 0.10.0",
+ "strat9-syscall",
+]
+
+[[package]]
 name = "strat9-components-api"
 version = "0.1.0"
 dependencies = [
@@ -1183,6 +1193,15 @@ dependencies = [
  "static_assertions",
  "thiserror",
  "zerocopy",
+]
+
+[[package]]
+name = "strate-bus"
+version = "0.1.0"
+dependencies = [
+ "alloc-freelist",
+ "strat9-bus-drivers",
+ "strat9-syscall",
 ]
 
 [[package]]

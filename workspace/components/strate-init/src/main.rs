@@ -245,8 +245,25 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
 }
 
 fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
+    let has_bus = silos.iter().any(|s| s.name == "bus");
     let has_network = silos.iter().any(|s| s.name == "network");
     let has_dhcp = silos.iter().any(|s| s.name == "dhcp-client");
+
+    if !has_bus {
+        log("[init] Missing mandatory silo 'bus' in config, adding fallback\n");
+        silos.push(SiloDef {
+            name: String::from("bus"),
+            sid: 42,
+            family: String::from("DRV"),
+            mode: String::from("076"),
+            strates: alloc::vec![StrateDef {
+                name: String::from("strate-bus"),
+                binary: String::from("/initfs/strate-bus"),
+                stype: String::from("elf"),
+                target: String::from("default"),
+            }],
+        });
+    }
 
     if !has_network {
         log("[init] Missing mandatory silo 'network' in config, adding fallback\n");
@@ -664,6 +681,16 @@ sid = 42
 [[silos.strates]]
 name = "console-admin"
 binary = "/initfs/console-admin"
+type = "elf"
+
+[[silos]]
+name = "bus"
+family = "DRV"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-bus"
+binary = "/initfs/strate-bus"
 type = "elf"
 
 [[silos]]

@@ -1,0 +1,15 @@
+[package]
+name = "strate-bus"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[[bin]]
+name = "strate-bus"
+path = "src/main.rs"
+
+[dependencies]
+strat9-bus-drivers = { path = "../../drivers/bus" }
+strat9-syscall = { path = "../syscall", features = ["userspace"] }
+alloc-freelist = { path = "../alloc-freelist" }

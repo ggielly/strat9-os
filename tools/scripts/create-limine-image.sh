@@ -22,6 +22,7 @@ MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/strate-init"
 CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
+BUS_ELF="target/x86_64-unknown-none/${PROFILE}/strate-bus"
 STRATE_WASM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-wasm"
 DHCP_CLIENT_ELF="target/x86_64-unknown-none/${PROFILE}/dhcp-client"
 PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
@@ -107,6 +108,12 @@ if [ -f "$NET_ELF" ]; then
     echo "    strate-net   : $net_size bytes"
 else
     echo "    strate-net   : (missing)"
+fi
+if [ -f "$BUS_ELF" ]; then
+    bus_size=$(stat -c%s "$BUS_ELF")
+    echo "    strate-bus   : $bus_size bytes"
+else
+    echo "    strate-bus   : (missing)"
 fi
 if [ -f "$STRATE_WASM_ELF" ]; then
     wasm_size=$(stat -c%s "$STRATE_WASM_ELF")
@@ -233,6 +240,13 @@ if [ -f "$NET_ELF" ]; then
     echo "  [OK] Copied strate-net: /initfs/strate-net"
 else
     echo "  [WARN] strate-net binary not found at $NET_ELF"
+fi
+
+if [ -f "$BUS_ELF" ]; then
+    cp "$BUS_ELF" "$ISO_ROOT/initfs/strate-bus"
+    echo "  [OK] Copied strate-bus: /initfs/strate-bus"
+else
+    echo "  [WARN] strate-bus binary not found at $BUS_ELF"
 fi
 
 if [ -f "$STRATE_WASM_ELF" ]; then

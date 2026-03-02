@@ -78,10 +78,15 @@ fn extract_string(payload: &[u8], offset: usize, len: usize) -> String {
 }
 
 fn send_response(original_sender: u64, status: u32) {
-    let mut msg = IpcMessage::new(0x80);
+    let mut msg = IpcMessage::new(REPLY_MSG_TYPE);
     msg.sender = original_sender;
     msg.payload[0..4].copy_from_slice(&status.to_le_bytes());
     let _ = call::ipc_reply(&msg);
+}
+
+fn bind_runtime_alias(port_h: usize, label: &str) {
+    let path = format!("/srv/strate-wasm/{}", label);
+    let _ = call::ipc_bind_port(port_h, path.as_bytes());
 }
 
 fn read_leb_u32(bytes: &[u8], mut idx: usize) -> Option<(u32, usize)> {
@@ -179,6 +184,7 @@ fn wasi_proc_exit(_caller: Caller<'_, HostState>, code: u32) { call::exit(code a
 const OP_WASM_LOAD_PATH: u32 = 0x100;
 const OP_WASM_RUN_MAIN: u32  = 0x102;
 const OP_BOOTSTRAP: u32      = 0x10;
+const REPLY_MSG_TYPE: u32    = 0x80;
 
 const RESP_OK: u32  = 0x0;
 const RESP_ERR_OPEN: u32 = 0x10;
@@ -190,6 +196,7 @@ const RESP_ERR_NO_INSTANCE: u32 = 0x20;
 const RESP_ERR_NO_ENTRY: u32 = 0x21;
 const RESP_ERR_RUN: u32 = 0x22;
 const RESP_ERR_TOO_LARGE: u32 = 0x23;
+const RESP_ERR_UNSUPPORTED: u32 = 0x24;
 
 const MAX_WASM_SIZE: usize = 16 * 1024 * 1024;
 
@@ -224,13 +231,14 @@ pub unsafe extern "C" fn _start() -> ! {
     if let Ok(_) = call::ipc_try_recv(port_h, &mut b_msg) {
         if b_msg.msg_type == OP_BOOTSTRAP {
             label = extract_string(&b_msg.payload, 1, b_msg.payload[0] as usize);
+            send_response(b_msg.sender, RESP_OK);
         } else {
             queued_msg = Some(b_msg);
         }
     }
 
+    bind_runtime_alias(port_h, &label);
     let final_path = format!("/srv/strate-wasm/{}", label);
-    let _ = call::ipc_bind_port(port_h, final_path.as_bytes());
     debug_log("[strate-wasm] running: ");
     debug_log(&final_path);
     debug_log("\n");
@@ -243,12 +251,18 @@ pub unsafe extern "C" fn _start() -> ! {
         } else {
             let mut m = IpcMessage::new(0);
             if call::ipc_recv(port_h, &mut m).is_err() {
+                let _ = call::sched_yield();
                 continue;
             }
             m
         };
         let src = msg.sender;
         match msg.msg_type {
+            OP_BOOTSTRAP => {
+                let new_label = extract_string(&msg.payload, 1, msg.payload[0] as usize);
+                bind_runtime_alias(port_h, &new_label);
+                send_response(src, RESP_OK);
+            }
             OP_WASM_LOAD_PATH => {
                 let path = extract_string(&msg.payload, 1, msg.payload[0] as usize);
                 let mut wasm_bytes = Vec::new();
@@ -361,7 +375,9 @@ pub unsafe extern "C" fn _start() -> ! {
                 }
             }
 
-            _ => {}
+            _ => {
+                send_response(src, RESP_ERR_UNSUPPORTED);
+            }
         }
     }
 }

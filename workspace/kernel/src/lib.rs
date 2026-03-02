@@ -247,6 +247,7 @@ fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
         ("init", crate::boot::limine::init_module()),
         ("console-admin", crate::boot::limine::console_admin_module()),
         ("strate-net", crate::boot::limine::strate_net_module()),
+        ("strate-bus", crate::boot::limine::strate_bus_module()),
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
@@ -271,6 +272,7 @@ fn log_boot_module_magics(stage: &str) {
         ("init", crate::boot::limine::init_module()),
         ("console-admin", crate::boot::limine::console_admin_module()),
         ("strate-net", crate::boot::limine::strate_net_module()),
+        ("strate-bus", crate::boot::limine::strate_bus_module()),
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
@@ -406,6 +408,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         ("init", crate::boot::limine::init_module()),
         ("console-admin", crate::boot::limine::console_admin_module()),
         ("strate-net", crate::boot::limine::strate_net_module()),
+        ("strate-bus", crate::boot::limine::strate_bus_module()),
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
@@ -414,7 +417,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         ("wasm-test.toml", crate::boot::limine::wasm_test_toml_module()),
     ];
 
-    for (name, module) in reserve_modules {
+    for (_name, module) in reserve_modules {
         let Some((base, size)) = module else {
             continue;
         };
@@ -434,14 +437,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         {
             serial_println!(
                 "[init] Reserved module pages: {} phys=0x{:x}..0x{:x}",
-                name,
+                _name,
                 reserve_start,
                 reserve_end
             );
             let kind = region_kind_for_addr(&mmap_work, mmap_work_len, reserve_start);
             serial_println!(
                 "[init] Module map kind: {} @0x{:x} => {:?}",
-                name,
+                _name,
                 reserve_start,
                 kind
             );

@@ -1,0 +1,15 @@
+[package]
+name = "strat9-bus-drivers"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[dependencies]
+strat9-syscall = { path = "../../components/syscall", features = ["userspace"] }
+alloc-freelist = { path = "../../components/alloc-freelist" }
+spin = { workspace = true }
+bitflags = { workspace = true }
+
+[features]
+default = []
