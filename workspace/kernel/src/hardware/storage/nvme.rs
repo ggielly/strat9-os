@@ -59,6 +59,11 @@ struct ControllerConfig {
 }
 
 impl ControllerConfig {
+    fn clear_io_fields(&self) {
+        let mut val = self.value.read();
+        val &= !(((0xF) << 16) | ((0xF) << 20) | ((0x7) << 4));
+        self.value.write(val);
+    }
     fn set_iosqes(&self, size: u32) {
         let mut val = self.value.read();
         val |= (size & 0xF) << 16;
@@ -169,13 +174,33 @@ impl NvmeController {
 
     fn init_admin_queue(&mut self) -> Result<(), NvmeError> {
         let regs = unsafe { &*(self.registers as *const Registers) };
-        let admin_sq_phys = self.admin_queue.lock().submission_phys();
-        let admin_cq_phys = self.admin_queue.lock().completion_phys();
+        let (admin_sq_phys, admin_cq_phys, queue_size) = {
+            let q = self.admin_queue.lock();
+            (q.submission_phys(), q.completion_phys(), q.size)
+        };
 
-        regs.aqa.write((1023 & 0xFFF) | ((1023 & 0xFFF) << 16));
+        if queue_size == 0 {
+            return Err(NvmeError::IoError);
+        }
+        let qsz = ((queue_size as u32).saturating_sub(1)) & 0x0FFF;
+
+        if regs.cc.is_enabled() {
+            regs.cc.set_enable(false);
+            let mut disable_timeout = 1_000_000u32;
+            while regs.csts.is_ready() {
+                core::hint::spin_loop();
+                disable_timeout = disable_timeout.saturating_sub(1);
+                if disable_timeout == 0 {
+                    return Err(NvmeError::Timeout);
+                }
+            }
+        }
+
+        regs.aqa.write(qsz | (qsz << 16));
         regs.asq.write(admin_sq_phys);
         regs.acq.write(admin_cq_phys);
 
+        regs.cc.clear_io_fields();
         regs.cc.set_css(0);
         regs.cc.set_iosqes(6);
         regs.cc.set_iocqes(6);
@@ -435,9 +460,15 @@ impl QueuePair {
         }
         self.command_id = self.command_id.wrapping_add(1);
         self.submission.submit_command(cmd, slot);
+        let mut timeout = 5_000_000u32;
         loop {
             if let Some(c) = self.completion.poll_completion() {
                 return Some(c);
+            }
+            timeout = timeout.saturating_sub(1);
+            if timeout == 0 {
+                log::error!("NVMe: admin command timeout");
+                return None;
             }
             core::hint::spin_loop();
         }

@@ -114,7 +114,7 @@ const ATA_READ_DMA_EXT: u8 = 0x25;
 const ATA_WRITE_DMA_EXT: u8 = 0x35;
 
 // PxIS bit 30 = Task File Error Status
-const PxIS_TFES: u32 = 1 << 30;
+const PXIS_TFES: u32 = 1 << 30;
 
 // ─── Error type ──────────────────────────────────────────────────────────────
 
@@ -230,7 +230,13 @@ fn port_start(pvirt: u64) {
     // SAFETY: pvirt is a valid MMIO virtual address
     unsafe {
         // Ensure Command List Running is clear before asserting ST
+        let mut timeout = 500_000u32;
         while rd32(pvirt, PORT_CMD) & CMD_CR != 0 {
+            timeout = timeout.saturating_sub(1);
+            if timeout == 0 {
+                log::warn!("AHCI: port start wait for CR clear timed out");
+                break;
+            }
             core::hint::spin_loop();
         }
         let mut cmd = rd32(pvirt, PORT_CMD);
@@ -425,7 +431,7 @@ fn submit_cmd(
             let ci = unsafe { rd32(port.port_virt, PORT_CI) };
             let is = unsafe { rd32(port.port_virt, PORT_IS) };
 
-            if is & PxIS_TFES != 0 {
+            if is & PXIS_TFES != 0 {
                 // SAFETY: MMIO writes to clear error status
                 unsafe {
                     wr32(port.port_virt, PORT_IS, 0xFFFF_FFFF);
@@ -501,7 +507,7 @@ pub fn handle_interrupt() {
         let pxis = unsafe { rd32(pvirt, PORT_IS) };
 
         // Determine outcome and record in the error flag
-        if pxis & PxIS_TFES != 0 {
+        if pxis & PXIS_TFES != 0 {
             PORT_SLOT0_ERROR[port_num as usize].store(true, Ordering::Release);
             // SAFETY: MMIO writes to clear error state
             unsafe {
@@ -566,6 +572,23 @@ impl AhciController {
         if ghc & GHC_AE == 0 {
             wr32(abar_virt, HBA_GHC, ghc | GHC_AE);
         }
+
+        // Perform HBA reset sequence (HR), then re-enable AHCI.
+        let mut ghc_after = rd32(abar_virt, HBA_GHC) | GHC_AE;
+        wr32(abar_virt, HBA_GHC, ghc_after | GHC_HR);
+        let mut reset_timeout = 1_000_000u32;
+        while rd32(abar_virt, HBA_GHC) & GHC_HR != 0 {
+            reset_timeout = reset_timeout.saturating_sub(1);
+            if reset_timeout == 0 {
+                log::warn!("AHCI: HBA reset timed out, continuing with current state");
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        ghc_after = rd32(abar_virt, HBA_GHC) | GHC_AE;
+        wr32(abar_virt, HBA_GHC, ghc_after);
+        // Clear global pending interrupts before per-port setup.
+        wr32(abar_virt, HBA_IS, 0xFFFF_FFFF);
 
         log::debug!(
             "AHCI: ABAR phys={:#x} virt={:#x}  GHC={:#010x}",

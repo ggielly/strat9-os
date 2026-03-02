@@ -84,11 +84,32 @@ pub fn init() {
         vendor_id: Some(pci::vendor::INTEL),
         device_id: None,
         class_code: Some(pci::class::NETWORK),
-        subclass: Some(pci::net_subclass::ETHERNET),
+        subclass: None,
         prog_if: None,
     });
+    let mut found_intel_nic = false;
+    let mut warned_modern_intel = false;
     for pci_dev in candidates.into_iter() {
+        // Accept standard Ethernet class and vendor-specific network subclass.
+        if pci_dev.subclass != pci::net_subclass::ETHERNET && pci_dev.subclass != pci::net_subclass::OTHER {
+            continue;
+        }
+        found_intel_nic = true;
         if !e1000::E1000_DEVICE_IDS.contains(&pci_dev.device_id) {
+            if matches!(
+                pci_dev.device_id,
+                pci::intel_eth::I219_LM
+                    | pci::intel_eth::I219_V
+                    | pci::intel_eth::I225_LM
+                    | pci::intel_eth::I225_V
+                    | pci::intel_eth::I226_LM
+                    | pci::intel_eth::I226_V
+            ) {
+                if !warned_modern_intel {
+                    log::warn!("E1000: modern Intel NIC detected; add e1000e/igc for full laptop support");
+                    warned_modern_intel = true;
+                }
+            }
             continue;
         }
 
@@ -100,12 +121,16 @@ pub fn init() {
         );
         pci_dev.enable_bus_master();
         pci_dev.enable_memory_space();
+        // Firmware may leave PCI interrupt disabled; clear bit 10.
+        let mut cmd = pci_dev.read_config_u16(pci::config::COMMAND);
+        cmd &= !pci::command::INTERRUPT_DISABLE;
+        pci_dev.write_config_u16(pci::config::COMMAND, cmd);
 
-        let mmio_phys = match pci_dev.read_bar(0) {
+        let mmio_phys = match pci_dev.read_bar(0).or_else(|| pci_dev.read_bar(1)) {
             Some(Bar::Memory32 { addr, .. }) => addr as u64,
             Some(Bar::Memory64 { addr, .. }) => addr,
             _ => {
-                log::error!("E1000: BAR0 not memory-mapped");
+                log::error!("E1000: no MMIO BAR (BAR0/BAR1)");
                 continue;
             }
         };
@@ -127,18 +152,39 @@ pub fn init() {
             continue;
         }
 
-        match E1000Nic::init(mmio_virt, &KernelDma) {
-            Ok(nic) => {
-                let mac = nic.mac_address();
-                let dev = Arc::new(KernelE1000 {
-                    mac,
-                    inner: SpinLock::new(nic),
-                });
-                register_device(dev);
-                return;
+        // Some firmware leaves NIC in a stale power/reset state; retry once.
+        let mut init_ok = None;
+        for attempt in 0..2 {
+            match E1000Nic::init(mmio_virt, &KernelDma) {
+                Ok(nic) => {
+                    init_ok = Some(nic);
+                    break;
+                }
+                Err(e) => {
+                    if attempt == 0 {
+                        let mut cmd_retry = pci_dev.read_config_u16(pci::config::COMMAND);
+                        cmd_retry |= pci::command::BUS_MASTER | pci::command::MEMORY_SPACE;
+                        cmd_retry &= !pci::command::INTERRUPT_DISABLE;
+                        pci_dev.write_config_u16(pci::config::COMMAND, cmd_retry);
+                        continue;
+                    }
+                    log::error!("E1000: init failed: {}", e);
+                }
             }
-            Err(e) => log::error!("E1000: init failed: {}", e),
         }
+
+        if let Some(nic) = init_ok {
+            let mac = nic.mac_address();
+            let dev = Arc::new(KernelE1000 {
+                mac,
+                inner: SpinLock::new(nic),
+            });
+            register_device(dev);
+            return;
+        }
+    }
+    if found_intel_nic {
+        log::warn!("E1000: Intel NIC(s) found but no supported e1000 device initialized");
     }
     log::info!("E1000: no compatible device found");
 }

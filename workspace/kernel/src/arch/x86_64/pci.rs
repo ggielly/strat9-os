@@ -107,8 +107,17 @@ pub mod intel_eth {
     pub const E1000_82540EM: u16 = 0x100E; // QEMU default e1000
     pub const E1000_82545EM: u16 = 0x100F;
     pub const E1000E_82574L: u16 = 0x10D3; // QEMU e1000e
+    pub const I210_AT: u16 = 0x1533;
+    pub const I350_AM2: u16 = 0x1521;
+    pub const I350_AM4: u16 = 0x1523;
     pub const I217_LM: u16 = 0x153A;
     pub const I211_AT: u16 = 0x1539;
+    pub const I219_LM: u16 = 0x15F9;
+    pub const I219_V: u16 = 0x15FA;
+    pub const I225_LM: u16 = 0x15F2;
+    pub const I225_V: u16 = 0x15F3;
+    pub const I226_LM: u16 = 0x125B;
+    pub const I226_V: u16 = 0x125C;
 }
 
 /// PCI configuration register offsets
