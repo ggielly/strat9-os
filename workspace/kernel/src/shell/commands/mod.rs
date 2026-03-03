@@ -110,4 +110,9 @@ impl CommandRegistry {
             Err(ShellError::UnknownCommand)
         }
     }
+
+    /// Return all registered command names (sorted).
+    pub fn command_names(&self) -> alloc::vec::Vec<&str> {
+        self.commands.keys().map(|k| k.as_str()).collect()
+    }
 }

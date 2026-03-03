@@ -154,40 +154,52 @@ pub fn cmd_whoami(_args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Search for lines matching a pattern in a file or piped input.
+///
+/// Usage: `grep <pattern> [path]`
+///
+/// When invoked as the right-hand side of a pipe (`cmd | grep pat`),
+/// reads from pipe input instead of a file.
 pub fn cmd_grep(args: &[String]) -> Result<(), ShellError> {
-    if args.len() < 2 {
-        shell_println!("Usage: grep <pattern> <path>");
+    if args.is_empty() {
+        shell_println!("Usage: grep <pattern> [path]");
         return Err(ShellError::InvalidArguments);
     }
     let pattern = args[0].as_str();
-    let path = args[1].as_str();
 
-    let fd = vfs::open(path, vfs::OpenFlags::READ).map_err(|_| {
-        shell_println!("grep: cannot open '{}'", path);
-        ShellError::ExecutionFailed
-    })?;
-    let data = match vfs::read_all(fd) {
-        Ok(d) => d,
-        Err(_) => {
-            let _ = vfs::close(fd);
-            shell_println!("grep: cannot read '{}'", path);
-            return Err(ShellError::ExecutionFailed);
-        }
+    let (data, label) = if let Some(piped) = crate::shell::output::take_pipe_input() {
+        (piped, String::from("(pipe)"))
+    } else if args.len() >= 2 {
+        let path = args[1].as_str();
+        let fd = vfs::open(path, vfs::OpenFlags::READ).map_err(|_| {
+            shell_println!("grep: cannot open '{}'", path);
+            ShellError::ExecutionFailed
+        })?;
+        let d = match vfs::read_all(fd) {
+            Ok(d) => d,
+            Err(_) => {
+                let _ = vfs::close(fd);
+                shell_println!("grep: cannot read '{}'", path);
+                return Err(ShellError::ExecutionFailed);
+            }
+        };
+        let _ = vfs::close(fd);
+        (d, String::from(path))
+    } else {
+        shell_println!("Usage: grep <pattern> <path>");
+        return Err(ShellError::InvalidArguments);
     };
-    let _ = vfs::close(fd);
 
     let text = core::str::from_utf8(&data).unwrap_or("");
-    let mut line_no = 1u32;
     let mut found = 0u32;
     for line in text.split('\n') {
         if line.contains(pattern) {
-            shell_println!("{}:{}: {}", path, line_no, line);
+            shell_println!("{}", line);
             found += 1;
         }
-        line_no += 1;
     }
     if found == 0 {
-        shell_println!("(no match)");
+        shell_println!("(no match in {})", label);
     }
     Ok(())
 }

@@ -155,7 +155,22 @@ pub fn cmd_ls(args: &[String]) -> Result<(), ShellError> {
 // ─── cat ─────────────────────────────────────────────────────────────────────
 
 /// Display file contents.
+/// Display file contents or piped input.
+///
+/// When invoked without arguments and pipe input is available,
+/// prints the piped data. Otherwise reads from the specified path.
 pub fn cmd_cat(args: &[String]) -> Result<(), ShellError> {
+    if let Some(piped) = crate::shell::output::take_pipe_input() {
+        if args.is_empty() {
+            let s = core::str::from_utf8(&piped).unwrap_or("(non-UTF8 data)");
+            crate::shell_print!("{}", s);
+            if !s.ends_with('\n') {
+                shell_println!();
+            }
+            return Ok(());
+        }
+    }
+
     if args.is_empty() {
         shell_println!("Usage: cat <path>");
         return Ok(());

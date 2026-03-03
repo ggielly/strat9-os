@@ -13,10 +13,10 @@ pub mod parser;
 
 use commands::CommandRegistry;
 use output::{print_char, print_prompt};
-use parser::parse;
+use parser::{parse_pipeline, Redirect};
 
-// Import the shell output macros
-use crate::shell_println;
+use crate::{shell_println, vfs};
+use strat9_abi::flag::OpenFlags;
 
 /// Shell error types
 #[derive(Debug)]
@@ -307,21 +307,7 @@ pub extern "C" fn shell_main() -> ! {
                             }
                         }
 
-                        if let Some(cmd) = parse(line) {
-                            match registry.execute(&cmd) {
-                                Ok(()) => {}
-                                Err(ShellError::UnknownCommand) => {
-                                    shell_println!("Error: unknown command '{}'", cmd.name);
-                                    shell_println!("Type 'help' for available commands.");
-                                }
-                                Err(ShellError::InvalidArguments) => {
-                                    shell_println!("Error: invalid arguments");
-                                }
-                                Err(ShellError::ExecutionFailed) => {
-                                    shell_println!("Error: command execution failed");
-                                }
-                            }
-                        }
+                        execute_line(line, &registry);
                         input_len = 0;
                         cursor_pos = 0;
                         history_idx = -1;
@@ -590,6 +576,100 @@ pub extern "C" fn shell_main() -> ! {
                 }
             }
             crate::process::yield_task();
+        }
+    }
+}
+
+/// Execute a command line, handling pipes (`|`) and redirections (`>`, `>>`, `<`).
+fn execute_line(line: &str, registry: &CommandRegistry) {
+    let pipeline = match parse_pipeline(line) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let stage_count = pipeline.stages.len();
+    let mut pipe_data: Option<alloc::vec::Vec<u8>> = None;
+
+    for (i, stage) in pipeline.stages.iter().enumerate() {
+        let is_last = i == stage_count - 1;
+        let needs_capture = !is_last || stage.stdout_redirect.is_some();
+
+        if let Some(ref stdin_path) = stage.stdin_redirect {
+            match vfs::open(stdin_path, vfs::OpenFlags::READ) {
+                Ok(fd) => {
+                    let data = vfs::read_all(fd).unwrap_or_default();
+                    let _ = vfs::close(fd);
+                    output::set_pipe_input(data);
+                }
+                Err(e) => {
+                    shell_println!("shell: cannot open '{}': {:?}", stdin_path, e);
+                    return;
+                }
+            }
+        } else if let Some(data) = pipe_data.take() {
+            output::set_pipe_input(data);
+        }
+
+        if needs_capture {
+            output::start_capture();
+        }
+
+        let result = registry.execute(&stage.command);
+
+        let captured = if needs_capture {
+            output::take_capture()
+        } else {
+            alloc::vec::Vec::new()
+        };
+
+        match result {
+            Ok(()) => {}
+            Err(ShellError::UnknownCommand) => {
+                shell_println!("Error: unknown command '{}'", stage.command.name);
+                return;
+            }
+            Err(ShellError::InvalidArguments) => {
+                shell_println!("Error: invalid arguments for '{}'", stage.command.name);
+                return;
+            }
+            Err(ShellError::ExecutionFailed) => {
+                shell_println!("Error: '{}' execution failed", stage.command.name);
+                return;
+            }
+        }
+
+        if let Some(ref redirect) = stage.stdout_redirect {
+            apply_redirect(redirect, &captured);
+        }
+
+        if !is_last {
+            pipe_data = Some(captured);
+        }
+    }
+}
+
+/// Write captured output to a file (truncate or append).
+fn apply_redirect(redirect: &Redirect, data: &[u8]) {
+    match redirect {
+        Redirect::Truncate(path) => {
+            let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
+            match vfs::open(path, flags) {
+                Ok(fd) => {
+                    let _ = vfs::write(fd, data);
+                    let _ = vfs::close(fd);
+                }
+                Err(e) => shell_println!("shell: cannot write '{}': {:?}", path, e),
+            }
+        }
+        Redirect::Append(path) => {
+            let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::APPEND;
+            match vfs::open(path, flags) {
+                Ok(fd) => {
+                    let _ = vfs::write(fd, data);
+                    let _ = vfs::close(fd);
+                }
+                Err(e) => shell_println!("shell: cannot append '{}': {:?}", path, e),
+            }
         }
     }
 }
