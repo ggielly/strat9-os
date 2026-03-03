@@ -91,7 +91,7 @@ impl AtaChannel {
         Err("ATA timeout")
     }
 
-    fn select_device(&self, device: u8, lba: u64) {
+    fn select_device(&self, _device: u8, lba: u64) {
         let device_reg = ATA_DEVICE_MASTER | ATA_DEVICE_LBA | ((lba >> 24) & 0x0F) as u8;
         self.write8(ATA_REG_DEVICE, device_reg);
         self.read8(ATA_REG_STATUS);

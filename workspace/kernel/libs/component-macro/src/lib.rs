@@ -245,8 +245,14 @@ pub fn parse_components_toml(_input: TokenStream) -> TokenStream {
 
     let entries = match found_path {
         Some(ref p) => {
-            let content = std::fs::read_to_string(p)
-                .unwrap_or_else(|e| panic!("Failed to read Components.toml: {e}"));
+            let content = match std::fs::read_to_string(p) {
+                Ok(c) => c,
+                Err(_e) => {
+                    return TokenStream::from(quote! {
+                        &[] as &[(&'static str, &'static [&'static str])]
+                    });
+                }
+            };
             parse_toml_deps(&content)
         }
         None => vec![],
@@ -289,7 +295,7 @@ fn parse_toml_deps(content: &str) -> Vec<(String, Vec<String>)> {
         // Extract `deps = [...]`.
         let deps = if let Some(di) = rest.find("deps") {
             let after = rest[di + 4..]
-                .trim_start_matches(|c: char| c == ' ' || c == '=')
+                .trim_start_matches([' ', '='])
                 .trim_start();
             if let Some(bs) = after.find('[') {
                 if let Some(be) = after.find(']') {

@@ -20,12 +20,12 @@ const IGC_IDS: &[u16] = &[
 struct KernelDma;
 
 impl DmaAllocator for KernelDma {
-    fn alloc_dma(&self, size: usize) -> Result<DmaRegion, ()> {
+    fn alloc_dma(&self, size: usize) -> Result<DmaRegion, nic_buffers::DmaAllocError> {
         let pages = (size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
         let mut lock = get_allocator().lock();
-        let alloc = lock.as_mut().ok_or(())?;
-        let frame = alloc.alloc(order).map_err(|_| ())?;
+        let alloc = lock.as_mut().ok_or(nic_buffers::DmaAllocError)?;
+        let frame = alloc.alloc(order).map_err(|_| nic_buffers::DmaAllocError)?;
         let phys = frame.start_address.as_u64();
         let virt = memory::phys_to_virt(phys) as *mut u8;
         Ok(DmaRegion {
