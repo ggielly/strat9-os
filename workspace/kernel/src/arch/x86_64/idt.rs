@@ -195,8 +195,12 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
-    // Try to handle COW fault first (before killing the process)
-    if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) && is_user {
+    // Try COW only for write-protection faults on already-present pages.
+    // For not-present faults, demand paging should run first.
+    if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        && error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+        && is_user
+    {
         if let Some(task) = crate::process::current_task_clone() {
             let address_space = unsafe { &*task.process.address_space.get() };
             if let Ok(vaddr) = fault_addr {
