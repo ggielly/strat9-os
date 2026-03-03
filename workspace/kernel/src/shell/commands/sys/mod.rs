@@ -620,6 +620,7 @@ pub fn cmd_silo(args: &[String]) -> Result<(), ShellError> {
         "pledge" => cmd_silo_pledge(args),
         "unveil" => cmd_silo_unveil(args),
         "sandbox" => cmd_silo_sandbox(args),
+        "limit" => cmd_silo_limit(args),
         "top" => cmd_silo_top(args),
         "logs" => cmd_silo_logs(args),
         "spawn" | "start" | "stop" | "kill" | "destroy" | "rename" | "config" => {
@@ -1582,6 +1583,7 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
         "pledge" => cmd_silo_pledge(args),
         "unveil" => cmd_silo_unveil(args),
         "sandbox" => cmd_silo_sandbox(args),
+        "limit" => cmd_silo_limit(args),
         "top" => cmd_silo_top(args),
         "logs" => cmd_silo_logs(args),
         _ => {
@@ -1752,6 +1754,36 @@ fn cmd_silo_sandbox(args: &[String]) -> Result<(), ShellError> {
     match silo::kernel_sandbox_silo(args[1].as_str()) {
         Ok(sid) => { shell_println!("silo sandbox: ok (sid={})", sid); Ok(()) }
         Err(e) => { shell_println!("silo sandbox failed: {:?}", e); Err(ShellError::ExecutionFailed) }
+    }
+}
+
+/// Dynamically adjust silo resource limits.
+///
+/// Usage: `silo limit <id|label> <key> <value>`
+///
+/// Keys: `mem_max`, `mem_min`, `max_tasks`, `cpu_shares`.
+fn cmd_silo_limit(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 4 {
+        shell_println!("Usage: silo limit <id|label> <key> <value>");
+        shell_println!("  Keys: mem_max, mem_min, max_tasks, cpu_shares");
+        return Err(ShellError::InvalidArguments);
+    }
+    let selector = args[1].as_str();
+    let key = args[2].as_str();
+    let value: u64 = args[3].parse().map_err(|_| {
+        shell_println!("silo limit: invalid value '{}'", args[3]);
+        ShellError::InvalidArguments
+    })?;
+
+    match silo::kernel_limit_silo(selector, key, value) {
+        Ok(sid) => {
+            shell_println!("silo limit: {}={} for sid={}", key, value, sid);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("silo limit failed: {:?}", e);
+            Err(ShellError::ExecutionFailed)
+        }
     }
 }
 

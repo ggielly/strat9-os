@@ -2611,6 +2611,24 @@ pub fn kernel_sandbox_silo(selector: &str) -> Result<u32, SyscallError> {
     Ok(silo_id)
 }
 
+/// Dynamically adjust resource quotas for a silo.
+///
+/// `key` can be: `mem_max`, `mem_min`, `max_tasks`, `cpu_shares`.
+/// Values are parsed as u64 (bytes for memory, count otherwise).
+pub fn kernel_limit_silo(selector: &str, key: &str, value: u64) -> Result<u32, SyscallError> {
+    let mut mgr = SILO_MANAGER.lock();
+    let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    let silo = mgr.get_mut(silo_id)?;
+    match key {
+        "mem_max" => silo.config.mem_max = value,
+        "mem_min" => silo.config.mem_min = value,
+        "max_tasks" => silo.config.max_tasks = value as u32,
+        "cpu_shares" => silo.config.cpu_shares = value as u32,
+        _ => return Err(SyscallError::InvalidArgument),
+    }
+    Ok(silo_id)
+}
+
 // ============================================================================
 // Fault handling (called from exception handlers)
 // ============================================================================
