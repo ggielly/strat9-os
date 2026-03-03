@@ -19,6 +19,7 @@ pub struct XfsDriver {
 }
 
 impl XfsDriver {
+    /// Creates a new instance.
     pub fn new(device: Arc<dyn BlockDevice>) -> FsResult<Self> {
         let mut sb_buf = [0u8; 512];
         device
@@ -38,6 +39,7 @@ impl XfsDriver {
         })
     }
 
+    /// Reads inode.
     fn read_inode(&self, ino: u64) -> FsResult<Inode> {
         let inode_size = self.superblock.inode_size as usize;
         let inode_offset = self.calculate_inode_offset(ino)?;
@@ -50,6 +52,7 @@ impl XfsDriver {
         Inode::parse(&buf, inode_size).map_err(|_| FsError::Corrupted)
     }
 
+    /// Implements calculate inode offset.
     fn calculate_inode_offset(&self, ino: u64) -> FsResult<u64> {
         let sb = &self.superblock;
 
@@ -68,6 +71,7 @@ impl XfsDriver {
         Ok(offset)
     }
 
+    /// Reads file data.
     fn read_file_data(&self, inode: &Inode, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
         match &inode.data_fork {
             xfs_rs::DataFork::Local(data) => {
@@ -93,6 +97,7 @@ impl XfsDriver {
         }
     }
 
+    /// Reads from extents.
     fn read_from_extents(
         &self,
         _inode: &Inode,
@@ -136,19 +141,23 @@ impl XfsDriver {
 }
 
 impl FileSystem for XfsDriver {
+    /// Implements mount.
     fn mount(&mut self, _device: Arc<dyn BlockDevice>) -> FsResult<()> {
         Ok(())
     }
 
+    /// Implements unmount.
     fn unmount(&mut self) -> FsResult<()> {
         Ok(())
     }
 
+    /// Implements lookup.
     fn lookup(&self, _path: &str) -> FsResult<u64> {
         // TODO: implement path lookup traversing directory structure
         Err(FsError::NotImplemented)
     }
 
+    /// Implements read.
     fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
         let inode = self.read_inode(ino)?;
 
@@ -159,21 +168,25 @@ impl FileSystem for XfsDriver {
         self.read_file_data(&inode, offset, buf)
     }
 
+    /// Implements write.
     fn write(&mut self, _ino: u64, _offset: u64, _buf: &[u8]) -> FsResult<usize> {
         // TODO: implement write (requires XFS journaling)
         Err(FsError::NotImplemented)
     }
 
+    /// Implements create.
     fn create(&mut self, _parent: u64, _name: &str, _file_type: FileType) -> FsResult<u64> {
         // TODO: implement create (requires XFS journaling)
         Err(FsError::NotImplemented)
     }
 
+    /// Implements remove.
     fn remove(&mut self, _parent: u64, _name: &str) -> FsResult<()> {
         // TODO: implement remove (requires XFS journaling)
         Err(FsError::NotImplemented)
     }
 
+    /// Implements stat.
     fn stat(&self, ino: u64) -> FsResult<FileStat> {
         let inode = self.read_inode(ino)?;
 
@@ -193,6 +206,7 @@ impl FileSystem for XfsDriver {
         })
     }
 
+    /// Implements readdir.
     fn readdir(&self, ino: u64) -> FsResult<alloc::vec::Vec<(alloc::string::String, u64)>> {
         let inode = self.read_inode(ino)?;
 
@@ -213,6 +227,7 @@ impl FileSystem for XfsDriver {
         }
     }
 
+    /// Parses directory entries.
     fn parse_directory_entries(
         &self,
         parent_ino: u64,
@@ -228,6 +243,7 @@ impl FileSystem for XfsDriver {
         Ok(entries)
     }
 
+    /// Reads large directory.
     fn read_large_directory(
         &self,
         ino: u64,

@@ -19,6 +19,7 @@ pub struct OmapOcp2Scp {
 }
 
 impl OmapOcp2Scp {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -28,14 +29,17 @@ impl OmapOcp2Scp {
         }
     }
 
+    /// Sets am437x.
     pub fn set_am437x(&mut self, am437x: bool) {
         self.is_am437x = am437x;
     }
 
+    /// Performs the add child operation.
     pub fn add_child(&mut self, child: BusChild) {
         self.children.push(child);
     }
 
+    /// Performs the configure timing operation.
     fn configure_timing(&self) {
         if self.is_am437x || !self.regs.is_valid() {
             return;
@@ -48,10 +52,13 @@ impl OmapOcp2Scp {
 }
 
 impl BusDriver for OmapOcp2Scp {
+    /// Performs the name operation.
     fn name(&self) -> &str { "omap-ocp2scp" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x20);
         self.configure_timing();
@@ -59,22 +66,26 @@ impl BusDriver for OmapOcp2Scp {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.regs.write32(offset, value);
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.children.clone()
     }

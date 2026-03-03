@@ -49,6 +49,7 @@ pub struct CsTiming {
 }
 
 impl CsTiming {
+    /// Creates a new instance.
     pub const fn new() -> Self {
         Self {
             is_applied: false,
@@ -66,6 +67,7 @@ pub struct ImxWeim {
 }
 
 impl ImxWeim {
+    /// Creates a new instance.
     pub fn new(devtype: WeimDevtype) -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -76,6 +78,7 @@ impl ImxWeim {
         }
     }
 
+    /// Sets cs timing.
     pub fn set_cs_timing(&mut self, cs: usize, regs: &[u32]) {
         if cs >= self.devtype.cs_count || regs.len() > self.devtype.cs_regs_count {
             return;
@@ -86,6 +89,7 @@ impl ImxWeim {
         self.timings[cs].is_applied = true;
     }
 
+    /// Performs the apply timings operation.
     pub fn apply_timings(&self) {
         for cs in 0..self.devtype.cs_count {
             if !self.timings[cs].is_applied {
@@ -98,6 +102,7 @@ impl ImxWeim {
         }
     }
 
+    /// Sets burst clock.
     pub fn set_burst_clock(&self, enable: bool) {
         if self.devtype.wcr_offset == 0 { return; }
         let mut wcr = self.regs.read32(self.devtype.wcr_offset);
@@ -109,16 +114,20 @@ impl ImxWeim {
         self.regs.write32(self.devtype.wcr_offset, wcr);
     }
 
+    /// Performs the add child operation.
     pub fn add_child(&mut self, child: BusChild) {
         self.children.push(child);
     }
 }
 
 impl BusDriver for ImxWeim {
+    /// Performs the name operation.
     fn name(&self) -> &str { "imx-weim" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         let size = self.devtype.cs_count * self.devtype.cs_stride + 0x100;
         self.regs.init(base, size);
@@ -127,22 +136,26 @@ impl BusDriver for ImxWeim {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.regs.write32(offset, value);
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.children.clone()
     }

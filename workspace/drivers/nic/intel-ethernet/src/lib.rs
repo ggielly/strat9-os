@@ -20,15 +20,19 @@ pub struct LegacyRxDesc {
 const RX_DD: u8 = 1 << 0;
 
 impl RxDescriptor for LegacyRxDesc {
+    /// Sets buffer addr.
     fn set_buffer_addr(&mut self, phys: u64) {
         self.addr = phys;
     }
+    /// Returns whether done.
     fn is_done(&self) -> bool {
         self.status & RX_DD != 0
     }
+    /// Performs the packet length operation.
     fn packet_length(&self) -> u16 {
         self.length
     }
+    /// Performs the clear status operation.
     fn clear_status(&mut self) {
         self.status = 0;
         self.length = 0;
@@ -58,16 +62,20 @@ const TX_CMD_IFCS: u8 = 1 << 1;
 const TX_CMD_RS: u8 = 1 << 3;
 
 impl TxDescriptor for LegacyTxDesc {
+    /// Sets buffer.
     fn set_buffer(&mut self, phys: u64, len: u16) {
         self.addr = phys;
         self.length = len;
     }
+    /// Sets eop ifcs rs.
     fn set_eop_ifcs_rs(&mut self) {
         self.cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
     }
+    /// Returns whether done.
     fn is_done(&self) -> bool {
         self.status & TX_DD != 0
     }
+    /// Performs the clear operation.
     fn clear(&mut self) {
         *self = Self::default();
     }

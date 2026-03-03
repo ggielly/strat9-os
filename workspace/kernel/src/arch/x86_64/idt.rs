@@ -4,6 +4,7 @@
 //! Inspired by MaestroOS `idt.rs` and Redox-OS kernel.
 
 use super::{pic, tss};
+use core::sync::atomic::{AtomicU32, Ordering};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 /// IRQ interrupt vector numbers (PIC1_OFFSET + IRQ number)
@@ -22,6 +23,7 @@ pub mod irq {
 
 /// Static IDT storage (must be 'static for load())
 static mut IDT_STORAGE: InterruptDescriptorTable = InterruptDescriptorTable::new();
+static USER_PF_TRACE_BUDGET: AtomicU32 = AtomicU32::new(64);
 
 /// Initialize the IDT with exception handlers and IRQ handlers
 pub fn init() {
@@ -129,10 +131,12 @@ pub fn register_virtio_block_irq(irq: u8) {
 // CPU Exception Handlers
 // =============================================
 
+/// Performs the breakpoint handler operation.
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     log::warn!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
+/// Performs the invalid opcode handler operation.
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
     if is_user {
@@ -151,6 +155,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     panic!("Invalid opcode");
 }
 
+/// Performs the page fault handler operation.
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
@@ -177,26 +182,34 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
-    crate::trace_mem!(
-        crate::trace::category::MEM_PF,
-        crate::trace::TraceKind::MemPageFault,
-        error_code.bits() as u64,
-        trace_ctx,
-        rip,
-        fault_vaddr,
-        user_rsp,
-        0
-    );
-
-    if is_user {
-        if let Some(task) = crate::process::current_task_clone() {
-            let as_ref = unsafe { &*task.process.address_space.get() };
-            dump_user_pf_context(as_ref, rip, user_rsp);
-        }
+    let do_pf_trace = if is_user {
+        USER_PF_TRACE_BUDGET
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                if v > 0 { Some(v - 1) } else { None }
+            })
+            .is_ok()
+    } else {
+        true
+    };
+    if do_pf_trace {
+        crate::trace_mem!(
+            crate::trace::category::MEM_PF,
+            crate::trace::TraceKind::MemPageFault,
+            error_code.bits() as u64,
+            trace_ctx,
+            rip,
+            fault_vaddr,
+            user_rsp,
+            0
+        );
     }
 
-    // Try to handle COW fault first (before killing the process)
-    if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) && is_user {
+    // Try COW only for write-protection faults on already-present pages.
+    // For not-present faults, demand paging should run first.
+    if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        && error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+        && is_user
+    {
         if let Some(task) = crate::process::current_task_clone() {
             let address_space = unsafe { &*task.process.address_space.get() };
             if let Ok(vaddr) = fault_addr {
@@ -247,7 +260,9 @@ extern "x86-interrupt" fn page_fault_handler(
             if let Ok(vaddr) = fault_addr {
                 match address_space.handle_fault(vaddr.as_u64()) {
                     Ok(()) => return,
-                    Err(_) => {}
+                    Err(_) => {
+                        dump_user_pf_context(address_space, rip, user_rsp);
+                    }
                 }
             }
         }
@@ -351,6 +366,7 @@ extern "x86-interrupt" fn page_fault_handler(
     panic!("Page fault");
 }
 
+/// Performs the dump user pf context operation.
 fn dump_user_pf_context(as_ref: &crate::memory::AddressSpace, rip: u64, rsp: u64) {
     use x86_64::VirtAddr;
 
@@ -390,6 +406,7 @@ fn dump_user_pf_context(as_ref: &crate::memory::AddressSpace, rip: u64, rsp: u64
     }
 }
 
+/// Performs the general protection fault handler operation.
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -413,6 +430,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     panic!("General protection fault");
 }
 
+/// Performs the double fault handler operation.
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -475,6 +493,7 @@ extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
     }
 }
 
+/// Performs the keyboard handler operation.
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     let raw = unsafe { super::io::inb(0x60) };
     // Port 0x60 is consumed on read: feed the raw scancode directly.

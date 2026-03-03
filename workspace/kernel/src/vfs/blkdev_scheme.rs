@@ -28,7 +28,10 @@ use crate::{
         virtio_block::{BlockDevice, BlockError, SECTOR_SIZE},
     },
     syscall::error::SyscallError,
-    vfs::scheme::{DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_BLK, DT_CHR},
+    vfs::scheme::{
+        finalize_pseudo_stat, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
+        DEV_DEVFS, DT_BLK, DT_CHR,
+    },
 };
 
 // ─── File-ID constants ────────────────────────────────────────────────────────
@@ -41,9 +44,17 @@ const FID_ZERO:   u64 = 4;
 const FID_RANDOM: u64 = 5;
 const FID_URANDOM: u64 = 6;
 
+const RDEV_NULL: u64 = (1u64 << 8) | 3;
+const RDEV_ZERO: u64 = (1u64 << 8) | 5;
+const RDEV_RANDOM: u64 = (1u64 << 8) | 8;
+const RDEV_URANDOM: u64 = (1u64 << 8) | 9;
+const RDEV_SDA: u64 = (8u64 << 8) | 0;
+const RDEV_VDA: u64 = (254u64 << 8) | 0;
+
 // ─── xorshift64 fallback PRNG ────────────────────────────────────────────────
 static PRNG_STATE: AtomicU64 = AtomicU64::new(0xdeadbeef_cafebabe);
 
+/// Performs the prng fill operation.
 fn prng_fill(buf: &mut [u8]) {
     if crate::hardware::virtio::rng::is_available() {
         let _ = crate::hardware::virtio::rng::read_entropy(buf);
@@ -68,6 +79,7 @@ fn prng_fill(buf: &mut [u8]) {
 pub struct BlkDevScheme;
 
 impl BlkDevScheme {
+    /// Creates a new instance.
     pub fn new() -> Self {
         BlkDevScheme
     }
@@ -76,6 +88,7 @@ impl BlkDevScheme {
 impl Scheme for BlkDevScheme {
     // ── open ─────────────────────────────────────────────────────────────────
 
+    /// Performs the open operation.
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         match path.trim_start_matches('/') {
             "" => {
@@ -113,6 +126,7 @@ impl Scheme for BlkDevScheme {
 
     // ── read ─────────────────────────────────────────────────────────────────
 
+    /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         match file_id {
             FID_ROOT => {
@@ -147,6 +161,7 @@ impl Scheme for BlkDevScheme {
 
     // ── write ────────────────────────────────────────────────────────────────
 
+    /// Performs the write operation.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         match file_id {
             FID_NULL => Ok(buf.len()),
@@ -166,12 +181,14 @@ impl Scheme for BlkDevScheme {
 
     // ── close ────────────────────────────────────────────────────────────────
 
+    /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(()) // stateless: nothing to clean up
     }
 
     // ── size ─────────────────────────────────────────────────────────────────
 
+    /// Performs the size operation.
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
         if file_id == FID_SDA {
             let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
@@ -187,44 +204,48 @@ impl Scheme for BlkDevScheme {
 
     // ── stat ─────────────────────────────────────────────────────────────────
 
+    /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         match file_id {
-            FID_ROOT => Ok(FileStat {
+            FID_ROOT => Ok(finalize_pseudo_stat(FileStat {
                 st_ino: FID_ROOT,
                 st_mode: 0o040_755,
                 st_nlink: 2,
                 st_size: 0,
                 st_blksize: SECTOR_SIZE as u64,
                 st_blocks: 0,
-            }),
-            FID_NULL => Ok(FileStat { st_ino: FID_NULL,   st_mode: 0o020_666, st_nlink: 1, st_size: 0,    st_blksize: 1, st_blocks: 0 }),
-            FID_ZERO => Ok(FileStat { st_ino: FID_ZERO,   st_mode: 0o020_444, st_nlink: 1, st_size: 0,    st_blksize: 1, st_blocks: 0 }),
-            FID_RANDOM  => Ok(FileStat { st_ino: FID_RANDOM,  st_mode: 0o020_444, st_nlink: 1, st_size: 0, st_blksize: 1, st_blocks: 0 }),
-            FID_URANDOM => Ok(FileStat { st_ino: FID_URANDOM, st_mode: 0o020_444, st_nlink: 1, st_size: 0, st_blksize: 1, st_blocks: 0 }),
+                ..FileStat::zeroed()
+            }, DEV_DEVFS, 0)),
+            FID_NULL => Ok(finalize_pseudo_stat(FileStat { st_ino: FID_NULL,   st_mode: 0o020_666, st_nlink: 1, st_size: 0,    st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }, DEV_DEVFS, RDEV_NULL)),
+            FID_ZERO => Ok(finalize_pseudo_stat(FileStat { st_ino: FID_ZERO,   st_mode: 0o020_444, st_nlink: 1, st_size: 0,    st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }, DEV_DEVFS, RDEV_ZERO)),
+            FID_RANDOM  => Ok(finalize_pseudo_stat(FileStat { st_ino: FID_RANDOM,  st_mode: 0o020_444, st_nlink: 1, st_size: 0, st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }, DEV_DEVFS, RDEV_RANDOM)),
+            FID_URANDOM => Ok(finalize_pseudo_stat(FileStat { st_ino: FID_URANDOM, st_mode: 0o020_444, st_nlink: 1, st_size: 0, st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }, DEV_DEVFS, RDEV_URANDOM)),
             FID_SDA => {
                 let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
                 let size = dev.sector_count() * SECTOR_SIZE as u64;
-                Ok(FileStat {
+                Ok(finalize_pseudo_stat(FileStat {
                     st_ino: FID_SDA,
                     st_mode: 0o060_660, // brw-rw---- (block device)
                     st_nlink: 1,
                     st_size: size,
                     st_blksize: SECTOR_SIZE as u64,
                     st_blocks: dev.sector_count(),
-                })
+                    ..FileStat::zeroed()
+                }, DEV_DEVFS, RDEV_SDA))
             }
             FID_VDA => {
                 let dev = crate::hardware::storage::virtio_block::get_device()
                     .ok_or(SyscallError::BadHandle)?;
                 let size = dev.sector_count() * SECTOR_SIZE as u64;
-                Ok(FileStat {
+                Ok(finalize_pseudo_stat(FileStat {
                     st_ino: FID_VDA,
                     st_mode: 0o060_660,
                     st_nlink: 1,
                     st_size: size,
                     st_blksize: SECTOR_SIZE as u64,
                     st_blocks: dev.sector_count(),
-                })
+                    ..FileStat::zeroed()
+                }, DEV_DEVFS, RDEV_VDA))
             }
             _ => Err(SyscallError::BadHandle),
         }
@@ -232,6 +253,7 @@ impl Scheme for BlkDevScheme {
 
     // ── readdir ──────────────────────────────────────────────────────────────
 
+    /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         if file_id != FID_ROOT {
             return Err(SyscallError::InvalidArgument);

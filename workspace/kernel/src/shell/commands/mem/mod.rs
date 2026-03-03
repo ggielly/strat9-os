@@ -99,6 +99,7 @@ fn cmd_mem_zones() -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the zone type from u8 operation.
 fn zone_type_from_u8(val: u8) -> crate::memory::zone::ZoneType {
     match val {
         0 => crate::memory::zone::ZoneType::DMA,

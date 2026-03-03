@@ -114,6 +114,7 @@ pub struct InodeBtreeKey {
 impl InodeBtreeKey {
     pub const SIZE: usize = 4;
 
+    /// Implements parse.
     pub fn parse(buffer: &[u8]) -> FsResult<Self> {
         if buffer.len() < Self::SIZE {
             return Err(FsError::BufferTooSmall);
@@ -123,6 +124,7 @@ impl InodeBtreeKey {
         })
     }
 
+    /// Converts this value to bytes.
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         self.start_ino.to_be_bytes()
     }
@@ -138,6 +140,7 @@ pub struct InodeBtreePtr {
 impl InodeBtreePtr {
     pub const SIZE: usize = 4;
 
+    /// Implements parse.
     pub fn parse(buffer: &[u8]) -> FsResult<Self> {
         if buffer.len() < Self::SIZE {
             return Err(FsError::BufferTooSmall);
@@ -147,6 +150,7 @@ impl InodeBtreePtr {
         })
     }
 
+    /// Converts this value to bytes.
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         self.block.to_be_bytes()
     }
@@ -434,6 +438,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Implements test inode btree rec parse.
     fn test_inode_btree_rec_parse() {
         let mut buf = [0u8; 16];
         buf[0..4].copy_from_slice(&100u32.to_be_bytes()); // start_ino
@@ -449,6 +454,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test inode allocation.
     fn test_inode_allocation() {
         let mut rec = InodeBtreeRec {
             start_ino: 64,
@@ -469,6 +475,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test inode number split.
     fn test_inode_number_split() {
         let ag_block_log = 16u8;
         let inode_per_block_log = 4u8;

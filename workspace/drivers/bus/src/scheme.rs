@@ -1,9 +1,10 @@
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use strat9_syscall::data::IpcMessage;
 use strat9_syscall::call;
-use strat9_syscall::error::ENOSYS;
+use strat9_syscall::error::{EBADF, EINVAL, ENOENT, ENOSYS, ENOTDIR};
 use strat9_syscall::data::{
-    PciAddress, PciDeviceInfo, PciProbeCriteria, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID,
+    DT_DIR, DT_REG, PciAddress, PciDeviceInfo, PciProbeCriteria, PCI_MATCH_DEVICE_ID,
+    PCI_MATCH_VENDOR_ID,
 };
 
 use crate::BusDriver;
@@ -16,13 +17,6 @@ const OPCODE_READDIR: u32 = 0x08;
 const REPLY_MSG_TYPE: u32 = 0x80;
 const STATUS_OK: u32 = 0;
 const FILEFLAG_DIRECTORY: u32 = 1;
-
-const ENOENT: u32 = 2;
-const EINVAL: u32 = 22;
-const EBADF: u32 = 9;
-const ENOTDIR: u32 = 20;
-const DT_REG: u8 = 8;
-const DT_DIR: u8 = 4;
 
 struct OpenHandle {
     path: String,
@@ -37,6 +31,7 @@ pub struct BusSchemeServer<D: BusDriver> {
 }
 
 impl<D: BusDriver> BusSchemeServer<D> {
+    /// Creates a new instance.
     pub fn new(driver: D, port_handle: u64) -> Self {
         Self {
             driver,
@@ -47,11 +42,13 @@ impl<D: BusDriver> BusSchemeServer<D> {
         }
     }
 
+    /// Performs the with pci cache operation.
     pub fn with_pci_cache(mut self, cache: Vec<PciDeviceInfo>) -> Self {
         self.pci_cache = cache;
         self
     }
 
+    /// Performs the ok reply operation.
     fn ok_reply(sender: u64) -> IpcMessage {
         let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
         reply.sender = sender;
@@ -59,21 +56,25 @@ impl<D: BusDriver> BusSchemeServer<D> {
         reply
     }
 
-    fn err_reply(sender: u64, code: u32) -> IpcMessage {
+    /// Performs the err reply operation.
+    fn err_reply(sender: u64, code: usize) -> IpcMessage {
         let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
         reply.sender = sender;
-        reply.payload[0..4].copy_from_slice(&code.to_le_bytes());
+        reply.payload[0..4].copy_from_slice(&(code as u32).to_le_bytes());
         reply
     }
 
+    /// Parses hex u8.
     fn parse_hex_u8(s: &str) -> Option<u8> {
         u8::from_str_radix(s.trim_start_matches("0x"), 16).ok()
     }
 
+    /// Parses hex u16.
     fn parse_hex_u16(s: &str) -> Option<u16> {
         u16::from_str_radix(s.trim_start_matches("0x"), 16).ok()
     }
 
+    /// Parses pci bdf.
     fn parse_pci_bdf(s: &str) -> Option<PciAddress> {
         let (bus_s, rest) = s.split_once(':')?;
         let (dev_s, fun_s) = rest.split_once('.')?;
@@ -91,6 +92,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         })
     }
 
+    /// Parses cfg path.
     fn parse_cfg_path(path: &str) -> Option<(PciAddress, u8, u8)> {
         let mut parts = path.strip_prefix("pci/cfg/")?.split('/');
         let bdf = parts.next()?;
@@ -108,6 +110,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         Some((addr, offset, width))
     }
 
+    /// Parses find path.
     fn parse_find_path(path: &str) -> Option<(u16, u16)> {
         let mut parts = path.strip_prefix("pci/find/")?.split('/');
         let ven = Self::parse_hex_u16(parts.next()?)?;
@@ -118,6 +121,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         Some((ven, dev))
     }
 
+    /// Performs the refresh pci cache operation.
     pub fn refresh_pci_cache(&mut self) {
         let criteria = PciProbeCriteria {
             match_flags: 0,
@@ -152,6 +156,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         }
     }
 
+    /// Performs the render inventory operation.
     fn render_inventory(&self) -> Vec<u8> {
         let mut out = alloc::vec::Vec::new();
         out.extend_from_slice(b"bus:dev.fn vendor:device class:sub prog_if rev irq\n");
@@ -174,6 +179,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         out
     }
 
+    /// Handles open.
     fn handle_open(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let path_len = u16::from_le_bytes([payload[4], payload[5]]) as usize;
         if path_len > 42 {
@@ -205,6 +211,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         reply
     }
 
+    /// Handles read.
     fn handle_read(&self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes([
             payload[0], payload[1], payload[2], payload[3],
@@ -229,6 +236,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         reply
     }
 
+    /// Performs the generate read content operation.
     fn generate_read_content(&self, path: &str, offset: usize) -> Vec<u8> {
         if let Some(child) = self.driver.children().into_iter().find(|c| c.name == path) {
             let text = format!(
@@ -347,6 +355,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         }
     }
 
+    /// Performs the normalize path operation.
     fn normalize_path(path: &str) -> String {
         if path.is_empty() || path == "/" {
             return String::new();
@@ -355,6 +364,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         String::from(trimmed)
     }
 
+    /// Parses reg offset.
     fn parse_reg_offset(path: &str) -> Option<usize> {
         let reg_str = path.strip_prefix("reg/")?;
         if reg_str.is_empty() {
@@ -363,6 +373,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         usize::from_str_radix(reg_str.trim_start_matches("0x"), 16).ok()
     }
 
+    /// Performs the path exists operation.
     fn path_exists(&self, path: &str) -> bool {
         if path.is_empty()
             || path == "status"
@@ -388,6 +399,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         self.driver.children().iter().any(|c| c.name == path)
     }
 
+    /// Handles write.
     fn handle_write(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes([
             payload[0], payload[1], payload[2], payload[3],
@@ -421,7 +433,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         } else {
             let reg_str = match handle.path.strip_prefix("reg/") {
                 Some(s) => s,
-                None => return Self::err_reply(sender, ENOSYS as u32),
+                None => return Self::err_reply(sender, ENOSYS),
             };
             let reg_offset = match usize::from_str_radix(reg_str.trim_start_matches("0x"), 16) {
                 Ok(v) => v,
@@ -443,6 +455,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         reply
     }
 
+    /// Handles close.
     fn handle_close(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes([
             payload[0], payload[1], payload[2], payload[3],
@@ -455,6 +468,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         }
     }
 
+    /// Handles readdir.
     fn handle_readdir(&self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes([
             payload[0], payload[1], payload[2], payload[3],
@@ -527,6 +541,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         reply
     }
 
+    /// Performs the serve operation.
     pub fn serve(&mut self) -> ! {
         loop {
             let mut msg = IpcMessage::new(0);
@@ -541,7 +556,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
                 OPCODE_WRITE => self.handle_write(msg.sender, &msg.payload),
                 OPCODE_CLOSE => self.handle_close(msg.sender, &msg.payload),
                 OPCODE_READDIR => self.handle_readdir(msg.sender, &msg.payload),
-                _ => Self::err_reply(msg.sender, ENOSYS as u32),
+                _ => Self::err_reply(msg.sender, ENOSYS),
             };
             let _ = call::ipc_reply(&reply);
         }

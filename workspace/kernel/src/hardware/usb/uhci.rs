@@ -95,6 +95,7 @@ unsafe impl Send for UhciController {}
 unsafe impl Sync for UhciController {}
 
 impl UhciController {
+    /// Creates a new instance.
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Arc<Self>, &'static str> {
         let io_base = match pci_dev.read_bar(4) {
             Some(Bar::Io { port }) => port as u16,
@@ -119,6 +120,7 @@ impl UhciController {
         Ok(Arc::new(controller))
     }
 
+    /// Performs the init operation.
     fn init(&mut self) -> Result<(), &'static str> {
         unsafe {
             let mut cmd = self.usbcmd.read();
@@ -174,6 +176,7 @@ impl UhciController {
         Ok(())
     }
 
+    /// Initializes frame list.
     unsafe fn init_frame_list(&mut self) -> Result<(), &'static str> {
         // Allocate frame list (4KB aligned, 1024 entries for 1ms frames)
         let frame = allocate_dma_frame().ok_or("Failed to allocate frame list")?;
@@ -192,20 +195,24 @@ impl UhciController {
         Ok(())
     }
 
+    /// Reads portsc.
     unsafe fn read_portsc(&self, port: usize) -> u16 {
         let mut port_reg = Port::new(self.io_base + UHCI_PORTSC + (port as u16) * 2);
         port_reg.read()
     }
 
+    /// Writes portsc.
     unsafe fn write_portsc(&self, port: usize, val: u16) {
         let mut port_reg = Port::new(self.io_base + UHCI_PORTSC + (port as u16) * 2);
         port_reg.write(val);
     }
 
+    /// Performs the port count operation.
     pub fn port_count(&self) -> usize {
         self.max_ports
     }
 
+    /// Returns whether port connected.
     pub fn is_port_connected(&self, port: usize) -> bool {
         if port >= self.ports.len() {
             return false;
@@ -213,6 +220,7 @@ impl UhciController {
         self.ports[port].connected
     }
 
+    /// Returns whether low speed.
     pub fn is_low_speed(&self, port: usize) -> bool {
         if port >= self.ports.len() {
             return false;
@@ -224,6 +232,7 @@ impl UhciController {
 static UHCI_CONTROLLERS: Mutex<Vec<Arc<UhciController>>> = Mutex::new(Vec::new());
 static UHCI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[UHCI] Scanning for UHCI controllers...");
 
@@ -263,10 +272,12 @@ pub fn init() {
     );
 }
 
+/// Returns controller.
 pub fn get_controller(index: usize) -> Option<Arc<UhciController>> {
     UHCI_CONTROLLERS.lock().get(index).cloned()
 }
 
+/// Returns whether available.
 pub fn is_available() -> bool {
     UHCI_INITIALIZED.load(Ordering::Relaxed)
 }

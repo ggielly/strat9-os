@@ -29,6 +29,7 @@ static mut AREAS: [OsMemoryEntry; 1024] = [OsMemoryEntry {
 }; 1024];
 static mut AREAS_LEN: usize = 0;
 
+/// Performs the area add operation.
 pub fn area_add(area: OsMemoryEntry) {
     #[allow(static_mut_refs)]
     unsafe {
@@ -60,6 +61,7 @@ struct SliceWriter<'a> {
 }
 
 impl<'a> Write for SliceWriter<'a> {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for b in s.bytes() {
             if let Some(slice_b) = self.slice.get_mut(self.i) {
@@ -73,33 +75,9 @@ impl<'a> Write for SliceWriter<'a> {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-#[repr(C, packed(8))]
-pub struct KernelArgs {
-    kernel_base: u64,
-    kernel_size: u64,
-    stack_base: u64,
-    stack_size: u64,
-    env_base: u64,
-    env_size: u64,
+pub use strat9_abi::boot::KernelArgs;
 
-    /// The base pointer to the saved RSDP.
-    ///
-    /// This field can be NULL, and if so, the system has not booted with UEFI or in some other way
-    /// retrieved the RSDPs. The kernel or a userspace driver will thus try searching the BIOS
-    /// memory instead. On UEFI systems, searching is not guaranteed to actually work though.
-    acpi_rsdp_base: u64,
-    /// The size of the RSDP region.
-    acpi_rsdp_size: u64,
-
-    areas_base: u64,
-    areas_size: u64,
-
-    bootstrap_base: u64,
-    bootstrap_size: u64,
-}
-
+/// Performs the select mode operation.
 fn select_mode(
     os: &impl Os,
     output_i: usize,
@@ -269,6 +247,7 @@ fn select_mode(
     mode_opt
 }
 
+/// Performs the ext4fs operation.
 fn ext4fs<O: Os>(os: &O) -> (ext4::FileSystem<O::D>, Option<&'static [u8]>) {
     let attempts = 10;
     for attempt in 0..=attempts {
@@ -345,6 +324,7 @@ enum Filetype {
     Elf,
     Initfs,
 }
+/// Performs the load to memory operation.
 fn load_to_memory<O: Os>(
     os: &O,
     fs: &mut ext4::FileSystem<O::D>,
@@ -395,6 +375,7 @@ fn load_to_memory<O: Os>(
     slice
 }
 
+/// Performs the elf entry operation.
 fn elf_entry(data: &[u8]) -> (u64, bool) {
     match (data[4], data[5]) {
         // 32-bit, little endian
@@ -431,6 +412,7 @@ fn elf_entry(data: &[u8]) -> (u64, bool) {
     }
 }
 
+/// Entry point for this component.
 pub fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
     println!(
         "Strat9-OS Bootloader {} on {}",
@@ -636,6 +618,8 @@ pub fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
         page_phys,
         kernel_entry,
         KernelArgs {
+            magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
+            abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
             kernel_base: kernel.as_ptr() as u64,
             kernel_size: kernel.len() as u64,
             stack_base: stack_base as u64,
@@ -644,10 +628,22 @@ pub fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
             env_size: env_size as u64,
             acpi_rsdp_base,
             acpi_rsdp_size,
-            areas_base: unsafe { AREAS.as_ptr() as u64 },
-            areas_size: unsafe { (AREAS.len() * mem::size_of::<OsMemoryEntry>()) as u64 },
-            bootstrap_base,
-            bootstrap_size,
+            memory_map_base: unsafe { AREAS.as_ptr() as u64 },
+            memory_map_size: unsafe { (AREAS.len() * mem::size_of::<OsMemoryEntry>()) as u64 },
+            initfs_base: bootstrap_base,
+            initfs_size: bootstrap_size,
+            framebuffer_addr: 0,
+            framebuffer_width: 0,
+            framebuffer_height: 0,
+            framebuffer_stride: 0,
+            framebuffer_bpp: 0,
+            framebuffer_red_mask_size: 0,
+            framebuffer_red_mask_shift: 0,
+            framebuffer_green_mask_size: 0,
+            framebuffer_green_mask_shift: 0,
+            framebuffer_blue_mask_size: 0,
+            framebuffer_blue_mask_shift: 0,
+            hhdm_offset: 0,
         },
     )
 }

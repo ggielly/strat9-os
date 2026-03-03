@@ -97,6 +97,7 @@ impl IdSet {
 }
 
 impl Default for IdSet {
+    /// Builds a default instance.
     fn default() -> Self {
         Self::new()
     }
@@ -112,6 +113,7 @@ pub struct IdSetIter<'a> {
 impl<'a> Iterator for IdSetIter<'a> {
     type Item = usize;
 
+    /// Performs the next operation.
     fn next(&mut self) -> Option<Self::Item> {
         // Check low bits first
         while self.low_index < 64 {

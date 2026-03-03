@@ -71,15 +71,26 @@ pub struct BusChild {
 }
 
 pub trait BusDriver: Send + Sync {
+    /// Performs the name operation.
     fn name(&self) -> &str;
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str];
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError>;
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError>;
+    /// Performs the suspend operation.
     fn suspend(&mut self) -> Result<(), BusError> { Ok(()) }
+    /// Performs the resume operation.
     fn resume(&mut self) -> Result<(), BusError> { Ok(()) }
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError>;
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError>;
+    /// Performs the error count operation.
     fn error_count(&self) -> u64 { 0 }
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> { Vec::new() }
+    /// Handles irq.
     fn handle_irq(&mut self) -> bool { false }
 }

@@ -13,6 +13,7 @@ struct Namespace {
 }
 
 impl Namespace {
+    /// Creates a new instance.
     const fn new() -> Self {
         Namespace {
             bindings: BTreeMap::new(),
@@ -22,6 +23,7 @@ impl Namespace {
 
 static NAMESPACE: SpinLock<Namespace> = SpinLock::new(Namespace::new());
 
+/// Performs the bind operation.
 pub fn bind(path: &str, port_id: u64) -> Result<(), SyscallError> {
     if path.is_empty() || !path.starts_with('/') {
         return Err(SyscallError::InvalidArgument);
@@ -31,10 +33,17 @@ pub fn bind(path: &str, port_id: u64) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Performs the unbind operation.
 pub fn unbind(path: &str) -> Result<(), SyscallError> {
     let mut ns = NAMESPACE.lock();
     ns.bindings.remove(path).ok_or(SyscallError::BadHandle)?;
     Ok(())
+}
+
+/// List all current namespace bindings (path -> port_id).
+pub fn list_all_bindings() -> alloc::vec::Vec<(String, u64)> {
+    let ns = NAMESPACE.lock();
+    ns.bindings.iter().map(|(k, v)| (k.clone(), *v)).collect()
 }
 
 /// Resolve a path to the longest matching prefix.

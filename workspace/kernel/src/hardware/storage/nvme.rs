@@ -20,12 +20,14 @@ struct VolatileCell<T> {
 }
 
 impl<T> VolatileCell<T> {
+    /// Performs the read operation.
     fn read(&self) -> T
     where
         T: Copy,
     {
         unsafe { ptr::read_volatile(&self.value) }
     }
+    /// Performs the write operation.
     fn write(&self, val: T) {
         unsafe { ptr::write_volatile(core::ptr::addr_of!(self.value) as *mut T, val) }
     }
@@ -40,9 +42,11 @@ struct Capability {
 }
 
 impl Capability {
+    /// Performs the max queue entries operation.
     fn max_queue_entries(&self) -> u16 {
         (self.value.read() & 0xFFFF) as u16
     }
+    /// Performs the doorbell stride operation.
     fn doorbell_stride(&self) -> u64 {
         (self.value.read() >> 32) & 0xF
     }
@@ -59,26 +63,31 @@ struct ControllerConfig {
 }
 
 impl ControllerConfig {
+    /// Performs the clear io fields operation.
     fn clear_io_fields(&self) {
         let mut val = self.value.read();
         val &= !(((0xF) << 16) | ((0xF) << 20) | ((0x7) << 4));
         self.value.write(val);
     }
+    /// Sets iosqes.
     fn set_iosqes(&self, size: u32) {
         let mut val = self.value.read();
         val |= (size & 0xF) << 16;
         self.value.write(val);
     }
+    /// Sets iocqes.
     fn set_iocqes(&self, size: u32) {
         let mut val = self.value.read();
         val |= (size & 0xF) << 20;
         self.value.write(val);
     }
+    /// Sets css.
     fn set_css(&self, css: u32) {
         let mut val = self.value.read();
         val |= (css & 0x7) << 4;
         self.value.write(val);
     }
+    /// Sets enable.
     fn set_enable(&self, enable: bool) {
         let mut val = self.value.read();
         if enable {
@@ -88,6 +97,7 @@ impl ControllerConfig {
         }
         self.value.write(val);
     }
+    /// Returns whether enabled.
     fn is_enabled(&self) -> bool {
         (self.value.read() & 1) != 0
     }
@@ -99,9 +109,11 @@ struct ControllerStatus {
 }
 
 impl ControllerStatus {
+    /// Returns whether ready.
     fn is_ready(&self) -> bool {
         (self.value.read() & 1) != 0
     }
+    /// Returns whether fatal.
     fn is_fatal(&self) -> bool {
         (self.value.read() >> 1) & 1 != 0
     }
@@ -148,6 +160,7 @@ unsafe impl Send for NvmeController {}
 unsafe impl Sync for NvmeController {}
 
 impl NvmeController {
+    /// Creates a new instance.
     unsafe fn new(registers: usize, name: String) -> Result<Self, NvmeError> {
         let regs = &*(registers as *const Registers);
         let dstrd = regs.capability.doorbell_stride() as usize;
@@ -167,11 +180,13 @@ impl NvmeController {
         Ok(controller)
     }
 
+    /// Performs the submit admin command operation.
     fn submit_admin_command(&self, command: Command) -> Result<CompletionEntry, NvmeError> {
         let mut admin = self.admin_queue.lock();
         admin.submit_command(command).ok_or(NvmeError::IoError)
     }
 
+    /// Initializes admin queue.
     fn init_admin_queue(&mut self) -> Result<(), NvmeError> {
         let regs = unsafe { &*(self.registers as *const Registers) };
         let (admin_sq_phys, admin_cq_phys, queue_size) = {
@@ -228,6 +243,7 @@ impl NvmeController {
         Ok(())
     }
 
+    /// Performs the identify operation.
     fn identify(&self, cns: u8, nsid: u32) -> Result<*mut u8, NvmeError> {
         let frame = allocate_dma_frame().ok_or(NvmeError::IoError)?;
         let phys = frame.start_address.as_u64();
@@ -251,6 +267,7 @@ impl NvmeController {
         Ok(virt)
     }
 
+    /// Performs the identify namespaces operation.
     fn identify_namespaces(&mut self) -> Result<(), NvmeError> {
         let ctrl_data = self.identify(0x01, 0)?;
         let nn = unsafe { ptr::read(ctrl_data.add(520) as *const u32) };
@@ -285,9 +302,11 @@ impl NvmeController {
         Ok(())
     }
 
+    /// Performs the namespace count operation.
     pub fn namespace_count(&self) -> usize {
         self.namespaces.len()
     }
+    /// Returns namespace.
     pub fn get_namespace(&self, index: usize) -> Option<&NvmeNamespace> {
         self.namespaces.get(index)
     }
@@ -324,6 +343,7 @@ struct CompletionEntry {
 }
 
 impl CompletionEntry {
+    /// Performs the status code operation.
     fn status_code(&self) -> u8 {
         ((self.status >> 1) & 0xFF) as u8
     }
@@ -365,6 +385,7 @@ struct Queue<T: QueueType> {
 }
 
 impl<T: QueueType> Queue<T> {
+    /// Creates a new instance.
     fn new(registers_base: usize, size: usize, queue_id: u16, dstrd: usize) -> Self {
         let doorbell_offset =
             0x1000 + ((((queue_id as usize) * 2) + T::DOORBELL_OFFSET) * (4 << dstrd));
@@ -393,12 +414,14 @@ impl<T: QueueType> Queue<T> {
         }
     }
 
+    /// Performs the phys addr operation.
     fn phys_addr(&self) -> u64 {
         self.phys_addr
     }
 }
 
 impl Queue<Completion> {
+    /// Performs the poll completion operation.
     fn poll_completion(&mut self) -> Option<CompletionEntry> {
         unsafe {
             let entry = &*self.entries.add(self.index);
@@ -423,6 +446,7 @@ impl Queue<Completion> {
 }
 
 impl Queue<Submission> {
+    /// Performs the submit command operation.
     fn submit_command(&mut self, command: Command, idx: usize) {
         unsafe {
             ptr::write(self.entries.add(idx), command);
@@ -433,6 +457,7 @@ impl Queue<Submission> {
 }
 
 impl QueuePair {
+    /// Creates a new instance.
     fn new(registers_base: usize, size: usize, dstrd: usize) -> Self {
         static NEXT_ID: AtomicU8 = AtomicU8::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst) as u16;
@@ -445,13 +470,16 @@ impl QueuePair {
         }
     }
 
+    /// Performs the submission phys operation.
     fn submission_phys(&self) -> u64 {
         self.submission.phys_addr()
     }
+    /// Performs the completion phys operation.
     fn completion_phys(&self) -> u64 {
         self.completion.phys_addr()
     }
 
+    /// Performs the submit command operation.
     fn submit_command(&mut self, command: Command) -> Option<CompletionEntry> {
         let slot = self.command_id as usize % self.size;
         let mut cmd = command;
@@ -477,6 +505,7 @@ impl QueuePair {
 
 static NVME_CONTROLLERS: Mutex<Vec<Arc<NvmeController>>> = Mutex::new(Vec::new());
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[NVMe] Scanning for NVMe controllers...");
 
@@ -526,10 +555,12 @@ pub fn init() {
     );
 }
 
+/// Returns first controller.
 pub fn get_first_controller() -> Option<Arc<NvmeController>> {
     NVME_CONTROLLERS.lock().first().cloned()
 }
 
+/// Performs the list controllers operation.
 pub fn list_controllers() -> Vec<String> {
     NVME_CONTROLLERS
         .lock()

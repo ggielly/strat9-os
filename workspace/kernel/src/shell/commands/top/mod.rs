@@ -70,6 +70,7 @@ struct SchedulerMetricsWindow {
     steal_out_delta: u64,
 }
 
+/// Performs the collect snapshot operation.
 fn collect_snapshot() -> TopSnapshot {
     let cpu_count = crate::arch::x86_64::percpu::cpu_count();
     let (total_pages, used_pages) = {
@@ -158,6 +159,7 @@ fn collect_snapshot() -> TopSnapshot {
     }
 }
 
+/// Performs the compute cpu usage window operation.
 fn compute_cpu_usage_window(
     prev: &crate::process::CpuUsageSnapshot,
     now: &crate::process::CpuUsageSnapshot,
@@ -189,6 +191,7 @@ fn compute_cpu_usage_window(
     }
 }
 
+/// Performs the compute scheduler metrics window operation.
 fn compute_scheduler_metrics_window(
     prev: &crate::process::SchedulerMetricsSnapshot,
     now: &crate::process::SchedulerMetricsSnapshot,
@@ -239,6 +242,7 @@ fn compute_scheduler_metrics_window(
     }
 }
 
+/// Performs the scheduler runtime lines operation.
 fn scheduler_runtime_lines(
     s: &crate::process::SchedulerStateSnapshot,
     w: &SchedulerMetricsWindow,

@@ -39,6 +39,7 @@ struct KeyboardBuffer {
 static KEYBOARD_BUFFER: KeyboardBuffer = KeyboardBuffer::new();
 
 impl KeyboardBuffer {
+    /// Creates a new instance.
     const fn new() -> Self {
         Self {
             inner: Mutex::new(KeyboardBufferInner {
@@ -125,6 +126,7 @@ pub struct KeyboardState {
 }
 
 impl KeyboardState {
+    /// Creates a new instance.
     pub const fn new() -> Self {
         Self {
             left_shift: false,

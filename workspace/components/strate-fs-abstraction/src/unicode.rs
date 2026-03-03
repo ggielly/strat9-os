@@ -154,6 +154,7 @@ impl<const N: usize> WideStringBuffer<N> {
 }
 
 impl<const N: usize> Default for WideStringBuffer<N> {
+    /// Implements default.
     fn default() -> Self {
         Self::new()
     }
@@ -228,6 +229,7 @@ impl WindowsString {
 
 #[cfg(feature = "alloc")]
 impl Default for WindowsString {
+    /// Implements default.
     fn default() -> Self {
         Self::new()
     }
@@ -288,6 +290,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Implements test wide buffer utf8.
     fn test_wide_buffer_utf8() {
         let mut buf = WideStringBuffer::<64>::from_utf8("Hello").unwrap();
         assert_eq!(buf.len(), 5);
@@ -296,12 +299,14 @@ mod tests {
     }
 
     #[test]
+    /// Implements test wide buffer overflow.
     fn test_wide_buffer_overflow() {
         let result = WideStringBuffer::<3>::from_utf8("Hello");
         assert!(result.is_err());
     }
 
     #[test]
+    /// Implements test ascii iequals.
     fn test_ascii_iequals() {
         let a = [
             b'H' as u16,
@@ -321,6 +326,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test is valid filename.
     fn test_is_valid_filename() {
         let valid = [b't' as u16, b'e' as u16, b's' as u16, b't' as u16];
         assert!(is_valid_filename(&valid));

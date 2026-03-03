@@ -560,6 +560,7 @@ pub fn wake_task(id: TaskId) -> bool {
     woken
 }
 
+/// Sets task wake deadline.
 pub fn set_task_wake_deadline(id: TaskId, deadline_ns: u64) -> bool {
     let saved_flags = save_flags_and_cli();
     let out = {
@@ -574,6 +575,7 @@ pub fn set_task_wake_deadline(id: TaskId, deadline_ns: u64) -> bool {
     out
 }
 
+/// Performs the clear task wake deadline operation.
 pub fn clear_task_wake_deadline(id: TaskId) -> bool {
     set_task_wake_deadline(id, 0)
 }
@@ -836,6 +838,7 @@ pub fn kill_task(id: TaskId) -> bool {
     killed
 }
 
+/// Performs the finalize forced death operation.
 fn finalize_forced_death(
     sched: &mut Scheduler,
     task_id: TaskId,
@@ -854,6 +857,7 @@ fn finalize_forced_death(
     }
 }
 
+/// Performs the reparent children operation.
 fn reparent_children(sched: &mut Scheduler, dying: TaskId) {
     let children = match sched.children_of.remove(&dying) {
         Some(c) => c,
@@ -890,7 +894,9 @@ fn reparent_children(sched: &mut Scheduler, dying: TaskId) {
     }
 }
 
+/// Performs the cleanup task resources operation.
 fn cleanup_task_resources(task: &Arc<Task>) {
+    crate::ipc::port::cleanup_ports_for_task(task.id);
     crate::silo::on_task_terminated(task.id);
 
     // SAFETY: strong_count is racy (a concurrent get_task_by_id may temporarily

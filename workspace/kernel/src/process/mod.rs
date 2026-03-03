@@ -6,8 +6,12 @@
 //! - Basic scheduler functionality
 
 #[cfg(feature = "selftest")]
+pub mod abi_layout_test;
+#[cfg(feature = "selftest")]
 pub mod demand_paging_test;
 pub mod elf;
+#[cfg(feature = "selftest")]
+pub mod errno_test;
 #[cfg(feature = "selftest")]
 pub mod fork_test;
 #[cfg(feature = "selftest")]
@@ -15,14 +19,24 @@ pub mod futex_test;
 #[cfg(feature = "selftest")]
 pub mod mmap_test;
 #[cfg(feature = "selftest")]
+pub mod pipe_test;
+#[cfg(feature = "selftest")]
 pub mod posix_signal_test;
 pub mod process;
+#[cfg(feature = "selftest")]
+pub mod process_id_test;
 pub mod sched_classes;
 pub mod scheduler;
 #[cfg(feature = "selftest")]
 pub mod scheduler_test;
 #[cfg(feature = "selftest")]
 pub mod selftest;
+#[cfg(feature = "selftest")]
+pub mod time_test;
+#[cfg(feature = "selftest")]
+pub mod vfs_ops_test;
+#[cfg(feature = "selftest")]
+pub mod vfs_stat_test;
 pub mod signal;
 pub mod task;
 pub mod test;

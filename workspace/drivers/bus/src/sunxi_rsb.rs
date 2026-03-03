@@ -40,9 +40,13 @@ const MAX_POLL: u32 = 10000;
 
 const COMPATIBLE: &[&str] = &["allwinner,sun8i-a23-rsb"];
 
+/// Performs the ccr sda out delay operation.
 fn ccr_sda_out_delay(v: u32) -> u32 { (v & 0x7) << 8 }
+/// Performs the ccr clk div operation.
 fn ccr_clk_div(v: u32) -> u32 { v & 0xFF }
+/// Performs the dar rta operation.
 fn dar_rta(v: u32) -> u32 { (v & 0xFF) << 16 }
+/// Performs the dar da operation.
 fn dar_da(v: u32) -> u32 { v & 0xFFFF }
 
 pub struct RsbAddrMap {
@@ -64,6 +68,7 @@ pub struct SunxiRsb {
 }
 
 impl SunxiRsb {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -73,10 +78,12 @@ impl SunxiRsb {
         }
     }
 
+    /// Sets clock freq.
     pub fn set_clock_freq(&mut self, freq: u32) {
         self.clock_freq = freq;
     }
 
+    /// Performs the soft reset operation.
     fn soft_reset(&self) {
         self.regs.write32(RSB_CTRL, RSB_CTRL_SOFT_RST);
         for _ in 0..MAX_POLL {
@@ -86,6 +93,7 @@ impl SunxiRsb {
         }
     }
 
+    /// Performs the wait transfer complete operation.
     fn wait_transfer_complete(&self) -> Result<u32, BusError> {
         for _ in 0..MAX_POLL {
             let status = self.regs.read32(RSB_INTS);
@@ -105,10 +113,12 @@ impl SunxiRsb {
         Err(BusError::Timeout)
     }
 
+    /// Starts transfer.
     fn start_transfer(&self) {
         self.regs.write32(RSB_CTRL, RSB_CTRL_START_TRANS | RSB_CTRL_GLOBAL_INT_ENB);
     }
 
+    /// Sets runtime address.
     pub fn set_runtime_address(&self, hwaddr: u16, rtaddr: u8) -> Result<(), BusError> {
         self.regs.write32(RSB_CMD, RSB_CMD_STRA);
         self.regs.write32(RSB_DAR, dar_rta(rtaddr as u32) | dar_da(hwaddr as u32));
@@ -117,6 +127,7 @@ impl SunxiRsb {
         Ok(())
     }
 
+    /// Initializes device mode.
     pub fn init_device_mode(&self) -> Result<(), BusError> {
         self.regs.write32(RSB_DMCR, RSB_DMCR_DEVICE_START | RSB_DMCR_MODE_DATA | RSB_DMCR_MODE_REG);
         for _ in 0..MAX_POLL {
@@ -127,6 +138,7 @@ impl SunxiRsb {
         Err(BusError::Timeout)
     }
 
+    /// Performs the read8 operation.
     pub fn read8(&self, rtaddr: u8, reg: u8) -> Result<u8, BusError> {
         self.regs.write32(RSB_CMD, RSB_CMD_RD8);
         self.regs.write32(RSB_DAR, dar_rta(rtaddr as u32));
@@ -136,6 +148,7 @@ impl SunxiRsb {
         Ok(self.regs.read32(RSB_DATA) as u8)
     }
 
+    /// Performs the write8 operation.
     pub fn write8(&self, rtaddr: u8, reg: u8, val: u8) -> Result<(), BusError> {
         self.regs.write32(RSB_CMD, RSB_CMD_WR8);
         self.regs.write32(RSB_DAR, dar_rta(rtaddr as u32));
@@ -146,6 +159,7 @@ impl SunxiRsb {
         Ok(())
     }
 
+    /// Performs the read16 operation.
     pub fn read16(&self, rtaddr: u8, reg: u8) -> Result<u16, BusError> {
         self.regs.write32(RSB_CMD, RSB_CMD_RD16);
         self.regs.write32(RSB_DAR, dar_rta(rtaddr as u32));
@@ -155,6 +169,7 @@ impl SunxiRsb {
         Ok(self.regs.read32(RSB_DATA) as u16)
     }
 
+    /// Performs the write16 operation.
     pub fn write16(&self, rtaddr: u8, reg: u8, val: u16) -> Result<(), BusError> {
         self.regs.write32(RSB_CMD, RSB_CMD_WR16);
         self.regs.write32(RSB_DAR, dar_rta(rtaddr as u32));
@@ -165,16 +180,20 @@ impl SunxiRsb {
         Ok(())
     }
 
+    /// Performs the add child operation.
     pub fn add_child(&mut self, child: BusChild) {
         self.children.push(child);
     }
 }
 
 impl BusDriver for SunxiRsb {
+    /// Performs the name operation.
     fn name(&self) -> &str { "sunxi-rsb" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x40);
         self.soft_reset();
@@ -184,23 +203,27 @@ impl BusDriver for SunxiRsb {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.soft_reset();
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.regs.write32(offset, value);
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.children.clone()
     }

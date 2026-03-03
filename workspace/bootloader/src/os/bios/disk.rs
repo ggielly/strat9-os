@@ -24,6 +24,7 @@ pub struct DiskAddressPacket {
 }
 
 impl DiskAddressPacket {
+    /// Builds this from block.
     pub fn from_block(block: u64, count: u64) -> DiskAddressPacket {
         let address = block * BLOCKS_PER_SECTOR;
         let sectors = count * BLOCKS_PER_SECTOR;
@@ -46,6 +47,7 @@ pub struct DiskBios {
 }
 
 impl DiskBios {
+    /// Creates a new instance.
     pub fn new(boot_disk: u8, thunk13: extern "C" fn()) -> Self {
         let chs_opt = unsafe {
             let mut data = ThunkData::new();
@@ -88,6 +90,7 @@ impl DiskBios {
 }
 
 impl BlockDevice for DiskBios {
+    /// Reads at.
     fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize, FsError> {
         // Convert byte offset to block number
         let block = offset / BLOCK_SIZE;
@@ -151,6 +154,7 @@ impl BlockDevice for DiskBios {
         }
     }
 
+    /// Writes at.
     fn write_at(&mut self, offset: u64, buffer: &[u8]) -> Result<usize, FsError> {
         log::error!(
             "DiskBios::write_at(0x{:X}, 0x{:X}:0x{:X}) not allowed",
@@ -161,12 +165,14 @@ impl BlockDevice for DiskBios {
         Err(FsError::ReadOnly)
     }
 
+    /// Performs the size operation.
     fn size(&mut self) -> Result<u64, FsError> {
         // Return a large size for now
         // TODO: Get actual disk size from BIOS
         Ok(u64::MAX)
     }
 
+    /// Performs the sector size operation.
     fn sector_size(&self) -> usize {
         SECTOR_SIZE as usize
     }

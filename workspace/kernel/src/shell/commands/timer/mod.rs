@@ -59,6 +59,7 @@ pub fn cmd_timer(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// Performs the print usage operation.
 fn print_usage() {
     shell_println!("Timer debug commands:");
     shell_println!("  timer test [seconds]  - Measure timer accuracy (default: 1s)");

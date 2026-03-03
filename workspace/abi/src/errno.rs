@@ -1,0 +1,37 @@
+//! Strat9 errno numeric values.
+//!
+//! ABI convention: syscalls return `usize` in RAX.
+//! Success is any non-negative value. Errors are encoded as negative errno
+//! values in two's complement (e.g. `-EPERM`), then interpreted by userspace.
+
+pub const EPERM: usize = 1;
+pub const ENOENT: usize = 2;
+pub const ESRCH: usize = 3;
+pub const EINTR: usize = 4;
+pub const EIO: usize = 5;
+pub const E2BIG: usize = 7;
+pub const ENOEXEC: usize = 8;
+pub const EBADF: usize = 9;
+pub const ECHILD: usize = 10;
+pub const EAGAIN: usize = 11;
+pub const ENOMEM: usize = 12;
+pub const EACCES: usize = 13;
+pub const EFAULT: usize = 14;
+pub const EEXIST: usize = 17;
+pub const ENOTDIR: usize = 20;
+pub const EISDIR: usize = 21;
+pub const EINVAL: usize = 22;
+pub const ENOTTY: usize = 25;
+pub const ENOSPC: usize = 28;
+pub const EPIPE: usize = 32;
+pub const ERANGE: usize = 34;
+pub const ENAMETOOLONG: usize = 36;
+pub const ENOSYS: usize = 38;
+pub const ENOTEMPTY: usize = 39;
+pub const ELOOP: usize = 40;
+pub const ENOTSUP: usize = 52;
+pub const EAFNOSUPPORT: usize = 97;
+pub const EADDRINUSE: usize = 98;
+pub const ENOBUFS: usize = 105;
+pub const ETIMEDOUT: usize = 110;
+pub const ECONNREFUSED: usize = 111;

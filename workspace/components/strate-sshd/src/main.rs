@@ -47,22 +47,26 @@ alloc_freelist::define_freelist_brk_allocator!(
 static ALLOCATOR: SshdAllocator = SshdAllocator;
 
 #[alloc_error_handler]
+/// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
     let _ = call::debug_log(b"[sshd] OOM\n");
     call::exit(12)
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_info: &PanicInfo) -> ! {
     let _ = call::debug_log(b"[sshd] panic\n");
     call::exit(255)
 }
 
+/// Opens log fd.
 fn open_log_fd() -> Option<usize> {
     let flags = (flag::OpenFlags::WRONLY | flag::OpenFlags::CREATE | flag::OpenFlags::APPEND).bits() as usize;
     call::openat(0, LOG_PATH, flags, 0).ok()
 }
 
+/// Implements log with fd.
 fn log_with_fd(log_fd: Option<usize>, msg: &str) {
     if let Some(fd) = log_fd {
         let _ = call::write(fd, msg.as_bytes());
@@ -70,6 +74,7 @@ fn log_with_fd(log_fd: Option<usize>, msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
 
+/// Reads file.
 fn read_file(path: &str) -> Option<Vec<u8>> {
     let fd = call::openat(0, path, flag::OpenFlags::RDONLY.bits() as usize, 0).ok()?;
     let mut out = Vec::new();
@@ -90,6 +95,7 @@ fn read_file(path: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Parses u32 ascii.
 fn parse_u32_ascii(data: &[u8]) -> Option<u32> {
     let s = core::str::from_utf8(data).ok()?.trim();
     if s.is_empty() {
@@ -106,6 +112,7 @@ fn parse_u32_ascii(data: &[u8]) -> Option<u32> {
     Some(out)
 }
 
+/// Implements load bool flag.
 fn load_bool_flag(path: &str, default: bool) -> bool {
     let Some(data) = read_file(path) else {
         return default;
@@ -131,6 +138,7 @@ fn load_bool_flag(path: &str, default: bool) -> bool {
     default
 }
 
+/// Implements load listen port.
 fn load_listen_port() -> u16 {
     let Some(data) = read_file(LISTEN_PORT_PATH) else {
         return 22;
@@ -145,6 +153,7 @@ fn load_listen_port() -> u16 {
     }
 }
 
+/// Implements load max auth tries.
 fn load_max_auth_tries() -> usize {
     let Some(data) = read_file(MAX_AUTH_TRIES_PATH) else {
         return 6;
@@ -156,6 +165,7 @@ fn load_max_auth_tries() -> usize {
     v as usize
 }
 
+/// Opens listener.
 fn open_listener(path: &str, log_fd: Option<usize>) -> usize {
     let flags = flag::OpenFlags::RDWR.bits() as usize;
     loop {
@@ -176,6 +186,7 @@ struct NetTransport {
 }
 
 impl NetTransport {
+    /// Creates a new instance.
     fn new(fd: usize) -> Self {
         Self {
             fd,
@@ -184,22 +195,26 @@ impl NetTransport {
         }
     }
 
+    /// Implements close.
     fn close(&mut self) {
         let _ = call::close(self.fd);
     }
 
+    /// Implements saw zero read.
     fn saw_zero_read(&mut self) -> bool {
         let v = self.saw_zero_read;
         self.saw_zero_read = false;
         v
     }
 
+    /// Returns whether connected.
     fn is_connected(&self) -> bool {
         self.connected
     }
 }
 
 impl Transport for NetTransport {
+    /// Implements recv.
     fn recv(&mut self, out: &mut [u8]) -> ssh_core::Result<usize> {
         match call::read(self.fd, out) {
             Ok(0) => {
@@ -216,6 +231,7 @@ impl Transport for NetTransport {
         }
     }
 
+    /// Implements send.
     fn send(&mut self, data: &[u8]) -> ssh_core::Result<usize> {
         let mut off = 0usize;
         while off < data.len() {
@@ -237,10 +253,12 @@ struct FixedHostKey {
 }
 
 impl HostKeyProvider for FixedHostKey {
+    /// Implements host public key.
     fn host_public_key(&self) -> &[u8] {
         self.key
     }
 
+    /// Implements sign exchange hash.
     fn sign_exchange_hash(&mut self, exchange_hash: &[u8], out: &mut [u8]) -> ssh_core::Result<usize> {
         if out.is_empty() {
             return Err(SshCoreError::BufferTooSmall);
@@ -271,6 +289,7 @@ struct PublicKeyAuth {
 }
 
 impl PublicKeyAuth {
+    /// Builds a value from paths.
     fn from_paths(global_paths: &'static [&'static str], user_dir: &'static str, deny_root_login: bool) -> Self {
         let mut auth = Self {
             global_paths,
@@ -283,6 +302,7 @@ impl PublicKeyAuth {
         auth
     }
 
+    /// Implements reload global.
     fn reload_global(&mut self) -> bool {
         let keys = Self::load_keys_from_paths(self.global_paths);
         let fp = Self::keys_fingerprint(&keys);
@@ -294,6 +314,7 @@ impl PublicKeyAuth {
         false
     }
 
+    /// Implements load keys from paths.
     fn load_keys_from_paths(paths: &[&str]) -> Vec<AuthorizedKey> {
         let mut keys = Vec::new();
 
@@ -309,6 +330,7 @@ impl PublicKeyAuth {
         keys
     }
 
+    /// Implements load user keys.
     fn load_user_keys(&self, username: &[u8]) -> Vec<AuthorizedKey> {
         let Some(user) = Self::sanitize_username(username) else {
             return Vec::new();
@@ -329,6 +351,7 @@ impl PublicKeyAuth {
         keys
     }
 
+    /// Implements sanitize username.
     fn sanitize_username(username: &[u8]) -> Option<String> {
         if username.is_empty() || username.len() > 64 {
             return None;
@@ -346,6 +369,7 @@ impl PublicKeyAuth {
         Some(out)
     }
 
+    /// Parses authorized keys.
     fn parse_authorized_keys(data: &[u8], out: &mut Vec<AuthorizedKey>) {
         let Ok(text) = core::str::from_utf8(data) else {
             return;
@@ -387,6 +411,7 @@ impl PublicKeyAuth {
         }
     }
 
+    /// Implements find algo index.
     fn find_algo_index(tokens: &[&str]) -> Option<usize> {
         let mut i = 0;
         while i < tokens.len() {
@@ -398,6 +423,7 @@ impl PublicKeyAuth {
         None
     }
 
+    /// Implements looks like algo.
     fn looks_like_algo(token: &str) -> bool {
         token.starts_with("ssh-")
             || token.starts_with("ecdsa-")
@@ -406,6 +432,7 @@ impl PublicKeyAuth {
             || token == "rsa-sha2-512"
     }
 
+    /// Implements matches.
     fn matches(keys: &[AuthorizedKey], algorithm: &[u8], public_key: &[u8]) -> bool {
         for key in keys {
             if key.algo.as_slice() == algorithm && key.key_blob.as_slice() == public_key {
@@ -415,6 +442,7 @@ impl PublicKeyAuth {
         false
     }
 
+    /// Implements keys fingerprint.
     fn keys_fingerprint(keys: &[AuthorizedKey]) -> u64 {
         let mut hash = 0xcbf29ce484222325u64;
         for key in keys {
@@ -430,6 +458,7 @@ impl PublicKeyAuth {
 }
 
 impl AuthProvider for PublicKeyAuth {
+    /// Implements authorize public key.
     fn authorize_public_key(
         &mut self,
         username: &[u8],
@@ -462,6 +491,7 @@ struct ExecPolicy {
 }
 
 impl ExecPolicy {
+    /// Creates a new instance.
     fn new(path: &'static str) -> Self {
         let mut policy = Self {
             path,
@@ -472,6 +502,7 @@ impl ExecPolicy {
         policy
     }
 
+    /// Implements reload.
     fn reload(&mut self) -> bool {
         let mut allowlist = Vec::new();
 
@@ -498,6 +529,7 @@ impl ExecPolicy {
         false
     }
 
+    /// Implements fingerprint.
     fn fingerprint(items: &[String]) -> u64 {
         let mut hash = 0xcbf29ce484222325u64;
         for item in items {
@@ -511,6 +543,7 @@ impl ExecPolicy {
         hash
     }
 
+    /// Returns whether allowed.
     fn is_allowed(&self, path: &str) -> bool {
         if self.allowlist.is_empty() {
             return true;
@@ -537,6 +570,7 @@ struct ExecBridge {
 }
 
 impl ExecBridge {
+    /// Creates a new instance.
     fn new(policy_path: &'static str, log_fd: Option<usize>) -> Self {
         Self {
             session_seq: 1,
@@ -546,10 +580,12 @@ impl ExecBridge {
         }
     }
 
+    /// Implements reload policy.
     fn reload_policy(&mut self) -> bool {
         self.policy.reload()
     }
 
+    /// Implements terminate all.
     fn terminate_all(&mut self) {
         while let Some(proc) = self.procs.pop() {
             let _ = call::kill(proc.pid as isize, 15);
@@ -558,6 +594,7 @@ impl ExecBridge {
         }
     }
 
+    /// Returns whether safe exec byte.
     fn is_safe_exec_byte(b: u8) -> bool {
         matches!(
             b,
@@ -575,6 +612,7 @@ impl ExecBridge {
         )
     }
 
+    /// Parses exec plan.
     fn parse_exec_plan(&self, command: &[u8]) -> ssh_core::Result<ExecPlan> {
         let text = core::str::from_utf8(command).map_err(|_| SshCoreError::Unsupported)?;
         let trimmed = text.trim();
@@ -611,6 +649,7 @@ impl ExecBridge {
         Ok(ExecPlan { path, args })
     }
 
+    /// Implements reap exited.
     fn reap_exited(&mut self) {
         loop {
             match call::waitpid(-1, None, call::WNOHANG) {
@@ -623,6 +662,7 @@ impl ExecBridge {
         }
     }
 
+    /// Implements drop pid.
     fn drop_pid(&mut self, pid: usize) {
         if let Some(idx) = self.procs.iter().position(|p| p.pid == pid) {
             self.procs.swap_remove(idx);
@@ -631,6 +671,7 @@ impl ExecBridge {
 }
 
 impl ExecSessionProvider for ExecBridge {
+    /// Implements spawn exec.
     fn spawn_exec(&mut self, _username: &[u8], command: &[u8]) -> ssh_core::Result<ExecSessionWiring> {
         let plan = self.parse_exec_plan(command)?;
 
@@ -676,6 +717,7 @@ impl ExecSessionProvider for ExecBridge {
         })
     }
 
+    /// Closes exec.
     fn close_exec(&mut self, wiring: &ExecSessionWiring) -> ssh_core::Result<()> {
         let Some(idx) = self.procs.iter().position(|p| p.session_id == wiring.session_id) else {
             return Ok(());
@@ -692,6 +734,7 @@ impl ExecSessionProvider for ExecBridge {
 }
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     let log_fd = open_log_fd();
     let listen_port = load_listen_port();

@@ -8,6 +8,7 @@
 pub mod hpet;
 pub mod rtc;
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[TIMER] Initializing timers...");
     

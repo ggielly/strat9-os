@@ -19,6 +19,7 @@ pub struct ProcInfo {
     pub mem_used: String,
 }
 
+/// Parses proc status.
 fn parse_proc_status(raw: &str) -> ProcInfo {
     let mut info = ProcInfo {
         pid: 0,
@@ -50,22 +51,27 @@ fn parse_proc_status(raw: &str) -> ProcInfo {
 // /proc readers
 // ---------------------------------------------------------------------------
 
+/// Implements kernel version.
 pub fn kernel_version() -> String {
     net::read_file_text("/proc/version")
 }
 
+/// Implements cpu info.
 pub fn cpu_info() -> String {
     net::read_file_text("/proc/cpuinfo")
 }
 
+/// Implements mem info.
 pub fn mem_info() -> String {
     net::read_file_text("/proc/meminfo")
 }
 
+/// Implements silo info.
 pub fn silo_info() -> String {
     net::read_file_text("/proc/silos")
 }
 
+/// Implements net routes.
 pub fn net_routes() -> String {
     net::read_file_text("/net/routes")
 }
@@ -74,22 +80,27 @@ pub fn net_routes() -> String {
 // /net scheme readers
 // ---------------------------------------------------------------------------
 
+/// Implements net address.
 pub fn net_address() -> String {
     net::read_file_text("/net/address").trim().into()
 }
 
+/// Implements net gateway.
 pub fn net_gateway() -> String {
     net::read_file_text("/net/gateway").trim().into()
 }
 
+/// Implements net dns.
 pub fn net_dns() -> String {
     net::read_file_text("/net/dns").trim().into()
 }
 
+/// Implements net ip.
 pub fn net_ip() -> String {
     net::read_file_text("/net/ip").trim().into()
 }
 
+/// Implements net netmask.
 pub fn net_netmask() -> String {
     net::read_file_text("/net/netmask").trim().into()
 }
@@ -98,6 +109,7 @@ pub fn net_netmask() -> String {
 // Process list via /proc + getdents (loops until all entries read)
 // ---------------------------------------------------------------------------
 
+/// Implements process list.
 pub fn process_list() -> Vec<ProcInfo> {
     let fd = match call::openat(
         0,
@@ -149,6 +161,7 @@ pub fn process_list() -> Vec<ProcInfo> {
     result
 }
 
+/// Implements uptime secs.
 pub fn uptime_secs() -> u64 {
     net::clock_gettime_ns() / 1_000_000_000
 }
@@ -157,6 +170,7 @@ pub fn uptime_secs() -> u64 {
 // Kill a process by PID
 // ---------------------------------------------------------------------------
 
+/// Implements kill process.
 pub fn kill_process(pid: u32) -> bool {
     if pid <= 2 {
         return false;
@@ -168,12 +182,14 @@ pub fn kill_process(pid: u32) -> bool {
 // JSON builders
 // ---------------------------------------------------------------------------
 
+/// Implements json health.
 pub fn json_health() -> String {
     let pid = call::getpid().unwrap_or(0);
     let up = uptime_secs();
     format!(r#"{{"status":"ok","pid":{},"uptime_secs":{}}}"#, pid, up)
 }
 
+/// Implements json uptime.
 pub fn json_uptime() -> String {
     let ns = net::clock_gettime_ns();
     let secs = ns / 1_000_000_000;
@@ -186,22 +202,27 @@ pub fn json_uptime() -> String {
     )
 }
 
+/// Implements json version.
 pub fn json_version() -> String {
     format!(r#"{{"version":"{}"}}"#, json_escape(&kernel_version()))
 }
 
+/// Implements json cpuinfo.
 pub fn json_cpuinfo() -> String {
     format!(r#"{{"cpuinfo":"{}"}}"#, json_escape(&cpu_info()))
 }
 
+/// Implements json meminfo.
 pub fn json_meminfo() -> String {
     format!(r#"{{"meminfo":"{}"}}"#, json_escape(&mem_info()))
 }
 
+/// Implements json silos.
 pub fn json_silos() -> String {
     format!(r#"{{"silos":"{}"}}"#, json_escape(&silo_info()))
 }
 
+/// Implements json network.
 pub fn json_network() -> String {
     format!(
         r#"{{"address":"{}","gateway":"{}","dns":"{}","ip":"{}","netmask":"{}"}}"#,
@@ -213,10 +234,12 @@ pub fn json_network() -> String {
     )
 }
 
+/// Implements json routes.
 pub fn json_routes() -> String {
     format!(r#"{{"routes":"{}"}}"#, json_escape(&net_routes()))
 }
 
+/// Implements json processes.
 pub fn json_processes() -> String {
     let procs = process_list();
     let mut out = String::with_capacity(procs.len() * 120 + 32);
@@ -240,6 +263,7 @@ pub fn json_processes() -> String {
     out
 }
 
+/// Implements json kill result.
 pub fn json_kill_result(pid: u32) -> String {
     let ok = kill_process(pid);
     format!(
@@ -250,6 +274,7 @@ pub fn json_kill_result(pid: u32) -> String {
     )
 }
 
+/// Implements json all.
 pub fn json_all() -> String {
     let mut out = String::with_capacity(4096);
     out.push_str(r#"{"health":"#);
@@ -278,6 +303,7 @@ pub fn json_all() -> String {
 // JSON string escaping
 // ---------------------------------------------------------------------------
 
+/// Implements json escape.
 pub fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 8);
     for c in s.chars() {

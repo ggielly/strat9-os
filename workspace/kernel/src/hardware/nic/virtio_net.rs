@@ -221,10 +221,12 @@ impl VirtioNetDevice {
 }
 
 impl NetworkDevice for VirtioNetDevice {
+    /// Performs the name operation.
     fn name(&self) -> &str {
         "virtio-net"
     }
 
+    /// Performs the receive operation.
     fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
         let mut rx_queue = self.rx_queue.lock();
 
@@ -290,6 +292,7 @@ impl NetworkDevice for VirtioNetDevice {
         Ok(packet_len)
     }
 
+    /// Performs the transmit operation.
     fn transmit(&self, buf: &[u8]) -> Result<(), NetError> {
         if buf.len() > net::MTU {
             return Err(NetError::BufferTooSmall);
@@ -360,10 +363,12 @@ impl NetworkDevice for VirtioNetDevice {
         Ok(())
     }
 
+    /// Performs the mac address operation.
     fn mac_address(&self) -> [u8; 6] {
         self.mac_address
     }
 
+    /// Performs the link up operation.
     fn link_up(&self) -> bool {
         let status = self.read_link_status();
         status & net_status::VIRTIO_NET_S_LINK_UP != 0

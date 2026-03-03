@@ -34,6 +34,7 @@ pub struct Process {
 }
 
 impl Process {
+    /// Creates a new instance.
     pub fn new(
         pid: crate::process::Pid,
         address_space: Arc<AddressSpace>,

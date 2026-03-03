@@ -30,6 +30,7 @@ pub enum BlockError {
 }
 
 impl core::fmt::Display for BlockError {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         match self {
             BlockError::IoError => write!(f, "I/O error"),

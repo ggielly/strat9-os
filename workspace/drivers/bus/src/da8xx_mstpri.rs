@@ -44,6 +44,7 @@ pub struct Da8xxMstpri {
 }
 
 impl Da8xxMstpri {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -52,10 +53,12 @@ impl Da8xxMstpri {
         }
     }
 
+    /// Performs the add priority operation.
     pub fn add_priority(&mut self, master: MasterPriDescr, priority: u32) {
         self.priorities.push(MasterPriority { master, priority });
     }
 
+    /// Performs the apply priorities operation.
     fn apply_priorities(&self) {
         for p in &self.priorities {
             let val = self.regs.read32(p.master.reg);
@@ -66,10 +69,13 @@ impl Da8xxMstpri {
 }
 
 impl BusDriver for Da8xxMstpri {
+    /// Performs the name operation.
     fn name(&self) -> &str { "da8xx-mstpri" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x10);
         self.apply_priorities();
@@ -77,16 +83,19 @@ impl BusDriver for Da8xxMstpri {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.regs.write32(offset, value);

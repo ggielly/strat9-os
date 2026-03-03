@@ -41,10 +41,12 @@ unsafe impl Sync for HpetInfo {}
 static HPET_INFO: Mutex<Option<HpetInfo>> = Mutex::new(None);
 static HPET_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Performs the hpet read operation.
 unsafe fn hpet_read(mmio_base: usize, offset: usize) -> u64 {
     core::ptr::read_volatile((mmio_base + offset) as *const u64)
 }
 
+/// Performs the hpet write operation.
 unsafe fn hpet_write(mmio_base: usize, offset: usize, value: u64) {
     core::ptr::write_volatile((mmio_base + offset) as *mut u64, value);
 }

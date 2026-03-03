@@ -223,6 +223,7 @@ pub fn sys_execve(
     Ok(0)
 }
 
+/// Performs the setup user stack operation.
 fn setup_user_stack(
     new_as: &AddressSpace,
     argv_ptr: u64,
@@ -349,6 +350,7 @@ fn setup_user_stack(
     Ok(sp)
 }
 
+/// Reads string array.
 fn read_string_array(ptr: u64) -> Result<Vec<Vec<u8>>, SyscallError> {
     let mut res = Vec::new();
     if ptr == 0 {
@@ -398,6 +400,7 @@ fn read_string_array(ptr: u64) -> Result<Vec<Vec<u8>>, SyscallError> {
     Ok(res)
 }
 
+/// Writes bytes to as.
 fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(), SyscallError> {
     use x86_64::VirtAddr;
     let mut written = 0;
@@ -431,11 +434,13 @@ fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(
     Ok(())
 }
 
+/// Writes u64 to as.
 fn write_u64_to_as(as_ref: &AddressSpace, vaddr: u64, val: u64) -> Result<(), SyscallError> {
     let bytes = val.to_ne_bytes();
     write_bytes_to_as(as_ref, vaddr, &bytes)
 }
 
+/// Performs the generate aux random seed operation.
 fn generate_aux_random_seed() -> [u8; 16] {
     use x86_64::registers::control::Cr3;
     let mut s = [0u8; 16];

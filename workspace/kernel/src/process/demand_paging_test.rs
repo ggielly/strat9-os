@@ -13,6 +13,7 @@ const DP_ADDR_A: u64 = 0x0000_5100_0000;
 const DP_ADDR_B: u64 = 0x0000_5101_0000;
 const DP_ADDR_C: u64 = 0x0000_5102_0000;
 
+/// Performs the rw flags operation.
 fn rw_flags() -> VmaFlags {
     VmaFlags {
         readable: true,
@@ -22,10 +23,12 @@ fn rw_flags() -> VmaFlags {
     }
 }
 
+/// Performs the new user as operation.
 fn new_user_as() -> Result<Arc<AddressSpace>, &'static str> {
     Ok(Arc::new(AddressSpace::new_user()?))
 }
 
+/// Performs the test fault maps and refcount operation.
 fn test_fault_maps_and_refcount() -> bool {
     let aspace = match new_user_as() {
         Ok(v) => v,
@@ -76,6 +79,7 @@ fn test_fault_maps_and_refcount() -> bool {
     crate::memory::cow::frame_get_refcount(frame) == 0
 }
 
+/// Performs the test repeat fault same page no leak operation.
 fn test_repeat_fault_same_page_no_leak() -> bool {
     crate::serial_println!("[dp-test] t2: new_user");
     let aspace = match new_user_as() {
@@ -135,6 +139,7 @@ fn test_repeat_fault_same_page_no_leak() -> bool {
     crate::memory::cow::frame_get_refcount(frame) == 0
 }
 
+/// Performs the test unmap lazy unfaulted region operation.
 fn test_unmap_lazy_unfaulted_region() -> bool {
     let aspace = match new_user_as() {
         Ok(v) => v,
@@ -158,6 +163,7 @@ fn test_unmap_lazy_unfaulted_region() -> bool {
     aspace.handle_fault(DP_ADDR_C).is_err()
 }
 
+/// Performs the demand paging test main operation.
 extern "C" fn demand_paging_test_main() -> ! {
     crate::serial_println!("[dp-test] start");
 
@@ -186,6 +192,7 @@ extern "C" fn demand_paging_test_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Creates demand paging test task.
 pub fn create_demand_paging_test_task() {
     if let Ok(task) = Task::new_kernel_task_with_stack(
         demand_paging_test_main,

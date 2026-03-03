@@ -13,6 +13,7 @@ pub enum BackendError {
 }
 
 impl fmt::Display for BackendError {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FramebufferUnavailable => write!(f, "framebuffer unavailable"),
@@ -28,6 +29,7 @@ pub struct Strat9RatatuiBackend {
 }
 
 impl Strat9RatatuiBackend {
+    /// Creates a new instance.
     pub fn new() -> Result<Self, BackendError> {
         if !vga::is_available() {
             return Err(BackendError::FramebufferUnavailable);
@@ -38,6 +40,7 @@ impl Strat9RatatuiBackend {
         })
     }
 
+    /// Maps fg color.
     fn map_fg_color(color: Color) -> RgbColor {
         match color {
             Color::Reset => RgbColor::LIGHT_GREY,
@@ -88,6 +91,7 @@ impl Strat9RatatuiBackend {
         }
     }
 
+    /// Maps bg color.
     fn map_bg_color(color: Color) -> RgbColor {
         match color {
             // For background, Reset should stay dark to match console expectations.
@@ -96,6 +100,7 @@ impl Strat9RatatuiBackend {
         }
     }
 
+    /// Performs the normalize symbol operation.
     fn normalize_symbol(symbol: &str) -> char {
         let ch = symbol.chars().next().unwrap_or(' ');
         match ch {
@@ -113,6 +118,7 @@ impl Strat9RatatuiBackend {
         }
     }
 
+    /// Performs the draw cell operation.
     fn draw_cell(&self, x: u16, y: u16, cell: &Cell) {
         if cell.skip {
             return;
@@ -154,6 +160,7 @@ impl Strat9RatatuiBackend {
 impl Backend for Strat9RatatuiBackend {
     type Error = BackendError;
 
+    /// Performs the draw operation.
     fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
@@ -167,20 +174,24 @@ impl Backend for Strat9RatatuiBackend {
         Ok(())
     }
 
+    /// Performs the hide cursor operation.
     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
         self.cursor_visible = false;
         Ok(())
     }
 
+    /// Performs the show cursor operation.
     fn show_cursor(&mut self) -> Result<(), Self::Error> {
         self.cursor_visible = true;
         Ok(())
     }
 
+    /// Returns cursor position.
     fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
         Ok(self.cursor)
     }
 
+    /// Sets cursor position.
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
         let pos = position.into();
         self.cursor = pos;
@@ -188,6 +199,7 @@ impl Backend for Strat9RatatuiBackend {
         Ok(())
     }
 
+    /// Performs the clear operation.
     fn clear(&mut self) -> Result<(), Self::Error> {
         if !vga::is_available() {
             return Err(BackendError::FramebufferUnavailable);
@@ -196,6 +208,7 @@ impl Backend for Strat9RatatuiBackend {
         Ok(())
     }
 
+    /// Performs the clear region operation.
     fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
         match clear_type {
             ClearType::All => self.clear(),
@@ -203,6 +216,7 @@ impl Backend for Strat9RatatuiBackend {
         }
     }
 
+    /// Performs the size operation.
     fn size(&self) -> Result<Size, Self::Error> {
         if !vga::is_available() {
             return Err(BackendError::FramebufferUnavailable);
@@ -210,6 +224,7 @@ impl Backend for Strat9RatatuiBackend {
         Ok(Size::new(vga::text_cols() as u16, vga::text_rows() as u16))
     }
 
+    /// Performs the window size operation.
     fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
         if !vga::is_available() {
             return Err(BackendError::FramebufferUnavailable);
@@ -220,6 +235,7 @@ impl Backend for Strat9RatatuiBackend {
         })
     }
 
+    /// Performs the flush operation.
     fn flush(&mut self) -> Result<(), Self::Error> {
         if !vga::is_available() {
             return Err(BackendError::FramebufferUnavailable);

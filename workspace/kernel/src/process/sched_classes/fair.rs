@@ -18,6 +18,7 @@ const WEIGHT_0: u64 = 1024;
 /// Derivation: target_ms = 10 ms, tick_ms = 1000 / TIMER_HZ = 10 ms -> 1 tick.
 const BASE_SLICE_TICKS: u64 = 1;
 
+/// Performs the nice to weight operation.
 pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {
     const FACTOR_NUMERATOR: u64 = 5;
     const FACTOR_DENOMINATOR: u64 = 4;
@@ -52,18 +53,21 @@ pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {
 struct FairQueueItem(Arc<Task>, u64); // Task, vruntime
 
 impl FairQueueItem {
+    /// Performs the key operation.
     fn key(&self) -> u64 {
         self.1
     }
 }
 
 impl core::fmt::Debug for FairQueueItem {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.key())
     }
 }
 
 impl PartialEq for FairQueueItem {
+    /// Performs the eq operation.
     fn eq(&self, other: &Self) -> bool {
         self.key().eq(&other.key())
     }
@@ -71,12 +75,14 @@ impl PartialEq for FairQueueItem {
 impl Eq for FairQueueItem {}
 
 impl PartialOrd for FairQueueItem {
+    /// Performs the partial cmp operation.
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for FairQueueItem {
+    /// Performs the cmp operation.
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         self.key().cmp(&other.key())
     }
@@ -89,6 +95,7 @@ pub struct FairClassRq {
 }
 
 impl FairClassRq {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             entities: BinaryHeap::new(),
@@ -97,6 +104,7 @@ impl FairClassRq {
         }
     }
 
+    /// Performs the period operation.
     fn period(&self) -> u64 {
         // Total scheduling period (ticks) = BASE_SLICE_TICKS * nr_runnable.
         // Ensures each runnable task gets at least BASE_SLICE_TICKS per round.
@@ -105,10 +113,12 @@ impl FairClassRq {
         (BASE_SLICE_TICKS * count).max(BASE_SLICE_TICKS)
     }
 
+    /// Performs the vtime slice operation.
     fn vtime_slice(&self) -> u64 {
         self.period() / (self.entities.len() + 1) as u64
     }
 
+    /// Performs the time slice operation.
     fn time_slice(&self, cur_weight: u64) -> u64 {
         if self.total_weight + cur_weight == 0 {
             return self.period();
@@ -118,6 +128,7 @@ impl FairClassRq {
 }
 
 impl SchedClassRq for FairClassRq {
+    /// Performs the enqueue operation.
     fn enqueue(&mut self, task: Arc<Task>) {
         if let super::SchedPolicy::Fair(nice) = task.sched_policy() {
             let weight = nice_to_weight(nice);
@@ -132,10 +143,12 @@ impl SchedClassRq for FairClassRq {
         }
     }
 
+    /// Performs the len operation.
     fn len(&self) -> usize {
         self.entities.len()
     }
 
+    /// Performs the pick next operation.
     fn pick_next(&mut self) -> Option<Arc<Task>> {
         let Reverse(FairQueueItem(task, _)) = self.entities.pop()?;
         if let super::SchedPolicy::Fair(nice) = task.sched_policy() {
@@ -145,6 +158,7 @@ impl SchedClassRq for FairClassRq {
         Some(task)
     }
 
+    /// Updates current.
     fn update_current(&mut self, rt: &CurrentRuntime, task: &Task, is_yield: bool) -> bool {
         if is_yield {
             return true;
@@ -176,6 +190,7 @@ impl SchedClassRq for FairClassRq {
         }
     }
 
+    /// Performs the remove operation.
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool {
         let mut vec = self.entities.drain().collect::<alloc::vec::Vec<_>>();
         let old_len = vec.len();

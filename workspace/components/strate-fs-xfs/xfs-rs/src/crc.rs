@@ -353,6 +353,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Implements test crc32c empty.
     fn test_crc32c_empty() {
         // CRC32C of empty data
         let crc = xfs_crc32c(&[]);
@@ -360,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test crc32c known value.
     fn test_crc32c_known_value() {
         // Test vector from iSCSI spec: "123456789" should give 0xE3069283
         let data = b"123456789";
@@ -368,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test recalculate crc.
     fn test_recalculate_crc() {
         let mut buf = [0u8; 16];
         buf[0..4].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
@@ -380,6 +383,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test xfs superblock crc.
     fn test_xfs_superblock_crc() {
         // Test with a simulated XFS superblock
         let mut sb = [0u8; 512];
@@ -412,6 +416,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test inode crc consistency.
     fn test_inode_crc_consistency() {
         // Simulate an XFS inode (typically 256 or 512 bytes)
         let mut inode = [0u8; 256];
@@ -431,6 +436,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test crc32c optimized vs regular.
     fn test_crc32c_optimized_vs_regular() {
         // Test that optimized version gives same result as regular
         let data = b"Test data for CRC comparison";

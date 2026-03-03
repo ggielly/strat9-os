@@ -338,6 +338,7 @@ unsafe fn flush_tlb_all() {
     Cr3::write(frame, flags);
 }
 
+/// Performs the send tlb ipi operation.
 fn send_tlb_ipi(target_apic_id: u32) {
     // SAFETY: APIC base is valid and mapped; ICR MMIO is 32-bit aligned.
     unsafe {
@@ -351,6 +352,7 @@ fn send_tlb_ipi(target_apic_id: u32) {
     }
 }
 
+/// Performs the collect tlb targets operation.
 fn collect_tlb_targets() -> Vec<u32> {
     let current_apic_id = crate::arch::x86_64::apic::lapic_id();
     let mut targets = Vec::new();

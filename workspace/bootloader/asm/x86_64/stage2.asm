@@ -235,52 +235,43 @@ s2_pm32_entry:
     mov dword [0x60110], 1               ; kind = Free
     mov dword [0x60114], 0               ; kind high
 
-    ; KernelArgs struct at 0x60000 (packed(8), all u64 then u32s)
+    ; KernelArgs struct at 0x60000 (repr(C, packed(8)))
+    ; Zero-fill first 144 bytes (struct size) to clear padding + trailing fields
+    mov edi, 0x60000
+    mov ecx, 36                          ; 144 / 4 = 36 dwords
+    xor eax, eax
+    rep stosd
+    ; magic (u32) = 0x53543942 "ST9B"
+    mov dword [0x60000], 0x53543942
+    ; abi_version (u32) = 1
+    mov dword [0x60004], 1
     ; kernel_base (u64)
-    mov dword [0x60000], 0x00100000      ; 1MB
-    mov dword [0x60004], 0
+    mov dword [0x60008], 0x00100000      ; 1MB
     ; kernel_size (u64)
-    mov dword [0x60008], 0x00040000      ; 256KB approx
-    mov dword [0x6000C], 0
+    mov dword [0x60010], 0x00040000      ; 256KB approx
     ; stack_base (u64)
-    mov dword [0x60010], 0x00080000
-    mov dword [0x60014], 0
+    mov dword [0x60018], 0x00080000
     ; stack_size (u64)
-    mov dword [0x60018], 0x00010000      ; 64KB
-    mov dword [0x6001C], 0
-    ; env_base (u64)
-    mov dword [0x60020], 0
-    mov dword [0x60024], 0
-    ; env_size (u64)
-    mov dword [0x60028], 0
-    mov dword [0x6002C], 0
-    ; acpi_rsdp_base (u64)
-    mov dword [0x60030], 0
-    mov dword [0x60034], 0
-    ; acpi_rsdp_size (u64)
-    mov dword [0x60038], 0
-    mov dword [0x6003C], 0
+    mov dword [0x60020], 0x00010000      ; 64KB
+    ; env_base (u64) = 0 (already zeroed)
+    ; env_size (u64) = 0
+    ; acpi_rsdp_base (u64) = 0
+    ; acpi_rsdp_size (u64) = 0
     ; memory_map_base (u64)
-    mov dword [0x60040], 0x00060100      ; -> 0x60100
-    mov dword [0x60044], 0
+    mov dword [0x60048], 0x00060100      ; -> 0x60100
     ; memory_map_size (u64) = 24 bytes (one MemoryRegion)
-    mov dword [0x60048], 24
-    mov dword [0x6004C], 0
-    ; initfs_base (u64)
-    mov dword [0x60050], 0
-    mov dword [0x60054], 0
-    ; initfs_size (u64)
-    mov dword [0x60058], 0
-    mov dword [0x6005C], 0
+    mov dword [0x60050], 24
+    ; initfs_base (u64) = 0
+    ; initfs_size (u64) = 0
     ; framebuffer_addr (u64)
-    mov dword [0x60060], 0x000B8000      ; VGA text buffer
-    mov dword [0x60064], 0
+    mov dword [0x60068], 0x000B8000      ; VGA text buffer
     ; framebuffer_width (u32)
-    mov dword [0x60068], 80
-    ; framebuffer_height (u32)
-    mov dword [0x6006C], 25
-    ; framebuffer_stride (u32)
     mov dword [0x60070], 80
+    ; framebuffer_height (u32)
+    mov dword [0x60074], 25
+    ; framebuffer_stride (u32)
+    mov dword [0x60078], 80
+    ; framebuffer_bpp..hhdm_offset = 0 (already zeroed)
 
     ; ----- Transition to Long Mode -----
     mov dword [long_mode.page_table], 0x1000

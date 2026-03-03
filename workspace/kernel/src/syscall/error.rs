@@ -39,12 +39,22 @@ pub enum SyscallError {
     InvalidArgument = -22,
     #[error("Not a typewriter")]
     NotATty = -25,
+    #[error("Not a directory")]
+    NotADirectory = -20,
+    #[error("Is a directory")]
+    IsADirectory = -21,
     #[error("No space left on device")]
     NoSpace = -28,
     #[error("Broken pipe")]
     Pipe = -32,
+    #[error("Result too large")]
+    Range = -34,
+    #[error("File name too long")]
+    NameTooLong = -36,
     #[error("Function not implemented")]
     NotImplemented = -38,
+    #[error("Directory not empty")]
+    NotEmpty = -39,
     #[error("Not supported")]
     NotSupported = -52,
     #[error("No buffer space available")]
@@ -54,20 +64,24 @@ pub enum SyscallError {
 }
 
 impl SyscallError {
+    /// Converts this to raw.
     #[inline]
     pub fn to_raw(self) -> u64 {
         (self as i64) as u64
     }
 
+    /// Builds this from code.
     pub fn from_code(code: i64) -> Self {
         Self::try_from(code).unwrap_or(SyscallError::InvalidArgument)
     }
 
+    /// Returns whether retryable.
     #[inline]
     pub fn is_retryable(self) -> bool {
         matches!(self, SyscallError::Interrupted | SyscallError::Again)
     }
 
+    /// Performs the name operation.
     #[inline]
     pub fn name(self) -> &'static str {
         match self {
@@ -85,10 +99,15 @@ impl SyscallError {
             SyscallError::Fault => "EFAULT",
             SyscallError::AlreadyExists => "EEXIST",
             SyscallError::InvalidArgument => "EINVAL",
+            SyscallError::NotADirectory => "ENOTDIR",
+            SyscallError::IsADirectory => "EISDIR",
             SyscallError::NotATty => "ENOTTY",
             SyscallError::NoSpace => "ENOSPC",
             SyscallError::Pipe => "EPIPE",
+            SyscallError::Range => "ERANGE",
+            SyscallError::NameTooLong => "ENAMETOOLONG",
             SyscallError::NotImplemented => "ENOSYS",
+            SyscallError::NotEmpty => "ENOTEMPTY",
             SyscallError::NotSupported => "ENOTSUP",
             SyscallError::QueueFull => "ENOBUFS",
             SyscallError::TimedOut => "ETIMEDOUT",
@@ -99,6 +118,7 @@ impl SyscallError {
 // ── From impls for kernel-internal error types ──────────────────────────────
 
 impl From<core::str::Utf8Error> for SyscallError {
+    /// Performs the from operation.
     #[inline]
     fn from(_: core::str::Utf8Error) -> Self {
         SyscallError::InvalidArgument
@@ -106,6 +126,7 @@ impl From<core::str::Utf8Error> for SyscallError {
 }
 
 impl From<crate::ostd::util::Error> for SyscallError {
+    /// Performs the from operation.
     fn from(err: crate::ostd::util::Error) -> Self {
         use crate::ostd::util::Error;
         match err {
@@ -122,6 +143,7 @@ impl From<crate::ostd::util::Error> for SyscallError {
 }
 
 impl From<crate::ostd::mm::MapError> for SyscallError {
+    /// Performs the from operation.
     fn from(err: crate::ostd::mm::MapError) -> Self {
         use crate::ostd::mm::MapError;
         match err {
@@ -136,6 +158,7 @@ impl From<crate::ostd::mm::MapError> for SyscallError {
 }
 
 impl From<crate::hardware::storage::virtio_block::BlockError> for SyscallError {
+    /// Performs the from operation.
     fn from(err: crate::hardware::storage::virtio_block::BlockError) -> Self {
         use crate::hardware::storage::virtio_block::BlockError;
         match err {
@@ -148,6 +171,7 @@ impl From<crate::hardware::storage::virtio_block::BlockError> for SyscallError {
 }
 
 impl From<crate::ipc::port::IpcError> for SyscallError {
+    /// Performs the from operation.
     fn from(err: crate::ipc::port::IpcError) -> Self {
         use crate::ipc::port::IpcError;
         match err {
@@ -159,6 +183,7 @@ impl From<crate::ipc::port::IpcError> for SyscallError {
 }
 
 impl From<net_core::NetError> for SyscallError {
+    /// Performs the from operation.
     fn from(err: net_core::NetError) -> Self {
         use net_core::NetError;
         match err {
@@ -173,6 +198,7 @@ impl From<net_core::NetError> for SyscallError {
 }
 
 impl From<crate::ipc::channel::ChannelError> for SyscallError {
+    /// Performs the from operation.
     fn from(err: crate::ipc::channel::ChannelError) -> Self {
         use crate::ipc::channel::ChannelError;
         match err {

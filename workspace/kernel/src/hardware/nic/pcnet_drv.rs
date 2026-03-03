@@ -27,6 +27,7 @@ const DE_ENP: usize = 0;
 const DE_STP: usize = 1;
 const DE_OWN: usize = 7;
 
+/// Performs the log2 operation.
 fn log2(x: u8) -> u8 {
     8 - 1 - x.leading_zeros() as u8
 }
@@ -55,70 +56,85 @@ struct Ports {
 }
 
 impl Ports {
+    /// Creates a new instance.
     fn new(io_base: u16) -> Self {
         Self { io_base }
     }
 
+    /// Performs the read8 operation.
     #[inline]
     fn read8(&self, offset: u16) -> u8 {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
     }
 
+    /// Performs the write8 operation.
     #[inline]
     fn write8(&mut self, offset: u16, value: u8) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
 
+    /// Performs the read32 operation.
     #[inline]
     fn read32(&self, offset: u16) -> u32 {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
     }
 
+    /// Performs the write32 operation.
     #[inline]
     fn write32(&mut self, offset: u16, value: u32) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
 
+    /// Writes rap.
     fn write_rap(&mut self, val: u32) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + 0x14).write(val) }
     }
 
+    /// Reads rdp.
     fn read_rdp(&self) -> u32 {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + 0x10).read() }
     }
 
+    /// Writes rdp.
     fn write_rdp(&mut self, val: u32) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + 0x10).write(val) }
     }
 
+    /// Reads bdp.
     fn read_bdp(&self) -> u32 {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + 0x1C).read() }
     }
 
+    /// Writes bdp.
     fn write_bdp(&mut self, val: u32) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + 0x1C).write(val) }
     }
 
+    /// Reads csr.
     fn read_csr(&mut self, csr: u32) -> u32 {
         self.write_rap(csr);
         self.read_rdp()
     }
 
+    /// Writes csr.
     fn write_csr(&mut self, csr: u32, val: u32) {
         self.write_rap(csr);
         self.write_rdp(val);
     }
 
+    /// Reads bcr.
     fn read_bcr(&mut self, bcr: u32) -> u32 {
         self.write_rap(bcr);
         self.read_bdp()
     }
 
+    /// Writes bcr.
     fn write_bcr(&mut self, bcr: u32, val: u32) {
         self.write_rap(bcr);
         self.write_bdp(val);
     }
 
+    /// Performs the mac operation.
     fn mac(&mut self) -> [u8; 6] {
         [
             self.read8(0x00),
@@ -132,6 +148,7 @@ impl Ports {
 }
 
 impl PcnetDevice {
+    /// Creates a new instance.
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let io_base = match pci_dev.read_bar(0) {
             Some(Bar::Io { port }) => port as u16,
@@ -192,6 +209,7 @@ impl PcnetDevice {
         Ok(device)
     }
 
+    /// Performs the init operation.
     fn init(&mut self) {
         let mut ports = self.ports.lock();
 
@@ -265,6 +283,7 @@ impl PcnetDevice {
         );
     }
 
+    /// Initializes rx descriptor.
     fn init_rx_descriptor(&self, i: usize) {
         unsafe {
             let desc = self.rx_des.add(i * DESC_LEN);
@@ -282,6 +301,7 @@ impl PcnetDevice {
         }
     }
 
+    /// Initializes tx descriptor.
     fn init_tx_descriptor(&self, i: usize) {
         unsafe {
             let desc = self.tx_des.add(i * DESC_LEN);
@@ -295,6 +315,7 @@ impl PcnetDevice {
         }
     }
 
+    /// Performs the receive inner operation.
     fn receive_inner(&self) -> Option<Vec<u8>> {
         let rx_id = self.rx_id.load(Ordering::Relaxed);
 
@@ -336,6 +357,7 @@ impl PcnetDevice {
         None
     }
 
+    /// Performs the transmit inner operation.
     fn transmit_inner(&self, data: &[u8]) -> Result<(), NetError> {
         if data.len() > MTU {
             return Err(NetError::BufferTooSmall);
@@ -380,20 +402,24 @@ impl PcnetDevice {
 }
 
 impl NetworkDevice for PcnetDevice {
+    /// Performs the name operation.
     fn name(&self) -> &str {
         &self.name
     }
 
+    /// Performs the mac address operation.
     fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
 
+    /// Performs the link up operation.
     fn link_up(&self) -> bool {
         let mut ports = self.ports.lock();
         let csr_4 = ports.read_csr(4);
         (csr_4 & 0x20) != 0
     }
 
+    /// Performs the receive operation.
     fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
         if let Some(packet) = self.receive_inner() {
             let len = core::cmp::min(packet.len(), buf.len());
@@ -404,6 +430,7 @@ impl NetworkDevice for PcnetDevice {
         }
     }
 
+    /// Performs the transmit operation.
     fn transmit(&self, data: &[u8]) -> Result<(), NetError> {
         self.transmit_inner(data)
     }
@@ -411,6 +438,7 @@ impl NetworkDevice for PcnetDevice {
 
 static PCNET_DEVICES: Mutex<Vec<Arc<PcnetDevice>>> = Mutex::new(Vec::new());
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[PCnet] Scanning for PCnet devices...");
 

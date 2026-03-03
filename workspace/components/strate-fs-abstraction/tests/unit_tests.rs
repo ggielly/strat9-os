@@ -3,6 +3,7 @@ mod fs_abstraction_tests {
     use fs_abstraction::FsError;
 
     #[test]
+    /// Implements test fs error types.
     fn test_fs_error_types() {
         let err = FsError::BufferTooSmall;
         assert!(matches!(err, FsError::BufferTooSmall));

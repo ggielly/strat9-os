@@ -558,7 +558,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             user_accessible: true,
         };
         if unsafe { &*task.process.address_space.get() }
-            .map_region(
+            .reserve_region(
                 old_page_end,
                 n_pages,
                 vma_flags,
@@ -571,7 +571,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             return Ok(current_brk);
         }
         log::trace!(
-            "sys_brk: grow {:#x}..{:#x} ({} pages)",
+            "sys_brk: grow {:#x}..{:#x} ({} pages, lazy)",
             old_page_end,
             new_page_end,
             n_pages,

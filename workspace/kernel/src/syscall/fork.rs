@@ -23,6 +23,7 @@ pub struct ForkResult {
     pub child_pid: Pid,
 }
 
+/// Performs the local invlpg operation.
 #[inline]
 fn local_invlpg(vaddr: u64) {
     // Local TLB invalidation is sufficient here: this kernel currently runs
@@ -83,6 +84,7 @@ extern "C" fn fork_child_start(ctx_ptr: u64) -> ! {
     unsafe { fork_iret_from_ctx(&ctx as *const ForkUserContext) }
 }
 
+/// Performs the fork iret from ctx operation.
 #[unsafe(naked)]
 unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
     core::arch::naked_asm!(
@@ -141,6 +143,7 @@ unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
 }
 
 
+/// Performs the build child task operation.
 fn build_child_task(
     parent: &Arc<Task>,
     child_as: Arc<AddressSpace>,

@@ -17,17 +17,20 @@ struct FutexQueue {
 }
 
 impl FutexQueue {
+    /// Creates a new instance.
     const fn new() -> Self {
         FutexQueue {
             waiters: SpinLock::new(VecDeque::new()),
         }
     }
 
+    /// Performs the pop waiter operation.
     fn pop_waiter(&self) -> Option<crate::process::TaskId> {
         let mut waiters = self.waiters.lock();
         waiters.pop_front()
     }
 
+    /// Performs the remove waiter operation.
     fn remove_waiter(&self, id: crate::process::TaskId) {
         let mut waiters = self.waiters.lock();
         if let Some(pos) = waiters.iter().position(|&x| x == id) {
@@ -35,6 +38,7 @@ impl FutexQueue {
         }
     }
 
+    /// Returns whether empty.
     fn is_empty(&self) -> bool {
         self.waiters.lock().is_empty()
     }
@@ -42,6 +46,7 @@ impl FutexQueue {
 
 static FUTEX_QUEUES: SpinLock<BTreeMap<u64, Arc<FutexQueue>>> = SpinLock::new(BTreeMap::new());
 
+/// Returns queue.
 fn get_queue(addr: u64) -> Arc<FutexQueue> {
     let mut map = FUTEX_QUEUES.lock();
     map.entry(addr)
@@ -49,12 +54,14 @@ fn get_queue(addr: u64) -> Arc<FutexQueue> {
         .clone()
 }
 
+/// Reads u32.
 fn read_u32(addr: u64) -> Result<u32, SyscallError> {
     let slice =
         UserSliceRead::new(addr, core::mem::size_of::<u32>()).map_err(|_| SyscallError::Fault)?;
     slice.read_val::<u32>().map_err(|_| SyscallError::Fault)
 }
 
+/// Performs the atomic cmpxchg u32 operation.
 #[inline]
 fn atomic_cmpxchg_u32(ptr: *mut u32, expected: u32, desired: u32) -> u32 {
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -68,6 +75,7 @@ fn atomic_cmpxchg_u32(ptr: *mut u32, expected: u32, desired: u32) -> u32 {
         .unwrap_or_else(|x| x)
 }
 
+/// Performs the atomic fetch update u32 operation.
 fn atomic_fetch_update_u32<F>(addr: u64, update: F) -> Result<u32, SyscallError>
 where
     F: Fn(u32) -> u32,
@@ -89,6 +97,7 @@ where
     }
 }
 
+/// Performs the lock two queues operation.
 fn lock_two_queues<'a>(
     addr1: u64,
     q1: &'a FutexQueue,
@@ -110,6 +119,7 @@ fn lock_two_queues<'a>(
     }
 }
 
+/// Performs the wake from waiters operation.
 fn wake_from_waiters(waiters: &mut VecDeque<crate::process::TaskId>, max_wake: u32) -> u64 {
     let mut woke = 0u64;
     while woke < max_wake as u64 {
@@ -124,6 +134,7 @@ fn wake_from_waiters(waiters: &mut VecDeque<crate::process::TaskId>, max_wake: u
     woke
 }
 
+/// Performs the do requeue operation.
 fn do_requeue(
     addr1: u64,
     max_wake: u32,
@@ -176,6 +187,7 @@ fn do_requeue(
     Ok(woke + requeued)
 }
 
+/// Attempts to gc queue.
 fn try_gc_queue(addr: u64, queue: &Arc<FutexQueue>) {
     let waiters = queue.waiters.lock();
     if waiters.is_empty() {
@@ -198,6 +210,7 @@ struct FutexWakeOpEncode {
 }
 
 impl FutexWakeOpEncode {
+    /// Performs the decode operation.
     fn decode(bits: u32) -> Result<Self, SyscallError> {
         let is_oparg_shift = ((bits >> 31) & 1) == 1;
         let op = (bits >> 28) & 0x7;
@@ -218,6 +231,7 @@ impl FutexWakeOpEncode {
         })
     }
 
+    /// Performs the effective oparg operation.
     fn effective_oparg(&self) -> u32 {
         if self.is_oparg_shift {
             1u32 << (self.oparg & 31)
@@ -226,6 +240,7 @@ impl FutexWakeOpEncode {
         }
     }
 
+    /// Performs the calculate new val operation.
     fn calculate_new_val(&self, old_val: u32) -> u32 {
         let oparg = self.effective_oparg();
         match self.op {
@@ -238,6 +253,7 @@ impl FutexWakeOpEncode {
         }
     }
 
+    /// Performs the should wake operation.
     fn should_wake(&self, old_val: u32) -> bool {
         match self.cmp {
             0 => old_val == self.cmparg,

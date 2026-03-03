@@ -191,6 +191,7 @@ impl OpenFile {
 }
 
 impl Drop for OpenFile {
+    /// Performs the drop operation.
     fn drop(&mut self) {
         // Best-effort close on drop
         let _ = self.scheme.close(self.file_id);

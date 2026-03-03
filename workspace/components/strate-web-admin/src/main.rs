@@ -29,6 +29,7 @@ alloc_freelist::define_freelist_brk_allocator!(
 static ALLOCATOR: WebAdminAllocator = WebAdminAllocator;
 
 #[alloc_error_handler]
+/// Implements alloc error.
 fn alloc_error(layout: Layout) -> ! {
     let mut buf = [0u8; 80];
     let n = {
@@ -41,6 +42,7 @@ fn alloc_error(layout: Layout) -> ! {
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(info: &PanicInfo) -> ! {
     let mut buf = [0u8; 256];
     let n = {
@@ -58,15 +60,18 @@ struct BufWriter<'a> {
 }
 
 impl<'a> BufWriter<'a> {
+    /// Creates a new instance.
     fn new(buf: &'a mut [u8]) -> Self {
         Self { buf, pos: 0 }
     }
+    /// Implements len.
     fn len(&self) -> usize {
         self.pos
     }
 }
 
 impl core::fmt::Write for BufWriter<'_> {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let bytes = s.as_bytes();
         let avail = self.buf.len().saturating_sub(self.pos);
@@ -77,6 +82,7 @@ impl core::fmt::Write for BufWriter<'_> {
     }
 }
 
+/// Implements log.
 pub fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
@@ -84,6 +90,7 @@ pub fn log(msg: &str) {
 static CONFIG: picoserve::Config = picoserve::Config::const_default().close_connection_after_response();
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     log("[web-admin] Strat9 Web Admin starting on port 8080\n");
 

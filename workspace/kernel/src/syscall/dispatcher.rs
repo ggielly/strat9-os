@@ -32,6 +32,7 @@ static NET_SEND_ERR_LOG_BUDGET: AtomicU32 = AtomicU32::new(32);
 static NET_RECV_ERR_LOG_BUDGET: AtomicU32 = AtomicU32::new(32);
 static DHCP_TRACE_LOG_BUDGET: AtomicU32 = AtomicU32::new(64);
 
+/// Performs the trace dhcp frame operation.
 fn trace_dhcp_frame(tag: &str, frame: &[u8]) {
     if DHCP_TRACE_LOG_BUDGET.fetch_sub(1, Ordering::Relaxed) == 0 {
         return;
@@ -93,7 +94,7 @@ fn trace_dhcp_frame(tag: &str, frame: &[u8]) {
 /// `SyscallFrame` on the current kernel stack.
 #[no_mangle]
 pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
-    let syscall_num = frame.rax;
+    let syscall_num = frame.rax as usize;
     let arg1 = frame.rdi;
     let arg2 = frame.rsi;
     let arg3 = frame.rdx;
@@ -121,7 +122,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PROC_YIELD => sys_proc_yield(),
         SYS_PROC_FORK => sys_fork(frame).map(|result| result.child_pid as u64),
         SYS_PROC_GETPID | SYS_GETPID => proc_sys::sys_getpid(),
-        SYS_PROC_GETPPID | SYS_GETPPID => proc_sys::sys_getppid(),
+        SYS_PROC_GETPPID => proc_sys::sys_getppid(),
         SYS_GETTID => proc_sys::sys_gettid(),
         SYS_PROC_WAITPID => {
             super::wait::sys_waitpid(arg1 as i64, arg2, arg3 as u32).map(|pid| pid as u64)
@@ -235,6 +236,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_FCHMOD => crate::vfs::sys_fchmod(arg1 as u32, arg2),
         SYS_TRUNCATE => crate::vfs::sys_truncate(arg1, arg2, arg3),
         SYS_FTRUNCATE => crate::vfs::sys_ftruncate(arg1 as u32, arg2),
+        SYS_PREAD => crate::vfs::sys_pread(arg1 as u32, arg2, arg3, arg4),
+        SYS_PWRITE => crate::vfs::sys_pwrite(arg1 as u32, arg2, arg3, arg4),
         SYS_POLL => super::poll::sys_poll(arg1, arg2, arg3),
         SYS_PPOLL => super::poll::sys_poll(arg1, arg2, 0),
 
@@ -261,6 +264,9 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SILO_PLEDGE => silo::sys_silo_pledge(arg1),
         SYS_SILO_UNVEIL => silo::sys_silo_unveil(arg1, arg2, arg3),
         SYS_SILO_ENTER_SANDBOX => silo::sys_silo_enter_sandbox(),
+        SYS_ABI_VERSION => Ok(
+            ((strat9_abi::ABI_VERSION_MAJOR as u64) << 16) | (strat9_abi::ABI_VERSION_MINOR as u64)
+        ),
         _ => {
             log::warn!("Unknown syscall: {} (0x{:x})", syscall_num, syscall_num);
             Err(SyscallError::NotImplemented)
@@ -321,6 +327,7 @@ fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
     }
 }
 
+/// Performs the cleanup cap resource operation.
 fn cleanup_cap_resource(cap: &crate::capability::Capability) {
     match cap.resource_type {
         ResourceType::File => {
@@ -353,6 +360,7 @@ fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
 const HANDLE_EVENT_READABLE: u64 = 1 << 0;
 const HANDLE_EVENT_WRITABLE: u64 = 1 << 1;
 
+/// Performs the poll handle events operation.
 fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
@@ -427,6 +435,7 @@ fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
     }
 }
 
+/// Performs the sys handle wait operation.
 fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
@@ -478,6 +487,7 @@ fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     }
 }
 
+/// Performs the sys handle grant operation.
 fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     crate::silo::enforce_silo_may_grant()?;
@@ -503,6 +513,7 @@ fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
     Ok(new_id.as_u64())
 }
 
+/// Performs the sys handle revoke operation.
 fn sys_handle_revoke(handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -520,14 +531,9 @@ fn sys_handle_revoke(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct HandleInfoAbi {
-    resource_type: u32,
-    permissions: u32,
-    resource: u64,
-}
+use strat9_abi::data::HandleInfo as HandleInfoAbi;
 
+/// Performs the cap perm bits operation.
 fn cap_perm_bits(p: CapPermissions) -> u32 {
     (if p.read { 1 } else { 0 })
         | (if p.write { 1 << 1 } else { 0 })
@@ -536,6 +542,7 @@ fn cap_perm_bits(p: CapPermissions) -> u32 {
         | (if p.revoke { 1 << 4 } else { 0 })
 }
 
+/// Performs the resource type code operation.
 fn resource_type_code(rt: ResourceType) -> u32 {
     match rt {
         ResourceType::MemoryRegion => 1,
@@ -559,6 +566,7 @@ fn resource_type_code(rt: ResourceType) -> u32 {
     }
 }
 
+/// Performs the sys handle info operation.
 fn sys_handle_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     if out_ptr == 0 {
@@ -641,6 +649,7 @@ fn sys_sigprocmask(how: i32, set_ptr: u64, oldset_ptr: u64) -> Result<u64, Sysca
     Ok(0)
 }
 
+/// Performs the sys uname operation.
 fn sys_uname(uts_ptr: u64) -> Result<u64, SyscallError> {
     const UTS_FIELD_LEN: usize = 65;
     const UTS_TOTAL_LEN: usize = UTS_FIELD_LEN * 6;
@@ -649,6 +658,7 @@ fn sys_uname(uts_ptr: u64) -> Result<u64, SyscallError> {
         return Err(SyscallError::Fault);
     }
 
+    /// Writes field.
     fn write_field(dst: &mut [u8], src: &[u8]) {
         let n = core::cmp::min(src.len(), dst.len().saturating_sub(1));
         if n > 0 {
@@ -737,6 +747,7 @@ enum VolumeDeviceRef {
 }
 
 impl VolumeDeviceRef {
+    /// Performs the sector count operation.
     fn sector_count(&self) -> u64 {
         match self {
             VolumeDeviceRef::Virtio(dev) => BlockDevice::sector_count(*dev),
@@ -744,6 +755,7 @@ impl VolumeDeviceRef {
         }
     }
 
+    /// Reads sector.
     fn read_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), SyscallError> {
         match self {
             VolumeDeviceRef::Virtio(dev) => {
@@ -755,6 +767,7 @@ impl VolumeDeviceRef {
         }
     }
 
+    /// Writes sector.
     fn write_sector(&self, sector: u64, buf: &[u8]) -> Result<(), SyscallError> {
         match self {
             VolumeDeviceRef::Virtio(dev) => {
@@ -767,6 +780,7 @@ impl VolumeDeviceRef {
     }
 }
 
+/// Performs the resolve volume device operation.
 fn resolve_volume_device(
     handle: u64,
     required: CapPermissions,
@@ -796,6 +810,7 @@ fn resolve_volume_device(
     Err(SyscallError::BadHandle)
 }
 
+/// Performs the sys volume read operation.
 fn sys_volume_read(
     handle: u64,
     sector: u64,
@@ -839,6 +854,7 @@ fn sys_volume_read(
     Ok(sector_count)
 }
 
+/// Performs the sys volume write operation.
 fn sys_volume_write(
     handle: u64,
     sector: u64,
@@ -886,6 +902,7 @@ fn sys_volume_write(
     Ok(sector_count)
 }
 
+/// Performs the sys volume info operation.
 fn sys_volume_info(handle: u64) -> Result<u64, SyscallError> {
     let required = CapPermissions {
         read: true,
@@ -932,8 +949,9 @@ fn sys_debug_log(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 // Network syscalls
 // ============================================================
 
+/// Performs the sys net recv operation.
 pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
     let mut kbuf = vec![0u8; buf_len as usize];
 
     let n = match device.receive(&mut kbuf) {
@@ -955,8 +973,9 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     Ok(n as u64)
 }
 
+/// Performs the sys net send operation.
 pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
     let user = UserSliceRead::new(buf_ptr, buf_len as usize)?;
     let kbuf = user.read_to_vec();
     trace_dhcp_frame("tx", &kbuf);
@@ -972,8 +991,9 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     Ok(buf_len)
 }
 
+/// Performs the sys net info operation.
 pub fn sys_net_info(info_type: u64, buf_ptr: u64) -> Result<u64, SyscallError> {
-    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
 
     match info_type {
         0 => {
@@ -990,6 +1010,7 @@ pub fn sys_net_info(info_type: u64, buf_ptr: u64) -> Result<u64, SyscallError> {
 // IPC syscalls (with capability enforcement)
 // ============================================================
 
+/// Performs the sys ipc create port operation.
 fn sys_ipc_create_port(_flags: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let port_id = port::create_port(task.id);
@@ -1002,6 +1023,7 @@ fn sys_ipc_create_port(_flags: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
+/// Performs the sys ipc send operation.
 fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(port)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -1048,6 +1070,7 @@ fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the sys ipc recv operation.
 fn sys_ipc_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(port)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -1090,15 +1113,13 @@ fn sys_ipc_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
     let mut buf = [0u8; MSG_SIZE];
-    // SAFETY: buf is exactly the size of IpcMessage.
-    unsafe {
-        msg.to_raw(buf.as_mut_ptr());
-    }
+    crate::ipc::message::ipc_message_to_raw(&msg, &mut buf);
     let user = UserSliceWrite::new(_msg_ptr, MSG_SIZE)?;
     user.copy_from(&buf);
     Ok(0)
 }
 
+/// Performs the sys ipc try recv operation.
 fn sys_ipc_try_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(port)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -1146,15 +1167,13 @@ fn sys_ipc_try_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
     let mut buf = [0u8; MSG_SIZE];
-    // SAFETY: buf is exactly the size of IpcMessage.
-    unsafe {
-        msg.to_raw(buf.as_mut_ptr());
-    }
+    crate::ipc::message::ipc_message_to_raw(&msg, &mut buf);
     let user = UserSliceWrite::new(_msg_ptr, MSG_SIZE)?;
     user.copy_from(&buf);
     Ok(0)
 }
 
+/// Performs the sys ipc connect operation.
 fn sys_ipc_connect(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     if path_ptr == 0 || path_len == 0 {
         return Err(SyscallError::Fault);
@@ -1189,6 +1208,7 @@ fn sys_ipc_connect(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
+/// Performs the sys ipc call operation.
 fn sys_ipc_call(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(port)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -1235,14 +1255,13 @@ fn sys_ipc_call(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let reply_msg = reply::wait_for_reply(task.id);
     let mut out_buf = [0u8; MSG_SIZE];
-    unsafe {
-        reply_msg.to_raw(out_buf.as_mut_ptr());
-    }
+    crate::ipc::message::ipc_message_to_raw(&reply_msg, &mut out_buf);
     let user = UserSliceWrite::new(_msg_ptr, MSG_SIZE)?;
     user.copy_from(&out_buf);
     Ok(0)
 }
 
+/// Performs the sys ipc reply operation.
 fn sys_ipc_reply(_msg_ptr: u64) -> Result<u64, SyscallError> {
     if _msg_ptr == 0 {
         return Err(SyscallError::Fault);
@@ -1275,6 +1294,7 @@ fn sys_ipc_reply(_msg_ptr: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the sys ipc bind port operation.
 fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_registry_bind_for_current_task()?;
     crate::silo::enforce_cap_for_current_task(port)?;
@@ -1409,6 +1429,7 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
     Ok(0)
 }
 
+/// Performs the sys ipc unbind port operation.
 fn sys_ipc_unbind_port(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     crate::silo::require_silo_admin()?;
     if path_ptr == 0 || path_len == 0 {
@@ -1426,6 +1447,7 @@ fn sys_ipc_unbind_port(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError
     Ok(0)
 }
 
+/// Performs the sys ipc ring create operation.
 fn sys_ipc_ring_create(_size: u64) -> Result<u64, SyscallError> {
     let size = usize::try_from(_size).map_err(|_| SyscallError::InvalidArgument)?;
     let ring_id = shared_ring::create_ring(size).map_err(|e| match e {
@@ -1450,6 +1472,7 @@ fn sys_ipc_ring_create(_size: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
+/// Performs the sys ipc ring map operation.
 fn sys_ipc_ring_map(ring: u64, _out_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(ring)?;
     if _out_ptr == 0 {
@@ -1508,6 +1531,7 @@ fn sys_ipc_ring_map(ring: u64, _out_ptr: u64) -> Result<u64, SyscallError> {
     Ok(map_size)
 }
 
+/// Performs the sys sem create operation.
 fn sys_sem_create(initial: u64) -> Result<u64, SyscallError> {
     let initial = u32::try_from(initial).map_err(|_| SyscallError::InvalidArgument)?;
     let sem_id = semaphore::create_semaphore(initial).map_err(|e| match e {
@@ -1533,6 +1557,7 @@ fn sys_sem_create(initial: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
+/// Performs the resolve sem operation.
 fn resolve_sem(
     handle: u64,
     required: CapPermissions,
@@ -1550,6 +1575,7 @@ fn resolve_sem(
     semaphore::get_semaphore(id).ok_or(SyscallError::BadHandle)
 }
 
+/// Performs the sys sem wait operation.
 fn sys_sem_wait(handle: u64) -> Result<u64, SyscallError> {
     let sem = resolve_sem(
         handle,
@@ -1570,6 +1596,7 @@ fn sys_sem_wait(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the sys sem trywait operation.
 fn sys_sem_trywait(handle: u64) -> Result<u64, SyscallError> {
     let sem = resolve_sem(
         handle,
@@ -1590,6 +1617,7 @@ fn sys_sem_trywait(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the sys sem post operation.
 fn sys_sem_post(handle: u64) -> Result<u64, SyscallError> {
     let sem = resolve_sem(
         handle,
@@ -1610,6 +1638,7 @@ fn sys_sem_post(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the sys sem close operation.
 fn sys_sem_close(handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -1629,49 +1658,13 @@ fn sys_sem_close(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-const PCI_MATCH_VENDOR_ID: u32 = 1 << 0;
-const PCI_MATCH_DEVICE_ID: u32 = 1 << 1;
-const PCI_MATCH_CLASS_CODE: u32 = 1 << 2;
-const PCI_MATCH_SUBCLASS: u32 = 1 << 3;
-const PCI_MATCH_PROG_IF: u32 = 1 << 4;
+use strat9_abi::data::{
+    PciAddress as PciAddressAbi, PciDeviceInfo as PciDeviceInfoAbi,
+    PciProbeCriteria as PciProbeCriteriaAbi, PCI_MATCH_CLASS_CODE, PCI_MATCH_DEVICE_ID,
+    PCI_MATCH_PROG_IF, PCI_MATCH_SUBCLASS, PCI_MATCH_VENDOR_ID,
+};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PciAddressAbi {
-    bus: u8,
-    device: u8,
-    function: u8,
-    _reserved: u8,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PciProbeCriteriaAbi {
-    match_flags: u32,
-    vendor_id: u16,
-    device_id: u16,
-    class_code: u8,
-    subclass: u8,
-    prog_if: u8,
-    _reserved: u8,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PciDeviceInfoAbi {
-    address: PciAddressAbi,
-    vendor_id: u16,
-    device_id: u16,
-    class_code: u8,
-    subclass: u8,
-    prog_if: u8,
-    revision: u8,
-    header_type: u8,
-    interrupt_line: u8,
-    interrupt_pin: u8,
-    _reserved: u8,
-}
-
+/// Reads pci address.
 fn read_pci_address(addr_ptr: u64) -> Result<pci::PciAddress, SyscallError> {
     if addr_ptr == 0 {
         return Err(SyscallError::Fault);
@@ -1686,6 +1679,7 @@ fn read_pci_address(addr_ptr: u64) -> Result<pci::PciAddress, SyscallError> {
     Ok(pci::PciAddress::new(abi.bus, abi.device, abi.function))
 }
 
+/// Performs the sys pci enum operation.
 fn sys_pci_enum(criteria_ptr: u64, out_ptr: u64, max_entries: u64) -> Result<u64, SyscallError> {
     if criteria_ptr == 0 || out_ptr == 0 {
         return Err(SyscallError::Fault);
@@ -1763,6 +1757,7 @@ fn sys_pci_enum(criteria_ptr: u64, out_ptr: u64, max_entries: u64) -> Result<u64
     Ok(out.len() as u64)
 }
 
+/// Performs the sys pci cfg read operation.
 fn sys_pci_cfg_read(addr_ptr: u64, offset: u64, width: u64) -> Result<u64, SyscallError> {
     let dev_addr = read_pci_address(addr_ptr)?;
     let offset = u8::try_from(offset).map_err(|_| SyscallError::InvalidArgument)?;
@@ -1788,6 +1783,7 @@ fn sys_pci_cfg_read(addr_ptr: u64, offset: u64, width: u64) -> Result<u64, Sysca
     Ok(value as u64)
 }
 
+/// Performs the sys pci cfg write operation.
 fn sys_pci_cfg_write(addr_ptr: u64, offset: u64, width: u64, value: u64) -> Result<u64, SyscallError> {
     let dev_addr = read_pci_address(addr_ptr)?;
     let offset = u8::try_from(offset).map_err(|_| SyscallError::InvalidArgument)?;

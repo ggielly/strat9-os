@@ -231,6 +231,7 @@ extern "C" fn chan_consumer_main() -> ! {
 static SEM_TEST_ID: AtomicU64 = AtomicU64::new(0);
 static SEM_TEST_RESULT: SpinLock<Option<bool>> = SpinLock::new(None);
 
+/// Creates ipc 04 05 test task.
 pub fn create_ipc_04_05_test_task() {
     let task = Task::new_kernel_task(
         ipc_04_05_main,
@@ -241,6 +242,7 @@ pub fn create_ipc_04_05_test_task() {
     add_task(task);
 }
 
+/// Performs the ipc 04 05 main operation.
 extern "C" fn ipc_04_05_main() -> ! {
     crate::serial_println!("[ipc-04-05] start");
 
@@ -315,6 +317,7 @@ extern "C" fn ipc_04_05_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Performs the sem poster main operation.
 extern "C" fn sem_poster_main() -> ! {
     for _ in 0..4 {
         crate::process::yield_task();

@@ -375,6 +375,7 @@ impl VirtioBlockDevice {
 }
 
 impl BlockDevice for VirtioBlockDevice {
+    /// Reads sector.
     fn read_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         if sector >= self.capacity {
             return Err(BlockError::InvalidSector);
@@ -387,6 +388,7 @@ impl BlockDevice for VirtioBlockDevice {
         self.do_request(RequestType::In, sector, Some((buf, false)))
     }
 
+    /// Writes sector.
     fn write_sector(&self, sector: u64, buf: &[u8]) -> Result<(), BlockError> {
         if sector >= self.capacity {
             return Err(BlockError::InvalidSector);
@@ -410,6 +412,7 @@ impl BlockDevice for VirtioBlockDevice {
         self.do_request(RequestType::Out, sector, Some((&mut buf_copy, true)))
     }
 
+    /// Performs the sector count operation.
     fn sector_count(&self) -> u64 {
         self.capacity
     }

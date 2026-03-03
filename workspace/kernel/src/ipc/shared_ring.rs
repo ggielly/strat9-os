@@ -9,9 +9,11 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub struct RingId(pub u64);
 
 impl RingId {
+    /// Returns this as u64.
     pub fn as_u64(self) -> u64 {
         self.0
     }
+    /// Builds this from u64.
     pub fn from_u64(raw: u64) -> Self {
         Self(raw)
     }
@@ -33,14 +35,17 @@ pub struct SharedRing {
 }
 
 impl SharedRing {
+    /// Performs the size operation.
     pub fn size(&self) -> usize {
         self.size
     }
 
+    /// Performs the page count operation.
     pub fn page_count(&self) -> usize {
         self.frames.len()
     }
 
+    /// Performs the frame phys addrs operation.
     pub fn frame_phys_addrs(&self) -> Vec<u64> {
         self.frames
             .iter()
@@ -50,6 +55,7 @@ impl SharedRing {
 }
 
 impl Drop for SharedRing {
+    /// Performs the drop operation.
     fn drop(&mut self) {
         for frame in self.frames.drain(..) {
             crate::memory::cow::frame_dec_ref(frame);
@@ -60,12 +66,14 @@ impl Drop for SharedRing {
 static NEXT_RING_ID: AtomicU64 = AtomicU64::new(1);
 static RINGS: SpinLock<Option<BTreeMap<RingId, Arc<SharedRing>>>> = SpinLock::new(None);
 
+/// Performs the ensure registry operation.
 fn ensure_registry(guard: &mut Option<BTreeMap<RingId, Arc<SharedRing>>>) {
     if guard.is_none() {
         *guard = Some(BTreeMap::new());
     }
 }
 
+/// Creates ring.
 pub fn create_ring(size: usize) -> Result<RingId, RingError> {
     if size == 0 {
         return Err(RingError::InvalidSize);
@@ -111,11 +119,13 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
     Ok(id)
 }
 
+/// Returns ring.
 pub fn get_ring(id: RingId) -> Option<Arc<SharedRing>> {
     let reg = RINGS.lock();
     reg.as_ref().and_then(|map| map.get(&id).cloned())
 }
 
+/// Destroys ring.
 pub fn destroy_ring(id: RingId) -> Result<(), RingError> {
     let mut reg = RINGS.lock();
     let map = reg.as_mut().ok_or(RingError::NotFound)?;

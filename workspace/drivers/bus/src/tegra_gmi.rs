@@ -22,13 +22,21 @@ const COMPATIBLE: &[&str] = &[
     "nvidia,tegra30-gmi",
 ];
 
+/// Performs the cs select operation.
 fn cs_select(x: u32) -> u32 { (x & 0x7) << 4 }
+/// Performs the muxed width operation.
 fn muxed_width(x: u32) -> u32 { (x & 0xF) << 12 }
+/// Performs the hold width operation.
 fn hold_width(x: u32) -> u32 { (x & 0xF) << 8 }
+/// Performs the adv width operation.
 fn adv_width(x: u32) -> u32 { (x & 0xF) << 4 }
+/// Performs the ce width operation.
 fn ce_width(x: u32) -> u32 { x & 0xF }
+/// Performs the we width operation.
 fn we_width(x: u32) -> u32 { (x & 0xFF) << 16 }
+/// Performs the oe width operation.
 fn oe_width(x: u32) -> u32 { (x & 0xFF) << 8 }
+/// Performs the wait width operation.
 fn wait_width(x: u32) -> u32 { x & 0xFF }
 
 pub struct GmiConfig {
@@ -61,6 +69,7 @@ pub struct TegraGmi {
 }
 
 impl TegraGmi {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -71,6 +80,7 @@ impl TegraGmi {
         }
     }
 
+    /// Performs the configure operation.
     pub fn configure(&mut self, cfg: &GmiConfig, timing: &GmiTiming) {
         let mut config = 0u32;
         if cfg.bus_width_32 { config |= BUS_WIDTH_32BIT; }
@@ -95,6 +105,7 @@ impl TegraGmi {
             | wait_width(timing.wait_width);
     }
 
+    /// Performs the apply config operation.
     pub fn apply_config(&self) {
         if !self.regs.is_valid() { return; }
         self.regs.write32(TEGRA_GMI_TIMING0, self.snor_timing0);
@@ -104,10 +115,13 @@ impl TegraGmi {
 }
 
 impl BusDriver for TegraGmi {
+    /// Performs the name operation.
     fn name(&self) -> &str { "tegra-gmi" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x20);
         self.apply_config();
@@ -115,22 +129,26 @@ impl BusDriver for TegraGmi {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Performs the suspend operation.
     fn suspend(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Suspended;
         Ok(())
     }
 
+    /// Performs the resume operation.
     fn resume(&mut self) -> Result<(), BusError> {
         self.apply_config();
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
@@ -138,6 +156,7 @@ impl BusDriver for TegraGmi {
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);

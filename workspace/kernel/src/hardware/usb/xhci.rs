@@ -111,6 +111,7 @@ struct Trb {
 }
 
 impl Trb {
+    /// Performs the link operation.
     fn link(addr: u64, toggle_cycle: bool) -> Self {
         Self {
             d0: (addr & 0xFFFFFFFF) as u32,
@@ -120,6 +121,7 @@ impl Trb {
         }
     }
 
+    /// Performs the normal operation.
     fn normal(addr: u64, len: u32, cycle: bool, ioc: bool) -> Self {
         let mut d3 = (TRB_TYPE_NORMAL << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
         if ioc { d3 |= TRB_IOC; }
@@ -207,6 +209,7 @@ unsafe impl Send for XhciController {}
 unsafe impl Sync for XhciController {}
 
 impl XhciController {
+    /// Creates a new instance.
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Arc<Self>, &'static str> {
         let bar = match pci_dev.read_bar(0) {
             Some(Bar::Memory64 { addr, .. }) => addr,
@@ -253,6 +256,7 @@ impl XhciController {
         Ok(Arc::new(controller))
     }
 
+    /// Performs the init operation.
     fn init(&mut self) -> Result<(), &'static str> {
         unsafe {
             let op = &mut *self.op_regs;
@@ -320,6 +324,7 @@ impl XhciController {
         Ok(())
     }
 
+    /// Initializes rings.
     unsafe fn init_rings(&mut self) -> Result<(), &'static str> {
         let cmd_frame = allocate_dma_frame().ok_or("Failed to allocate cmd ring")?;
         self.cmd_ring_phys = cmd_frame.start_address.as_u64();
@@ -342,6 +347,7 @@ impl XhciController {
         Ok(())
     }
 
+    /// Initializes interrupter.
     unsafe fn init_interrupter(&mut self) -> Result<(), &'static str> {
         let erst_frame = allocate_dma_frame().ok_or("Failed to allocate ERST")?;
         let erst_phys = erst_frame.start_address.as_u64();
@@ -365,18 +371,21 @@ impl XhciController {
         Ok(())
     }
 
+    /// Reads portsc.
     unsafe fn read_portsc(&self, port: usize) -> u32 {
         let port_offset = XHCI_PORT_REG_BASE + (port * XHCI_PORT_REG_STRIDE);
         let portsc_ptr = (self.op_regs as *const u8).add(port_offset) as *const u32;
         portsc_ptr.read_volatile()
     }
 
+    /// Writes portsc.
     unsafe fn write_portsc(&self, port: usize, val: u32) {
         let port_offset = XHCI_PORT_REG_BASE + (port * XHCI_PORT_REG_STRIDE);
         let portsc_ptr = (self.op_regs as *const u8).add(port_offset) as *mut u32;
         portsc_ptr.write_volatile(val);
     }
 
+    /// Enables slot.
     unsafe fn enable_slot(&mut self) -> Result<(), &'static str> {
         self.cmd_ring_enqueue(Trb {
             d0: 0,
@@ -399,6 +408,7 @@ impl XhciController {
         Ok(())
     }
 
+    /// Performs the cmd ring enqueue operation.
     unsafe fn cmd_ring_enqueue(&mut self, trb: Trb) {
         let idx = self.cmd_ring_deq;
         let mut trb = trb;
@@ -427,6 +437,7 @@ impl XhciController {
         core::ptr::write_volatile(self.db_regs.add(0), 0);
     }
 
+    /// Performs the wait for event operation.
     unsafe fn wait_for_event(&mut self) -> Result<Trb, &'static str> {
         for _ in 0..1000000 {
             let idx = self.event_ring_deq;
@@ -447,10 +458,12 @@ impl XhciController {
         Err("Event timeout")
     }
 
+    /// Performs the port count operation.
     pub fn port_count(&self) -> usize {
         self.max_ports
     }
 
+    /// Returns whether port connected.
     pub fn is_port_connected(&self, port: usize) -> bool {
         if port >= self.ports.len() {
             return false;
@@ -462,6 +475,7 @@ impl XhciController {
 static XHCI_CONTROLLERS: Mutex<Vec<Arc<XhciController>>> = Mutex::new(Vec::new());
 static XHCI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[xHCI] Scanning for xHCI controllers...");
 
@@ -498,10 +512,12 @@ pub fn init() {
     log::info!("[xHCI] Found {} controller(s)", XHCI_CONTROLLERS.lock().len());
 }
 
+/// Returns controller.
 pub fn get_controller(index: usize) -> Option<Arc<XhciController>> {
     XHCI_CONTROLLERS.lock().get(index).cloned()
 }
 
+/// Returns whether available.
 pub fn is_available() -> bool {
     XHCI_INITIALIZED.load(Ordering::Relaxed)
 }

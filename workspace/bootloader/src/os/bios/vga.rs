@@ -40,6 +40,7 @@ pub struct Vga {
 }
 
 impl Vga {
+    /// Creates a new instance.
     pub const fn new(base: usize, width: usize, height: usize) -> Self {
         Self {
             base,
@@ -52,36 +53,43 @@ impl Vga {
         }
     }
 
+    /// Performs the color byte operation.
     #[inline(always)]
     fn color_byte(&self) -> u8 {
         ((self.bg as u8) << 4) | (self.fg as u8)
     }
 
+    /// Returns whether disabled.
     #[inline(always)]
     fn is_disabled(&self) -> bool {
         self.width == 0 || self.height == 0
     }
 
+    /// Performs the len operation.
     #[inline(always)]
     fn len(&self) -> usize {
         self.width * self.height
     }
 
+    /// Performs the ptr operation.
     #[inline(always)]
     fn ptr(&self) -> *mut VgaTextBlock {
         self.base as *mut VgaTextBlock
     }
 
+    /// Writes block.
     #[inline(always)]
     unsafe fn write_block(&self, index: usize, value: VgaTextBlock) {
         unsafe { ptr::write_volatile(self.ptr().add(index), value) };
     }
 
+    /// Reads block.
     #[inline(always)]
     unsafe fn read_block(&self, index: usize) -> VgaTextBlock {
         unsafe { ptr::read_volatile(self.ptr().add(index)) }
     }
 
+    /// Performs the scroll up one operation.
     fn scroll_up_one(&mut self, blank: VgaTextBlock) {
         let width = self.width;
         let len = self.len();
@@ -97,6 +105,7 @@ impl Vga {
         }
     }
 
+    /// Performs the clear operation.
     pub fn clear(&mut self) {
         if self.is_disabled() {
             self.x = 0;
@@ -117,6 +126,7 @@ impl Vga {
 }
 
 impl fmt::Write for Vga {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> Result<(), fmt::Error> {
         if self.is_disabled() {
             return Ok(());

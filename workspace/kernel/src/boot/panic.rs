@@ -13,6 +13,7 @@ static PANIC_HOOKS: Mutex<[Option<PanicHook>; MAX_PANIC_HOOKS]> =
     Mutex::new([None; MAX_PANIC_HOOKS]);
 static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
+/// Performs the register panic hook operation.
 pub fn register_panic_hook(hook: PanicHook) -> bool {
     let mut hooks = PANIC_HOOKS.lock();
     for slot in hooks.iter_mut() {
@@ -24,6 +25,7 @@ pub fn register_panic_hook(hook: PanicHook) -> bool {
     false
 }
 
+/// Performs the run panic hooks operation.
 fn run_panic_hooks(info: &PanicInfo) {
     let hooks = PANIC_HOOKS.lock();
     for hook in hooks.iter().flatten() {
@@ -31,6 +33,7 @@ fn run_panic_hooks(info: &PanicInfo) {
     }
 }
 
+/// Performs the panic hook dump context operation.
 fn panic_hook_dump_context(_info: &PanicInfo) {
     let ticks = crate::process::scheduler::ticks();
     let cr3 = crate::memory::paging::active_page_table().as_u64();
@@ -56,6 +59,7 @@ fn panic_hook_dump_context(_info: &PanicInfo) {
     );
 }
 
+/// Reads rbp.
 #[inline(always)]
 fn read_rbp() -> u64 {
     let rbp: u64;
@@ -65,6 +69,7 @@ fn read_rbp() -> u64 {
     rbp
 }
 
+/// Reads rsp.
 #[inline(always)]
 fn read_rsp() -> u64 {
     let rsp: u64;
@@ -74,10 +79,12 @@ fn read_rsp() -> u64 {
     rsp
 }
 
+/// Performs the addr readable operation.
 fn addr_readable(addr: u64) -> bool {
     crate::memory::paging::translate(VirtAddr::new(addr)).is_some()
 }
 
+/// Performs the panic hook backtrace operation.
 fn panic_hook_backtrace(_info: &PanicInfo) {
     let mut rbp = read_rbp();
     let rsp = read_rsp();
@@ -107,6 +114,7 @@ fn panic_hook_backtrace(_info: &PanicInfo) {
     }
 }
 
+/// Performs the install default panic hooks operation.
 pub fn install_default_panic_hooks() {
     let _ = register_panic_hook(panic_hook_dump_context);
     let _ = register_panic_hook(panic_hook_backtrace);

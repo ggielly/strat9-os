@@ -74,6 +74,7 @@ pub enum VmaPageSize {
 }
 
 impl VmaPageSize {
+    /// Performs the bytes operation.
     pub fn bytes(self) -> u64 {
         match self {
             VmaPageSize::Small => 4096,
@@ -345,12 +346,6 @@ impl AddressSpace {
             .map_err(|_| "OOM during demand paging")?;
         drop(guard);
 
-        // Zero the frame
-        unsafe {
-            let virt = crate::memory::phys_to_virt(frame.start_address.as_u64());
-            core::ptr::write_bytes(virt as *mut u8, 0, page_bytes as usize);
-        }
-
         let mut page_flags = vma.flags.to_page_flags();
 
         // SAFETY: We own the address space.
@@ -365,7 +360,10 @@ impl AddressSpace {
                             frame.start_address,
                         );
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
-                        Ok(flush) => flush.flush(),
+                        Ok(flush) => {
+                            flush.flush();
+                            core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
+                        }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             let lock = crate::memory::get_allocator();
                             let mut guard = lock.lock();
@@ -403,7 +401,10 @@ impl AddressSpace {
                         );
                     page_flags |= PageTableFlags::HUGE_PAGE;
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
-                        Ok(flush) => flush.flush(),
+                        Ok(flush) => {
+                            flush.flush();
+                            core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
+                        }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             let lock = crate::memory::get_allocator();
                             let mut guard = lock.lock();
@@ -440,12 +441,6 @@ impl AddressSpace {
             start_address: frame.start_address,
         });
 
-        log::trace!(
-            "Demand paging ({:?}): mapped {:#x} to frame {:#x}",
-            vma.page_size,
-            page_addr,
-            frame.start_address.as_u64()
-        );
         Ok(())
     }
 
@@ -646,6 +641,7 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Maps shared frames.
     pub fn map_shared_frames(
         &self,
         start: u64,
@@ -897,6 +893,7 @@ impl AddressSpace {
         Ok(false)
     }
 
+    /// Performs the protect range operation.
     pub fn protect_range(&self, addr: u64, len: u64, flags: VmaFlags) -> Result<(), &'static str> {
         if len == 0 {
             return Ok(());
@@ -1034,6 +1031,7 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Unmaps range.
     pub fn unmap_range(&self, addr: u64, len: u64) -> Result<(), &'static str> {
         if len == 0 {
             return Ok(());
@@ -1248,6 +1246,7 @@ impl AddressSpace {
         }
     }
 
+    /// Performs the clone cow operation.
     pub fn clone_cow(&self) -> Result<Arc<AddressSpace>, &'static str> {
         if self.is_kernel {
             return Err("Cannot fork kernel address space");
@@ -1442,6 +1441,7 @@ impl AddressSpace {
         Ok(child)
     }
 
+    /// Releases user page tables.
     fn free_user_page_tables(&self) {
         if self.is_kernel {
             return;
@@ -1469,6 +1469,7 @@ impl AddressSpace {
 }
 
 impl Drop for AddressSpace {
+    /// Performs the drop operation.
     fn drop(&mut self) {
         if self.is_kernel {
             return; // Never free the kernel address space.
@@ -1515,6 +1516,7 @@ impl Drop for AddressSpace {
 // Page table cleanup helpers (user half only)
 // ---------------------------------------------------------------------------
 
+/// Releases frame.
 fn free_frame(phys: PhysAddr) {
     let phys_frame = crate::memory::PhysFrame {
         start_address: phys,
@@ -1526,6 +1528,7 @@ fn free_frame(phys: PhysAddr) {
     }
 }
 
+/// Releases l1 table.
 fn free_l1_table(frame: X86PhysFrame<Size4KiB>) {
     let l1_virt = VirtAddr::new(crate::memory::phys_to_virt(frame.start_address().as_u64()));
     // SAFETY: l1_virt points to a valid page table frame in HHDM.
@@ -1539,6 +1542,7 @@ fn free_l1_table(frame: X86PhysFrame<Size4KiB>) {
     free_frame(frame.start_address());
 }
 
+/// Releases l2 table.
 fn free_l2_table(frame: X86PhysFrame<Size4KiB>) {
     let l2_virt = VirtAddr::new(crate::memory::phys_to_virt(frame.start_address().as_u64()));
     let l2 = unsafe { &mut *l2_virt.as_mut_ptr::<PageTable>() };
@@ -1559,6 +1563,7 @@ fn free_l2_table(frame: X86PhysFrame<Size4KiB>) {
     free_frame(frame.start_address());
 }
 
+/// Releases l3 table.
 fn free_l3_table(frame: X86PhysFrame<Size4KiB>) {
     let l3_virt = VirtAddr::new(crate::memory::phys_to_virt(frame.start_address().as_u64()));
     let l3 = unsafe { &mut *l3_virt.as_mut_ptr::<PageTable>() };

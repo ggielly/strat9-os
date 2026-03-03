@@ -121,6 +121,7 @@ static LAST_STEAL_TICK: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
 const STEAL_IMBALANCE_MIN: usize = 2;
 const STEAL_COOLDOWN_TICKS: u64 = 2;
 
+/// Performs the active cpu count operation.
 #[inline]
 fn active_cpu_count() -> usize {
     percpu::cpu_count()
@@ -128,6 +129,7 @@ fn active_cpu_count() -> usize {
         .min(crate::arch::x86_64::percpu::MAX_CPUS)
 }
 
+/// Performs the cpu is valid operation.
 #[inline]
 fn cpu_is_valid(cpu: usize) -> bool {
     cpu < crate::arch::x86_64::percpu::MAX_CPUS
@@ -168,6 +170,7 @@ pub struct SchedulerStateSnapshot {
     pub need_resched: [bool; crate::arch::x86_64::percpu::MAX_CPUS],
 }
 
+/// Performs the cpu usage snapshot operation.
 pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
     let cpu_count = active_cpu_count();
     let mut total_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
@@ -183,6 +186,7 @@ pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
     }
 }
 
+/// Performs the scheduler metrics snapshot operation.
 pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
     let cpu_count = active_cpu_count();
     let mut rt_runtime_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
@@ -216,6 +220,7 @@ pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
     }
 }
 
+/// Performs the reset scheduler metrics operation.
 pub fn reset_scheduler_metrics() {
     let cpu_count = active_cpu_count();
     for i in 0..cpu_count {
@@ -230,6 +235,7 @@ pub fn reset_scheduler_metrics() {
     }
 }
 
+/// Performs the note try lock fail on cpu operation.
 #[inline]
 pub(crate) fn note_try_lock_fail_on_cpu(cpu: usize) {
     if cpu_is_valid(cpu) {
@@ -237,6 +243,7 @@ pub(crate) fn note_try_lock_fail_on_cpu(cpu: usize) {
     }
 }
 
+/// Performs the note try lock fail operation.
 #[inline]
 pub fn note_try_lock_fail() {
     note_try_lock_fail_on_cpu(current_cpu_index());
@@ -273,6 +280,7 @@ static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Verbose scheduler trace switch.
 static SCHED_VERBOSE: AtomicBool = AtomicBool::new(false);
 
+/// Performs the sched trace operation.
 #[inline]
 fn sched_trace(args: core::fmt::Arguments<'_>) {
     if SCHED_VERBOSE.load(Ordering::Relaxed) {
@@ -309,6 +317,7 @@ pub enum WaitChildResult {
     StillRunning,
 }
 
+/// Performs the current cpu index operation.
 fn current_cpu_index() -> usize {
     if apic::is_initialized() {
         let apic_id = apic::lapic_id();
@@ -325,6 +334,7 @@ struct PerCpuClassRqSet {
 }
 
 impl PerCpuClassRqSet {
+    /// Creates a new instance.
     fn new() -> Self {
         Self {
             real_time: crate::process::sched::real_time::RealTimeClassRq::new(),
@@ -333,6 +343,7 @@ impl PerCpuClassRqSet {
         }
     }
 
+    /// Performs the enqueue operation.
     fn enqueue(&mut self, class: crate::process::sched::SchedClassId, task: Arc<Task>) {
         use crate::process::sched::SchedClassRq;
         match class {
@@ -342,6 +353,7 @@ impl PerCpuClassRqSet {
         }
     }
 
+    /// Performs the len by class operation.
     fn len_by_class(&self, class: crate::process::sched::SchedClassId) -> usize {
         use crate::process::sched::SchedClassRq;
         match class {
@@ -351,11 +363,13 @@ impl PerCpuClassRqSet {
         }
     }
 
+    /// Performs the runnable len operation.
     fn runnable_len(&self) -> usize {
         self.len_by_class(crate::process::sched::SchedClassId::RealTime)
             + self.len_by_class(crate::process::sched::SchedClassId::Fair)
     }
 
+    /// Performs the pick next by class operation.
     fn pick_next_by_class(
         &mut self,
         class: crate::process::sched::SchedClassId,
@@ -368,6 +382,7 @@ impl PerCpuClassRqSet {
         }
     }
 
+    /// Performs the pick next operation.
     fn pick_next(&mut self, table: &crate::process::sched::SchedClassTable) -> Option<Arc<Task>> {
         for class in table.pick_order().iter().copied() {
             if let Some(task) = self.pick_next_by_class(class) {
@@ -377,6 +392,7 @@ impl PerCpuClassRqSet {
         None
     }
 
+    /// Updates current.
     fn update_current(
         &mut self,
         rt: &crate::process::sched::CurrentRuntime,
@@ -403,11 +419,13 @@ impl PerCpuClassRqSet {
                 && any_ready)
     }
 
+    /// Performs the remove operation.
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool {
         use crate::process::sched::SchedClassRq;
         self.real_time.remove(task_id) || self.fair.remove(task_id) || self.idle.remove(task_id)
     }
 
+    /// Performs the steal candidate operation.
     fn steal_candidate(
         &mut self,
         table: &crate::process::sched::SchedClassTable,
@@ -475,6 +493,7 @@ pub struct Scheduler {
     class_table: crate::process::sched::SchedClassTable,
 }
 
+/// Performs the validate task context operation.
 fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
     let saved_rsp = unsafe { (*task.context.get()).saved_rsp };
     let stack_base = task.kernel_stack.virt_base.as_u64();

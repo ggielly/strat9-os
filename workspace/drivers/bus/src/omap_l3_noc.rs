@@ -55,6 +55,7 @@ pub struct OmapL3Noc {
 }
 
 impl OmapL3Noc {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             modules: [MmioRegion::new(), MmioRegion::new(), MmioRegion::new()],
@@ -66,6 +67,7 @@ impl OmapL3Noc {
         }
     }
 
+    /// Initializes module.
     pub fn init_module(&mut self, index: usize, base: usize, size: usize) {
         if index < MAX_L3_MODULES {
             self.modules[index].init(base, size);
@@ -75,6 +77,7 @@ impl OmapL3Noc {
         }
     }
 
+    /// Handles target error.
     pub fn handle_target_error(&self, module: usize, target_offset: usize) -> Result<ErrorInfo, BusError> {
         if module >= self.num_modules || !self.modules[module].is_valid() {
             return Err(BusError::InvalidArgument);
@@ -119,6 +122,7 @@ impl OmapL3Noc {
         Ok(info)
     }
 
+    /// Reads flagmux.
     pub fn read_flagmux(&self, module: usize, inttype: usize) -> u32 {
         if module >= self.num_modules || !self.modules[module].is_valid() {
             return 0;
@@ -126,6 +130,7 @@ impl OmapL3Noc {
         self.modules[module].read32(L3_FLAGMUX_REGERR0 + (inttype << 3))
     }
 
+    /// Performs the mask target operation.
     pub fn mask_target(&self, module: usize, target_bit: u32, inttype: usize) {
         if module >= self.num_modules || !self.modules[module].is_valid() {
             return;
@@ -151,21 +156,26 @@ pub struct ErrorInfo {
 }
 
 impl BusDriver for OmapL3Noc {
+    /// Performs the name operation.
     fn name(&self) -> &str { "omap-l3-noc" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.init_module(0, base, 0x1000);
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Performs the suspend operation.
     fn suspend(&mut self) -> Result<(), BusError> {
         for i in 0..self.num_modules {
             if self.modules[i].is_valid() {
@@ -177,6 +187,7 @@ impl BusDriver for OmapL3Noc {
         Ok(())
     }
 
+    /// Performs the resume operation.
     fn resume(&mut self) -> Result<(), BusError> {
         for i in 0..self.num_modules {
             if self.modules[i].is_valid() {
@@ -188,6 +199,7 @@ impl BusDriver for OmapL3Noc {
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if self.num_modules == 0 || !self.modules[0].is_valid() {
             return Err(BusError::InitFailed);
@@ -195,6 +207,7 @@ impl BusDriver for OmapL3Noc {
         Ok(self.modules[0].read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if self.num_modules == 0 || !self.modules[0].is_valid() {
             return Err(BusError::InitFailed);
@@ -203,10 +216,12 @@ impl BusDriver for OmapL3Noc {
         Ok(())
     }
 
+    /// Performs the error count operation.
     fn error_count(&self) -> u64 {
         self.error_count.load(Ordering::Relaxed)
     }
 
+    /// Handles irq.
     fn handle_irq(&mut self) -> bool {
         self.error_count.fetch_add(1, Ordering::Relaxed);
         true

@@ -28,6 +28,7 @@ struct InitComponentArgs {
 }
 
 impl Parse for InitComponentArgs {
+    /// Performs the parse operation.
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut stage = "Bootstrap".to_string();
         let mut priority = 0u32;

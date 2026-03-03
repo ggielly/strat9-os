@@ -73,6 +73,7 @@ pub struct SpinLockGuard<'a, T> {
 impl<'a, T> Deref for SpinLockGuard<'a, T> {
     type Target = T;
 
+    /// Performs the deref operation.
     fn deref(&self) -> &T {
         // SAFETY: We hold the lock, so exclusive access is guaranteed
         unsafe { &*self.lock.data.get() }
@@ -80,6 +81,7 @@ impl<'a, T> Deref for SpinLockGuard<'a, T> {
 }
 
 impl<'a, T> DerefMut for SpinLockGuard<'a, T> {
+    /// Performs the deref mut operation.
     fn deref_mut(&mut self) -> &mut T {
         // SAFETY: We hold the lock, so exclusive access is guaranteed
         unsafe { &mut *self.lock.data.get() }
@@ -87,6 +89,7 @@ impl<'a, T> DerefMut for SpinLockGuard<'a, T> {
 }
 
 impl<'a, T> Drop for SpinLockGuard<'a, T> {
+    /// Performs the drop operation.
     fn drop(&mut self) {
         // Release the lock
         self.lock.locked.store(false, Ordering::Release);

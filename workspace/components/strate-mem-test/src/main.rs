@@ -6,18 +6,22 @@ use strat9_syscall::call;
 
 const PAGE_SIZE: usize = 4096;
 
+/// Writes fd.
 fn write_fd(fd: usize, msg: &str) {
     let _ = call::write(fd, msg.as_bytes());
 }
 
+/// Implements log.
 fn log(msg: &str) {
     write_fd(1, msg);
 }
 
+/// Implements log err.
 fn log_err(msg: &str) {
     write_fd(2, msg);
 }
 
+/// Implements log u64.
 fn log_u64(mut value: u64) {
     let mut buf = [0u8; 21];
     if value == 0 {
@@ -34,6 +38,7 @@ fn log_u64(mut value: u64) {
     log(s);
 }
 
+/// Implements log hex u64.
 fn log_hex_u64(mut value: u64) {
     let mut buf = [0u8; 16];
     for i in (0..16).rev() {
@@ -50,12 +55,14 @@ fn log_hex_u64(mut value: u64) {
     log(s);
 }
 
+/// Implements log line.
 fn log_line(label: &str, value: u64) {
     log(label);
     log_u64(value);
     log("\n");
 }
 
+/// Implements section.
 fn section(title: &str) {
     log("\n============================================================\n");
     log("[test_mem] ");
@@ -63,6 +70,7 @@ fn section(title: &str) {
     log("\n============================================================\n");
 }
 
+/// Implements query brk.
 fn query_brk() -> usize {
     match call::brk(0) {
         Ok(v) => v,
@@ -75,6 +83,7 @@ fn query_brk() -> usize {
     }
 }
 
+/// Sets brk.
 fn set_brk(new_brk: usize, ctx: &str) -> usize {
     match call::brk(new_brk) {
         Ok(v) => v,
@@ -89,6 +98,7 @@ fn set_brk(new_brk: usize, ctx: &str) -> usize {
     }
 }
 
+/// Implements fill and verify pages.
 fn fill_and_verify_pages(base: usize, pages: usize, seed: u8, tag: &str) {
     log("[test_mem] fill_and_verify ");
     log(tag);
@@ -138,6 +148,7 @@ fn fill_and_verify_pages(base: usize, pages: usize, seed: u8, tag: &str) {
     log("\n");
 }
 
+/// Implements single roundtrip.
 fn single_roundtrip(case_name: &str, pages: usize, seed: u8) {
     section(case_name);
     let base = query_brk();
@@ -172,6 +183,7 @@ fn single_roundtrip(case_name: &str, pages: usize, seed: u8) {
     }
 }
 
+/// Implements saw tooth stress.
 fn saw_tooth_stress() {
     section("Saw-tooth stress (split/coalesce pressure)");
     let base = query_brk();
@@ -213,6 +225,7 @@ fn saw_tooth_stress() {
     log("\n");
 }
 
+/// Implements churn many small ops.
 fn churn_many_small_ops() {
     section("Many small grow/shrink cycles");
     let base = query_brk();
@@ -231,12 +244,14 @@ fn churn_many_small_ops() {
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_info: &PanicInfo) -> ! {
     log_err("[test_mem] PANIC\n");
     call::exit(200)
 }
 
 #[no_mangle]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     section("Strat9 userspace memory stress test (very verbose)");
     log("[test_mem] objectif: valider grow/shrink BRK + accès page par page\n");

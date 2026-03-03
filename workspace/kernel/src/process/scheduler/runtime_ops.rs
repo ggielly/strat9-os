@@ -40,6 +40,7 @@ pub fn schedule() -> ! {
     schedule_on_cpu(cpu_index)
 }
 
+/// Performs the schedule on cpu operation.
 pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     // Disable interrupts for the entire critical section.
     //

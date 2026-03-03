@@ -163,6 +163,7 @@ impl<'a> ExtentIter<'a> {
 impl<'a> Iterator for ExtentIter<'a> {
     type Item = FsResult<Extent>;
 
+    /// Implements next.
     fn next(&mut self) -> Option<Self::Item> {
         if self.current >= self.count {
             return None;
@@ -201,6 +202,7 @@ mod tests {
     use alloc::vec::Vec;
 
     #[test]
+    /// Implements test extent parse.
     fn test_extent_parse() {
         // Create a simple test extent with known values
         // file_offset = 100, start_block = 200, block_count = 50, not unwritten
@@ -223,6 +225,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test extent buffer too small.
     fn test_extent_buffer_too_small() {
         let buffer = [0u8; 8];
         assert!(matches!(
@@ -232,6 +235,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test extent contains file block.
     fn test_extent_contains_file_block() {
         let extent = Extent {
             file_offset: 100,
@@ -253,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test extent translate.
     fn test_extent_translate() {
         let extent = Extent {
             file_offset: 100,
@@ -268,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test extent file and disk end.
     fn test_extent_file_and_disk_end() {
         let extent = Extent {
             file_offset: 100,
@@ -281,6 +287,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test extent iter.
     fn test_extent_iter() {
         let buffer = [0u8; 32]; // Two extents
                                 // Fill with dummy data

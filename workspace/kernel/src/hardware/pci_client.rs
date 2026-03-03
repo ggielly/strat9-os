@@ -20,6 +20,7 @@ pub struct PciAddress {
 }
 
 impl PciAddress {
+    /// Creates a new instance.
     pub const fn new(bus: u8, device: u8, function: u8) -> Self {
         Self {
             bus,
@@ -53,6 +54,7 @@ pub struct ProbeCriteria {
 }
 
 impl ProbeCriteria {
+    /// Performs the any operation.
     pub const fn any() -> Self {
         Self {
             vendor_id: None,
@@ -63,6 +65,7 @@ impl ProbeCriteria {
         }
     }
 
+    /// Performs the matches operation.
     fn matches(&self, dev: &PciDevice) -> bool {
         if self.vendor_id.is_some_and(|v| dev.vendor_id != v) {
             return false;
@@ -83,6 +86,7 @@ impl ProbeCriteria {
     }
 }
 
+/// Opens read all.
 fn open_read_all(path: &str) -> Option<Vec<u8>> {
     let fd = vfs::open(path, OpenFlags::READ).ok()?;
     let mut out = Vec::new();
@@ -104,6 +108,7 @@ fn open_read_all(path: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Opens write.
 fn open_write(path: &str, bytes: &[u8]) -> bool {
     let fd = match vfs::open(path, OpenFlags::WRITE) {
         Ok(fd) => fd,
@@ -114,14 +119,17 @@ fn open_write(path: &str, bytes: &[u8]) -> bool {
     ok
 }
 
+/// Parses hex u8.
 fn parse_hex_u8(s: &str) -> Option<u8> {
     u8::from_str_radix(s.trim_start_matches("0x"), 16).ok()
 }
 
+/// Parses hex u16.
 fn parse_hex_u16(s: &str) -> Option<u16> {
     u16::from_str_radix(s.trim_start_matches("0x"), 16).ok()
 }
 
+/// Parses inventory line.
 fn parse_inventory_line(line: &str) -> Option<PciDevice> {
     let mut parts = line.split_whitespace();
     let bdf = parts.next()?;
@@ -163,6 +171,7 @@ fn parse_inventory_line(line: &str) -> Option<PciDevice> {
     })
 }
 
+/// Performs the all devices from bus service operation.
 fn all_devices_from_bus_service() -> Vec<PciDevice> {
     let bytes = match open_read_all("/bus/pci/inventory") {
         Some(b) => b,
@@ -184,6 +193,7 @@ fn all_devices_from_bus_service() -> Vec<PciDevice> {
     out
 }
 
+/// Performs the cfg path operation.
 fn cfg_path(addr: PciAddress, offset: u8, width: u8) -> String {
     format!(
         "/bus/pci/cfg/{:02x}:{:02x}.{:x}/{:02x}/{}",
@@ -191,6 +201,7 @@ fn cfg_path(addr: PciAddress, offset: u8, width: u8) -> String {
     )
 }
 
+/// Performs the cfg read operation.
 fn cfg_read(addr: PciAddress, offset: u8, width: u8) -> Option<u32> {
     let bytes = open_read_all(&cfg_path(addr, offset, width))?;
     let text = core::str::from_utf8(&bytes).ok()?.trim();
@@ -198,35 +209,43 @@ fn cfg_read(addr: PciAddress, offset: u8, width: u8) -> Option<u32> {
     u32::from_str_radix(hex, 16).ok()
 }
 
+/// Performs the cfg write operation.
 fn cfg_write(addr: PciAddress, offset: u8, width: u8, value: u32) -> bool {
     open_write(&cfg_path(addr, offset, width), &value.to_le_bytes())
 }
 
 impl PciDevice {
+    /// Reads config u8.
     pub fn read_config_u8(&self, offset: u8) -> u8 {
         cfg_read(self.address, offset, 1).map_or(0, |v| v as u8)
     }
 
+    /// Reads config u16.
     pub fn read_config_u16(&self, offset: u8) -> u16 {
         cfg_read(self.address, offset, 2).map_or(0, |v| v as u16)
     }
 
+    /// Reads config u32.
     pub fn read_config_u32(&self, offset: u8) -> u32 {
         cfg_read(self.address, offset, 4).unwrap_or(0)
     }
 
+    /// Writes config u8.
     pub fn write_config_u8(&self, offset: u8, value: u8) {
         let _ = cfg_write(self.address, offset, 1, value as u32);
     }
 
+    /// Writes config u16.
     pub fn write_config_u16(&self, offset: u8, value: u16) {
         let _ = cfg_write(self.address, offset, 2, value as u32);
     }
 
+    /// Writes config u32.
     pub fn write_config_u32(&self, offset: u8, value: u32) {
         let _ = cfg_write(self.address, offset, 4, value);
     }
 
+    /// Reads bar.
     pub fn read_bar(&self, bar_index: u8) -> Option<Bar> {
         if bar_index > 5 {
             return None;
@@ -262,6 +281,7 @@ impl PciDevice {
         }
     }
 
+    /// Reads bar raw.
     pub fn read_bar_raw(&self, bar_index: u8) -> Option<u64> {
         match self.read_bar(bar_index) {
             Some(Bar::Io { port }) => Some(port as u64),
@@ -271,18 +291,21 @@ impl PciDevice {
         }
     }
 
+    /// Enables bus master.
     pub fn enable_bus_master(&self) {
         let mut cmd = self.read_config_u16(config::COMMAND);
         cmd |= command::BUS_MASTER;
         self.write_config_u16(config::COMMAND, cmd);
     }
 
+    /// Enables memory space.
     pub fn enable_memory_space(&self) {
         let mut cmd = self.read_config_u16(config::COMMAND);
         cmd |= command::MEMORY_SPACE;
         self.write_config_u16(config::COMMAND, cmd);
     }
 
+    /// Enables io space.
     pub fn enable_io_space(&self) {
         let mut cmd = self.read_config_u16(config::COMMAND);
         cmd |= command::IO_SPACE;
@@ -290,6 +313,7 @@ impl PciDevice {
     }
 }
 
+/// Performs the all devices operation.
 pub fn all_devices() -> Vec<PciDevice> {
     // Blocking startup contract:
     // this strict client only uses /bus/pci/inventory.
@@ -297,20 +321,24 @@ pub fn all_devices() -> Vec<PciDevice> {
     all_devices_from_bus_service()
 }
 
+/// Performs the find device operation.
 pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
     all_devices()
         .into_iter()
         .find(|d| d.vendor_id == vendor_id && d.device_id == device_id)
 }
 
+/// Performs the find virtio device operation.
 pub fn find_virtio_device(device_id: u16) -> Option<PciDevice> {
     find_device(vendor::VIRTIO, device_id)
 }
 
+/// Performs the find virtio devices operation.
 pub fn find_virtio_devices() -> Vec<PciDevice> {
     find_devices_by_vendor(vendor::VIRTIO)
 }
 
+/// Performs the find devices by vendor operation.
 pub fn find_devices_by_vendor(vendor_id: u16) -> Vec<PciDevice> {
     all_devices()
         .into_iter()
@@ -318,6 +346,7 @@ pub fn find_devices_by_vendor(vendor_id: u16) -> Vec<PciDevice> {
         .collect()
 }
 
+/// Performs the find devices by class operation.
 pub fn find_devices_by_class(class_code: u8, subclass: u8) -> Vec<PciDevice> {
     all_devices()
         .into_iter()
@@ -325,6 +354,7 @@ pub fn find_devices_by_class(class_code: u8, subclass: u8) -> Vec<PciDevice> {
         .collect()
 }
 
+/// Performs the probe all operation.
 pub fn probe_all(criteria: ProbeCriteria) -> Vec<PciDevice> {
     all_devices()
         .into_iter()
@@ -332,10 +362,12 @@ pub fn probe_all(criteria: ProbeCriteria) -> Vec<PciDevice> {
         .collect()
 }
 
+/// Performs the probe first operation.
 pub fn probe_first(criteria: ProbeCriteria) -> Option<PciDevice> {
     all_devices().into_iter().find(|d| criteria.matches(d))
 }
 
+/// Performs the invalidate cache operation.
 pub fn invalidate_cache() {
     let _ = open_write("/bus/pci/rescan", &[1, 0, 0, 0]);
 }

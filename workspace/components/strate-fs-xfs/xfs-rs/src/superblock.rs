@@ -477,6 +477,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Implements test parse too small.
     fn test_parse_too_small() {
         let buf = [0u8; 100];
         assert!(matches!(
@@ -486,6 +487,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test parse invalid magic.
     fn test_parse_invalid_magic() {
         let mut buf = [0u8; XFS_SB_SIZE_V4];
         // Wrong magic
@@ -497,6 +499,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test parse valid v4.
     fn test_parse_valid_v4() {
         let mut buf = [0u8; XFS_SB_SIZE_V4];
         // Set valid magic
@@ -530,6 +533,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test is v5.
     fn test_is_v5() {
         let mut buf = [0u8; XFS_SB_SIZE_V4];
         buf[0..4].copy_from_slice(&XFS_SB_MAGIC.to_be_bytes());

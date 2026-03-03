@@ -48,6 +48,7 @@ impl PreemptGuard {
 }
 
 impl Drop for PreemptGuard {
+    /// Performs the drop operation.
     #[inline]
     fn drop(&mut self) {
         percpu::preempt_enable();

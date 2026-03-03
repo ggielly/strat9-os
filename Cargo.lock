@@ -1129,6 +1129,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "strat9-abi"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.11.0",
+ "static_assertions",
+ "zerocopy",
+]
+
+[[package]]
 name = "strat9-bootloader"
 version = "0.1.0"
 dependencies = [
@@ -1137,6 +1146,7 @@ dependencies = [
  "log",
  "nasm-rs",
  "spin 0.10.0",
+ "strat9-abi",
  "uart_16550",
 ]
 
@@ -1178,6 +1188,7 @@ dependencies = [
  "ratatui",
  "spin 0.10.0",
  "static_assertions",
+ "strat9-abi",
  "thiserror",
  "uart_16550",
  "x86_64",
@@ -1191,6 +1202,7 @@ dependencies = [
  "bitflags 2.11.0",
  "num_enum",
  "static_assertions",
+ "strat9-abi",
  "thiserror",
  "zerocopy",
 ]

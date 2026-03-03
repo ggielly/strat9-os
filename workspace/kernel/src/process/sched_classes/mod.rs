@@ -40,6 +40,7 @@ pub enum SchedClassId {
 impl SchedClassId {
     pub const ALL: [Self; 3] = [Self::RealTime, Self::Fair, Self::Idle];
 
+    /// Returns this as str.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RealTime => "rt",
@@ -48,6 +49,7 @@ impl SchedClassId {
         }
     }
 
+    /// Performs the parse operation.
     pub fn parse(s: &str) -> Option<Self> {
         if s.eq_ignore_ascii_case("rt")
             || s.eq_ignore_ascii_case("real-time")
@@ -80,6 +82,7 @@ pub struct SchedClassTable {
 }
 
 impl Default for SchedClassTable {
+    /// Builds a default instance.
     fn default() -> Self {
         Self {
             entries: [
@@ -115,6 +118,7 @@ impl Default for SchedClassTable {
 }
 
 impl SchedClassTable {
+    /// Creates a new instance.
     pub fn new(pick_order: [SchedClassId; 3], steal_order: [SchedClassId; 2]) -> Self {
         let mut out = Self::default();
         let _ = out.set_pick_order(pick_order);
@@ -122,6 +126,7 @@ impl SchedClassTable {
         out
     }
 
+    /// Performs the kind index operation.
     fn kind_index(kind: SchedPolicyKind) -> usize {
         match kind {
             SchedPolicyKind::Fair => 0,
@@ -130,6 +135,7 @@ impl SchedClassTable {
         }
     }
 
+    /// Performs the class index operation.
     fn class_index(class: SchedClassId) -> usize {
         match class {
             SchedClassId::RealTime => 0,
@@ -138,6 +144,7 @@ impl SchedClassTable {
         }
     }
 
+    /// Performs the refresh ranks operation.
     fn refresh_ranks(&mut self) {
         for entry in self.entries.iter_mut() {
             entry.rank = match entry.id {
@@ -156,6 +163,7 @@ impl SchedClassTable {
         }
     }
 
+    /// Performs the validate operation.
     pub fn validate(&self) -> bool {
         let mut seen = [false; 3];
         for class in self.pick_order.iter().copied() {
@@ -186,26 +194,32 @@ impl SchedClassTable {
         true
     }
 
+    /// Performs the entries operation.
     pub fn entries(&self) -> &[SchedClassEntry; 3] {
         &self.entries
     }
 
+    /// Performs the pick order operation.
     pub fn pick_order(&self) -> &[SchedClassId; 3] {
         &self.pick_order
     }
 
+    /// Performs the steal order operation.
     pub fn steal_order(&self) -> &[SchedClassId; 2] {
         &self.steal_order
     }
 
+    /// Performs the policy class operation.
     pub fn policy_class(&self, kind: SchedPolicyKind) -> SchedClassId {
         self.policy_map[Self::kind_index(kind)]
     }
 
+    /// Performs the policy map operation.
     pub fn policy_map(&self) -> &[SchedClassId; 3] {
         &self.policy_map
     }
 
+    /// Sets pick order.
     pub fn set_pick_order(&mut self, pick_order: [SchedClassId; 3]) -> bool {
         let prev = self.pick_order;
         self.pick_order = pick_order;
@@ -217,6 +231,7 @@ impl SchedClassTable {
         true
     }
 
+    /// Sets steal order.
     pub fn set_steal_order(&mut self, steal_order: [SchedClassId; 2]) -> bool {
         let prev = self.steal_order;
         self.steal_order = steal_order;
@@ -227,6 +242,7 @@ impl SchedClassTable {
         true
     }
 
+    /// Sets policy class.
     pub fn set_policy_class(&mut self, kind: SchedPolicyKind, class: SchedClassId) -> bool {
         let idx = Self::kind_index(kind);
         let prev = self.policy_map[idx];
@@ -238,16 +254,19 @@ impl SchedClassTable {
         true
     }
 
+    /// Performs the class for policy operation.
     pub fn class_for_policy(&self, policy: SchedPolicy) -> SchedClassId {
         self.policy_class(policy.kind())
     }
 
+    /// Performs the class for task operation.
     pub fn class_for_task(&self, task: &Task) -> SchedClassId {
         self.class_for_policy(task.sched_policy())
     }
 }
 
 impl SchedPolicy {
+    /// Performs the kind operation.
     pub fn kind(&self) -> SchedPolicyKind {
         match self {
             Self::Fair(_) => SchedPolicyKind::Fair,
@@ -258,6 +277,7 @@ impl SchedPolicy {
 }
 
 impl SchedPolicyKind {
+    /// Returns this as str.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Fair => "fair",
@@ -266,6 +286,7 @@ impl SchedPolicyKind {
         }
     }
 
+    /// Performs the parse operation.
     pub fn parse(s: &str) -> Option<Self> {
         if s.eq_ignore_ascii_case("fair") {
             Some(Self::Fair)
@@ -289,6 +310,7 @@ pub struct CurrentRuntime {
 }
 
 impl CurrentRuntime {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             start_ticks: crate::process::scheduler::ticks(),
@@ -297,6 +319,7 @@ impl CurrentRuntime {
         }
     }
 
+    /// Performs the update operation.
     pub fn update(&mut self) {
         let now = crate::process::scheduler::ticks();
         self.delta_ticks = now.saturating_sub(core::mem::replace(&mut self.start_ticks, now));
@@ -305,12 +328,18 @@ impl CurrentRuntime {
 }
 
 pub trait SchedClassRq {
+    /// Performs the enqueue operation.
     fn enqueue(&mut self, task: Arc<Task>);
+    /// Performs the len operation.
     fn len(&self) -> usize;
+    /// Returns whether empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// Performs the pick next operation.
     fn pick_next(&mut self) -> Option<Arc<Task>>;
+    /// Updates current.
     fn update_current(&mut self, rt: &CurrentRuntime, task: &Task, is_yield: bool) -> bool;
+    /// Performs the remove operation.
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool;
 }

@@ -16,6 +16,7 @@ pub struct ArmIntegratorLm {
 }
 
 impl ArmIntegratorLm {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             syscon_regs: MmioRegion::new(),
@@ -24,6 +25,7 @@ impl ArmIntegratorLm {
         }
     }
 
+    /// Performs the detect modules operation.
     fn detect_modules(&mut self) {
         if !self.syscon_regs.is_valid() { return; }
         let val = self.syscon_regs.read32(INTEGRATOR_SC_DEC_OFFSET);
@@ -32,20 +34,25 @@ impl ArmIntegratorLm {
         }
     }
 
+    /// Performs the slot base operation.
     pub fn slot_base(slot: usize) -> u64 {
         INTEGRATOR_AP_EXP_BASE + (slot as u64) * INTEGRATOR_AP_EXP_STRIDE
     }
 
+    /// Returns whether slot present.
     pub fn is_slot_present(&self, slot: usize) -> bool {
         slot < NUM_SLOTS && self.slots_present[slot]
     }
 }
 
 impl BusDriver for ArmIntegratorLm {
+    /// Performs the name operation.
     fn name(&self) -> &str { "arm-integrator-lm" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.syscon_regs.init(base, 0x100);
         self.detect_modules();
@@ -53,11 +60,13 @@ impl BusDriver for ArmIntegratorLm {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.syscon_regs.is_valid() {
             return Err(BusError::InitFailed);
@@ -65,6 +74,7 @@ impl BusDriver for ArmIntegratorLm {
         Ok(self.syscon_regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.syscon_regs.is_valid() {
             return Err(BusError::InitFailed);
@@ -73,6 +83,7 @@ impl BusDriver for ArmIntegratorLm {
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         let mut children = Vec::new();
         for i in 0..NUM_SLOTS {

@@ -12,10 +12,12 @@ use strat9_syscall::{call, number};
 // I/O helpers
 // ---------------------------------------------------------------------------
 
+/// Writes str.
 fn write_str(msg: &str) {
     let _ = call::write(1, msg.as_bytes());
 }
 
+/// Writes u64.
 fn write_u64(mut value: u64) {
     let mut buf = [0u8; 21];
     if value == 0 {
@@ -33,6 +35,7 @@ fn write_u64(mut value: u64) {
 }
 
 #[allow(dead_code)]
+/// Writes hex.
 fn write_hex(mut value: u64) {
     let mut buf = [0u8; 16];
     for i in (0..16).rev() {
@@ -61,6 +64,7 @@ struct LineBuf {
 }
 
 impl LineBuf {
+    /// Creates a new instance.
     const fn new() -> Self {
         LineBuf {
             buf: [0u8; LINE_BUF_SIZE],
@@ -68,10 +72,12 @@ impl LineBuf {
         }
     }
 
+    /// Implements clear.
     fn clear(&mut self) {
         self.len = 0;
     }
 
+    /// Implements push.
     fn push(&mut self, b: u8) -> bool {
         if self.len < LINE_BUF_SIZE {
             self.buf[self.len] = b;
@@ -82,6 +88,7 @@ impl LineBuf {
         }
     }
 
+    /// Implements pop.
     fn pop(&mut self) -> bool {
         if self.len > 0 {
             self.len -= 1;
@@ -91,6 +98,7 @@ impl LineBuf {
         }
     }
 
+    /// Returns this value as str.
     fn as_str(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
     }
@@ -100,6 +108,7 @@ impl LineBuf {
 // Read one line from stdin (fd 0) with echo
 // ---------------------------------------------------------------------------
 
+/// Reads line.
 fn read_line(line: &mut LineBuf) {
     line.clear();
     let mut byte = [0u8; 1];
@@ -139,6 +148,7 @@ fn read_line(line: &mut LineBuf) {
 // Command parsing helpers
 // ---------------------------------------------------------------------------
 
+/// Implements trim.
 fn trim(s: &str) -> &str {
     let bytes = s.as_bytes();
     let mut start = 0;
@@ -152,6 +162,7 @@ fn trim(s: &str) -> &str {
     unsafe { core::str::from_utf8_unchecked(&bytes[start..end]) }
 }
 
+/// Implements split first word.
 fn split_first_word(s: &str) -> (&str, &str) {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -167,6 +178,7 @@ fn split_first_word(s: &str) -> (&str, &str) {
     (cmd, rest)
 }
 
+/// Parses usize.
 fn parse_usize(s: &str) -> Option<usize> {
     if s.is_empty() {
         return None;
@@ -206,6 +218,7 @@ struct SiloConfig {
 }
 
 impl SiloConfig {
+    /// Implements user default.
     const fn user_default(sid: u32) -> Self {
         Self {
             mem_min: 0,
@@ -229,6 +242,7 @@ impl SiloConfig {
 
 static NEXT_SID: AtomicU32 = AtomicU32::new(1000);
 
+/// Implements cmd help.
 fn cmd_help() {
     write_str("Available commands:\n");
     write_str("  help              - Show this help\n");
@@ -244,6 +258,7 @@ fn cmd_help() {
     write_str("  exit              - Exit console-admin\n");
 }
 
+/// Implements cmd pid.
 fn cmd_pid() {
     match call::getpid() {
         Ok(pid) => {
@@ -259,6 +274,7 @@ fn cmd_pid() {
     }
 }
 
+/// Implements cmd silo create.
 fn cmd_silo_create() {
     for _ in 0..32 {
         let sid = NEXT_SID.fetch_add(1, Ordering::Relaxed);
@@ -284,6 +300,7 @@ fn cmd_silo_create() {
     write_str("silo_create failed: no free SID range\n");
 }
 
+/// Implements cmd silo start.
 fn cmd_silo_start(args: &str) {
     let id_str = trim(args);
     match parse_usize(id_str) {
@@ -303,6 +320,7 @@ fn cmd_silo_start(args: &str) {
     }
 }
 
+/// Implements cmd silo stop.
 fn cmd_silo_stop(args: &str) {
     let id_str = trim(args);
     match parse_usize(id_str) {
@@ -322,6 +340,7 @@ fn cmd_silo_stop(args: &str) {
     }
 }
 
+/// Implements cmd silo kill.
 fn cmd_silo_kill(args: &str) {
     let id_str = trim(args);
     match parse_usize(id_str) {
@@ -426,6 +445,7 @@ fn cmd_silo_load(args: &str) {
     write_str("Use 'silo-create' + 'silo-attach <silo> <mod>' to wire it up.\n");
 }
 
+/// Implements cmd silo attach.
 fn cmd_silo_attach(args: &str) {
     let (silo_str, rest) = split_first_word(args);
     let (mod_str, _) = split_first_word(rest);
@@ -448,6 +468,7 @@ fn cmd_silo_attach(args: &str) {
     }
 }
 
+/// Implements cmd silos.
 fn cmd_silos() {
     // TODO: implement silo listing via a query syscall or /proc/silos
     write_str("Silo listing not yet implemented.\n");
@@ -458,6 +479,7 @@ fn cmd_silos() {
 // Main loop
 // ---------------------------------------------------------------------------
 
+/// Implements dispatch.
 fn dispatch(line: &str) {
     let input = trim(line);
     if input.is_empty() {
@@ -489,17 +511,20 @@ fn dispatch(line: &str) {
     }
 }
 
+/// Implements prompt.
 fn prompt() {
     write_str("admin> ");
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_info: &PanicInfo) -> ! {
     write_str("[console-admin] PANIC!\n");
     call::exit(255)
 }
 
 #[no_mangle]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     write_str("\n");
     write_str("============================================================\n");

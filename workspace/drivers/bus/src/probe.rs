@@ -16,23 +16,29 @@ pub struct ProbeResult {
 }
 
 impl ProbeResult {
+    /// Creates a new instance.
     fn new() -> Self { Self { passed: 0, failed: 0 } }
 
+    /// Performs the check operation.
     fn check(&mut self, ok: bool) {
         if ok { self.passed += 1; } else { self.failed += 1; }
     }
 
+    /// Performs the all passed operation.
     pub fn all_passed(&self) -> bool { self.failed == 0 && self.passed > 0 }
 }
 
+/// Performs the zero buf operation.
 fn zero_buf(buf: &mut [u64]) {
     buf.fill(0);
 }
 
+/// Performs the run mmio probe operation.
 pub fn run_mmio_probe() -> ProbeResult {
     run_mmio_probe_with_mode(ProbeMode::Full)
 }
 
+/// Performs the run mmio probe with mode operation.
 pub fn run_mmio_probe_with_mode(mode: ProbeMode) -> ProbeResult {
     let mut r = ProbeResult::new();
     let mut buf = vec![0u64; REGION_WORDS];
@@ -86,12 +92,14 @@ pub fn run_mmio_probe_with_mode(mode: ProbeMode) -> ProbeResult {
     r
 }
 
+/// Performs the make region operation.
 fn make_region(base: usize) -> MmioRegion {
     let mut reg = MmioRegion::new();
     reg.init(base, REGION_SIZE);
     reg
 }
 
+/// Performs the probe lifecycle operation.
 fn probe_lifecycle(r: &mut ProbeResult, base: usize) {
     let uninit = MmioRegion::new();
     r.check(!uninit.is_valid());
@@ -102,6 +110,7 @@ fn probe_lifecycle(r: &mut ProbeResult, base: usize) {
     r.check(reg.base() == base);
 }
 
+/// Performs the probe read write 8 operation.
 fn probe_read_write_8(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -126,6 +135,7 @@ fn probe_read_write_8(r: &mut ProbeResult, base: usize) {
     }
 }
 
+/// Performs the probe read write 16 operation.
 fn probe_read_write_16(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -147,6 +157,7 @@ fn probe_read_write_16(r: &mut ProbeResult, base: usize) {
     r.check(combined == expected);
 }
 
+/// Performs the probe read write 32 operation.
 fn probe_read_write_32(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -179,6 +190,7 @@ fn probe_read_write_32(r: &mut ProbeResult, base: usize) {
     }
 }
 
+/// Performs the probe read write 64 operation.
 fn probe_read_write_64(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -197,6 +209,7 @@ fn probe_read_write_64(r: &mut ProbeResult, base: usize) {
     r.check(reg.read32(4) == 0xCAFEBABE);
 }
 
+/// Performs the probe set bits operation.
 fn probe_set_bits(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -215,6 +228,7 @@ fn probe_set_bits(r: &mut ProbeResult, base: usize) {
     r.check(reg.read32(0) == 0x80000001);
 }
 
+/// Performs the probe clear bits operation.
 fn probe_clear_bits(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -233,6 +247,7 @@ fn probe_clear_bits(r: &mut ProbeResult, base: usize) {
     r.check(reg.read32(0) == 0x00000001);
 }
 
+/// Performs the probe modify32 operation.
 fn probe_modify32(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -253,6 +268,7 @@ fn probe_modify32(r: &mut ProbeResult, base: usize) {
     r.check(reg.read32(0) == 0x00AB00FF);
 }
 
+/// Performs the probe read field32 operation.
 fn probe_read_field32(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -273,6 +289,7 @@ fn probe_read_field32(r: &mut ProbeResult, base: usize) {
     r.check(reg.read_field32(0, 0xFFFFFFFF, 0) == 0xFFFFFFFF);
 }
 
+/// Performs the probe write field32 operation.
 fn probe_write_field32(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -295,6 +312,7 @@ fn probe_write_field32(r: &mut ProbeResult, base: usize) {
     r.check((val & 0xFFF0FFFF) == 0xAAA0AAAA);
 }
 
+/// Performs the probe boundary offsets operation.
 fn probe_boundary_offsets(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -314,6 +332,7 @@ fn probe_boundary_offsets(r: &mut ProbeResult, base: usize) {
     r.check(reg.read64(REGION_SIZE - 8) == 0x0102030405060708);
 }
 
+/// Performs the probe multi width overlap operation.
 fn probe_multi_width_overlap(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -341,6 +360,7 @@ fn probe_multi_width_overlap(r: &mut ProbeResult, base: usize) {
     r.check(reg.read16(2) == 0xAABB);
 }
 
+/// Performs the probe walking ones 32 operation.
 fn probe_walking_ones_32(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -362,6 +382,7 @@ fn probe_walking_ones_32(r: &mut ProbeResult, base: usize) {
     r.check(reg.read32(0) == 0x00000000);
 }
 
+/// Performs the probe walking ones 64 operation.
 fn probe_walking_ones_64(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -378,6 +399,7 @@ fn probe_walking_ones_64(r: &mut ProbeResult, base: usize) {
     r.check(reg.read64(0) == 0x5555555555555555);
 }
 
+/// Performs the probe memory barrier operation.
 fn probe_memory_barrier(r: &mut ProbeResult, base: usize) {
     let reg = make_region(base);
 
@@ -401,6 +423,7 @@ fn probe_memory_barrier(r: &mut ProbeResult, base: usize) {
     }
 }
 
+/// Performs the probe reinit operation.
 fn probe_reinit(r: &mut ProbeResult, base: usize) {
     let mut reg = MmioRegion::new();
     r.check(!reg.is_valid());

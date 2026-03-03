@@ -66,6 +66,7 @@ pub struct IntelIxp4xxEb {
 }
 
 impl IntelIxp4xxEb {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -78,12 +79,14 @@ impl IntelIxp4xxEb {
         }
     }
 
+    /// Sets variant.
     pub fn set_variant(&mut self, is_42x: bool, is_43x: bool) {
         self.is_42x = is_42x;
         self.is_43x = is_43x;
         if is_43x { self.num_cs = 4; }
     }
 
+    /// Performs the detect bus base operation.
     fn detect_bus_base(&mut self) {
         let cnfg0 = self.regs.read32(IXP4XX_EXP_CNFG0);
         self.bus_base = if cnfg0 & IXP4XX_EXP_CNFG0_MEM_MAP != 0 {
@@ -93,6 +96,7 @@ impl IntelIxp4xxEb {
         };
     }
 
+    /// Performs the configure cs operation.
     pub fn configure_cs(&self, cs: usize, config: &CsTimingConfig) -> Result<(), BusError> {
         if cs >= self.num_cs {
             return Err(BusError::InvalidArgument);
@@ -119,20 +123,25 @@ impl IntelIxp4xxEb {
         Ok(())
     }
 
+    /// Performs the cs base addr operation.
     pub fn cs_base_addr(&self, cs: usize) -> u64 {
         self.bus_base + (cs as u64) * CS_STRIDE
     }
 
+    /// Performs the add child operation.
     pub fn add_child(&mut self, child: BusChild) {
         self.children.push(child);
     }
 }
 
 impl BusDriver for IntelIxp4xxEb {
+    /// Performs the name operation.
     fn name(&self) -> &str { "intel-ixp4xx-eb" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x30);
         self.detect_bus_base();
@@ -140,22 +149,26 @@ impl BusDriver for IntelIxp4xxEb {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.regs.write32(offset, value);
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.children.clone()
     }

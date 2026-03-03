@@ -38,6 +38,7 @@ struct RamInode {
 }
 
 impl RamInode {
+    /// Creates a new instance.
     fn new(node: RamNode) -> Self {
         Self {
             node: Mutex::new(node),
@@ -53,6 +54,7 @@ pub struct RamFileSystem {
 }
 
 impl RamFileSystem {
+    /// Creates a new instance.
     pub fn new() -> Self {
         let root = Arc::new(RamInode::new(RamNode::Directory {
             entries: BTreeMap::new(),
@@ -68,6 +70,7 @@ impl RamFileSystem {
         }
     }
 
+    /// Returns node.
     fn get_node(&self, ino: u64) -> FsResult<Arc<RamInode>> {
         self.inodes
             .read()
@@ -76,12 +79,14 @@ impl RamFileSystem {
             .ok_or(FsError::InodeNotFound)
     }
 
+    /// Implements allocate inode.
     fn allocate_inode(&self, node: RamNode) -> u64 {
         let id = self.next_inode.fetch_add(1, Ordering::SeqCst);
         self.inodes.write().insert(id, Arc::new(RamInode::new(node)));
         id
     }
 
+    /// Implements lookup child inode.
     fn lookup_child_inode(&self, parent_ino: u64, name: &str) -> FsResult<u64> {
         let parent = self.get_node(parent_ino)?;
         let guard = parent.node.lock();
@@ -102,14 +107,17 @@ impl RamFileSystem {
         Ok(current_ino)
     }
 
+    /// Converts this value to file mode.
     fn to_file_mode(mode: u32) -> u32 {
         0o100000 | (mode & 0o7777)
     }
 
+    /// Converts this value to dir mode.
     fn to_dir_mode(mode: u32) -> u32 {
         0o040000 | (mode & 0o7777)
     }
 
+    /// Implements register open.
     pub fn register_open(&self, ino: u64) -> FsResult<()> {
         let inode = self.get_node(ino)?;
         let mut current = inode.open_count.load(Ordering::Acquire);
@@ -129,6 +137,7 @@ impl RamFileSystem {
         }
     }
 
+    /// Implements unregister open.
     pub fn unregister_open(&self, ino: u64) -> FsResult<()> {
         let inode = self.get_node(ino)?;
         let mut current = inode.open_count.load(Ordering::Acquire);
@@ -154,12 +163,14 @@ impl RamFileSystem {
         Ok(())
     }
 
+    /// Returns whether open.
     fn is_open(&self, ino: u64) -> bool {
         self.get_node(ino)
             .map(|inode| inode.open_count.load(Ordering::Acquire) > 0)
             .unwrap_or(false)
     }
 
+    /// Implements directory contains inode.
     fn directory_contains_inode(&self, root_dir_ino: u64, target_ino: u64) -> FsResult<bool> {
         let mut stack = Vec::new();
         stack.push(root_dir_ino);
@@ -181,6 +192,7 @@ impl RamFileSystem {
         Ok(false)
     }
 
+    /// Implements collect if detached.
     fn collect_if_detached(&self, ino: u64) -> FsResult<()> {
         if ino == self.root_inode() || self.is_open(ino) {
             return Ok(());
@@ -191,6 +203,7 @@ impl RamFileSystem {
         self.collect_detached_subtree(ino)
     }
 
+    /// Implements collect detached subtree.
     fn collect_detached_subtree(&self, ino: u64) -> FsResult<()> {
         if self.is_open(ino) {
             return Ok(());
@@ -225,18 +238,22 @@ impl RamFileSystem {
 }
 
 impl VfsFileSystem for RamFileSystem {
+    /// Implements fs type.
     fn fs_type(&self) -> &'static str {
         "ramfs"
     }
 
+    /// Implements capabilities.
     fn capabilities(&self) -> &FsCapabilities {
         &self.capabilities
     }
 
+    /// Implements root inode.
     fn root_inode(&self) -> u64 {
         2
     }
 
+    /// Returns volume info.
     fn get_volume_info(&self) -> FsResult<VfsVolumeInfo> {
         Ok(VfsVolumeInfo {
             fs_type: String::from("ramfs"),
@@ -245,6 +262,7 @@ impl VfsFileSystem for RamFileSystem {
         })
     }
 
+    /// Implements stat.
     fn stat(&self, ino: u64) -> FsResult<VfsFileInfo> {
         let node = self.get_node(ino)?;
         let guard = node.node.lock();
@@ -265,15 +283,18 @@ impl VfsFileSystem for RamFileSystem {
         Ok(info)
     }
 
+    /// Implements lookup.
     fn lookup(&self, parent_ino: u64, name: &str) -> FsResult<VfsFileInfo> {
         let ino = self.lookup_child_inode(parent_ino, name)?;
         self.stat(ino)
     }
 
+    /// Implements resolve path.
     fn resolve_path(&self, path: &str) -> FsResult<u64> {
         self.resolve_path_internal(path)
     }
 
+    /// Implements read.
     fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
         let node = self.get_node(ino)?;
         let guard = node.node.lock();
@@ -295,6 +316,7 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
+    /// Implements write.
     fn write(&self, ino: u64, offset: u64, data: &[u8]) -> FsResult<usize> {
         let node = self.get_node(ino)?;
         let mut guard = node.node.lock();
@@ -314,6 +336,7 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
+    /// Implements readdir.
     fn readdir(&self, ino: u64) -> FsResult<Vec<VfsDirEntry>> {
         let node = self.get_node(ino)?;
         let guard = node.node.lock();
@@ -346,6 +369,7 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
+    /// Implements create file.
     fn create_file(&self, parent_ino: u64, name: &str, mode: u32) -> FsResult<VfsFileInfo> {
         let parent = self.get_node(parent_ino)?;
         {
@@ -383,6 +407,7 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
+    /// Implements create directory.
     fn create_directory(&self, parent_ino: u64, name: &str, mode: u32) -> FsResult<VfsFileInfo> {
         let parent = self.get_node(parent_ino)?;
         {
@@ -420,6 +445,7 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
+    /// Implements unlink.
     fn unlink(&self, parent_ino: u64, name: &str, target_ino: u64) -> FsResult<()> {
         let parent = self.get_node(parent_ino)?;
         let child_ino = {
@@ -466,6 +492,7 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
+    /// Implements rename.
     fn rename(
         &self,
         old_parent: u64,
@@ -572,6 +599,7 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
+    /// Sets size.
     fn set_size(&self, ino: u64, size: u64) -> FsResult<()> {
         let node = self.get_node(ino)?;
         let mut guard = node.node.lock();
@@ -585,6 +613,7 @@ impl VfsFileSystem for RamFileSystem {
         }
     }
 
+    /// Sets times.
     fn set_times(
         &self,
         ino: u64,
@@ -595,14 +624,18 @@ impl VfsFileSystem for RamFileSystem {
         Ok(())
     }
 
+    /// Implements readlink.
     fn readlink(&self, _ino: u64) -> FsResult<String> {
         Err(FsError::NotSupported)
     }
 
+    /// Implements invalidate inode.
     fn invalidate_inode(&self, _ino: u64) {}
+    /// Implements invalidate all caches.
     fn invalidate_all_caches(&self) {}
 }
 
+/// Implements split path.
 pub fn split_path(path: &str) -> (&str, &str) {
     let path = path.trim_end_matches('/');
     if let Some(idx) = path.rfind('/') {

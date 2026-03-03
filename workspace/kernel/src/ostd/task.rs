@@ -37,18 +37,21 @@ impl TaskId {
 }
 
 impl From<u32> for TaskId {
+    /// Performs the from operation.
     fn from(id: u32) -> Self {
         Self::new(id)
     }
 }
 
 impl From<TaskId> for u32 {
+    /// Performs the from operation.
     fn from(id: TaskId) -> u32 {
         id.0
     }
 }
 
 impl core::fmt::Display for TaskId {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Task #{}", self.0)
     }
@@ -140,6 +143,7 @@ impl TaskRef {
 }
 
 impl Drop for TaskRef {
+    /// Performs the drop operation.
     fn drop(&mut self) {
         if self.ref_count.fetch_sub(1, Ordering::Release) == 1 {
             // Last reference - task can be cleaned up
@@ -152,6 +156,7 @@ impl Drop for TaskRef {
 }
 
 impl Clone for TaskRef {
+    /// Performs the clone operation.
     fn clone(&self) -> Self {
         self.clone()
     }
@@ -293,6 +298,7 @@ impl TaskOptions {
 }
 
 impl Default for TaskOptions {
+    /// Builds a default instance.
     fn default() -> Self {
         Self::new()
     }

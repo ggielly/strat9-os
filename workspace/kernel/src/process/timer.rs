@@ -18,6 +18,7 @@ pub enum ITimerWhich {
 }
 
 impl ITimerWhich {
+    /// Builds this from u32.
     pub fn from_u32(value: u32) -> Option<Self> {
         match value {
             0 => Some(ITimerWhich::Real),
@@ -48,6 +49,7 @@ pub struct ITimerVal {
 }
 
 impl ITimerVal {
+    /// Performs the zero operation.
     pub const fn zero() -> Self {
         Self {
             it_interval: TimeVal::zero(),
@@ -70,6 +72,7 @@ pub struct TimeVal {
 }
 
 impl TimeVal {
+    /// Performs the zero operation.
     pub const fn zero() -> Self {
         Self {
             tv_sec: 0,
@@ -103,6 +106,7 @@ pub struct ITimerState {
 }
 
 impl ITimerState {
+    /// Creates a new instance.
     pub const fn new() -> Self {
         Self {
             next_expiration: AtomicU64::new(0),
@@ -188,6 +192,7 @@ pub struct ITimers {
 }
 
 impl ITimers {
+    /// Creates a new instance.
     pub const fn new() -> Self {
         Self {
             real: ITimerState::new(),
@@ -196,6 +201,7 @@ impl ITimers {
         }
     }
 
+    /// Performs the get operation.
     pub fn get(&self, which: ITimerWhich) -> &ITimerState {
         match which {
             ITimerWhich::Real => &self.real,

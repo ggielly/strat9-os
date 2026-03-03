@@ -33,6 +33,7 @@ impl PortId {
 }
 
 impl core::fmt::Display for PortId {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -141,14 +142,17 @@ impl Port {
         self.recv_waitq.wake_all();
     }
 
+    /// Returns whether messages is available.
     pub fn has_messages(&self) -> bool {
         !self.queue.is_empty()
     }
 
+    /// Returns whether this can send.
     pub fn can_send(&self) -> bool {
         !self.destroyed.load(Ordering::Acquire) && !self.queue.is_full()
     }
 
+    /// Returns whether destroyed.
     pub fn is_destroyed(&self) -> bool {
         self.destroyed.load(Ordering::Acquire)
     }
@@ -209,4 +213,47 @@ pub fn destroy_port(id: PortId, caller: TaskId) -> Result<(), IpcError> {
     port.destroy();
     log::debug!("IPC: destroyed port {} (by task {})", id, caller);
     Ok(())
+}
+
+/// Clean up all ports owned by a dying task.
+///
+/// For each port: drain queued messages and deliver error replies to any
+/// callers blocked in `wait_for_reply`, then destroy the port.
+///
+/// NOTE: Only covers messages still in the queue. If the owner already
+/// recv'd a message but died before calling reply(), the caller task
+/// remains stuck. Servers should handle their own graceful shutdown.
+pub fn cleanup_ports_for_task(owner: TaskId) {
+    super::reply::cancel_replies_waiting_on(owner);
+
+    let owned: alloc::vec::Vec<Arc<Port>> = {
+        let mut registry = PORTS.lock();
+        let Some(map) = registry.as_mut() else { return };
+        let ids: alloc::vec::Vec<PortId> = map
+            .iter()
+            .filter(|(_, p)| p.owner == owner)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut ports = alloc::vec::Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(p) = map.remove(&id) {
+                ports.push(p);
+            }
+        }
+        ports
+    };
+
+    for port in owned {
+        port.destroy();
+        while let Some(msg) = port.queue.pop() {
+            let sender = TaskId::from_u64(msg.sender);
+            if sender == owner {
+                continue;
+            }
+            let mut err_reply = IpcMessage::new(0x80);
+            let epipe: u32 = 32;
+            err_reply.payload[0..4].copy_from_slice(&epipe.to_le_bytes());
+            let _ = super::reply::deliver_reply(sender, err_reply);
+        }
+    }
 }

@@ -161,6 +161,7 @@ pub fn star_msr_value() -> u64 {
     (kernel_cs << 32) | (user_base << 48)
 }
 
+/// Performs the selectors for operation.
 fn selectors_for(cpu_index: usize) -> Selectors {
     if !SELECTORS_INIT[cpu_index].load(Ordering::Acquire) {
         panic!("GDT selectors for CPU{} not initialized", cpu_index);
@@ -169,6 +170,7 @@ fn selectors_for(cpu_index: usize) -> Selectors {
     unsafe { *SELECTORS[cpu_index].as_ptr() }
 }
 
+/// Performs the current cpu index operation.
 fn current_cpu_index() -> usize {
     let apic_id = super::apic::lapic_id();
     crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id).unwrap_or(0)

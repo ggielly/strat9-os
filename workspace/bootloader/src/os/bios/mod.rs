@@ -71,6 +71,7 @@ pub struct Xsdp {
     reserved: [u8; 3],
 }
 
+/// Performs the search rsdp operation.
 unsafe fn search_rsdp(start: usize, end: usize) -> Option<(u64, u64)> {
     unsafe {
         // Align start up to 16 bytes
@@ -100,10 +101,12 @@ impl Os for OsBios {
     type D = DiskBios;
     type V = VideoModeIter;
 
+    /// Performs the name operation.
     fn name(&self) -> &str {
         "x86/BIOS"
     }
 
+    /// Allocates zeroed page aligned.
     fn alloc_zeroed_page_aligned(&self, size: usize) -> *mut u8 {
         assert!(size != 0);
 
@@ -117,10 +120,12 @@ impl Os for OsBios {
         ptr
     }
 
+    /// Performs the page size operation.
     fn page_size(&self) -> usize {
         4096
     }
 
+    /// Performs the boot disk operation.
     fn boot_disk(&self) -> Option<DiskBios> {
         // Return boot disk for EXT4 probing
         match u8::try_from(self.boot_disk) {
@@ -129,6 +134,7 @@ impl Os for OsBios {
         }
     }
 
+    /// Performs the hwdesc operation.
     fn hwdesc(&self) -> OsHwDesc {
         // See ACPI specification - Finding the RSDP on IA-PC Systems
         unsafe {
@@ -146,15 +152,18 @@ impl Os for OsBios {
         OsHwDesc::NotFound
     }
 
+    /// Performs the video outputs operation.
     fn video_outputs(&self) -> usize {
         //TODO: return 1 only if vbe supported?
         1
     }
 
+    /// Performs the video modes operation.
     fn video_modes(&self, _output_i: usize) -> VideoModeIter {
         VideoModeIter::new(self.thunk10)
     }
 
+    /// Sets video mode.
     fn set_video_mode(&self, _output_i: usize, mode: &mut OsVideoMode) {
         // Set video mode
         let mut data = ThunkData::new();
@@ -166,6 +175,7 @@ impl Os for OsBios {
         //TODO: check result
     }
 
+    /// Performs the best resolution operation.
     fn best_resolution(&self, _output_i: usize) -> Option<(u32, u32)> {
         let mut data = ThunkData::new();
         data.eax = 0x4F15;
@@ -190,6 +200,7 @@ impl Os for OsBios {
         }
     }
 
+    /// Returns key.
     fn get_key(&self) -> OsKey {
         // Read keypress
         let mut data = ThunkData::new();
@@ -211,16 +222,19 @@ impl Os for OsBios {
         }
     }
 
+    /// Performs the clear text operation.
     fn clear_text(&self) {
         let mut vga = VGA.lock();
         vga.clear();
     }
 
+    /// Returns text position.
     fn get_text_position(&self) -> (usize, usize) {
         let vga = VGA.lock();
         (vga.x, vga.y)
     }
 
+    /// Sets text position.
     fn set_text_position(&self, x: usize, y: usize) {
         //TODO: ensure this is inside bounds!
         let mut vga = VGA.lock();
@@ -228,6 +242,7 @@ impl Os for OsBios {
         vga.y = y;
     }
 
+    /// Sets text highlight.
     fn set_text_highlight(&self, highlight: bool) {
         let mut vga = VGA.lock();
         if highlight {
@@ -240,6 +255,7 @@ impl Os for OsBios {
     }
 }
 
+/// Performs the start operation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn start(
     kernel_entry: extern "C" fn(

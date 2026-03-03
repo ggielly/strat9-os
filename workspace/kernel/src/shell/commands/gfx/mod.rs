@@ -8,6 +8,7 @@ use alloc::{string::String, vec, vec::Vec};
 
 /// Graphics console commands
 pub fn cmd_gfx(args: &[String]) -> Result<(), ShellError> {
+    /// Performs the print gfx help operation.
     fn print_gfx_help() {
         shell_println!("Usage: gfx <subcommand>");
         shell_println!("  help                 Show this help");
@@ -122,6 +123,7 @@ pub fn cmd_gfx(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// Performs the cmd gfx test operation.
 pub fn cmd_gfx_test() -> Result<(), ShellError> {
     if !vga::is_available() {
         shell_println!("gfx-test: framebuffer console unavailable");
@@ -198,6 +200,7 @@ pub fn cmd_gfx_test() -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the cmd gfx demo operation.
 pub fn cmd_gfx_demo(_args: &[String]) -> Result<(), ShellError> {
     use vga::{
         DockEdge, TerminalWidget, UiDockLayout, UiLabel, UiPanel, UiProgressBar, UiRect, UiTable,

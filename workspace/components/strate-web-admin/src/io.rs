@@ -7,8 +7,11 @@ const EAGAIN: usize = 11;
 
 pub struct Strat9Runtime;
 
+/// Implements noop raw waker.
 fn noop_raw_waker() -> RawWaker {
+    /// Implements noop.
     fn noop(_: *const ()) {}
+    /// Implements clone.
     fn clone(_: *const ()) -> RawWaker {
         noop_raw_waker()
     }
@@ -24,6 +27,7 @@ fn noop_raw_waker() -> RawWaker {
 pub struct IoError(pub usize);
 
 impl core::fmt::Display for IoError {
+    /// Implements fmt.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "IoError({})", self.0)
     }
@@ -32,6 +36,7 @@ impl core::fmt::Display for IoError {
 impl core::error::Error for IoError {}
 
 impl embedded_io_async::Error for IoError {
+    /// Implements kind.
     fn kind(&self) -> embedded_io_async::ErrorKind {
         embedded_io_async::ErrorKind::Other
     }
@@ -58,6 +63,7 @@ impl embedded_io_async::ErrorType for TcpWriteHalf {
 }
 
 impl embedded_io_async::Read for TcpReadHalf {
+    /// Implements read.
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
         let mut eagain_spins = 0usize;
         loop {
@@ -78,6 +84,7 @@ impl embedded_io_async::Read for TcpReadHalf {
 }
 
 impl embedded_io_async::Write for TcpWriteHalf {
+    /// Implements write.
     async fn write(&mut self, buf: &[u8]) -> Result<usize, IoError> {
         let mut eagain_spins = 0usize;
         loop {
@@ -96,6 +103,7 @@ impl embedded_io_async::Write for TcpWriteHalf {
         }
     }
 
+    /// Implements flush.
     async fn flush(&mut self) -> Result<(), IoError> {
         Ok(())
     }
@@ -110,6 +118,7 @@ pub struct TcpSocket {
 }
 
 impl TcpSocket {
+    /// Creates a new instance.
     pub fn new(fd: usize) -> Self {
         Self { fd }
     }
@@ -120,6 +129,7 @@ impl picoserve::io::Socket<Strat9Runtime> for TcpSocket {
     type ReadHalf<'a> = TcpReadHalf;
     type WriteHalf<'a> = TcpWriteHalf;
 
+    /// Implements split.
     fn split(&mut self) -> (TcpReadHalf, TcpWriteHalf) {
         (TcpReadHalf { fd: self.fd }, TcpWriteHalf { fd: self.fd })
     }
@@ -150,6 +160,7 @@ impl picoserve::io::Socket<Strat9Runtime> for TcpSocket {
 pub struct Strat9Timer;
 
 impl picoserve::time::Timer<Strat9Runtime> for Strat9Timer {
+    /// Implements delay.
     async fn delay(&self, duration: picoserve::time::Duration) {
         crate::net::sleep_ms(duration.as_millis());
     }

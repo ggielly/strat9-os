@@ -92,6 +92,7 @@ struct ManagedSiloDef {
     strates: Vec<ManagedStrateDef>,
 }
 
+/// Parses silo toml.
 fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
     #[derive(Clone, Copy)]
     enum Section {
@@ -99,6 +100,7 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
         Strate,
     }
 
+    /// Performs the push default strate operation.
     fn push_default_strate(silo: &mut ManagedSiloDef) {
         silo.strates.push(ManagedStrateDef {
             name: String::new(),
@@ -175,6 +177,7 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
     silos
 }
 
+/// Performs the render silo toml operation.
 fn render_silo_toml(silos: &[ManagedSiloDef]) -> String {
     use core::fmt::Write;
     let mut out = String::new();
@@ -199,6 +202,7 @@ fn render_silo_toml(silos: &[ManagedSiloDef]) -> String {
     out
 }
 
+/// Reads silo toml from initfs.
 fn read_silo_toml_from_initfs() -> Result<String, ShellError> {
     let path = "/initfs/silo.toml";
     match vfs::open(path, vfs::OpenFlags::READ) {
@@ -213,6 +217,7 @@ fn read_silo_toml_from_initfs() -> Result<String, ShellError> {
     }
 }
 
+/// Performs the load managed silos with source operation.
 fn load_managed_silos_with_source() -> (Vec<ManagedSiloDef>, &'static str) {
     match read_silo_toml_from_initfs() {
         Ok(text) => {
@@ -233,12 +238,14 @@ fn load_managed_silos_with_source() -> (Vec<ManagedSiloDef>, &'static str) {
     }
 }
 
+/// Performs the push unique operation.
 fn push_unique(values: &mut Vec<String>, item: &str) {
     if !values.iter().any(|v| v == item) {
         values.push(String::from(item));
     }
 }
 
+/// Performs the join csv operation.
 fn join_csv(values: &[String]) -> String {
     if values.is_empty() {
         return String::from("-");
@@ -283,6 +290,7 @@ struct ConfigListRow {
     strates: String,
 }
 
+/// Performs the render silo table ratatui operation.
 fn render_silo_table_ratatui(
     runtime_rows: &[SiloListRow],
     config_rows: &[ConfigListRow],
@@ -422,6 +430,7 @@ fn render_silo_table_ratatui(
     Ok(true)
 }
 
+/// Performs the render strate table ratatui operation.
 fn render_strate_table_ratatui(
     runtime_rows: &[RuntimeStrateRow],
     config_rows: &[ConfigStrateRow],
@@ -530,6 +539,7 @@ fn render_strate_table_ratatui(
     Ok(true)
 }
 
+/// Writes silo toml to initfs.
 fn write_silo_toml_to_initfs(text: &str) -> Result<(), ShellError> {
     let path = "/initfs/silo.toml";
     let fd = vfs::open(
@@ -551,6 +561,7 @@ fn write_silo_toml_to_initfs(text: &str) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the print strate state for sid operation.
 fn print_strate_state_for_sid(sid: u32) {
     if let Some(s) = silo::list_silos_snapshot().into_iter().find(|s| s.id == sid) {
         shell_println!("state: {:?}", s.state);
@@ -559,6 +570,7 @@ fn print_strate_state_for_sid(sid: u32) {
     }
 }
 
+/// Performs the print strate usage operation.
 fn print_strate_usage() {
     shell_println!("{}", STRATE_USAGE);
     shell_println!("  strate list");
@@ -573,6 +585,7 @@ fn print_strate_usage() {
     shell_println!("  strate config remove <silo> <name>");
 }
 
+/// Performs the print silo usage operation.
 fn print_silo_usage() {
     shell_println!("{}", SILO_USAGE);
     shell_println!("  silo list");
@@ -587,6 +600,7 @@ fn print_silo_usage() {
     shell_println!("  silo config remove <silo> <name>");
 }
 
+/// Performs the cmd silo operation.
 pub fn cmd_silo(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         print_silo_usage();
@@ -604,6 +618,7 @@ pub fn cmd_silo(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// Performs the cmd silos operation.
 pub fn cmd_silos(_args: &[String]) -> Result<(), ShellError> {
     let args = [String::from("list")];
     cmd_silo(&args)
@@ -916,6 +931,7 @@ pub fn cmd_test_mem_stressed(_args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// Performs the cmd silo list operation.
 fn cmd_silo_list(_args: &[String]) -> Result<(), ShellError> {
     let (managed, managed_source) = load_managed_silos_with_source();
     let mut silos = silo::list_silos_snapshot();
@@ -1006,6 +1022,7 @@ fn cmd_silo_list(_args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the cmd strate list operation.
 fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
     struct StrateEntry {
         name: String,
@@ -1110,6 +1127,7 @@ fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the cmd strate spawn operation.
 fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
         shell_println!("Usage: strate spawn <type> [--label <label>] [--dev <path>]");
@@ -1181,6 +1199,7 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// Performs the cmd strate config show operation.
 fn cmd_strate_config_show(args: &[String]) -> Result<(), ShellError> {
     let existing = read_silo_toml_from_initfs()?;
     let silos = parse_silo_toml(&existing);
@@ -1228,6 +1247,7 @@ fn cmd_strate_config_show(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the cmd strate config add operation.
 fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 5 {
         shell_println!("Usage: strate config add <silo> <name> <binary> [--type <t>] [--target <x>] [--family <F>] [--mode <ooo>] [--sid <n>]");
@@ -1349,6 +1369,7 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the cmd strate config remove operation.
 fn cmd_strate_config_remove(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 4 {
         shell_println!("Usage: strate config remove <silo> <name>");
@@ -1390,6 +1411,7 @@ fn cmd_strate_config_remove(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the cmd strate config operation.
 fn cmd_strate_config(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
         shell_println!("Usage: strate config <show|add|remove> ...");
@@ -1406,6 +1428,7 @@ fn cmd_strate_config(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// Performs the cmd strate start operation.
 fn cmd_strate_start(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 2 {
         shell_println!("Usage: strate start <id|label>");
@@ -1425,6 +1448,7 @@ fn cmd_strate_start(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// Performs the cmd strate lifecycle operation.
 fn cmd_strate_lifecycle(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 2 {
         shell_println!("Usage: strate start|stop|kill|destroy <id|label>");
@@ -1453,6 +1477,7 @@ fn cmd_strate_lifecycle(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// Performs the cmd strate rename operation.
 fn cmd_strate_rename(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 3 {
         shell_println!("Usage: strate rename <id|label> <new_label>");
@@ -1577,5 +1602,38 @@ pub fn cmd_wasm_run(args: &[String]) -> Result<(), ShellError> {
     }
     shell_println!("wasm-run: done");
 
+    Ok(())
+}
+
+/// `health` — system health diagnostic (boot graph, strates, IPC, VFS mounts).
+pub fn cmd_health(_args: &[String]) -> Result<(), ShellError> {
+    shell_println!("=== Strat9 Health Report ===\n");
+
+    shell_println!("-- VFS Mounts --");
+    for m in vfs::list_mounts() {
+        shell_println!("  {}", m);
+    }
+
+    shell_println!("\n-- IPC Namespace --");
+    let bindings = crate::namespace::list_all_bindings();
+    if bindings.is_empty() {
+        shell_println!("  (none)");
+    } else {
+        for (name, port_id) in &bindings {
+            shell_println!("  {} -> port {}", name, port_id);
+        }
+    }
+
+    shell_println!("\n-- Active Silos --");
+    let silo_list = silo::list_silos_snapshot();
+    if silo_list.is_empty() {
+        shell_println!("  (none)");
+    } else {
+        for info in &silo_list {
+            shell_println!("  SID={} name={} state={:?} tasks={}", info.id, info.name, info.state, info.task_count);
+        }
+    }
+
+    shell_println!("\n=== End Health Report ===");
     Ok(())
 }

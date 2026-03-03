@@ -26,18 +26,22 @@ where
     H: HostKeyProvider,
     S: ExecSessionProvider,
 {
+    /// Creates a new instance.
     pub fn new(core: SshCore<B, A, H, S>) -> Self {
         Self { core }
     }
 
+    /// Implements state.
     pub fn state(&self) -> ConnectionState {
         self.core.state()
     }
 
+    /// Implements ingest packet.
     pub fn ingest_packet(&mut self, packet: &[u8]) -> Result<Vec<CoreDirective>> {
         self.core.ingest_packet(packet)
     }
 
+    /// Implements core mut.
     pub fn core_mut(&mut self) -> &mut SshCore<B, A, H, S> {
         &mut self.core
     }
@@ -54,6 +58,7 @@ impl<T> SessionPump<T>
 where
     T: Transport,
 {
+    /// Creates a new instance.
     pub fn new(transport: T) -> Self {
         Self { transport }
     }
@@ -84,6 +89,7 @@ where
         Ok(directives)
     }
 
+    /// Implements transport mut.
     pub fn transport_mut(&mut self) -> &mut T {
         &mut self.transport
     }

@@ -43,6 +43,7 @@ pub struct ArmCci {
 }
 
 impl ArmCci {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -53,11 +54,13 @@ impl ArmCci {
         }
     }
 
+    /// Sets port counts.
     pub fn set_port_counts(&mut self, ace: usize, ace_lite: usize) {
         self.nb_ace = ace;
         self.nb_ace_lite = ace_lite;
     }
 
+    /// Performs the add port operation.
     pub fn add_port(&mut self, index: usize, port_type: CciPortType, base_offset: usize) {
         if index < MAX_PORTS {
             self.ports[index] = Some(CciPort {
@@ -68,6 +71,7 @@ impl ArmCci {
         }
     }
 
+    /// Enables port.
     pub fn enable_port(&mut self, index: usize) -> Result<(), BusError> {
         if index >= MAX_PORTS {
             return Err(BusError::InvalidArgument);
@@ -83,6 +87,7 @@ impl ArmCci {
         Ok(())
     }
 
+    /// Disables port.
     pub fn disable_port(&mut self, index: usize) -> Result<(), BusError> {
         if index >= MAX_PORTS {
             return Err(BusError::InvalidArgument);
@@ -98,6 +103,7 @@ impl ArmCci {
         Ok(())
     }
 
+    /// Performs the wait for status clear operation.
     fn wait_for_status_clear(&self) -> Result<(), BusError> {
         for _ in 0..MAX_POLL {
             let status = self.regs.read32(CCI_CTRL_STATUS);
@@ -110,16 +116,20 @@ impl ArmCci {
 }
 
 impl BusDriver for ArmCci {
+    /// Performs the name operation.
     fn name(&self) -> &str { "arm-cci" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x10000);
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         for i in 0..MAX_PORTS {
             if self.ports[i].as_ref().map_or(false, |p| p.enabled) {
@@ -130,6 +140,7 @@ impl BusDriver for ArmCci {
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
@@ -137,6 +148,7 @@ impl BusDriver for ArmCci {
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
@@ -145,6 +157,7 @@ impl BusDriver for ArmCci {
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         let mut children = Vec::new();
         for (i, port) in self.ports.iter().enumerate() {

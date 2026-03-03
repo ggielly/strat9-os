@@ -26,6 +26,7 @@ struct PipeInner {
 }
 
 impl PipeInner {
+    /// Creates a new instance.
     fn new() -> Self {
         PipeInner {
             buf: [0u8; PIPE_BUF_SIZE],
@@ -39,18 +40,22 @@ impl PipeInner {
         }
     }
 
+    /// Returns whether empty.
     fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// Returns whether full.
     fn is_full(&self) -> bool {
         self.len >= PIPE_BUF_SIZE
     }
 
+    /// Performs the available read operation.
     fn available_read(&self) -> usize {
         self.len
     }
 
+    /// Performs the available write operation.
     fn available_write(&self) -> usize {
         PIPE_BUF_SIZE - self.len
     }
@@ -66,6 +71,7 @@ pub struct Pipe {
 }
 
 impl Pipe {
+    /// Creates a new instance.
     pub fn new() -> Arc<Self> {
         Arc::new(Pipe {
             inner: SpinLock::new(PipeInner::new()),
@@ -192,7 +198,7 @@ impl Pipe {
 // Pipe as a VFS Scheme
 // ============================================================================
 
-use super::scheme::{DirEntry, FileStat, OpenFlags, OpenResult, Scheme};
+use super::scheme::{finalize_pseudo_stat, DirEntry, FileStat, OpenFlags, OpenResult, Scheme, DEV_PIPEFS};
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -206,6 +212,7 @@ pub struct PipeScheme {
 static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(2); // Start at 2 (even numbers)
 
 impl PipeScheme {
+    /// Creates a new instance.
     pub fn new() -> Self {
         PipeScheme {
             pipes: SpinLock::new(BTreeMap::new()),
@@ -220,6 +227,7 @@ impl PipeScheme {
         (base_id, pipe)
     }
 
+    /// Returns pipe.
     fn get_pipe(&self, file_id: u64) -> Result<Arc<Pipe>, SyscallError> {
         let base = file_id & !1; // Even = base
         self.pipes
@@ -229,16 +237,19 @@ impl PipeScheme {
             .ok_or(SyscallError::BadHandle)
     }
 
+    /// Returns whether read end.
     fn is_read_end(file_id: u64) -> bool {
         file_id & 1 == 0
     }
 }
 
 impl Scheme for PipeScheme {
+    /// Performs the open operation.
     fn open(&self, _path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         Err(SyscallError::NotSupported) // Pipes are created via sys_pipe, not open()
     }
 
+    /// Performs the read operation.
     fn read(&self, file_id: u64, _offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         if !Self::is_read_end(file_id) {
             return Err(SyscallError::PermissionDenied);
@@ -247,6 +258,7 @@ impl Scheme for PipeScheme {
         pipe.read(buf)
     }
 
+    /// Performs the write operation.
     fn write(&self, file_id: u64, _offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         if Self::is_read_end(file_id) {
             return Err(SyscallError::PermissionDenied);
@@ -255,6 +267,7 @@ impl Scheme for PipeScheme {
         pipe.write(buf)
     }
 
+    /// Performs the close operation.
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
         let pipe = self.get_pipe(file_id)?;
         if Self::is_read_end(file_id) {
@@ -274,23 +287,27 @@ impl Scheme for PipeScheme {
         Ok(())
     }
 
+    /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         let pipe = self.get_pipe(file_id)?;
         let inner = pipe.inner.lock();
-        Ok(FileStat {
+        Ok(finalize_pseudo_stat(FileStat {
             st_ino: file_id,
             st_mode: 0o010600, // S_IFIFO | rw-------
             st_nlink: 1,
             st_size: inner.len as u64,
             st_blksize: PIPE_BUF_SIZE as u64,
             st_blocks: 0,
-        })
+            ..FileStat::zeroed()
+        }, DEV_PIPEFS, 0))
     }
 
+    /// Performs the readdir operation.
     fn readdir(&self, _file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         Err(SyscallError::InvalidArgument)
     }
 
+    /// Performs the size operation.
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
         let pipe = self.get_pipe(file_id)?;
         let len = pipe.inner.lock().len;

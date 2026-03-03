@@ -15,40 +15,9 @@ use alloc::{
     vec::Vec,
 };
 
-/// File type constants (matching Linux DT_* values).
-pub const DT_UNKNOWN: u8 = 0;
-pub const DT_FIFO: u8 = 1;
-pub const DT_CHR: u8 = 2;
-pub const DT_DIR: u8 = 4;
-pub const DT_BLK: u8 = 6;
-pub const DT_REG: u8 = 8;
-pub const DT_LNK: u8 = 10;
-pub const DT_SOCK: u8 = 12;
-
-/// Metadata returned by stat operations.
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct FileStat {
-    pub st_ino: u64,
-    pub st_mode: u32,
-    pub st_nlink: u32,
-    pub st_size: u64,
-    pub st_blksize: u64,
-    pub st_blocks: u64,
-}
-
-impl FileStat {
-    pub const fn zeroed() -> Self {
-        FileStat {
-            st_ino: 0,
-            st_mode: 0,
-            st_nlink: 1,
-            st_size: 0,
-            st_blksize: 512,
-            st_blocks: 0,
-        }
-    }
-}
+pub use strat9_abi::data::{
+    DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK, DT_UNKNOWN, FileStat,
+};
 
 /// A single directory entry returned by readdir.
 #[derive(Debug, Clone)]
@@ -80,17 +49,7 @@ bitflags::bitflags! {
     }
 }
 
-bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct OpenFlags: u32 {
-        const READ      = 1 << 0;
-        const WRITE     = 1 << 1;
-        const CREATE    = 1 << 2;
-        const TRUNCATE  = 1 << 3;
-        const APPEND    = 1 << 4;
-        const DIRECTORY = 1 << 5;
-    }
-}
+pub use strat9_abi::flag::OpenFlags;
 
 /// Abstraction for a filesystem/service backend.
 pub trait Scheme: Send + Sync {
@@ -156,10 +115,67 @@ pub trait Scheme: Send + Sync {
         let _ = file_id;
         Err(SyscallError::NotImplemented)
     }
+
+    /// Rename/move an entry within this scheme.
+    fn rename(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+        let _ = (old_path, new_path);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Change permission bits on a path.
+    fn chmod(&self, path: &str, mode: u32) -> Result<(), SyscallError> {
+        let _ = (path, mode);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Change permission bits on an open file handle.
+    fn fchmod(&self, file_id: u64, mode: u32) -> Result<(), SyscallError> {
+        let _ = (file_id, mode);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Create a hard link.
+    fn link(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+        let _ = (old_path, new_path);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Create a symbolic link.
+    fn symlink(&self, target: &str, link_path: &str) -> Result<(), SyscallError> {
+        let _ = (target, link_path);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Read the target of a symbolic link.
+    fn readlink(&self, path: &str) -> Result<String, SyscallError> {
+        let _ = path;
+        Err(SyscallError::NotImplemented)
+    }
 }
 
 /// Type-erased Scheme reference.
 pub type DynScheme = Arc<dyn Scheme>;
+
+pub const DEV_RAMFS: u64 = 1;
+pub const DEV_SYSFS: u64 = 2;
+pub const DEV_PROCFS: u64 = 3;
+pub const DEV_DEVFS: u64 = 4;
+pub const DEV_CONSOLE: u64 = 5;
+pub const DEV_PIPEFS: u64 = 6;
+pub const DEV_IPCFS: u64 = 7;
+pub const DEV_NETFS: u64 = 8;
+
+/// Finalize pseudo-filesystem stats with a stable device identity and
+/// synthetic timestamps.
+pub fn finalize_pseudo_stat(mut st: FileStat, st_dev: u64, st_rdev: u64) -> FileStat {
+    let now = strat9_abi::data::TimeSpec::from_nanos(crate::syscall::time::current_time_ns());
+    st.st_dev = st_dev;
+    st.st_rdev = st_rdev;
+    st.st_atime = now;
+    st.st_mtime = now;
+    st.st_ctime = now;
+    st
+}
 
 // ============================================================================
 // Built-in Schemes
@@ -171,6 +187,7 @@ pub struct IpcScheme {
 }
 
 impl IpcScheme {
+    /// Creates a new instance.
     pub fn new(port_id: PortId) -> Self {
         IpcScheme { port_id }
     }
@@ -225,6 +242,7 @@ impl IpcScheme {
         msg
     }
 
+    /// Performs the build readdir msg operation.
     fn build_readdir_msg(file_id: u64, cursor: u16) -> IpcMessage {
         const OPCODE_READDIR: u32 = 0x08;
         let mut msg = IpcMessage::new(OPCODE_READDIR);
@@ -233,6 +251,7 @@ impl IpcScheme {
         msg
     }
 
+    /// Parses status.
     fn parse_status(reply: &IpcMessage) -> Result<(), SyscallError> {
         if reply.msg_type != 0x80 {
             return Err(SyscallError::IoError);
@@ -283,6 +302,7 @@ impl IpcScheme {
 }
 
 impl Scheme for IpcScheme {
+    /// Performs the open operation.
     fn open(&self, path: &str, flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         let msg = Self::build_open_msg(path, flags)?;
         let reply = self.call(msg)?;
@@ -326,6 +346,7 @@ impl Scheme for IpcScheme {
         })
     }
 
+    /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         let msg = Self::build_read_msg(file_id, offset, buf.len() as u32);
         let reply = self.call(msg)?;
@@ -347,6 +368,7 @@ impl Scheme for IpcScheme {
         Ok(to_copy)
     }
 
+    /// Performs the write operation.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         let (msg, packed) = Self::build_write_msg(file_id, offset, buf);
         let reply = self.call(msg)?;
@@ -365,6 +387,7 @@ impl Scheme for IpcScheme {
         Ok(bytes_written.min(packed))
     }
 
+    /// Performs the close operation.
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
         let msg = Self::build_close_msg(file_id);
         let reply = self.call(msg)?;
@@ -374,16 +397,19 @@ impl Scheme for IpcScheme {
         Ok(())
     }
 
+    /// Creates file.
     fn create_file(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
         const OPCODE_CREATE_FILE: u32 = 0x05;
         self.handle_create_op(OPCODE_CREATE_FILE, path, mode)
     }
 
+    /// Creates directory.
     fn create_directory(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
         const OPCODE_CREATE_DIR: u32 = 0x06;
         self.handle_create_op(OPCODE_CREATE_DIR, path, mode)
     }
 
+    /// Performs the unlink operation.
     fn unlink(&self, path: &str) -> Result<(), SyscallError> {
         const OPCODE_UNLINK: u32 = 0x07;
         let mut msg = IpcMessage::new(OPCODE_UNLINK);
@@ -401,6 +427,7 @@ impl Scheme for IpcScheme {
         Ok(())
     }
 
+    /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         let mut cursor: u16 = 0;
         let mut entries = Vec::new();
@@ -465,6 +492,7 @@ impl Scheme for IpcScheme {
 }
 
 impl IpcScheme {
+    /// Handles create op.
     fn handle_create_op(
         &self,
         opcode: u32,
@@ -522,6 +550,7 @@ unsafe impl Send for KernelFile {}
 unsafe impl Sync for KernelFile {}
 
 impl KernelScheme {
+    /// Creates a new instance.
     pub fn new() -> Self {
         KernelScheme {
             files: SpinLock::new(BTreeMap::new()),
@@ -539,6 +568,7 @@ impl KernelScheme {
         self.by_id.lock().insert(id, String::from(path));
     }
 
+    /// Returns by id.
     fn get_by_id(&self, file_id: u64) -> Option<KernelFile> {
         let name = self.by_id.lock().get(&file_id)?.clone();
         self.files.lock().get(&name).cloned()
@@ -546,6 +576,7 @@ impl KernelScheme {
 }
 
 impl Scheme for KernelScheme {
+    /// Performs the open operation.
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         if path.is_empty() || path == "/" {
             return Ok(OpenResult {
@@ -564,6 +595,7 @@ impl Scheme for KernelScheme {
         })
     }
 
+    /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         if file_id == 0 {
             // Handle directory listing for root
@@ -603,41 +635,48 @@ impl Scheme for KernelScheme {
         Ok(to_copy)
     }
 
+    /// Performs the write operation.
     fn write(&self, _file_id: u64, _offset: u64, _buf: &[u8]) -> Result<usize, SyscallError> {
         Err(SyscallError::PermissionDenied) // Read-only
     }
 
+    /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(()) // No-op for kernel files
     }
 
+    /// Performs the size operation.
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
         let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
         Ok(file.len as u64)
     }
 
+    /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         if file_id == 0 {
-            return Ok(FileStat {
+            return Ok(finalize_pseudo_stat(FileStat {
                 st_ino: 0,
                 st_mode: 0o040555,
                 st_nlink: 2,
                 st_size: 0,
                 st_blksize: 512,
                 st_blocks: 0,
-            });
+                ..FileStat::zeroed()
+            }, DEV_SYSFS, 0));
         }
         let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
-        Ok(FileStat {
+        Ok(finalize_pseudo_stat(FileStat {
             st_ino: file_id,
             st_mode: 0o100444,
             st_nlink: 1,
             st_size: file.len as u64,
             st_blksize: 512,
             st_blocks: ((file.len as u64) + 511) / 512,
-        })
+            ..FileStat::zeroed()
+        }, DEV_SYSFS, 0))
     }
 
+    /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         if file_id != 0 {
             return Err(SyscallError::InvalidArgument);

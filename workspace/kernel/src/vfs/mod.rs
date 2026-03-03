@@ -109,6 +109,69 @@ pub fn unlink(path: &str) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Rename a file or directory (must be within the same mount).
+pub fn rename(old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+    let (scheme, old_rel) = mount::resolve(old_path)?;
+    let (scheme2, new_rel) = mount::resolve(new_path)?;
+    if !Arc::ptr_eq(&scheme, &scheme2) {
+        return Err(SyscallError::NotSupported);
+    }
+    scheme.rename(&old_rel, &new_rel)
+}
+
+/// Change permission bits on a path.
+pub fn chmod(path: &str, mode: u32) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.chmod(&relative_path, mode)
+}
+
+/// Change permission bits on an open fd.
+pub fn fchmod(fd: u32, mode: u32) -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.process.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    file.scheme().fchmod(file.file_id(), mode)
+}
+
+/// Truncate a file by path.
+pub fn truncate(path: &str, length: u64) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    let res = scheme.open(&relative_path, OpenFlags::WRITE)?;
+    let r = scheme.truncate(res.file_id, length);
+    let _ = scheme.close(res.file_id);
+    r
+}
+
+/// Truncate an open fd.
+pub fn ftruncate(fd: u32, length: u64) -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.process.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    file.scheme().truncate(file.file_id(), length)
+}
+
+/// Create a hard link (must be within the same mount).
+pub fn link(old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+    let (scheme, old_rel) = mount::resolve(old_path)?;
+    let (scheme2, new_rel) = mount::resolve(new_path)?;
+    if !Arc::ptr_eq(&scheme, &scheme2) {
+        return Err(SyscallError::NotSupported);
+    }
+    scheme.link(&old_rel, &new_rel)
+}
+
+/// Create a symbolic link.
+pub fn symlink(target: &str, link_path: &str) -> Result<(), SyscallError> {
+    let (scheme, link_rel) = mount::resolve(link_path)?;
+    scheme.symlink(target, &link_rel)
+}
+
+/// Read the target of a symbolic link.
+pub fn readlink(path: &str) -> Result<String, SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.readlink(&relative_path)
+}
+
 /// Read from a file descriptor.
 pub fn read(fd: u32, buf: &mut [u8]) -> Result<usize, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -308,25 +371,8 @@ pub fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, Syscall
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let path = resolve_path(&raw, &cwd);
 
-    let mut open_flags = OpenFlags::empty();
-    if flags & 0x1 != 0 {
-        open_flags |= OpenFlags::READ;
-    }
-    if flags & 0x2 != 0 {
-        open_flags |= OpenFlags::WRITE;
-    }
-    if flags & 0x4 != 0 {
-        open_flags |= OpenFlags::CREATE;
-    }
-    if flags & 0x8 != 0 {
-        open_flags |= OpenFlags::TRUNCATE;
-    }
-    if flags & 0x10 != 0 {
-        open_flags |= OpenFlags::APPEND;
-    }
-    if flags & 0x20 != 0 {
-        open_flags |= OpenFlags::DIRECTORY;
-    }
+    let open_flags =
+        OpenFlags::from_bits_truncate(flags as u32);
 
     let want_read =
         open_flags.contains(OpenFlags::READ) || open_flags.contains(OpenFlags::DIRECTORY);
@@ -487,27 +533,29 @@ pub fn sys_stat(path_ptr: u64, path_len: u64, stat_ptr: u64) -> Result<u64, Sysc
 /// Writes a packed array of `KernelDirent` entries into the user buffer.
 /// Returns the number of bytes written.
 pub fn sys_getdents(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let entries = getdents(fd)?;
+    use strat9_abi::data::DirentHeader;
 
+    let entries = getdents(fd)?;
     let mut offset: usize = 0;
     let buf_size = buf_len as usize;
 
     for entry in &entries {
         let name_bytes = entry.name.as_bytes();
-        let name_len = core::cmp::min(name_bytes.len(), 255);
-        let entry_size = 8 + 1 + 2 + name_len + 1; // ino(8) + type(1) + name_len(2) + name + nul
+        let name_len = core::cmp::min(name_bytes.len(), 255) as u16;
+        let entry_size = DirentHeader::SIZE + name_len as usize + 1;
 
         if offset + entry_size > buf_size {
             break;
         }
 
         let user = UserSliceWrite::new(buf_ptr + offset as u64, entry_size)?;
-        let mut kbuf = [0u8; 268]; // max entry
+        let mut kbuf = [0u8; 268];
         kbuf[0..8].copy_from_slice(&entry.ino.to_le_bytes());
         kbuf[8] = entry.file_type;
-        kbuf[9..11].copy_from_slice(&(name_len as u16).to_le_bytes());
-        kbuf[11..11 + name_len].copy_from_slice(&name_bytes[..name_len]);
-        kbuf[11 + name_len] = 0; // nul-terminator
+        kbuf[9..11].copy_from_slice(&name_len.to_le_bytes());
+        kbuf[11] = 0; // DirentHeader::_padding
+        kbuf[12..12 + name_len as usize].copy_from_slice(&name_bytes[..name_len as usize]);
+        kbuf[12 + name_len as usize] = 0;
         user.copy_from(&kbuf[..entry_size]);
 
         offset += entry_size;
@@ -620,10 +668,11 @@ pub fn sys_chdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
 /// SYS_FCHDIR (441): Change cwd using an open file descriptor.
 pub fn sys_fchdir(fd: u32) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let fd_table = unsafe { &*task.process.fd_table.get() };
-    let file = fd_table.get(fd)?;
-    let path = alloc::string::String::from(file.path());
-    drop(fd_table);
+    let path = {
+        let fd_table = unsafe { &*task.process.fd_table.get() };
+        let file = fd_table.get(fd)?;
+        alloc::string::String::from(file.path())
+    };
     unsafe { *task.process.cwd.get() = path };
     Ok(0)
 }
@@ -638,7 +687,7 @@ pub fn sys_getcwd(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let bytes = cwd.as_bytes();
     let needed = bytes.len() + 1; // include NUL terminator
     if needed > buf_len as usize {
-        return Err(SyscallError::OutOfMemory); // ERANGE in POSIX
+        return Err(SyscallError::Range);
     }
     let out = UserSliceWrite::new(buf_ptr, needed)?;
     let mut tmp = alloc::vec![0u8; needed];
@@ -705,8 +754,6 @@ pub fn sys_mkdir(path_ptr: u64, path_len: u64, mode: u64) -> Result<u64, Syscall
 }
 
 /// SYS_RENAME (448): Rename a file or directory.
-///
-/// Not yet implemented in the scheme abstraction; returns ENOSYS.
 pub fn sys_rename(
     old_ptr: u64,
     old_len: u64,
@@ -721,88 +768,151 @@ pub fn sys_rename(
     let new_abs = resolve_path(&new, &cwd);
     crate::silo::enforce_path_for_current_task(&old_abs, true, true, false)?;
     crate::silo::enforce_path_for_current_task(&new_abs, false, true, false)?;
-    Err(SyscallError::NotImplemented)
+    rename(&old_abs, &new_abs)?;
+    Ok(0)
 }
 
-/// SYS_LINK (449): Create a hard link — not yet implemented.
+/// SYS_LINK (449): Create a hard link.
 pub fn sys_link(
-    _old_ptr: u64,
-    _old_len: u64,
-    _new_ptr: u64,
-    _new_len: u64,
+    old_ptr: u64,
+    old_len: u64,
+    new_ptr: u64,
+    new_len: u64,
 ) -> Result<u64, SyscallError> {
-    let old = read_user_path(_old_ptr, _old_len)?;
-    let new = read_user_path(_new_ptr, _new_len)?;
+    let old = read_user_path(old_ptr, old_len)?;
+    let new = read_user_path(new_ptr, new_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let old_abs = resolve_path(&old, &cwd);
     let new_abs = resolve_path(&new, &cwd);
     crate::silo::enforce_path_for_current_task(&old_abs, true, false, false)?;
     crate::silo::enforce_path_for_current_task(&new_abs, false, true, false)?;
-    Err(SyscallError::NotImplemented)
+    link(&old_abs, &new_abs)?;
+    Ok(0)
 }
 
-/// SYS_SYMLINK (450): Create a symbolic link — not yet implemented.
+/// SYS_SYMLINK (450): Create a symbolic link.
 pub fn sys_symlink(
-    _target_ptr: u64,
-    _target_len: u64,
-    _linkpath_ptr: u64,
-    _linkpath_len: u64,
+    target_ptr: u64,
+    target_len: u64,
+    linkpath_ptr: u64,
+    linkpath_len: u64,
 ) -> Result<u64, SyscallError> {
-    let target = read_user_path(_target_ptr, _target_len)?;
-    let linkpath = read_user_path(_linkpath_ptr, _linkpath_len)?;
+    let target = read_user_path(target_ptr, target_len)?;
+    let linkpath = read_user_path(linkpath_ptr, linkpath_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
-    let target_abs = resolve_path(&target, &cwd);
     let link_abs = resolve_path(&linkpath, &cwd);
-    crate::silo::enforce_path_for_current_task(&target_abs, true, false, false)?;
     crate::silo::enforce_path_for_current_task(&link_abs, false, true, false)?;
-    Err(SyscallError::NotImplemented)
+    symlink(&target, &link_abs)?;
+    Ok(0)
 }
 
-/// SYS_READLINK (451): Read a symbolic link — not yet implemented.
+/// SYS_READLINK (451): Read a symbolic link.
 pub fn sys_readlink(
-    _path_ptr: u64,
-    _path_len: u64,
-    _buf_ptr: u64,
-    _buf_len: u64,
+    path_ptr: u64,
+    path_len: u64,
+    buf_ptr: u64,
+    buf_len: u64,
 ) -> Result<u64, SyscallError> {
-    let path = read_user_path(_path_ptr, _path_len)?;
+    let path = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&path, &cwd);
     crate::silo::enforce_path_for_current_task(&abs, true, false, false)?;
-    Err(SyscallError::NotImplemented)
+    let target = readlink(&abs)?;
+    let bytes = target.as_bytes();
+    let n = bytes.len().min(buf_len as usize);
+    let user = UserSliceWrite::new(buf_ptr, n)?;
+    user.copy_from(&bytes[..n]);
+    Ok(n as u64)
 }
 
 /// SYS_CHMOD (452): Change file mode bits.
-pub fn sys_chmod(path_ptr: u64, path_len: u64, _mode: u64) -> Result<u64, SyscallError> {
+pub fn sys_chmod(path_ptr: u64, path_len: u64, mode: u64) -> Result<u64, SyscallError> {
     let path = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&path, &cwd);
     crate::silo::enforce_path_for_current_task(&abs, false, true, false)?;
-    Err(SyscallError::NotImplemented)
+    chmod(&abs, mode as u32)?;
+    Ok(0)
 }
 
 /// SYS_FCHMOD (453): Change file mode bits on open fd.
-pub fn sys_fchmod(_fd: u32, _mode: u64) -> Result<u64, SyscallError> {
-    Err(SyscallError::NotImplemented)
+pub fn sys_fchmod(fd: u32, mode: u64) -> Result<u64, SyscallError> {
+    fchmod(fd, mode as u32)?;
+    Ok(0)
 }
 
 /// SYS_TRUNCATE (454): Truncate file to given length.
-pub fn sys_truncate(path_ptr: u64, path_len: u64, _length: u64) -> Result<u64, SyscallError> {
+pub fn sys_truncate(path_ptr: u64, path_len: u64, length: u64) -> Result<u64, SyscallError> {
     let path = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&path, &cwd);
     crate::silo::enforce_path_for_current_task(&abs, false, true, false)?;
-    Err(SyscallError::NotImplemented)
+    truncate(&abs, length)?;
+    Ok(0)
 }
 
 /// SYS_FTRUNCATE (455): Truncate open fd to given length.
-pub fn sys_ftruncate(_fd: u32, _length: u64) -> Result<u64, SyscallError> {
-    Err(SyscallError::NotImplemented)
+pub fn sys_ftruncate(fd: u32, length: u64) -> Result<u64, SyscallError> {
+    ftruncate(fd, length)?;
+    Ok(0)
+}
+
+/// SYS_PREAD (456): Read at offset without changing fd position.
+pub fn sys_pread(fd: u32, buf_ptr: u64, buf_len: u64, offset: u64) -> Result<u64, SyscallError> {
+    if buf_len == 0 {
+        return Ok(0);
+    }
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.process.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    let mut kbuf = [0u8; 4096];
+    let mut total = 0usize;
+    let mut off = offset;
+    while total < buf_len as usize {
+        let to_read = core::cmp::min(kbuf.len(), buf_len as usize - total);
+        let n = file.pread(off, &mut kbuf[..to_read])?;
+        if n == 0 {
+            break;
+        }
+        let user = UserSliceWrite::new(buf_ptr + total as u64, n)?;
+        user.copy_from(&kbuf[..n]);
+        total += n;
+        off += n as u64;
+        if n < to_read {
+            break;
+        }
+    }
+    Ok(total as u64)
+}
+
+/// SYS_PWRITE (457): Write at offset without changing fd position.
+pub fn sys_pwrite(fd: u32, buf_ptr: u64, buf_len: u64, offset: u64) -> Result<u64, SyscallError> {
+    if buf_len == 0 {
+        return Ok(0);
+    }
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.process.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    let mut kbuf = [0u8; 4096];
+    let mut total = 0usize;
+    let mut off = offset;
+    while total < buf_len as usize {
+        let to_write = core::cmp::min(kbuf.len(), buf_len as usize - total);
+        let user = UserSliceRead::new(buf_ptr + total as u64, to_write)?;
+        user.copy_to(&mut kbuf[..to_write]);
+        let n = file.pwrite(off, &kbuf[..to_write])?;
+        total += n;
+        off += n as u64;
+        if n < to_write {
+            break;
+        }
+    }
+    Ok(total as u64)
 }
 
 // ============================================================================
@@ -811,6 +921,7 @@ pub fn sys_ftruncate(_fd: u32, _length: u64) -> Result<u64, SyscallError> {
 
 static PIPE_SCHEME: SpinLock<Option<Arc<PipeScheme>>> = SpinLock::new(None);
 
+/// Returns pipe scheme.
 fn get_pipe_scheme() -> Arc<PipeScheme> {
     let mut guard = PIPE_SCHEME.lock();
     if let Some(ref scheme) = *guard {
@@ -821,6 +932,7 @@ fn get_pipe_scheme() -> Arc<PipeScheme> {
     scheme
 }
 
+/// Performs the build pci inventory text operation.
 fn build_pci_inventory_text() -> String {
     #[cfg(target_arch = "x86_64")]
     {

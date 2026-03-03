@@ -122,6 +122,7 @@ pub struct CapabilityTable {
 }
 
 impl Clone for CapabilityTable {
+    /// Performs the clone operation.
     fn clone(&self) -> Self {
         Self {
             capabilities: self.capabilities.clone(),

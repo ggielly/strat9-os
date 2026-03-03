@@ -35,11 +35,13 @@ use alloc::{
     string::{String, ToString},
 };
 
+/// Returns whether continuation byte.
 #[inline]
 fn is_continuation_byte(b: u8) -> bool {
     (b & 0b1100_0000) == 0b1000_0000
 }
 
+/// Performs the prev char boundary operation.
 fn prev_char_boundary(input: &[u8], mut idx: usize) -> usize {
     if idx == 0 {
         return 0;
@@ -51,6 +53,7 @@ fn prev_char_boundary(input: &[u8], mut idx: usize) -> usize {
     idx
 }
 
+/// Performs the next char boundary operation.
 fn next_char_boundary(input: &[u8], mut idx: usize) -> usize {
     if idx >= input.len() {
         return input.len();
@@ -62,12 +65,14 @@ fn next_char_boundary(input: &[u8], mut idx: usize) -> usize {
     idx
 }
 
+/// Performs the char count operation.
 fn char_count(input: &[u8]) -> usize {
     core::str::from_utf8(input)
         .map(|s| s.chars().count())
         .unwrap_or(input.len())
 }
 
+/// Performs the print bytes operation.
 fn print_bytes(input: &[u8]) {
     if let Ok(s) = core::str::from_utf8(input) {
         for ch in s.chars() {
@@ -80,12 +85,14 @@ fn print_bytes(input: &[u8]) {
     }
 }
 
+/// Performs the move cursor left chars operation.
 fn move_cursor_left_chars(n: usize) {
     for _ in 0..n {
         print_char('\x08');
     }
 }
 
+/// Performs the clear visible line operation.
 fn clear_visible_line(line: &[u8]) {
     let n = char_count(line);
     move_cursor_left_chars(n);
@@ -121,6 +128,7 @@ fn redraw_line(input: &[u8], cursor_pos: usize) {
     }
 }
 
+/// Performs the redraw full line operation.
 fn redraw_full_line(input: &[u8], cursor_pos: usize) {
     clear_visible_line(input);
     print_bytes(input);
@@ -133,6 +141,7 @@ fn redraw_full_line(input: &[u8], cursor_pos: usize) {
     }
 }
 
+/// Performs the insert bytes at cursor operation.
 fn insert_bytes_at_cursor(
     input_buf: &mut [u8],
     input_len: &mut usize,
@@ -158,6 +167,7 @@ fn insert_bytes_at_cursor(
     true
 }
 
+/// Performs the delete prev char at cursor operation.
 fn delete_prev_char_at_cursor(
     input_buf: &mut [u8],
     input_len: &mut usize,
@@ -181,6 +191,7 @@ fn delete_prev_char_at_cursor(
     true
 }
 
+/// Performs the delete next char at cursor operation.
 fn delete_next_char_at_cursor(
     input_buf: &mut [u8],
     input_len: &mut usize,

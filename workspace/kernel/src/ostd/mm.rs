@@ -72,12 +72,14 @@ impl PhysAddr {
 }
 
 impl From<u64> for PhysAddr {
+    /// Performs the from operation.
     fn from(addr: u64) -> Self {
         Self::new(addr)
     }
 }
 
 impl From<PhysAddr> for u64 {
+    /// Performs the from operation.
     fn from(addr: PhysAddr) -> u64 {
         addr.as_u64()
     }
@@ -141,12 +143,14 @@ impl VirtAddr {
 }
 
 impl From<u64> for VirtAddr {
+    /// Performs the from operation.
     fn from(addr: u64) -> Self {
         Self::new(addr)
     }
 }
 
 impl From<VirtAddr> for u64 {
+    /// Performs the from operation.
     fn from(addr: VirtAddr) -> u64 {
         addr.as_u64()
     }
@@ -311,6 +315,7 @@ impl MappedPages {
 }
 
 impl Drop for MappedPages {
+    /// Performs the drop operation.
     fn drop(&mut self) {
         if self.owned {
             // Calculate page count
@@ -328,6 +333,7 @@ impl Drop for MappedPages {
 }
 
 impl core::fmt::Debug for MappedPages {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MappedPages")
             .field("start", &self.start_vaddr)
@@ -363,6 +369,7 @@ impl AllocatedPages {
 }
 
 impl Drop for AllocatedPages {
+    /// Performs the drop operation.
     fn drop(&mut self) {
         // Deallocate the frames using the buddy allocator
         // SAFETY: we own these pages and are responsible for deallocation
@@ -531,6 +538,7 @@ impl Vmar {
 }
 
 impl core::fmt::Debug for Vmar {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Vmar")
             .field("base", &self.base)

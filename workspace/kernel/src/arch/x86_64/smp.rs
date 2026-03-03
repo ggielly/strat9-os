@@ -123,7 +123,9 @@ smp_trampoline_end:
 );
 
 unsafe extern "C" {
+    /// Performs the smp trampoline operation.
     fn smp_trampoline();
+    /// Performs the smp trampoline end operation.
     fn smp_trampoline_end();
 }
 
@@ -134,6 +136,7 @@ fn udelay(us: u32) {
     }
 }
 
+/// Performs the ensure identity mapping operation.
 fn ensure_identity_mapping(phys_start: u64, length: usize) {
     let start = phys_start & !0xFFFu64;
     let end = (phys_start + length as u64 + 0xFFF) & !0xFFFu64;
@@ -161,6 +164,7 @@ fn ensure_identity_mapping(phys_start: u64, length: usize) {
     }
 }
 
+/// Performs the copy trampoline operation.
 fn copy_trampoline(cr3_phys: u64, stacks_ptr: *const u64) {
     let tramp_len = (smp_trampoline_end as *const u8 as usize)
         .saturating_sub(smp_trampoline as *const u8 as usize);
@@ -178,6 +182,7 @@ fn copy_trampoline(cr3_phys: u64, stacks_ptr: *const u64) {
     }
 }
 
+/// Performs the wait delivery operation.
 fn wait_delivery() {
     const DELIVERY_STATUS: u32 = 1 << 12;
     for _ in 0..1_000_000 {
@@ -191,6 +196,7 @@ fn wait_delivery() {
     log::warn!("SMP: IPI delivery timeout");
 }
 
+/// Performs the send ipi operation.
 fn send_ipi(apic_id: u32, value: u32) {
     unsafe {
         apic::write_reg(apic::REG_ESR, 0);
@@ -201,6 +207,7 @@ fn send_ipi(apic_id: u32, value: u32) {
     wait_delivery();
 }
 
+/// Performs the send init sipi operation.
 fn send_init_sipi(apic_id: u32) {
     // INIT IPI (assert)
     send_ipi(apic_id, 0x0000_c500);

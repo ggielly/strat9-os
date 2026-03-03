@@ -24,6 +24,7 @@ pub fn get_cwd() -> String {
     SHELL_CWD.lock().clone()
 }
 
+/// Sets cwd.
 fn set_cwd(path: String) {
     *SHELL_CWD.lock() = path;
 }
@@ -205,6 +206,7 @@ pub fn cmd_scheme(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the cmd mount operation.
 pub fn cmd_mount(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() || args[0] == "ls" {
         shell_println!("Mount points:");
@@ -242,6 +244,7 @@ pub fn cmd_mount(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the cmd umount operation.
 pub fn cmd_umount(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 1 {
         shell_println!("Usage: umount <target>");

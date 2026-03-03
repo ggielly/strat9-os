@@ -3,6 +3,7 @@
 
 use std::{env, path::PathBuf, process::Command};
 
+/// Entry point for this component.
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -52,6 +53,8 @@ fn main() {
     let status = Command::new("nasm")
         .arg("-f")
         .arg("bin")
+        .arg("-I")
+        .arg(format!("{}/", asm_dir.display()))
         .arg("-o")
         .arg(&stage1_bin)
         .arg(&stage1_src)

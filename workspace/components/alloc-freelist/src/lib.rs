@@ -23,11 +23,13 @@ macro_rules! define_freelist_allocator {
         const __MIN_BLOCK_SIZE: usize = core::mem::size_of::<__FreeNode>();
 
         #[inline]
+        /// Implements align up.
         fn __align_up(v: usize, align: usize) -> usize {
             (v + align - 1) & !(align - 1)
         }
 
         #[inline]
+        /// Implements lock alloc.
         fn __lock_alloc() {
             while __ALLOC_LOCK
                 .compare_exchange(
@@ -43,17 +45,20 @@ macro_rules! define_freelist_allocator {
         }
 
         #[inline]
+        /// Implements unlock alloc.
         fn __unlock_alloc() {
             __ALLOC_LOCK.store(0, core::sync::atomic::Ordering::Release);
         }
 
         #[inline]
+        /// Implements alloc size.
         fn __alloc_size(layout: core::alloc::Layout) -> usize {
             __align_up(layout.size().max(__MIN_BLOCK_SIZE), __MIN_BLOCK_SIZE)
         }
 
         unsafe impl core::alloc::GlobalAlloc for $name {
             #[allow(unsafe_op_in_unsafe_fn)]
+            /// Implements alloc.
             unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
                 let align = layout.align().max(__MIN_ALIGN);
                 let size = __alloc_size(layout);
@@ -127,6 +132,7 @@ macro_rules! define_freelist_allocator {
             }
 
             #[allow(unsafe_op_in_unsafe_fn)]
+            /// Implements dealloc.
             unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
                 if ptr.is_null() {
                     return;
@@ -201,11 +207,13 @@ macro_rules! define_freelist_brk_allocator {
         const __MIN_BLOCK_SIZE: usize = core::mem::size_of::<__FreeNode>();
 
         #[inline]
+        /// Implements align up.
         fn __align_up(v: usize, align: usize) -> usize {
             (v + align - 1) & !(align - 1)
         }
 
         #[inline]
+        /// Implements lock alloc.
         fn __lock_alloc() {
             while __ALLOC_LOCK
                 .compare_exchange(
@@ -221,17 +229,20 @@ macro_rules! define_freelist_brk_allocator {
         }
 
         #[inline]
+        /// Implements unlock alloc.
         fn __unlock_alloc() {
             __ALLOC_LOCK.store(0, core::sync::atomic::Ordering::Release);
         }
 
         #[inline]
+        /// Implements alloc size.
         fn __alloc_size(layout: core::alloc::Layout) -> usize {
             __align_up(layout.size().max(__MIN_BLOCK_SIZE), __MIN_BLOCK_SIZE)
         }
 
         unsafe impl core::alloc::GlobalAlloc for $name {
             #[allow(unsafe_op_in_unsafe_fn)]
+            /// Implements alloc.
             unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
                 let align = layout.align().max(__MIN_ALIGN);
                 let size = __alloc_size(layout);
@@ -319,6 +330,7 @@ macro_rules! define_freelist_brk_allocator {
             }
 
             #[allow(unsafe_op_in_unsafe_fn)]
+            /// Implements dealloc.
             unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
                 if ptr.is_null() {
                     return;

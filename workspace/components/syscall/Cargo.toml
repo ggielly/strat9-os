@@ -6,6 +6,7 @@ license = "GPL-3.0-or-later"
 authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 
 [dependencies]
+strat9-abi = { workspace = true }
 bitflags = "2.4"
 zerocopy = { workspace = true }
 num_enum = { version = "0.7", default-features = false }

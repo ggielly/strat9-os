@@ -1,4 +1,7 @@
-use super::scheme::{DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_DIR, DT_REG};
+use super::scheme::{
+    finalize_pseudo_stat, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
+    DEV_IPCFS, DT_DIR, DT_REG,
+};
 use crate::{
     ipc::{
         semaphore::{self, SemId},
@@ -32,6 +35,7 @@ pub struct IpcControlScheme {
 }
 
 impl IpcControlScheme {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             next_file_id: AtomicU64::new(1),
@@ -39,6 +43,7 @@ impl IpcControlScheme {
         }
     }
 
+    /// Allocates handle.
     fn alloc_handle(&self, kind: HandleKind) -> u64 {
         let id = self.next_file_id.fetch_add(1, Ordering::Relaxed);
         self.handles.lock().insert(
@@ -51,11 +56,13 @@ impl IpcControlScheme {
         id
     }
 
+    /// Parses u64.
     fn parse_u64(path: &str) -> Result<u64, SyscallError> {
         path.parse::<u64>()
             .map_err(|_| SyscallError::InvalidArgument)
     }
 
+    /// Reads static.
     fn read_static(offset: u64, out: &mut [u8], s: &str) -> usize {
         let bytes = s.as_bytes();
         let start = offset as usize;
@@ -67,6 +74,7 @@ impl IpcControlScheme {
         n
     }
 
+    /// Handles mut.
     fn handle_mut<R>(
         &self,
         file_id: u64,
@@ -79,6 +87,7 @@ impl IpcControlScheme {
 }
 
 impl Scheme for IpcControlScheme {
+    /// Performs the open operation.
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         let p = path.trim_matches('/');
         let kind = if p.is_empty() {
@@ -137,6 +146,7 @@ impl Scheme for IpcControlScheme {
         })
     }
 
+    /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         self.handle_mut(file_id, |state| match state.kind {
             HandleKind::Root => Ok(Self::read_static(offset, buf, "shm\nsem\n")),
@@ -164,6 +174,7 @@ impl Scheme for IpcControlScheme {
         })
     }
 
+    /// Performs the write operation.
     fn write(&self, file_id: u64, _offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         let cmd = core::str::from_utf8(buf)
             .map_err(|_| SyscallError::InvalidArgument)?
@@ -238,6 +249,7 @@ impl Scheme for IpcControlScheme {
         })
     }
 
+    /// Performs the close operation.
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
         let state = self
             .handles
@@ -255,6 +267,7 @@ impl Scheme for IpcControlScheme {
         Ok(())
     }
 
+    /// Performs the unlink operation.
     fn unlink(&self, path: &str) -> Result<(), SyscallError> {
         crate::silo::require_silo_admin()?;
         let p = path.trim_matches('/');
@@ -271,6 +284,7 @@ impl Scheme for IpcControlScheme {
         Err(SyscallError::InvalidArgument)
     }
 
+    /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         self.handle_mut(file_id, |state| {
             let (mode, size) = match state.kind {
@@ -281,17 +295,19 @@ impl Scheme for IpcControlScheme {
                 }
                 HandleKind::Sem(_) => (0o100660, 0),
             };
-            Ok(FileStat {
+            Ok(finalize_pseudo_stat(FileStat {
                 st_ino: file_id,
                 st_mode: mode,
                 st_nlink: 1,
                 st_size: size,
                 st_blksize: 4096,
                 st_blocks: (size + 511) / 512,
-            })
+                ..FileStat::zeroed()
+            }, DEV_IPCFS, 0))
         })
     }
 
+    /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         self.handle_mut(file_id, |state| match state.kind {
             HandleKind::Root => Ok(vec![

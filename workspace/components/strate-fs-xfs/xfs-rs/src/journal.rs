@@ -109,6 +109,7 @@ impl TransactionHeader {
 
     // "TRNS"
 
+    /// Converts this value to bytes.
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
         buf[0..4].copy_from_slice(&self.magic.to_be_bytes());
@@ -324,6 +325,7 @@ pub struct SyncMarker {
 }
 
 impl SyncMarker {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             dirty: false,
@@ -331,10 +333,12 @@ impl SyncMarker {
         }
     }
 
+    /// Implements mark dirty.
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
+    /// Implements mark clean.
     pub fn mark_clean(&mut self, timestamp: u64) {
         self.dirty = false;
         self.last_sync = timestamp;
@@ -342,6 +346,7 @@ impl SyncMarker {
 }
 
 impl Default for SyncMarker {
+    /// Implements default.
     fn default() -> Self {
         Self::new()
     }

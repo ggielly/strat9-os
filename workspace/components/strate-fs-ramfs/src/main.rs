@@ -26,10 +26,12 @@ const HEAP_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
 static mut HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
 #[alloc_error_handler]
+/// Implements oom.
 fn oom(_: Layout) -> ! {
     call::exit(12)
 }
 
+/// Implements exit.
 fn exit(code: usize) -> ! {
     call::exit(code)
 }
@@ -63,6 +65,7 @@ struct StrateRamServer {
 }
 
 impl StrateRamServer {
+    /// Creates a new instance.
     fn new() -> Self {
         Self {
             fs: RamFileSystem::new(),
@@ -70,6 +73,7 @@ impl StrateRamServer {
         }
     }
 
+    /// Implements sanitize label.
     fn sanitize_label(raw: &str) -> String {
         let mut out = String::new();
         for b in raw.bytes().take(31) {
@@ -83,6 +87,7 @@ impl StrateRamServer {
         }
     }
 
+    /// Parses bootstrap label.
     fn parse_bootstrap_label(payload: &[u8]) -> String {
         let len = payload.first().copied().unwrap_or(0) as usize;
         if len == 0 {
@@ -98,6 +103,7 @@ impl StrateRamServer {
         }
     }
 
+    /// Implements bind srv alias.
     fn bind_srv_alias(&mut self, port: u64, label: &str) {
         if self.alias_label.as_deref() == Some(label) {
             return;
@@ -108,6 +114,7 @@ impl StrateRamServer {
         }
     }
 
+    /// Implements ok reply.
     fn ok_reply(sender: u64) -> IpcMessage {
         let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
         reply.sender = sender;
@@ -115,6 +122,7 @@ impl StrateRamServer {
         reply
     }
 
+    /// Implements err reply.
     fn err_reply(sender: u64, status: u32) -> IpcMessage {
         let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
         reply.sender = sender;
@@ -122,18 +130,21 @@ impl StrateRamServer {
         reply
     }
 
+    /// Reads u16.
     fn read_u16(payload: &[u8], start: usize) -> core::result::Result<u16, u32> {
         let end = start.checked_add(2).ok_or(EINVAL as u32)?;
         let bytes = payload.get(start..end).ok_or(EINVAL as u32)?;
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
+    /// Reads u32.
     fn read_u32(payload: &[u8], start: usize) -> core::result::Result<u32, u32> {
         let end = start.checked_add(4).ok_or(EINVAL as u32)?;
         let bytes = payload.get(start..end).ok_or(EINVAL as u32)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    /// Reads u64.
     fn read_u64(payload: &[u8], start: usize) -> core::result::Result<u64, u32> {
         let end = start.checked_add(8).ok_or(EINVAL as u32)?;
         let bytes = payload.get(start..end).ok_or(EINVAL as u32)?;
@@ -142,6 +153,7 @@ impl StrateRamServer {
         ]))
     }
 
+    /// Implements fs status.
     fn fs_status(err: FsError) -> u32 {
         let code: strat9_syscall::error::Error = err.into();
         code.to_errno() as u32
@@ -162,6 +174,7 @@ impl StrateRamServer {
         core::str::from_utf8(path_bytes).map_err(|_| EINVAL as u32)
     }
 
+    /// Implements dirent type.
     fn dirent_type(file_type: VfsFileType) -> u8 {
         match file_type {
             VfsFileType::RegularFile => 8, // DT_REG
@@ -182,6 +195,7 @@ impl StrateRamServer {
         Ok((parent_path, name))
     }
 
+    /// Implements handle open.
     fn handle_open(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let flags = match Self::read_u32(payload, 0) {
             Ok(v) => v,
@@ -245,6 +259,7 @@ impl StrateRamServer {
         reply
     }
 
+    /// Implements handle read.
     fn handle_read(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let ino = match Self::read_u64(payload, 0) {
             Ok(v) => v,
@@ -274,6 +289,7 @@ impl StrateRamServer {
         reply
     }
 
+    /// Implements handle create.
     fn handle_create(&mut self, sender: u64, payload: &[u8], is_dir: bool) -> IpcMessage {
         let mode = match Self::read_u32(payload, 0) {
             Ok(v) => v,
@@ -309,6 +325,7 @@ impl StrateRamServer {
         }
     }
 
+    /// Implements handle write.
     fn handle_write(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let ino = match Self::read_u64(payload, 0) {
             Ok(v) => v,
@@ -343,6 +360,7 @@ impl StrateRamServer {
         reply
     }
 
+    /// Implements handle close.
     fn handle_close(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let ino = match Self::read_u64(payload, 0) {
             Ok(v) => v,
@@ -356,6 +374,7 @@ impl StrateRamServer {
         }
     }
 
+    /// Implements handle unlink.
     fn handle_unlink(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let path = match Self::parse_path(payload, 0, 2, MAX_UNLINK_PATH) {
             Ok(path) => path,
@@ -379,6 +398,7 @@ impl StrateRamServer {
         }
     }
 
+    /// Implements handle readdir.
     fn handle_readdir(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let ino = match Self::read_u64(payload, 0) {
             Ok(v) => v,
@@ -444,6 +464,7 @@ impl StrateRamServer {
         reply
     }
 
+    /// Implements serve.
     fn serve(&mut self, port: u64) -> ! {
         loop {
             let mut msg = IpcMessage::new(0);
@@ -473,6 +494,7 @@ impl StrateRamServer {
 }
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     unsafe {
         ALLOCATOR.lock().init(HEAP.as_mut_ptr(), HEAP_SIZE);
@@ -491,6 +513,7 @@ pub extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_: &PanicInfo) -> ! {
     exit(255);
 }

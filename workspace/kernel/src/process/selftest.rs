@@ -8,6 +8,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+/// Performs the wait task exit operation.
 fn wait_task_exit(name: &'static str, timeout_ticks: u64) -> bool {
     let start = ticks();
     loop {
@@ -26,6 +27,7 @@ fn wait_task_exit(name: &'static str, timeout_ticks: u64) -> bool {
     }
 }
 
+/// Performs the wait until operation.
 fn wait_until(timeout_ticks: u64, mut cond: impl FnMut() -> bool) -> bool {
     let start = ticks();
     loop {
@@ -39,6 +41,7 @@ fn wait_until(timeout_ticks: u64, mut cond: impl FnMut() -> bool) -> bool {
     }
 }
 
+/// Reads initfs.
 fn read_initfs(path: &str) -> Option<Vec<u8>> {
     let fd = vfs::open(path, vfs::OpenFlags::READ).ok()?;
     let data = vfs::read_all(fd).ok();
@@ -46,6 +49,7 @@ fn read_initfs(path: &str) -> Option<Vec<u8>> {
     data
 }
 
+/// Performs the run strate lifecycle e2e operation.
 fn run_strate_lifecycle_e2e() -> bool {
     crate::serial_println!("[selftest][strate] start");
     let ram = match read_initfs("/initfs/strate-fs-ramfs") {
@@ -123,6 +127,7 @@ fn run_strate_lifecycle_e2e() -> bool {
     true
 }
 
+/// Performs the selftest orchestrator operation.
 extern "C" fn selftest_orchestrator() -> ! {
     crate::serial_println!("[selftest] orchestrator start");
 
@@ -151,6 +156,27 @@ extern "C" fn selftest_orchestrator() -> ! {
     let _ = wait_task_exit("ipc-sem-poster", 2_000);
     let _ = wait_task_exit("ipc-04-05-test", 3_000);
 
+    crate::process::vfs_stat_test::create_vfs_stat_test_task();
+    let _ = wait_task_exit("vfs-stat-test", 3_000);
+
+    crate::process::abi_layout_test::create_abi_layout_test_task();
+    let _ = wait_task_exit("abi-layout-test", 2_000);
+
+    crate::process::vfs_ops_test::create_vfs_ops_test_task();
+    let _ = wait_task_exit("vfs-ops-test", 5_000);
+
+    crate::process::process_id_test::create_process_id_test_task();
+    let _ = wait_task_exit("proc-id-test", 2_000);
+
+    crate::process::time_test::create_time_test_task();
+    let _ = wait_task_exit("time-test", 15_000);
+
+    crate::process::pipe_test::create_pipe_test_task();
+    let _ = wait_task_exit("pipe-test", 3_000);
+
+    crate::process::errno_test::create_errno_test_task();
+    let _ = wait_task_exit("errno-test", 3_000);
+
     let strate_ok = run_strate_lifecycle_e2e();
     if strate_ok {
         crate::serial_println!("[selftest][strate] PASS");
@@ -162,6 +188,7 @@ extern "C" fn selftest_orchestrator() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Creates selftest tasks.
 pub fn create_selftest_tasks() {
     match Task::new_kernel_task(
         selftest_orchestrator,

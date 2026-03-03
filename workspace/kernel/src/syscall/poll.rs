@@ -10,6 +10,7 @@ const POLLNVAL: i16 = 0x0020;
 
 const POLLFD_SIZE: usize = 8; // sizeof(pollfd) = i32 + i16 + i16
 
+/// Reads pollfd.
 fn read_pollfd(buf: &[u8], i: usize) -> (i32, i16) {
     let off = i * POLLFD_SIZE;
     let fd = i32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
@@ -17,6 +18,7 @@ fn read_pollfd(buf: &[u8], i: usize) -> (i32, i16) {
     (fd, events)
 }
 
+/// Writes revents.
 fn write_revents(buf: &mut [u8], i: usize, revents: i16) {
     let off = i * POLLFD_SIZE + 6;
     let bytes = revents.to_le_bytes();
@@ -24,6 +26,7 @@ fn write_revents(buf: &mut [u8], i: usize, revents: i16) {
     buf[off + 1] = bytes[1];
 }
 
+/// Performs the sys poll operation.
 pub fn sys_poll(fds_ptr: u64, nfds: u64, _timeout_ms: u64) -> Result<u64, SyscallError> {
     if nfds == 0 {
         return Ok(0);

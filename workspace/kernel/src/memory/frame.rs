@@ -42,6 +42,7 @@ pub struct FrameRangeInclusive {
 impl Iterator for FrameRangeInclusive {
     type Item = PhysFrame;
 
+    /// Performs the next operation.
     fn next(&mut self) -> Option<Self::Item> {
         if self.start <= self.end {
             let frame = self.start;

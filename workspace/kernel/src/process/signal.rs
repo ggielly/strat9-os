@@ -145,6 +145,7 @@ pub struct SignalSet {
 }
 
 impl Clone for SignalSet {
+    /// Performs the clone operation.
     fn clone(&self) -> Self {
         Self::from_mask(self.get_mask())
     }
@@ -270,16 +271,21 @@ pub struct SigActionData {
 }
 
 impl SigActionData {
+    /// Builds a default instance.
     pub const fn default() -> Self {
         Self { handler: SIG_DFL, flags: 0, restorer: 0, mask: 0 }
     }
 
+    /// Returns whether default.
     pub fn is_default(&self) -> bool { self.handler == SIG_DFL }
+    /// Returns whether ignore.
     pub fn is_ignore(&self) -> bool { self.handler == SIG_IGN }
+    /// Returns whether user handler.
     pub fn is_user_handler(&self) -> bool { self.handler > 1 }
 }
 
 impl Default for SigActionData {
+    /// Builds a default instance.
     fn default() -> Self { Self::default() }
 }
 
@@ -293,6 +299,7 @@ pub enum DefaultAction {
 }
 
 impl Signal {
+    /// Performs the default action operation.
     pub fn default_action(self) -> DefaultAction {
         match self {
             Signal::SIGHUP | Signal::SIGINT | Signal::SIGPIPE |
@@ -346,6 +353,7 @@ pub struct SignalFrame {
     pub magic: u64,
 }
 
+/// Performs the deliver pending signal operation.
 pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool {
     let task = match crate::process::current_task_clone() {
         Some(t) => t,

@@ -8,6 +8,7 @@ pub mod usb;
 pub mod video;
 pub mod virtio;
 
+/// Performs the init operation.
 pub fn init() {
     nic::init();
     timer::init();

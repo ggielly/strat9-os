@@ -43,6 +43,7 @@ pub enum BlockDeviceError {
 }
 
 impl fmt::Display for BlockDeviceError {
+    /// Implements fmt.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BlockDeviceError::Io => write!(f, "I/O error"),

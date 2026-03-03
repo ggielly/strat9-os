@@ -1,5 +1,6 @@
 use std::env;
 
+/// Entry point for this component.
 fn main() {
     // Get the kernel directory and add it to linker search path
     let manifest_dir = match env::var("CARGO_MANIFEST_DIR") {
