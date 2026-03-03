@@ -26,10 +26,12 @@ use alloc::{
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
+    process::current_task_clone,
     sync::SpinLock,
     syscall::error::SyscallError,
     vfs::scheme::{
-        DT_DIR, DT_LNK, DT_REG, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
+        DEV_RAMFS, DT_DIR, DT_LNK, DT_REG, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult,
+        Scheme,
     },
 };
 
@@ -51,6 +53,12 @@ struct RamInode {
     kind: RamKind,
     /// Unix permission bits including file-type high bits (e.g. `0o100_644`).
     mode: u32,
+    uid: u32,
+    gid: u32,
+    atime_ns: u64,
+    mtime_ns: u64,
+    ctime_ns: u64,
+    rdev: u64,
 }
 
 impl RamInode {
@@ -74,8 +82,24 @@ struct RamState {
 }
 
 impl RamState {
+    fn now_ns() -> u64 {
+        crate::syscall::time::current_time_ns()
+    }
+
+    fn current_ids() -> (u32, u32) {
+        if let Some(task) = current_task_clone() {
+            (
+                task.uid.load(Ordering::Relaxed),
+                task.gid.load(Ordering::Relaxed),
+            )
+        } else {
+            (0, 0)
+        }
+    }
+
     fn new() -> Self {
         let mut inodes = BTreeMap::new();
+        let now = Self::now_ns();
         inodes.insert(
             INO_ROOT,
             RamInode {
@@ -84,6 +108,12 @@ impl RamState {
                     children: BTreeMap::new(),
                 },
                 mode: 0o040_755, // drwxr-xr-x
+                uid: 0,
+                gid: 0,
+                atime_ns: now,
+                mtime_ns: now,
+                ctime_ns: now,
+                rdev: 0,
             },
         );
         RamState { inodes }
@@ -214,6 +244,7 @@ impl RamfsScheme {
     pub fn insert_file(&self, name: &str, content: &[u8]) {
         let ino = self.alloc_ino();
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
         st.inodes.insert(
             ino,
             RamInode {
@@ -222,11 +253,19 @@ impl RamfsScheme {
                     data: content.to_vec(),
                 },
                 mode: 0o100_444, // -r--r--r--
+                uid: 0,
+                gid: 0,
+                atime_ns: now,
+                mtime_ns: now,
+                ctime_ns: now,
+                rdev: 0,
             },
         );
         if let Some(root) = st.inodes.get_mut(&INO_ROOT) {
             if let RamKind::Dir { ref mut children } = root.kind {
                 children.insert(String::from(name), ino);
+                root.mtime_ns = now;
+                root.ctime_ns = now;
             }
         }
     }
@@ -240,11 +279,13 @@ impl Scheme for RamfsScheme {
 
         if flags.contains(OpenFlags::CREATE) {
             let mut st = self.state.lock();
+            let now = RamState::now_ns();
 
             if let Some(ino) = st.lookup(path) {
                 // Entry already exists — succeed (POSIX O_CREAT without O_EXCL).
                 let inode = st.inodes.get_mut(&ino).unwrap();
                 if inode.is_dir() {
+                    inode.atime_ns = now;
                     return Ok(OpenResult {
                         file_id: ino,
                         size: Some(0),
@@ -255,7 +296,10 @@ impl Scheme for RamfsScheme {
                     if let RamKind::File { ref mut data } = inode.kind {
                         data.clear();
                     }
+                    inode.mtime_ns = now;
+                    inode.ctime_ns = now;
                 }
+                inode.atime_ns = now;
                 let size = inode.byte_size();
                 return Ok(OpenResult {
                     file_id: ino,
@@ -271,17 +315,26 @@ impl Scheme for RamfsScheme {
                 return Err(SyscallError::InvalidArgument);
             }
             let new_ino = self.next_ino.fetch_add(1, Ordering::Relaxed);
+            let (uid, gid) = RamState::current_ids();
             st.inodes.insert(
                 new_ino,
                 RamInode {
                     ino: new_ino,
                     kind: RamKind::File { data: Vec::new() },
                     mode: 0o100_644,
+                    uid,
+                    gid,
+                    atime_ns: now,
+                    mtime_ns: now,
+                    ctime_ns: now,
+                    rdev: 0,
                 },
             );
             if let Some(parent) = st.inodes.get_mut(&parent_ino) {
                 if let RamKind::Dir { ref mut children } = parent.kind {
                     children.insert(String::from(name), new_ino);
+                    parent.mtime_ns = now;
+                    parent.ctime_ns = now;
                 }
             }
             return Ok(OpenResult {
@@ -292,9 +345,11 @@ impl Scheme for RamfsScheme {
         }
 
         // Normal open (no O_CREAT).
-        let st = self.state.lock();
+        let mut st = self.state.lock();
+        let now = RamState::now_ns();
         let ino = st.lookup(path).ok_or(SyscallError::NotFound)?;
-        let inode = st.inodes.get(&ino).unwrap();
+        let inode = st.inodes.get_mut(&ino).unwrap();
+        inode.atime_ns = now;
 
         if inode.is_dir() {
             Ok(OpenResult {
@@ -314,16 +369,19 @@ impl Scheme for RamfsScheme {
     // ── read ─────────────────────────────────────────────────────────────────
 
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let st = self.state.lock();
-        let inode = st.inodes.get(&file_id).ok_or(SyscallError::BadHandle)?;
+        let mut st = self.state.lock();
+        let now = RamState::now_ns();
+        let inode = st.inodes.get_mut(&file_id).ok_or(SyscallError::BadHandle)?;
         match &inode.kind {
             RamKind::File { data } => {
                 let start = offset as usize;
                 if start >= data.len() {
+                    inode.atime_ns = now;
                     return Ok(0);
                 }
                 let n = (data.len() - start).min(buf.len());
                 buf[..n].copy_from_slice(&data[start..start + n]);
+                inode.atime_ns = now;
                 Ok(n)
             }
             RamKind::Dir { .. } | RamKind::Symlink { .. } => Err(SyscallError::InvalidArgument),
@@ -334,6 +392,7 @@ impl Scheme for RamfsScheme {
 
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
         let inode = st.inodes.get_mut(&file_id).ok_or(SyscallError::BadHandle)?;
         match &mut inode.kind {
             RamKind::File { ref mut data } => {
@@ -343,6 +402,8 @@ impl Scheme for RamfsScheme {
                     data.resize(end, 0);
                 }
                 data[start..end].copy_from_slice(buf);
+                inode.mtime_ns = now;
+                inode.ctime_ns = now;
                 Ok(buf.len())
             }
             RamKind::Dir { .. } | RamKind::Symlink { .. } => Err(SyscallError::InvalidArgument),
@@ -367,10 +428,13 @@ impl Scheme for RamfsScheme {
 
     fn truncate(&self, file_id: u64, new_size: u64) -> Result<(), SyscallError> {
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
         let inode = st.inodes.get_mut(&file_id).ok_or(SyscallError::BadHandle)?;
         match &mut inode.kind {
             RamKind::File { ref mut data } => {
                 data.resize(new_size as usize, 0);
+                inode.mtime_ns = now;
+                inode.ctime_ns = now;
                 Ok(())
             }
             RamKind::Dir { .. } | RamKind::Symlink { .. } => Err(SyscallError::InvalidArgument),
@@ -382,6 +446,8 @@ impl Scheme for RamfsScheme {
     fn create_file(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
         let path = path.trim_matches('/');
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
+        let (uid, gid) = RamState::current_ids();
 
         if st.lookup(path).is_some() {
             return Err(SyscallError::AlreadyExists);
@@ -401,11 +467,19 @@ impl Scheme for RamfsScheme {
                 ino: new_ino,
                 kind: RamKind::File { data: Vec::new() },
                 mode: file_mode,
+                uid,
+                gid,
+                atime_ns: now,
+                mtime_ns: now,
+                ctime_ns: now,
+                rdev: 0,
             },
         );
         if let Some(parent) = st.inodes.get_mut(&parent_ino) {
             if let RamKind::Dir { ref mut children } = parent.kind {
                 children.insert(String::from(name), new_ino);
+                parent.mtime_ns = now;
+                parent.ctime_ns = now;
             }
         }
 
@@ -421,6 +495,8 @@ impl Scheme for RamfsScheme {
     fn create_directory(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
         let path = path.trim_matches('/');
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
+        let (uid, gid) = RamState::current_ids();
 
         // Idempotent: return Ok if it already exists as a directory.
         if let Some(ino) = st.lookup(path) {
@@ -450,11 +526,19 @@ impl Scheme for RamfsScheme {
                     children: BTreeMap::new(),
                 },
                 mode: dir_mode,
+                uid,
+                gid,
+                atime_ns: now,
+                mtime_ns: now,
+                ctime_ns: now,
+                rdev: 0,
             },
         );
         if let Some(parent) = st.inodes.get_mut(&parent_ino) {
             if let RamKind::Dir { ref mut children } = parent.kind {
                 children.insert(String::from(name), new_ino);
+                parent.mtime_ns = now;
+                parent.ctime_ns = now;
             }
         }
 
@@ -474,6 +558,7 @@ impl Scheme for RamfsScheme {
         }
 
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
         let ino = st.lookup(path).ok_or(SyscallError::NotFound)?;
 
         // Refuse to remove a non-empty directory.
@@ -489,6 +574,8 @@ impl Scheme for RamfsScheme {
         if let Some(parent) = st.inodes.get_mut(&parent_ino) {
             if let RamKind::Dir { ref mut children } = parent.kind {
                 children.remove(name);
+                parent.mtime_ns = now;
+                parent.ctime_ns = now;
             }
         }
         if st
@@ -517,12 +604,19 @@ impl Scheme for RamfsScheme {
         };
 
         Ok(FileStat {
+            st_dev: DEV_RAMFS,
             st_ino: file_id,
             st_mode,
             st_nlink,
+            st_uid: inode.uid,
+            st_gid: inode.gid,
+            st_rdev: inode.rdev,
             st_size,
             st_blksize: 4096,
             st_blocks: (st_size + 511) / 512,
+            st_atime: strat9_abi::data::TimeSpec::from_nanos(inode.atime_ns),
+            st_mtime: strat9_abi::data::TimeSpec::from_nanos(inode.mtime_ns),
+            st_ctime: strat9_abi::data::TimeSpec::from_nanos(inode.ctime_ns),
             ..FileStat::zeroed()
         })
     }
@@ -530,29 +624,39 @@ impl Scheme for RamfsScheme {
     // ── readdir ──────────────────────────────────────────────────────────────
 
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
-        let st = self.state.lock();
-        let inode = st.inodes.get(&file_id).ok_or(SyscallError::BadHandle)?;
-
-        match &inode.kind {
-            RamKind::Dir { children } => {
-                let mut entries = Vec::with_capacity(children.len());
-                for (name, &child_ino) in children.iter() {
-                    let file_type = match st.inodes.get(&child_ino).map(|c| &c.kind) {
-                        Some(RamKind::Dir { .. }) => DT_DIR,
-                        Some(RamKind::Symlink { .. }) => DT_LNK,
-                        _ => DT_REG,
-                    };
-                    entries.push(DirEntry {
-                        ino: child_ino,
-                        file_type,
-                        name: name.clone(),
-                    });
+        let mut st = self.state.lock();
+        let now = RamState::now_ns();
+        let children_snapshot: Vec<(String, u64)> = {
+            let inode = st.inodes.get(&file_id).ok_or(SyscallError::BadHandle)?;
+            match &inode.kind {
+                RamKind::Dir { children } => children
+                    .iter()
+                    .map(|(name, &child_ino)| (name.clone(), child_ino))
+                    .collect(),
+                RamKind::File { .. } | RamKind::Symlink { .. } => {
+                    return Err(SyscallError::InvalidArgument)
                 }
-                Ok(entries)
             }
-            RamKind::File { .. } => Err(SyscallError::InvalidArgument),
-            RamKind::Symlink { .. } => Err(SyscallError::InvalidArgument),
+        };
+
+        let mut entries = Vec::with_capacity(children_snapshot.len());
+        for (name, child_ino) in children_snapshot {
+            let file_type = match st.inodes.get(&child_ino).map(|c| &c.kind) {
+                Some(RamKind::Dir { .. }) => DT_DIR,
+                Some(RamKind::Symlink { .. }) => DT_LNK,
+                _ => DT_REG,
+            };
+            entries.push(DirEntry {
+                ino: child_ino,
+                file_type,
+                name,
+            });
         }
+
+        if let Some(inode) = st.inodes.get_mut(&file_id) {
+            inode.atime_ns = now;
+        }
+        Ok(entries)
     }
 
     // ── rename ──────────────────────────────────────────────────────────────
@@ -565,6 +669,7 @@ impl Scheme for RamfsScheme {
         }
 
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
         let ino = st.lookup(old_path).ok_or(SyscallError::NotFound)?;
 
         let (old_parent, old_name) = st.lookup_parent(old_path).ok_or(SyscallError::NotFound)?;
@@ -598,12 +703,19 @@ impl Scheme for RamfsScheme {
         if let Some(parent) = st.inodes.get_mut(&old_parent) {
             if let RamKind::Dir { ref mut children } = parent.kind {
                 children.remove(&old_name);
+                parent.mtime_ns = now;
+                parent.ctime_ns = now;
             }
         }
         if let Some(parent) = st.inodes.get_mut(&new_parent) {
             if let RamKind::Dir { ref mut children } = parent.kind {
                 children.insert(new_name, ino);
+                parent.mtime_ns = now;
+                parent.ctime_ns = now;
             }
+        }
+        if let Some(inode) = st.inodes.get_mut(&ino) {
+            inode.ctime_ns = now;
         }
         if let Some(existing) = existing {
             if !st.has_any_name_ref(existing) {
@@ -618,10 +730,12 @@ impl Scheme for RamfsScheme {
     fn chmod(&self, path: &str, mode: u32) -> Result<(), SyscallError> {
         let path = path.trim_matches('/');
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
         let ino = st.lookup(path).ok_or(SyscallError::NotFound)?;
         let inode = st.inodes.get_mut(&ino).ok_or(SyscallError::NotFound)?;
         let type_bits = inode.mode & 0o170_000;
         inode.mode = type_bits | (mode & 0o7777);
+        inode.ctime_ns = now;
         Ok(())
     }
 
@@ -629,9 +743,11 @@ impl Scheme for RamfsScheme {
 
     fn fchmod(&self, file_id: u64, mode: u32) -> Result<(), SyscallError> {
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
         let inode = st.inodes.get_mut(&file_id).ok_or(SyscallError::BadHandle)?;
         let type_bits = inode.mode & 0o170_000;
         inode.mode = type_bits | (mode & 0o7777);
+        inode.ctime_ns = now;
         Ok(())
     }
 
@@ -642,6 +758,7 @@ impl Scheme for RamfsScheme {
         let new_path = new_path.trim_matches('/');
 
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
         let ino = st.lookup(old_path).ok_or(SyscallError::NotFound)?;
 
         if st.inodes.get(&ino).map(|i| i.is_dir()).unwrap_or(false) {
@@ -655,7 +772,12 @@ impl Scheme for RamfsScheme {
         if let Some(parent) = st.inodes.get_mut(&parent_ino) {
             if let RamKind::Dir { ref mut children } = parent.kind {
                 children.insert(String::from(name), ino);
+                parent.mtime_ns = now;
+                parent.ctime_ns = now;
             }
+        }
+        if let Some(inode) = st.inodes.get_mut(&ino) {
+            inode.ctime_ns = now;
         }
         Ok(())
     }
@@ -669,6 +791,8 @@ impl Scheme for RamfsScheme {
         }
 
         let mut st = self.state.lock();
+        let now = RamState::now_ns();
+        let (uid, gid) = RamState::current_ids();
         if st.lookup(link_path).is_some() {
             return Err(SyscallError::AlreadyExists);
         }
@@ -681,11 +805,19 @@ impl Scheme for RamfsScheme {
                 ino: new_ino,
                 kind: RamKind::Symlink { target: String::from(target) },
                 mode: 0o120_777,
+                uid,
+                gid,
+                atime_ns: now,
+                mtime_ns: now,
+                ctime_ns: now,
+                rdev: 0,
             },
         );
         if let Some(parent) = st.inodes.get_mut(&parent_ino) {
             if let RamKind::Dir { ref mut children } = parent.kind {
                 children.insert(String::from(name), new_ino);
+                parent.mtime_ns = now;
+                parent.ctime_ns = now;
             }
         }
         Ok(())
@@ -695,11 +827,15 @@ impl Scheme for RamfsScheme {
 
     fn readlink(&self, path: &str) -> Result<String, SyscallError> {
         let path = path.trim_matches('/');
-        let st = self.state.lock();
+        let mut st = self.state.lock();
+        let now = RamState::now_ns();
         let ino = st.lookup(path).ok_or(SyscallError::NotFound)?;
-        let inode = st.inodes.get(&ino).ok_or(SyscallError::NotFound)?;
+        let inode = st.inodes.get_mut(&ino).ok_or(SyscallError::NotFound)?;
         match &inode.kind {
-            RamKind::Symlink { target } => Ok(target.clone()),
+            RamKind::Symlink { target } => {
+                inode.atime_ns = now;
+                Ok(target.clone())
+            }
             _ => Err(SyscallError::InvalidArgument),
         }
     }

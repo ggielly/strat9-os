@@ -7,9 +7,9 @@ This website is generated from:
 
 ## API reference
 
-- [strat9-abi crate](../api/strat9_abi/index.html)
-- [strat9-syscall crate](../api/strat9_syscall/index.html)
-- [Rustdoc index](../api/index.html)
+- [strat9-abi crate](./api/strat9_abi/index.html)
+- [strat9-syscall crate](./api/strat9_syscall/index.html)
+- [Rustdoc index](./api/index.html)
 
 ## Local generation
 

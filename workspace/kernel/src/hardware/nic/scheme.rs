@@ -6,7 +6,10 @@ use super::{get_device, list_interfaces};
 use crate::{
     syscall::error::SyscallError,
     vfs::{
-        scheme::{DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_REG},
+        scheme::{
+            finalize_pseudo_stat, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
+            DEV_NETFS, DT_REG,
+        },
         scheme_router,
     },
 };
@@ -111,7 +114,7 @@ impl Scheme for NetScheme {
         let h = self.handles.read();
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
         Ok(match handle {
-            Handle::Root => FileStat {
+            Handle::Root => finalize_pseudo_stat(FileStat {
                 st_ino: 0,
                 st_mode: 0o040555,
                 st_nlink: 2,
@@ -119,8 +122,8 @@ impl Scheme for NetScheme {
                 st_blksize: 1514,
                 st_blocks: 0,
                 ..FileStat::zeroed()
-            },
-            Handle::Iface(_) => FileStat {
+            }, DEV_NETFS, 0),
+            Handle::Iface(_) => finalize_pseudo_stat(FileStat {
                 st_ino: fid,
                 st_mode: 0o020666,
                 st_nlink: 1,
@@ -128,7 +131,7 @@ impl Scheme for NetScheme {
                 st_blksize: 1514,
                 st_blocks: 0,
                 ..FileStat::zeroed()
-            },
+            }, DEV_NETFS, fid),
         })
     }
 

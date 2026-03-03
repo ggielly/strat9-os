@@ -192,7 +192,7 @@ impl Pipe {
 // Pipe as a VFS Scheme
 // ============================================================================
 
-use super::scheme::{DirEntry, FileStat, OpenFlags, OpenResult, Scheme};
+use super::scheme::{finalize_pseudo_stat, DirEntry, FileStat, OpenFlags, OpenResult, Scheme, DEV_PIPEFS};
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -277,7 +277,7 @@ impl Scheme for PipeScheme {
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         let pipe = self.get_pipe(file_id)?;
         let inner = pipe.inner.lock();
-        Ok(FileStat {
+        Ok(finalize_pseudo_stat(FileStat {
             st_ino: file_id,
             st_mode: 0o010600, // S_IFIFO | rw-------
             st_nlink: 1,
@@ -285,7 +285,7 @@ impl Scheme for PipeScheme {
             st_blksize: PIPE_BUF_SIZE as u64,
             st_blocks: 0,
             ..FileStat::zeroed()
-        })
+        }, DEV_PIPEFS, 0))
     }
 
     fn readdir(&self, _file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {

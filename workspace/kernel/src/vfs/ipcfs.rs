@@ -1,4 +1,7 @@
-use super::scheme::{DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_DIR, DT_REG};
+use super::scheme::{
+    finalize_pseudo_stat, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
+    DEV_IPCFS, DT_DIR, DT_REG,
+};
 use crate::{
     ipc::{
         semaphore::{self, SemId},
@@ -281,7 +284,7 @@ impl Scheme for IpcControlScheme {
                 }
                 HandleKind::Sem(_) => (0o100660, 0),
             };
-            Ok(FileStat {
+            Ok(finalize_pseudo_stat(FileStat {
                 st_ino: file_id,
                 st_mode: mode,
                 st_nlink: 1,
@@ -289,7 +292,7 @@ impl Scheme for IpcControlScheme {
                 st_blksize: 4096,
                 st_blocks: (size + 511) / 512,
                 ..FileStat::zeroed()
-            })
+            }, DEV_IPCFS, 0))
         })
     }
 

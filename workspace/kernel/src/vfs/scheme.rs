@@ -156,6 +156,27 @@ pub trait Scheme: Send + Sync {
 /// Type-erased Scheme reference.
 pub type DynScheme = Arc<dyn Scheme>;
 
+pub const DEV_RAMFS: u64 = 1;
+pub const DEV_SYSFS: u64 = 2;
+pub const DEV_PROCFS: u64 = 3;
+pub const DEV_DEVFS: u64 = 4;
+pub const DEV_CONSOLE: u64 = 5;
+pub const DEV_PIPEFS: u64 = 6;
+pub const DEV_IPCFS: u64 = 7;
+pub const DEV_NETFS: u64 = 8;
+
+/// Finalize pseudo-filesystem stats with a stable device identity and
+/// synthetic timestamps.
+pub fn finalize_pseudo_stat(mut st: FileStat, st_dev: u64, st_rdev: u64) -> FileStat {
+    let now = strat9_abi::data::TimeSpec::from_nanos(crate::syscall::time::current_time_ns());
+    st.st_dev = st_dev;
+    st.st_rdev = st_rdev;
+    st.st_atime = now;
+    st.st_mtime = now;
+    st.st_ctime = now;
+    st
+}
+
 // ============================================================================
 // Built-in Schemes
 // ============================================================================
@@ -613,7 +634,7 @@ impl Scheme for KernelScheme {
 
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         if file_id == 0 {
-            return Ok(FileStat {
+            return Ok(finalize_pseudo_stat(FileStat {
                 st_ino: 0,
                 st_mode: 0o040555,
                 st_nlink: 2,
@@ -621,10 +642,10 @@ impl Scheme for KernelScheme {
                 st_blksize: 512,
                 st_blocks: 0,
                 ..FileStat::zeroed()
-            });
+            }, DEV_SYSFS, 0));
         }
         let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
-        Ok(FileStat {
+        Ok(finalize_pseudo_stat(FileStat {
             st_ino: file_id,
             st_mode: 0o100444,
             st_nlink: 1,
@@ -632,7 +653,7 @@ impl Scheme for KernelScheme {
             st_blksize: 512,
             st_blocks: ((file.len as u64) + 511) / 512,
             ..FileStat::zeroed()
-        })
+        }, DEV_SYSFS, 0))
     }
 
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {

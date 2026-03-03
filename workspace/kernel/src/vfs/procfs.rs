@@ -21,7 +21,8 @@ use crate::{
     silo,
     syscall::error::SyscallError,
     vfs::scheme::{
-        DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_DIR, DT_REG,
+        finalize_pseudo_stat, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
+        DEV_PROCFS, DT_DIR, DT_REG,
     },
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
@@ -388,8 +389,8 @@ impl Scheme for ProcScheme {
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         let (kind, _pid) = Self::decode_id(file_id);
         let is_dir = file_id == 0 || file_id == 1 || kind == KIND_PROC_DIR;
-        if is_dir {
-            Ok(FileStat {
+        let mut st = if is_dir {
+            FileStat {
                 st_ino: file_id,
                 st_mode: 0o040555,
                 st_nlink: 2,
@@ -397,9 +398,9 @@ impl Scheme for ProcScheme {
                 st_blksize: 512,
                 st_blocks: 0,
                 ..FileStat::zeroed()
-            })
+            }
         } else {
-            Ok(FileStat {
+            FileStat {
                 st_ino: file_id,
                 st_mode: 0o100444,
                 st_nlink: 1,
@@ -407,8 +408,21 @@ impl Scheme for ProcScheme {
                 st_blksize: 512,
                 st_blocks: 0,
                 ..FileStat::zeroed()
-            })
+            }
+        };
+
+        let (kind, pid) = Self::decode_id(file_id);
+        let per_process_node =
+            kind == KIND_PROC_DIR || kind == KIND_PROC_STATUS || kind == KIND_PROC_CMDLINE;
+        if per_process_node && pid != 0 {
+            if let Some(tasks) = get_all_tasks() {
+                if let Some(task) = tasks.iter().find(|t| t.pid as u64 == pid) {
+                    st.st_uid = task.uid.load(core::sync::atomic::Ordering::Relaxed);
+                    st.st_gid = task.gid.load(core::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
+        Ok(finalize_pseudo_stat(st, DEV_PROCFS, 0))
     }
 
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
