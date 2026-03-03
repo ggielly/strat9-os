@@ -220,7 +220,7 @@ pub fn sys_sigsuspend(mask_ptr: u64) -> Result<u64, SyscallError> {
 pub fn sys_sigtimedwait(
     set_ptr: u64,
     _siginfo_ptr: u64,
-    timeout_ptr: u64,
+    _timeout_ptr: u64,
 ) -> Result<u64, SyscallError> {
     // TODO: Implement proper timed wait
     // For now, just check if any signal in the set is pending

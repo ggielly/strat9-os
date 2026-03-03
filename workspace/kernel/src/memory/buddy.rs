@@ -57,11 +57,11 @@ impl BuddyAllocator {
             "Buddy allocator: initializing with {} memory regions",
             memory_regions.len()
         );
-        for (protected_base, protected_size) in Self::protected_module_ranges().into_iter().flatten() {
+        for (_protected_base, _protected_size) in Self::protected_module_ranges().into_iter().flatten() {
             buddy_dbg!(
                 "  Protected module range: phys=0x{:x}..0x{:x}",
-                Self::align_down(protected_base, PAGE_SIZE),
-                Self::align_up(protected_base.saturating_add(protected_size), PAGE_SIZE)
+                Self::align_down(_protected_base, PAGE_SIZE),
+                Self::align_up(_protected_base.saturating_add(_protected_size), PAGE_SIZE)
             );
         }
 
