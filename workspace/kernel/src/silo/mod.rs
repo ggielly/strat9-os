@@ -570,6 +570,28 @@ pub struct SiloSnapshot {
     pub mode: u16,
 }
 
+#[derive(Debug, Clone)]
+pub struct SiloDetailSnapshot {
+    pub base: SiloSnapshot,
+    pub family: StrateFamily,
+    pub sandboxed: bool,
+    pub cpu_shares: u32,
+    pub cpu_affinity_mask: u64,
+    pub max_tasks: u32,
+    pub task_ids: Vec<u64>,
+    pub unveil_rules: Vec<(String, u8)>,
+    pub granted_caps_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SiloEventSnapshot {
+    pub silo_id: u64,
+    pub kind: SiloEventKind,
+    pub data0: u64,
+    pub data1: u64,
+    pub tick: u64,
+}
+
 struct SiloManager {
     silos: BTreeMap<u32, Silo>,
     events: VecDeque<SiloEvent>,
@@ -2415,6 +2437,178 @@ pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
     });
 
     Ok(0)
+}
+
+// ============================================================================
+// Kernel-side CLI helpers (no capability gate — shell runs in Ring 0)
+// ============================================================================
+
+pub fn kernel_suspend_silo(selector: &str) -> Result<u32, SyscallError> {
+    let (silo_id, tasks) = {
+        let mut mgr = SILO_MANAGER.lock();
+        let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+        let silo = mgr.get_mut(silo_id)?;
+        match silo.state {
+            SiloState::Running => {
+                silo.state = SiloState::Paused;
+                let t = silo.tasks.clone();
+                (silo_id, t)
+            }
+            _ => return Err(SyscallError::InvalidArgument),
+        }
+    };
+    for tid in &tasks {
+        crate::process::suspend_task(*tid);
+    }
+    let mut mgr = SILO_MANAGER.lock();
+    mgr.push_event(SiloEvent {
+        silo_id: silo_id.into(),
+        kind: SiloEventKind::Paused,
+        data0: 0,
+        data1: 0,
+        tick: crate::process::scheduler::ticks(),
+    });
+    Ok(silo_id)
+}
+
+pub fn kernel_resume_silo(selector: &str) -> Result<u32, SyscallError> {
+    let (silo_id, tasks) = {
+        let mut mgr = SILO_MANAGER.lock();
+        let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+        let silo = mgr.get_mut(silo_id)?;
+        match silo.state {
+            SiloState::Paused => {
+                silo.state = SiloState::Running;
+                let t = silo.tasks.clone();
+                (silo_id, t)
+            }
+            _ => return Err(SyscallError::InvalidArgument),
+        }
+    };
+    for tid in &tasks {
+        crate::process::resume_task(*tid);
+    }
+    let mut mgr = SILO_MANAGER.lock();
+    mgr.push_event(SiloEvent {
+        silo_id: silo_id.into(),
+        kind: SiloEventKind::Resumed,
+        data0: 0,
+        data1: 0,
+        tick: crate::process::scheduler::ticks(),
+    });
+    Ok(silo_id)
+}
+
+pub fn silo_detail_snapshot(selector: &str) -> Result<SiloDetailSnapshot, SyscallError> {
+    let mgr = SILO_MANAGER.lock();
+    let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    let s = mgr.get(silo_id)?;
+    Ok(SiloDetailSnapshot {
+        base: SiloSnapshot {
+            id: s.id.sid,
+            tier: s.id.tier,
+            name: s.name.clone(),
+            strate_label: s.strate_label.clone(),
+            state: s.state,
+            task_count: s.tasks.len(),
+            mem_usage_bytes: s.mem_usage_bytes,
+            mem_min_bytes: s.config.mem_min,
+            mem_max_bytes: s.config.mem_max,
+            mode: s.config.mode,
+        },
+        family: s.family,
+        sandboxed: s.sandboxed,
+        cpu_shares: s.config.cpu_shares,
+        cpu_affinity_mask: s.config.cpu_affinity_mask,
+        max_tasks: s.config.max_tasks,
+        task_ids: s.tasks.iter().map(|t| t.as_u64()).collect(),
+        unveil_rules: s
+            .unveil_rules
+            .iter()
+            .map(|r| {
+                let bits = (if r.rights.read { 4 } else { 0 })
+                    | (if r.rights.write { 2 } else { 0 })
+                    | (if r.rights.execute { 1 } else { 0 });
+                (r.path.clone(), bits)
+            })
+            .collect(),
+        granted_caps_count: s.granted_caps.len(),
+    })
+}
+
+pub fn list_events_snapshot() -> Vec<SiloEventSnapshot> {
+    let mgr = SILO_MANAGER.lock();
+    mgr.events
+        .iter()
+        .map(|e| SiloEventSnapshot {
+            silo_id: e.silo_id,
+            kind: e.kind,
+            data0: e.data0,
+            data1: e.data1,
+            tick: e.tick,
+        })
+        .collect()
+}
+
+pub fn list_events_for_silo(selector: &str) -> Result<Vec<SiloEventSnapshot>, SyscallError> {
+    let mgr = SILO_MANAGER.lock();
+    let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    let sid64 = silo_id as u64;
+    Ok(mgr
+        .events
+        .iter()
+        .filter(|e| e.silo_id == sid64)
+        .map(|e| SiloEventSnapshot {
+            silo_id: e.silo_id,
+            kind: e.kind,
+            data0: e.data0,
+            data1: e.data1,
+            tick: e.tick,
+        })
+        .collect())
+}
+
+pub fn kernel_pledge_silo(selector: &str, mode_val: u16) -> Result<(u16, u16), SyscallError> {
+    let new_mode = OctalMode::from_octal(mode_val);
+    let mut mgr = SILO_MANAGER.lock();
+    let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    let silo = mgr.get_mut(silo_id)?;
+    let old_raw = silo.config.mode;
+    silo.mode.pledge(new_mode)?;
+    silo.config.mode = mode_val;
+    Ok((old_raw, mode_val))
+}
+
+pub fn kernel_unveil_silo(
+    selector: &str,
+    path: &str,
+    rights_str: &str,
+) -> Result<u32, SyscallError> {
+    let rights = UnveilRights {
+        read: rights_str.contains('r'),
+        write: rights_str.contains('w'),
+        execute: rights_str.contains('x'),
+    };
+    let mut mgr = SILO_MANAGER.lock();
+    let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    let silo = mgr.get_mut(silo_id)?;
+    if let Some(rule) = silo.unveil_rules.iter_mut().find(|r| r.path == path) {
+        rule.rights = rights;
+    } else {
+        silo.unveil_rules.push(UnveilRule {
+            path: String::from(path),
+            rights,
+        });
+    }
+    Ok(silo_id)
+}
+
+pub fn kernel_sandbox_silo(selector: &str) -> Result<u32, SyscallError> {
+    let mut mgr = SILO_MANAGER.lock();
+    let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    let silo = mgr.get_mut(silo_id)?;
+    silo.sandboxed = true;
+    Ok(silo_id)
 }
 
 // ============================================================================

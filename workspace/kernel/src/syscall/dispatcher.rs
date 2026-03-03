@@ -4,7 +4,7 @@
 //! Called from the naked `syscall_entry` assembly with a pointer to `SyscallFrame`.
 use super::{
     error::SyscallError, exec::sys_execve, fork::sys_fork, numbers::*, process as proc_sys,
-    sys_clock_gettime, sys_nanosleep, SyscallFrame,
+    SyscallFrame,
 };
 use crate::{
     arch::x86_64::pci,
@@ -250,7 +250,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_VOLUME_WRITE => sys_volume_write(arg1, arg2, arg3, arg4),
         SYS_VOLUME_INFO => sys_volume_info(arg1),
         SYS_CLOCK_GETTIME => super::time::sys_clock_gettime(arg1 as u32, arg2),
-        SYS_NANOSLEEP => sys_nanosleep(arg1, arg2),
+        SYS_NANOSLEEP => super::time::sys_nanosleep(arg1, arg2),
         SYS_DEBUG_LOG => sys_debug_log(arg1, arg2),
         SYS_SILO_CREATE => silo::sys_silo_create(arg1),
         SYS_SILO_CONFIG => silo::sys_silo_config(arg1, arg2),

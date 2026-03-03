@@ -309,7 +309,6 @@ pub fn cmd_rm(args: &[String]) -> Result<(), ShellError> {
 
 // ─── write ───────────────────────────────────────────────────────────────────
 
-/// Write text to a file.
 pub fn cmd_write(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
         shell_println!("Usage: write <path> <text>");
@@ -321,12 +320,130 @@ pub fn cmd_write(args: &[String]) -> Result<(), ShellError> {
     match vfs::open(&path, OpenFlags::WRITE | OpenFlags::CREATE) {
         Ok(fd) => {
             match vfs::write(fd, text.as_bytes()) {
-                Ok(n) => shell_println!("write: {} bytes → {}", n, path),
+                Ok(n) => shell_println!("write: {} bytes -> {}", n, path),
                 Err(e) => shell_println!("write: {}: {:?}", path, e),
             }
             let _ = vfs::close(fd);
         }
         Err(e) => shell_println!("write: {}: {:?}", path, e),
     }
+    Ok(())
+}
+
+// ─── stat ───────────────────────────────────────────────────────────────────
+
+pub fn cmd_stat(args: &[String]) -> Result<(), ShellError> {
+    if args.is_empty() {
+        shell_println!("Usage: stat <path>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let path = resolve_shell_path(&args[0]);
+    match vfs::stat_path(&path) {
+        Ok(st) => {
+            let ftype = match st.st_mode & 0xF000 {
+                0x4000 => "directory",
+                0x8000 => "regular file",
+                0xA000 => "symbolic link",
+                0x1000 => "FIFO",
+                0x6000 => "block device",
+                0x2000 => "character device",
+                _ => "unknown",
+            };
+            shell_println!("  File: {}", path);
+            shell_println!("  Type: {}", ftype);
+            shell_println!("  Size: {} bytes", st.st_size);
+            shell_println!("  Mode: {:04o}", st.st_mode & 0o7777);
+            shell_println!("  Links: {}", st.st_nlink);
+            shell_println!("  Inode: {}", st.st_ino);
+        }
+        Err(e) => shell_println!("stat: {}: {:?}", path, e),
+    }
+    Ok(())
+}
+
+// ─── cp ─────────────────────────────────────────────────────────────────────
+
+pub fn cmd_cp(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 2 {
+        shell_println!("Usage: cp <src> <dst>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let src = resolve_shell_path(&args[0]);
+    let dst = resolve_shell_path(&args[1]);
+
+    let fd_src = vfs::open(&src, OpenFlags::READ).map_err(|e| {
+        shell_println!("cp: cannot open '{}': {:?}", src, e);
+        ShellError::ExecutionFailed
+    })?;
+    let data = match vfs::read_all(fd_src) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = vfs::close(fd_src);
+            shell_println!("cp: cannot read '{}': {:?}", src, e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+    let _ = vfs::close(fd_src);
+
+    let fd_dst = vfs::open(&dst, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
+        .map_err(|e| {
+            shell_println!("cp: cannot create '{}': {:?}", dst, e);
+            ShellError::ExecutionFailed
+        })?;
+    match vfs::write(fd_dst, &data) {
+        Ok(n) => shell_println!("cp: {} -> {} ({} bytes)", src, dst, n),
+        Err(e) => shell_println!("cp: write to '{}': {:?}", dst, e),
+    }
+    let _ = vfs::close(fd_dst);
+    Ok(())
+}
+
+// ─── mv ─────────────────────────────────────────────────────────────────────
+
+pub fn cmd_mv(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 2 {
+        shell_println!("Usage: mv <src> <dst>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let src = resolve_shell_path(&args[0]);
+    let dst = resolve_shell_path(&args[1]);
+
+    match vfs::rename(&src, &dst) {
+        Ok(()) => {
+            shell_println!("mv: {} -> {}", src, dst);
+            return Ok(());
+        }
+        Err(crate::syscall::error::SyscallError::NotSupported) => {
+            // Cross-mount: fallback to cp + rm
+        }
+        Err(e) => {
+            shell_println!("mv: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    }
+
+    cmd_cp(args)?;
+    match vfs::unlink(&src) {
+        Ok(()) => shell_println!("mv: removed {}", src),
+        Err(e) => shell_println!("mv: could not remove source '{}': {:?}", src, e),
+    }
+    Ok(())
+}
+
+// ─── df ─────────────────────────────────────────────────────────────────────
+
+pub fn cmd_df(_args: &[String]) -> Result<(), ShellError> {
+    let mounts = vfs::list_mounts();
+    shell_println!("{:<20} {}", "Mount", "Status");
+    shell_println!("────────────────────────────────────────");
+    for m in &mounts {
+        let status = if vfs::open(m, OpenFlags::READ | OpenFlags::DIRECTORY).map(|fd| { let _ = vfs::close(fd); }).is_ok() {
+            "accessible"
+        } else {
+            "unavailable"
+        };
+        shell_println!("{:<20} {}", m, status);
+    }
+    shell_println!("{} mount(s)", mounts.len());
     Ok(())
 }

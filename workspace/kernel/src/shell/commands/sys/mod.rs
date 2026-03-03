@@ -21,8 +21,8 @@ use ratatui::{
     Terminal,
 };
 
-const STRATE_USAGE: &str = "Usage: strate <list|spawn|start|stop|kill|destroy|rename|config> ...";
-const SILO_USAGE: &str = "Usage: silo <list|spawn|start|stop|kill|destroy|rename|config> ...";
+const STRATE_USAGE: &str = "Usage: strate <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|top|logs> ...";
+const SILO_USAGE: &str = "Usage: silo <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|top|logs> ...";
 const DEFAULT_MANAGED_SILO_TOML: &str = r#"
 [[silos]]
 name = "console-admin"
@@ -570,37 +570,42 @@ fn print_strate_state_for_sid(sid: u32) {
     }
 }
 
-/// Performs the print strate usage operation.
 fn print_strate_usage() {
     shell_println!("{}", STRATE_USAGE);
     shell_println!("  strate list");
-    shell_println!("  strate spawn <type> [--label <label>] [--dev <path>]");
+    shell_println!("  strate spawn <path|type> [--label <l>] [--dev <p>] [--type elf|wasm]");
     shell_println!("  strate start <id|label>");
-    shell_println!("  strate stop <id|label>");
-    shell_println!("  strate kill <id|label>");
-    shell_println!("  strate destroy <id|label>");
+    shell_println!("  strate stop|kill|destroy <id|label>");
     shell_println!("  strate rename <id|label> <new_label>");
-    shell_println!("  strate config show [silo]");
-    shell_println!("  strate config add <silo> <name> <binary> [--type <t>] [--target <x>] [--family <F>] [--mode <ooo>] [--sid <n>]");
-    shell_println!("  strate config remove <silo> <name>");
+    shell_println!("  strate config show|add|remove ...");
+    shell_println!("  strate info <id|label>");
+    shell_println!("  strate suspend|resume <id|label>");
+    shell_println!("  strate events [id|label]");
+    shell_println!("  strate pledge <id|label> <octal_mode>");
+    shell_println!("  strate unveil <id|label> <path> <rwx>");
+    shell_println!("  strate sandbox <id|label>");
+    shell_println!("  strate top [--sort mem|tasks]");
+    shell_println!("  strate logs <id|label>");
 }
 
-/// Performs the print silo usage operation.
 fn print_silo_usage() {
     shell_println!("{}", SILO_USAGE);
     shell_println!("  silo list");
-    shell_println!("  silo spawn <type> [--label <label>] [--dev <path>]");
+    shell_println!("  silo spawn <path|type> [--label <l>] [--dev <p>] [--type elf|wasm]");
     shell_println!("  silo start <id|label>");
-    shell_println!("  silo stop <id|label>");
-    shell_println!("  silo kill <id|label>");
-    shell_println!("  silo destroy <id|label>");
+    shell_println!("  silo stop|kill|destroy <id|label>");
     shell_println!("  silo rename <id|label> <new_label>");
-    shell_println!("  silo config show [silo]");
-    shell_println!("  silo config add <silo> <name> <binary> [--type <t>] [--target <x>] [--family <F>] [--mode <ooo>] [--sid <n>]");
-    shell_println!("  silo config remove <silo> <name>");
+    shell_println!("  silo config show|add|remove ...");
+    shell_println!("  silo info <id|label>");
+    shell_println!("  silo suspend|resume <id|label>");
+    shell_println!("  silo events [id|label]");
+    shell_println!("  silo pledge <id|label> <octal_mode>");
+    shell_println!("  silo unveil <id|label> <path> <rwx>");
+    shell_println!("  silo sandbox <id|label>");
+    shell_println!("  silo top [--sort mem|tasks]");
+    shell_println!("  silo logs <id|label>");
 }
 
-/// Performs the cmd silo operation.
 pub fn cmd_silo(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         print_silo_usage();
@@ -608,6 +613,15 @@ pub fn cmd_silo(args: &[String]) -> Result<(), ShellError> {
     }
     match args[0].as_str() {
         "list" => cmd_silo_list(args),
+        "info" => cmd_silo_info(args),
+        "suspend" => cmd_silo_suspend(args),
+        "resume" => cmd_silo_resume(args),
+        "events" => cmd_silo_events(args),
+        "pledge" => cmd_silo_pledge(args),
+        "unveil" => cmd_silo_unveil(args),
+        "sandbox" => cmd_silo_sandbox(args),
+        "top" => cmd_silo_top(args),
+        "logs" => cmd_silo_logs(args),
         "spawn" | "start" | "stop" | "kill" | "destroy" | "rename" | "config" => {
             cmd_strate(args)
         }
@@ -1127,55 +1141,64 @@ fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-/// Performs the cmd strate spawn operation.
 fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: strate spawn <type> [--label <label>] [--dev <path>]");
+        shell_println!("Usage: strate spawn <path|type> [--label <l>] [--dev <p>] [--type elf|wasm]");
         return Err(ShellError::InvalidArguments);
     }
-    let strate_type = args[1].as_str();
-    let module_path = match strate_type {
-        "strate-fs-ext4" => "/initfs/fs-ext4",
-        "ramfs" | "strate-fs-ramfs" => "/initfs/strate-fs-ramfs",
-        _ => {
-            shell_println!("strate spawn: unsupported type '{}'", strate_type);
-            return Err(ShellError::InvalidArguments);
-        }
-    };
+    let target = args[1].as_str();
 
     let mut label: Option<&str> = None;
     let mut dev: Option<&str> = None;
+    let mut spawn_type: Option<&str> = None;
     let mut i = 2usize;
     while i < args.len() {
         match args[i].as_str() {
             "--label" => {
-                if i + 1 >= args.len() {
-                    shell_println!("strate spawn: missing value for --label");
-                    return Err(ShellError::InvalidArguments);
-                }
+                if i + 1 >= args.len() { return Err(ShellError::InvalidArguments); }
                 label = Some(args[i + 1].as_str());
                 i += 2;
             }
             "--dev" => {
-                if i + 1 >= args.len() {
-                    shell_println!("strate spawn: missing value for --dev");
-                    return Err(ShellError::InvalidArguments);
-                }
+                if i + 1 >= args.len() { return Err(ShellError::InvalidArguments); }
                 dev = Some(args[i + 1].as_str());
                 i += 2;
             }
-            other => {
-                shell_println!("strate spawn: unknown option '{}'", other);
+            "--type" => {
+                if i + 1 >= args.len() { return Err(ShellError::InvalidArguments); }
+                spawn_type = Some(args[i + 1].as_str());
+                i += 2;
+            }
+            _ => {
+                shell_println!("strate spawn: unknown option '{}'", args[i]);
                 return Err(ShellError::InvalidArguments);
             }
         }
     }
 
-    let fd = vfs::open(module_path, vfs::OpenFlags::READ).map_err(|_| ShellError::ExecutionFailed)?;
+    let module_path: String = match target {
+        "strate-fs-ext4" => String::from("/initfs/fs-ext4"),
+        "ramfs" | "strate-fs-ramfs" => String::from("/initfs/strate-fs-ramfs"),
+        path if path.starts_with('/') => String::from(path),
+        name => {
+            let mut p = String::from("/initfs/bin/");
+            p.push_str(name);
+            p
+        }
+    };
+
+    if spawn_type == Some("wasm") {
+        shell_println!("strate spawn: delegating wasm to wasm-run...");
+        return cmd_wasm_run(&[String::from(target)]);
+    }
+
+    let fd = vfs::open(&module_path, vfs::OpenFlags::READ)
+        .map_err(|_| { shell_println!("strate spawn: cannot open '{}'", module_path); ShellError::ExecutionFailed })?;
     let data = match vfs::read_all(fd) {
         Ok(d) => d,
         Err(_) => {
             let _ = vfs::close(fd);
+            shell_println!("strate spawn: cannot read '{}'", module_path);
             return Err(ShellError::ExecutionFailed);
         }
     };
@@ -1183,13 +1206,7 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
 
     match silo::kernel_spawn_strate(&data, label, dev) {
         Ok(sid) => {
-            shell_println!(
-                "strate spawn: {} started (sid={}, label={}, dev={})",
-                strate_type,
-                sid,
-                label.unwrap_or("default"),
-                dev.unwrap_or("auto")
-            );
+            shell_println!("strate spawn: started (sid={}, path={}, label={})", sid, module_path, label.unwrap_or("-"));
             Ok(())
         }
         Err(e) => {
@@ -1503,7 +1520,6 @@ fn cmd_strate_rename(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
-/// strate command suite
 pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         print_strate_usage();
@@ -1517,6 +1533,15 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
         "start" => cmd_strate_start(args),
         "stop" | "kill" | "destroy" => cmd_strate_lifecycle(args),
         "rename" => cmd_strate_rename(args),
+        "info" => cmd_silo_info(args),
+        "suspend" => cmd_silo_suspend(args),
+        "resume" => cmd_silo_resume(args),
+        "events" => cmd_silo_events(args),
+        "pledge" => cmd_silo_pledge(args),
+        "unveil" => cmd_silo_unveil(args),
+        "sandbox" => cmd_silo_sandbox(args),
+        "top" => cmd_silo_top(args),
+        "logs" => cmd_silo_logs(args),
         _ => {
             print_strate_usage();
             Err(ShellError::InvalidArguments)
@@ -1524,7 +1549,218 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
-/// wasm-run /path/to/app.wasm
+// ============================================================================
+// silo info / suspend / resume / events / pledge / unveil / sandbox / top / logs
+// ============================================================================
+
+fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 2 {
+        shell_println!("Usage: silo info <id|label>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let selector = args[1].as_str();
+    let detail = silo::silo_detail_snapshot(selector).map_err(|e| {
+        shell_println!("silo info: {:?}", e);
+        ShellError::ExecutionFailed
+    })?;
+    let b = &detail.base;
+    let (used_v, used_u) = format_bytes(b.mem_usage_bytes as usize);
+    let (min_v, min_u) = format_bytes(b.mem_min_bytes as usize);
+    let mem_max = if b.mem_max_bytes == 0 {
+        String::from("unlimited")
+    } else {
+        let (v, u) = format_bytes(b.mem_max_bytes as usize);
+        alloc::format!("{} {}", v, u)
+    };
+
+    shell_println!("SID:        {}", b.id);
+    shell_println!("Name:       {}", b.name);
+    shell_println!("Label:      {}", b.strate_label.as_deref().unwrap_or("-"));
+    shell_println!("Tier:       {:?}", b.tier);
+    shell_println!("State:      {:?}", b.state);
+    shell_println!("Family:     {:?}", detail.family);
+    shell_println!("Mode:       {:03o}", b.mode);
+    shell_println!("Sandboxed:  {}", detail.sandboxed);
+    shell_println!("Tasks:      {}", b.task_count);
+    shell_println!("Memory:     {} {} / {} {} / {}", used_v, used_u, min_v, min_u, mem_max);
+    shell_println!("CPU shares: {}", detail.cpu_shares);
+    shell_println!("CPU mask:   {:#x}", detail.cpu_affinity_mask);
+    shell_println!("Max tasks:  {}", if detail.max_tasks == 0 { String::from("unlimited") } else { alloc::format!("{}", detail.max_tasks) });
+    shell_println!("Caps:       {} granted", detail.granted_caps_count);
+
+    if !detail.task_ids.is_empty() {
+        shell_println!("Task IDs:   {:?}", detail.task_ids);
+    }
+
+    if !detail.unveil_rules.is_empty() {
+        shell_println!("Unveil rules:");
+        for (path, bits) in &detail.unveil_rules {
+            let r = if bits & 4 != 0 { 'r' } else { '-' };
+            let w = if bits & 2 != 0 { 'w' } else { '-' };
+            let x = if bits & 1 != 0 { 'x' } else { '-' };
+            shell_println!("  {}{}{} {}", r, w, x, path);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_silo_suspend(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 2 {
+        shell_println!("Usage: silo suspend <id|label>");
+        return Err(ShellError::InvalidArguments);
+    }
+    match silo::kernel_suspend_silo(args[1].as_str()) {
+        Ok(sid) => { shell_println!("silo suspend: ok (sid={})", sid); Ok(()) }
+        Err(e) => { shell_println!("silo suspend failed: {:?}", e); Err(ShellError::ExecutionFailed) }
+    }
+}
+
+fn cmd_silo_resume(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 2 {
+        shell_println!("Usage: silo resume <id|label>");
+        return Err(ShellError::InvalidArguments);
+    }
+    match silo::kernel_resume_silo(args[1].as_str()) {
+        Ok(sid) => { shell_println!("silo resume: ok (sid={})", sid); Ok(()) }
+        Err(e) => { shell_println!("silo resume failed: {:?}", e); Err(ShellError::ExecutionFailed) }
+    }
+}
+
+fn event_kind_str(kind: silo::SiloEventKind) -> &'static str {
+    match kind {
+        silo::SiloEventKind::Started => "Started",
+        silo::SiloEventKind::Stopped => "Stopped",
+        silo::SiloEventKind::Killed => "Killed",
+        silo::SiloEventKind::Crashed => "Crashed",
+        silo::SiloEventKind::Paused => "Paused",
+        silo::SiloEventKind::Resumed => "Resumed",
+    }
+}
+
+fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
+    let events = if args.len() >= 2 {
+        silo::list_events_for_silo(args[1].as_str()).map_err(|e| {
+            shell_println!("silo events: {:?}", e);
+            ShellError::ExecutionFailed
+        })?
+    } else {
+        silo::list_events_snapshot()
+    };
+
+    if events.is_empty() {
+        shell_println!("(no events)");
+        return Ok(());
+    }
+
+    shell_println!("{:<8} {:<10} {:<12} {:<12} {}", "SID", "Kind", "Data0", "Data1", "Tick");
+    shell_println!("────────────────────────────────────────────────────────");
+    for ev in &events {
+        shell_println!("{:<8} {:<10} {:#010x}   {:#010x}   {}",
+            ev.silo_id, event_kind_str(ev.kind), ev.data0, ev.data1, ev.tick);
+    }
+    Ok(())
+}
+
+fn cmd_silo_pledge(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 3 {
+        shell_println!("Usage: silo pledge <id|label> <octal_mode>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let mode_val = u16::from_str_radix(args[2].as_str(), 8).map_err(|_| {
+        shell_println!("silo pledge: invalid octal mode '{}'", args[2]);
+        ShellError::InvalidArguments
+    })?;
+    match silo::kernel_pledge_silo(args[1].as_str(), mode_val) {
+        Ok((old, new)) => {
+            shell_println!("silo pledge: {:03o} -> {:03o}", old, new);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("silo pledge failed: {:?}", e);
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
+fn cmd_silo_unveil(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 4 {
+        shell_println!("Usage: silo unveil <id|label> <path> <rwx>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let selector = args[1].as_str();
+    let path = args[2].as_str();
+    let rights = args[3].as_str();
+    match silo::kernel_unveil_silo(selector, path, rights) {
+        Ok(sid) => {
+            shell_println!("silo unveil: ok (sid={}, path={}, rights={})", sid, path, rights);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("silo unveil failed: {:?}", e);
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
+fn cmd_silo_sandbox(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 2 {
+        shell_println!("Usage: silo sandbox <id|label>");
+        return Err(ShellError::InvalidArguments);
+    }
+    match silo::kernel_sandbox_silo(args[1].as_str()) {
+        Ok(sid) => { shell_println!("silo sandbox: ok (sid={})", sid); Ok(()) }
+        Err(e) => { shell_println!("silo sandbox failed: {:?}", e); Err(ShellError::ExecutionFailed) }
+    }
+}
+
+fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
+    let mut silos = silo::list_silos_snapshot();
+
+    let sort_by_mem = _args.len() >= 3 && _args[1] == "--sort" && _args[2] == "mem";
+    if sort_by_mem {
+        silos.sort_by(|a, b| b.mem_usage_bytes.cmp(&a.mem_usage_bytes));
+    } else {
+        silos.sort_by(|a, b| b.task_count.cmp(&a.task_count).then(b.mem_usage_bytes.cmp(&a.mem_usage_bytes)));
+    }
+
+    let total_tasks: usize = silos.iter().map(|s| s.task_count).sum();
+    let total_mem: u64 = silos.iter().map(|s| s.mem_usage_bytes).sum();
+    let (tm_v, tm_u) = format_bytes(total_mem as usize);
+
+    shell_println!("Silos: {}   Tasks: {}   Memory: {} {}", silos.len(), total_tasks, tm_v, tm_u);
+    shell_println!("");
+    shell_println!("{:<6} {:<14} {:<10} {:<7} {:<16} {:<6}", "SID", "Name", "State", "Tasks", "Memory", "Mode");
+    shell_println!("────────────────────────────────────────────────────────────────");
+    for s in &silos {
+        let (mv, mu) = format_bytes(s.mem_usage_bytes as usize);
+        let mem_str = alloc::format!("{} {}", mv, mu);
+        shell_println!("{:<6} {:<14} {:<10} {:<7} {:<16} {:03o}",
+            s.id, s.name, alloc::format!("{:?}", s.state), s.task_count, mem_str, s.mode);
+    }
+    Ok(())
+}
+
+fn cmd_silo_logs(args: &[String]) -> Result<(), ShellError> {
+    if args.len() < 2 {
+        shell_println!("Usage: silo logs <id|label>");
+        return Err(ShellError::InvalidArguments);
+    }
+    let events = silo::list_events_for_silo(args[1].as_str()).map_err(|e| {
+        shell_println!("silo logs: {:?}", e);
+        ShellError::ExecutionFailed
+    })?;
+    if events.is_empty() {
+        shell_println!("(no log entries for this silo)");
+        return Ok(());
+    }
+    for ev in &events {
+        let tick_s = ev.tick / 100;
+        let tick_cs = ev.tick % 100;
+        shell_println!("[{:>6}.{:02}] sid={} {}", tick_s, tick_cs, ev.silo_id, event_kind_str(ev.kind));
+    }
+    Ok(())
+}
+
 pub fn cmd_wasm_run(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 1 {
         shell_println!("Usage: wasm-run <path>");

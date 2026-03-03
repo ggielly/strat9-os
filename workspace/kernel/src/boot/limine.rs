@@ -723,6 +723,7 @@ pub unsafe extern "C" fn kmain() -> ! {
         framebuffer_green_mask_shift: fb_green_mask_shift,
         framebuffer_blue_mask_size: fb_blue_mask_size,
         framebuffer_blue_mask_shift: fb_blue_mask_shift,
+        _padding1: 0,
         hhdm_offset,
     };
 
