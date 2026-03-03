@@ -554,6 +554,44 @@ struct Silo {
     unveil_rules: Vec<UnveilRule>,
     sandboxed: bool,
     event_seq: u64,
+    /// Ring buffer capturing debug output for `silo attach`.
+    output_buf: SiloOutputBuf,
+}
+
+const SILO_OUTPUT_CAPACITY: usize = 4096;
+
+struct SiloOutputBuf {
+    buf: [u8; SILO_OUTPUT_CAPACITY],
+    head: usize,
+    count: usize,
+}
+
+impl SiloOutputBuf {
+    const fn new() -> Self {
+        Self { buf: [0; SILO_OUTPUT_CAPACITY], head: 0, count: 0 }
+    }
+
+    fn push(&mut self, data: &[u8]) {
+        for &b in data {
+            let tail = (self.head + self.count) % SILO_OUTPUT_CAPACITY;
+            self.buf[tail] = b;
+            if self.count < SILO_OUTPUT_CAPACITY {
+                self.count += 1;
+            } else {
+                self.head = (self.head + 1) % SILO_OUTPUT_CAPACITY;
+            }
+        }
+    }
+
+    fn drain(&mut self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.count);
+        for i in 0..self.count {
+            out.push(self.buf[(self.head + i) % SILO_OUTPUT_CAPACITY]);
+        }
+        self.head = 0;
+        self.count = 0;
+        out
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -639,6 +677,7 @@ impl SiloManager {
             unveil_rules: Vec::new(),
             sandboxed: false,
             event_seq: 0,
+            output_buf: SiloOutputBuf::new(),
         };
 
         self.silos.insert(id.sid, silo);
@@ -1226,6 +1265,7 @@ pub fn kernel_spawn_strate(
             unveil_rules: Vec::new(),
             sandboxed: false,
             event_seq: 0,
+            output_buf: SiloOutputBuf::new(),
         };
 
         mgr.silos.insert(id.sid, silo);
@@ -1457,6 +1497,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             unveil_rules: Vec::new(),
             sandboxed: false,
             event_seq: 0,
+            output_buf: SiloOutputBuf::new(),
         };
         mgr.silos.insert(id.sid, silo);
     }
@@ -2609,6 +2650,27 @@ pub fn kernel_sandbox_silo(selector: &str) -> Result<u32, SyscallError> {
     let silo = mgr.get_mut(silo_id)?;
     silo.sandboxed = true;
     Ok(silo_id)
+}
+
+/// Get the silo ID for a given task, if any.
+pub fn task_silo_id(task_id: TaskId) -> Option<u32> {
+    SILO_MANAGER.lock().silo_for_task(task_id)
+}
+
+/// Append data to a silo's output ring buffer (called from `sys_debug_log`).
+pub fn silo_output_write(silo_id: u32, data: &[u8]) {
+    let mut mgr = SILO_MANAGER.lock();
+    if let Ok(silo) = mgr.get_mut(silo_id) {
+        silo.output_buf.push(data);
+    }
+}
+
+/// Drain the output buffer for a silo, returning accumulated bytes.
+pub fn silo_output_drain(selector: &str) -> Result<Vec<u8>, SyscallError> {
+    let mut mgr = SILO_MANAGER.lock();
+    let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    let silo = mgr.get_mut(silo_id)?;
+    Ok(silo.output_buf.drain())
 }
 
 /// Dynamically adjust resource quotas for a silo.

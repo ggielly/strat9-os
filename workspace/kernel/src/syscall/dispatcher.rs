@@ -942,6 +942,12 @@ fn sys_debug_log(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     }
     crate::serial_println!();
 
+    if let Some(task) = crate::process::current_task_clone() {
+        if let Some(silo_id) = crate::silo::task_silo_id(task.id) {
+            crate::silo::silo_output_write(silo_id, &kbuf[..copied]);
+        }
+    }
+
     Ok(copied as u64)
 }
 
