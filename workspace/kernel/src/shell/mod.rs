@@ -232,6 +232,7 @@ fn delete_next_char_at_cursor(
 /// parses commands, and executes them.
 pub extern "C" fn shell_main() -> ! {
     let registry = CommandRegistry::new();
+    commands::util::init_shell_env();
     let mut input_buf = [0u8; 256];
     let mut input_len = 0;
     let mut cursor_pos = 0;
