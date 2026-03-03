@@ -15,7 +15,7 @@ use commands::CommandRegistry;
 use output::{print_char, print_prompt};
 use parser::{parse_pipeline, Redirect};
 
-use crate::{shell_println, vfs};
+use crate::{shell_print, shell_println, vfs};
 use strat9_abi::flag::OpenFlags;
 
 /// Shell error types
@@ -344,8 +344,18 @@ pub extern "C" fn shell_main() -> ! {
                     input_len = 0;
                     cursor_pos = 0;
                     history_idx = -1;
-                    SHELL_INTERRUPTED.store(false, core::sync::atomic::Ordering::Relaxed);
+                    SHELL_INTERRUPTED.store(false, Ordering::Relaxed);
                     print_prompt();
+                }
+                b'\t' => {
+                    in_escape_seq = false;
+                    utf8_pending_len = 0;
+                    tab_complete(
+                        &mut input_buf,
+                        &mut input_len,
+                        &mut cursor_pos,
+                        &registry,
+                    );
                 }
                 b'\x04' => {
                     in_escape_seq = false;
@@ -668,6 +678,175 @@ fn execute_line(line: &str, registry: &CommandRegistry) {
             pipe_data = Some(captured);
         }
     }
+}
+
+/// Tab completion for command names and VFS paths.
+///
+/// If the cursor is on the first token, completes against registered commands.
+/// Otherwise completes against VFS directory entries.
+fn tab_complete(
+    input_buf: &mut [u8],
+    input_len: &mut usize,
+    cursor_pos: &mut usize,
+    registry: &CommandRegistry,
+) {
+    let text = match core::str::from_utf8(&input_buf[..*input_len]) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let before_cursor = &text[..*cursor_pos];
+    let has_space = before_cursor.contains(' ');
+
+    if !has_space {
+        let prefix = before_cursor;
+        let names = registry.command_names();
+        let matches: alloc::vec::Vec<&str> =
+            names.iter().copied().filter(|n| n.starts_with(prefix)).collect();
+
+        if matches.len() == 1 {
+            complete_replace_word(input_buf, input_len, cursor_pos, 0, matches[0], true);
+        } else if matches.len() > 1 {
+            let common = longest_common_prefix(&matches);
+            if common.len() > prefix.len() {
+                complete_replace_word(input_buf, input_len, cursor_pos, 0, &common, false);
+            } else {
+                shell_println!();
+                for m in &matches {
+                    shell_print!("{}  ", m);
+                }
+                shell_println!();
+                output::print_prompt();
+                print_bytes(&input_buf[..*input_len]);
+                let back = char_count(&input_buf[*cursor_pos..*input_len]);
+                move_cursor_left_chars(back);
+            }
+        }
+    } else {
+        let last_space = before_cursor.rfind(' ').unwrap_or(0);
+        let partial = &before_cursor[last_space + 1..];
+        let (dir, file_prefix) = if let Some(slash_pos) = partial.rfind('/') {
+            (&partial[..=slash_pos], &partial[slash_pos + 1..])
+        } else {
+            ("/", partial)
+        };
+
+        if let Ok(fd) = vfs::open(dir, OpenFlags::READ | OpenFlags::DIRECTORY) {
+            let entries = vfs::getdents(fd).unwrap_or_default();
+            let _ = vfs::close(fd);
+
+            let matches: alloc::vec::Vec<alloc::string::String> = entries
+                .iter()
+                .filter(|e| e.name != "." && e.name != ".." && e.name.starts_with(file_prefix))
+                .map(|e| {
+                    let mut s = alloc::string::String::from(dir);
+                    s.push_str(&e.name);
+                    if e.file_type == strat9_abi::data::DT_DIR {
+                        s.push('/');
+                    }
+                    s
+                })
+                .collect();
+
+            if matches.len() == 1 {
+                let add_space = !matches[0].ends_with('/');
+                complete_replace_word(
+                    input_buf,
+                    input_len,
+                    cursor_pos,
+                    last_space + 1,
+                    &matches[0],
+                    add_space,
+                );
+            } else if matches.len() > 1 {
+                let refs: alloc::vec::Vec<&str> = matches.iter().map(|s| s.as_str()).collect();
+                let common = longest_common_prefix(&refs);
+                if common.len() > partial.len() {
+                    complete_replace_word(
+                        input_buf,
+                        input_len,
+                        cursor_pos,
+                        last_space + 1,
+                        &common,
+                        false,
+                    );
+                } else {
+                    shell_println!();
+                    for m in &matches {
+                        let name = m.rsplit('/').next().unwrap_or(m);
+                        shell_print!("{}  ", name);
+                    }
+                    shell_println!();
+                    output::print_prompt();
+                    print_bytes(&input_buf[..*input_len]);
+                    let back = char_count(&input_buf[*cursor_pos..*input_len]);
+                    move_cursor_left_chars(back);
+                }
+            }
+        }
+    }
+}
+
+/// Replace the word starting at `word_start` (byte offset) with `replacement`.
+fn complete_replace_word(
+    buf: &mut [u8],
+    len: &mut usize,
+    cursor: &mut usize,
+    word_start: usize,
+    replacement: &str,
+    add_trailing_space: bool,
+) {
+    let mut new_line = alloc::string::String::new();
+    if let Ok(prefix) = core::str::from_utf8(&buf[..word_start]) {
+        new_line.push_str(prefix);
+    }
+    new_line.push_str(replacement);
+    if add_trailing_space {
+        new_line.push(' ');
+    }
+    let new_cursor = new_line.len();
+    if let Ok(suffix) = core::str::from_utf8(&buf[*cursor..*len]) {
+        new_line.push_str(suffix);
+    }
+
+    let bytes = new_line.as_bytes();
+    if bytes.len() > buf.len() {
+        return;
+    }
+
+    let old_visible = char_count(&buf[..*len]);
+    move_cursor_left_chars(char_count(&buf[..*cursor]));
+
+    buf[..bytes.len()].copy_from_slice(bytes);
+    *len = bytes.len();
+    *cursor = new_cursor;
+
+    for _ in 0..old_visible {
+        print_char(' ');
+    }
+    move_cursor_left_chars(old_visible);
+    print_bytes(&buf[..*len]);
+    let back = char_count(&buf[*cursor..*len]);
+    move_cursor_left_chars(back);
+}
+
+/// Find the longest common prefix of a set of strings.
+fn longest_common_prefix(strings: &[&str]) -> alloc::string::String {
+    if strings.is_empty() {
+        return alloc::string::String::new();
+    }
+    let first = strings[0];
+    let mut end = first.len();
+    for s in &strings[1..] {
+        end = end.min(s.len());
+        for (i, (a, b)) in first.bytes().zip(s.bytes()).enumerate() {
+            if a != b {
+                end = end.min(i);
+                break;
+            }
+        }
+    }
+    alloc::string::String::from(&first[..end])
 }
 
 /// Write captured output to a file (truncate or append).
