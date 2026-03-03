@@ -21,8 +21,8 @@ use ratatui::{
     Terminal,
 };
 
-const STRATE_USAGE: &str = "Usage: strate <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|top|logs> ...";
-const SILO_USAGE: &str = "Usage: silo <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|top|logs> ...";
+const STRATE_USAGE: &str = "Usage: strate <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|limit|attach|top|logs> ...";
+const SILO_USAGE: &str = "Usage: silo <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|limit|attach|top|logs> ...";
 const DEFAULT_MANAGED_SILO_TOML: &str = r#"
 [[silos]]
 name = "console-admin"
@@ -89,6 +89,7 @@ struct ManagedSiloDef {
     sid: u32,
     family: String,
     mode: String,
+    cpu_features: String,
     strates: Vec<ManagedStrateDef>,
 }
 
@@ -128,6 +129,7 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
                 sid: 42,
                 family: String::from("USR"),
                 mode: String::from("000"),
+                cpu_features: String::new(),
                 strates: Vec::new(),
             });
             section = Section::Silo;
@@ -150,6 +152,7 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
                         "sid" => s.sid = val.parse().unwrap_or(42),
                         "family" => s.family = String::from(val),
                         "mode" => s.mode = String::from(val),
+                        "cpu_features" => s.cpu_features = String::from(val),
                         _ => {}
                     },
                     Section::Strate => {
@@ -190,6 +193,9 @@ fn render_silo_toml(silos: &[ManagedSiloDef]) -> String {
         let _ = writeln!(out, "sid = {}", s.sid);
         let _ = writeln!(out, "family = \"{}\"", s.family);
         let _ = writeln!(out, "mode = \"{}\"", s.mode);
+        if !s.cpu_features.is_empty() {
+            let _ = writeln!(out, "cpu_features = \"{}\"", s.cpu_features);
+        }
         for st in &s.strates {
             out.push('\n');
             let _ = writeln!(out, "[[silos.strates]]");
@@ -602,6 +608,8 @@ fn print_silo_usage() {
     shell_println!("  silo pledge <id|label> <octal_mode>");
     shell_println!("  silo unveil <id|label> <path> <rwx>");
     shell_println!("  silo sandbox <id|label>");
+    shell_println!("  silo limit <id|label> <mem_max|mem_min|max_tasks|cpu_shares> <value>");
+    shell_println!("  silo attach <id|label>");
     shell_println!("  silo top [--sort mem|tasks]");
     shell_println!("  silo logs <id|label>");
 }
@@ -700,10 +708,11 @@ pub fn cmd_shutdown(_args: &[String]) -> Result<(), ShellError> {
     }
 
     shell_println!("[shutdown] Killing remaining tasks...");
+    let current_tid = crate::process::current_task_clone().map(|t| t.id);
     if let Some(tasks) = crate::process::get_all_tasks() {
         for t in tasks.iter().rev() {
             let tid = t.id;
-            if tid.as_u64() <= 1 {
+            if tid.as_u64() <= 1 || current_tid == Some(tid) {
                 continue;
             }
             crate::process::kill_task(tid);
@@ -1391,6 +1400,7 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
                 sid: sid.unwrap_or(42),
                 family: family.clone().unwrap_or_else(|| String::from("USR")),
                 mode: mode.clone().unwrap_or_else(|| String::from("000")),
+                cpu_features: String::new(),
                 strates: Vec::new(),
             });
             silos.len() - 1
@@ -1631,6 +1641,9 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     shell_println!("Memory:     {} {} / {} {} / {}", used_v, used_u, min_v, min_u, mem_max);
     shell_println!("CPU shares: {}", detail.cpu_shares);
     shell_println!("CPU mask:   {:#x}", detail.cpu_affinity_mask);
+    shell_println!("CPU req:    {:#x}", detail.cpu_features_required);
+    shell_println!("CPU allow:  {:#x}", detail.cpu_features_allowed);
+    shell_println!("XCR0 mask:  {:#x}", detail.xcr0_mask);
     shell_println!("Max tasks:  {}", if detail.max_tasks == 0 { String::from("unlimited") } else { alloc::format!("{}", detail.max_tasks) });
     shell_println!("Caps:       {} granted", detail.granted_caps_count);
 

@@ -3,6 +3,7 @@ name = "console-admin"
 family = "SYS"
 mode = "700"
 sid = 42
+cpu_features = "sse2"
 [[silos.strates]]
 name = "console-admin"
 binary = "/initfs/console-admin"
@@ -54,6 +55,7 @@ name = "ssh"
 family = "NET"
 mode = "076"
 sid = 42
+cpu_features = "sse2,aes"
 [[silos.strates]]
 name = "sshd"
 binary = "/initfs/bin/sshd"
