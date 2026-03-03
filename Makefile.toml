@@ -1678,6 +1678,25 @@ fi
 ''']
 
 # =============================================================================
+# Documentation Tasks
+# =============================================================================
+
+[tasks.docs-site]
+description = "Build mdBook + rustdoc website"
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/build-docs-site.sh
+''']
+
+[tasks.docs-serve]
+description = "Serve generated docs website locally on :8000"
+dependencies = ["docs-site"]
+script_runner = "@shell"
+script = ['''
+python3 -m http.server --directory build/docs-site 8000
+''']
+
+# =============================================================================
 # Default Task
 # =============================================================================
 

@@ -1,0 +1,11 @@
+[book]
+title = "Strat9 Documentation"
+description = "Guide and API reference for Strat9 ABI and userspace syscall layer."
+language = "en"
+multilingual = false
+src = "src"
+
+[output.html]
+default-theme = "navy"
+git-repository-url = "https://github.com/ggielly/strat9-os"
+edit-url-template = "https://github.com/ggielly/strat9-os/edit/main/docs-site/{path}"
