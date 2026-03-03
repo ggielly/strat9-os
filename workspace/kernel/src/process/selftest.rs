@@ -151,6 +151,9 @@ extern "C" fn selftest_orchestrator() -> ! {
     let _ = wait_task_exit("ipc-sem-poster", 2_000);
     let _ = wait_task_exit("ipc-04-05-test", 3_000);
 
+    crate::process::vfs_stat_test::create_vfs_stat_test_task();
+    let _ = wait_task_exit("vfs-stat-test", 3_000);
+
     let strate_ok = run_strate_lifecycle_e2e();
     if strate_ok {
         crate::serial_println!("[selftest][strate] PASS");

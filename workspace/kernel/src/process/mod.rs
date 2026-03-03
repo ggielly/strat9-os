@@ -23,6 +23,8 @@ pub mod scheduler;
 pub mod scheduler_test;
 #[cfg(feature = "selftest")]
 pub mod selftest;
+#[cfg(feature = "selftest")]
+pub mod vfs_stat_test;
 pub mod signal;
 pub mod task;
 pub mod test;

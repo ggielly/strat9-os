@@ -73,18 +73,25 @@ PY
 rm -f /tmp/abi-auto-block.txt
 
 echo "==> Building rustdoc (workspace, resilient mode)"
+METADATA_JSON="$(mktemp)"
+cargo metadata \
+  --manifest-path "${ROOT_DIR}/Cargo.toml" \
+  --format-version 1 \
+  --no-deps > "${METADATA_JSON}"
+
 mapfile -t WORKSPACE_PACKAGES < <(
-  cargo metadata --manifest-path "${ROOT_DIR}/Cargo.toml" --format-version 1 --no-deps \
-  | python3 - <<'PY'
+  python3 - "${METADATA_JSON}" <<'PY'
 import json
 import sys
+from pathlib import Path
 
-data = json.load(sys.stdin)
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 id_to_name = {p["id"]: p["name"] for p in data["packages"]}
 for pkg_id in data["workspace_members"]:
     print(id_to_name[pkg_id])
 PY
 )
+rm -f "${METADATA_JSON}"
 
 FAILED_PACKAGES=()
 for pkg in "${WORKSPACE_PACKAGES[@]}"; do
