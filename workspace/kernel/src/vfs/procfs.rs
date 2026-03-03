@@ -396,6 +396,7 @@ impl Scheme for ProcScheme {
                 st_size: 0,
                 st_blksize: 512,
                 st_blocks: 0,
+                ..FileStat::zeroed()
             })
         } else {
             Ok(FileStat {
@@ -405,6 +406,7 @@ impl Scheme for ProcScheme {
                 st_size: 0,
                 st_blksize: 512,
                 st_blocks: 0,
+                ..FileStat::zeroed()
             })
         }
     }

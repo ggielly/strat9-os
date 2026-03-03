@@ -523,6 +523,7 @@ impl Scheme for RamfsScheme {
             st_size,
             st_blksize: 4096,
             st_blocks: (st_size + 511) / 512,
+            ..FileStat::zeroed()
         })
     }
 

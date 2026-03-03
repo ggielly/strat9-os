@@ -288,6 +288,7 @@ impl Scheme for IpcControlScheme {
                 st_size: size,
                 st_blksize: 4096,
                 st_blocks: (size + 511) / 512,
+                ..FileStat::zeroed()
             })
         })
     }

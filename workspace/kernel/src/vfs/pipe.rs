@@ -284,6 +284,7 @@ impl Scheme for PipeScheme {
             st_size: inner.len as u64,
             st_blksize: PIPE_BUF_SIZE as u64,
             st_blocks: 0,
+            ..FileStat::zeroed()
         })
     }
 

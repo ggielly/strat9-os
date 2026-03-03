@@ -118,6 +118,7 @@ impl Scheme for NetScheme {
                 st_size: 0,
                 st_blksize: 1514,
                 st_blocks: 0,
+                ..FileStat::zeroed()
             },
             Handle::Iface(_) => FileStat {
                 st_ino: fid,
@@ -126,6 +127,7 @@ impl Scheme for NetScheme {
                 st_size: 0,
                 st_blksize: 1514,
                 st_blocks: 0,
+                ..FileStat::zeroed()
             },
         })
     }

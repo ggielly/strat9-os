@@ -125,23 +125,37 @@ pub struct PciDeviceInfo {
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
 #[repr(C)]
 pub struct FileStat {
+    pub st_dev: u64,
     pub st_ino: u64,
     pub st_mode: u32,
     pub st_nlink: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
     pub st_size: u64,
     pub st_blksize: u64,
     pub st_blocks: u64,
+    pub st_atime: TimeSpec,
+    pub st_mtime: TimeSpec,
+    pub st_ctime: TimeSpec,
 }
 
 impl FileStat {
     pub const fn zeroed() -> Self {
         FileStat {
+            st_dev: 0,
             st_ino: 0,
             st_mode: 0,
             st_nlink: 0,
+            st_uid: 0,
+            st_gid: 0,
+            st_rdev: 0,
             st_size: 0,
             st_blksize: 0,
             st_blocks: 0,
+            st_atime: TimeSpec::zero(),
+            st_mtime: TimeSpec::zero(),
+            st_ctime: TimeSpec::zero(),
         }
     }
 
@@ -237,7 +251,7 @@ assert_abi_struct!(DirentHeader, 12, 1);
 assert_abi_struct!(Stat, 120, 8);
 assert_abi_struct!(StatVfs, 88, 8);
 assert_abi_struct!(Map, 32, 8);
-assert_abi_struct!(FileStat, 40, 8);
+assert_abi_struct!(FileStat, 112, 8);
 assert_abi_struct!(IpcMessage, 64, 64);
 assert_abi_struct!(TimeSpec, 16, 8);
 assert_abi_struct!(HandleInfo, 16, 8);

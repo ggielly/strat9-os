@@ -620,6 +620,7 @@ impl Scheme for KernelScheme {
                 st_size: 0,
                 st_blksize: 512,
                 st_blocks: 0,
+                ..FileStat::zeroed()
             });
         }
         let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
@@ -630,6 +631,7 @@ impl Scheme for KernelScheme {
             st_size: file.len as u64,
             st_blksize: 512,
             st_blocks: ((file.len as u64) + 511) / 512,
+            ..FileStat::zeroed()
         })
     }
 

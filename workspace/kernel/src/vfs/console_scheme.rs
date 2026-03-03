@@ -69,6 +69,7 @@ impl Scheme for ConsoleScheme {
             st_size: 0,
             st_blksize: 1,
             st_blocks: 0,
+            ..FileStat::zeroed()
         })
     }
 }

@@ -196,11 +196,12 @@ impl Scheme for BlkDevScheme {
                 st_size: 0,
                 st_blksize: SECTOR_SIZE as u64,
                 st_blocks: 0,
+                ..FileStat::zeroed()
             }),
-            FID_NULL => Ok(FileStat { st_ino: FID_NULL,   st_mode: 0o020_666, st_nlink: 1, st_size: 0,    st_blksize: 1, st_blocks: 0 }),
-            FID_ZERO => Ok(FileStat { st_ino: FID_ZERO,   st_mode: 0o020_444, st_nlink: 1, st_size: 0,    st_blksize: 1, st_blocks: 0 }),
-            FID_RANDOM  => Ok(FileStat { st_ino: FID_RANDOM,  st_mode: 0o020_444, st_nlink: 1, st_size: 0, st_blksize: 1, st_blocks: 0 }),
-            FID_URANDOM => Ok(FileStat { st_ino: FID_URANDOM, st_mode: 0o020_444, st_nlink: 1, st_size: 0, st_blksize: 1, st_blocks: 0 }),
+            FID_NULL => Ok(FileStat { st_ino: FID_NULL,   st_mode: 0o020_666, st_nlink: 1, st_size: 0,    st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }),
+            FID_ZERO => Ok(FileStat { st_ino: FID_ZERO,   st_mode: 0o020_444, st_nlink: 1, st_size: 0,    st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }),
+            FID_RANDOM  => Ok(FileStat { st_ino: FID_RANDOM,  st_mode: 0o020_444, st_nlink: 1, st_size: 0, st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }),
+            FID_URANDOM => Ok(FileStat { st_ino: FID_URANDOM, st_mode: 0o020_444, st_nlink: 1, st_size: 0, st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }),
             FID_SDA => {
                 let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
                 let size = dev.sector_count() * SECTOR_SIZE as u64;
@@ -211,6 +212,7 @@ impl Scheme for BlkDevScheme {
                     st_size: size,
                     st_blksize: SECTOR_SIZE as u64,
                     st_blocks: dev.sector_count(),
+                    ..FileStat::zeroed()
                 })
             }
             FID_VDA => {
@@ -224,6 +226,7 @@ impl Scheme for BlkDevScheme {
                     st_size: size,
                     st_blksize: SECTOR_SIZE as u64,
                     st_blocks: dev.sector_count(),
+                    ..FileStat::zeroed()
                 })
             }
             _ => Err(SyscallError::BadHandle),
