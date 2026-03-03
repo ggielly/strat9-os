@@ -69,6 +69,10 @@ pub fn cmd_ping(args: &[String]) -> Result<(), ShellError> {
     let mut received: u32 = 0;
 
     for seq in 0..count {
+        if crate::shell::is_interrupted() {
+            shell_println!("^C");
+            break;
+        }
         match vfs::open(path, OpenFlags::WRITE) {
             Ok(fd) => {
                 let mut req = [0u8; 4];

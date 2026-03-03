@@ -34,6 +34,19 @@ use alloc::{
     collections::VecDeque,
     string::{String, ToString},
 };
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Global flag set by Ctrl+C. Long-running commands should poll this
+/// via [`is_interrupted`] and abort early when it returns `true`.
+pub static SHELL_INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Returns `true` if Ctrl+C was pressed, and clears the flag.
+///
+/// Commands that loop (e.g. `top`, `watch`) should call this each
+/// iteration to support cancellation.
+pub fn is_interrupted() -> bool {
+    SHELL_INTERRUPTED.swap(false, Ordering::Relaxed)
+}
 
 /// Returns whether continuation byte.
 #[inline]
@@ -324,8 +337,17 @@ pub extern "C" fn shell_main() -> ! {
                         &mut cursor_pos,
                     );
                 }
+                b'\x03' => {
+                    in_escape_seq = false;
+                    utf8_pending_len = 0;
+                    shell_println!("^C");
+                    input_len = 0;
+                    cursor_pos = 0;
+                    history_idx = -1;
+                    SHELL_INTERRUPTED.store(false, core::sync::atomic::Ordering::Relaxed);
+                    print_prompt();
+                }
                 b'\x04' => {
-                    // Ctrl+D: forward-delete one character at cursor.
                     in_escape_seq = false;
                     utf8_pending_len = 0;
                     let _ = delete_next_char_at_cursor(

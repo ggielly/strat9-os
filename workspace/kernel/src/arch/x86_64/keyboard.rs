@@ -94,7 +94,14 @@ impl KeyboardBuffer {
 }
 
 /// Add a character to the keyboard buffer (called from IRQ context).
+///
+/// Ctrl+C (0x03) is also pushed to the buffer but additionally sets the
+/// global [`crate::shell::SHELL_INTERRUPTED`] flag so that long-running
+/// commands can detect cancellation.
 pub fn add_to_buffer(ch: u8) {
+    if ch == 0x03 {
+        crate::shell::SHELL_INTERRUPTED.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
     KEYBOARD_BUFFER.push(ch);
 }
 
