@@ -4,6 +4,7 @@
 //! Inspired by MaestroOS `idt.rs` and Redox-OS kernel.
 
 use super::{pic, tss};
+use core::sync::atomic::{AtomicU32, Ordering};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 /// IRQ interrupt vector numbers (PIC1_OFFSET + IRQ number)
@@ -22,6 +23,7 @@ pub mod irq {
 
 /// Static IDT storage (must be 'static for load())
 static mut IDT_STORAGE: InterruptDescriptorTable = InterruptDescriptorTable::new();
+static USER_PF_TRACE_BUDGET: AtomicU32 = AtomicU32::new(64);
 
 /// Initialize the IDT with exception handlers and IRQ handlers
 pub fn init() {
@@ -177,16 +179,27 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
-    crate::trace_mem!(
-        crate::trace::category::MEM_PF,
-        crate::trace::TraceKind::MemPageFault,
-        error_code.bits() as u64,
-        trace_ctx,
-        rip,
-        fault_vaddr,
-        user_rsp,
-        0
-    );
+    let do_pf_trace = if is_user {
+        USER_PF_TRACE_BUDGET
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                if v > 0 { Some(v - 1) } else { None }
+            })
+            .is_ok()
+    } else {
+        true
+    };
+    if do_pf_trace {
+        crate::trace_mem!(
+            crate::trace::category::MEM_PF,
+            crate::trace::TraceKind::MemPageFault,
+            error_code.bits() as u64,
+            trace_ctx,
+            rip,
+            fault_vaddr,
+            user_rsp,
+            0
+        );
+    }
 
     // Try COW only for write-protection faults on already-present pages.
     // For not-present faults, demand paging should run first.

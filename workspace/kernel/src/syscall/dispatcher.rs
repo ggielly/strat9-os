@@ -930,7 +930,7 @@ fn sys_debug_log(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 // ============================================================
 
 pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
     let mut kbuf = vec![0u8; buf_len as usize];
 
     let n = match device.receive(&mut kbuf) {
@@ -953,7 +953,7 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 }
 
 pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
     let user = UserSliceRead::new(buf_ptr, buf_len as usize)?;
     let kbuf = user.read_to_vec();
     trace_dhcp_frame("tx", &kbuf);
@@ -970,7 +970,7 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 }
 
 pub fn sys_net_info(info_type: u64, buf_ptr: u64) -> Result<u64, SyscallError> {
-    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::NotImplemented)?;
+    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
 
     match info_type {
         0 => {

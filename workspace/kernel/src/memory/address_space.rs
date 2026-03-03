@@ -345,14 +345,6 @@ impl AddressSpace {
             .map_err(|_| "OOM during demand paging")?;
         drop(guard);
 
-        crate::memory::paging::ensure_identity_map_range(frame.start_address.as_u64(), page_bytes);
-
-        // Zero the frame
-        unsafe {
-            let virt = crate::memory::phys_to_virt(frame.start_address.as_u64());
-            core::ptr::write_bytes(virt as *mut u8, 0, page_bytes as usize);
-        }
-
         let mut page_flags = vma.flags.to_page_flags();
 
         // SAFETY: We own the address space.
@@ -367,7 +359,10 @@ impl AddressSpace {
                             frame.start_address,
                         );
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
-                        Ok(flush) => flush.flush(),
+                        Ok(flush) => {
+                            flush.flush();
+                            core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
+                        }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             let lock = crate::memory::get_allocator();
                             let mut guard = lock.lock();
@@ -405,7 +400,10 @@ impl AddressSpace {
                         );
                     page_flags |= PageTableFlags::HUGE_PAGE;
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
-                        Ok(flush) => flush.flush(),
+                        Ok(flush) => {
+                            flush.flush();
+                            core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
+                        }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             let lock = crate::memory::get_allocator();
                             let mut guard = lock.lock();
@@ -442,12 +440,6 @@ impl AddressSpace {
             start_address: frame.start_address,
         });
 
-        log::trace!(
-            "Demand paging ({:?}): mapped {:#x} to frame {:#x}",
-            vma.page_size,
-            page_addr,
-            frame.start_address.as_u64()
-        );
         Ok(())
     }
 
