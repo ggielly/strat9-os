@@ -11,7 +11,7 @@ Useful entry points:
 
 API reference:
 
-- [strat9_syscall::call](../api/strat9_syscall/call/index.html)
-- [strat9_syscall::number](../api/strat9_syscall/number/index.html)
-- [strat9_syscall::error](../api/strat9_syscall/error/index.html)
-- [strat9_syscall::data](../api/strat9_syscall/data/index.html)
+- [strat9_syscall::call](./api/strat9_syscall/call/index.html)
+- [strat9_syscall::number](./api/strat9_syscall/number/index.html)
+- [strat9_syscall::error](./api/strat9_syscall/error/index.html)
+- [strat9_syscall::data](./api/strat9_syscall/data/index.html)

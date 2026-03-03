@@ -162,18 +162,6 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="publishing"><a class="header" href="#publishing">Publishing</a></h1>
-<h2 id="github-pages-recommended"><a class="header" href="#github-pages-recommended">GitHub Pages (recommended)</a></h2>
-<p>This repository includes a workflow that publishes this docs site to GitHub Pages.</p>
-<h3 id="one-time-setup"><a class="header" href="#one-time-setup">One-time setup</a></h3>
-<p>Run once from the repository root:</p>
-<pre><code class="language-bash">gh repo edit --enable-pages --pages-source=gh-pages
-</code></pre>
-<p>If your GitHub organization/repo policy requires it, set Pages source to <strong>GitHub Actions</strong> in repository settings.</p>
-<h3 id="trigger-publication"><a class="header" href="#trigger-publication">Trigger publication</a></h3>
-<ul>
-<li>Push to <code>main</code>, or</li>
-<li>Run the workflow manually from Actions tab (<code>workflow_dispatch</code>)</li>
-</ul>
 <h2 id="one-command-publication-script"><a class="header" href="#one-command-publication-script">One-command publication script</a></h2>
 <p>At repository root:</p>
 <pre><code class="language-bash">./publish-doc.sh
@@ -181,15 +169,15 @@
 <p>This script:</p>
 <ol>
 <li>builds docs (<code>cargo make docs-site</code>)</li>
-<li>commits changes</li>
-<li>pushes current branch</li>
-<li>triggers <code>Publish Docs</code> workflow with <code>gh</code></li>
+<li>regenerates ABI changelog auto section from git history</li>
+<li>commits/pushes current branch changes</li>
+<li>uploads built website to <code>ggielly.github.io/strat9-os-docs</code></li>
 </ol>
-<p>The workflow builds:</p>
+<p>The docs builder publishes:</p>
 <ol>
-<li>rustdoc for <code>strat9-abi</code> and <code>strat9-syscall</code></li>
 <li>mdBook pages under <code>docs-site/</code></li>
-<li>A combined site served by Pages</li>
+<li>rustdoc for all workspace crates (<code>cargo doc --workspace --no-deps</code>)</li>
+<li>a combined static site in <code>build/docs-site</code></li>
 </ol>
 
                     </main>

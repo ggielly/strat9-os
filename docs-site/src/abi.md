@@ -12,8 +12,8 @@ Focus modules:
 
 API reference:
 
-- [strat9_abi::syscall](../api/strat9_abi/syscall/index.html)
-- [strat9_abi::data](../api/strat9_abi/data/index.html)
-- [strat9_abi::flag](../api/strat9_abi/flag/index.html)
-- [strat9_abi::errno](../api/strat9_abi/errno/index.html)
-- [strat9_abi::boot](../api/strat9_abi/boot/index.html)
+- [strat9_abi::syscall](./api/strat9_abi/syscall/index.html)
+- [strat9_abi::data](./api/strat9_abi/data/index.html)
+- [strat9_abi::flag](./api/strat9_abi/flag/index.html)
+- [strat9_abi::errno](./api/strat9_abi/errno/index.html)
+- [strat9_abi::boot](./api/strat9_abi/boot/index.html)

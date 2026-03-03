@@ -72,11 +72,42 @@ md_path.write_text(new_text, encoding="utf-8")
 PY
 rm -f /tmp/abi-auto-block.txt
 
-echo "==> Building rustdoc (workspace)"
-cargo +nightly doc \
-  --manifest-path "${ROOT_DIR}/Cargo.toml" \
-  --workspace \
-  --no-deps
+echo "==> Building rustdoc (workspace, resilient mode)"
+mapfile -t WORKSPACE_PACKAGES < <(
+  cargo metadata --manifest-path "${ROOT_DIR}/Cargo.toml" --format-version 1 --no-deps \
+  | python3 - <<'PY'
+import json
+import sys
+
+data = json.load(sys.stdin)
+id_to_name = {p["id"]: p["name"] for p in data["packages"]}
+for pkg_id in data["workspace_members"]:
+    print(id_to_name[pkg_id])
+PY
+)
+
+FAILED_PACKAGES=()
+for pkg in "${WORKSPACE_PACKAGES[@]}"; do
+  if [[ "${pkg}" == "strat9-bootloader" ]]; then
+    echo "   - skipping ${pkg} (custom asm build script is not rustdoc-friendly yet)"
+    continue
+  fi
+  echo "   - doc ${pkg}"
+  if ! cargo +nightly doc \
+      --manifest-path "${ROOT_DIR}/Cargo.toml" \
+      -p "${pkg}" \
+      --no-deps; then
+    echo "     warning: rustdoc failed for ${pkg}, continuing"
+    FAILED_PACKAGES+=("${pkg}")
+  fi
+done
+
+if [[ "${#FAILED_PACKAGES[@]}" -gt 0 ]]; then
+  echo "==> rustdoc skipped/failed packages:"
+  for pkg in "${FAILED_PACKAGES[@]}"; do
+    echo "   - ${pkg}"
+  done
+fi
 
 echo "==> Building mdBook pages"
 mdbook build "${ROOT_DIR}/docs-site"

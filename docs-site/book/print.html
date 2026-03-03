@@ -167,9 +167,9 @@
 </ul>
 <h2 id="api-reference"><a class="header" href="#api-reference">API reference</a></h2>
 <ul>
-<li><a href="../api/strat9_abi/index.html">strat9-abi crate</a></li>
-<li><a href="../api/strat9_syscall/index.html">strat9-syscall crate</a></li>
-<li><a href="../api/index.html">Rustdoc index</a></li>
+<li><a href="./api/strat9_abi/index.html">strat9-abi crate</a></li>
+<li><a href="./api/strat9_syscall/index.html">strat9-syscall crate</a></li>
+<li><a href="./api/index.html">Rustdoc index</a></li>
 </ul>
 <h2 id="local-generation"><a class="header" href="#local-generation">Local generation</a></h2>
 <pre><code class="language-bash">bash tools/scripts/build-docs-site.sh
@@ -187,11 +187,11 @@ python3 -m http.server --directory build/docs-site 8000
 </ul>
 <p>API reference:</p>
 <ul>
-<li><a href="../api/strat9_abi/syscall/index.html">strat9_abi::syscall</a></li>
-<li><a href="../api/strat9_abi/data/index.html">strat9_abi::data</a></li>
-<li><a href="../api/strat9_abi/flag/index.html">strat9_abi::flag</a></li>
-<li><a href="../api/strat9_abi/errno/index.html">strat9_abi::errno</a></li>
-<li><a href="../api/strat9_abi/boot/index.html">strat9_abi::boot</a></li>
+<li><a href="./api/strat9_abi/syscall/index.html">strat9_abi::syscall</a></li>
+<li><a href="./api/strat9_abi/data/index.html">strat9_abi::data</a></li>
+<li><a href="./api/strat9_abi/flag/index.html">strat9_abi::flag</a></li>
+<li><a href="./api/strat9_abi/errno/index.html">strat9_abi::errno</a></li>
+<li><a href="./api/strat9_abi/boot/index.html">strat9_abi::boot</a></li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="abi-changelog"><a class="header" href="#abi-changelog">ABI Changelog</a></h1>
 <p>This page tracks ABI evolution for <code>strat9-abi</code>.</p>
@@ -202,17 +202,53 @@ python3 -m http.server --directory build/docs-site 8000
 <li><strong>No silent renumbering</strong> of existing syscall IDs.</li>
 <li><strong><code>repr(C)</code> and explicit size checks</strong> are mandatory for exported ABI structs.</li>
 </ul>
+<!-- AUTO-ABI-CHANGELOG:START -->
 <h2 id="current-version"><a class="header" href="#current-version">Current version</a></h2>
 <ul>
 <li><code>ABI_VERSION_MAJOR = 0</code></li>
 <li><code>ABI_VERSION_MINOR = 1</code></li>
+<li>Packed: <code>0.1</code></li>
 </ul>
 <p>See:</p>
 <ul>
-<li><a href="../api/strat9_abi/index.html">crate root constants</a></li>
-<li><a href="../api/strat9_abi/syscall/index.html">syscall numbers</a></li>
-<li><a href="../api/strat9_abi/data/index.html">ABI data structs</a></li>
+<li><a href="./api/strat9_abi/index.html">crate root constants</a></li>
+<li><a href="./api/strat9_abi/syscall/index.html">syscall numbers</a></li>
+<li><a href="./api/strat9_abi/data/index.html">ABI data structs</a></li>
 </ul>
+<h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
+<ul>
+<li>2026-03-03 <code>f314904</code> feat: Expand <code>FileStat</code> with additional POSIX fields and update kernel VFS schemes, and add a <code>nonce</code> to <code>IpcHandshake</code>.</li>
+<li>2026-03-03 <code>769f3eb</code> feat: Update syscall ABI with struct layout adjustments, error encoding clarification, and versioning.</li>
+<li>2026-03-03 <code>c23a68a</code> feat: Ensure Limine bootloader directories exist, use a real time source for <code>setitimer</code>, and add <code>itimerval</code> value validation.</li>
+<li>2026-03-03 <code>ea80816</code> fix: Correct <code>O_NOFOLLOW</code> flag value and add length bounds checks to <code>DirentIter</code> initialization and name length assignment.</li>
+<li>2026-03-03 <code>748f98c</code> feat: Add <code>pread</code> and <code>pwrite</code> syscalls, enhance WASM <code>proc_exit</code> handling, and implement IPC port cleanup on task termination.</li>
+<li>2026-03-03 <code>aa38e26</code> refactor: Change network syscall error for missing device, add user page fault trace budget, and zero demand-paged memory after mapping.</li>
+<li>2026-03-03 <code>326613a</code> feat: Add PCI and handle ABI types, improve user page fault error reporting, ensure identity mapping for demand-paged frames, and update the build target triplet.</li>
+<li>2026-03-03 <code>52f3586</code> Enhance error handling by adding new error variants to the Error enum</li>
+<li>2026-03-03 <code>6cf254d</code> Refactor IPC message handling and update memory management logging</li>
+<li>2026-03-03 <code>50d7f2f</code> Enhance ABI structures and improve syscall error handling</li>
+<li>2026-03-03 <code>607abac</code> Enhance ABI introspection and improve syscall handling</li>
+<li>2026-03-03 <code>deabb18</code> Enhance Strat9 ABI integration and update OpenFlags implementation</li>
+<li>2026-03-03 <code>92ba1c6</code> Add strat9-abi as a workspace dependency and refactor bootloader integration</li>
+<li>2026-03-03 <code>eb5de02</code> Refactor variable names in BuddyAllocator and sys_sigtimedwait for clarity</li>
+<li>2026-03-03 <code>259bb9d</code> Enhance PCI support and update related components</li>
+<li>2026-03-02 <code>c57b44d</code> Add <code>strate-bus</code> component and related build tasks.</li>
+<li>2026-03-01 <code>8c7a98d</code> Enhance QEMU GUI support and update related scripts</li>
+<li>2026-03-01 <code>84fdb29</code> Update zerocopy dependency and refactor related code</li>
+<li>2026-03-01 <code>34a1f24</code> Update dependencies and add web-admin component</li>
+<li>2026-03-01 <code>51c2a03</code> Update scheduler functionality and enhance shell command integration</li>
+<li>2026-03-01 <code>20e1849</code> Add SSH daemon support and enhance build tasks</li>
+<li>2026-03-01 <code>6966081</code> Implement WASM service connection and enhance IPC handling</li>
+<li>2026-02-28 <code>30ea654</code> Add WASM runtime support and enhance build tasks</li>
+<li>2026-02-28 <code>03d5804</code> Implement mandatory silo checks and enhance network error logging</li>
+<li>2026-02-28 <code>de55138</code> Massive code quality and refactor</li>
+<li>2026-02-28 <code>abe3e7d</code> Update Makefile and script to manage test inclusion and enhance silo functionality</li>
+<li>2026-02-28 <code>7cf6f39</code> Implement new silo management syscalls and enhance kernel functionality</li>
+<li>2026-02-28 <code>59595b1</code> Refactor image format retrieval in ACPI BGRT implementation</li>
+<li>2026-02-28 <code>2b052de</code> Refactor ACPI and IPC structures for improved functionality</li>
+<li>2026-02-28 <code>4fe2c19</code> Enhance IPC message structure and silo management</li>
+</ul>
+<!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
 <h3 id="01"><a class="header" href="#01">0.1</a></h3>
 <ul>
@@ -245,24 +281,12 @@ python3 -m http.server --directory build/docs-site 8000
 </ul>
 <p>API reference:</p>
 <ul>
-<li><a href="../api/strat9_syscall/call/index.html">strat9_syscall::call</a></li>
-<li><a href="../api/strat9_syscall/number/index.html">strat9_syscall::number</a></li>
-<li><a href="../api/strat9_syscall/error/index.html">strat9_syscall::error</a></li>
-<li><a href="../api/strat9_syscall/data/index.html">strat9_syscall::data</a></li>
+<li><a href="./api/strat9_syscall/call/index.html">strat9_syscall::call</a></li>
+<li><a href="./api/strat9_syscall/number/index.html">strat9_syscall::number</a></li>
+<li><a href="./api/strat9_syscall/error/index.html">strat9_syscall::error</a></li>
+<li><a href="./api/strat9_syscall/data/index.html">strat9_syscall::data</a></li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="publishing"><a class="header" href="#publishing">Publishing</a></h1>
-<h2 id="github-pages-recommended"><a class="header" href="#github-pages-recommended">GitHub Pages (recommended)</a></h2>
-<p>This repository includes a workflow that publishes this docs site to GitHub Pages.</p>
-<h3 id="one-time-setup"><a class="header" href="#one-time-setup">One-time setup</a></h3>
-<p>Run once from the repository root:</p>
-<pre><code class="language-bash">gh repo edit --enable-pages --pages-source=gh-pages
-</code></pre>
-<p>If your GitHub organization/repo policy requires it, set Pages source to <strong>GitHub Actions</strong> in repository settings.</p>
-<h3 id="trigger-publication"><a class="header" href="#trigger-publication">Trigger publication</a></h3>
-<ul>
-<li>Push to <code>main</code>, or</li>
-<li>Run the workflow manually from Actions tab (<code>workflow_dispatch</code>)</li>
-</ul>
 <h2 id="one-command-publication-script"><a class="header" href="#one-command-publication-script">One-command publication script</a></h2>
 <p>At repository root:</p>
 <pre><code class="language-bash">./publish-doc.sh
@@ -270,15 +294,15 @@ python3 -m http.server --directory build/docs-site 8000
 <p>This script:</p>
 <ol>
 <li>builds docs (<code>cargo make docs-site</code>)</li>
-<li>commits changes</li>
-<li>pushes current branch</li>
-<li>triggers <code>Publish Docs</code> workflow with <code>gh</code></li>
+<li>regenerates ABI changelog auto section from git history</li>
+<li>commits/pushes current branch changes</li>
+<li>uploads built website to <code>ggielly.github.io/strat9-os-docs</code></li>
 </ol>
-<p>The workflow builds:</p>
+<p>The docs builder publishes:</p>
 <ol>
-<li>rustdoc for <code>strat9-abi</code> and <code>strat9-syscall</code></li>
 <li>mdBook pages under <code>docs-site/</code></li>
-<li>A combined site served by Pages</li>
+<li>rustdoc for all workspace crates (<code>cargo doc --workspace --no-deps</code>)</li>
+<li>a combined static site in <code>build/docs-site</code></li>
 </ol>
 
                     </main>

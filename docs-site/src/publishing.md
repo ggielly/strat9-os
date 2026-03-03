@@ -1,24 +1,5 @@
 # Publishing
 
-## GitHub Pages (recommended)
-
-This repository includes a workflow that publishes this docs site to GitHub Pages.
-
-### One-time setup
-
-Run once from the repository root:
-
-```bash
-gh repo edit --enable-pages --pages-source=gh-pages
-```
-
-If your GitHub organization/repo policy requires it, set Pages source to **GitHub Actions** in repository settings.
-
-### Trigger publication
-
-- Push to `main`, or
-- Run the workflow manually from Actions tab (`workflow_dispatch`)
-
 ## One-command publication script
 
 At repository root:
@@ -30,12 +11,12 @@ At repository root:
 This script:
 
 1. builds docs (`cargo make docs-site`)
-2. commits changes
-3. pushes current branch
-4. triggers `Publish Docs` workflow with `gh`
+2. regenerates ABI changelog auto section from git history
+3. commits/pushes current branch changes
+4. uploads built website to `ggielly.github.io/strat9-os-docs`
 
-The workflow builds:
+The docs builder publishes:
 
-1. rustdoc for `strat9-abi` and `strat9-syscall`
-2. mdBook pages under `docs-site/`
-3. A combined site served by Pages
+1. mdBook pages under `docs-site/`
+2. rustdoc for all workspace crates (`cargo doc --workspace --no-deps`)
+3. a combined static site in `build/docs-site`

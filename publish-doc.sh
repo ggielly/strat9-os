@@ -149,7 +149,51 @@ if [[ "${NO_PAGES_UPLOAD}" -eq 0 ]]; then
   rsync -a --delete "build/docs-site/" "${TMP_DIR}/pages/${PAGES_SUBDIR}/"
 
   pushd "${TMP_DIR}/pages" >/dev/null
-  git add "${PAGES_SUBDIR}"
+  README_FILE="README.md"
+  DOCS_URL="https://ggielly.github.io/${PAGES_SUBDIR}/"
+  README_MARK_START="<!-- AUTO-STRAT9-DOCS:START -->"
+  README_MARK_END="<!-- AUTO-STRAT9-DOCS:END -->"
+
+  if [[ ! -f "${README_FILE}" ]]; then
+    cat > "${README_FILE}" <<EOF
+# ggielly.github.io
+
+${README_MARK_START}
+## Documentation Strat9 OS
+
+- ${DOCS_URL}
+${README_MARK_END}
+EOF
+  elif ! grep -q "${README_MARK_START}" "${README_FILE}"; then
+    cat >> "${README_FILE}" <<EOF
+
+${README_MARK_START}
+## Documentation Strat9 OS
+
+- ${DOCS_URL}
+${README_MARK_END}
+EOF
+  else
+    python3 - "${README_FILE}" "${DOCS_URL}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+readme = Path(sys.argv[1])
+docs_url = sys.argv[2]
+text = readme.read_text(encoding="utf-8")
+start = "<!-- AUTO-STRAT9-DOCS:START -->"
+end = "<!-- AUTO-STRAT9-DOCS:END -->"
+pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.S)
+replacement = f"{start}\n## Documentation Strat9 OS\n\n- {docs_url}\n{end}"
+new_text, n = pattern.subn(replacement, text, count=1)
+if n != 1:
+    raise SystemExit("failed to update AUTO-STRAT9-DOCS block in README.md")
+readme.write_text(new_text, encoding="utf-8")
+PY
+  fi
+
+  git add "${PAGES_SUBDIR}" "${README_FILE}"
   if ! git diff --cached --quiet; then
     git commit -m "docs: publish ${PAGES_SUBDIR} from ${REPO_FULL_NAME}@${BRANCH}"
     git push origin "${PAGES_BRANCH}"

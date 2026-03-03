@@ -170,17 +170,53 @@
 <li><strong>No silent renumbering</strong> of existing syscall IDs.</li>
 <li><strong><code>repr(C)</code> and explicit size checks</strong> are mandatory for exported ABI structs.</li>
 </ul>
+<!-- AUTO-ABI-CHANGELOG:START -->
 <h2 id="current-version"><a class="header" href="#current-version">Current version</a></h2>
 <ul>
 <li><code>ABI_VERSION_MAJOR = 0</code></li>
 <li><code>ABI_VERSION_MINOR = 1</code></li>
+<li>Packed: <code>0.1</code></li>
 </ul>
 <p>See:</p>
 <ul>
-<li><a href="../api/strat9_abi/index.html">crate root constants</a></li>
-<li><a href="../api/strat9_abi/syscall/index.html">syscall numbers</a></li>
-<li><a href="../api/strat9_abi/data/index.html">ABI data structs</a></li>
+<li><a href="./api/strat9_abi/index.html">crate root constants</a></li>
+<li><a href="./api/strat9_abi/syscall/index.html">syscall numbers</a></li>
+<li><a href="./api/strat9_abi/data/index.html">ABI data structs</a></li>
 </ul>
+<h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
+<ul>
+<li>2026-03-03 <code>f314904</code> feat: Expand <code>FileStat</code> with additional POSIX fields and update kernel VFS schemes, and add a <code>nonce</code> to <code>IpcHandshake</code>.</li>
+<li>2026-03-03 <code>769f3eb</code> feat: Update syscall ABI with struct layout adjustments, error encoding clarification, and versioning.</li>
+<li>2026-03-03 <code>c23a68a</code> feat: Ensure Limine bootloader directories exist, use a real time source for <code>setitimer</code>, and add <code>itimerval</code> value validation.</li>
+<li>2026-03-03 <code>ea80816</code> fix: Correct <code>O_NOFOLLOW</code> flag value and add length bounds checks to <code>DirentIter</code> initialization and name length assignment.</li>
+<li>2026-03-03 <code>748f98c</code> feat: Add <code>pread</code> and <code>pwrite</code> syscalls, enhance WASM <code>proc_exit</code> handling, and implement IPC port cleanup on task termination.</li>
+<li>2026-03-03 <code>aa38e26</code> refactor: Change network syscall error for missing device, add user page fault trace budget, and zero demand-paged memory after mapping.</li>
+<li>2026-03-03 <code>326613a</code> feat: Add PCI and handle ABI types, improve user page fault error reporting, ensure identity mapping for demand-paged frames, and update the build target triplet.</li>
+<li>2026-03-03 <code>52f3586</code> Enhance error handling by adding new error variants to the Error enum</li>
+<li>2026-03-03 <code>6cf254d</code> Refactor IPC message handling and update memory management logging</li>
+<li>2026-03-03 <code>50d7f2f</code> Enhance ABI structures and improve syscall error handling</li>
+<li>2026-03-03 <code>607abac</code> Enhance ABI introspection and improve syscall handling</li>
+<li>2026-03-03 <code>deabb18</code> Enhance Strat9 ABI integration and update OpenFlags implementation</li>
+<li>2026-03-03 <code>92ba1c6</code> Add strat9-abi as a workspace dependency and refactor bootloader integration</li>
+<li>2026-03-03 <code>eb5de02</code> Refactor variable names in BuddyAllocator and sys_sigtimedwait for clarity</li>
+<li>2026-03-03 <code>259bb9d</code> Enhance PCI support and update related components</li>
+<li>2026-03-02 <code>c57b44d</code> Add <code>strate-bus</code> component and related build tasks.</li>
+<li>2026-03-01 <code>8c7a98d</code> Enhance QEMU GUI support and update related scripts</li>
+<li>2026-03-01 <code>84fdb29</code> Update zerocopy dependency and refactor related code</li>
+<li>2026-03-01 <code>34a1f24</code> Update dependencies and add web-admin component</li>
+<li>2026-03-01 <code>51c2a03</code> Update scheduler functionality and enhance shell command integration</li>
+<li>2026-03-01 <code>20e1849</code> Add SSH daemon support and enhance build tasks</li>
+<li>2026-03-01 <code>6966081</code> Implement WASM service connection and enhance IPC handling</li>
+<li>2026-02-28 <code>30ea654</code> Add WASM runtime support and enhance build tasks</li>
+<li>2026-02-28 <code>03d5804</code> Implement mandatory silo checks and enhance network error logging</li>
+<li>2026-02-28 <code>de55138</code> Massive code quality and refactor</li>
+<li>2026-02-28 <code>abe3e7d</code> Update Makefile and script to manage test inclusion and enhance silo functionality</li>
+<li>2026-02-28 <code>7cf6f39</code> Implement new silo management syscalls and enhance kernel functionality</li>
+<li>2026-02-28 <code>59595b1</code> Refactor image format retrieval in ACPI BGRT implementation</li>
+<li>2026-02-28 <code>2b052de</code> Refactor ACPI and IPC structures for improved functionality</li>
+<li>2026-02-28 <code>4fe2c19</code> Enhance IPC message structure and silo management</li>
+</ul>
+<!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
 <h3 id="01"><a class="header" href="#01">0.1</a></h3>
 <ul>
