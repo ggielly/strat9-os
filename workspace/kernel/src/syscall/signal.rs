@@ -400,9 +400,7 @@ pub fn sys_setitimer(
     let which = ITimerWhich::from_u32(which).ok_or(SyscallError::InvalidArgument)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
-    // Get current monotonic time (stub for now - returns 0)
-    // TODO: Implement proper time source
-    let current_time_ns = 0u64;
+    let current_time_ns = crate::syscall::time::current_time_ns();
 
     let timer = task.itimers.get(which);
 
@@ -421,6 +419,12 @@ pub fn sys_setitimer(
             return Err(SyscallError::InvalidArgument);
         }
         let new_value = itimerval_from_bytes(&bytes);
+        let valid = |sec: i64, usec: i64| sec >= 0 && (0..1_000_000).contains(&usec);
+        if !valid(new_value.it_interval.tv_sec, new_value.it_interval.tv_usec)
+            || !valid(new_value.it_value.tv_sec, new_value.it_value.tv_usec)
+        {
+            return Err(SyscallError::InvalidArgument);
+        }
         timer.set(&new_value, current_time_ns);
     }
 

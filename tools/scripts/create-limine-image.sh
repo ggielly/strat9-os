@@ -165,6 +165,8 @@ cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel.elf"
 echo "  [OK] Copied kernel"
 
 # Copy Limine files
+# Re-ensure destination exists in case an external step altered build/ tree.
+mkdir -p "$ISO_ROOT/boot/limine"
 cp "$LIMINE_DIR/limine-bios.sys" "$ISO_ROOT/boot/limine/"
 cp "$LIMINE_DIR/limine-bios-cd.bin" "$ISO_ROOT/boot/limine/"
 cp "$LIMINE_DIR/limine-uefi-cd.bin" "$ISO_ROOT/boot/limine/"

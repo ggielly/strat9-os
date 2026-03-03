@@ -146,6 +146,7 @@ fn cidr_to_netmask(prefix_str: &str) -> Option<[u8; 20]> {
 
 const BOOT_RETRIES: usize = 10;
 const POLL_INTERVAL_MS: u64 = 500;
+const BACKGROUND_POLL_INTERVAL_MS: u64 = 1000;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -156,6 +157,7 @@ pub extern "C" fn _start() -> ! {
     let mut route_buf = [0u8; 64];
     let mut dns_buf = [0u8; 96];
     let mut retries = 0;
+    let mut background_mode = false;
 
     loop {
         // Try to read the IP address from the network strate
@@ -167,8 +169,12 @@ pub extern "C" fn _start() -> ! {
                 }
                 retries += 1;
                 if retries >= BOOT_RETRIES {
-                    log("[dhcp-client] /net not ready yet; continuing boot without DHCP\n");
-                    call::exit(0);
+                    if !background_mode {
+                        log("[dhcp-client] /net not ready yet; keeping background probe alive\n");
+                        background_mode = true;
+                    }
+                    sleep_ms(BACKGROUND_POLL_INTERVAL_MS);
+                    continue;
                 }
                 sleep_ms(POLL_INTERVAL_MS);
                 continue;
@@ -178,8 +184,12 @@ pub extern "C" fn _start() -> ! {
         if ip_n == 0 || is_unconfigured(&ip_buf[..ip_n]) {
             retries += 1;
             if retries >= BOOT_RETRIES {
-                log("[dhcp-client] DHCP not ready during boot window; leaving background probe\n");
-                call::exit(0);
+                if !background_mode {
+                    log("[dhcp-client] DHCP not ready during boot window; keeping background probe alive\n");
+                    background_mode = true;
+                }
+                sleep_ms(BACKGROUND_POLL_INTERVAL_MS);
+                continue;
             }
             sleep_ms(POLL_INTERVAL_MS);
             continue;

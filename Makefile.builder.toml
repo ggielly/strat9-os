@@ -177,7 +177,7 @@ args = ["build", "--target", "${KERNEL_TARGET}"]
 # =============================================================================
 
 [tasks.build-bootloader]
-cwd = "workspace/bootloader"fs-ext4
+cwd = "workspace/bootloader"
 description = "Build bootloader"
 dependencies = ["verify-workspace"]
 command = "cargo"
@@ -201,6 +201,8 @@ echo "creating bootable ISO image..."
 # Create build directories
 mkdir -p build/iso_root/boot/limine
 mkdir -p build/iso_root/strates
+mkdir -p build/iso_root/initfs
+mkdir -p build/iso_root/initfs/bin
 
 # Copy kernel
 echo "  copying kernel..."
@@ -211,8 +213,24 @@ echo "  copying strates..."
 [ -f workspace/target/x86_64-unknown-none/release/fs-ext4 ] && \
     cp workspace/target/x86_64-unknown-none/release/fs-ext4 build/iso_root/strates/
 
+# Copy initfs runtime binaries (required by strate-init boot flow)
+echo "  copying initfs runtime binaries..."
+[ -f workspace/target/x86_64-unknown-none/release/strate-init ] && \
+    cp workspace/target/x86_64-unknown-none/release/strate-init build/iso_root/initfs/strate-init
+[ -f workspace/target/x86_64-unknown-none/release/console-admin ] && \
+    cp workspace/target/x86_64-unknown-none/release/console-admin build/iso_root/initfs/console-admin
+[ -f workspace/target/x86_64-unknown-none/release/strate-bus ] && \
+    cp workspace/target/x86_64-unknown-none/release/strate-bus build/iso_root/initfs/strate-bus
+[ -f workspace/target/x86_64-unknown-none/release/strate-net-silo ] && \
+    cp workspace/target/x86_64-unknown-none/release/strate-net-silo build/iso_root/initfs/strate-net
+[ -f workspace/target/x86_64-unknown-none/release/dhcp-client ] && \
+    cp workspace/target/x86_64-unknown-none/release/dhcp-client build/iso_root/initfs/bin/dhcp-client
+[ -f workspace/assets/boot/silo.toml ] && \
+    cp workspace/assets/boot/silo.toml build/iso_root/initfs/silo.toml
+
 # Copy Limine files
 echo "  copying Limine bootloader..."
+mkdir -p build/iso_root/boot/limine
 cp /opt/limine/limine-bios.sys build/iso_root/boot/limine/
 cp /opt/limine/limine-bios-cd.bin build/iso_root/boot/limine/
 cp /opt/limine/limine-uefi-cd.bin build/iso_root/boot/limine/
