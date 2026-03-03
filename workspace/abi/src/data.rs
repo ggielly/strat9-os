@@ -205,6 +205,7 @@ impl DirentHeader {
 }
 
 static_assertions::assert_eq_size!(DirentHeader, [u8; 11]);
+static_assertions::assert_eq_size!(FileStat, [u8; 40]);
 static_assertions::assert_eq_size!(IpcMessage, [u8; 64]);
 static_assertions::const_assert_eq!(core::mem::align_of::<IpcMessage>(), 64);
 static_assertions::assert_eq_size!(TimeSpec, [u8; 16]);

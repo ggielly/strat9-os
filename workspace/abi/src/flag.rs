@@ -37,6 +37,8 @@ bitflags! {
 
 /// Translate POSIX O_* flags to Strat9 ABI `OpenFlags`.
 pub fn posix_oflags_to_strat9(posix: u32) -> OpenFlags {
+    const O_ACCMODE: u32  = 0o3;
+    const O_RDONLY: u32   = 0o000000;
     const O_WRONLY: u32   = 0o000001;
     const O_RDWR: u32     = 0o000002;
     const O_CREAT: u32    = 0o000100;
@@ -49,13 +51,13 @@ pub fn posix_oflags_to_strat9(posix: u32) -> OpenFlags {
     const O_NOFOLLOW: u32 = 0o0100000;
     const O_SYNC: u32     = 0o04000000;
 
-    let access = posix & 0o3;
+    let access = posix & O_ACCMODE;
     let mut out = OpenFlags::empty();
 
     match access {
-        0 => { out |= OpenFlags::READ; }
-        1 => { out |= OpenFlags::WRITE; }
-        2 => { out |= OpenFlags::READ | OpenFlags::WRITE; }
+        O_RDONLY => { out |= OpenFlags::READ; }
+        O_WRONLY => { out |= OpenFlags::WRITE; }
+        O_RDWR   => { out |= OpenFlags::READ | OpenFlags::WRITE; }
         _ => {}
     }
 

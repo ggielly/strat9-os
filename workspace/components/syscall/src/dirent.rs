@@ -24,8 +24,7 @@ impl Dirent {
     }
 
     pub fn name(&self) -> &[u8] {
-        let len = self.name.iter().position(|&b| b == 0).unwrap_or(self.name_len as usize);
-        &self.name[..len]
+        &self.name[..self.name_len as usize]
     }
 }
 

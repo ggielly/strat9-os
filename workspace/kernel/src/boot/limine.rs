@@ -688,6 +688,8 @@ pub unsafe extern "C" fn kmain() -> ! {
     }
 
     let args = super::entry::KernelArgs {
+        magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
+        abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
         kernel_base: EXECUTABLE_ADDRESS
             .get_response()
             .map(|r| r.physical_base())

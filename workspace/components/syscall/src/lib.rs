@@ -1231,4 +1231,14 @@ pub mod call {
     pub fn silo_enter_sandbox() -> error::Result<usize> {
         unsafe { syscall0(number::SYS_SILO_ENTER_SANDBOX) }
     }
+
+    // -----------------------------------------------------------------------
+    // ABI introspection (block 900)
+    // -----------------------------------------------------------------------
+
+    /// Query the kernel ABI version. Returns (major << 16) | minor.
+    pub fn abi_version() -> error::Result<(u16, u16)> {
+        let raw = unsafe { syscall0(number::SYS_ABI_VERSION) }?;
+        Ok(((raw >> 16) as u16, raw as u16))
+    }
 }
