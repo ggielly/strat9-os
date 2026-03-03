@@ -36,6 +36,8 @@ impl CommandRegistry {
         registry.register("shutdown", sys::cmd_shutdown);
         registry.register("uptime", util::cmd_uptime);
         registry.register("echo", util::cmd_echo);
+        registry.register("date", util::cmd_date);
+        registry.register("ntpdate", util::cmd_ntpdate);
 
         // Process
         registry.register("ps", ps::cmd_ps);

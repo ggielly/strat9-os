@@ -211,6 +211,52 @@ pub fn cmd_whoami(_args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Display the current kernel time.
+///
+/// Shows uptime-based time since boot and the nanosecond timestamp
+/// from the kernel clock source.
+pub fn cmd_date(_args: &[String]) -> Result<(), ShellError> {
+    let ns = crate::syscall::time::current_time_ns();
+    let secs = ns / 1_000_000_000;
+    let hours = (secs / 3600) % 24;
+    let minutes = (secs % 3600) / 60;
+    let s = secs % 60;
+    shell_println!("Kernel time: {:02}:{:02}:{:02} ({}ns since boot)", hours, minutes, s, ns);
+    Ok(())
+}
+
+/// NTP time synchronization stub.
+///
+/// Attempts to query an NTP server via `/net/ntp/<server>`. Currently
+/// a stub that reports the kernel's internal clock until UDP support
+/// is available in the network strate.
+pub fn cmd_ntpdate(args: &[String]) -> Result<(), ShellError> {
+    let server = args.first().map(|s| s.as_str()).unwrap_or("pool.ntp.org");
+    shell_println!("ntpdate: querying {}...", server);
+
+    let path = alloc::format!("/net/ntp/{}", server);
+    match vfs::open(&path, vfs::OpenFlags::READ) {
+        Ok(fd) => {
+            let mut buf = [0u8; 64];
+            let n = vfs::read(fd, &mut buf).unwrap_or(0);
+            let _ = vfs::close(fd);
+            if n > 0 {
+                let s = core::str::from_utf8(&buf[..n]).unwrap_or("(invalid)");
+                shell_println!("  server time: {}", s.trim());
+            } else {
+                shell_println!("  no response");
+            }
+        }
+        Err(_) => {
+            // TODO: implement when UDP socket support is available
+            let ns = crate::syscall::time::current_time_ns();
+            shell_println!("  NTP unavailable (no UDP), showing kernel clock:");
+            shell_println!("  {}ns since boot", ns);
+        }
+    }
+    Ok(())
+}
+
 /// Search for lines matching a pattern in a file or piped input.
 ///
 /// Usage: `grep <pattern> [path]`
