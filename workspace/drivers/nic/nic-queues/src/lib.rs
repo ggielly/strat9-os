@@ -20,6 +20,9 @@ pub struct RxRing<D: RxDescriptor> {
     tail: usize,
 }
 
+// SAFETY: RxRing only contains a raw pointer to a descriptor ring and plain
+// indices. Sending it to another thread is safe as long as external code
+// upholds exclusive mutation/aliasing rules for the underlying ring memory.
 unsafe impl<D: RxDescriptor> Send for RxRing<D> {}
 
 impl<D: RxDescriptor> RxRing<D> {
@@ -42,12 +45,16 @@ impl<D: RxDescriptor> RxRing<D> {
     }
 
     pub fn desc_mut(&mut self, idx: usize) -> &mut D {
+        // SAFETY: `new` guarantees `descs` points to `count` valid descriptors.
+        // Indexing is wrapped modulo `count`, so pointer arithmetic stays in ring bounds.
         unsafe { &mut *self.descs.add(idx % self.count) }
     }
 
     /// Check the next descriptor; returns `(index, packet_length)` if ready.
     pub fn poll(&self) -> Option<(usize, u16)> {
         let next = (self.tail + 1) % self.count;
+        // SAFETY: `next < count` and `descs` points to `count` valid descriptors.
+        // Immutable access does not violate aliasing.
         let desc = unsafe { &*self.descs.add(next) };
         if desc.is_done() {
             Some((next, desc.packet_length()))
@@ -76,9 +83,13 @@ pub struct TxRing<D: TxDescriptor> {
     tail: usize,
 }
 
+// SAFETY: TxRing stores a raw descriptor pointer and indices only. Transfer
+// across threads is sound when callers synchronize ownership of descriptor memory.
 unsafe impl<D: TxDescriptor> Send for TxRing<D> {}
 
 impl<D: TxDescriptor> TxRing<D> {
+    /// # Safety
+    /// `descs` must point to `count` valid, zero-initialised descriptors.
     pub unsafe fn new(descs: *mut D, count: usize) -> Self {
         Self {
             descs,
@@ -96,10 +107,12 @@ impl<D: TxDescriptor> TxRing<D> {
     }
 
     pub fn desc(&self, idx: usize) -> &D {
+        // SAFETY: `idx % count` is in bounds and `descs` points to `count` valid descriptors.
         unsafe { &*self.descs.add(idx % self.count) }
     }
 
     pub fn desc_mut(&mut self, idx: usize) -> &mut D {
+        // SAFETY: `idx % count` is in bounds and mutable access is gated by `&mut self`.
         unsafe { &mut *self.descs.add(idx % self.count) }
     }
 
