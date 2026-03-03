@@ -60,7 +60,7 @@ pub const SYS_PROC_GETPPID: usize = 309;
 pub const SYS_PROC_WAITPID: usize = 310;
 pub const SYS_GETPID: usize = 311;
 pub const SYS_GETTID: usize = 312;
-pub const SYS_GETPPID: usize = 313;
+pub const SYS_GETPPID: usize = SYS_PROC_GETPPID;
 pub const SYS_PROC_WAIT: usize = 314;
 pub const SYS_PROC_EXECVE: usize = 315;
 pub const SYS_FCNTL: usize = 316;
@@ -171,4 +171,5 @@ pub const SYS_SILO_UNVEIL: usize = 810;
 pub const SYS_SILO_ENTER_SANDBOX: usize = 811;
 
 // Block 900: ABI introspection
+// Return format for SYS_ABI_VERSION: (major << 16) | minor
 pub const SYS_ABI_VERSION: usize = 900;

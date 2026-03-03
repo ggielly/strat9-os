@@ -86,6 +86,7 @@ impl Error {
 
     #[inline]
     pub fn demux(ret: usize) -> core::result::Result<usize, Error> {
+        // Strat9 syscall ABI encodes errors as negative errno values in RAX.
         let ret_s = ret as isize;
         if ret_s >= -ERRNO_MAX && ret_s < 0 {
             Err(Error::from_errno((-ret_s) as usize))

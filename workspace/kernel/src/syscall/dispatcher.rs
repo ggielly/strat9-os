@@ -121,7 +121,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PROC_YIELD => sys_proc_yield(),
         SYS_PROC_FORK => sys_fork(frame).map(|result| result.child_pid as u64),
         SYS_PROC_GETPID | SYS_GETPID => proc_sys::sys_getpid(),
-        SYS_PROC_GETPPID | SYS_GETPPID => proc_sys::sys_getppid(),
+        SYS_PROC_GETPPID => proc_sys::sys_getppid(),
         SYS_GETTID => proc_sys::sys_gettid(),
         SYS_PROC_WAITPID => {
             super::wait::sys_waitpid(arg1 as i64, arg2, arg3 as u32).map(|pid| pid as u64)

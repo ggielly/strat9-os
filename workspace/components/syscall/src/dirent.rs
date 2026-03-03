@@ -64,6 +64,7 @@ impl<'a> Iterator for DirentIter<'a> {
         let ino = u64::from_le_bytes(hdr[0..8].try_into().ok()?);
         let file_type = hdr[8];
         let name_len = u16::from_le_bytes(hdr[9..11].try_into().ok()?);
+        let _padding = hdr[11];
         let name_start = self.offset + DirentHeader::SIZE;
         let name_end = name_start + name_len as usize;
         if name_end + 1 > self.buf.len() {

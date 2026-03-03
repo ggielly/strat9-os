@@ -553,8 +553,9 @@ pub fn sys_getdents(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallE
         kbuf[0..8].copy_from_slice(&entry.ino.to_le_bytes());
         kbuf[8] = entry.file_type;
         kbuf[9..11].copy_from_slice(&name_len.to_le_bytes());
-        kbuf[11..11 + name_len as usize].copy_from_slice(&name_bytes[..name_len as usize]);
-        kbuf[11 + name_len as usize] = 0;
+        kbuf[11] = 0; // DirentHeader::_padding
+        kbuf[12..12 + name_len as usize].copy_from_slice(&name_bytes[..name_len as usize]);
+        kbuf[12 + name_len as usize] = 0;
         user.copy_from(&kbuf[..entry_size]);
 
         offset += entry_size;

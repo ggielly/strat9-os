@@ -1,3 +1,9 @@
+//! Strat9 errno numeric values.
+//!
+//! ABI convention: syscalls return `usize` in RAX.
+//! Success is any non-negative value. Errors are encoded as negative errno
+//! values in two's complement (e.g. `-EPERM`), then interpreted by userspace.
+
 pub const EPERM: usize = 1;
 pub const ENOENT: usize = 2;
 pub const ESRCH: usize = 3;

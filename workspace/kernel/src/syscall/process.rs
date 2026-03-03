@@ -233,7 +233,7 @@ pub fn sys_thread_exit(exit_code: u64) -> Result<u64, SyscallError> {
     crate::process::scheduler::exit_current_task(code)
 }
 
-/// SYS_GETPPID (313): Return parent process ID.
+/// SYS_PROC_GETPPID/SYS_GETPPID (309): Return parent process ID.
 pub fn sys_getppid() -> Result<u64, SyscallError> {
     let child = current_task_id().ok_or(SyscallError::Fault)?;
     Ok(get_parent_pid(child).map(|p| p as u64).unwrap_or(0))
