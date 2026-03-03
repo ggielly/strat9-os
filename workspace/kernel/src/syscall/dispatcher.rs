@@ -1087,10 +1087,7 @@ fn sys_ipc_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
     let mut buf = [0u8; MSG_SIZE];
-    // SAFETY: buf is exactly the size of IpcMessage.
-    unsafe {
-        msg.to_raw(buf.as_mut_ptr());
-    }
+    crate::ipc::message::ipc_message_to_raw(&msg, &mut buf);
     let user = UserSliceWrite::new(_msg_ptr, MSG_SIZE)?;
     user.copy_from(&buf);
     Ok(0)
@@ -1143,10 +1140,7 @@ fn sys_ipc_try_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
     let mut buf = [0u8; MSG_SIZE];
-    // SAFETY: buf is exactly the size of IpcMessage.
-    unsafe {
-        msg.to_raw(buf.as_mut_ptr());
-    }
+    crate::ipc::message::ipc_message_to_raw(&msg, &mut buf);
     let user = UserSliceWrite::new(_msg_ptr, MSG_SIZE)?;
     user.copy_from(&buf);
     Ok(0)
@@ -1232,9 +1226,7 @@ fn sys_ipc_call(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let reply_msg = reply::wait_for_reply(task.id);
     let mut out_buf = [0u8; MSG_SIZE];
-    unsafe {
-        reply_msg.to_raw(out_buf.as_mut_ptr());
-    }
+    crate::ipc::message::ipc_message_to_raw(&reply_msg, &mut out_buf);
     let user = UserSliceWrite::new(_msg_ptr, MSG_SIZE)?;
     user.copy_from(&out_buf);
     Ok(0)

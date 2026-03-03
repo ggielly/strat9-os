@@ -10,26 +10,15 @@ pub struct IpcLabel {
     pub compartment: u16,
 }
 
-impl IpcMessage {
-    /// # Safety
-    /// `buf` must point to at least 64 readable bytes.
-    pub unsafe fn from_raw(buf: *const u8) -> Self {
-        // SAFETY: IpcMessage is POD, fully initialized by copy.
-        let mut msg: Self = unsafe { core::mem::zeroed() };
-        // SAFETY: caller guarantees buf validity.
-        unsafe {
-            core::ptr::copy_nonoverlapping(buf, &mut msg as *mut _ as *mut u8, 64);
-        }
-        msg
-    }
+pub fn ipc_message_from_raw(buf: &[u8; 64]) -> IpcMessage {
+    // SAFETY: `buf` has exactly 64 bytes, matching `IpcMessage` size.
+    unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const IpcMessage) }
+}
 
-    /// # Safety
-    /// `buf` must point to at least 64 writable bytes.
-    pub unsafe fn to_raw(&self, buf: *mut u8) {
-        // SAFETY: caller guarantees buf validity.
-        unsafe {
-            core::ptr::copy_nonoverlapping(self as *const _ as *const u8, buf, 64);
-        }
+pub fn ipc_message_to_raw(msg: &IpcMessage, out: &mut [u8; 64]) {
+    // SAFETY: `out` has exactly 64 bytes, matching `IpcMessage` size.
+    unsafe {
+        core::ptr::copy_nonoverlapping(msg as *const _ as *const u8, out.as_mut_ptr(), 64);
     }
 }
 
