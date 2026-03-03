@@ -81,6 +81,7 @@ impl CommandRegistry {
         registry.register("ping", net::cmd_ping);
         registry.register("ifconfig", net::cmd_ifconfig);
         registry.register("net", net::cmd_net);
+        registry.register("nslookup", net::cmd_nslookup);
 
         // Scheduler
         registry.register("scheduler", sys::cmd_scheduler);
