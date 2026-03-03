@@ -20,6 +20,7 @@ pub struct Dmar {
 }
 
 impl Dmar {
+    /// Performs the get operation.
     pub fn get() -> Option<Self> {
         unsafe {
             super::find_table(DMAR_SIGNATURE).map(|ptr| Dmar {
@@ -28,10 +29,12 @@ impl Dmar {
         }
     }
 
+    /// Performs the host address width operation.
     pub fn host_address_width(&self) -> u8 {
         self.table.host_address_width + 1
     }
 
+    /// Performs the flags operation.
     pub fn flags(&self) -> u8 {
         self.table.flags
     }

@@ -30,6 +30,7 @@ alloc_freelist::define_freelist_brk_allocator!(
 static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
+/// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
     let _ = call::debug_log(b"[init] OOM Fatal\n");
     call::exit(12);
@@ -43,6 +44,7 @@ fn alloc_error(_layout: Layout) -> ! {
 struct OctalMode(u16);
 
 impl OctalMode {
+    /// Returns whether subset of.
     fn is_subset_of(&self, other: &OctalMode) -> bool {
         let (s_c, s_h, s_r) = ((self.0 >> 6) & 0o7, (self.0 >> 3) & 0o7, self.0 & 0o7);
         let (o_c, o_h, o_r) = ((other.0 >> 6) & 0o7, (other.0 >> 3) & 0o7, other.0 & 0o7);
@@ -82,6 +84,7 @@ const FAMILY_PROFILES: &[FamilyProfile] = &[
     },
 ];
 
+/// Returns family profile.
 fn get_family_profile(name: &str) -> &'static FamilyProfile {
     for p in FAMILY_PROFILES {
         if p.family == name {
@@ -95,10 +98,12 @@ fn get_family_profile(name: &str) -> &'static FamilyProfile {
 // UTILS
 // ---------------------------------------------------------------------------
 
+/// Implements log.
 fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
 
+/// Reads file.
 fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
     let fd = call::openat(0, path, 0x1, 0).map_err(|_| "open failed")?;
     let mut out = Vec::new();
@@ -158,6 +163,7 @@ struct SiloDef {
     strates: Vec<StrateDef>,
 }
 
+/// Parses config.
 fn parse_config(data: &str) -> Vec<SiloDef> {
     #[derive(Clone, Copy)]
     enum Section {
@@ -165,6 +171,7 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
         Strate,
     }
 
+    /// Implements push default strate.
     fn push_default_strate(silo: &mut SiloDef) {
         silo.strates.push(StrateDef {
             name: String::new(),
@@ -244,6 +251,7 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
     silos
 }
 
+/// Implements ensure required silos.
 fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
     let has_bus = silos.iter().any(|s| s.name == "bus");
     let has_network = silos.iter().any(|s| s.name == "network");
@@ -300,6 +308,7 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
     silos
 }
 
+/// Implements load primary silos.
 fn load_primary_silos() -> Vec<SiloDef> {
     log("[init] load_primary_silos: begin\n");
     match read_file("/initfs/silo.toml") {
@@ -344,6 +353,7 @@ fn load_primary_silos() -> Vec<SiloDef> {
     }
 }
 
+/// Implements merge wasm test overlay.
 fn merge_wasm_test_overlay(silos: &mut Vec<SiloDef>) {
     let data = match read_file("/initfs/wasm-test.toml") {
         Ok(d) => d,
@@ -401,6 +411,7 @@ struct SiloConfig {
 }
 
 impl SiloConfig {
+    /// Creates a new instance.
     const fn new(sid: u32, mode: u16, family: u8, flags: u64) -> Self {
         Self {
             mem_min: 0,
@@ -422,6 +433,7 @@ impl SiloConfig {
     }
 }
 
+/// Implements family to id.
 fn family_to_id(name: &str) -> Option<u8> {
     match name {
         "SYS" => Some(0),
@@ -434,6 +446,7 @@ fn family_to_id(name: &str) -> Option<u8> {
     }
 }
 
+/// Parses mode octal.
 fn parse_mode_octal(s: &str) -> Option<u16> {
     let trimmed = if let Some(rest) = s.strip_prefix("0o") {
         rest
@@ -443,6 +456,7 @@ fn parse_mode_octal(s: &str) -> Option<u16> {
     u16::from_str_radix(trimmed, 8).ok()
 }
 
+/// Implements log u32.
 fn log_u32(mut value: u32) {
     let mut buf = [0u8; 10];
     if value == 0 {
@@ -459,6 +473,7 @@ fn log_u32(mut value: u32) {
     log(s);
 }
 
+/// Implements ipc call status.
 fn ipc_call_status(port: usize, msg: &mut IpcMessage) -> Result<u32, &'static str> {
     call::ipc_call(port, msg).map_err(|_| "ipc_call failed")?;
     Ok(u32::from_le_bytes([
@@ -469,6 +484,7 @@ fn ipc_call_status(port: usize, msg: &mut IpcMessage) -> Result<u32, &'static st
     ]))
 }
 
+/// Implements connect wasm service.
 fn connect_wasm_service(path: &str) -> Result<usize, &'static str> {
     for _ in 0..256 {
         if let Ok(h) = call::ipc_connect(path.as_bytes()) {
@@ -479,6 +495,7 @@ fn connect_wasm_service(path: &str) -> Result<usize, &'static str> {
     Err("ipc_connect timeout")
 }
 
+/// Implements run wasm app.
 fn run_wasm_app(service_path: &str, wasm_path: &str) -> Result<(), u32> {
     let port = connect_wasm_service(service_path).map_err(|_| 0xffff0000u32)?;
 
@@ -504,6 +521,7 @@ fn run_wasm_app(service_path: &str, wasm_path: &str) -> Result<(), u32> {
     Ok(())
 }
 
+/// Implements boot silos.
 fn boot_silos(silos: Vec<SiloDef>) {
     let mut next_sys_sid = 100u32;
     let mut next_usr_sid = 1000u32;
@@ -752,6 +770,7 @@ type = "elf"
 "#;
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub unsafe extern "C" fn _start() -> ! {
     log("[init] Strat9 Hierarchical Boot Starting\n");
     log("[init] Stage: load primary silos\n");
@@ -769,6 +788,7 @@ pub unsafe extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_info: &PanicInfo) -> ! {
     let _ = call::debug_log(b"[init] PANIC!\n");
     call::exit(255)

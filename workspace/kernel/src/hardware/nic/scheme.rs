@@ -30,18 +30,21 @@ pub struct NetScheme {
 }
 
 impl NetScheme {
+    /// Creates a new instance.
     fn new() -> Self {
         Self {
             handles: RwLock::new(BTreeMap::new()),
             next: AtomicU64::new(1),
         }
     }
+    /// Allocates id.
     fn alloc_id(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
 }
 
 impl Scheme for NetScheme {
+    /// Performs the open operation.
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         let path = path.trim_start_matches('/');
         let id = self.alloc_id();
@@ -66,6 +69,7 @@ impl Scheme for NetScheme {
         })
     }
 
+    /// Performs the read operation.
     fn read(&self, fid: u64, _off: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         let h = self.handles.read();
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
@@ -88,6 +92,7 @@ impl Scheme for NetScheme {
         }
     }
 
+    /// Performs the write operation.
     fn write(&self, fid: u64, _off: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         let h = self.handles.read();
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
@@ -105,11 +110,13 @@ impl Scheme for NetScheme {
         }
     }
 
+    /// Performs the close operation.
     fn close(&self, fid: u64) -> Result<(), SyscallError> {
         self.handles.write().remove(&fid);
         Ok(())
     }
 
+    /// Performs the stat operation.
     fn stat(&self, fid: u64) -> Result<FileStat, SyscallError> {
         let h = self.handles.read();
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
@@ -135,6 +142,7 @@ impl Scheme for NetScheme {
         })
     }
 
+    /// Performs the readdir operation.
     fn readdir(&self, fid: u64) -> Result<Vec<DirEntry>, SyscallError> {
         let h = self.handles.read();
         if !matches!(h.get(&fid), Some(Handle::Root)) {
@@ -152,6 +160,7 @@ impl Scheme for NetScheme {
     }
 }
 
+/// Performs the register net scheme operation.
 pub fn register_net_scheme() -> Result<(), SyscallError> {
     let scheme = Arc::new(NetScheme::new());
     scheme_router::register_scheme("net", scheme)?;

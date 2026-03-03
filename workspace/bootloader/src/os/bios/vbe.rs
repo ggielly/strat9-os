@@ -13,6 +13,7 @@ pub struct VbeFarPtr {
 }
 
 impl VbeFarPtr {
+    /// Returns this as ptr.
     pub unsafe fn as_ptr<T>(&self) -> *const T {
         (((self.segment as usize) << 4) + (self.offset as usize)) as *const T
     }
@@ -79,6 +80,7 @@ pub struct VideoModeIter {
 }
 
 impl VideoModeIter {
+    /// Creates a new instance.
     pub fn new(thunk10: extern "C" fn()) -> Self {
         // Get card info
         let mut data = ThunkData::new();
@@ -100,6 +102,7 @@ impl VideoModeIter {
 
 impl Iterator for VideoModeIter {
     type Item = OsVideoMode;
+    /// Performs the next operation.
     fn next(&mut self) -> Option<Self::Item> {
         if self.mode_ptr.is_null() {
             return None;

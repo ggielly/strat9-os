@@ -1,16 +1,24 @@
 #![no_std]
 
 pub trait RxDescriptor: Copy {
+    /// Sets buffer addr.
     fn set_buffer_addr(&mut self, phys: u64);
+    /// Returns whether done.
     fn is_done(&self) -> bool;
+    /// Performs the packet length operation.
     fn packet_length(&self) -> u16;
+    /// Performs the clear status operation.
     fn clear_status(&mut self);
 }
 
 pub trait TxDescriptor: Copy {
+    /// Sets buffer.
     fn set_buffer(&mut self, phys: u64, len: u16);
+    /// Sets eop ifcs rs.
     fn set_eop_ifcs_rs(&mut self);
+    /// Returns whether done.
     fn is_done(&self) -> bool;
+    /// Performs the clear operation.
     fn clear(&mut self);
 }
 
@@ -36,14 +44,17 @@ impl<D: RxDescriptor> RxRing<D> {
         }
     }
 
+    /// Performs the count operation.
     pub fn count(&self) -> usize {
         self.count
     }
 
+    /// Performs the tail operation.
     pub fn tail(&self) -> usize {
         self.tail
     }
 
+    /// Performs the desc mut operation.
     pub fn desc_mut(&mut self, idx: usize) -> &mut D {
         // SAFETY: `new` guarantees `descs` points to `count` valid descriptors.
         // Indexing is wrapped modulo `count`, so pointer arithmetic stays in ring bounds.
@@ -98,19 +109,23 @@ impl<D: TxDescriptor> TxRing<D> {
         }
     }
 
+    /// Performs the count operation.
     pub fn count(&self) -> usize {
         self.count
     }
 
+    /// Performs the tail operation.
     pub fn tail(&self) -> usize {
         self.tail
     }
 
+    /// Performs the desc operation.
     pub fn desc(&self, idx: usize) -> &D {
         // SAFETY: `idx % count` is in bounds and `descs` points to `count` valid descriptors.
         unsafe { &*self.descs.add(idx % self.count) }
     }
 
+    /// Performs the desc mut operation.
     pub fn desc_mut(&mut self, idx: usize) -> &mut D {
         // SAFETY: `idx % count` is in bounds and mutable access is gated by `&mut self`.
         unsafe { &mut *self.descs.add(idx % self.count) }
@@ -128,6 +143,7 @@ impl<D: TxDescriptor> TxRing<D> {
         idx
     }
 
+    /// Returns whether done.
     pub fn is_done(&self, idx: usize) -> bool {
         self.desc(idx).is_done()
     }

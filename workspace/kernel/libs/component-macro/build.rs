@@ -4,6 +4,7 @@
 //! incremental-rebuild tracking, and validates the dependency graph at
 //! compile time (detects unknown deps and cycles).
 
+/// Entry point for this component.
 fn main() {
     // Walk up from this crate's manifest dir to find Components.toml.
     let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
@@ -42,6 +43,7 @@ fn main() {
 // Validation
 // =================================================================
 
+/// Performs the validate components toml operation.
 fn validate_components_toml(path: &std::path::Path) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -118,6 +120,7 @@ fn validate_components_toml(path: &std::path::Path) {
     }
 }
 
+/// Returns whether cycle is available.
 fn has_cycle(graph: &std::collections::HashMap<String, Vec<String>>) -> bool {
     let mut visited = std::collections::HashSet::new();
     let mut on_stack = std::collections::HashSet::new();
@@ -130,6 +133,7 @@ fn has_cycle(graph: &std::collections::HashMap<String, Vec<String>>) -> bool {
     false
 }
 
+/// Performs the dfs operation.
 fn dfs(
     node: &str,
     graph: &std::collections::HashMap<String, Vec<String>>,

@@ -77,6 +77,7 @@ pub struct TraceTaskCtx {
 }
 
 impl TraceTaskCtx {
+    /// Performs the empty operation.
     pub const fn empty() -> Self {
         Self {
             task_id: 0,
@@ -103,6 +104,7 @@ struct CpuTraceRing {
 }
 
 impl CpuTraceRing {
+    /// Creates a new instance.
     const fn new() -> Self {
         Self {
             head: 0,
@@ -112,6 +114,7 @@ impl CpuTraceRing {
         }
     }
 
+    /// Performs the push operation.
     fn push(&mut self, event: TraceEvent) {
         self.events[self.head] = event;
         self.head = (self.head + 1) % TRACE_CAPACITY;
@@ -121,12 +124,14 @@ impl CpuTraceRing {
         self.stored = self.stored.saturating_add(1);
     }
 
+    /// Performs the clear operation.
     fn clear(&mut self) {
         self.head = 0;
         self.len = 0;
         self.stored = 0;
     }
 
+    /// Performs the snapshot operation.
     fn snapshot(&self, limit: usize) -> Vec<TraceEvent> {
         let n = self.len.min(limit);
         let mut out = Vec::with_capacity(n);
@@ -151,41 +156,49 @@ static TRACE_DROPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static TRACE_RINGS: [SpinLock<CpuTraceRing>; percpu::MAX_CPUS] =
     [const { SpinLock::new(CpuTraceRing::new()) }; percpu::MAX_CPUS];
 
+/// Performs the mask operation.
 #[inline]
 pub fn mask() -> u64 {
     TRACE_MASK.load(Ordering::Relaxed)
 }
 
+/// Sets mask.
 #[inline]
 pub fn set_mask(new_mask: u64) {
     TRACE_MASK.store(new_mask, Ordering::Relaxed);
 }
 
+/// Performs the enable operation.
 #[inline]
 pub fn enable(bits: u64) {
     TRACE_MASK.fetch_or(bits, Ordering::Relaxed);
 }
 
+/// Performs the disable operation.
 #[inline]
 pub fn disable(bits: u64) {
     TRACE_MASK.fetch_and(!bits, Ordering::Relaxed);
 }
 
+/// Performs the enabled operation.
 #[inline]
 pub fn enabled(category: u64) -> bool {
     (mask() & category) != 0
 }
 
+/// Sets serial echo.
 #[inline]
 pub fn set_serial_echo(on: bool) {
     TRACE_SERIAL_ECHO.store(on, Ordering::Relaxed);
 }
 
+/// Performs the serial echo operation.
 #[inline]
 pub fn serial_echo() -> bool {
     TRACE_SERIAL_ECHO.load(Ordering::Relaxed)
 }
 
+/// Performs the clear all operation.
 pub fn clear_all() {
     for ring in TRACE_RINGS.iter() {
         if let Some(mut guard) = ring.try_lock() {
@@ -194,6 +207,7 @@ pub fn clear_all() {
     }
 }
 
+/// Performs the stats operation.
 pub fn stats() -> TraceStats {
     let mut out = TraceStats::default();
     out.dropped = TRACE_DROPPED_TOTAL.load(Ordering::Relaxed);
@@ -205,6 +219,7 @@ pub fn stats() -> TraceStats {
     out
 }
 
+/// Performs the snapshot all operation.
 pub fn snapshot_all(limit_per_cpu: usize) -> Vec<TraceEvent> {
     let mut out = Vec::new();
     let limit = limit_per_cpu.max(1);
@@ -220,11 +235,13 @@ pub fn snapshot_all(limit_per_cpu: usize) -> Vec<TraceEvent> {
     out
 }
 
+/// Performs the current cpu operation.
 #[inline]
 fn current_cpu() -> usize {
     percpu::cpu_index_from_gs().unwrap_or(0)
 }
 
+/// Performs the record operation.
 pub fn record(
     category: u64,
     kind: TraceKind,
@@ -282,6 +299,7 @@ pub fn record(
     }
 }
 
+/// Performs the kind name operation.
 #[inline]
 pub fn kind_name(kind: u16) -> &'static str {
     match kind {
@@ -294,6 +312,7 @@ pub fn kind_name(kind: u16) -> &'static str {
     }
 }
 
+/// Performs the mask human operation.
 pub fn mask_human(mask: u64) -> &'static str {
     if mask == 0 {
         "none"

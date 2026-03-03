@@ -20,6 +20,7 @@ const E1000E_IDS: &[u16] = &[
 struct KernelDma;
 
 impl DmaAllocator for KernelDma {
+    /// Allocates dma.
     fn alloc_dma(&self, size: usize) -> Result<DmaRegion, nic_buffers::DmaAllocError> {
         let pages = (size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
@@ -35,6 +36,7 @@ impl DmaAllocator for KernelDma {
         })
     }
 
+    /// Releases dma.
     unsafe fn free_dma(&self, region: DmaRegion) {
         let pages = (region.size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
@@ -53,30 +55,38 @@ pub struct KernelE1000e {
 }
 
 impl NetworkDevice for KernelE1000e {
+    /// Performs the name operation.
     fn name(&self) -> &str {
         "e1000e"
     }
+    /// Performs the mac address operation.
     fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
+    /// Performs the link up operation.
     fn link_up(&self) -> bool {
         self.inner.lock().link_up()
     }
+    /// Performs the receive operation.
     fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
         self.inner.lock().receive(buf)
     }
+    /// Performs the transmit operation.
     fn transmit(&self, buf: &[u8]) -> Result<(), NetError> {
         self.inner.lock().transmit(buf, &KernelDma)
     }
+    /// Handles interrupt.
     fn handle_interrupt(&self) {
         self.inner.lock().handle_interrupt();
     }
 }
 
+/// Returns whether e1000e id.
 fn is_e1000e_id(device_id: u16) -> bool {
     E1000E_IDS.contains(&device_id)
 }
 
+/// Performs the init operation.
 pub fn init() {
     if !memory::paging::is_initialized() {
         log::warn!("E1000e: paging not initialized, deferring probe");

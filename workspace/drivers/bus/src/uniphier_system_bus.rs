@@ -23,14 +23,17 @@ pub struct BankConfig {
 }
 
 impl BankConfig {
+    /// Performs the empty operation.
     pub const fn empty() -> Self {
         Self { base: 0, end: 0 }
     }
 
+    /// Returns whether valid.
     pub fn is_valid(&self) -> bool {
         self.end > self.base
     }
 
+    /// Performs the size operation.
     pub fn size(&self) -> u32 {
         self.end - self.base
     }
@@ -45,6 +48,7 @@ pub struct UniphierSystemBus {
 }
 
 impl UniphierSystemBus {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -55,6 +59,7 @@ impl UniphierSystemBus {
         }
     }
 
+    /// Sets bank.
     pub fn set_bank(&mut self, index: usize, base: u32, end: u32) {
         if index < UNIPHIER_SBC_NR_BANKS {
             let aligned_base = base & !((MIN_BANK_SIZE) - 1);
@@ -66,6 +71,7 @@ impl UniphierSystemBus {
         }
     }
 
+    /// Performs the check boot swap operation.
     pub fn check_boot_swap(&mut self) {
         let bank0_base = self.regs.read32(UNIPHIER_SBC_BASE);
         self.boot_swap = (bank0_base & UNIPHIER_SBC_BASE_BE) != 0;
@@ -76,6 +82,7 @@ impl UniphierSystemBus {
         }
     }
 
+    /// Performs the apply bank config operation.
     fn apply_bank_config(&self) {
         for i in 0..UNIPHIER_SBC_NR_BANKS {
             let offset = UNIPHIER_SBC_BASE + i * UNIPHIER_SBC_STRIDE;
@@ -96,16 +103,20 @@ impl UniphierSystemBus {
         }
     }
 
+    /// Performs the add child operation.
     pub fn add_child(&mut self, child: BusChild) {
         self.children.push(child);
     }
 }
 
 impl BusDriver for UniphierSystemBus {
+    /// Performs the name operation.
     fn name(&self) -> &str { "uniphier-system-bus" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x400);
         self.check_boot_swap();
@@ -114,28 +125,33 @@ impl BusDriver for UniphierSystemBus {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Performs the resume operation.
     fn resume(&mut self) -> Result<(), BusError> {
         self.apply_bank_config();
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.regs.write32(offset, value);
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.children.clone()
     }

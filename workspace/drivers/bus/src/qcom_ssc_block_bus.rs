@@ -23,6 +23,7 @@ pub struct QcomSscBlockBus {
 }
 
 impl QcomSscBlockBus {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             halt_regs: MmioRegion::new(),
@@ -33,15 +34,18 @@ impl QcomSscBlockBus {
         }
     }
 
+    /// Initializes halt regs.
     pub fn init_halt_regs(&mut self, base: usize) {
         self.halt_regs.init(base, 0x10);
     }
 
+    /// Initializes config regs.
     pub fn init_config_regs(&mut self, config0_base: usize, config1_base: usize) {
         self.config0_regs.init(config0_base, 0x10);
         self.config1_regs.init(config1_base, 0x10);
     }
 
+    /// Performs the bus init operation.
     fn bus_init(&self) -> Result<(), BusError> {
         self.config0_regs.clear_bits32(0, SSCAON_CONFIG0_CLAMP_EN_OVRD_VAL);
         self.config0_regs.set_bits32(0, SSCAON_CONFIG0_CLAMP_EN_OVRD);
@@ -59,6 +63,7 @@ impl QcomSscBlockBus {
         Ok(())
     }
 
+    /// Performs the bus deinit operation.
     fn bus_deinit(&self) {
         self.halt_regs.write32(AXI_HALTREQ_REG, 1);
 
@@ -71,16 +76,20 @@ impl QcomSscBlockBus {
         self.config1_regs.set_bits32(0, SSCAON_CONFIG1_CFG);
     }
 
+    /// Performs the add child operation.
     pub fn add_child(&mut self, child: BusChild) {
         self.children.push(child);
     }
 }
 
 impl BusDriver for QcomSscBlockBus {
+    /// Performs the name operation.
     fn name(&self) -> &str { "qcom-ssc-block-bus" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.halt_regs.init(base, 0x10);
         self.bus_init()?;
@@ -88,23 +97,27 @@ impl BusDriver for QcomSscBlockBus {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.bus_deinit();
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.halt_regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.halt_regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.halt_regs.is_valid() { return Err(BusError::InitFailed); }
         self.halt_regs.write32(offset, value);
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.children.clone()
     }

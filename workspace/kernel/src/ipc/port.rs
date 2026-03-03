@@ -33,6 +33,7 @@ impl PortId {
 }
 
 impl core::fmt::Display for PortId {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -141,14 +142,17 @@ impl Port {
         self.recv_waitq.wake_all();
     }
 
+    /// Returns whether messages is available.
     pub fn has_messages(&self) -> bool {
         !self.queue.is_empty()
     }
 
+    /// Returns whether this can send.
     pub fn can_send(&self) -> bool {
         !self.destroyed.load(Ordering::Acquire) && !self.queue.is_full()
     }
 
+    /// Returns whether destroyed.
     pub fn is_destroyed(&self) -> bool {
         self.destroyed.load(Ordering::Acquire)
     }

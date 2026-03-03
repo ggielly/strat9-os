@@ -83,6 +83,7 @@ const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
 
 impl VirtioConsole {
+    /// Creates a new instance.
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let bar = match pci_dev.read_bar(0) {
             Some(Bar::Memory64 { addr, .. }) => addr,
@@ -127,6 +128,7 @@ impl VirtioConsole {
         })
     }
 
+    /// Performs the write operation.
     pub fn write(&self, data: &[u8]) -> Result<usize, &'static str> {
         let mut ports = self.ports.lock();
         let port = ports.first_mut().ok_or("No console port")?;
@@ -146,6 +148,7 @@ impl VirtioConsole {
         Ok(data.len())
     }
 
+    /// Performs the read operation.
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
         let mut ports = self.ports.lock();
         let port = ports.first_mut().ok_or("No console port")?;
@@ -154,6 +157,7 @@ impl VirtioConsole {
 }
 
 impl VirtioDevice {
+    /// Performs the reset operation.
     fn reset(&mut self) {
         unsafe {
             (self.mmio as *mut u32).write_volatile(0);
@@ -161,6 +165,7 @@ impl VirtioDevice {
         core::hint::spin_loop();
     }
 
+    /// Performs the add status operation.
     fn add_status(&mut self, status: u8) {
         unsafe {
             let current = ((self.mmio + 0x14) as *const u8).read_volatile();
@@ -168,10 +173,12 @@ impl VirtioDevice {
         }
     }
 
+    /// Reads status.
     fn read_status(&self) -> u8 {
         unsafe { ((self.mmio + 0x14) as *const u8).read_volatile() }
     }
 
+    /// Reads features.
     fn read_features(&self) -> u64 {
         unsafe {
             let lo = (self.mmio as *const u32).read_volatile() as u64;
@@ -180,6 +187,7 @@ impl VirtioDevice {
         }
     }
 
+    /// Writes features.
     fn write_features(&mut self, features: u64) {
         unsafe {
             (self.mmio as *mut u32).write_volatile((features & 0xFFFFFFFF) as u32);
@@ -187,6 +195,7 @@ impl VirtioDevice {
         }
     }
 
+    /// Performs the notify queue operation.
     fn notify_queue(&self, queue: u16) {
         unsafe {
             let offset = ((self.mmio + 0x20) as *const u16).read_volatile() as usize;
@@ -197,6 +206,7 @@ impl VirtioDevice {
 }
 
 impl Virtqueue {
+    /// Creates a new instance.
     fn new(device: &mut VirtioDevice, queue_idx: u16) -> Result<Self, &'static str> {
         unsafe {
             ((device.mmio + 0x16) as *mut u16).write_volatile(queue_idx);
@@ -254,6 +264,7 @@ impl Virtqueue {
         }
     }
 
+    /// Performs the write operation.
     fn write(&mut self, data: &[u8]) -> Result<(), &'static str> {
         unsafe {
             if self.free.is_empty() {
@@ -276,6 +287,7 @@ impl Virtqueue {
         Ok(())
     }
 
+    /// Performs the read operation.
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, &'static str> {
         unsafe {
             if self.last_used_idx == (*self.used).idx {
@@ -293,6 +305,7 @@ impl Virtqueue {
         }
     }
 
+    /// Performs the poll used operation.
     fn poll_used(&mut self) -> bool {
         unsafe { self.last_used_idx != (*self.used).idx }
     }
@@ -301,6 +314,7 @@ impl Virtqueue {
 static CONSOLE_INSTANCE: Once<Arc<VirtioConsole>> = Once::new();
 static CONSOLE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[VirtIO-Console] Scanning for VirtIO Console devices...");
 
@@ -339,6 +353,7 @@ pub fn init() {
     log::info!("[VirtIO-Console] No device found");
 }
 
+/// Performs the write operation.
 pub fn write(data: &[u8]) -> Result<usize, &'static str> {
     CONSOLE_INSTANCE
         .get()
@@ -346,6 +361,7 @@ pub fn write(data: &[u8]) -> Result<usize, &'static str> {
         .write(data)
 }
 
+/// Performs the read operation.
 pub fn read(buf: &mut [u8]) -> Result<usize, &'static str> {
     CONSOLE_INSTANCE
         .get()
@@ -353,6 +369,7 @@ pub fn read(buf: &mut [u8]) -> Result<usize, &'static str> {
         .read(buf)
 }
 
+/// Returns whether available.
 pub fn is_available() -> bool {
     CONSOLE_INITIALIZED.load(Ordering::Relaxed)
 }

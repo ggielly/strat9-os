@@ -2,8 +2,11 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
+/// Implements noop raw waker.
 fn noop_raw_waker() -> RawWaker {
+    /// Implements noop.
     fn noop(_: *const ()) {}
+    /// Implements clone.
     fn clone(_: *const ()) -> RawWaker {
         noop_raw_waker()
     }

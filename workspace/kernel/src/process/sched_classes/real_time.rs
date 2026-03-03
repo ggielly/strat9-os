@@ -18,10 +18,12 @@ impl RealTimePriority {
     pub const MIN: Self = Self(0);
     pub const MAX: Self = Self(99);
 
+    /// Creates a new instance.
     pub fn new(prio: u8) -> Self {
         Self(prio.clamp(Self::MIN.0, Self::MAX.0))
     }
 
+    /// Performs the get operation.
     pub fn get(self) -> u8 {
         self.0
     }
@@ -33,6 +35,7 @@ pub struct RealTimeClassRq {
 }
 
 impl RealTimeClassRq {
+    /// Creates a new instance.
     pub fn new() -> Self {
         const EMPTY: VecDeque<Arc<Task>> = VecDeque::new();
         Self {
@@ -41,16 +44,19 @@ impl RealTimeClassRq {
         }
     }
 
+    /// Sets bit.
     fn set_bit(&mut self, prio: u8) {
         self.bitmap |= 1u128 << prio;
     }
 
+    /// Performs the clear bit operation.
     fn clear_bit(&mut self, prio: u8) {
         self.bitmap &= !(1u128 << prio);
     }
 }
 
 impl SchedClassRq for RealTimeClassRq {
+    /// Performs the enqueue operation.
     fn enqueue(&mut self, task: Arc<Task>) {
         let prio = match task.sched_policy() {
             super::SchedPolicy::RealTimeRR { prio } => prio.get(),
@@ -61,10 +67,12 @@ impl SchedClassRq for RealTimeClassRq {
         self.set_bit(prio);
     }
 
+    /// Performs the len operation.
     fn len(&self) -> usize {
         self.queues.iter().map(|q| q.len()).sum()
     }
 
+    /// Performs the pick next operation.
     fn pick_next(&mut self) -> Option<Arc<Task>> {
         if self.bitmap == 0 {
             return None;
@@ -79,6 +87,7 @@ impl SchedClassRq for RealTimeClassRq {
         Some(task)
     }
 
+    /// Updates current.
     fn update_current(&mut self, rt: &CurrentRuntime, task: &Task, is_yield: bool) -> bool {
         if is_yield {
             return true;
@@ -97,6 +106,7 @@ impl SchedClassRq for RealTimeClassRq {
         }
     }
 
+    /// Performs the remove operation.
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool {
         let mut removed = false;
         let mut bits = self.bitmap;

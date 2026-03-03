@@ -13,6 +13,7 @@ struct Namespace {
 }
 
 impl Namespace {
+    /// Creates a new instance.
     const fn new() -> Self {
         Namespace {
             bindings: BTreeMap::new(),
@@ -22,6 +23,7 @@ impl Namespace {
 
 static NAMESPACE: SpinLock<Namespace> = SpinLock::new(Namespace::new());
 
+/// Performs the bind operation.
 pub fn bind(path: &str, port_id: u64) -> Result<(), SyscallError> {
     if path.is_empty() || !path.starts_with('/') {
         return Err(SyscallError::InvalidArgument);
@@ -31,6 +33,7 @@ pub fn bind(path: &str, port_id: u64) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Performs the unbind operation.
 pub fn unbind(path: &str) -> Result<(), SyscallError> {
     let mut ns = NAMESPACE.lock();
     ns.bindings.remove(path).ok_or(SyscallError::BadHandle)?;

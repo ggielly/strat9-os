@@ -11,11 +11,13 @@ const ANSI_GREEN: &str = "\x1b[32m";
 const ANSI_VIOLET: &str = "\x1b[35m";
 const TOKEN_BUF_CAP: usize = 64;
 
+/// Returns whether token char.
 #[inline]
 fn is_token_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Returns whether hex word.
 #[inline]
 fn is_hex_word(s: &str) -> bool {
     if s.len() <= 2 {
@@ -37,6 +39,7 @@ struct AnsiStylingWriter<'a, W: fmt::Write> {
 }
 
 impl<'a, W: fmt::Write> AnsiStylingWriter<'a, W> {
+    /// Creates a new instance.
     fn new(inner: &'a mut W) -> Self {
         Self {
             inner,
@@ -47,6 +50,7 @@ impl<'a, W: fmt::Write> AnsiStylingWriter<'a, W> {
         }
     }
 
+    /// Performs the flush token operation.
     fn flush_token(&mut self) -> fmt::Result {
         if self.token_len == 0 {
             return Ok(());
@@ -71,16 +75,19 @@ impl<'a, W: fmt::Write> AnsiStylingWriter<'a, W> {
         Ok(())
     }
 
+    /// Writes byte raw.
     fn write_byte_raw(&mut self, b: u8) -> fmt::Result {
         self.inner.write_char(b as char)
     }
 
+    /// Performs the finish operation.
     fn finish(&mut self) -> fmt::Result {
         self.flush_token()
     }
 }
 
 impl<W: fmt::Write> fmt::Write for AnsiStylingWriter<'_, W> {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for &b in s.as_bytes() {
             if self.in_escape {

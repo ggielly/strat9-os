@@ -30,6 +30,7 @@ alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size =
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
+/// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
     debug_log("[fs-ext4] OOM\n");
     exit(12);
@@ -58,6 +59,7 @@ struct BootstrapInfo {
     label: String,
 }
 
+/// Implements sanitize label.
 fn sanitize_label(raw: &str) -> String {
     let mut out = String::new();
     for b in raw.bytes().take(31) {
@@ -71,6 +73,7 @@ fn sanitize_label(raw: &str) -> String {
     }
 }
 
+/// Parses bootstrap label.
 fn parse_bootstrap_label(payload: &[u8]) -> String {
     let len = payload.first().copied().unwrap_or(0) as usize;
     if len == 0 {
@@ -86,6 +89,7 @@ fn parse_bootstrap_label(payload: &[u8]) -> String {
     }
 }
 
+/// Implements bind srv alias.
 fn bind_srv_alias(port_handle: u64, label: &str) {
     let path = format!("/srv/strate-fs-ext4/{}", label);
     match call::ipc_bind_port(port_handle as usize, path.as_bytes()) {
@@ -106,12 +110,14 @@ struct Ext4Strate {
 }
 
 impl Ext4Strate {
+    /// Creates a new instance.
     fn new(fs: Ext4FileSystem) -> Self {
         Ext4Strate {
             _fs: fs,
         }
     }
 
+    /// Implements ok reply.
     fn ok_reply(sender: u64) -> IpcMessage {
         let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
         reply.sender = sender;
@@ -119,6 +125,7 @@ impl Ext4Strate {
         reply
     }
 
+    /// Implements err reply.
     fn err_reply(sender: u64, status: u32) -> IpcMessage {
         let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
         reply.sender = sender;
@@ -126,18 +133,21 @@ impl Ext4Strate {
         reply
     }
 
+    /// Reads u16.
     fn read_u16(payload: &[u8], start: usize) -> core::result::Result<u16, u32> {
         let end = start.checked_add(2).ok_or(EINVAL as u32)?;
         let bytes = payload.get(start..end).ok_or(EINVAL as u32)?;
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
+    /// Reads u32.
     fn read_u32(payload: &[u8], start: usize) -> core::result::Result<u32, u32> {
         let end = start.checked_add(4).ok_or(EINVAL as u32)?;
         let bytes = payload.get(start..end).ok_or(EINVAL as u32)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    /// Reads u64.
     fn read_u64(payload: &[u8], start: usize) -> core::result::Result<u64, u32> {
         let end = start.checked_add(8).ok_or(EINVAL as u32)?;
         let bytes = payload.get(start..end).ok_or(EINVAL as u32)?;
@@ -161,6 +171,7 @@ impl Ext4Strate {
         core::str::from_utf8(path_bytes).map_err(|_| EINVAL as u32)
     }
 
+    /// Implements handle open.
     fn handle_open(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let _flags = match Self::read_u32(payload, 0) {
             Ok(v) => v,
@@ -173,6 +184,7 @@ impl Ext4Strate {
         Self::err_reply(sender, ENOSYS as u32)
     }
 
+    /// Implements handle read.
     fn handle_read(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let _file_id = match Self::read_u64(payload, 0) {
             Ok(v) => v,
@@ -189,6 +201,7 @@ impl Ext4Strate {
         Self::err_reply(sender, ENOSYS as u32)
     }
 
+    /// Implements handle write.
     fn handle_write(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let _file_id = match Self::read_u64(payload, 0) {
             Ok(v) => v,
@@ -213,6 +226,7 @@ impl Ext4Strate {
         Self::err_reply(sender, ENOSYS as u32)
     }
 
+    /// Implements handle close.
     fn handle_close(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let _file_id = match Self::read_u64(payload, 0) {
             Ok(v) => v,
@@ -263,6 +277,7 @@ struct VolumeBlockDevice {
 }
 
 impl VolumeBlockDevice {
+    /// Creates a new instance.
     fn new(handle: u64) -> core::result::Result<Self, BlockDeviceError> {
         let sector_count = volume_info(handle).map_err(map_sys_err)?;
         Ok(Self {
@@ -272,6 +287,7 @@ impl VolumeBlockDevice {
     }
 }
 
+/// Implements map sys err.
 fn map_sys_err(err: Error) -> BlockDeviceError {
     match err {
         Error::Again => BlockDeviceError::NotReady,
@@ -281,11 +297,13 @@ fn map_sys_err(err: Error) -> BlockDeviceError {
     }
 }
 
+/// Implements log sys err.
 fn log_sys_err(prefix: &str, err: Error) {
     let msg = format!("[fs-ext4] {}: {} ({})\n", prefix, err.name(), err);
     debug_log(&msg);
 }
 
+/// Implements validate volume handle.
 fn validate_volume_handle(handle: u64) -> Result<u64> {
     let sectors = volume_info(handle)?;
     if sectors == 0 {
@@ -296,6 +314,7 @@ fn validate_volume_handle(handle: u64) -> Result<u64> {
     Ok(sectors)
 }
 
+/// Implements discover volume handle local.
 fn discover_volume_handle_local() -> Option<u64> {
     // Pragmatic fallback: probe low capability ids for a usable Volume handle.
     // In current boot flow, init often receives the first inserted capability.
@@ -313,6 +332,7 @@ fn discover_volume_handle_local() -> Option<u64> {
 }
 
 impl BlockDevice for VolumeBlockDevice {
+    /// Reads offset.
     fn read_offset(&self, offset: usize) -> core::result::Result<Vec<u8>, BlockDeviceError> {
         if offset % SECTOR_SIZE != 0 {
             return Err(BlockDeviceError::InvalidOffset);
@@ -327,6 +347,7 @@ impl BlockDevice for VolumeBlockDevice {
         Ok(buf)
     }
 
+    /// Writes offset.
     fn write_offset(
         &mut self,
         offset: usize,
@@ -344,11 +365,13 @@ impl BlockDevice for VolumeBlockDevice {
         Ok(())
     }
 
+    /// Implements size.
     fn size(&self) -> core::result::Result<usize, BlockDeviceError> {
         Ok(self.sector_count as usize * SECTOR_SIZE)
     }
 }
 
+/// Implements wait for bootstrap.
 fn wait_for_bootstrap(port_handle: u64) -> BootstrapInfo {
     debug_log("[fs-ext4] Waiting for volume bootstrap...\n");
     loop {
@@ -372,6 +395,7 @@ fn wait_for_bootstrap(port_handle: u64) -> BootstrapInfo {
     }
 }
 
+/// Attempts to wait for bootstrap.
 fn try_wait_for_bootstrap(port_handle: u64, attempts: usize) -> Option<BootstrapInfo> {
     for _ in 0..attempts {
         let mut msg = IpcMessage::new(0);
@@ -399,6 +423,7 @@ fn try_wait_for_bootstrap(port_handle: u64, attempts: usize) -> Option<Bootstrap
 }
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
     // TODO: Initialize allocator (we need heap)
     // For now, this will panic since we can't allocate
@@ -526,6 +551,7 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_info: &PanicInfo) -> ! {
     debug_log("[fs-ext4] PANIC!\n");
     exit(255);

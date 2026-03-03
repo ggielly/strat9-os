@@ -25,6 +25,7 @@ struct UserLaunchCtx {
     user_rsp: u64,
 }
 
+/// Performs the ring3 test trampoline operation.
 extern "C" fn ring3_test_trampoline(ctx_ptr: u64) -> ! {
     use crate::arch::x86_64::gdt;
 
@@ -53,6 +54,7 @@ extern "C" fn ring3_test_trampoline(ctx_ptr: u64) -> ! {
     }
 }
 
+/// Performs the spawn user program task operation.
 fn spawn_user_program_task(
     name: &'static str,
     code: &[u8],
@@ -123,6 +125,7 @@ fn spawn_user_program_task(
     Ok(tid)
 }
 
+/// Performs the wait child exit operation.
 fn wait_child_exit(parent: TaskId, child: TaskId) -> Result<i32, &'static str> {
     let start = crate::process::scheduler::ticks();
     const TIMEOUT_TICKS: u64 = 500; // ~5s at 100Hz
@@ -142,6 +145,7 @@ fn wait_child_exit(parent: TaskId, child: TaskId) -> Result<i32, &'static str> {
     }
 }
 
+/// Performs the run scenario operation.
 fn run_scenario(parent: TaskId, name: &'static str, code: &[u8]) -> bool {
     crate::serial_println!("[fork-test] {}: spawn", name);
     let child = match spawn_user_program_task(name, code, parent) {
@@ -165,6 +169,7 @@ fn run_scenario(parent: TaskId, name: &'static str, code: &[u8]) -> bool {
     }
 }
 
+/// Performs the cow test refcount unmap operation.
 fn cow_test_refcount_unmap() -> bool {
     let aspace = match AddressSpace::new_user() {
         Ok(v) => Arc::new(v),
@@ -259,6 +264,7 @@ fn cow_test_refcount_unmap() -> bool {
     true
 }
 
+/// Performs the cow test write fault copy operation.
 fn cow_test_write_fault_copy() -> bool {
     let aspace = match AddressSpace::new_user() {
         Ok(v) => Arc::new(v),
@@ -424,6 +430,7 @@ const PROG_WAIT_INVALID: &[u8] = &[
     0x00, 0x48, 0xC7, 0xC0, 0x2C, 0x01, 0x00, 0x00, 0x0F, 0x05, 0xF4, 0xEB, 0xFD,
 ];
 
+/// Performs the fork test main operation.
 extern "C" fn fork_test_main() -> ! {
     crate::serial_println!("[fork-test] start");
 
@@ -480,10 +487,12 @@ extern "C" fn fork_test_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Performs the fork test entry operation.
 extern "C" fn fork_test_entry() -> ! {
     fork_test_main()
 }
 
+/// Creates fork test task.
 pub fn create_fork_test_task() {
     if let Ok(task) = Task::new_kernel_task_with_stack(
         fork_test_entry,

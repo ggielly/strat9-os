@@ -72,6 +72,7 @@ pub struct Waitmsg {
 }
 
 impl Waitmsg {
+    /// Creates a new instance.
     fn new(pid: u64, exit_code: i32) -> Self {
         let mut msg = [0u8; 64];
         if exit_code != 0 {
@@ -294,6 +295,7 @@ fn write_wstatus(status_ptr: u64, exit_code: i32) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Performs the resolve cow for range operation.
 fn resolve_cow_for_range(ptr: u64, len: usize) -> Result<(), SyscallError> {
     if len == 0 {
         return Ok(());
@@ -313,6 +315,7 @@ fn resolve_cow_for_range(ptr: u64, len: usize) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Writes user with cow.
 fn write_user_with_cow(ptr: u64, data: &[u8]) -> Result<(), SyscallError> {
     match UserSliceWrite::new(ptr, data.len()) {
         Ok(user) => {

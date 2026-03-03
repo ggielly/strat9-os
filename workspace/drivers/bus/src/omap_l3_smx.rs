@@ -50,6 +50,7 @@ pub struct Omap3L3ErrorInfo {
 }
 
 impl Omap3L3ErrorInfo {
+    /// Performs the code str operation.
     pub fn code_str(&self) -> &'static str {
         L3_ERROR_CODES.get(self.code as usize).unwrap_or(&"unknown")
     }
@@ -62,6 +63,7 @@ pub struct OmapL3Smx {
 }
 
 impl OmapL3Smx {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -70,6 +72,7 @@ impl OmapL3Smx {
         }
     }
 
+    /// Reads error at.
     pub fn read_error_at(&self, base_offset: usize) -> Omap3L3ErrorInfo {
         let err_log = self.regs.read32(base_offset + L3_ERROR_LOG);
         let address = self.regs.read32(base_offset + L3_ERROR_LOG_ADDR);
@@ -88,6 +91,7 @@ impl OmapL3Smx {
         }
     }
 
+    /// Performs the clear error at operation.
     pub fn clear_error_at(&self, base_offset: usize) {
         self.regs.write32(
             base_offset + L3_AGENT_STATUS,
@@ -96,11 +100,13 @@ impl OmapL3Smx {
         self.regs.write32(base_offset + L3_ERROR_LOG, 0);
     }
 
+    /// Reads flag status.
     pub fn read_flag_status(&self, irq_type: usize) -> u32 {
         let offset = if irq_type == 0 { L3_SI_FLAG_STATUS_0 } else { L3_SI_FLAG_STATUS_1 };
         self.regs.read32(offset)
     }
 
+    /// Handles error irq.
     pub fn handle_error_irq(&mut self, irq_type: usize) -> Option<Omap3L3ErrorInfo> {
         let status = self.read_flag_status(irq_type);
         if status == 0 {
@@ -123,36 +129,44 @@ impl OmapL3Smx {
 }
 
 impl BusDriver for OmapL3Smx {
+    /// Performs the name operation.
     fn name(&self) -> &str { "omap-l3-smx" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x10000);
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.regs.write32(offset, value);
         Ok(())
     }
 
+    /// Performs the error count operation.
     fn error_count(&self) -> u64 {
         self.error_count.load(Ordering::Relaxed)
     }
 
+    /// Handles irq.
     fn handle_irq(&mut self) -> bool {
         let app = self.handle_error_irq(0);
         let dbg = self.handle_error_irq(1);

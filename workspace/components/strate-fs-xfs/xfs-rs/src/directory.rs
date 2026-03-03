@@ -26,6 +26,7 @@ pub struct DataFree {
 }
 
 impl DataFree {
+    /// Implements parse.
     pub fn parse(buffer: &[u8], offset: usize) -> FsResult<Self> {
         Ok(Self {
             offset: buffer.read_be_u16(offset)?,
@@ -49,6 +50,7 @@ pub enum DirFileType {
 }
 
 impl DirFileType {
+    /// Builds a value from u8.
     fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::RegularFile,
@@ -185,6 +187,7 @@ impl<'a> ShortformDirIter<'a> {
 impl<'a> Iterator for ShortformDirIter<'a> {
     type Item = FsResult<DirEntry>;
 
+    /// Implements next.
     fn next(&mut self) -> Option<Self::Item> {
         if self.current >= self.count {
             return None;
@@ -291,6 +294,7 @@ pub struct DataHeaderV4 {
 impl DataHeaderV4 {
     pub const SIZE: usize = 16;
 
+    /// Implements parse.
     pub fn parse(buffer: &[u8]) -> FsResult<Self> {
         let magic = buffer.read_be_u32(0)?;
         let best_free = [
@@ -317,6 +321,7 @@ pub struct DataHeaderV5 {
 impl DataHeaderV5 {
     pub const SIZE: usize = 64;
 
+    /// Implements parse.
     pub fn parse(buffer: &[u8]) -> FsResult<Self> {
         let magic = buffer.read_be_u32(0)?;
         let crc = buffer.read_be_u32(4)?;
@@ -354,6 +359,7 @@ pub struct LeafEntry {
 impl LeafEntry {
     pub const SIZE: usize = 8;
 
+    /// Implements parse.
     pub fn parse(buffer: &[u8], offset: usize) -> FsResult<Self> {
         Ok(Self {
             hashval: buffer.read_be_u32(offset)?,
@@ -374,6 +380,7 @@ pub struct BlockTail {
 impl BlockTail {
     pub const SIZE: usize = 8;
 
+    /// Implements parse.
     pub fn parse(buffer: &[u8], offset: usize) -> FsResult<Self> {
         Ok(Self {
             count: buffer.read_be_u32(offset)?,
@@ -422,6 +429,7 @@ pub struct BlockInfoV5 {
 impl BlockInfoV4 {
     pub const SIZE: usize = 10;
 
+    /// Implements parse.
     pub fn parse(buffer: &[u8], offset: usize) -> FsResult<Self> {
         Ok(Self {
             forw: buffer.read_be_u32(offset)?,
@@ -434,6 +442,7 @@ impl BlockInfoV4 {
 impl BlockInfoV5 {
     pub const SIZE: usize = 56;
 
+    /// Implements parse.
     pub fn parse(buffer: &[u8], offset: usize) -> FsResult<Self> {
         let mut uuid = [0u8; 16];
         uuid.copy_from_slice(&buffer[offset + 32..offset + 48]);
@@ -459,6 +468,7 @@ pub struct DataDirIter<'a> {
 }
 
 impl<'a> DataDirIter<'a> {
+    /// Creates a new instance.
     pub fn new(buffer: &'a [u8], header_size: usize, end_offset: usize, has_ftype: bool) -> Self {
         Self {
             buffer,
@@ -472,6 +482,7 @@ impl<'a> DataDirIter<'a> {
 impl<'a> Iterator for DataDirIter<'a> {
     type Item = FsResult<DirEntry>;
 
+    /// Implements next.
     fn next(&mut self) -> Option<Self::Item> {
         while self.offset < self.end_offset {
             // Check for unused entry (freetag = 0xFFFF)

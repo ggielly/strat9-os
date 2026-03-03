@@ -12,12 +12,14 @@ pub type Pid = u32;
 /// POSIX thread ID.
 pub type Tid = u32;
 
+/// Performs the next pid operation.
 #[inline]
 fn next_pid() -> Pid {
     static NEXT_PID: AtomicU32 = AtomicU32::new(1);
     NEXT_PID.fetch_add(1, Ordering::SeqCst)
 }
 
+/// Performs the next tid operation.
 #[inline]
 fn next_tid() -> Tid {
     static NEXT_TID: AtomicU32 = AtomicU32::new(1);
@@ -47,6 +49,7 @@ impl TaskId {
 }
 
 impl core::fmt::Display for TaskId {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -85,12 +88,14 @@ pub struct SyncUnsafeCell<T> {
 unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 
 impl<T> SyncUnsafeCell<T> {
+    /// Creates a new instance.
     pub const fn new(value: T) -> Self {
         Self {
             inner: UnsafeCell::new(value),
         }
     }
 
+    /// Performs the get operation.
     pub fn get(&self) -> *mut T {
         self.inner.get()
     }
@@ -103,6 +108,7 @@ pub struct FpuState {
 }
 
 impl FpuState {
+    /// Creates a new instance.
     pub const fn new() -> Self {
         let mut data = [0; 512];
         // Default x87 FPU Control Word (FCW) = 0x037F
@@ -198,6 +204,7 @@ pub struct Task {
 }
 
 impl Task {
+    /// Performs the default sched policy operation.
     pub fn default_sched_policy(priority: TaskPriority) -> crate::process::sched::SchedPolicy {
         use crate::process::sched::{nice::Nice, real_time::RealTimePriority, SchedPolicy};
         match priority {
@@ -361,6 +368,7 @@ impl KernelStack {
 }
 
 impl Drop for KernelStack {
+    /// Performs the drop operation.
     fn drop(&mut self) {
         use crate::memory::{frame::PhysFrame, get_allocator, FrameAllocator};
 

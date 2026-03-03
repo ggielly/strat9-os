@@ -216,6 +216,7 @@ mod tests {
     use crate::directory::DirFileType;
 
     #[test]
+    /// Implements test add shortform entry empty.
     fn test_add_shortform_entry_empty() {
         let entry = NewDirEntry::new(b"test", 123, DirFileType::RegularFile);
         let result = add_shortform_entry(&[], &entry, 456, true, 256).unwrap();
@@ -227,6 +228,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test add shortform entry 64bit.
     fn test_add_shortform_entry_64bit() {
         let entry = NewDirEntry::new(b"test", 0x1_0000_0000, DirFileType::RegularFile);
         let result = add_shortform_entry(&[], &entry, 456, true, 256).unwrap();
@@ -357,6 +359,7 @@ pub fn shortform_contains(data: &[u8], name: &[u8], has_ftype: bool) -> FsResult
 }
 
 impl From<u8> for DirFileType {
+    /// Implements from.
     fn from(v: u8) -> Self {
         match v {
             1 => Self::RegularFile,

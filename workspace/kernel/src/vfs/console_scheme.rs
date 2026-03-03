@@ -17,12 +17,14 @@ static CONSOLE: SpinLock<Option<Arc<ConsoleScheme>>> = SpinLock::new(None);
 pub struct ConsoleScheme;
 
 impl ConsoleScheme {
+    /// Creates a new instance.
     pub fn new() -> Self {
         ConsoleScheme
     }
 }
 
 impl Scheme for ConsoleScheme {
+    /// Performs the open operation.
     fn open(&self, _path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         Ok(OpenResult {
@@ -32,6 +34,7 @@ impl Scheme for ConsoleScheme {
         })
     }
 
+    /// Performs the read operation.
     fn read(&self, _file_id: u64, _offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         let mut count = 0;
         for slot in buf.iter_mut() {
@@ -46,6 +49,7 @@ impl Scheme for ConsoleScheme {
         Ok(count)
     }
 
+    /// Performs the write operation.
     fn write(&self, _file_id: u64, _offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         if let Ok(s) = core::str::from_utf8(buf) {
             crate::serial_print!("{}", s);
@@ -60,10 +64,12 @@ impl Scheme for ConsoleScheme {
         Ok(buf.len())
     }
 
+    /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(())
     }
 
+    /// Performs the stat operation.
     fn stat(&self, _file_id: u64) -> Result<FileStat, SyscallError> {
         Ok(finalize_pseudo_stat(FileStat {
             st_ino: 0,
@@ -77,12 +83,14 @@ impl Scheme for ConsoleScheme {
     }
 }
 
+/// Initializes console scheme.
 pub fn init_console_scheme() -> Arc<ConsoleScheme> {
     let scheme = Arc::new(ConsoleScheme::new());
     *CONSOLE.lock() = Some(scheme.clone());
     scheme
 }
 
+/// Performs the setup stdio operation.
 pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     let scheme = match CONSOLE.lock().clone() {
         Some(s) => s as DynScheme,

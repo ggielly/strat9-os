@@ -6,6 +6,7 @@ const EAGAIN: usize = 11;
 const MAX_EAGAIN_RETRIES: usize = 50;
 const MAX_FILE_READ_BYTES: usize = 128 * 1024;
 
+/// Implements sleep ms.
 pub fn sleep_ms(ms: u64) {
     let req = TimeSpec {
         tv_sec: (ms / 1000) as i64,
@@ -16,6 +17,7 @@ pub fn sleep_ms(ms: u64) {
     };
 }
 
+/// Opens listener.
 pub fn open_listener(port: u16) -> usize {
     let path = alloc::format!("/net/tcp/listen/{}", port);
     loop {
@@ -26,6 +28,7 @@ pub fn open_listener(port: u16) -> usize {
     }
 }
 
+/// Writes all.
 pub fn write_all(fd: usize, data: &[u8]) -> bool {
     let mut off = 0usize;
     while off < data.len() {
@@ -42,6 +45,7 @@ pub fn write_all(fd: usize, data: &[u8]) -> bool {
     true
 }
 
+/// Reads file buf.
 pub fn read_file_buf(path: &str, buf: &mut [u8]) -> usize {
     let fd = match call::openat(0, path, flag::OpenFlags::RDONLY.bits() as usize, 0) {
         Ok(fd) => fd as usize,
@@ -74,6 +78,7 @@ pub fn read_file_buf(path: &str, buf: &mut [u8]) -> usize {
     total
 }
 
+/// Reads file string.
 pub fn read_file_string(path: &str) -> Vec<u8> {
     let fd = match call::openat(0, path, flag::OpenFlags::RDONLY.bits() as usize, 0) {
         Ok(fd) => fd as usize,
@@ -112,11 +117,13 @@ pub fn read_file_string(path: &str) -> Vec<u8> {
     out
 }
 
+/// Reads file text.
 pub fn read_file_text(path: &str) -> String {
     let data = read_file_string(path);
     String::from_utf8(data).unwrap_or_default()
 }
 
+/// Implements clock gettime ns.
 pub fn clock_gettime_ns() -> u64 {
     let mut ts = TimeSpec {
         tv_sec: 0,

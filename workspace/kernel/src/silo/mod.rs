@@ -41,6 +41,7 @@ pub struct SiloId {
 }
 
 impl SiloId {
+    /// Creates a new instance.
     pub const fn new(sid: u32) -> Self {
         let tier = match sid {
             1..=9 => SiloTier::Critical,
@@ -50,6 +51,7 @@ impl SiloId {
         Self { sid, tier }
     }
 
+    /// Returns this as u64.
     pub fn as_u64(&self) -> u64 {
         self.sid as u64
     }
@@ -96,6 +98,7 @@ pub struct OctalMode {
 }
 
 impl OctalMode {
+    /// Builds this from octal.
     pub const fn from_octal(val: u16) -> Self {
         Self {
             control: ControlMode::from_bits_truncate(((val >> 6) & 0o7) as u8),
@@ -104,12 +107,14 @@ impl OctalMode {
         }
     }
 
+    /// Returns whether subset of.
     pub const fn is_subset_of(&self, other: &OctalMode) -> bool {
         (self.control.bits() & !other.control.bits() == 0)
             && (self.hardware.bits() & !other.hardware.bits() == 0)
             && (self.registry.bits() & !other.registry.bits() == 0)
     }
 
+    /// Performs the pledge operation.
     pub fn pledge(&mut self, new_mode: OctalMode) -> Result<(), SyscallError> {
         if !new_mode.is_subset_of(self) {
             return Err(SyscallError::PermissionDenied); // Escalation attempt
@@ -119,6 +124,7 @@ impl OctalMode {
     }
 }
 
+/// Performs the sys silo pledge operation.
 pub fn sys_silo_pledge(mode_val: u64) -> Result<u64, SyscallError> {
     let new_mode = OctalMode::from_octal(mode_val as u16);
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -141,6 +147,7 @@ pub fn sys_silo_pledge(mode_val: u64) -> Result<u64, SyscallError> {
     Err(SyscallError::BadHandle)
 }
 
+/// Performs the sys silo unveil operation.
 pub fn sys_silo_unveil(
     path_ptr: u64,
     path_len: u64,
@@ -181,6 +188,7 @@ pub fn sys_silo_unveil(
     Ok(0)
 }
 
+/// Performs the sys silo enter sandbox operation.
 pub fn sys_silo_enter_sandbox() -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let mut mgr = SILO_MANAGER.lock();
@@ -196,6 +204,7 @@ pub fn sys_silo_enter_sandbox() -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the enforce silo may grant operation.
 pub fn enforce_silo_may_grant() -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     if is_admin_task(&task) {
@@ -212,6 +221,7 @@ pub fn enforce_silo_may_grant() -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Performs the normalize unveil path operation.
 fn normalize_unveil_path(path: &str) -> Result<String, SyscallError> {
     if !path.starts_with('/') {
         return Err(SyscallError::InvalidArgument);
@@ -241,6 +251,7 @@ fn normalize_unveil_path(path: &str) -> Result<String, SyscallError> {
     Ok(out)
 }
 
+/// Performs the path rule matches operation.
 fn path_rule_matches(rule: &str, path: &str) -> bool {
     if rule == "/" {
         return true;
@@ -256,6 +267,7 @@ fn path_rule_matches(rule: &str, path: &str) -> bool {
     idx < bytes.len() && bytes[idx] == b'/'
 }
 
+/// Performs the enforce path for current task operation.
 pub fn enforce_path_for_current_task(
     path: &str,
     want_read: bool,
@@ -301,6 +313,7 @@ struct UnveilRights {
 }
 
 impl UnveilRights {
+    /// Builds this from bits.
     fn from_bits(bits: u64) -> Result<Self, SyscallError> {
         if bits & !0x7 != 0 {
             return Err(SyscallError::InvalidArgument);
@@ -312,6 +325,7 @@ impl UnveilRights {
         })
     }
 
+    /// Performs the intersect operation.
     fn intersect(self, other: Self) -> Self {
         Self {
             read: self.read && other.read,
@@ -377,6 +391,7 @@ pub struct SiloConfig {
 }
 
 impl Default for SiloConfig {
+    /// Builds a default instance.
     fn default() -> Self {
         SiloConfig {
             mem_min: 0,
@@ -399,6 +414,7 @@ impl Default for SiloConfig {
 }
 
 impl SiloConfig {
+    /// Performs the validate operation.
     fn validate(&self) -> Result<(), SyscallError> {
         if self.mem_min > self.mem_max && self.mem_max != 0 {
             return Err(SyscallError::InvalidArgument);
@@ -438,6 +454,7 @@ pub struct Strat9ModuleHeader {
 }
 
 impl core::fmt::Debug for Strat9ModuleHeader {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // SAFETY: read fields via read_unaligned to avoid UB on packed struct.
         let version = unsafe { core::ptr::addr_of!(self.version).read_unaligned() };
@@ -508,6 +525,7 @@ pub struct SiloEvent {
 // - bits 32..63: reserved
 pub const FAULT_SUBCODE_SHIFT: u64 = 16;
 
+/// Performs the pack fault operation.
 pub fn pack_fault(reason: SiloFaultReason, subcode: u64) -> u64 {
     (reason as u64) | (subcode << FAULT_SUBCODE_SHIFT)
 }
@@ -559,6 +577,7 @@ struct SiloManager {
 }
 
 impl SiloManager {
+    /// Creates a new instance.
     const fn new() -> Self {
         SiloManager {
             silos: BTreeMap::new(),
@@ -567,6 +586,7 @@ impl SiloManager {
         }
     }
 
+    /// Creates silo.
     fn create_silo(&mut self, config: &SiloConfig) -> Result<SiloId, SyscallError> {
         let id = SiloId::new(config.sid);
         if self.silos.contains_key(&id.sid) {
@@ -603,14 +623,17 @@ impl SiloManager {
         Ok(id)
     }
 
+    /// Returns mut.
     fn get_mut(&mut self, id: u32) -> Result<&mut Silo, SyscallError> {
         self.silos.get_mut(&id).ok_or(SyscallError::BadHandle)
     }
 
+    /// Performs the get operation.
     fn get(&self, id: u32) -> Result<&Silo, SyscallError> {
         self.silos.get(&id).ok_or(SyscallError::BadHandle)
     }
 
+    /// Performs the push event operation.
     fn push_event(&mut self, ev: SiloEvent) {
         const MAX_EVENTS: usize = 256;
         if self.events.len() >= MAX_EVENTS {
@@ -619,19 +642,23 @@ impl SiloManager {
         self.events.push_back(ev);
     }
 
+    /// Maps task.
     fn map_task(&mut self, task_id: TaskId, silo_id: u32) {
         self.task_to_silo.insert(task_id, silo_id);
     }
 
+    /// Unmaps task.
     fn unmap_task(&mut self, task_id: TaskId) {
         self.task_to_silo.remove(&task_id);
     }
 
+    /// Performs the silo for task operation.
     fn silo_for_task(&self, task_id: TaskId) -> Option<u32> {
         self.task_to_silo.get(&task_id).copied()
     }
 }
 
+/// Performs the kernel check spawn invariants operation.
 pub fn kernel_check_spawn_invariants(id: &SiloId, mode: &OctalMode) -> Result<(), SyscallError> {
     if id.tier == SiloTier::User && !mode.hardware.is_empty() {
         return Err(SyscallError::PermissionDenied);
@@ -642,6 +669,7 @@ pub fn kernel_check_spawn_invariants(id: &SiloId, mode: &OctalMode) -> Result<()
     Ok(())
 }
 
+/// Performs the decode family operation.
 fn decode_family(raw: u8) -> Result<StrateFamily, SyscallError> {
     match raw {
         0 => Ok(StrateFamily::SYS),
@@ -664,6 +692,7 @@ const IPC_STREAM_EOF: u32 = 0xFFFF_FFFF;
 const MODULE_FLAG_SIGNED: u32 = 1 << 0;
 const MODULE_FLAG_KERNEL: u32 = 1 << 1;
 
+/// Reads user config.
 fn read_user_config(ptr: u64) -> Result<SiloConfig, SyscallError> {
     if ptr == 0 {
         return Err(SyscallError::Fault);
@@ -677,6 +706,7 @@ fn read_user_config(ptr: u64) -> Result<SiloConfig, SyscallError> {
     Ok(config)
 }
 
+/// Reads caps list.
 fn read_caps_list(ptr: u64, len: u64) -> Result<Vec<u64>, SyscallError> {
     if len == 0 {
         return Ok(Vec::new());
@@ -696,6 +726,7 @@ fn read_caps_list(ptr: u64, len: u64) -> Result<Vec<u64>, SyscallError> {
     Ok(out)
 }
 
+/// Reads module stream from port.
 fn read_module_stream_from_port(
     port: &alloc::sync::Arc<port::Port>,
 ) -> Result<Vec<u8>, SyscallError> {
@@ -729,6 +760,7 @@ fn read_module_stream_from_port(
     Ok(out)
 }
 
+/// Parses module header.
 fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, SyscallError> {
     const MAGIC: [u8; 4] = *b"CMOD";
     let header_size = core::mem::size_of::<Strat9ModuleHeader>();
@@ -808,6 +840,7 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
     Ok(Some(header))
 }
 
+/// Reads u32 le.
 fn read_u32_le(data: &[u8], offset: usize) -> Result<u32, SyscallError> {
     if offset + 4 > data.len() {
         return Err(SyscallError::InvalidArgument);
@@ -817,6 +850,7 @@ fn read_u32_le(data: &[u8], offset: usize) -> Result<u32, SyscallError> {
     Ok(u32::from_le_bytes(buf))
 }
 
+/// Reads u64 le.
 fn read_u64_le(data: &[u8], offset: usize) -> Result<u64, SyscallError> {
     if offset + 8 > data.len() {
         return Err(SyscallError::InvalidArgument);
@@ -826,6 +860,7 @@ fn read_u64_le(data: &[u8], offset: usize) -> Result<u64, SyscallError> {
     Ok(u64::from_le_bytes(buf))
 }
 
+/// Performs the resolve export offset operation.
 fn resolve_export_offset(module: &ModuleImage, ordinal: u64) -> Result<u64, SyscallError> {
     let header = module.header.ok_or(SyscallError::InvalidArgument)?;
     if header.export_table_offset == 0 {
@@ -843,6 +878,7 @@ fn resolve_export_offset(module: &ModuleImage, ordinal: u64) -> Result<u64, Sysc
     Ok(rva)
 }
 
+/// Performs the require silo admin operation.
 pub fn require_silo_admin() -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: Current task owns its capability table during syscall execution.
@@ -862,6 +898,7 @@ pub fn require_silo_admin() -> Result<(), SyscallError> {
     }
 }
 
+/// Performs the resolve silo handle operation.
 fn resolve_silo_handle(handle: u64, required: CapPermissions) -> Result<u32, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
@@ -901,12 +938,14 @@ struct ModuleRegistry {
 }
 
 impl ModuleRegistry {
+    /// Creates a new instance.
     const fn new() -> Self {
         ModuleRegistry {
             modules: BTreeMap::new(),
         }
     }
 
+    /// Performs the register operation.
     fn register(&mut self, data: Vec<u8>) -> Result<u64, SyscallError> {
         let header = parse_module_header(&data)?;
         static NEXT_MOD: AtomicU64 = AtomicU64::new(1);
@@ -922,10 +961,12 @@ impl ModuleRegistry {
         Ok(id)
     }
 
+    /// Performs the get operation.
     fn get(&self, id: u64) -> Option<&ModuleImage> {
         self.modules.get(&id)
     }
 
+    /// Performs the remove operation.
     fn remove(&mut self, id: u64) -> Option<ModuleImage> {
         self.modules.remove(&id)
     }
@@ -933,6 +974,7 @@ impl ModuleRegistry {
 
 static MODULE_REGISTRY: SpinLock<ModuleRegistry> = SpinLock::new(ModuleRegistry::new());
 
+/// Performs the charge task silo memory operation.
 fn charge_task_silo_memory(task_id: TaskId, bytes: u64) -> Result<(), SyscallError> {
     if bytes == 0 {
         return Ok(());
@@ -953,6 +995,7 @@ fn charge_task_silo_memory(task_id: TaskId, bytes: u64) -> Result<(), SyscallErr
     Ok(())
 }
 
+/// Performs the release task silo memory operation.
 fn release_task_silo_memory(task_id: TaskId, bytes: u64) {
     if bytes == 0 {
         return;
@@ -988,6 +1031,7 @@ pub fn release_current_task_memory(bytes: u64) {
     }
 }
 
+/// Performs the extract strate label operation.
 fn extract_strate_label(path: &str) -> Option<String> {
     let prefix = "/srv/strate-fs-";
     let rest = path.strip_prefix(prefix)?;
@@ -1000,6 +1044,7 @@ fn extract_strate_label(path: &str) -> Option<String> {
     Some(String::from(label))
 }
 
+/// Performs the sanitize label operation.
 fn sanitize_label(raw: &str) -> String {
     let mut out = String::new();
     for b in raw.bytes().take(31) {
@@ -1013,6 +1058,7 @@ fn sanitize_label(raw: &str) -> String {
     }
 }
 
+/// Returns whether valid label.
 fn is_valid_label(raw: &str) -> bool {
     if raw.is_empty() || raw.len() > 31 {
         return false;
@@ -1021,6 +1067,7 @@ fn is_valid_label(raw: &str) -> bool {
         .all(|b| (b as char).is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
 }
 
+/// Sets current silo label from path.
 pub fn set_current_silo_label_from_path(path: &str) -> Result<(), SyscallError> {
     let Some(label) = extract_strate_label(path) else {
         return Ok(());
@@ -1039,6 +1086,7 @@ pub fn set_current_silo_label_from_path(path: &str) -> Result<(), SyscallError> 
     Ok(())
 }
 
+/// Performs the current task silo label operation.
 pub fn current_task_silo_label() -> Option<String> {
     let task = current_task_clone()?;
     let mgr = SILO_MANAGER.lock();
@@ -1047,6 +1095,7 @@ pub fn current_task_silo_label() -> Option<String> {
     silo.strate_label.clone()
 }
 
+/// Performs the list silos snapshot operation.
 pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
     let mgr = SILO_MANAGER.lock();
     mgr.silos
@@ -1087,6 +1136,7 @@ pub fn silo_info_for_task(task_id: TaskId) -> Option<(u32, Option<String>, u64, 
     ))
 }
 
+/// Performs the resolve volume resource from dev path operation.
 fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, SyscallError> {
     match dev_path {
         "/dev/sda" => ahci::get_device()
@@ -1099,6 +1149,7 @@ fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, Syscal
     }
 }
 
+/// Performs the kernel spawn strate operation.
 pub fn kernel_spawn_strate(
     elf_data: &[u8],
     label: Option<&str>,
@@ -1213,6 +1264,7 @@ pub fn kernel_spawn_strate(
     Ok(silo_id)
 }
 
+/// Performs the resolve selector to silo id operation.
 fn resolve_selector_to_silo_id(selector: &str, mgr: &SiloManager) -> Result<u32, SyscallError> {
     if let Ok(id) = selector.parse::<u32>() {
         if mgr.silos.contains_key(&id) {
@@ -1232,6 +1284,7 @@ fn resolve_selector_to_silo_id(selector: &str, mgr: &SiloManager) -> Result<u32,
     found.ok_or(SyscallError::NotFound)
 }
 
+/// Performs the kernel stop silo operation.
 pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u32, SyscallError> {
     let (silo_id, tasks) = {
         let mut mgr = SILO_MANAGER.lock();
@@ -1280,6 +1333,7 @@ pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u32, Syscall
     Ok(silo_id)
 }
 
+/// Performs the kernel start silo operation.
 pub fn kernel_start_silo(selector: &str) -> Result<u32, SyscallError> {
     let silo_id = {
         let mgr = SILO_MANAGER.lock();
@@ -1289,6 +1343,7 @@ pub fn kernel_start_silo(selector: &str) -> Result<u32, SyscallError> {
     Ok(silo_id)
 }
 
+/// Performs the kernel destroy silo operation.
 pub fn kernel_destroy_silo(selector: &str) -> Result<u32, SyscallError> {
     let (silo_id, module_id) = {
         let mut mgr = SILO_MANAGER.lock();
@@ -1315,6 +1370,7 @@ pub fn kernel_destroy_silo(selector: &str) -> Result<u32, SyscallError> {
     Ok(silo_id)
 }
 
+/// Performs the kernel rename silo label operation.
 pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u32, SyscallError> {
     if !is_valid_label(new_label) {
         return Err(SyscallError::InvalidArgument);
@@ -1338,6 +1394,7 @@ pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u32, 
     }
 }
 
+/// Performs the register boot strate task operation.
 pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, SyscallError> {
     let mut mgr = SILO_MANAGER.lock();
     // Default boot tasks get SID 1, 2, ...
@@ -1392,6 +1449,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
     Ok(id.sid)
 }
 
+/// Performs the resolve module handle operation.
 fn resolve_module_handle(handle: u64, required: CapPermissions) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
@@ -1431,6 +1489,7 @@ pub fn grant_silo_admin_to_task(task: &alloc::sync::Arc<Task>) -> CapId {
 // Module syscalls (temporary blob loader)
 // ============================================================================
 
+/// Performs the sys module load operation.
 pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
     // Module loading is currently restricted to admin.
     require_silo_admin()?;
@@ -1524,6 +1583,7 @@ pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
+/// Performs the sys module unload operation.
 pub fn sys_module_unload(handle: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let required = CapPermissions {
@@ -1539,6 +1599,7 @@ pub fn sys_module_unload(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the sys module get symbol operation.
 pub fn sys_module_get_symbol(handle: u64, _ordinal: u64) -> Result<u64, SyscallError> {
     let required = CapPermissions {
         read: true,
@@ -1557,6 +1618,7 @@ pub fn sys_module_get_symbol(handle: u64, _ordinal: u64) -> Result<u64, SyscallE
     Ok(header.code_offset.saturating_add(rva))
 }
 
+/// Performs the sys module query operation.
 pub fn sys_module_query(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     let required = CapPermissions {
         read: true,
@@ -1615,6 +1677,7 @@ pub fn sys_module_query(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> 
 // Syscall handlers (kernel entry points)
 // ============================================================================
 
+/// Performs the sys silo create operation.
 pub fn sys_silo_create(config_ptr: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let config = read_user_config(config_ptr)?;
@@ -1636,6 +1699,7 @@ pub fn sys_silo_create(config_ptr: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
+/// Performs the sys silo config operation.
 pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let config = read_user_config(res_ptr)?;
@@ -1695,6 +1759,7 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the sys silo attach module operation.
 pub fn sys_silo_attach_module(handle: u64, module_handle: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let silo_id = resolve_silo_handle(handle, CapPermissions::read_write())?;
@@ -1725,6 +1790,7 @@ pub fn sys_silo_attach_module(handle: u64, module_handle: u64) -> Result<u64, Sy
     }
 }
 
+/// Starts silo by id.
 fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
     let (
         module_id,
@@ -1894,6 +1960,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Performs the sys silo start operation.
 pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let required = CapPermissions {
@@ -1948,6 +2015,7 @@ pub fn on_task_terminated(task_id: TaskId) {
     }
 }
 
+/// Stops or kill silo by id.
 fn stop_or_kill_silo_by_id(
     silo_id: u32,
     force_kill: bool,
@@ -1998,6 +2066,7 @@ fn stop_or_kill_silo_by_id(
     Ok(tasks)
 }
 
+/// Performs the sys silo stop operation.
 pub fn sys_silo_stop(handle: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let required = CapPermissions {
@@ -2016,6 +2085,7 @@ pub fn sys_silo_stop(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the sys silo kill operation.
 pub fn sys_silo_kill(handle: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let required = CapPermissions {
@@ -2034,11 +2104,13 @@ pub fn sys_silo_kill(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the silo has capability operation.
 fn silo_has_capability(task: &Task, cap_id: u64) -> bool {
     let caps = unsafe { &*task.process.capabilities.get() };
     caps.get(CapId::from_raw(cap_id)).is_some()
 }
 
+/// Returns whether delegated resource.
 fn is_delegated_resource(rt: ResourceType) -> bool {
     matches!(
         rt,
@@ -2055,6 +2127,7 @@ fn is_delegated_resource(rt: ResourceType) -> bool {
     )
 }
 
+/// Returns whether admin task.
 fn is_admin_task(task: &Task) -> bool {
     let caps = unsafe { &*task.process.capabilities.get() };
     let required = CapPermissions {
@@ -2067,6 +2140,7 @@ fn is_admin_task(task: &Task) -> bool {
     caps.has_resource_with_permissions(ResourceType::Silo, SILO_ADMIN_RESOURCE, required)
 }
 
+/// Maps elf start error.
 fn map_elf_start_error(err: &'static str) -> SyscallError {
     if err.contains("allocate")
         || err.contains("Out of memory")
@@ -2095,6 +2169,7 @@ struct GrantedResource {
     permissions: CapPermissions,
 }
 
+/// Performs the merge permissions operation.
 fn merge_permissions(a: CapPermissions, b: CapPermissions) -> CapPermissions {
     CapPermissions {
         read: a.read || b.read,
@@ -2105,6 +2180,7 @@ fn merge_permissions(a: CapPermissions, b: CapPermissions) -> CapPermissions {
     }
 }
 
+/// Performs the permissions subset operation.
 fn permissions_subset(requested: CapPermissions, allowed: CapPermissions) -> bool {
     (!requested.read || allowed.read)
         && (!requested.write || allowed.write)
@@ -2113,6 +2189,7 @@ fn permissions_subset(requested: CapPermissions, allowed: CapPermissions) -> boo
         && (!requested.revoke || allowed.revoke)
 }
 
+/// Performs the add or merge granted resource operation.
 fn add_or_merge_granted_resource(list: &mut Vec<GrantedResource>, grant: GrantedResource) {
     for existing in list.iter_mut() {
         if existing.resource_type == grant.resource_type && existing.resource == grant.resource {
@@ -2123,6 +2200,7 @@ fn add_or_merge_granted_resource(list: &mut Vec<GrantedResource>, grant: Granted
     list.push(grant);
 }
 
+/// Performs the register current task granted resource operation.
 pub fn register_current_task_granted_resource(
     resource_type: ResourceType,
     resource: usize,
@@ -2178,6 +2256,7 @@ pub fn enforce_cap_for_current_task(handle: u64) -> Result<(), SyscallError> {
     Err(SyscallError::PermissionDenied)
 }
 
+/// Performs the enforce registry bind for current task operation.
 pub fn enforce_registry_bind_for_current_task() -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     if is_admin_task(&task) {
@@ -2229,6 +2308,7 @@ pub fn enforce_console_access() -> Result<(), SyscallError> {
     }
 }
 
+/// Performs the sys silo event next operation.
 pub fn sys_silo_event_next(_event_ptr: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     if _event_ptr == 0 {
@@ -2253,6 +2333,7 @@ pub fn sys_silo_event_next(_event_ptr: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the sys silo suspend operation.
 pub fn sys_silo_suspend(handle: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let required = CapPermissions {
@@ -2295,6 +2376,7 @@ pub fn sys_silo_suspend(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Performs the sys silo resume operation.
 pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let required = CapPermissions {
@@ -2339,6 +2421,7 @@ pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
 // Fault handling (called from exception handlers)
 // ============================================================================
 
+/// Performs the dump user fault operation.
 fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode: u64, rip: u64) {
     let task_meta = crate::process::get_task_by_id(task_id).map(|task| {
         let state = unsafe { *task.state.get() };
@@ -2417,6 +2500,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
     }
 }
 
+/// Handles user fault.
 pub fn handle_user_fault(
     task_id: TaskId,
     reason: SiloFaultReason,

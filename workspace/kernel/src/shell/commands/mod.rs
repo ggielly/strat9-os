@@ -21,6 +21,7 @@ pub struct CommandRegistry {
 }
 
 impl CommandRegistry {
+    /// Creates a new instance.
     pub fn new() -> Self {
         let mut registry = Self {
             commands: BTreeMap::new(),
@@ -65,10 +66,12 @@ impl CommandRegistry {
         registry
     }
 
+    /// Performs the register operation.
     pub fn register(&mut self, name: &str, func: fn(&[String]) -> Result<(), ShellError>) {
         self.commands.insert(String::from(name), func);
     }
 
+    /// Performs the execute operation.
     pub fn execute(&self, cmd: &super::parser::Command) -> Result<(), ShellError> {
         if let Some(func) = self.commands.get(&cmd.name) {
             func(&cmd.args)

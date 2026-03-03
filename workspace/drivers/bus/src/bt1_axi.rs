@@ -19,6 +19,7 @@ pub struct Bt1Axi {
 }
 
 impl Bt1Axi {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             qos_regs: MmioRegion::new(),
@@ -28,10 +29,12 @@ impl Bt1Axi {
         }
     }
 
+    /// Initializes sys regs.
     pub fn init_sys_regs(&mut self, base: usize, size: usize) {
         self.sys_regs.init(base, size);
     }
 
+    /// Reads error info.
     pub fn read_error_info(&self) -> Option<AxiErrorInfo> {
         if !self.sys_regs.is_valid() {
             return None;
@@ -57,31 +60,38 @@ pub struct AxiErrorInfo {
 }
 
 impl AxiErrorInfo {
+    /// Performs the full address operation.
     pub fn full_address(&self) -> u64 {
         ((self.address_high as u64) << 32) | (self.address_low as u64)
     }
 
+    /// Performs the error type str operation.
     pub fn error_type_str(&self) -> &'static str {
         if self.is_no_slave { "no slave" } else { "slave protocol error" }
     }
 }
 
 impl BusDriver for Bt1Axi {
+    /// Performs the name operation.
     fn name(&self) -> &str { "bt1-axi" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.qos_regs.init(base, 0x200);
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.qos_regs.is_valid() {
             return Err(BusError::InitFailed);
@@ -89,6 +99,7 @@ impl BusDriver for Bt1Axi {
         Ok(self.qos_regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.qos_regs.is_valid() {
             return Err(BusError::InitFailed);
@@ -97,10 +108,12 @@ impl BusDriver for Bt1Axi {
         Ok(())
     }
 
+    /// Performs the error count operation.
     fn error_count(&self) -> u64 {
         self.error_count.load(Ordering::Relaxed)
     }
 
+    /// Handles irq.
     fn handle_irq(&mut self) -> bool {
         if let Some(_info) = self.read_error_info() {
             self.error_count.fetch_add(1, Ordering::Relaxed);

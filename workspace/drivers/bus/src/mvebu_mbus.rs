@@ -65,6 +65,7 @@ pub struct MvebuMbus {
 }
 
 impl MvebuMbus {
+    /// Creates a new instance.
     pub fn new(num_wins: usize, has_bridge: bool) -> Self {
         Self {
             mbus_regs: MmioRegion::new(),
@@ -78,19 +79,23 @@ impl MvebuMbus {
         }
     }
 
+    /// Initializes sdram regs.
     pub fn init_sdram_regs(&mut self, base: usize, size: usize) {
         self.sdram_regs.init(base, size);
     }
 
+    /// Initializes bridge regs.
     pub fn init_bridge_regs(&mut self, base: usize, size: usize) {
         self.bridge_regs.init(base, size);
         self.has_bridge = true;
     }
 
+    /// Sets hw io coherency.
     pub fn set_hw_io_coherency(&mut self, enable: bool) {
         self.hw_io_coherency = enable;
     }
 
+    /// Performs the win offset operation.
     fn win_offset(&self, win: usize) -> usize {
         if win < 8 {
             win * 0x10
@@ -99,10 +104,12 @@ impl MvebuMbus {
         }
     }
 
+    /// Returns whether remap is available.
     fn has_remap(&self, win: usize) -> bool {
         win < 8
     }
 
+    /// Reads window.
     pub fn read_window(&self, win: usize) -> MbusWindowData {
         let off = self.win_offset(win);
         MbusWindowData {
@@ -113,6 +120,7 @@ impl MvebuMbus {
         }
     }
 
+    /// Performs the setup window operation.
     pub fn setup_window(&self, win: usize, base: u32, size: u32, target: u8, attr: u8, remap: Option<u64>) {
         let off = self.win_offset(win);
 
@@ -139,6 +147,7 @@ impl MvebuMbus {
         self.mbus_regs.write32(off + WIN_CTRL_OFF, ctrl);
     }
 
+    /// Disables window.
     pub fn disable_window(&self, win: usize) {
         let off = self.win_offset(win);
         self.mbus_regs.write32(off + WIN_CTRL_OFF, 0);
@@ -149,12 +158,14 @@ impl MvebuMbus {
         }
     }
 
+    /// Performs the save windows operation.
     pub fn save_windows(&mut self) {
         for i in 0..self.num_wins {
             self.saved_wins[i] = self.read_window(i);
         }
     }
 
+    /// Performs the restore windows operation.
     pub fn restore_windows(&self) {
         for i in 0..self.num_wins {
             let off = self.win_offset(i);
@@ -171,38 +182,46 @@ impl MvebuMbus {
 }
 
 impl BusDriver for MvebuMbus {
+    /// Performs the name operation.
     fn name(&self) -> &str { "mvebu-mbus" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.mbus_regs.init(base, 0x200);
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Performs the suspend operation.
     fn suspend(&mut self) -> Result<(), BusError> {
         self.save_windows();
         self.power_state = PowerState::Suspended;
         Ok(())
     }
 
+    /// Performs the resume operation.
     fn resume(&mut self) -> Result<(), BusError> {
         self.restore_windows();
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.mbus_regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.mbus_regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.mbus_regs.is_valid() { return Err(BusError::InitFailed); }
         self.mbus_regs.write32(offset, value);

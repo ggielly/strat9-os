@@ -24,6 +24,7 @@ pub struct KeyboardState {
 }
 
 impl KeyboardState {
+    /// Creates a new instance.
     pub const fn new() -> Self {
         Self {
             left_shift: false,

@@ -17,6 +17,7 @@ pub enum MoxtetModuleId {
 }
 
 impl MoxtetModuleId {
+    /// Builds this from raw.
     pub fn from_raw(raw: u8) -> Self {
         match raw & 0x0F {
             0x01 => MoxtetModuleId::Sfp,
@@ -29,6 +30,7 @@ impl MoxtetModuleId {
         }
     }
 
+    /// Performs the name operation.
     pub fn name(&self) -> &'static str {
         match self {
             MoxtetModuleId::Sfp => "sfp",
@@ -57,6 +59,7 @@ pub struct Moxtet {
 }
 
 impl Moxtet {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             modules: Vec::new(),
@@ -68,6 +71,7 @@ impl Moxtet {
         }
     }
 
+    /// Performs the discover topology operation.
     pub fn discover_topology(&mut self, spi_data: &[u8]) {
         self.modules.clear();
         self.module_count = 0;
@@ -83,6 +87,7 @@ impl Moxtet {
         }
     }
 
+    /// Performs the module read operation.
     pub fn module_read(&self, index: usize) -> Result<u8, BusError> {
         if index >= self.module_count {
             return Err(BusError::DeviceNotFound);
@@ -90,6 +95,7 @@ impl Moxtet {
         Ok(self.rx_buf[index + 1])
     }
 
+    /// Performs the module write operation.
     pub fn module_write(&mut self, index: usize, value: u8) -> Result<(), BusError> {
         if index >= self.module_count {
             return Err(BusError::DeviceNotFound);
@@ -98,6 +104,7 @@ impl Moxtet {
         Ok(())
     }
 
+    /// Sets irq mask.
     pub fn set_irq_mask(&mut self, index: usize, masked: bool) {
         if index < MAX_MODULES {
             self.irq_mask[index] = masked;
@@ -106,28 +113,35 @@ impl Moxtet {
 }
 
 impl BusDriver for Moxtet {
+    /// Performs the name operation.
     fn name(&self) -> &str { "moxtet" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, _base: usize) -> Result<(), BusError> {
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         self.module_read(offset).map(|v| v as u32)
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         self.module_write(offset, value as u8)
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.modules.iter().map(|m| {
             BusChild {
@@ -138,6 +152,7 @@ impl BusDriver for Moxtet {
         }).collect()
     }
 
+    /// Handles irq.
     fn handle_irq(&mut self) -> bool {
         for i in 0..self.module_count {
             if self.irq_mask[i] { continue; }

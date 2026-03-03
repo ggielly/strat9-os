@@ -11,6 +11,7 @@ pub mod hid;
 pub mod uhci;
 pub mod xhci;
 
+/// Performs the init operation.
 pub fn init() {
     // Initialize controllers in order: xHCI first (USB 3.0), then EHCI (USB 2.0), then UHCI (USB 1.1)
     // This ensures we use the fastest available controller for each device

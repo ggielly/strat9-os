@@ -197,11 +197,13 @@ static PORT_WQ: [WaitQueue; 32] = {
 
 // ─── MMIO helpers ─────────────────────────────────────────────────────────────
 
+/// Performs the rd32 operation.
 #[inline]
 unsafe fn rd32(base: u64, off: u64) -> u32 {
     ptr::read_volatile((base + off) as *const u32)
 }
 
+/// Performs the wr32 operation.
 #[inline]
 unsafe fn wr32(base: u64, off: u64, val: u32) {
     ptr::write_volatile((base + off) as *mut u32, val);
@@ -209,6 +211,7 @@ unsafe fn wr32(base: u64, off: u64, val: u32) {
 
 // ─── Port start/stop ──────────────────────────────────────────────────────────
 
+/// Performs the port stop operation.
 fn port_stop(pvirt: u64) {
     // SAFETY: pvirt is a valid MMIO virtual address for this port's registers
     unsafe {
@@ -226,6 +229,7 @@ fn port_stop(pvirt: u64) {
     }
 }
 
+/// Performs the port start operation.
 fn port_start(pvirt: u64) {
     // SAFETY: pvirt is a valid MMIO virtual address
     unsafe {
@@ -281,6 +285,7 @@ struct Bounce {
 }
 
 impl Bounce {
+    /// Performs the alloc operation.
     fn alloc(bytes: usize) -> Result<Self, AhciError> {
         let pages = (bytes + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
@@ -299,6 +304,7 @@ impl Bounce {
         })
     }
 
+    /// Performs the free operation.
     fn free(self) {
         let mut lock = get_allocator().lock();
         if let Some(a) = lock.as_mut() {
@@ -314,6 +320,7 @@ impl Bounce {
 //      task is blocked by the scheduler until the IRQ fires and wakes it.
 //   2. Boot context (no task yet): legacy busy-poll with timeout.
 
+/// Performs the submit cmd operation.
 fn submit_cmd(
     port: &AhciPort,
     lba: u64,
@@ -713,12 +720,14 @@ impl AhciController {
         self.ports.first().map(|p| p.sector_count).unwrap_or(0)
     }
 
+    /// Performs the first port operation.
     fn first_port(&self) -> Option<&AhciPort> {
         self.ports.first()
     }
 }
 
 impl BlockDevice for AhciController {
+    /// Reads sector.
     fn read_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         let port = self.first_port().ok_or(BlockError::NotReady)?;
         if sector >= port.sector_count {
@@ -730,6 +739,7 @@ impl BlockDevice for AhciController {
         submit_cmd(port, sector, 1, buf, false, ATA_READ_DMA_EXT).map_err(|_| BlockError::IoError)
     }
 
+    /// Writes sector.
     fn write_sector(&self, sector: u64, buf: &[u8]) -> Result<(), BlockError> {
         let port = self.first_port().ok_or(BlockError::NotReady)?;
         if sector >= port.sector_count {
@@ -745,6 +755,7 @@ impl BlockDevice for AhciController {
             .map_err(|_| BlockError::IoError)
     }
 
+    /// Performs the sector count operation.
     fn sector_count(&self) -> u64 {
         self.sector_count()
     }

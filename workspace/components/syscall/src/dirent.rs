@@ -32,6 +32,7 @@ impl Dirent {
 }
 
 impl fmt::Display for Dirent {
+    /// Implements fmt.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -61,6 +62,7 @@ impl<'a> DirentIter<'a> {
 impl<'a> Iterator for DirentIter<'a> {
     type Item = Dirent;
 
+    /// Implements next.
     fn next(&mut self) -> Option<Dirent> {
         if self.offset + DirentHeader::SIZE > self.buf.len() {
             return None;

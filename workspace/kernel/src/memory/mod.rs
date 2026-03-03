@@ -49,6 +49,7 @@ pub fn init_cow_subsystem(memory_regions: &[MemoryRegion]) {
     init_cow_metadata(memory_regions);
 }
 
+/// Initializes cow metadata.
 fn init_cow_metadata(memory_regions: &[MemoryRegion]) {
     use crate::boot::entry::MemoryKind;
 

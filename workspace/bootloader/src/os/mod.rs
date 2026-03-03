@@ -51,10 +51,13 @@ pub trait Os {
     type D: BlockDevice;
     type V: Iterator<Item = OsVideoMode>;
 
+    /// Performs the name operation.
     fn name(&self) -> &str;
 
+    /// Allocates zeroed page aligned.
     fn alloc_zeroed_page_aligned(&self, size: usize) -> *mut u8;
 
+    /// Performs the page size operation.
     #[allow(dead_code)]
     fn page_size(&self) -> usize;
 
@@ -62,17 +65,27 @@ pub trait Os {
     /// This will be used to search for EXT4 partitions
     fn boot_disk(&self) -> Option<Self::D>;
 
+    /// Performs the hwdesc operation.
     fn hwdesc(&self) -> OsHwDesc;
 
+    /// Performs the video outputs operation.
     fn video_outputs(&self) -> usize;
+    /// Performs the video modes operation.
     fn video_modes(&self, output_i: usize) -> Self::V;
+    /// Sets video mode.
     fn set_video_mode(&self, output_i: usize, mode: &mut OsVideoMode);
+    /// Performs the best resolution operation.
     fn best_resolution(&self, output_i: usize) -> Option<(u32, u32)>;
 
+    /// Returns key.
     fn get_key(&self) -> OsKey;
 
+    /// Performs the clear text operation.
     fn clear_text(&self);
+    /// Returns text position.
     fn get_text_position(&self) -> (usize, usize);
+    /// Sets text position.
     fn set_text_position(&self, x: usize, y: usize);
+    /// Sets text highlight.
     fn set_text_highlight(&self, highlight: bool);
 }

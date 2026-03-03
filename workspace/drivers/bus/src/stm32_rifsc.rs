@@ -41,6 +41,7 @@ pub struct Stm32Rifsc {
 }
 
 impl Stm32Rifsc {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -52,6 +53,7 @@ impl Stm32Rifsc {
         }
     }
 
+    /// Reads hwcfg.
     fn read_hwcfg(&mut self) {
         let hwcfg = self.regs.read32(RIFSC_RISC_HWCFGR2);
         self.nb_risup = hwcfg & HWCFGR2_CONF1_MASK;
@@ -59,6 +61,7 @@ impl Stm32Rifsc {
         self.nb_risal = (hwcfg & HWCFGR2_CONF3_MASK) >> HWCFGR2_CONF3_SHIFT;
     }
 
+    /// Returns whether secure.
     fn is_secure(&self, id: u32) -> bool {
         let reg_idx = id / 32;
         let bit = id % 32;
@@ -66,6 +69,7 @@ impl Stm32Rifsc {
         (val & (1 << bit)) != 0
     }
 
+    /// Returns whether privileged.
     fn is_privileged(&self, id: u32) -> bool {
         let reg_idx = id / 32;
         let bit = id % 32;
@@ -73,14 +77,17 @@ impl Stm32Rifsc {
         (val & (1 << bit)) != 0
     }
 
+    /// Performs the cidcfgr offset operation.
     fn cidcfgr_offset(id: u32) -> usize {
         RIFSC_RISC_PER0_CIDCFGR + (id as usize) * CIDCFGR_STRIDE
     }
 
+    /// Performs the semcr offset operation.
     fn semcr_offset(id: u32) -> usize {
         RIFSC_RISC_PER0_SEMCR + (id as usize) * CIDCFGR_STRIDE
     }
 
+    /// Performs the acquire semaphore operation.
     fn acquire_semaphore(&self, id: u32) -> Result<(), BusError> {
         let offset = Self::semcr_offset(id);
         self.regs.write32(offset, SEMCR_MUTEX);
@@ -92,23 +99,29 @@ impl Stm32Rifsc {
         }
     }
 
+    /// Performs the release semaphore operation.
     fn release_semaphore(&self, id: u32) {
         let offset = Self::semcr_offset(id);
         self.regs.write32(offset, 0);
     }
 
+    /// Performs the add child operation.
     pub fn add_child(&mut self, child: BusChild) {
         self.children.push(child);
     }
 }
 
 impl FirewallController for Stm32Rifsc {
+    /// Performs the name operation.
     fn name(&self) -> &str { "stm32-rifsc" }
 
+    /// Performs the firewall type operation.
     fn firewall_type(&self) -> FirewallType { FirewallType::Peripheral }
 
+    /// Performs the max entries operation.
     fn max_entries(&self) -> u32 { self.nb_risup }
 
+    /// Performs the grant access operation.
     fn grant_access(&self, firewall_id: u32) -> Result<(), BusError> {
         if firewall_id >= self.nb_risup {
             return Err(BusError::InvalidArgument);
@@ -139,6 +152,7 @@ impl FirewallController for Stm32Rifsc {
         Ok(())
     }
 
+    /// Performs the release access operation.
     fn release_access(&self, firewall_id: u32) -> Result<(), BusError> {
         if firewall_id >= self.nb_risup {
             return Err(BusError::InvalidArgument);
@@ -154,10 +168,13 @@ impl FirewallController for Stm32Rifsc {
 }
 
 impl BusDriver for Stm32Rifsc {
+    /// Performs the name operation.
     fn name(&self) -> &str { "stm32-rifsc" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x1000);
         self.read_hwcfg();
@@ -165,22 +182,26 @@ impl BusDriver for Stm32Rifsc {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.regs.write32(offset, value);
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.children.clone()
     }

@@ -81,6 +81,7 @@ pub struct TiSysc {
 }
 
 impl TiSysc {
+    /// Creates a new instance.
     pub fn new(regbits: &'static SyscRegbits) -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -95,20 +96,24 @@ impl TiSysc {
         }
     }
 
+    /// Sets offsets.
     pub fn set_offsets(&mut self, rev: Option<usize>, sysc: Option<usize>, syss: Option<usize>) {
         self.rev_offset = rev;
         self.sysc_offset = sysc;
         self.syss_offset = syss;
     }
 
+    /// Sets quirks.
     pub fn set_quirks(&mut self, quirks: SyscQuirks) {
         self.quirks = quirks;
     }
 
+    /// Performs the add child operation.
     pub fn add_child(&mut self, child: BusChild) {
         self.children.push(child);
     }
 
+    /// Reads sysc.
     fn read_sysc(&self) -> u32 {
         match self.sysc_offset {
             Some(off) => {
@@ -122,6 +127,7 @@ impl TiSysc {
         }
     }
 
+    /// Writes sysc.
     fn write_sysc(&self, val: u32) {
         if let Some(off) = self.sysc_offset {
             if self.quirks.contains(SyscQuirks::QUIRK_16BIT) {
@@ -132,6 +138,7 @@ impl TiSysc {
         }
     }
 
+    /// Reads revision.
     pub fn read_revision(&self) -> u32 {
         match self.rev_offset {
             Some(off) => self.regs.read32(off),
@@ -139,6 +146,7 @@ impl TiSysc {
         }
     }
 
+    /// Enables module.
     pub fn enable_module(&self) {
         let mut val = self.read_sysc();
         let sidle_mask = 0x3 << self.regbits.sidle_shift;
@@ -158,6 +166,7 @@ impl TiSysc {
         self.write_sysc(val);
     }
 
+    /// Disables module.
     pub fn disable_module(&self) {
         let mut val = self.read_sysc();
         let sidle_mask = 0x3 << self.regbits.sidle_shift;
@@ -173,6 +182,7 @@ impl TiSysc {
         self.write_sysc(val);
     }
 
+    /// Performs the softreset operation.
     pub fn softreset(&self) -> Result<(), BusError> {
         if self.quirks.contains(SyscQuirks::QUIRK_NO_RESET_ON_INIT) {
             return Ok(());
@@ -207,10 +217,13 @@ impl TiSysc {
 }
 
 impl BusDriver for TiSysc {
+    /// Performs the name operation.
     fn name(&self) -> &str { "ti-sysc" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x100);
         self.revision = self.read_revision();
@@ -224,18 +237,21 @@ impl BusDriver for TiSysc {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.disable_module();
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Performs the suspend operation.
     fn suspend(&mut self) -> Result<(), BusError> {
         self.disable_module();
         self.power_state = PowerState::Suspended;
         Ok(())
     }
 
+    /// Performs the resume operation.
     fn resume(&mut self) -> Result<(), BusError> {
         if self.quirks.contains(SyscQuirks::QUIRK_REINIT_ON_CTX_LOST) {
             self.softreset()?;
@@ -245,17 +261,20 @@ impl BusDriver for TiSysc {
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.regs.write32(offset, value);
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.children.clone()
     }

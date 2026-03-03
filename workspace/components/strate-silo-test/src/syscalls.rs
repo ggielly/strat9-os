@@ -24,18 +24,22 @@ struct Ctx {
     fail: u64,
 }
 
+/// Writes fd.
 fn write_fd(fd: usize, msg: &str) {
     let _ = call::write(fd, msg.as_bytes());
 }
 
+/// Implements log.
 fn log(msg: &str) {
     write_fd(1, msg);
 }
 
+/// Implements log err.
 fn log_err(msg: &str) {
     write_fd(2, msg);
 }
 
+/// Implements log u64.
 fn log_u64(mut value: u64) {
     let mut buf = [0u8; 21];
     if value == 0 {
@@ -52,6 +56,7 @@ fn log_u64(mut value: u64) {
     log(s);
 }
 
+/// Implements log hex u64.
 fn log_hex_u64(mut value: u64) {
     let mut buf = [0u8; 16];
     for i in (0..16).rev() {
@@ -68,6 +73,7 @@ fn log_hex_u64(mut value: u64) {
     log(s);
 }
 
+/// Implements section.
 fn section(title: &str) {
     log("\n============================================================\n");
     log("[test_syscalls] ");
@@ -75,6 +81,7 @@ fn section(title: &str) {
     log("\n============================================================\n");
 }
 
+/// Implements ok.
 fn ok(ctx: &mut Ctx, label: &str, value: usize) {
     ctx.pass += 1;
     log("[OK] ");
@@ -86,6 +93,7 @@ fn ok(ctx: &mut Ctx, label: &str, value: usize) {
     log(")\n");
 }
 
+/// Implements fail.
 fn fail(ctx: &mut Ctx, label: &str, err: Error) {
     ctx.fail += 1;
     log_err("[FAIL] ");
@@ -95,6 +103,7 @@ fn fail(ctx: &mut Ctx, label: &str, err: Error) {
     log_err("\n");
 }
 
+/// Implements check ok.
 fn check_ok(ctx: &mut Ctx, label: &str, res: core::result::Result<usize, Error>) -> Option<usize> {
     match res {
         Ok(v) => {
@@ -108,6 +117,7 @@ fn check_ok(ctx: &mut Ctx, label: &str, res: core::result::Result<usize, Error>)
     }
 }
 
+/// Implements check expect one of.
 fn check_expect_one_of(
     ctx: &mut Ctx,
     label: &str,
@@ -138,6 +148,7 @@ fn check_expect_one_of(
     }
 }
 
+/// Implements check expect err.
 fn check_expect_err(ctx: &mut Ctx, label: &str, res: core::result::Result<usize, Error>, expected: Error) {
     match res {
         Ok(v) => {
@@ -160,6 +171,7 @@ fn check_expect_err(ctx: &mut Ctx, label: &str, res: core::result::Result<usize,
     }
 }
 
+/// Implements test process and ids.
 fn test_process_and_ids(ctx: &mut Ctx) {
     section("Process IDs / Session / Group / Credentials");
 
@@ -181,6 +193,7 @@ fn test_process_and_ids(ctx: &mut Ctx) {
     let _ = check_ok(ctx, "raw SYS_SETGID(current gid)", unsafe { syscall1(SYS_SETGID, cur_gid) });
 }
 
+/// Implements test memory.
 fn test_memory(ctx: &mut Ctx) {
     section("Memory: brk / mmap / mprotect / mremap / munmap");
 
@@ -249,6 +262,7 @@ fn test_memory(ctx: &mut Ctx) {
     );
 }
 
+/// Implements test fs.
 fn test_fs(ctx: &mut Ctx) {
     section("Filesystem and CWD syscalls");
 
@@ -421,6 +435,7 @@ fn test_fs(ctx: &mut Ctx) {
     );
 }
 
+/// Implements test handles.
 fn test_handles(ctx: &mut Ctx) {
     section("Handle syscalls via semaphore handle");
 
@@ -472,12 +487,14 @@ fn test_handles(ctx: &mut Ctx) {
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_info: &PanicInfo) -> ! {
     log_err("[test_syscalls] PANIC\n");
     call::exit(250)
 }
 
 #[no_mangle]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     let mut ctx = Ctx { pass: 0, fail: 0 };
 

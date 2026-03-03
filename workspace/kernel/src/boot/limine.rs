@@ -239,6 +239,7 @@ pub fn wasm_test_toml_module() -> Option<(u64, u64)> {
     unsafe { WASM_TEST_TOML_FILE_MODULE }
 }
 
+/// Performs the path matches operation.
 fn path_matches(module_path: &[u8], expected_path: &[u8]) -> bool {
     let expected_no_leading = expected_path.strip_prefix(b"/").unwrap_or(expected_path);
     module_path == expected_path
@@ -247,6 +248,7 @@ fn path_matches(module_path: &[u8], expected_path: &[u8]) -> bool {
         || module_path.ends_with(expected_no_leading)
 }
 
+/// Performs the module addr to phys operation.
 #[inline]
 const fn module_addr_to_phys(addr: u64, hhdm_offset: u64) -> u64 {
     if hhdm_offset != 0 && addr >= hhdm_offset {
@@ -276,6 +278,7 @@ struct ResolvedModules {
     wasm_test_toml: Option<(u64, u64)>,
 }
 
+/// Performs the resolve modules once operation.
 fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> ResolvedModules {
     let mut resolved = ResolvedModules::default();
     for module in modules {
@@ -321,6 +324,7 @@ fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> Re
     resolved
 }
 
+/// Maps limine region kind.
 fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> super::entry::MemoryKind {
     if kind == limine::memory_map::EntryType::USABLE {
         super::entry::MemoryKind::Free

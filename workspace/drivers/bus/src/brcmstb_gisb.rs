@@ -76,6 +76,7 @@ pub struct BrcmstbGisb {
 }
 
 impl BrcmstbGisb {
+    /// Creates a new instance.
     pub fn new(offsets: GisbOffsets) -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -88,32 +89,39 @@ impl BrcmstbGisb {
         }
     }
 
+    /// Sets big endian.
     pub fn set_big_endian(&mut self, big_endian: bool) {
         self.big_endian = big_endian;
     }
 
+    /// Performs the add master name operation.
     pub fn add_master_name(&mut self, name: String) {
         self.master_names.push(name);
     }
 
+    /// Reads gisb.
     fn read_gisb(&self, offset: usize) -> u32 {
         let val = self.regs.read32(offset);
         if self.big_endian { val.swap_bytes() } else { val }
     }
 
+    /// Writes gisb.
     fn write_gisb(&self, offset: usize, val: u32) {
         let val = if self.big_endian { val.swap_bytes() } else { val };
         self.regs.write32(offset, val);
     }
 
+    /// Returns timeout.
     pub fn get_timeout(&self) -> u32 {
         self.read_gisb(self.offsets.arb_timer)
     }
 
+    /// Sets timeout.
     pub fn set_timeout(&self, val: u32) {
         self.write_gisb(self.offsets.arb_timer, val);
     }
 
+    /// Handles timeout irq.
     pub fn handle_timeout_irq(&self) -> Option<GisbErrorInfo> {
         let status = self.read_gisb(self.offsets.arb_err_cap_status);
         if status & ARB_ERR_CAP_STATUS_VALID == 0 {
@@ -140,6 +148,7 @@ impl BrcmstbGisb {
         Some(info)
     }
 
+    /// Handles bp irq.
     pub fn handle_bp_irq(&self) -> Option<GisbErrorInfo> {
         let status = self.read_gisb(self.offsets.arb_bp_cap_status);
         if status & ARB_BP_CAP_STATUS_VALID == 0 {
@@ -165,48 +174,58 @@ impl BrcmstbGisb {
 }
 
 impl BusDriver for BrcmstbGisb {
+    /// Performs the name operation.
     fn name(&self) -> &str { "brcmstb-gisb" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x800);
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Performs the suspend operation.
     fn suspend(&mut self) -> Result<(), BusError> {
         self.saved_timeout = self.get_timeout();
         self.power_state = PowerState::Suspended;
         Ok(())
     }
 
+    /// Performs the resume operation.
     fn resume(&mut self) -> Result<(), BusError> {
         self.set_timeout(self.saved_timeout);
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.read_gisb(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.write_gisb(offset, value);
         Ok(())
     }
 
+    /// Performs the error count operation.
     fn error_count(&self) -> u64 {
         self.error_count.load(Ordering::Relaxed)
     }
 
+    /// Handles irq.
     fn handle_irq(&mut self) -> bool {
         let timeout = self.handle_timeout_irq();
         let bp = self.handle_bp_irq();

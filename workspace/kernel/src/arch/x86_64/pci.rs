@@ -183,6 +183,7 @@ pub struct PciAddress {
 }
 
 impl fmt::Debug for PciAddress {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:02x}:{:02x}.{}", self.bus, self.device, self.function)
     }
@@ -225,6 +226,7 @@ pub struct PciDevice {
 }
 
 impl fmt::Debug for PciDevice {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -397,6 +399,7 @@ pub struct PciScanner {
 }
 
 impl PciScanner {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             bus: 0,
@@ -409,6 +412,7 @@ impl PciScanner {
 impl Iterator for PciScanner {
     type Item = PciDevice;
 
+    /// Performs the next operation.
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.bus > 255 {
@@ -478,10 +482,12 @@ fn read_vendor_id(address: PciAddress) -> u16 {
     }
 }
 
+/// Returns whether absent vendor.
 fn is_absent_vendor(vendor_id: u16) -> bool {
     vendor_id == 0xFFFF || vendor_id == 0x0000
 }
 
+/// Performs the quirk zero irq line operation.
 fn quirk_zero_irq_line(vendor_id: u16, device_id: u16, irq_line: u8) -> u8 {
     if irq_line != 0xFF {
         return irq_line;
@@ -495,10 +501,12 @@ fn quirk_zero_irq_line(vendor_id: u16, device_id: u16, irq_line: u8) -> u8 {
     0
 }
 
+/// Performs the valid header type operation.
 fn valid_header_type(header_type: u8) -> bool {
     matches!(header_type & 0x7F, 0x00..=0x02)
 }
 
+/// Returns whether ghost device.
 fn is_ghost_device(class_code: u8, subclass: u8, prog_if: u8) -> bool {
     class_code == 0xFF && subclass == 0xFF && prog_if == 0xFF
 }
@@ -623,6 +631,7 @@ pub struct ProbeCriteria {
 }
 
 impl ProbeCriteria {
+    /// Performs the any operation.
     pub const fn any() -> Self {
         Self {
             vendor_id: None,
@@ -633,6 +642,7 @@ impl ProbeCriteria {
         }
     }
 
+    /// Performs the matches operation.
     fn matches(&self, dev: &PciDevice) -> bool {
         if self.vendor_id.is_some_and(|v| dev.vendor_id != v) {
             return false;

@@ -362,6 +362,7 @@ pub trait VfsFileSystemExt {
 
 #[cfg(feature = "alloc")]
 impl<T: VfsFileSystem + 'static> VfsFileSystemExt for T {
+    /// Implements into arc.
     fn into_arc(self) -> Arc<dyn VfsFileSystem> {
         Arc::new(self)
     }

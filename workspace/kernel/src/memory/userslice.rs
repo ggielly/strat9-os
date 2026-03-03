@@ -60,6 +60,7 @@ pub enum UserSliceError {
 }
 
 impl From<UserSliceError> for SyscallError {
+    /// Performs the from operation.
     fn from(e: UserSliceError) -> Self {
         match e {
             UserSliceError::NullPointer => SyscallError::Fault,

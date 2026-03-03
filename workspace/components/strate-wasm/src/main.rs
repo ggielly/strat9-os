@@ -22,6 +22,7 @@ use wasmi::{Caller, Config, Engine, Linker, Module, Store, Instance, StoreLimits
 struct BrkGrower;
 
 impl OomHandler for BrkGrower {
+    /// Implements handle oom.
     fn handle_oom(talc: &mut Talc<Self>, layout: Layout) -> Result<(), ()> {
         let current_brk = call::brk(0).map_err(|_| ())?;
         let growth = (layout.size().max(layout.align()) + 65536) & !4095;
@@ -42,6 +43,7 @@ impl OomHandler for BrkGrower {
 static ALLOCATOR: Talck<spin::Mutex<()>, BrkGrower> = Talck::new(Talc::new(BrkGrower));
 
 #[alloc_error_handler]
+/// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
     let _ = call::debug_log(b"[strate-wasm] Fatal: OOM\n");
     call::exit(12);
@@ -51,16 +53,19 @@ fn alloc_error(_layout: Layout) -> ! {
 // UTILITIES
 // ---------------------------------------------------------------------------
 
+/// Implements debug log.
 fn debug_log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_info: &PanicInfo) -> ! {
     debug_log("[strate-wasm] PANIC!\n");
     call::exit(1);
 }
 
+/// Implements extract string.
 fn extract_string(payload: &[u8], offset: usize, len: usize) -> String {
     if len == 0 || offset + len > payload.len() {
         return String::from("invalid");
@@ -77,6 +82,7 @@ fn extract_string(payload: &[u8], offset: usize, len: usize) -> String {
     s
 }
 
+/// Implements send response.
 fn send_response(original_sender: u64, status: u32) {
     let mut msg = IpcMessage::new(REPLY_MSG_TYPE);
     msg.sender = original_sender;
@@ -84,11 +90,13 @@ fn send_response(original_sender: u64, status: u32) {
     let _ = call::ipc_reply(&msg);
 }
 
+/// Implements bind runtime alias.
 fn bind_runtime_alias(port_h: usize, label: &str) {
     let path = format!("/srv/strate-wasm/{}", label);
     let _ = call::ipc_bind_port(port_h, path.as_bytes());
 }
 
+/// Reads leb u32.
 fn read_leb_u32(bytes: &[u8], mut idx: usize) -> Option<(u32, usize)> {
     let mut result: u32 = 0;
     let mut shift = 0u32;
@@ -104,6 +112,7 @@ fn read_leb_u32(bytes: &[u8], mut idx: usize) -> Option<(u32, usize)> {
     None
 }
 
+/// Implements wasm effective len.
 fn wasm_effective_len(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < 8 {
         return None;
@@ -146,6 +155,7 @@ struct HostState {
     exit_code: Option<u32>,
 }
 
+/// Implements wasi fd write.
 fn wasi_fd_write(mut caller: Caller<'_, HostState>, fd: u32, iovs_ptr: u32, iovs_len: u32, nwritten_ptr: u32) -> u32 {
     let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else { return 1; };
     if fd != 1 && fd != 2 {
@@ -169,13 +179,16 @@ fn wasi_fd_write(mut caller: Caller<'_, HostState>, fd: u32, iovs_ptr: u32, iovs
     0
 }
 
+/// Implements wasi environ get.
 fn wasi_environ_get(_caller: Caller<'_, HostState>, _environ: u32, _environ_buf: u32) -> u32 { 0 }
+/// Implements wasi environ sizes get.
 fn wasi_environ_sizes_get(mut caller: Caller<'_, HostState>, count_ptr: u32, size_ptr: u32) -> u32 {
     let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else { return 1; };
     let _ = memory.write(&mut caller, count_ptr as usize, &0u32.to_le_bytes());
     let _ = memory.write(&mut caller, size_ptr as usize, &0u32.to_le_bytes());
     0
 }
+/// Implements wasi proc exit.
 fn wasi_proc_exit(mut caller: Caller<'_, HostState>, code: u32) -> Result<(), wasmi::Error> {
     caller.data_mut().exit_code = Some(code);
     Err(wasmi::Error::new("proc_exit"))
@@ -209,6 +222,7 @@ const MAX_WASM_SIZE: usize = 16 * 1024 * 1024;
 // ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub unsafe extern "C" fn _start() -> ! {
     let mut config = Config::default();
     config.consume_fuel(true);

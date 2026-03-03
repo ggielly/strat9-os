@@ -11,12 +11,14 @@ use crate::{
 };
 use core::sync::atomic::Ordering;
 
+/// Performs the parked task operation.
 extern "C" fn parked_task() -> ! {
     loop {
         crate::process::yield_task();
     }
 }
 
+/// Performs the test groups and sessions operation.
 fn test_groups_and_sessions() -> bool {
     let pgid = current_pgid().unwrap_or(0) as u64;
     let sid = current_sid().unwrap_or(0) as u64;
@@ -44,6 +46,7 @@ fn test_groups_and_sessions() -> bool {
     )
 }
 
+/// Performs the test kill permissions operation.
 fn test_kill_permissions() -> bool {
     let caller = match current_task_clone() {
         Some(t) => t,
@@ -103,6 +106,7 @@ fn test_kill_permissions() -> bool {
     true
 }
 
+/// Performs the posix signal test main operation.
 extern "C" fn posix_signal_test_main() -> ! {
     crate::serial_println!("[posix-test] start");
 
@@ -130,6 +134,7 @@ extern "C" fn posix_signal_test_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Creates posix signal test task.
 pub fn create_posix_signal_test_task() {
     if let Ok(task) = Task::new_kernel_task(
         posix_signal_test_main,

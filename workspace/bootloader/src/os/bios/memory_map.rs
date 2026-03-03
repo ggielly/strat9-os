@@ -19,6 +19,7 @@ pub struct MemoryMapIter {
 }
 
 impl MemoryMapIter {
+    /// Creates a new instance.
     pub fn new(thunk15: extern "C" fn()) -> Self {
         Self {
             thunk15,
@@ -30,6 +31,7 @@ impl MemoryMapIter {
 
 impl Iterator for MemoryMapIter {
     type Item = OsMemoryEntry;
+    /// Performs the next operation.
     fn next(&mut self) -> Option<Self::Item> {
         if self.first {
             self.first = false;
@@ -64,6 +66,7 @@ impl Iterator for MemoryMapIter {
     }
 }
 
+/// Performs the memory map operation.
 pub unsafe fn memory_map(thunk15: extern "C" fn()) -> Option<(usize, usize)> {
     let mut heap_limits = None;
     for entry in MemoryMapIter::new(thunk15) {

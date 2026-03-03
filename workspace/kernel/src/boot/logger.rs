@@ -6,10 +6,12 @@ struct SerialLogger;
 static LOGGER: SerialLogger = SerialLogger;
 
 impl log::Log for SerialLogger {
+    /// Performs the enabled operation.
     fn enabled(&self, metadata: &Metadata) -> bool {
         metadata.level() <= Level::Trace
     }
 
+    /// Performs the log operation.
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
             let (level_str, msg_color) = match record.level() {
@@ -29,6 +31,7 @@ impl log::Log for SerialLogger {
         }
     }
 
+    /// Performs the flush operation.
     fn flush(&self) {}
 }
 

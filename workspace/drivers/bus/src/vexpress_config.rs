@@ -26,10 +26,15 @@ const MAX_POLL_TRIES: u32 = 100;
 
 const COMPATIBLE: &[&str] = &["vexpress-syscfg"];
 
+/// Performs the cfg ctrl dcc operation.
 fn cfg_ctrl_dcc(n: u32) -> u32 { (n & 0xF) << 26 }
+/// Performs the cfg ctrl func operation.
 fn cfg_ctrl_func(n: u32) -> u32 { (n & 0x3F) << 20 }
+/// Performs the cfg ctrl site operation.
 fn cfg_ctrl_site(n: u32) -> u32 { (n & 0x3) << 16 }
+/// Performs the cfg ctrl position operation.
 fn cfg_ctrl_position(n: u32) -> u32 { (n & 0xF) << 12 }
+/// Performs the cfg ctrl device operation.
 fn cfg_ctrl_device(n: u32) -> u32 { n & 0xFFF }
 
 pub struct VexpressConfig {
@@ -39,6 +44,7 @@ pub struct VexpressConfig {
 }
 
 impl VexpressConfig {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -47,6 +53,7 @@ impl VexpressConfig {
         }
     }
 
+    /// Performs the detect master site operation.
     fn detect_master_site(&mut self) {
         let misc = self.regs.read32(SYS_MISC);
         self.master_site = if misc & SYS_MISC_MASTERSITE != 0 {
@@ -56,16 +63,19 @@ impl VexpressConfig {
         };
     }
 
+    /// Reads procid.
     pub fn read_procid(&self, site: u32) -> u32 {
         let offset = if site == SITE_DB1 { SYS_PROCID0 } else { SYS_PROCID1 };
         self.regs.read32(offset)
     }
 
+    /// Performs the hbi operation.
     pub fn hbi(&self) -> u32 {
         let id = self.read_procid(self.master_site);
         id & SYS_HBI_MASK
     }
 
+    /// Performs the config read operation.
     pub fn config_read(&self, site: u32, position: u32, dcc: u32,
                        function: u32, device: u32) -> Result<u32, BusError> {
         let command = self.regs.read32(SYS_CFGCTRL);
@@ -100,6 +110,7 @@ impl VexpressConfig {
         Err(BusError::Timeout)
     }
 
+    /// Performs the config write operation.
     pub fn config_write(&self, site: u32, position: u32, dcc: u32,
                         function: u32, device: u32, data: u32) -> Result<(), BusError> {
         let command = self.regs.read32(SYS_CFGCTRL);
@@ -137,10 +148,13 @@ impl VexpressConfig {
 }
 
 impl BusDriver for VexpressConfig {
+    /// Performs the name operation.
     fn name(&self) -> &str { "vexpress-config" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x100);
         self.detect_master_site();
@@ -148,11 +162,13 @@ impl BusDriver for VexpressConfig {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
@@ -160,6 +176,7 @@ impl BusDriver for VexpressConfig {
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);

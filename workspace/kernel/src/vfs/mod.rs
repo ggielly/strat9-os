@@ -920,6 +920,7 @@ pub fn sys_pwrite(fd: u32, buf_ptr: u64, buf_len: u64, offset: u64) -> Result<u6
 
 static PIPE_SCHEME: SpinLock<Option<Arc<PipeScheme>>> = SpinLock::new(None);
 
+/// Returns pipe scheme.
 fn get_pipe_scheme() -> Arc<PipeScheme> {
     let mut guard = PIPE_SCHEME.lock();
     if let Some(ref scheme) = *guard {
@@ -930,6 +931,7 @@ fn get_pipe_scheme() -> Arc<PipeScheme> {
     scheme
 }
 
+/// Performs the build pci inventory text operation.
 fn build_pci_inventory_text() -> String {
     #[cfg(target_arch = "x86_64")]
     {

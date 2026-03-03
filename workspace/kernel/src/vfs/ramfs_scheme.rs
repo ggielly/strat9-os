@@ -62,10 +62,12 @@ struct RamInode {
 }
 
 impl RamInode {
+    /// Returns whether dir.
     fn is_dir(&self) -> bool {
         matches!(self.kind, RamKind::Dir { .. })
     }
 
+    /// Performs the byte size operation.
     fn byte_size(&self) -> u64 {
         match &self.kind {
             RamKind::File { data } => data.len() as u64,
@@ -82,10 +84,12 @@ struct RamState {
 }
 
 impl RamState {
+    /// Performs the now ns operation.
     fn now_ns() -> u64 {
         crate::syscall::time::current_time_ns()
     }
 
+    /// Performs the current ids operation.
     fn current_ids() -> (u32, u32) {
         if let Some(task) = current_task_clone() {
             (
@@ -97,6 +101,7 @@ impl RamState {
         }
     }
 
+    /// Creates a new instance.
     fn new() -> Self {
         let mut inodes = BTreeMap::new();
         let now = Self::now_ns();
@@ -156,6 +161,7 @@ impl RamState {
         Some((parent_ino, name))
     }
 
+    /// Returns whether any name ref is available.
     fn has_any_name_ref(&self, ino: u64) -> bool {
         self.inodes.values().any(|inode| {
             if let RamKind::Dir { children } = &inode.kind {
@@ -166,6 +172,7 @@ impl RamState {
         })
     }
 
+    /// Performs the link count operation.
     fn link_count(&self, ino: u64) -> u32 {
         let mut count = 0u32;
         for inode in self.inodes.values() {
@@ -180,6 +187,7 @@ impl RamState {
         count
     }
 
+    /// Performs the dir contains ino operation.
     fn dir_contains_ino(&self, ancestor_ino: u64, candidate_ino: u64) -> bool {
         if ancestor_ino == candidate_ino {
             return true;
@@ -220,6 +228,7 @@ pub struct RamfsScheme {
 }
 
 impl RamfsScheme {
+    /// Creates a new instance.
     pub fn new() -> Self {
         RamfsScheme {
             state: SpinLock::new(RamState::new()),
@@ -227,6 +236,7 @@ impl RamfsScheme {
         }
     }
 
+    /// Allocates ino.
     fn alloc_ino(&self) -> u64 {
         self.next_ino.fetch_add(1, Ordering::Relaxed)
     }
@@ -274,6 +284,7 @@ impl RamfsScheme {
 impl Scheme for RamfsScheme {
     // ── open ─────────────────────────────────────────────────────────────────
 
+    /// Performs the open operation.
     fn open(&self, path: &str, flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         let path = path.trim_matches('/');
 
@@ -368,6 +379,7 @@ impl Scheme for RamfsScheme {
 
     // ── read ─────────────────────────────────────────────────────────────────
 
+    /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         let mut st = self.state.lock();
         let now = RamState::now_ns();
@@ -390,6 +402,7 @@ impl Scheme for RamfsScheme {
 
     // ── write ────────────────────────────────────────────────────────────────
 
+    /// Performs the write operation.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         let mut st = self.state.lock();
         let now = RamState::now_ns();
@@ -412,12 +425,14 @@ impl Scheme for RamfsScheme {
 
     // ── close ────────────────────────────────────────────────────────────────
 
+    /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(()) // stateless — nothing to clean up
     }
 
     // ── size ─────────────────────────────────────────────────────────────────
 
+    /// Performs the size operation.
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
         let st = self.state.lock();
         let inode = st.inodes.get(&file_id).ok_or(SyscallError::BadHandle)?;
@@ -426,6 +441,7 @@ impl Scheme for RamfsScheme {
 
     // ── truncate ─────────────────────────────────────────────────────────────
 
+    /// Performs the truncate operation.
     fn truncate(&self, file_id: u64, new_size: u64) -> Result<(), SyscallError> {
         let mut st = self.state.lock();
         let now = RamState::now_ns();
@@ -443,6 +459,7 @@ impl Scheme for RamfsScheme {
 
     // ── create_file ──────────────────────────────────────────────────────────
 
+    /// Creates file.
     fn create_file(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
         let path = path.trim_matches('/');
         let mut st = self.state.lock();
@@ -492,6 +509,7 @@ impl Scheme for RamfsScheme {
 
     // ── create_directory ─────────────────────────────────────────────────────
 
+    /// Creates directory.
     fn create_directory(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
         let path = path.trim_matches('/');
         let mut st = self.state.lock();
@@ -551,6 +569,7 @@ impl Scheme for RamfsScheme {
 
     // ── unlink ───────────────────────────────────────────────────────────────
 
+    /// Performs the unlink operation.
     fn unlink(&self, path: &str) -> Result<(), SyscallError> {
         let path = path.trim_matches('/');
         if path.is_empty() {
@@ -593,6 +612,7 @@ impl Scheme for RamfsScheme {
 
     // ── stat ─────────────────────────────────────────────────────────────────
 
+    /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         let st = self.state.lock();
         let inode = st.inodes.get(&file_id).ok_or(SyscallError::BadHandle)?;
@@ -623,6 +643,7 @@ impl Scheme for RamfsScheme {
 
     // ── readdir ──────────────────────────────────────────────────────────────
 
+    /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         let mut st = self.state.lock();
         let now = RamState::now_ns();
@@ -661,6 +682,7 @@ impl Scheme for RamfsScheme {
 
     // ── rename ──────────────────────────────────────────────────────────────
 
+    /// Performs the rename operation.
     fn rename(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
         let old_path = old_path.trim_matches('/');
         let new_path = new_path.trim_matches('/');
@@ -727,6 +749,7 @@ impl Scheme for RamfsScheme {
 
     // ── chmod ───────────────────────────────────────────────────────────────
 
+    /// Performs the chmod operation.
     fn chmod(&self, path: &str, mode: u32) -> Result<(), SyscallError> {
         let path = path.trim_matches('/');
         let mut st = self.state.lock();
@@ -741,6 +764,7 @@ impl Scheme for RamfsScheme {
 
     // ── fchmod ──────────────────────────────────────────────────────────────
 
+    /// Performs the fchmod operation.
     fn fchmod(&self, file_id: u64, mode: u32) -> Result<(), SyscallError> {
         let mut st = self.state.lock();
         let now = RamState::now_ns();
@@ -753,6 +777,7 @@ impl Scheme for RamfsScheme {
 
     // ── link ────────────────────────────────────────────────────────────────
 
+    /// Performs the link operation.
     fn link(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
         let old_path = old_path.trim_matches('/');
         let new_path = new_path.trim_matches('/');
@@ -784,6 +809,7 @@ impl Scheme for RamfsScheme {
 
     // ── symlink ─────────────────────────────────────────────────────────────
 
+    /// Performs the symlink operation.
     fn symlink(&self, target: &str, link_path: &str) -> Result<(), SyscallError> {
         let link_path = link_path.trim_matches('/');
         if link_path.is_empty() {
@@ -825,6 +851,7 @@ impl Scheme for RamfsScheme {
 
     // ── readlink ────────────────────────────────────────────────────────────
 
+    /// Performs the readlink operation.
     fn readlink(&self, path: &str) -> Result<String, SyscallError> {
         let path = path.trim_matches('/');
         let mut st = self.state.lock();

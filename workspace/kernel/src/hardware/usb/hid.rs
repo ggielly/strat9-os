@@ -70,6 +70,7 @@ const USB_TO_PS2: [u8; 128] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 78-7F
 ];
 
+/// Performs the usb to ps2 operation.
 fn usb_to_ps2(keycode: u8) -> u8 {
     if keycode < USB_TO_PS2.len() as u8 {
         USB_TO_PS2[keycode as usize]
@@ -93,6 +94,7 @@ unsafe impl Send for HidKeyboard {}
 unsafe impl Sync for HidKeyboard {}
 
 impl HidKeyboard {
+    /// Creates a new instance.
     pub fn new(
         controller: Arc<XhciController>,
         port: usize,
@@ -113,6 +115,7 @@ impl HidKeyboard {
         }
     }
 
+    /// Reads event.
     pub fn read_event(&mut self) -> Option<KeyEvent> {
         if self.event_queue.is_empty() {
             self.poll();
@@ -120,12 +123,14 @@ impl HidKeyboard {
         self.event_queue.pop()
     }
 
+    /// Performs the poll operation.
     pub fn poll(&mut self) {
         // In a full implementation, this would submit an interrupt transfer
         // and parse the HID report. For now, we simulate basic functionality.
         // The actual polling would be done via xHCI interrupt transfers.
     }
 
+    /// Performs the process report operation.
     pub fn process_report(&mut self, report: &[u8; KBD_REPORT_SIZE]) {
         // report[0] = modifiers
         // report[1] = reserved
@@ -165,6 +170,7 @@ impl HidKeyboard {
         self.last_report = *report;
     }
 
+    /// Returns whether modifier pressed.
     pub fn is_modifier_pressed(&self, modifier: u8) -> bool {
         self.last_report[0] & modifier != 0
     }
@@ -185,6 +191,7 @@ unsafe impl Send for HidMouse {}
 unsafe impl Sync for HidMouse {}
 
 impl HidMouse {
+    /// Creates a new instance.
     pub fn new(
         controller: Arc<XhciController>,
         port: usize,
@@ -205,6 +212,7 @@ impl HidMouse {
         }
     }
 
+    /// Reads event.
     pub fn read_event(&mut self) -> Option<MouseEvent> {
         if self.event_queue.is_empty() {
             self.poll();
@@ -212,11 +220,13 @@ impl HidMouse {
         self.event_queue.pop()
     }
 
+    /// Performs the poll operation.
     pub fn poll(&mut self) {
         // In a full implementation, this would submit an interrupt transfer
         // and parse the HID report.
     }
 
+    /// Performs the process report operation.
     pub fn process_report(&mut self, report: &[u8]) {
         if report.len() < 3 {
             return;
@@ -251,6 +261,7 @@ impl HidMouse {
         self.last_buttons = buttons;
     }
 
+    /// Returns whether button pressed.
     pub fn is_button_pressed(&self, button: u8) -> bool {
         self.last_buttons & (1 << button) != 0
     }
@@ -260,6 +271,7 @@ static KEYBOARDS: Mutex<Vec<Arc<Mutex<HidKeyboard>>>> = Mutex::new(Vec::new());
 static MICE: Mutex<Vec<Arc<Mutex<HidMouse>>>> = Mutex::new(Vec::new());
 static HID_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[USB-HID] Initializing HID drivers...");
 
@@ -285,6 +297,7 @@ pub fn init() {
     );
 }
 
+/// Performs the probe hid device operation.
 fn probe_hid_device(controller: Arc<XhciController>, port: usize) {
     // In a full implementation, this would:
     // 1. Get device descriptor
@@ -306,22 +319,27 @@ fn probe_hid_device(controller: Arc<XhciController>, port: usize) {
     }
 }
 
+/// Returns keyboard.
 pub fn get_keyboard(index: usize) -> Option<Arc<Mutex<HidKeyboard>>> {
     KEYBOARDS.lock().get(index).cloned()
 }
 
+/// Returns mouse.
 pub fn get_mouse(index: usize) -> Option<Arc<Mutex<HidMouse>>> {
     MICE.lock().get(index).cloned()
 }
 
+/// Performs the keyboard count operation.
 pub fn keyboard_count() -> usize {
     KEYBOARDS.lock().len()
 }
 
+/// Performs the mouse count operation.
 pub fn mouse_count() -> usize {
     MICE.lock().len()
 }
 
+/// Returns whether available.
 pub fn is_available() -> bool {
     HID_INITIALIZED.load(Ordering::Relaxed)
 }

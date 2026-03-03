@@ -29,6 +29,7 @@ static mut AREAS: [OsMemoryEntry; 1024] = [OsMemoryEntry {
 }; 1024];
 static mut AREAS_LEN: usize = 0;
 
+/// Performs the area add operation.
 pub fn area_add(area: OsMemoryEntry) {
     #[allow(static_mut_refs)]
     unsafe {
@@ -60,6 +61,7 @@ struct SliceWriter<'a> {
 }
 
 impl<'a> Write for SliceWriter<'a> {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for b in s.bytes() {
             if let Some(slice_b) = self.slice.get_mut(self.i) {
@@ -75,6 +77,7 @@ impl<'a> Write for SliceWriter<'a> {
 
 pub use strat9_abi::boot::KernelArgs;
 
+/// Performs the select mode operation.
 fn select_mode(
     os: &impl Os,
     output_i: usize,
@@ -244,6 +247,7 @@ fn select_mode(
     mode_opt
 }
 
+/// Performs the ext4fs operation.
 fn ext4fs<O: Os>(os: &O) -> (ext4::FileSystem<O::D>, Option<&'static [u8]>) {
     let attempts = 10;
     for attempt in 0..=attempts {
@@ -320,6 +324,7 @@ enum Filetype {
     Elf,
     Initfs,
 }
+/// Performs the load to memory operation.
 fn load_to_memory<O: Os>(
     os: &O,
     fs: &mut ext4::FileSystem<O::D>,
@@ -370,6 +375,7 @@ fn load_to_memory<O: Os>(
     slice
 }
 
+/// Performs the elf entry operation.
 fn elf_entry(data: &[u8]) -> (u64, bool) {
     match (data[4], data[5]) {
         // 32-bit, little endian
@@ -406,6 +412,7 @@ fn elf_entry(data: &[u8]) -> (u64, bool) {
     }
 }
 
+/// Entry point for this component.
 pub fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
     println!(
         "Strat9-OS Bootloader {} on {}",

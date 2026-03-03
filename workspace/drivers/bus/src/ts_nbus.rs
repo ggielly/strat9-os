@@ -17,10 +17,15 @@ pub struct GpioPin {
 }
 
 impl GpioPin {
+    /// Sets high.
     pub fn set_high(&self) { /* MMIO GPIO set */ }
+    /// Sets low.
     pub fn set_low(&self) { /* MMIO GPIO clear */ }
+    /// Returns value.
     pub fn get_value(&self) -> bool { false }
+    /// Sets direction input.
     pub fn set_direction_input(&self) { /* configure as input */ }
+    /// Sets direction output.
     pub fn set_direction_output(&self) { /* configure as output */ }
 }
 
@@ -36,6 +41,7 @@ pub struct TsNbus {
 }
 
 impl TsNbus {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             data_pins: [const { None }; 8],
@@ -49,6 +55,7 @@ impl TsNbus {
         }
     }
 
+    /// Sets data direction.
     fn set_data_direction(&self, output: bool) {
         for pin in &self.data_pins {
             if let Some(p) = pin {
@@ -61,6 +68,7 @@ impl TsNbus {
         }
     }
 
+    /// Writes byte.
     fn write_byte(&self, val: u8) {
         for i in 0..8 {
             if let Some(ref p) = self.data_pins[i] {
@@ -73,6 +81,7 @@ impl TsNbus {
         }
     }
 
+    /// Reads byte.
     fn read_byte(&self) -> u8 {
         let mut val = 0u8;
         for i in 0..8 {
@@ -85,18 +94,21 @@ impl TsNbus {
         val
     }
 
+    /// Starts transaction.
     fn start_transaction(&self) {
         if let Some(ref s) = self.strobe {
             s.set_high();
         }
     }
 
+    /// Performs the end transaction operation.
     fn end_transaction(&self) {
         if let Some(ref s) = self.strobe {
             s.set_low();
         }
     }
 
+    /// Performs the wait rdy operation.
     fn wait_rdy(&self) -> Result<(), BusError> {
         for _ in 0..MAX_POLL_RDY {
             if let Some(ref r) = self.rdy {
@@ -108,6 +120,7 @@ impl TsNbus {
         Err(BusError::Timeout)
     }
 
+    /// Performs the reset bus operation.
     fn reset_bus(&self) {
         self.write_byte(0);
         if let Some(ref c) = self.csn { c.set_low(); }
@@ -115,6 +128,7 @@ impl TsNbus {
         if let Some(ref a) = self.ale { a.set_low(); }
     }
 
+    /// Performs the bus read operation.
     pub fn bus_read(&self, address: u16) -> Result<u16, BusError> {
         self.set_data_direction(true);
         if let Some(ref t) = self.txrx { t.set_low(); }
@@ -147,6 +161,7 @@ impl TsNbus {
         Ok(((msb as u16) << 8) | (lsb as u16))
     }
 
+    /// Performs the bus write operation.
     pub fn bus_write(&self, address: u16, value: u16) -> Result<(), BusError> {
         self.set_data_direction(true);
         if let Some(ref t) = self.txrx { t.set_high(); }
@@ -178,37 +193,45 @@ impl TsNbus {
         Ok(())
     }
 
+    /// Performs the add child operation.
     pub fn add_child(&mut self, child: BusChild) {
         self.children.push(child);
     }
 }
 
 impl BusDriver for TsNbus {
+    /// Performs the name operation.
     fn name(&self) -> &str { "ts-nbus" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, _base: usize) -> Result<(), BusError> {
         self.reset_bus();
         self.power_state = PowerState::On;
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.reset_bus();
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         let val = self.bus_read(offset as u16)?;
         Ok(val as u32)
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         self.bus_write(offset as u16, value as u16)
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.children.clone()
     }

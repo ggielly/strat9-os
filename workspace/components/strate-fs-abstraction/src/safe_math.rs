@@ -32,21 +32,25 @@ pub trait CheckedOps: Sized {
 
 impl CheckedOps for u64 {
     #[inline]
+    /// Implements checked add offset.
     fn checked_add_offset(self, offset: u64) -> FsResult<Self> {
         self.checked_add(offset).ok_or(FsError::ArithmeticOverflow)
     }
 
     #[inline]
+    /// Implements checked mul size.
     fn checked_mul_size(self, size: u64) -> FsResult<Self> {
         self.checked_mul(size).ok_or(FsError::ArithmeticOverflow)
     }
 
     #[inline]
+    /// Implements checked sub safe.
     fn checked_sub_safe(self, other: u64) -> FsResult<Self> {
         self.checked_sub(other).ok_or(FsError::ArithmeticOverflow)
     }
 
     #[inline]
+    /// Implements checked shl safe.
     fn checked_shl_safe(self, shift: u32) -> FsResult<Self> {
         if shift >= 64 {
             return Err(FsError::ArithmeticOverflow);
@@ -62,21 +66,25 @@ impl CheckedOps for u64 {
 
 impl CheckedOps for u32 {
     #[inline]
+    /// Implements checked add offset.
     fn checked_add_offset(self, offset: u32) -> FsResult<Self> {
         self.checked_add(offset).ok_or(FsError::ArithmeticOverflow)
     }
 
     #[inline]
+    /// Implements checked mul size.
     fn checked_mul_size(self, size: u32) -> FsResult<Self> {
         self.checked_mul(size).ok_or(FsError::ArithmeticOverflow)
     }
 
     #[inline]
+    /// Implements checked sub safe.
     fn checked_sub_safe(self, other: u32) -> FsResult<Self> {
         self.checked_sub(other).ok_or(FsError::ArithmeticOverflow)
     }
 
     #[inline]
+    /// Implements checked shl safe.
     fn checked_shl_safe(self, shift: u32) -> FsResult<Self> {
         if shift >= 32 {
             return Err(FsError::ArithmeticOverflow);
@@ -91,21 +99,25 @@ impl CheckedOps for u32 {
 
 impl CheckedOps for usize {
     #[inline]
+    /// Implements checked add offset.
     fn checked_add_offset(self, offset: usize) -> FsResult<Self> {
         self.checked_add(offset).ok_or(FsError::ArithmeticOverflow)
     }
 
     #[inline]
+    /// Implements checked mul size.
     fn checked_mul_size(self, size: usize) -> FsResult<Self> {
         self.checked_mul(size).ok_or(FsError::ArithmeticOverflow)
     }
 
     #[inline]
+    /// Implements checked sub safe.
     fn checked_sub_safe(self, other: usize) -> FsResult<Self> {
         self.checked_sub(other).ok_or(FsError::ArithmeticOverflow)
     }
 
     #[inline]
+    /// Implements checked shl safe.
     fn checked_shl_safe(self, shift: u32) -> FsResult<Self> {
         if shift >= (core::mem::size_of::<usize>() * 8) as u32 {
             return Err(FsError::ArithmeticOverflow);
@@ -144,6 +156,7 @@ pub trait CheckedSliceOps {
 
 impl CheckedSliceOps for [u8] {
     #[inline]
+    /// Returns checked.
     fn get_checked(&self, start: usize, len: usize) -> FsResult<&[u8]> {
         let end = start.checked_add(len).ok_or(FsError::ArithmeticOverflow)?;
         if end > self.len() {
@@ -153,18 +166,21 @@ impl CheckedSliceOps for [u8] {
     }
 
     #[inline]
+    /// Reads be u16.
     fn read_be_u16(&self, offset: usize) -> FsResult<u16> {
         let bytes = self.get_checked(offset, 2)?;
         Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
     }
 
     #[inline]
+    /// Reads be u32.
     fn read_be_u32(&self, offset: usize) -> FsResult<u32> {
         let bytes = self.get_checked(offset, 4)?;
         Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
     #[inline]
+    /// Reads be u64.
     fn read_be_u64(&self, offset: usize) -> FsResult<u64> {
         let bytes = self.get_checked(offset, 8)?;
         Ok(u64::from_be_bytes([
@@ -173,18 +189,21 @@ impl CheckedSliceOps for [u8] {
     }
 
     #[inline]
+    /// Reads le u16.
     fn read_le_u16(&self, offset: usize) -> FsResult<u16> {
         let bytes = self.get_checked(offset, 2)?;
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
     #[inline]
+    /// Reads le u32.
     fn read_le_u32(&self, offset: usize) -> FsResult<u32> {
         let bytes = self.get_checked(offset, 4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
     #[inline]
+    /// Reads le u64.
     fn read_le_u64(&self, offset: usize) -> FsResult<u64> {
         let bytes = self.get_checked(offset, 8)?;
         Ok(u64::from_le_bytes([
@@ -253,18 +272,21 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Implements test checked add overflow.
     fn test_checked_add_overflow() {
         assert!(u64::MAX.checked_add_offset(1).is_err());
         assert_eq!(1u64.checked_add_offset(2).unwrap(), 3);
     }
 
     #[test]
+    /// Implements test checked mul overflow.
     fn test_checked_mul_overflow() {
         assert!(u64::MAX.checked_mul_size(2).is_err());
         assert_eq!(3u64.checked_mul_size(4).unwrap(), 12);
     }
 
     #[test]
+    /// Implements test read be.
     fn test_read_be() {
         let data = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
         assert_eq!(data.read_be_u16(0).unwrap(), 0x1234);
@@ -273,12 +295,14 @@ mod tests {
     }
 
     #[test]
+    /// Implements test read buffer bounds.
     fn test_read_buffer_bounds() {
         let data = [0x12, 0x34];
         assert!(data.read_be_u32(0).is_err());
     }
 
     #[test]
+    /// Implements test align up.
     fn test_align_up() {
         assert_eq!(align_up(0, 4).unwrap(), 0);
         assert_eq!(align_up(1, 4).unwrap(), 4);
@@ -287,6 +311,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test div ceil.
     fn test_div_ceil() {
         assert_eq!(div_ceil(0, 4).unwrap(), 0);
         assert_eq!(div_ceil(1, 4).unwrap(), 1);

@@ -20,6 +20,7 @@ const IGC_IDS: &[u16] = &[
 struct KernelDma;
 
 impl DmaAllocator for KernelDma {
+    /// Allocates dma.
     fn alloc_dma(&self, size: usize) -> Result<DmaRegion, nic_buffers::DmaAllocError> {
         let pages = (size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
@@ -35,6 +36,7 @@ impl DmaAllocator for KernelDma {
         })
     }
 
+    /// Releases dma.
     unsafe fn free_dma(&self, region: DmaRegion) {
         let pages = (region.size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
@@ -53,26 +55,33 @@ pub struct KernelIgc {
 }
 
 impl NetworkDevice for KernelIgc {
+    /// Performs the name operation.
     fn name(&self) -> &str {
         "igc"
     }
+    /// Performs the mac address operation.
     fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
+    /// Performs the link up operation.
     fn link_up(&self) -> bool {
         self.inner.lock().link_up()
     }
+    /// Performs the receive operation.
     fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
         self.inner.lock().receive(buf)
     }
+    /// Performs the transmit operation.
     fn transmit(&self, buf: &[u8]) -> Result<(), NetError> {
         self.inner.lock().transmit(buf, &KernelDma)
     }
+    /// Handles interrupt.
     fn handle_interrupt(&self) {
         self.inner.lock().handle_interrupt();
     }
 }
 
+/// Performs the init operation.
 pub fn init() {
     if !memory::paging::is_initialized() {
         log::warn!("IGC: paging not initialized, deferring probe");

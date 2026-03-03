@@ -45,6 +45,7 @@ pub struct PixelFormat {
 }
 
 impl Default for PixelFormat {
+    /// Builds a default instance.
     fn default() -> Self {
         Self {
             red_mask: 0x00FF0000,
@@ -97,6 +98,7 @@ struct DirtyRect {
 }
 
 impl DirtyRect {
+    /// Performs the empty operation.
     const fn empty() -> Self {
         Self {
             valid: false,
@@ -107,6 +109,7 @@ impl DirtyRect {
         }
     }
 
+    /// Performs the include operation.
     fn include(&mut self, x: u32, y: u32, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -127,6 +130,7 @@ impl DirtyRect {
         }
     }
 
+    /// Performs the take operation.
     fn take(&mut self) -> Option<(u32, u32, u32, u32)> {
         if !self.valid {
             return None;

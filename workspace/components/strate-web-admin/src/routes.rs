@@ -19,9 +19,11 @@ static KILL_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
 pub struct HtmlContent(pub &'static str);
 
 impl picoserve::response::Content for HtmlContent {
+    /// Implements content type.
     fn content_type(&self) -> &'static str {
         "text/html; charset=utf-8"
     }
+    /// Implements content length.
     fn content_length(&self) -> usize {
         self.0.len()
     }
@@ -33,9 +35,11 @@ impl picoserve::response::Content for HtmlContent {
 pub struct JsonContent(pub String);
 
 impl picoserve::response::Content for JsonContent {
+    /// Implements content type.
     fn content_type(&self) -> &'static str {
         "application/json"
     }
+    /// Implements content length.
     fn content_length(&self) -> usize {
         self.0.len()
     }
@@ -48,24 +52,28 @@ impl picoserve::response::Content for JsonContent {
 // Helper: JSON response with CORS
 // ---------------------------------------------------------------------------
 
+/// Implements json ok.
 fn json_ok(
     body: String,
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     Response::ok(JsonContent(body)).with_header("Access-Control-Allow-Origin", "*")
 }
 
+/// Implements json admin.
 fn json_admin(
     body: String,
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     Response::ok(JsonContent(body))
 }
 
+/// Implements admin token.
 fn admin_token() -> String {
     let token = net::read_file_text(ADMIN_TOKEN_PATH);
     let trimmed = token.trim();
     String::from(trimmed)
 }
 
+/// Implements allow kill now.
 fn allow_kill_now() -> bool {
     let now = net::clock_gettime_ns();
     let start = KILL_WINDOW_START_NS.load(Ordering::Relaxed);
@@ -82,6 +90,7 @@ struct AdminAuth;
 impl<'r, State> FromRequestParts<'r, State> for AdminAuth {
     type Rejection = String;
 
+    /// Builds a value from request parts.
     async fn from_request_parts(
         _state: &'r State,
         request_parts: &RequestParts<'r>,
@@ -116,61 +125,73 @@ impl<'r, State> FromRequestParts<'r, State> for AdminAuth {
 // Route handlers
 // ---------------------------------------------------------------------------
 
+/// Implements index.
 async fn index() -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body>
 {
     Response::ok(HtmlContent(DASHBOARD_HTML))
 }
 
+/// Implements api health.
 async fn api_health(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     json_ok(sysinfo::json_health())
 }
 
+/// Implements api uptime.
 async fn api_uptime(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     json_ok(sysinfo::json_uptime())
 }
 
+/// Implements api version.
 async fn api_version(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     json_ok(sysinfo::json_version())
 }
 
+/// Implements api cpuinfo.
 async fn api_cpuinfo(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     json_ok(sysinfo::json_cpuinfo())
 }
 
+/// Implements api meminfo.
 async fn api_meminfo(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     json_ok(sysinfo::json_meminfo())
 }
 
+/// Implements api silos.
 async fn api_silos(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     json_ok(sysinfo::json_silos())
 }
 
+/// Implements api processes.
 async fn api_processes(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     json_ok(sysinfo::json_processes())
 }
 
+/// Implements api network.
 async fn api_network(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     json_ok(sysinfo::json_network())
 }
 
+/// Implements api routes.
 async fn api_routes(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     json_ok(sysinfo::json_routes())
 }
 
+/// Implements api all.
 async fn api_all(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     json_ok(sysinfo::json_all())
 }
 
+/// Implements api kill.
 async fn api_kill(
     pid: u32,
     _auth: AdminAuth,
@@ -187,6 +208,7 @@ async fn api_kill(
 // Router construction
 // ---------------------------------------------------------------------------
 
+/// Implements build router.
 pub fn build_router() -> picoserve::Router<impl picoserve::routing::PathRouter> {
     picoserve::Router::new()
         .route("/", get(index))

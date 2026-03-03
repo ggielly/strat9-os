@@ -6,9 +6,11 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 pub struct SemId(pub u64);
 
 impl SemId {
+    /// Returns this as u64.
     pub fn as_u64(self) -> u64 {
         self.0
     }
+    /// Builds this from u64.
     pub fn from_u64(raw: u64) -> Self {
         Self(raw)
     }
@@ -33,6 +35,7 @@ pub struct PosixSemaphore {
 }
 
 impl PosixSemaphore {
+    /// Creates a new instance.
     fn new(initial: u32) -> Self {
         Self {
             count: AtomicI32::new(initial as i32),
@@ -41,6 +44,7 @@ impl PosixSemaphore {
         }
     }
 
+    /// Performs the wait operation.
     pub fn wait(&self) -> Result<(), SemaphoreError> {
         self.waitq.wait_until(|| {
             if self.destroyed.load(Ordering::Acquire) {
@@ -57,6 +61,7 @@ impl PosixSemaphore {
         })
     }
 
+    /// Attempts to wait.
     pub fn try_wait(&self) -> Result<(), SemaphoreError> {
         if self.destroyed.load(Ordering::Acquire) {
             return Err(SemaphoreError::Destroyed);
@@ -76,6 +81,7 @@ impl PosixSemaphore {
         }
     }
 
+    /// Performs the post operation.
     pub fn post(&self) -> Result<(), SemaphoreError> {
         if self.destroyed.load(Ordering::Acquire) {
             return Err(SemaphoreError::Destroyed);
@@ -93,15 +99,18 @@ impl PosixSemaphore {
         Ok(())
     }
 
+    /// Performs the destroy operation.
     pub fn destroy(&self) {
         self.destroyed.store(true, Ordering::Release);
         self.waitq.wake_all();
     }
 
+    /// Performs the count operation.
     pub fn count(&self) -> i32 {
         self.count.load(Ordering::Acquire)
     }
 
+    /// Returns whether destroyed.
     pub fn is_destroyed(&self) -> bool {
         self.destroyed.load(Ordering::Acquire)
     }
@@ -110,12 +119,14 @@ impl PosixSemaphore {
 static NEXT_SEM_ID: AtomicU64 = AtomicU64::new(1);
 static SEMAPHORES: SpinLock<Option<BTreeMap<SemId, Arc<PosixSemaphore>>>> = SpinLock::new(None);
 
+/// Performs the ensure registry operation.
 fn ensure_registry(guard: &mut Option<BTreeMap<SemId, Arc<PosixSemaphore>>>) {
     if guard.is_none() {
         *guard = Some(BTreeMap::new());
     }
 }
 
+/// Creates semaphore.
 pub fn create_semaphore(initial: u32) -> Result<SemId, SemaphoreError> {
     if initial > i32::MAX as u32 {
         return Err(SemaphoreError::InvalidValue);
@@ -128,11 +139,13 @@ pub fn create_semaphore(initial: u32) -> Result<SemId, SemaphoreError> {
     Ok(id)
 }
 
+/// Returns semaphore.
 pub fn get_semaphore(id: SemId) -> Option<Arc<PosixSemaphore>> {
     let reg = SEMAPHORES.lock();
     reg.as_ref().and_then(|m| m.get(&id).cloned())
 }
 
+/// Destroys semaphore.
 pub fn destroy_semaphore(id: SemId) -> Result<(), SemaphoreError> {
     let sem = {
         let mut reg = SEMAPHORES.lock();

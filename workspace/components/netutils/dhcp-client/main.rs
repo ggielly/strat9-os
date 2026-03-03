@@ -29,12 +29,14 @@ alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size =
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
+/// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
     log("[dhcp-client] OOM\n");
     call::exit(12)
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(info: &PanicInfo) -> ! {
     log("[dhcp-client] PANIC: ");
     let msg = info.message();
@@ -59,6 +61,7 @@ fn panic(info: &PanicInfo) -> ! {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Implements log.
 fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
@@ -68,6 +71,7 @@ struct BufWriter<'a> {
     pos: usize,
 }
 impl core::fmt::Write for BufWriter<'_> {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let bytes = s.as_bytes();
         let avail = self.buf.len().saturating_sub(self.pos);
@@ -88,6 +92,7 @@ fn scheme_read(path: &str, buf: &mut [u8]) -> Result<usize, ()> {
     Ok(n)
 }
 
+/// Implements sleep ms.
 fn sleep_ms(ms: u64) {
     let req = TimeSpec {
         tv_sec: (ms / 1000) as i64,
@@ -98,10 +103,12 @@ fn sleep_ms(ms: u64) {
     };
 }
 
+/// Returns whether unconfigured.
 fn is_unconfigured(data: &[u8]) -> bool {
     data.starts_with(b"0.0.0.0") || data.starts_with(b"169.254.")
 }
 
+/// Implements cidr to netmask.
 fn cidr_to_netmask(prefix_str: &str) -> Option<[u8; 20]> {
     let mut out = [0u8; 20];
     let s = prefix_str.trim();
@@ -149,6 +156,7 @@ const POLL_INTERVAL_MS: u64 = 500;
 const BACKGROUND_POLL_INTERVAL_MS: u64 = 1000;
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     log("[dhcp-client] Waiting for DHCP configuration via /net scheme...\n");
 

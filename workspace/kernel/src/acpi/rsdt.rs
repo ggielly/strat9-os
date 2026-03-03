@@ -44,6 +44,7 @@ impl RsdtXsdt {
         Some(RsdtXsdt::Regular(rsdt_ptr))
     }
 
+    /// Performs the sdt operation.
     pub fn sdt(&self) -> &'static Sdt {
         match self {
             RsdtXsdt::Regular(ptr) => unsafe { &**ptr },
@@ -93,6 +94,7 @@ pub enum RsdtXsdtIter {
 impl Iterator for RsdtXsdtIter {
     type Item = u64;
 
+    /// Performs the next operation.
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             RsdtXsdtIter::Empty => None,

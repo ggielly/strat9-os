@@ -131,10 +131,12 @@ pub fn register_virtio_block_irq(irq: u8) {
 // CPU Exception Handlers
 // =============================================
 
+/// Performs the breakpoint handler operation.
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     log::warn!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
+/// Performs the invalid opcode handler operation.
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
     if is_user {
@@ -153,6 +155,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     panic!("Invalid opcode");
 }
 
+/// Performs the page fault handler operation.
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
@@ -363,6 +366,7 @@ extern "x86-interrupt" fn page_fault_handler(
     panic!("Page fault");
 }
 
+/// Performs the dump user pf context operation.
 fn dump_user_pf_context(as_ref: &crate::memory::AddressSpace, rip: u64, rsp: u64) {
     use x86_64::VirtAddr;
 
@@ -402,6 +406,7 @@ fn dump_user_pf_context(as_ref: &crate::memory::AddressSpace, rip: u64, rsp: u64
     }
 }
 
+/// Performs the general protection fault handler operation.
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -425,6 +430,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     panic!("General protection fault");
 }
 
+/// Performs the double fault handler operation.
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -487,6 +493,7 @@ extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
     }
 }
 
+/// Performs the keyboard handler operation.
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     let raw = unsafe { super::io::inb(0x60) };
     // Port 0x60 is consumed on read: feed the raw scancode directly.

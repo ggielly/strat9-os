@@ -34,6 +34,7 @@ pub struct ProcScheme {
 }
 
 impl ProcScheme {
+    /// Creates a new instance.
     pub fn new() -> Self {
         ProcScheme {}
     }
@@ -260,6 +261,7 @@ impl ProcScheme {
 }
 
 impl Scheme for ProcScheme {
+    /// Performs the open operation.
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         let entry = self.get_entry(path)?;
 
@@ -324,6 +326,7 @@ impl Scheme for ProcScheme {
         })
     }
 
+    /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         let (kind, pid) = Self::decode_id(file_id);
         let content = if file_id == 0 {
@@ -378,14 +381,17 @@ impl Scheme for ProcScheme {
         Ok(to_copy)
     }
 
+    /// Performs the write operation.
     fn write(&self, _file_id: u64, _offset: u64, _buf: &[u8]) -> Result<usize, SyscallError> {
         Err(SyscallError::PermissionDenied)
     }
 
+    /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(())
     }
 
+    /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         let (kind, _pid) = Self::decode_id(file_id);
         let is_dir = file_id == 0 || file_id == 1 || kind == KIND_PROC_DIR;
@@ -425,6 +431,7 @@ impl Scheme for ProcScheme {
         Ok(finalize_pseudo_stat(st, DEV_PROCFS, 0))
     }
 
+    /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         let (kind, pid) = Self::decode_id(file_id);
         if file_id == 0 {

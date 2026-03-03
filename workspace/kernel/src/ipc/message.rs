@@ -10,11 +10,13 @@ pub struct IpcLabel {
     pub compartment: u16,
 }
 
+/// Performs the ipc message from raw operation.
 pub fn ipc_message_from_raw(buf: &[u8; 64]) -> IpcMessage {
     // SAFETY: `buf` has exactly 64 bytes, matching `IpcMessage` size.
     unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const IpcMessage) }
 }
 
+/// Performs the ipc message to raw operation.
 pub fn ipc_message_to_raw(msg: &IpcMessage, out: &mut [u8; 64]) {
     // SAFETY: `out` has exactly 64 bytes, matching `IpcMessage` size.
     unsafe {

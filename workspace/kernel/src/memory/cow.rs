@@ -44,6 +44,7 @@ pub mod frame_flags {
 }
 
 impl FrameMeta {
+    /// Creates a new instance.
     pub const fn new() -> Self {
         FrameMeta {
             refcount: AtomicU32::new(0),
@@ -51,16 +52,19 @@ impl FrameMeta {
         }
     }
 
+    /// Performs the inc ref operation.
     #[inline]
     pub fn inc_ref(&self) {
         self.refcount.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Performs the dec ref operation.
     #[inline]
     pub fn dec_ref(&self) -> u32 {
         self.refcount.fetch_sub(1, Ordering::Release)
     }
 
+    /// Returns refcount.
     pub fn get_refcount(&self) -> u32 {
         self.refcount.load(Ordering::Acquire)
     }
@@ -167,11 +171,13 @@ fn get_frame_meta_mut(pfn: u64) -> Option<&'static mut FrameMeta> {
     }
 }
 
+/// Performs the frame to pfn operation.
 #[inline]
 fn frame_to_pfn(frame: PhysFrame) -> u64 {
     frame.start_address.as_u64() >> 12
 }
 
+/// Performs the frame inc ref operation.
 pub fn frame_inc_ref(frame: PhysFrame) {
     let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta(pfn) {
@@ -179,6 +185,7 @@ pub fn frame_inc_ref(frame: PhysFrame) {
     }
 }
 
+/// Performs the frame dec ref operation.
 pub fn frame_dec_ref(frame: PhysFrame) {
     let pfn = frame_to_pfn(frame);
     if let Some(meta) = get_frame_meta(pfn) {
@@ -193,6 +200,7 @@ pub fn frame_dec_ref(frame: PhysFrame) {
     }
 }
 
+/// Performs the frame get refcount operation.
 pub fn frame_get_refcount(frame: PhysFrame) -> u32 {
     let pfn = frame_to_pfn(frame);
     get_frame_meta(pfn).map(|m| m.get_refcount()).unwrap_or(0)

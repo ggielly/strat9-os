@@ -25,6 +25,7 @@ pub enum InodeFormat {
 }
 
 impl InodeFormat {
+    /// Builds a value from u8.
     fn from_u8(v: u8) -> FsResult<Self> {
         match v {
             XFS_DINODE_FMT_DEV => Ok(Self::Device),
@@ -62,6 +63,7 @@ pub enum FileType {
 }
 
 impl FileType {
+    /// Builds a value from mode.
     fn from_mode(mode: u16) -> Self {
         match mode & S_IFMT {
             S_IFIFO => Self::Fifo,
@@ -788,6 +790,7 @@ mod tests {
     use alloc::vec;
 
     #[test]
+    /// Implements test inode core parse minimal.
     fn test_inode_core_parse_minimal() {
         let mut buffer = [0u8; InodeCore::V2_SIZE];
         // Set magic number
@@ -807,6 +810,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test inode core parse too small.
     fn test_inode_core_parse_too_small() {
         let buffer = [0u8; 96]; // Less than V2_SIZE (100)
         assert!(matches!(
@@ -816,6 +820,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test inode parse.
     fn test_inode_parse() {
         let mut buffer = vec![0u8; 256]; // Common inode size
                                          // Set magic number
@@ -836,6 +841,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test file type detection.
     fn test_file_type_detection() {
         assert_eq!(FileType::from_mode(0x4000), FileType::Directory); // S_IFDIR
         assert_eq!(FileType::from_mode(0x8000), FileType::RegularFile); // S_IFREG
@@ -847,6 +853,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test permissions extraction.
     fn test_permissions_extraction() {
         let mut buffer = [0u8; InodeCore::V2_SIZE];
         buffer[0..2].copy_from_slice(&XFS_DINODE_MAGIC.to_be_bytes());
@@ -860,6 +867,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test timestamp to unix bigtime.
     fn test_timestamp_to_unix_bigtime() {
         // Values from user logs: 0x365D4214 C637B335
         let sec = 0x365D4214;
@@ -874,6 +882,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test timestamp to unix v3 extension.
     fn test_timestamp_to_unix_v3_extension() {
         // Test epoch extension: sec = 1, nsec = (3 << 30) | 123
         let sec = 1;

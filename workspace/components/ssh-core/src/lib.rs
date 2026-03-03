@@ -45,16 +45,21 @@ pub struct ExecSessionWiring {
 }
 
 pub trait Transport {
+    /// Implements recv.
     fn recv(&mut self, out: &mut [u8]) -> Result<usize>;
+    /// Implements send.
     fn send(&mut self, data: &[u8]) -> Result<usize>;
 }
 
 pub trait HostKeyProvider {
+    /// Implements host public key.
     fn host_public_key(&self) -> &[u8];
+    /// Implements sign exchange hash.
     fn sign_exchange_hash(&mut self, exchange_hash: &[u8], out: &mut [u8]) -> Result<usize>;
 }
 
 pub trait AuthProvider {
+    /// Implements authorize public key.
     fn authorize_public_key(
         &mut self,
         username: &[u8],
@@ -66,7 +71,9 @@ pub trait AuthProvider {
 }
 
 pub trait ExecSessionProvider {
+    /// Implements spawn exec.
     fn spawn_exec(&mut self, username: &[u8], command: &[u8]) -> Result<ExecSessionWiring>;
+    /// Closes exec.
     fn close_exec(&mut self, wiring: &ExecSessionWiring) -> Result<()>;
 }
 
@@ -100,10 +107,15 @@ pub enum ParsedPacket<'a> {
 
 pub trait SshBackend {
     fn parse_packet<'a>(&mut self, packet: &'a [u8]) -> Result<ParsedPacket<'a>>;
+    /// Implements make server banner.
     fn make_server_banner(&mut self) -> Result<Vec<u8>>;
+    /// Implements make kex reply.
     fn make_kex_reply(&mut self, client_kex: &[u8], host_keys: &mut dyn HostKeyProvider) -> Result<Vec<u8>>;
+    /// Implements make auth reply.
     fn make_auth_reply(&mut self, accepted: bool) -> Result<Vec<u8>>;
+    /// Implements make exec reply.
     fn make_exec_reply(&mut self, channel_id: u32, accepted: bool) -> Result<Vec<u8>>;
+    /// Implements make disconnect.
     fn make_disconnect(&mut self) -> Result<Vec<u8>>;
 }
 
@@ -146,6 +158,7 @@ where
     H: HostKeyProvider,
     S: ExecSessionProvider,
 {
+    /// Creates a new instance.
     pub fn new(backend: B, auth: A, host_keys: H, sessions: S) -> Self {
         Self {
             backend,
@@ -159,23 +172,28 @@ where
         }
     }
 
+    /// Implements state.
     pub fn state(&self) -> ConnectionState {
         self.state
     }
 
+    /// Implements auth mut.
     pub fn auth_mut(&mut self) -> &mut A {
         &mut self.auth
     }
 
+    /// Implements sessions mut.
     pub fn sessions_mut(&mut self) -> &mut S {
         &mut self.sessions
     }
 
+    /// Implements ingest packet.
     pub fn ingest_packet(&mut self, packet: &[u8]) -> Result<Vec<CoreDirective>> {
         let event = self.backend.parse_packet(packet)?;
         self.handle_event(event)
     }
 
+    /// Implements handle event.
     fn handle_event(&mut self, event: ParsedPacket<'_>) -> Result<Vec<CoreDirective>> {
         let mut out = Vec::new();
 
@@ -304,6 +322,7 @@ where
 pub struct MinimalBackend;
 
 impl MinimalBackend {
+    /// Reads u16 be.
     fn read_u16_be(input: &[u8], off: usize) -> Result<u16> {
         if off + 2 > input.len() {
             return Err(SshCoreError::InvalidPacket);
@@ -311,6 +330,7 @@ impl MinimalBackend {
         Ok(u16::from_be_bytes([input[off], input[off + 1]]))
     }
 
+    /// Reads u32 be.
     fn read_u32_be(input: &[u8], off: usize) -> Result<u32> {
         if off + 4 > input.len() {
             return Err(SshCoreError::InvalidPacket);
@@ -415,10 +435,12 @@ impl SshBackend for MinimalBackend {
         }
     }
 
+    /// Implements make server banner.
     fn make_server_banner(&mut self) -> Result<Vec<u8>> {
         Ok(b"\x81SSH-2.0-Strat9\n".to_vec())
     }
 
+    /// Implements make kex reply.
     fn make_kex_reply(&mut self, client_kex: &[u8], host_keys: &mut dyn HostKeyProvider) -> Result<Vec<u8>> {
         let mut sig = [0u8; 128];
         let sig_len = host_keys.sign_exchange_hash(client_kex, &mut sig)?;
@@ -433,10 +455,12 @@ impl SshBackend for MinimalBackend {
         Ok(out)
     }
 
+    /// Implements make auth reply.
     fn make_auth_reply(&mut self, accepted: bool) -> Result<Vec<u8>> {
         Ok(vec![0x83, u8::from(accepted)])
     }
 
+    /// Implements make exec reply.
     fn make_exec_reply(&mut self, channel_id: u32, accepted: bool) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(6);
         out.push(0x84);
@@ -445,6 +469,7 @@ impl SshBackend for MinimalBackend {
         Ok(out)
     }
 
+    /// Implements make disconnect.
     fn make_disconnect(&mut self) -> Result<Vec<u8>> {
         Ok(vec![0x85])
     }
@@ -457,6 +482,7 @@ pub struct ZsshBackend {
 
 #[cfg(feature = "backend-zssh")]
 impl Default for ZsshBackend {
+    /// Implements default.
     fn default() -> Self {
         use zssh as _;
         Self {
@@ -471,22 +497,27 @@ impl SshBackend for ZsshBackend {
         self.fallback.parse_packet(packet)
     }
 
+    /// Implements make server banner.
     fn make_server_banner(&mut self) -> Result<Vec<u8>> {
         self.fallback.make_server_banner()
     }
 
+    /// Implements make kex reply.
     fn make_kex_reply(&mut self, client_kex: &[u8], host_keys: &mut dyn HostKeyProvider) -> Result<Vec<u8>> {
         self.fallback.make_kex_reply(client_kex, host_keys)
     }
 
+    /// Implements make auth reply.
     fn make_auth_reply(&mut self, accepted: bool) -> Result<Vec<u8>> {
         self.fallback.make_auth_reply(accepted)
     }
 
+    /// Implements make exec reply.
     fn make_exec_reply(&mut self, channel_id: u32, accepted: bool) -> Result<Vec<u8>> {
         self.fallback.make_exec_reply(channel_id, accepted)
     }
 
+    /// Implements make disconnect.
     fn make_disconnect(&mut self) -> Result<Vec<u8>> {
         self.fallback.make_disconnect()
     }
@@ -498,6 +529,7 @@ pub type DefaultBackend = ZsshBackend;
 #[cfg(not(feature = "backend-zssh"))]
 pub type DefaultBackend = MinimalBackend;
 
+/// Implements default backend.
 pub fn default_backend() -> DefaultBackend {
     Default::default()
 }

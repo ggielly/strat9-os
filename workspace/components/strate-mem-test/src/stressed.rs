@@ -6,18 +6,22 @@ use strat9_syscall::call;
 
 const PAGE_SIZE: usize = 4096;
 
+/// Writes fd.
 fn write_fd(fd: usize, msg: &str) {
     let _ = call::write(fd, msg.as_bytes());
 }
 
+/// Implements log.
 fn log(msg: &str) {
     write_fd(1, msg);
 }
 
+/// Implements log err.
 fn log_err(msg: &str) {
     write_fd(2, msg);
 }
 
+/// Implements log u64.
 fn log_u64(mut value: u64) {
     let mut buf = [0u8; 21];
     if value == 0 {
@@ -34,6 +38,7 @@ fn log_u64(mut value: u64) {
     log(s);
 }
 
+/// Implements log hex u64.
 fn log_hex_u64(mut value: u64) {
     let mut buf = [0u8; 16];
     for i in (0..16).rev() {
@@ -50,6 +55,7 @@ fn log_hex_u64(mut value: u64) {
     log(s);
 }
 
+/// Implements section.
 fn section(title: &str) {
     log("\n############################################################\n");
     log("[test_mem_stressed] ");
@@ -57,6 +63,7 @@ fn section(title: &str) {
     log("\n############################################################\n");
 }
 
+/// Implements query brk.
 fn query_brk() -> usize {
     match call::brk(0) {
         Ok(v) => v,
@@ -69,6 +76,7 @@ fn query_brk() -> usize {
     }
 }
 
+/// Sets brk.
 fn set_brk(new_brk: usize, ctx: &str) -> usize {
     match call::brk(new_brk) {
         Ok(v) => v,
@@ -83,11 +91,13 @@ fn set_brk(new_brk: usize, ctx: &str) -> usize {
     }
 }
 
+/// Implements pattern byte.
 fn pattern_byte(seed: u8, page: usize, pos: usize) -> u8 {
     seed.wrapping_add((page as u8).wrapping_mul(13))
         .wrapping_add(pos as u8)
 }
 
+/// Implements touch pages.
 fn touch_pages(base: usize, pages: usize, seed: u8, tag: &str) {
     log("[test_mem_stressed] touch ");
     log(tag);
@@ -133,6 +143,7 @@ fn touch_pages(base: usize, pages: usize, seed: u8, tag: &str) {
     }
 }
 
+/// Implements stage fixed rounds.
 fn stage_fixed_rounds() {
     section("Stage A: fixed-size rounds (up to 128 pages)");
     let base = query_brk();
@@ -157,6 +168,7 @@ fn stage_fixed_rounds() {
     }
 }
 
+/// Implements stage sawtooth heavy.
 fn stage_sawtooth_heavy() {
     section("Stage B: heavy saw-tooth (split/coalesce pressure)");
     let base = query_brk();
@@ -188,6 +200,7 @@ fn stage_sawtooth_heavy() {
     let _ = set_brk(base, "sawtooth_end");
 }
 
+/// Implements stage churn loops.
 fn stage_churn_loops() {
     section("Stage C: many small/medium churn loops");
     let base = query_brk();
@@ -209,12 +222,14 @@ fn stage_churn_loops() {
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_info: &PanicInfo) -> ! {
     log_err("[test_mem_stressed] PANIC\n");
     call::exit(250)
 }
 
 #[no_mangle]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     section("Start");
     log("[test_mem_stressed] test intensif (verbose) demarre\n");

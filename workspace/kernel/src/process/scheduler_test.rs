@@ -15,11 +15,13 @@ static SWITCH_WORKER_HITS: AtomicU64 = AtomicU64::new(0);
 static SWITCH_WORKER_DONE: AtomicBool = AtomicBool::new(false);
 static MIGRATION_READY_HITS: AtomicU64 = AtomicU64::new(0);
 
+/// Performs the sched test log operation.
 #[inline]
 fn sched_test_log(msg: core::fmt::Arguments<'_>) {
     crate::serial_println!("[sched][test] {}", msg);
 }
 
+/// Performs the wait exit operation.
 fn wait_exit(id: TaskId, timeout_ticks: u64) -> bool {
     let start = ticks();
     // Budget proportionnel au timeout pour éviter de l'épuiser avant les ticks
@@ -43,6 +45,7 @@ fn wait_exit(id: TaskId, timeout_ticks: u64) -> bool {
     }
 }
 
+/// Performs the rt probe main operation.
 extern "C" fn rt_probe_main() -> ! {
     let start = ticks();
     while ticks().saturating_sub(start) < 40 {
@@ -51,6 +54,7 @@ extern "C" fn rt_probe_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Performs the fair probe main operation.
 extern "C" fn fair_probe_main() -> ! {
     let start = ticks();
     while ticks().saturating_sub(start) < 40 {
@@ -60,6 +64,7 @@ extern "C" fn fair_probe_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Performs the switch probe main operation.
 extern "C" fn switch_probe_main() -> ! {
     while !SWITCH_WORKER_DONE.load(Ordering::Relaxed) {
         SWITCH_WORKER_HITS.fetch_add(1, Ordering::Relaxed);
@@ -68,11 +73,13 @@ extern "C" fn switch_probe_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Performs the migration ready probe main operation.
 extern "C" fn migration_ready_probe_main() -> ! {
     MIGRATION_READY_HITS.fetch_add(1, Ordering::Relaxed);
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Performs the test rt preempts fair operation.
 fn test_rt_preempts_fair() -> bool {
     RT_HITS.store(0, Ordering::Relaxed);
     FAIR_HITS.store(0, Ordering::Relaxed);
@@ -106,6 +113,7 @@ fn test_rt_preempts_fair() -> bool {
     rt_hits > 0 && fair_hits > 0
 }
 
+/// Performs the test dynamic policy switch operation.
 fn test_dynamic_policy_switch() -> bool {
     SWITCH_WORKER_HITS.store(0, Ordering::Relaxed);
     SWITCH_WORKER_DONE.store(false, Ordering::Relaxed);
@@ -148,6 +156,7 @@ fn test_dynamic_policy_switch() -> bool {
     done && SWITCH_WORKER_HITS.load(Ordering::Relaxed) > 0
 }
 
+/// Performs the test config validation reject operation.
 fn test_config_validation_reject() -> bool {
     let mut t1 = scheduler_class_table();
     let bad_pick = t1.set_pick_order([
@@ -171,6 +180,7 @@ fn test_config_validation_reject() -> bool {
     !bad_pick && !bad_steal && !bad_policy
 }
 
+/// Performs the test ready task migration on policy map update operation.
 fn test_ready_task_migration_on_policy_map_update() -> bool {
     MIGRATION_READY_HITS.store(0, Ordering::Relaxed);
     let task = match Task::new_kernel_task(
@@ -203,6 +213,7 @@ fn test_ready_task_migration_on_policy_map_update() -> bool {
     changed && applied && finished && MIGRATION_READY_HITS.load(Ordering::Relaxed) > 0
 }
 
+/// Performs the scheduler test main operation.
 extern "C" fn scheduler_test_main() -> ! {
     sched_test_log(format_args!("event=start"));
     set_scheduler_verbose(false);
@@ -244,6 +255,7 @@ extern "C" fn scheduler_test_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Creates scheduler test task.
 pub fn create_scheduler_test_task() {
     if let Ok(task) = Task::new_kernel_task_with_stack(
         scheduler_test_main,

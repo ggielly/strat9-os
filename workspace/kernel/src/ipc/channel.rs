@@ -75,6 +75,7 @@ struct ChannelInner<T: Send> {
 }
 
 impl<T: Send> ChannelInner<T> {
+    /// Creates a new instance.
     fn new(capacity: usize) -> Self {
         ChannelInner {
             buffer: ArrayQueue::new(capacity.max(1)),
@@ -86,11 +87,13 @@ impl<T: Send> ChannelInner<T> {
         }
     }
 
+    /// Returns whether sender gone.
     #[inline]
     fn is_sender_gone(&self) -> bool {
         self.status.load(Ordering::Acquire) == STATUS_SENDER_GONE
     }
 
+    /// Returns whether receiver gone.
     #[inline]
     fn is_receiver_gone(&self) -> bool {
         self.status.load(Ordering::Acquire) == STATUS_RECEIVER_GONE
@@ -107,6 +110,7 @@ pub struct Sender<T: Send> {
 }
 
 impl<T: Send> Clone for Sender<T> {
+    /// Performs the clone operation.
     fn clone(&self) -> Self {
         self.inner.sender_count.fetch_add(1, Ordering::AcqRel);
         Sender {
@@ -116,6 +120,7 @@ impl<T: Send> Clone for Sender<T> {
 }
 
 impl<T: Send> Drop for Sender<T> {
+    /// Performs the drop operation.
     fn drop(&mut self) {
         if self.inner.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last sender gone — mark and wake blocked receivers.
@@ -218,6 +223,7 @@ pub struct Receiver<T: Send> {
 }
 
 impl<T: Send> Clone for Receiver<T> {
+    /// Performs the clone operation.
     fn clone(&self) -> Self {
         self.inner.receiver_count.fetch_add(1, Ordering::AcqRel);
         Receiver {
@@ -227,6 +233,7 @@ impl<T: Send> Clone for Receiver<T> {
 }
 
 impl<T: Send> Drop for Receiver<T> {
+    /// Performs the drop operation.
     fn drop(&mut self) {
         if self.inner.receiver_count.fetch_sub(1, Ordering::AcqRel) == 1 {
             // Last receiver gone — mark and wake blocked senders.
@@ -342,6 +349,7 @@ pub struct SyncChan {
 }
 
 impl SyncChan {
+    /// Creates a new instance.
     fn new(capacity: usize) -> Self {
         SyncChan {
             queue: ArrayQueue::new(capacity.max(1)),
@@ -461,10 +469,12 @@ impl SyncChan {
         self.len() == 0
     }
 
+    /// Returns whether full.
     pub fn is_full(&self) -> bool {
         self.queue.is_full()
     }
 
+    /// Returns whether this can send.
     pub fn can_send(&self) -> bool {
         !self.destroyed.load(Ordering::Acquire) && !self.queue.is_full()
     }
@@ -476,15 +486,18 @@ impl SyncChan {
 pub struct ChanId(pub u64);
 
 impl ChanId {
+    /// Returns this as u64.
     pub fn as_u64(self) -> u64 {
         self.0
     }
+    /// Builds this from u64.
     pub fn from_u64(raw: u64) -> Self {
         ChanId(raw)
     }
 }
 
 impl core::fmt::Display for ChanId {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -496,6 +509,7 @@ static NEXT_CHAN_ID: AtomicU64 = AtomicU64::new(1);
 /// Global registry: `ChanId → Arc<SyncChan>`.
 static CHANNELS: SpinLock<Option<BTreeMap<ChanId, Arc<SyncChan>>>> = SpinLock::new(None);
 
+/// Performs the ensure registry operation.
 fn ensure_registry(guard: &mut Option<BTreeMap<ChanId, Arc<SyncChan>>>) {
     if guard.is_none() {
         *guard = Some(BTreeMap::new());

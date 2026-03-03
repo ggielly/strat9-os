@@ -54,6 +54,7 @@ const RDEV_VDA: u64 = (254u64 << 8) | 0;
 // ─── xorshift64 fallback PRNG ────────────────────────────────────────────────
 static PRNG_STATE: AtomicU64 = AtomicU64::new(0xdeadbeef_cafebabe);
 
+/// Performs the prng fill operation.
 fn prng_fill(buf: &mut [u8]) {
     if crate::hardware::virtio::rng::is_available() {
         let _ = crate::hardware::virtio::rng::read_entropy(buf);
@@ -78,6 +79,7 @@ fn prng_fill(buf: &mut [u8]) {
 pub struct BlkDevScheme;
 
 impl BlkDevScheme {
+    /// Creates a new instance.
     pub fn new() -> Self {
         BlkDevScheme
     }
@@ -86,6 +88,7 @@ impl BlkDevScheme {
 impl Scheme for BlkDevScheme {
     // ── open ─────────────────────────────────────────────────────────────────
 
+    /// Performs the open operation.
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         match path.trim_start_matches('/') {
             "" => {
@@ -123,6 +126,7 @@ impl Scheme for BlkDevScheme {
 
     // ── read ─────────────────────────────────────────────────────────────────
 
+    /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         match file_id {
             FID_ROOT => {
@@ -157,6 +161,7 @@ impl Scheme for BlkDevScheme {
 
     // ── write ────────────────────────────────────────────────────────────────
 
+    /// Performs the write operation.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         match file_id {
             FID_NULL => Ok(buf.len()),
@@ -176,12 +181,14 @@ impl Scheme for BlkDevScheme {
 
     // ── close ────────────────────────────────────────────────────────────────
 
+    /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(()) // stateless: nothing to clean up
     }
 
     // ── size ─────────────────────────────────────────────────────────────────
 
+    /// Performs the size operation.
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
         if file_id == FID_SDA {
             let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
@@ -197,6 +204,7 @@ impl Scheme for BlkDevScheme {
 
     // ── stat ─────────────────────────────────────────────────────────────────
 
+    /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         match file_id {
             FID_ROOT => Ok(finalize_pseudo_stat(FileStat {
@@ -245,6 +253,7 @@ impl Scheme for BlkDevScheme {
 
     // ── readdir ──────────────────────────────────────────────────────────────
 
+    /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         if file_id != FID_ROOT {
             return Err(SyscallError::InvalidArgument);

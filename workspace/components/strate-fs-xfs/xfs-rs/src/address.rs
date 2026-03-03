@@ -143,6 +143,7 @@ impl InodeLocation {
 mod tests {
     use super::*;
 
+    /// Implements make test superblock.
     fn make_test_superblock() -> Superblock {
         // Minimal superblock for testing
         Superblock {
@@ -191,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    /// Implements test split inode.
     fn test_split_inode() {
         let sb = make_test_superblock();
         // Root inode 128 should be in AG 0

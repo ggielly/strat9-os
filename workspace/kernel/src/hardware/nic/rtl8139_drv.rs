@@ -44,40 +44,48 @@ struct Ports {
 }
 
 impl Ports {
+    /// Creates a new instance.
     fn new(io_base: u16) -> Self {
         Self { io_base }
     }
 
+    /// Performs the read8 operation.
     #[inline]
     fn read8(&self, offset: u16) -> u8 {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
     }
 
+    /// Performs the write8 operation.
     #[inline]
     fn write8(&mut self, offset: u16, value: u8) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
 
+    /// Performs the read16 operation.
     #[inline]
     fn read16(&self, offset: u16) -> u16 {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
     }
 
+    /// Performs the write16 operation.
     #[inline]
     fn write16(&mut self, offset: u16, value: u16) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
 
+    /// Performs the read32 operation.
     #[inline]
     fn read32(&self, offset: u16) -> u32 {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
     }
 
+    /// Performs the write32 operation.
     #[inline]
     fn write32(&mut self, offset: u16, value: u32) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
 
+    /// Performs the mac operation.
     fn mac(&mut self) -> [u8; 6] {
         [
             self.read8(0x00),
@@ -106,6 +114,7 @@ unsafe impl Send for Rtl8139Device {}
 unsafe impl Sync for Rtl8139Device {}
 
 impl Rtl8139Device {
+    /// Creates a new instance.
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let io_base = match pci_dev.read_bar(0) {
             Some(Bar::Io { port }) => port as u16,
@@ -146,6 +155,7 @@ impl Rtl8139Device {
         Ok(device)
     }
 
+    /// Performs the init operation.
     fn init(&mut self) {
         let mut ports = self.ports.lock();
 
@@ -184,14 +194,17 @@ impl Rtl8139Device {
         );
     }
 
+    /// Performs the receive packet operation.
     fn receive_packet(&self) -> Option<Vec<u8>> {
         self.receive_inner()
     }
 
+    /// Performs the transmit packet operation.
     fn transmit_packet(&self, data: &[u8]) -> Result<(), NetError> {
         self.transmit_inner(data)
     }
 
+    /// Performs the receive inner operation.
     fn receive_inner(&self) -> Option<Vec<u8>> {
         let mut ports = self.ports.lock();
         let rx_offset = self.rx_offset.load(Ordering::Relaxed);
@@ -227,6 +240,7 @@ impl Rtl8139Device {
         None
     }
 
+    /// Performs the transmit inner operation.
     fn transmit_inner(&self, data: &[u8]) -> Result<(), NetError> {
         if data.len() > MTU {
             return Err(NetError::BufferTooSmall);
@@ -258,19 +272,23 @@ impl Rtl8139Device {
 }
 
 impl NetworkDevice for Rtl8139Device {
+    /// Performs the name operation.
     fn name(&self) -> &str {
         &self.name
     }
 
+    /// Performs the mac address operation.
     fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
 
+    /// Performs the link up operation.
     fn link_up(&self) -> bool {
         let ports = self.ports.lock();
         (ports.read8(0x58) & 0x80) != 0
     }
 
+    /// Performs the receive operation.
     fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
         if let Some(packet) = self.receive_inner() {
             let len = core::cmp::min(packet.len(), buf.len());
@@ -281,6 +299,7 @@ impl NetworkDevice for Rtl8139Device {
         }
     }
 
+    /// Performs the transmit operation.
     fn transmit(&self, data: &[u8]) -> Result<(), NetError> {
         self.transmit_inner(data)
     }
@@ -288,6 +307,7 @@ impl NetworkDevice for Rtl8139Device {
 
 static RTL8139_DEVICES: Mutex<Vec<Arc<Rtl8139Device>>> = Mutex::new(Vec::new());
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[RTL8139] Scanning for RTL8139 devices...");
 

@@ -42,6 +42,7 @@ pub struct AtaChannel {
 }
 
 impl AtaChannel {
+    /// Creates a new instance.
     fn new(io_base: u16, bus: u8) -> Self {
         Self {
             io_base,
@@ -50,22 +51,27 @@ impl AtaChannel {
         }
     }
 
+    /// Performs the read8 operation.
     fn read8(&self, offset: usize) -> u8 {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset as u16).read() }
     }
 
+    /// Performs the write8 operation.
     fn write8(&self, offset: usize, value: u8) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset as u16).write(value) }
     }
 
+    /// Performs the read16 operation.
     fn read16(&self) -> u16 {
         unsafe { x86_64::instructions::port::Port::new(self.io_base).read() }
     }
 
+    /// Performs the write16 operation.
     fn write16(&self, value: u16) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base).write(value) }
     }
 
+    /// Performs the wait ready operation.
     fn wait_ready(&self) -> Result<(), &'static str> {
         for _ in 0..100000 {
             let status = self.read8(ATA_REG_STATUS);
@@ -77,6 +83,7 @@ impl AtaChannel {
         Err("ATA timeout")
     }
 
+    /// Performs the wait drq operation.
     fn wait_drq(&self) -> Result<(), &'static str> {
         for _ in 0..100000 {
             let status = self.read8(ATA_REG_STATUS);
@@ -91,6 +98,7 @@ impl AtaChannel {
         Err("ATA timeout")
     }
 
+    /// Performs the select device operation.
     fn select_device(&self, _device: u8, lba: u64) {
         let device_reg = ATA_DEVICE_MASTER | ATA_DEVICE_LBA | ((lba >> 24) & 0x0F) as u8;
         self.write8(ATA_REG_DEVICE, device_reg);
@@ -100,6 +108,7 @@ impl AtaChannel {
         }
     }
 
+    /// Performs the identify operation.
     fn identify(&self, device: u8) -> Option<AtaDriveInfo> {
         self.select_device(device, 0);
         self.write8(ATA_REG_SECCOUNT, 0);
@@ -133,6 +142,7 @@ impl AtaChannel {
         Some(AtaDriveInfo { model, serial, capacity })
     }
 
+    /// Performs the decode identify string operation.
     fn decode_identify_string(buffer: &[u16], start: usize, end: usize) -> String {
         use alloc::string::String;
         let mut s = String::new();
@@ -148,6 +158,7 @@ impl AtaChannel {
         s
     }
 
+    /// Reads sector pio.
     fn read_sector_pio(&self, device: u8, lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
         if buffer.len() < SECTOR_SIZE {
             return Err("Buffer too small");
@@ -175,6 +186,7 @@ impl AtaChannel {
         Ok(())
     }
 
+    /// Writes sector pio.
     fn write_sector_pio(&self, device: u8, lba: u64, buffer: &[u8]) -> Result<(), &'static str> {
         if buffer.len() < SECTOR_SIZE {
             return Err("Buffer too small");
@@ -221,26 +233,31 @@ unsafe impl Send for AtaDrive {}
 unsafe impl Sync for AtaDrive {}
 
 impl AtaDrive {
+    /// Creates a new instance.
     pub fn new(channel: AtaChannel, device: u8) -> Option<Self> {
         let info = channel.identify(device)?;
         let name = format!("ata{}_{}", channel.bus, if device == ATA_DEVICE_MASTER { "master" } else { "slave" });
         Some(Self { channel, device, info, name })
     }
 
+    /// Performs the info operation.
     pub fn info(&self) -> &AtaDriveInfo {
         &self.info
     }
 }
 
 impl BlockDevice for AtaDrive {
+    /// Reads sector.
     fn read_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         self.channel.read_sector_pio(self.device, sector, buf).map_err(|_| BlockError::IoError)
     }
 
+    /// Writes sector.
     fn write_sector(&self, sector: u64, buf: &[u8]) -> Result<(), BlockError> {
         self.channel.write_sector_pio(self.device, sector, buf).map_err(|_| BlockError::IoError)
     }
 
+    /// Performs the sector count operation.
     fn sector_count(&self) -> u64 {
         self.info.capacity
     }
@@ -249,6 +266,7 @@ impl BlockDevice for AtaDrive {
 static ATA_DRIVES: Mutex<Vec<Arc<AtaDrive>>> = Mutex::new(Vec::new());
 static ATA_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[ATA] Scanning for legacy ATA/IDE devices...");
 
@@ -276,14 +294,17 @@ pub fn init() {
     log::info!("[ATA] Found {} drive(s)", ATA_DRIVES.lock().len());
 }
 
+/// Returns drive.
 pub fn get_drive(index: usize) -> Option<Arc<AtaDrive>> {
     ATA_DRIVES.lock().get(index).cloned()
 }
 
+/// Returns first drive.
 pub fn get_first_drive() -> Option<Arc<AtaDrive>> {
     ATA_DRIVES.lock().first().cloned()
 }
 
+/// Returns whether available.
 pub fn is_available() -> bool {
     ATA_INITIALIZED.load(Ordering::Relaxed)
 }

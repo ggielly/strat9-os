@@ -35,6 +35,7 @@ pub struct PerCpu {
 }
 
 impl PerCpu {
+    /// Creates a new instance.
     pub const fn new() -> Self {
         Self {
             arch: PerCpuArch {
@@ -51,10 +52,12 @@ impl PerCpu {
         }
     }
 
+    /// Performs the apic id operation.
     pub fn apic_id(&self) -> u32 {
         self.apic_id.load(Ordering::Acquire)
     }
 
+    /// Performs the online operation.
     pub fn online(&self) -> bool {
         self.online.load(Ordering::Acquire)
     }

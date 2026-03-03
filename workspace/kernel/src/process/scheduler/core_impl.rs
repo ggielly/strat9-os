@@ -42,6 +42,7 @@ impl Scheduler {
         }
     }
 
+    /// Performs the member add operation.
     pub(crate) fn member_add(
         map: &mut BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
         key: Pid,
@@ -53,6 +54,7 @@ impl Scheduler {
         }
     }
 
+    /// Performs the member remove operation.
     pub(crate) fn member_remove(
         map: &mut BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
         key: Pid,
@@ -68,6 +70,7 @@ impl Scheduler {
         }
     }
 
+    /// Performs the register identity locked operation.
     pub(crate) fn register_identity_locked(&mut self, task: &Arc<Task>) {
         let task_id = task.id;
         let pid = task.pid;
@@ -79,6 +82,7 @@ impl Scheduler {
         Self::member_add(&mut self.sid_members, sid, task_id);
     }
 
+    /// Performs the unregister identity locked operation.
     pub(crate) fn unregister_identity_locked(&mut self, task_id: TaskId, pid: Pid, tid: Tid) {
         self.pid_to_task.remove(&pid);
         self.tid_to_task.remove(&tid);
@@ -96,6 +100,7 @@ impl Scheduler {
         self.add_task_on_cpu(task, cpu_index);
     }
 
+    /// Performs the add task with parent operation.
     pub fn add_task_with_parent(&mut self, task: Arc<Task>, parent: TaskId) {
         let child = task.id;
         let cpu_index = self.select_cpu_for_task();
@@ -104,6 +109,7 @@ impl Scheduler {
         self.children_of.entry(parent).or_default().push(child);
     }
 
+    /// Performs the add task on cpu operation.
     fn add_task_on_cpu(&mut self, task: Arc<Task>, cpu_index: usize) {
         let task_id = task.id;
         // SAFETY: We have exclusive access via the scheduler lock
@@ -131,6 +137,7 @@ impl Scheduler {
         }
     }
 
+    /// Performs the clear task wake deadline locked operation.
     pub fn clear_task_wake_deadline_locked(&mut self, id: TaskId) -> bool {
         if let Some(task) = self.all_tasks.get(&id) {
             task.wake_deadline_ns.store(0, Ordering::Relaxed);
@@ -140,6 +147,7 @@ impl Scheduler {
         }
     }
 
+    /// Sets task wake deadline locked.
     pub fn set_task_wake_deadline_locked(&mut self, id: TaskId, deadline: u64) -> bool {
         if deadline == 0 {
             return self.clear_task_wake_deadline_locked(id);
@@ -152,6 +160,7 @@ impl Scheduler {
         }
     }
 
+    /// Performs the wake task locked operation.
     pub fn wake_task_locked(&mut self, id: TaskId) -> bool {
         self.clear_task_wake_deadline_locked(id);
         if let Some(task) = self.blocked_tasks.remove(&id) {
@@ -178,6 +187,7 @@ impl Scheduler {
         }
     }
 
+    /// Attempts to reap child locked.
     pub fn try_reap_child_locked(
         &mut self,
         parent: TaskId,
@@ -408,6 +418,7 @@ impl Scheduler {
         })
     }
 
+    /// Performs the select cpu for task operation.
     fn select_cpu_for_task(&self) -> usize {
         let mut best = 0usize;
         let mut best_load = usize::MAX;
@@ -428,6 +439,7 @@ impl Scheduler {
         best
     }
 
+    /// Performs the migrate ready tasks for new class table operation.
     pub fn migrate_ready_tasks_for_new_class_table(&mut self) {
         let mut ready: Vec<(TaskId, Arc<Task>, usize)> = Vec::new();
         for (id, task) in self.all_tasks.iter() {

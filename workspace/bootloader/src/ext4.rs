@@ -76,12 +76,14 @@ pub struct Ext4Error {
 }
 
 impl Ext4Error {
+    /// Creates a new instance.
     pub fn new(message: &'static str) -> Self {
         Self { message }
     }
 }
 
 impl core::fmt::Display for Ext4Error {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "EXT4 Error: {}", self.message)
     }

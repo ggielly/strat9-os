@@ -53,6 +53,7 @@ unsafe impl Send for SlabState {}
 unsafe impl Sync for SlabState {}
 
 impl SlabState {
+    /// Creates a new instance.
     const fn new() -> Self {
         SlabState {
             free_lists: [ptr::null_mut(); NUM_SLABS],
@@ -143,6 +144,7 @@ static SLAB_ALLOC: SpinLock<SlabState> = SpinLock::new(SlabState::new());
 pub struct LockedHeap;
 
 unsafe impl GlobalAlloc for LockedHeap {
+    /// Performs the alloc operation.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Effective size must satisfy both the size and alignment requirements.
         let effective = layout.size().max(layout.align());
@@ -174,6 +176,7 @@ unsafe impl GlobalAlloc for LockedHeap {
         }
     }
 
+    /// Performs the dealloc operation.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let effective = layout.size().max(layout.align());
 
@@ -208,6 +211,7 @@ unsafe impl GlobalAlloc for LockedHeap {
 #[global_allocator]
 static HEAP_ALLOCATOR: LockedHeap = LockedHeap;
 
+/// Allocates error handler.
 #[alloc_error_handler]
 fn alloc_error_handler(layout: Layout) -> ! {
     panic!("allocation error: {:?}", layout)

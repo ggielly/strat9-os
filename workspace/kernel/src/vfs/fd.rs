@@ -42,6 +42,7 @@ pub struct FileDescriptorTable {
 }
 
 impl FileDescriptorTable {
+    /// Performs the advance next fd hint operation.
     fn advance_next_fd_hint(&mut self) {
         while self.next_fd_hint < self.fds.len() && self.fds[self.next_fd_hint].is_some() {
             self.next_fd_hint = self.next_fd_hint.saturating_add(1);
@@ -259,6 +260,7 @@ impl FileDescriptorTable {
 }
 
 impl Default for FileDescriptorTable {
+    /// Builds a default instance.
     fn default() -> Self {
         Self::new()
     }

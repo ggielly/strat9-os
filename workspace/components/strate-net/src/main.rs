@@ -22,12 +22,14 @@ alloc_freelist::define_freelist_brk_allocator!(
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
+/// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
     let _ = call::debug_log(b"[strate-net] OOM\n");
     exit(12);
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(info: &PanicInfo) -> ! {
     let _ = call::debug_log(b"[strate-net] PANIC: ");
     let msg = info.message();
@@ -53,6 +55,7 @@ struct BufWriter<'a> {
 }
 
 impl core::fmt::Write for BufWriter<'_> {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let bytes = s.as_bytes();
         let avail = self.buf.len().saturating_sub(self.pos);
@@ -75,6 +78,7 @@ use smoltcp::{
     wire::{DnsQueryType, EthernetAddress, IpAddress, IpCidr, Ipv4Address},
 };
 
+/// Implements icmp checksum.
 fn icmp_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let mut i = 0;
@@ -97,6 +101,7 @@ const NANOS_PER_MICRO: u64 = 1_000;
 static RX_ERR_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
 static TX_ERR_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
 
+/// Implements log errno.
 fn log_errno(prefix: &str, err: strate_net::syscalls::Error) {
     use core::fmt::Write;
     let mut buf = [0u8; 96];
@@ -113,6 +118,7 @@ fn log_errno(prefix: &str, err: strate_net::syscalls::Error) {
     }
 }
 
+/// Implements now instant.
 fn now_instant() -> Instant {
     match clock_gettime_ns() {
         Ok(ns) => Instant::from_micros((ns / NANOS_PER_MICRO) as i64),
@@ -120,6 +126,7 @@ fn now_instant() -> Instant {
     }
 }
 
+/// Implements sleep micros.
 fn sleep_micros(micros: u64) {
     if micros == 0 {
         return;
@@ -138,6 +145,7 @@ impl Device for Strat9NetDevice {
     type RxToken<'a> = Strat9RxToken;
     type TxToken<'a> = Strat9TxToken;
 
+    /// Implements receive.
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let mut buf = [0u8; MAX_FRAME_SIZE];
         match net_recv(&mut buf) {
@@ -158,10 +166,12 @@ impl Device for Strat9NetDevice {
         }
     }
 
+    /// Implements transmit.
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
         Some(Strat9TxToken)
     }
 
+    /// Implements capabilities.
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.max_transmission_unit = MAX_FRAME_SIZE;
@@ -255,6 +265,7 @@ fn ipv4_addr_to_str(addr: &Ipv4Address, buf: &mut [u8]) -> usize {
     w.pos
 }
 
+/// Implements u8 to str.
 fn u8_to_str(v: u8, buf: &mut [u8]) -> usize {
     use core::fmt::Write;
     let mut w = BufWriter { buf, pos: 0 };
@@ -262,6 +273,7 @@ fn u8_to_str(v: u8, buf: &mut [u8]) -> usize {
     w.pos
 }
 
+/// Implements mask from prefix.
 fn mask_from_prefix(prefix: u8) -> Ipv4Address {
     let mask: u32 = if prefix == 0 {
         0
@@ -274,6 +286,7 @@ fn mask_from_prefix(prefix: u8) -> Ipv4Address {
     Ipv4Address::new(b[0], b[1], b[2], b[3])
 }
 
+/// Implements broadcast from host prefix.
 fn broadcast_from_host_prefix(host: Ipv4Address, prefix: u8) -> Ipv4Address {
     let h = u32::from_be_bytes(host.octets());
     let m = u32::from_be_bytes(mask_from_prefix(prefix).octets());
@@ -282,6 +295,7 @@ fn broadcast_from_host_prefix(host: Ipv4Address, prefix: u8) -> Ipv4Address {
     Ipv4Address::new(o[0], o[1], o[2], o[3])
 }
 
+/// Implements route to str.
 fn route_to_str(gateway: &Ipv4Address, buf: &mut [u8]) -> usize {
     use core::fmt::Write;
     let mut w = BufWriter { buf, pos: 0 };
@@ -290,6 +304,7 @@ fn route_to_str(gateway: &Ipv4Address, buf: &mut [u8]) -> usize {
     w.pos
 }
 
+/// Implements dns list to str.
 fn dns_list_to_str(dns: &[Option<Ipv4Address>; 3], buf: &mut [u8]) -> usize {
     use core::fmt::Write;
     let mut w = BufWriter { buf, pos: 0 };
@@ -305,6 +320,7 @@ fn dns_list_to_str(dns: &[Option<Ipv4Address>; 3], buf: &mut [u8]) -> usize {
     w.pos
 }
 
+/// Parses ipv4 cidr.
 fn parse_ipv4_cidr(s: &str) -> Option<smoltcp::wire::Ipv4Cidr> {
     let slash = s.find('/')?;
     let ip = parse_ipv4(&s[..slash])?;
@@ -333,6 +349,7 @@ fn parse_ipv4_cidr(s: &str) -> Option<smoltcp::wire::Ipv4Cidr> {
 // CLOSE / generic OK reply (msg_type = 0x80):
 //   payload[0..4] = status : u32 LE (0 = OK)
 
+/// Implements reply open.
 fn reply_open(sender: u64, file_id: u64, size: u64, flags: u32) -> IpcMessage {
     let mut msg = IpcMessage::new(0x80);
     msg.sender = sender;
@@ -343,6 +360,7 @@ fn reply_open(sender: u64, file_id: u64, size: u64, flags: u32) -> IpcMessage {
     msg
 }
 
+/// Implements reply read.
 fn reply_read(sender: u64, data: &[u8]) -> IpcMessage {
     let mut msg = IpcMessage::new(0x80);
     msg.sender = sender;
@@ -354,6 +372,7 @@ fn reply_read(sender: u64, data: &[u8]) -> IpcMessage {
     msg
 }
 
+/// Implements reply write.
 fn reply_write(sender: u64, n: usize) -> IpcMessage {
     let mut msg = IpcMessage::new(0x80);
     msg.sender = sender;
@@ -362,6 +381,7 @@ fn reply_write(sender: u64, n: usize) -> IpcMessage {
     msg
 }
 
+/// Implements reply ok.
 fn reply_ok(sender: u64) -> IpcMessage {
     let mut msg = IpcMessage::new(0x80);
     msg.sender = sender;
@@ -369,6 +389,7 @@ fn reply_ok(sender: u64) -> IpcMessage {
     msg
 }
 
+/// Parses ipv4.
 fn parse_ipv4(s: &str) -> Option<Ipv4Address> {
     let mut octets = [0u8; 4];
     let mut idx = 0;
@@ -436,6 +457,7 @@ struct NetworkStrate {
 }
 
 impl NetworkStrate {
+    /// Creates a new instance.
     fn new(mac: [u8; 6]) -> Self {
         let mut device = Strat9NetDevice;
         let config = Config::new(EthernetAddress(mac).into());
@@ -481,6 +503,7 @@ impl NetworkStrate {
     // DHCP event processing
     // -----------------------------------------------------------------------
 
+    /// Implements process dhcp.
     fn process_dhcp(&mut self) {
         if !self.dhcp_enabled {
             return;
@@ -547,6 +570,7 @@ impl NetworkStrate {
         }
     }
 
+    /// Implements refresh dns servers.
     fn refresh_dns_servers(&mut self) {
         let mut servers = [IpAddress::Ipv4(Ipv4Address::new(0, 0, 0, 0)); 3];
         let mut count = 0usize;
@@ -570,6 +594,7 @@ impl NetworkStrate {
         socket.update_servers(&servers[..count]);
     }
 
+    /// Implements apply ipv4 config.
     fn apply_ipv4_config(
         &mut self,
         address: smoltcp::wire::Ipv4Cidr,
@@ -607,6 +632,7 @@ impl NetworkStrate {
         self.refresh_dns_servers();
     }
 
+    /// Implements resolve hostname blocking.
     fn resolve_hostname_blocking(&mut self, name: &str) -> core::result::Result<Ipv4Address, i32> {
         if let Some(ip) = parse_ipv4(name) {
             return Ok(ip);
@@ -661,6 +687,7 @@ impl NetworkStrate {
     // ICMP echo processing
     // -----------------------------------------------------------------------
 
+    /// Implements process icmp.
     fn process_icmp(&mut self) {
         let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
         if !socket.can_recv() {
@@ -694,6 +721,7 @@ impl NetworkStrate {
         }
     }
 
+    /// Implements send ping.
     fn send_ping(&mut self, target: Ipv4Address, seq: u16) -> bool {
         // One in-flight ping at a time, and don't overwrite unread replies.
         if self.pending_ping.is_some() || self.ping_reply.is_some() {
@@ -737,6 +765,7 @@ impl NetworkStrate {
     // VFS / IPC handlers
     // -----------------------------------------------------------------------
 
+    /// Implements handle open.
     fn handle_open(&mut self, msg: &IpcMessage) -> IpcMessage {
         let path_len = u16::from_le_bytes([msg.payload[4], msg.payload[5]]) as usize;
         if path_len > 42 {
@@ -816,6 +845,7 @@ impl NetworkStrate {
         }
     }
 
+    /// Implements handle tcp read.
     fn handle_tcp_read(&mut self, sender: u64, listener: TcpListenerState) -> IpcMessage {
         let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
         if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
@@ -837,6 +867,7 @@ impl NetworkStrate {
         IpcMessage::error_reply(sender, -11)
     }
 
+    /// Implements handle tcp write.
     fn handle_tcp_write(&mut self, sender: u64, listener: TcpListenerState, msg: &IpcMessage) -> IpcMessage {
         let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
         if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
@@ -857,6 +888,7 @@ impl NetworkStrate {
         }
     }
 
+    /// Implements handle read.
     fn handle_read(&mut self, msg: &IpcMessage) -> IpcMessage {
         let file_id = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap_or([0u8; 8]));
         let offset = u64::from_le_bytes(msg.payload[8..16].try_into().unwrap_or([0u8; 8]));
@@ -1026,6 +1058,7 @@ impl NetworkStrate {
         }
     }
 
+    /// Implements handle write.
     fn handle_write(&mut self, msg: &IpcMessage) -> IpcMessage {
         let file_id = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap_or([0u8; 8]));
 
@@ -1215,6 +1248,7 @@ impl NetworkStrate {
         IpcMessage::error_reply(msg.sender, -1) // EPERM
     }
 
+    /// Implements handle close.
     fn handle_close(&mut self, msg: &IpcMessage) -> IpcMessage {
         let file_id = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap_or([0u8; 8]));
         self.open_handles.remove(&file_id);
@@ -1224,6 +1258,7 @@ impl NetworkStrate {
         reply_ok(msg.sender)
     }
 
+    /// Implements alloc fid.
     fn alloc_fid(&mut self) -> u64 {
         let id = self.next_fid;
         self.next_fid += 1;
@@ -1234,6 +1269,7 @@ impl NetworkStrate {
     // Main event loop
     // -----------------------------------------------------------------------
 
+    /// Implements serve.
     fn serve(&mut self, port: u64) -> ! {
         log("[strate-net] Starting DHCP...\n");
 
@@ -1281,11 +1317,13 @@ impl NetworkStrate {
     }
 }
 
+/// Implements log.
 fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     log("[strate-net] Starting network silo\n");
 
@@ -1320,6 +1358,7 @@ pub extern "C" fn _start() -> ! {
     strate.serve(port);
 }
 
+/// Implements log error code.
 fn log_error_code(e: strate_net::syscalls::Error) {
     use core::fmt::Write;
     let mut buf = [0u8; 32];

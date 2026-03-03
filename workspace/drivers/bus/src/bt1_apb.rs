@@ -23,6 +23,7 @@ pub struct Bt1Apb {
 }
 
 impl Bt1Apb {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -33,14 +34,17 @@ impl Bt1Apb {
         }
     }
 
+    /// Initializes nodev region.
     pub fn init_nodev_region(&mut self, base: usize, size: usize) {
         self.nodev_regs.init(base, size);
     }
 
+    /// Sets clock rate.
     pub fn set_clock_rate(&mut self, rate: u64) {
         self.clock_rate = rate;
     }
 
+    /// Performs the timeout cycles to us operation.
     pub fn timeout_cycles_to_us(&self, n: u32) -> u64 {
         if self.clock_rate == 0 {
             return 0;
@@ -48,6 +52,7 @@ impl Bt1Apb {
         (n as u64) * 1_000_000 / self.clock_rate
     }
 
+    /// Performs the timeout us to cycles operation.
     pub fn timeout_us_to_cycles(&self, timeout_us: u64) -> u32 {
         if self.clock_rate == 0 {
             return APB_EHB_TIMEOUT_MIN;
@@ -56,20 +61,24 @@ impl Bt1Apb {
         (n as u32).clamp(APB_EHB_TIMEOUT_MIN, APB_EHB_TIMEOUT_MAX)
     }
 
+    /// Returns timeout us.
     pub fn get_timeout_us(&self) -> u64 {
         let n = self.regs.read32(APB_EHB_TIMEOUT);
         self.timeout_cycles_to_us(n)
     }
 
+    /// Sets timeout us.
     pub fn set_timeout_us(&self, timeout_us: u64) {
         let n = self.timeout_us_to_cycles(timeout_us);
         self.regs.write32(APB_EHB_TIMEOUT, n);
     }
 
+    /// Reads fault address.
     pub fn read_fault_address(&self) -> u32 {
         self.regs.read32(APB_EHB_ADDR)
     }
 
+    /// Enables irq.
     pub fn enable_irq(&self) {
         self.regs.modify32(
             APB_EHB_ISR,
@@ -78,20 +87,25 @@ impl Bt1Apb {
         );
     }
 
+    /// Disables irq.
     pub fn disable_irq(&self) {
         self.regs.clear_bits32(APB_EHB_ISR, APB_EHB_ISR_MASK);
     }
 
+    /// Performs the clear pending operation.
     pub fn clear_pending(&self) {
         self.regs.clear_bits32(APB_EHB_ISR, APB_EHB_ISR_PENDING);
     }
 }
 
 impl BusDriver for Bt1Apb {
+    /// Performs the name operation.
     fn name(&self) -> &str { "bt1-apb" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x10);
         self.enable_irq();
@@ -99,12 +113,14 @@ impl BusDriver for Bt1Apb {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.disable_irq();
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
@@ -112,6 +128,7 @@ impl BusDriver for Bt1Apb {
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
@@ -120,10 +137,12 @@ impl BusDriver for Bt1Apb {
         Ok(())
     }
 
+    /// Performs the error count operation.
     fn error_count(&self) -> u64 {
         self.error_count.load(Ordering::Relaxed)
     }
 
+    /// Handles irq.
     fn handle_irq(&mut self) -> bool {
         let isr = self.regs.read32(APB_EHB_ISR);
         if isr & APB_EHB_ISR_PENDING == 0 {

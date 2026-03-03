@@ -31,12 +31,14 @@ alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size =
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
+/// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
     log("[ping] OOM\n");
     call::exit(12)
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(info: &PanicInfo) -> ! {
     log("[ping] PANIC: ");
     let msg = info.message();
@@ -60,16 +62,19 @@ fn panic(info: &PanicInfo) -> ! {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Implements log.
 fn log(msg: &str) {
     let _ = call::write(1, msg.as_bytes());
 }
 
+/// Implements log u32.
 fn log_u32(val: u32) {
     let mut buf = [0u8; 12];
     let s = u32_to_str(val, &mut buf);
     log(s);
 }
 
+/// Implements u32 to str.
 fn u32_to_str(mut val: u32, buf: &mut [u8; 12]) -> &str {
     if val == 0 {
         return "0";
@@ -88,6 +93,7 @@ struct BufWriter<'a> {
     pos: usize,
 }
 impl core::fmt::Write for BufWriter<'_> {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let bytes = s.as_bytes();
         let avail = self.buf.len().saturating_sub(self.pos);
@@ -98,12 +104,14 @@ impl core::fmt::Write for BufWriter<'_> {
     }
 }
 
+/// Implements clock ns.
 fn clock_ns() -> u64 {
     unsafe { strat9_syscall::syscall0(number::SYS_CLOCK_GETTIME) }
         .map(|v| v as u64)
         .unwrap_or(0)
 }
 
+/// Implements sleep ms.
 fn sleep_ms(ms: u64) {
     let req = TimeSpec {
         tv_sec: (ms / 1000) as i64,
@@ -134,6 +142,7 @@ fn scheme_write(path: &str, data: &[u8]) -> Result<usize, ()> {
     Ok(n)
 }
 
+/// Parses ipv4 literal.
 fn parse_ipv4_literal(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.is_empty() {
@@ -201,6 +210,7 @@ struct PingArgs {
     count: u32,
 }
 
+/// Parses args.
 fn parse_args() -> PingArgs {
     // In strat9-os, command-line args are not yet available via /proc or argc/argv.
     // For now, we hard-code a sensible default.  When the init passes arguments
@@ -257,6 +267,7 @@ struct PingReply {
 }
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     let args = parse_args();
     let raw_target = unsafe { core::str::from_utf8_unchecked(&args.target[..args.target_len]) };

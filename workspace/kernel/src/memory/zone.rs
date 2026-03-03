@@ -41,6 +41,7 @@ impl BuddyBitmap {
         }
     }
 
+    /// Returns whether empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.data.is_null() || self.num_bits == 0
@@ -60,6 +61,7 @@ impl BuddyBitmap {
         }
     }
 
+    /// Performs the test operation.
     #[inline]
     pub fn test(&self, idx: usize) -> bool {
         if idx >= self.num_bits || self.is_empty() {
@@ -70,6 +72,7 @@ impl BuddyBitmap {
         unsafe { (*self.data.add(byte_idx) & mask) != 0 }
     }
 
+    /// Performs the set operation.
     #[inline]
     pub fn set(&self, idx: usize) {
         debug_assert!(idx < self.num_bits);
@@ -80,6 +83,7 @@ impl BuddyBitmap {
         }
     }
 
+    /// Performs the clear operation.
     #[inline]
     pub fn clear(&self, idx: usize) {
         debug_assert!(idx < self.num_bits);

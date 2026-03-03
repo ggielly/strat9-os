@@ -1,6 +1,7 @@
 use crc32c::crc32c;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use xfs_rs::crc::*;
+/// Implements bench crc implementations.
 fn bench_crc_implementations(c: &mut Criterion) {
     let sizes = [64, 256, 512, 1024, 4096, 16384, 65536];
 
@@ -25,6 +26,7 @@ fn bench_crc_implementations(c: &mut Criterion) {
     group.finish();
 }
 
+/// Implements bench xfs structures.
 fn bench_xfs_structures(c: &mut Criterion) {
     let mut group = c.benchmark_group("XFS Structures");
 
@@ -49,6 +51,7 @@ fn bench_xfs_structures(c: &mut Criterion) {
 }
 
 #[cfg(feature = "std")]
+/// Implements bench runtime detection.
 fn bench_runtime_detection(c: &mut Criterion) {
     let data = vec![0x42u8; 4096];
 

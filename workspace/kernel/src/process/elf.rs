@@ -240,6 +240,7 @@ fn program_headers<'a>(
     })
 }
 
+/// Parses interp path.
 fn parse_interp_path<'a>(
     elf_data: &'a [u8],
     phdrs: &[Elf64Phdr],
@@ -269,6 +270,7 @@ fn parse_interp_path<'a>(
     Ok(Some(s))
 }
 
+/// Performs the find relocated phdr vaddr operation.
 fn find_relocated_phdr_vaddr(
     header: &Elf64Header,
     phdrs: &[Elf64Phdr],
@@ -300,6 +302,7 @@ fn find_relocated_phdr_vaddr(
     Err("Program headers are not covered by a PT_LOAD segment")
 }
 
+/// Reads elf from vfs.
 fn read_elf_from_vfs(path: &str) -> Result<Vec<u8>, &'static str> {
     const MAX_ELF_SIZE: usize = 64 * 1024 * 1024;
     let fd =
@@ -418,6 +421,7 @@ fn compute_load_bias_and_entry(
     Ok((load_bias, relocated_entry))
 }
 
+/// Performs the apply segment permissions operation.
 fn apply_segment_permissions(
     user_as: &AddressSpace,
     page_start: u64,
@@ -464,6 +468,7 @@ fn apply_segment_permissions(
     Ok(())
 }
 
+/// Reads user mapped bytes.
 fn read_user_mapped_bytes(
     user_as: &AddressSpace,
     mut vaddr: u64,
@@ -493,6 +498,7 @@ fn read_user_mapped_bytes(
     Ok(())
 }
 
+/// Writes user mapped bytes.
 fn write_user_mapped_bytes(
     user_as: &AddressSpace,
     mut vaddr: u64,
@@ -522,16 +528,19 @@ fn write_user_mapped_bytes(
     Ok(())
 }
 
+/// Reads user u64.
 fn read_user_u64(user_as: &AddressSpace, vaddr: u64) -> Result<u64, &'static str> {
     let mut raw = [0u8; 8];
     read_user_mapped_bytes(user_as, vaddr, &mut raw)?;
     Ok(u64::from_le_bytes(raw))
 }
 
+/// Writes user u64.
 fn write_user_u64(user_as: &AddressSpace, vaddr: u64, value: u64) -> Result<(), &'static str> {
     write_user_mapped_bytes(user_as, vaddr, &value.to_le_bytes())
 }
 
+/// Performs the apply relr relocations operation.
 fn apply_relr_relocations(
     user_as: &AddressSpace,
     load_bias: u64,
@@ -609,6 +618,7 @@ fn apply_relr_relocations(
     Ok(applied)
 }
 
+/// Performs the apply dynamic relocations operation.
 fn apply_dynamic_relocations(
     user_as: &AddressSpace,
     phdrs: &[Elf64Phdr],
@@ -1069,6 +1079,7 @@ pub fn load_and_run_elf(elf_data: &[u8], name: &'static str) -> Result<TaskId, &
     load_and_run_elf_with_caps(elf_data, name, &[])
 }
 
+/// Performs the load and run elf with caps operation.
 pub fn load_and_run_elf_with_caps(
     elf_data: &[u8],
     name: &'static str,
@@ -1099,6 +1110,7 @@ const AT_BASE: u64 = 7;
 const AT_ENTRY: u64 = 9;
 const AT_RANDOM: u64 = 25;
 
+/// Performs the push auxv operation.
 fn push_auxv(
     user_as: &AddressSpace,
     sp: &mut u64,
@@ -1110,6 +1122,7 @@ fn push_auxv(
     Ok(())
 }
 
+/// Performs the setup boot user stack operation.
 fn setup_boot_user_stack(
     user_as: &AddressSpace,
     name: &str,
@@ -1158,6 +1171,7 @@ fn setup_boot_user_stack(
     Ok(sp)
 }
 
+/// Performs the load elf task with caps operation.
 pub fn load_elf_task_with_caps(
     elf_data: &[u8],
     name: &'static str,
@@ -1456,6 +1470,7 @@ pub fn load_elf_image(
     })
 }
 
+/// Reads user mapped bytes pub.
 pub fn read_user_mapped_bytes_pub(
     user_as: &AddressSpace,
     vaddr: u64,
@@ -1464,6 +1479,7 @@ pub fn read_user_mapped_bytes_pub(
     read_user_mapped_bytes(user_as, vaddr, out)
 }
 
+/// Writes user mapped bytes pub.
 pub fn write_user_mapped_bytes_pub(
     user_as: &AddressSpace,
     vaddr: u64,
@@ -1472,6 +1488,7 @@ pub fn write_user_mapped_bytes_pub(
     write_user_mapped_bytes(user_as, vaddr, src)
 }
 
+/// Writes user u64 pub.
 pub fn write_user_u64_pub(
     user_as: &AddressSpace,
     vaddr: u64,

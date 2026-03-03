@@ -9,14 +9,17 @@ use crate::{
 };
 use alloc::string::String;
 
+/// Parses class.
 fn parse_class(s: &str) -> Option<crate::process::sched::SchedClassId> {
     crate::process::sched::SchedClassId::parse(s)
 }
 
+/// Parses kind.
 fn parse_kind(s: &str) -> Option<crate::process::sched::SchedPolicyKind> {
     crate::process::sched::SchedPolicyKind::parse(s)
 }
 
+/// Performs the print table operation.
 fn print_table(table: crate::process::sched::SchedClassTable) {
     let pick = table.pick_order();
     let steal = table.steal_order();
@@ -46,6 +49,7 @@ fn print_table(table: crate::process::sched::SchedClassTable) {
     }
 }
 
+/// Performs the print table kv operation.
 fn print_table_kv(table: crate::process::sched::SchedClassTable) {
     let pick = table.pick_order();
     let steal = table.steal_order();
@@ -68,6 +72,7 @@ fn print_table_kv(table: crate::process::sched::SchedClassTable) {
     }
 }
 
+/// Performs the print metrics kv operation.
 fn print_metrics_kv(m: crate::process::SchedulerMetricsSnapshot) {
     shell_println!("scheduler.cpu_count={}", m.cpu_count);
     for i in 0..m.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS) {
@@ -86,6 +91,7 @@ fn print_metrics_kv(m: crate::process::SchedulerMetricsSnapshot) {
     }
 }
 
+/// Performs the wants kv operation.
 fn wants_kv(args: &[String], idx: usize) -> bool {
     args.get(idx).map(|s| s.as_str()) == Some("kv")
 }

@@ -128,6 +128,7 @@ impl MadtInfo {
     }
 }
 
+/// Parses madt.
 pub fn parse_madt() -> Option<MadtInfo> {
     let madt_ptr = super::find_table(MADT_SIGNATURE)? as *const MadtAcpiTable;
     let madt = unsafe { &*madt_ptr };

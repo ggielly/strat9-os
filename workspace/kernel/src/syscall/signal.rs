@@ -11,6 +11,7 @@ use crate::{
     },
 };
 
+/// Performs the sys sigaction operation.
 pub fn sys_sigaction(signum: u64, act_ptr: u64, oact_ptr: u64) -> Result<u64, SyscallError> {
     use core::mem;
 
@@ -65,6 +66,7 @@ struct SigActionRaw {
 }
 
 impl SigActionRaw {
+    /// Converts this to bytes.
     fn to_bytes(&self) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         bytes[0..8].copy_from_slice(&self.sa_handler.to_ne_bytes());
@@ -74,6 +76,7 @@ impl SigActionRaw {
         bytes
     }
 
+    /// Builds this from bytes.
     fn from_bytes(bytes: &[u8]) -> Self {
         Self {
             sa_handler: u64::from_ne_bytes(bytes[0..8].try_into().unwrap()),
@@ -145,6 +148,7 @@ struct SigStackRaw {
 }
 
 impl SigStackRaw {
+    /// Converts this to bytes.
     fn to_bytes(&self) -> [u8; 24] {
         let mut bytes = [0u8; 24];
         bytes[0..8].copy_from_slice(&self.ss_sp.to_ne_bytes());
@@ -154,6 +158,7 @@ impl SigStackRaw {
         bytes
     }
 
+    /// Builds this from bytes.
     fn from_bytes(bytes: &[u8]) -> Self {
         Self {
             ss_sp: u64::from_ne_bytes(bytes[0..8].try_into().unwrap()),
@@ -302,6 +307,7 @@ pub fn sys_kill(pid: i64, signum: u32) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Returns whether kill permission is available.
 fn has_kill_permission(
     sender: &alloc::sync::Arc<crate::process::Task>,
     target_id: TaskId,
@@ -322,6 +328,7 @@ fn has_kill_permission(
         || sender_euid == target_euid)
 }
 
+/// Performs the resolve kill targets operation.
 fn resolve_kill_targets(pid: i64) -> Result<alloc::vec::Vec<TaskId>, SyscallError> {
     use alloc::vec::Vec;
 
@@ -458,6 +465,7 @@ fn itimerval_from_bytes(bytes: &[u8]) -> crate::process::timer::ITimerVal {
     }
 }
 
+/// Performs the sys rt sigreturn operation.
 pub fn sys_rt_sigreturn(frame: &mut super::SyscallFrame) -> Result<u64, SyscallError> {
     use crate::process::signal::{SignalFrame, SIGNAL_FRAME_MAGIC};
 

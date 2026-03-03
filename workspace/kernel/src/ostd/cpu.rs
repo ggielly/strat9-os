@@ -66,18 +66,21 @@ impl CpuId {
 }
 
 impl From<usize> for CpuId {
+    /// Performs the from operation.
     fn from(id: usize) -> Self {
         Self::new(id)
     }
 }
 
 impl From<CpuId> for usize {
+    /// Performs the from operation.
     fn from(cpu_id: CpuId) -> Self {
         cpu_id.id
     }
 }
 
 impl core::fmt::Display for CpuId {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "CPU #{}", self.id)
     }
@@ -92,6 +95,7 @@ pub struct CpuIter {
 impl Iterator for CpuIter {
     type Item = CpuId;
 
+    /// Performs the next operation.
     fn next(&mut self) -> Option<Self::Item> {
         if self.current < self.end {
             let cpu = CpuId::new(self.current);

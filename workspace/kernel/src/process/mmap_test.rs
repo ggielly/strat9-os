@@ -15,10 +15,12 @@ const MAP_FIXED: u32 = 1 << 4;
 const MAP_ANONYMOUS: u32 = 1 << 5;
 const MAP_FIXED_NOREPLACE: u32 = 1 << 20;
 
+/// Returns whether err.
 fn is_err(res: &Result<u64, SyscallError>, code: SyscallError) -> bool {
     matches!(res, Err(e) if *e == code)
 }
 
+/// Performs the test flags validation operation.
 fn test_flags_validation() -> bool {
     // Missing MAP_PRIVATE/MAP_SHARED.
     let r1 = mmap::sys_mmap(0, 4096, PROT_RW, MAP_ANONYMOUS, 0, 0);
@@ -45,11 +47,13 @@ fn test_flags_validation() -> bool {
         && is_err(&r3, SyscallError::InvalidArgument)
 }
 
+/// Performs the test munmap overflow guard operation.
 fn test_munmap_overflow_guard() -> bool {
     let r = mmap::sys_munmap(TEST_MAP_ADDR, u64::MAX);
     is_err(&r, SyscallError::InvalidArgument)
 }
 
+/// Performs the test fixed noreplace operation.
 fn test_fixed_noreplace() -> bool {
     let base_flags = MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED;
     let r1 = mmap::sys_mmap(TEST_MAP_ADDR, 4096, PROT_RW, base_flags, 0, 0);
@@ -70,6 +74,7 @@ fn test_fixed_noreplace() -> bool {
     is_err(&r2, SyscallError::AlreadyExists)
 }
 
+/// Performs the test brk contract operation.
 fn test_brk_contract() -> bool {
     let cur = match mmap::sys_brk(0) {
         Ok(v) => v,
@@ -91,6 +96,7 @@ fn test_brk_contract() -> bool {
     shrink == Ok(cur)
 }
 
+/// Performs the test oom rollback operation.
 fn test_oom_rollback() -> bool {
     let aspace = crate::memory::kernel_address_space();
     let before = aspace.has_mapping_in_range(TEST_MAP_ADDR, 4096);
@@ -123,6 +129,7 @@ fn test_oom_rollback() -> bool {
     is_err(&r, SyscallError::OutOfMemory) && cleaned
 }
 
+/// Performs the mmap test main operation.
 extern "C" fn mmap_test_main() -> ! {
     crate::serial_println!("[mmap-test] start");
 
@@ -167,6 +174,7 @@ extern "C" fn mmap_test_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Creates mmap test task.
 pub fn create_mmap_test_task() {
     if let Ok(task) = Task::new_kernel_task(mmap_test_main, "mmap-test", TaskPriority::Normal) {
         add_task(task);

@@ -27,6 +27,7 @@ static SC_WAKE_RES_1: AtomicIsize = AtomicIsize::new(0);
 static SC_WAKE_RES_2: AtomicIsize = AtomicIsize::new(0);
 static SC_PHASE: AtomicI32 = AtomicI32::new(0);
 
+/// Performs the encode result operation.
 fn encode_result(res: Result<u64, SyscallError>) -> isize {
     match res {
         Ok(v) => v as isize,
@@ -34,6 +35,7 @@ fn encode_result(res: Result<u64, SyscallError>) -> isize {
     }
 }
 
+/// Performs the wait done operation.
 fn wait_done(target: u32) -> bool {
     for _ in 0..WAIT_LOOPS {
         if SC_DONE.load(Ordering::Acquire) >= target {
@@ -44,6 +46,7 @@ fn wait_done(target: u32) -> bool {
     false
 }
 
+/// Performs the reset scenario state operation.
 fn reset_scenario_state() {
     SC_DONE.store(0, Ordering::Release);
     SC_WAIT_RES_1.store(0, Ordering::Release);
@@ -53,6 +56,7 @@ fn reset_scenario_state() {
     SC_PHASE.store(0, Ordering::Release);
 }
 
+/// Performs the spawn task operation.
 fn spawn_task(entry: extern "C" fn() -> !, name: &'static str) -> bool {
     match Task::new_kernel_task(entry, name, TaskPriority::Normal) {
         Ok(t) => {
@@ -66,6 +70,7 @@ fn spawn_task(entry: extern "C" fn() -> !, name: &'static str) -> bool {
     }
 }
 
+/// Maps test pages.
 fn map_test_pages() -> bool {
     let aspace = crate::memory::kernel_address_space();
     let flags = VmaFlags {
@@ -107,6 +112,7 @@ fn map_test_pages() -> bool {
     true
 }
 
+/// Performs the waiter a 1 operation.
 extern "C" fn waiter_a_1() -> ! {
     SC_PHASE.fetch_add(1, Ordering::AcqRel);
     let addr = FUTEX_A_ADDR.load(Ordering::Acquire);
@@ -116,6 +122,7 @@ extern "C" fn waiter_a_1() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Performs the waiter a 2 operation.
 extern "C" fn waiter_a_2() -> ! {
     SC_PHASE.fetch_add(1, Ordering::AcqRel);
     let addr = FUTEX_A_ADDR.load(Ordering::Acquire);
@@ -125,6 +132,7 @@ extern "C" fn waiter_a_2() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Performs the waiter b 1 operation.
 extern "C" fn waiter_b_1() -> ! {
     SC_PHASE.fetch_add(1, Ordering::AcqRel);
     let addr = FUTEX_B_ADDR.load(Ordering::Acquire);
@@ -134,6 +142,7 @@ extern "C" fn waiter_b_1() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Performs the wake loop a operation.
 extern "C" fn wake_loop_a() -> ! {
     let addr = FUTEX_A_ADDR.load(Ordering::Acquire);
     let mut rv = 0isize;
@@ -149,6 +158,7 @@ extern "C" fn wake_loop_a() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Performs the run wait wake scenario operation.
 fn run_wait_wake_scenario() -> bool {
     reset_scenario_state();
     // SAFETY: Test pages are mapped and writable.
@@ -170,6 +180,7 @@ fn run_wait_wake_scenario() -> bool {
     wait_res == 0 && wake_res > 0
 }
 
+/// Performs the run cmp requeue scenario operation.
 fn run_cmp_requeue_scenario() -> bool {
     reset_scenario_state();
     let a = FUTEX_A_ADDR.load(Ordering::Acquire);
@@ -224,6 +235,7 @@ fn run_cmp_requeue_scenario() -> bool {
     w1 == 0 && w2 == 0 && cmp >= 1 && wb >= 1
 }
 
+/// Performs the run cmp requeue eagain scenario operation.
 fn run_cmp_requeue_eagain_scenario() -> bool {
     reset_scenario_state();
     let a = FUTEX_A_ADDR.load(Ordering::Acquire);
@@ -267,6 +279,7 @@ fn run_cmp_requeue_eagain_scenario() -> bool {
     expect_again && wake_a > 0 && w1 == 0
 }
 
+/// Performs the run wake op scenario operation.
 fn run_wake_op_scenario() -> bool {
     reset_scenario_state();
     let a = FUTEX_A_ADDR.load(Ordering::Acquire);
@@ -309,6 +322,7 @@ fn run_wake_op_scenario() -> bool {
     w1 == 0 && w2 == 0 && op >= 1 && b_val == 1
 }
 
+/// Performs the futex test main operation.
 extern "C" fn futex_test_main() -> ! {
     crate::serial_println!("[futex-test] start");
 

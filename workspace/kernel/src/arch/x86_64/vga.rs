@@ -55,6 +55,7 @@ pub struct RgbColor {
 }
 
 impl RgbColor {
+    /// Creates a new instance.
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
     }
@@ -87,6 +88,7 @@ pub struct TextOptions {
 }
 
 impl TextOptions {
+    /// Creates a new instance.
     pub const fn new(fg: RgbColor, bg: RgbColor) -> Self {
         Self {
             fg,
@@ -131,6 +133,7 @@ pub enum UiScale {
 }
 
 impl UiScale {
+    /// Performs the factor operation.
     pub const fn factor(self) -> usize {
         self as usize
     }
@@ -185,6 +188,7 @@ pub struct UiRect {
 }
 
 impl UiRect {
+    /// Creates a new instance.
     pub const fn new(x: usize, y: usize, w: usize, h: usize) -> Self {
         Self { x, y, w, h }
     }
@@ -204,20 +208,24 @@ pub struct UiDockLayout {
 }
 
 impl UiDockLayout {
+    /// Builds this from screen.
     pub fn from_screen() -> Self {
         Self {
             remaining: UiRect::new(0, 0, width(), height()),
         }
     }
 
+    /// Builds this from rect.
     pub const fn from_rect(rect: UiRect) -> Self {
         Self { remaining: rect }
     }
 
+    /// Performs the remaining operation.
     pub const fn remaining(&self) -> UiRect {
         self.remaining
     }
 
+    /// Performs the dock operation.
     pub fn dock(&mut self, edge: DockEdge, size: usize) -> UiRect {
         match edge {
             DockEdge::Top => {
@@ -310,6 +318,7 @@ pub struct TerminalWidget {
 }
 
 impl TerminalWidget {
+    /// Creates a new instance.
     pub fn new(rect: UiRect, max_lines: usize) -> Self {
         Self {
             rect,
@@ -322,15 +331,18 @@ impl TerminalWidget {
         }
     }
 
+    /// Performs the push line operation.
     pub fn push_line(&mut self, text: &str) {
         self.push_colored_line(text, self.fg);
     }
 
+    /// Performs the push ansi line operation.
     pub fn push_ansi_line(&mut self, text: &str) {
         let (fg, stripped) = parse_ansi_color_prefix(text, self.fg);
         self.push_colored_line(&stripped, fg);
     }
 
+    /// Performs the push colored line operation.
     fn push_colored_line(&mut self, text: &str, fg: RgbColor) {
         if self.lines.len() >= self.max_lines {
             self.lines.pop_front();
@@ -341,10 +353,12 @@ impl TerminalWidget {
         });
     }
 
+    /// Performs the clear operation.
     pub fn clear(&mut self) {
         self.lines.clear();
     }
 
+    /// Performs the draw operation.
     pub fn draw(&self) {
         let _ = with_writer(|w| {
             if self.rect.w < 8 || self.rect.h < 8 {
@@ -409,6 +423,7 @@ impl TerminalWidget {
     }
 }
 
+/// Parses ansi color prefix.
 fn parse_ansi_color_prefix(input: &str, default_fg: RgbColor) -> (RgbColor, String) {
     let bytes = input.as_bytes();
     if !bytes.starts_with(b"\x1b[") {
@@ -433,6 +448,7 @@ fn parse_ansi_color_prefix(input: &str, default_fg: RgbColor) -> (RgbColor, Stri
     (fg, String::from(rest))
 }
 
+/// Performs the color to rgb operation.
 #[inline]
 fn color_to_rgb(c: Color) -> (u8, u8, u8) {
     match c {
@@ -456,6 +472,7 @@ fn color_to_rgb(c: Color) -> (u8, u8, u8) {
 }
 
 impl From<Color> for RgbColor {
+    /// Performs the from operation.
     fn from(value: Color) -> Self {
         let (r, g, b) = color_to_rgb(value);
         Self::new(r, g, b)
@@ -496,7 +513,9 @@ pub struct FramebufferInfo {
 }
 
 impl PixelFormat {
+    /// Performs the pack rgb operation.
     fn pack_rgb(&self, r: u8, g: u8, b: u8) -> u32 {
+        /// Performs the scale operation.
         fn scale(v: u8, bits: u8) -> u32 {
             if bits == 0 {
                 0
@@ -530,6 +549,7 @@ struct ClipRect {
     h: usize,
 }
 
+/// Parses psf.
 fn parse_psf(font: &[u8]) -> Option<FontInfo> {
     // PSF1
     if font.len() >= 4 && font[0] == 0x36 && font[1] == 0x04 {
@@ -578,6 +598,7 @@ fn parse_psf(font: &[u8]) -> Option<FontInfo> {
     None
 }
 
+/// Performs the decode utf8 at operation.
 fn decode_utf8_at(bytes: &[u8], pos: usize) -> Option<(u32, usize)> {
     let b0 = *bytes.get(pos)?;
     if b0 < 0x80 {
@@ -616,6 +637,7 @@ fn decode_utf8_at(bytes: &[u8], pos: usize) -> Option<(u32, usize)> {
     None
 }
 
+/// Parses psf2 unicode map.
 fn parse_psf2_unicode_map(font: &[u8], info: &FontInfo) -> Vec<(u32, usize)> {
     let Some(mut i) = info.unicode_table_offset else {
         return Vec::new();
@@ -744,6 +766,7 @@ pub struct VgaWriter {
 unsafe impl Send for VgaWriter {}
 
 impl VgaWriter {
+    /// Creates a new instance.
     pub const fn new() -> Self {
         Self {
             enabled: false,
@@ -802,6 +825,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the configure operation.
     fn configure(
         &mut self,
         fb_addr: *mut u8,
@@ -857,12 +881,15 @@ impl VgaWriter {
         true
     }
 
+    /// Performs the pack color operation.
     #[inline]
     fn pack_color(&self, color: RgbColor) -> u32 {
         self.fmt.pack_rgb(color.r, color.g, color.b)
     }
 
+    /// Performs the unpack color operation.
     fn unpack_color(&self, value: u32) -> RgbColor {
+        /// Performs the unscale operation.
         fn unscale(v: u32, bits: u8) -> u8 {
             if bits == 0 {
                 return 0;
@@ -886,39 +913,48 @@ impl VgaWriter {
         RgbColor::new(r, g, b)
     }
 
+    /// Sets color.
     pub fn set_color(&mut self, fg: Color, bg: Color) {
         self.set_rgb_color(fg.into(), bg.into());
     }
 
+    /// Sets rgb color.
     pub fn set_rgb_color(&mut self, fg: RgbColor, bg: RgbColor) {
         self.fg = self.pack_color(fg);
         self.bg = self.pack_color(bg);
     }
 
+    /// Performs the text colors operation.
     pub fn text_colors(&self) -> (RgbColor, RgbColor) {
         (self.unpack_color(self.fg), self.unpack_color(self.bg))
     }
 
+    /// Performs the width operation.
     pub fn width(&self) -> usize {
         self.fb_width
     }
 
+    /// Performs the height operation.
     pub fn height(&self) -> usize {
         self.fb_height
     }
 
+    /// Performs the cols operation.
     pub fn cols(&self) -> usize {
         self.cols
     }
 
+    /// Performs the rows operation.
     pub fn rows(&self) -> usize {
         self.rows
     }
 
+    /// Performs the glyph size operation.
     pub fn glyph_size(&self) -> (usize, usize) {
         (self.font_info.glyph_w, self.font_info.glyph_h)
     }
 
+    /// Sets cursor cell.
     pub fn set_cursor_cell(&mut self, col: usize, row: usize) {
         if !self.enabled || self.cols == 0 || self.rows == 0 {
             return;
@@ -927,14 +963,17 @@ impl VgaWriter {
         self.row = core::cmp::min(row, self.rows - 1);
     }
 
+    /// Performs the text area height operation.
     fn text_area_height(&self) -> usize {
         self.fb_height.saturating_sub(self.status_bar_height)
     }
 
+    /// Performs the enabled operation.
     pub fn enabled(&self) -> bool {
         self.enabled
     }
 
+    /// Performs the framebuffer info operation.
     pub fn framebuffer_info(&self) -> FramebufferInfo {
         FramebufferInfo {
             available: self.enabled,
@@ -958,6 +997,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the in clip operation.
     #[inline]
     fn in_clip(&self, x: usize, y: usize) -> bool {
         x >= self.clip.x
@@ -966,6 +1006,7 @@ impl VgaWriter {
             && y < self.clip.y.saturating_add(self.clip.h)
     }
 
+    /// Performs the clipped rect operation.
     fn clipped_rect(
         &self,
         x: usize,
@@ -991,10 +1032,12 @@ impl VgaWriter {
         Some((sx, sy, ex - sx, ey - sy))
     }
 
+    /// Performs the clear dirty operation.
     fn clear_dirty(&mut self) {
         self.dirty_rect = None;
     }
 
+    /// Performs the mark dirty rect operation.
     fn mark_dirty_rect(&mut self, x: usize, y: usize, width: usize, height: usize) {
         if !self.track_dirty {
             return;
@@ -1025,6 +1068,7 @@ impl VgaWriter {
         });
     }
 
+    /// Sets clip rect.
     pub fn set_clip_rect(&mut self, x: usize, y: usize, width: usize, height: usize) {
         let x_end = core::cmp::min(x.saturating_add(width), self.fb_width);
         let y_end = core::cmp::min(y.saturating_add(height), self.fb_height);
@@ -1036,6 +1080,7 @@ impl VgaWriter {
         };
     }
 
+    /// Performs the reset clip rect operation.
     pub fn reset_clip_rect(&mut self) {
         self.clip = ClipRect {
             x: 0,
@@ -1045,10 +1090,12 @@ impl VgaWriter {
         };
     }
 
+    /// Performs the draw to back buffer operation.
     fn draw_to_back_buffer(&self) -> bool {
         self.draw_to_back && self.back_buffer.is_some()
     }
 
+    /// Enables double buffer.
     pub fn enable_double_buffer(&mut self) -> bool {
         if !self.enabled {
             return false;
@@ -1068,6 +1115,7 @@ impl VgaWriter {
         true
     }
 
+    /// Disables double buffer.
     pub fn disable_double_buffer(&mut self, present: bool) {
         if present {
             self.present();
@@ -1077,6 +1125,7 @@ impl VgaWriter {
         self.clear_dirty();
     }
 
+    /// Performs the present operation.
     pub fn present(&mut self) {
         if !self.enabled {
             return;
@@ -1137,6 +1186,7 @@ impl VgaWriter {
 
     // ── Mouse cursor ──────────────────────────────────────────────────────────
 
+    /// Performs the mc save hw operation.
     fn mc_save_hw(&mut self) {
         let x = self.mc_x;
         let y = self.mc_y;
@@ -1156,6 +1206,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the mc draw hw operation.
     fn mc_draw_hw(&mut self) {
         let x = self.mc_x;
         let y = self.mc_y;
@@ -1176,6 +1227,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the mc erase hw operation.
     fn mc_erase_hw(&mut self) {
         let x = self.mc_x;
         let y = self.mc_y;
@@ -1192,6 +1244,7 @@ impl VgaWriter {
         }
     }
 
+    /// Updates mouse cursor.
     pub fn update_mouse_cursor(&mut self, x: i32, y: i32) {
         if !self.enabled { return; }
         if self.mc_visible && self.mc_x == x && self.mc_y == y { return; }
@@ -1205,6 +1258,7 @@ impl VgaWriter {
         self.mc_visible = true;
     }
 
+    /// Performs the hide mouse cursor operation.
     pub fn hide_mouse_cursor(&mut self) {
         if self.mc_visible {
             self.mc_erase_hw();
@@ -1214,11 +1268,13 @@ impl VgaWriter {
 
     // ── Text selection ────────────────────────────────────────────────────────
 
+    /// Performs the sel normalized operation.
     fn sel_normalized(&self) -> (usize, usize, usize, usize) {
         let (sr, sc, er, ec) = (self.sel_start_row, self.sel_start_col, self.sel_end_row, self.sel_end_col);
         if sr < er || (sr == er && sc <= ec) { (sr, sc, er, ec) } else { (er, ec, sr, sc) }
     }
 
+    /// Performs the pixel to sb pos operation.
     pub fn pixel_to_sb_pos(&self, px: usize, py: usize) -> Option<(usize, usize)> {
         if !self.enabled { return None; }
         let gw = self.font_info.glyph_w;
@@ -1247,6 +1303,7 @@ impl VgaWriter {
         Some((view_start + vis_row, vis_col))
     }
 
+    /// Starts selection.
     pub fn start_selection(&mut self, px: usize, py: usize) {
         if let Some((row, col)) = self.pixel_to_sb_pos(px, py) {
             self.sel_start_row = row;
@@ -1258,6 +1315,7 @@ impl VgaWriter {
         }
     }
 
+    /// Updates selection.
     pub fn update_selection(&mut self, px: usize, py: usize) {
         if !self.sel_active { return; }
         if let Some((row, col)) = self.pixel_to_sb_pos(px, py) {
@@ -1268,6 +1326,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the end selection operation.
     pub fn end_selection(&mut self) {
         if !self.sel_active { return; }
         let (start_row, start_col, end_row, end_col) = self.sel_normalized();
@@ -1300,6 +1359,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the clear selection operation.
     pub fn clear_selection(&mut self) {
         if self.sel_active {
             self.sel_active = false;
@@ -1307,6 +1367,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the clear with operation.
     pub fn clear_with(&mut self, color: RgbColor) {
         if !self.enabled {
             return;
@@ -1321,10 +1382,12 @@ impl VgaWriter {
         self.row = 0;
     }
 
+    /// Performs the clear operation.
     pub fn clear(&mut self) {
         self.clear_with(self.unpack_color(self.bg));
     }
 
+    /// Performs the pixel offset operation.
     #[inline]
     fn pixel_offset(&self, x: usize, y: usize) -> Option<usize> {
         if x >= self.fb_width || y >= self.fb_height { return None; }
@@ -1334,6 +1397,7 @@ impl VgaWriter {
         row.checked_add(col)
     }
 
+    /// Writes hw pixel packed.
     fn write_hw_pixel_packed(&mut self, x: usize, y: usize, color: u32) {
         let Some(off) = self.pixel_offset(x, y) else {
             return;
@@ -1359,6 +1423,7 @@ impl VgaWriter {
         }
     }
 
+    /// Reads hw pixel packed.
     fn read_hw_pixel_packed(&self, x: usize, y: usize) -> u32 {
         let Some(off) = self.pixel_offset(x, y) else {
             return 0;
@@ -1377,6 +1442,7 @@ impl VgaWriter {
         }
     }
 
+    /// Reads pixel packed.
     fn read_pixel_packed(&self, x: usize, y: usize) -> u32 {
         if self.draw_to_back_buffer() {
             if let Some(buf) = self.back_buffer.as_ref() {
@@ -1386,6 +1452,7 @@ impl VgaWriter {
         self.read_hw_pixel_packed(x, y)
     }
 
+    /// Performs the put pixel raw operation.
     fn put_pixel_raw(&mut self, x: usize, y: usize, color: u32) {
         if !self.enabled || x >= self.fb_width || y >= self.fb_height || !self.in_clip(x, y) {
             return;
@@ -1400,10 +1467,12 @@ impl VgaWriter {
         self.write_hw_pixel_packed(x, y, color);
     }
 
+    /// Performs the draw pixel operation.
     pub fn draw_pixel(&mut self, x: usize, y: usize, color: RgbColor) {
         self.put_pixel_raw(x, y, self.pack_color(color));
     }
 
+    /// Performs the draw pixel alpha operation.
     pub fn draw_pixel_alpha(&mut self, x: usize, y: usize, color: RgbColor, alpha: u8) {
         if !self.enabled
             || alpha == 0
@@ -1428,6 +1497,7 @@ impl VgaWriter {
         self.put_pixel_raw(x, y, self.pack_color(blended));
     }
 
+    /// Performs the draw line operation.
     pub fn draw_line(&mut self, x0: isize, y0: isize, x1: isize, y1: isize, color: RgbColor) {
         let mut x = x0;
         let mut y = y0;
@@ -1457,6 +1527,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the draw rect operation.
     pub fn draw_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
         if width == 0 || height == 0 {
             return;
@@ -1469,6 +1540,7 @@ impl VgaWriter {
         self.draw_line(x as isize, y2 as isize, x2 as isize, y2 as isize, color);
     }
 
+    /// Performs the fill rect operation.
     pub fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
         let Some((sx, sy, sw, sh)) = self.clipped_rect(x, y, width, height) else {
             return;
@@ -1514,6 +1586,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the fill rect alpha operation.
     pub fn fill_rect_alpha(
         &mut self,
         x: usize,
@@ -1539,6 +1612,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the blit rgb operation.
     pub fn blit_rgb(
         &mut self,
         dst_x: usize,
@@ -1567,6 +1641,7 @@ impl VgaWriter {
         true
     }
 
+    /// Performs the blit rgb24 operation.
     pub fn blit_rgb24(
         &mut self,
         dst_x: usize,
@@ -1596,6 +1671,7 @@ impl VgaWriter {
         true
     }
 
+    /// Performs the blit rgba operation.
     pub fn blit_rgba(
         &mut self,
         dst_x: usize,
@@ -1646,6 +1722,7 @@ impl VgaWriter {
         true
     }
 
+    /// Performs the blit sprite rgba operation.
     pub fn blit_sprite_rgba(
         &mut self,
         dst_x: usize,
@@ -1663,6 +1740,7 @@ impl VgaWriter {
         )
     }
 
+    /// Performs the draw text at operation.
     pub fn draw_text_at(
         &mut self,
         pixel_x: usize,
@@ -1692,6 +1770,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the glyph index for char operation.
     fn glyph_index_for_char(&self, ch: char) -> usize {
         if ch.is_ascii() {
             let idx = ch as usize;
@@ -1712,6 +1791,7 @@ impl VgaWriter {
         0
     }
 
+    /// Performs the draw glyph index at pixel operation.
     fn draw_glyph_index_at_pixel(
         &mut self,
         pixel_x: usize,
@@ -1767,11 +1847,13 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the draw glyph at pixel operation.
     fn draw_glyph_at_pixel(&mut self, pixel_x: usize, pixel_y: usize, ch: char, fg: u32, bg: u32) {
         let glyph_index = self.glyph_index_for_char(ch);
         self.draw_glyph_index_at_pixel(pixel_x, pixel_y, glyph_index, fg, bg);
     }
 
+    /// Performs the layout text lines operation.
     fn layout_text_lines(&self, text: &str, wrap: bool, max_cols: Option<usize>) -> Vec<Vec<char>> {
         let mut lines: Vec<Vec<char>> = Vec::new();
         let mut current: Vec<char> = Vec::new();
@@ -1800,6 +1882,7 @@ impl VgaWriter {
         lines
     }
 
+    /// Performs the measure text operation.
     pub fn measure_text(&self, text: &str, max_width: Option<usize>, wrap: bool) -> TextMetrics {
         if !self.enabled {
             return TextMetrics {
@@ -1825,6 +1908,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the draw text operation.
     pub fn draw_text(
         &mut self,
         pixel_x: usize,
@@ -1878,6 +1962,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the draw strata stack operation.
     pub fn draw_strata_stack(
         &mut self,
         origin_x: usize,
@@ -1915,6 +2000,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the draw glyph operation.
     fn draw_glyph(&mut self, cx: usize, cy: usize, ch: char) {
         let glyph_index = self.glyph_index_for_char(ch);
         self.draw_glyph_index_at_pixel(
@@ -1926,6 +2012,7 @@ impl VgaWriter {
         );
     }
 
+    /// Performs the clear row operation.
     fn clear_row(&mut self, row: usize) {
         if !self.enabled {
             return;
@@ -1939,6 +2026,7 @@ impl VgaWriter {
         }
     }
 
+    /// Performs the scroll operation.
     fn scroll(&mut self) {
         if !self.enabled {
             return;
@@ -1973,6 +2061,7 @@ impl VgaWriter {
         self.row = self.rows - 1;
     }
 
+    /// Writes char.
     fn write_char(&mut self, c: char) {
         if !self.enabled {
             return;
@@ -2018,6 +2107,7 @@ impl VgaWriter {
         }
     }
 
+    /// Writes bytes.
     fn write_bytes(&mut self, s: &str) {
         // Skip basic ANSI escape sequences to avoid rendering control garbage.
         let mut chars = s.chars();
@@ -2357,6 +2447,7 @@ impl VgaWriter {
     }
 }
 
+/// Performs the normalize console char operation.
 fn normalize_console_char(ch: char) -> char {
     match ch {
         '\n' | '\r' | '\t' | '\u{8}' => ch,
@@ -2372,6 +2463,7 @@ fn normalize_console_char(ch: char) -> char {
 }
 
 impl fmt::Write for VgaWriter {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> fmt::Result {
         if self.enabled {
             self.write_bytes(s);
@@ -2384,11 +2476,13 @@ impl fmt::Write for VgaWriter {
 
 pub static VGA_WRITER: Mutex<VgaWriter> = Mutex::new(VgaWriter::new());
 
+/// Returns whether available.
 #[inline]
 pub fn is_available() -> bool {
     VGA_AVAILABLE.load(Ordering::Relaxed)
 }
 
+/// Performs the with writer operation.
 pub fn with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
     if !is_available() {
         return None;
@@ -2397,6 +2491,7 @@ pub fn with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
     Some(f(&mut writer))
 }
 
+/// Performs the status line info operation.
 fn status_line_info() -> StatusLineInfo {
     let mut guard = STATUS_LINE_INFO.lock();
     if guard.is_none() {
@@ -2411,6 +2506,7 @@ fn status_line_info() -> StatusLineInfo {
     })
 }
 
+/// Performs the format uptime from ticks operation.
 fn format_uptime_from_ticks(ticks: u64) -> String {
     let total_secs = ticks / 100;
     let h = total_secs / 3600;
@@ -2419,6 +2515,7 @@ fn format_uptime_from_ticks(ticks: u64) -> String {
     format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
+/// Performs the current fps operation.
 fn current_fps(tick: u64) -> u64 {
     let last_tick = FPS_LAST_TICK.load(Ordering::Relaxed);
     let frames = PRESENTED_FRAMES.load(Ordering::Relaxed);
@@ -2449,6 +2546,7 @@ fn current_fps(tick: u64) -> u64 {
     FPS_ESTIMATE.load(Ordering::Relaxed)
 }
 
+/// Performs the current ui scale operation.
 fn current_ui_scale() -> UiScale {
     match UI_SCALE.load(Ordering::Relaxed) {
         1 => UiScale::Compact,
@@ -2457,20 +2555,24 @@ fn current_ui_scale() -> UiScale {
     }
 }
 
+/// Performs the ui scale operation.
 pub fn ui_scale() -> UiScale {
     current_ui_scale()
 }
 
+/// Sets ui scale.
 pub fn set_ui_scale(scale: UiScale) {
     UI_SCALE.store(scale as u8, Ordering::Relaxed);
 }
 
+/// Performs the ui scale px operation.
 pub fn ui_scale_px(base: usize) -> usize {
     let factor = current_ui_scale().factor();
     let denom = UiScale::Normal.factor();
     base.saturating_mul(factor) / denom
 }
 
+/// Performs the format mem usage operation.
 fn format_mem_usage() -> String {
     let lock = crate::memory::buddy::get_allocator();
     let Some(guard) = lock.try_lock() else {
@@ -2488,6 +2590,7 @@ fn format_mem_usage() -> String {
     format!("{}/{}", format_size(free), format_size(total))
 }
 
+/// Performs the format size operation.
 fn format_size(bytes: usize) -> String {
     const KB: usize = 1024;
     const MB: usize = 1024 * KB;
@@ -2503,6 +2606,7 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
+/// Performs the draw status bar inner operation.
 fn draw_status_bar_inner(w: &mut VgaWriter, left: &str, right: &str, theme: UiTheme) {
     let saved_clip = w.clip;
     w.reset_clip_rect();
@@ -2536,6 +2640,7 @@ fn draw_status_bar_inner(w: &mut VgaWriter, left: &str, right: &str, theme: UiTh
     w.clip = saved_clip;
 }
 
+/// Performs the init operation.
 #[allow(clippy::too_many_arguments)]
 pub fn init(
     fb_addr: u64,
@@ -2629,6 +2734,7 @@ macro_rules! vga_println {
     ($($arg:tt)*) => ($crate::vga_print!("{}\n", format_args!($($arg)*)));
 }
 
+/// Performs the print operation.
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
@@ -2646,6 +2752,7 @@ pub struct Canvas {
 }
 
 impl Default for Canvas {
+    /// Builds a default instance.
     fn default() -> Self {
         Self {
             fg: RgbColor::LIGHT_GREY,
@@ -2655,59 +2762,73 @@ impl Default for Canvas {
 }
 
 impl Canvas {
+    /// Creates a new instance.
     pub const fn new(fg: RgbColor, bg: RgbColor) -> Self {
         Self { fg, bg }
     }
 
+    /// Sets fg.
     pub fn set_fg(&mut self, fg: RgbColor) {
         self.fg = fg;
     }
 
+    /// Sets bg.
     pub fn set_bg(&mut self, bg: RgbColor) {
         self.bg = bg;
     }
 
+    /// Sets colors.
     pub fn set_colors(&mut self, fg: RgbColor, bg: RgbColor) {
         self.fg = fg;
         self.bg = bg;
     }
 
+    /// Sets clip rect.
     pub fn set_clip_rect(&self, x: usize, y: usize, w: usize, h: usize) {
         set_clip_rect(x, y, w, h);
     }
 
+    /// Performs the reset clip rect operation.
     pub fn reset_clip_rect(&self) {
         reset_clip_rect();
     }
 
+    /// Performs the clear operation.
     pub fn clear(&self) {
         fill_rect(0, 0, width(), height(), self.bg);
     }
 
+    /// Performs the pixel operation.
     pub fn pixel(&self, x: usize, y: usize) {
         draw_pixel(x, y, self.fg);
     }
 
+    /// Performs the line operation.
     pub fn line(&self, x0: isize, y0: isize, x1: isize, y1: isize) {
         draw_line(x0, y0, x1, y1, self.fg);
     }
 
+    /// Performs the rect operation.
     pub fn rect(&self, x: usize, y: usize, w: usize, h: usize) {
         draw_rect(x, y, w, h, self.fg);
     }
 
+    /// Performs the fill rect operation.
     pub fn fill_rect(&self, x: usize, y: usize, w: usize, h: usize) {
         fill_rect(x, y, w, h, self.fg);
     }
 
+    /// Performs the fill rect alpha operation.
     pub fn fill_rect_alpha(&self, x: usize, y: usize, w: usize, h: usize, alpha: u8) {
         fill_rect_alpha(x, y, w, h, self.fg, alpha);
     }
 
+    /// Performs the text operation.
     pub fn text(&self, x: usize, y: usize, text: &str) {
         draw_text_at(x, y, text, self.fg, self.bg);
     }
 
+    /// Performs the text opts operation.
     pub fn text_opts(
         &self,
         x: usize,
@@ -2731,18 +2852,22 @@ impl Canvas {
         )
     }
 
+    /// Performs the measure text operation.
     pub fn measure_text(&self, text: &str, max_width: Option<usize>, wrap: bool) -> TextMetrics {
         measure_text(text, max_width, wrap)
     }
 
+    /// Performs the blit rgb operation.
     pub fn blit_rgb(&self, x: usize, y: usize, w: usize, h: usize, pixels: &[RgbColor]) -> bool {
         blit_rgb(x, y, w, h, pixels)
     }
 
+    /// Performs the blit rgb24 operation.
     pub fn blit_rgb24(&self, x: usize, y: usize, w: usize, h: usize, bytes: &[u8]) -> bool {
         blit_rgb24(x, y, w, h, bytes)
     }
 
+    /// Performs the blit rgba operation.
     pub fn blit_rgba(
         &self,
         x: usize,
@@ -2755,6 +2880,7 @@ impl Canvas {
         blit_rgba(x, y, w, h, bytes, global_alpha)
     }
 
+    /// Performs the blit sprite rgba operation.
     pub fn blit_sprite_rgba(
         &self,
         x: usize,
@@ -2765,18 +2891,22 @@ impl Canvas {
         blit_sprite_rgba(x, y, sprite, global_alpha)
     }
 
+    /// Performs the begin frame operation.
     pub fn begin_frame(&self) -> bool {
         begin_frame()
     }
 
+    /// Performs the end frame operation.
     pub fn end_frame(&self) {
         end_frame();
     }
 
+    /// Performs the ui clear operation.
     pub fn ui_clear(&self, theme: UiTheme) {
         ui_clear(theme);
     }
 
+    /// Performs the ui panel operation.
     pub fn ui_panel(
         &self,
         x: usize,
@@ -2790,31 +2920,38 @@ impl Canvas {
         ui_draw_panel(x, y, w, h, title, body, theme);
     }
 
+    /// Performs the ui status bar operation.
     pub fn ui_status_bar(&self, left: &str, right: &str, theme: UiTheme) {
         ui_draw_status_bar(left, right, theme);
     }
 
+    /// Performs the system status line operation.
     pub fn system_status_line(&self, theme: UiTheme) {
         draw_system_status_line(theme);
     }
 
+    /// Performs the layout screen operation.
     pub fn layout_screen(&self) -> UiDockLayout {
         UiDockLayout::from_screen()
     }
 
+    /// Performs the ui label operation.
     pub fn ui_label(&self, label: &UiLabel<'_>) {
         ui_draw_label(label);
     }
 
+    /// Performs the ui progress bar operation.
     pub fn ui_progress_bar(&self, bar: UiProgressBar) {
         ui_draw_progress_bar(bar);
     }
 
+    /// Performs the ui table operation.
     pub fn ui_table(&self, table: &UiTable) {
         ui_draw_table(table);
     }
 }
 
+/// Performs the width operation.
 pub fn width() -> usize {
     if !is_available() {
         return 0;
@@ -2822,6 +2959,7 @@ pub fn width() -> usize {
     VGA_WRITER.lock().width()
 }
 
+/// Performs the height operation.
 pub fn height() -> usize {
     if !is_available() {
         return 0;
@@ -2829,14 +2967,17 @@ pub fn height() -> usize {
     VGA_WRITER.lock().height()
 }
 
+/// Performs the screen size operation.
 pub fn screen_size() -> (usize, usize) {
     (width(), height())
 }
 
+/// Performs the ui layout screen operation.
 pub fn ui_layout_screen() -> UiDockLayout {
     UiDockLayout::from_screen()
 }
 
+/// Performs the glyph size operation.
 pub fn glyph_size() -> (usize, usize) {
     if !is_available() {
         return (0, 0);
@@ -2844,6 +2985,7 @@ pub fn glyph_size() -> (usize, usize) {
     VGA_WRITER.lock().glyph_size()
 }
 
+/// Performs the text cols operation.
 pub fn text_cols() -> usize {
     if !is_available() {
         return 0;
@@ -2851,6 +2993,7 @@ pub fn text_cols() -> usize {
     VGA_WRITER.lock().cols()
 }
 
+/// Performs the text rows operation.
 pub fn text_rows() -> usize {
     if !is_available() {
         return 0;
@@ -2858,6 +3001,7 @@ pub fn text_rows() -> usize {
     VGA_WRITER.lock().rows()
 }
 
+/// Returns text cursor.
 pub fn get_text_cursor() -> (usize, usize) {
     if !is_available() {
         return (0, 0);
@@ -2866,6 +3010,7 @@ pub fn get_text_cursor() -> (usize, usize) {
     (writer.col, writer.row)
 }
 
+/// Sets text cursor.
 pub fn set_text_cursor(col: usize, row: usize) {
     if !is_available() {
         return;
@@ -2873,14 +3018,17 @@ pub fn set_text_cursor(col: usize, row: usize) {
     VGA_WRITER.lock().set_cursor_cell(col, row);
 }
 
+/// Performs the double buffer mode operation.
 pub fn double_buffer_mode() -> bool {
     DOUBLE_BUFFER_MODE.load(Ordering::Relaxed)
 }
 
+/// Sets double buffer mode.
 pub fn set_double_buffer_mode(enabled: bool) {
     DOUBLE_BUFFER_MODE.store(enabled, Ordering::Relaxed);
 }
 
+/// Performs the draw text cursor operation.
 pub fn draw_text_cursor(color: RgbColor) {
     if !is_available() {
         return;
@@ -2900,6 +3048,7 @@ pub fn draw_text_cursor(color: RgbColor) {
     }
 }
 
+/// Performs the framebuffer info operation.
 pub fn framebuffer_info() -> FramebufferInfo {
     if !is_available() {
         return FramebufferInfo {
@@ -2926,6 +3075,7 @@ pub fn framebuffer_info() -> FramebufferInfo {
     VGA_WRITER.lock().framebuffer_info()
 }
 
+/// Sets text color.
 pub fn set_text_color(fg: RgbColor, bg: RgbColor) {
     if !is_available() {
         return;
@@ -2933,6 +3083,7 @@ pub fn set_text_color(fg: RgbColor, bg: RgbColor) {
     VGA_WRITER.lock().set_rgb_color(fg, bg);
 }
 
+/// Sets clip rect.
 pub fn set_clip_rect(x: usize, y: usize, width: usize, height: usize) {
     if !is_available() {
         return;
@@ -2940,6 +3091,7 @@ pub fn set_clip_rect(x: usize, y: usize, width: usize, height: usize) {
     VGA_WRITER.lock().set_clip_rect(x, y, width, height);
 }
 
+/// Performs the reset clip rect operation.
 pub fn reset_clip_rect() {
     if !is_available() {
         return;
@@ -2947,6 +3099,7 @@ pub fn reset_clip_rect() {
     VGA_WRITER.lock().reset_clip_rect();
 }
 
+/// Performs the begin frame operation.
 pub fn begin_frame() -> bool {
     if !is_available() {
         return false;
@@ -2957,6 +3110,7 @@ pub fn begin_frame() -> bool {
     VGA_WRITER.lock().enable_double_buffer()
 }
 
+/// Performs the end frame operation.
 pub fn end_frame() {
     if !is_available() {
         return;
@@ -2966,6 +3120,7 @@ pub fn end_frame() {
     writer.disable_double_buffer(false);
 }
 
+/// Performs the present operation.
 pub fn present() {
     if !is_available() {
         return;
@@ -2973,6 +3128,7 @@ pub fn present() {
     VGA_WRITER.lock().present();
 }
 
+/// Performs the draw pixel operation.
 pub fn draw_pixel(x: usize, y: usize, color: RgbColor) {
     if !is_available() {
         return;
@@ -2980,6 +3136,7 @@ pub fn draw_pixel(x: usize, y: usize, color: RgbColor) {
     VGA_WRITER.lock().draw_pixel(x, y, color);
 }
 
+/// Performs the draw pixel alpha operation.
 pub fn draw_pixel_alpha(x: usize, y: usize, color: RgbColor, alpha: u8) {
     if !is_available() {
         return;
@@ -2987,6 +3144,7 @@ pub fn draw_pixel_alpha(x: usize, y: usize, color: RgbColor, alpha: u8) {
     VGA_WRITER.lock().draw_pixel_alpha(x, y, color, alpha);
 }
 
+/// Performs the draw line operation.
 pub fn draw_line(x0: isize, y0: isize, x1: isize, y1: isize, color: RgbColor) {
     if !is_available() {
         return;
@@ -2994,6 +3152,7 @@ pub fn draw_line(x0: isize, y0: isize, x1: isize, y1: isize, color: RgbColor) {
     VGA_WRITER.lock().draw_line(x0, y0, x1, y1, color);
 }
 
+/// Performs the draw rect operation.
 pub fn draw_rect(x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
     if !is_available() {
         return;
@@ -3001,6 +3160,7 @@ pub fn draw_rect(x: usize, y: usize, width: usize, height: usize, color: RgbColo
     VGA_WRITER.lock().draw_rect(x, y, width, height, color);
 }
 
+/// Performs the fill rect operation.
 pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
     if !is_available() {
         return;
@@ -3008,6 +3168,7 @@ pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: RgbColo
     VGA_WRITER.lock().fill_rect(x, y, width, height, color);
 }
 
+/// Performs the fill rect alpha operation.
 pub fn fill_rect_alpha(
     x: usize,
     y: usize,
@@ -3024,6 +3185,7 @@ pub fn fill_rect_alpha(
         .fill_rect_alpha(x, y, width, height, color, alpha);
 }
 
+/// Performs the blit rgb operation.
 pub fn blit_rgb(
     dst_x: usize,
     dst_y: usize,
@@ -3039,6 +3201,7 @@ pub fn blit_rgb(
         .blit_rgb(dst_x, dst_y, src_width, src_height, pixels)
 }
 
+/// Performs the blit rgb24 operation.
 pub fn blit_rgb24(
     dst_x: usize,
     dst_y: usize,
@@ -3054,6 +3217,7 @@ pub fn blit_rgb24(
         .blit_rgb24(dst_x, dst_y, src_width, src_height, bytes)
 }
 
+/// Performs the blit rgba operation.
 pub fn blit_rgba(
     dst_x: usize,
     dst_y: usize,
@@ -3070,6 +3234,7 @@ pub fn blit_rgba(
         .blit_rgba(dst_x, dst_y, src_width, src_height, bytes, global_alpha)
 }
 
+/// Performs the blit sprite rgba operation.
 pub fn blit_sprite_rgba(
     dst_x: usize,
     dst_y: usize,
@@ -3084,6 +3249,7 @@ pub fn blit_sprite_rgba(
         .blit_sprite_rgba(dst_x, dst_y, sprite, global_alpha)
 }
 
+/// Performs the draw text at operation.
 pub fn draw_text_at(pixel_x: usize, pixel_y: usize, text: &str, fg: RgbColor, bg: RgbColor) {
     if !is_available() {
         return;
@@ -3093,6 +3259,7 @@ pub fn draw_text_at(pixel_x: usize, pixel_y: usize, text: &str, fg: RgbColor, bg
         .draw_text_at(pixel_x, pixel_y, text, fg, bg);
 }
 
+/// Performs the draw text operation.
 pub fn draw_text(pixel_x: usize, pixel_y: usize, text: &str, opts: TextOptions) -> TextMetrics {
     if !is_available() {
         return TextMetrics {
@@ -3104,6 +3271,7 @@ pub fn draw_text(pixel_x: usize, pixel_y: usize, text: &str, opts: TextOptions) 
     VGA_WRITER.lock().draw_text(pixel_x, pixel_y, text, opts)
 }
 
+/// Performs the measure text operation.
 pub fn measure_text(text: &str, max_width: Option<usize>, wrap: bool) -> TextMetrics {
     if !is_available() {
         return TextMetrics {
@@ -3115,10 +3283,12 @@ pub fn measure_text(text: &str, max_width: Option<usize>, wrap: bool) -> TextMet
     VGA_WRITER.lock().measure_text(text, max_width, wrap)
 }
 
+/// Performs the ui clear operation.
 pub fn ui_clear(theme: UiTheme) {
     let _ = with_writer(|w| w.clear_with(theme.background));
 }
 
+/// Performs the ui draw panel operation.
 pub fn ui_draw_panel(
     x: usize,
     y: usize,
@@ -3180,6 +3350,7 @@ pub fn ui_draw_panel(
     });
 }
 
+/// Performs the ui draw panel widget operation.
 pub fn ui_draw_panel_widget(panel: &UiPanel<'_>) {
     ui_draw_panel(
         panel.rect.x,
@@ -3192,6 +3363,7 @@ pub fn ui_draw_panel_widget(panel: &UiPanel<'_>) {
     );
 }
 
+/// Performs the ui draw label operation.
 pub fn ui_draw_label(label: &UiLabel<'_>) {
     let _ = with_writer(|w| {
         w.draw_text(
@@ -3209,6 +3381,7 @@ pub fn ui_draw_label(label: &UiLabel<'_>) {
     });
 }
 
+/// Performs the ui draw progress bar operation.
 pub fn ui_draw_progress_bar(bar: UiProgressBar) {
     let _ = with_writer(|w| {
         if bar.rect.w < 3 || bar.rect.h < 3 {
@@ -3231,6 +3404,7 @@ pub fn ui_draw_progress_bar(bar: UiProgressBar) {
     });
 }
 
+/// Performs the ui draw table operation.
 pub fn ui_draw_table(table: &UiTable) {
     let _ = with_writer(|w| {
         if table.rect.w < 8 || table.rect.h < 8 {
@@ -3311,12 +3485,14 @@ pub fn ui_draw_table(table: &UiTable) {
     });
 }
 
+/// Performs the ui draw status bar operation.
 pub fn ui_draw_status_bar(left: &str, right: &str, theme: UiTheme) {
     let _ = with_writer(|w| {
         draw_status_bar_inner(w, left, right, theme);
     });
 }
 
+/// Sets status hostname.
 pub fn set_status_hostname(hostname: &str) {
     let mut guard = STATUS_LINE_INFO.lock();
     if guard.is_none() {
@@ -3331,6 +3507,7 @@ pub fn set_status_hostname(hostname: &str) {
     }
 }
 
+/// Sets status ip.
 pub fn set_status_ip(ip: &str) {
     let mut guard = STATUS_LINE_INFO.lock();
     if guard.is_none() {
@@ -3345,6 +3522,7 @@ pub fn set_status_ip(ip: &str) {
     }
 }
 
+/// Performs the draw system status line operation.
 pub fn draw_system_status_line(theme: UiTheme) {
     let info = status_line_info();
     let version = env!("CARGO_PKG_VERSION");
@@ -3360,6 +3538,7 @@ pub fn draw_system_status_line(theme: UiTheme) {
     ui_draw_status_bar(&left, &right, theme);
 }
 
+/// Performs the draw boot status line operation.
 fn draw_boot_status_line(theme: UiTheme) {
     let _ = with_writer(|w| {
         draw_status_bar_inner(
@@ -3371,6 +3550,7 @@ fn draw_boot_status_line(theme: UiTheme) {
     });
 }
 
+/// Performs the refresh status ip from net scheme operation.
 fn refresh_status_ip_from_net_scheme() {
     let paths = ["/net/address", "/net/ip"];
     for path in paths {
@@ -3412,18 +3592,21 @@ struct StackStr<const N: usize> {
 }
 
 impl<const N: usize> StackStr<N> {
+    /// Creates a new instance.
     const fn new() -> Self {
         Self {
             buf: [0; N],
             len: 0,
         }
     }
+    /// Returns this as str.
     fn as_str(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
     }
 }
 
 impl<const N: usize> core::fmt::Write for StackStr<N> {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let bytes = s.as_bytes();
         let avail = N - self.len;
@@ -3434,6 +3617,7 @@ impl<const N: usize> core::fmt::Write for StackStr<N> {
     }
 }
 
+/// Performs the maybe refresh system status line operation.
 pub fn maybe_refresh_system_status_line(theme: UiTheme) {
     if !is_available() {
         return;
@@ -3531,6 +3715,7 @@ pub fn maybe_refresh_system_status_line(theme: UiTheme) {
     }
 }
 
+/// Performs the format size stack operation.
 fn format_size_stack(bytes: usize) -> StackStr<16> {
     use core::fmt::Write;
     const KB: usize = 1024;
@@ -3550,11 +3735,13 @@ fn format_size_stack(bytes: usize) -> StackStr<16> {
 }
 
 impl<const N: usize> core::fmt::Display for StackStr<N> {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
+/// Performs the status line task main operation.
 pub extern "C" fn status_line_task_main() -> ! {
     let mut last_tick = 0u64;
     let mut diag_counter = 0u64;
@@ -3576,6 +3763,7 @@ pub extern "C" fn status_line_task_main() -> ! {
     }
 }
 
+/// Performs the draw strata stack operation.
 pub fn draw_strata_stack(origin_x: usize, origin_y: usize, layer_w: usize, layer_h: usize) {
     if !is_available() {
         return;
@@ -3645,6 +3833,7 @@ pub fn scrollbar_hit_test(px_x: usize, px_y: usize) -> bool {
     }
 }
 
+/// Updates mouse cursor.
 pub fn update_mouse_cursor(x: i32, y: i32) {
     if !is_available() { return; }
     if let Some(mut w) = VGA_WRITER.try_lock() {
@@ -3652,6 +3841,7 @@ pub fn update_mouse_cursor(x: i32, y: i32) {
     }
 }
 
+/// Performs the hide mouse cursor operation.
 pub fn hide_mouse_cursor() {
     if !is_available() { return; }
     if let Some(mut w) = VGA_WRITER.try_lock() {
@@ -3659,6 +3849,7 @@ pub fn hide_mouse_cursor() {
     }
 }
 
+/// Starts selection.
 pub fn start_selection(px: usize, py: usize) {
     if !is_available() { return; }
     if let Some(mut w) = VGA_WRITER.try_lock() {
@@ -3666,6 +3857,7 @@ pub fn start_selection(px: usize, py: usize) {
     }
 }
 
+/// Updates selection.
 pub fn update_selection(px: usize, py: usize) {
     if !is_available() { return; }
     if let Some(mut w) = VGA_WRITER.try_lock() {
@@ -3673,6 +3865,7 @@ pub fn update_selection(px: usize, py: usize) {
     }
 }
 
+/// Performs the end selection operation.
 pub fn end_selection() {
     if !is_available() { return; }
     if let Some(mut w) = VGA_WRITER.try_lock() {
@@ -3680,6 +3873,7 @@ pub fn end_selection() {
     }
 }
 
+/// Performs the clear selection operation.
 pub fn clear_selection() {
     if !is_available() { return; }
     if let Some(mut w) = VGA_WRITER.try_lock() {
@@ -3687,6 +3881,7 @@ pub fn clear_selection() {
     }
 }
 
+/// Returns clipboard text.
 pub fn get_clipboard_text(buf: &mut [u8]) -> usize {
     if let Some(clip) = CLIPBOARD.try_lock() {
         let n = clip.1.min(buf.len());

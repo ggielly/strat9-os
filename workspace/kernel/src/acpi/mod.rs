@@ -159,6 +159,7 @@ pub fn init(rsdp_vaddr: u64) -> Result<bool, &'static str> {
     Ok(true)
 }
 
+/// Performs the validate checksum operation.
 fn validate_checksum(ptr: *const u8, len: usize) -> bool {
     let mut sum: u8 = 0;
     for i in 0..len {
@@ -167,6 +168,7 @@ fn validate_checksum(ptr: *const u8, len: usize) -> bool {
     sum == 0
 }
 
+/// Performs the discover tables operation.
 fn discover_tables(rsdp_vaddr: u64, revision: u8) -> Result<(), &'static str> {
     let rxsdt = rsdt::RsdtXsdt::from_rsdp(rsdp_vaddr, revision)
         .ok_or("ACPI: Failed to find RSDT/XSDT from RSDP")?;
@@ -221,6 +223,7 @@ fn discover_tables(rsdp_vaddr: u64, revision: u8) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Performs the validate sdt at phys operation.
 fn validate_sdt_at_phys(sdt_phys: u64) -> Result<([u8; 4], *const Sdt), &'static str> {
     // Map header first to read SDT length.
     memory::paging::ensure_identity_map_range(sdt_phys, core::mem::size_of::<Sdt>() as u64);

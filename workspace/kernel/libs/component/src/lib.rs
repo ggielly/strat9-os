@@ -59,6 +59,7 @@ pub enum ComponentInitError {
 }
 
 impl core::fmt::Display for ComponentInitError {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::UninitializedDependencies(dep) => {
@@ -128,6 +129,7 @@ pub struct ComponentInfo {
 }
 
 impl ComponentInfo {
+    /// Creates a new instance.
     pub fn new(name: &'static str, path: &'static str, priority: u32) -> Self {
         Self {
             name: String::from(name),
@@ -138,17 +140,20 @@ impl ComponentInfo {
 }
 
 impl PartialEq for ComponentInfo {
+    /// Performs the eq operation.
     fn eq(&self, o: &Self) -> bool {
         self.priority == o.priority
     }
 }
 impl Eq for ComponentInfo {}
 impl Ord for ComponentInfo {
+    /// Performs the cmp operation.
     fn cmp(&self, o: &Self) -> core::cmp::Ordering {
         self.priority.cmp(&o.priority)
     }
 }
 impl PartialOrd for ComponentInfo {
+    /// Performs the partial cmp operation.
     fn partial_cmp(&self, o: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(o))
     }

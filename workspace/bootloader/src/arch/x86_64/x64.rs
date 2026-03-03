@@ -8,6 +8,7 @@ const PAGE_ENTRIES: usize = 512;
 const PAGE_SIZE: usize = 4096;
 pub(crate) const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
+/// Performs the paging allocate operation.
 unsafe fn paging_allocate(os: &impl Os) -> Option<&'static mut [u64]> {
     unsafe {
         let ptr = os.alloc_zeroed_page_aligned(PAGE_SIZE);
@@ -29,6 +30,7 @@ const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
 const LARGE: u64 = 1 << 7;
 
+/// Performs the paging create operation.
 pub unsafe fn paging_create(os: &impl Os, kernel_phys: u64, kernel_size: u64) -> Option<usize> {
     unsafe {
         // Create PML4
@@ -92,6 +94,7 @@ pub unsafe fn paging_create(os: &impl Os, kernel_phys: u64, kernel_size: u64) ->
     }
 }
 
+/// Performs the paging framebuffer operation.
 pub unsafe fn paging_framebuffer(
     os: &impl Os,
     page_phys: usize,

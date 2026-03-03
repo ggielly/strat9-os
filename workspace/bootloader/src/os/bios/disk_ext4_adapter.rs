@@ -9,12 +9,14 @@ pub struct DiskExt4Adapter {
 }
 
 impl DiskExt4Adapter {
+    /// Creates a new instance.
     pub fn new(disk: DiskBios) -> Self {
         Self { inner: disk }
     }
 }
 
 impl BlockDevice for DiskExt4Adapter {
+    /// Reads at.
     fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize, FsError> {
         // DiskBios uses the redoxfs Disk trait which works with blocks
         // We need to adapt byte offsets to block offsets
@@ -36,17 +38,20 @@ impl BlockDevice for DiskExt4Adapter {
         }
     }
 
+    /// Writes at.
     fn write_at(&mut self, offset: u64, buffer: &[u8]) -> Result<usize, FsError> {
         // Write not supported in bootloader
         Err(FsError::ReadOnly)
     }
 
+    /// Performs the size operation.
     fn size(&mut self) -> Result<u64, FsError> {
         // DiskBios doesn't implement size, return a large value
         // This will be improved when we add proper disk geometry detection
         Ok(u64::MAX)
     }
 
+    /// Performs the sector size operation.
     fn sector_size(&self) -> usize {
         512 // Standard sector size for BIOS disks
     }

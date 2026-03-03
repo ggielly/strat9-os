@@ -100,6 +100,7 @@ unsafe impl Send for EhciController {}
 unsafe impl Sync for EhciController {}
 
 impl EhciController {
+    /// Creates a new instance.
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Arc<Self>, &'static str> {
         let bar = match pci_dev.read_bar(0) {
             Some(Bar::Memory32 { addr, .. }) => addr as u64,
@@ -131,6 +132,7 @@ impl EhciController {
         Ok(Arc::new(controller))
     }
 
+    /// Performs the init operation.
     fn init(&mut self) -> Result<(), &'static str> {
         unsafe {
             let op = &mut *self.op_regs;
@@ -171,6 +173,7 @@ impl EhciController {
         Ok(())
     }
 
+    /// Initializes schedules.
     unsafe fn init_schedules(&mut self) -> Result<(), &'static str> {
         // Allocate periodic list (4KB aligned, 1024 entries)
         let periodic_frame = allocate_dma_frame().ok_or("Failed to allocate periodic list")?;
@@ -194,20 +197,24 @@ impl EhciController {
         Ok(())
     }
 
+    /// Reads portsc.
     unsafe fn read_portsc(&self, port: usize) -> u32 {
         let portsc_ptr = core::ptr::addr_of!((*self.port_regs).portsc[port]) as *const u32;
         portsc_ptr.read_volatile()
     }
 
+    /// Writes portsc.
     unsafe fn write_portsc(&self, port: usize, val: u32) {
         let portsc_ptr = core::ptr::addr_of!((*self.port_regs).portsc[port]) as *mut u32;
         portsc_ptr.write_volatile(val);
     }
 
+    /// Performs the port count operation.
     pub fn port_count(&self) -> usize {
         self.max_ports
     }
 
+    /// Returns whether port connected.
     pub fn is_port_connected(&self, port: usize) -> bool {
         if port >= self.ports.len() {
             return false;
@@ -215,6 +222,7 @@ impl EhciController {
         self.ports[port].connected
     }
 
+    /// Returns port speed.
     pub fn get_port_speed(&self, port: usize) -> u8 {
         if port >= self.ports.len() {
             return 0;
@@ -226,6 +234,7 @@ impl EhciController {
 static EHCI_CONTROLLERS: Mutex<Vec<Arc<EhciController>>> = Mutex::new(Vec::new());
 static EHCI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[EHCI] Scanning for EHCI controllers...");
 
@@ -262,10 +271,12 @@ pub fn init() {
     log::info!("[EHCI] Found {} controller(s)", EHCI_CONTROLLERS.lock().len());
 }
 
+/// Returns controller.
 pub fn get_controller(index: usize) -> Option<Arc<EhciController>> {
     EHCI_CONTROLLERS.lock().get(index).cloned()
 }
 
+/// Returns whether available.
 pub fn is_available() -> bool {
     EHCI_INITIALIZED.load(Ordering::Relaxed)
 }

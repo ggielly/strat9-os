@@ -20,6 +20,7 @@ fn shell_sleep_ms(ms: u64) {
     }
 }
 
+/// Performs the build ping path operation.
 fn build_ping_path<'a>(buf: &'a mut [u8; 80], target: &str) -> &'a str {
     let prefix = b"/net/ping/";
     let tlen = target.len().min(buf.len() - prefix.len());
@@ -29,6 +30,7 @@ fn build_ping_path<'a>(buf: &'a mut [u8; 80], target: &str) -> &'a str {
     core::str::from_utf8(&buf[..total]).unwrap_or("/net/ping/0.0.0.0")
 }
 
+/// Performs the cmd ping operation.
 pub fn cmd_ping(args: &[String]) -> Result<(), ShellError> {
     let target = if args.is_empty() {
         match vfs::open("/net/gateway", OpenFlags::READ) {
@@ -145,6 +147,7 @@ pub fn cmd_ping(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Performs the cmd ifconfig operation.
 pub fn cmd_ifconfig(args: &[String]) -> Result<(), ShellError> {
     if !args.is_empty() {
         match args[0].as_str() {
@@ -261,6 +264,7 @@ pub fn cmd_ifconfig(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Writes path.
 fn write_path(path: &str, data: &[u8]) -> Result<(), ShellError> {
     let fd = vfs::open(path, OpenFlags::WRITE).map_err(|_| ShellError::ExecutionFailed)?;
     let res = vfs::write(fd, data).map(|_| ());
@@ -268,6 +272,7 @@ fn write_path(path: &str, data: &[u8]) -> Result<(), ShellError> {
     res.map_err(|_| ShellError::ExecutionFailed)
 }
 
+/// Performs the cmd net operation.
 pub fn cmd_net(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         shell_println!("Usage: net route <show|add|del|default> ...");

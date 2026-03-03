@@ -143,6 +143,7 @@ impl FsError {
 
 #[cfg(feature = "syscall")]
 impl From<FsError> for strat9_syscall::error::Error {
+    /// Implements from.
     fn from(e: FsError) -> Self {
         use strat9_syscall::error::Error as SE;
         match e {

@@ -35,6 +35,7 @@ pub struct BuddyAllocator {
 }
 
 impl BuddyAllocator {
+    /// Creates a new instance.
     pub const fn new() -> Self {
         BuddyAllocator {
             zones: [
@@ -46,6 +47,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the init operation.
     pub fn init(&mut self, memory_regions: &[MemoryRegion]) {
         #[cfg(debug_assertions)]
         debug_assert!(
@@ -85,6 +87,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the pass count operation.
     fn pass_count(&mut self, memory_regions: &[MemoryRegion]) {
         let mut min_base = [u64::MAX; ZoneType::COUNT];
         let mut max_end = [0u64; ZoneType::COUNT];
@@ -119,6 +122,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the pass steal and setup bitmaps operation.
     fn pass_steal_and_setup_bitmaps(&mut self, memory_regions: &[MemoryRegion]) {
         for zi in 0..ZoneType::COUNT {
             let zone_span = self.zones[zi].span_pages;
@@ -155,6 +159,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the pass populate operation.
     fn pass_populate(&mut self, memory_regions: &[MemoryRegion]) {
         for region in memory_regions {
             for zi in 0..ZoneType::COUNT {
@@ -182,6 +187,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the clear zone bitmaps operation.
     fn clear_zone_bitmaps(&mut self, zone_idx: usize) {
         let zone = &mut self.zones[zone_idx];
         zone.buddy_bitmaps = [BuddyBitmap::empty(); MAX_ORDER + 1];
@@ -191,6 +197,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the setup zone bitmaps operation.
     fn setup_zone_bitmaps(&mut self, zone_idx: usize, pool_start: u64, pool_end: u64) {
         let zone = &mut self.zones[zone_idx];
         let mut cursor = pool_start;
@@ -229,6 +236,7 @@ impl BuddyAllocator {
         debug_assert!(cursor <= pool_end);
     }
 
+    /// Performs the seed range as free operation.
     fn seed_range_as_free(&mut self, zone_idx: usize, start: u64, end: u64) {
         if start >= end {
             return;
@@ -251,6 +259,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Allocates from zone.
     fn alloc_from_zone(zone: &mut Zone, order: u8) -> Option<PhysFrame> {
         for cur_order in order..=MAX_ORDER as u8 {
             let Some(frame_phys) = Self::free_list_pop(zone, cur_order) else {
@@ -292,6 +301,7 @@ impl BuddyAllocator {
         None
     }
 
+    /// Releases to zone.
     fn free_to_zone(zone: &mut Zone, frame: PhysFrame, order: u8) {
         let frame_phys = frame.start_address.as_u64();
         let block_size = PAGE_SIZE << order;
@@ -349,6 +359,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the page index operation.
     #[inline]
     fn page_index(zone: &Zone, phys: u64) -> usize {
         debug_assert!(zone.span_pages > 0);
@@ -358,11 +369,13 @@ impl BuddyAllocator {
         ((phys - base) / PAGE_SIZE) as usize
     }
 
+    /// Performs the pair index operation.
     #[inline]
     fn pair_index(zone: &Zone, phys: u64, order: u8) -> usize {
         Self::page_index(zone, phys) >> (order as usize + 1)
     }
 
+    /// Performs the toggle pair operation.
     #[inline]
     fn toggle_pair(zone: &mut Zone, phys: u64, order: u8) -> bool {
         let bitmap = zone.buddy_bitmaps[order as usize];
@@ -374,6 +387,7 @@ impl BuddyAllocator {
         bitmap.toggle(idx)
     }
 
+    /// Performs the buddy phys operation.
     #[inline]
     fn buddy_phys(zone: &Zone, phys: u64, order: u8) -> Option<u64> {
         let base = zone.base.as_u64();
@@ -390,6 +404,7 @@ impl BuddyAllocator {
         Some(base + buddy_offset)
     }
 
+    /// Performs the mark allocated operation.
     #[cfg(debug_assertions)]
     fn mark_allocated(zone: &mut Zone, frame_phys: u64, order: u8, allocated: bool) {
         if zone.alloc_bitmap.is_empty() {
@@ -410,6 +425,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Releases list push.
     fn free_list_push(zone: &mut Zone, phys: u64, order: u8) {
         let head = zone.free_lists[order as usize];
         Self::write_free_prev(phys, 0);
@@ -420,6 +436,7 @@ impl BuddyAllocator {
         zone.free_lists[order as usize] = phys;
     }
 
+    /// Releases list pop.
     fn free_list_pop(zone: &mut Zone, order: u8) -> Option<u64> {
         let head = zone.free_lists[order as usize];
         if head == 0 {
@@ -435,6 +452,7 @@ impl BuddyAllocator {
         Some(head)
     }
 
+    /// Releases list remove.
     fn free_list_remove(zone: &mut Zone, phys: u64, order: u8) -> bool {
         let prev = Self::read_free_prev(phys);
         let next = Self::read_free_next(phys);
@@ -457,11 +475,13 @@ impl BuddyAllocator {
         true
     }
 
+    /// Reads free next.
     #[inline]
     fn read_free_next(phys: u64) -> u64 {
         unsafe { *(phys_to_virt(phys) as *const u64) }
     }
 
+    /// Writes free next.
     #[inline]
     fn write_free_next(phys: u64, next: u64) {
         unsafe {
@@ -469,11 +489,13 @@ impl BuddyAllocator {
         }
     }
 
+    /// Reads free prev.
     #[inline]
     fn read_free_prev(phys: u64) -> u64 {
         unsafe { *((phys_to_virt(phys) + 8) as *const u64) }
     }
 
+    /// Writes free prev.
     #[inline]
     fn write_free_prev(phys: u64, prev: u64) {
         unsafe {
@@ -481,6 +503,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the zone index for addr operation.
     fn zone_index_for_addr(addr: u64) -> usize {
         if addr < DMA_MAX {
             ZoneType::DMA as usize
@@ -491,6 +514,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the zone bounds operation.
     fn zone_bounds(zone_idx: usize) -> (u64, u64) {
         match zone_idx {
             x if x == ZoneType::DMA as usize => (0, DMA_MAX),
@@ -499,6 +523,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the zone intersection aligned operation.
     fn zone_intersection_aligned(region: &MemoryRegion, zone_idx: usize) -> Option<(u64, u64)> {
         if !matches!(region.kind, MemoryKind::Free) {
             return None;
@@ -524,6 +549,7 @@ impl BuddyAllocator {
         }
     }
 
+    /// Performs the steal contiguous pool operation.
     fn steal_contiguous_pool(
         &self,
         memory_regions: &[MemoryRegion],
@@ -560,6 +586,7 @@ impl BuddyAllocator {
         );
     }
 
+    /// Performs the protected overlap end operation.
     fn protected_overlap_end(start: u64, end: u64) -> Option<u64> {
         for (base, size) in Self::protected_module_ranges().into_iter().flatten() {
             if size == 0 {
@@ -575,6 +602,7 @@ impl BuddyAllocator {
         None
     }
 
+    /// Returns whether protected module page.
     fn is_protected_module_page(phys: u64) -> bool {
         let page = Self::align_down(phys, PAGE_SIZE);
         for (base, size) in Self::protected_module_ranges().into_iter().flatten() {
@@ -590,6 +618,7 @@ impl BuddyAllocator {
         false
     }
 
+    /// Performs the protected module ranges operation.
     fn protected_module_ranges() -> [Option<(u64, u64)>; 10] {
         [
             crate::boot::limine::fs_ext4_module(),
@@ -605,17 +634,20 @@ impl BuddyAllocator {
         ]
     }
 
+    /// Performs the pairs for order operation.
     #[inline]
     fn pairs_for_order(span_pages: usize, order: u8) -> usize {
         let pair_span = 1usize << (order as usize + 1);
         span_pages.div_ceil(pair_span)
     }
 
+    /// Performs the bits to bytes operation.
     #[inline]
     fn bits_to_bytes(bits: usize) -> usize {
         bits.div_ceil(8)
     }
 
+    /// Performs the bitmap bytes for span operation.
     fn bitmap_bytes_for_span(span_pages: usize) -> usize {
         let mut bytes = 0usize;
         for order in 0..=MAX_ORDER as u8 {
@@ -628,12 +660,14 @@ impl BuddyAllocator {
         bytes
     }
 
+    /// Performs the align up operation.
     #[inline]
     fn align_up(value: u64, align: u64) -> u64 {
         debug_assert!(align.is_power_of_two());
         (value + align - 1) & !(align - 1)
     }
 
+    /// Performs the align down operation.
     #[inline]
     fn align_down(value: u64, align: u64) -> u64 {
         debug_assert!(align.is_power_of_two());
@@ -642,6 +676,7 @@ impl BuddyAllocator {
 }
 
 impl FrameAllocator for BuddyAllocator {
+    /// Performs the alloc operation.
     fn alloc(&mut self, order: u8) -> Result<PhysFrame, AllocError> {
         if order > MAX_ORDER as u8 {
             return Err(AllocError::InvalidOrder);
@@ -660,6 +695,7 @@ impl FrameAllocator for BuddyAllocator {
         Err(AllocError::OutOfMemory)
     }
 
+    /// Performs the free operation.
     fn free(&mut self, frame: PhysFrame, order: u8) {
         let frame_phys = frame.start_address.as_u64();
         let zi = Self::zone_index_for_addr(frame_phys);
@@ -680,12 +716,14 @@ impl BuddyAllocator {
 
 static BUDDY_ALLOCATOR: SpinLock<Option<BuddyAllocator>> = SpinLock::new(None);
 
+/// Initializes buddy allocator.
 pub fn init_buddy_allocator(memory_regions: &[MemoryRegion]) {
     let mut allocator = BuddyAllocator::new();
     allocator.init(memory_regions);
     *BUDDY_ALLOCATOR.lock() = Some(allocator);
 }
 
+/// Returns allocator.
 pub fn get_allocator() -> &'static SpinLock<Option<BuddyAllocator>> {
     &BUDDY_ALLOCATOR
 }

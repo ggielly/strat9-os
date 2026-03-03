@@ -143,10 +143,12 @@ impl E1000Nic {
         }
     }
 
+    /// Performs the mac address operation.
     pub fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
 
+    /// Performs the link up operation.
     pub fn link_up(&self) -> bool {
         self.link_up
     }
@@ -161,6 +163,7 @@ impl E1000Nic {
         self.link_up
     }
 
+    /// Performs the receive operation.
     pub fn receive(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
         // Check link status first
         if !self.check_link() {
@@ -192,6 +195,7 @@ impl E1000Nic {
         Ok(len)
     }
 
+    /// Performs the transmit operation.
     pub fn transmit(&mut self, buf: &[u8], alloc: &dyn DmaAllocator) -> Result<(), NetError> {
         // Check link status first
         if !self.check_link() {
@@ -255,6 +259,7 @@ impl E1000Nic {
         }
     }
 
+    /// Handles interrupt.
     pub fn handle_interrupt(&self) {
         // Read and clear interrupt causes
         // SAFETY: MMIO access is safe during interrupt handling.

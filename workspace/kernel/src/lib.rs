@@ -65,6 +65,7 @@ use core::panic::PanicInfo;
 const PAGE_SIZE: u64 = 4096;
 const MAX_BOOT_MMAP_REGIONS_WORK: usize = 1024;
 
+/// Performs the null region operation.
 const fn null_region() -> boot::entry::MemoryRegion {
     boot::entry::MemoryRegion {
         base: 0,
@@ -73,16 +74,19 @@ const fn null_region() -> boot::entry::MemoryRegion {
     }
 }
 
+/// Performs the align down operation.
 #[inline]
 const fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
 
+/// Performs the align up operation.
 #[inline]
 const fn align_up(value: u64, align: u64) -> u64 {
     (value + align - 1) & !(align - 1)
 }
 
+/// Performs the virt or phys to phys operation.
 #[inline]
 const fn virt_or_phys_to_phys(addr: u64, hhdm: u64) -> u64 {
     if hhdm != 0 && addr >= hhdm {
@@ -92,6 +96,7 @@ const fn virt_or_phys_to_phys(addr: u64, hhdm: u64) -> u64 {
     }
 }
 
+/// Performs the reserve range in map operation.
 fn reserve_range_in_map(
     map: &mut [boot::entry::MemoryRegion],
     len: &mut usize,
@@ -169,6 +174,7 @@ fn reserve_range_in_map(
     }
 }
 
+/// Performs the region kind for addr operation.
 #[cfg(feature = "selftest")]
 fn region_kind_for_addr(
     map: &[boot::entry::MemoryRegion],
@@ -192,6 +198,7 @@ fn panic_handler(info: &PanicInfo) -> ! {
     boot::panic::panic_handler(info)
 }
 
+/// Performs the register initfs module operation.
 fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
     let Some((base, size)) = module else {
         return;
@@ -225,6 +232,7 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
     }
 }
 
+/// Performs the register boot initfs modules operation.
 fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
     let boot_test_pid = if initfs_base != 0 && initfs_size != 0 {
         Some((initfs_base, initfs_size))
@@ -260,12 +268,14 @@ fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
     }
 }
 
+/// Performs the boot module slice operation.
 #[inline]
 fn boot_module_slice(base: u64, size: u64) -> &'static [u8] {
     let base_virt = memory::phys_to_virt(base);
     unsafe { core::slice::from_raw_parts(base_virt as *const u8, size as usize) }
 }
 
+/// Performs the log boot module magics operation.
 #[cfg(feature = "selftest")]
 fn log_boot_module_magics(stage: &str) {
     let modules = [
@@ -306,6 +316,7 @@ fn log_boot_module_magics(stage: &str) {
     }
 }
 
+/// Performs the log boot module magics operation.
 #[cfg(not(feature = "selftest"))]
 fn log_boot_module_magics(_stage: &str) {}
 

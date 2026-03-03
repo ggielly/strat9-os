@@ -63,6 +63,7 @@ pub struct RtcDateTime {
 }
 
 impl RtcDateTime {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             second: 0,
@@ -164,6 +165,7 @@ fn bcd_to_binary(bcd: u8) -> u8 {
     (bcd & 0x0F) + ((bcd / 16) * 10)
 }
 
+/// Performs the detect century register operation.
 fn detect_century_register(use_binary: bool) -> u8 {
     if let Some(fadt) = crate::acpi::get_fadt() {
         let reg = fadt.century;
@@ -207,6 +209,7 @@ fn read_rtc_time() -> RtcDateTime {
         status_b: u8,
     }
 
+    /// Reads raw once.
     fn read_raw_once(century_reg: u8) -> RawRtc {
         RawRtc {
             second: cmos_read(CMOS_REG_SECOND),

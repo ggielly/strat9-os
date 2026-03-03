@@ -57,6 +57,7 @@ fn bsd_prefix(driver_name: &str) -> &'static str {
 /// Counters per-prefix so that `em0`, `em1`, `vtnet0` are independent.
 static PREFIX_COUNTERS: RwLock<Vec<(String, usize)>> = RwLock::new(Vec::new());
 
+/// Performs the next index for operation.
 fn next_index_for(prefix: &str) -> usize {
     let mut counters = PREFIX_COUNTERS.write();
     for entry in counters.iter_mut() {
@@ -70,6 +71,7 @@ fn next_index_for(prefix: &str) -> usize {
     0
 }
 
+/// Performs the register device operation.
 pub fn register_device(device: Arc<dyn NetworkDevice>) -> String {
     let prefix = bsd_prefix(device.name());
     let idx = next_index_for(prefix);
@@ -94,6 +96,7 @@ pub fn register_device(device: Arc<dyn NetworkDevice>) -> String {
     iface
 }
 
+/// Returns device.
 pub fn get_device(name: &str) -> Option<Arc<dyn NetworkDevice>> {
     NET_DEVICES
         .read()
@@ -102,14 +105,17 @@ pub fn get_device(name: &str) -> Option<Arc<dyn NetworkDevice>> {
         .map(|e| e.device.clone())
 }
 
+/// Returns default device.
 pub fn get_default_device() -> Option<Arc<dyn NetworkDevice>> {
     NET_DEVICES.read().first().map(|e| e.device.clone())
 }
 
+/// Performs the list interfaces operation.
 pub fn list_interfaces() -> Vec<String> {
     NET_DEVICES.read().iter().map(|e| e.iface.clone()).collect()
 }
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[net] Scanning for network devices...");
     // Probe modern Intel first, then legacy fallback.

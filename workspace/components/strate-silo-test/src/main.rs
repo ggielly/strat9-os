@@ -36,30 +36,37 @@ static THREAD_CASE_B: ThreadCase = ThreadCase {
     spin_loops: 128,
 };
 
+/// Writes fd.
 fn write_fd(fd: usize, msg: &str) {
     let _ = call::write(fd, msg.as_bytes());
 }
 
+/// Implements log.
 fn log(msg: &str) {
     write_fd(1, msg);
 }
 
+/// Implements log err.
 fn log_err(msg: &str) {
     write_fd(2, msg);
 }
 
+/// Implements log nl.
 fn log_nl() {
     log("\n");
 }
 
+/// Implements log sep star.
 fn log_sep_star() {
     log("************************************************************\n");
 }
 
+/// Implements log sep eq.
 fn log_sep_eq() {
     log("============================================================\n");
 }
 
+/// Implements log section.
 fn log_section(title: &str) {
     log_sep_star();
     log("[init-test] ");
@@ -68,6 +75,7 @@ fn log_section(title: &str) {
     log_sep_eq();
 }
 
+/// Implements log u64.
 fn log_u64(mut value: u64) {
     let mut buf = [0u8; 21];
     if value == 0 {
@@ -86,6 +94,7 @@ fn log_u64(mut value: u64) {
     write_fd(1, s);
 }
 
+/// Implements log i64.
 fn log_i64(value: i64) {
     if value < 0 {
         write_fd(1, "-");
@@ -95,6 +104,7 @@ fn log_i64(value: i64) {
     }
 }
 
+/// Implements log hex u64.
 fn log_hex_u64(mut value: u64) {
     let mut buf = [0u8; 16];
     for i in (0..16).rev() {
@@ -111,6 +121,7 @@ fn log_hex_u64(mut value: u64) {
     write_fd(1, s);
 }
 
+/// Implements log result.
 fn log_result(label: &str, res: core::result::Result<usize, Error>) -> Option<usize> {
     log("[init-test] ");
     log(label);
@@ -136,6 +147,7 @@ fn log_result(label: &str, res: core::result::Result<usize, Error>) -> Option<us
     }
 }
 
+/// Implements decode wait status.
 fn decode_wait_status(status: i32) {
     let exit_code = ((status >> 8) & 0xff) as u8;
     let signal = (status & 0x7f) as u8;
@@ -150,6 +162,7 @@ fn decode_wait_status(status: i32) {
     log_nl();
 }
 
+/// Implements raw syscall.
 unsafe fn raw_syscall(nr: usize, a1: usize, a2: usize, a3: usize) -> usize {
     let mut ret = nr;
     unsafe {
@@ -167,6 +180,7 @@ unsafe fn raw_syscall(nr: usize, a1: usize, a2: usize, a3: usize) -> usize {
     ret
 }
 
+/// Implements log raw ret.
 fn log_raw_ret(label: &str, ret: usize) {
     log("[init-test] RAW ");
     log(label);
@@ -185,28 +199,34 @@ fn log_raw_ret(label: &str, ret: usize) {
     log_nl();
 }
 
+/// Implements cow addr.
 fn cow_addr() -> u64 {
     core::ptr::addr_of!(COW_SENTINEL) as u64
 }
 
+/// Implements cow read.
 fn cow_read() -> u64 {
     unsafe { core::ptr::read_volatile(core::ptr::addr_of!(COW_SENTINEL)) }
 }
 
+/// Implements cow write.
 fn cow_write(value: u64) {
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(COW_SENTINEL), value);
     }
 }
 
+/// Implements cow multi addr.
 fn cow_multi_addr() -> u64 {
     core::ptr::addr_of!(COW_MULTI) as u64
 }
 
+/// Implements cow multi read.
 fn cow_multi_read(offset: usize) -> u8 {
     unsafe { core::ptr::read_volatile((core::ptr::addr_of!(COW_MULTI) as *const u8).add(offset)) }
 }
 
+/// Implements cow multi write.
 fn cow_multi_write(offset: usize, value: u8) {
     unsafe {
         core::ptr::write_volatile(
@@ -216,6 +236,7 @@ fn cow_multi_write(offset: usize, value: u8) {
     }
 }
 
+/// Implements log cow multi page snapshot.
 fn log_cow_multi_page_snapshot(prefix: &str, page: usize) {
     let base = page * 4096;
     let a = cow_multi_read(base);
@@ -233,14 +254,17 @@ fn log_cow_multi_page_snapshot(prefix: &str, page: usize) {
     log_nl();
 }
 
+/// Implements exit process.
 fn exit_process(code: usize) -> ! {
     call::exit(code)
 }
 
+/// Implements stack top for.
 fn stack_top_for(buf: *mut u8, len: usize) -> usize {
     (buf as usize + len) & !0xFusize
 }
 
+/// Implements userspace thread entry.
 extern "C" fn userspace_thread_entry(arg0: usize) -> ! {
     let case = unsafe { &*(arg0 as *const ThreadCase) };
 
@@ -260,12 +284,14 @@ extern "C" fn userspace_thread_entry(arg0: usize) -> ! {
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_info: &PanicInfo) -> ! {
     log_err("[init-test] PANIC detected, exiting with code 222\n");
     exit_process(222)
 }
 
 #[no_mangle]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     log_nl();
     log_sep_eq();

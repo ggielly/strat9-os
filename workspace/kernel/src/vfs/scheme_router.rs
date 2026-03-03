@@ -41,6 +41,7 @@ pub struct SchemeRouter {
 }
 
 impl SchemeRouter {
+    /// Creates a new instance.
     const fn new() -> Self {
         Self {
             schemes: BTreeMap::new(),

@@ -204,6 +204,7 @@ impl IpcMessage {
 }
 
 impl core::fmt::Debug for IpcMessage {
+    /// Implements fmt.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("IpcMessage")
             .field("sender", &self.sender)

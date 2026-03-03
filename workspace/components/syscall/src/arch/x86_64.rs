@@ -38,12 +38,14 @@ pub struct IntRegisters {
 
 impl Deref for IntRegisters {
     type Target = [u8];
+    /// Implements deref.
     fn deref(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self as *const Self as *const u8, mem::size_of::<Self>()) }
     }
 }
 
 impl DerefMut for IntRegisters {
+    /// Implements deref mut.
     fn deref_mut(&mut self) -> &mut [u8] {
         unsafe { slice::from_raw_parts_mut(self as *mut Self as *mut u8, mem::size_of::<Self>()) }
     }
@@ -68,6 +70,7 @@ pub struct FloatRegisters {
 
 impl Deref for FloatRegisters {
     type Target = [u8];
+    /// Implements deref.
     fn deref(&self) -> &[u8] {
         unsafe {
             slice::from_raw_parts(
@@ -79,6 +82,7 @@ impl Deref for FloatRegisters {
 }
 
 impl DerefMut for FloatRegisters {
+    /// Implements deref mut.
     fn deref_mut(&mut self) -> &mut [u8] {
         unsafe {
             slice::from_raw_parts_mut(
@@ -97,6 +101,7 @@ pub struct EnvRegisters {
 }
 impl Deref for EnvRegisters {
     type Target = [u8];
+    /// Implements deref.
     fn deref(&self) -> &[u8] {
         unsafe {
             slice::from_raw_parts(
@@ -108,6 +113,7 @@ impl Deref for EnvRegisters {
 }
 
 impl DerefMut for EnvRegisters {
+    /// Implements deref mut.
     fn deref_mut(&mut self) -> &mut [u8] {
         unsafe {
             slice::from_raw_parts_mut(
@@ -127,6 +133,7 @@ pub struct Exception {
 }
 impl Deref for Exception {
     type Target = [u8];
+    /// Implements deref.
     fn deref(&self) -> &[u8] {
         unsafe {
             slice::from_raw_parts(
@@ -138,6 +145,7 @@ impl Deref for Exception {
 }
 
 impl DerefMut for Exception {
+    /// Implements deref mut.
     fn deref_mut(&mut self) -> &mut [u8] {
         unsafe {
             slice::from_raw_parts_mut(

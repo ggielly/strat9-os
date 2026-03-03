@@ -64,6 +64,7 @@ pub struct Ebi2CsConfig {
 }
 
 impl Ebi2CsConfig {
+    /// Converts this to slow reg.
     pub fn to_slow_reg(&self) -> u32 {
         (self.recovery_cycles << SLOW_RECOVERY_SHIFT)
             | (self.wr_hold_cycles << SLOW_WR_HOLD_SHIFT)
@@ -73,6 +74,7 @@ impl Ebi2CsConfig {
             | (self.rd_wait_cycles << SLOW_RD_WAIT_SHIFT)
     }
 
+    /// Converts this to fast reg.
     pub fn to_fast_reg(&self) -> u32 {
         let mut val = (self.rd_hold_cycles << FAST_RD_HOLD_SHIFT)
             | (self.adv_oe_recovery << FAST_ADV_OE_RECOVERY_SHIFT);
@@ -91,6 +93,7 @@ pub struct QcomEbi2 {
 }
 
 impl QcomEbi2 {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
@@ -100,12 +103,14 @@ impl QcomEbi2 {
         }
     }
 
+    /// Performs the configure cs operation.
     pub fn configure_cs(&mut self, cs: usize, config: Ebi2CsConfig) {
         if cs < NUM_CS {
             self.cs_configs[cs] = Some(config);
         }
     }
 
+    /// Performs the apply config operation.
     fn apply_config(&self) {
         self.regs.write32(EBI2_XMEM_CFG, 0);
 
@@ -121,16 +126,20 @@ impl QcomEbi2 {
         }
     }
 
+    /// Performs the add child operation.
     pub fn add_child(&mut self, child: BusChild) {
         self.children.push(child);
     }
 }
 
 impl BusDriver for QcomEbi2 {
+    /// Performs the name operation.
     fn name(&self) -> &str { "qcom-ebi2" }
 
+    /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] { COMPATIBLE }
 
+    /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x100);
         self.apply_config();
@@ -138,22 +147,26 @@ impl BusDriver for QcomEbi2 {
         Ok(())
     }
 
+    /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         self.power_state = PowerState::Off;
         Ok(())
     }
 
+    /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         Ok(self.regs.read32(offset))
     }
 
+    /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         if !self.regs.is_valid() { return Err(BusError::InitFailed); }
         self.regs.write32(offset, value);
         Ok(())
     }
 
+    /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
         self.children.clone()
     }

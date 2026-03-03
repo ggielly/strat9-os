@@ -36,6 +36,7 @@ pub fn parse(line: &str) -> Option<Command> {
 mod tests {
     use super::*;
 
+    /// Performs the test parse simple operation.
     #[test]
     fn test_parse_simple() {
         let cmd = parse("help").unwrap();
@@ -43,6 +44,7 @@ mod tests {
         assert_eq!(cmd.args.len(), 0);
     }
 
+    /// Performs the test parse with args operation.
     #[test]
     fn test_parse_with_args() {
         let cmd = parse("silo ls").unwrap();
@@ -51,6 +53,7 @@ mod tests {
         assert_eq!(cmd.args[0], "ls");
     }
 
+    /// Performs the test parse empty operation.
     #[test]
     fn test_parse_empty() {
         assert!(parse("").is_none());

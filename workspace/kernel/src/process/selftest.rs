@@ -8,6 +8,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+/// Performs the wait task exit operation.
 fn wait_task_exit(name: &'static str, timeout_ticks: u64) -> bool {
     let start = ticks();
     loop {
@@ -26,6 +27,7 @@ fn wait_task_exit(name: &'static str, timeout_ticks: u64) -> bool {
     }
 }
 
+/// Performs the wait until operation.
 fn wait_until(timeout_ticks: u64, mut cond: impl FnMut() -> bool) -> bool {
     let start = ticks();
     loop {
@@ -39,6 +41,7 @@ fn wait_until(timeout_ticks: u64, mut cond: impl FnMut() -> bool) -> bool {
     }
 }
 
+/// Reads initfs.
 fn read_initfs(path: &str) -> Option<Vec<u8>> {
     let fd = vfs::open(path, vfs::OpenFlags::READ).ok()?;
     let data = vfs::read_all(fd).ok();
@@ -46,6 +49,7 @@ fn read_initfs(path: &str) -> Option<Vec<u8>> {
     data
 }
 
+/// Performs the run strate lifecycle e2e operation.
 fn run_strate_lifecycle_e2e() -> bool {
     crate::serial_println!("[selftest][strate] start");
     let ram = match read_initfs("/initfs/strate-fs-ramfs") {
@@ -123,6 +127,7 @@ fn run_strate_lifecycle_e2e() -> bool {
     true
 }
 
+/// Performs the selftest orchestrator operation.
 extern "C" fn selftest_orchestrator() -> ! {
     crate::serial_println!("[selftest] orchestrator start");
 
@@ -165,6 +170,7 @@ extern "C" fn selftest_orchestrator() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
+/// Creates selftest tasks.
 pub fn create_selftest_tasks() {
     match Task::new_kernel_task(
         selftest_orchestrator,

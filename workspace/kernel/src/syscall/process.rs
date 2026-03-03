@@ -33,6 +33,7 @@ const THREAD_OFF_USER_CS: usize = offset_of!(ThreadUserContext, user_cs);
 const THREAD_OFF_USER_RFLAGS: usize = offset_of!(ThreadUserContext, user_rflags);
 const THREAD_OFF_USER_SS: usize = offset_of!(ThreadUserContext, user_ss);
 
+/// Performs the thread child start operation.
 extern "C" fn thread_child_start(ctx_ptr: u64) -> ! {
     // SAFETY: `ctx_ptr` is allocated with Box::into_raw in `build_user_thread_task`
     // and passed as immutable bootstrap data for this task only.
@@ -42,6 +43,7 @@ extern "C" fn thread_child_start(ctx_ptr: u64) -> ! {
     unsafe { thread_iret_from_ctx(&ctx as *const ThreadUserContext) }
 }
 
+/// Performs the thread iret from ctx operation.
 #[unsafe(naked)]
 unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
     core::arch::naked_asm!(
@@ -71,6 +73,7 @@ unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
     );
 }
 
+/// Performs the build user thread task operation.
 fn build_user_thread_task(
     parent: &Arc<Task>,
     bootstrap_ctx: Box<ThreadUserContext>,

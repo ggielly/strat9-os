@@ -39,6 +39,7 @@ pub struct McfgEntry {
 }
 
 impl McfgEntry {
+    /// Performs the bus count operation.
     pub fn bus_count(&self) -> u16 {
         (self.end_bus as u16).saturating_sub(self.start_bus as u16) + 1
     }
@@ -50,6 +51,7 @@ pub struct McfgInfo {
 }
 
 impl McfgInfo {
+    /// Performs the entry for segment operation.
     pub fn entry_for_segment(&self, segment_group: u16) -> Option<&McfgEntry> {
         self.entries
             .iter()
@@ -57,10 +59,12 @@ impl McfgInfo {
     }
 }
 
+/// Returns whether aligned 1m.
 fn is_aligned_1m(addr: u64) -> bool {
     (addr & ((1 << 20) - 1)) == 0
 }
 
+/// Performs the should skip entry operation.
 fn should_skip_entry(entry: &McfgEntry) -> bool {
     if entry.base_address == 0 {
         return true;
@@ -74,6 +78,7 @@ fn should_skip_entry(entry: &McfgEntry) -> bool {
     false
 }
 
+/// Performs the overlaps operation.
 fn overlaps(a: &McfgEntry, b: &McfgEntry) -> bool {
     if a.segment_group != b.segment_group {
         return false;
@@ -81,6 +86,7 @@ fn overlaps(a: &McfgEntry, b: &McfgEntry) -> bool {
     !(a.end_bus < b.start_bus || b.end_bus < a.start_bus)
 }
 
+/// Parses mcfg.
 pub fn parse_mcfg() -> Option<McfgInfo> {
     let mcfg_ptr = super::find_table(MCFG_SIGNATURE)? as *const Mcfg;
     let mcfg = unsafe { &*mcfg_ptr };

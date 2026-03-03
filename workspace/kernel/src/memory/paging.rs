@@ -24,6 +24,7 @@ pub struct BuddyFrameAllocator;
 // SAFETY: allocate_frame returns valid, unused, 4KiB-aligned physical frames
 // from the buddy allocator.
 unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
+    /// Performs the allocate frame operation.
     fn allocate_frame(&mut self) -> Option<X86PhysFrame<Size4KiB>> {
         let lock = crate::memory::get_allocator();
         let mut guard = lock.lock();
@@ -39,6 +40,7 @@ static mut PAGING_READY: bool = false;
 /// Physical address of the kernel's level-4 page table (set at init, never changes).
 static mut KERNEL_CR3: PhysAddr = PhysAddr::new_truncate(0);
 
+/// Returns whether initialized.
 pub fn is_initialized() -> bool {
     unsafe { *(&raw const PAGING_READY) }
 }

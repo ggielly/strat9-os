@@ -116,6 +116,7 @@ pub struct AllocPtr {
 impl AllocPtr {
     pub const SIZE: usize = 4;
 
+    /// Implements parse.
     pub fn parse(buffer: &[u8]) -> FsResult<Self> {
         if buffer.len() < Self::SIZE {
             return Err(FsError::BufferTooSmall);
@@ -125,6 +126,7 @@ impl AllocPtr {
         })
     }
 
+    /// Converts this value to bytes.
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         self.block.to_be_bytes()
     }
@@ -248,10 +250,12 @@ impl AllocBtreeBlock {
         buf
     }
 
+    /// Returns whether leaf.
     pub fn is_leaf(&self) -> bool {
         self.level == 0
     }
 
+    /// Implements header size.
     pub fn header_size(&self, is_v5: bool) -> usize {
         if is_v5 {
             Self::SIZE_V5

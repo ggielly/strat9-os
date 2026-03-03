@@ -13,6 +13,7 @@ pub enum NetError {
 }
 
 impl core::fmt::Display for NetError {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NoPacket => f.write_str("no packet available"),
@@ -31,10 +32,16 @@ impl core::fmt::Display for NetError {
 /// `SpinLock` and implement this trait with interior mutability.
 /// Future silo-hosted drivers expose the same interface via IPC.
 pub trait NetworkDevice: Send + Sync {
+    /// Performs the name operation.
     fn name(&self) -> &str;
+    /// Performs the receive operation.
     fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError>;
+    /// Performs the transmit operation.
     fn transmit(&self, buf: &[u8]) -> Result<(), NetError>;
+    /// Performs the mac address operation.
     fn mac_address(&self) -> [u8; 6];
+    /// Performs the link up operation.
     fn link_up(&self) -> bool;
+    /// Handles interrupt.
     fn handle_interrupt(&self) {}
 }

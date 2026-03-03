@@ -17,6 +17,7 @@ struct ReplyRegistry {
 }
 
 impl ReplyRegistry {
+    /// Creates a new instance.
     const fn new() -> Self {
         ReplyRegistry {
             slots: BTreeMap::new(),

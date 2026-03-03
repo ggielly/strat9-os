@@ -23,17 +23,20 @@ alloc_freelist::define_freelist_brk_allocator!(
 static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
+/// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
     let _ = call::debug_log(b"[strate-bus] OOM\n");
     call::exit(12);
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(_info: &PanicInfo) -> ! {
     let _ = call::debug_log(b"[strate-bus] PANIC\n");
     call::exit(255);
 }
 
+/// Implements u32 to ascii.
 fn u32_to_ascii(mut n: u32, buf: &mut [u8; 10]) -> &[u8] {
     if n == 0 {
         buf[9] = b'0';
@@ -48,6 +51,7 @@ fn u32_to_ascii(mut n: u32, buf: &mut [u8; 10]) -> &[u8] {
     &buf[pos..10]
 }
 
+/// Implements log probe counts.
 fn log_probe_counts(passed: u32, failed: u32) {
     let mut line = [0u8; 64];
     let prefix = b"[strate-bus] MMIO probe: passed=";
@@ -76,6 +80,7 @@ fn log_probe_counts(passed: u32, failed: u32) {
     let _ = call::debug_log(&line[..off]);
 }
 
+/// Reads file.
 fn read_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
     let fd = call::openat(0, path, 0x1, 0).ok()?;
     let mut out = alloc::vec::Vec::new();
@@ -91,6 +96,7 @@ fn read_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
     Some(out)
 }
 
+/// Parses probe mode from silo toml.
 fn parse_probe_mode_from_silo_toml(text: &str) -> Option<ProbeMode> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Section {
@@ -154,6 +160,7 @@ fn parse_probe_mode_from_silo_toml(text: &str) -> Option<ProbeMode> {
     None
 }
 
+/// Implements load probe mode.
 fn load_probe_mode() -> ProbeMode {
     let Some(data) = read_file("/initfs/silo.toml") else {
         return ProbeMode::Full;
@@ -164,6 +171,7 @@ fn load_probe_mode() -> ProbeMode {
     parse_probe_mode_from_silo_toml(text).unwrap_or(ProbeMode::Full)
 }
 
+/// Implements startup hardware test.
 fn startup_hardware_test(driver: &mut SimplePmBus) -> bool {
     if driver.compatible().is_empty() {
         return false;
@@ -175,6 +183,7 @@ fn startup_hardware_test(driver: &mut SimplePmBus) -> bool {
 }
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     let _ = call::debug_log(b"[strate-bus] Starting\n");
     let port = match call::ipc_create_port(0) {

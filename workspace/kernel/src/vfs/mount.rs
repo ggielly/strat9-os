@@ -22,6 +22,7 @@ pub struct MountTable {
 }
 
 impl MountTable {
+    /// Creates a new instance.
     pub fn new() -> Self {
         MountTable {
             mounts: Vec::new(),
@@ -139,6 +140,7 @@ pub struct Namespace {
 }
 
 impl Namespace {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Namespace {
             mounts: MountTable::new(),
@@ -155,20 +157,24 @@ impl Namespace {
         }
     }
 
+    /// Performs the mount operation.
     pub fn mount(&mut self, prefix: &str, scheme: DynScheme) -> Result<(), SyscallError> {
         self.mounts.mount(prefix, scheme)
     }
 
+    /// Performs the unmount operation.
     pub fn unmount(&mut self, prefix: &str) -> Result<(), SyscallError> {
         self.mounts.unmount(prefix)
     }
 
+    /// Performs the resolve operation.
     pub fn resolve(&self, path: &str) -> Result<(DynScheme, String), SyscallError> {
         self.mounts.resolve(path)
     }
 }
 
 impl Default for Namespace {
+    /// Builds a default instance.
     fn default() -> Self {
         Self::new()
     }

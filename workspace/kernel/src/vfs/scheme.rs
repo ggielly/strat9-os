@@ -187,6 +187,7 @@ pub struct IpcScheme {
 }
 
 impl IpcScheme {
+    /// Creates a new instance.
     pub fn new(port_id: PortId) -> Self {
         IpcScheme { port_id }
     }
@@ -241,6 +242,7 @@ impl IpcScheme {
         msg
     }
 
+    /// Performs the build readdir msg operation.
     fn build_readdir_msg(file_id: u64, cursor: u16) -> IpcMessage {
         const OPCODE_READDIR: u32 = 0x08;
         let mut msg = IpcMessage::new(OPCODE_READDIR);
@@ -249,6 +251,7 @@ impl IpcScheme {
         msg
     }
 
+    /// Parses status.
     fn parse_status(reply: &IpcMessage) -> Result<(), SyscallError> {
         if reply.msg_type != 0x80 {
             return Err(SyscallError::IoError);
@@ -299,6 +302,7 @@ impl IpcScheme {
 }
 
 impl Scheme for IpcScheme {
+    /// Performs the open operation.
     fn open(&self, path: &str, flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         let msg = Self::build_open_msg(path, flags)?;
         let reply = self.call(msg)?;
@@ -342,6 +346,7 @@ impl Scheme for IpcScheme {
         })
     }
 
+    /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         let msg = Self::build_read_msg(file_id, offset, buf.len() as u32);
         let reply = self.call(msg)?;
@@ -363,6 +368,7 @@ impl Scheme for IpcScheme {
         Ok(to_copy)
     }
 
+    /// Performs the write operation.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         let (msg, packed) = Self::build_write_msg(file_id, offset, buf);
         let reply = self.call(msg)?;
@@ -381,6 +387,7 @@ impl Scheme for IpcScheme {
         Ok(bytes_written.min(packed))
     }
 
+    /// Performs the close operation.
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
         let msg = Self::build_close_msg(file_id);
         let reply = self.call(msg)?;
@@ -390,16 +397,19 @@ impl Scheme for IpcScheme {
         Ok(())
     }
 
+    /// Creates file.
     fn create_file(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
         const OPCODE_CREATE_FILE: u32 = 0x05;
         self.handle_create_op(OPCODE_CREATE_FILE, path, mode)
     }
 
+    /// Creates directory.
     fn create_directory(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
         const OPCODE_CREATE_DIR: u32 = 0x06;
         self.handle_create_op(OPCODE_CREATE_DIR, path, mode)
     }
 
+    /// Performs the unlink operation.
     fn unlink(&self, path: &str) -> Result<(), SyscallError> {
         const OPCODE_UNLINK: u32 = 0x07;
         let mut msg = IpcMessage::new(OPCODE_UNLINK);
@@ -417,6 +427,7 @@ impl Scheme for IpcScheme {
         Ok(())
     }
 
+    /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         let mut cursor: u16 = 0;
         let mut entries = Vec::new();
@@ -481,6 +492,7 @@ impl Scheme for IpcScheme {
 }
 
 impl IpcScheme {
+    /// Handles create op.
     fn handle_create_op(
         &self,
         opcode: u32,
@@ -538,6 +550,7 @@ unsafe impl Send for KernelFile {}
 unsafe impl Sync for KernelFile {}
 
 impl KernelScheme {
+    /// Creates a new instance.
     pub fn new() -> Self {
         KernelScheme {
             files: SpinLock::new(BTreeMap::new()),
@@ -555,6 +568,7 @@ impl KernelScheme {
         self.by_id.lock().insert(id, String::from(path));
     }
 
+    /// Returns by id.
     fn get_by_id(&self, file_id: u64) -> Option<KernelFile> {
         let name = self.by_id.lock().get(&file_id)?.clone();
         self.files.lock().get(&name).cloned()
@@ -562,6 +576,7 @@ impl KernelScheme {
 }
 
 impl Scheme for KernelScheme {
+    /// Performs the open operation.
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         if path.is_empty() || path == "/" {
             return Ok(OpenResult {
@@ -580,6 +595,7 @@ impl Scheme for KernelScheme {
         })
     }
 
+    /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         if file_id == 0 {
             // Handle directory listing for root
@@ -619,19 +635,23 @@ impl Scheme for KernelScheme {
         Ok(to_copy)
     }
 
+    /// Performs the write operation.
     fn write(&self, _file_id: u64, _offset: u64, _buf: &[u8]) -> Result<usize, SyscallError> {
         Err(SyscallError::PermissionDenied) // Read-only
     }
 
+    /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(()) // No-op for kernel files
     }
 
+    /// Performs the size operation.
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
         let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
         Ok(file.len as u64)
     }
 
+    /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         if file_id == 0 {
             return Ok(finalize_pseudo_stat(FileStat {
@@ -656,6 +676,7 @@ impl Scheme for KernelScheme {
         }, DEV_SYSFS, 0))
     }
 
+    /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         if file_id != 0 {
             return Err(SyscallError::InvalidArgument);

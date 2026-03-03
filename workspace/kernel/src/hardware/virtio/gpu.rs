@@ -70,6 +70,7 @@ struct DirtyRect {
 }
 
 impl DirtyRect {
+    /// Performs the empty operation.
     const fn empty() -> Self {
         Self {
             valid: false,
@@ -81,6 +82,7 @@ impl DirtyRect {
         }
     }
 
+    /// Performs the include operation.
     fn include(&mut self, x: u32, y: u32, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -258,6 +260,7 @@ struct CmdTransferToHost2d {
 }
 
 impl VirtioGpu {
+    /// Creates a new instance.
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let bar = match pci_dev.read_bar(0) {
             Some(Bar::Memory64 { addr, .. }) => addr,
@@ -312,6 +315,7 @@ impl VirtioGpu {
         Ok(gpu)
     }
 
+    /// Initializes display.
     fn init_display(&mut self) -> Result<(), &'static str> {
         self.get_display_info()?;
 
@@ -379,6 +383,7 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// Returns display info.
     fn get_display_info(&mut self) -> Result<(), &'static str> {
         let cmd = CmdGetDisplayInfo {
             hdr: CtrlHeader {
@@ -405,6 +410,7 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// Performs the resource create 2d operation.
     fn resource_create_2d(
         &self,
         resource_id: u32,
@@ -431,6 +437,7 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// Performs the resource attach backing operation.
     fn resource_attach_backing(
         &self,
         resource_id: u32,
@@ -463,6 +470,7 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// Sets scanout.
     fn set_scanout(&self, scanout_id: u32, resource_id: u32) -> Result<(), &'static str> {
         let cmd = CmdSetScanout {
             hdr: CtrlHeader {
@@ -488,6 +496,7 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// Performs the transfer to host 2d operation.
     fn transfer_to_host_2d(
         &self,
         resource_id: u32,
@@ -521,6 +530,7 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// Performs the resource flush operation.
     fn resource_flush(
         &self,
         resource_id: u32,
@@ -553,10 +563,12 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// Performs the send command operation.
     fn send_command<T: Copy, R: Copy>(&self, cmd: &T) -> Result<R, &'static str> {
         self.send_command_with_payload::<T, R>(cmd, None)
     }
 
+    /// Performs the send command with payload operation.
     fn send_command_with_payload<T: Copy, R: Copy>(
         &self,
         cmd: &T,
@@ -661,6 +673,7 @@ impl VirtioGpu {
         Ok(response)
     }
 
+    /// Performs the copy to backing operation.
     fn copy_to_backing(
         &self,
         mut src: *const u8,
@@ -694,6 +707,7 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// Performs the present from linear operation.
     pub fn present_from_linear(
         &self,
         src: *const u8,
@@ -737,10 +751,12 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// Performs the info operation.
     pub fn info(&self) -> GpuInfo {
         self.info
     }
 
+    /// Performs the flush operation.
     pub fn flush(&self, x: u32, y: u32, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -760,6 +776,7 @@ impl VirtioGpu {
         let _ = self.resource_flush(1, x0, y0, w, h);
     }
 
+    /// Performs the flush now operation.
     pub fn flush_now(&self) {
         let (x0, y0, w, h) = {
             let mut dirty = self.dirty.lock();
@@ -779,6 +796,7 @@ impl VirtioGpu {
 }
 
 impl VirtioDevice {
+    /// Performs the reset operation.
     fn reset(&mut self) {
         unsafe {
             (self.mmio as *mut u32).write_volatile(0);
@@ -786,6 +804,7 @@ impl VirtioDevice {
         core::hint::spin_loop();
     }
 
+    /// Performs the add status operation.
     fn add_status(&mut self, status: u8) {
         unsafe {
             let current = ((self.mmio + 0x14) as *const u8).read_volatile();
@@ -793,10 +812,12 @@ impl VirtioDevice {
         }
     }
 
+    /// Reads status.
     fn read_status(&self) -> u8 {
         unsafe { ((self.mmio + 0x14) as *const u8).read_volatile() }
     }
 
+    /// Reads features.
     fn read_features(&self) -> u64 {
         unsafe {
             let lo = (self.mmio as *const u32).read_volatile() as u64;
@@ -805,6 +826,7 @@ impl VirtioDevice {
         }
     }
 
+    /// Writes features.
     fn write_features(&mut self, features: u64) {
         unsafe {
             (self.mmio as *mut u32).write_volatile((features & 0xFFFF_FFFF) as u32);
@@ -814,6 +836,7 @@ impl VirtioDevice {
 }
 
 impl Virtqueue {
+    /// Creates a new instance.
     fn new(device: &mut VirtioDevice, queue_idx: u16) -> Result<Self, &'static str> {
         unsafe {
             ((device.mmio + 0x16) as *mut u16).write_volatile(queue_idx);
@@ -893,6 +916,7 @@ impl Virtqueue {
         }
     }
 
+    /// Performs the pop desc operation.
     fn pop_desc(&mut self) -> Option<u16> {
         if self.free_len == 0 {
             None
@@ -902,6 +926,7 @@ impl Virtqueue {
         }
     }
 
+    /// Performs the push desc operation.
     fn push_desc(&mut self, idx: u16) {
         if self.free_len < self.free_stack.len() {
             self.free_stack[self.free_len] = idx;
@@ -913,6 +938,7 @@ impl Virtqueue {
 static GPU_INSTANCE: Once<Arc<VirtioGpu>> = Once::new();
 static GPU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Performs the init operation.
 pub fn init() {
     log::info!("[VirtIO-GPU] Scanning for VirtIO GPU devices...");
 
@@ -957,14 +983,17 @@ pub fn init() {
     log::info!("[VirtIO-GPU] No device found");
 }
 
+/// Returns gpu.
 pub fn get_gpu() -> Option<Arc<VirtioGpu>> {
     GPU_INSTANCE.get().cloned()
 }
 
+/// Returns whether available.
 pub fn is_available() -> bool {
     GPU_INITIALIZED.load(Ordering::Relaxed)
 }
 
+/// Returns framebuffer info.
 pub fn get_framebuffer_info() -> Option<GpuInfo> {
     GPU_INSTANCE.get().map(|gpu| gpu.info())
 }

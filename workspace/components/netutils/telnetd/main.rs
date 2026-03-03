@@ -17,12 +17,14 @@ alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size =
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
+/// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
     log("[telnetd] OOM\n");
     call::exit(12)
 }
 
 #[panic_handler]
+/// Implements panic.
 fn panic(info: &PanicInfo) -> ! {
     log("[telnetd] PANiK: ");
     let mut buf = [0u8; 256];
@@ -47,6 +49,7 @@ struct BufWriter<'a> {
 }
 
 impl core::fmt::Write for BufWriter<'_> {
+    /// Writes str.
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let bytes = s.as_bytes();
         let avail = self.buf.len().saturating_sub(self.pos);
@@ -57,10 +60,12 @@ impl core::fmt::Write for BufWriter<'_> {
     }
 }
 
+/// Implements log.
 fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
 
+/// Implements sleep ms.
 fn sleep_ms(ms: u64) {
     let req = TimeSpec {
         tv_sec: (ms / 1000) as i64,
@@ -71,6 +76,7 @@ fn sleep_ms(ms: u64) {
     };
 }
 
+/// Writes all.
 fn write_all(fd: usize, data: &[u8]) -> bool {
     let mut off = 0usize;
     while off < data.len() {
@@ -89,6 +95,7 @@ fn write_all(fd: usize, data: &[u8]) -> bool {
     true
 }
 
+/// Reads text file.
 fn read_text_file(path: &str, out: &mut [u8]) -> usize {
     let fd = match call::openat(0, path, 0x0, 0) {
         Ok(fd) => fd as usize,
@@ -99,6 +106,7 @@ fn read_text_file(path: &str, out: &mut [u8]) -> usize {
     n
 }
 
+/// Opens listener.
 fn open_listener() -> usize {
     loop {
         match call::openat(0, "/net/tcp/listen/23", 0x2, 0) {
@@ -121,6 +129,7 @@ struct TelnetSession {
 }
 
 impl TelnetSession {
+    /// Creates a new instance.
     const fn new() -> Self {
         Self {
             connected: false,
@@ -130,6 +139,7 @@ impl TelnetSession {
         }
     }
 
+    /// Implements reset.
     fn reset(&mut self) {
         self.connected = false;
         self.line_len = 0;
@@ -137,10 +147,12 @@ impl TelnetSession {
     }
 }
 
+/// Implements send prompt.
 fn send_prompt(fd: usize) {
     let _ = write_all(fd, b"\r\nstrat9> ");
 }
 
+/// Implements handle command.
 fn handle_command(fd: usize, line: &str) -> LineAction {
     let cmd = line.trim();
     if cmd.is_empty() {
@@ -216,6 +228,7 @@ fn handle_command(fd: usize, line: &str) -> LineAction {
     LineAction::Continue
 }
 
+/// Implements handle bytes.
 fn handle_bytes(fd: usize, session: &mut TelnetSession, bytes: &[u8]) -> LineAction {
     for &b in bytes {
         if session.iac_skip > 0 {
@@ -247,6 +260,7 @@ fn handle_bytes(fd: usize, session: &mut TelnetSession, bytes: &[u8]) -> LineAct
 }
 
 #[unsafe(no_mangle)]
+/// Implements start.
 pub extern "C" fn _start() -> ! {
     log("[telnetd] Starting telnet server on /net/tcp/listen/23\n");
     let mut fd = open_listener();

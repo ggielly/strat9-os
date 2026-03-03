@@ -26,12 +26,14 @@ impl DmaRegion {
         size: 0,
     };
 
+    /// Returns whether null.
     pub fn is_null(&self) -> bool {
         self.virt.is_null()
     }
 }
 
 pub trait DmaAllocator {
+    /// Allocates dma.
     fn alloc_dma(&self, size: usize) -> Result<DmaRegion, DmaAllocError>;
     /// # Safety
     ///

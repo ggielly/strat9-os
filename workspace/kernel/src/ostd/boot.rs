@@ -33,6 +33,7 @@ pub enum MemoryRegionType {
 }
 
 impl From<u32> for MemoryRegionType {
+    /// Performs the from operation.
     fn from(value: u32) -> Self {
         match value {
             0 => Self::Usable,
@@ -166,6 +167,7 @@ impl BootInfo {
 }
 
 impl fmt::Display for BootInfo {
+    /// Performs the fmt operation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Boot Information:")?;
         writeln!(f, "  HHDM Offset: 0x{:x}", self.hhdm_offset)?;

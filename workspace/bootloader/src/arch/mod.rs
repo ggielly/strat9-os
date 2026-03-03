@@ -7,6 +7,7 @@ pub mod x86_64;
 // Compatibility aliases for old code
 use x86_64 as x64;
 
+/// Performs the paging create operation.
 pub unsafe fn paging_create(os: &impl Os, kernel_phys: u64, kernel_size: u64) -> Option<usize> {
     unsafe {
         if crate::KERNEL_64BIT {
@@ -17,6 +18,7 @@ pub unsafe fn paging_create(os: &impl Os, kernel_phys: u64, kernel_size: u64) ->
     }
 }
 
+/// Performs the paging framebuffer operation.
 pub unsafe fn paging_framebuffer(
     os: &impl Os,
     page_phys: usize,

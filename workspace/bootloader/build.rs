@@ -3,6 +3,7 @@
 
 use std::{env, path::PathBuf, process::Command};
 
+/// Entry point for this component.
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

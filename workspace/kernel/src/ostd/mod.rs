@@ -53,6 +53,7 @@ pub mod early_print {
     pub struct EarlyWriter;
 
     impl Write for EarlyWriter {
+        /// Writes str.
         fn write_str(&mut self, s: &str) -> Result {
             // SAFETY: serial port is initialized early in boot and is a shared resource.
             // We accept potential race conditions during early boot for debug output.

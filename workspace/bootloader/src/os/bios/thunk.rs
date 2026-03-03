@@ -17,6 +17,7 @@ pub struct ThunkData {
 }
 
 impl ThunkData {
+    /// Creates a new instance.
     pub fn new() -> Self {
         Self {
             es: 0,
@@ -30,18 +31,21 @@ impl ThunkData {
         }
     }
 
+    /// Performs the save operation.
     pub unsafe fn save(&self) {
         unsafe {
             ptr::write((THUNK_STACK_ADDR - 64) as *mut ThunkData, *self);
         }
     }
 
+    /// Performs the load operation.
     pub unsafe fn load(&mut self) {
         unsafe {
             *self = ptr::read((THUNK_STACK_ADDR - 64) as *const ThunkData);
         }
     }
 
+    /// Performs the with operation.
     pub unsafe fn with(&mut self, f: extern "C" fn()) {
         unsafe {
             self.save();

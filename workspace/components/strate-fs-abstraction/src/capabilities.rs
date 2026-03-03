@@ -150,6 +150,7 @@ impl FsCapabilities {
 }
 
 impl Default for FsCapabilities {
+    /// Implements default.
     fn default() -> Self {
         Self::read_only_linux()
     }

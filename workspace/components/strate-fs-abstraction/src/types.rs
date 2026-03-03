@@ -81,6 +81,7 @@ impl VfsFileType {
 }
 
 impl Default for VfsFileType {
+    /// Implements default.
     fn default() -> Self {
         VfsFileType::Unknown
     }
@@ -130,6 +131,7 @@ impl VfsTimestamp {
 
 #[cfg(feature = "std")]
 impl From<SystemTime> for VfsTimestamp {
+    /// Implements from.
     fn from(time: SystemTime) -> Self {
         match time.duration_since(SystemTime::UNIX_EPOCH) {
             Ok(duration) => Self {
@@ -149,6 +151,7 @@ impl From<SystemTime> for VfsTimestamp {
 
 #[cfg(feature = "std")]
 impl From<VfsTimestamp> for SystemTime {
+    /// Implements from.
     fn from(ts: VfsTimestamp) -> Self {
         use std::time::Duration;
         if ts.secs >= 0 {
@@ -218,6 +221,7 @@ impl VfsFileInfo {
 }
 
 impl Default for VfsFileInfo {
+    /// Implements default.
     fn default() -> Self {
         Self {
             ino: 0,
@@ -312,6 +316,7 @@ pub struct VfsVolumeInfo {
 
 #[cfg(feature = "alloc")]
 impl Default for VfsVolumeInfo {
+    /// Implements default.
     fn default() -> Self {
         Self {
             total_bytes: 0,
