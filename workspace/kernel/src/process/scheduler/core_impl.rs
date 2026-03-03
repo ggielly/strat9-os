@@ -371,7 +371,7 @@ impl Scheduler {
     ///
     /// Returns `None` if there's nothing to switch to (same task selected,
     /// or no current task).
-    pub fn yield_cpu(&mut self, cpu_index: usize) -> Option<SwitchTarget> {
+    pub(super) fn yield_cpu(&mut self, cpu_index: usize) -> Option<SwitchTarget> {
         if cpu_index >= self.cpus.len() {
             return None;
         }
