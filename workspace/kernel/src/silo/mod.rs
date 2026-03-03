@@ -384,14 +384,18 @@ pub struct SiloConfig {
     pub caps_ptr: u64,
     pub caps_len: u64,
     pub flags: u64,
-    // Security Model Extensions
     pub sid: u32,
-    pub mode: u16, // Octal mode packed
+    pub mode: u16,
     pub family: u8,
+    /// CPU features that this silo requires (bitflags from `CpuFeatures`).
+    pub cpu_features_required: u64,
+    /// CPU features that this silo is allowed to use.
+    pub cpu_features_allowed: u64,
+    /// Effective XCR0 mask (computed from allowed features & host capabilities).
+    pub xcr0_mask: u64,
 }
 
 impl Default for SiloConfig {
-    /// Builds a default instance.
     fn default() -> Self {
         SiloConfig {
             mem_min: 0,
@@ -409,6 +413,9 @@ impl Default for SiloConfig {
             sid: 42,
             mode: 0,
             family: StrateFamily::USR as u8,
+            cpu_features_required: 0,
+            cpu_features_allowed: u64::MAX,
+            xcr0_mask: 0,
         }
     }
 }
@@ -450,7 +457,9 @@ pub struct Strat9ModuleHeader {
     pub relocation_table_offset: u64,
     pub key_id: [u8; 8],
     pub signature: [u8; 64],
-    pub reserved: [u8; 56],
+    /// CPU features required by this module (CpuFeatures bitflags). Header v2+.
+    pub cpu_features_required: u64,
+    pub reserved: [u8; 48],
 }
 
 impl core::fmt::Debug for Strat9ModuleHeader {
@@ -625,6 +634,9 @@ pub struct SiloDetailSnapshot {
     pub task_ids: Vec<u64>,
     pub unveil_rules: Vec<(String, u8)>,
     pub granted_caps_count: usize,
+    pub cpu_features_required: u64,
+    pub cpu_features_allowed: u64,
+    pub xcr0_mask: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -845,11 +857,26 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
     // SAFETY: We checked length, and we read unaligned from a byte slice.
     let header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Strat9ModuleHeader) };
 
-    if header.version != 1 {
+    if header.version != 1 && header.version != 2 {
         return Err(SyscallError::InvalidArgument);
     }
     if header.cpu_arch != 0 {
         return Err(SyscallError::InvalidArgument);
+    }
+
+    // Header v2+: validate that required CPU features are available on this host.
+    let req = unsafe { core::ptr::addr_of!(header.cpu_features_required).read_unaligned() };
+    if req != 0 {
+        let host = crate::arch::x86_64::cpuid::host();
+        let required = crate::arch::x86_64::cpuid::CpuFeatures::from_bits_truncate(req);
+        if !host.features.contains(required) {
+            log::warn!(
+                "[cmod] module requires CPU features {:#x} but host has {:#x}",
+                req,
+                host.features.bits()
+            );
+            return Err(SyscallError::InvalidArgument);
+        }
     }
 
     let data_len = data.len() as u64;
@@ -1216,6 +1243,13 @@ fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, Syscal
     }
 }
 
+/// Compute the effective XCR0 mask for a silo from its allowed CPU features.
+fn compute_silo_xcr0(config: &SiloConfig) -> u64 {
+    use crate::arch::x86_64::cpuid::{CpuFeatures, xcr0_for_features};
+    let allowed = CpuFeatures::from_bits_truncate(config.cpu_features_allowed);
+    xcr0_for_features(allowed)
+}
+
 /// Performs the kernel spawn strate operation.
 pub fn kernel_spawn_strate(
     elf_data: &[u8],
@@ -1249,17 +1283,20 @@ pub fn kernel_spawn_strate(
             return Err(SyscallError::AlreadyExists);
         }
 
+        let mut cfg = SiloConfig {
+            sid: id.sid,
+            mode: 0o000,
+            family: StrateFamily::USR as u8,
+            ..SiloConfig::default()
+        };
+        cfg.xcr0_mask = compute_silo_xcr0(&cfg);
+
         let silo = Silo {
             id,
             name: alloc::format!("silo-{}", id.sid),
             strate_label: Some(requested_label),
             state: SiloState::Ready,
-            config: SiloConfig {
-                sid: id.sid,
-                mode: 0o000, // Minimal mode for manual spawn
-                family: StrateFamily::USR as u8,
-                ..SiloConfig::default()
-            },
+            config: cfg,
             mode: OctalMode::from_octal(0),
             family: StrateFamily::USR,
             mem_usage_bytes: 0,
@@ -1318,6 +1355,7 @@ pub fn kernel_spawn_strate(
         let silo = mgr.get_mut(silo_id)?;
         silo.tasks.push(task_id);
         silo.state = SiloState::Running;
+        task.xcr0_mask.store(silo.config.xcr0_mask, core::sync::atomic::Ordering::Relaxed);
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
@@ -2015,6 +2053,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         };
         silo.tasks.push(task_id);
         silo.state = SiloState::Running;
+        task.xcr0_mask.store(silo.config.xcr0_mask, core::sync::atomic::Ordering::Relaxed);
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
@@ -2580,6 +2619,9 @@ pub fn silo_detail_snapshot(selector: &str) -> Result<SiloDetailSnapshot, Syscal
             })
             .collect(),
         granted_caps_count: s.granted_caps.len(),
+        cpu_features_required: s.config.cpu_features_required,
+        cpu_features_allowed: s.config.cpu_features_allowed,
+        xcr0_mask: s.config.xcr0_mask,
     })
 }
 
@@ -2695,9 +2737,22 @@ pub fn kernel_limit_silo(selector: &str, key: &str, value: u64) -> Result<u32, S
     match key {
         "mem_max" => silo.config.mem_max = value,
         "mem_min" => silo.config.mem_min = value,
-        "max_tasks" => silo.config.max_tasks = value as u32,
-        "cpu_shares" => silo.config.cpu_shares = value as u32,
+        "max_tasks" => {
+            if value > u32::MAX as u64 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            silo.config.max_tasks = value as u32;
+        }
+        "cpu_shares" => {
+            if value > u32::MAX as u64 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            silo.config.cpu_shares = value as u32;
+        }
         _ => return Err(SyscallError::InvalidArgument),
+    }
+    if silo.config.mem_max != 0 && silo.config.mem_min > silo.config.mem_max {
+        return Err(SyscallError::InvalidArgument);
     }
     crate::audit::log(
         crate::audit::AuditCategory::Security,
