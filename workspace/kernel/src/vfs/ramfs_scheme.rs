@@ -29,7 +29,7 @@ use crate::{
     sync::SpinLock,
     syscall::error::SyscallError,
     vfs::scheme::{
-        DT_DIR, DT_REG, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
+        DT_DIR, DT_LNK, DT_REG, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
     },
 };
 
@@ -41,10 +41,9 @@ const INO_FIRST: u64 = 2;
 // ─── Inode types ─────────────────────────────────────────────────────────────
 
 enum RamKind {
-    /// Regular file with byte-addressable content.
     File { data: Vec<u8> },
-    /// Directory with an ordered map of child names to inode numbers.
     Dir { children: BTreeMap<String, u64> },
+    Symlink { target: String },
 }
 
 struct RamInode {
@@ -63,6 +62,7 @@ impl RamInode {
         match &self.kind {
             RamKind::File { data } => data.len() as u64,
             RamKind::Dir { .. } => 0,
+            RamKind::Symlink { target } => target.len() as u64,
         }
     }
 }
@@ -272,7 +272,7 @@ impl Scheme for RamfsScheme {
                 buf[..n].copy_from_slice(&data[start..start + n]);
                 Ok(n)
             }
-            RamKind::Dir { .. } => Err(SyscallError::InvalidArgument),
+            RamKind::Dir { .. } | RamKind::Symlink { .. } => Err(SyscallError::InvalidArgument),
         }
     }
 
@@ -291,7 +291,7 @@ impl Scheme for RamfsScheme {
                 data[start..end].copy_from_slice(buf);
                 Ok(buf.len())
             }
-            RamKind::Dir { .. } => Err(SyscallError::InvalidArgument),
+            RamKind::Dir { .. } | RamKind::Symlink { .. } => Err(SyscallError::InvalidArgument),
         }
     }
 
@@ -319,7 +319,7 @@ impl Scheme for RamfsScheme {
                 data.resize(new_size as usize, 0);
                 Ok(())
             }
-            RamKind::Dir { .. } => Err(SyscallError::InvalidArgument),
+            RamKind::Dir { .. } | RamKind::Symlink { .. } => Err(SyscallError::InvalidArgument),
         }
     }
 
@@ -451,6 +451,7 @@ impl Scheme for RamfsScheme {
         let (st_mode, st_size, st_nlink) = match &inode.kind {
             RamKind::Dir { children } => (inode.mode, 0u64, 2 + children.len() as u32),
             RamKind::File { data } => (inode.mode, data.len() as u64, 1u32),
+            RamKind::Symlink { target } => (inode.mode, target.len() as u64, 1u32),
         };
 
         Ok(FileStat {
@@ -475,6 +476,7 @@ impl Scheme for RamfsScheme {
                 for (name, &child_ino) in children.iter() {
                     let file_type = match st.inodes.get(&child_ino).map(|c| &c.kind) {
                         Some(RamKind::Dir { .. }) => DT_DIR,
+                        Some(RamKind::Symlink { .. }) => DT_LNK,
                         _ => DT_REG,
                     };
                     entries.push(DirEntry {
@@ -486,6 +488,140 @@ impl Scheme for RamfsScheme {
                 Ok(entries)
             }
             RamKind::File { .. } => Err(SyscallError::InvalidArgument),
+            RamKind::Symlink { .. } => Err(SyscallError::InvalidArgument),
+        }
+    }
+
+    // ── rename ──────────────────────────────────────────────────────────────
+
+    fn rename(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+        let old_path = old_path.trim_matches('/');
+        let new_path = new_path.trim_matches('/');
+        if old_path.is_empty() || new_path.is_empty() {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        let mut st = self.state.lock();
+        let ino = st.lookup(old_path).ok_or(SyscallError::NotFound)?;
+
+        let (old_parent, old_name) = st.lookup_parent(old_path).ok_or(SyscallError::NotFound)?;
+        let old_name = String::from(old_name);
+
+        let (new_parent, new_name) = st.lookup_parent(new_path).ok_or(SyscallError::NotFound)?;
+        let new_name = String::from(new_name);
+
+        if let Some(existing) = st.lookup(new_path) {
+            if let Some(inode) = st.inodes.get(&existing) {
+                if let RamKind::Dir { children } = &inode.kind {
+                    if !children.is_empty() {
+                        return Err(SyscallError::NotSupported);
+                    }
+                }
+            }
+            st.inodes.remove(&existing);
+        }
+
+        if let Some(parent) = st.inodes.get_mut(&old_parent) {
+            if let RamKind::Dir { ref mut children } = parent.kind {
+                children.remove(&old_name);
+            }
+        }
+        if let Some(parent) = st.inodes.get_mut(&new_parent) {
+            if let RamKind::Dir { ref mut children } = parent.kind {
+                children.insert(new_name, ino);
+            }
+        }
+        Ok(())
+    }
+
+    // ── chmod ───────────────────────────────────────────────────────────────
+
+    fn chmod(&self, path: &str, mode: u32) -> Result<(), SyscallError> {
+        let path = path.trim_matches('/');
+        let mut st = self.state.lock();
+        let ino = st.lookup(path).ok_or(SyscallError::NotFound)?;
+        let inode = st.inodes.get_mut(&ino).ok_or(SyscallError::NotFound)?;
+        let type_bits = inode.mode & 0o170_000;
+        inode.mode = type_bits | (mode & 0o7777);
+        Ok(())
+    }
+
+    // ── fchmod ──────────────────────────────────────────────────────────────
+
+    fn fchmod(&self, file_id: u64, mode: u32) -> Result<(), SyscallError> {
+        let mut st = self.state.lock();
+        let inode = st.inodes.get_mut(&file_id).ok_or(SyscallError::BadHandle)?;
+        let type_bits = inode.mode & 0o170_000;
+        inode.mode = type_bits | (mode & 0o7777);
+        Ok(())
+    }
+
+    // ── link ────────────────────────────────────────────────────────────────
+
+    fn link(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+        let old_path = old_path.trim_matches('/');
+        let new_path = new_path.trim_matches('/');
+
+        let mut st = self.state.lock();
+        let ino = st.lookup(old_path).ok_or(SyscallError::NotFound)?;
+
+        if st.inodes.get(&ino).map(|i| i.is_dir()).unwrap_or(false) {
+            return Err(SyscallError::PermissionDenied);
+        }
+        if st.lookup(new_path).is_some() {
+            return Err(SyscallError::AlreadyExists);
+        }
+
+        let (parent_ino, name) = st.lookup_parent(new_path).ok_or(SyscallError::NotFound)?;
+        if let Some(parent) = st.inodes.get_mut(&parent_ino) {
+            if let RamKind::Dir { ref mut children } = parent.kind {
+                children.insert(String::from(name), ino);
+            }
+        }
+        Ok(())
+    }
+
+    // ── symlink ─────────────────────────────────────────────────────────────
+
+    fn symlink(&self, target: &str, link_path: &str) -> Result<(), SyscallError> {
+        let link_path = link_path.trim_matches('/');
+        if link_path.is_empty() {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        let mut st = self.state.lock();
+        if st.lookup(link_path).is_some() {
+            return Err(SyscallError::AlreadyExists);
+        }
+
+        let (parent_ino, name) = st.lookup_parent(link_path).ok_or(SyscallError::NotFound)?;
+        let new_ino = self.next_ino.fetch_add(1, Ordering::Relaxed);
+        st.inodes.insert(
+            new_ino,
+            RamInode {
+                ino: new_ino,
+                kind: RamKind::Symlink { target: String::from(target) },
+                mode: 0o120_777,
+            },
+        );
+        if let Some(parent) = st.inodes.get_mut(&parent_ino) {
+            if let RamKind::Dir { ref mut children } = parent.kind {
+                children.insert(String::from(name), new_ino);
+            }
+        }
+        Ok(())
+    }
+
+    // ── readlink ────────────────────────────────────────────────────────────
+
+    fn readlink(&self, path: &str) -> Result<String, SyscallError> {
+        let path = path.trim_matches('/');
+        let st = self.state.lock();
+        let ino = st.lookup(path).ok_or(SyscallError::NotFound)?;
+        let inode = st.inodes.get(&ino).ok_or(SyscallError::NotFound)?;
+        match &inode.kind {
+            RamKind::Symlink { target } => Ok(target.clone()),
+            _ => Err(SyscallError::InvalidArgument),
         }
     }
 }

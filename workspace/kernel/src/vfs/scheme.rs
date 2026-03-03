@@ -115,6 +115,42 @@ pub trait Scheme: Send + Sync {
         let _ = file_id;
         Err(SyscallError::NotImplemented)
     }
+
+    /// Rename/move an entry within this scheme.
+    fn rename(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+        let _ = (old_path, new_path);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Change permission bits on a path.
+    fn chmod(&self, path: &str, mode: u32) -> Result<(), SyscallError> {
+        let _ = (path, mode);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Change permission bits on an open file handle.
+    fn fchmod(&self, file_id: u64, mode: u32) -> Result<(), SyscallError> {
+        let _ = (file_id, mode);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Create a hard link.
+    fn link(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+        let _ = (old_path, new_path);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Create a symbolic link.
+    fn symlink(&self, target: &str, link_path: &str) -> Result<(), SyscallError> {
+        let _ = (target, link_path);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Read the target of a symbolic link.
+    fn readlink(&self, path: &str) -> Result<String, SyscallError> {
+        let _ = path;
+        Err(SyscallError::NotImplemented)
+    }
 }
 
 /// Type-erased Scheme reference.

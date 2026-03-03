@@ -109,6 +109,63 @@ pub fn unlink(path: &str) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Rename a file or directory.
+pub fn rename(old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+    let (scheme, old_rel) = mount::resolve(old_path)?;
+    let (_scheme2, new_rel) = mount::resolve(new_path)?;
+    scheme.rename(&old_rel, &new_rel)
+}
+
+/// Change permission bits on a path.
+pub fn chmod(path: &str, mode: u32) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.chmod(&relative_path, mode)
+}
+
+/// Change permission bits on an open fd.
+pub fn fchmod(fd: u32, mode: u32) -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.process.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    file.scheme().fchmod(file.file_id(), mode)
+}
+
+/// Truncate a file by path.
+pub fn truncate(path: &str, length: u64) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    let res = scheme.open(&relative_path, OpenFlags::WRITE)?;
+    let r = scheme.truncate(res.file_id, length);
+    let _ = scheme.close(res.file_id);
+    r
+}
+
+/// Truncate an open fd.
+pub fn ftruncate(fd: u32, length: u64) -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.process.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    file.scheme().truncate(file.file_id(), length)
+}
+
+/// Create a hard link.
+pub fn link(old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+    let (scheme, old_rel) = mount::resolve(old_path)?;
+    let (_scheme2, new_rel) = mount::resolve(new_path)?;
+    scheme.link(&old_rel, &new_rel)
+}
+
+/// Create a symbolic link.
+pub fn symlink(target: &str, link_path: &str) -> Result<(), SyscallError> {
+    let (scheme, link_rel) = mount::resolve(link_path)?;
+    scheme.symlink(target, &link_rel)
+}
+
+/// Read the target of a symbolic link.
+pub fn readlink(path: &str) -> Result<String, SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.readlink(&relative_path)
+}
+
 /// Read from a file descriptor.
 pub fn read(fd: u32, buf: &mut [u8]) -> Result<usize, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -689,8 +746,6 @@ pub fn sys_mkdir(path_ptr: u64, path_len: u64, mode: u64) -> Result<u64, Syscall
 }
 
 /// SYS_RENAME (448): Rename a file or directory.
-///
-/// Not yet implemented in the scheme abstraction; returns ENOSYS.
 pub fn sys_rename(
     old_ptr: u64,
     old_len: u64,
@@ -705,88 +760,98 @@ pub fn sys_rename(
     let new_abs = resolve_path(&new, &cwd);
     crate::silo::enforce_path_for_current_task(&old_abs, true, true, false)?;
     crate::silo::enforce_path_for_current_task(&new_abs, false, true, false)?;
-    Err(SyscallError::NotImplemented)
+    rename(&old_abs, &new_abs)?;
+    Ok(0)
 }
 
-/// SYS_LINK (449): Create a hard link — not yet implemented.
+/// SYS_LINK (449): Create a hard link.
 pub fn sys_link(
-    _old_ptr: u64,
-    _old_len: u64,
-    _new_ptr: u64,
-    _new_len: u64,
+    old_ptr: u64,
+    old_len: u64,
+    new_ptr: u64,
+    new_len: u64,
 ) -> Result<u64, SyscallError> {
-    let old = read_user_path(_old_ptr, _old_len)?;
-    let new = read_user_path(_new_ptr, _new_len)?;
+    let old = read_user_path(old_ptr, old_len)?;
+    let new = read_user_path(new_ptr, new_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let old_abs = resolve_path(&old, &cwd);
     let new_abs = resolve_path(&new, &cwd);
     crate::silo::enforce_path_for_current_task(&old_abs, true, false, false)?;
     crate::silo::enforce_path_for_current_task(&new_abs, false, true, false)?;
-    Err(SyscallError::NotImplemented)
+    link(&old_abs, &new_abs)?;
+    Ok(0)
 }
 
-/// SYS_SYMLINK (450): Create a symbolic link — not yet implemented.
+/// SYS_SYMLINK (450): Create a symbolic link.
 pub fn sys_symlink(
-    _target_ptr: u64,
-    _target_len: u64,
-    _linkpath_ptr: u64,
-    _linkpath_len: u64,
+    target_ptr: u64,
+    target_len: u64,
+    linkpath_ptr: u64,
+    linkpath_len: u64,
 ) -> Result<u64, SyscallError> {
-    let target = read_user_path(_target_ptr, _target_len)?;
-    let linkpath = read_user_path(_linkpath_ptr, _linkpath_len)?;
+    let target = read_user_path(target_ptr, target_len)?;
+    let linkpath = read_user_path(linkpath_ptr, linkpath_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
-    let target_abs = resolve_path(&target, &cwd);
     let link_abs = resolve_path(&linkpath, &cwd);
-    crate::silo::enforce_path_for_current_task(&target_abs, true, false, false)?;
     crate::silo::enforce_path_for_current_task(&link_abs, false, true, false)?;
-    Err(SyscallError::NotImplemented)
+    symlink(&target, &link_abs)?;
+    Ok(0)
 }
 
-/// SYS_READLINK (451): Read a symbolic link — not yet implemented.
+/// SYS_READLINK (451): Read a symbolic link.
 pub fn sys_readlink(
-    _path_ptr: u64,
-    _path_len: u64,
-    _buf_ptr: u64,
-    _buf_len: u64,
+    path_ptr: u64,
+    path_len: u64,
+    buf_ptr: u64,
+    buf_len: u64,
 ) -> Result<u64, SyscallError> {
-    let path = read_user_path(_path_ptr, _path_len)?;
+    let path = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&path, &cwd);
     crate::silo::enforce_path_for_current_task(&abs, true, false, false)?;
-    Err(SyscallError::NotImplemented)
+    let target = readlink(&abs)?;
+    let bytes = target.as_bytes();
+    let n = bytes.len().min(buf_len as usize);
+    let user = UserSliceWrite::new(buf_ptr, n)?;
+    user.copy_from(&bytes[..n]);
+    Ok(n as u64)
 }
 
 /// SYS_CHMOD (452): Change file mode bits.
-pub fn sys_chmod(path_ptr: u64, path_len: u64, _mode: u64) -> Result<u64, SyscallError> {
+pub fn sys_chmod(path_ptr: u64, path_len: u64, mode: u64) -> Result<u64, SyscallError> {
     let path = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&path, &cwd);
     crate::silo::enforce_path_for_current_task(&abs, false, true, false)?;
-    Err(SyscallError::NotImplemented)
+    chmod(&abs, mode as u32)?;
+    Ok(0)
 }
 
 /// SYS_FCHMOD (453): Change file mode bits on open fd.
-pub fn sys_fchmod(_fd: u32, _mode: u64) -> Result<u64, SyscallError> {
-    Err(SyscallError::NotImplemented)
+pub fn sys_fchmod(fd: u32, mode: u64) -> Result<u64, SyscallError> {
+    fchmod(fd, mode as u32)?;
+    Ok(0)
 }
 
 /// SYS_TRUNCATE (454): Truncate file to given length.
-pub fn sys_truncate(path_ptr: u64, path_len: u64, _length: u64) -> Result<u64, SyscallError> {
+pub fn sys_truncate(path_ptr: u64, path_len: u64, length: u64) -> Result<u64, SyscallError> {
     let path = read_user_path(path_ptr, path_len)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let abs = resolve_path(&path, &cwd);
     crate::silo::enforce_path_for_current_task(&abs, false, true, false)?;
-    Err(SyscallError::NotImplemented)
+    truncate(&abs, length)?;
+    Ok(0)
 }
 
 /// SYS_FTRUNCATE (455): Truncate open fd to given length.
-pub fn sys_ftruncate(_fd: u32, _length: u64) -> Result<u64, SyscallError> {
-    Err(SyscallError::NotImplemented)
+pub fn sys_ftruncate(fd: u32, length: u64) -> Result<u64, SyscallError> {
+    ftruncate(fd, length)?;
+    Ok(0)
 }
 
 // ============================================================================
