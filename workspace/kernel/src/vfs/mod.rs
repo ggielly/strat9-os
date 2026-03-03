@@ -487,27 +487,28 @@ pub fn sys_stat(path_ptr: u64, path_len: u64, stat_ptr: u64) -> Result<u64, Sysc
 /// Writes a packed array of `KernelDirent` entries into the user buffer.
 /// Returns the number of bytes written.
 pub fn sys_getdents(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let entries = getdents(fd)?;
+    use strat9_abi::data::DirentHeader;
 
+    let entries = getdents(fd)?;
     let mut offset: usize = 0;
     let buf_size = buf_len as usize;
 
     for entry in &entries {
         let name_bytes = entry.name.as_bytes();
-        let name_len = core::cmp::min(name_bytes.len(), 255);
-        let entry_size = 8 + 1 + 2 + name_len + 1; // ino(8) + type(1) + name_len(2) + name + nul
+        let name_len = core::cmp::min(name_bytes.len(), 255) as u16;
+        let entry_size = DirentHeader::SIZE + name_len as usize + 1;
 
         if offset + entry_size > buf_size {
             break;
         }
 
         let user = UserSliceWrite::new(buf_ptr + offset as u64, entry_size)?;
-        let mut kbuf = [0u8; 268]; // max entry
+        let mut kbuf = [0u8; 268];
         kbuf[0..8].copy_from_slice(&entry.ino.to_le_bytes());
         kbuf[8] = entry.file_type;
-        kbuf[9..11].copy_from_slice(&(name_len as u16).to_le_bytes());
-        kbuf[11..11 + name_len].copy_from_slice(&name_bytes[..name_len]);
-        kbuf[11 + name_len] = 0; // nul-terminator
+        kbuf[9..11].copy_from_slice(&name_len.to_le_bytes());
+        kbuf[11..11 + name_len as usize].copy_from_slice(&name_bytes[..name_len as usize]);
+        kbuf[11 + name_len as usize] = 0;
         user.copy_from(&kbuf[..entry_size]);
 
         offset += entry_size;

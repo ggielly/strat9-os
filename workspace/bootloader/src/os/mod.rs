@@ -35,24 +35,8 @@ pub enum OsKey {
     Other,
 }
 
-// Keep synced with BootloaderMemoryKind in kernel
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u64)]
-pub enum OsMemoryKind {
-    Null = 0,
-    Free = 1,
-    Reclaim = 2,
-    Reserved = 3,
-}
-
-// Keep synced with BootloaderMemoryEntry in kernel
-#[derive(Clone, Copy, Debug)]
-#[repr(C, packed(8))]
-pub struct OsMemoryEntry {
-    pub base: u64,
-    pub size: u64,
-    pub kind: OsMemoryKind,
-}
+pub use strat9_abi::boot::MemoryKind as OsMemoryKind;
+pub use strat9_abi::boot::MemoryRegion as OsMemoryEntry;
 
 #[derive(Clone, Copy, Debug)]
 pub struct OsVideoMode {

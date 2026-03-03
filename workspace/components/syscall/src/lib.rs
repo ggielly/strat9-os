@@ -859,9 +859,9 @@ pub mod call {
         }
     }
 
-    /// Unbind an IPC port from the namespace.
-    pub fn ipc_unbind_port(port_handle: usize, name_ptr: usize) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_IPC_UNBIND_PORT, port_handle, name_ptr) }
+    /// Unbind a namespace path from its IPC port.
+    pub fn ipc_unbind_port(path: &[u8]) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_UNBIND_PORT, path.as_ptr() as usize, path.len()) }
     }
 
     /// Create a shared-memory ring buffer.
@@ -875,9 +875,9 @@ pub mod call {
     /// Map a shared-memory ring buffer into the calling process.
     ///
     /// `ring_handle`: capability handle returned by [`ipc_ring_create`].
-    /// `flags`: mapping flags. Returns the user-virtual address.
-    pub fn ipc_ring_map(ring_handle: usize, flags: usize) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_IPC_RING_MAP, ring_handle, flags) }
+    /// `out_ptr`: pointer to receive the mapped user-virtual address.
+    pub fn ipc_ring_map(ring_handle: usize, out_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IPC_RING_MAP, ring_handle, out_ptr) }
     }
 
     // -----------------------------------------------------------------------

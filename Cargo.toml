@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "workspace/abi",
     "workspace/kernel",
     "workspace/bootloader",
     "workspace/drivers/bus",
@@ -44,6 +45,7 @@ authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 repository = "https://github.com/ggielly/strat9-os"
 
 [workspace.dependencies]
+strat9-abi = { path = "workspace/abi" }
 spin = "0.10.0"
 bitflags = "2.11.0"
 log = "0.4"

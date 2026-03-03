@@ -1,41 +1,9 @@
-//! Syscall error handling (no_std).
-//!
-//! Kernel return values follow the Linux convention: on error, RAX contains
-//! `-errno` (signed integer, two's complement).
+pub use strat9_abi::errno::*;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-pub const EPERM: usize = 1;
-pub const ENOENT: usize = 2;
-pub const EINTR: usize = 4;
-pub const EIO: usize = 5;
-pub const E2BIG: usize = 7;
-pub const ENOEXEC: usize = 8;
-pub const EBADF: usize = 9;
-pub const ECHILD: usize = 10;
-pub const EAGAIN: usize = 11;
-pub const ENOMEM: usize = 12;
-pub const EACCES: usize = 13;
-pub const EFAULT: usize = 14;
-pub const EEXIST: usize = 17;
-pub const EINVAL: usize = 22;
-pub const ENOTTY: usize = 25;
-pub const ENOSPC: usize = 28;
-pub const EPIPE: usize = 32;
-pub const ENOSYS: usize = 38;
-pub const ENOTSUP: usize = 52;
-pub const ENOBUFS: usize = 105;
-pub const ETIMEDOUT: usize = 110;
-
 const ERRNO_MAX: isize = 4095;
 
-/// Syscall error type for userspace programs.
-///
-/// Discriminant values match POSIX errno codes. The `Unknown` catch-all
-/// variant preserves unrecognized errno values for forward compatibility.
-///
-/// Conversions via `From<usize>` (from errno) and `Into<usize>` (to errno)
-/// are derived by `num_enum` and replace the hand-rolled match tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive, thiserror::Error)]
 #[must_use]
 #[repr(usize)]
@@ -88,23 +56,16 @@ pub enum Error {
 }
 
 impl Error {
-    /// Build an error from a positive errno code (e.g. 2 for ENOENT).
-    ///
-    /// Never panics: the `#[num_enum(catch_all)]` variant guarantees
-    /// exhaustive mapping — unrecognized codes land in `Unknown(n)`.
     #[inline]
     pub fn from_errno(errno: usize) -> Self {
         Self::try_from(errno).unwrap_or(Error::Unknown(errno))
     }
 
-    /// Return the corresponding positive errno code.
     #[inline]
     pub fn to_errno(&self) -> usize {
         usize::from(*self)
     }
 
-    /// Demultiplex the raw syscall return value (RAX).
-    /// The kernel returns `-errno` on error (Linux convention).
     #[inline]
     pub fn demux(ret: usize) -> core::result::Result<usize, Error> {
         let ret_s = ret as isize;
@@ -115,13 +76,11 @@ impl Error {
         }
     }
 
-    /// `true` if the syscall can be retried (EINTR, EAGAIN).
     #[inline]
     pub fn is_retryable(&self) -> bool {
         matches!(self, Error::Interrupted | Error::Again)
     }
 
-    /// Short errno name for logging (no_std, no allocation).
     #[inline]
     pub fn name(&self) -> &'static str {
         match self {

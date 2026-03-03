@@ -1,0 +1,11 @@
+[package]
+name = "strat9-abi"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+
+[dependencies]
+zerocopy = { workspace = true }
+bitflags = { workspace = true }
+static_assertions = "1.1"

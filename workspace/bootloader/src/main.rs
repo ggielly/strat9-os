@@ -73,32 +73,7 @@ impl<'a> Write for SliceWriter<'a> {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-#[repr(C, packed(8))]
-pub struct KernelArgs {
-    kernel_base: u64,
-    kernel_size: u64,
-    stack_base: u64,
-    stack_size: u64,
-    env_base: u64,
-    env_size: u64,
-
-    /// The base pointer to the saved RSDP.
-    ///
-    /// This field can be NULL, and if so, the system has not booted with UEFI or in some other way
-    /// retrieved the RSDPs. The kernel or a userspace driver will thus try searching the BIOS
-    /// memory instead. On UEFI systems, searching is not guaranteed to actually work though.
-    acpi_rsdp_base: u64,
-    /// The size of the RSDP region.
-    acpi_rsdp_size: u64,
-
-    areas_base: u64,
-    areas_size: u64,
-
-    bootstrap_base: u64,
-    bootstrap_size: u64,
-}
+pub use strat9_abi::boot::KernelArgs;
 
 fn select_mode(
     os: &impl Os,
@@ -644,10 +619,22 @@ pub fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
             env_size: env_size as u64,
             acpi_rsdp_base,
             acpi_rsdp_size,
-            areas_base: unsafe { AREAS.as_ptr() as u64 },
-            areas_size: unsafe { (AREAS.len() * mem::size_of::<OsMemoryEntry>()) as u64 },
-            bootstrap_base,
-            bootstrap_size,
+            memory_map_base: unsafe { AREAS.as_ptr() as u64 },
+            memory_map_size: unsafe { (AREAS.len() * mem::size_of::<OsMemoryEntry>()) as u64 },
+            initfs_base: bootstrap_base,
+            initfs_size: bootstrap_size,
+            framebuffer_addr: 0,
+            framebuffer_width: 0,
+            framebuffer_height: 0,
+            framebuffer_stride: 0,
+            framebuffer_bpp: 0,
+            framebuffer_red_mask_size: 0,
+            framebuffer_red_mask_shift: 0,
+            framebuffer_green_mask_size: 0,
+            framebuffer_green_mask_shift: 0,
+            framebuffer_blue_mask_size: 0,
+            framebuffer_blue_mask_shift: 0,
+            hhdm_offset: 0,
         },
     )
 }

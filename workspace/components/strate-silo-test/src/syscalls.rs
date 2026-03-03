@@ -2,30 +2,9 @@
 #![no_main]
 
 use core::panic::PanicInfo;
-use strat9_syscall::{call, data, error::Error, number, syscall1, syscall2, syscall3, syscall4, syscall6};
+use strat9_syscall::{call, data, error::Error, number, number::*, syscall1, syscall2, syscall3, syscall4, syscall6};
 
 const PAGE_SIZE: usize = 4096;
-
-const SYS_GETUID: usize = 335;
-const SYS_GETEUID: usize = 336;
-const SYS_GETGID: usize = 337;
-const SYS_GETEGID: usize = 338;
-const SYS_SETUID: usize = 339;
-const SYS_SETGID: usize = 340;
-const SYS_CHDIR: usize = 440;
-const SYS_FCHDIR: usize = 441;
-const SYS_GETCWD: usize = 442;
-const SYS_UMASK: usize = 444;
-const SYS_UNLINK: usize = 445;
-const SYS_RMDIR: usize = 446;
-const SYS_MKDIR: usize = 447;
-const SYS_RENAME: usize = 448;
-const SYS_LINK: usize = 449;
-const SYS_SYMLINK: usize = 450;
-const SYS_READLINK: usize = 451;
-const SYS_CHMOD: usize = 452;
-const SYS_FCHMOD: usize = 453;
-const SYS_FTRUNCATE: usize = 455;
 
 const PROT_READ: usize = 1;
 const PROT_WRITE: usize = 2;

@@ -15,40 +15,9 @@ use alloc::{
     vec::Vec,
 };
 
-/// File type constants (matching Linux DT_* values).
-pub const DT_UNKNOWN: u8 = 0;
-pub const DT_FIFO: u8 = 1;
-pub const DT_CHR: u8 = 2;
-pub const DT_DIR: u8 = 4;
-pub const DT_BLK: u8 = 6;
-pub const DT_REG: u8 = 8;
-pub const DT_LNK: u8 = 10;
-pub const DT_SOCK: u8 = 12;
-
-/// Metadata returned by stat operations.
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct FileStat {
-    pub st_ino: u64,
-    pub st_mode: u32,
-    pub st_nlink: u32,
-    pub st_size: u64,
-    pub st_blksize: u64,
-    pub st_blocks: u64,
-}
-
-impl FileStat {
-    pub const fn zeroed() -> Self {
-        FileStat {
-            st_ino: 0,
-            st_mode: 0,
-            st_nlink: 1,
-            st_size: 0,
-            st_blksize: 512,
-            st_blocks: 0,
-        }
-    }
-}
+pub use strat9_abi::data::{
+    DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK, DT_UNKNOWN, FileStat,
+};
 
 /// A single directory entry returned by readdir.
 #[derive(Debug, Clone)]

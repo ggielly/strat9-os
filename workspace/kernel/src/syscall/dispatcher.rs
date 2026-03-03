@@ -93,7 +93,7 @@ fn trace_dhcp_frame(tag: &str, frame: &[u8]) {
 /// `SyscallFrame` on the current kernel stack.
 #[no_mangle]
 pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
-    let syscall_num = frame.rax;
+    let syscall_num = frame.rax as usize;
     let arg1 = frame.rdi;
     let arg2 = frame.rsi;
     let arg3 = frame.rdx;
