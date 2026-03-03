@@ -45,6 +45,7 @@ pub struct DirentIter<'a> {
 
 impl<'a> DirentIter<'a> {
     pub fn new(buf: &'a [u8], valid_len: usize) -> Self {
+        let valid_len = core::cmp::min(valid_len, buf.len());
         Self {
             buf: &buf[..valid_len],
             offset: 0,
@@ -69,7 +70,7 @@ impl<'a> Iterator for DirentIter<'a> {
             return None;
         }
         let mut d = Dirent::new(ino, file_type, &self.buf[name_start..name_end]);
-        d.name_len = name_len;
+        d.name_len = core::cmp::min(name_len, 255);
         self.offset = name_end + 1; // skip NUL
         Some(d)
     }

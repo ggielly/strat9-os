@@ -71,7 +71,7 @@ pub fn posix_oflags_to_strat9(posix: u32) -> OpenFlags {
     const O_APPEND: u32   = 0o002000;
     const O_NONBLOCK: u32 = 0o004000;
     const O_DIRECTORY: u32 = 0o0200000;
-    const O_NOFOLLOW: u32 = 0o0100000;
+    const O_NOFOLLOW: u32 = 0o0400000;
     const O_SYNC: u32     = 0o04000000;
 
     let access = posix & O_ACCMODE;

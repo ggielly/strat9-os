@@ -125,6 +125,60 @@ impl RamState {
         let parent_ino = self.lookup(parent_path)?;
         Some((parent_ino, name))
     }
+
+    fn has_any_name_ref(&self, ino: u64) -> bool {
+        self.inodes.values().any(|inode| {
+            if let RamKind::Dir { children } = &inode.kind {
+                children.values().any(|&child| child == ino)
+            } else {
+                false
+            }
+        })
+    }
+
+    fn link_count(&self, ino: u64) -> u32 {
+        let mut count = 0u32;
+        for inode in self.inodes.values() {
+            if let RamKind::Dir { children } = &inode.kind {
+                for &child in children.values() {
+                    if child == ino {
+                        count = count.saturating_add(1);
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    fn dir_contains_ino(&self, ancestor_ino: u64, candidate_ino: u64) -> bool {
+        if ancestor_ino == candidate_ino {
+            return true;
+        }
+        let mut stack = Vec::new();
+        stack.push(ancestor_ino);
+        while let Some(cur) = stack.pop() {
+            let Some(inode) = self.inodes.get(&cur) else {
+                continue;
+            };
+            let RamKind::Dir { children } = &inode.kind else {
+                continue;
+            };
+            for &child in children.values() {
+                if child == candidate_ino {
+                    return true;
+                }
+                if self
+                    .inodes
+                    .get(&child)
+                    .map(|n| matches!(n.kind, RamKind::Dir { .. }))
+                    .unwrap_or(false)
+                {
+                    stack.push(child);
+                }
+            }
+        }
+        false
+    }
 }
 
 // ─── RamfsScheme ─────────────────────────────────────────────────────────────
@@ -437,7 +491,15 @@ impl Scheme for RamfsScheme {
                 children.remove(name);
             }
         }
-        st.inodes.remove(&ino);
+        if st
+            .inodes
+            .get(&ino)
+            .map(|inode| inode.is_dir())
+            .unwrap_or(false)
+            || !st.has_any_name_ref(ino)
+        {
+            st.inodes.remove(&ino);
+        }
 
         Ok(())
     }
@@ -450,8 +512,8 @@ impl Scheme for RamfsScheme {
 
         let (st_mode, st_size, st_nlink) = match &inode.kind {
             RamKind::Dir { children } => (inode.mode, 0u64, 2 + children.len() as u32),
-            RamKind::File { data } => (inode.mode, data.len() as u64, 1u32),
-            RamKind::Symlink { target } => (inode.mode, target.len() as u64, 1u32),
+            RamKind::File { data } => (inode.mode, data.len() as u64, st.link_count(file_id)),
+            RamKind::Symlink { target } => (inode.mode, target.len() as u64, st.link_count(file_id)),
         };
 
         Ok(FileStat {
@@ -509,8 +571,17 @@ impl Scheme for RamfsScheme {
 
         let (new_parent, new_name) = st.lookup_parent(new_path).ok_or(SyscallError::NotFound)?;
         let new_name = String::from(new_name);
+        if st
+            .inodes
+            .get(&ino)
+            .map(|n| n.is_dir() && st.dir_contains_ino(ino, new_parent))
+            .unwrap_or(false)
+        {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let existing = st.lookup(new_path);
 
-        if let Some(existing) = st.lookup(new_path) {
+        if let Some(existing) = existing {
             if existing == ino {
                 return Ok(());
             }
@@ -521,7 +592,6 @@ impl Scheme for RamfsScheme {
                     }
                 }
             }
-            st.inodes.remove(&existing);
         }
 
         if let Some(parent) = st.inodes.get_mut(&old_parent) {
@@ -532,6 +602,11 @@ impl Scheme for RamfsScheme {
         if let Some(parent) = st.inodes.get_mut(&new_parent) {
             if let RamKind::Dir { ref mut children } = parent.kind {
                 children.insert(new_name, ino);
+            }
+        }
+        if let Some(existing) = existing {
+            if !st.has_any_name_ref(existing) {
+                st.inodes.remove(&existing);
             }
         }
         Ok(())
