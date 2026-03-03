@@ -699,6 +699,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         // =============================================
         // Phase 8d: VirtIO + hardware drivers
         // =============================================
+        // Blocking launch order note:
+        // PCI consumers now rely on /bus/pci/* exposed by userspace strate-bus.
+        // The userspace boot sequence must start silo "bus" before PCI-dependent
+        // silos, otherwise early probes can legitimately return no device.
         serial_println!("[init] Loading hardware drivers...");
         vga_println!("[..] Initializing hardware drivers...");
         hardware::init();

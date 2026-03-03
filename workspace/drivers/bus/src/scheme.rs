@@ -2,6 +2,9 @@ use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use strat9_syscall::data::IpcMessage;
 use strat9_syscall::call;
 use strat9_syscall::error::ENOSYS;
+use strat9_syscall::data::{
+    PciAddress, PciDeviceInfo, PciProbeCriteria, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID,
+};
 
 use crate::BusDriver;
 
@@ -19,6 +22,7 @@ const EINVAL: u32 = 22;
 const EBADF: u32 = 9;
 const ENOTDIR: u32 = 20;
 const DT_REG: u8 = 8;
+const DT_DIR: u8 = 4;
 
 struct OpenHandle {
     path: String,
@@ -29,7 +33,7 @@ pub struct BusSchemeServer<D: BusDriver> {
     port_handle: u64,
     handles: BTreeMap<u64, OpenHandle>,
     next_id: u64,
-    pci_inventory: Vec<u8>,
+    pci_cache: Vec<PciDeviceInfo>,
 }
 
 impl<D: BusDriver> BusSchemeServer<D> {
@@ -39,12 +43,12 @@ impl<D: BusDriver> BusSchemeServer<D> {
             port_handle,
             handles: BTreeMap::new(),
             next_id: 1,
-            pci_inventory: Vec::new(),
+            pci_cache: Vec::new(),
         }
     }
 
-    pub fn with_pci_inventory(mut self, inventory: Vec<u8>) -> Self {
-        self.pci_inventory = inventory;
+    pub fn with_pci_cache(mut self, cache: Vec<PciDeviceInfo>) -> Self {
+        self.pci_cache = cache;
         self
     }
 
@@ -60,6 +64,114 @@ impl<D: BusDriver> BusSchemeServer<D> {
         reply.sender = sender;
         reply.payload[0..4].copy_from_slice(&code.to_le_bytes());
         reply
+    }
+
+    fn parse_hex_u8(s: &str) -> Option<u8> {
+        u8::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+    }
+
+    fn parse_hex_u16(s: &str) -> Option<u16> {
+        u16::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+    }
+
+    fn parse_pci_bdf(s: &str) -> Option<PciAddress> {
+        let (bus_s, rest) = s.split_once(':')?;
+        let (dev_s, fun_s) = rest.split_once('.')?;
+        let bus = Self::parse_hex_u8(bus_s)?;
+        let device = Self::parse_hex_u8(dev_s)?;
+        let function = Self::parse_hex_u8(fun_s)?;
+        if device > 31 || function > 7 {
+            return None;
+        }
+        Some(PciAddress {
+            bus,
+            device,
+            function,
+            _reserved: 0,
+        })
+    }
+
+    fn parse_cfg_path(path: &str) -> Option<(PciAddress, u8, u8)> {
+        let mut parts = path.strip_prefix("pci/cfg/")?.split('/');
+        let bdf = parts.next()?;
+        let off = parts.next()?;
+        let width = parts.next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        let addr = Self::parse_pci_bdf(bdf)?;
+        let offset = Self::parse_hex_u8(off)?;
+        let width = width.parse::<u8>().ok()?;
+        if !matches!(width, 1 | 2 | 4) {
+            return None;
+        }
+        Some((addr, offset, width))
+    }
+
+    fn parse_find_path(path: &str) -> Option<(u16, u16)> {
+        let mut parts = path.strip_prefix("pci/find/")?.split('/');
+        let ven = Self::parse_hex_u16(parts.next()?)?;
+        let dev = Self::parse_hex_u16(parts.next()?)?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some((ven, dev))
+    }
+
+    pub fn refresh_pci_cache(&mut self) {
+        let criteria = PciProbeCriteria {
+            match_flags: 0,
+            vendor_id: 0,
+            device_id: 0,
+            class_code: 0,
+            subclass: 0,
+            prog_if: 0,
+            _reserved: 0,
+        };
+        let mut buf = alloc::vec![PciDeviceInfo {
+            address: PciAddress {
+                bus: 0,
+                device: 0,
+                function: 0,
+                _reserved: 0,
+            },
+            vendor_id: 0,
+            device_id: 0,
+            class_code: 0,
+            subclass: 0,
+            prog_if: 0,
+            revision: 0,
+            header_type: 0,
+            interrupt_line: 0,
+            interrupt_pin: 0,
+            _reserved: 0,
+        }; 256];
+        if let Ok(n) = call::pci_enum(&criteria, &mut buf) {
+            self.pci_cache.clear();
+            self.pci_cache.extend_from_slice(&buf[..n.min(buf.len())]);
+        }
+    }
+
+    fn render_inventory(&self) -> Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        out.extend_from_slice(b"bus:dev.fn vendor:device class:sub prog_if rev irq\n");
+        for d in &self.pci_cache {
+            let line = format!(
+                "{:02x}:{:02x}.{} {:04x}:{:04x} {:02x}:{:02x} {:02x} {:02x} {}\n",
+                d.address.bus,
+                d.address.device,
+                d.address.function,
+                d.vendor_id,
+                d.device_id,
+                d.class_code,
+                d.subclass,
+                d.prog_if,
+                d.revision,
+                d.interrupt_line
+            );
+            out.extend_from_slice(line.as_bytes());
+        }
+        out
     }
 
     fn handle_open(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
@@ -84,7 +196,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         let mut reply = Self::ok_reply(sender);
         reply.payload[4..12].copy_from_slice(&file_id.to_le_bytes());
         reply.payload[12..20].copy_from_slice(&0u64.to_le_bytes());
-        let flags = if path.is_empty() || path == "pci" {
+        let flags = if path.is_empty() || path == "pci" || path == "pci/find" || path == "pci/cfg" {
             FILEFLAG_DIRECTORY
         } else {
             0
@@ -148,25 +260,68 @@ impl<D: BusDriver> BusSchemeServer<D> {
             "error_count" => {
                 format!("{}\n", self.driver.error_count()).into_bytes()
             }
-            "pci" => b"inventory\ncount\n".to_vec(),
-            "pci/inventory" => {
-                if self.pci_inventory.is_empty() {
-                    b"unavailable\n".to_vec()
-                } else {
-                    self.pci_inventory.clone()
+            "pci" => b"inventory\ncount\nrescan\nfind\ncfg\n".to_vec(),
+            "pci/find" => b"usage: /bus/pci/find/<vendor>/<device>\n".to_vec(),
+            "pci/cfg" => b"usage: /bus/pci/cfg/<bb:dd.f>/<offset>/<width>\n".to_vec(),
+            "pci/inventory" => self.render_inventory(),
+            "pci/count" => format!("{}\n", self.pci_cache.len()).into_bytes(),
+            path if path.starts_with("pci/find/") => {
+                let Some((vendor_id, device_id)) = Self::parse_find_path(path) else {
+                    return b"invalid path\n".to_vec();
+                };
+                let criteria = PciProbeCriteria {
+                    match_flags: PCI_MATCH_VENDOR_ID | PCI_MATCH_DEVICE_ID,
+                    vendor_id,
+                    device_id,
+                    class_code: 0,
+                    subclass: 0,
+                    prog_if: 0,
+                    _reserved: 0,
+                };
+                let mut matches = alloc::vec![PciDeviceInfo {
+                    address: PciAddress {
+                        bus: 0,
+                        device: 0,
+                        function: 0,
+                        _reserved: 0,
+                    },
+                    vendor_id: 0,
+                    device_id: 0,
+                    class_code: 0,
+                    subclass: 0,
+                    prog_if: 0,
+                    revision: 0,
+                    header_type: 0,
+                    interrupt_line: 0,
+                    interrupt_pin: 0,
+                    _reserved: 0,
+                }; 64];
+                match call::pci_enum(&criteria, &mut matches) {
+                    Ok(n) => {
+                        let mut out = alloc::vec::Vec::new();
+                        for d in matches.into_iter().take(n) {
+                            let line = format!(
+                                "{:02x}:{:02x}.{} {:04x}:{:04x}\n",
+                                d.address.bus, d.address.device, d.address.function, d.vendor_id, d.device_id
+                            );
+                            out.extend_from_slice(line.as_bytes());
+                        }
+                        if out.is_empty() {
+                            b"none\n".to_vec()
+                        } else {
+                            out
+                        }
+                    }
+                    Err(_) => b"error\n".to_vec(),
                 }
             }
-            "pci/count" => {
-                if self.pci_inventory.is_empty() {
-                    b"0\n".to_vec()
-                } else {
-                    let count = self
-                        .pci_inventory
-                        .split(|b| *b == b'\n')
-                        .skip(1)
-                        .filter(|line| !line.is_empty())
-                        .count();
-                    format!("{}\n", count).into_bytes()
+            path if path.starts_with("pci/cfg/") => {
+                let Some((addr, reg, width)) = Self::parse_cfg_path(path) else {
+                    return b"invalid path\n".to_vec();
+                };
+                match call::pci_cfg_read(&addr, reg, width) {
+                    Ok(v) => format!("0x{:08x}\n", v as u32).into_bytes(),
+                    Err(_) => b"error\n".to_vec(),
                 }
             }
             _ => {
@@ -215,8 +370,17 @@ impl<D: BusDriver> BusSchemeServer<D> {
             || path == "pci"
             || path == "pci/inventory"
             || path == "pci/count"
+            || path == "pci/rescan"
+            || path == "pci/find"
+            || path == "pci/cfg"
         {
             return true;
+        }
+        if path.starts_with("pci/find/") {
+            return Self::parse_find_path(path).is_some();
+        }
+        if path.starts_with("pci/cfg/") {
+            return Self::parse_cfg_path(path).is_some();
         }
         if Self::parse_reg_offset(path).is_some() {
             return true;
@@ -244,22 +408,34 @@ impl<D: BusDriver> BusSchemeServer<D> {
             None => return Self::err_reply(sender, EBADF),
         };
 
-        let reg_str = match handle.path.strip_prefix("reg/") {
-            Some(s) => s,
-            None => return Self::err_reply(sender, ENOSYS as u32),
-        };
-        let reg_offset = match usize::from_str_radix(reg_str.trim_start_matches("0x"), 16) {
-            Ok(v) => v,
-            Err(_) => return Self::err_reply(sender, EINVAL),
-        };
-        if len < 4 {
-            return Self::err_reply(sender, EINVAL);
-        }
-        let val = u32::from_le_bytes([
-            payload[18], payload[19], payload[20], payload[21],
-        ]);
-        if self.driver.write_reg(reg_offset, val).is_err() {
-            return Self::err_reply(sender, EINVAL);
+        if handle.path == "pci/rescan" {
+            self.refresh_pci_cache();
+        } else if let Some((addr, reg, width)) = Self::parse_cfg_path(&handle.path) {
+            if len < 4 {
+                return Self::err_reply(sender, EINVAL);
+            }
+            let val = u32::from_le_bytes([payload[18], payload[19], payload[20], payload[21]]);
+            if call::pci_cfg_write(&addr, reg, width, val).is_err() {
+                return Self::err_reply(sender, EINVAL);
+            }
+        } else {
+            let reg_str = match handle.path.strip_prefix("reg/") {
+                Some(s) => s,
+                None => return Self::err_reply(sender, ENOSYS as u32),
+            };
+            let reg_offset = match usize::from_str_radix(reg_str.trim_start_matches("0x"), 16) {
+                Ok(v) => v,
+                Err(_) => return Self::err_reply(sender, EINVAL),
+            };
+            if len < 4 {
+                return Self::err_reply(sender, EINVAL);
+            }
+            let val = u32::from_le_bytes([
+                payload[18], payload[19], payload[20], payload[21],
+            ]);
+            if self.driver.write_reg(reg_offset, val).is_err() {
+                return Self::err_reply(sender, EINVAL);
+            }
         }
 
         let mut reply = Self::ok_reply(sender);
@@ -293,7 +469,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
             let mut e = alloc::vec![
                 (1u64, DT_REG, String::from("status")),
                 (2u64, DT_REG, String::from("error_count")),
-                (3u64, 4u8, String::from("pci")),
+                (3u64, DT_DIR, String::from("pci")),
             ];
             for c in self.driver.children() {
                 e.push((c.base_addr, DT_REG, c.name));
@@ -303,7 +479,12 @@ impl<D: BusDriver> BusSchemeServer<D> {
             alloc::vec![
                 (4u64, DT_REG, String::from("inventory")),
                 (5u64, DT_REG, String::from("count")),
+                (6u64, DT_REG, String::from("rescan")),
+                (7u64, DT_DIR, String::from("find")),
+                (8u64, DT_DIR, String::from("cfg")),
             ]
+        } else if handle.path == "pci/find" || handle.path == "pci/cfg" {
+            alloc::vec![]
         } else {
             return Self::err_reply(sender, ENOTDIR);
         };

@@ -212,7 +212,7 @@ pub fn cmd_gfx_demo(_args: &[String]) -> Result<(), ShellError> {
     let top = layout.dock(DockEdge::Top, vga::ui_scale_px(56));
     let bottom = layout.dock(DockEdge::Bottom, vga::ui_scale_px(120));
     let left = layout.dock(DockEdge::Left, vga::ui_scale_px(360));
-    let center = layout.remaining();
+    let _center = layout.remaining();
 
     let theme = UiTheme::SLATE;
     let canvas = vga::Canvas::new(theme.text, theme.background);

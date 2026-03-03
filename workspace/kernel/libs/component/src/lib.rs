@@ -191,8 +191,8 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
     // SAFETY: linker guarantees the section boundaries are valid and all
     // objects in the section are `ComponentEntry` structs placed by the macro.
     unsafe {
-        let start = &raw const __start_component_entries as *const ComponentEntry;
-        let stop = &raw const __stop_component_entries as *const ComponentEntry;
+        let start = &raw const __start_component_entries;
+        let stop = &raw const __stop_component_entries;
         let mut cur = start;
         while cur < stop {
             let entry = &*cur;
@@ -322,9 +322,11 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
 pub fn list_components() -> Vec<&'static ComponentEntry> {
     let mut components: Vec<&'static ComponentEntry> = Vec::new();
 
+    // SAFETY: linker guarantees the section boundaries are valid and all
+    // objects in the section are `ComponentEntry` structs placed by the macro.
     unsafe {
-        let start = &raw const __start_component_entries as *const ComponentEntry;
-        let stop = &raw const __stop_component_entries as *const ComponentEntry;
+        let start = &raw const __start_component_entries;
+        let stop = &raw const __stop_component_entries;
         let mut cur = start;
         while cur < stop {
             components.push(&*cur);

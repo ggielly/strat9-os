@@ -641,7 +641,7 @@ fn apply_dynamic_relocations(
     let mut pltrel_kind: Option<u64> = None;
     let mut symtab_addr: Option<u64> = None;
     let mut sym_ent: usize = core::mem::size_of::<Elf64Sym>();
-    let mut strtab_addr: Option<u64> = None;
+    let _strtab_addr: Option<u64> = None;
     let mut rela_count_hint: Option<usize> = None;
     let mut relr_addr: Option<u64> = None;
     let mut relr_size: usize = 0;
@@ -689,12 +689,10 @@ fn apply_dynamic_relocations(
             }
             DT_SYMENT => sym_ent = dyn_entry.d_val as usize,
             DT_STRTAB => {
-                strtab_addr = Some(
-                    dyn_entry
-                        .d_val
-                        .checked_add(load_bias)
-                        .ok_or("DT_STRTAB relocated address overflow")?,
-                )
+                let _ = dyn_entry
+                    .d_val
+                    .checked_add(load_bias)
+                    .ok_or("DT_STRTAB relocated address overflow")?;
             }
             DT_RELR => {
                 relr_addr = Some(
@@ -1374,7 +1372,7 @@ pub fn load_elf_task_with_caps(
     }
 
     // Bootstrapping: grant Silo Admin capability to the initial userspace task.
-    if name == "init" || name == "silo-admin" {
+    if name == "init" || name == "silo-admin" || name.starts_with("strate-admin:") {
         let _ = crate::silo::grant_silo_admin_to_task(&task);
     }
 

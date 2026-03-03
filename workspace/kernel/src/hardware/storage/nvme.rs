@@ -2,7 +2,7 @@
 // Reference: NVM Express Base Specification 2.0
 
 use crate::{
-    arch::x86_64::pci::{self, Bar, ProbeCriteria},
+    hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_dma_frame, phys_to_virt},
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};

@@ -106,6 +106,18 @@ pub const SYS_SEM_POST: u64 = 233;
 /// Close/destroy semaphore. arg1 = semaphore handle
 pub const SYS_SEM_CLOSE: u64 = 234;
 
+/// Enumerate PCI devices into a userspace array.
+/// arg1=criteria_ptr, arg2=out_ptr, arg3=max_entries
+pub const SYS_PCI_ENUM: u64 = 240;
+
+/// Read a PCI configuration register.
+/// arg1=address_ptr, arg2=offset, arg3=width(1|2|4)
+pub const SYS_PCI_CFG_READ: u64 = 241;
+
+/// Write a PCI configuration register.
+/// arg1=address_ptr, arg2=offset, arg3=width(1|2|4), arg4=value
+pub const SYS_PCI_CFG_WRITE: u64 = 242;
+
 /// create a typed sync-channel.
 /// arg1 = capacity (number of IpcMessages). Returns channel handle.
 pub const SYS_CHAN_CREATE: u64 = 220;
@@ -278,6 +290,9 @@ pub const SYS_THREAD_JOIN: u64 = 342;
 /// Exit current userspace thread.
 /// arg1 = exit_code
 pub const SYS_THREAD_EXIT: u64 = 343;
+
+/// Fill a userspace `struct utsname` buffer. arg1 = utsname_ptr.
+pub const SYS_UNAME: u64 = 344;
 
 /// Architecture-specific process info (x86_64: FS/GS base).
 /// arg1 = code (ARCH_SET_FS=0x1002, ARCH_GET_FS=0x1003, etc.), arg2 = addr.

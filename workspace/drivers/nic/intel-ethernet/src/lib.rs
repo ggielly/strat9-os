@@ -7,7 +7,7 @@ use nic_queues::{RxDescriptor, TxDescriptor};
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct LegacyRxDesc {
     pub addr: u64,
     pub length: u16,
@@ -15,19 +15,6 @@ pub struct LegacyRxDesc {
     pub status: u8,
     pub errors: u8,
     pub special: u16,
-}
-
-impl Default for LegacyRxDesc {
-    fn default() -> Self {
-        Self {
-            addr: 0,
-            length: 0,
-            checksum: 0,
-            status: 0,
-            errors: 0,
-            special: 0,
-        }
-    }
 }
 
 const RX_DD: u8 = 1 << 0;
@@ -54,7 +41,7 @@ impl RxDescriptor for LegacyRxDesc {
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct LegacyTxDesc {
     pub addr: u64,
     pub length: u16,
@@ -63,20 +50,6 @@ pub struct LegacyTxDesc {
     pub status: u8,
     pub css: u8,
     pub special: u16,
-}
-
-impl Default for LegacyTxDesc {
-    fn default() -> Self {
-        Self {
-            addr: 0,
-            length: 0,
-            cso: 0,
-            cmd: 0,
-            status: 0,
-            css: 0,
-            special: 0,
-        }
-    }
 }
 
 const TX_DD: u8 = 1 << 0;

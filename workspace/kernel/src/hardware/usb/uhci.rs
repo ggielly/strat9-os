@@ -10,7 +10,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    arch::x86_64::pci::{self, Bar, ProbeCriteria},
+    hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_dma_frame, phys_to_virt},
 };
 use alloc::{sync::Arc, vec::Vec};

@@ -203,8 +203,6 @@ pub extern "C" fn _start() -> ! {
         let _ = call::debug_log(b"[strate-bus] MMIO probe: FAILURES DETECTED\n");
     }
     log_probe_counts(probe_result.passed, probe_result.failed);
-    let pci_inventory = read_file("/sys/pci/inventory").unwrap_or_default();
-
     let mut driver = SimplePmBus::new();
     if startup_hardware_test(&mut driver) {
         let _ = call::debug_log(b"[strate-bus] Startup hardware test: OK\n");
@@ -212,6 +210,7 @@ pub extern "C" fn _start() -> ! {
         let _ = call::debug_log(b"[strate-bus] Startup hardware test: FAILED\n");
     }
 
-    let mut server = BusSchemeServer::new(driver, port).with_pci_inventory(pci_inventory);
+    let mut server = BusSchemeServer::new(driver, port);
+    server.refresh_pci_cache();
     server.serve();
 }

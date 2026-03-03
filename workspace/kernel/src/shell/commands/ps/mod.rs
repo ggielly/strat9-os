@@ -17,14 +17,6 @@ pub fn cmd_ps(_args: &[String]) -> Result<(), ShellError> {
                 crate::process::TaskState::Dead => "Dead",
             };
 
-            let priority_str = match task.priority {
-                crate::process::TaskPriority::Idle => "Idle",
-                crate::process::TaskPriority::Low => "Low",
-                crate::process::TaskPriority::Normal => "Normal",
-                crate::process::TaskPriority::High => "High",
-                crate::process::TaskPriority::Realtime => "Realtime",
-            };
-
             shell_println!(
                 "{:<6} {:<17} {:<10} {:?}",
                 task.id.as_u64(),

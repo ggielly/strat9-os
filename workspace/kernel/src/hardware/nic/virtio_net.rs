@@ -235,8 +235,8 @@ impl NetworkDevice for VirtioNetDevice {
 
         let (token, len) = rx_queue.get_used().ok_or(NetError::NoPacket)?;
 
-        let desc_index = token as usize;
-        let desc_table = rx_queue.desc_area(); // Physical address
+        let _desc_index = token as usize;
+        let _desc_table = rx_queue.desc_area(); // Physical address
 
         let (frame, order) = self
             .rx_frames

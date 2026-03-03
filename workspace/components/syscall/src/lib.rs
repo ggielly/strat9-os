@@ -538,16 +538,14 @@ pub mod call {
 
     /// Replace the current process image with a new program.
     ///
-    /// `path`: executable path as a byte slice.
+    /// `path`: executable path as a nul-terminated C string byte slice.
     /// `argv` and `envp`: pointers to null-terminated C-style arrays.
     pub unsafe fn execve(path: &[u8], argv: usize, envp: usize) -> error::Result<usize> {
-        syscall5(
+        syscall3(
             number::SYS_PROC_EXECVE,
             path.as_ptr() as usize,
-            path.len(),
             argv,
             envp,
-            0,
         )
     }
 
@@ -932,6 +930,57 @@ pub mod call {
     /// Close and destroy a channel.
     pub fn chan_close(chan_handle: usize) -> error::Result<usize> {
         unsafe { syscall1(number::SYS_CHAN_CLOSE, chan_handle) }
+    }
+
+    /// Enumerate PCI devices matching `criteria`.
+    ///
+    /// Returns the number of entries written into `out`.
+    pub fn pci_enum(
+        criteria: &data::PciProbeCriteria,
+        out: &mut [data::PciDeviceInfo],
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_PCI_ENUM,
+                criteria as *const data::PciProbeCriteria as usize,
+                out.as_mut_ptr() as usize,
+                out.len(),
+            )
+        }
+    }
+
+    /// Read a PCI configuration value from `addr`.
+    ///
+    /// `width` must be 1, 2 or 4.
+    pub fn pci_cfg_read(addr: &data::PciAddress, offset: u8, width: u8) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_PCI_CFG_READ,
+                addr as *const data::PciAddress as usize,
+                offset as usize,
+                width as usize,
+            )
+        }
+    }
+
+    /// Write a PCI configuration value to `addr`.
+    ///
+    /// `width` must be 1, 2 or 4.
+    pub fn pci_cfg_write(
+        addr: &data::PciAddress,
+        offset: u8,
+        width: u8,
+        value: u32,
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall4(
+                number::SYS_PCI_CFG_WRITE,
+                addr as *const data::PciAddress as usize,
+                offset as usize,
+                width as usize,
+                value as usize,
+            )
+        }
     }
 
     // -----------------------------------------------------------------------

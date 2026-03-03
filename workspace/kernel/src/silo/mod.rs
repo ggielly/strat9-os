@@ -13,6 +13,7 @@ use crate::{
     syscall::error::SyscallError,
 };
 use alloc::{
+    boxed::Box,
     collections::{BTreeMap, VecDeque},
     string::{String, ToString},
     sync::Arc,
@@ -1181,7 +1182,15 @@ pub fn kernel_spawn_strate(
         seed_caps.push(cap);
     }
 
-    let task = crate::process::elf::load_elf_task_with_caps(&module_data, "silo-admin", &seed_caps)
+    let display = {
+        let mgr = SILO_MANAGER.lock();
+        let silo = mgr.get(silo_id)?;
+        silo.strate_label
+            .clone()
+            .unwrap_or_else(|| alloc::format!("silo-{}", silo.id.sid))
+    };
+    let task_name: &'static str = Box::leak(alloc::format!("strate-admin:{}", display).into_boxed_str());
+    let task = crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps)
         .map_err(|_| SyscallError::InvalidArgument)?;
     let task_id = task.id;
 
@@ -1717,7 +1726,16 @@ pub fn sys_silo_attach_module(handle: u64, module_handle: u64) -> Result<u64, Sy
 }
 
 fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
-    let (module_id, granted_caps, silo_flags, previous_state, can_start, within_task_limit) = {
+    let (
+        module_id,
+        granted_caps,
+        silo_flags,
+        previous_state,
+        can_start,
+        within_task_limit,
+        silo_name,
+        silo_label,
+    ) = {
         let mut mgr = SILO_MANAGER.lock();
         let silo = mgr.get_mut(silo_id)?;
         let previous_state = silo.state;
@@ -1732,6 +1750,8 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         let module_id = silo.module_id;
         let granted_caps = silo.granted_caps.clone();
         let silo_flags = silo.config.flags;
+        let silo_name = silo.name.clone();
+        let silo_label = silo.strate_label.clone();
         if can_start && within_task_limit {
             silo.state = SiloState::Loading;
         }
@@ -1742,6 +1762,8 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
             previous_state,
             can_start,
             within_task_limit,
+            silo_name,
+            silo_label,
         )
     };
 
@@ -1795,11 +1817,15 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         out
     };
 
-    let task_name: &'static str = if silo_flags & SILO_FLAG_ADMIN != 0 {
-        "silo-admin"
+    let display = silo_label.unwrap_or(silo_name);
+    let task_name_owned = if silo_flags & SILO_FLAG_ADMIN != 0 {
+        alloc::format!("strate-admin:{}", display)
     } else {
-        "silo"
+        alloc::format!("strate:{}", display)
     };
+    // Intentional leak: task names are expected to live for the task lifetime.
+    // This avoids generic "silo" labels in process viewers.
+    let task_name: &'static str = Box::leak(task_name_owned.into_boxed_str());
 
     let module_data = {
         let registry = MODULE_REGISTRY.lock();

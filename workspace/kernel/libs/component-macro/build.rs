@@ -6,7 +6,13 @@
 
 fn main() {
     // Walk up from this crate's manifest dir to find Components.toml.
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
+        Ok(v) => v,
+        Err(e) => {
+            println!("cargo:warning=component-macro: CARGO_MANIFEST_DIR missing: {e}");
+            return;
+        }
+    };
     let mut search = std::path::PathBuf::from(&manifest_dir);
 
     let mut found: Option<std::path::PathBuf> = None;
@@ -62,7 +68,7 @@ fn validate_components_toml(path: &std::path::Path) {
 
         let deps: Vec<String> = if let Some(di) = rest.find("deps") {
             let after = rest[di + 4..]
-                .trim_start_matches(|c: char| c == ' ' || c == '=')
+                .trim_start_matches([' ', '='])
                 .trim_start();
             if let Some(bs) = after.find('[') {
                 if let Some(be) = after.find(']') {

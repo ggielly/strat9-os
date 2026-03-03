@@ -7,6 +7,7 @@ use super::{
     sys_clock_gettime, sys_nanosleep, SyscallFrame,
 };
 use crate::{
+    arch::x86_64::pci,
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
     hardware::storage::{
         ahci,
@@ -143,6 +144,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_THREAD_CREATE => proc_sys::sys_thread_create(frame, arg1, arg2, arg3, arg4, frame.r8),
         SYS_THREAD_JOIN => proc_sys::sys_thread_join(arg1, arg2, arg3),
         SYS_THREAD_EXIT => proc_sys::sys_thread_exit(arg1),
+        SYS_UNAME => sys_uname(arg1),
         // ── Thread lifecycle (333-334) ────────────────────────────────────────
         SYS_SET_TID_ADDRESS => proc_sys::sys_set_tid_address(arg1),
         SYS_EXIT_GROUP => proc_sys::sys_exit_group(arg1),
@@ -191,6 +193,9 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SEM_TRYWAIT => sys_sem_trywait(arg1),
         SYS_SEM_POST => sys_sem_post(arg1),
         SYS_SEM_CLOSE => sys_sem_close(arg1),
+        SYS_PCI_ENUM => sys_pci_enum(arg1, arg2, arg3),
+        SYS_PCI_CFG_READ => sys_pci_cfg_read(arg1, arg2, arg3),
+        SYS_PCI_CFG_WRITE => sys_pci_cfg_write(arg1, arg2, arg3, arg4),
 
         // Typed MPMC sync-channel (IPC-02)
         SYS_CHAN_CREATE => sys_chan_create(arg1),
@@ -633,6 +638,35 @@ fn sys_sigprocmask(how: i32, set_ptr: u64, oldset_ptr: u64) -> Result<u64, Sysca
         blocked.set_mask(updated_mask);
     }
 
+    Ok(0)
+}
+
+fn sys_uname(uts_ptr: u64) -> Result<u64, SyscallError> {
+    const UTS_FIELD_LEN: usize = 65;
+    const UTS_TOTAL_LEN: usize = UTS_FIELD_LEN * 6;
+
+    if uts_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+
+    fn write_field(dst: &mut [u8], src: &[u8]) {
+        let n = core::cmp::min(src.len(), dst.len().saturating_sub(1));
+        if n > 0 {
+            dst[..n].copy_from_slice(&src[..n]);
+        }
+        dst[n] = 0;
+    }
+
+    let mut uts = [0u8; UTS_TOTAL_LEN];
+    write_field(&mut uts[0 * UTS_FIELD_LEN..1 * UTS_FIELD_LEN], b"Strat9");
+    write_field(&mut uts[1 * UTS_FIELD_LEN..2 * UTS_FIELD_LEN], b"localhost");
+    write_field(&mut uts[2 * UTS_FIELD_LEN..3 * UTS_FIELD_LEN], b"0.1.0");
+    write_field(&mut uts[3 * UTS_FIELD_LEN..4 * UTS_FIELD_LEN], b"Strat9-OS");
+    write_field(&mut uts[4 * UTS_FIELD_LEN..5 * UTS_FIELD_LEN], b"x86_64");
+    write_field(&mut uts[5 * UTS_FIELD_LEN..6 * UTS_FIELD_LEN], b"localdomain");
+
+    let user = UserSliceWrite::new(uts_ptr, UTS_TOTAL_LEN)?;
+    user.copy_from(&uts);
     Ok(0)
 }
 
@@ -1592,6 +1626,190 @@ fn sys_sem_close(handle: u64) -> Result<u64, SyscallError> {
         semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
         semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
     })?;
+    Ok(0)
+}
+
+const PCI_MATCH_VENDOR_ID: u32 = 1 << 0;
+const PCI_MATCH_DEVICE_ID: u32 = 1 << 1;
+const PCI_MATCH_CLASS_CODE: u32 = 1 << 2;
+const PCI_MATCH_SUBCLASS: u32 = 1 << 3;
+const PCI_MATCH_PROG_IF: u32 = 1 << 4;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PciAddressAbi {
+    bus: u8,
+    device: u8,
+    function: u8,
+    _reserved: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PciProbeCriteriaAbi {
+    match_flags: u32,
+    vendor_id: u16,
+    device_id: u16,
+    class_code: u8,
+    subclass: u8,
+    prog_if: u8,
+    _reserved: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PciDeviceInfoAbi {
+    address: PciAddressAbi,
+    vendor_id: u16,
+    device_id: u16,
+    class_code: u8,
+    subclass: u8,
+    prog_if: u8,
+    revision: u8,
+    header_type: u8,
+    interrupt_line: u8,
+    interrupt_pin: u8,
+    _reserved: u8,
+}
+
+fn read_pci_address(addr_ptr: u64) -> Result<pci::PciAddress, SyscallError> {
+    if addr_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+    let user = UserSliceRead::new(addr_ptr, core::mem::size_of::<PciAddressAbi>())?;
+    let mut raw = [0u8; core::mem::size_of::<PciAddressAbi>()];
+    user.copy_to(&mut raw);
+    let abi = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const PciAddressAbi) };
+    if abi.device > 31 || abi.function > 7 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok(pci::PciAddress::new(abi.bus, abi.device, abi.function))
+}
+
+fn sys_pci_enum(criteria_ptr: u64, out_ptr: u64, max_entries: u64) -> Result<u64, SyscallError> {
+    if criteria_ptr == 0 || out_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+    if max_entries == 0 {
+        return Ok(0);
+    }
+    let max_entries = core::cmp::min(max_entries as usize, 4096);
+    let user_criteria = UserSliceRead::new(criteria_ptr, core::mem::size_of::<PciProbeCriteriaAbi>())?;
+    let mut criteria_bytes = [0u8; core::mem::size_of::<PciProbeCriteriaAbi>()];
+    user_criteria.copy_to(&mut criteria_bytes);
+    let criteria_abi =
+        unsafe { core::ptr::read_unaligned(criteria_bytes.as_ptr() as *const PciProbeCriteriaAbi) };
+
+    let criteria = pci::ProbeCriteria {
+        vendor_id: if (criteria_abi.match_flags & PCI_MATCH_VENDOR_ID) != 0 {
+            Some(criteria_abi.vendor_id)
+        } else {
+            None
+        },
+        device_id: if (criteria_abi.match_flags & PCI_MATCH_DEVICE_ID) != 0 {
+            Some(criteria_abi.device_id)
+        } else {
+            None
+        },
+        class_code: if (criteria_abi.match_flags & PCI_MATCH_CLASS_CODE) != 0 {
+            Some(criteria_abi.class_code)
+        } else {
+            None
+        },
+        subclass: if (criteria_abi.match_flags & PCI_MATCH_SUBCLASS) != 0 {
+            Some(criteria_abi.subclass)
+        } else {
+            None
+        },
+        prog_if: if (criteria_abi.match_flags & PCI_MATCH_PROG_IF) != 0 {
+            Some(criteria_abi.prog_if)
+        } else {
+            None
+        },
+    };
+
+    let devices = pci::probe_all(criteria);
+    let count = core::cmp::min(devices.len(), max_entries);
+    let mut out = alloc::vec::Vec::<PciDeviceInfoAbi>::with_capacity(count);
+    for dev in devices.into_iter().take(count) {
+        out.push(PciDeviceInfoAbi {
+            address: PciAddressAbi {
+                bus: dev.address.bus,
+                device: dev.address.device,
+                function: dev.address.function,
+                _reserved: 0,
+            },
+            vendor_id: dev.vendor_id,
+            device_id: dev.device_id,
+            class_code: dev.class_code,
+            subclass: dev.subclass,
+            prog_if: dev.prog_if,
+            revision: dev.revision,
+            header_type: dev.header_type,
+            interrupt_line: dev.interrupt_line,
+            interrupt_pin: dev.interrupt_pin,
+            _reserved: 0,
+        });
+    }
+    let out_bytes_len = out
+        .len()
+        .checked_mul(core::mem::size_of::<PciDeviceInfoAbi>())
+        .ok_or(SyscallError::InvalidArgument)?;
+    let user_out = UserSliceWrite::new(out_ptr, out_bytes_len)?;
+    let out_bytes = unsafe {
+        core::slice::from_raw_parts(out.as_ptr() as *const u8, out_bytes_len)
+    };
+    user_out.copy_from(out_bytes);
+    Ok(out.len() as u64)
+}
+
+fn sys_pci_cfg_read(addr_ptr: u64, offset: u64, width: u64) -> Result<u64, SyscallError> {
+    let dev_addr = read_pci_address(addr_ptr)?;
+    let offset = u8::try_from(offset).map_err(|_| SyscallError::InvalidArgument)?;
+    let width = u8::try_from(width).map_err(|_| SyscallError::InvalidArgument)?;
+    if !matches!(width, 1 | 2 | 4) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if offset > 0xFC || (offset as u16 + width as u16) > 0x100 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if (width == 2 && (offset & 1) != 0) || (width == 4 && (offset & 3) != 0) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let dev = pci::all_devices()
+        .into_iter()
+        .find(|d| d.address == dev_addr)
+        .ok_or(SyscallError::NotFound)?;
+    let value = match width {
+        1 => dev.read_config_u8(offset) as u32,
+        2 => dev.read_config_u16(offset) as u32,
+        _ => dev.read_config_u32(offset),
+    };
+    Ok(value as u64)
+}
+
+fn sys_pci_cfg_write(addr_ptr: u64, offset: u64, width: u64, value: u64) -> Result<u64, SyscallError> {
+    let dev_addr = read_pci_address(addr_ptr)?;
+    let offset = u8::try_from(offset).map_err(|_| SyscallError::InvalidArgument)?;
+    let width = u8::try_from(width).map_err(|_| SyscallError::InvalidArgument)?;
+    if !matches!(width, 1 | 2 | 4) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if offset > 0xFC || (offset as u16 + width as u16) > 0x100 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if (width == 2 && (offset & 1) != 0) || (width == 4 && (offset & 3) != 0) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let dev = pci::all_devices()
+        .into_iter()
+        .find(|d| d.address == dev_addr)
+        .ok_or(SyscallError::NotFound)?;
+    match width {
+        1 => dev.write_config_u8(offset, value as u8),
+        2 => dev.write_config_u16(offset, value as u16),
+        _ => dev.write_config_u32(offset, value as u32),
+    }
     Ok(0)
 }
 

@@ -1,6 +1,7 @@
 //! Hardware integration layer.
 
 pub mod nic;
+pub mod pci_client;
 pub mod storage;
 pub mod timer;
 pub mod usb;

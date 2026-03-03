@@ -57,7 +57,7 @@ pub fn cmd_mem(args: &[String]) -> Result<(), ShellError> {
 fn cmd_mem_zones() -> Result<(), ShellError> {
     const MAX_ZONES: usize = 4;
     let mut zones_info = [(0u8, 0u64, 0usize, 0usize); MAX_ZONES];
-    let mut zone_count = 0;
+    let zone_count;
 
     {
         let allocator_guard = crate::memory::buddy::get_allocator().lock();

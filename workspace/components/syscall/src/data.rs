@@ -58,6 +58,49 @@ pub struct HandleInfo {
     pub resource: u64,
 }
 
+pub const PCI_MATCH_VENDOR_ID: u32 = 1 << 0;
+pub const PCI_MATCH_DEVICE_ID: u32 = 1 << 1;
+pub const PCI_MATCH_CLASS_CODE: u32 = 1 << 2;
+pub const PCI_MATCH_SUBCLASS: u32 = 1 << 3;
+pub const PCI_MATCH_PROG_IF: u32 = 1 << 4;
+
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[repr(C)]
+pub struct PciAddress {
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    pub _reserved: u8,
+}
+
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[repr(C)]
+pub struct PciProbeCriteria {
+    pub match_flags: u32,
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub class_code: u8,
+    pub subclass: u8,
+    pub prog_if: u8,
+    pub _reserved: u8,
+}
+
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[repr(C)]
+pub struct PciDeviceInfo {
+    pub address: PciAddress,
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub class_code: u8,
+    pub subclass: u8,
+    pub prog_if: u8,
+    pub revision: u8,
+    pub header_type: u8,
+    pub interrupt_line: u8,
+    pub interrupt_pin: u8,
+    pub _reserved: u8,
+}
+
 /// Kernel-level file metadata returned by fstat/stat syscalls.
 ///
 /// Matches kernel `vfs::scheme::FileStat` layout exactly.

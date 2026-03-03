@@ -80,7 +80,6 @@ bitflags::bitflags! {
     }
 }
 
-/// Open flags passed to open().
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct OpenFlags: u32 {

@@ -507,6 +507,12 @@ fn run_wasm_app(service_path: &str, wasm_path: &str) -> Result<(), u32> {
 fn boot_silos(silos: Vec<SiloDef>) {
     let mut next_sys_sid = 100u32;
     let mut next_usr_sid = 1000u32;
+    let mut silos = silos;
+
+    // Blocking launch order requirement:
+    // - "bus" must start first and expose /bus/pci/* before PCI-dependent silos.
+    // - other silos keep their relative order.
+    silos.sort_by_key(|s| if s.name == "bus" { 0u8 } else { 1u8 });
 
     for s_def in silos {
         let requested_mode = parse_mode_octal(&s_def.mode).unwrap_or(0);

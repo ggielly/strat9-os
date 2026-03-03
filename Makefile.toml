@@ -228,6 +228,49 @@ cwd = "workspace/kernel"
 command = "cargo"
 args = ["clippy", "--target", "${KERNEL_TARGET}"]
 
+[tasks.clippy-strict]
+description = "Run strict clippy checks on kernel code"
+cwd = "workspace/kernel"
+command = "cargo"
+args = [
+    "clippy",
+    "--target",
+    "${KERNEL_TARGET}",
+    "--",
+    "-D",
+    "warnings",
+    "-W",
+    "clippy::all",
+    "-W",
+    "clippy::undocumented_unsafe_blocks",
+    "-W",
+    "clippy::unwrap_used",
+    "-W",
+    "clippy::expect_used",
+    "-W",
+    "clippy::panic",
+    "-W",
+    "clippy::todo",
+    "-W",
+    "clippy::unimplemented",
+]
+
+[tasks.miri-test]
+description = "Install Miri and run selected test suites"
+cwd = "."
+script_runner = "@shell"
+script = """
+set -euo pipefail
+rustup +nightly component add miri
+cargo +nightly miri setup
+cargo +nightly miri test -p strat9-syscall
+cargo +nightly miri test -p strat9-bus-drivers
+"""
+
+[tasks.quality-strict]
+description = "Run strict clippy and selected miri tests"
+dependencies = ["clippy-strict", "miri-test"]
+
 [tasks.fmt]
 description = "Format all code"
 command = "cargo"
@@ -874,6 +917,7 @@ args = [
 
 description = "Create bootable ISO/IMG with Limine + kernel"
 dependencies = [
+    "build-relibc",
     "setup-limine",
     "kernel",
     "strate-ext4",
@@ -899,6 +943,7 @@ bash tools/scripts/create-limine-image.sh
 
 description = "Create bootable ISO/IMG with Limine + kernel (self-tests enabled)"
 dependencies = [
+    "build-relibc",
     "setup-limine",
     "kernel-test",
     "strate-ext4",
@@ -926,6 +971,7 @@ bash tools/scripts/create-limine-image.sh
 
 description = "Create bootable ISO/IMG with Limine + kernel (dev-opt profile)"
 dependencies = [
+    "build-relibc",
     "setup-limine",
     "kernel-dev-opt",
     "strate-ext4-dev-opt",
@@ -951,6 +997,7 @@ bash tools/scripts/create-limine-image.sh
 
 description = "Create bootable ISO/IMG with Limine + kernel (release profile)"
 dependencies = [
+    "build-relibc",
     "setup-limine",
     "kernel-release",
     "strate-ext4-release",

@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    arch::x86_64::pci::{self, Bar, ProbeCriteria},
+    hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_dma_frame, paging, phys_to_virt},
 };
 use alloc::sync::Arc;
@@ -366,14 +366,12 @@ impl XhciController {
     }
 
     unsafe fn read_portsc(&self, port: usize) -> u32 {
-        let op = &*self.op_regs;
         let port_offset = XHCI_PORT_REG_BASE + (port * XHCI_PORT_REG_STRIDE);
         let portsc_ptr = (self.op_regs as *const u8).add(port_offset) as *const u32;
         portsc_ptr.read_volatile()
     }
 
     unsafe fn write_portsc(&self, port: usize, val: u32) {
-        let op = &*self.op_regs;
         let port_offset = XHCI_PORT_REG_BASE + (port * XHCI_PORT_REG_STRIDE);
         let portsc_ptr = (self.op_regs as *const u8).add(port_offset) as *mut u32;
         portsc_ptr.write_volatile(val);
@@ -441,7 +439,7 @@ impl XhciController {
                     self.event_ring_cycle = !self.event_ring_cycle;
                 }
                 let ir = &mut (*self.rt_regs).ir[0];
-                ir.erdp = self.event_ring_phys + (self.event_ring_deq as u64) * 16 | (1 << 3);
+                ir.erdp = (self.event_ring_phys + (self.event_ring_deq as u64) * 16) | (1 << 3);
                 return Ok(trb);
             }
             core::hint::spin_loop();

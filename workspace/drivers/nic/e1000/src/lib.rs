@@ -6,9 +6,9 @@ use net_core::NetError;
 use nic_buffers::{DmaAllocator, DmaRegion};
 use nic_queues::{RxDescriptor, RxRing, TxRing};
 
-pub const NUM_RX: usize = 128;  // Optimisé pour plus de throughput
-pub const NUM_TX: usize = 128;  // Optimisé pour plus de throughput
-pub const RX_BUF_SIZE: usize = 4096;  // Buffer size optimisé (MTU + overhead)
+pub const NUM_RX: usize = 128; // Optimisé pour plus de throughput
+pub const NUM_TX: usize = 128; // Optimisé pour plus de throughput
+pub const RX_BUF_SIZE: usize = 4096; // Buffer size optimisé (MTU + overhead)
 
 pub const E1000_DEVICE_IDS: &[u16] = &[0x100E, 0x100F, 0x10D3, 0x153A, 0x1539];
 pub const INTEL_VENDOR: u16 = 0x8086;
@@ -24,16 +24,24 @@ pub struct E1000Nic {
     link_up: bool,
 }
 
+// SAFETY: E1000Nic owns its MMIO region and DMA buffers. It is safe to send
+// across threads as long as only one thread accesses the hardware at a time.
 unsafe impl Send for E1000Nic {}
 
 // MMIO helpers
+/// # Safety
+///
+/// The caller must ensure that `base + reg` is a valid mapped MMIO region.
 #[inline]
 unsafe fn rd(base: u64, reg: usize) -> u32 {
     ptr::read_volatile((base + reg as u64) as *const u32)
 }
+/// # Safety
+///
+/// The caller must ensure that `base + reg` is a valid mapped MMIO region.
 #[inline]
 unsafe fn wr(base: u64, reg: usize, val: u32) {
-    ptr::write_volatile((base + reg as u64) as *mut u32, val);
+    ptr::write_volatile((base + reg as u64) as *mut u32, val)
 }
 
 impl E1000Nic {
@@ -42,6 +50,8 @@ impl E1000Nic {
     /// `mmio_base` is the virtual address of the mapped BAR0 region.
     /// The caller must ensure the MMIO region (>=128 KiB) is identity-mapped.
     pub fn init(mmio_base: u64, alloc: &dyn DmaAllocator) -> Result<Self, NetError> {
+        // SAFETY: We have exclusive access to the MMIO region during initialization.
+        // All DMA allocations are fresh and properly zeroed.
         unsafe {
             // Reset
             let c = rd(mmio_base, regs::CTRL);
@@ -64,13 +74,12 @@ impl E1000Nic {
             let rx_descs = rx_ring_region.virt as *mut LegacyRxDesc;
 
             let mut rx_bufs = [DmaRegion::ZERO; NUM_RX];
-            for i in 0..NUM_RX {
+            for rx_buf in rx_bufs.iter_mut().take(NUM_RX) {
                 let buf = alloc
                     .alloc_dma(RX_BUF_SIZE)
                     .map_err(|_| NetError::NotReady)?;
                 ptr::write_bytes(buf.virt, 0, RX_BUF_SIZE);
-                (*rx_descs.add(i)).addr = buf.phys;
-                rx_bufs[i] = buf;
+                *rx_buf = buf;
             }
 
             wr(mmio_base, regs::RDBAL, rx_ring_region.phys as u32);
@@ -78,6 +87,11 @@ impl E1000Nic {
             wr(mmio_base, regs::RDLEN, rx_ring_region.size as u32);
             wr(mmio_base, regs::RDH, 0);
             wr(mmio_base, regs::RDT, (NUM_RX - 1) as u32);
+
+            // Set buffer addresses in descriptors
+            for (i, buf) in rx_bufs.iter().enumerate().take(NUM_RX) {
+                (*rx_descs.add(i)).addr = buf.phys;
+            }
 
             // TX ring
             let tx_ring_region = alloc
@@ -139,6 +153,7 @@ impl E1000Nic {
 
     /// Check and update link status
     pub fn check_link(&mut self) -> bool {
+        // SAFETY: MMIO read is safe as long as the device is mapped.
         unsafe {
             let status = rd(self.mmio, regs::STATUS);
             self.link_up = (status & 0x02) != 0;
@@ -158,6 +173,7 @@ impl E1000Nic {
             return Err(NetError::BufferTooSmall);
         }
 
+        // SAFETY: The DMA buffer is valid and we have exclusive access during receive.
         unsafe {
             ptr::copy_nonoverlapping(self.rx_bufs[idx].virt, buf.as_mut_ptr(), len);
         }
@@ -168,6 +184,7 @@ impl E1000Nic {
             .desc_mut(idx)
             .set_buffer_addr(self.rx_bufs[idx].phys);
         let new_tail = self.rx.advance();
+        // SAFETY: Writing to RDT is safe as the device is initialized.
         unsafe {
             wr(self.mmio, regs::RDT, new_tail as u32);
         }
@@ -186,7 +203,7 @@ impl E1000Nic {
         }
 
         let idx = self.tx.tail();
-        
+
         // Check if previous TX at this slot is complete (non-blocking)
         if self.tx.desc(idx).cmd != 0 && !self.tx.is_done(idx) {
             return Err(NetError::TxQueueFull);
@@ -194,6 +211,7 @@ impl E1000Nic {
 
         // Free previous buffer if present
         if let Some(old) = self.tx_bufs[idx].take() {
+            // SAFETY: We own this DMA region and are freeing it after use.
             unsafe {
                 alloc.free_dma(old);
             }
@@ -201,12 +219,14 @@ impl E1000Nic {
 
         // Allocate new DMA buffer
         let region = alloc.alloc_dma(buf.len()).map_err(|_| NetError::NotReady)?;
+        // SAFETY: The DMA region is valid and we have exclusive access.
         unsafe {
             ptr::copy_nonoverlapping(buf.as_ptr(), region.virt, buf.len());
         }
 
         self.tx_bufs[idx] = Some(region);
         let _submitted = self.tx.submit(region.phys, buf.len() as u16);
+        // SAFETY: Writing to TDT is safe as the device is initialized.
         unsafe {
             wr(self.mmio, regs::TDT, self.tx.tail() as u32);
         }
@@ -237,28 +257,33 @@ impl E1000Nic {
 
     pub fn handle_interrupt(&self) {
         // Read and clear interrupt causes
+        // SAFETY: MMIO access is safe during interrupt handling.
         let icr = unsafe { rd(self.mmio, regs::ICR) };
-        
+
         // Handle specific interrupt causes
         if (icr & int_bits::LSC) != 0 {
             // Link Status Change - update cached state
+            // SAFETY: MMIO read is safe.
             let _status = unsafe { rd(self.mmio, regs::STATUS) };
         }
-        
+
         if (icr & (int_bits::RXT0 | int_bits::RXDMT0 | int_bits::RXO)) != 0 {
             // RX interrupts - packet received, will be handled by poll
         }
-        
+
         if (icr & int_bits::TXDW) != 0 {
             // TX descriptor written back - buffers can be freed
         }
     }
 
+    /// # Safety
+    ///
+    /// The caller must ensure that `base` is a valid mapped MMIO region.
     unsafe fn read_mac(base: u64) -> [u8; 6] {
         // Try RAL/RAH registers first
         let ral = rd(base, regs::RAL0);
         let rah = rd(base, regs::RAH0);
-        
+
         // Check if MAC address is valid (not all zeros)
         if ral != 0 || rah != 0 {
             return [
@@ -270,7 +295,7 @@ impl E1000Nic {
                 (rah >> 8) as u8,
             ];
         }
-        
+
         // Fallback to EEPROM read
         let mut mac = [0u8; 6];
         for i in 0u32..3 {
@@ -281,6 +306,9 @@ impl E1000Nic {
         mac
     }
 
+    /// # Safety
+    ///
+    /// The caller must ensure that `base` is a valid mapped MMIO region.
     unsafe fn eeprom_read(base: u64, addr: u8) -> u16 {
         wr(
             base,
