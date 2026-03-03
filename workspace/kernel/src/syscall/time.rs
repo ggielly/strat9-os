@@ -8,36 +8,7 @@ use crate::{
     syscall::error::SyscallError,
 };
 
-/// Time specification structure (matches POSIX timespec)
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct TimeSpec {
-    pub tv_sec: i64,
-    pub tv_nsec: i64,
-}
-
-impl TimeSpec {
-    pub const fn zero() -> Self {
-        Self {
-            tv_sec: 0,
-            tv_nsec: 0,
-        }
-    }
-
-    /// Convert to nanoseconds
-    pub fn to_nanos(&self) -> u64 {
-        (self.tv_sec as u64)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(self.tv_nsec as u64)
-    }
-
-    /// Create from nanoseconds
-    pub fn from_nanos(nanos: u64) -> Self {
-        let tv_sec = (nanos / 1_000_000_000) as i64;
-        let tv_nsec = (nanos % 1_000_000_000) as i64;
-        Self { tv_sec, tv_nsec }
-    }
-}
+pub use strat9_abi::data::TimeSpec;
 
 /// Get current monotonic time in nanoseconds since boot.
 ///

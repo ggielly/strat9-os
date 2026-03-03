@@ -1,9 +1,10 @@
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use strat9_syscall::data::IpcMessage;
 use strat9_syscall::call;
-use strat9_syscall::error::ENOSYS;
+use strat9_syscall::error::{EBADF, EINVAL, ENOENT, ENOSYS, ENOTDIR};
 use strat9_syscall::data::{
-    PciAddress, PciDeviceInfo, PciProbeCriteria, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID,
+    DT_DIR, DT_REG, PciAddress, PciDeviceInfo, PciProbeCriteria, PCI_MATCH_DEVICE_ID,
+    PCI_MATCH_VENDOR_ID,
 };
 
 use crate::BusDriver;
@@ -16,13 +17,6 @@ const OPCODE_READDIR: u32 = 0x08;
 const REPLY_MSG_TYPE: u32 = 0x80;
 const STATUS_OK: u32 = 0;
 const FILEFLAG_DIRECTORY: u32 = 1;
-
-const ENOENT: u32 = 2;
-const EINVAL: u32 = 22;
-const EBADF: u32 = 9;
-const ENOTDIR: u32 = 20;
-const DT_REG: u8 = 8;
-const DT_DIR: u8 = 4;
 
 struct OpenHandle {
     path: String,
@@ -59,10 +53,10 @@ impl<D: BusDriver> BusSchemeServer<D> {
         reply
     }
 
-    fn err_reply(sender: u64, code: u32) -> IpcMessage {
+    fn err_reply(sender: u64, code: usize) -> IpcMessage {
         let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
         reply.sender = sender;
-        reply.payload[0..4].copy_from_slice(&code.to_le_bytes());
+        reply.payload[0..4].copy_from_slice(&(code as u32).to_le_bytes());
         reply
     }
 
@@ -421,7 +415,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
         } else {
             let reg_str = match handle.path.strip_prefix("reg/") {
                 Some(s) => s,
-                None => return Self::err_reply(sender, ENOSYS as u32),
+                None => return Self::err_reply(sender, ENOSYS),
             };
             let reg_offset = match usize::from_str_radix(reg_str.trim_start_matches("0x"), 16) {
                 Ok(v) => v,
@@ -541,7 +535,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
                 OPCODE_WRITE => self.handle_write(msg.sender, &msg.payload),
                 OPCODE_CLOSE => self.handle_close(msg.sender, &msg.payload),
                 OPCODE_READDIR => self.handle_readdir(msg.sender, &msg.payload),
-                _ => Self::err_reply(msg.sender, ENOSYS as u32),
+                _ => Self::err_reply(msg.sender, ENOSYS),
             };
             let _ = call::ipc_reply(&reply);
         }

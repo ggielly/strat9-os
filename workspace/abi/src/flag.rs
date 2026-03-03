@@ -18,6 +18,10 @@ bitflags! {
         const NOFOLLOW  = 1 << 8;
         const NOCTTY    = 1 << 9;
         const SYNC      = 1 << 10;
+
+        const RDONLY = Self::READ.bits();
+        const WRONLY = Self::WRITE.bits();
+        const RDWR   = Self::READ.bits() | Self::WRITE.bits();
     }
 }
 
@@ -32,6 +36,25 @@ bitflags! {
         const MAP_POPULATE  = 0x8000;
         const MAP_LOCKED    = 0x2000;
         const MAP_GROWSDOWN = 0x0100;
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct CallFlags: u32 {
+        const READ    = 0x01;
+        const WRITE   = 0x02;
+        const NONBLOCK = 0x04;
+        const PEEK    = 0x08;
+        const WAIT    = 0x10;
+        const NOWAIT  = 0x20;
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct UnlinkFlags: u32 {
+        const REMOVEDIR = 0o02000000;
     }
 }
 

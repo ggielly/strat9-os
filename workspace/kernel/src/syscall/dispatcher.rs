@@ -523,13 +523,7 @@ fn sys_handle_revoke(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct HandleInfoAbi {
-    resource_type: u32,
-    permissions: u32,
-    resource: u64,
-}
+use strat9_abi::data::HandleInfo as HandleInfoAbi;
 
 fn cap_perm_bits(p: CapPermissions) -> u32 {
     (if p.read { 1 } else { 0 })
@@ -1632,48 +1626,11 @@ fn sys_sem_close(handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-const PCI_MATCH_VENDOR_ID: u32 = 1 << 0;
-const PCI_MATCH_DEVICE_ID: u32 = 1 << 1;
-const PCI_MATCH_CLASS_CODE: u32 = 1 << 2;
-const PCI_MATCH_SUBCLASS: u32 = 1 << 3;
-const PCI_MATCH_PROG_IF: u32 = 1 << 4;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PciAddressAbi {
-    bus: u8,
-    device: u8,
-    function: u8,
-    _reserved: u8,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PciProbeCriteriaAbi {
-    match_flags: u32,
-    vendor_id: u16,
-    device_id: u16,
-    class_code: u8,
-    subclass: u8,
-    prog_if: u8,
-    _reserved: u8,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PciDeviceInfoAbi {
-    address: PciAddressAbi,
-    vendor_id: u16,
-    device_id: u16,
-    class_code: u8,
-    subclass: u8,
-    prog_if: u8,
-    revision: u8,
-    header_type: u8,
-    interrupt_line: u8,
-    interrupt_pin: u8,
-    _reserved: u8,
-}
+use strat9_abi::data::{
+    PciAddress as PciAddressAbi, PciDeviceInfo as PciDeviceInfoAbi,
+    PciProbeCriteria as PciProbeCriteriaAbi, PCI_MATCH_CLASS_CODE, PCI_MATCH_DEVICE_ID,
+    PCI_MATCH_PROG_IF, PCI_MATCH_SUBCLASS, PCI_MATCH_VENDOR_ID,
+};
 
 fn read_pci_address(addr_ptr: u64) -> Result<pci::PciAddress, SyscallError> {
     if addr_ptr == 0 {

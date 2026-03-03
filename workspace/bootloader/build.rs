@@ -52,6 +52,8 @@ fn main() {
     let status = Command::new("nasm")
         .arg("-f")
         .arg("bin")
+        .arg("-I")
+        .arg(format!("{}/", asm_dir.display()))
         .arg("-o")
         .arg(&stage1_bin)
         .arg(&stage1_src)

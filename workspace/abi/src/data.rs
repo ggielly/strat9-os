@@ -7,6 +7,25 @@ pub struct TimeSpec {
     pub tv_nsec: i64,
 }
 
+impl TimeSpec {
+    pub const fn zero() -> Self {
+        Self { tv_sec: 0, tv_nsec: 0 }
+    }
+
+    pub fn to_nanos(&self) -> u64 {
+        (self.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(self.tv_nsec as u64)
+    }
+
+    pub fn from_nanos(nanos: u64) -> Self {
+        Self {
+            tv_sec: (nanos / 1_000_000_000) as i64,
+            tv_nsec: (nanos % 1_000_000_000) as i64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct Stat {
