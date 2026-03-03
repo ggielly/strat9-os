@@ -25,6 +25,7 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-03-03 `ef0f1d7` docs: Add documentation comments to ABI and syscall components and enhance error handling in the documentation build script.
 - 2026-03-03 `f314904` feat: Expand `FileStat` with additional POSIX fields and update kernel VFS schemes, and add a `nonce` to `IpcHandshake`.
 - 2026-03-03 `769f3eb` feat: Update syscall ABI with struct layout adjustments, error encoding clarification, and versioning.
 - 2026-03-03 `c23a68a` feat: Ensure Limine bootloader directories exist, use a real time source for `setitimer`, and add `itimerval` value validation.
@@ -54,7 +55,6 @@ See:
 - 2026-02-28 `7cf6f39` Implement new silo management syscalls and enhance kernel functionality
 - 2026-02-28 `59595b1` Refactor image format retrieval in ACPI BGRT implementation
 - 2026-02-28 `2b052de` Refactor ACPI and IPC structures for improved functionality
-- 2026-02-28 `4fe2c19` Enhance IPC message structure and silo management
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 
