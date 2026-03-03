@@ -75,16 +75,19 @@ pub enum Error {
 
 impl Error {
     #[inline]
+    /// Convert a raw errno value into a typed `Error`.
     pub fn from_errno(errno: usize) -> Self {
         Self::try_from(errno).unwrap_or(Error::Unknown(errno))
     }
 
     #[inline]
+    /// Convert this error to its numeric errno representation.
     pub fn to_errno(&self) -> usize {
         usize::from(*self)
     }
 
     #[inline]
+    /// Decode a raw syscall return value into `Result`.
     pub fn demux(ret: usize) -> core::result::Result<usize, Error> {
         // Strat9 syscall ABI encodes errors as negative errno values in RAX.
         let ret_s = ret as isize;
@@ -96,11 +99,13 @@ impl Error {
     }
 
     #[inline]
+    /// Return true when retrying later may succeed (`EINTR`/`EAGAIN`).
     pub fn is_retryable(&self) -> bool {
         matches!(self, Error::Interrupted | Error::Again)
     }
 
     #[inline]
+    /// Return the canonical symbolic errno name.
     pub fn name(&self) -> &'static str {
         match self {
             Error::PermissionDenied => "EPERM",
@@ -138,4 +143,5 @@ impl Error {
     }
 }
 
+/// Result type used by the syscall API.
 pub type Result<T> = core::result::Result<T, Error>;

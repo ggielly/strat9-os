@@ -74,10 +74,17 @@ rm -f /tmp/abi-auto-block.txt
 
 echo "==> Building rustdoc (workspace, resilient mode)"
 METADATA_JSON="$(mktemp)"
-cargo metadata \
-  --manifest-path "${ROOT_DIR}/Cargo.toml" \
-  --format-version 1 \
-  --no-deps > "${METADATA_JSON}"
+METADATA_ERR="$(mktemp)"
+if ! cargo metadata \
+    --manifest-path "${ROOT_DIR}/Cargo.toml" \
+    --format-version 1 \
+    --no-deps \
+    > "${METADATA_JSON}" 2> "${METADATA_ERR}"; then
+  cat "${METADATA_ERR}" >&2
+  rm -f "${METADATA_JSON}" "${METADATA_ERR}"
+  exit 1
+fi
+rm -f "${METADATA_ERR}"
 
 mapfile -t WORKSPACE_PACKAGES < <(
   python3 - "${METADATA_JSON}" <<'PY'
@@ -100,13 +107,19 @@ for pkg in "${WORKSPACE_PACKAGES[@]}"; do
     continue
   fi
   echo "   - doc ${pkg}"
+  DOC_STDOUT="$(mktemp)"
+  DOC_STDERR="$(mktemp)"
   if ! cargo +nightly doc \
       --manifest-path "${ROOT_DIR}/Cargo.toml" \
       -p "${pkg}" \
-      --no-deps; then
-    echo "     warning: rustdoc failed for ${pkg}, continuing"
+      --no-deps \
+      > "${DOC_STDOUT}" 2> "${DOC_STDERR}"; then
+    echo "     error: rustdoc failed for ${pkg}, continuing"
+    sed -n '1,200p' "${DOC_STDERR}" >&2
+    sed -n '1,120p' "${DOC_STDOUT}" >&2
     FAILED_PACKAGES+=("${pkg}")
   fi
+  rm -f "${DOC_STDOUT}" "${DOC_STDERR}"
 done
 
 if [[ "${#FAILED_PACKAGES[@]}" -gt 0 ]]; then

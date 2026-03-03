@@ -2,6 +2,7 @@ use core::fmt;
 pub use strat9_abi::data::DirentHeader;
 
 #[derive(Debug, Clone, Copy)]
+/// Decoded directory entry with an inline fixed-size name buffer.
 pub struct Dirent {
     pub ino: u64,
     pub type_: u8,
@@ -10,6 +11,7 @@ pub struct Dirent {
 }
 
 impl Dirent {
+    /// Create a `Dirent` from raw inode/type/name fields.
     pub fn new(ino: u64, type_: u8, name: &[u8]) -> Self {
         let mut d = Self {
             ino,
@@ -23,6 +25,7 @@ impl Dirent {
         d
     }
 
+    /// Return the valid file name bytes (without trailing NUL).
     pub fn name(&self) -> &[u8] {
         &self.name[..self.name_len as usize]
     }
@@ -38,12 +41,14 @@ impl fmt::Display for Dirent {
     }
 }
 
+/// Iterator over packed kernel `getdents` records.
 pub struct DirentIter<'a> {
     buf: &'a [u8],
     offset: usize,
 }
 
 impl<'a> DirentIter<'a> {
+    /// Create an iterator over the first `valid_len` bytes of `buf`.
     pub fn new(buf: &'a [u8], valid_len: usize) -> Self {
         let valid_len = core::cmp::min(valid_len, buf.len());
         Self {

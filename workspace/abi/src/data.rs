@@ -8,16 +8,19 @@ pub struct TimeSpec {
 }
 
 impl TimeSpec {
+    /// Return a zero-initialized timestamp.
     pub const fn zero() -> Self {
         Self { tv_sec: 0, tv_nsec: 0 }
     }
 
+    /// Convert the timestamp to nanoseconds with saturating arithmetic.
     pub fn to_nanos(&self) -> u64 {
         (self.tv_sec as u64)
             .saturating_mul(1_000_000_000)
             .saturating_add(self.tv_nsec as u64)
     }
 
+    /// Build a timestamp from a nanoseconds value.
     pub fn from_nanos(nanos: u64) -> Self {
         Self {
             tv_sec: (nanos / 1_000_000_000) as i64,
@@ -141,6 +144,7 @@ pub struct FileStat {
 }
 
 impl FileStat {
+    /// Return a fully zeroed `FileStat`.
     pub const fn zeroed() -> Self {
         FileStat {
             st_dev: 0,
@@ -159,10 +163,12 @@ impl FileStat {
         }
     }
 
+    /// Return true when the mode encodes a directory.
     pub fn is_dir(&self) -> bool {
         (self.st_mode & 0o170000) == 0o040000
     }
 
+    /// Return true when the mode encodes a regular file.
     pub fn is_file(&self) -> bool {
         (self.st_mode & 0o170000) == 0o100000
     }
@@ -178,6 +184,7 @@ pub struct IpcMessage {
 }
 
 impl IpcMessage {
+    /// Create an empty IPC message for `msg_type`.
     pub const fn new(msg_type: u32) -> Self {
         IpcMessage {
             sender: 0,
@@ -187,6 +194,7 @@ impl IpcMessage {
         }
     }
 
+    /// Build a standard error reply carrying a status code in payload.
     pub fn error_reply(sender: u64, status: i32) -> Self {
         let mut msg = IpcMessage::new(0x80);
         msg.sender = sender;
@@ -235,6 +243,7 @@ pub struct DirentHeader {
 impl DirentHeader {
     pub const SIZE: usize = 12; // 8 + 1 + 2 + 1
 
+    /// Return the total packed entry size (header + name + trailing NUL).
     pub const fn entry_size(&self) -> usize {
         Self::SIZE + self.name_len as usize + 1
     }

@@ -17,10 +17,12 @@ pub struct IpcHandshake {
 }
 
 impl IpcHandshake {
+    /// Build a default handshake with a zero nonce.
     pub const fn new() -> Self {
         Self::new_with_nonce(0)
     }
 
+    /// Build a handshake with a caller-provided nonce.
     pub const fn new_with_nonce(nonce: u32) -> Self {
         Self {
             magic: IPC_HANDSHAKE_MAGIC,
@@ -33,10 +35,12 @@ impl IpcHandshake {
         }
     }
 
+    /// Return true when the message carries the expected handshake magic.
     pub fn is_valid(&self) -> bool {
         self.magic == IPC_HANDSHAKE_MAGIC
     }
 
+    /// Return true when magic and protocol version match this ABI.
     pub fn is_compatible(&self) -> bool {
         self.is_valid() && self.protocol_version == IPC_PROTOCOL_VERSION
     }
@@ -59,6 +63,7 @@ pub const IPC_HANDSHAKE_VERSION_MISMATCH: u16 = 1;
 pub const IPC_HANDSHAKE_REJECTED: u16 = 2;
 
 impl IpcHandshakeReply {
+    /// Build a successful handshake reply for the current ABI version.
     pub const fn ok() -> Self {
         Self {
             magic: IPC_HANDSHAKE_MAGIC,
@@ -70,6 +75,7 @@ impl IpcHandshakeReply {
         }
     }
 
+    /// Build a rejected handshake reply with an explicit status code.
     pub const fn reject(status: u16) -> Self {
         Self {
             magic: IPC_HANDSHAKE_MAGIC,

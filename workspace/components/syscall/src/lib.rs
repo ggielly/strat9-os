@@ -46,6 +46,7 @@ pub use dirent::*;
 // (0..6 arguments) so the duplication is negligible and much more readable.
 
 #[cfg(feature = "userspace")]
+/// Invoke a syscall with no argument registers.
 pub unsafe fn syscall0(mut a: usize) -> error::Result<usize> {
     core::arch::asm!(
         "syscall",
@@ -59,6 +60,7 @@ pub unsafe fn syscall0(mut a: usize) -> error::Result<usize> {
 }
 
 #[cfg(feature = "userspace")]
+/// Invoke a syscall with one argument (`rdi`).
 pub unsafe fn syscall1(mut a: usize, b: usize) -> error::Result<usize> {
     core::arch::asm!(
         "syscall",
@@ -73,6 +75,7 @@ pub unsafe fn syscall1(mut a: usize, b: usize) -> error::Result<usize> {
 }
 
 #[cfg(feature = "userspace")]
+/// Invoke a syscall with two arguments (`rdi`, `rsi`).
 pub unsafe fn syscall2(mut a: usize, b: usize, c: usize) -> error::Result<usize> {
     core::arch::asm!(
         "syscall",
@@ -88,6 +91,7 @@ pub unsafe fn syscall2(mut a: usize, b: usize, c: usize) -> error::Result<usize>
 }
 
 #[cfg(feature = "userspace")]
+/// Invoke a syscall with three arguments (`rdi`, `rsi`, `rdx`).
 pub unsafe fn syscall3(mut a: usize, b: usize, c: usize, d: usize) -> error::Result<usize> {
     core::arch::asm!(
         "syscall",
@@ -104,6 +108,7 @@ pub unsafe fn syscall3(mut a: usize, b: usize, c: usize, d: usize) -> error::Res
 }
 
 #[cfg(feature = "userspace")]
+/// Invoke a syscall with four arguments (`rdi`, `rsi`, `rdx`, `r10`).
 pub unsafe fn syscall4(
     mut a: usize,
     b: usize,
@@ -127,6 +132,7 @@ pub unsafe fn syscall4(
 }
 
 #[cfg(feature = "userspace")]
+/// Invoke a syscall with five arguments (`rdi`, `rsi`, `rdx`, `r10`, `r8`).
 pub unsafe fn syscall5(
     mut a: usize,
     b: usize,
@@ -152,6 +158,7 @@ pub unsafe fn syscall5(
 }
 
 #[cfg(feature = "userspace")]
+/// Invoke a syscall with six arguments (`rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`).
 pub unsafe fn syscall6(
     mut a: usize,
     b: usize,
@@ -358,7 +365,7 @@ pub mod call {
         Err(error::Error::NotSupported)
     }
 
-    // Change modify and/or access times
+    /// Set access/modify timestamps for an open file descriptor.
     pub fn futimens(fd: usize, times: &[data::TimeSpec]) -> error::Result<usize> {
         let _ = (fd, times);
         Err(error::Error::NotSupported)
@@ -1213,10 +1220,12 @@ pub mod call {
         unsafe { syscall1(number::SYS_SILO_RESUME, silo_id) }
     }
 
+    /// Tighten sandbox mode for the current silo/process context.
     pub fn silo_pledge(new_mode: usize) -> error::Result<usize> {
         unsafe { syscall1(number::SYS_SILO_PLEDGE, new_mode) }
     }
 
+    /// Restrict path visibility/rights for the current sandbox context.
     pub fn silo_unveil(path: &[u8], rights_bits: usize) -> error::Result<usize> {
         unsafe {
             syscall3(
@@ -1228,6 +1237,7 @@ pub mod call {
         }
     }
 
+    /// Seal current context into sandboxed mode (no return to broader rights).
     pub fn silo_enter_sandbox() -> error::Result<usize> {
         unsafe { syscall0(number::SYS_SILO_ENTER_SANDBOX) }
     }
