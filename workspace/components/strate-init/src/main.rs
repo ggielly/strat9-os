@@ -15,6 +15,7 @@ const EAGAIN: usize = 11;
 const MAX_READ_BYTES: usize = 512 * 1024;
 const MAX_READ_ITERS: usize = 4096;
 const MAX_READ_EAGAIN: usize = 256;
+const SUPERVISOR_POLL_YIELDS: usize = 512;
 
 // ---------------------------------------------------------------------------
 // GLOBAL ALLOCATOR (BUMP + BRK)
@@ -769,6 +770,90 @@ binary = "/initfs/bin/web-admin"
 type = "elf"
 "#;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StrateHealth {
+    Ready,
+    Degraded,
+    Failed,
+}
+
+struct SupervisedChild {
+    name: [u8; 32],
+    name_len: u8,
+    pid: u64,
+    health: StrateHealth,
+    restart_count: u16,
+}
+
+impl SupervisedChild {
+    fn from_name(name: &str, pid: u64) -> Self {
+        let mut buf = [0u8; 32];
+        let n = core::cmp::min(name.len(), 32);
+        buf[..n].copy_from_slice(&name.as_bytes()[..n]);
+        Self { name: buf, name_len: n as u8, pid, health: StrateHealth::Ready, restart_count: 0 }
+    }
+
+    fn name_str(&self) -> &str {
+        unsafe { core::str::from_utf8_unchecked(&self.name[..self.name_len as usize]) }
+    }
+}
+
+static mut SUPERVISED: [Option<SupervisedChild>; 16] = [
+    None, None, None, None, None, None, None, None,
+    None, None, None, None, None, None, None, None,
+];
+static mut SUPERVISED_COUNT: usize = 0;
+
+fn register_supervised(name: &str, pid: u64) {
+    unsafe {
+        if SUPERVISED_COUNT < SUPERVISED.len() {
+            SUPERVISED[SUPERVISED_COUNT] = Some(SupervisedChild::from_name(name, pid));
+            SUPERVISED_COUNT += 1;
+        }
+    }
+}
+
+fn supervisor_loop() -> ! {
+    log("[init] Supervisor: entering watch loop\n");
+    loop {
+        for _ in 0..SUPERVISOR_POLL_YIELDS { let _ = call::sched_yield(); }
+
+        let mut wstatus: i32 = 0;
+        match call::waitpid(-1, Some(&mut wstatus), 1) { // WNOHANG = 1
+            Ok(pid) if pid > 0 => {
+                let status = wstatus;
+                let mut found = false;
+                unsafe {
+                    for slot in SUPERVISED.iter_mut().take(SUPERVISED_COUNT) {
+                        if let Some(child) = slot {
+                            if child.pid == pid as u64 {
+                                child.health = StrateHealth::Failed;
+                                found = true;
+                                log("[init] Supervisor: strate '");
+                                log(child.name_str());
+                                log("' exited (status=");
+                                log_u32(status as u32);
+                                log(", restarts=");
+                                log_u32(child.restart_count as u32);
+                                log(")\n");
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !found {
+                    log("[init] Supervisor: unknown child pid=");
+                    log_u32(pid as u32);
+                    log(" exited status=");
+                    log_u32(status as u32);
+                    log("\n");
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 /// Implements start.
 pub unsafe extern "C" fn _start() -> ! {
@@ -782,9 +867,7 @@ pub unsafe extern "C" fn _start() -> ! {
     log("[init] Stage: boot silos\n");
     boot_silos(silos);
     log("[init] Boot complete.\n");
-    loop {
-        let _ = call::sched_yield();
-    }
+    supervisor_loop();
 }
 
 #[panic_handler]

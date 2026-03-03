@@ -186,12 +186,34 @@ fn startup_hardware_test(driver: &mut SimplePmBus) -> bool {
 /// Implements start.
 pub extern "C" fn _start() -> ! {
     let _ = call::debug_log(b"[strate-bus] Starting\n");
-    let port = match call::ipc_create_port(0) {
-        Ok(h) => h as u64,
-        Err(_) => call::exit(1),
+
+    const MAX_RETRIES: usize = 20;
+    const BACKOFF_YIELDS: usize = 64;
+
+    let port = {
+        let mut p = None;
+        for attempt in 0..MAX_RETRIES {
+            match call::ipc_create_port(0) {
+                Ok(h) => { p = Some(h as u64); break; }
+                Err(_) => {
+                    let _ = call::debug_log(b"[strate-bus] ipc_create_port retry\n");
+                    for _ in 0..(BACKOFF_YIELDS * (attempt + 1)) { let _ = call::sched_yield(); }
+                }
+            }
+        }
+        match p {
+            Some(h) => h,
+            None => { let _ = call::debug_log(b"[strate-bus] ipc_create_port failed after retries\n"); call::exit(1); }
+        }
     };
-    if call::ipc_bind_port(port as usize, b"/srv/strate-bus/default").is_err() {
-        call::exit(2);
+
+    for attempt in 0..MAX_RETRIES {
+        if call::ipc_bind_port(port as usize, b"/srv/strate-bus/default").is_ok() { break; }
+        if attempt + 1 == MAX_RETRIES {
+            let _ = call::debug_log(b"[strate-bus] ipc_bind_port failed after retries\n");
+            call::exit(2);
+        }
+        for _ in 0..(BACKOFF_YIELDS * (attempt + 1)) { let _ = call::sched_yield(); }
     }
     let _ = call::ipc_bind_port(port as usize, b"/bus");
 

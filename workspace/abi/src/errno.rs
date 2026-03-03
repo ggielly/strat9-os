@@ -30,6 +30,7 @@ pub const ENOSYS: usize = 38;
 pub const ENOTEMPTY: usize = 39;
 pub const ELOOP: usize = 40;
 pub const ENOTSUP: usize = 52;
+pub const EAFNOSUPPORT: usize = 97;
 pub const EADDRINUSE: usize = 98;
 pub const ENOBUFS: usize = 105;
 pub const ETIMEDOUT: usize = 110;

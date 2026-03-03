@@ -114,7 +114,7 @@ pub fn rename(old_path: &str, new_path: &str) -> Result<(), SyscallError> {
     let (scheme, old_rel) = mount::resolve(old_path)?;
     let (scheme2, new_rel) = mount::resolve(new_path)?;
     if !Arc::ptr_eq(&scheme, &scheme2) {
-        return Err(SyscallError::InvalidArgument); // EXDEV
+        return Err(SyscallError::NotSupported);
     }
     scheme.rename(&old_rel, &new_rel)
 }
@@ -155,7 +155,7 @@ pub fn link(old_path: &str, new_path: &str) -> Result<(), SyscallError> {
     let (scheme, old_rel) = mount::resolve(old_path)?;
     let (scheme2, new_rel) = mount::resolve(new_path)?;
     if !Arc::ptr_eq(&scheme, &scheme2) {
-        return Err(SyscallError::InvalidArgument); // EXDEV
+        return Err(SyscallError::NotSupported);
     }
     scheme.link(&old_rel, &new_rel)
 }
@@ -668,10 +668,11 @@ pub fn sys_chdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
 /// SYS_FCHDIR (441): Change cwd using an open file descriptor.
 pub fn sys_fchdir(fd: u32) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let fd_table = unsafe { &*task.process.fd_table.get() };
-    let file = fd_table.get(fd)?;
-    let path = alloc::string::String::from(file.path());
-    drop(fd_table);
+    let path = {
+        let fd_table = unsafe { &*task.process.fd_table.get() };
+        let file = fd_table.get(fd)?;
+        alloc::string::String::from(file.path())
+    };
     unsafe { *task.process.cwd.get() = path };
     Ok(0)
 }
@@ -686,7 +687,7 @@ pub fn sys_getcwd(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let bytes = cwd.as_bytes();
     let needed = bytes.len() + 1; // include NUL terminator
     if needed > buf_len as usize {
-        return Err(SyscallError::OutOfMemory); // ERANGE in POSIX
+        return Err(SyscallError::Range);
     }
     let out = UserSliceWrite::new(buf_ptr, needed)?;
     let mut tmp = alloc::vec![0u8; needed];

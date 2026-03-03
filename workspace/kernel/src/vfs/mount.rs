@@ -97,7 +97,7 @@ impl MountTable {
             }
         }
 
-        Err(SyscallError::BadHandle)
+        Err(SyscallError::NotFound)
     }
 
     /// List all mount points.

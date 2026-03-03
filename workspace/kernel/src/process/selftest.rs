@@ -159,6 +159,24 @@ extern "C" fn selftest_orchestrator() -> ! {
     crate::process::vfs_stat_test::create_vfs_stat_test_task();
     let _ = wait_task_exit("vfs-stat-test", 3_000);
 
+    crate::process::abi_layout_test::create_abi_layout_test_task();
+    let _ = wait_task_exit("abi-layout-test", 2_000);
+
+    crate::process::vfs_ops_test::create_vfs_ops_test_task();
+    let _ = wait_task_exit("vfs-ops-test", 5_000);
+
+    crate::process::process_id_test::create_process_id_test_task();
+    let _ = wait_task_exit("proc-id-test", 2_000);
+
+    crate::process::time_test::create_time_test_task();
+    let _ = wait_task_exit("time-test", 15_000);
+
+    crate::process::pipe_test::create_pipe_test_task();
+    let _ = wait_task_exit("pipe-test", 3_000);
+
+    crate::process::errno_test::create_errno_test_task();
+    let _ = wait_task_exit("errno-test", 3_000);
+
     let strate_ok = run_strate_lifecycle_e2e();
     if strate_ok {
         crate::serial_println!("[selftest][strate] PASS");

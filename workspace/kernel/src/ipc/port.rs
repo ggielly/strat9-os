@@ -224,6 +224,8 @@ pub fn destroy_port(id: PortId, caller: TaskId) -> Result<(), IpcError> {
 /// recv'd a message but died before calling reply(), the caller task
 /// remains stuck. Servers should handle their own graceful shutdown.
 pub fn cleanup_ports_for_task(owner: TaskId) {
+    super::reply::cancel_replies_waiting_on(owner);
+
     let owned: alloc::vec::Vec<Arc<Port>> = {
         let mut registry = PORTS.lock();
         let Some(map) = registry.as_mut() else { return };

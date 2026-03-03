@@ -1604,3 +1604,36 @@ pub fn cmd_wasm_run(args: &[String]) -> Result<(), ShellError> {
 
     Ok(())
 }
+
+/// `health` — system health diagnostic (boot graph, strates, IPC, VFS mounts).
+pub fn cmd_health(_args: &[String]) -> Result<(), ShellError> {
+    shell_println!("=== Strat9 Health Report ===\n");
+
+    shell_println!("-- VFS Mounts --");
+    for m in vfs::list_mounts() {
+        shell_println!("  {}", m);
+    }
+
+    shell_println!("\n-- IPC Namespace --");
+    let bindings = crate::namespace::list_all_bindings();
+    if bindings.is_empty() {
+        shell_println!("  (none)");
+    } else {
+        for (name, port_id) in &bindings {
+            shell_println!("  {} -> port {}", name, port_id);
+        }
+    }
+
+    shell_println!("\n-- Active Silos --");
+    let silo_list = silo::list_silos_snapshot();
+    if silo_list.is_empty() {
+        shell_println!("  (none)");
+    } else {
+        for info in &silo_list {
+            shell_println!("  SID={} name={} state={:?} tasks={}", info.id, info.name, info.state, info.task_count);
+        }
+    }
+
+    shell_println!("\n=== End Health Report ===");
+    Ok(())
+}

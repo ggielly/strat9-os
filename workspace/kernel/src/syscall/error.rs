@@ -39,12 +39,22 @@ pub enum SyscallError {
     InvalidArgument = -22,
     #[error("Not a typewriter")]
     NotATty = -25,
+    #[error("Not a directory")]
+    NotADirectory = -20,
+    #[error("Is a directory")]
+    IsADirectory = -21,
     #[error("No space left on device")]
     NoSpace = -28,
     #[error("Broken pipe")]
     Pipe = -32,
+    #[error("Result too large")]
+    Range = -34,
+    #[error("File name too long")]
+    NameTooLong = -36,
     #[error("Function not implemented")]
     NotImplemented = -38,
+    #[error("Directory not empty")]
+    NotEmpty = -39,
     #[error("Not supported")]
     NotSupported = -52,
     #[error("No buffer space available")]
@@ -89,10 +99,15 @@ impl SyscallError {
             SyscallError::Fault => "EFAULT",
             SyscallError::AlreadyExists => "EEXIST",
             SyscallError::InvalidArgument => "EINVAL",
+            SyscallError::NotADirectory => "ENOTDIR",
+            SyscallError::IsADirectory => "EISDIR",
             SyscallError::NotATty => "ENOTTY",
             SyscallError::NoSpace => "ENOSPC",
             SyscallError::Pipe => "EPIPE",
+            SyscallError::Range => "ERANGE",
+            SyscallError::NameTooLong => "ENAMETOOLONG",
             SyscallError::NotImplemented => "ENOSYS",
+            SyscallError::NotEmpty => "ENOTEMPTY",
             SyscallError::NotSupported => "ENOTSUP",
             SyscallError::QueueFull => "ENOBUFS",
             SyscallError::TimedOut => "ETIMEDOUT",

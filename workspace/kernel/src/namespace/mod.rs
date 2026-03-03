@@ -40,6 +40,12 @@ pub fn unbind(path: &str) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// List all current namespace bindings (path -> port_id).
+pub fn list_all_bindings() -> alloc::vec::Vec<(String, u64)> {
+    let ns = NAMESPACE.lock();
+    ns.bindings.iter().map(|(k, v)| (k.clone(), *v)).collect()
+}
+
 /// Resolve a path to the longest matching prefix.
 ///
 /// Returns (port_id, remaining_path).

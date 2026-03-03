@@ -584,7 +584,7 @@ impl Scheme for RamfsScheme {
         if let Some(inode) = st.inodes.get(&ino) {
             if let RamKind::Dir { children } = &inode.kind {
                 if !children.is_empty() {
-                    return Err(SyscallError::NotSupported);
+                    return Err(SyscallError::NotEmpty);
                 }
             }
         }
