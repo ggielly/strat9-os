@@ -409,12 +409,12 @@ impl Scheduler {
             (*next.process.address_space.get()).switch_to();
         }
 
-        // Return raw pointers for switch_context
         Some(SwitchTarget {
             old_rsp_ptr: unsafe { &raw mut (*current.context.get()).saved_rsp },
             new_rsp_ptr: unsafe { &raw const (*next.context.get()).saved_rsp },
-            old_fpu_ptr: current.fpu_state.get(),
-            new_fpu_ptr: next.fpu_state.get(),
+            old_fpu_ptr: current.fpu_state.get() as *mut u8,
+            new_fpu_ptr: next.fpu_state.get() as *const u8,
+            new_xcr0: next.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
         })
     }
 

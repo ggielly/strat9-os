@@ -518,17 +518,10 @@ pub fn block_current_task() {
         }
     }; // Lock released
 
-    if let Some(target) = switch_target {
-        // SAFETY: Pointers are valid. Interrupts are disabled.
+    if let Some(ref target) = switch_target {
         unsafe {
-            switch_context(
-                target.old_rsp_ptr,
-                target.new_rsp_ptr,
-                target.old_fpu_ptr,
-                target.new_fpu_ptr,
-            );
+            crate::process::task::do_switch_context(target);
         }
-        // We return here when woken and rescheduled.
         finish_switch();
     }
 
@@ -643,20 +636,13 @@ pub fn suspend_task(id: TaskId) -> bool {
         }
     } // scheduler lock released before IPI and context switch
 
-    if let Some(target) = switch_target {
-        // SAFETY: pointers valid. Interrupts disabled.
+    if let Some(ref target) = switch_target {
         unsafe {
-            switch_context(
-                target.old_rsp_ptr,
-                target.new_rsp_ptr,
-                target.old_fpu_ptr,
-                target.new_fpu_ptr,
-            );
+            crate::process::task::do_switch_context(target);
         }
         finish_switch();
     }
 
-    // Send IPI after releasing the lock to avoid lock inversion.
     if let Some(ci) = ipi_to_cpu {
         send_resched_ipi_to_cpu(ci);
     }
@@ -715,9 +701,10 @@ pub fn resume_task(id: TaskId) -> bool {
 ///
 /// Returns `true` if the task was found and killed.
 pub fn kill_task(id: TaskId) -> bool {
+    let pid = crate::process::get_task_by_id(id).map(|t| t.pid).unwrap_or(0);
     crate::audit::log(
         crate::audit::AuditCategory::Process,
-        0,
+        pid,
         crate::silo::task_silo_id(id).unwrap_or(0),
         alloc::format!("kill_task tid={}", id.as_u64()),
     );
@@ -816,20 +803,13 @@ pub fn kill_task(id: TaskId) -> bool {
         }
     } // scheduler lock released before IPI and context switch
 
-    if let Some(target) = switch_target {
-        // SAFETY: pointers valid. Interrupts disabled.
+    if let Some(ref target) = switch_target {
         unsafe {
-            switch_context(
-                target.old_rsp_ptr,
-                target.new_rsp_ptr,
-                target.old_fpu_ptr,
-                target.new_fpu_ptr,
-            );
+            crate::process::task::do_switch_context(target);
         }
         finish_switch();
     }
 
-    // Send IPI after releasing the lock to avoid lock inversion.
     if let Some(ci) = ipi_to_cpu {
         send_resched_ipi_to_cpu(ci);
     }

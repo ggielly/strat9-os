@@ -99,11 +99,11 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     // SAFETY: The context was set up by CpuContext::new with a valid stack frame.
     // Interrupts are disabled; the trampoline's `sti` re-enables them.
     unsafe {
-        restore_first_task(
+        crate::process::task::do_restore_first_task(
             &raw const (*first_task.context.get()).saved_rsp,
-            first_task.fpu_state.get(),
+            first_task.fpu_state.get() as *const u8,
+            first_task.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
         );
-        core::hint::unreachable_unchecked()
     }
 }
 
@@ -187,24 +187,15 @@ pub fn yield_task() {
         }
     }; // Lock released here, before the actual context switch
 
-    if let Some(target) = switch_target {
+    if let Some(ref target) = switch_target {
         // SAFETY: Pointers are valid (they point into Arc<Task> contexts
         // kept alive by the scheduler). Interrupts are disabled.
         unsafe {
-            switch_context(
-                target.old_rsp_ptr,
-                target.new_rsp_ptr,
-                target.old_fpu_ptr,
-                target.new_fpu_ptr,
-            );
+            crate::process::task::do_switch_context(target);
         }
-        // We return here when this task is rescheduled in the future.
-        // The task that switched back to us may have had different flags,
-        // so restore our own saved flags.
         finish_switch();
     }
 
-    // Restore interrupt state (re-enables IF if it was enabled before)
     restore_flags(saved_flags);
 }
 
@@ -266,25 +257,13 @@ pub fn maybe_preempt() {
         }
     }; // Lock released here
 
-    if let Some(target) = switch_target {
+    if let Some(ref target) = switch_target {
         if cpu_is_valid(cpu_index) {
             CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
         }
-        // SAFETY: Pointers are valid. IF is cleared by the CPU on interrupt entry.
-        // When the new task resumes from its last switch_context call, it will
-        // eventually return through its own interrupt handler -> iretq (if preempted)
-        // or through yield_task -> restore_flags (if it yielded cooperatively).
         unsafe {
-            switch_context(
-                target.old_rsp_ptr,
-                target.new_rsp_ptr,
-                target.old_fpu_ptr,
-                target.new_fpu_ptr,
-            );
+            crate::process::task::do_switch_context(target);
         }
-        // When we return here, this task was rescheduled. We're back in
-        // the timer handler context, which will return via iretq and
-        // restore the original RFLAGS (including IF=1).
         finish_switch();
     }
 }

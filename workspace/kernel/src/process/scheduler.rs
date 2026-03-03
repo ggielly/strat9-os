@@ -77,9 +77,7 @@
 //!      - SMP preempt/steal stress.
 //!    - if any regression appears, disable feature first, debug second.
 
-use super::task::{
-    restore_first_task, switch_context, Pid, Task, TaskId, TaskPriority, TaskState, Tid,
-};
+use super::task::{Pid, Task, TaskId, TaskPriority, TaskState, Tid};
 use crate::{
     arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer},
     arch::x86_64::timer::NS_PER_TICK,
@@ -290,15 +288,12 @@ fn sched_trace(args: core::fmt::Arguments<'_>) {
 
 
 /// Information needed to perform a context switch after releasing the lock.
-struct SwitchTarget {
-    /// Pointer to old task's saved_rsp (in CpuContext)
-    old_rsp_ptr: *mut u64,
-    /// Pointer to new task's saved_rsp (in CpuContext)
-    new_rsp_ptr: *const u64,
-    /// Pointer to old task's FPU state
-    old_fpu_ptr: *mut crate::process::task::FpuState,
-    /// Pointer to new task's FPU state
-    new_fpu_ptr: *const crate::process::task::FpuState,
+pub(super) struct SwitchTarget {
+    pub(super) old_rsp_ptr: *mut u64,
+    pub(super) new_rsp_ptr: *const u64,
+    pub(super) old_fpu_ptr: *mut u8,
+    pub(super) new_fpu_ptr: *const u8,
+    pub(super) new_xcr0: u64,
 }
 
 // SAFETY: The pointers in SwitchTarget point into Arc<Task> objects

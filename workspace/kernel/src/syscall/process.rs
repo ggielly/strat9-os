@@ -8,7 +8,7 @@ use crate::process::{
     block_current_task, create_session, current_pgid, current_task_clone,
     current_task_id, current_tid, get_parent_id, get_parent_pid, get_pgid_by_pid,
     get_sid_by_pid, get_task_id_by_tid, set_process_group,
-    task::{CpuContext, FpuState, KernelStack, SyncUnsafeCell, Task},
+    task::{CpuContext, ExtendedState, KernelStack, SyncUnsafeCell, Task},
     WaitChildResult,
 };
 use alloc::{boxed::Box, sync::Arc};
@@ -85,8 +85,8 @@ fn build_user_thread_task(
     let (pid, tid, _) = Task::allocate_process_ids();
 
     let parent_fpu = unsafe { &*parent.fpu_state.get() };
-    let mut child_fpu = FpuState::new();
-    child_fpu.data.copy_from_slice(&parent_fpu.data);
+    let mut child_fpu = ExtendedState::new();
+    child_fpu.copy_from(parent_fpu);
 
     let task = Arc::new(Task {
         id: crate::process::TaskId::new(),
@@ -121,6 +121,7 @@ fn build_user_thread_task(
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
         user_fs_base: core::sync::atomic::AtomicU64::new(tls_base),
         fpu_state: SyncUnsafeCell::new(child_fpu),
+        xcr0_mask: core::sync::atomic::AtomicU64::new(parent.xcr0_mask.load(Ordering::Relaxed)),
     });
 
     // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret
