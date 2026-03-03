@@ -671,12 +671,54 @@ pub fn cmd_cpuinfo(_args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-/// Reboot the system
+/// Reboot the system.
 pub fn cmd_reboot(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("Rebooting system...");
     unsafe {
         crate::arch::x86_64::cli();
         crate::arch::x86_64::io::outb(0x64, 0xFE);
+        loop {
+            crate::arch::x86_64::hlt();
+        }
+    }
+}
+
+/// Graceful shutdown: stop strates in reverse order, then power off.
+///
+/// QEMU/KVM ACPI shutdown uses I/O port 0x604 (Bochs/QEMU) or 0xB004 (older).
+pub fn cmd_shutdown(_args: &[String]) -> Result<(), ShellError> {
+    shell_println!("[shutdown] Stopping silos...");
+
+    let mut silos = crate::silo::list_silos_snapshot();
+    silos.sort_by(|a, b| b.id.cmp(&a.id));
+
+    for s in &silos {
+        shell_println!("  stopping silo {} ({})", s.id, s.name);
+        let _ = crate::silo::kernel_suspend_silo(&alloc::format!("{}", s.id));
+    }
+
+    shell_println!("[shutdown] Killing remaining tasks...");
+    if let Some(tasks) = crate::process::get_all_tasks() {
+        for t in tasks.iter().rev() {
+            let tid = t.id;
+            if tid.as_u64() <= 1 {
+                continue;
+            }
+            crate::process::kill_task(tid);
+        }
+    }
+
+    for _ in 0..500 {
+        crate::process::yield_task();
+    }
+
+    shell_println!("[shutdown] Power off...");
+    unsafe {
+        crate::arch::x86_64::cli();
+        // QEMU/Bochs ACPI shutdown
+        crate::arch::x86_64::io::outw(0x604, 0x2000);
+        // Fallback: older QEMU
+        crate::arch::x86_64::io::outw(0xB004, 0x2000);
         loop {
             crate::arch::x86_64::hlt();
         }

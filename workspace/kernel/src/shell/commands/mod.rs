@@ -33,6 +33,7 @@ impl CommandRegistry {
         registry.register("version", sys::cmd_version);
         registry.register("clear", sys::cmd_clear);
         registry.register("reboot", sys::cmd_reboot);
+        registry.register("shutdown", sys::cmd_shutdown);
         registry.register("uptime", util::cmd_uptime);
         registry.register("echo", util::cmd_echo);
 
