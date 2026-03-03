@@ -235,6 +235,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_FCHMOD => crate::vfs::sys_fchmod(arg1 as u32, arg2),
         SYS_TRUNCATE => crate::vfs::sys_truncate(arg1, arg2, arg3),
         SYS_FTRUNCATE => crate::vfs::sys_ftruncate(arg1 as u32, arg2),
+        SYS_PREAD => crate::vfs::sys_pread(arg1 as u32, arg2, arg3, arg4),
+        SYS_PWRITE => crate::vfs::sys_pwrite(arg1 as u32, arg2, arg3, arg4),
         SYS_POLL => super::poll::sys_poll(arg1, arg2, arg3),
         SYS_PPOLL => super::poll::sys_poll(arg1, arg2, 0),
 

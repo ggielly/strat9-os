@@ -891,6 +891,7 @@ fn reparent_children(sched: &mut Scheduler, dying: TaskId) {
 }
 
 fn cleanup_task_resources(task: &Arc<Task>) {
+    crate::ipc::port::cleanup_ports_for_task(task.id);
     crate::silo::on_task_terminated(task.id);
 
     // SAFETY: strong_count is racy (a concurrent get_task_by_id may temporarily

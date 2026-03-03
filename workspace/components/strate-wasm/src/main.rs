@@ -143,6 +143,7 @@ fn wasm_effective_len(bytes: &[u8]) -> Option<usize> {
 
 struct HostState {
     limits: StoreLimits,
+    exit_code: Option<u32>,
 }
 
 fn wasi_fd_write(mut caller: Caller<'_, HostState>, fd: u32, iovs_ptr: u32, iovs_len: u32, nwritten_ptr: u32) -> u32 {
@@ -175,7 +176,10 @@ fn wasi_environ_sizes_get(mut caller: Caller<'_, HostState>, count_ptr: u32, siz
     let _ = memory.write(&mut caller, size_ptr as usize, &0u32.to_le_bytes());
     0
 }
-fn wasi_proc_exit(_caller: Caller<'_, HostState>, code: u32) { call::exit(code as usize); }
+fn wasi_proc_exit(mut caller: Caller<'_, HostState>, code: u32) -> Result<(), wasmi::Error> {
+    caller.data_mut().exit_code = Some(code);
+    Err(wasmi::Error::new("proc_exit"))
+}
 
 // ---------------------------------------------------------------------------
 // IPC PROTOCOL
@@ -212,7 +216,7 @@ pub unsafe extern "C" fn _start() -> ! {
     let engine = Engine::new(&config);
     let mut linker = Linker::new(&engine);
     let limits = StoreLimitsBuilder::new().memory_size(16 * 1024 * 1024).instances(1).build();
-    let mut store = Store::new(&engine, HostState { limits });
+    let mut store = Store::new(&engine, HostState { limits, exit_code: None });
     store.limiter(|state| &mut state.limits);
 
     let _ = linker.define("wasi_snapshot_preview1", "fd_write", wasmi::Func::wrap(&mut store, wasi_fd_write));
@@ -356,13 +360,18 @@ pub unsafe extern "C" fn _start() -> ! {
 
             OP_WASM_RUN_MAIN => {
                 if let Some(ref instance) = current_instance {
+                    store.data_mut().exit_code = None;
                     let _ = store.set_fuel(10_000_000);
                     if let Ok(func) = instance.get_typed_func::<(), ()>(&store, "_start") {
                         match func.call(&mut store, ()) {
                             Ok(_) => send_response(src, RESP_OK),
                             Err(_) => {
-                                debug_log("[strate-wasm] run error: trap\n");
-                                send_response(src, RESP_ERR_RUN)
+                                if store.data().exit_code.is_some() {
+                                    send_response(src, RESP_OK);
+                                } else {
+                                    debug_log("[strate-wasm] run error: trap\n");
+                                    send_response(src, RESP_ERR_RUN);
+                                }
                             }
                         }
                     } else {

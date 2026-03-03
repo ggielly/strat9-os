@@ -511,6 +511,9 @@ impl Scheme for RamfsScheme {
         let new_name = String::from(new_name);
 
         if let Some(existing) = st.lookup(new_path) {
+            if existing == ino {
+                return Ok(());
+            }
             if let Some(inode) = st.inodes.get(&existing) {
                 if let RamKind::Dir { children } = &inode.kind {
                     if !children.is_empty() {

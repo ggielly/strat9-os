@@ -109,10 +109,13 @@ pub fn unlink(path: &str) -> Result<(), SyscallError> {
     Ok(())
 }
 
-/// Rename a file or directory.
+/// Rename a file or directory (must be within the same mount).
 pub fn rename(old_path: &str, new_path: &str) -> Result<(), SyscallError> {
     let (scheme, old_rel) = mount::resolve(old_path)?;
-    let (_scheme2, new_rel) = mount::resolve(new_path)?;
+    let (scheme2, new_rel) = mount::resolve(new_path)?;
+    if !Arc::ptr_eq(&scheme, &scheme2) {
+        return Err(SyscallError::InvalidArgument); // EXDEV
+    }
     scheme.rename(&old_rel, &new_rel)
 }
 
@@ -147,10 +150,13 @@ pub fn ftruncate(fd: u32, length: u64) -> Result<(), SyscallError> {
     file.scheme().truncate(file.file_id(), length)
 }
 
-/// Create a hard link.
+/// Create a hard link (must be within the same mount).
 pub fn link(old_path: &str, new_path: &str) -> Result<(), SyscallError> {
     let (scheme, old_rel) = mount::resolve(old_path)?;
-    let (_scheme2, new_rel) = mount::resolve(new_path)?;
+    let (scheme2, new_rel) = mount::resolve(new_path)?;
+    if !Arc::ptr_eq(&scheme, &scheme2) {
+        return Err(SyscallError::InvalidArgument); // EXDEV
+    }
     scheme.link(&old_rel, &new_rel)
 }
 
@@ -852,6 +858,59 @@ pub fn sys_truncate(path_ptr: u64, path_len: u64, length: u64) -> Result<u64, Sy
 pub fn sys_ftruncate(fd: u32, length: u64) -> Result<u64, SyscallError> {
     ftruncate(fd, length)?;
     Ok(0)
+}
+
+/// SYS_PREAD (456): Read at offset without changing fd position.
+pub fn sys_pread(fd: u32, buf_ptr: u64, buf_len: u64, offset: u64) -> Result<u64, SyscallError> {
+    if buf_len == 0 {
+        return Ok(0);
+    }
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.process.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    let mut kbuf = [0u8; 4096];
+    let mut total = 0usize;
+    let mut off = offset;
+    while total < buf_len as usize {
+        let to_read = core::cmp::min(kbuf.len(), buf_len as usize - total);
+        let n = file.pread(off, &mut kbuf[..to_read])?;
+        if n == 0 {
+            break;
+        }
+        let user = UserSliceWrite::new(buf_ptr + total as u64, n)?;
+        user.copy_from(&kbuf[..n]);
+        total += n;
+        off += n as u64;
+        if n < to_read {
+            break;
+        }
+    }
+    Ok(total as u64)
+}
+
+/// SYS_PWRITE (457): Write at offset without changing fd position.
+pub fn sys_pwrite(fd: u32, buf_ptr: u64, buf_len: u64, offset: u64) -> Result<u64, SyscallError> {
+    if buf_len == 0 {
+        return Ok(0);
+    }
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let fd_table = unsafe { &*task.process.fd_table.get() };
+    let file = fd_table.get(fd)?;
+    let mut kbuf = [0u8; 4096];
+    let mut total = 0usize;
+    let mut off = offset;
+    while total < buf_len as usize {
+        let to_write = core::cmp::min(kbuf.len(), buf_len as usize - total);
+        let user = UserSliceRead::new(buf_ptr + total as u64, to_write)?;
+        user.copy_to(&mut kbuf[..to_write]);
+        let n = file.pwrite(off, &kbuf[..to_write])?;
+        total += n;
+        off += n as u64;
+        if n < to_write {
+            break;
+        }
+    }
+    Ok(total as u64)
 }
 
 // ============================================================================

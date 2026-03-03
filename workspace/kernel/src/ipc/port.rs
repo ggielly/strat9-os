@@ -210,3 +210,44 @@ pub fn destroy_port(id: PortId, caller: TaskId) -> Result<(), IpcError> {
     log::debug!("IPC: destroyed port {} (by task {})", id, caller);
     Ok(())
 }
+
+/// Clean up all ports owned by a dying task.
+///
+/// For each port: drain queued messages and deliver error replies to any
+/// callers blocked in `wait_for_reply`, then destroy the port.
+///
+/// NOTE: Only covers messages still in the queue. If the owner already
+/// recv'd a message but died before calling reply(), the caller task
+/// remains stuck. Servers should handle their own graceful shutdown.
+pub fn cleanup_ports_for_task(owner: TaskId) {
+    let owned: alloc::vec::Vec<Arc<Port>> = {
+        let mut registry = PORTS.lock();
+        let Some(map) = registry.as_mut() else { return };
+        let ids: alloc::vec::Vec<PortId> = map
+            .iter()
+            .filter(|(_, p)| p.owner == owner)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut ports = alloc::vec::Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(p) = map.remove(&id) {
+                ports.push(p);
+            }
+        }
+        ports
+    };
+
+    for port in owned {
+        port.destroy();
+        while let Some(msg) = port.queue.pop() {
+            let sender = TaskId::from_u64(msg.sender);
+            if sender == owner {
+                continue;
+            }
+            let mut err_reply = IpcMessage::new(0x80);
+            let epipe: u32 = 32;
+            err_reply.payload[0..4].copy_from_slice(&epipe.to_le_bytes());
+            let _ = super::reply::deliver_reply(sender, err_reply);
+        }
+    }
+}

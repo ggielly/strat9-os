@@ -138,6 +138,8 @@ pub const SYS_CHMOD: usize = 452;
 pub const SYS_FCHMOD: usize = 453;
 pub const SYS_TRUNCATE: usize = 454;
 pub const SYS_FTRUNCATE: usize = 455;
+pub const SYS_PREAD: usize = 456;
+pub const SYS_PWRITE: usize = 457;
 pub const SYS_POLL: usize = 460;
 pub const SYS_PPOLL: usize = 461;
 
