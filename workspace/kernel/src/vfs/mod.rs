@@ -32,6 +32,7 @@ pub mod ipcfs;
 pub mod mount;
 pub mod pipe;
 pub mod procfs;
+pub mod pty_scheme;
 pub mod ramfs_scheme;
 pub mod scheme;
 pub mod scheme_router;
@@ -1071,6 +1072,10 @@ pub fn init() {
     } else {
         log::info!("[VFS] Mounted /dev/console (serial + keyboard)");
     }
+
+    // PTY scheme (/dev/pts) — pseudo-terminals for interactive programs
+    pty_scheme::init_pty_scheme();
+    log::info!("[VFS] Mounted /dev/pts (PTY scheme)");
 
     log::info!("[VFS] VFS ready");
 }
