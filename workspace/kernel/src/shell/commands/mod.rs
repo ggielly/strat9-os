@@ -69,6 +69,7 @@ impl CommandRegistry {
         registry.register("lsns", hw::cmd_lsns);
         registry.register("cpuinfo", sys::cmd_cpuinfo);
         registry.register("dmesg", util::cmd_dmesg);
+        registry.register("audit", util::cmd_audit);
         registry.register("env", util::cmd_env);
         registry.register("setenv", util::cmd_setenv);
         registry.register("unsetenv", util::cmd_unsetenv);

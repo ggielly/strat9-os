@@ -715,6 +715,12 @@ pub fn resume_task(id: TaskId) -> bool {
 ///
 /// Returns `true` if the task was found and killed.
 pub fn kill_task(id: TaskId) -> bool {
+    crate::audit::log(
+        crate::audit::AuditCategory::Process,
+        0,
+        crate::silo::task_silo_id(id).unwrap_or(0),
+        alloc::format!("kill_task tid={}", id.as_u64()),
+    );
     let saved_flags = save_flags_and_cli();
 
     let mut switch_target: Option<SwitchTarget> = None;

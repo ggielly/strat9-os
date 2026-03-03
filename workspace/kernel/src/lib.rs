@@ -21,6 +21,7 @@ pub mod ostd;
 
 pub mod acpi;
 pub mod arch;
+pub mod audit;
 pub mod boot;
 pub mod capability;
 pub mod components;

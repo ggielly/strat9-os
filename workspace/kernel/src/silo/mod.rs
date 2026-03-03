@@ -566,6 +566,12 @@ struct SiloOutputBuf {
     count: usize,
 }
 
+impl core::fmt::Debug for SiloOutputBuf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SiloOutputBuf").field("count", &self.count).finish()
+    }
+}
+
 impl SiloOutputBuf {
     const fn new() -> Self {
         Self { buf: [0; SILO_OUTPUT_CAPACITY], head: 0, count: 0 }
@@ -2649,6 +2655,11 @@ pub fn kernel_sandbox_silo(selector: &str) -> Result<u32, SyscallError> {
     let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
     let silo = mgr.get_mut(silo_id)?;
     silo.sandboxed = true;
+    crate::audit::log(
+        crate::audit::AuditCategory::Security,
+        0, silo_id,
+        alloc::format!("silo sandboxed"),
+    );
     Ok(silo_id)
 }
 
@@ -2688,6 +2699,11 @@ pub fn kernel_limit_silo(selector: &str, key: &str, value: u64) -> Result<u32, S
         "cpu_shares" => silo.config.cpu_shares = value as u32,
         _ => return Err(SyscallError::InvalidArgument),
     }
+    crate::audit::log(
+        crate::audit::AuditCategory::Security,
+        0, silo_id,
+        alloc::format!("silo limit: {}={}", key, value),
+    );
     Ok(silo_id)
 }
 
