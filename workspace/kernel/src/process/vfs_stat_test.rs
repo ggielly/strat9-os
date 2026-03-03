@@ -273,7 +273,6 @@ fn run_vfs_stat_timestamp_suite() -> bool {
             }
             let st6_fd = vfs::fstat(fd_file).unwrap();
             log_stat("after rename(fd)", &file2, &st6_fd);
-            st = st6_fd;
         }
     }
 
@@ -282,17 +281,8 @@ fn run_vfs_stat_timestamp_suite() -> bool {
         crate::serial_println!("[vfs-stat-test] FAIL: symlink => {:?}", e);
         ok = false;
     } else {
-        let fd_sym = match vfs::open(&sym, vfs::OpenFlags::READ) {
-            Ok(fd) => fd,
-            Err(e) => {
-                crate::serial_println!("[vfs-stat-test] FAIL: open symlink => {:?}", e);
-                ok = false;
-                0
-            }
-        };
-        if fd_sym == 0 {
-            // continue cleanup section
-        } else {
+        match vfs::open(&sym, vfs::OpenFlags::READ) {
+            Ok(fd_sym) => {
         let st_sym_before = vfs::fstat(fd_sym).unwrap();
         log_stat("symlink created", &sym, &st_sym_before);
         let prev = core::cmp::max(
@@ -331,6 +321,11 @@ fn run_vfs_stat_timestamp_suite() -> bool {
             ok = false;
         }
         let _ = vfs::close(fd_sym);
+            }
+            Err(e) => {
+                crate::serial_println!("[vfs-stat-test] FAIL: open symlink => {:?}", e);
+                ok = false;
+            }
         }
     }
 

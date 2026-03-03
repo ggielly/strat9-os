@@ -126,6 +126,57 @@ cp -r "${ROOT_DIR}/docs-site/book/." "${SITE_DIR}/"
 cp -r "${RUSTDOC_DIR}/." "${SITE_DIR}/api/"
 touch "${SITE_DIR}/.nojekyll"
 
+echo "==> Generating API index page"
+python3 - "${SITE_DIR}/api" <<'PY'
+import html
+import os
+import sys
+from pathlib import Path
+
+api_dir = Path(sys.argv[1])
+entries = []
+
+for child in sorted(api_dir.iterdir()):
+    if not child.is_dir():
+        continue
+    index = child / "index.html"
+    if not index.exists():
+        continue
+    name = child.name
+    if name.startswith("."):
+        continue
+    entries.append((name, f"./{name}/index.html"))
+
+body_items = "\n".join(
+    f'      <li><a href="{href}">{html.escape(name)}</a></li>'
+    for name, href in entries
+)
+
+doc = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Strat9 API Index</title>
+    <style>
+      body {{ font-family: sans-serif; margin: 2rem; line-height: 1.5; }}
+      h1 {{ margin-bottom: 0.5rem; }}
+      p {{ color: #555; }}
+    </style>
+  </head>
+  <body>
+    <h1>Strat9 API Index</h1>
+    <p>Rustdoc crates published under <code>/strat9-os-docs/api</code>.</p>
+    <ul>
+{body_items}
+    </ul>
+  </body>
+</html>
+"""
+
+(api_dir / "index.html").write_text(doc, encoding="utf-8")
+PY
+
 echo ""
 echo "Done. Website generated at:"
 echo "  ${SITE_DIR}"
