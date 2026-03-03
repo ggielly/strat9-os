@@ -12,6 +12,8 @@ pub enum Error {
     PermissionDenied = EPERM,
     #[error("No such file or directory")]
     NotFound = ENOENT,
+    #[error("No such process")]
+    NoSuchProcess = ESRCH,
     #[error("Interrupted system call")]
     Interrupted = EINTR,
     #[error("Input/output error")]
@@ -34,6 +36,10 @@ pub enum Error {
     Fault = EFAULT,
     #[error("File exists")]
     AlreadyExists = EEXIST,
+    #[error("Not a directory")]
+    NotADirectory = ENOTDIR,
+    #[error("Is a directory")]
+    IsADirectory = EISDIR,
     #[error("Invalid argument")]
     InvalidArgument = EINVAL,
     #[error("Not a typewriter")]
@@ -42,14 +48,26 @@ pub enum Error {
     NoSpace = ENOSPC,
     #[error("Broken pipe")]
     Pipe = EPIPE,
+    #[error("Result too large")]
+    RangeError = ERANGE,
+    #[error("File name too long")]
+    NameTooLong = ENAMETOOLONG,
     #[error("Function not implemented")]
     NotImplemented = ENOSYS,
+    #[error("Directory not empty")]
+    NotEmpty = ENOTEMPTY,
+    #[error("Too many levels of symbolic links")]
+    SymlinkLoop = ELOOP,
     #[error("Not supported")]
     NotSupported = ENOTSUP,
+    #[error("Address already in use")]
+    AddressInUse = EADDRINUSE,
     #[error("No buffer space available")]
     QueueFull = ENOBUFS,
     #[error("Connection timed out")]
     TimedOut = ETIMEDOUT,
+    #[error("Connection refused")]
+    ConnectionRefused = ECONNREFUSED,
     #[error("Unknown error (errno={0})")]
     #[num_enum(catch_all)]
     Unknown(usize),
@@ -86,6 +104,7 @@ impl Error {
         match self {
             Error::PermissionDenied => "EPERM",
             Error::NotFound => "ENOENT",
+            Error::NoSuchProcess => "ESRCH",
             Error::Interrupted => "EINTR",
             Error::IoError => "EIO",
             Error::ArgumentListTooLong => "E2BIG",
@@ -97,14 +116,22 @@ impl Error {
             Error::AccessDenied => "EACCES",
             Error::Fault => "EFAULT",
             Error::AlreadyExists => "EEXIST",
+            Error::NotADirectory => "ENOTDIR",
+            Error::IsADirectory => "EISDIR",
             Error::InvalidArgument => "EINVAL",
             Error::NotATty => "ENOTTY",
             Error::NoSpace => "ENOSPC",
             Error::Pipe => "EPIPE",
-            Error::NotSupported => "ENOTSUP",
+            Error::RangeError => "ERANGE",
+            Error::NameTooLong => "ENAMETOOLONG",
             Error::NotImplemented => "ENOSYS",
+            Error::NotEmpty => "ENOTEMPTY",
+            Error::SymlinkLoop => "ELOOP",
+            Error::NotSupported => "ENOTSUP",
+            Error::AddressInUse => "EADDRINUSE",
             Error::QueueFull => "ENOBUFS",
             Error::TimedOut => "ETIMEDOUT",
+            Error::ConnectionRefused => "ECONNREFUSED",
             Error::Unknown(_) => "E???",
         }
     }
