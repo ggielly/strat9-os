@@ -10,6 +10,10 @@ use crate::{
 
 pub use strat9_abi::data::TimeSpec;
 
+/// Clock IDs for clock_gettime (POSIX-compatible subset)
+pub const CLOCK_MONOTONIC: u32 = 1;
+pub const CLOCK_REALTIME: u32 = 0;
+
 /// Get current monotonic time in nanoseconds since boot.
 ///
 /// Uses the scheduler tick counter (100Hz = 10ms per tick).
@@ -18,12 +22,37 @@ pub fn current_time_ns() -> u64 {
     crate::process::scheduler::ticks() * 10_000_000 // 10ms = 10,000,000 ns
 }
 
-/// SYS_CLOCK_GETTIME: Get current monotonic time.
+/// SYS_CLOCK_GETTIME: Get current time for the specified clock.
 ///
-/// Returns the time as a u64 nanosecond count since boot.
-/// For compatibility with POSIX, userspace can convert to timespec.
-pub fn sys_clock_gettime() -> Result<u64, SyscallError> {
-    Ok(current_time_ns())
+/// # Arguments
+/// * `clock_id` - Clock identifier (CLOCK_MONOTONIC or CLOCK_REALTIME)
+/// * `tp_ptr` - Pointer to userspace timespec structure to fill
+///
+/// # Returns
+/// * 0 on success
+/// * -EINVAL if clock_id is invalid
+/// * -EFAULT if tp_ptr is invalid
+///
+/// # POSIX compatibility
+/// This follows the POSIX signature: `int clock_gettime(clockid_t clock_id, struct timespec *tp)`
+pub fn sys_clock_gettime(clock_id: u32, tp_ptr: u64) -> Result<u64, SyscallError> {
+    if tp_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+
+    // Currently we only support CLOCK_MONOTONIC and CLOCK_REALTIME (both return same time)
+    // In the future, CLOCK_REALTIME could be backed by an RTC
+    match clock_id {
+        CLOCK_MONOTONIC | CLOCK_REALTIME => {}
+        _ => return Err(SyscallError::InvalidArgument),
+    }
+
+    let now_ns = current_time_ns();
+    let ts = TimeSpec::from_nanos(now_ns);
+
+    let user = UserSliceReadWrite::new(tp_ptr, core::mem::size_of::<TimeSpec>())?;
+    user.write_val(&ts).map_err(|_| SyscallError::Fault)?;
+    Ok(0)
 }
 
 /// SYS_NANOSLEEP: Sleep for a specified duration.

@@ -36,6 +36,10 @@ pub use schemev2::*;
 pub mod dirent;
 pub use dirent::*;
 
+// Clock IDs for clock_gettime (POSIX-compatible)
+pub const CLOCK_REALTIME: u32 = 0;
+pub const CLOCK_MONOTONIC: u32 = 1;
+
 // High-level call functions are defined inline below (after syscall0..6).
 
 // ---------------------------------------------------------------------------
@@ -204,12 +208,21 @@ pub mod call {
         unsafe { syscall1(number::SYS_CLOSE, fd) }
     }
 
-    /// Get the current system time
-    pub fn clock_gettime(clock: usize, tp: &mut data::TimeSpec) -> error::Result<usize> {
+    /// Get the current system time.
+    ///
+    /// # Arguments
+    /// * `clock_id` - Clock identifier (CLOCK_MONOTONIC or CLOCK_REALTIME)
+    /// * `tp` - Mutable reference to timespec structure to fill
+    ///
+    /// # Returns
+    /// * `Ok(0)` on success
+    /// * `Err(Error::InvalidArgument)` if clock_id is invalid
+    /// * `Err(Error::Fault)` if tp pointer is invalid
+    pub fn clock_gettime(clock_id: u32, tp: &mut data::TimeSpec) -> error::Result<usize> {
         unsafe {
             syscall2(
                 number::SYS_CLOCK_GETTIME,
-                clock,
+                clock_id as usize,
                 tp as *mut data::TimeSpec as usize,
             )
         }
@@ -460,6 +473,26 @@ pub mod call {
                 flags | fcntl_flags,
             )
         }
+    }
+
+    /// Open a file at a specific path with POSIX flags.
+    ///
+    /// This is a convenience wrapper that converts POSIX `O_*` flags to Strat9 ABI flags.
+    /// For direct Strat9 ABI usage, prefer [`openat`].
+    ///
+    /// # Arguments
+    /// * `path` - Path to the file to open
+    /// * `posix_flags` - POSIX O_* flags (e.g., `O_RDONLY`, `O_CREAT`, `O_WRONLY`)
+    ///
+    /// # Example
+    /// ```no_run
+    /// use strat9_syscall::{call, flag};
+    /// // Open a file read-only using POSIX flags
+    /// let fd = call::open("/etc/passwd", flag::O_RDONLY).unwrap();
+    /// ```
+    pub fn open<T: AsRef<str>>(path: T, posix_flags: u32) -> error::Result<usize> {
+        let strat9_flags = flag::posix_oflags_to_strat9(posix_flags);
+        openat(0, path, strat9_flags.bits() as usize, 0)
     }
 
     /// Open a file at a specific path with filter

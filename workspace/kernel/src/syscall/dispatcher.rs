@@ -249,7 +249,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_VOLUME_READ => sys_volume_read(arg1, arg2, arg3, arg4),
         SYS_VOLUME_WRITE => sys_volume_write(arg1, arg2, arg3, arg4),
         SYS_VOLUME_INFO => sys_volume_info(arg1),
-        SYS_CLOCK_GETTIME => sys_clock_gettime(),
+        SYS_CLOCK_GETTIME => super::time::sys_clock_gettime(arg1 as u32, arg2),
         SYS_NANOSLEEP => sys_nanosleep(arg1, arg2),
         SYS_DEBUG_LOG => sys_debug_log(arg1, arg2),
         SYS_SILO_CREATE => silo::sys_silo_create(arg1),
@@ -1046,11 +1046,11 @@ fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     let user = UserSliceRead::new(_msg_ptr, MSG_SIZE)?;
     let mut buf = [0u8; MSG_SIZE];
     user.copy_to(&mut buf);
-    let mut msg = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const IpcMessage) };
-    
+    let mut msg = crate::ipc::message::ipc_message_from_raw(&buf);
+
     // Stamp identity
     msg.sender = task.id.as_u64();
-    
+
     if msg.flags == 0 {
         if let Some((sid, _label, _mem_used, _mem_min, _mem_max)) = crate::silo::silo_info_for_task(task.id) {
             if let Some(snapshot) = crate::silo::list_silos_snapshot().into_iter().find(|s| s.id == sid) {
@@ -1231,7 +1231,7 @@ fn sys_ipc_call(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     let user = UserSliceRead::new(_msg_ptr, MSG_SIZE)?;
     let mut buf = [0u8; MSG_SIZE];
     user.copy_to(&mut buf);
-    let mut msg = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const IpcMessage) };
+    let mut msg = crate::ipc::message::ipc_message_from_raw(&buf);
     msg.sender = task.id.as_u64();
     if msg.flags != 0 {
         let transfer_required = CapPermissions {
@@ -1270,7 +1270,7 @@ fn sys_ipc_reply(_msg_ptr: u64) -> Result<u64, SyscallError> {
     let user = UserSliceRead::new(_msg_ptr, MSG_SIZE)?;
     let mut buf = [0u8; MSG_SIZE];
     user.copy_to(&mut buf);
-    let msg = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const IpcMessage) };
+    let msg = crate::ipc::message::ipc_message_from_raw(&buf);
 
     let target = crate::process::TaskId::from_u64(msg.sender);
     let mut msg = msg;
