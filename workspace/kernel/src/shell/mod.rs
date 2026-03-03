@@ -10,6 +10,7 @@
 pub mod commands;
 pub mod output;
 pub mod parser;
+pub mod scripting;
 
 use commands::CommandRegistry;
 use output::{print_char, print_prompt};
@@ -613,8 +614,71 @@ pub extern "C" fn shell_main() -> ! {
     }
 }
 
-/// Execute a command line, handling pipes (`|`) and redirections (`>`, `>>`, `<`).
+/// Execute a command line, handling scripting, pipes and redirections.
 fn execute_line(line: &str, registry: &CommandRegistry) {
+    let expanded = scripting::expand_vars(line);
+
+    match scripting::parse_script(&expanded) {
+        scripting::ScriptConstruct::SetVar { key, val } => {
+            let expanded_val = scripting::expand_vars(&val);
+            scripting::set_var(&key, &expanded_val);
+            scripting::set_last_exit(0);
+            return;
+        }
+        scripting::ScriptConstruct::UnsetVar(key) => {
+            scripting::unset_var(&key);
+            scripting::set_last_exit(0);
+            return;
+        }
+        scripting::ScriptConstruct::ForLoop { var, items, body } => {
+            for item in &items {
+                scripting::set_var(&var, item);
+                for cmd in &body {
+                    let exp = scripting::expand_vars(cmd);
+                    execute_pipeline(&exp, registry);
+                }
+            }
+            return;
+        }
+        scripting::ScriptConstruct::WhileLoop { cond, body } => {
+            let mut iters = 0u32;
+            loop {
+                if iters > 10000 || SHELL_INTERRUPTED.load(Ordering::Relaxed) {
+                    break;
+                }
+                execute_pipeline(&cond, registry);
+                if scripting::last_exit() != 0 {
+                    break;
+                }
+                for cmd in &body {
+                    let exp = scripting::expand_vars(cmd);
+                    execute_pipeline(&exp, registry);
+                }
+                iters += 1;
+            }
+            return;
+        }
+        scripting::ScriptConstruct::IfElse { cond, then_body, else_body } => {
+            execute_pipeline(&cond, registry);
+            let branch = if scripting::last_exit() == 0 {
+                &then_body
+            } else {
+                &else_body
+            };
+            for cmd in branch {
+                let exp = scripting::expand_vars(cmd);
+                execute_pipeline(&exp, registry);
+            }
+            return;
+        }
+        scripting::ScriptConstruct::Simple(s) => {
+            execute_pipeline(&s, registry);
+        }
+    }
+}
+
+/// Execute a single pipeline (no scripting).
+fn execute_pipeline(line: &str, registry: &CommandRegistry) {
     let pipeline = match parse_pipeline(line) {
         Some(p) => p,
         None => return,
@@ -656,16 +720,21 @@ fn execute_line(line: &str, registry: &CommandRegistry) {
         };
 
         match result {
-            Ok(()) => {}
+            Ok(()) => {
+                scripting::set_last_exit(0);
+            }
             Err(ShellError::UnknownCommand) => {
+                scripting::set_last_exit(127);
                 shell_println!("Error: unknown command '{}'", stage.command.name);
                 return;
             }
             Err(ShellError::InvalidArguments) => {
+                scripting::set_last_exit(2);
                 shell_println!("Error: invalid arguments for '{}'", stage.command.name);
                 return;
             }
             Err(ShellError::ExecutionFailed) => {
+                scripting::set_last_exit(1);
                 shell_println!("Error: '{}' execution failed", stage.command.name);
                 return;
             }
