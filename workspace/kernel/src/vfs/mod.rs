@@ -308,25 +308,8 @@ pub fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, Syscall
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let path = resolve_path(&raw, &cwd);
 
-    let mut open_flags = OpenFlags::empty();
-    if flags & 0x1 != 0 {
-        open_flags |= OpenFlags::READ;
-    }
-    if flags & 0x2 != 0 {
-        open_flags |= OpenFlags::WRITE;
-    }
-    if flags & 0x4 != 0 {
-        open_flags |= OpenFlags::CREATE;
-    }
-    if flags & 0x8 != 0 {
-        open_flags |= OpenFlags::TRUNCATE;
-    }
-    if flags & 0x10 != 0 {
-        open_flags |= OpenFlags::APPEND;
-    }
-    if flags & 0x20 != 0 {
-        open_flags |= OpenFlags::DIRECTORY;
-    }
+    let open_flags =
+        OpenFlags::from_bits_truncate(flags as u32);
 
     let want_read =
         open_flags.contains(OpenFlags::READ) || open_flags.contains(OpenFlags::DIRECTORY);

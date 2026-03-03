@@ -359,6 +359,17 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     let args = &*args;
     serial_println!("[init] KernelArgs at {:p}", args);
 
+    if args.magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
+        serial_println!("[CRIT] Bad KernelArgs magic: 0x{:08x} (expected 0x{:08x})",
+            args.magic, strat9_abi::boot::STRAT9_BOOT_MAGIC);
+        loop { arch::x86_64::hlt(); }
+    }
+    if args.abi_version != strat9_abi::boot::STRAT9_BOOT_ABI_VERSION {
+        serial_println!("[CRIT] Unsupported boot ABI version: {} (kernel expects {})",
+            args.abi_version, strat9_abi::boot::STRAT9_BOOT_ABI_VERSION);
+        loop { arch::x86_64::hlt(); }
+    }
+
     // =============================================
     // Phase 1b : HHDM offset (must be set before any physical memory access)
     // =============================================

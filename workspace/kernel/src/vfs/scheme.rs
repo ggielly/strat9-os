@@ -49,17 +49,7 @@ bitflags::bitflags! {
     }
 }
 
-bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct OpenFlags: u32 {
-        const READ      = 1 << 0;
-        const WRITE     = 1 << 1;
-        const CREATE    = 1 << 2;
-        const TRUNCATE  = 1 << 3;
-        const APPEND    = 1 << 4;
-        const DIRECTORY = 1 << 5;
-    }
-}
+pub use strat9_abi::flag::OpenFlags;
 
 /// Abstraction for a filesystem/service backend.
 pub trait Scheme: Send + Sync {

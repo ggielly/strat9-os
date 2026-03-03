@@ -1,5 +1,10 @@
+pub const STRAT9_BOOT_ABI_VERSION: u32 = 1;
+pub const STRAT9_BOOT_MAGIC: u32 = 0x5354_3942; // "ST9B"
+
 #[repr(C, packed(8))]
 pub struct KernelArgs {
+    pub magic: u32,
+    pub abi_version: u32,
     pub kernel_base: u64,
     pub kernel_size: u64,
     pub stack_base: u64,

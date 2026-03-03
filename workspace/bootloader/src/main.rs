@@ -611,6 +611,8 @@ pub fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
         page_phys,
         kernel_entry,
         KernelArgs {
+            magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
+            abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
             kernel_base: kernel.as_ptr() as u64,
             kernel_size: kernel.len() as u64,
             stack_base: stack_base as u64,
