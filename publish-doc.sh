@@ -142,6 +142,9 @@ if [[ "${NO_PAGES_UPLOAD}" -eq 0 ]]; then
   trap cleanup EXIT
 
   git clone --depth 1 "https://github.com/${PAGES_REPO}.git" "${TMP_DIR}/pages"
+  pushd "${TMP_DIR}/pages" >/dev/null
+  git checkout "${PAGES_BRANCH}" >/dev/null 2>&1 || git checkout -b "${PAGES_BRANCH}"
+  popd >/dev/null
   mkdir -p "${TMP_DIR}/pages/${PAGES_SUBDIR}"
   rsync -a --delete "build/docs-site/" "${TMP_DIR}/pages/${PAGES_SUBDIR}/"
 
