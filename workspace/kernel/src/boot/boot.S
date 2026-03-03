@@ -71,9 +71,9 @@ _start:
     movl    $boot_pml4, %eax
     movl    %eax, %cr3
 
-    # Enable PAE and SSE (accumulate bits in EAX)
+    # Enable PAE, SSE, and XSAVE (accumulate bits in EAX)
     movl    %cr4, %eax
-    orl     $0x620, %eax    # Set PAE (5), OSFXSR (9), OSXMMEXCPT (10)
+    orl     $0x40620, %eax  # Set PAE (5), OSFXSR (9), OSXMMEXCPT (10), OSXSAVE (18)
     movl    %eax, %cr4
 
     # Enable SSE in CR0

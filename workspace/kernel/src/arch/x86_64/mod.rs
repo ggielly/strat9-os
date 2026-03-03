@@ -3,6 +3,7 @@
 //! Inspired by MaestroOS `arch/x86/mod.rs`
 
 pub mod apic;
+pub mod cpuid;
 pub mod gdt;
 pub mod idt;
 pub mod io;
@@ -24,25 +25,65 @@ pub mod vga;
 
 use core::arch::asm;
 
-/// Initialize FPU/SSE for the current CPU
-pub fn init_fpu() {
+/// Initialize FPU, SSE, and optionally XSAVE for the current CPU.
+pub fn init_cpu_extensions() {
     unsafe {
-        // Enable OSFXSR (bit 9) and OSXMMEXCPT (bit 10) in CR4
         let mut cr4: u64;
         asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+        // OSFXSR (9) + OSXMMEXCPT (10)
         cr4 |= (1 << 9) | (1 << 10);
+
+        if cpuid::host_uses_xsave() {
+            // OSXSAVE (18) — required before xsetbv/xgetbv
+            cr4 |= 1 << 18;
+        }
         asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
 
-        // Clear EM (bit 2) and set MP (bit 1) in CR0
         let mut cr0: u64;
         asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
-        cr0 &= !(1 << 2);
-        cr0 |= 1 << 1;
+        cr0 &= !(1 << 2); // clear EM
+        cr0 |= 1 << 1; // set MP
         asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack));
 
-        // Initialize FPU state
         asm!("fninit", options(nomem, nostack));
+
+        if cpuid::host_uses_xsave() {
+            let xcr0 = cpuid::host().max_xcr0;
+            xsetbv(0, xcr0);
+        }
     }
+}
+
+/// Read an Extended Control Register (XGETBV).
+#[inline]
+pub fn xgetbv(xcr: u32) -> u64 {
+    let eax: u32;
+    let edx: u32;
+    unsafe {
+        asm!(
+            "xgetbv",
+            in("ecx") xcr,
+            out("eax") eax,
+            out("edx") edx,
+            options(nomem, nostack),
+        );
+    }
+    ((edx as u64) << 32) | eax as u64
+}
+
+/// Write an Extended Control Register (XSETBV).
+///
+/// # Safety
+/// Caller must ensure CR4.OSXSAVE is set and the value is valid for XCR0.
+#[inline]
+pub unsafe fn xsetbv(xcr: u32, value: u64) {
+    asm!(
+        "xsetbv",
+        in("ecx") xcr,
+        in("eax") value as u32,
+        in("edx") (value >> 32) as u32,
+        options(nomem, nostack),
+    );
 }
 
 /// Halt the CPU until the next interrupt

@@ -83,9 +83,9 @@ _gdt:
     mov eax, [SMP_VAR_ADDR]
     mov cr3, eax
 
-    # Enable PSE, PAE, OSFXSR, OSXMMEXCPT
+    # Enable PSE, PAE, OSFXSR, OSXMMEXCPT, OSXSAVE
     mov eax, cr4
-    or eax, 0x630
+    or eax, 0x40630
     mov cr4, eax
 
     # Enable LME
@@ -322,7 +322,7 @@ pub extern "C" fn smp_main() -> ! {
     crate::arch::x86_64::gdt::init_cpu(cpu_index);
     crate::arch::x86_64::percpu::init_gs_base(cpu_index);
     crate::arch::x86_64::syscall::init();
-    crate::arch::x86_64::init_fpu();
+    crate::arch::x86_64::init_cpu_extensions();
 
     if let Some(stack_top) = percpu::kernel_stack_top(cpu_index) {
         crate::arch::x86_64::tss::set_kernel_stack_for(cpu_index, x86_64::VirtAddr::new(stack_top));

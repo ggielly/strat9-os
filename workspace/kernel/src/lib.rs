@@ -330,8 +330,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     init_serial();
     init_logger();
 
-    // Initialize FPU/SSE for the BSP
-    crate::arch::x86_64::init_fpu();
+    // Detect CPU features (must happen before init_cpu_extensions)
+    crate::arch::x86_64::cpuid::init();
+
+    // Initialize FPU/SSE/XSAVE for the BSP
+    crate::arch::x86_64::init_cpu_extensions();
 
     // Puts default panic hooks early to ensure
     //we get useful info on any panics during init.
