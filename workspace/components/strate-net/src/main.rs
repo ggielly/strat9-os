@@ -436,6 +436,12 @@ struct TcpListenerState {
     port: u16,
 }
 
+/// State for an outgoing TCP connection (`tcp/connect/<ip>/<port>`).
+#[derive(Copy, Clone)]
+struct TcpConnState {
+    socket: SocketHandle,
+}
+
 struct NetworkStrate {
     device: Strat9NetDevice,
     interface: Interface,
@@ -447,6 +453,7 @@ struct NetworkStrate {
     /// VFS handles: file_id → virtual path ("/net/*")
     open_handles: BTreeMap<u64, String>,
     tcp_listeners: BTreeMap<u64, TcpListenerState>,
+    tcp_connections: BTreeMap<u64, TcpConnState>,
     next_fid: u64,
     /// Last ping that was sent, waiting for reply
     pending_ping: Option<PendingPing>,
@@ -491,6 +498,7 @@ impl NetworkStrate {
             ip_config: None,
             open_handles: BTreeMap::new(),
             tcp_listeners: BTreeMap::new(),
+            tcp_connections: BTreeMap::new(),
             next_fid: 1,
             pending_ping: None,
             ping_reply: None,
@@ -802,6 +810,37 @@ impl NetworkStrate {
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
+            p if p.starts_with("tcp/connect/") => {
+                let rest = &p[12..];
+                let parts: alloc::vec::Vec<&str> = rest.splitn(2, '/').collect();
+                if parts.len() != 2 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+                let Some(ip) = parse_ipv4(parts[0]) else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                let Some(port) = parts[1].parse::<u16>().ok() else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+
+                let rx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
+                let tx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
+                let sock = tcp::Socket::new(rx_buf, tx_buf);
+                let handle = self.sockets.add(sock);
+
+                let local_port = 49152 + (self.next_fid as u16 % 16384);
+                let remote = (smoltcp::wire::IpAddress::Ipv4(ip), port);
+                let conn_socket = self.sockets.get_mut::<tcp::Socket>(handle);
+                if conn_socket.connect(self.interface.context(), remote, local_port).is_err() {
+                    self.sockets.remove(handle);
+                    return IpcMessage::error_reply(msg.sender, -111);
+                }
+
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                self.tcp_connections.insert(fid, TcpConnState { socket: handle });
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
             p if p.starts_with("tcp/listen/") => {
                 let port_str = &p[11..];
                 let Some(port) = port_str.parse::<u16>().ok() else {
@@ -888,6 +927,42 @@ impl NetworkStrate {
         }
     }
 
+    /// Read from an outgoing TCP connection.
+    fn handle_tcp_conn_read(&mut self, sender: u64, conn: TcpConnState) -> IpcMessage {
+        let socket = self.sockets.get_mut::<tcp::Socket>(conn.socket);
+        if !socket.is_active() && !socket.may_recv() {
+            return IpcMessage::error_reply(sender, -104); // ECONNRESET
+        }
+        let mut data = [0u8; 40];
+        if socket.can_recv() {
+            match socket.recv_slice(&mut data) {
+                Ok(n) => reply_read(sender, &data[..n]),
+                Err(_) => IpcMessage::error_reply(sender, -5),
+            }
+        } else {
+            IpcMessage::error_reply(sender, -11) // EAGAIN
+        }
+    }
+
+    /// Write to an outgoing TCP connection.
+    fn handle_tcp_conn_write(&mut self, sender: u64, conn: TcpConnState, msg: &IpcMessage) -> IpcMessage {
+        let socket = self.sockets.get_mut::<tcp::Socket>(conn.socket);
+        if !socket.is_active() && !socket.may_send() {
+            return IpcMessage::error_reply(sender, -104);
+        }
+        let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+        let data_len = core::cmp::min(data_len, msg.payload.len().saturating_sub(18));
+        let data = &msg.payload[18..18 + data_len];
+
+        if !socket.can_send() {
+            return IpcMessage::error_reply(sender, -11);
+        }
+        match socket.send_slice(data) {
+            Ok(n) => reply_write(sender, n),
+            Err(_) => IpcMessage::error_reply(sender, -11),
+        }
+    }
+
     /// Implements handle read.
     fn handle_read(&mut self, msg: &IpcMessage) -> IpcMessage {
         let file_id = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap_or([0u8; 8]));
@@ -895,6 +970,9 @@ impl NetworkStrate {
 
         if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
             return self.handle_tcp_read(msg.sender, listener);
+        }
+        if let Some(conn) = self.tcp_connections.get(&file_id).copied() {
+            return self.handle_tcp_conn_read(msg.sender, conn);
         }
 
         let path = match self.open_handles.get(&file_id) {
@@ -1064,6 +1142,9 @@ impl NetworkStrate {
 
         if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
             return self.handle_tcp_write(msg.sender, listener, msg);
+        }
+        if let Some(conn) = self.tcp_connections.get(&file_id).copied() {
+            return self.handle_tcp_conn_write(msg.sender, conn, msg);
         }
 
         let path = match self.open_handles.get(&file_id) {
@@ -1254,6 +1335,11 @@ impl NetworkStrate {
         self.open_handles.remove(&file_id);
         if let Some(listener) = self.tcp_listeners.remove(&file_id) {
             let _ = self.sockets.remove(listener.socket);
+        }
+        if let Some(conn) = self.tcp_connections.remove(&file_id) {
+            let sock = self.sockets.get_mut::<tcp::Socket>(conn.socket);
+            sock.close();
+            self.sockets.remove(conn.socket);
         }
         reply_ok(msg.sender)
     }
