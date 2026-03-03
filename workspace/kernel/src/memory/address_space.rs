@@ -345,6 +345,8 @@ impl AddressSpace {
             .map_err(|_| "OOM during demand paging")?;
         drop(guard);
 
+        crate::memory::paging::ensure_identity_map_range(frame.start_address.as_u64(), page_bytes);
+
         // Zero the frame
         unsafe {
             let virt = crate::memory::phys_to_virt(frame.start_address.as_u64());

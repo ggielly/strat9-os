@@ -134,7 +134,7 @@ script = [
 description = "Check relibc compilation for Strat9 target"
 script_runner = "@shell"
 script = ['''
-echo "Checking relibc for x86_64-strat9 target..."
+echo "Checking relibc for x86_64-unknown-strat9 target..."
 cd sdk/relibc
 cargo check \
     --target ../../targets/x86_64-unknown-strat9.json \
@@ -149,7 +149,7 @@ description = "Build relibc static library for Strat9"
 dependencies = ["setup-relibc"]
 script_runner = "@shell"
 script = ['''
-echo "Building relibc for x86_64-strat9 target..."
+echo "Building relibc for x86_64-unknown-strat9 target..."
 cd sdk/relibc
 cargo build \
     --target ../../targets/x86_64-unknown-strat9.json \
@@ -161,12 +161,12 @@ cargo build \
 echo ""
 echo "=== Relibc Build Complete ==="
 echo ""
-librelibc="../../target/x86_64-strat9/release/librelibc.a"
+librelibc="../../target/x86_64-unknown-strat9/release/librelibc.a"
 if [ -f "$librelibc" ]; then
     size=$(stat -c%s "$librelibc" 2>/dev/null || stat -f%z "$librelibc")
     size_kb=$((size / 1024))
     echo "  librelibc.a: $size bytes ($size_kb KB)"
-    echo "  Location: target/x86_64-strat9/release/librelibc.a"
+    echo "  Location: target/x86_64-unknown-strat9/release/librelibc.a"
 else
     echo "  Warning: librelibc.a not found"
 fi

@@ -228,3 +228,7 @@ static_assertions::assert_eq_size!(FileStat, [u8; 40]);
 static_assertions::assert_eq_size!(IpcMessage, [u8; 64]);
 static_assertions::const_assert_eq!(core::mem::align_of::<IpcMessage>(), 64);
 static_assertions::assert_eq_size!(TimeSpec, [u8; 16]);
+static_assertions::assert_eq_size!(HandleInfo, [u8; 16]);
+static_assertions::assert_eq_size!(PciAddress, [u8; 4]);
+static_assertions::assert_eq_size!(PciProbeCriteria, [u8; 12]);
+static_assertions::assert_eq_size!(PciDeviceInfo, [u8; 16]);

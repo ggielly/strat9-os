@@ -188,13 +188,6 @@ extern "x86-interrupt" fn page_fault_handler(
         0
     );
 
-    if is_user {
-        if let Some(task) = crate::process::current_task_clone() {
-            let as_ref = unsafe { &*task.process.address_space.get() };
-            dump_user_pf_context(as_ref, rip, user_rsp);
-        }
-    }
-
     // Try COW only for write-protection faults on already-present pages.
     // For not-present faults, demand paging should run first.
     if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
@@ -251,7 +244,9 @@ extern "x86-interrupt" fn page_fault_handler(
             if let Ok(vaddr) = fault_addr {
                 match address_space.handle_fault(vaddr.as_u64()) {
                     Ok(()) => return,
-                    Err(_) => {}
+                    Err(_) => {
+                        dump_user_pf_context(address_space, rip, user_rsp);
+                    }
                 }
             }
         }
