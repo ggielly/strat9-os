@@ -99,18 +99,21 @@ impl ProcScheme {
         }
     }
 
-    /// Generate /proc/cpuinfo content
+    /// Generate /proc/cpuinfo content from actual CPUID data.
     fn get_cpuinfo(&self) -> String {
         let mut output = String::new();
         let cpu_count = crate::arch::x86_64::percpu::get_cpu_count();
+        let host = crate::arch::x86_64::cpuid::host();
+        let flags = crate::arch::x86_64::cpuid::features_to_flags_string(host.features);
+        let has_fpu = host.features.contains(crate::arch::x86_64::cpuid::CpuFeatures::FPU);
 
         for i in 0..cpu_count {
             let _ = writeln!(output, "processor\t: {}", i);
-            let _ = writeln!(output, "vendor_id\t: GenuineIntel");
-            let _ = writeln!(output, "cpu family\t: 6");
-            let _ = writeln!(output, "model\t\t: 85");
-            let _ = writeln!(output, "model name\t: QEMU Virtual CPU");
-            let _ = writeln!(output, "stepping\t: 0");
+            let _ = writeln!(output, "vendor_id\t: {}", host.vendor_string());
+            let _ = writeln!(output, "cpu family\t: {}", host.family);
+            let _ = writeln!(output, "model\t\t: {}", host.model);
+            let _ = writeln!(output, "model name\t: {}", host.model_name_str());
+            let _ = writeln!(output, "stepping\t: {}", host.stepping);
             let _ = writeln!(output, "cpu MHz\t\t: 2400.000");
             let _ = writeln!(output, "cache size\t: 4096 KB");
             let _ = writeln!(output, "physical id\t: {}", i);
@@ -118,12 +121,11 @@ impl ProcScheme {
             let _ = writeln!(output, "core id\t\t: {}", i);
             let _ = writeln!(output, "cpu cores\t: 1");
             let _ = writeln!(output, "apicid\t\t: {}", i);
-            let _ = writeln!(output, "fpu\t\t: yes");
-            let _ = writeln!(output, "fpu_exception\t: yes");
+            let _ = writeln!(output, "fpu\t\t: {}", if has_fpu { "yes" } else { "no" });
+            let _ = writeln!(output, "fpu_exception\t: {}", if has_fpu { "yes" } else { "no" });
             let _ = writeln!(output, "cpuid level\t: 13");
             let _ = writeln!(output, "wp\t\t: yes");
-            let _ = writeln!(output, "flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 syscall nx rdtscp lm constant_tsc rep_good nopl xtopology");
-            let _ = writeln!(output, "bugs\t\t: spectre_v1 spectre_v2 spec_store_bypass");
+            let _ = writeln!(output, "flags\t\t: {}", flags);
             let _ = writeln!(output, "bogomips\t: 4800.00");
             let _ = writeln!(output, "clflush size\t: 64");
             let _ = writeln!(output, "cache_alignment\t: 64");
