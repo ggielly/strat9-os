@@ -318,5 +318,8 @@ s2_msg_ok:        db '[OK]', 0
 ; Kernel entry point (filled by ELF parser in PM)
 kernel_entry_addr: dq 0
 
+; Number of sectors loaded in the first chunk.
+kernel_chunk1_sectors: dd 0
+
 ; Padding to 8KB (16 sectors) to fit the extra code
 times 8192-($-stage2) db 0

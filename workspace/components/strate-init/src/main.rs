@@ -803,11 +803,14 @@ static mut SUPERVISED: [Option<SupervisedChild>; 16] = [
     None, None, None, None, None, None, None, None,
 ];
 static mut SUPERVISED_COUNT: usize = 0;
+const SUPERVISED_CAPACITY: usize = 16;
 
 fn register_supervised(name: &str, pid: u64) {
     unsafe {
-        if SUPERVISED_COUNT < SUPERVISED.len() {
-            SUPERVISED[SUPERVISED_COUNT] = Some(SupervisedChild::from_name(name, pid));
+        if SUPERVISED_COUNT < SUPERVISED_CAPACITY {
+            let base = core::ptr::addr_of_mut!(SUPERVISED).cast::<Option<SupervisedChild>>();
+            let slot = base.add(SUPERVISED_COUNT);
+            slot.write(Some(SupervisedChild::from_name(name, pid)));
             SUPERVISED_COUNT += 1;
         }
     }
@@ -824,8 +827,11 @@ fn supervisor_loop() -> ! {
                 let status = wstatus;
                 let mut found = false;
                 unsafe {
-                    for slot in SUPERVISED.iter_mut().take(SUPERVISED_COUNT) {
-                        if let Some(child) = slot {
+                    let base = core::ptr::addr_of_mut!(SUPERVISED).cast::<Option<SupervisedChild>>();
+                    let count = SUPERVISED_COUNT;
+                    for idx in 0..count {
+                        let slot = base.add(idx);
+                        if let Some(child) = (*slot).as_mut() {
                             if child.pid == pid as u64 {
                                 child.health = StrateHealth::Failed;
                                 found = true;

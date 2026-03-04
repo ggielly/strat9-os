@@ -1,22 +1,32 @@
 //! Utility commands: uptime, dmesg, echo, env, whoami, grep, setenv, unsetenv
 mod audit;
 mod date;
+mod dmesg;
+mod echo;
 mod env;
+mod grep;
 mod ntpdate;
+mod uptime;
 mod watch;
+mod whoami;
 
 use crate::{shell::ShellError, shell_println, vfs};
 use alloc::string::String;
 
 pub use audit::cmd_audit;
 pub use date::cmd_date;
+pub use dmesg::cmd_dmesg;
+pub use echo::cmd_echo;
 pub use env::{
     cmd_env, cmd_setenv, cmd_unsetenv, init_shell_env, shell_getenv, shell_setenv, shell_unsetenv,
 };
+pub use grep::cmd_grep;
 pub use ntpdate::cmd_ntpdate;
+pub use uptime::cmd_uptime;
 pub use watch::cmd_watch;
+pub use whoami::cmd_whoami;
 
-pub fn cmd_uptime(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_uptime_impl(_args: &[String]) -> Result<(), ShellError> {
     let ticks = crate::process::scheduler::ticks();
     let hz = crate::arch::x86_64::timer::TIMER_HZ;
     let total_secs = ticks / hz;
@@ -95,7 +105,7 @@ pub fn klog_write(msg: &str) {
     KLOG.lock().push(msg);
 }
 
-pub fn cmd_dmesg(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_dmesg_impl(args: &[String]) -> Result<(), ShellError> {
     let limit: usize = if !args.is_empty() {
         args[0].parse().unwrap_or(50)
     } else {
@@ -122,7 +132,7 @@ pub fn cmd_dmesg(args: &[String]) -> Result<(), ShellError> {
 }
 
 
-pub fn cmd_echo(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_echo_impl(args: &[String]) -> Result<(), ShellError> {
     let mut first = true;
     for arg in args {
         if !first { crate::shell_print!(" "); }
@@ -134,7 +144,7 @@ pub fn cmd_echo(args: &[String]) -> Result<(), ShellError> {
 }
 
 
-pub fn cmd_whoami(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_whoami_impl(_args: &[String]) -> Result<(), ShellError> {
     if let Some(label) = crate::silo::current_task_silo_label() {
         shell_println!("silo: {}", label);
     } else {
@@ -155,7 +165,7 @@ pub fn cmd_whoami(_args: &[String]) -> Result<(), ShellError> {
 ///
 /// When invoked as the right-hand side of a pipe (`cmd | grep pat`),
 /// reads from pipe input instead of a file.
-pub fn cmd_grep(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_grep_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         shell_println!("Usage: grep <pattern> [path]");
         return Err(ShellError::InvalidArguments);

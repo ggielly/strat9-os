@@ -5,7 +5,8 @@ mod health;
 mod reboot;
 mod scheduler;
 mod shutdown;
-mod silo;
+#[path = "silo.rs"]
+mod silo_cmd;
 mod silo_attach;
 mod silo_limit;
 mod silos;
@@ -23,7 +24,7 @@ pub use cpuinfo::cmd_cpuinfo;
 pub use health::cmd_health;
 pub use reboot::cmd_reboot;
 pub use shutdown::cmd_shutdown;
-pub use silo::cmd_silo;
+pub use silo_cmd::cmd_silo;
 pub use silos::cmd_silos;
 pub use strate::cmd_strate;
 pub use test_mem::cmd_test_mem;
