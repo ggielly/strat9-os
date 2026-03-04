@@ -1406,12 +1406,27 @@ pub fn load_elf_task_with_caps(
         let _ = crate::silo::grant_silo_admin_to_task(&task);
     }
 
-    log::info!(
-        "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x}",
-        name,
-        runtime_entry,
-        boot_sp,
-    );
+    {
+        let arc_data_ptr = alloc::sync::Arc::as_ptr(&task) as usize;
+        let fpu_ptr = task.fpu_state.get() as usize;
+        if let Some(cur) = crate::process::scheduler::current_task_clone() {
+            let cur_data_ptr = alloc::sync::Arc::as_ptr(&cur) as usize;
+            let cur_strong = alloc::sync::Arc::strong_count(&cur);
+            log::info!(
+                "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x} \
+                 new_arc={:#x} new_fpu={:#x} cur_arc={:#x} cur_strong={}",
+                name, runtime_entry, boot_sp,
+                arc_data_ptr, fpu_ptr, cur_data_ptr, cur_strong,
+            );
+        } else {
+            log::info!(
+                "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x} \
+                 new_arc={:#x} new_fpu={:#x} (no current task)",
+                name, runtime_entry, boot_sp,
+                arc_data_ptr, fpu_ptr,
+            );
+        }
+    }
 
     Ok(task)
 }

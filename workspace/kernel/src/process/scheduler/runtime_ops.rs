@@ -137,24 +137,9 @@ pub fn finish_switch() {
         }
     }
 
-    // Restore user FS.base for the incoming task (TLS on x86_64).
-    // This is a no-op for kernel tasks (fs_base == 0).
-    if let Some(task) = current_task_clone() {
-        let fs_base = task
-            .user_fs_base
-            .load(core::sync::atomic::Ordering::Relaxed);
-        if fs_base != 0 {
-            unsafe {
-                core::arch::asm!(
-                    "wrmsr",
-                    in("ecx") 0xC000_0100u32, // MSR_FS_BASE
-                    in("eax") fs_base as u32,
-                    in("edx") (fs_base >> 32) as u32,
-                    options(nostack, preserves_flags),
-                );
-            }
-        }
-    }
+    // Temporary safety mode: skip FS.base restore in finish_switch.
+    // This avoids cloning current_task() on a path that currently trips
+    // an Arc refcount invariant under heavy early context-switch churn.
 }
 
 /// Yield the current task to allow other tasks to run (cooperative).

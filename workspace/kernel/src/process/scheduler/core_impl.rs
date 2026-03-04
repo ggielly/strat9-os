@@ -288,14 +288,17 @@ impl Scheduler {
         unsafe {
             *next_task.state.get() = TaskState::Running;
         }
-        self.cpus[cpu_index].current_task = Some(next_task.clone());
+        let cloned = next_task.clone();
+        let strong_after = Arc::strong_count(&cloned);
+        self.cpus[cpu_index].current_task = Some(cloned);
         // Reset the runtime accounting for the new task
         self.cpus[cpu_index].current_runtime = crate::process::sched::CurrentRuntime::new();
         sched_trace(format_args!(
-            "cpu={} pick_next task={} policy={:?}",
+            "cpu={} pick_next task={} policy={:?} strong={}",
             cpu_index,
             next_task.id.as_u64(),
-            next_task.sched_policy()
+            next_task.sched_policy(),
+            strong_after,
         ));
         next_task
     }
@@ -376,7 +379,18 @@ impl Scheduler {
             return None;
         }
         // Must have a current task to yield from
-        let current = self.cpus[cpu_index].current_task.as_ref()?.clone();
+        let current_ref = self.cpus[cpu_index].current_task.as_ref()?;
+        let strong_before = Arc::strong_count(current_ref);
+        if strong_before == 0 || strong_before > (isize::MAX as usize) {
+            log::error!(
+                "[sched] CORRUPT Arc in yield_cpu before clone! cpu={} strong={:#x} task={} ptr={:p}",
+                cpu_index, strong_before,
+                current_ref.id.as_u64(),
+                Arc::as_ptr(current_ref) as *const u8,
+            );
+            return None;
+        }
+        let current = current_ref.clone();
 
         // Pick the next task
         let next = self.pick_next_task(cpu_index);

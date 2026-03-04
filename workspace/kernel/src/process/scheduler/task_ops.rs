@@ -130,7 +130,25 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
             sched
                 .cpus
                 .get(cpu_index)
-                .and_then(|cpu| cpu.current_task.clone())
+                .and_then(|cpu| {
+                    let arc = cpu.current_task.as_ref()?;
+                    let strong = Arc::strong_count(arc);
+                    if strong == 0 || strong > (isize::MAX as usize) {
+                        let ptr = Arc::as_ptr(arc) as *const u8;
+                        // Read the raw 8 bytes at the ArcInner start (strong counter).
+                        // ArcInner layout: [strong: usize, weak: usize, data…]
+                        // `Arc::as_ptr` points to `data`, so the strong counter is
+                        // somewhere before it.  Use `strong_count` result instead.
+                        log::error!(
+                            "[sched] CORRUPT Arc refcount in current_task! \
+                             cpu={} strong={:#x} data_ptr={:p}",
+                            cpu_index, strong, ptr,
+                        );
+                        None
+                    } else {
+                        Some(arc.clone())
+                    }
+                })
         } else {
             None
         }
@@ -151,7 +169,20 @@ pub fn current_task_clone_try() -> Option<Arc<Task>> {
             sched
                 .cpus
                 .get(cpu_index)
-                .and_then(|cpu| cpu.current_task.clone())
+                .and_then(|cpu| {
+                    let arc = cpu.current_task.as_ref()?;
+                    let strong = Arc::strong_count(arc);
+                    if strong == 0 || strong > (isize::MAX as usize) {
+                        log::error!(
+                            "[sched] CORRUPT Arc refcount in current_task_try! \
+                             cpu={} strong={:#x} data_ptr={:p}",
+                            cpu_index, strong, Arc::as_ptr(arc) as *const u8,
+                        );
+                        None
+                    } else {
+                        Some(arc.clone())
+                    }
+                })
         } else {
             None
         }
