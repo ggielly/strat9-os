@@ -1,6 +1,13 @@
 //! System management commands
 mod scheduler;
+mod shutdown;
+mod silo_attach;
+mod silo_limit;
 pub use scheduler::cmd_scheduler;
+pub use shutdown::cmd_shutdown;
+
+use silo_attach::cmd_silo_attach;
+use silo_limit::cmd_silo_limit;
 
 use crate::{
     arch::x86_64::vga,
@@ -693,48 +700,6 @@ pub fn cmd_reboot(_args: &[String]) -> Result<(), ShellError> {
     }
 }
 
-/// Graceful shutdown: stop strates in reverse order, then power off.
-///
-/// QEMU/KVM ACPI shutdown uses I/O port 0x604 (Bochs/QEMU) or 0xB004 (older).
-pub fn cmd_shutdown(_args: &[String]) -> Result<(), ShellError> {
-    shell_println!("[shutdown] Stopping silos...");
-
-    let mut silos = crate::silo::list_silos_snapshot();
-    silos.sort_by(|a, b| b.id.cmp(&a.id));
-
-    for s in &silos {
-        shell_println!("  stopping silo {} ({})", s.id, s.name);
-        let _ = crate::silo::kernel_suspend_silo(&alloc::format!("{}", s.id));
-    }
-
-    shell_println!("[shutdown] Killing remaining tasks...");
-    let current_tid = crate::process::current_task_clone().map(|t| t.id);
-    if let Some(tasks) = crate::process::get_all_tasks() {
-        for t in tasks.iter().rev() {
-            let tid = t.id;
-            if tid.as_u64() <= 1 || current_tid == Some(tid) {
-                continue;
-            }
-            crate::process::kill_task(tid);
-        }
-    }
-
-    for _ in 0..500 {
-        crate::process::yield_task();
-    }
-
-    shell_println!("[shutdown] Power off...");
-    unsafe {
-        crate::arch::x86_64::cli();
-        // QEMU/Bochs ACPI shutdown
-        crate::arch::x86_64::io::outw(0x604, 0x2000);
-        // Fallback: older QEMU
-        crate::arch::x86_64::io::outw(0xB004, 0x2000);
-        loop {
-            crate::arch::x86_64::hlt();
-        }
-    }
-}
 
 /// trace mem on|off|dump [n]|clear|serial on|off|mask
 pub fn cmd_trace(args: &[String]) -> Result<(), ShellError> {
@@ -1772,83 +1737,6 @@ fn cmd_silo_sandbox(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
-/// Attach to a silo's debug output stream.
-///
-/// Usage: `silo attach <id|label>`
-///
-/// Displays output from `sys_debug_log` calls made by tasks in the silo.
-/// Press Ctrl+C or 'q' to detach.
-fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
-    if args.len() < 2 {
-        shell_println!("Usage: silo attach <id|label>");
-        return Err(ShellError::InvalidArguments);
-    }
-    let selector = args[1].as_str();
-
-    let sid = match silo::silo_detail_snapshot(selector) {
-        Ok(detail) => {
-            shell_println!("Attached to silo {} ({}). Press Ctrl+C or 'q' to detach.",
-                detail.base.id, detail.base.name);
-            detail.base.id
-        }
-        Err(e) => {
-            shell_println!("silo attach: {:?}", e);
-            return Err(ShellError::ExecutionFailed);
-        }
-    };
-
-    loop {
-        if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
-            if ch == b'q' || ch == 0x03 || ch == 0x1B {
-                break;
-            }
-        }
-
-        match silo::silo_output_drain(&alloc::format!("{}", sid)) {
-            Ok(data) if !data.is_empty() => {
-                if let Ok(s) = core::str::from_utf8(&data) {
-                    crate::shell_print!("{}", s);
-                }
-            }
-            _ => {}
-        }
-
-        crate::process::yield_task();
-    }
-
-    shell_println!("\nDetached from silo {}", sid);
-    Ok(())
-}
-
-/// Dynamically adjust silo resource limits.
-///
-/// Usage: `silo limit <id|label> <key> <value>`
-///
-/// Keys: `mem_max`, `mem_min`, `max_tasks`, `cpu_shares`.
-fn cmd_silo_limit(args: &[String]) -> Result<(), ShellError> {
-    if args.len() < 4 {
-        shell_println!("Usage: silo limit <id|label> <key> <value>");
-        shell_println!("  Keys: mem_max, mem_min, max_tasks, cpu_shares");
-        return Err(ShellError::InvalidArguments);
-    }
-    let selector = args[1].as_str();
-    let key = args[2].as_str();
-    let value: u64 = args[3].parse().map_err(|_| {
-        shell_println!("silo limit: invalid value '{}'", args[3]);
-        ShellError::InvalidArguments
-    })?;
-
-    match silo::kernel_limit_silo(selector, key, value) {
-        Ok(sid) => {
-            shell_println!("silo limit: {}={} for sid={}", key, value, sid);
-            Ok(())
-        }
-        Err(e) => {
-            shell_println!("silo limit failed: {:?}", e);
-            Err(ShellError::ExecutionFailed)
-        }
-    }
-}
 
 fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
     let mut silos = silo::list_silos_snapshot();

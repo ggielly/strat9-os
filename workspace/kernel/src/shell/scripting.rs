@@ -55,6 +55,11 @@ pub fn expand_vars(input: &str) -> String {
                 while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
                 }
+                if i == start {
+                    // Keep literal '$' when no variable name follows.
+                    result.push('$');
+                    continue;
+                }
                 let var_name = core::str::from_utf8(&bytes[start..i]).unwrap_or("");
                 if let Some(val) = get_var(var_name) {
                     result.push_str(&val);
@@ -126,8 +131,14 @@ pub fn parse_script(line: &str) -> ScriptConstruct {
 
 /// `for VAR in A B C ; do cmd1 ; cmd2 ; done`
 fn parse_for_loop(parts: &[&str]) -> ScriptConstruct {
+    if parts.is_empty() {
+        return ScriptConstruct::Simple(String::new());
+    }
     let header = parts[0];
     let tokens: Vec<&str> = header.split_whitespace().collect();
+    if tokens.len() < 4 || tokens[0] != "for" || tokens[2] != "in" {
+        return ScriptConstruct::Simple(String::from(header));
+    }
 
     let var = tokens.get(1).unwrap_or(&"_").to_string();
     let items: Vec<String> = tokens.iter()
@@ -135,8 +146,15 @@ fn parse_for_loop(parts: &[&str]) -> ScriptConstruct {
         .map(|s| String::from(*s))
         .collect();
 
-    let do_idx = parts.iter().position(|p| *p == "do").unwrap_or(1);
-    let done_idx = parts.iter().position(|p| *p == "done").unwrap_or(parts.len());
+    let Some(do_idx) = parts.iter().position(|p| *p == "do") else {
+        return ScriptConstruct::Simple(String::from(header));
+    };
+    let Some(done_idx) = parts.iter().position(|p| *p == "done") else {
+        return ScriptConstruct::Simple(String::from(header));
+    };
+    if done_idx <= do_idx {
+        return ScriptConstruct::Simple(String::from(header));
+    }
 
     let body: Vec<String> = parts[do_idx + 1..done_idx]
         .iter()
@@ -149,9 +167,22 @@ fn parse_for_loop(parts: &[&str]) -> ScriptConstruct {
 
 /// `while cond ; do body ; done`
 fn parse_while_loop(parts: &[&str]) -> ScriptConstruct {
-    let cond = parts[0][6..].trim();
-    let do_idx = parts.iter().position(|p| *p == "do").unwrap_or(1);
-    let done_idx = parts.iter().position(|p| *p == "done").unwrap_or(parts.len());
+    if parts.is_empty() {
+        return ScriptConstruct::Simple(String::new());
+    }
+    let header = parts[0];
+    let Some(cond) = header.strip_prefix("while ") else {
+        return ScriptConstruct::Simple(String::from(header));
+    };
+    let Some(do_idx) = parts.iter().position(|p| *p == "do") else {
+        return ScriptConstruct::Simple(String::from(header));
+    };
+    let Some(done_idx) = parts.iter().position(|p| *p == "done") else {
+        return ScriptConstruct::Simple(String::from(header));
+    };
+    if done_idx <= do_idx {
+        return ScriptConstruct::Simple(String::from(header));
+    }
 
     let body: Vec<String> = parts[do_idx + 1..done_idx]
         .iter()
@@ -167,10 +198,23 @@ fn parse_while_loop(parts: &[&str]) -> ScriptConstruct {
 
 /// `if cond ; then body ; [else body ;] fi`
 fn parse_if_else(parts: &[&str]) -> ScriptConstruct {
-    let cond = parts[0][3..].trim();
-    let then_idx = parts.iter().position(|p| *p == "then").unwrap_or(1);
+    if parts.is_empty() {
+        return ScriptConstruct::Simple(String::new());
+    }
+    let header = parts[0];
+    let Some(cond) = header.strip_prefix("if ") else {
+        return ScriptConstruct::Simple(String::from(header));
+    };
+    let Some(then_idx) = parts.iter().position(|p| *p == "then") else {
+        return ScriptConstruct::Simple(String::from(header));
+    };
     let else_idx = parts.iter().position(|p| *p == "else");
-    let fi_idx = parts.iter().position(|p| *p == "fi").unwrap_or(parts.len());
+    let Some(fi_idx) = parts.iter().position(|p| *p == "fi") else {
+        return ScriptConstruct::Simple(String::from(header));
+    };
+    if fi_idx <= then_idx {
+        return ScriptConstruct::Simple(String::from(header));
+    }
 
     let then_end = else_idx.unwrap_or(fi_idx);
     let then_body: Vec<String> = parts[then_idx + 1..then_end]

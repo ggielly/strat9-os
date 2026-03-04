@@ -49,6 +49,15 @@ pub fn is_interrupted() -> bool {
     SHELL_INTERRUPTED.swap(false, Ordering::Relaxed)
 }
 
+/// Execute one shell line without prompt/history handling.
+///
+/// This helper is used by commands such as `watch` to run another
+/// command through the same parser/executor pipeline.
+pub fn run_line(line: &str) {
+    let registry = CommandRegistry::new();
+    execute_line(line, &registry);
+}
+
 /// Returns whether continuation byte.
 #[inline]
 fn is_continuation_byte(b: u8) -> bool {
@@ -643,10 +652,11 @@ fn execute_line(line: &str, registry: &CommandRegistry) {
         scripting::ScriptConstruct::WhileLoop { cond, body } => {
             let mut iters = 0u32;
             loop {
-                if iters > 10000 || SHELL_INTERRUPTED.load(Ordering::Relaxed) {
+                if iters > 10000 || is_interrupted() {
                     break;
                 }
-                execute_pipeline(&cond, registry);
+                let cond_expanded = scripting::expand_vars(&cond);
+                execute_pipeline(&cond_expanded, registry);
                 if scripting::last_exit() != 0 {
                     break;
                 }
@@ -659,7 +669,8 @@ fn execute_line(line: &str, registry: &CommandRegistry) {
             return;
         }
         scripting::ScriptConstruct::IfElse { cond, then_body, else_body } => {
-            execute_pipeline(&cond, registry);
+            let cond_expanded = scripting::expand_vars(&cond);
+            execute_pipeline(&cond_expanded, registry);
             let branch = if scripting::last_exit() == 0 {
                 &then_body
             } else {
@@ -679,6 +690,9 @@ fn execute_line(line: &str, registry: &CommandRegistry) {
 
 /// Execute a single pipeline (no scripting).
 fn execute_pipeline(line: &str, registry: &CommandRegistry) {
+    // Ensure stale pipe input from a previous command cannot leak.
+    output::clear_pipe_input();
+
     let pipeline = match parse_pipeline(line) {
         Some(p) => p,
         None => return,
@@ -739,6 +753,9 @@ fn execute_pipeline(line: &str, registry: &CommandRegistry) {
                 return;
             }
         }
+
+        // A stage may ignore stdin pipe input; clear any leftovers before next stage.
+        output::clear_pipe_input();
 
         if let Some(ref redirect) = stage.stdout_redirect {
             apply_redirect(redirect, &captured);

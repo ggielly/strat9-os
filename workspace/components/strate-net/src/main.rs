@@ -930,7 +930,7 @@ impl NetworkStrate {
     /// Read from an outgoing TCP connection.
     fn handle_tcp_conn_read(&mut self, sender: u64, conn: TcpConnState) -> IpcMessage {
         let socket = self.sockets.get_mut::<tcp::Socket>(conn.socket);
-        if !socket.is_active() && !socket.may_recv() {
+        if !socket.is_open() {
             return IpcMessage::error_reply(sender, -104); // ECONNRESET
         }
         let mut data = [0u8; 40];
@@ -947,7 +947,7 @@ impl NetworkStrate {
     /// Write to an outgoing TCP connection.
     fn handle_tcp_conn_write(&mut self, sender: u64, conn: TcpConnState, msg: &IpcMessage) -> IpcMessage {
         let socket = self.sockets.get_mut::<tcp::Socket>(conn.socket);
-        if !socket.is_active() && !socket.may_send() {
+        if !socket.is_open() {
             return IpcMessage::error_reply(sender, -104);
         }
         let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;

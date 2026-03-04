@@ -154,8 +154,10 @@ impl Scheme for PtyScheme {
     }
 
     fn read(&self, file_id: u64, _offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let handles = self.handles.lock();
-        let &(pty_id, is_master) = handles.get(&file_id).ok_or(SyscallError::BadHandle)?;
+        let (pty_id, is_master) = {
+            let handles = self.handles.lock();
+            *handles.get(&file_id).ok_or(SyscallError::BadHandle)?
+        };
 
         if pty_id == u64::MAX {
             return self.readdir_root(buf);
@@ -174,8 +176,10 @@ impl Scheme for PtyScheme {
     }
 
     fn write(&self, file_id: u64, _offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
-        let handles = self.handles.lock();
-        let &(pty_id, is_master) = handles.get(&file_id).ok_or(SyscallError::BadHandle)?;
+        let (pty_id, is_master) = {
+            let handles = self.handles.lock();
+            *handles.get(&file_id).ok_or(SyscallError::BadHandle)?
+        };
 
         let mut pairs = self.pairs.lock();
         let pair = pairs.get_mut(&pty_id).ok_or(SyscallError::BadHandle)?;

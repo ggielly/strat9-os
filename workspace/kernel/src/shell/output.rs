@@ -50,6 +50,11 @@ pub fn has_pipe_input() -> bool {
     PIPE_INPUT.lock().is_some()
 }
 
+/// Clear any pending pipe input.
+pub fn clear_pipe_input() {
+    PIPE_INPUT.lock().take();
+}
+
 /// Print to both serial and VGA.
 #[macro_export]
 macro_rules! shell_print {

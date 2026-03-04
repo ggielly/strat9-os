@@ -157,14 +157,19 @@ fn detect() -> CpuInfo {
     };
 
     let stepping = (eax1 & 0xF) as u8;
-    let mut family = ((eax1 >> 8) & 0xF) as u8;
-    let mut model = ((eax1 >> 4) & 0xF) as u8;
-    if family == 6 || family == 15 {
-        model += ((eax1 >> 12) & 0xF0) as u8;
+    let base_family = (eax1 >> 8) & 0xF;
+    let base_model = (eax1 >> 4) & 0xF;
+    let ext_model = (eax1 >> 16) & 0xF;
+    let ext_family = (eax1 >> 20) & 0xFF;
+    let mut family_full: u16 = base_family as u16;
+    let mut model: u8 = base_model as u8;
+    if base_family == 6 || base_family == 15 {
+        model |= (ext_model << 4) as u8;
     }
-    if family == 15 {
-        family += ((eax1 >> 20) & 0xFF) as u8;
+    if base_family == 15 {
+        family_full += ext_family as u16;
     }
+    let family = family_full as u8;
 
     if ecx1 & (1 << 0) != 0 {
         features |= CpuFeatures::SSE3;
@@ -335,6 +340,19 @@ pub fn xsave_size_for_xcr0(xcr0: u64) -> usize {
         size = size.max(2688); // full AVX-512
     }
     size.min(h.xsave_size)
+}
+
+/// Return the host's default XCR0 mask (all supported features).
+/// Safe to call before `init()` — returns `XCR0_X87 | XCR0_SSE` if not yet initialized.
+pub fn host_default_xcr0() -> u64 {
+    if INITIALIZED.load(Ordering::Acquire) {
+        HOST_CPU
+            .lock()
+            .as_ref()
+            .map_or(XCR0_X87 | XCR0_SSE, |h| h.max_xcr0)
+    } else {
+        XCR0_X87 | XCR0_SSE
+    }
 }
 
 /// Build a Linux-style `flags` string from CPU features.

@@ -527,7 +527,7 @@ impl Task {
             clear_child_tid: AtomicU64::new(0),
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(ExtendedState::new()),
-            xcr0_mask: AtomicU64::new(0),
+            xcr0_mask: AtomicU64::new(crate::arch::x86_64::cpuid::host_default_xcr0()),
         }))
     }
 
@@ -587,7 +587,7 @@ impl Task {
             clear_child_tid: AtomicU64::new(0),
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(ExtendedState::new()),
-            xcr0_mask: AtomicU64::new(0),
+            xcr0_mask: AtomicU64::new(crate::arch::x86_64::cpuid::host_default_xcr0()),
         }))
     }
 
@@ -725,7 +725,6 @@ unsafe extern "C" fn switch_context_xsave(
     _new_xcr0: u64,
 ) {
     core::arch::naked_asm!(
-        // xsave clobbers edx — save old_fpu_ptr in r10 first
         "mov r10, rdx",
         "mov eax, 0xFFFFFFFF",
         "mov edx, 0xFFFFFFFF",
@@ -744,7 +743,8 @@ unsafe extern "C" fn switch_context_xsave(
         "pop r12",
         "pop rbp",
         "pop rbx",
-        // Switch XCR0 to new task's silo mask (r8 = new_xcr0)
+        "test r8, r8",
+        "jz 2f",
         "push rcx",
         "mov ecx, 0",
         "mov eax, r8d",
@@ -752,7 +752,7 @@ unsafe extern "C" fn switch_context_xsave(
         "mov edx, r8d",
         "xsetbv",
         "pop rcx",
-        // Restore new FPU state
+        "2:",
         "mov eax, 0xFFFFFFFF",
         "mov edx, 0xFFFFFFFF",
         "xrstor [rcx]",
@@ -775,14 +775,15 @@ unsafe extern "C" fn restore_first_task_xsave(
         "pop r12",
         "pop rbp",
         "pop rbx",
-        // Set XCR0 for the first task
+        "test rdx, rdx",
+        "jz 2f",
         "push rsi",
         "mov ecx, 0",
         "mov eax, edx",
         "shr rdx, 32",
         "xsetbv",
         "pop rsi",
-        // Restore FPU
+        "2:",
         "mov eax, 0xFFFFFFFF",
         "mov edx, 0xFFFFFFFF",
         "xrstor [rsi]",

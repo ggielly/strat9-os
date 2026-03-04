@@ -1356,7 +1356,7 @@ pub fn load_elf_task_with_caps(
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
         user_fs_base: core::sync::atomic::AtomicU64::new(user_fs_base_val),
         fpu_state: crate::process::task::SyncUnsafeCell::new(crate::process::task::ExtendedState::new()),
-        xcr0_mask: core::sync::atomic::AtomicU64::new(0),
+        xcr0_mask: core::sync::atomic::AtomicU64::new(crate::arch::x86_64::cpuid::host_default_xcr0()),
     });
 
     // Seed capabilities into the new task (before scheduling).

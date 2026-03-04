@@ -1,4 +1,6 @@
 //! Network commands (ping, ifconfig)
+mod nslookup;
+mod telnet;
 
 use crate::{
     shell::ShellError,
@@ -6,10 +8,12 @@ use crate::{
     vfs::{self, OpenFlags},
 };
 use alloc::string::String;
+pub use nslookup::cmd_nslookup;
+pub use telnet::cmd_telnet;
 
 /// Busy-wait for approximately `ms` milliseconds, yielding to other tasks.
 /// Scheduler ticks are 10ms each.
-fn shell_sleep_ms(ms: u64) {
+pub(super) fn shell_sleep_ms(ms: u64) {
     let ticks_to_wait = (ms + 9) / 10; // round up
     let start = crate::process::scheduler::ticks();
     loop {
@@ -353,113 +357,3 @@ pub fn cmd_net(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
-/// Minimal DNS lookup command.
-///
-/// Reads the configured DNS servers and attempts a resolution via the
-/// `/net/dns/resolve/<domain>` scheme path. If the network strate does
-/// not yet support it, shows the configured nameservers and a TODO.
-pub fn cmd_nslookup(args: &[String]) -> Result<(), ShellError> {
-    if args.is_empty() {
-        shell_println!("Usage: nslookup <domain>");
-        return Err(ShellError::InvalidArguments);
-    }
-    let domain = &args[0];
-
-    let dns = match vfs::open("/net/dns", OpenFlags::READ) {
-        Ok(fd) => {
-            let mut buf = [0u8; 128];
-            let n = vfs::read(fd, &mut buf).unwrap_or(0);
-            let _ = vfs::close(fd);
-            let s = core::str::from_utf8(&buf[..n]).unwrap_or("").trim();
-            String::from(s)
-        }
-        Err(_) => String::from("(not configured)"),
-    };
-    shell_println!("Server: {}", dns);
-
-    let resolve_path = alloc::format!("/net/dns/resolve/{}", domain);
-    match vfs::open(&resolve_path, OpenFlags::READ) {
-        Ok(fd) => {
-            let mut buf = [0u8; 256];
-            let n = vfs::read(fd, &mut buf).unwrap_or(0);
-            let _ = vfs::close(fd);
-            if n > 0 {
-                let result = core::str::from_utf8(&buf[..n]).unwrap_or("(invalid)");
-                shell_println!("Name:   {}", domain);
-                shell_println!("Address: {}", result.trim());
-            } else {
-                shell_println!("** cannot resolve {}", domain);
-            }
-        }
-        Err(_) => {
-            // TODO: implement raw UDP DNS query when UDP sockets are available
-            shell_println!("** DNS resolution not yet available (no UDP socket support)");
-            shell_println!("   Configured nameserver(s): {}", dns);
-        }
-    }
-    Ok(())
-}
-
-/// Open a TCP connection and send/receive data interactively.
-///
-/// Usage: `telnet <ip> <port> [--http]`
-///
-/// With `--http`, sends an HTTP GET and prints the response.
-pub fn cmd_telnet(args: &[String]) -> Result<(), ShellError> {
-    if args.len() < 2 {
-        shell_println!("Usage: telnet <ip> <port> [--http]");
-        return Err(ShellError::InvalidArguments);
-    }
-    let ip = &args[0];
-    let port = &args[1];
-    let http_mode = args.get(2).map(|s| s.as_str()) == Some("--http");
-
-    let path = alloc::format!("/net/tcp/connect/{}/{}", ip, port);
-    let fd = match vfs::open(&path, OpenFlags::RDWR) {
-        Ok(fd) => fd,
-        Err(e) => {
-            shell_println!("telnet: connect failed: {:?}", e);
-            return Err(ShellError::ExecutionFailed);
-        }
-    };
-
-    shell_println!("Connected to {}:{}", ip, port);
-
-    for _ in 0..50 {
-        shell_sleep_ms(100);
-        if crate::shell::is_interrupted() {
-            shell_println!("^C");
-            let _ = vfs::close(fd);
-            return Ok(());
-        }
-    }
-
-    if http_mode {
-        let req = alloc::format!("GET / HTTP/1.0\r\nHost: {}\r\n\r\n", ip);
-        let _ = vfs::write(fd, req.as_bytes());
-    }
-
-    let mut buf = [0u8; 256];
-    let mut total = 0usize;
-    for _ in 0..100 {
-        if crate::shell::is_interrupted() {
-            shell_println!("^C");
-            break;
-        }
-        match vfs::read(fd, &mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                    crate::shell_print!("{}", s);
-                }
-                total += n;
-            }
-            Err(_) => {
-                shell_sleep_ms(100);
-            }
-        }
-    }
-    shell_println!("\nConnection closed ({} bytes received)", total);
-    let _ = vfs::close(fd);
-    Ok(())
-}

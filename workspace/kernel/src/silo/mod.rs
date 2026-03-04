@@ -864,8 +864,12 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Header v2+: validate that required CPU features are available on this host.
-    let req = unsafe { core::ptr::addr_of!(header.cpu_features_required).read_unaligned() };
+    let version = unsafe { core::ptr::addr_of!(header.version).read_unaligned() };
+    let req = if version >= 2 {
+        unsafe { core::ptr::addr_of!(header.cpu_features_required).read_unaligned() }
+    } else {
+        0
+    };
     if req != 0 {
         let host = crate::arch::x86_64::cpuid::host();
         let required = crate::arch::x86_64::cpuid::CpuFeatures::from_bits_truncate(req);
@@ -2734,26 +2738,34 @@ pub fn kernel_limit_silo(selector: &str, key: &str, value: u64) -> Result<u32, S
     let mut mgr = SILO_MANAGER.lock();
     let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
     let silo = mgr.get_mut(silo_id)?;
+    let mut next_mem_min = silo.config.mem_min;
+    let mut next_mem_max = silo.config.mem_max;
+    let mut next_max_tasks = silo.config.max_tasks;
+    let mut next_cpu_shares = silo.config.cpu_shares;
     match key {
-        "mem_max" => silo.config.mem_max = value,
-        "mem_min" => silo.config.mem_min = value,
+        "mem_max" => next_mem_max = value,
+        "mem_min" => next_mem_min = value,
         "max_tasks" => {
             if value > u32::MAX as u64 {
                 return Err(SyscallError::InvalidArgument);
             }
-            silo.config.max_tasks = value as u32;
+            next_max_tasks = value as u32;
         }
         "cpu_shares" => {
             if value > u32::MAX as u64 {
                 return Err(SyscallError::InvalidArgument);
             }
-            silo.config.cpu_shares = value as u32;
+            next_cpu_shares = value as u32;
         }
         _ => return Err(SyscallError::InvalidArgument),
     }
-    if silo.config.mem_max != 0 && silo.config.mem_min > silo.config.mem_max {
+    if next_mem_max != 0 && next_mem_min > next_mem_max {
         return Err(SyscallError::InvalidArgument);
     }
+    silo.config.mem_min = next_mem_min;
+    silo.config.mem_max = next_mem_max;
+    silo.config.max_tasks = next_max_tasks;
+    silo.config.cpu_shares = next_cpu_shares;
     crate::audit::log(
         crate::audit::AuditCategory::Security,
         0, silo_id,
