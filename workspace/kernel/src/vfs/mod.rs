@@ -1028,7 +1028,9 @@ pub fn init() {
     // /sys/cpu/* — CPU information scheme (Plan9-style)
     {
         let host = crate::arch::x86_64::cpuid::host();
-        let cpu_count = crate::arch::x86_64::percpu::get_cpu_count();
+        // VFS initializes before SMP/percpu registration is complete.
+        // Expose at least 1 CPU (BSP) instead of showing 0.
+        let cpu_count = crate::arch::x86_64::percpu::get_cpu_count().max(1);
 
         let count_s = Box::leak(alloc::format!("{}\n", cpu_count).into_bytes().into_boxed_slice());
         kernel_scheme.register("cpu/count", count_s.as_ptr(), count_s.len());
