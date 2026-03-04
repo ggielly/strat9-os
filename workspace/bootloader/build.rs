@@ -74,7 +74,7 @@ fn main() {
 
     if stage1_size != 512 {
         println!(
-            "cargo:warning=Stage 1 image size is {} bytes (expected 512 for pure MBR)",
+            "Note: Stage 1 image size is {} bytes (expected 512 for pure MBR)",
             stage1_size
         );
     }
@@ -100,15 +100,12 @@ fn main() {
                 .expect("Failed to get stage2.bin metadata")
                 .len();
             if stage2_size > 4096 {
-                println!(
-                    "cargo:warning=Stage 2 exceeds 4KB limit ({} bytes)",
-                    stage2_size
-                );
+                println!("Note: Stage 2 exceeds 4KB limit ({} bytes)", stage2_size);
             }
             println!("Stage 2 assembled: {} bytes", stage2_size);
         }
         Ok(_) | Err(_) => {
-            println!("cargo:warning=Stage 2 standalone assembly failed; continuing with embedded stage2 path");
+            println!("Note: Stage 2 standalone assembly failed; continuing with embedded stage2 path");
             let _ = std::fs::write(&stage2_bin, []);
         }
     }

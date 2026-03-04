@@ -1,5 +1,8 @@
 #![no_std]
 #![feature(alloc_error_handler)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
 
 extern crate alloc;
 
