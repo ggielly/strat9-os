@@ -13,10 +13,10 @@ _start:
     # Setup stack
     leaq boot_stack_top(%rip), %rsp
     
-    # Enable SSE/XSAVE (Required for Rust 2024 / SIMD)
-    # 1. Enable OSFXSR(9), OSXMMEXCPT(10), PAE(5), OSXSAVE(18) in CR4
+    # Enable SSE baseline in CR4.
+    # OSXSAVE is enabled later in Rust after CPUID capability probing.
     movq %cr4, %rax
-    orq $0x40620, %rax
+    orq $0x620, %rax
     movq %rax, %cr4
     
     # 2. Enable SSE in CR0

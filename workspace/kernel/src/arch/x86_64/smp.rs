@@ -83,9 +83,11 @@ _gdt:
     mov eax, [SMP_VAR_ADDR]
     mov cr3, eax
 
-    # Enable PSE, PAE, OSFXSR, OSXMMEXCPT, OSXSAVE
+    # Enable PSE, PAE, OSFXSR, OSXMMEXCPT.
+    # Do not force OSXSAVE here: some VMs/CPUs may fault before Rust-side
+    # feature probing. init_cpu_extensions() enables OSXSAVE conditionally.
     mov eax, cr4
-    or eax, 0x40630
+    or eax, 0x630
     mov cr4, eax
 
     # Enable LME
@@ -287,12 +289,25 @@ pub fn init() -> Result<usize, &'static str> {
         send_init_sipi(apic_id);
     }
 
-    while BOOTED_CORES.load(Ordering::Acquire) < expected {
+    // Do not spin forever if one AP fails very early (e.g. trampoline fault).
+    // Keep booting with available CPUs and report partial bring-up.
+    let mut spins: u64 = 0;
+    const MAX_SPINS: u64 = 200_000_000;
+    while BOOTED_CORES.load(Ordering::Acquire) < expected && spins < MAX_SPINS {
         core::hint::spin_loop();
+        spins = spins.saturating_add(1);
+    }
+    if BOOTED_CORES.load(Ordering::Acquire) < expected {
+        log::warn!(
+            "SMP: timeout waiting APs (online={} expected={}), continuing",
+            BOOTED_CORES.load(Ordering::Acquire),
+            expected
+        );
     }
 
-    log::info!("SMP: {} cores online", expected);
-    Ok(expected)
+    let online = BOOTED_CORES.load(Ordering::Acquire);
+    log::info!("SMP: {} cores online (expected {})", online, expected);
+    Ok(online)
 }
 
 /// First Rust function executed on APs after the trampoline.
