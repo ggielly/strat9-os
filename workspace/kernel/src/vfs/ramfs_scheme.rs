@@ -49,6 +49,7 @@ enum RamKind {
 }
 
 struct RamInode {
+    #[allow(dead_code)]
     ino: u64,
     kind: RamKind,
     /// Unix permission bits including file-type high bits (e.g. `0o100_644`).

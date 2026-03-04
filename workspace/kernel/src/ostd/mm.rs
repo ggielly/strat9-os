@@ -482,8 +482,10 @@ struct VmarChild {
     /// Offset from parent base
     offset: usize,
     /// Size of the child region
+    #[allow(dead_code)]
     size: usize,
     /// The actual mapping
+    #[allow(dead_code)]
     mapping: Option<MappedPages>,
 }
 

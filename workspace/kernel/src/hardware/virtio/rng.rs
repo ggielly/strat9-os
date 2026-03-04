@@ -63,6 +63,7 @@ struct VirtqUsedElem {
 }
 
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
+#[allow(dead_code)]
 const VIRTIO_STATUS_RESET: u8 = 0;
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;

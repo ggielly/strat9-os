@@ -475,8 +475,10 @@ pub struct Scheduler {
     /// Session membership index: sid -> task ids.
     sid_members: BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
     /// Deadline -> task ids map for sleeping tasks (ordered wakeups).
+    #[allow(dead_code)]
     wake_deadlines: BTreeMap<u64, alloc::vec::Vec<TaskId>>,
     /// Task -> deadline reverse index.
+    #[allow(dead_code)]
     wake_deadline_of: BTreeMap<TaskId, u64>,
     /// Parent relationship: child -> parent
     parent_of: BTreeMap<TaskId, TaskId>,

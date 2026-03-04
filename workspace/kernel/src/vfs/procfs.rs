@@ -236,6 +236,7 @@ impl ProcScheme {
 }
 
 /// Procfs entry type
+#[allow(dead_code)]
 enum ProcEntry {
     File(String),
     Directory,

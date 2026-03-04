@@ -36,6 +36,7 @@ const TCR_MXDMA: u32 = 7 << 8;
 const ISR_ROK: u16 = 1 << 0;
 const ISR_TOK: u16 = 1 << 2;
 
+#[allow(dead_code)]
 const TOK: u32 = 1 << 15;
 const OWN: u32 = 1 << 13;
 
@@ -63,6 +64,7 @@ impl Ports {
 
     /// Performs the read16 operation.
     #[inline]
+    #[allow(dead_code)]
     fn read16(&self, offset: u16) -> u16 {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
     }
@@ -195,11 +197,13 @@ impl Rtl8139Device {
     }
 
     /// Performs the receive packet operation.
+    #[allow(dead_code)]
     fn receive_packet(&self) -> Option<Vec<u8>> {
         self.receive_inner()
     }
 
     /// Performs the transmit packet operation.
+    #[allow(dead_code)]
     fn transmit_packet(&self, data: &[u8]) -> Result<(), NetError> {
         self.transmit_inner(data)
     }

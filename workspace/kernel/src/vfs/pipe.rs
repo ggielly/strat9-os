@@ -41,11 +41,13 @@ impl PipeInner {
     }
 
     /// Returns whether empty.
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.len == 0
     }
 
     /// Returns whether full.
+    #[allow(dead_code)]
     fn is_full(&self) -> bool {
         self.len >= PIPE_BUF_SIZE
     }

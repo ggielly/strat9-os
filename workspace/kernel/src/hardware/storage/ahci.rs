@@ -153,6 +153,7 @@ struct AhciPort {
 // ─── Controller ──────────────────────────────────────────────────────────────
 
 pub struct AhciController {
+    #[allow(dead_code)]
     abar_virt: u64,
     ports: Vec<AhciPort>,
 }

@@ -69,6 +69,7 @@ impl Ports {
 
     /// Performs the write8 operation.
     #[inline]
+    #[allow(dead_code)]
     fn write8(&mut self, offset: u16, value: u8) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
@@ -81,6 +82,7 @@ impl Ports {
 
     /// Performs the write32 operation.
     #[inline]
+    #[allow(dead_code)]
     fn write32(&mut self, offset: u16, value: u32) {
         unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
     }

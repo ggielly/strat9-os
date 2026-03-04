@@ -13,7 +13,9 @@ use super::virtio_block::{BlockDevice, BlockError, SECTOR_SIZE};
 const ATA_PRIMARY_IO: u16 = 0x1F0;
 const ATA_SECONDARY_IO: u16 = 0x170;
 
+#[allow(dead_code)]
 const ATA_REG_DATA: usize = 0;
+#[allow(dead_code)]
 const ATA_REG_ERROR: usize = 1;
 const ATA_REG_SECCOUNT: usize = 2;
 const ATA_REG_LBA_LOW: usize = 3;
@@ -24,6 +26,7 @@ const ATA_REG_STATUS: usize = 7;
 const ATA_REG_COMMAND: usize = 7;
 
 const ATA_SR_BSY: u8 = 0x80;
+#[allow(dead_code)]
 const ATA_SR_DRDY: u8 = 0x40;
 const ATA_SR_DRQ: u8 = 0x08;
 const ATA_SR_ERR: u8 = 0x01;
@@ -37,6 +40,7 @@ const ATA_DEVICE_LBA: u8 = 0x40;
 #[derive(Clone, Copy)]
 pub struct AtaChannel {
     io_base: u16,
+    #[allow(dead_code)]
     control_base: u16,
     bus: u8,
 }
@@ -226,6 +230,7 @@ pub struct AtaDrive {
     channel: AtaChannel,
     device: u8,
     info: AtaDriveInfo,
+    #[allow(dead_code)]
     name: String,
 }
 

@@ -22,9 +22,11 @@ struct VirtioDevice {
 }
 
 struct VirtioConsolePort {
+    #[allow(dead_code)]
     id: u16,
     rx_queue: Virtqueue,
     tx_queue: Virtqueue,
+    #[allow(dead_code)]
     open: bool,
 }
 
@@ -32,8 +34,11 @@ struct Virtqueue {
     desc: *mut VirtqDesc,
     avail: *mut VirtqAvail,
     used: *mut VirtqUsed,
+    #[allow(dead_code)]
     desc_phys: u64,
+    #[allow(dead_code)]
     avail_phys: u64,
+    #[allow(dead_code)]
     used_phys: u64,
     buffer_phys: u64,
     buffer_virt: *mut u8,
@@ -76,6 +81,7 @@ struct VirtqUsedElem {
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 const VIRTIO_CONSOLE_F_MULTIPORT: u32 = 1;
 
+#[allow(dead_code)]
 const VIRTIO_STATUS_RESET: u8 = 0;
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
