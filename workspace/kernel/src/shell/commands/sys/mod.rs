@@ -632,7 +632,7 @@ fn print_strate_usage() {
 
 fn print_silo_usage() {
     shell_println!("{}", SILO_USAGE);
-    shell_println!("  silo list");
+    shell_println!("  silo list [--gui]");
     shell_println!("  silo spawn <path|type> [--label <l>] [--dev <p>] [--type elf|wasm]");
     shell_println!("  silo start <id|label>");
     shell_println!("  silo stop|kill|destroy <id|label>");
@@ -993,7 +993,18 @@ pub(super) fn cmd_test_mem_stressed_impl(_args: &[String]) -> Result<(), ShellEr
 }
 
 /// Performs the cmd silo list operation.
-fn cmd_silo_list(_args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
+    let mut want_gui = false;
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "--gui" => want_gui = true,
+            _ => {
+                shell_println!("Usage: silo list [--gui]");
+                return Err(ShellError::InvalidArguments);
+            }
+        }
+    }
+
     let (managed, managed_source) = load_managed_silos_with_source();
     let mut silos = silo::list_silos_snapshot();
     silos.sort_by_key(|s| s.id);
@@ -1051,8 +1062,11 @@ fn cmd_silo_list(_args: &[String]) -> Result<(), ShellError> {
             strates: strates_cell,
         });
     }
-    if render_silo_table_ratatui(&rows, &config_rows, managed_source).unwrap_or(false) {
-        return Ok(());
+    if want_gui {
+        if render_silo_table_ratatui(&rows, &config_rows, managed_source).unwrap_or(false) {
+            return Ok(());
+        }
+        shell_println!("silo list: GUI unavailable, fallback console");
     }
 
     shell_println!(
