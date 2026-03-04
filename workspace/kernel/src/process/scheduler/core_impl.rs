@@ -1,5 +1,4 @@
-use super::*;
-use super::runtime_ops::idle_task_main;
+use super::{runtime_ops::idle_task_main, *};
 
 impl Scheduler {
     /// Create a new scheduler instance
@@ -266,10 +265,28 @@ impl Scheduler {
                     // Another CPU could steal it before its context is saved.
                     self.cpus[cpu_index].task_to_requeue = Some(task);
                 }
-            } else {
-                // Task is Dead or Blocked. Prevent it from dropping right here
-                // by deferring the drop to finish_switch().
+            } else if task_state == TaskState::Dead {
+                // Task is Dead. Clean up before deferring the drop.
+                // We must remove from all_tasks NOW to prevent double-cleanup
+                // if the task is also being killed via kill_task().
+                let task_id = task.id;
+                let task_pid = task.pid;
+                let task_tid = task.tid;
+
+                // Remove from global maps - this is the canonical cleanup point
+                self.all_tasks.remove(&task_id);
+                self.task_cpu.remove(&task_id);
+                self.unregister_identity_locked(task_id, task_pid, task_tid);
+
+                // Run resource cleanup (ports, capabilities, etc.)
+                // SAFETY: scheduler lock held, task is no longer accessible
+                super::task_ops::cleanup_task_resources(&task);
+
+                // Defer the actual Arc drop to finish_switch()
                 self.cpus[cpu_index].task_to_drop = Some(task);
+            } else {
+                // Blocked task: leave bookkeeping intact; blocked_tasks holds the ref.
+                // Dropping the Arc here is fine; the blocked map keeps the task alive.
             }
         }
 
@@ -428,7 +445,9 @@ impl Scheduler {
             new_rsp_ptr: unsafe { &raw const (*next.context.get()).saved_rsp },
             old_fpu_ptr: current.fpu_state.get() as *mut u8,
             new_fpu_ptr: next.fpu_state.get() as *const u8,
-            old_xcr0: current.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
+            old_xcr0: current
+                .xcr0_mask
+                .load(core::sync::atomic::Ordering::Relaxed),
             new_xcr0: next.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
         })
     }
