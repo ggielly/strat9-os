@@ -1,4 +1,4 @@
-pub use strat9_abi::flag::{CallFlags, MapFlags, OpenFlags, UnlinkFlags};
+pub use strat9_abi::flag::{posix_oflags_to_strat9, CallFlags, MapFlags, OpenFlags, UnlinkFlags};
 
 // ============================================================================
 // POSIX O_* constants for open()

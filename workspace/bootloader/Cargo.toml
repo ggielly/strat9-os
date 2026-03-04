@@ -2,12 +2,13 @@
 name = "strat9-bootloader"
 version = "0.1.0"
 edition = "2021"
+autobins = false
 
 # BIOS uses lib target
 [lib]
 name = "bootloader"
 path = "src/lib.rs"
-crate-type = ["staticlib"]
+crate-type = ["rlib"]
 
 # Binary target removed to avoid conflicts - bootloader is library-only
 

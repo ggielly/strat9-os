@@ -1,5 +1,4 @@
-use super::*;
-use super::runtime_ops::finish_switch;
+use super::{runtime_ops::finish_switch, *};
 
 /// Mark the current task as Dead and yield to the scheduler.
 ///
@@ -45,8 +44,12 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 unsafe {
                     *current.state.get() = TaskState::Dead;
                 }
-                cleanup_task_resources(&current);
-                sched.all_tasks.remove(&current_id);
+                // Do NOT call cleanup_task_resources or all_tasks.remove() here!
+                // The task is still in current_task[cpu_index], and an interrupt
+                // could access it. Instead, mark it Dead and let pick_next_task
+                // handle the cleanup when it moves the task to task_to_drop.
+                // We only remove task_cpu and identity mappings to prevent
+                // lookups while the task is dying.
                 sched.task_cpu.remove(&current_id);
                 sched.unregister_identity_locked(current_id, current_pid, current.tid);
                 sched.parent_of.remove(&current_id);
@@ -121,16 +124,52 @@ pub fn current_sid() -> Option<Pid> {
 }
 
 /// Get the current task (cloned Arc), if any.
+#[track_caller]
 pub fn current_task_clone() -> Option<Arc<Task>> {
     let saved_flags = save_flags_and_cli();
     let cpu_index = current_cpu_index();
     let task = {
-        let scheduler = SCHEDULER.lock();
-        if let Some(ref sched) = *scheduler {
-            sched
-                .cpus
-                .get(cpu_index)
-                .and_then(|cpu| cpu.current_task.clone())
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
+            sched.cpus.get_mut(cpu_index).and_then(|cpu| {
+                let arc = cpu.current_task.as_ref()?;
+                let strong = Arc::strong_count(arc);
+                let state = unsafe { *arc.state.get() };
+                let caller = core::panic::Location::caller();
+                log::trace!(
+                    "[sched] current_task_clone cpu={} ptr={:p} strong={} task_id={} pid={} tid={} state={:?} caller={}:{}",
+                    cpu_index,
+                    Arc::as_ptr(arc),
+                    strong,
+                    arc.id.as_u64(),
+                    arc.pid,
+                    arc.tid,
+                    state,
+                    caller.file(),
+                    caller.line(),
+                );
+                // Treat insane refcounts as corruption and fall back to idle.
+                if strong == 0 || strong > (isize::MAX as usize) / 2 {
+                    let ptr = Arc::as_ptr(arc) as *const u8;
+                    log::error!(
+                        "[sched] CORRUPT Arc refcount in current_task! cpu={} strong={:#x} data_ptr={:p} task_id={} pid={} tid={} state={:?} caller={}:{}",
+                        cpu_index,
+                        strong,
+                        ptr,
+                        arc.id.as_u64(),
+                        arc.pid,
+                        arc.tid,
+                        state,
+                        caller.file(),
+                        caller.line(),
+                    );
+                    let idle = cpu.idle_task.clone();
+                    cpu.current_task = Some(idle.clone());
+                    Some(idle)
+                } else {
+                    Some(arc.clone())
+                }
+            })
         } else {
             None
         }
@@ -143,15 +182,49 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
 ///
 /// Returns `None` when the scheduler lock is contended.
 /// Useful in cleanup paths where blocking on `SCHEDULER.lock()` could deadlock.
+#[track_caller]
 pub fn current_task_clone_try() -> Option<Arc<Task>> {
     let saved_flags = save_flags_and_cli();
     let cpu_index = current_cpu_index();
-    let task = if let Some(scheduler) = SCHEDULER.try_lock() {
-        if let Some(ref sched) = *scheduler {
-            sched
-                .cpus
-                .get(cpu_index)
-                .and_then(|cpu| cpu.current_task.clone())
+    let task = if let Some(mut scheduler) = SCHEDULER.try_lock() {
+        if let Some(ref mut sched) = *scheduler {
+            sched.cpus.get_mut(cpu_index).and_then(|cpu| {
+                let arc = cpu.current_task.as_ref()?;
+                let strong = Arc::strong_count(arc);
+                let state = unsafe { *arc.state.get() };
+                let caller = core::panic::Location::caller();
+                log::trace!(
+                    "[sched] current_task_clone_try cpu={} ptr={:p} strong={} task_id={} pid={} tid={} state={:?} caller={}:{}",
+                    cpu_index,
+                    Arc::as_ptr(arc),
+                    strong,
+                    arc.id.as_u64(),
+                    arc.pid,
+                    arc.tid,
+                    state,
+                    caller.file(),
+                    caller.line(),
+                );
+                if strong == 0 || strong > (isize::MAX as usize) / 2 {
+                    log::error!(
+                        "[sched] CORRUPT Arc refcount in current_task_try! cpu={} strong={:#x} data_ptr={:p} task_id={} pid={} tid={} state={:?} caller={}:{}",
+                        cpu_index,
+                        strong,
+                        Arc::as_ptr(arc) as *const u8,
+                        arc.id.as_u64(),
+                        arc.pid,
+                        arc.tid,
+                        state,
+                        caller.file(),
+                        caller.line(),
+                    );
+                    let idle = cpu.idle_task.clone();
+                    cpu.current_task = Some(idle.clone());
+                    Some(idle)
+                } else {
+                    Some(arc.clone())
+                }
+            })
         } else {
             None
         }
@@ -239,7 +312,11 @@ pub fn get_task_ids_in_pgid(pgid: Pid) -> alloc::vec::Vec<TaskId> {
     let out = {
         let scheduler = SCHEDULER.lock();
         if let Some(ref sched) = *scheduler {
-            sched.pgid_members.get(&pgid).cloned().unwrap_or_else(Vec::new)
+            sched
+                .pgid_members
+                .get(&pgid)
+                .cloned()
+                .unwrap_or_else(Vec::new)
         } else {
             Vec::new()
         }
@@ -311,7 +388,10 @@ pub fn set_process_group(
                 .get(&desired_pgid)
                 .copied()
                 .ok_or(SyscallError::NotFound)?;
-            let group_leader = sched.all_tasks.get(&group_leader_tid).ok_or(SyscallError::NotFound)?;
+            let group_leader = sched
+                .all_tasks
+                .get(&group_leader_tid)
+                .ok_or(SyscallError::NotFound)?;
             if group_leader.sid.load(Ordering::Relaxed) != target_sid {
                 return Err(SyscallError::PermissionDenied);
             }
@@ -518,17 +598,10 @@ pub fn block_current_task() {
         }
     }; // Lock released
 
-    if let Some(target) = switch_target {
-        // SAFETY: Pointers are valid. Interrupts are disabled.
+    if let Some(ref target) = switch_target {
         unsafe {
-            switch_context(
-                target.old_rsp_ptr,
-                target.new_rsp_ptr,
-                target.old_fpu_ptr,
-                target.new_fpu_ptr,
-            );
+            crate::process::task::do_switch_context(target);
         }
-        // We return here when woken and rescheduled.
         finish_switch();
     }
 
@@ -643,20 +716,13 @@ pub fn suspend_task(id: TaskId) -> bool {
         }
     } // scheduler lock released before IPI and context switch
 
-    if let Some(target) = switch_target {
-        // SAFETY: pointers valid. Interrupts disabled.
+    if let Some(ref target) = switch_target {
         unsafe {
-            switch_context(
-                target.old_rsp_ptr,
-                target.new_rsp_ptr,
-                target.old_fpu_ptr,
-                target.new_fpu_ptr,
-            );
+            crate::process::task::do_switch_context(target);
         }
         finish_switch();
     }
 
-    // Send IPI after releasing the lock to avoid lock inversion.
     if let Some(ci) = ipi_to_cpu {
         send_resched_ipi_to_cpu(ci);
     }
@@ -715,6 +781,15 @@ pub fn resume_task(id: TaskId) -> bool {
 ///
 /// Returns `true` if the task was found and killed.
 pub fn kill_task(id: TaskId) -> bool {
+    let pid = crate::process::get_task_by_id(id)
+        .map(|t| t.pid)
+        .unwrap_or(0);
+    crate::audit::log(
+        crate::audit::AuditCategory::Process,
+        pid,
+        crate::silo::task_silo_id(id).unwrap_or(0),
+        alloc::format!("kill_task tid={}", id.as_u64()),
+    );
     let saved_flags = save_flags_and_cli();
 
     let mut switch_target: Option<SwitchTarget> = None;
@@ -735,7 +810,11 @@ pub fn kill_task(id: TaskId) -> bool {
             for (ci, cpu) in sched.cpus.iter().enumerate() {
                 if let Some(current) = cpu.current_task.as_ref() {
                     if current.id == id {
-                        running_hit = Some((ci, current.clone()));
+                        // Check if already marked Dead by a previous kill attempt
+                        let state = unsafe { *current.state.get() };
+                        if state != TaskState::Dead {
+                            running_hit = Some((ci, current.clone()));
+                        }
                         break;
                     }
                 }
@@ -746,8 +825,10 @@ pub fn kill_task(id: TaskId) -> bool {
                 unsafe {
                     *current.state.get() = TaskState::Dead;
                 }
-                cleanup_task_resources(&current);
-                sched.all_tasks.remove(&id);
+                // Do NOT call cleanup_task_resources or all_tasks.remove() here!
+                // The task is still in current_task[ci], and an interrupt could
+                // access it. Instead, mark it Dead and let pick_next_task handle
+                // the cleanup when it moves the task to task_to_drop.
                 sched.task_cpu.remove(&id);
                 sched.unregister_identity_locked(id, task_pid, current.tid);
                 parent_to_signal =
@@ -810,20 +891,13 @@ pub fn kill_task(id: TaskId) -> bool {
         }
     } // scheduler lock released before IPI and context switch
 
-    if let Some(target) = switch_target {
-        // SAFETY: pointers valid. Interrupts disabled.
+    if let Some(ref target) = switch_target {
         unsafe {
-            switch_context(
-                target.old_rsp_ptr,
-                target.new_rsp_ptr,
-                target.old_fpu_ptr,
-                target.new_fpu_ptr,
-            );
+            crate::process::task::do_switch_context(target);
         }
         finish_switch();
     }
 
-    // Send IPI after releasing the lock to avoid lock inversion.
     if let Some(ci) = ipi_to_cpu {
         send_resched_ipi_to_cpu(ci);
     }
@@ -895,7 +969,14 @@ fn reparent_children(sched: &mut Scheduler, dying: TaskId) {
 }
 
 /// Performs the cleanup task resources operation.
-fn cleanup_task_resources(task: &Arc<Task>) {
+///
+/// Called when a task exits or is killed to release ports, capabilities,
+/// and user address space mappings.
+///
+/// # Safety
+/// Must be called with the scheduler lock held and the task no longer
+/// accessible from any global map (all_tasks, current_task, etc.).
+pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     crate::ipc::port::cleanup_ports_for_task(task.id);
     crate::silo::on_task_terminated(task.id);
 

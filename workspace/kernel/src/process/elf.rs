@@ -204,9 +204,8 @@ fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
     if header.e_entry >= USER_ADDR_MAX {
         return Err("Entry point outside user address range");
     }
-    if header.e_type == ET_EXEC && header.e_entry == 0 {
-        return Err("ET_EXEC has null entry");
-    }
+    // Some toolchains/images can emit ET_EXEC with e_entry=0.
+    // We handle this case later by deriving a fallback entry from PT_LOAD|PF_X.
 
     // Sanity check program headers
     if header.e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
@@ -410,8 +409,22 @@ fn compute_load_bias_and_entry(
         return Err("Relocated PT_LOAD range exceeds user space");
     }
 
-    let relocated_entry = header
-        .e_entry
+    let entry_raw = if header.e_type == ET_EXEC && header.e_entry == 0 {
+        let fallback = phdrs
+            .iter()
+            .find(|ph| ph.p_type == PT_LOAD && ph.p_memsz != 0 && (ph.p_flags & PF_X) != 0)
+            .map(|ph| ph.p_vaddr)
+            .ok_or("ET_EXEC has null entry and no executable PT_LOAD")?;
+        log::warn!(
+            "[elf] ET_EXEC has null entry, using fallback executable segment vaddr={:#x}",
+            fallback
+        );
+        fallback
+    } else {
+        header.e_entry
+    };
+
+    let relocated_entry = entry_raw
         .checked_add(load_bias)
         .ok_or("Relocated entry overflow")?;
     if relocated_entry == 0 || relocated_entry >= USER_ADDR_MAX {
@@ -1320,6 +1333,8 @@ pub fn load_elf_task_with_caps(
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
     let context = CpuContext::new(elf_ring3_trampoline as *const () as u64, &kernel_stack);
     let (pid, tid, tgid) = Task::allocate_process_ids();
+    let fpu_state = crate::process::task::ExtendedState::new();
+    let xcr0_mask = fpu_state.xcr0_mask;
 
     let task = Arc::new(Task {
         id: TaskId::new(),
@@ -1355,7 +1370,8 @@ pub fn load_elf_task_with_caps(
         vruntime: core::sync::atomic::AtomicU64::new(0),
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
         user_fs_base: core::sync::atomic::AtomicU64::new(user_fs_base_val),
-        fpu_state: crate::process::task::SyncUnsafeCell::new(crate::process::task::FpuState::new()),
+        fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
+        xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
     });
 
     // Seed capabilities into the new task (before scheduling).
@@ -1390,12 +1406,27 @@ pub fn load_elf_task_with_caps(
         let _ = crate::silo::grant_silo_admin_to_task(&task);
     }
 
-    log::info!(
-        "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x}",
-        name,
-        runtime_entry,
-        boot_sp,
-    );
+    {
+        let arc_data_ptr = alloc::sync::Arc::as_ptr(&task) as usize;
+        let fpu_ptr = task.fpu_state.get() as usize;
+        if let Some(cur) = crate::process::scheduler::current_task_clone() {
+            let cur_data_ptr = alloc::sync::Arc::as_ptr(&cur) as usize;
+            let cur_strong = alloc::sync::Arc::strong_count(&cur);
+            log::info!(
+                "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x} \
+                 new_arc={:#x} new_fpu={:#x} cur_arc={:#x} cur_strong={}",
+                name, runtime_entry, boot_sp,
+                arc_data_ptr, fpu_ptr, cur_data_ptr, cur_strong,
+            );
+        } else {
+            log::info!(
+                "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x} \
+                 new_arc={:#x} new_fpu={:#x} (no current task)",
+                name, runtime_entry, boot_sp,
+                arc_data_ptr, fpu_ptr,
+            );
+        }
+    }
 
     Ok(task)
 }

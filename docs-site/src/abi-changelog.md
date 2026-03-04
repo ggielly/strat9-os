@@ -25,6 +25,13 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-03-04 `04b384e` fix(build): improve stage assembly error handling and warnings
+- 2026-03-03 `2eb44c0` feat(task): replace FpuState with ExtendedState, support xsave/xrstor
+- 2026-03-03 `ae5480a` feat(silo): add silo attach for live debug output monitoring
+- 2026-03-03 `8c0056a` feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.
+- 2026-03-03 `e9cce98` feat: Implement POSIX-compatible `clock_gettime` syscall and add `call::open` with POSIX `O_*` flag conversion.
+- 2026-03-03 `04cbe05` feat: Add comprehensive VFS operation self-tests, refine VFS error handling, and improve IPC port cleanup.
+- 2026-03-03 `2642cf8` docs: Add `/// Implements` doc comments to various functions across components for improved clarity.
 - 2026-03-03 `ef0f1d7` docs: Add documentation comments to ABI and syscall components and enhance error handling in the documentation build script.
 - 2026-03-03 `f314904` feat: Expand `FileStat` with additional POSIX fields and update kernel VFS schemes, and add a `nonce` to `IpcHandshake`.
 - 2026-03-03 `769f3eb` feat: Update syscall ABI with struct layout adjustments, error encoding clarification, and versioning.
@@ -48,13 +55,6 @@ See:
 - 2026-03-01 `51c2a03` Update scheduler functionality and enhance shell command integration
 - 2026-03-01 `20e1849` Add SSH daemon support and enhance build tasks
 - 2026-03-01 `6966081` Implement WASM service connection and enhance IPC handling
-- 2026-02-28 `30ea654` Add WASM runtime support and enhance build tasks
-- 2026-02-28 `03d5804` Implement mandatory silo checks and enhance network error logging
-- 2026-02-28 `de55138` Massive code quality and refactor
-- 2026-02-28 `abe3e7d` Update Makefile and script to manage test inclusion and enhance silo functionality
-- 2026-02-28 `7cf6f39` Implement new silo management syscalls and enhance kernel functionality
-- 2026-02-28 `59595b1` Refactor image format retrieval in ACPI BGRT implementation
-- 2026-02-28 `2b052de` Refactor ACPI and IPC structures for improved functionality
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

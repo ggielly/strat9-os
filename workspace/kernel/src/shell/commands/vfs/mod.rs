@@ -1,4 +1,19 @@
 //! VFS management commands
+mod cat;
+mod cd;
+mod cp;
+mod df;
+mod ls;
+mod mkdir;
+mod mount;
+mod mv;
+mod rm;
+mod scheme;
+mod stat;
+mod touch;
+mod umount;
+mod write;
+
 use crate::{
     shell::ShellError,
     shell_println,
@@ -9,6 +24,21 @@ use alloc::{
     vec::Vec,
 };
 use spin::Lazy;
+
+pub use cat::cmd_cat;
+pub use cd::cmd_cd;
+pub use cp::cmd_cp;
+pub use df::cmd_df;
+pub use ls::cmd_ls;
+pub use mkdir::cmd_mkdir;
+pub use mount::cmd_mount;
+pub use mv::cmd_mv;
+pub use rm::cmd_rm;
+pub use scheme::cmd_scheme;
+pub use stat::cmd_stat;
+pub use touch::cmd_touch;
+pub use umount::cmd_umount;
+pub use write::cmd_write;
 
 // ─── Shell CWD ───────────────────────────────────────────────────────────────
 
@@ -78,7 +108,7 @@ pub fn resolve_shell_path(path: &str) -> String {
 // ─── cd ──────────────────────────────────────────────────────────────────────
 
 /// Change the shell working directory.
-pub fn cmd_cd(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_cd_impl(args: &[String]) -> Result<(), ShellError> {
     let target = if args.is_empty() {
         String::from("/")
     } else {
@@ -102,7 +132,7 @@ pub fn cmd_cd(args: &[String]) -> Result<(), ShellError> {
 // ─── ls ──────────────────────────────────────────────────────────────────────
 
 /// List directory contents or mount points.
-pub fn cmd_ls(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_ls_impl(args: &[String]) -> Result<(), ShellError> {
     let path = if args.is_empty() {
         resolve_shell_path("")
     } else {
@@ -155,7 +185,22 @@ pub fn cmd_ls(args: &[String]) -> Result<(), ShellError> {
 // ─── cat ─────────────────────────────────────────────────────────────────────
 
 /// Display file contents.
-pub fn cmd_cat(args: &[String]) -> Result<(), ShellError> {
+/// Display file contents or piped input.
+///
+/// When invoked without arguments and pipe input is available,
+/// prints the piped data. Otherwise reads from the specified path.
+pub(super) fn cmd_cat_impl(args: &[String]) -> Result<(), ShellError> {
+    if let Some(piped) = crate::shell::output::take_pipe_input() {
+        if args.is_empty() {
+            let s = core::str::from_utf8(&piped).unwrap_or("(non-UTF8 data)");
+            crate::shell_print!("{}", s);
+            if !s.ends_with('\n') {
+                shell_println!();
+            }
+            return Ok(());
+        }
+    }
+
     if args.is_empty() {
         shell_println!("Usage: cat <path>");
         return Ok(());
@@ -190,7 +235,7 @@ pub fn cmd_cat(args: &[String]) -> Result<(), ShellError> {
 // ─── scheme ──────────────────────────────────────────────────────────────────
 
 /// List registered schemes.
-pub fn cmd_scheme(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_scheme_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() || args[0] != "ls" {
         shell_println!("Usage: scheme ls");
         return Ok(());
@@ -207,7 +252,7 @@ pub fn cmd_scheme(args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Performs the cmd mount operation.
-pub fn cmd_mount(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_mount_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() || args[0] == "ls" {
         shell_println!("Mount points:");
         for m in vfs::list_mounts() {
@@ -245,7 +290,7 @@ pub fn cmd_mount(args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Performs the cmd umount operation.
-pub fn cmd_umount(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_umount_impl(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 1 {
         shell_println!("Usage: umount <target>");
         return Ok(());
@@ -262,7 +307,7 @@ pub fn cmd_umount(args: &[String]) -> Result<(), ShellError> {
 // ─── mkdir ───────────────────────────────────────────────────────────────────
 
 /// Create a new directory.
-pub fn cmd_mkdir(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_mkdir_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         shell_println!("Usage: mkdir <path>");
         return Ok(());
@@ -278,7 +323,7 @@ pub fn cmd_mkdir(args: &[String]) -> Result<(), ShellError> {
 // ─── touch ───────────────────────────────────────────────────────────────────
 
 /// Create a new empty file.
-pub fn cmd_touch(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_touch_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         shell_println!("Usage: touch <path>");
         return Ok(());
@@ -294,7 +339,7 @@ pub fn cmd_touch(args: &[String]) -> Result<(), ShellError> {
 // ─── rm ──────────────────────────────────────────────────────────────────────
 
 /// Remove a file or directory.
-pub fn cmd_rm(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_rm_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         shell_println!("Usage: rm <path>");
         return Ok(());
@@ -309,7 +354,7 @@ pub fn cmd_rm(args: &[String]) -> Result<(), ShellError> {
 
 // ─── write ───────────────────────────────────────────────────────────────────
 
-pub fn cmd_write(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_write_impl(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
         shell_println!("Usage: write <path> <text>");
         return Ok(());
@@ -332,7 +377,7 @@ pub fn cmd_write(args: &[String]) -> Result<(), ShellError> {
 
 // ─── stat ───────────────────────────────────────────────────────────────────
 
-pub fn cmd_stat(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_stat_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         shell_println!("Usage: stat <path>");
         return Err(ShellError::InvalidArguments);
@@ -363,7 +408,7 @@ pub fn cmd_stat(args: &[String]) -> Result<(), ShellError> {
 
 // ─── cp ─────────────────────────────────────────────────────────────────────
 
-pub fn cmd_cp(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_cp_impl(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
         shell_println!("Usage: cp <src> <dst>");
         return Err(ShellError::InvalidArguments);
@@ -400,7 +445,7 @@ pub fn cmd_cp(args: &[String]) -> Result<(), ShellError> {
 
 // ─── mv ─────────────────────────────────────────────────────────────────────
 
-pub fn cmd_mv(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_mv_impl(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
         shell_println!("Usage: mv <src> <dst>");
         return Err(ShellError::InvalidArguments);
@@ -432,7 +477,7 @@ pub fn cmd_mv(args: &[String]) -> Result<(), ShellError> {
 
 // ─── df ─────────────────────────────────────────────────────────────────────
 
-pub fn cmd_df(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_df_impl(_args: &[String]) -> Result<(), ShellError> {
     let mounts = vfs::list_mounts();
     shell_println!("{:<20} {}", "Mount", "Status");
     shell_println!("────────────────────────────────────────");

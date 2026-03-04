@@ -71,7 +71,8 @@ _start:
     movl    $boot_pml4, %eax
     movl    %eax, %cr3
 
-    # Enable PAE and SSE (accumulate bits in EAX)
+    # Enable PAE + SSE baseline.
+    # OSXSAVE is enabled later in Rust after CPUID capability probing.
     movl    %cr4, %eax
     orl     $0x620, %eax    # Set PAE (5), OSFXSR (9), OSXMMEXCPT (10)
     movl    %eax, %cr4

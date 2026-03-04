@@ -1,4 +1,9 @@
 //! Network commands (ping, ifconfig)
+mod ifconfig;
+mod netcmd;
+mod nslookup;
+mod ping;
+mod telnet;
 
 use crate::{
     shell::ShellError,
@@ -6,10 +11,15 @@ use crate::{
     vfs::{self, OpenFlags},
 };
 use alloc::string::String;
+pub use ifconfig::cmd_ifconfig;
+pub use netcmd::cmd_net;
+pub use nslookup::cmd_nslookup;
+pub use ping::cmd_ping;
+pub use telnet::cmd_telnet;
 
 /// Busy-wait for approximately `ms` milliseconds, yielding to other tasks.
 /// Scheduler ticks are 10ms each.
-fn shell_sleep_ms(ms: u64) {
+pub(super) fn shell_sleep_ms(ms: u64) {
     let ticks_to_wait = (ms + 9) / 10; // round up
     let start = crate::process::scheduler::ticks();
     loop {
@@ -31,7 +41,7 @@ fn build_ping_path<'a>(buf: &'a mut [u8; 80], target: &str) -> &'a str {
 }
 
 /// Performs the cmd ping operation.
-pub fn cmd_ping(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_ping_impl(args: &[String]) -> Result<(), ShellError> {
     let target = if args.is_empty() {
         match vfs::open("/net/gateway", OpenFlags::READ) {
             Ok(fd) => {
@@ -69,6 +79,10 @@ pub fn cmd_ping(args: &[String]) -> Result<(), ShellError> {
     let mut received: u32 = 0;
 
     for seq in 0..count {
+        if crate::shell::is_interrupted() {
+            shell_println!("^C");
+            break;
+        }
         match vfs::open(path, OpenFlags::WRITE) {
             Ok(fd) => {
                 let mut req = [0u8; 4];
@@ -148,7 +162,7 @@ pub fn cmd_ping(args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Performs the cmd ifconfig operation.
-pub fn cmd_ifconfig(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_ifconfig_impl(args: &[String]) -> Result<(), ShellError> {
     if !args.is_empty() {
         match args[0].as_str() {
             "inet" => {
@@ -273,7 +287,7 @@ fn write_path(path: &str, data: &[u8]) -> Result<(), ShellError> {
 }
 
 /// Performs the cmd net operation.
-pub fn cmd_net(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_net_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         shell_println!("Usage: net route <show|add|del|default> ...");
         return Err(ShellError::InvalidArguments);
@@ -348,3 +362,4 @@ pub fn cmd_net(args: &[String]) -> Result<(), ShellError> {
         }
     }
 }
+

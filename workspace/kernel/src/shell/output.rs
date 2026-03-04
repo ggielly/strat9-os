@@ -1,45 +1,112 @@
-//! Shell output formatting
+//! Shell output formatting and capture.
 //!
-//! Provides utilities for formatted shell output.
+//! When capture mode is active, `shell_print!` / `shell_println!` write to an
+//! internal buffer instead of serial + VGA.  This powers pipe (`|`) and
+//! redirection (`>`, `>>`) in the Chevron shell.
 
-/// Print to both serial and VGA
+use crate::sync::SpinLock;
+use alloc::vec::Vec;
+
+static CAPTURE_BUF: SpinLock<Option<Vec<u8>>> = SpinLock::new(None);
+static PIPE_INPUT: SpinLock<Option<Vec<u8>>> = SpinLock::new(None);
+
+/// Begin capturing shell output into an internal buffer.
+pub fn start_capture() {
+    *CAPTURE_BUF.lock() = Some(Vec::new());
+}
+
+/// Stop capturing and return the accumulated bytes.
+pub fn take_capture() -> Vec<u8> {
+    CAPTURE_BUF.lock().take().unwrap_or_default()
+}
+
+/// Returns `true` when capture mode is active.
+pub fn is_capturing() -> bool {
+    CAPTURE_BUF.lock().is_some()
+}
+
+/// Append raw bytes to the capture buffer (called by the macros).
+pub fn capture_write_bytes(data: &[u8]) {
+    if let Some(buf) = CAPTURE_BUF.lock().as_mut() {
+        buf.extend_from_slice(data);
+    }
+}
+
+/// Set pipe input data for the next command in a pipeline.
+pub fn set_pipe_input(data: Vec<u8>) {
+    *PIPE_INPUT.lock() = Some(data);
+}
+
+/// Take and return the current pipe input, if any.
+///
+/// Commands call this to consume piped data. Returns `None` when
+/// the command was not invoked as the right-hand side of a pipe.
+pub fn take_pipe_input() -> Option<Vec<u8>> {
+    PIPE_INPUT.lock().take()
+}
+
+/// Returns `true` when pipe input data is available.
+pub fn has_pipe_input() -> bool {
+    PIPE_INPUT.lock().is_some()
+}
+
+/// Clear any pending pipe input.
+pub fn clear_pipe_input() {
+    PIPE_INPUT.lock().take();
+}
+
+/// Print to both serial and VGA.
 #[macro_export]
 macro_rules! shell_print {
     ($($arg:tt)*) => {{
-        $crate::serial_print!($($arg)*);
-        if $crate::arch::x86_64::vga::is_available() {
+        if $crate::shell::output::is_capturing() {
             use core::fmt::Write;
-            let _ = write!($crate::arch::x86_64::vga::VGA_WRITER.lock(), $($arg)*);
+            let mut __tmp = alloc::string::String::new();
+            let _ = write!(__tmp, $($arg)*);
+            $crate::shell::output::capture_write_bytes(__tmp.as_bytes());
+        } else {
+            $crate::serial_print!($($arg)*);
+            if $crate::arch::x86_64::vga::is_available() {
+                use core::fmt::Write;
+                let _ = write!($crate::arch::x86_64::vga::VGA_WRITER.lock(), $($arg)*);
+            }
         }
     }};
 }
 
-/// Print to both serial and VGA with newline
+/// Print to both serial and VGA with newline.
 #[macro_export]
 macro_rules! shell_println {
     () => ($crate::shell_print!("\n"));
     ($($arg:tt)*) => {{
-        $crate::serial_println!($($arg)*);
-        if $crate::arch::x86_64::vga::is_available() {
+        if $crate::shell::output::is_capturing() {
             use core::fmt::Write;
-            let _ = writeln!($crate::arch::x86_64::vga::VGA_WRITER.lock(), $($arg)*);
+            let mut __tmp = alloc::string::String::new();
+            let _ = writeln!(__tmp, $($arg)*);
+            $crate::shell::output::capture_write_bytes(__tmp.as_bytes());
+        } else {
+            $crate::serial_println!($($arg)*);
+            if $crate::arch::x86_64::vga::is_available() {
+                use core::fmt::Write;
+                let _ = writeln!($crate::arch::x86_64::vga::VGA_WRITER.lock(), $($arg)*);
+            }
         }
     }};
 }
 
-/// Clear the VGA screen
+/// Clear the VGA screen.
 pub fn clear_screen() {
     if crate::arch::x86_64::vga::is_available() {
         crate::arch::x86_64::vga::VGA_WRITER.lock().clear();
     }
 }
 
-/// Print the shell prompt
+/// Print the shell prompt.
 pub fn print_prompt() {
     shell_print!(">>> ");
 }
 
-/// Print a character (no newline)
+/// Print a character (no newline).
 pub fn print_char(ch: char) {
     if crate::arch::x86_64::vga::is_available() {
         use core::fmt::Write;
@@ -49,7 +116,7 @@ pub fn print_char(ch: char) {
     }
 }
 
-/// Format bytes as human-readable size
+/// Format bytes as human-readable size.
 pub fn format_bytes(bytes: usize) -> (usize, &'static str) {
     const KB: usize = 1024;
     const MB: usize = KB * 1024;

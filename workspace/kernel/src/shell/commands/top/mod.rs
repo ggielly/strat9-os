@@ -318,7 +318,7 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
         // Keep input responsive even between render ticks.
         if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
             match ch {
-                b'q' | 0x1B => break,
+                b'q' | 0x1B | 0x03 => break,
                 crate::arch::x86_64::keyboard::KEY_UP => {
                     selected_task = selected_task.saturating_sub(1);
                 }

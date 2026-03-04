@@ -33,8 +33,12 @@ impl CommandRegistry {
         registry.register("version", sys::cmd_version);
         registry.register("clear", sys::cmd_clear);
         registry.register("reboot", sys::cmd_reboot);
+        registry.register("shutdown", sys::cmd_shutdown);
         registry.register("uptime", util::cmd_uptime);
         registry.register("echo", util::cmd_echo);
+        registry.register("watch", util::cmd_watch);
+        registry.register("date", util::cmd_date);
+        registry.register("ntpdate", util::cmd_ntpdate);
 
         // Process
         registry.register("ps", ps::cmd_ps);
@@ -66,7 +70,10 @@ impl CommandRegistry {
         registry.register("lsns", hw::cmd_lsns);
         registry.register("cpuinfo", sys::cmd_cpuinfo);
         registry.register("dmesg", util::cmd_dmesg);
+        registry.register("audit", util::cmd_audit);
         registry.register("env", util::cmd_env);
+        registry.register("setenv", util::cmd_setenv);
+        registry.register("unsetenv", util::cmd_unsetenv);
         registry.register("health", sys::cmd_health);
 
         // Silo / Strate
@@ -78,6 +85,8 @@ impl CommandRegistry {
         registry.register("ping", net::cmd_ping);
         registry.register("ifconfig", net::cmd_ifconfig);
         registry.register("net", net::cmd_net);
+        registry.register("nslookup", net::cmd_nslookup);
+        registry.register("telnet", net::cmd_telnet);
 
         // Scheduler
         registry.register("scheduler", sys::cmd_scheduler);
@@ -109,5 +118,10 @@ impl CommandRegistry {
         } else {
             Err(ShellError::UnknownCommand)
         }
+    }
+
+    /// Return all registered command names (sorted).
+    pub fn command_names(&self) -> alloc::vec::Vec<&str> {
+        self.commands.keys().map(|k| k.as_str()).collect()
     }
 }

@@ -101,23 +101,85 @@ impl<T> SyncUnsafeCell<T> {
     }
 }
 
-#[derive(Debug)]
-#[repr(C, align(16))]
-pub struct FpuState {
-    pub data: [u8; 512],
+/// FPU/SSE/AVX extended state, saved and restored on context switch.
+///
+/// When XSAVE is available, uses `xsave`/`xrstor` with a variable-size area.
+/// Falls back to `fxsave`/`fxrstor` (512 bytes) on older CPUs.
+#[repr(C, align(64))]
+pub struct ExtendedState {
+    pub data: [u8; Self::MAX_XSAVE_SIZE],
+    pub size: usize,
+    pub uses_xsave: bool,
+    pub xcr0_mask: u64,
 }
 
-impl FpuState {
-    /// Creates a new instance.
-    pub const fn new() -> Self {
-        let mut data = [0; 512];
-        // Default x87 FPU Control Word (FCW) = 0x037F
-        data[0] = 0x7F;
-        data[1] = 0x03;
-        // Default MXCSR = 0x1F80
-        data[24] = 0x80;
-        data[25] = 0x1F;
-        Self { data }
+impl core::fmt::Debug for ExtendedState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ExtendedState")
+            .field("size", &self.size)
+            .field("uses_xsave", &self.uses_xsave)
+            .field("xcr0_mask", &self.xcr0_mask)
+            .finish()
+    }
+}
+
+impl ExtendedState {
+    pub const FXSAVE_SIZE: usize = 512;
+    pub const MAX_XSAVE_SIZE: usize = 2688;
+
+    /// Create a new default state using the host's maximum capabilities.
+    pub fn new() -> Self {
+        let (uses_xsave, size, default_xcr0) = if crate::arch::x86_64::cpuid::host_uses_xsave() {
+            let xcr0 = crate::arch::x86_64::cpuid::host_default_xcr0();
+            let sz = crate::arch::x86_64::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE);
+            (true, sz, xcr0)
+        } else {
+            (false, Self::FXSAVE_SIZE, 0x3)
+        };
+
+        let mut state = Self {
+            data: [0u8; Self::MAX_XSAVE_SIZE],
+            size,
+            uses_xsave,
+            xcr0_mask: default_xcr0,
+        };
+        state.set_defaults();
+        state
+    }
+
+    /// Create a state for a specific XCR0 mask (per-silo feature restriction).
+    pub fn for_xcr0(xcr0: u64) -> Self {
+        let uses_xsave = crate::arch::x86_64::cpuid::host_uses_xsave();
+        let size = if uses_xsave {
+            crate::arch::x86_64::cpuid::xsave_size_for_xcr0(xcr0)
+                .min(Self::MAX_XSAVE_SIZE)
+        } else {
+            Self::FXSAVE_SIZE
+        };
+
+        let mut state = Self {
+            data: [0u8; Self::MAX_XSAVE_SIZE],
+            size,
+            uses_xsave,
+            xcr0_mask: xcr0,
+        };
+        state.set_defaults();
+        state
+    }
+
+    fn set_defaults(&mut self) {
+        // x87 FCW = 0x037F
+        self.data[0] = 0x7F;
+        self.data[1] = 0x03;
+        // MXCSR = 0x1F80
+        self.data[24] = 0x80;
+        self.data[25] = 0x1F;
+    }
+
+    /// Copy the state from another `ExtendedState`.
+    pub fn copy_from(&mut self, other: &ExtendedState) {
+        let len = other.size.min(self.size);
+        self.data[..len].copy_from_slice(&other.data[..len]);
     }
 }
 
@@ -199,8 +261,10 @@ pub struct Task {
     /// User-space FS.base (TLS on x86_64, set via arch_prctl ARCH_SET_FS).
     /// Saved/restored across context switches.
     pub user_fs_base: AtomicU64,
-    /// FPU/SSE/AVX state saved during context switch.
-    pub fpu_state: SyncUnsafeCell<FpuState>,
+    /// FPU/SSE/AVX extended state saved during context switch.
+    pub fpu_state: SyncUnsafeCell<ExtendedState>,
+    /// XCR0 mask for this task (inherited from its silo).
+    pub xcr0_mask: AtomicU64,
 }
 
 impl Task {
@@ -419,6 +483,8 @@ impl Task {
         let context = CpuContext::new(entry_point as *const () as u64, &kernel_stack);
         let id = TaskId::new();
         let (pid, tid, tgid) = Self::allocate_process_ids();
+        let fpu_state = ExtendedState::new();
+        let xcr0_mask = fpu_state.xcr0_mask;
 
         log::debug!(
             "[task][create] name={} id={} pid={} tid={} kstack={:?} kstack_kib={}",
@@ -462,7 +528,8 @@ impl Task {
             vruntime: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
             user_fs_base: AtomicU64::new(0),
-            fpu_state: SyncUnsafeCell::new(FpuState::new()),
+            fpu_state: SyncUnsafeCell::new(fpu_state),
+            xcr0_mask: AtomicU64::new(xcr0_mask),
         }))
     }
 
@@ -479,6 +546,8 @@ impl Task {
         let context = CpuContext::new(entry_point, &kernel_stack);
         let id = TaskId::new();
         let (pid, tid, tgid) = Self::allocate_process_ids();
+        let fpu_state = ExtendedState::new();
+        let xcr0_mask = fpu_state.xcr0_mask;
 
         log::debug!(
             "[task][create] name={} id={} pid={} tid={} user_as_cr3={:#x}",
@@ -521,7 +590,8 @@ impl Task {
             vruntime: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
             user_fs_base: AtomicU64::new(0),
-            fpu_state: SyncUnsafeCell::new(FpuState::new()),
+            fpu_state: SyncUnsafeCell::new(fpu_state),
+            xcr0_mask: AtomicU64::new(xcr0_mask),
         }))
     }
 
@@ -555,75 +625,178 @@ impl Task {
     }
 }
 
-/// Low-level context switch: save callee-saved registers on current stack,
-/// swap RSP, restore callee-saved registers from new stack, and `ret`.
+/// Context switch dispatcher. Picks the xsave or fxsave path based on host
+/// capabilities, then performs the full save/swap/restore sequence.
 ///
-/// Arguments (x86-64 SysV ABI):
-/// - rdi = pointer to old task's `saved_rsp` field
-/// - rsi = pointer to new task's `saved_rsp` field
-/// - rdx = pointer to old task's FPU state
-/// - rcx = pointer to new task's FPU state
+/// # Safety
+/// Caller must ensure all pointers in `target` are valid and interrupts are disabled.
+pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) {
+    // Temporary safety mode: force legacy FXSAVE/FXRSTOR path.
+    // This avoids XSAVE/XRSTOR state-size mismatches that can corrupt task memory.
+    let _ = target.old_xcr0;
+    let _ = target.new_xcr0;
+    switch_context_fxsave(
+        target.old_rsp_ptr,
+        target.new_rsp_ptr,
+        target.old_fpu_ptr,
+        target.new_fpu_ptr,
+    );
+}
+
+/// First-task restore dispatcher. Like `do_switch_context` but without
+/// saving old state (there is no previous task).
 ///
-/// The caller (scheduler) has already handled TSS.rsp0 and CR3 switching.
+/// # Safety
+/// Caller must ensure pointers are valid and interrupts are disabled. Never returns.
+pub(super) unsafe fn do_restore_first_task(
+    rsp_ptr: *const u64,
+    fpu_ptr: *const u8,
+    xcr0: u64,
+) -> ! {
+    let _ = xcr0;
+    restore_first_task_fxsave(rsp_ptr, fpu_ptr);
+}
+
+// ── FXSAVE path (legacy, no XSAVE support) ──
+
+/// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu
 #[unsafe(naked)]
-pub(super) unsafe extern "C" fn switch_context(
+unsafe extern "C" fn switch_context_fxsave(
     _old_rsp_ptr: *mut u64,
     _new_rsp_ptr: *const u64,
-    _old_fpu_ptr: *mut FpuState,
-    _new_fpu_ptr: *const FpuState,
+    _old_fpu_ptr: *mut u8,
+    _new_fpu_ptr: *const u8,
 ) {
     core::arch::naked_asm!(
-        // Save FPU state
         "fxsave [rdx]",
-        // Save callee-saved registers on current stack
         "push rbx",
         "push rbp",
         "push r12",
         "push r13",
         "push r14",
         "push r15",
-        // Save current RSP into old context
         "mov [rdi], rsp",
-        // Load new RSP from new context
         "mov rsp, [rsi]",
-        // Restore callee-saved registers from new stack
         "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
         "pop rbp",
         "pop rbx",
-        // Restore FPU state
         "fxrstor [rcx]",
-        // Return to wherever the new task left off
-        // (or to task_entry_trampoline for new tasks)
         "ret",
     );
 }
 
-/// Restore context for the very first task (no old context to save).
-///
-/// Argument (x86-64 SysV ABI):
-/// - rdi = pointer to the first task's `saved_rsp` field
-/// - rsi = pointer to the first task's FPU state
+/// rdi=rsp_ptr, rsi=fpu_ptr
 #[unsafe(naked)]
-pub(super) unsafe extern "C" fn restore_first_task(
+unsafe extern "C" fn restore_first_task_fxsave(
     _rsp_ptr: *const u64,
-    _fpu_ptr: *const FpuState,
-) {
+    _fpu_ptr: *const u8,
+) -> ! {
     core::arch::naked_asm!(
-        // Load RSP from context
         "mov rsp, [rdi]",
-        // Restore callee-saved registers
         "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
         "pop rbp",
         "pop rbx",
-        // Restore FPU state
         "fxrstor [rsi]",
-        // Jump to task_entry_trampoline -> real entry point
+        "ret",
+    );
+}
+
+// ── XSAVE path (with XCR0 switching per-silo) ──
+
+/// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu, r8=new_xcr0, r9=old_xcr0
+#[unsafe(naked)]
+unsafe extern "C" fn switch_context_xsave(
+    _old_rsp_ptr: *mut u64,
+    _new_rsp_ptr: *const u64,
+    _old_fpu_ptr: *mut u8,
+    _new_fpu_ptr: *const u8,
+    _new_xcr0: u64,
+    _old_xcr0: u64,
+) {
+    core::arch::naked_asm!(
+        "mov r10, rdx",
+        "mov r11, r8",
+        "test r11, r11",
+        "jnz 10f",
+        "mov r11, 3",
+        "10:",
+        "test r9, r9",
+        "jnz 11f",
+        "mov r9, 3",
+        "11:",
+        "mov eax, r9d",
+        "shr r9, 32",
+        "mov edx, r9d",
+        "xsave [r10]",
+        "push rbx",
+        "push rbp",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        "mov [rdi], rsp",
+        "mov rsp, [rsi]",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbp",
+        "pop rbx",
+        "push rcx",
+        "mov ecx, 0",
+        "mov eax, r11d",
+        "mov r8, r11",
+        "shr r8, 32",
+        "mov edx, r8d",
+        "xsetbv",
+        "pop rcx",
+        "mov eax, r11d",
+        "mov r8, r11",
+        "shr r8, 32",
+        "mov edx, r8d",
+        "xrstor [rcx]",
+        "ret",
+    );
+}
+
+/// rdi=rsp_ptr, rsi=fpu_ptr, rdx=xcr0
+#[unsafe(naked)]
+unsafe extern "C" fn restore_first_task_xsave(
+    _rsp_ptr: *const u64,
+    _fpu_ptr: *const u8,
+    _xcr0: u64,
+) -> ! {
+    core::arch::naked_asm!(
+        "mov rsp, [rdi]",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbp",
+        "pop rbx",
+        "mov r8, rdx",
+        "test r8, r8",
+        "jnz 10f",
+        "mov r8, 3",
+        "10:",
+        "mov r9, r8",
+        "push rsi",
+        "mov ecx, 0",
+        "mov eax, r8d",
+        "shr r8, 32",
+        "mov edx, r8d",
+        "xsetbv",
+        "pop rsi",
+        "mov eax, r9d",
+        "shr r9, 32",
+        "mov edx, r9d",
+        "xrstor [rsi]",
         "ret",
     );
 }

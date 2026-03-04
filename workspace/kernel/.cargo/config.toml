@@ -4,9 +4,15 @@ target = "x86_64-unknown-none"
 [target.x86_64-unknown-none]
 rustflags = [
     "-C",
-    "link-arg=-L.",
+    "link-arg=-Lworkspace/kernel",
     "-C",
-    "link-arg=-Tlinker-limine.ld",
+    "link-arg=-Tworkspace/kernel/linker-limine.ld",
+    "-C",
+    "link-arg=-no-pie",
+    "-C",
+    "link-arg=-z",
+    "-C",
+    "link-arg=nostart-stop-gc",
     "-C",
     "relocation-model=static",
     "-C",

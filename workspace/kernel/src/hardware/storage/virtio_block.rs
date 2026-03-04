@@ -72,6 +72,7 @@ pub enum BlockStatus {
 
 /// Block device configuration space
 #[repr(C)]
+#[allow(dead_code)]
 struct BlockConfig {
     capacity: u64,
     size_max: u32,

@@ -384,14 +384,18 @@ pub struct SiloConfig {
     pub caps_ptr: u64,
     pub caps_len: u64,
     pub flags: u64,
-    // Security Model Extensions
     pub sid: u32,
-    pub mode: u16, // Octal mode packed
+    pub mode: u16,
     pub family: u8,
+    /// CPU features that this silo requires (bitflags from `CpuFeatures`).
+    pub cpu_features_required: u64,
+    /// CPU features that this silo is allowed to use.
+    pub cpu_features_allowed: u64,
+    /// Effective XCR0 mask (computed from allowed features & host capabilities).
+    pub xcr0_mask: u64,
 }
 
 impl Default for SiloConfig {
-    /// Builds a default instance.
     fn default() -> Self {
         SiloConfig {
             mem_min: 0,
@@ -409,6 +413,9 @@ impl Default for SiloConfig {
             sid: 42,
             mode: 0,
             family: StrateFamily::USR as u8,
+            cpu_features_required: 0,
+            cpu_features_allowed: u64::MAX,
+            xcr0_mask: 0,
         }
     }
 }
@@ -450,7 +457,9 @@ pub struct Strat9ModuleHeader {
     pub relocation_table_offset: u64,
     pub key_id: [u8; 8],
     pub signature: [u8; 64],
-    pub reserved: [u8; 56],
+    /// CPU features required by this module (CpuFeatures bitflags). Header v2+.
+    pub cpu_features_required: u64,
+    pub reserved: [u8; 48],
 }
 
 impl core::fmt::Debug for Strat9ModuleHeader {
@@ -554,6 +563,50 @@ struct Silo {
     unveil_rules: Vec<UnveilRule>,
     sandboxed: bool,
     event_seq: u64,
+    /// Ring buffer capturing debug output for `silo attach`.
+    output_buf: SiloOutputBuf,
+}
+
+const SILO_OUTPUT_CAPACITY: usize = 4096;
+
+struct SiloOutputBuf {
+    buf: [u8; SILO_OUTPUT_CAPACITY],
+    head: usize,
+    count: usize,
+}
+
+impl core::fmt::Debug for SiloOutputBuf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SiloOutputBuf").field("count", &self.count).finish()
+    }
+}
+
+impl SiloOutputBuf {
+    const fn new() -> Self {
+        Self { buf: [0; SILO_OUTPUT_CAPACITY], head: 0, count: 0 }
+    }
+
+    fn push(&mut self, data: &[u8]) {
+        for &b in data {
+            let tail = (self.head + self.count) % SILO_OUTPUT_CAPACITY;
+            self.buf[tail] = b;
+            if self.count < SILO_OUTPUT_CAPACITY {
+                self.count += 1;
+            } else {
+                self.head = (self.head + 1) % SILO_OUTPUT_CAPACITY;
+            }
+        }
+    }
+
+    fn drain(&mut self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.count);
+        for i in 0..self.count {
+            out.push(self.buf[(self.head + i) % SILO_OUTPUT_CAPACITY]);
+        }
+        self.head = 0;
+        self.count = 0;
+        out
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -581,6 +634,9 @@ pub struct SiloDetailSnapshot {
     pub task_ids: Vec<u64>,
     pub unveil_rules: Vec<(String, u8)>,
     pub granted_caps_count: usize,
+    pub cpu_features_required: u64,
+    pub cpu_features_allowed: u64,
+    pub xcr0_mask: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -639,6 +695,7 @@ impl SiloManager {
             unveil_rules: Vec::new(),
             sandboxed: false,
             event_seq: 0,
+            output_buf: SiloOutputBuf::new(),
         };
 
         self.silos.insert(id.sid, silo);
@@ -800,11 +857,30 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
     // SAFETY: We checked length, and we read unaligned from a byte slice.
     let header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Strat9ModuleHeader) };
 
-    if header.version != 1 {
+    if header.version != 1 && header.version != 2 {
         return Err(SyscallError::InvalidArgument);
     }
     if header.cpu_arch != 0 {
         return Err(SyscallError::InvalidArgument);
+    }
+
+    let version = unsafe { core::ptr::addr_of!(header.version).read_unaligned() };
+    let req = if version >= 2 {
+        unsafe { core::ptr::addr_of!(header.cpu_features_required).read_unaligned() }
+    } else {
+        0
+    };
+    if req != 0 {
+        let host = crate::arch::x86_64::cpuid::host();
+        let required = crate::arch::x86_64::cpuid::CpuFeatures::from_bits_truncate(req);
+        if !host.features.contains(required) {
+            log::warn!(
+                "[cmod] module requires CPU features {:#x} but host has {:#x}",
+                req,
+                host.features.bits()
+            );
+            return Err(SyscallError::InvalidArgument);
+        }
     }
 
     let data_len = data.len() as u64;
@@ -1171,6 +1247,13 @@ fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, Syscal
     }
 }
 
+/// Compute the effective XCR0 mask for a silo from its allowed CPU features.
+fn compute_silo_xcr0(config: &SiloConfig) -> u64 {
+    use crate::arch::x86_64::cpuid::{CpuFeatures, xcr0_for_features};
+    let allowed = CpuFeatures::from_bits_truncate(config.cpu_features_allowed);
+    xcr0_for_features(allowed)
+}
+
 /// Performs the kernel spawn strate operation.
 pub fn kernel_spawn_strate(
     elf_data: &[u8],
@@ -1204,17 +1287,20 @@ pub fn kernel_spawn_strate(
             return Err(SyscallError::AlreadyExists);
         }
 
+        let mut cfg = SiloConfig {
+            sid: id.sid,
+            mode: 0o000,
+            family: StrateFamily::USR as u8,
+            ..SiloConfig::default()
+        };
+        cfg.xcr0_mask = compute_silo_xcr0(&cfg);
+
         let silo = Silo {
             id,
             name: alloc::format!("silo-{}", id.sid),
             strate_label: Some(requested_label),
             state: SiloState::Ready,
-            config: SiloConfig {
-                sid: id.sid,
-                mode: 0o000, // Minimal mode for manual spawn
-                family: StrateFamily::USR as u8,
-                ..SiloConfig::default()
-            },
+            config: cfg,
             mode: OctalMode::from_octal(0),
             family: StrateFamily::USR,
             mem_usage_bytes: 0,
@@ -1226,6 +1312,7 @@ pub fn kernel_spawn_strate(
             unveil_rules: Vec::new(),
             sandboxed: false,
             event_seq: 0,
+            output_buf: SiloOutputBuf::new(),
         };
 
         mgr.silos.insert(id.sid, silo);
@@ -1272,6 +1359,10 @@ pub fn kernel_spawn_strate(
         let silo = mgr.get_mut(silo_id)?;
         silo.tasks.push(task_id);
         silo.state = SiloState::Running;
+        let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
+        let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
+        task.xcr0_mask
+            .store(effective_xcr0, core::sync::atomic::Ordering::Relaxed);
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
@@ -1457,6 +1548,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             unveil_rules: Vec::new(),
             sandboxed: false,
             event_seq: 0,
+            output_buf: SiloOutputBuf::new(),
         };
         mgr.silos.insert(id.sid, silo);
     }
@@ -1968,6 +2060,10 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         };
         silo.tasks.push(task_id);
         silo.state = SiloState::Running;
+        let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
+        let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
+        task.xcr0_mask
+            .store(effective_xcr0, core::sync::atomic::Ordering::Relaxed);
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
@@ -2533,6 +2629,9 @@ pub fn silo_detail_snapshot(selector: &str) -> Result<SiloDetailSnapshot, Syscal
             })
             .collect(),
         granted_caps_count: s.granted_caps.len(),
+        cpu_features_required: s.config.cpu_features_required,
+        cpu_features_allowed: s.config.cpu_features_allowed,
+        xcr0_mask: s.config.xcr0_mask,
     })
 }
 
@@ -2608,6 +2707,76 @@ pub fn kernel_sandbox_silo(selector: &str) -> Result<u32, SyscallError> {
     let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
     let silo = mgr.get_mut(silo_id)?;
     silo.sandboxed = true;
+    crate::audit::log(
+        crate::audit::AuditCategory::Security,
+        0, silo_id,
+        alloc::format!("silo sandboxed"),
+    );
+    Ok(silo_id)
+}
+
+/// Get the silo ID for a given task, if any.
+pub fn task_silo_id(task_id: TaskId) -> Option<u32> {
+    SILO_MANAGER.lock().silo_for_task(task_id)
+}
+
+/// Append data to a silo's output ring buffer (called from `sys_debug_log`).
+pub fn silo_output_write(silo_id: u32, data: &[u8]) {
+    let mut mgr = SILO_MANAGER.lock();
+    if let Ok(silo) = mgr.get_mut(silo_id) {
+        silo.output_buf.push(data);
+    }
+}
+
+/// Drain the output buffer for a silo, returning accumulated bytes.
+pub fn silo_output_drain(selector: &str) -> Result<Vec<u8>, SyscallError> {
+    let mut mgr = SILO_MANAGER.lock();
+    let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    let silo = mgr.get_mut(silo_id)?;
+    Ok(silo.output_buf.drain())
+}
+
+/// Dynamically adjust resource quotas for a silo.
+///
+/// `key` can be: `mem_max`, `mem_min`, `max_tasks`, `cpu_shares`.
+/// Values are parsed as u64 (bytes for memory, count otherwise).
+pub fn kernel_limit_silo(selector: &str, key: &str, value: u64) -> Result<u32, SyscallError> {
+    let mut mgr = SILO_MANAGER.lock();
+    let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    let silo = mgr.get_mut(silo_id)?;
+    let mut next_mem_min = silo.config.mem_min;
+    let mut next_mem_max = silo.config.mem_max;
+    let mut next_max_tasks = silo.config.max_tasks;
+    let mut next_cpu_shares = silo.config.cpu_shares;
+    match key {
+        "mem_max" => next_mem_max = value,
+        "mem_min" => next_mem_min = value,
+        "max_tasks" => {
+            if value > u32::MAX as u64 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            next_max_tasks = value as u32;
+        }
+        "cpu_shares" => {
+            if value > u32::MAX as u64 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            next_cpu_shares = value as u32;
+        }
+        _ => return Err(SyscallError::InvalidArgument),
+    }
+    if next_mem_max != 0 && next_mem_min > next_mem_max {
+        return Err(SyscallError::InvalidArgument);
+    }
+    silo.config.mem_min = next_mem_min;
+    silo.config.mem_max = next_mem_max;
+    silo.config.max_tasks = next_max_tasks;
+    silo.config.cpu_shares = next_cpu_shares;
+    crate::audit::log(
+        crate::audit::AuditCategory::Security,
+        0, silo_id,
+        alloc::format!("silo limit: {}={}", key, value),
+    );
     Ok(silo_id)
 }
 

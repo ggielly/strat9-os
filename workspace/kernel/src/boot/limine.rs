@@ -363,6 +363,7 @@ fn hlt_loop() -> ! {
 /// - Stack is set up
 /// - All Limine requests have been answered
 #[no_mangle]
+#[allow(static_mut_refs)]
 pub unsafe extern "C" fn kmain() -> ! {
     // Verify the Limine base revision is supported
     assert!(BASE_REVISION.is_supported());

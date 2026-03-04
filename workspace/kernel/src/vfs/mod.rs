@@ -32,6 +32,7 @@ pub mod ipcfs;
 pub mod mount;
 pub mod pipe;
 pub mod procfs;
+pub mod pty_scheme;
 pub mod ramfs_scheme;
 pub mod scheme;
 pub mod scheme_router;
@@ -1024,6 +1025,35 @@ pub fn init() {
     let pci_count = Box::leak(pci_count_str.into_bytes().into_boxed_slice());
     kernel_scheme.register("pci/count", pci_count.as_ptr(), pci_count.len());
 
+    // /sys/cpu/* — CPU information scheme (Plan9-style)
+    {
+        let host = crate::arch::x86_64::cpuid::host();
+        // VFS initializes before SMP/percpu registration is complete.
+        // Expose at least 1 CPU (BSP) instead of showing 0.
+        let cpu_count = crate::arch::x86_64::percpu::get_cpu_count().max(1);
+
+        let count_s = Box::leak(alloc::format!("{}\n", cpu_count).into_bytes().into_boxed_slice());
+        kernel_scheme.register("cpu/count", count_s.as_ptr(), count_s.len());
+
+        let vendor_s = Box::leak(alloc::format!("{}\n", host.vendor_string()).into_bytes().into_boxed_slice());
+        kernel_scheme.register("cpu/vendor", vendor_s.as_ptr(), vendor_s.len());
+
+        let model_s = Box::leak(alloc::format!("{}\n", host.model_name_str()).into_bytes().into_boxed_slice());
+        kernel_scheme.register("cpu/model", model_s.as_ptr(), model_s.len());
+
+        let features_s = Box::leak(
+            alloc::format!("{}\n", crate::arch::x86_64::cpuid::features_to_flags_string(host.features))
+                .into_bytes().into_boxed_slice()
+        );
+        kernel_scheme.register("cpu/features", features_s.as_ptr(), features_s.len());
+
+        let xcr0_s = Box::leak(alloc::format!("{:#x}\n", host.max_xcr0).into_bytes().into_boxed_slice());
+        kernel_scheme.register("cpu/xcr0", xcr0_s.as_ptr(), xcr0_s.len());
+
+        let xsave_s = Box::leak(alloc::format!("{}\n", host.xsave_size).into_bytes().into_boxed_slice());
+        kernel_scheme.register("cpu/xsave_size", xsave_s.as_ptr(), xsave_s.len());
+    }
+
     let kernel_scheme = Arc::new(kernel_scheme);
 
     // Mount /sys
@@ -1071,6 +1101,10 @@ pub fn init() {
     } else {
         log::info!("[VFS] Mounted /dev/console (serial + keyboard)");
     }
+
+    // PTY scheme (/dev/pts) — pseudo-terminals for interactive programs
+    pty_scheme::init_pty_scheme();
+    log::info!("[VFS] Mounted /dev/pts (PTY scheme)");
 
     log::info!("[VFS] VFS ready");
 }

@@ -350,6 +350,7 @@ impl CompletionEntry {
 }
 
 struct QueuePair {
+    #[allow(dead_code)]
     id: u16,
     size: usize,
     command_id: u16,

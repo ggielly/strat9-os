@@ -1,6 +1,42 @@
 //! System management commands
+mod clear;
+mod cpuinfo;
+mod health;
+mod reboot;
 mod scheduler;
+mod shutdown;
+#[path = "silo.rs"]
+mod silo_cmd;
+mod silo_attach;
+mod silo_limit;
+mod silos;
+mod strate;
+mod test_mem;
+mod test_mem_stressed;
+mod test_pid;
+mod test_syscalls;
+mod trace;
+mod version;
+mod wasm_run;
 pub use scheduler::cmd_scheduler;
+pub use clear::cmd_clear;
+pub use cpuinfo::cmd_cpuinfo;
+pub use health::cmd_health;
+pub use reboot::cmd_reboot;
+pub use shutdown::cmd_shutdown;
+pub use silo_cmd::cmd_silo;
+pub use silos::cmd_silos;
+pub use strate::cmd_strate;
+pub use test_mem::cmd_test_mem;
+pub use test_mem_stressed::cmd_test_mem_stressed;
+pub use test_pid::cmd_test_pid;
+pub use test_syscalls::cmd_test_syscalls;
+pub use trace::cmd_trace;
+pub use version::cmd_version;
+pub use wasm_run::cmd_wasm_run;
+
+use silo_attach::cmd_silo_attach;
+use silo_limit::cmd_silo_limit;
 
 use crate::{
     arch::x86_64::vga,
@@ -21,8 +57,8 @@ use ratatui::{
     Terminal,
 };
 
-const STRATE_USAGE: &str = "Usage: strate <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|top|logs> ...";
-const SILO_USAGE: &str = "Usage: silo <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|top|logs> ...";
+const STRATE_USAGE: &str = "Usage: strate <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|limit|attach|top|logs> ...";
+const SILO_USAGE: &str = "Usage: silo <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|limit|attach|top|logs> ...";
 const DEFAULT_MANAGED_SILO_TOML: &str = r#"
 [[silos]]
 name = "console-admin"
@@ -89,6 +125,7 @@ struct ManagedSiloDef {
     sid: u32,
     family: String,
     mode: String,
+    cpu_features: String,
     strates: Vec<ManagedStrateDef>,
 }
 
@@ -128,6 +165,7 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
                 sid: 42,
                 family: String::from("USR"),
                 mode: String::from("000"),
+                cpu_features: String::new(),
                 strates: Vec::new(),
             });
             section = Section::Silo;
@@ -150,6 +188,7 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
                         "sid" => s.sid = val.parse().unwrap_or(42),
                         "family" => s.family = String::from(val),
                         "mode" => s.mode = String::from(val),
+                        "cpu_features" => s.cpu_features = String::from(val),
                         _ => {}
                     },
                     Section::Strate => {
@@ -190,6 +229,9 @@ fn render_silo_toml(silos: &[ManagedSiloDef]) -> String {
         let _ = writeln!(out, "sid = {}", s.sid);
         let _ = writeln!(out, "family = \"{}\"", s.family);
         let _ = writeln!(out, "mode = \"{}\"", s.mode);
+        if !s.cpu_features.is_empty() {
+            let _ = writeln!(out, "cpu_features = \"{}\"", s.cpu_features);
+        }
         for st in &s.strates {
             out.push('\n');
             let _ = writeln!(out, "[[silos.strates]]");
@@ -590,7 +632,7 @@ fn print_strate_usage() {
 
 fn print_silo_usage() {
     shell_println!("{}", SILO_USAGE);
-    shell_println!("  silo list");
+    shell_println!("  silo list [--gui]");
     shell_println!("  silo spawn <path|type> [--label <l>] [--dev <p>] [--type elf|wasm]");
     shell_println!("  silo start <id|label>");
     shell_println!("  silo stop|kill|destroy <id|label>");
@@ -602,11 +644,13 @@ fn print_silo_usage() {
     shell_println!("  silo pledge <id|label> <octal_mode>");
     shell_println!("  silo unveil <id|label> <path> <rwx>");
     shell_println!("  silo sandbox <id|label>");
+    shell_println!("  silo limit <id|label> <mem_max|mem_min|max_tasks|cpu_shares> <value>");
+    shell_println!("  silo attach <id|label>");
     shell_println!("  silo top [--sort mem|tasks]");
     shell_println!("  silo logs <id|label>");
 }
 
-pub fn cmd_silo(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_silo_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         print_silo_usage();
         return Err(ShellError::InvalidArguments);
@@ -620,6 +664,8 @@ pub fn cmd_silo(args: &[String]) -> Result<(), ShellError> {
         "pledge" => cmd_silo_pledge(args),
         "unveil" => cmd_silo_unveil(args),
         "sandbox" => cmd_silo_sandbox(args),
+        "limit" => cmd_silo_limit(args),
+        "attach" => cmd_silo_attach(args),
         "top" => cmd_silo_top(args),
         "logs" => cmd_silo_logs(args),
         "spawn" | "start" | "stop" | "kill" | "destroy" | "rename" | "config" => {
@@ -633,13 +679,13 @@ pub fn cmd_silo(args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Performs the cmd silos operation.
-pub fn cmd_silos(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_silos_impl(_args: &[String]) -> Result<(), ShellError> {
     let args = [String::from("list")];
     cmd_silo(&args)
 }
 
 /// Display kernel version
-pub fn cmd_version(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_version_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("Strat9-OS v0.1.0 (Bedrock)");
     shell_println!("Build: x86_64-unknown-none");
     shell_println!("Features: SMP, APIC, VirtIO, IPC, Schemes");
@@ -647,13 +693,13 @@ pub fn cmd_version(_args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Clear the screen
-pub fn cmd_clear(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_clear_impl(_args: &[String]) -> Result<(), ShellError> {
     clear_screen();
     Ok(())
 }
 
 /// Display CPU information
-pub fn cmd_cpuinfo(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_cpuinfo_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("CPU information:");
 
     if crate::arch::x86_64::apic::is_initialized() {
@@ -671,8 +717,8 @@ pub fn cmd_cpuinfo(_args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-/// Reboot the system
-pub fn cmd_reboot(_args: &[String]) -> Result<(), ShellError> {
+/// Reboot the system.
+pub(super) fn cmd_reboot_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("Rebooting system...");
     unsafe {
         crate::arch::x86_64::cli();
@@ -683,8 +729,9 @@ pub fn cmd_reboot(_args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+
 /// trace mem on|off|dump [n]|clear|serial on|off|mask
-pub fn cmd_trace(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_trace_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() || args[0].as_str() != "mem" {
         shell_println!("Usage: trace mem on|off|dump [n]|clear|serial on|off|mask");
         return Err(ShellError::InvalidArguments);
@@ -798,7 +845,7 @@ pub fn cmd_trace(args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Launch the userspace PID test binary from initfs.
-pub fn cmd_test_pid(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_test_pid_impl(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_pid";
     shell_println!("Launching {} ...", path);
 
@@ -835,7 +882,7 @@ pub fn cmd_test_pid(_args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Launch the userspace syscall integration test binary from initfs.
-pub fn cmd_test_syscalls(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_test_syscalls_impl(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_syscalls";
     shell_println!("Launching {} ...", path);
 
@@ -872,7 +919,7 @@ pub fn cmd_test_syscalls(_args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Launch the userspace memory test binary from initfs.
-pub fn cmd_test_mem(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_test_mem_impl(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_mem";
     shell_println!("Launching {} ...", path);
 
@@ -909,7 +956,7 @@ pub fn cmd_test_mem(_args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Launch the userspace stressed memory test binary from initfs.
-pub fn cmd_test_mem_stressed(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_test_mem_stressed_impl(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_mem_stressed";
     shell_println!("Launching {} ...", path);
 
@@ -946,7 +993,18 @@ pub fn cmd_test_mem_stressed(_args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Performs the cmd silo list operation.
-fn cmd_silo_list(_args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
+    let mut want_gui = false;
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "--gui" => want_gui = true,
+            _ => {
+                shell_println!("Usage: silo list [--gui]");
+                return Err(ShellError::InvalidArguments);
+            }
+        }
+    }
+
     let (managed, managed_source) = load_managed_silos_with_source();
     let mut silos = silo::list_silos_snapshot();
     silos.sort_by_key(|s| s.id);
@@ -1004,8 +1062,11 @@ fn cmd_silo_list(_args: &[String]) -> Result<(), ShellError> {
             strates: strates_cell,
         });
     }
-    if render_silo_table_ratatui(&rows, &config_rows, managed_source).unwrap_or(false) {
-        return Ok(());
+    if want_gui {
+        if render_silo_table_ratatui(&rows, &config_rows, managed_source).unwrap_or(false) {
+            return Ok(());
+        }
+        shell_println!("silo list: GUI unavailable, fallback console");
     }
 
     shell_println!(
@@ -1347,6 +1408,7 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
                 sid: sid.unwrap_or(42),
                 family: family.clone().unwrap_or_else(|| String::from("USR")),
                 mode: mode.clone().unwrap_or_else(|| String::from("000")),
+                cpu_features: String::new(),
                 strates: Vec::new(),
             });
             silos.len() - 1
@@ -1520,7 +1582,7 @@ fn cmd_strate_rename(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
-pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_strate_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         print_strate_usage();
         return Err(ShellError::InvalidArguments);
@@ -1540,6 +1602,8 @@ pub fn cmd_strate(args: &[String]) -> Result<(), ShellError> {
         "pledge" => cmd_silo_pledge(args),
         "unveil" => cmd_silo_unveil(args),
         "sandbox" => cmd_silo_sandbox(args),
+        "limit" => cmd_silo_limit(args),
+        "attach" => cmd_silo_attach(args),
         "top" => cmd_silo_top(args),
         "logs" => cmd_silo_logs(args),
         _ => {
@@ -1585,6 +1649,9 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     shell_println!("Memory:     {} {} / {} {} / {}", used_v, used_u, min_v, min_u, mem_max);
     shell_println!("CPU shares: {}", detail.cpu_shares);
     shell_println!("CPU mask:   {:#x}", detail.cpu_affinity_mask);
+    shell_println!("CPU req:    {:#x}", detail.cpu_features_required);
+    shell_println!("CPU allow:  {:#x}", detail.cpu_features_allowed);
+    shell_println!("XCR0 mask:  {:#x}", detail.xcr0_mask);
     shell_println!("Max tasks:  {}", if detail.max_tasks == 0 { String::from("unlimited") } else { alloc::format!("{}", detail.max_tasks) });
     shell_println!("Caps:       {} granted", detail.granted_caps_count);
 
@@ -1713,6 +1780,7 @@ fn cmd_silo_sandbox(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+
 fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
     let mut silos = silo::list_silos_snapshot();
 
@@ -1761,7 +1829,7 @@ fn cmd_silo_logs(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-pub fn cmd_wasm_run(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_wasm_run_impl(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 1 {
         shell_println!("Usage: wasm-run <path>");
         return Err(ShellError::InvalidArguments);
@@ -1842,7 +1910,7 @@ pub fn cmd_wasm_run(args: &[String]) -> Result<(), ShellError> {
 }
 
 /// `health` — system health diagnostic (boot graph, strates, IPC, VFS mounts).
-pub fn cmd_health(_args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_health_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("=== Strat9 Health Report ===\n");
 
     shell_println!("-- VFS Mounts --");

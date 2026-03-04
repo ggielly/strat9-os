@@ -1,5 +1,4 @@
-use super::*;
-use super::runtime_ops::idle_task_main;
+use super::{runtime_ops::idle_task_main, *};
 
 impl Scheduler {
     /// Create a new scheduler instance
@@ -266,10 +265,28 @@ impl Scheduler {
                     // Another CPU could steal it before its context is saved.
                     self.cpus[cpu_index].task_to_requeue = Some(task);
                 }
-            } else {
-                // Task is Dead or Blocked. Prevent it from dropping right here
-                // by deferring the drop to finish_switch().
+            } else if task_state == TaskState::Dead {
+                // Task is Dead. Clean up before deferring the drop.
+                // We must remove from all_tasks NOW to prevent double-cleanup
+                // if the task is also being killed via kill_task().
+                let task_id = task.id;
+                let task_pid = task.pid;
+                let task_tid = task.tid;
+
+                // Remove from global maps - this is the canonical cleanup point
+                self.all_tasks.remove(&task_id);
+                self.task_cpu.remove(&task_id);
+                self.unregister_identity_locked(task_id, task_pid, task_tid);
+
+                // Run resource cleanup (ports, capabilities, etc.)
+                // SAFETY: scheduler lock held, task is no longer accessible
+                super::task_ops::cleanup_task_resources(&task);
+
+                // Defer the actual Arc drop to finish_switch()
                 self.cpus[cpu_index].task_to_drop = Some(task);
+            } else {
+                // Blocked task: leave bookkeeping intact; blocked_tasks holds the ref.
+                // Dropping the Arc here is fine; the blocked map keeps the task alive.
             }
         }
 
@@ -288,14 +305,17 @@ impl Scheduler {
         unsafe {
             *next_task.state.get() = TaskState::Running;
         }
-        self.cpus[cpu_index].current_task = Some(next_task.clone());
+        let cloned = next_task.clone();
+        let strong_after = Arc::strong_count(&cloned);
+        self.cpus[cpu_index].current_task = Some(cloned);
         // Reset the runtime accounting for the new task
         self.cpus[cpu_index].current_runtime = crate::process::sched::CurrentRuntime::new();
         sched_trace(format_args!(
-            "cpu={} pick_next task={} policy={:?}",
+            "cpu={} pick_next task={} policy={:?} strong={}",
             cpu_index,
             next_task.id.as_u64(),
-            next_task.sched_policy()
+            next_task.sched_policy(),
+            strong_after,
         ));
         next_task
     }
@@ -371,12 +391,23 @@ impl Scheduler {
     ///
     /// Returns `None` if there's nothing to switch to (same task selected,
     /// or no current task).
-    pub fn yield_cpu(&mut self, cpu_index: usize) -> Option<SwitchTarget> {
+    pub(super) fn yield_cpu(&mut self, cpu_index: usize) -> Option<SwitchTarget> {
         if cpu_index >= self.cpus.len() {
             return None;
         }
         // Must have a current task to yield from
-        let current = self.cpus[cpu_index].current_task.as_ref()?.clone();
+        let current_ref = self.cpus[cpu_index].current_task.as_ref()?;
+        let strong_before = Arc::strong_count(current_ref);
+        if strong_before == 0 || strong_before > (isize::MAX as usize) {
+            log::error!(
+                "[sched] CORRUPT Arc in yield_cpu before clone! cpu={} strong={:#x} task={} ptr={:p}",
+                cpu_index, strong_before,
+                current_ref.id.as_u64(),
+                Arc::as_ptr(current_ref) as *const u8,
+            );
+            return None;
+        }
+        let current = current_ref.clone();
 
         // Pick the next task
         let next = self.pick_next_task(cpu_index);
@@ -409,12 +440,15 @@ impl Scheduler {
             (*next.process.address_space.get()).switch_to();
         }
 
-        // Return raw pointers for switch_context
         Some(SwitchTarget {
             old_rsp_ptr: unsafe { &raw mut (*current.context.get()).saved_rsp },
             new_rsp_ptr: unsafe { &raw const (*next.context.get()).saved_rsp },
-            old_fpu_ptr: current.fpu_state.get(),
-            new_fpu_ptr: next.fpu_state.get(),
+            old_fpu_ptr: current.fpu_state.get() as *mut u8,
+            new_fpu_ptr: next.fpu_state.get() as *const u8,
+            old_xcr0: current
+                .xcr0_mask
+                .load(core::sync::atomic::Ordering::Relaxed),
+            new_xcr0: next.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
         })
     }
 
