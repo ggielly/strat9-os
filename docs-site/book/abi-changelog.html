@@ -185,6 +185,12 @@
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
+<li>2026-03-03 <code>2eb44c0</code> feat(task): replace FpuState with ExtendedState, support xsave/xrstor</li>
+<li>2026-03-03 <code>ae5480a</code> feat(silo): add silo attach for live debug output monitoring</li>
+<li>2026-03-03 <code>8c0056a</code> feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.</li>
+<li>2026-03-03 <code>e9cce98</code> feat: Implement POSIX-compatible <code>clock_gettime</code> syscall and add <code>call::open</code> with POSIX <code>O_*</code> flag conversion.</li>
+<li>2026-03-03 <code>04cbe05</code> feat: Add comprehensive VFS operation self-tests, refine VFS error handling, and improve IPC port cleanup.</li>
+<li>2026-03-03 <code>2642cf8</code> docs: Add <code>/// Implements</code> doc comments to various functions across components for improved clarity.</li>
 <li>2026-03-03 <code>ef0f1d7</code> docs: Add documentation comments to ABI and syscall components and enhance error handling in the documentation build script.</li>
 <li>2026-03-03 <code>f314904</code> feat: Expand <code>FileStat</code> with additional POSIX fields and update kernel VFS schemes, and add a <code>nonce</code> to <code>IpcHandshake</code>.</li>
 <li>2026-03-03 <code>769f3eb</code> feat: Update syscall ABI with struct layout adjustments, error encoding clarification, and versioning.</li>
@@ -209,12 +215,6 @@
 <li>2026-03-01 <code>20e1849</code> Add SSH daemon support and enhance build tasks</li>
 <li>2026-03-01 <code>6966081</code> Implement WASM service connection and enhance IPC handling</li>
 <li>2026-02-28 <code>30ea654</code> Add WASM runtime support and enhance build tasks</li>
-<li>2026-02-28 <code>03d5804</code> Implement mandatory silo checks and enhance network error logging</li>
-<li>2026-02-28 <code>de55138</code> Massive code quality and refactor</li>
-<li>2026-02-28 <code>abe3e7d</code> Update Makefile and script to manage test inclusion and enhance silo functionality</li>
-<li>2026-02-28 <code>7cf6f39</code> Implement new silo management syscalls and enhance kernel functionality</li>
-<li>2026-02-28 <code>59595b1</code> Refactor image format retrieval in ACPI BGRT implementation</li>
-<li>2026-02-28 <code>2b052de</code> Refactor ACPI and IPC structures for improved functionality</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
@@ -247,7 +247,7 @@
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="syscall.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="abi-matrix.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -261,7 +261,7 @@
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="syscall.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="abi-matrix.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

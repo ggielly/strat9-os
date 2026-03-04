@@ -217,6 +217,12 @@ python3 -m http.server --directory build/docs-site 8000
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
+<li>2026-03-03 <code>2eb44c0</code> feat(task): replace FpuState with ExtendedState, support xsave/xrstor</li>
+<li>2026-03-03 <code>ae5480a</code> feat(silo): add silo attach for live debug output monitoring</li>
+<li>2026-03-03 <code>8c0056a</code> feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.</li>
+<li>2026-03-03 <code>e9cce98</code> feat: Implement POSIX-compatible <code>clock_gettime</code> syscall and add <code>call::open</code> with POSIX <code>O_*</code> flag conversion.</li>
+<li>2026-03-03 <code>04cbe05</code> feat: Add comprehensive VFS operation self-tests, refine VFS error handling, and improve IPC port cleanup.</li>
+<li>2026-03-03 <code>2642cf8</code> docs: Add <code>/// Implements</code> doc comments to various functions across components for improved clarity.</li>
 <li>2026-03-03 <code>ef0f1d7</code> docs: Add documentation comments to ABI and syscall components and enhance error handling in the documentation build script.</li>
 <li>2026-03-03 <code>f314904</code> feat: Expand <code>FileStat</code> with additional POSIX fields and update kernel VFS schemes, and add a <code>nonce</code> to <code>IpcHandshake</code>.</li>
 <li>2026-03-03 <code>769f3eb</code> feat: Update syscall ABI with struct layout adjustments, error encoding clarification, and versioning.</li>
@@ -241,12 +247,6 @@ python3 -m http.server --directory build/docs-site 8000
 <li>2026-03-01 <code>20e1849</code> Add SSH daemon support and enhance build tasks</li>
 <li>2026-03-01 <code>6966081</code> Implement WASM service connection and enhance IPC handling</li>
 <li>2026-02-28 <code>30ea654</code> Add WASM runtime support and enhance build tasks</li>
-<li>2026-02-28 <code>03d5804</code> Implement mandatory silo checks and enhance network error logging</li>
-<li>2026-02-28 <code>de55138</code> Massive code quality and refactor</li>
-<li>2026-02-28 <code>abe3e7d</code> Update Makefile and script to manage test inclusion and enhance silo functionality</li>
-<li>2026-02-28 <code>7cf6f39</code> Implement new silo management syscalls and enhance kernel functionality</li>
-<li>2026-02-28 <code>59595b1</code> Refactor image format retrieval in ACPI BGRT implementation</li>
-<li>2026-02-28 <code>2b052de</code> Refactor ACPI and IPC structures for improved functionality</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
@@ -270,7 +270,89 @@ python3 -m http.server --directory build/docs-site 8000
 - Migration notes:
   - &lt;what userspace/kernel must update&gt;
 </code></pre>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="syscall-layer"><a class="header" href="#syscall-layer">Syscall Layer</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="abi-support-matrix"><a class="header" href="#abi-support-matrix">ABI Support Matrix</a></h1>
+<p>Status of relibc platform APIs on <code>x86_64-unknown-strat9</code>.</p>
+<p>Legend: <strong>OK</strong> = implemented, <strong>Stub</strong> = returns ENOSYS, <strong>Partial</strong> = limited.</p>
+<h2 id="posix-file-io"><a class="header" href="#posix-file-io">POSIX File I/O</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
+<tr><td>open / openat</td><td>OK</td><td>Via SYS_OPEN</td></tr>
+<tr><td>read</td><td>OK</td><td>Via SYS_READ</td></tr>
+<tr><td>write</td><td>OK</td><td>Via SYS_WRITE</td></tr>
+<tr><td>close</td><td>OK</td><td>Via SYS_CLOSE</td></tr>
+<tr><td>lseek</td><td>OK</td><td>Via SYS_LSEEK</td></tr>
+<tr><td>pread</td><td>OK</td><td>Via SYS_PREAD</td></tr>
+<tr><td>pwrite</td><td>OK</td><td>Via SYS_PWRITE</td></tr>
+<tr><td>fstat / fstatat</td><td>OK</td><td>Via SYS_FSTAT / SYS_STAT</td></tr>
+<tr><td>dup / dup2</td><td>OK</td><td>Via SYS_DUP / SYS_DUP2</td></tr>
+<tr><td>pipe / pipe2</td><td>OK</td><td>Via SYS_PIPE</td></tr>
+<tr><td>fcntl</td><td>OK</td><td>Via SYS_FCNTL</td></tr>
+<tr><td>mkdir / mkdirat</td><td>OK</td><td>Via SYS_MKDIR</td></tr>
+<tr><td>unlink</td><td>OK</td><td>Via SYS_UNLINK</td></tr>
+<tr><td>rmdir</td><td>OK</td><td>Via SYS_RMDIR</td></tr>
+<tr><td>rename / renameat</td><td>OK</td><td>Via SYS_RENAME</td></tr>
+<tr><td>link</td><td>OK</td><td>Via SYS_LINK</td></tr>
+<tr><td>symlink</td><td>OK</td><td>Via SYS_SYMLINK</td></tr>
+<tr><td>readlink</td><td>OK</td><td>Via SYS_READLINK</td></tr>
+<tr><td>chmod / fchmod</td><td>OK</td><td>Via SYS_CHMOD / SYS_FCHMOD</td></tr>
+<tr><td>truncate / ftruncate</td><td>OK</td><td>Via SYS_TRUNCATE / SYS_FTRUNCATE</td></tr>
+<tr><td>chdir / fchdir</td><td>OK</td><td>Via SYS_CHDIR / SYS_FCHDIR</td></tr>
+<tr><td>getcwd</td><td>OK</td><td>Via SYS_GETCWD</td></tr>
+<tr><td>getdents</td><td>OK</td><td>Via SYS_GETDENTS</td></tr>
+<tr><td>access</td><td>OK</td><td>Open + close probe</td></tr>
+<tr><td>umask</td><td>OK</td><td>Via SYS_UMASK</td></tr>
+<tr><td>fsync / fdatasync</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>flock</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>chown / fchown / lchown</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>statvfs / fstatvfs</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>mknod / mknodat / mkfifoat</td><td>Stub</td><td>ENOSYS</td></tr>
+</tbody></table>
+</div>
+<h2 id="process-management"><a class="header" href="#process-management">Process Management</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
+<tr><td>exit</td><td>OK</td><td>Via SYS_PROC_EXIT</td></tr>
+<tr><td>fork</td><td>OK</td><td>Via SYS_PROC_FORK</td></tr>
+<tr><td>execve</td><td>OK</td><td>Via SYS_PROC_EXEC</td></tr>
+<tr><td>waitpid</td><td>OK</td><td>Via SYS_PROC_WAITPID</td></tr>
+<tr><td>getpid / getppid / gettid</td><td>OK</td><td></td></tr>
+<tr><td>setsid / setpgid / getpgid / getsid</td><td>OK</td><td></td></tr>
+<tr><td>sched_yield</td><td>OK</td><td>Via SYS_PROC_YIELD</td></tr>
+<tr><td>nanosleep</td><td>OK</td><td>Via SYS_NANOSLEEP</td></tr>
+<tr><td>clock_gettime</td><td>OK</td><td>Via SYS_CLOCK_GETTIME</td></tr>
+<tr><td>brk</td><td>OK</td><td>Via SYS_BRK</td></tr>
+<tr><td>mmap / munmap</td><td>OK</td><td>Via SYS_MMAP / SYS_MUNMAP</td></tr>
+<tr><td>uname</td><td>OK</td><td>Via SYS_PROC_UNAME</td></tr>
+<tr><td>getuid / geteuid / getgid / getegid</td><td>Partial</td><td>Returns 0 (no UID model)</td></tr>
+<tr><td>mprotect / mlock / munlock</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>getrandom</td><td>Stub</td><td>ENOSYS</td></tr>
+</tbody></table>
+</div>
+<h2 id="signals"><a class="header" href="#signals">Signals</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
+<tr><td>kill</td><td>OK</td><td>Via SYS_KILL</td></tr>
+<tr><td>sigaction</td><td>OK</td><td>Via SYS_SIGACTION</td></tr>
+<tr><td>sigprocmask</td><td>OK</td><td>Via SYS_SIGPROCMASK</td></tr>
+<tr><td>sigsuspend</td><td>OK</td><td>Via SYS_SIGSUSPEND</td></tr>
+<tr><td>sigtimedwait</td><td>OK</td><td>Via SYS_SIGTIMEDWAIT</td></tr>
+<tr><td>getitimer / setitimer</td><td>OK</td><td>Via SYS_GETITIMER / SYS_SETITIMER</td></tr>
+<tr><td>sigaltstack</td><td>OK</td><td>Via SYS_SIGALTSTACK</td></tr>
+</tbody></table>
+</div>
+<h2 id="network--sockets"><a class="header" href="#network--sockets">Network / Sockets</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
+<tr><td>socketpair (AF_UNIX)</td><td>Partial</td><td>Backed by pipe (unidirectional)</td></tr>
+<tr><td>recvfrom / sendto</td><td>Partial</td><td>Delegates to read/write</td></tr>
+<tr><td>socket / bind / listen / accept / connect</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>setsockopt / getsockopt</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>shutdown</td><td>Stub</td><td>ENOSYS</td></tr>
+</tbody></table>
+</div>
+<h2 id="epoll"><a class="header" href="#epoll">Epoll</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
+<tr><td>epoll_create1</td><td>Partial</td><td>Backed by pipe fd</td></tr>
+<tr><td>epoll_ctl</td><td>Stub</td><td>No-op</td></tr>
+<tr><td>epoll_pwait</td><td>Partial</td><td>Sleeps, no real multiplexing</td></tr>
+</tbody></table>
+</div><div style="break-before: page; page-break-before: always;"></div><h1 id="syscall-layer"><a class="header" href="#syscall-layer">Syscall Layer</a></h1>
 <p>The userspace syscall crate is <code>workspace/components/syscall</code> (<code>strat9-syscall</code>).</p>
 <p>Useful entry points:</p>
 <ul>
