@@ -640,10 +640,16 @@ fn boot_silos(silos: Vec<SiloDef>) {
                             ));
                             continue;
                         }
-                        if let Err(e) = call::silo_start(silo_handle) {
-                            log(&alloc::format!("[init] silo_start failed: {}\n", e.name()));
-                        } else if str_def.stype == "wasm-runtime" {
-                            runtime_targets.push((str_def.name.clone(), str_def.target.clone()));
+                        match call::silo_start(silo_handle) {
+                            Err(e) => {
+                                log(&alloc::format!("[init] silo_start failed: {}\n", e.name()));
+                            }
+                            Ok(pid) => {
+                                register_supervised(&str_def.name, pid as u64);
+                                if str_def.stype == "wasm-runtime" {
+                                    runtime_targets.push((str_def.name.clone(), str_def.target.clone()));
+                                }
+                            }
                         }
                     } else {
                         log(&alloc::format!(
@@ -773,7 +779,6 @@ type = "elf"
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StrateHealth {
     Ready,
-    Degraded,
     Failed,
 }
 
