@@ -55,6 +55,9 @@ static EVENT_BUF: Mutex<EventBuffer> = Mutex::new(EventBuffer {
 // ── Absolute cursor position (accumulated) ───────────────────────────────────
 static MOUSE_ABS_X: AtomicI32 = AtomicI32::new(0);
 static MOUSE_ABS_Y: AtomicI32 = AtomicI32::new(0);
+// Cached screen bounds to avoid locking VGA from IRQ context.
+static SCREEN_W: AtomicI32 = AtomicI32::new(1280);
+static SCREEN_H: AtomicI32 = AtomicI32::new(800);
 
 // ── Packet state machine ──────────────────────────────────────────────────────
 /// Current byte index within the current packet (0, 1, 2, [3])
@@ -203,6 +206,16 @@ pub fn init() -> bool {
         return false;
     }
 
+    // Cache screen size once (safe in init context) to avoid locking VGA in IRQs.
+    let w = crate::arch::x86_64::vga::width() as i32;
+    let h = crate::arch::x86_64::vga::height() as i32;
+    if w > 0 {
+        SCREEN_W.store(w, Ordering::Relaxed);
+    }
+    if h > 0 {
+        SCREEN_H.store(h, Ordering::Relaxed);
+    }
+
     MOUSE_READY.store(true, Ordering::Relaxed);
     crate::serial_println!("[mouse] PS/2 mouse initialized OK");
     true
@@ -308,9 +321,9 @@ fn decode_packet() {
     let right = flags & 0x02 != 0;
     let middle = flags & 0x04 != 0;
 
-    // Clamp and accumulate absolute position (approx screen bounds)
-    let scr_w = crate::arch::x86_64::vga::width() as i32;
-    let scr_h = crate::arch::x86_64::vga::height() as i32;
+    // Clamp and accumulate absolute position using cached bounds (IRQ-safe)
+    let scr_w = SCREEN_W.load(Ordering::Relaxed);
+    let scr_h = SCREEN_H.load(Ordering::Relaxed);
     let max_x = if scr_w > 0 { scr_w - 1 } else { 1279 };
     let max_y = if scr_h > 0 { scr_h - 1 } else { 799 };
 

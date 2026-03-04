@@ -208,25 +208,27 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
         return;
     }
 
-    let base_virt = memory::phys_to_virt(base);
-    let data = unsafe { core::slice::from_raw_parts(base_virt as *const u8, size as usize) };
+    let base_virt = memory::phys_to_virt(base) as *const u8;
+    let len = size as usize;
     #[cfg(feature = "selftest")]
-    if data.len() >= 4 {
-        serial_println!(
-            "[init] /initfs/{} source magic={:02x}{:02x}{:02x}{:02x} size={}",
-            path,
-            data[0],
-            data[1],
-            data[2],
-            data[3],
-            size
-        );
+    {
+        // Only peek small header bytes for debugging; no heap allocations.
+        let data = unsafe { core::slice::from_raw_parts(base_virt, len.min(4)) };
+        if data.len() == 4 {
+            serial_println!(
+                "[init] /initfs/{} source magic={:02x}{:02x}{:02x}{:02x} size={}",
+                path,
+                data[0],
+                data[1],
+                data[2],
+                data[3],
+                size
+            );
+        }
     }
-    let mut owned = alloc::vec::Vec::with_capacity(data.len());
-    owned.extend_from_slice(data);
-    let leaked: &'static [u8] = alloc::boxed::Box::leak(owned.into_boxed_slice());
 
-    if let Err(e) = vfs::register_initfs_file(path, leaked.as_ptr(), leaked.len()) {
+    // Register the bootloader-provided module directly; keep it read-only.
+    if let Err(e) = vfs::register_initfs_file(path, base_virt, len) {
         serial_println!("[init] Failed to register /initfs/{}: {:?}", path, e);
     } else {
         serial_println!("[init] Registered /initfs/{} ({} bytes)", path, size);
@@ -262,7 +264,10 @@ fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
         ("strate-wasm", crate::boot::limine::strate_wasm_module()),
         ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
-        ("wasm-test.toml", crate::boot::limine::wasm_test_toml_module()),
+        (
+            "wasm-test.toml",
+            crate::boot::limine::wasm_test_toml_module(),
+        ),
     ];
     for (path, module) in initfs_modules {
         register_initfs_module(path, module);
@@ -289,7 +294,10 @@ fn log_boot_module_magics(stage: &str) {
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
         ("strate-wasm", crate::boot::limine::strate_wasm_module()),
         ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
-        ("wasm-test.toml", crate::boot::limine::wasm_test_toml_module()),
+        (
+            "wasm-test.toml",
+            crate::boot::limine::wasm_test_toml_module(),
+        ),
     ];
     for (name, module) in modules {
         let Some((base, size)) = module else {
@@ -323,7 +331,6 @@ fn log_boot_module_magics(_stage: &str) {}
 
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
-
     // =============================================
     // Phase 1: serial output (earliest debug output)
     // =============================================
@@ -375,14 +382,24 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] KernelArgs at {:p}", args);
 
     if args.magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
-        serial_println!("[CRIT] Bad KernelArgs magic: 0x{:08x} (expected 0x{:08x})",
-            args.magic, strat9_abi::boot::STRAT9_BOOT_MAGIC);
-        loop { arch::x86_64::hlt(); }
+        serial_println!(
+            "[CRIT] Bad KernelArgs magic: 0x{:08x} (expected 0x{:08x})",
+            args.magic,
+            strat9_abi::boot::STRAT9_BOOT_MAGIC
+        );
+        loop {
+            arch::x86_64::hlt();
+        }
     }
     if args.abi_version != strat9_abi::boot::STRAT9_BOOT_ABI_VERSION {
-        serial_println!("[CRIT] Unsupported boot ABI version: {} (kernel expects {})",
-            args.abi_version, strat9_abi::boot::STRAT9_BOOT_ABI_VERSION);
-        loop { arch::x86_64::hlt(); }
+        serial_println!(
+            "[CRIT] Unsupported boot ABI version: {} (kernel expects {})",
+            args.abi_version,
+            strat9_abi::boot::STRAT9_BOOT_ABI_VERSION
+        );
+        loop {
+            arch::x86_64::hlt();
+        }
     }
 
     // =============================================
@@ -410,16 +427,19 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     let mmap = core::slice::from_raw_parts(mmap_ptr, mmap_len);
     let mut mmap_work = [null_region(); MAX_BOOT_MMAP_REGIONS_WORK];
     let mut mmap_work_len = core::cmp::min(mmap.len(), mmap_work.len());
-    for (dst, src) in mmap_work
-        .iter_mut()
-        .zip(mmap.iter())
-        .take(mmap_work_len)
-    {
+    for (dst, src) in mmap_work.iter_mut().zip(mmap.iter()).take(mmap_work_len) {
         *dst = *src;
     }
 
     let reserve_modules = [
-        ("test_pid", if args.initfs_base != 0 && args.initfs_size != 0 { Some((args.initfs_base, args.initfs_size)) } else { None }),
+        (
+            "test_pid",
+            if args.initfs_base != 0 && args.initfs_size != 0 {
+                Some((args.initfs_base, args.initfs_size))
+            } else {
+                None
+            },
+        ),
         ("test_syscalls", crate::boot::limine::test_syscalls_module()),
         ("test_mem", crate::boot::limine::test_mem_module()),
         (
@@ -440,7 +460,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
         ("strate-wasm", crate::boot::limine::strate_wasm_module()),
         ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
-        ("wasm-test.toml", crate::boot::limine::wasm_test_toml_module()),
+        (
+            "wasm-test.toml",
+            crate::boot::limine::wasm_test_toml_module(),
+        ),
     ];
 
     for (_name, module) in reserve_modules {

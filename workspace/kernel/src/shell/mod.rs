@@ -276,7 +276,8 @@ pub extern "C" fn shell_main() -> ! {
 
     let mut last_blink_tick = 0;
     let mut cursor_visible = false;
-    const MAX_MOUSE_EVENTS_PER_TURN: usize = 64;
+    // Cap per-loop mouse work to avoid starving timer ticks when dragging.
+    const MAX_MOUSE_EVENTS_PER_TURN: usize = 16;
     const SCROLLBAR_DRAG_MIN_TICKS: u64 = 1;
 
     loop {
@@ -342,11 +343,8 @@ pub extern "C" fn shell_main() -> ! {
                 b'\x08' | b'\x7f' => {
                     in_escape_seq = false;
                     utf8_pending_len = 0;
-                    let _ = delete_prev_char_at_cursor(
-                        &mut input_buf,
-                        &mut input_len,
-                        &mut cursor_pos,
-                    );
+                    let _ =
+                        delete_prev_char_at_cursor(&mut input_buf, &mut input_len, &mut cursor_pos);
                 }
                 b'\x03' => {
                     in_escape_seq = false;
@@ -361,21 +359,13 @@ pub extern "C" fn shell_main() -> ! {
                 b'\t' => {
                     in_escape_seq = false;
                     utf8_pending_len = 0;
-                    tab_complete(
-                        &mut input_buf,
-                        &mut input_len,
-                        &mut cursor_pos,
-                        &registry,
-                    );
+                    tab_complete(&mut input_buf, &mut input_len, &mut cursor_pos, &registry);
                 }
                 b'\x04' => {
                     in_escape_seq = false;
                     utf8_pending_len = 0;
-                    let _ = delete_next_char_at_cursor(
-                        &mut input_buf,
-                        &mut input_len,
-                        &mut cursor_pos,
-                    );
+                    let _ =
+                        delete_next_char_at_cursor(&mut input_buf, &mut input_len, &mut cursor_pos);
                 }
                 KEY_LEFT => {
                     in_escape_seq = false;
@@ -558,6 +548,12 @@ pub extern "C" fn shell_main() -> ! {
                     }
                 }
 
+                // Under heavy mouse input, give the scheduler a chance to run
+                // other tasks (including timer tick handlers driving UI).
+                if mouse_events_seen >= MAX_MOUSE_EVENTS_PER_TURN {
+                    crate::process::scheduler::yield_task();
+                }
+
                 if had_events || left_held {
                     let (new_mx, new_my) = crate::arch::x86_64::mouse::mouse_pos();
                     let moved = new_mx != mouse_x || new_my != mouse_y;
@@ -668,7 +664,11 @@ fn execute_line(line: &str, registry: &CommandRegistry) {
             }
             return;
         }
-        scripting::ScriptConstruct::IfElse { cond, then_body, else_body } => {
+        scripting::ScriptConstruct::IfElse {
+            cond,
+            then_body,
+            else_body,
+        } => {
             let cond_expanded = scripting::expand_vars(&cond);
             execute_pipeline(&cond_expanded, registry);
             let branch = if scripting::last_exit() == 0 {
@@ -788,8 +788,11 @@ fn tab_complete(
     if !has_space {
         let prefix = before_cursor;
         let names = registry.command_names();
-        let matches: alloc::vec::Vec<&str> =
-            names.iter().copied().filter(|n| n.starts_with(prefix)).collect();
+        let matches: alloc::vec::Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| n.starts_with(prefix))
+            .collect();
 
         if matches.len() == 1 {
             complete_replace_word(input_buf, input_len, cursor_pos, 0, matches[0], true);
