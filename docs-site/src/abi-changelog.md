@@ -25,6 +25,7 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-03-04 `04b384e` fix(build): improve stage assembly error handling and warnings
 - 2026-03-03 `2eb44c0` feat(task): replace FpuState with ExtendedState, support xsave/xrstor
 - 2026-03-03 `ae5480a` feat(silo): add silo attach for live debug output monitoring
 - 2026-03-03 `8c0056a` feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.
@@ -54,7 +55,6 @@ See:
 - 2026-03-01 `51c2a03` Update scheduler functionality and enhance shell command integration
 - 2026-03-01 `20e1849` Add SSH daemon support and enhance build tasks
 - 2026-03-01 `6966081` Implement WASM service connection and enhance IPC handling
-- 2026-02-28 `30ea654` Add WASM runtime support and enhance build tasks
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 
