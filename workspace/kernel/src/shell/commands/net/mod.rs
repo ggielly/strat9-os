@@ -1,5 +1,8 @@
 //! Network commands (ping, ifconfig)
+mod ifconfig;
+mod netcmd;
 mod nslookup;
+mod ping;
 mod telnet;
 
 use crate::{
@@ -8,7 +11,10 @@ use crate::{
     vfs::{self, OpenFlags},
 };
 use alloc::string::String;
+pub use ifconfig::cmd_ifconfig;
+pub use netcmd::cmd_net;
 pub use nslookup::cmd_nslookup;
+pub use ping::cmd_ping;
 pub use telnet::cmd_telnet;
 
 /// Busy-wait for approximately `ms` milliseconds, yielding to other tasks.
@@ -35,7 +41,7 @@ fn build_ping_path<'a>(buf: &'a mut [u8; 80], target: &str) -> &'a str {
 }
 
 /// Performs the cmd ping operation.
-pub fn cmd_ping(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_ping_impl(args: &[String]) -> Result<(), ShellError> {
     let target = if args.is_empty() {
         match vfs::open("/net/gateway", OpenFlags::READ) {
             Ok(fd) => {
@@ -156,7 +162,7 @@ pub fn cmd_ping(args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Performs the cmd ifconfig operation.
-pub fn cmd_ifconfig(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_ifconfig_impl(args: &[String]) -> Result<(), ShellError> {
     if !args.is_empty() {
         match args[0].as_str() {
             "inet" => {
@@ -281,7 +287,7 @@ fn write_path(path: &str, data: &[u8]) -> Result<(), ShellError> {
 }
 
 /// Performs the cmd net operation.
-pub fn cmd_net(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_net_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
         shell_println!("Usage: net route <show|add|del|default> ...");
         return Err(ShellError::InvalidArguments);
