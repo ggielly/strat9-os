@@ -175,7 +175,7 @@ fn check_expect_err(ctx: &mut Ctx, label: &str, res: core::result::Result<usize,
 fn test_process_and_ids(ctx: &mut Ctx) {
     section("Process IDs / Session / Group / Credentials");
 
-    let pid = check_ok(ctx, "getpid()", call::getpid()).unwrap_or(0);
+    let _pid = check_ok(ctx, "getpid()", call::getpid()).unwrap_or(0);
     let _ = check_ok(ctx, "getppid()", call::getppid());
     let _ = check_ok(ctx, "gettid()", call::gettid());
     let _ = check_ok(ctx, "getpgid(0)", call::getpgid(0));

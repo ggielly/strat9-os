@@ -674,9 +674,8 @@ impl NetworkStrate {
             match res {
                 Ok(addrs) => {
                     for addr in addrs {
-                        if let IpAddress::Ipv4(v4) = addr {
-                            return Ok(v4);
-                        }
+                        let IpAddress::Ipv4(v4) = addr;
+                        return Ok(v4);
                     }
                     return Err(-2);
                 }
@@ -1080,24 +1079,23 @@ impl NetworkStrate {
                     let mut any = false;
                     self.interface.routes_mut().update(|table| {
                         for r in table.iter() {
-                            if let (IpCidr::Ipv4(c), IpAddress::Ipv4(gw)) = (r.cidr, r.via_router) {
-                                let ca = c.address().octets();
-                                let ga = gw.octets();
-                                let _ = write!(
-                                    w,
-                                    "{}.{}.{}.{}/{} via {}.{}.{}.{}\n",
-                                    ca[0],
-                                    ca[1],
-                                    ca[2],
-                                    ca[3],
-                                    c.prefix_len(),
-                                    ga[0],
-                                    ga[1],
-                                    ga[2],
-                                    ga[3]
-                                );
-                                any = true;
-                            }
+                            let (IpCidr::Ipv4(c), IpAddress::Ipv4(gw)) = (r.cidr, r.via_router);
+                            let ca = c.address().octets();
+                            let ga = gw.octets();
+                            let _ = write!(
+                                w,
+                                "{}.{}.{}.{}/{} via {}.{}.{}.{}\n",
+                                ca[0],
+                                ca[1],
+                                ca[2],
+                                ca[3],
+                                c.prefix_len(),
+                                ga[0],
+                                ga[1],
+                                ga[2],
+                                ga[3]
+                            );
+                            any = true;
                         }
                     });
                     if !any {
