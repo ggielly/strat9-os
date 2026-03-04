@@ -14,6 +14,3 @@ path = "main.rs"
 strat9-syscall = { path = "../../syscall", features = ["userspace"] }
 alloc-freelist = { path = "../../alloc-freelist" }
 
-[profile.release]
-panic = "abort"
-strip = true
