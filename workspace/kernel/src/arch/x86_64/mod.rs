@@ -48,7 +48,7 @@ pub fn init_cpu_extensions() {
         asm!("fninit", options(nomem, nostack));
 
         if cpuid::host_uses_xsave() {
-            let xcr0 = cpuid::host().max_xcr0;
+            let xcr0 = cpuid::host_default_xcr0();
             xsetbv(0, xcr0);
         }
     }

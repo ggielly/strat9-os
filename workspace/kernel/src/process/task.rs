@@ -129,19 +129,19 @@ impl ExtendedState {
 
     /// Create a new default state using the host's maximum capabilities.
     pub fn new() -> Self {
-        let (uses_xsave, size, max_xcr0) =
-            if crate::arch::x86_64::cpuid::host_uses_xsave() {
-                let h = crate::arch::x86_64::cpuid::host();
-                (true, h.xsave_size.min(Self::MAX_XSAVE_SIZE), h.max_xcr0)
-            } else {
-                (false, Self::FXSAVE_SIZE, 0x3)
-            };
+        let (uses_xsave, size, default_xcr0) = if crate::arch::x86_64::cpuid::host_uses_xsave() {
+            let xcr0 = crate::arch::x86_64::cpuid::host_default_xcr0();
+            let sz = crate::arch::x86_64::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE);
+            (true, sz, xcr0)
+        } else {
+            (false, Self::FXSAVE_SIZE, 0x3)
+        };
 
         let mut state = Self {
             data: [0u8; Self::MAX_XSAVE_SIZE],
             size,
             uses_xsave,
-            xcr0_mask: max_xcr0,
+            xcr0_mask: default_xcr0,
         };
         state.set_defaults();
         state
