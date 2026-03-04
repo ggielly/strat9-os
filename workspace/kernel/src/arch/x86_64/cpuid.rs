@@ -346,10 +346,19 @@ pub fn xsave_size_for_xcr0(xcr0: u64) -> usize {
 /// Safe to call before `init()` — returns `XCR0_X87 | XCR0_SSE` if not yet initialized.
 pub fn host_default_xcr0() -> u64 {
     if INITIALIZED.load(Ordering::Acquire) {
-        HOST_CPU
-            .lock()
-            .as_ref()
-            .map_or(XCR0_X87 | XCR0_SSE, |h| h.max_xcr0)
+        HOST_CPU.lock().as_ref().map_or(XCR0_X87 | XCR0_SSE, |h| {
+            // IMPORTANT: do not call xcr0_for_features() here: it calls host()
+            // and would deadlock while HOST_CPU lock is already held.
+            let mut xcr0 = XCR0_X87 | XCR0_SSE;
+            if h.features.contains(CpuFeatures::AVX) {
+                xcr0 |= XCR0_AVX;
+            }
+            if h.features.contains(CpuFeatures::AVX512F) {
+                xcr0 |= XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
+            }
+            // Clamp to host-supported bits.
+            xcr0 & h.max_xcr0
+        })
     } else {
         XCR0_X87 | XCR0_SSE
     }
