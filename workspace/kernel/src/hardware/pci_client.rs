@@ -1,5 +1,6 @@
 use alloc::{format, string::String, vec::Vec};
 
+use crate::arch::x86_64::pci as arch_pci;
 pub use crate::arch::x86_64::pci::{
     class, command, config, device, intel_eth, net_subclass, sata_progif, storage_subclass, vendor,
 };
@@ -201,17 +202,60 @@ fn cfg_path(addr: PciAddress, offset: u8, width: u8) -> String {
     )
 }
 
+/// Converts address to arch address.
+fn to_arch_addr(addr: PciAddress) -> arch_pci::PciAddress {
+    arch_pci::PciAddress::new(addr.bus, addr.device, addr.function)
+}
+
+/// Creates a lightweight arch device handle for direct cfg access.
+fn arch_dev_handle(addr: PciAddress) -> arch_pci::PciDevice {
+    arch_pci::PciDevice {
+        address: to_arch_addr(addr),
+        vendor_id: 0,
+        device_id: 0,
+        class_code: 0,
+        subclass: 0,
+        prog_if: 0,
+        revision: 0,
+        header_type: 0,
+        interrupt_line: 0,
+        interrupt_pin: 0,
+    }
+}
+
 /// Performs the cfg read operation.
 fn cfg_read(addr: PciAddress, offset: u8, width: u8) -> Option<u32> {
-    let bytes = open_read_all(&cfg_path(addr, offset, width))?;
-    let text = core::str::from_utf8(&bytes).ok()?.trim();
-    let hex = text.strip_prefix("0x")?;
-    u32::from_str_radix(hex, 16).ok()
+    if let Some(bytes) = open_read_all(&cfg_path(addr, offset, width)) {
+        let text = core::str::from_utf8(&bytes).ok()?.trim();
+        let hex = text.strip_prefix("0x")?;
+        return u32::from_str_radix(hex, 16).ok();
+    }
+
+    // Early boot fallback when /bus/pci is not available yet.
+    let dev = arch_dev_handle(addr);
+    Some(match width {
+        1 => dev.read_config_u8(offset) as u32,
+        2 => dev.read_config_u16(offset) as u32,
+        4 => dev.read_config_u32(offset),
+        _ => return None,
+    })
 }
 
 /// Performs the cfg write operation.
 fn cfg_write(addr: PciAddress, offset: u8, width: u8, value: u32) -> bool {
-    open_write(&cfg_path(addr, offset, width), &value.to_le_bytes())
+    if open_write(&cfg_path(addr, offset, width), &value.to_le_bytes()) {
+        return true;
+    }
+
+    // Early boot fallback when /bus/pci is not available yet.
+    let dev = arch_dev_handle(addr);
+    match width {
+        1 => dev.write_config_u8(offset, value as u8),
+        2 => dev.write_config_u16(offset, value as u16),
+        4 => dev.write_config_u32(offset, value),
+        _ => return false,
+    }
+    true
 }
 
 impl PciDevice {
@@ -315,10 +359,27 @@ impl PciDevice {
 
 /// Performs the all devices operation.
 pub fn all_devices() -> Vec<PciDevice> {
-    // Blocking startup contract:
-    // this strict client only uses /bus/pci/inventory.
-    // If strate-bus is not started yet, enumeration is empty by design.
-    all_devices_from_bus_service()
+    let from_bus = all_devices_from_bus_service();
+    if !from_bus.is_empty() {
+        return from_bus;
+    }
+
+    // Early boot fallback when /bus/pci/inventory is not ready yet.
+    arch_pci::all_devices()
+        .into_iter()
+        .map(|d| PciDevice {
+            address: PciAddress::new(d.address.bus, d.address.device, d.address.function),
+            vendor_id: d.vendor_id,
+            device_id: d.device_id,
+            class_code: d.class_code,
+            subclass: d.subclass,
+            prog_if: d.prog_if,
+            revision: d.revision,
+            header_type: d.header_type,
+            interrupt_line: d.interrupt_line,
+            interrupt_pin: d.interrupt_pin,
+        })
+        .collect()
 }
 
 /// Performs the find device operation.
@@ -370,4 +431,5 @@ pub fn probe_first(criteria: ProbeCriteria) -> Option<PciDevice> {
 /// Performs the invalidate cache operation.
 pub fn invalidate_cache() {
     let _ = open_write("/bus/pci/rescan", &[1, 0, 0, 0]);
+    arch_pci::invalidate_cache();
 }

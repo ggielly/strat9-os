@@ -483,6 +483,8 @@ impl Task {
         let context = CpuContext::new(entry_point as *const () as u64, &kernel_stack);
         let id = TaskId::new();
         let (pid, tid, tgid) = Self::allocate_process_ids();
+        let fpu_state = ExtendedState::new();
+        let xcr0_mask = fpu_state.xcr0_mask;
 
         log::debug!(
             "[task][create] name={} id={} pid={} tid={} kstack={:?} kstack_kib={}",
@@ -526,8 +528,8 @@ impl Task {
             vruntime: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
             user_fs_base: AtomicU64::new(0),
-            fpu_state: SyncUnsafeCell::new(ExtendedState::new()),
-            xcr0_mask: AtomicU64::new(crate::arch::x86_64::cpuid::host_default_xcr0()),
+            fpu_state: SyncUnsafeCell::new(fpu_state),
+            xcr0_mask: AtomicU64::new(xcr0_mask),
         }))
     }
 
@@ -544,6 +546,8 @@ impl Task {
         let context = CpuContext::new(entry_point, &kernel_stack);
         let id = TaskId::new();
         let (pid, tid, tgid) = Self::allocate_process_ids();
+        let fpu_state = ExtendedState::new();
+        let xcr0_mask = fpu_state.xcr0_mask;
 
         log::debug!(
             "[task][create] name={} id={} pid={} tid={} user_as_cr3={:#x}",
@@ -586,8 +590,8 @@ impl Task {
             vruntime: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
             user_fs_base: AtomicU64::new(0),
-            fpu_state: SyncUnsafeCell::new(ExtendedState::new()),
-            xcr0_mask: AtomicU64::new(crate::arch::x86_64::cpuid::host_default_xcr0()),
+            fpu_state: SyncUnsafeCell::new(fpu_state),
+            xcr0_mask: AtomicU64::new(xcr0_mask),
         }))
     }
 
@@ -627,22 +631,16 @@ impl Task {
 /// # Safety
 /// Caller must ensure all pointers in `target` are valid and interrupts are disabled.
 pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) {
-    if crate::arch::x86_64::cpuid::host_uses_xsave() {
-        switch_context_xsave(
-            target.old_rsp_ptr,
-            target.new_rsp_ptr,
-            target.old_fpu_ptr,
-            target.new_fpu_ptr,
-            target.new_xcr0,
-        );
-    } else {
-        switch_context_fxsave(
-            target.old_rsp_ptr,
-            target.new_rsp_ptr,
-            target.old_fpu_ptr,
-            target.new_fpu_ptr,
-        );
-    }
+    // Temporary safety mode: force legacy FXSAVE/FXRSTOR path.
+    // This avoids XSAVE/XRSTOR state-size mismatches that can corrupt task memory.
+    let _ = target.old_xcr0;
+    let _ = target.new_xcr0;
+    switch_context_fxsave(
+        target.old_rsp_ptr,
+        target.new_rsp_ptr,
+        target.old_fpu_ptr,
+        target.new_fpu_ptr,
+    );
 }
 
 /// First-task restore dispatcher. Like `do_switch_context` but without
@@ -655,11 +653,8 @@ pub(super) unsafe fn do_restore_first_task(
     fpu_ptr: *const u8,
     xcr0: u64,
 ) -> ! {
-    if crate::arch::x86_64::cpuid::host_uses_xsave() {
-        restore_first_task_xsave(rsp_ptr, fpu_ptr, xcr0);
-    } else {
-        restore_first_task_fxsave(rsp_ptr, fpu_ptr);
-    }
+    let _ = xcr0;
+    restore_first_task_fxsave(rsp_ptr, fpu_ptr);
 }
 
 // ── FXSAVE path (legacy, no XSAVE support) ──
@@ -714,7 +709,7 @@ unsafe extern "C" fn restore_first_task_fxsave(
 
 // ── XSAVE path (with XCR0 switching per-silo) ──
 
-/// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu, r8=new_xcr0
+/// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu, r8=new_xcr0, r9=old_xcr0
 #[unsafe(naked)]
 unsafe extern "C" fn switch_context_xsave(
     _old_rsp_ptr: *mut u64,
@@ -722,11 +717,22 @@ unsafe extern "C" fn switch_context_xsave(
     _old_fpu_ptr: *mut u8,
     _new_fpu_ptr: *const u8,
     _new_xcr0: u64,
+    _old_xcr0: u64,
 ) {
     core::arch::naked_asm!(
         "mov r10, rdx",
-        "mov eax, 0xFFFFFFFF",
-        "mov edx, 0xFFFFFFFF",
+        "mov r11, r8",
+        "test r11, r11",
+        "jnz 10f",
+        "mov r11, 3",
+        "10:",
+        "test r9, r9",
+        "jnz 11f",
+        "mov r9, 3",
+        "11:",
+        "mov eax, r9d",
+        "shr r9, 32",
+        "mov edx, r9d",
         "xsave [r10]",
         "push rbx",
         "push rbp",
@@ -742,18 +748,18 @@ unsafe extern "C" fn switch_context_xsave(
         "pop r12",
         "pop rbp",
         "pop rbx",
-        "test r8, r8",
-        "jz 2f",
         "push rcx",
         "mov ecx, 0",
-        "mov eax, r8d",
+        "mov eax, r11d",
+        "mov r8, r11",
         "shr r8, 32",
         "mov edx, r8d",
         "xsetbv",
         "pop rcx",
-        "2:",
-        "mov eax, 0xFFFFFFFF",
-        "mov edx, 0xFFFFFFFF",
+        "mov eax, r11d",
+        "mov r8, r11",
+        "shr r8, 32",
+        "mov edx, r8d",
         "xrstor [rcx]",
         "ret",
     );
@@ -774,17 +780,22 @@ unsafe extern "C" fn restore_first_task_xsave(
         "pop r12",
         "pop rbp",
         "pop rbx",
-        "test rdx, rdx",
-        "jz 2f",
+        "mov r8, rdx",
+        "test r8, r8",
+        "jnz 10f",
+        "mov r8, 3",
+        "10:",
+        "mov r9, r8",
         "push rsi",
         "mov ecx, 0",
-        "mov eax, edx",
-        "shr rdx, 32",
+        "mov eax, r8d",
+        "shr r8, 32",
+        "mov edx, r8d",
         "xsetbv",
         "pop rsi",
-        "2:",
-        "mov eax, 0xFFFFFFFF",
-        "mov edx, 0xFFFFFFFF",
+        "mov eax, r9d",
+        "shr r9, 32",
+        "mov edx, r9d",
         "xrstor [rsi]",
         "ret",
     );

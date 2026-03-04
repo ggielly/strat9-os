@@ -1359,7 +1359,10 @@ pub fn kernel_spawn_strate(
         let silo = mgr.get_mut(silo_id)?;
         silo.tasks.push(task_id);
         silo.state = SiloState::Running;
-        task.xcr0_mask.store(silo.config.xcr0_mask, core::sync::atomic::Ordering::Relaxed);
+        let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
+        let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
+        task.xcr0_mask
+            .store(effective_xcr0, core::sync::atomic::Ordering::Relaxed);
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
@@ -2057,7 +2060,10 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         };
         silo.tasks.push(task_id);
         silo.state = SiloState::Running;
-        task.xcr0_mask.store(silo.config.xcr0_mask, core::sync::atomic::Ordering::Relaxed);
+        let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
+        let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
+        task.xcr0_mask
+            .store(effective_xcr0, core::sync::atomic::Ordering::Relaxed);
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {

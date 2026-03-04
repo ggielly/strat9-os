@@ -414,6 +414,7 @@ impl Scheduler {
             new_rsp_ptr: unsafe { &raw const (*next.context.get()).saved_rsp },
             old_fpu_ptr: current.fpu_state.get() as *mut u8,
             new_fpu_ptr: next.fpu_state.get() as *const u8,
+            old_xcr0: current.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
             new_xcr0: next.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
         })
     }

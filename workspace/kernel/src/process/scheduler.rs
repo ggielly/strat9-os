@@ -293,6 +293,7 @@ pub(super) struct SwitchTarget {
     pub(super) new_rsp_ptr: *const u64,
     pub(super) old_fpu_ptr: *mut u8,
     pub(super) new_fpu_ptr: *const u8,
+    pub(super) old_xcr0: u64,
     pub(super) new_xcr0: u64,
 }
 

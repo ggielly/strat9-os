@@ -118,6 +118,8 @@ pub fn create_user_test_task() {
 
     let context = CpuContext::new(ring3_trampoline as *const () as u64, &kernel_stack);
     let (pid, tid, tgid) = Task::allocate_process_ids();
+    let fpu_state = crate::process::task::ExtendedState::new();
+    let xcr0_mask = fpu_state.xcr0_mask;
 
     let task = Arc::new(Task {
         id: crate::process::TaskId::new(),
@@ -155,8 +157,8 @@ pub fn create_user_test_task() {
         vruntime: core::sync::atomic::AtomicU64::new(0),
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
         user_fs_base: core::sync::atomic::AtomicU64::new(0),
-        fpu_state: crate::process::task::SyncUnsafeCell::new(crate::process::task::ExtendedState::new()),
-        xcr0_mask: core::sync::atomic::AtomicU64::new(crate::arch::x86_64::cpuid::host_default_xcr0()),
+        fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
+        xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
     });
 
     crate::process::add_task(task);
