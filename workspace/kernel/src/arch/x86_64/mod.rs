@@ -199,7 +199,6 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
             inout("ecx") sub_leaf => ecx,
             ebx_out = out(reg) ebx,
             out("edx") edx,
-            options(nostack)
         );
     }
     (eax, ebx, ecx, edx)

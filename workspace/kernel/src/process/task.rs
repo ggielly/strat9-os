@@ -660,7 +660,6 @@ pub(super) unsafe fn do_restore_first_task(
     } else {
         restore_first_task_fxsave(rsp_ptr, fpu_ptr);
     }
-    core::hint::unreachable_unchecked()
 }
 
 // ── FXSAVE path (legacy, no XSAVE support) ──
@@ -699,7 +698,7 @@ unsafe extern "C" fn switch_context_fxsave(
 unsafe extern "C" fn restore_first_task_fxsave(
     _rsp_ptr: *const u64,
     _fpu_ptr: *const u8,
-) {
+) -> ! {
     core::arch::naked_asm!(
         "mov rsp, [rdi]",
         "pop r15",
@@ -766,7 +765,7 @@ unsafe extern "C" fn restore_first_task_xsave(
     _rsp_ptr: *const u64,
     _fpu_ptr: *const u8,
     _xcr0: u64,
-) {
+) -> ! {
     core::arch::naked_asm!(
         "mov rsp, [rdi]",
         "pop r15",
