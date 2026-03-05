@@ -4,8 +4,8 @@ use alloc::string::String;
 /// NTP time synchronization stub.
 ///
 /// Attempts to query an NTP server via `/net/ntp/<server>`. Currently
-/// a stub that reports the kernel's internal clock until UDP support
-/// is available in the network strate.
+/// a stub that reports the kernel's internal clock until the `/net/ntp/*`
+/// endpoint is implemented in the network strate.
 pub fn cmd_ntpdate(args: &[String]) -> Result<(), ShellError> {
     let server = args.first().map(|s| s.as_str()).unwrap_or("pool.ntp.org");
     shell_println!("ntpdate: querying {}...", server);
@@ -24,9 +24,9 @@ pub fn cmd_ntpdate(args: &[String]) -> Result<(), ShellError> {
             }
         }
         Err(_) => {
-            // TODO: implement when UDP socket support is available
+            // TODO: implement /net/ntp/<server> endpoint in network strate
             let ns = crate::syscall::time::current_time_ns();
-            shell_println!("  NTP unavailable (no UDP), showing kernel clock:");
+            shell_println!("  NTP unavailable (/net/ntp endpoint missing), showing kernel clock:");
             shell_println!("  {}ns since boot", ns);
         }
     }

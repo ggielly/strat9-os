@@ -39,8 +39,8 @@ pub fn cmd_nslookup(args: &[String]) -> Result<(), ShellError> {
             }
         }
         Err(_) => {
-            // TODO: implement raw UDP DNS query when UDP sockets are available
-            shell_println!("** DNS resolution not yet available (no UDP socket support)");
+            // TODO: optional fallback resolver if /net/resolve is unavailable
+            shell_println!("** DNS resolution unavailable in /net scheme");
             shell_println!("   Configured nameserver(s): {}", dns);
         }
     }

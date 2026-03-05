@@ -30,6 +30,7 @@ members = [
     "workspace/components/netutils/dhcp-client",
     "workspace/components/netutils/ping",
     "workspace/components/netutils/telnetd",
+    "workspace/components/netutils/udp-tool",
     "workspace/components/strate-web-admin",
 ]
 exclude = [
