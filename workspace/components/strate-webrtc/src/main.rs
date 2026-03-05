@@ -97,10 +97,22 @@ struct Session {
     last_input: [u8; 24],
     last_input_len: u8,
     last_frame_seq: u64,
+    udp_rx_fd: Option<usize>,
+    udp_tx_fd: Option<usize>,
+    udp_local_port: u16,
 }
 
 impl Session {
-    fn new(id: u64, silo_id: u32, token: u64, flags: u64, ttl_sec: u32, now_ns: u64) -> Self {
+    fn new(
+        id: u64,
+        silo_id: u32,
+        token: u64,
+        flags: u64,
+        ttl_sec: u32,
+        now_ns: u64,
+        udp_local_port: u16,
+        udp_rx_fd: Option<usize>,
+    ) -> Self {
         Self {
             id,
             silo_id,
@@ -115,6 +127,9 @@ impl Session {
             last_input: [0u8; 24],
             last_input_len: 0,
             last_frame_seq: 0,
+            udp_rx_fd,
+            udp_tx_fd: None,
+            udp_local_port,
         }
     }
 
@@ -265,8 +280,88 @@ fn cleanup_expired(rt: &mut Runtime, now: u64) {
         }
     }
     for id in expired {
-        let _ = rt.sessions.remove(&id);
+        if let Some(mut s) = rt.sessions.remove(&id) {
+            if let Some(fd) = s.udp_rx_fd.take() {
+                let _ = call::close(fd);
+            }
+            if let Some(fd) = s.udp_tx_fd.take() {
+                let _ = call::close(fd);
+            }
+        }
     }
+}
+
+fn parse_ipv4_addr(s: &str) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut idx = 0usize;
+    let mut val: u16 = 0;
+    let mut has = false;
+    for &b in s.as_bytes() {
+        if b == b'.' {
+            if !has || idx >= 3 || val > 255 {
+                return None;
+            }
+            out[idx] = val as u8;
+            idx += 1;
+            val = 0;
+            has = false;
+            continue;
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        val = val * 10 + (b - b'0') as u16;
+        has = true;
+    }
+    if !has || idx != 3 || val > 255 {
+        return None;
+    }
+    out[3] = val as u8;
+    Some(out)
+}
+
+fn read_local_ipv4() -> Option<[u8; 4]> {
+    let text = read_text_file("/net/address")?;
+    let first = text.lines().next()?.trim();
+    let ip_only = first.split('/').next().unwrap_or(first).trim();
+    parse_ipv4_addr(ip_only)
+}
+
+fn parse_endpoint_candidate(raw: &[u8]) -> Option<([u8; 4], u16)> {
+    let s = core::str::from_utf8(raw).ok()?.trim();
+    let s = if let Some(rest) = s.strip_prefix("udp4:") {
+        rest
+    } else {
+        s
+    };
+    let (ip_s, port_s) = s.rsplit_once(':')?;
+    let ip = parse_ipv4_addr(ip_s.trim())?;
+    let port = port_s.trim().parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+    Some((ip, port))
+}
+
+fn encode_endpoint_candidate(ip: [u8; 4], port: u16, out: &mut [u8; 38]) -> usize {
+    let s = format!("udp4:{}.{}.{}.{}:{}", ip[0], ip[1], ip[2], ip[3], port);
+    let b = s.as_bytes();
+    let n = core::cmp::min(b.len(), out.len());
+    out[..n].copy_from_slice(&b[..n]);
+    n
+}
+
+fn open_udp_bind(local_port: u16) -> Option<usize> {
+    let path = format!("/net/udp/bind/{}", local_port);
+    call::openat(0, &path, 0x3, 0).ok().map(|fd| fd as usize)
+}
+
+fn open_udp_connect(ip: [u8; 4], port: u16) -> Option<usize> {
+    let path = format!(
+        "/net/udp/connect/{}.{}.{}.{}/{}",
+        ip[0], ip[1], ip[2], ip[3], port
+    );
+    call::openat(0, &path, 0x3, 0).ok().map(|fd| fd as usize)
 }
 
 fn send_response(sender: u64, status: u32, fill: impl FnOnce(&mut IpcMessage)) {
@@ -314,9 +409,39 @@ pub unsafe extern "C" fn _start() -> ! {
 
     loop {
         cleanup_expired(&mut rt, now_ns());
+        for s in rt.sessions.values_mut() {
+            let Some(fd) = s.udp_rx_fd else {
+                continue;
+            };
+            let mut buf = [0u8; 64];
+            if let Ok(n) = call::read(fd, &mut buf) {
+                if n >= 6 {
+                    if s.udp_tx_fd.is_none() {
+                        let src_ip = [buf[0], buf[1], buf[2], buf[3]];
+                        let src_port = u16::from_be_bytes([buf[4], buf[5]]);
+                        s.udp_tx_fd = open_udp_connect(src_ip, src_port);
+                        let mut cand = Candidate {
+                            direction: 2,
+                            data: [0u8; 38],
+                            len: 0,
+                        };
+                        let clen = encode_endpoint_candidate(src_ip, src_port, &mut cand.data);
+                        cand.len = clen as u8;
+                        if s.candidates.len() >= MAX_CANDIDATES {
+                            let _ = s.candidates.pop_front();
+                        }
+                        s.candidates.push_back(cand);
+                    }
+                    let m = core::cmp::min(n.saturating_sub(6), 24);
+                    s.last_input[..m].copy_from_slice(&buf[6..6 + m]);
+                    s.last_input_len = m as u8;
+                    s.last_frame_seq = s.last_frame_seq.wrapping_add(1);
+                }
+            }
+        }
 
         let mut msg = IpcMessage::new(0);
-        if call::ipc_recv(port_h, &mut msg).is_err() {
+        if call::ipc_try_recv(port_h, &mut msg).is_err() {
             let _ = call::sched_yield();
             continue;
         }
@@ -360,8 +485,29 @@ pub unsafe extern "C" fn _start() -> ! {
                     flags |= SILO_FLAG_GRAPHICS_READ_ONLY;
                 }
                 let token = derive_token(id, sid, t);
-                rt.sessions
-                    .insert(id, Session::new(id, sid, token, flags, policy.ttl_sec, t));
+                let local_port = 40_000u16.saturating_add((id as u16) & 0x1FFF);
+                let udp_rx_fd = open_udp_bind(local_port);
+                let mut sess = Session::new(
+                    id,
+                    sid,
+                    token,
+                    flags,
+                    policy.ttl_sec,
+                    t,
+                    local_port,
+                    udp_rx_fd,
+                );
+                if let Some(ip) = read_local_ipv4() {
+                    let mut cand = Candidate {
+                        direction: 0,
+                        data: [0u8; 38],
+                        len: 0,
+                    };
+                    let clen = encode_endpoint_candidate(ip, local_port, &mut cand.data);
+                    cand.len = clen as u8;
+                    sess.candidates.push_back(cand);
+                }
+                rt.sessions.insert(id, sess);
 
                 send_response(msg.sender, RESP_OK, |out| {
                     out.payload[4..12].copy_from_slice(&id.to_le_bytes());
@@ -374,7 +520,13 @@ pub unsafe extern "C" fn _start() -> ! {
                     send_response(msg.sender, RESP_BAD_REQ, |_| {});
                     continue;
                 };
-                if rt.sessions.remove(&id).is_some() {
+                if let Some(mut s) = rt.sessions.remove(&id) {
+                    if let Some(fd) = s.udp_rx_fd.take() {
+                        let _ = call::close(fd);
+                    }
+                    if let Some(fd) = s.udp_tx_fd.take() {
+                        let _ = call::close(fd);
+                    }
                     send_response(msg.sender, RESP_OK, |_| {});
                 } else {
                     send_response(msg.sender, RESP_NOT_FOUND, |_| {});
@@ -464,6 +616,12 @@ pub unsafe extern "C" fn _start() -> ! {
                 };
                 c.data[..len].copy_from_slice(&msg.payload[10..10 + len]);
                 s.candidates.push_back(c);
+                if let Some((ip, port)) = parse_endpoint_candidate(&msg.payload[10..10 + len]) {
+                    if let Some(old) = s.udp_tx_fd.take() {
+                        let _ = call::close(old);
+                    }
+                    s.udp_tx_fd = open_udp_connect(ip, port);
+                }
                 send_response(msg.sender, RESP_OK, |_| {});
             }
             OP_SESSION_POP_CANDIDATE => {
@@ -510,6 +668,10 @@ pub unsafe extern "C" fn _start() -> ! {
                     continue;
                 };
                 s.last_frame_seq = s.last_frame_seq.wrapping_add(1);
+                let n = core::cmp::min(msg.payload[8] as usize, 38);
+                if let Some(fd) = s.udp_tx_fd {
+                    let _ = call::write(fd, &msg.payload[9..9 + n]);
+                }
                 send_response(msg.sender, RESP_OK, |out| {
                     out.payload[4..12].copy_from_slice(&s.last_frame_seq.to_le_bytes());
                 });
@@ -529,6 +691,9 @@ pub unsafe extern "C" fn _start() -> ! {
                     out.payload[16..24].copy_from_slice(&s.token.to_le_bytes());
                     out.payload[24..32].copy_from_slice(&s.flags.to_le_bytes());
                     out.payload[32..40].copy_from_slice(&s.expires_at_ns.to_le_bytes());
+                    out.payload[40..42].copy_from_slice(&s.udp_local_port.to_le_bytes());
+                    out.payload[42] = if s.udp_rx_fd.is_some() { 1 } else { 0 };
+                    out.payload[43] = if s.udp_tx_fd.is_some() { 1 } else { 0 };
                 });
             }
             _ => send_response(msg.sender, RESP_BAD_REQ, |_| {}),
