@@ -434,12 +434,15 @@ struct PendingPing {
 struct TcpListenerState {
     socket: SocketHandle,
     port: u16,
+    auto_relisten: bool,
 }
 
 /// State for an outgoing TCP connection (`tcp/connect/<ip>/<port>`).
 #[derive(Copy, Clone)]
 struct TcpConnState {
     socket: SocketHandle,
+    local_port: u16,
+    remote: IpEndpoint,
 }
 
 /// State for a UDP scheme handle bound on a local port (`udp/bind/<port>`).
@@ -563,6 +566,23 @@ impl NetworkStrate {
             return Err(-98); // EADDRINUSE
         }
         Ok(self.sockets.add(socket))
+    }
+
+    /// Returns a textual name for a TCP state.
+    fn tcp_state_name(state: tcp::State) -> &'static str {
+        match state {
+            tcp::State::Closed => "CLOSED",
+            tcp::State::Listen => "LISTEN",
+            tcp::State::SynSent => "SYN-SENT",
+            tcp::State::SynReceived => "SYN-RECEIVED",
+            tcp::State::Established => "ESTABLISHED",
+            tcp::State::FinWait1 => "FIN-WAIT-1",
+            tcp::State::FinWait2 => "FIN-WAIT-2",
+            tcp::State::CloseWait => "CLOSE-WAIT",
+            tcp::State::Closing => "CLOSING",
+            tcp::State::LastAck => "LAST-ACK",
+            tcp::State::TimeWait => "TIME-WAIT",
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -849,7 +869,8 @@ impl NetworkStrate {
                 reply_open(msg.sender, fid, u64::MAX, 1)
             }
             "ip" | "address" | "prefix" | "netmask" | "broadcast" | "gateway" | "route"
-            | "routes" | "dns" | "resolve" | "ping" | "tcp" | "udp" | "dhcp" => {
+            | "routes" | "dns" | "resolve" | "ping" | "tcp" | "tcp/listeners"
+            | "tcp/connections" | "tcp/stats" | "udp" | "dhcp" => {
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
@@ -869,8 +890,8 @@ impl NetworkStrate {
             }
             p if p.starts_with("tcp/connect/") => {
                 let rest = &p[12..];
-                let parts: alloc::vec::Vec<&str> = rest.splitn(2, '/').collect();
-                if parts.len() != 2 {
+                let parts: alloc::vec::Vec<&str> = rest.split('/').collect();
+                if parts.len() < 2 || parts.len() > 3 {
                     return IpcMessage::error_reply(msg.sender, -22);
                 }
                 let Some(ip) = parse_ipv4(parts[0]) else {
@@ -879,13 +900,28 @@ impl NetworkStrate {
                 let Some(port) = parts[1].parse::<u16>().ok() else {
                     return IpcMessage::error_reply(msg.sender, -22);
                 };
+                if port == 0 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
 
                 let rx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
                 let tx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
                 let sock = tcp::Socket::new(rx_buf, tx_buf);
                 let handle = self.sockets.add(sock);
 
-                let local_port = 49152 + (self.next_fid as u16 % 16384);
+                let local_port = if parts.len() == 3 {
+                    let Some(lp) = parts[2].parse::<u16>().ok() else {
+                        self.sockets.remove(handle);
+                        return IpcMessage::error_reply(msg.sender, -22);
+                    };
+                    if lp == 0 {
+                        self.sockets.remove(handle);
+                        return IpcMessage::error_reply(msg.sender, -22);
+                    }
+                    lp
+                } else {
+                    49152 + (self.next_fid as u16 % 16384)
+                };
                 let remote = (smoltcp::wire::IpAddress::Ipv4(ip), port);
                 let conn_socket = self.sockets.get_mut::<tcp::Socket>(handle);
                 if conn_socket.connect(self.interface.context(), remote, local_port).is_err() {
@@ -895,7 +931,43 @@ impl NetworkStrate {
 
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
-                self.tcp_connections.insert(fid, TcpConnState { socket: handle });
+                self.tcp_connections.insert(
+                    fid,
+                    TcpConnState {
+                        socket: handle,
+                        local_port,
+                        remote: IpEndpoint::new(IpAddress::Ipv4(ip), port),
+                    },
+                );
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("tcp/listen-once/") => {
+                let port_str = &p[16..];
+                let Some(port) = port_str.parse::<u16>().ok() else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                if port == 0 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+
+                let rx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
+                let tx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
+                let mut sock = tcp::Socket::new(rx_buf, tx_buf);
+                if sock.listen(port).is_err() {
+                    return IpcMessage::error_reply(msg.sender, -98);
+                }
+                let socket = self.sockets.add(sock);
+
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                self.tcp_listeners.insert(
+                    fid,
+                    TcpListenerState {
+                        socket,
+                        port,
+                        auto_relisten: false,
+                    },
+                );
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
             p if p.starts_with("tcp/listen/") => {
@@ -917,8 +989,14 @@ impl NetworkStrate {
 
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
-                self.tcp_listeners
-                    .insert(fid, TcpListenerState { socket, port });
+                self.tcp_listeners.insert(
+                    fid,
+                    TcpListenerState {
+                        socket,
+                        port,
+                        auto_relisten: true,
+                    },
+                );
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
             p if p.starts_with("udp/bind/") => {
@@ -1038,7 +1116,11 @@ impl NetworkStrate {
     fn handle_tcp_read(&mut self, sender: u64, listener: TcpListenerState) -> IpcMessage {
         let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
         if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
-            let _ = socket.listen(listener.port);
+            if listener.auto_relisten {
+                let _ = socket.listen(listener.port);
+            } else {
+                return IpcMessage::error_reply(sender, -104);
+            }
         }
 
         let mut data = [0u8; 40];
@@ -1051,7 +1133,11 @@ impl NetworkStrate {
 
         if socket.is_open() && !socket.may_recv() && !socket.may_send() {
             socket.abort();
-            let _ = socket.listen(listener.port);
+            if listener.auto_relisten {
+                let _ = socket.listen(listener.port);
+            } else {
+                return IpcMessage::error_reply(sender, -104);
+            }
         }
         IpcMessage::error_reply(sender, -11)
     }
@@ -1060,7 +1146,11 @@ impl NetworkStrate {
     fn handle_tcp_write(&mut self, sender: u64, listener: TcpListenerState, msg: &IpcMessage) -> IpcMessage {
         let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
         if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
-            let _ = socket.listen(listener.port);
+            if listener.auto_relisten {
+                let _ = socket.listen(listener.port);
+            } else {
+                return IpcMessage::error_reply(sender, -104);
+            }
         }
 
         let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
@@ -1083,6 +1173,10 @@ impl NetworkStrate {
         if !socket.is_open() {
             return IpcMessage::error_reply(sender, -104); // ECONNRESET
         }
+        let state = socket.state();
+        if state == tcp::State::SynSent || state == tcp::State::SynReceived {
+            return IpcMessage::error_reply(sender, -115); // EINPROGRESS
+        }
         let mut data = [0u8; 40];
         if socket.can_recv() {
             match socket.recv_slice(&mut data) {
@@ -1099,6 +1193,10 @@ impl NetworkStrate {
         let socket = self.sockets.get_mut::<tcp::Socket>(conn.socket);
         if !socket.is_open() {
             return IpcMessage::error_reply(sender, -104);
+        }
+        let state = socket.state();
+        if state == tcp::State::SynSent || state == tcp::State::SynReceived {
+            return IpcMessage::error_reply(sender, -115); // EINPROGRESS
         }
         let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
         let data_len = core::cmp::min(data_len, msg.payload.len().saturating_sub(18));
@@ -1327,7 +1425,119 @@ impl NetworkStrate {
                 reply_read(msg.sender, &out[start..n])
             }
             "resolve" => reply_read(msg.sender, b"use /net/resolve/<hostname>\n"),
-            "tcp" => reply_read(msg.sender, b"use /net/tcp/listen/<port>\n"),
+            "tcp" => reply_read(
+                msg.sender,
+                b"use /net/tcp/listen/<port>, /net/tcp/listen-once/<port>, /net/tcp/connect/<ip>/<port>[/<local_port>], /net/tcp/listeners, /net/tcp/connections, /net/tcp/stats\n",
+            ),
+            "tcp/listeners" => {
+                use core::fmt::Write;
+                let mut out = [0u8; 512];
+                let n = {
+                    let mut w = BufWriter {
+                        buf: &mut out,
+                        pos: 0,
+                    };
+                    if self.tcp_listeners.is_empty() {
+                        let _ = write!(w, "none\n");
+                    } else {
+                        for (fid, listener) in self.tcp_listeners.iter() {
+                            let socket = self.sockets.get::<tcp::Socket>(listener.socket);
+                            let mode = if listener.auto_relisten { "auto" } else { "once" };
+                            let _ = write!(
+                                w,
+                                "fid={} port={} state={} mode={}\n",
+                                fid,
+                                listener.port,
+                                Self::tcp_state_name(socket.state()),
+                                mode
+                            );
+                        }
+                    }
+                    w.pos
+                };
+                let start = (offset as usize).min(n);
+                reply_read(msg.sender, &out[start..n])
+            }
+            "tcp/connections" => {
+                use core::fmt::Write;
+                let mut out = [0u8; 768];
+                let n = {
+                    let mut w = BufWriter {
+                        buf: &mut out,
+                        pos: 0,
+                    };
+                    if self.tcp_connections.is_empty() {
+                        let _ = write!(w, "none\n");
+                    } else {
+                        for (fid, conn) in self.tcp_connections.iter() {
+                            let socket = self.sockets.get::<tcp::Socket>(conn.socket);
+                            let local = socket.local_endpoint();
+                            let remote = socket.remote_endpoint();
+                            match (local, remote) {
+                                (Some(l), Some(r)) => {
+                                    let _ = write!(
+                                        w,
+                                        "fid={} local={} remote={} state={}\n",
+                                        fid,
+                                        l,
+                                        r,
+                                        Self::tcp_state_name(socket.state())
+                                    );
+                                }
+                                _ => {
+                                    let _ = write!(
+                                        w,
+                                        "fid={} local_port={} remote={} state={}\n",
+                                        fid,
+                                        conn.local_port,
+                                        conn.remote,
+                                        Self::tcp_state_name(socket.state())
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    w.pos
+                };
+                let start = (offset as usize).min(n);
+                reply_read(msg.sender, &out[start..n])
+            }
+            "tcp/stats" => {
+                use core::fmt::Write;
+                let mut out = [0u8; 256];
+                let n = {
+                    let mut w = BufWriter {
+                        buf: &mut out,
+                        pos: 0,
+                    };
+                    let listeners = self.tcp_listeners.len();
+                    let connections = self.tcp_connections.len();
+                    let mut established = 0usize;
+                    let mut connecting = 0usize;
+                    let mut closing = 0usize;
+                    for conn in self.tcp_connections.values() {
+                        let socket = self.sockets.get::<tcp::Socket>(conn.socket);
+                        match socket.state() {
+                            tcp::State::Established => established += 1,
+                            tcp::State::SynSent | tcp::State::SynReceived => connecting += 1,
+                            tcp::State::Closed => {}
+                            _ => closing += 1,
+                        }
+                    }
+                    let _ = write!(
+                        w,
+                        "listeners={}\nconnections={}\nestablished={}\nconnecting={}\nclosing={}\n",
+                        listeners,
+                        connections,
+                        established,
+                        connecting,
+                        closing
+                    );
+                    w.pos
+                };
+                let start = (offset as usize).min(n);
+                reply_read(msg.sender, &out[start..n])
+            }
             "udp" => reply_read(
                 msg.sender,
                 b"use /net/udp/bind/<port>, /net/udp/connect/<ip>/<port> or /net/udp/send/<ip>/<port>\n",
