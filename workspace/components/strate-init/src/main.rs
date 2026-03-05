@@ -161,6 +161,12 @@ struct SiloDef {
     sid: u32,
     family: String,
     mode: String,
+    graphics_enabled: bool,
+    graphics_mode: String,
+    graphics_read_only: bool,
+    graphics_max_sessions: u16,
+    graphics_session_ttl_sec: u32,
+    graphics_turn_policy: String,
     strates: Vec<StrateDef>,
 }
 
@@ -201,6 +207,12 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
                 sid: 42,
                 family: String::from("USR"),
                 mode: String::from("000"),
+                graphics_enabled: false,
+                graphics_mode: String::new(),
+                graphics_read_only: false,
+                graphics_max_sessions: 0,
+                graphics_session_ttl_sec: 0,
+                graphics_turn_policy: String::from("auto"),
                 strates: Vec::new(),
             });
             section = Section::Silo;
@@ -226,6 +238,14 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
                         "sid" => s.sid = val.parse().unwrap_or(42),
                         "family" => s.family = String::from(val),
                         "mode" => s.mode = String::from(val),
+                        "graphics_enabled" => s.graphics_enabled = parse_toml_bool(val),
+                        "graphics_mode" => s.graphics_mode = String::from(val),
+                        "graphics_read_only" => s.graphics_read_only = parse_toml_bool(val),
+                        "graphics_max_sessions" => s.graphics_max_sessions = val.parse().unwrap_or(0),
+                        "graphics_session_ttl_sec" => {
+                            s.graphics_session_ttl_sec = val.parse().unwrap_or(0)
+                        }
+                        "graphics_turn_policy" => s.graphics_turn_policy = String::from(val),
                         _ => {}
                     },
                     Section::Strate => {
@@ -265,6 +285,12 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             sid: 42,
             family: String::from("DRV"),
             mode: String::from("076"),
+            graphics_enabled: false,
+            graphics_mode: String::new(),
+            graphics_read_only: false,
+            graphics_max_sessions: 0,
+            graphics_session_ttl_sec: 0,
+            graphics_turn_policy: String::from("auto"),
             strates: alloc::vec![StrateDef {
                 name: String::from("strate-bus"),
                 binary: String::from("/initfs/strate-bus"),
@@ -281,6 +307,12 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             sid: 42,
             family: String::from("NET"),
             mode: String::from("076"),
+            graphics_enabled: false,
+            graphics_mode: String::new(),
+            graphics_read_only: false,
+            graphics_max_sessions: 0,
+            graphics_session_ttl_sec: 0,
+            graphics_turn_policy: String::from("auto"),
             strates: alloc::vec![StrateDef {
                 name: String::from("strate-net"),
                 binary: String::from("/initfs/strate-net"),
@@ -297,6 +329,12 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             sid: 42,
             family: String::from("NET"),
             mode: String::from("076"),
+            graphics_enabled: false,
+            graphics_mode: String::new(),
+            graphics_read_only: false,
+            graphics_max_sessions: 0,
+            graphics_session_ttl_sec: 0,
+            graphics_turn_policy: String::from("auto"),
             strates: alloc::vec![StrateDef {
                 name: String::from("dhcp-client"),
                 binary: String::from("/initfs/bin/dhcp-client"),
@@ -409,6 +447,12 @@ struct SiloConfig {
     sid: u32,
     mode: u16,
     family: u8,
+    cpu_features_required: u64,
+    cpu_features_allowed: u64,
+    xcr0_mask: u64,
+    graphics_max_sessions: u16,
+    graphics_session_ttl_sec: u32,
+    graphics_reserved: u16,
 }
 
 impl SiloConfig {
@@ -430,9 +474,20 @@ impl SiloConfig {
             sid,
             mode,
             family,
+            cpu_features_required: 0,
+            cpu_features_allowed: u64::MAX,
+            xcr0_mask: 0,
+            graphics_max_sessions: 0,
+            graphics_session_ttl_sec: 0,
+            graphics_reserved: 0,
         }
     }
 }
+
+const SILO_FLAG_GRAPHICS: u64 = 1 << 1;
+const SILO_FLAG_WEBRTC_NATIVE: u64 = 1 << 2;
+const SILO_FLAG_GRAPHICS_READ_ONLY: u64 = 1 << 3;
+const SILO_FLAG_WEBRTC_TURN_FORCE: u64 = 1 << 4;
 
 /// Implements family to id.
 fn family_to_id(name: &str) -> Option<u8> {
@@ -455,6 +510,10 @@ fn parse_mode_octal(s: &str) -> Option<u16> {
         s
     };
     u16::from_str_radix(trimmed, 8).ok()
+}
+
+fn parse_toml_bool(s: &str) -> bool {
+    matches!(s, "true" | "True" | "TRUE" | "1" | "yes" | "on")
 }
 
 /// Implements log u32.
@@ -576,7 +635,39 @@ fn boot_silos(silos: Vec<SiloDef>) {
             s_def.name, final_sid
         ));
 
-        let config = SiloConfig::new(final_sid, requested_mode, family_id, 0);
+        let mut flags = 0u64;
+        let graphics_mode = s_def.graphics_mode.as_str();
+        if s_def.graphics_enabled {
+            flags |= SILO_FLAG_GRAPHICS;
+            if graphics_mode == "webrtc-native" {
+                flags |= SILO_FLAG_WEBRTC_NATIVE;
+            }
+            if s_def.graphics_read_only {
+                flags |= SILO_FLAG_GRAPHICS_READ_ONLY;
+            }
+            if s_def.graphics_turn_policy == "force" {
+                flags |= SILO_FLAG_WEBRTC_TURN_FORCE;
+            }
+        }
+        let mut config = SiloConfig::new(final_sid, requested_mode, family_id, flags);
+        config.graphics_max_sessions = if s_def.graphics_enabled {
+            if s_def.graphics_max_sessions == 0 {
+                1
+            } else {
+                s_def.graphics_max_sessions
+            }
+        } else {
+            0
+        };
+        config.graphics_session_ttl_sec = if s_def.graphics_enabled {
+            if s_def.graphics_session_ttl_sec == 0 {
+                1800
+            } else {
+                s_def.graphics_session_ttl_sec
+            }
+        } else {
+            0
+        };
 
         let silo_handle = match call::silo_create((&config as *const SiloConfig) as usize) {
             Ok(h) => h,
