@@ -204,28 +204,25 @@ impl AddressSpace {
                     let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
                     // SAFETY: new_l4_virt is the freshly allocated user PML4.
                     let l4 = unsafe { &mut *new_l4_virt.as_mut_ptr::<PageTable>() };
-                    let mut mapper =
-                        unsafe { OffsetPageTable::new(l4, phys_offset) };
+                    let mut mapper = unsafe { OffsetPageTable::new(l4, phys_offset) };
                     let mut buddy = crate::memory::paging::BuddyFrameAllocator;
                     let mmio_flags = PageTableFlags::PRESENT
                         | PageTableFlags::WRITABLE
                         | PageTableFlags::NO_CACHE;
-                    let lapic_page = Page::<Size4KiB>::containing_address(
-                        VirtAddr::new(lapic_virt),
-                    );
-                    let lapic_frame = X86PhysFrame::<Size4KiB>::containing_address(
-                        PhysAddr::new(lapic_phys),
-                    );
+                    let lapic_page =
+                        Page::<Size4KiB>::containing_address(VirtAddr::new(lapic_virt));
+                    let lapic_frame =
+                        X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(lapic_phys));
                     // Use map_to_with_table_flags to avoid USER_ACCESSIBLE on
                     // intermediate tables so user code cannot reach LAPIC MMIO.
-                    match unsafe {
-                        mapper.map_to(lapic_page, lapic_frame, mmio_flags, &mut buddy)
-                    } {
+                    match unsafe { mapper.map_to(lapic_page, lapic_frame, mmio_flags, &mut buddy) }
+                    {
                         Ok(flush) => flush.flush(),
                         Err(e) => {
                             crate::serial_println!(
                                 "[as] WARN: failed to map LAPIC ({:#x}) in user AS: {:?}",
-                                lapic_phys, e
+                                lapic_phys,
+                                e
                             );
                         }
                     }

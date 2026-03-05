@@ -136,18 +136,6 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
                 let strong = Arc::strong_count(arc);
                 let state = unsafe { *arc.state.get() };
                 let caller = core::panic::Location::caller();
-                log::trace!(
-                    "[sched] current_task_clone cpu={} ptr={:p} strong={} task_id={} pid={} tid={} state={:?} caller={}:{}",
-                    cpu_index,
-                    Arc::as_ptr(arc),
-                    strong,
-                    arc.id.as_u64(),
-                    arc.pid,
-                    arc.tid,
-                    state,
-                    caller.file(),
-                    caller.line(),
-                );
                 // Treat insane refcounts as corruption and fall back to idle.
                 if strong == 0 || strong > (isize::MAX as usize) / 2 {
                     let ptr = Arc::as_ptr(arc) as *const u8;
@@ -193,18 +181,6 @@ pub fn current_task_clone_try() -> Option<Arc<Task>> {
                 let strong = Arc::strong_count(arc);
                 let state = unsafe { *arc.state.get() };
                 let caller = core::panic::Location::caller();
-                log::trace!(
-                    "[sched] current_task_clone_try cpu={} ptr={:p} strong={} task_id={} pid={} tid={} state={:?} caller={}:{}",
-                    cpu_index,
-                    Arc::as_ptr(arc),
-                    strong,
-                    arc.id.as_u64(),
-                    arc.pid,
-                    arc.tid,
-                    state,
-                    caller.file(),
-                    caller.line(),
-                );
                 if strong == 0 || strong > (isize::MAX as usize) / 2 {
                     log::error!(
                         "[sched] CORRUPT Arc refcount in current_task_try! cpu={} strong={:#x} data_ptr={:p} task_id={} pid={} tid={} state={:?} caller={}:{}",

@@ -170,16 +170,20 @@ extern "x86-interrupt" fn page_fault_handler(
     let user_rsp = stack_frame.stack_pointer.as_u64();
 
     let mut trace_ctx = crate::trace::TraceTaskCtx::empty();
-    if is_user {
-        if let Some(task) = crate::process::current_task_clone() {
-            let as_ref = unsafe { &*task.process.address_space.get() };
-            trace_ctx = crate::trace::TraceTaskCtx {
-                task_id: task.id.as_u64(),
-                pid: task.pid,
-                tid: task.tid,
-                cr3: as_ref.cr3().as_u64(),
-            };
-        }
+    let task = if is_user {
+        crate::process::scheduler::current_task_clone()
+    } else {
+        crate::process::scheduler::current_task_clone_try()
+    };
+
+    if let Some(ref t) = task {
+        let as_ref = unsafe { &*t.process.address_space.get() };
+        trace_ctx = crate::trace::TraceTaskCtx {
+            task_id: t.id.as_u64(),
+            pid: t.pid,
+            tid: t.tid,
+            cr3: as_ref.cr3().as_u64(),
+        };
     }
 
     let do_pf_trace = if is_user {
@@ -210,8 +214,8 @@ extern "x86-interrupt" fn page_fault_handler(
         && error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
         && is_user
     {
-        if let Some(task) = crate::process::current_task_clone() {
-            let address_space = unsafe { &*task.process.address_space.get() };
+        if let Some(ref t) = task {
+            let address_space = unsafe { &*t.process.address_space.get() };
             if let Ok(vaddr) = fault_addr {
                 match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), address_space) {
                     Ok(()) => {
@@ -240,9 +244,9 @@ extern "x86-interrupt" fn page_fault_handler(
                         );
                         crate::serial_println!(
                             "\x1b[31m[pagefault] COW resolve failed\x1b[0m: task={} \x1b[36mpid={}\x1b[0m tid={} \x1b[35maddr={:#x}\x1b[0m \x1b[35mrip={:#x}\x1b[0m err={}",
-                            task.id.as_u64(),
-                            task.pid,
-                            task.tid,
+                            t.id.as_u64(),
+                            t.pid,
+                            t.tid,
                             vaddr.as_u64(),
                             stack_frame.instruction_pointer.as_u64(),
                             reason
@@ -255,8 +259,8 @@ extern "x86-interrupt" fn page_fault_handler(
 
     // Try Demand Paging (lazy allocation) if page is not present
     if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) && is_user {
-        if let Some(task) = crate::process::current_task_clone() {
-            let address_space = unsafe { &*task.process.address_space.get() };
+        if let Some(ref t) = task {
+            let address_space = unsafe { &*t.process.address_space.get() };
             if let Ok(vaddr) = fault_addr {
                 match address_space.handle_fault(vaddr.as_u64()) {
                     Ok(()) => return,

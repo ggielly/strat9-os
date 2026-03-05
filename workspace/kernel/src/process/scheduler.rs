@@ -493,6 +493,10 @@ pub struct Scheduler {
 
 /// Performs the validate task context operation.
 fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
+    let ptr = Arc::as_ptr(task);
+    if ptr.is_null() {
+        return Err("null Task pointer in Arc");
+    }
     let saved_rsp = unsafe { (*task.context.get()).saved_rsp };
     let stack_base = task.kernel_stack.virt_base.as_u64();
     let stack_top = stack_base.saturating_add(task.kernel_stack.size as u64);
