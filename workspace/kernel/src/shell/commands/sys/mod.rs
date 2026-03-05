@@ -109,6 +109,16 @@ sid = 42
 name = "sshd"
 binary = "/initfs/bin/sshd"
 type = "elf"
+
+[[silos]]
+name = "graphics-webrtc"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-webrtc"
+binary = "/initfs/strate-webrtc"
+type = "elf"
 "#;
 
 #[derive(Clone)]

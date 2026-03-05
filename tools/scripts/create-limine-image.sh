@@ -24,6 +24,7 @@ CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
 BUS_ELF="target/x86_64-unknown-none/${PROFILE}/strate-bus"
 STRATE_WASM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-wasm"
+STRATE_WEBRTC_ELF="target/x86_64-unknown-none/${PROFILE}/strate-webrtc"
 DHCP_CLIENT_ELF="target/x86_64-unknown-none/${PROFILE}/dhcp-client"
 PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
 TELNETD_ELF="target/x86_64-unknown-none/${PROFILE}/telnetd"
@@ -121,6 +122,12 @@ if [ -f "$STRATE_WASM_ELF" ]; then
     echo "    strate-wasm  : $wasm_size bytes"
 else
     echo "    strate-wasm  : (missing)"
+fi
+if [ -f "$STRATE_WEBRTC_ELF" ]; then
+    webrtc_size=$(stat -c%s "$STRATE_WEBRTC_ELF")
+    echo "    strate-webrtc: $webrtc_size bytes"
+else
+    echo "    strate-webrtc: (missing)"
 fi
 if [ -f "$DHCP_CLIENT_ELF" ]; then
     dhcp_client_size=$(stat -c%s "$DHCP_CLIENT_ELF")
@@ -257,6 +264,13 @@ if [ -f "$STRATE_WASM_ELF" ]; then
     echo "  [OK] Copied strate-wasm: /initfs/strate-wasm"
 else
     echo "  [WARN] strate-wasm binary not found at $STRATE_WASM_ELF"
+fi
+
+if [ -f "$STRATE_WEBRTC_ELF" ]; then
+    cp "$STRATE_WEBRTC_ELF" "$ISO_ROOT/initfs/strate-webrtc"
+    echo "  [OK] Copied strate-webrtc: /initfs/strate-webrtc"
+else
+    echo "  [WARN] strate-webrtc binary not found at $STRATE_WEBRTC_ELF"
 fi
 
 if [ -f "$DHCP_CLIENT_ELF" ]; then

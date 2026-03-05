@@ -861,9 +861,24 @@ name = "web-admin"
 family = "NET"
 mode = "076"
 sid = 42
+graphics_enabled = true
+graphics_mode = "webrtc-native"
+graphics_max_sessions = 1
+graphics_session_ttl_sec = 1800
+graphics_turn_policy = "auto"
 [[silos.strates]]
 name = "web-admin"
 binary = "/initfs/bin/web-admin"
+type = "elf"
+
+[[silos]]
+name = "graphics-webrtc"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-webrtc"
+binary = "/initfs/strate-webrtc"
 type = "elf"
 "#;
 

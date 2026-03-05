@@ -1,6 +1,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
-use strat9_syscall::{call, data::TimeSpec, flag, number};
+use strat9_syscall::{call, data::{IpcMessage, TimeSpec}, flag, number};
 
 const EAGAIN: usize = 11;
 const MAX_EAGAIN_RETRIES: usize = 50;
@@ -131,4 +131,19 @@ pub fn clock_gettime_ns() -> u64 {
     };
     let _ = call::clock_gettime(1, &mut ts);
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+pub fn ipc_call_path(path: &str, msg_type: u32, payload: &[u8]) -> Option<IpcMessage> {
+    let h = call::ipc_connect(path.as_bytes()).ok()?;
+    let mut req = IpcMessage::new(msg_type);
+    let n = core::cmp::min(payload.len(), req.payload.len());
+    if n > 0 {
+        req.payload[..n].copy_from_slice(&payload[..n]);
+    }
+    if call::ipc_call(h, &mut req).is_err() {
+        let _ = call::handle_close(h);
+        return None;
+    }
+    let _ = call::handle_close(h);
+    Some(req)
 }

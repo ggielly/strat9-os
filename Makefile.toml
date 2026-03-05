@@ -393,6 +393,20 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-webrtc]
+description = "Build the webrtc-native graphics silo (debug profile)"
+cwd = "workspace/components/strate-webrtc"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-console-admin]
 
 
@@ -587,6 +601,21 @@ args = [
 [tasks.strate-wasm-release]
 description = "Build the wasm runtime silo (release profile)"
 cwd = "workspace/components/strate-wasm"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-webrtc-release]
+description = "Build the webrtc-native graphics silo (release profile)"
+cwd = "workspace/components/strate-webrtc"
 command = "cargo"
 args = [
     "build",
@@ -817,6 +846,22 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-webrtc-dev-opt]
+description = "Build the webrtc-native graphics silo (dev-opt profile)"
+cwd = "workspace/components/strate-webrtc"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-console-admin-dev-opt]
 description = "Build the console-admin silo (dev-opt profile)"
 cwd = "workspace/components/strate-console-admin"
@@ -927,6 +972,7 @@ dependencies = [
     "strate-net",
     "strate-bus",
     "strate-wasm",
+    "strate-webrtc",
     "dhcp-client",
     "ping",
     "telnetd",
@@ -955,6 +1001,7 @@ dependencies = [
     "strate-net",
     "strate-bus",
     "strate-wasm",
+    "strate-webrtc",
     "dhcp-client",
     "ping",
     "telnetd",
@@ -981,6 +1028,7 @@ dependencies = [
     "strate-net-dev-opt",
     "strate-bus-dev-opt",
     "strate-wasm-dev-opt",
+    "strate-webrtc-dev-opt",
     "dhcp-client-dev-opt",
     "ping-dev-opt",
     "telnetd-dev-opt",
@@ -1007,6 +1055,7 @@ dependencies = [
     "strate-net-release",
     "strate-bus-release",
     "strate-wasm-release",
+    "strate-webrtc-release",
     "dhcp-client-release",
     "ping-release",
     "telnetd-release",

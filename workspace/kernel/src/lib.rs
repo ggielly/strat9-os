@@ -263,6 +263,7 @@ fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
         ("strate-wasm", crate::boot::limine::strate_wasm_module()),
+        ("strate-webrtc", crate::boot::limine::strate_webrtc_module()),
         ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
         (
             "wasm-test.toml",
@@ -293,6 +294,7 @@ fn log_boot_module_magics(stage: &str) {
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
         ("strate-wasm", crate::boot::limine::strate_wasm_module()),
+        ("strate-webrtc", crate::boot::limine::strate_webrtc_module()),
         ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
         (
             "wasm-test.toml",
