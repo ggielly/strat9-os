@@ -1719,6 +1719,27 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     shell_println!("CPU req:    {:#x}", detail.cpu_features_required);
     shell_println!("CPU allow:  {:#x}", detail.cpu_features_allowed);
     shell_println!("XCR0 mask:  {:#x}", detail.xcr0_mask);
+    shell_println!("GFX flags:  {:#x}", detail.graphics_flags);
+    shell_println!(
+        "GFX mode:   {}",
+        if (detail.graphics_flags & (1 << 2)) != 0 {
+            "webrtc-native"
+        } else if (detail.graphics_flags & (1 << 1)) != 0 {
+            "graphics-raw"
+        } else {
+            "disabled"
+        }
+    );
+    shell_println!(
+        "GFX ro:     {}",
+        if (detail.graphics_flags & (1 << 3)) != 0 {
+            "true"
+        } else {
+            "false"
+        }
+    );
+    shell_println!("GFX sess:   {}", detail.graphics_max_sessions);
+    shell_println!("GFX ttl:    {} sec", detail.graphics_session_ttl_sec);
     shell_println!("Max tasks:  {}", if detail.max_tasks == 0 { String::from("unlimited") } else { alloc::format!("{}", detail.max_tasks) });
     shell_println!("Caps:       {} granted", detail.granted_caps_count);
 
