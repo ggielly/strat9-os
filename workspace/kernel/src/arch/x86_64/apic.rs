@@ -13,6 +13,14 @@ static APIC_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Virtual base address of the Local APIC MMIO registers
 static APIC_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
 
+/// Physical base address of the Local APIC MMIO registers (used by address-space init)
+static APIC_BASE_PHYS: AtomicU64 = AtomicU64::new(0);
+
+/// Return the physical base address of the LAPIC MMIO region, or 0 if not yet initialized.
+pub fn lapic_phys() -> u64 {
+    APIC_BASE_PHYS.load(Ordering::Relaxed)
+}
+
 // ===== Local APIC Register Offsets =====
 
 /// Local APIC ID Register
@@ -136,6 +144,22 @@ pub fn init(madt_lapic_addr: u32) {
     // Convert physical base to virtual via HHDM
     let apic_virt = memory::phys_to_virt(apic_phys);
     APIC_BASE_VIRT.store(apic_virt, Ordering::Relaxed);
+    APIC_BASE_PHYS.store(apic_phys, Ordering::Relaxed);
+
+    // Diagnostic: log HHDM and computed addresses so we can detect HHDM=0 issues.
+    crate::serial_println!(
+        "[apic] init: hhdm={:#x} lapic_phys={:#x} lapic_virt={:#x}",
+        memory::hhdm_offset(),
+        apic_phys,
+        apic_virt
+    );
+    if apic_virt == apic_phys {
+        crate::serial_println!(
+            "[apic] WARN: lapic_virt == lapic_phys (HHDM offset is 0!) \
+             The LAPIC MMIO is identity-mapped at a low address. \
+             Kernel MMIO entries will be propagated to user page tables."
+        );
+    }
 
     // SAFETY: APIC base is now set and mapped via HHDM
     unsafe {

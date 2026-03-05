@@ -2,7 +2,6 @@ use core::{
     panic::PanicInfo,
     sync::atomic::{AtomicBool, Ordering},
 };
-
 use spin::Mutex;
 use x86_64::VirtAddr;
 
@@ -38,14 +37,16 @@ fn panic_hook_dump_context(_info: &PanicInfo) {
     let ticks = crate::process::scheduler::ticks();
     let cr3 = crate::memory::paging::active_page_table().as_u64();
     crate::serial_println!("panic-hook: ticks={} cr3=0x{:x}", ticks, cr3);
-    if let Some(task) = crate::process::current_task_clone() {
+    // Use try_lock variant to avoid deadlocking when the panic occurs while
+    // the scheduler lock is already held (e.g. during a context switch).
+    if let Some(task) = crate::process::scheduler::current_task_clone_try() {
         crate::serial_println!(
             "panic-hook: current_task id={} name={}",
             task.id.as_u64(),
             task.name
         );
     } else {
-        crate::serial_println!("panic-hook: current_task none");
+        crate::serial_println!("panic-hook: current_task none (scheduler locked or idle)");
     }
     let fb = crate::arch::x86_64::vga::framebuffer_info();
     crate::serial_println!(

@@ -421,10 +421,39 @@ impl Scheduler {
         }
 
         if let Err(e) = validate_task_context(&next) {
-            panic!(
-                "scheduler: refusing to switch to invalid task '{}' (id={:?}): {}",
-                next.name, next.id, e
+            // Do NOT panic here — the scheduler lock is held, which would
+            // deadlock the panic hook (current_task_clone → SCHEDULER.lock()).
+            // Instead, log the problem and fall back to idle so the system
+            // survives and the serial log shows the problematic task.
+            let bad_rsp = unsafe { (*next.context.get()).saved_rsp };
+            let stk_base = next.kernel_stack.virt_base.as_u64();
+            let stk_top = stk_base + next.kernel_stack.size as u64;
+            crate::serial_println!(
+                "[sched] WARN: invalid ctx for task '{}' (id={}) cpu={}: {} \
+                 rsp={:#x} stack=[{:#x}..{:#x}] — falling back to idle",
+                next.name,
+                next.id.as_u64(),
+                cpu_index,
+                e,
+                bad_rsp,
+                stk_base,
+                stk_top,
             );
+            log::error!(
+                "[sched] invalid context for task '{}' (id={:?}) cpu={}: {} \
+                 rsp={:#x} stack=[{:#x}..{:#x}]",
+                next.name,
+                next.id,
+                cpu_index,
+                e,
+                bad_rsp,
+                stk_base,
+                stk_top,
+            );
+            // Re-assign next to idle so we keep a valid switch target *or*
+            // just bail out — returning None from yield_cpu stays on the
+            // current task until the next tick (safest option).
+            return None;
         }
 
         // Update TSS.rsp0 for the new task (needed for Ring 3 -> Ring 0 transitions)

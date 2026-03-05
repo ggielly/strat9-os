@@ -14,8 +14,8 @@ use spin::Once;
 use x86_64::{
     registers::control::{Cr3, Cr3Flags},
     structures::paging::{
-        mapper::TranslateResult, Mapper, OffsetPageTable,
-        Page, PageTable, PageTableFlags, PhysFrame as X86PhysFrame, Size2MiB, Size4KiB, Translate,
+        mapper::TranslateResult, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
+        PhysFrame as X86PhysFrame, Size2MiB, Size4KiB, Translate,
     },
     PhysAddr, VirtAddr,
 };
@@ -178,6 +178,58 @@ impl AddressSpace {
             let new_l4 = &mut *(new_l4_virt.as_mut_ptr::<PageTable>());
             for i in 256..512 {
                 new_l4[i] = kernel_l4[i].clone();
+            }
+        }
+
+        // ---------- LAPIC low-half mapping (HHDM=0 workaround) ----------
+        //
+        // When Limine provides a non-zero HHDM offset the LAPIC is mapped in
+        // PML4[256..512] (kernel half) and is already shared above.
+        //
+        // When HHDM=0 the LAPIC is identity-mapped at its physical address
+        // (0xFEE00000) in the low half (PML4[0]).  Every Ring-0 interrupt
+        // handler calls apic::eoi() which writes to this address.  If the
+        // handler fires while a user CR3 is active the write faults because
+        // PML4[0] is absent in the user page tables.
+        //
+        // Fix: map just the LAPIC 4KiB MMIO page into every new user AS using
+        // a fresh private L3/L2/L1 hierarchy (no sharing with the kernel's
+        // page table subtrees at the LAPIC virtual address).
+        {
+            let lapic_phys = crate::arch::x86_64::apic::lapic_phys();
+            if lapic_phys != 0 {
+                let lapic_virt = crate::memory::phys_to_virt(lapic_phys);
+                // Only needed when LAPIC is in the low half.
+                if lapic_virt < 0xFFFF_8000_0000_0000 {
+                    let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
+                    // SAFETY: new_l4_virt is the freshly allocated user PML4.
+                    let l4 = unsafe { &mut *new_l4_virt.as_mut_ptr::<PageTable>() };
+                    let mut mapper =
+                        unsafe { OffsetPageTable::new(l4, phys_offset) };
+                    let mut buddy = crate::memory::paging::BuddyFrameAllocator;
+                    let mmio_flags = PageTableFlags::PRESENT
+                        | PageTableFlags::WRITABLE
+                        | PageTableFlags::NO_CACHE;
+                    let lapic_page = Page::<Size4KiB>::containing_address(
+                        VirtAddr::new(lapic_virt),
+                    );
+                    let lapic_frame = X86PhysFrame::<Size4KiB>::containing_address(
+                        PhysAddr::new(lapic_phys),
+                    );
+                    // Use map_to_with_table_flags to avoid USER_ACCESSIBLE on
+                    // intermediate tables so user code cannot reach LAPIC MMIO.
+                    match unsafe {
+                        mapper.map_to(lapic_page, lapic_frame, mmio_flags, &mut buddy)
+                    } {
+                        Ok(flush) => flush.flush(),
+                        Err(e) => {
+                            crate::serial_println!(
+                                "[as] WARN: failed to map LAPIC ({:#x}) in user AS: {:?}",
+                                lapic_phys, e
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -656,9 +708,7 @@ impl AddressSpace {
         let len = (page_count as u64)
             .checked_mul(4096)
             .ok_or("Shared region length overflow")?;
-        let end = start
-            .checked_add(len)
-            .ok_or("Shared region end overflow")?;
+        let end = start.checked_add(len).ok_or("Shared region end overflow")?;
         const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
         if end > USER_SPACE_END {
             return Err("Shared region out of user-space range");
@@ -698,7 +748,9 @@ impl AddressSpace {
             if !map_ok {
                 for j in (0..mapped_pages).rev() {
                     let rb_addr = start + (j as u64) * 4096;
-                    if let Ok(rb_page) = Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr)) {
+                    if let Ok(rb_page) =
+                        Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
+                    {
                         if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
                             rb_flush.flush();
                             crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
@@ -879,7 +931,9 @@ impl AddressSpace {
         if len == 0 {
             return Ok(false);
         }
-        let end = addr.checked_add(len).ok_or("any_mapped_in_range: address overflow")?;
+        let end = addr
+            .checked_add(len)
+            .ok_or("any_mapped_in_range: address overflow")?;
         let step = page_size.bytes();
         let mut cur = addr;
         while cur < end {
@@ -915,7 +969,9 @@ impl AddressSpace {
                     if range_start % vma.page_size.bytes() != 0
                         || range_end % vma.page_size.bytes() != 0
                     {
-                        return Err("protect_range: partial mprotect of 2MiB pages is not supported");
+                        return Err(
+                            "protect_range: partial mprotect of 2MiB pages is not supported",
+                        );
                     }
                 }
             }
@@ -955,8 +1011,9 @@ impl AddressSpace {
                 unsafe {
                     match vma.page_size {
                         VmaPageSize::Small => {
-                            let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
-                                .map_err(|_| "protect_range: invalid 4K page address")?;
+                            let page =
+                                Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                                    .map_err(|_| "protect_range: invalid 4K page address")?;
                             mapper
                                 .update_flags(page, new_pt_flags)
                                 .map(|f| f.ignore())
@@ -965,8 +1022,9 @@ impl AddressSpace {
                         VmaPageSize::Huge => {
                             let mut huge_flags = new_pt_flags;
                             huge_flags |= PageTableFlags::HUGE_PAGE;
-                            let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
-                                .map_err(|_| "protect_range: invalid 2M page address")?;
+                            let page =
+                                Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
+                                    .map_err(|_| "protect_range: invalid 2M page address")?;
                             mapper
                                 .update_flags(page, huge_flags)
                                 .map(|f| f.ignore())
