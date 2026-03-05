@@ -174,7 +174,7 @@ impl ProcScheme {
             };
             let _ = writeln!(
                 output,
-                "{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 s.id,
                 s.state,
                 s.task_count,
