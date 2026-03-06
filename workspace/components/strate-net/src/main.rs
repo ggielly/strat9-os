@@ -800,6 +800,14 @@ impl NetworkStrate {
         49152 + (self.next_fid as u16 % 16384)
     }
 
+    // CRITICAL: This function is BLOCKING — it spins inside the IPC event loop for up to
+    // 3 seconds waiting for a UDP response from the NTP server.  While it runs, no other
+    // IPC requests (reads, writes, opens) are processed.  Side effects to be aware of:
+    //   - DNS resolution (resolve_hostname_blocking) may add additional blocking time.
+    //   - Callers on the scheme path must accept the latency hit (NTP is typically called
+    //     once at boot or on-demand via /net/ntp/<hostname>, not in a tight loop).
+    // If low-latency IPC handling becomes a requirement, this function must be refactored
+    // into an asynchronous state machine stored in NetworkStrate.
     fn query_ntp_blocking(&mut self, name: &str) -> core::result::Result<u64, i32> {
         let server = self.resolve_hostname_blocking(name)?;
         let handle = self.create_udp_socket();
