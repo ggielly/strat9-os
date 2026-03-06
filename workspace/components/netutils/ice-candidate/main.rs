@@ -246,7 +246,7 @@ pub extern "C" fn _start() -> ! {
         call::exit(2);
     }
 
-    let mut resp = [0u8; 40];
+    let mut resp = [0u8; 128];
     let mut mapped: Option<([u8; 4], u16)> = None;
     let mut tries = 0usize;
     while tries < 50 {
