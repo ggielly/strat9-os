@@ -1,5 +1,5 @@
 use crate::{
-    memory::{get_allocator, frame::FrameAllocator, PhysFrame},
+    memory::{frame::FrameAllocator, get_allocator, PhysFrame},
     sync::SpinLock,
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
@@ -139,11 +139,7 @@ pub fn destroy_ring(id: RingId) -> Result<(), RingError> {
         );
         return Err(RingError::NotFound);
     }
-    crate::serial_println!(
-        "[ipc] destroy_ring({}) map.len={}",
-        id.as_u64(),
-        len
-    );
+    crate::serial_println!("[ipc] destroy_ring({}) map.len={}", id.as_u64(), len);
 
     map.remove(&id).ok_or(RingError::NotFound)?;
     Ok(())

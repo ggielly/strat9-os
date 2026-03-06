@@ -167,9 +167,21 @@ impl SlabState {
             if let Some(off) = corruption_offset {
                 // Read a few bytes around the corruption point
                 let b0 = *head.add(off);
-                let b1 = if off + 1 < slab_size { *head.add(off + 1) } else { 0 };
-                let b2 = if off + 2 < slab_size { *head.add(off + 2) } else { 0 };
-                let b3 = if off + 3 < slab_size { *head.add(off + 3) } else { 0 };
+                let b1 = if off + 1 < slab_size {
+                    *head.add(off + 1)
+                } else {
+                    0
+                };
+                let b2 = if off + 2 < slab_size {
+                    *head.add(off + 2)
+                } else {
+                    0
+                };
+                let b3 = if off + 3 < slab_size {
+                    *head.add(off + 3)
+                } else {
+                    0
+                };
                 crate::serial_println!(
                     "\x1b[1;31m[HEAP] POISON CORRUPTED: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}]\x1b[0m",
                     slab_size, head as u64, off, b0, b1, b2, b3
