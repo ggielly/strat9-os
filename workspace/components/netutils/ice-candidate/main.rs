@@ -332,13 +332,15 @@ pub extern "C" fn _start() -> ! {
 
     let mut local_ip_buf = [0u8; 64];
     if let Some(local_ip) = read_local_ip(&mut local_ip_buf) {
-        let host = format!("candidate:1 1 UDP 2130706431 {} 9 typ host\r\n", local_ip);
+        // RFC 8445 §5.1.1: use port 0 when the actual bound port is not known.
+        let host = format!("candidate:1 1 UDP 2130706431 {} 0 typ host\r\n", local_ip);
         log(&host);
     }
 
     if let Some((ip, port)) = mapped {
         let srflx = format!(
-            "candidate:2 1 UDP 1694498815 {}.{}.{}.{} {} typ srflx raddr 0.0.0.0 rport 9\r\n",
+            // RFC 8445 §5.1.1: rport 0 when the reflexive base port is not tracked.
+            "candidate:2 1 UDP 1694498815 {}.{}.{}.{} {} typ srflx raddr 0.0.0.0 rport 0\r\n",
             ip[0], ip[1], ip[2], ip[3], port
         );
         log(&srflx);
