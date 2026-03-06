@@ -1306,6 +1306,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "strate-webrtc"
+version = "0.1.0"
+dependencies = [
+ "alloc-freelist",
+ "strat9-syscall",
+]
+
+[[package]]
 name = "string-interner"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
