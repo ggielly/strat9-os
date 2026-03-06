@@ -129,6 +129,30 @@ pub fn get_ring(id: RingId) -> Option<Arc<SharedRing>> {
 pub fn destroy_ring(id: RingId) -> Result<(), RingError> {
     let mut reg = RINGS.lock();
     let map = reg.as_mut().ok_or(RingError::NotFound)?;
+
+    // ==========================================================================
+    // CRITICAL: BTreeMap corruption guard
+    //
+    // A corrupted heap can produce a BTreeMap whose internal node pointers are
+    // invalid (e.g. NULL + offset 16 = 0x10), causing remove() to page-fault.
+    // Sanity-check `len()` before mutating: the ring registry never holds more
+    // than a few hundred entries under normal operation.  An absurd value
+    // indicates that the BTreeMap header itself has been overwritten, and
+    // calling remove() would immediately dereference a bad node pointer.
+    //
+    // In that case we bail early rather than crash.  The heap poison detector
+    // in heap.rs will identify the corrupting allocation on the next alloc/free.
+    // ==========================================================================
+    let len = map.len();
+    if len > 10_000 {
+        crate::serial_println!(
+            "\x1b[1;31m[ipc] RINGS BTreeMap corrupted: len={} for id={} \u2014 aborting remove\x1b[0m",
+            len, id.as_u64()
+        );
+        return Err(RingError::NotFound);
+    }
+    crate::serial_println!("[ipc] destroy_ring(id={}) map.len={}", id.as_u64(), len);
+
     map.remove(&id).ok_or(RingError::NotFound)?;
     Ok(())
 }
