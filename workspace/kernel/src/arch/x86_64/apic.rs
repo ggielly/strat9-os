@@ -80,6 +80,13 @@ pub fn is_present() -> bool {
     edx & (1 << 9) != 0
 }
 
+/// Check if x2APIC is supported via CPUID
+pub fn is_x2apic_supported() -> bool {
+    let (_eax, _ebx, ecx, _edx) = super::cpuid(1, 0);
+    // CPUID.01H:ECX bit 21 = x2APIC
+    ecx & (1 << 21) != 0
+}
+
 /// Get the current Local APIC ID.
 ///
 /// When APIC is initialized, read the LAPIC ID register (authoritative at runtime).
@@ -184,6 +191,13 @@ pub fn init(madt_lapic_addr: u32) {
         apic_virt,
         id
     );
+
+    // Check for x2APIC support
+    if is_x2apic_supported() {
+        log::info!("x2APIC: supported by CPU (will use xAPIC mode for now)");
+        // Note: We could switch to x2APIC mode here, but for compatibility
+        // we continue using xAPIC mode unless explicitly configured otherwise
+    }
 }
 
 /// Initialize per-core Local APIC state on Application Processors.

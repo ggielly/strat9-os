@@ -4,6 +4,7 @@
 
 pub mod apic;
 pub mod cpuid;
+pub mod x2apic;
 pub mod gdt;
 pub mod idt;
 pub mod io;
@@ -131,7 +132,7 @@ pub fn save_flags_and_cli() -> u64 {
     // SAFETY: pushfq/pop reads RFLAGS, cli disables interrupts.
     // This is safe and required for single-core mutual exclusion.
     unsafe {
-        asm!("pushfq; pop {0}; cli", out(reg) flags, options(nostack));
+        asm!("pushfq; pop {0}; cli", out(reg) flags);
     }
     flags
 }
@@ -143,7 +144,7 @@ pub fn save_flags_and_cli() -> u64 {
 pub fn restore_flags(flags: u64) {
     // SAFETY: push/popfq restores RFLAGS to a previously-saved valid state.
     unsafe {
-        asm!("push {0}; popfq", in(reg) flags, options(nostack));
+        asm!("push {0}; popfq", in(reg) flags);
     }
 }
 

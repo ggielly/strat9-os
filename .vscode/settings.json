@@ -1,4 +1,8 @@
 {
     "cmake.ignoreCMakeListsMissing": true,
-    "editor.formatOnSave": true
+    "editor.formatOnSave": true,
+    "chat.tools.terminal.autoApprove": {
+        "git add": true,
+        "git commit": true
+    }
 }

@@ -701,17 +701,21 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] Initializing scheduler...");
     vga_println!("[..] Setting up multitasking...");
     process::init_scheduler();
+    arch::x86_64::smp::open_ap_scheduler_gate();
     serial_println!("[init] Scheduler initialized.");
+    serial_println!("[trace][bsp] after init_scheduler");
     vga_println!("[OK] Multitasking enabled");
 
     // =============================================
     // Phase 7b: component system - Kthread stage
     // =============================================
+    serial_println!("[trace][bsp] before kthread init_all");
     serial_println!("[init] Components (kthread)...");
     vga_println!("[..] Initializing kthread components...");
     if let Err(e) = component::init_all(component::InitStage::Kthread) {
         serial_println!("[WARN] Some kthread components failed: {:?}", e);
     }
+    serial_println!("[trace][bsp] after kthread init_all");
     serial_println!("[init] Kthread components initialized.");
     vga_println!("[OK] Kthread components ready");
 

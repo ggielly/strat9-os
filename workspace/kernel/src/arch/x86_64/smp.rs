@@ -6,7 +6,7 @@
 
 use core::{
     arch::global_asm,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use alloc::{vec, vec::Vec};
@@ -28,6 +28,8 @@ pub const TRAMPOLINE_PHYS_ADDR: u64 = 0x8000;
 
 /// Number of booted cores (starts at 1 for BSP).
 static BOOTED_CORES: AtomicUsize = AtomicUsize::new(1);
+/// Gate used by BSP to release APs into scheduler/timer start.
+static AP_SCHED_GATE_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// Keep AP kernel stacks alive.
 static AP_KERNEL_STACKS: SpinLock<Vec<KernelStack>> = SpinLock::new(Vec::new());
@@ -345,6 +347,16 @@ pub extern "C" fn smp_main() -> ! {
 
     let _ = percpu::mark_online_by_apic(apic_id);
     BOOTED_CORES.fetch_add(1, Ordering::Release);
+    crate::serial_println!(
+        "[trace][ap] online apic_id={} cpu_index={} entering ap scheduler",
+        apic_id,
+        cpu_index
+    );
+
+    // Wait until BSP has finished scheduler initialization.
+    while !AP_SCHED_GATE_OPEN.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
 
     // Start APIC timer on this CPU (uses cached calibration from BSP).
     timer::start_apic_timer_cached();
@@ -356,4 +368,9 @@ pub extern "C" fn smp_main() -> ! {
 /// Return the number of online CPUs.
 pub fn cpu_count() -> usize {
     BOOTED_CORES.load(Ordering::Acquire)
+}
+
+/// Allow APs to start their local timer and enter the scheduler.
+pub fn open_ap_scheduler_gate() {
+    AP_SCHED_GATE_OPEN.store(true, Ordering::Release);
 }
