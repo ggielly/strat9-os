@@ -129,6 +129,22 @@ pub fn get_ring(id: RingId) -> Option<Arc<SharedRing>> {
 pub fn destroy_ring(id: RingId) -> Result<(), RingError> {
     let mut reg = RINGS.lock();
     let map = reg.as_mut().ok_or(RingError::NotFound)?;
+
+    // Guard: validate BTreeMap integrity before mutation.
+    let len = map.len();
+    if len > 10_000 {
+        crate::serial_println!(
+            "\x1b[1;31m[ipc] RINGS BTreeMap corrupted: len={} (max expected ~100)\x1b[0m",
+            len
+        );
+        return Err(RingError::NotFound);
+    }
+    crate::serial_println!(
+        "[ipc] destroy_ring({}) map.len={}",
+        id.as_u64(),
+        len
+    );
+
     map.remove(&id).ok_or(RingError::NotFound)?;
     Ok(())
 }

@@ -103,6 +103,26 @@ pub fn current_task_id() -> Option<TaskId> {
     id
 }
 
+/// Get the current task's ID without blocking (safe for exceptions).
+pub fn current_task_id_try() -> Option<TaskId> {
+    let saved_flags = save_flags_and_cli();
+    let cpu_index = current_cpu_index();
+    let id = if let Some(scheduler) = SCHEDULER.try_lock() {
+        if let Some(ref sched) = *scheduler {
+            sched
+                .cpus
+                .get(cpu_index)
+                .and_then(|cpu| cpu.current_task.as_ref().map(|t| t.id))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    restore_flags(saved_flags);
+    id
+}
+
 /// Get the current process ID (POSIX pid).
 pub fn current_pid() -> Option<Pid> {
     current_task_clone().map(|t| t.pid)
@@ -134,20 +154,15 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
             sched.cpus.get_mut(cpu_index).and_then(|cpu| {
                 let arc = cpu.current_task.as_ref()?;
                 let strong = Arc::strong_count(arc);
-                let state = unsafe { *arc.state.get() };
-                let caller = core::panic::Location::caller();
                 // Treat insane refcounts as corruption and fall back to idle.
                 if strong == 0 || strong > (isize::MAX as usize) / 2 {
                     let ptr = Arc::as_ptr(arc) as *const u8;
-                    log::error!(
-                        "[sched] CORRUPT Arc refcount in current_task! cpu={} strong={:#x} data_ptr={:p} task_id={} pid={} tid={} state={:?} caller={}:{}",
+                    let caller = core::panic::Location::caller();
+                    crate::serial_println!(
+                        "[sched] CORRUPT Arc refcount! cpu={} strong={:#x} ptr={:p} caller={}:{}",
                         cpu_index,
                         strong,
                         ptr,
-                        arc.id.as_u64(),
-                        arc.pid,
-                        arc.tid,
-                        state,
                         caller.file(),
                         caller.line(),
                     );
@@ -179,18 +194,15 @@ pub fn current_task_clone_try() -> Option<Arc<Task>> {
             sched.cpus.get_mut(cpu_index).and_then(|cpu| {
                 let arc = cpu.current_task.as_ref()?;
                 let strong = Arc::strong_count(arc);
-                let state = unsafe { *arc.state.get() };
-                let caller = core::panic::Location::caller();
+                // Treat insane refcounts as corruption and fall back to idle.
                 if strong == 0 || strong > (isize::MAX as usize) / 2 {
-                    log::error!(
-                        "[sched] CORRUPT Arc refcount in current_task_try! cpu={} strong={:#x} data_ptr={:p} task_id={} pid={} tid={} state={:?} caller={}:{}",
+                    let ptr = Arc::as_ptr(arc) as *const u8;
+                    let caller = core::panic::Location::caller();
+                    crate::serial_println!(
+                        "[sched] CORRUPT Arc refcount! cpu={} strong={:#x} ptr={:p} caller={}:{}",
                         cpu_index,
                         strong,
-                        Arc::as_ptr(arc) as *const u8,
-                        arc.id.as_u64(),
-                        arc.pid,
-                        arc.tid,
-                        state,
+                        ptr,
                         caller.file(),
                         caller.line(),
                     );

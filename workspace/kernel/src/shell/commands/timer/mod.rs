@@ -18,19 +18,8 @@ pub fn cmd_timer(args: &[String]) -> Result<(), ShellError> {
 
     match args[0].as_str() {
         "test" => {
-            let seconds = if args.len() > 1 {
-                args[1].parse::<u32>().unwrap_or(1)
-            } else {
-                1 // Default: 1 second
-            };
-
-            shell_println!("Testing timer accuracy for {} seconds...", seconds);
-            shell_println!("Please compare with a real clock/stopwatch.");
-            shell_println!("Serial output will show detailed timing info.");
-
-            // Call the debug function
-            crate::arch::x86_64::timer::debug_measure_time(seconds);
-
+            shell_println!("timer test is disabled (unstable debug path removed).");
+            shell_println!("Use 'timer info' to inspect current timer configuration.");
             Ok(())
         }
         "info" => {
@@ -62,11 +51,10 @@ pub fn cmd_timer(args: &[String]) -> Result<(), ShellError> {
 /// Performs the print usage operation.
 fn print_usage() {
     shell_println!("Timer debug commands:");
-    shell_println!("  timer test [seconds]  - Measure timer accuracy (default: 1s)");
+    shell_println!("  timer test            - Disabled (unstable debug path removed)");
     shell_println!("  timer info            - Show timer configuration");
     shell_println!("");
     shell_println!("Examples:");
-    shell_println!("  timer test          - Test for 1 second");
-    shell_println!("  timer test 5        - Test for 5 seconds");
+    shell_println!("  timer test          - Shows disabled message");
     shell_println!("  timer info          - Show current timer info");
 }

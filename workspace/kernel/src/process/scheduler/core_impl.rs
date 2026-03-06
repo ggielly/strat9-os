@@ -71,6 +71,15 @@ impl Scheduler {
 
     /// Performs the register identity locked operation.
     pub(crate) fn register_identity_locked(&mut self, task: &Arc<Task>) {
+        if (self as *mut Self).is_null() {
+            crate::serial_println!("[sched] WARN: register_identity_locked called on NULL scheduler!");
+            return;
+        }
+        let task_ptr = Arc::as_ptr(task);
+        if task_ptr.is_null() {
+            crate::serial_println!("[sched] WARN: register_identity_locked called with NULL task!");
+            return;
+        }
         let task_id = task.id;
         let pid = task.pid;
         let pgid = task.pgid.load(Ordering::Relaxed);
@@ -110,6 +119,10 @@ impl Scheduler {
 
     /// Performs the add task on cpu operation.
     fn add_task_on_cpu(&mut self, task: Arc<Task>, cpu_index: usize) {
+        if (self as *mut Self).is_null() {
+            crate::serial_println!("[sched] ERROR: add_task_on_cpu called on NULL scheduler!");
+            return;
+        }
         let task_id = task.id;
         // SAFETY: We have exclusive access via the scheduler lock
         unsafe {
@@ -483,6 +496,9 @@ impl Scheduler {
 
     /// Performs the select cpu for task operation.
     fn select_cpu_for_task(&self) -> usize {
+        if (self as *const Self).is_null() {
+            return 0;
+        }
         let mut best = 0usize;
         let mut best_load = usize::MAX;
         for (idx, cpu) in self.cpus.iter().enumerate() {

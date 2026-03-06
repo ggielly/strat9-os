@@ -189,7 +189,11 @@ extern "x86-interrupt" fn page_fault_handler(
     let do_pf_trace = if is_user {
         USER_PF_TRACE_BUDGET
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                if v > 0 { Some(v - 1) } else { None }
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
             })
             .is_ok()
     } else {
@@ -273,7 +277,7 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 
     if is_user {
-        if let Some(tid) = crate::process::current_task_id() {
+        if let Some(tid) = crate::process::scheduler::current_task_id_try() {
             crate::silo::handle_user_fault(
                 tid,
                 crate::silo::SiloFaultReason::PageFault,
@@ -285,89 +289,754 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
-    log::error!("EXCEPTION: PAGE FAULT");
-    log::error!("Accessed Address: {:?}", fault_addr);
-    log::error!("Error code: {:?}", error_code);
-    log::error!("{:#?}", stack_frame);
+    // =========================================================================
+    // Comprehensive page fault diagnostics dump
+    // Uses serial_println! directly to avoid log framework deadlocks.
+    // =========================================================================
+    dump_page_fault_full(&stack_frame, error_code, fault_addr, &task);
+}
 
-    // Diagnostic: manual page table walk to show which level fails
-    if let Ok(vaddr) = fault_addr {
-        let addr = vaddr.as_u64();
-        let (cr3_frame, _) = Cr3::read();
-        let cr3_phys = cr3_frame.start_address().as_u64();
-        let hhdm = crate::memory::hhdm_offset();
-        log::error!(
-            "=== Page table walk for {:#x} (CR3={:#x}) ===",
-            addr,
-            cr3_phys
-        );
+// =============================================================================
+// Comprehensive page fault diagnostic dump
+// =============================================================================
 
-        // SAFETY: Read-only access to page tables via HHDM for diagnostics.
-        unsafe {
-            let l4_ptr = (cr3_phys + hhdm) as *const u64;
-            let l4_idx = ((addr >> 39) & 0x1FF) as usize;
-            let l4_entry = *l4_ptr.add(l4_idx);
-            log::error!(
-                "  PML4[{}] = {:#x} (present={})",
-                l4_idx,
-                l4_entry,
-                l4_entry & 1
-            );
-            if l4_entry & 1 == 0 {
-                log::error!("  -> WALK STOPS: PML4 entry not present");
-            } else {
-                let l3_phys = l4_entry & 0x000F_FFFF_FFFF_F000;
-                let l3_ptr = (l3_phys + hhdm) as *const u64;
-                let l3_idx = ((addr >> 30) & 0x1FF) as usize;
-                let l3_entry = *l3_ptr.add(l3_idx);
-                log::error!(
-                    "  PDPT[{}] = {:#x} (present={})",
-                    l3_idx,
-                    l3_entry,
-                    l3_entry & 1
-                );
-                if l3_entry & 1 == 0 {
-                    log::error!("  -> WALK STOPS: PDPT entry not present");
-                } else if l3_entry & 0x80 != 0 {
-                    log::error!("  -> 1GiB huge page");
-                } else {
-                    let l2_phys = l3_entry & 0x000F_FFFF_FFFF_F000;
-                    let l2_ptr = (l2_phys + hhdm) as *const u64;
-                    let l2_idx = ((addr >> 21) & 0x1FF) as usize;
-                    let l2_entry = *l2_ptr.add(l2_idx);
-                    log::error!(
-                        "  PD[{}] = {:#x} (present={})",
-                        l2_idx,
-                        l2_entry,
-                        l2_entry & 1
-                    );
-                    if l2_entry & 1 == 0 {
-                        log::error!("  -> WALK STOPS: PD entry not present");
-                    } else if l2_entry & 0x80 != 0 {
-                        log::error!("  -> 2MiB huge page");
-                    } else {
-                        let l1_phys = l2_entry & 0x000F_FFFF_FFFF_F000;
-                        let l1_ptr = (l1_phys + hhdm) as *const u64;
-                        let l1_idx = ((addr >> 12) & 0x1FF) as usize;
-                        let l1_entry = *l1_ptr.add(l1_idx);
-                        log::error!(
-                            "  PT[{}] = {:#x} (present={})",
-                            l1_idx,
-                            l1_entry,
-                            l1_entry & 1
-                        );
-                        if l1_entry & 1 == 0 {
-                            log::error!("  -> WALK STOPS: PT entry not present");
-                        } else {
-                            log::error!("  -> page present (flags issue?)");
-                        }
-                    }
+/// Decode `PageFaultErrorCode` bits into a human-readable string.
+fn decode_error_code(ec: PageFaultErrorCode) -> &'static str {
+    let p = ec.contains(PageFaultErrorCode::PROTECTION_VIOLATION);
+    let w = ec.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
+    let u = ec.contains(PageFaultErrorCode::USER_MODE);
+    match (p, w, u) {
+        (false, false, false) => "kernel read of non-present page",
+        (false, true, false) => "kernel write to non-present page",
+        (false, false, true) => "user read of non-present page",
+        (false, true, true) => "user write to non-present page",
+        (true, false, false) => "kernel read protection violation",
+        (true, true, false) => "kernel write protection violation (COW / RO page)",
+        (true, false, true) => "user read protection violation (NX / supervisor-only)",
+        (true, true, true) => "user write protection violation (COW / RO page)",
+    }
+}
+
+/// Format PTE flags in a human-readable way.
+fn format_pte_flags(entry: u64) -> [u8; 32] {
+    let mut buf = [b' '; 32];
+    let mut pos = 0;
+    let flags: &[(&str, u64)] = &[
+        ("P", 1 << 0),
+        ("RW", 1 << 1),
+        ("US", 1 << 2),
+        ("PWT", 1 << 3),
+        ("PCD", 1 << 4),
+        ("A", 1 << 5),
+        ("D", 1 << 6),
+        ("PS", 1 << 7),
+        ("G", 1 << 8),
+        ("NX", 1 << 63),
+    ];
+    for &(name, bit) in flags {
+        if entry & bit != 0 {
+            for &b in name.as_bytes() {
+                if pos < buf.len() {
+                    buf[pos] = b;
+                    pos += 1;
                 }
+            }
+            if pos < buf.len() {
+                buf[pos] = b'|';
+                pos += 1;
             }
         }
     }
+    if pos > 0 && buf[pos - 1] == b'|' {
+        buf[pos - 1] = b' ';
+    }
+    buf
+}
 
-    panic!("Page fault");
+/// Full page fault diagnostic dump — called just before the final `panic!`.
+///
+/// Prints everything needed to diagnose the fault in a single serial output:
+/// error code analysis, control registers, CPU/task context, memory stats,
+/// code bytes at RIP, stack dump, and a detailed page table walk.
+fn dump_page_fault_full(
+    stack_frame: &InterruptStackFrame,
+    error_code: PageFaultErrorCode,
+    fault_addr: Result<x86_64::VirtAddr, x86_64::addr::VirtAddrNotValid>,
+    task: &Option<alloc::sync::Arc<crate::process::task::Task>>,
+) {
+    use x86_64::registers::control::{Cr0, Cr3, Cr4};
+
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let rsp = stack_frame.stack_pointer.as_u64();
+    let cs = stack_frame.code_segment.0;
+    let ss = stack_frame.stack_segment.0;
+    let rflags = stack_frame.cpu_flags.bits();
+    let fault_vaddr = fault_addr.as_ref().map(|v| v.as_u64()).unwrap_or(0);
+    let is_user = (cs & 3) == 3;
+    let ring = cs & 3;
+
+    // ===== Banner =====
+    crate::serial_println!("\x1b[1;31m");
+    crate::serial_println!("╔══════════════════════════════════════════════════════════════════╗");
+    crate::serial_println!("║                  KERNEL PAGE FAULT EXCEPTION                    ║");
+    crate::serial_println!(
+        "╚══════════════════════════════════════════════════════════════════╝\x1b[0m"
+    );
+
+    // ===== Error Code Analysis =====
+    crate::serial_println!("\x1b[1;33m--- Error Code Analysis ---\x1b[0m");
+    crate::serial_println!(
+        "  Raw error code  : {:#06x} ({:#018b})",
+        error_code.bits(),
+        error_code.bits()
+    );
+    crate::serial_println!(
+        "  PRESENT (P)     : {}  ({})",
+        error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) as u8,
+        if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+            "protection violation on present page"
+        } else {
+            "page NOT present"
+        }
+    );
+    crate::serial_println!(
+        "  WRITE (W)       : {}  ({})",
+        error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) as u8,
+        if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) {
+            "caused by WRITE"
+        } else {
+            "caused by READ"
+        }
+    );
+    crate::serial_println!(
+        "  USER (U)        : {}  ({})",
+        error_code.contains(PageFaultErrorCode::USER_MODE) as u8,
+        if error_code.contains(PageFaultErrorCode::USER_MODE) {
+            "from USER mode (ring 3)"
+        } else {
+            "from SUPERVISOR mode (ring 0)"
+        }
+    );
+    crate::serial_println!(
+        "  RSVD            : {}  ({})",
+        (error_code.bits() >> 3) & 1,
+        if error_code.bits() & (1 << 3) != 0 {
+            "RESERVED BIT set in page table!"
+        } else {
+            "ok"
+        }
+    );
+    crate::serial_println!(
+        "  I/D (fetch)     : {}  ({})",
+        (error_code.bits() >> 4) & 1,
+        if error_code.bits() & (1 << 4) != 0 {
+            "caused by INSTRUCTION FETCH (NX violation)"
+        } else {
+            "data access"
+        }
+    );
+    crate::serial_println!(
+        "  \x1b[1;31mDiagnosis: {}\x1b[0m",
+        decode_error_code(error_code)
+    );
+
+    // ===== Faulting Context =====
+    crate::serial_println!("\x1b[1;33m--- Faulting Context ---\x1b[0m");
+    crate::serial_println!(
+        "  Faulting Addr (CR2) : \x1b[1;35m{:#018x}\x1b[0m",
+        fault_vaddr
+    );
+    crate::serial_println!("  Instruction (RIP)   : \x1b[1;36m{:#018x}\x1b[0m", rip);
+    crate::serial_println!("  Stack Pointer (RSP) : {:#018x}", rsp);
+    crate::serial_println!(
+        "  Code Segment (CS)   : {:#06x}  (index={}, RPL/ring={}{})",
+        cs,
+        cs >> 3,
+        ring,
+        if is_user { " USER" } else { " KERNEL" }
+    );
+    crate::serial_println!("  Stack Segment (SS)  : {:#06x}", ss);
+
+    // RFLAGS decomposition
+    let mut rflags_str = [0u8; 64];
+    let mut fpos = 0;
+    let rflags_bits: &[(&str, u64)] = &[
+        ("CF", 1 << 0),
+        ("PF", 1 << 2),
+        ("AF", 1 << 4),
+        ("ZF", 1 << 6),
+        ("SF", 1 << 7),
+        ("TF", 1 << 8),
+        ("IF", 1 << 9),
+        ("DF", 1 << 10),
+        ("OF", 1 << 11),
+        ("IOPL", 3 << 12),
+        ("NT", 1 << 14),
+        ("RF", 1 << 16),
+        ("VM", 1 << 17),
+        ("AC", 1 << 18),
+        ("VIF", 1 << 19),
+        ("VIP", 1 << 20),
+        ("ID", 1 << 21),
+    ];
+    for &(name, bit) in rflags_bits {
+        if rflags & bit != 0 {
+            for &b in name.as_bytes() {
+                if fpos < rflags_str.len() {
+                    rflags_str[fpos] = b;
+                    fpos += 1;
+                }
+            }
+            if fpos < rflags_str.len() {
+                rflags_str[fpos] = b' ';
+                fpos += 1;
+            }
+        }
+    }
+    let rflags_s = core::str::from_utf8(&rflags_str[..fpos]).unwrap_or("?");
+    crate::serial_println!("  RFLAGS              : {:#018x}  [{}]", rflags, rflags_s);
+
+    // ===== Control Registers =====
+    crate::serial_println!("\x1b[1;33m--- Control Registers ---\x1b[0m");
+    let cr0 = Cr0::read_raw();
+    let (cr3_frame, cr3_flags) = Cr3::read();
+    let cr3_phys = cr3_frame.start_address().as_u64();
+    let cr4 = Cr4::read_raw();
+
+    // CR0 flags
+    let cr0_flags = {
+        let mut s = [0u8; 48];
+        let mut p = 0;
+        let bits: &[(&str, u64)] = &[
+            ("PE", 1 << 0),
+            ("MP", 1 << 1),
+            ("EM", 1 << 2),
+            ("TS", 1 << 3),
+            ("ET", 1 << 4),
+            ("NE", 1 << 5),
+            ("WP", 1 << 16),
+            ("AM", 1 << 18),
+            ("NW", 1 << 29),
+            ("CD", 1 << 30),
+            ("PG", 1u64 << 31),
+        ];
+        for &(n, b) in bits {
+            if cr0 & b != 0 {
+                for &c in n.as_bytes() {
+                    if p < s.len() {
+                        s[p] = c;
+                        p += 1;
+                    }
+                }
+                if p < s.len() {
+                    s[p] = b' ';
+                    p += 1;
+                }
+            }
+        }
+        (s, p)
+    };
+    crate::serial_println!(
+        "  CR0 : {:#018x}  [{}]",
+        cr0,
+        core::str::from_utf8(&cr0_flags.0[..cr0_flags.1]).unwrap_or("?")
+    );
+    crate::serial_println!(
+        "  CR3 : {:#018x}  (PML4 phys, flags={:#x})",
+        cr3_phys,
+        cr3_flags.bits()
+    );
+    // CR4 flags
+    let cr4_flags = {
+        let mut s = [0u8; 64];
+        let mut p = 0;
+        let bits: &[(&str, u64)] = &[
+            ("VME", 1 << 0),
+            ("PVI", 1 << 1),
+            ("TSD", 1 << 2),
+            ("DE", 1 << 3),
+            ("PSE", 1 << 4),
+            ("PAE", 1 << 5),
+            ("MCE", 1 << 6),
+            ("PGE", 1 << 7),
+            ("PCE", 1 << 8),
+            ("OSFXSR", 1 << 9),
+            ("OSXMMEX", 1 << 10),
+            ("UMIP", 1 << 11),
+            ("VMXE", 1 << 13),
+            ("SMXE", 1 << 14),
+            ("FSGSBASE", 1 << 16),
+            ("PCIDE", 1 << 17),
+            ("OSXSAVE", 1 << 18),
+            ("SMEP", 1 << 20),
+            ("SMAP", 1 << 21),
+        ];
+        for &(n, b) in bits {
+            if cr4 & b != 0 {
+                for &c in n.as_bytes() {
+                    if p < s.len() {
+                        s[p] = c;
+                        p += 1;
+                    }
+                }
+                if p < s.len() {
+                    s[p] = b' ';
+                    p += 1;
+                }
+            }
+        }
+        (s, p)
+    };
+    crate::serial_println!(
+        "  CR4 : {:#018x}  [{}]",
+        cr4,
+        core::str::from_utf8(&cr4_flags.0[..cr4_flags.1]).unwrap_or("?")
+    );
+
+    // EFER MSR (IA32_EFER = 0xC0000080)
+    let efer: u64 = unsafe { x86_64::registers::model_specific::Efer::read_raw() };
+    crate::serial_println!(
+        "  EFER: {:#018x}  [{}{}{}]",
+        efer,
+        if efer & 1 != 0 { "SCE " } else { "" },
+        if efer & (1 << 8) != 0 { "LME " } else { "" },
+        if efer & (1 << 11) != 0 { "NXE" } else { "" }
+    );
+
+    // ===== CPU Context =====
+    crate::serial_println!("\x1b[1;33m--- CPU Context ---\x1b[0m");
+    let cpu_id = super::apic::lapic_id();
+    let apic_timer = crate::arch::x86_64::timer::is_apic_timer_active();
+    let sched_ticks = crate::process::scheduler::ticks();
+    crate::serial_println!("  CPU / LAPIC ID    : {}", cpu_id);
+    crate::serial_println!("  APIC timer active : {}", apic_timer);
+    crate::serial_println!("  Scheduler ticks   : {}", sched_ticks);
+    crate::serial_println!("  HHDM offset       : {:#x}", crate::memory::hhdm_offset());
+
+    // ===== Task Context =====
+    crate::serial_println!("\x1b[1;33m--- Task Context ---\x1b[0m");
+    if let Some(ref t) = *task {
+        crate::serial_println!("  Task ID    : {}", t.id.as_u64());
+        crate::serial_println!("  PID        : {}", t.pid);
+        crate::serial_println!("  TID        : {}", t.tid);
+        crate::serial_println!("  TGID       : {}", t.tgid);
+        crate::serial_println!("  Name       : \"{}\"", t.name);
+        crate::serial_println!("  Priority   : {:?}", t.priority);
+        crate::serial_println!("  CPU ticks  : {}", t.ticks.load(Ordering::Relaxed));
+        // Address space CR3 (may differ from hardware CR3 if preemption occurred)
+        let as_ref = unsafe { &*t.process.address_space.get() };
+        let task_cr3 = as_ref.cr3().as_u64();
+        crate::serial_println!(
+            "  Task CR3   : {:#018x}{}",
+            task_cr3,
+            if task_cr3 != cr3_phys {
+                " *** DIFFERS from hardware CR3! ***"
+            } else {
+                " (matches hardware CR3)"
+            }
+        );
+    } else {
+        crate::serial_println!("  (no current task — scheduler unavailable or idle)");
+    }
+
+    // ===== Memory Stats =====
+    crate::serial_println!("\x1b[1;33m--- Memory Stats ---\x1b[0m");
+    if let Some(guard) = crate::memory::get_allocator().try_lock() {
+        if let Some(ref alloc) = *guard {
+            let (total, allocated) = alloc.page_totals();
+            let free = total.saturating_sub(allocated);
+            crate::serial_println!(
+                "  Total pages : {} ({} KiB = {} MiB)",
+                total,
+                total * 4,
+                total * 4 / 1024
+            );
+            crate::serial_println!(
+                "  Allocated   : {} ({} KiB = {} MiB)",
+                allocated,
+                allocated * 4,
+                allocated * 4 / 1024
+            );
+            crate::serial_println!(
+                "  Free        : {} ({} KiB = {} MiB)",
+                free,
+                free * 4,
+                free * 4 / 1024
+            );
+            // Per-zone breakdown
+            let mut zones = [(0u8, 0u64, 0usize, 0usize); 4];
+            let n = alloc.zone_snapshot(&mut zones);
+            for i in 0..n {
+                let (zt, base, pages, alloc_pg) = zones[i];
+                let zone_name = match zt {
+                    0 => "DMA",
+                    1 => "Normal",
+                    2 => "High",
+                    _ => "?",
+                };
+                crate::serial_println!(
+                    "    Zone {} ({}): base={:#x} pages={} alloc={} free={}",
+                    i,
+                    zone_name,
+                    base,
+                    pages,
+                    alloc_pg,
+                    pages.saturating_sub(alloc_pg)
+                );
+            }
+        } else {
+            crate::serial_println!("  (allocator not initialized)");
+        }
+    } else {
+        crate::serial_println!("  (allocator lock contended — skipping)");
+    }
+
+    // ===== Code Bytes at RIP =====
+    crate::serial_println!("\x1b[1;33m--- Code at RIP ({:#x}) ---\x1b[0m", rip);
+    dump_memory_bytes(rip, cr3_phys, 32, "  ");
+
+    // ===== Stack Dump =====
+    crate::serial_println!("\x1b[1;33m--- Stack Dump (RSP={:#x}) ---\x1b[0m", rsp);
+    dump_memory_bytes(rsp, cr3_phys, 128, "  ");
+
+    // ===== Detailed Page Table Walk =====
+    crate::serial_println!(
+        "\x1b[1;33m--- Page Table Walk for {:#x} (CR3={:#x}) ---\x1b[0m",
+        fault_vaddr,
+        cr3_phys
+    );
+    if fault_addr.is_ok() {
+        dump_page_table_walk(fault_vaddr, cr3_phys);
+    } else {
+        crate::serial_println!("  (CR2 returned non-canonical address: {:#x})", fault_vaddr);
+    }
+
+    // ===== VMA Regions Near Fault =====
+    if let Some(ref t) = *task {
+        crate::serial_println!("\x1b[1;33m--- VMA Regions Near Fault Address ---\x1b[0m");
+        let as_ref = unsafe { &*t.process.address_space.get() };
+        dump_nearby_vma_regions(as_ref, fault_vaddr);
+    }
+
+    crate::serial_println!(
+        "\x1b[1;31m╔══════════════════════════════════════════════════════════════════╗"
+    );
+    crate::serial_println!("║                     END OF PAGE FAULT DUMP                      ║");
+    crate::serial_println!(
+        "╚══════════════════════════════════════════════════════════════════╝\x1b[0m"
+    );
+
+    panic!(
+        "PAGE FAULT: {} at {:#x}, RIP={:#x}, CR3={:#x}, err={:#x}",
+        decode_error_code(error_code),
+        fault_vaddr,
+        rip,
+        cr3_phys,
+        error_code.bits()
+    );
+}
+
+/// Dump `count` bytes of memory at virtual address `vaddr` using the given
+/// CR3 page tables.  Hex + ASCII output like a mini hexdump.
+/// Does a manual translate via page tables to avoid needing an AddressSpace.
+fn dump_memory_bytes(vaddr: u64, cr3_phys: u64, count: usize, prefix: &str) {
+    let hhdm = crate::memory::hhdm_offset();
+
+    // Try to translate vaddr → phys using the raw page tables
+    let phys = translate_via_raw_pt(vaddr, cr3_phys, hhdm);
+    let phys = match phys {
+        Some(p) => p,
+        None => {
+            crate::serial_println!(
+                "{}(address {:#x} is not mapped — cannot dump)",
+                prefix,
+                vaddr
+            );
+            return;
+        }
+    };
+
+    // Read up to `count` bytes, but don't cross a page boundary without re-translating
+    let mut offset = 0usize;
+    while offset < count {
+        let current_va = vaddr.wrapping_add(offset as u64);
+        let page_off = (current_va & 0xFFF) as usize;
+        let remain_in_page = 0x1000 - page_off;
+        let chunk = core::cmp::min(count - offset, remain_in_page);
+
+        let current_phys = if offset == 0 {
+            Some(phys)
+        } else {
+            translate_via_raw_pt(current_va, cr3_phys, hhdm)
+        };
+
+        if let Some(cp) = current_phys {
+            // SAFETY: Read-only access to physical memory via HHDM for diagnostics
+            let src = (cp + hhdm) as *const u8;
+            // Print in lines of 16 bytes
+            let mut line_off = 0;
+            while line_off < chunk {
+                let line_len = core::cmp::min(16, chunk - line_off);
+                let line_va = current_va.wrapping_add(line_off as u64);
+
+                // Hex part
+                let mut hex_buf = [0u8; 16 * 3];
+                let mut ascii_buf = [b'.'; 16];
+                for i in 0..line_len {
+                    let byte = unsafe { *src.add(page_off + line_off + i) };
+                    let hi = byte >> 4;
+                    let lo = byte & 0xF;
+                    hex_buf[i * 3] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                    hex_buf[i * 3 + 1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                    hex_buf[i * 3 + 2] = b' ';
+                    if byte >= 0x20 && byte < 0x7F {
+                        ascii_buf[i] = byte;
+                    }
+                }
+                // Pad remaining hex positions
+                for i in line_len..16 {
+                    hex_buf[i * 3] = b' ';
+                    hex_buf[i * 3 + 1] = b' ';
+                    hex_buf[i * 3 + 2] = b' ';
+                }
+                let hex_str = core::str::from_utf8(&hex_buf[..48]).unwrap_or("???");
+                let ascii_str = core::str::from_utf8(&ascii_buf[..line_len]).unwrap_or("???");
+                crate::serial_println!("{}{:#018x}: {} |{}|", prefix, line_va, hex_str, ascii_str);
+                line_off += line_len;
+            }
+        } else {
+            crate::serial_println!("{}(page at {:#x} not mapped)", prefix, current_va);
+        }
+        offset += chunk;
+    }
+}
+
+/// Translate a virtual address to physical using raw page table walk.
+/// Returns `Some(phys_addr)` or `None` if any level is not present.
+fn translate_via_raw_pt(vaddr: u64, cr3_phys: u64, hhdm: u64) -> Option<u64> {
+    // SAFETY: Read-only access to page tables via HHDM pointers.
+    unsafe {
+        let l4_ptr = (cr3_phys + hhdm) as *const u64;
+        let l4_idx = ((vaddr >> 39) & 0x1FF) as usize;
+        let l4_entry = *l4_ptr.add(l4_idx);
+        if l4_entry & 1 == 0 {
+            return None;
+        }
+
+        let l3_phys = l4_entry & 0x000F_FFFF_FFFF_F000;
+        let l3_ptr = (l3_phys + hhdm) as *const u64;
+        let l3_idx = ((vaddr >> 30) & 0x1FF) as usize;
+        let l3_entry = *l3_ptr.add(l3_idx);
+        if l3_entry & 1 == 0 {
+            return None;
+        }
+        if l3_entry & 0x80 != 0 {
+            // 1 GiB huge page
+            let page_phys = l3_entry & 0x000F_FFFF_C000_0000;
+            return Some(page_phys + (vaddr & 0x3FFF_FFFF));
+        }
+
+        let l2_phys = l3_entry & 0x000F_FFFF_FFFF_F000;
+        let l2_ptr = (l2_phys + hhdm) as *const u64;
+        let l2_idx = ((vaddr >> 21) & 0x1FF) as usize;
+        let l2_entry = *l2_ptr.add(l2_idx);
+        if l2_entry & 1 == 0 {
+            return None;
+        }
+        if l2_entry & 0x80 != 0 {
+            // 2 MiB huge page
+            let page_phys = l2_entry & 0x000F_FFFF_FFE0_0000;
+            return Some(page_phys + (vaddr & 0x1F_FFFF));
+        }
+
+        let l1_phys = l2_entry & 0x000F_FFFF_FFFF_F000;
+        let l1_ptr = (l1_phys + hhdm) as *const u64;
+        let l1_idx = ((vaddr >> 12) & 0x1FF) as usize;
+        let l1_entry = *l1_ptr.add(l1_idx);
+        if l1_entry & 1 == 0 {
+            return None;
+        }
+
+        let page_phys = l1_entry & 0x000F_FFFF_FFFF_F000;
+        Some(page_phys + (vaddr & 0xFFF))
+    }
+}
+
+/// Detailed page table walk with full flag decoding at each level.
+fn dump_page_table_walk(vaddr: u64, cr3_phys: u64) {
+    let hhdm = crate::memory::hhdm_offset();
+
+    let l4_idx = ((vaddr >> 39) & 0x1FF) as usize;
+    let l3_idx = ((vaddr >> 30) & 0x1FF) as usize;
+    let l2_idx = ((vaddr >> 21) & 0x1FF) as usize;
+    let l1_idx = ((vaddr >> 12) & 0x1FF) as usize;
+
+    // SAFETY: Read-only access to page tables via HHDM for diagnostics.
+    unsafe {
+        let l4_ptr = (cr3_phys + hhdm) as *const u64;
+        let l4_entry = *l4_ptr.add(l4_idx);
+        let flags = format_pte_flags(l4_entry);
+        let flags_s = core::str::from_utf8(&flags).unwrap_or("?");
+        let phys4 = l4_entry & 0x000F_FFFF_FFFF_F000;
+        crate::serial_println!(
+            "  PML4[{:>3}] = {:#018x}  phys={:#014x}  [{}]",
+            l4_idx,
+            l4_entry,
+            phys4,
+            flags_s.trim()
+        );
+        if l4_entry & 1 == 0 {
+            crate::serial_println!("  \x1b[1;31m╰→ STOP: PML4 entry NOT PRESENT\x1b[0m");
+            return;
+        }
+
+        let l3_phys = l4_entry & 0x000F_FFFF_FFFF_F000;
+        let l3_ptr = (l3_phys + hhdm) as *const u64;
+        let l3_entry = *l3_ptr.add(l3_idx);
+        let flags = format_pte_flags(l3_entry);
+        let flags_s = core::str::from_utf8(&flags).unwrap_or("?");
+        let phys3 = l3_entry & 0x000F_FFFF_FFFF_F000;
+        crate::serial_println!(
+            "  PDPT[{:>3}] = {:#018x}  phys={:#014x}  [{}]",
+            l3_idx,
+            l3_entry,
+            phys3,
+            flags_s.trim()
+        );
+        if l3_entry & 1 == 0 {
+            crate::serial_println!("  \x1b[1;31m╰→ STOP: PDPT entry NOT PRESENT\x1b[0m");
+            return;
+        }
+        if l3_entry & 0x80 != 0 {
+            crate::serial_println!(
+                "  ╰→ 1 GiB HUGE PAGE → phys {:#x}",
+                l3_entry & 0x000F_FFFF_C000_0000
+            );
+            return;
+        }
+
+        let l2_phys = l3_entry & 0x000F_FFFF_FFFF_F000;
+        let l2_ptr = (l2_phys + hhdm) as *const u64;
+        let l2_entry = *l2_ptr.add(l2_idx);
+        let flags = format_pte_flags(l2_entry);
+        let flags_s = core::str::from_utf8(&flags).unwrap_or("?");
+        let phys2 = l2_entry & 0x000F_FFFF_FFFF_F000;
+        crate::serial_println!(
+            "  PD  [{:>3}] = {:#018x}  phys={:#014x}  [{}]",
+            l2_idx,
+            l2_entry,
+            phys2,
+            flags_s.trim()
+        );
+        if l2_entry & 1 == 0 {
+            crate::serial_println!("  \x1b[1;31m╰→ STOP: PD entry NOT PRESENT\x1b[0m");
+            return;
+        }
+        if l2_entry & 0x80 != 0 {
+            crate::serial_println!(
+                "  ╰→ 2 MiB HUGE PAGE → phys {:#x}",
+                l2_entry & 0x000F_FFFF_FFE0_0000
+            );
+            return;
+        }
+
+        let l1_phys = l2_entry & 0x000F_FFFF_FFFF_F000;
+        let l1_ptr = (l1_phys + hhdm) as *const u64;
+        let l1_entry = *l1_ptr.add(l1_idx);
+        let flags = format_pte_flags(l1_entry);
+        let flags_s = core::str::from_utf8(&flags).unwrap_or("?");
+        let phys1 = l1_entry & 0x000F_FFFF_FFFF_F000;
+        crate::serial_println!(
+            "  PT  [{:>3}] = {:#018x}  phys={:#014x}  [{}]",
+            l1_idx,
+            l1_entry,
+            phys1,
+            flags_s.trim()
+        );
+        if l1_entry & 1 == 0 {
+            crate::serial_println!("  \x1b[1;31m╰→ STOP: PT entry NOT PRESENT\x1b[0m");
+        } else {
+            crate::serial_println!("  \x1b[1;32m╰→ PAGE PRESENT\x1b[0m → phys {:#x} (flags issue? check RW/US/NX above)",
+                l1_entry & 0x000F_FFFF_FFFF_F000);
+        }
+
+        // Show a few neighbouring PT entries for context
+        crate::serial_println!("  --- Neighbouring PT entries ---");
+        let start = if l1_idx >= 2 { l1_idx - 2 } else { 0 };
+        let end = core::cmp::min(l1_idx + 3, 512);
+        for i in start..end {
+            let e = *l1_ptr.add(i);
+            if e != 0 {
+                let f = format_pte_flags(e);
+                let fs = core::str::from_utf8(&f).unwrap_or("?");
+                let marker = if i == l1_idx { " <<<" } else { "" };
+                crate::serial_println!("    PT[{:>3}] = {:#018x}  [{}]{}", i, e, fs.trim(), marker);
+            }
+        }
+    }
+}
+
+/// Dump VMA regions near the fault address (±3 closest).
+fn dump_nearby_vma_regions(as_ref: &crate::memory::AddressSpace, fault_vaddr: u64) {
+    // We need to access the regions BTreeMap. Use the public region_by_start
+    // and scan a few pages around the fault address.
+    // Check if the exact fault page belongs to any VMA
+    let page_start = fault_vaddr & !0xFFF;
+
+    // Simple probe: check a few likely region starts
+    let probes = [
+        page_start,
+        fault_vaddr & !0x1F_FFFF,   // 2MiB aligned down
+        fault_vaddr & !0x3FFF_FFFF, // 1GiB aligned down
+        0x0000_0001_0000_0000,      // typical ELF base
+        0x0000_0000_0040_0000,      // lower ELF base
+        0x0000_7FFF_F000_0000,      // typical stack region
+    ];
+
+    let mut found_any = false;
+    for &p in &probes {
+        if let Some(vma) = as_ref.region_by_start(p) {
+            let end = vma.start + (vma.page_count as u64) * page_size_bytes(vma.page_size);
+            let contains = fault_vaddr >= vma.start && fault_vaddr < end;
+            crate::serial_println!(
+                "  VMA {:#014x}..{:#014x}  pages={:<5}  type={:?}  flags={:?}  pgsz={:?}{}",
+                vma.start,
+                end,
+                vma.page_count,
+                vma.vma_type,
+                vma.flags,
+                vma.page_size,
+                if contains {
+                    "  \x1b[1;32m<<< CONTAINS FAULT ADDR\x1b[0m"
+                } else {
+                    ""
+                }
+            );
+            found_any = true;
+        }
+    }
+
+    // Also check if address belongs to any mapped range via has_mapping_in_range
+    if as_ref.has_mapping_in_range(page_start, 0x1000) {
+        crate::serial_println!(
+            "  Note: fault page {:#x} IS within a tracked mapping range",
+            page_start
+        );
+    } else {
+        crate::serial_println!(
+            "  Note: fault page {:#x} is NOT within any tracked mapping range",
+            page_start
+        );
+    }
+
+    if !found_any {
+        crate::serial_println!("  (no VMA regions found at probed addresses)");
+    }
+}
+
+/// Convert VmaPageSize to byte count.
+fn page_size_bytes(ps: crate::memory::VmaPageSize) -> u64 {
+    ps.bytes()
 }
 
 /// Performs the dump user pf context operation.
