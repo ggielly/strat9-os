@@ -18,6 +18,10 @@ const DEFAULT_STUN_PORT: u16 = 19302;
 const ICE_HOST_PRIORITY: u32 = (126u32 << 24) | (65535u32 << 8) | (256 - 1);
 const ICE_SRFLX_PRIORITY: u32 = (100u32 << 24) | (65535u32 << 8) | (256 - 1);
 
+/// File open flags used with openat.
+const O_RDONLY: usize = 0x1;
+const O_RDWR: usize = 0x3;
+
 alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 64 * 1024;);
 
 #[global_allocator]
@@ -76,7 +80,7 @@ fn sleep_ms(ms: u64) {
 }
 
 fn scheme_read(path: &str, buf: &mut [u8]) -> Result<usize, ()> {
-    let fd = call::openat(0, path, 0x1, 0).map_err(|_| ())?;
+    let fd = call::openat(0, path, O_RDONLY, 0).map_err(|_| ())?;
     let n = call::read(fd as usize, buf).map_err(|_| {
         let _ = call::close(fd as usize);
     })?;
@@ -305,7 +309,7 @@ pub extern "C" fn _start() -> ! {
     let mut txid = [0u8; 12];
     txid.copy_from_slice(&req[8..20]);
 
-    let fd = match scheme_open(&path, 0x3) {
+    let fd = match scheme_open(&path, O_RDWR) {
         Ok(fd) => fd,
         Err(_) => {
             log("[ice-candidate] stun open failed\n");
