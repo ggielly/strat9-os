@@ -1156,7 +1156,7 @@ impl NetworkStrate {
             if src != conn.remote.0 {
                 return IpcMessage::error_reply(msg.sender, -11);
             }
-            let mut out = [0u8; 40];
+            let mut out = [0u8; 1472]; // max UDP payload at standard 1500-byte MTU
             let n = core::cmp::min(data.len(), out.len());
             out[..n].copy_from_slice(&data[..n]);
             return reply_read(msg.sender, &out[..n]);
@@ -1172,7 +1172,8 @@ impl NetworkStrate {
             let src = match meta.endpoint.addr {
                 IpAddress::Ipv4(v4) => v4,
             };
-            let mut out = [0u8; 40];
+            // Layout: [src_ip: 4 bytes][src_port: 2 bytes][payload: up to 1472 bytes]
+            let mut out = [0u8; 1478];
             out[0..4].copy_from_slice(&src.octets());
             out[4..6].copy_from_slice(&meta.endpoint.port.to_le_bytes());
             let payload_max = out.len() - 6;
