@@ -109,6 +109,16 @@ sid = 42
 name = "sshd"
 binary = "/initfs/bin/sshd"
 type = "elf"
+
+[[silos]]
+name = "graphics-webrtc"
+family = "NET"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-webrtc"
+binary = "/initfs/strate-webrtc"
+type = "elf"
 "#;
 
 #[derive(Clone)]
@@ -126,6 +136,12 @@ struct ManagedSiloDef {
     family: String,
     mode: String,
     cpu_features: String,
+    graphics_enabled: bool,
+    graphics_mode: String,
+    graphics_read_only: bool,
+    graphics_max_sessions: u16,
+    graphics_session_ttl_sec: u32,
+    graphics_turn_policy: String,
     strates: Vec<ManagedStrateDef>,
 }
 
@@ -166,6 +182,12 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
                 family: String::from("USR"),
                 mode: String::from("000"),
                 cpu_features: String::new(),
+                graphics_enabled: false,
+                graphics_mode: String::new(),
+                graphics_read_only: false,
+                graphics_max_sessions: 0,
+                graphics_session_ttl_sec: 0,
+                graphics_turn_policy: String::from("auto"),
                 strates: Vec::new(),
             });
             section = Section::Silo;
@@ -189,6 +211,20 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
                         "family" => s.family = String::from(val),
                         "mode" => s.mode = String::from(val),
                         "cpu_features" => s.cpu_features = String::from(val),
+                        "graphics_enabled" => {
+                            s.graphics_enabled = matches!(val, "true" | "True" | "TRUE" | "1")
+                        }
+                        "graphics_mode" => s.graphics_mode = String::from(val),
+                        "graphics_read_only" => {
+                            s.graphics_read_only = matches!(val, "true" | "True" | "TRUE" | "1")
+                        }
+                        "graphics_max_sessions" => {
+                            s.graphics_max_sessions = val.parse().unwrap_or(0)
+                        }
+                        "graphics_session_ttl_sec" => {
+                            s.graphics_session_ttl_sec = val.parse().unwrap_or(0)
+                        }
+                        "graphics_turn_policy" => s.graphics_turn_policy = String::from(val),
                         _ => {}
                     },
                     Section::Strate => {
@@ -231,6 +267,31 @@ fn render_silo_toml(silos: &[ManagedSiloDef]) -> String {
         let _ = writeln!(out, "mode = \"{}\"", s.mode);
         if !s.cpu_features.is_empty() {
             let _ = writeln!(out, "cpu_features = \"{}\"", s.cpu_features);
+        }
+        if s.graphics_enabled {
+            let _ = writeln!(out, "graphics_enabled = true");
+            let mode = if s.graphics_mode.is_empty() {
+                "webrtc-native"
+            } else {
+                s.graphics_mode.as_str()
+            };
+            let _ = writeln!(out, "graphics_mode = \"{}\"", mode);
+            if s.graphics_read_only {
+                let _ = writeln!(out, "graphics_read_only = true");
+            }
+            if s.graphics_max_sessions != 0 {
+                let _ = writeln!(out, "graphics_max_sessions = {}", s.graphics_max_sessions);
+            }
+            if s.graphics_session_ttl_sec != 0 {
+                let _ = writeln!(
+                    out,
+                    "graphics_session_ttl_sec = {}",
+                    s.graphics_session_ttl_sec
+                );
+            }
+            if s.graphics_turn_policy != "auto" && !s.graphics_turn_policy.is_empty() {
+                let _ = writeln!(out, "graphics_turn_policy = \"{}\"", s.graphics_turn_policy);
+            }
         }
         for st in &s.strates {
             out.push('\n');
@@ -1409,6 +1470,12 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
                 family: family.clone().unwrap_or_else(|| String::from("USR")),
                 mode: mode.clone().unwrap_or_else(|| String::from("000")),
                 cpu_features: String::new(),
+                graphics_enabled: false,
+                graphics_mode: String::new(),
+                graphics_read_only: false,
+                graphics_max_sessions: 0,
+                graphics_session_ttl_sec: 0,
+                graphics_turn_policy: String::from("auto"),
                 strates: Vec::new(),
             });
             silos.len() - 1
@@ -1652,6 +1719,27 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     shell_println!("CPU req:    {:#x}", detail.cpu_features_required);
     shell_println!("CPU allow:  {:#x}", detail.cpu_features_allowed);
     shell_println!("XCR0 mask:  {:#x}", detail.xcr0_mask);
+    shell_println!("GFX flags:  {:#x}", detail.graphics_flags);
+    shell_println!(
+        "GFX mode:   {}",
+        if (detail.graphics_flags & (1 << 2)) != 0 {
+            "webrtc-native"
+        } else if (detail.graphics_flags & (1 << 1)) != 0 {
+            "graphics-raw"
+        } else {
+            "disabled"
+        }
+    );
+    shell_println!(
+        "GFX ro:     {}",
+        if (detail.graphics_flags & (1 << 3)) != 0 {
+            "true"
+        } else {
+            "false"
+        }
+    );
+    shell_println!("GFX sess:   {}", detail.graphics_max_sessions);
+    shell_println!("GFX ttl:    {} sec", detail.graphics_session_ttl_sec);
     shell_println!("Max tasks:  {}", if detail.max_tasks == 0 { String::from("unlimited") } else { alloc::format!("{}", detail.max_tasks) });
     shell_println!("Caps:       {} granted", detail.granted_caps_count);
 

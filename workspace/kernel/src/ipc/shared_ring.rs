@@ -1,5 +1,5 @@
 use crate::{
-    memory::{get_allocator, frame::FrameAllocator, PhysFrame},
+    memory::{frame::FrameAllocator, get_allocator, PhysFrame},
     sync::SpinLock,
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};

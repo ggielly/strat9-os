@@ -393,6 +393,20 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-webrtc]
+description = "Build the webrtc-native graphics silo (debug profile)"
+cwd = "workspace/components/strate-webrtc"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-console-admin]
 
 
@@ -440,6 +454,20 @@ args = [
 [tasks.telnetd]
 description = "Build the telnet server utility (debug profile)"
 cwd = "workspace/components/netutils/telnetd"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.udp-tool]
+description = "Build the UDP scheme utility (debug profile)"
+cwd = "workspace/components/netutils/udp-tool"
 command = "cargo"
 args = [
     "build",
@@ -599,6 +627,21 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-webrtc-release]
+description = "Build the webrtc-native graphics silo (release profile)"
+cwd = "workspace/components/strate-webrtc"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-console-admin-release]
 
 
@@ -649,6 +692,21 @@ args = [
 [tasks.telnetd-release]
 description = "Build the telnet server utility (release profile)"
 cwd = "workspace/components/netutils/telnetd"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.udp-tool-release]
+description = "Build the UDP scheme utility (release profile)"
+cwd = "workspace/components/netutils/udp-tool"
 command = "cargo"
 args = [
     "build",
@@ -817,6 +875,22 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-webrtc-dev-opt]
+description = "Build the webrtc-native graphics silo (dev-opt profile)"
+cwd = "workspace/components/strate-webrtc"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-console-admin-dev-opt]
 description = "Build the console-admin silo (dev-opt profile)"
 cwd = "workspace/components/strate-console-admin"
@@ -881,6 +955,22 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.udp-tool-dev-opt]
+description = "Build the UDP scheme utility (dev-opt profile)"
+cwd = "workspace/components/netutils/udp-tool"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.strate-sshd-dev-opt]
 description = "Build the ssh daemon silo (dev-opt profile)"
 cwd = "workspace/components/strate-sshd"
@@ -927,9 +1017,11 @@ dependencies = [
     "strate-net",
     "strate-bus",
     "strate-wasm",
+    "strate-webrtc",
     "dhcp-client",
     "ping",
     "telnetd",
+    "udp-tool",
     "strate-sshd",
     "strate-web-admin",
 ]
@@ -955,9 +1047,11 @@ dependencies = [
     "strate-net",
     "strate-bus",
     "strate-wasm",
+    "strate-webrtc",
     "dhcp-client",
     "ping",
     "telnetd",
+    "udp-tool",
     "strate-sshd",
     "strate-web-admin",
 ]
@@ -981,9 +1075,11 @@ dependencies = [
     "strate-net-dev-opt",
     "strate-bus-dev-opt",
     "strate-wasm-dev-opt",
+    "strate-webrtc-dev-opt",
     "dhcp-client-dev-opt",
     "ping-dev-opt",
     "telnetd-dev-opt",
+    "udp-tool-dev-opt",
     "strate-sshd-dev-opt",
     "strate-web-admin-dev-opt",
 ]
@@ -1007,9 +1103,11 @@ dependencies = [
     "strate-net-release",
     "strate-bus-release",
     "strate-wasm-release",
+    "strate-webrtc-release",
     "dhcp-client-release",
     "ping-release",
     "telnetd-release",
+    "udp-tool-release",
     "strate-sshd-release",
     "strate-web-admin-release",
 ]

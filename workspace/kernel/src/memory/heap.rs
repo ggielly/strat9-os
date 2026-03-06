@@ -133,7 +133,9 @@ impl SlabState {
             if HEAP_POISON_ENABLED {
                 // Poison bytes [8..slab_size-4] and place canary at the tail.
                 let end = slab_size.saturating_sub(4);
-                for off in 8..end { *block.add(off) = POISON_BYTE; }
+                for off in 8..end {
+                    *block.add(off) = POISON_BYTE;
+                }
                 if slab_size >= 12 {
                     let cp = block.add(slab_size - 4) as *mut u32;
                     *cp = SLAB_CANARY;
@@ -165,13 +167,28 @@ impl SlabState {
             let end = slab_size.saturating_sub(4);
             let mut bad_off: Option<usize> = None;
             for off in 8..end {
-                if *head.add(off) != POISON_BYTE { bad_off = Some(off); break; }
+                if *head.add(off) != POISON_BYTE {
+                    bad_off = Some(off);
+                    break;
+                }
             }
             if let Some(off) = bad_off {
                 let b0 = *head.add(off);
-                let b1 = if off + 1 < slab_size { *head.add(off + 1) } else { 0 };
-                let b2 = if off + 2 < slab_size { *head.add(off + 2) } else { 0 };
-                let b3 = if off + 3 < slab_size { *head.add(off + 3) } else { 0 };
+                let b1 = if off + 1 < slab_size {
+                    *head.add(off + 1)
+                } else {
+                    0
+                };
+                let b2 = if off + 2 < slab_size {
+                    *head.add(off + 2)
+                } else {
+                    0
+                };
+                let b3 = if off + 3 < slab_size {
+                    *head.add(off + 3)
+                } else {
+                    0
+                };
                 crate::serial_println!(
                     "\x1b[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}]\x1b[0m",
                     slab_size, head as u64, off, b0, b1, b2, b3
@@ -203,7 +220,9 @@ impl SlabState {
                 *cp = SLAB_CANARY;
             }
             let end = slab_size.saturating_sub(4);
-            for off in 8..end { *ptr.add(off) = POISON_BYTE; }
+            for off in 8..end {
+                *ptr.add(off) = POISON_BYTE;
+            }
         }
         // Overwrite the first word of the freed block with the current head.
         *(ptr as *mut *mut u8) = self.free_lists[ci];

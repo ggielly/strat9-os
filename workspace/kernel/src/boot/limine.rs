@@ -77,9 +77,14 @@ static DHCP_CLIENT_MODULE: InternalModule =
 static PING_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/ping");
 /// Internal module: request Limine to load /initfs/bin/telnetd (Telnet server utility)
 static TELNETD_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/telnetd");
+/// Internal module: request Limine to load /initfs/bin/udp-tool (UDP scheme utility)
+static UDP_TOOL_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/udp-tool");
 /// Internal module: request Limine to load /initfs/strate-wasm (WASM runtime)
 static STRATE_WASM_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/strate-wasm");
+/// Internal module: request Limine to load /initfs/strate-webrtc (WebRTC-native graphics runtime)
+static STRATE_WEBRTC_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/strate-webrtc");
 /// Internal module: request Limine to load /initfs/bin/hello.wasm (WASM hello test)
 static HELLO_WASM_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/bin/hello.wasm");
@@ -104,7 +109,9 @@ static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
     &DHCP_CLIENT_MODULE,
     &PING_MODULE,
     &TELNETD_MODULE,
+    &UDP_TOOL_MODULE,
     &STRATE_WASM_MODULE,
+    &STRATE_WEBRTC_MODULE,
     &HELLO_WASM_MODULE,
     &WASM_TEST_TOML_MODULE,
 ]);
@@ -133,8 +140,12 @@ static mut DHCP_CLIENT_ELF_MODULE: Option<(u64, u64)> = None;
 static mut PING_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional telnetd module info (set during Limine entry).
 static mut TELNETD_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional udp-tool module info (set during Limine entry).
+static mut UDP_TOOL_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional strate-wasm module info (set during Limine entry).
 static mut STRATE_WASM_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional strate-webrtc module info (set during Limine entry).
+static mut STRATE_WEBRTC_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional hello.wasm module info (set during Limine entry).
 static mut HELLO_WASM_FILE_MODULE: Option<(u64, u64)> = None;
 /// Optional wasm-test.toml module info (set during Limine entry).
@@ -221,10 +232,22 @@ pub fn telnetd_module() -> Option<(u64, u64)> {
     unsafe { TELNETD_ELF_MODULE }
 }
 
+/// Return the udp-tool module (addr, size) if present.
+pub fn udp_tool_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { UDP_TOOL_ELF_MODULE }
+}
+
 /// Return the strate-wasm module (addr, size) if present.
 pub fn strate_wasm_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
     unsafe { STRATE_WASM_ELF_MODULE }
+}
+
+/// Return the strate-webrtc module (addr, size) if present.
+pub fn strate_webrtc_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { STRATE_WEBRTC_ELF_MODULE }
 }
 
 /// Return the hello.wasm module (addr, size) if present.
@@ -273,7 +296,9 @@ struct ResolvedModules {
     dhcp_client: Option<(u64, u64)>,
     ping: Option<(u64, u64)>,
     telnetd: Option<(u64, u64)>,
+    udp_tool: Option<(u64, u64)>,
     strate_wasm: Option<(u64, u64)>,
+    strate_webrtc: Option<(u64, u64)>,
     hello_wasm: Option<(u64, u64)>,
     wasm_test_toml: Option<(u64, u64)>,
 }
@@ -313,8 +338,12 @@ fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> Re
             resolved.ping = Some(info);
         } else if path_matches(path, b"/initfs/bin/telnetd") {
             resolved.telnetd = Some(info);
+        } else if path_matches(path, b"/initfs/bin/udp-tool") {
+            resolved.udp_tool = Some(info);
         } else if path_matches(path, b"/initfs/strate-wasm") {
             resolved.strate_wasm = Some(info);
+        } else if path_matches(path, b"/initfs/strate-webrtc") {
+            resolved.strate_webrtc = Some(info);
         } else if path_matches(path, b"/initfs/bin/hello.wasm") {
             resolved.hello_wasm = Some(info);
         } else if path_matches(path, b"/initfs/wasm-test.toml") {
@@ -629,6 +658,16 @@ pub unsafe extern "C" fn kmain() -> ! {
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/bin/telnetd not found in modules");
             }
+            if let Some((base, size)) = resolved.udp_tool {
+                unsafe { UDP_TOOL_ELF_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/bin/udp-tool found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/bin/udp-tool not found in modules");
+            }
             if let Some((base, size)) = resolved.strate_wasm {
                 unsafe { STRATE_WASM_ELF_MODULE = Some((base, size)) };
                 crate::serial_println!(
@@ -638,6 +677,18 @@ pub unsafe extern "C" fn kmain() -> ! {
                 );
             } else {
                 crate::serial_println!("[limine] WARN: /initfs/strate-wasm not found in modules");
+            }
+            if let Some((base, size)) = resolved.strate_webrtc {
+                unsafe { STRATE_WEBRTC_ELF_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/strate-webrtc found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!(
+                    "[limine] WARN: /initfs/strate-webrtc not found in modules"
+                );
             }
             if let Some((base, size)) = resolved.hello_wasm {
                 unsafe { HELLO_WASM_FILE_MODULE = Some((base, size)) };

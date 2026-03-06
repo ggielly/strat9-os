@@ -24,9 +24,11 @@ CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
 BUS_ELF="target/x86_64-unknown-none/${PROFILE}/strate-bus"
 STRATE_WASM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-wasm"
+STRATE_WEBRTC_ELF="target/x86_64-unknown-none/${PROFILE}/strate-webrtc"
 DHCP_CLIENT_ELF="target/x86_64-unknown-none/${PROFILE}/dhcp-client"
 PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
 TELNETD_ELF="target/x86_64-unknown-none/${PROFILE}/telnetd"
+UDP_TOOL_ELF="target/x86_64-unknown-none/${PROFILE}/udp-tool"
 STRATE_SSHD_ELF="target/x86_64-unknown-none/${PROFILE}/strate-sshd"
 WEB_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/web-admin"
 HELLO_WASM_FILE="workspace/assets/wasm/hello.wasm"
@@ -122,6 +124,12 @@ if [ -f "$STRATE_WASM_ELF" ]; then
 else
     echo "    strate-wasm  : (missing)"
 fi
+if [ -f "$STRATE_WEBRTC_ELF" ]; then
+    webrtc_size=$(stat -c%s "$STRATE_WEBRTC_ELF")
+    echo "    strate-webrtc: $webrtc_size bytes"
+else
+    echo "    strate-webrtc: (missing)"
+fi
 if [ -f "$DHCP_CLIENT_ELF" ]; then
     dhcp_client_size=$(stat -c%s "$DHCP_CLIENT_ELF")
     echo "    dhcp-client  : $dhcp_client_size bytes"
@@ -139,6 +147,12 @@ if [ -f "$TELNETD_ELF" ]; then
     echo "    telnetd      : $telnetd_size bytes"
 else
     echo "    telnetd      : (missing)"
+fi
+if [ -f "$UDP_TOOL_ELF" ]; then
+    udp_tool_size=$(stat -c%s "$UDP_TOOL_ELF")
+    echo "    udp-tool     : $udp_tool_size bytes"
+else
+    echo "    udp-tool     : (missing)"
 fi
 if [ -f "$STRATE_SSHD_ELF" ]; then
     sshd_size=$(stat -c%s "$STRATE_SSHD_ELF")
@@ -259,6 +273,13 @@ else
     echo "  [WARN] strate-wasm binary not found at $STRATE_WASM_ELF"
 fi
 
+if [ -f "$STRATE_WEBRTC_ELF" ]; then
+    cp "$STRATE_WEBRTC_ELF" "$ISO_ROOT/initfs/strate-webrtc"
+    echo "  [OK] Copied strate-webrtc: /initfs/strate-webrtc"
+else
+    echo "  [WARN] strate-webrtc binary not found at $STRATE_WEBRTC_ELF"
+fi
+
 if [ -f "$DHCP_CLIENT_ELF" ]; then
     cp "$DHCP_CLIENT_ELF" "$ISO_ROOT/initfs/bin/dhcp-client"
     echo "  [OK] Copied dhcp-client: /initfs/bin/dhcp-client"
@@ -278,6 +299,13 @@ if [ -f "$TELNETD_ELF" ]; then
     echo "  [OK] Copied telnetd: /initfs/bin/telnetd"
 else
     echo "  [WARN] telnetd binary not found at $TELNETD_ELF"
+fi
+
+if [ -f "$UDP_TOOL_ELF" ]; then
+    cp "$UDP_TOOL_ELF" "$ISO_ROOT/initfs/bin/udp-tool"
+    echo "  [OK] Copied udp-tool: /initfs/bin/udp-tool"
+else
+    echo "  [WARN] udp-tool binary not found at $UDP_TOOL_ELF"
 fi
 
 if [ -f "$STRATE_SSHD_ELF" ]; then

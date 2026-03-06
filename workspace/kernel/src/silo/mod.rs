@@ -368,6 +368,10 @@ pub enum SiloState {
 }
 
 pub const SILO_FLAG_ADMIN: u64 = 1 << 0;
+pub const SILO_FLAG_GRAPHICS: u64 = 1 << 1;
+pub const SILO_FLAG_WEBRTC_NATIVE: u64 = 1 << 2;
+pub const SILO_FLAG_GRAPHICS_READ_ONLY: u64 = 1 << 3;
+pub const SILO_FLAG_WEBRTC_TURN_FORCE: u64 = 1 << 4;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -393,6 +397,12 @@ pub struct SiloConfig {
     pub cpu_features_allowed: u64,
     /// Effective XCR0 mask (computed from allowed features & host capabilities).
     pub xcr0_mask: u64,
+    /// Maximum concurrent graphics sessions for this silo (0 = disabled).
+    pub graphics_max_sessions: u16,
+    /// Graphics session time-to-live in seconds.
+    pub graphics_session_ttl_sec: u32,
+    /// Reserved for ABI expansion.
+    pub graphics_reserved: u16,
 }
 
 impl Default for SiloConfig {
@@ -416,6 +426,9 @@ impl Default for SiloConfig {
             cpu_features_required: 0,
             cpu_features_allowed: u64::MAX,
             xcr0_mask: 0,
+            graphics_max_sessions: 0,
+            graphics_session_ttl_sec: 0,
+            graphics_reserved: 0,
         }
     }
 }
@@ -434,6 +447,21 @@ impl SiloConfig {
         }
         if self.caps_len > 0 && self.caps_ptr == 0 {
             return Err(SyscallError::InvalidArgument);
+        }
+        if self.flags & SILO_FLAG_WEBRTC_NATIVE != 0 && self.flags & SILO_FLAG_GRAPHICS == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if self.flags & SILO_FLAG_GRAPHICS == 0 {
+            if self.graphics_max_sessions != 0 || self.graphics_session_ttl_sec != 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+        } else {
+            if self.graphics_max_sessions == 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if self.graphics_session_ttl_sec == 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
         }
         Ok(())
     }
@@ -621,6 +649,9 @@ pub struct SiloSnapshot {
     pub mem_min_bytes: u64,
     pub mem_max_bytes: u64,
     pub mode: u16,
+    pub graphics_flags: u64,
+    pub graphics_max_sessions: u16,
+    pub graphics_session_ttl_sec: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -637,6 +668,9 @@ pub struct SiloDetailSnapshot {
     pub cpu_features_required: u64,
     pub cpu_features_allowed: u64,
     pub xcr0_mask: u64,
+    pub graphics_flags: u64,
+    pub graphics_max_sessions: u16,
+    pub graphics_session_ttl_sec: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1209,6 +1243,13 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
             mem_min_bytes: s.config.mem_min,
             mem_max_bytes: s.config.mem_max,
             mode: s.config.mode,
+            graphics_flags: s.config.flags
+                & (SILO_FLAG_GRAPHICS
+                    | SILO_FLAG_WEBRTC_NATIVE
+                    | SILO_FLAG_GRAPHICS_READ_ONLY
+                    | SILO_FLAG_WEBRTC_TURN_FORCE),
+            graphics_max_sessions: s.config.graphics_max_sessions,
+            graphics_session_ttl_sec: s.config.graphics_session_ttl_sec,
         })
         .collect()
 }
@@ -2611,6 +2652,13 @@ pub fn silo_detail_snapshot(selector: &str) -> Result<SiloDetailSnapshot, Syscal
             mem_min_bytes: s.config.mem_min,
             mem_max_bytes: s.config.mem_max,
             mode: s.config.mode,
+            graphics_flags: s.config.flags
+                & (SILO_FLAG_GRAPHICS
+                    | SILO_FLAG_WEBRTC_NATIVE
+                    | SILO_FLAG_GRAPHICS_READ_ONLY
+                    | SILO_FLAG_WEBRTC_TURN_FORCE),
+            graphics_max_sessions: s.config.graphics_max_sessions,
+            graphics_session_ttl_sec: s.config.graphics_session_ttl_sec,
         },
         family: s.family,
         sandboxed: s.sandboxed,
@@ -2632,6 +2680,13 @@ pub fn silo_detail_snapshot(selector: &str) -> Result<SiloDetailSnapshot, Syscal
         cpu_features_required: s.config.cpu_features_required,
         cpu_features_allowed: s.config.cpu_features_allowed,
         xcr0_mask: s.config.xcr0_mask,
+        graphics_flags: s.config.flags
+            & (SILO_FLAG_GRAPHICS
+                | SILO_FLAG_WEBRTC_NATIVE
+                | SILO_FLAG_GRAPHICS_READ_ONLY
+                | SILO_FLAG_WEBRTC_TURN_FORCE),
+        graphics_max_sessions: s.config.graphics_max_sessions,
+        graphics_session_ttl_sec: s.config.graphics_session_ttl_sec,
     })
 }
 

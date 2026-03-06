@@ -262,7 +262,9 @@ fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
+        ("bin/udp-tool", crate::boot::limine::udp_tool_module()),
         ("strate-wasm", crate::boot::limine::strate_wasm_module()),
+        ("strate-webrtc", crate::boot::limine::strate_webrtc_module()),
         ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
         (
             "wasm-test.toml",
@@ -292,7 +294,9 @@ fn log_boot_module_magics(stage: &str) {
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
+        ("bin/udp-tool", crate::boot::limine::udp_tool_module()),
         ("strate-wasm", crate::boot::limine::strate_wasm_module()),
+        ("strate-webrtc", crate::boot::limine::strate_webrtc_module()),
         ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
         (
             "wasm-test.toml",
@@ -458,6 +462,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
+        ("bin/udp-tool", crate::boot::limine::udp_tool_module()),
         ("strate-wasm", crate::boot::limine::strate_wasm_module()),
         ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
         (

@@ -5,6 +5,10 @@ use core::fmt::Write;
 use strat9_syscall::{call, flag};
 
 use crate::net;
+const WEBRTC_PATH: &str = "/srv/strate-webrtc/default";
+const WEBRTC_OP_SESSION_OPEN: u32 = 0x300;
+const WEBRTC_OP_SESSION_CLOSE: u32 = 0x301;
+const WEBRTC_OP_SESSION_INFO: u32 = 0x30A;
 
 // ---------------------------------------------------------------------------
 // Structured process info
@@ -297,6 +301,99 @@ pub fn json_all() -> String {
     out.push_str(&json_processes());
     out.push('}');
     out
+}
+
+pub fn json_graphics_open(sid: u32) -> String {
+    let mut payload = [0u8; 5];
+    payload[0..4].copy_from_slice(&sid.to_le_bytes());
+    payload[4] = 0;
+    let Some(reply) = net::ipc_call_path(WEBRTC_PATH, WEBRTC_OP_SESSION_OPEN, &payload) else {
+        return String::from(r#"{"ok":false,"error":"ipc_unreachable"}"#);
+    };
+    let status = u32::from_le_bytes([reply.payload[0], reply.payload[1], reply.payload[2], reply.payload[3]]);
+    if status != 0 {
+        return format!(r#"{{"ok":false,"status":{}}}"#, status);
+    }
+    let session = u64::from_le_bytes([
+        reply.payload[4],
+        reply.payload[5],
+        reply.payload[6],
+        reply.payload[7],
+        reply.payload[8],
+        reply.payload[9],
+        reply.payload[10],
+        reply.payload[11],
+    ]);
+    let token = u64::from_le_bytes([
+        reply.payload[12],
+        reply.payload[13],
+        reply.payload[14],
+        reply.payload[15],
+        reply.payload[16],
+        reply.payload[17],
+        reply.payload[18],
+        reply.payload[19],
+    ]);
+    let ttl = u32::from_le_bytes([reply.payload[20], reply.payload[21], reply.payload[22], reply.payload[23]]);
+    format!(
+        r#"{{"ok":true,"status":0,"session_id":{},"token":{},"ttl_sec":{}}}"#,
+        session, token, ttl
+    )
+}
+
+pub fn json_graphics_close(session_id: u64) -> String {
+    let payload = session_id.to_le_bytes();
+    let Some(reply) = net::ipc_call_path(WEBRTC_PATH, WEBRTC_OP_SESSION_CLOSE, &payload) else {
+        return String::from(r#"{"ok":false,"error":"ipc_unreachable"}"#);
+    };
+    let status = u32::from_le_bytes([reply.payload[0], reply.payload[1], reply.payload[2], reply.payload[3]]);
+    format!(r#"{{"ok":{},"status":{}}}"#, status == 0, status)
+}
+
+pub fn json_graphics_info(session_id: u64) -> String {
+    let payload = session_id.to_le_bytes();
+    let Some(reply) = net::ipc_call_path(WEBRTC_PATH, WEBRTC_OP_SESSION_INFO, &payload) else {
+        return String::from(r#"{"ok":false,"error":"ipc_unreachable"}"#);
+    };
+    let status = u32::from_le_bytes([reply.payload[0], reply.payload[1], reply.payload[2], reply.payload[3]]);
+    if status != 0 {
+        return format!(r#"{{"ok":false,"status":{}}}"#, status);
+    }
+    let sid = u32::from_le_bytes([reply.payload[12], reply.payload[13], reply.payload[14], reply.payload[15]]);
+    let token = u64::from_le_bytes([
+        reply.payload[16],
+        reply.payload[17],
+        reply.payload[18],
+        reply.payload[19],
+        reply.payload[20],
+        reply.payload[21],
+        reply.payload[22],
+        reply.payload[23],
+    ]);
+    let flags = u64::from_le_bytes([
+        reply.payload[24],
+        reply.payload[25],
+        reply.payload[26],
+        reply.payload[27],
+        reply.payload[28],
+        reply.payload[29],
+        reply.payload[30],
+        reply.payload[31],
+    ]);
+    let expires_at_ns = u64::from_le_bytes([
+        reply.payload[32],
+        reply.payload[33],
+        reply.payload[34],
+        reply.payload[35],
+        reply.payload[36],
+        reply.payload[37],
+        reply.payload[38],
+        reply.payload[39],
+    ]);
+    format!(
+        r#"{{"ok":true,"status":0,"silo_id":{},"token":{},"flags":{},"expires_at_ns":{}}}"#,
+        sid, token, flags, expires_at_ns
+    )
 }
 
 // ---------------------------------------------------------------------------

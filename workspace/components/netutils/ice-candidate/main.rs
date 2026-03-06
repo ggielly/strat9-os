@@ -342,7 +342,10 @@ pub extern "C" fn _start() -> ! {
     let mut local_ip_buf = [0u8; 64];
     if let Some(local_ip) = read_local_ip(&mut local_ip_buf) {
         // RFC 8445 §5.1.1: use port 0 when the actual bound port is not known.
-        let host = format!("candidate:1 1 UDP {} {} 0 typ host\r\n", ICE_HOST_PRIORITY, local_ip);
+        let host = format!(
+            "candidate:1 1 UDP {} {} 0 typ host\r\n",
+            ICE_HOST_PRIORITY, local_ip
+        );
         log(&host);
     }
 

@@ -185,6 +185,27 @@ async fn api_routes(
     json_ok(sysinfo::json_routes())
 }
 
+async fn api_graphics_open(
+    sid: u32,
+    _auth: AdminAuth,
+) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
+    json_admin(sysinfo::json_graphics_open(sid))
+}
+
+async fn api_graphics_close(
+    session_id: u64,
+    _auth: AdminAuth,
+) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
+    json_admin(sysinfo::json_graphics_close(session_id))
+}
+
+async fn api_graphics_info(
+    session_id: u64,
+    _auth: AdminAuth,
+) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
+    json_admin(sysinfo::json_graphics_info(session_id))
+}
+
 /// Implements api all.
 async fn api_all(
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
@@ -222,6 +243,18 @@ pub fn build_router() -> picoserve::Router<impl picoserve::routing::PathRouter> 
         .route("/api/network", get(api_network))
         .route("/api/routes", get(api_routes))
         .route("/api/all", get(api_all))
+        .route(
+            ("/api/graphics/open", parse_path_segment::<u32>()),
+            post(|sid, auth| async move { api_graphics_open(sid, auth).await }),
+        )
+        .route(
+            ("/api/graphics/close", parse_path_segment::<u64>()),
+            post(|session_id, auth| async move { api_graphics_close(session_id, auth).await }),
+        )
+        .route(
+            ("/api/graphics/info", parse_path_segment::<u64>()),
+            get(|session_id, auth| async move { api_graphics_info(session_id, auth).await }),
+        )
         .route(
             ("/api/kill", parse_path_segment::<u32>()),
             post(|pid, auth| async move { api_kill(pid, auth).await }),
