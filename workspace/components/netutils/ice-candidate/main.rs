@@ -8,6 +8,11 @@ use alloc::format;
 use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
 use strat9_syscall::{call, data::TimeSpec, number};
 
+/// Default STUN host used when /net/stun-config is absent or unreadable.
+const DEFAULT_STUN_HOST: &str = "stun.l.google.com";
+/// Default STUN port used when /net/stun-config does not specify one.
+const DEFAULT_STUN_PORT: u16 = 19302;
+
 alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 64 * 1024;);
 
 #[global_allocator]
@@ -129,6 +134,68 @@ fn resolve_target<'a>(target: &'a str, resolved_buf: &'a mut [u8; 64]) -> Option
     }
 }
 
+fn parse_u16_decimal(s: &[u8]) -> Option<u16> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut v: u32 = 0;
+    for &b in s {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        v = v * 10 + (b - b'0') as u32;
+        if v > 65535 {
+            return None;
+        }
+    }
+    Some(v as u16)
+}
+
+/// Read STUN configuration from /net/stun-config.
+///
+/// Accepted formats (newline-terminated):
+///   host          — uses DEFAULT_STUN_PORT
+///   host:port     — overrides both host and port
+///
+/// On any parse or I/O error the defaults are returned unchanged.
+fn read_stun_config<'a>(host_buf: &'a mut [u8; 253], port_out: &mut u16) -> &'a str {
+    let mut raw = [0u8; 260];
+    let n = match scheme_read("/net/stun-config", &mut raw) {
+        Ok(n) if n > 0 => n,
+        _ => return DEFAULT_STUN_HOST,
+    };
+    // Trim trailing whitespace / newlines.
+    let mut end = n;
+    while end > 0 && (raw[end - 1] == b'
+' || raw[end - 1] == b'
+' || raw[end - 1] == b' ') {
+        end -= 1;
+    }
+    let line = &raw[..end];
+    // Find the last ':' to split host from optional port.
+    let colon = line.iter().rposition(|&b| b == b':');
+    let (host_bytes, port_bytes) = if let Some(pos) = colon {
+        (&line[..pos], Some(&line[pos + 1..]))
+    } else {
+        (line, None)
+    };
+    if host_bytes.is_empty() || host_bytes.len() > 253 {
+        return DEFAULT_STUN_HOST;
+    }
+    if let Some(pb) = port_bytes {
+        if let Some(p) = parse_u16_decimal(pb) {
+            *port_out = p;
+        } else {
+            return DEFAULT_STUN_HOST;
+        }
+    }
+    host_buf[..host_bytes.len()].copy_from_slice(host_bytes);
+    match core::str::from_utf8(&host_buf[..host_bytes.len()]) {
+        Ok(s) => s,
+        Err(_) => DEFAULT_STUN_HOST,
+    }
+}
+
 fn read_local_ip<'a>(out: &'a mut [u8; 64]) -> Option<&'a str> {
     let n = scheme_read("/net/address", out).ok()?;
     if n == 0 {
@@ -212,8 +279,9 @@ fn parse_stun_binding(resp: &[u8], txid: &[u8; 12]) -> Option<([u8; 4], u16)> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    let stun_host = "stun.l.google.com";
-    let stun_port: u16 = 19302;
+    let mut stun_port: u16 = DEFAULT_STUN_PORT;
+    let mut stun_host_buf = [0u8; 253];
+    let stun_host = read_stun_config(&mut stun_host_buf, &mut stun_port);
     let mut resolved = [0u8; 64];
     let Some(stun_ip) = resolve_target(stun_host, &mut resolved) else {
         log("[ice-candidate] resolve failed\n");
