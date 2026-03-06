@@ -37,6 +37,30 @@ const NUM_SLABS: usize = SLAB_SIZES.len();
 /// Allocations with effective size above this threshold bypass the slab.
 const MAX_SLAB_SIZE: usize = 2048;
 
+// =============================================================================
+// CRITICAL: Slab corruption detection
+//
+// Set HEAP_POISON_ENABLED to true during debugging of heap-corruption crashes.
+// When enabled:
+//   - Every block carved by refill() is filled with POISON_BYTE in bytes [8..N-4]
+//     and stamped with SLAB_CANARY in the last 4 bytes.
+//   - dealloc_block() restores the canary and re-poisons before linking.
+//   - alloc_block() verifies poison and canary before handing the block out;
+//     a mismatch is logged immediately via serial_println! (non-allocating).
+//
+// This detects:
+//   - Use-after-free: a write to a freed slab block overwrites poison bytes.
+//   - Buffer overflow: a write past the end overwrites the canary or the next
+//     block's free-list pointer.
+//
+// Cost: one memset + canary write per alloc/dealloc for slab classes.
+// =============================================================================
+const HEAP_POISON_ENABLED: bool = true;
+/// Byte pattern written to the body of freed slab blocks.
+const POISON_BYTE: u8 = 0xDE;
+/// Canary word placed at the last 4 bytes of each slab block.
+const SLAB_CANARY: u32 = 0xDEAD_BEEF;
+
 // ---------------------------------------------------------------------------
 // SlabState
 // ---------------------------------------------------------------------------
@@ -106,6 +130,15 @@ impl SlabState {
             let block = page_virt.add(i * slab_size);
             // Store the next-free pointer in the first word of the free block.
             *(block as *mut *mut u8) = head;
+            if HEAP_POISON_ENABLED {
+                // Poison bytes [8..slab_size-4] and place canary at the tail.
+                let end = slab_size.saturating_sub(4);
+                for off in 8..end { *block.add(off) = POISON_BYTE; }
+                if slab_size >= 12 {
+                    let cp = block.add(slab_size - 4) as *mut u32;
+                    *cp = SLAB_CANARY;
+                }
+            }
             head = block;
         }
         self.free_lists[ci] = head;
@@ -124,11 +157,54 @@ impl SlabState {
         // Read the next pointer stored at the start of the block.
         let next = *(head as *const *mut u8);
         self.free_lists[ci] = next;
+
+        if HEAP_POISON_ENABLED {
+            let slab_size = SLAB_SIZES[ci];
+            // Bytes [8..slab_size-4] should still hold POISON_BYTE.
+            // Bytes [0..8] held the free-list pointer, exempt from check.
+            let end = slab_size.saturating_sub(4);
+            let mut bad_off: Option<usize> = None;
+            for off in 8..end {
+                if *head.add(off) != POISON_BYTE { bad_off = Some(off); break; }
+            }
+            if let Some(off) = bad_off {
+                let b0 = *head.add(off);
+                let b1 = if off + 1 < slab_size { *head.add(off + 1) } else { 0 };
+                let b2 = if off + 2 < slab_size { *head.add(off + 2) } else { 0 };
+                let b3 = if off + 3 < slab_size { *head.add(off + 3) } else { 0 };
+                crate::serial_println!(
+                    "\x1b[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}]\x1b[0m",
+                    slab_size, head as u64, off, b0, b1, b2, b3
+                );
+            }
+            // Verify the canary at the tail of the block.
+            if slab_size >= 12 {
+                let canary = *(head.add(slab_size - 4) as *const u32);
+                if canary != SLAB_CANARY {
+                    crate::serial_println!(
+                        "\x1b[1;31m[HEAP] CANARY OVERFLOW: slab[{}] block={:#x} expected={:#x} got={:#x}\x1b[0m",
+                        slab_size, head as u64, SLAB_CANARY, canary
+                    );
+                }
+            }
+        }
+
         head
     }
 
     /// Push a block back onto the free list for class `ci`.
     unsafe fn dealloc_block(&mut self, ptr: *mut u8, ci: usize) {
+        if HEAP_POISON_ENABLED {
+            let slab_size = SLAB_SIZES[ci];
+            // Canary at tail, then poison the body (skip the first 8 bytes
+            // which will be overwritten by the free-list pointer below).
+            if slab_size >= 12 {
+                let cp = ptr.add(slab_size - 4) as *mut u32;
+                *cp = SLAB_CANARY;
+            }
+            let end = slab_size.saturating_sub(4);
+            for off in 8..end { *ptr.add(off) = POISON_BYTE; }
+        }
         // Overwrite the first word of the freed block with the current head.
         *(ptr as *mut *mut u8) = self.free_lists[ci];
         self.free_lists[ci] = ptr;
