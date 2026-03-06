@@ -73,9 +73,9 @@ impl core::fmt::Write for BufWriter<'_> {
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{self, Device, DeviceCapabilities, Medium},
-    socket::{dhcpv4, dns, icmp, tcp},
+    socket::{dhcpv4, dns, icmp, tcp, udp},
     time::Instant,
-    wire::{DnsQueryType, EthernetAddress, IpAddress, IpCidr, Ipv4Address},
+    wire::{DnsQueryType, EthernetAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address},
 };
 
 /// Implements icmp checksum.
@@ -434,12 +434,31 @@ struct PendingPing {
 struct TcpListenerState {
     socket: SocketHandle,
     port: u16,
+    auto_relisten: bool,
 }
 
 /// State for an outgoing TCP connection (`tcp/connect/<ip>/<port>`).
 #[derive(Copy, Clone)]
 struct TcpConnState {
     socket: SocketHandle,
+    local_port: u16,
+    remote: IpEndpoint,
+}
+
+/// State for a UDP scheme handle bound on a local port (`udp/bind/<port>`).
+#[derive(Copy, Clone)]
+struct UdpBoundState {
+    socket: SocketHandle,
+    local_port: u16,
+}
+
+/// State for a UDP scheme handle with a fixed remote endpoint
+/// (`udp/connect/<ip>/<port>` or `udp/send/<ip>/<port>`).
+#[derive(Copy, Clone)]
+struct UdpConnState {
+    socket: SocketHandle,
+    local_port: u16,
+    remote: IpEndpoint,
 }
 
 struct NetworkStrate {
@@ -454,6 +473,8 @@ struct NetworkStrate {
     open_handles: BTreeMap<u64, String>,
     tcp_listeners: BTreeMap<u64, TcpListenerState>,
     tcp_connections: BTreeMap<u64, TcpConnState>,
+    udp_bound: BTreeMap<u64, UdpBoundState>,
+    udp_connections: BTreeMap<u64, UdpConnState>,
     next_fid: u64,
     /// Last ping that was sent, waiting for reply
     pending_ping: Option<PendingPing>,
@@ -499,11 +520,68 @@ impl NetworkStrate {
             open_handles: BTreeMap::new(),
             tcp_listeners: BTreeMap::new(),
             tcp_connections: BTreeMap::new(),
+            udp_bound: BTreeMap::new(),
+            udp_connections: BTreeMap::new(),
             next_fid: 1,
             pending_ping: None,
             ping_reply: None,
             ping_ident: 0x9001,
             dhcp_enabled: true,
+        }
+    }
+
+    /// Returns true if a local UDP port is already in use by an opened UDP handle.
+    fn udp_port_in_use(&self, port: u16) -> bool {
+        self.udp_bound.values().any(|s| s.local_port == port)
+            || self.udp_connections.values().any(|s| s.local_port == port)
+    }
+
+    /// Allocates an ephemeral UDP local port from the dynamic range.
+    fn alloc_udp_ephemeral_port(&self) -> Option<u16> {
+        const BASE: u16 = 49_152;
+        const COUNT: usize = 16_384;
+        let start = (self.next_fid as usize) % COUNT;
+        for step in 0..COUNT {
+            let port = BASE + ((start + step) % COUNT) as u16;
+            if !self.udp_port_in_use(port) {
+                return Some(port);
+            }
+        }
+        None
+    }
+
+    /// Creates and binds an internal UDP transport endpoint on `local_port`,
+    /// then registers it in the smoltcp socket set.
+    fn create_udp_socket(&mut self, local_port: u16) -> core::result::Result<SocketHandle, i32> {
+        let rx_buf = udp::PacketBuffer::new(
+            alloc::vec![udp::PacketMetadata::EMPTY; 16],
+            alloc::vec![0u8; 4096],
+        );
+        let tx_buf = udp::PacketBuffer::new(
+            alloc::vec![udp::PacketMetadata::EMPTY; 16],
+            alloc::vec![0u8; 4096],
+        );
+        let mut socket = udp::Socket::new(rx_buf, tx_buf);
+        if socket.bind(local_port).is_err() {
+            return Err(-98); // EADDRINUSE
+        }
+        Ok(self.sockets.add(socket))
+    }
+
+    /// Returns a textual name for a TCP state.
+    fn tcp_state_name(state: tcp::State) -> &'static str {
+        match state {
+            tcp::State::Closed => "CLOSED",
+            tcp::State::Listen => "LISTEN",
+            tcp::State::SynSent => "SYN-SENT",
+            tcp::State::SynReceived => "SYN-RECEIVED",
+            tcp::State::Established => "ESTABLISHED",
+            tcp::State::FinWait1 => "FIN-WAIT-1",
+            tcp::State::FinWait2 => "FIN-WAIT-2",
+            tcp::State::CloseWait => "CLOSE-WAIT",
+            tcp::State::Closing => "CLOSING",
+            tcp::State::LastAck => "LAST-ACK",
+            tcp::State::TimeWait => "TIME-WAIT",
         }
     }
 
@@ -791,7 +869,8 @@ impl NetworkStrate {
                 reply_open(msg.sender, fid, u64::MAX, 1)
             }
             "ip" | "address" | "prefix" | "netmask" | "broadcast" | "gateway" | "route"
-            | "routes" | "dns" | "resolve" | "tcp" | "dhcp" => {
+            | "routes" | "dns" | "resolve" | "ping" | "tcp" | "tcp/listeners"
+            | "tcp/connections" | "tcp/stats" | "udp" | "dhcp" => {
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
@@ -811,8 +890,8 @@ impl NetworkStrate {
             }
             p if p.starts_with("tcp/connect/") => {
                 let rest = &p[12..];
-                let parts: alloc::vec::Vec<&str> = rest.splitn(2, '/').collect();
-                if parts.len() != 2 {
+                let parts: alloc::vec::Vec<&str> = rest.split('/').collect();
+                if parts.len() < 2 || parts.len() > 3 {
                     return IpcMessage::error_reply(msg.sender, -22);
                 }
                 let Some(ip) = parse_ipv4(parts[0]) else {
@@ -821,13 +900,28 @@ impl NetworkStrate {
                 let Some(port) = parts[1].parse::<u16>().ok() else {
                     return IpcMessage::error_reply(msg.sender, -22);
                 };
+                if port == 0 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
 
                 let rx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
                 let tx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
                 let sock = tcp::Socket::new(rx_buf, tx_buf);
                 let handle = self.sockets.add(sock);
 
-                let local_port = 49152 + (self.next_fid as u16 % 16384);
+                let local_port = if parts.len() == 3 {
+                    let Some(lp) = parts[2].parse::<u16>().ok() else {
+                        self.sockets.remove(handle);
+                        return IpcMessage::error_reply(msg.sender, -22);
+                    };
+                    if lp == 0 {
+                        self.sockets.remove(handle);
+                        return IpcMessage::error_reply(msg.sender, -22);
+                    }
+                    lp
+                } else {
+                    49152 + (self.next_fid as u16 % 16384)
+                };
                 let remote = (smoltcp::wire::IpAddress::Ipv4(ip), port);
                 let conn_socket = self.sockets.get_mut::<tcp::Socket>(handle);
                 if conn_socket.connect(self.interface.context(), remote, local_port).is_err() {
@@ -837,7 +931,43 @@ impl NetworkStrate {
 
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
-                self.tcp_connections.insert(fid, TcpConnState { socket: handle });
+                self.tcp_connections.insert(
+                    fid,
+                    TcpConnState {
+                        socket: handle,
+                        local_port,
+                        remote: IpEndpoint::new(IpAddress::Ipv4(ip), port),
+                    },
+                );
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("tcp/listen-once/") => {
+                let port_str = &p[16..];
+                let Some(port) = port_str.parse::<u16>().ok() else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                if port == 0 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+
+                let rx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
+                let tx_buf = tcp::SocketBuffer::new(alloc::vec![0u8; 4096]);
+                let mut sock = tcp::Socket::new(rx_buf, tx_buf);
+                if sock.listen(port).is_err() {
+                    return IpcMessage::error_reply(msg.sender, -98);
+                }
+                let socket = self.sockets.add(sock);
+
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                self.tcp_listeners.insert(
+                    fid,
+                    TcpListenerState {
+                        socket,
+                        port,
+                        auto_relisten: false,
+                    },
+                );
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
             p if p.starts_with("tcp/listen/") => {
@@ -859,8 +989,107 @@ impl NetworkStrate {
 
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
-                self.tcp_listeners
-                    .insert(fid, TcpListenerState { socket, port });
+                self.tcp_listeners.insert(
+                    fid,
+                    TcpListenerState {
+                        socket,
+                        port,
+                        auto_relisten: true,
+                    },
+                );
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("udp/bind/") => {
+                let port_str = &p[9..];
+                let Some(port) = port_str.parse::<u16>().ok() else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                if port == 0 || self.udp_port_in_use(port) {
+                    return IpcMessage::error_reply(msg.sender, -98);
+                }
+                let Ok(socket) = self.create_udp_socket(port) else {
+                    return IpcMessage::error_reply(msg.sender, -98);
+                };
+
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                self.udp_bound.insert(
+                    fid,
+                    UdpBoundState {
+                        socket,
+                        local_port: port,
+                    },
+                );
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("udp/connect/") => {
+                let rest = &p[12..];
+                let parts: alloc::vec::Vec<&str> = rest.splitn(2, '/').collect();
+                if parts.len() != 2 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+                let Some(ip) = parse_ipv4(parts[0]) else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                let Some(remote_port) = parts[1].parse::<u16>().ok() else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                if remote_port == 0 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+
+                let Some(local_port) = self.alloc_udp_ephemeral_port() else {
+                    return IpcMessage::error_reply(msg.sender, -28); // ENOSPC
+                };
+                let Ok(socket) = self.create_udp_socket(local_port) else {
+                    return IpcMessage::error_reply(msg.sender, -98);
+                };
+
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                self.udp_connections.insert(
+                    fid,
+                    UdpConnState {
+                        socket,
+                        local_port,
+                        remote: IpEndpoint::new(IpAddress::Ipv4(ip), remote_port),
+                    },
+                );
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("udp/send/") => {
+                let rest = &p[9..];
+                let parts: alloc::vec::Vec<&str> = rest.splitn(2, '/').collect();
+                if parts.len() != 2 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+                let Some(ip) = parse_ipv4(parts[0]) else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                let Some(remote_port) = parts[1].parse::<u16>().ok() else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                if remote_port == 0 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+
+                let Some(local_port) = self.alloc_udp_ephemeral_port() else {
+                    return IpcMessage::error_reply(msg.sender, -28); // ENOSPC
+                };
+                let Ok(socket) = self.create_udp_socket(local_port) else {
+                    return IpcMessage::error_reply(msg.sender, -98);
+                };
+
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                self.udp_connections.insert(
+                    fid,
+                    UdpConnState {
+                        socket,
+                        local_port,
+                        remote: IpEndpoint::new(IpAddress::Ipv4(ip), remote_port),
+                    },
+                );
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
             p if p.starts_with("route/add/") || p.starts_with("route/del/")
@@ -887,7 +1116,11 @@ impl NetworkStrate {
     fn handle_tcp_read(&mut self, sender: u64, listener: TcpListenerState) -> IpcMessage {
         let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
         if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
-            let _ = socket.listen(listener.port);
+            if listener.auto_relisten {
+                let _ = socket.listen(listener.port);
+            } else {
+                return IpcMessage::error_reply(sender, -104);
+            }
         }
 
         let mut data = [0u8; 40];
@@ -900,7 +1133,11 @@ impl NetworkStrate {
 
         if socket.is_open() && !socket.may_recv() && !socket.may_send() {
             socket.abort();
-            let _ = socket.listen(listener.port);
+            if listener.auto_relisten {
+                let _ = socket.listen(listener.port);
+            } else {
+                return IpcMessage::error_reply(sender, -104);
+            }
         }
         IpcMessage::error_reply(sender, -11)
     }
@@ -909,7 +1146,11 @@ impl NetworkStrate {
     fn handle_tcp_write(&mut self, sender: u64, listener: TcpListenerState, msg: &IpcMessage) -> IpcMessage {
         let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
         if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
-            let _ = socket.listen(listener.port);
+            if listener.auto_relisten {
+                let _ = socket.listen(listener.port);
+            } else {
+                return IpcMessage::error_reply(sender, -104);
+            }
         }
 
         let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
@@ -932,6 +1173,10 @@ impl NetworkStrate {
         if !socket.is_open() {
             return IpcMessage::error_reply(sender, -104); // ECONNRESET
         }
+        let state = socket.state();
+        if state == tcp::State::SynSent || state == tcp::State::SynReceived {
+            return IpcMessage::error_reply(sender, -115); // EINPROGRESS
+        }
         let mut data = [0u8; 40];
         if socket.can_recv() {
             match socket.recv_slice(&mut data) {
@@ -949,6 +1194,10 @@ impl NetworkStrate {
         if !socket.is_open() {
             return IpcMessage::error_reply(sender, -104);
         }
+        let state = socket.state();
+        if state == tcp::State::SynSent || state == tcp::State::SynReceived {
+            return IpcMessage::error_reply(sender, -115); // EINPROGRESS
+        }
         let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
         let data_len = core::cmp::min(data_len, msg.payload.len().saturating_sub(18));
         let data = &msg.payload[18..18 + data_len];
@@ -959,6 +1208,69 @@ impl NetworkStrate {
         match socket.send_slice(data) {
             Ok(n) => reply_write(sender, n),
             Err(_) => IpcMessage::error_reply(sender, -11),
+        }
+    }
+
+    /// Read from a UDP scheme handle bound on a local port.
+    ///
+    /// Returned bytes are encoded as:
+    /// - [0..4]  source IPv4
+    /// - [4..6]  source UDP port (big-endian)
+    /// - [6..]   datagram payload (truncated to fit inline IPC reply)
+    fn handle_udp_bound_read(&mut self, sender: u64, state: UdpBoundState) -> IpcMessage {
+        let socket = self.sockets.get_mut::<udp::Socket>(state.socket);
+        let Ok((data, meta)) = socket.recv() else {
+            return IpcMessage::error_reply(sender, -11); // EAGAIN
+        };
+
+        let IpAddress::Ipv4(src_ip) = meta.endpoint.addr;
+
+        let mut out = [0u8; 40];
+        out[0..4].copy_from_slice(&src_ip.octets());
+        out[4..6].copy_from_slice(&meta.endpoint.port.to_be_bytes());
+        let data_n = core::cmp::min(data.len(), out.len().saturating_sub(6));
+        out[6..6 + data_n].copy_from_slice(&data[..data_n]);
+        reply_read(sender, &out[..6 + data_n])
+    }
+
+    /// Write to a bound UDP scheme handle is not supported directly.
+    ///
+    /// Use `/net/udp/connect/<ip>/<port>` for bidirectional traffic or
+    /// `/net/udp/send/<ip>/<port>` for datagram sends with a fixed peer.
+    fn handle_udp_bound_write(&mut self, sender: u64, state: UdpBoundState, msg: &IpcMessage) -> IpcMessage {
+        let _ = state;
+        let _ = msg;
+        IpcMessage::error_reply(sender, -95) // EOPNOTSUPP
+    }
+
+    /// Read from a connected UDP scheme handle.
+    fn handle_udp_conn_read(&mut self, sender: u64, conn: UdpConnState) -> IpcMessage {
+        let socket = self.sockets.get_mut::<udp::Socket>(conn.socket);
+        while socket.can_recv() {
+            let Ok((data, meta)) = socket.recv() else {
+                break;
+            };
+            if meta.endpoint.addr == conn.remote.addr && meta.endpoint.port == conn.remote.port {
+                let n = core::cmp::min(data.len(), 40);
+                return reply_read(sender, &data[..n]);
+            }
+        }
+        IpcMessage::error_reply(sender, -11) // EAGAIN
+    }
+
+    /// Write to a connected UDP scheme handle.
+    fn handle_udp_conn_write(&mut self, sender: u64, conn: UdpConnState, msg: &IpcMessage) -> IpcMessage {
+        let socket = self.sockets.get_mut::<udp::Socket>(conn.socket);
+        let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+        let data_len = core::cmp::min(data_len, msg.payload.len().saturating_sub(18));
+        let data = &msg.payload[18..18 + data_len];
+        if !socket.can_send() {
+            return IpcMessage::error_reply(sender, -11);
+        }
+        match socket.send_slice(data, conn.remote) {
+            Ok(()) => reply_write(sender, data_len),
+            Err(udp::SendError::BufferFull) => IpcMessage::error_reply(sender, -11),
+            Err(udp::SendError::Unaddressable) => IpcMessage::error_reply(sender, -22),
         }
     }
 
@@ -973,6 +1285,12 @@ impl NetworkStrate {
         if let Some(conn) = self.tcp_connections.get(&file_id).copied() {
             return self.handle_tcp_conn_read(msg.sender, conn);
         }
+        if let Some(state) = self.udp_bound.get(&file_id).copied() {
+            return self.handle_udp_bound_read(msg.sender, state);
+        }
+        if let Some(conn) = self.udp_connections.get(&file_id).copied() {
+            return self.handle_udp_conn_read(msg.sender, conn);
+        }
 
         let path = match self.open_handles.get(&file_id) {
             Some(p) => p.clone(),
@@ -984,7 +1302,7 @@ impl NetworkStrate {
         match path.as_str() {
             "" => {
                 let listing =
-                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\nroutes\ndns\ndhcp\nresolve\nping\ntcp\n";
+                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\nroutes\ndns\ndhcp\nresolve\nping\ntcp\nudp\n";
                 let start = (offset as usize).min(listing.len());
                 reply_read(msg.sender, &listing[start..])
             }
@@ -1107,7 +1425,123 @@ impl NetworkStrate {
                 reply_read(msg.sender, &out[start..n])
             }
             "resolve" => reply_read(msg.sender, b"use /net/resolve/<hostname>\n"),
-            "tcp" => reply_read(msg.sender, b"use /net/tcp/listen/<port>\n"),
+            "tcp" => reply_read(
+                msg.sender,
+                b"use /net/tcp/listen/<port>, /net/tcp/listen-once/<port>, /net/tcp/connect/<ip>/<port>[/<local_port>], /net/tcp/listeners, /net/tcp/connections, /net/tcp/stats\n",
+            ),
+            "tcp/listeners" => {
+                use core::fmt::Write;
+                let mut out = [0u8; 512];
+                let n = {
+                    let mut w = BufWriter {
+                        buf: &mut out,
+                        pos: 0,
+                    };
+                    if self.tcp_listeners.is_empty() {
+                        let _ = write!(w, "none\n");
+                    } else {
+                        for (fid, listener) in self.tcp_listeners.iter() {
+                            let socket = self.sockets.get::<tcp::Socket>(listener.socket);
+                            let mode = if listener.auto_relisten { "auto" } else { "once" };
+                            let _ = write!(
+                                w,
+                                "fid={} port={} state={} mode={}\n",
+                                fid,
+                                listener.port,
+                                Self::tcp_state_name(socket.state()),
+                                mode
+                            );
+                        }
+                    }
+                    w.pos
+                };
+                let start = (offset as usize).min(n);
+                reply_read(msg.sender, &out[start..n])
+            }
+            "tcp/connections" => {
+                use core::fmt::Write;
+                let mut out = [0u8; 768];
+                let n = {
+                    let mut w = BufWriter {
+                        buf: &mut out,
+                        pos: 0,
+                    };
+                    if self.tcp_connections.is_empty() {
+                        let _ = write!(w, "none\n");
+                    } else {
+                        for (fid, conn) in self.tcp_connections.iter() {
+                            let socket = self.sockets.get::<tcp::Socket>(conn.socket);
+                            let local = socket.local_endpoint();
+                            let remote = socket.remote_endpoint();
+                            match (local, remote) {
+                                (Some(l), Some(r)) => {
+                                    let _ = write!(
+                                        w,
+                                        "fid={} local={} remote={} state={}\n",
+                                        fid,
+                                        l,
+                                        r,
+                                        Self::tcp_state_name(socket.state())
+                                    );
+                                }
+                                _ => {
+                                    let _ = write!(
+                                        w,
+                                        "fid={} local_port={} remote={} state={}\n",
+                                        fid,
+                                        conn.local_port,
+                                        conn.remote,
+                                        Self::tcp_state_name(socket.state())
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    w.pos
+                };
+                let start = (offset as usize).min(n);
+                reply_read(msg.sender, &out[start..n])
+            }
+            "tcp/stats" => {
+                use core::fmt::Write;
+                let mut out = [0u8; 256];
+                let n = {
+                    let mut w = BufWriter {
+                        buf: &mut out,
+                        pos: 0,
+                    };
+                    let listeners = self.tcp_listeners.len();
+                    let connections = self.tcp_connections.len();
+                    let mut established = 0usize;
+                    let mut connecting = 0usize;
+                    let mut closing = 0usize;
+                    for conn in self.tcp_connections.values() {
+                        let socket = self.sockets.get::<tcp::Socket>(conn.socket);
+                        match socket.state() {
+                            tcp::State::Established => established += 1,
+                            tcp::State::SynSent | tcp::State::SynReceived => connecting += 1,
+                            tcp::State::Closed => {}
+                            _ => closing += 1,
+                        }
+                    }
+                    let _ = write!(
+                        w,
+                        "listeners={}\nconnections={}\nestablished={}\nconnecting={}\nclosing={}\n",
+                        listeners,
+                        connections,
+                        established,
+                        connecting,
+                        closing
+                    );
+                    w.pos
+                };
+                let start = (offset as usize).min(n);
+                reply_read(msg.sender, &out[start..n])
+            }
+            "udp" => reply_read(
+                msg.sender,
+                b"use /net/udp/bind/<port>, /net/udp/connect/<ip>/<port> or /net/udp/send/<ip>/<port>\n",
+            ),
             p if p.starts_with("resolve/") => {
                 let name = &p[8..];
                 match self.resolve_hostname_blocking(name) {
@@ -1143,6 +1577,12 @@ impl NetworkStrate {
         }
         if let Some(conn) = self.tcp_connections.get(&file_id).copied() {
             return self.handle_tcp_conn_write(msg.sender, conn, msg);
+        }
+        if let Some(state) = self.udp_bound.get(&file_id).copied() {
+            return self.handle_udp_bound_write(msg.sender, state, msg);
+        }
+        if let Some(conn) = self.udp_connections.get(&file_id).copied() {
+            return self.handle_udp_conn_write(msg.sender, conn, msg);
         }
 
         let path = match self.open_handles.get(&file_id) {
@@ -1336,6 +1776,16 @@ impl NetworkStrate {
         }
         if let Some(conn) = self.tcp_connections.remove(&file_id) {
             let sock = self.sockets.get_mut::<tcp::Socket>(conn.socket);
+            sock.close();
+            self.sockets.remove(conn.socket);
+        }
+        if let Some(state) = self.udp_bound.remove(&file_id) {
+            let sock = self.sockets.get_mut::<udp::Socket>(state.socket);
+            sock.close();
+            self.sockets.remove(state.socket);
+        }
+        if let Some(conn) = self.udp_connections.remove(&file_id) {
+            let sock = self.sockets.get_mut::<udp::Socket>(conn.socket);
             sock.close();
             self.sockets.remove(conn.socket);
         }

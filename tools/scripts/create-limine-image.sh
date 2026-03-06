@@ -28,6 +28,7 @@ STRATE_WEBRTC_ELF="target/x86_64-unknown-none/${PROFILE}/strate-webrtc"
 DHCP_CLIENT_ELF="target/x86_64-unknown-none/${PROFILE}/dhcp-client"
 PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
 TELNETD_ELF="target/x86_64-unknown-none/${PROFILE}/telnetd"
+UDP_TOOL_ELF="target/x86_64-unknown-none/${PROFILE}/udp-tool"
 STRATE_SSHD_ELF="target/x86_64-unknown-none/${PROFILE}/strate-sshd"
 WEB_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/web-admin"
 HELLO_WASM_FILE="workspace/assets/wasm/hello.wasm"
@@ -146,6 +147,12 @@ if [ -f "$TELNETD_ELF" ]; then
     echo "    telnetd      : $telnetd_size bytes"
 else
     echo "    telnetd      : (missing)"
+fi
+if [ -f "$UDP_TOOL_ELF" ]; then
+    udp_tool_size=$(stat -c%s "$UDP_TOOL_ELF")
+    echo "    udp-tool     : $udp_tool_size bytes"
+else
+    echo "    udp-tool     : (missing)"
 fi
 if [ -f "$STRATE_SSHD_ELF" ]; then
     sshd_size=$(stat -c%s "$STRATE_SSHD_ELF")
@@ -292,6 +299,13 @@ if [ -f "$TELNETD_ELF" ]; then
     echo "  [OK] Copied telnetd: /initfs/bin/telnetd"
 else
     echo "  [WARN] telnetd binary not found at $TELNETD_ELF"
+fi
+
+if [ -f "$UDP_TOOL_ELF" ]; then
+    cp "$UDP_TOOL_ELF" "$ISO_ROOT/initfs/bin/udp-tool"
+    echo "  [OK] Copied udp-tool: /initfs/bin/udp-tool"
+else
+    echo "  [WARN] udp-tool binary not found at $UDP_TOOL_ELF"
 fi
 
 if [ -f "$STRATE_SSHD_ELF" ]; then
