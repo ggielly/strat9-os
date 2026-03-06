@@ -3,8 +3,18 @@ use super::*;
 /// Initialize the scheduler
 pub fn init_scheduler() {
     let cpu_count = percpu::cpu_count().max(1);
+    crate::serial_println!(
+        "[trace][sched] init_scheduler enter cpu_count={}",
+        cpu_count
+    );
+    // Build the scheduler outside the global scheduler lock to avoid
+    // lock-order inversions (`SCHEDULER -> allocator`) during task/stack
+    // allocation in `Scheduler::new`.
+    let new_sched = Scheduler::new(cpu_count);
+    crate::serial_println!("[trace][sched] init_scheduler new() done");
+
     let mut scheduler = SCHEDULER.lock();
-    *scheduler = Some(Scheduler::new(cpu_count));
+    *scheduler = Some(new_sched);
     drop(scheduler); // Release the lock
 
     // Only initialize legacy PIT if APIC timer is not active
@@ -14,6 +24,7 @@ pub fn init_scheduler() {
     } else {
         log::info!("Scheduler: using APIC timer (100Hz)");
     }
+    crate::serial_println!("[trace][sched] init_scheduler exit");
 }
 
 /// Add a task to the scheduler

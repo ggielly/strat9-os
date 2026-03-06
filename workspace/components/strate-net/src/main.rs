@@ -73,9 +73,9 @@ impl core::fmt::Write for BufWriter<'_> {
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{self, Device, DeviceCapabilities, Medium},
-    socket::{dhcpv4, dns, icmp, tcp},
+    socket::{dhcpv4, dns, icmp, tcp, udp},
     time::Instant,
-    wire::{DnsQueryType, EthernetAddress, IpAddress, IpCidr, Ipv4Address},
+    wire::{DnsQueryType, EthernetAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address},
 };
 
 /// Implements icmp checksum.
@@ -442,6 +442,17 @@ struct TcpConnState {
     socket: SocketHandle,
 }
 
+#[derive(Copy, Clone)]
+struct UdpConnState {
+    socket: SocketHandle,
+    remote: (Ipv4Address, u16),
+}
+
+#[derive(Copy, Clone)]
+struct UdpBoundState {
+    socket: SocketHandle,
+}
+
 struct NetworkStrate {
     device: Strat9NetDevice,
     interface: Interface,
@@ -454,7 +465,11 @@ struct NetworkStrate {
     open_handles: BTreeMap<u64, String>,
     tcp_listeners: BTreeMap<u64, TcpListenerState>,
     tcp_connections: BTreeMap<u64, TcpConnState>,
+    udp_connections: BTreeMap<u64, UdpConnState>,
+    udp_bound: BTreeMap<u64, UdpBoundState>,
     next_fid: u64,
+    /// Monotonically incrementing ephemeral port counter; wraps within 49152..=65535.
+    ephemeral_port_next: u16,
     /// Last ping that was sent, waiting for reply
     pending_ping: Option<PendingPing>,
     /// Received reply: (seq, rtt_us)
@@ -499,7 +514,10 @@ impl NetworkStrate {
             open_handles: BTreeMap::new(),
             tcp_listeners: BTreeMap::new(),
             tcp_connections: BTreeMap::new(),
+            udp_connections: BTreeMap::new(),
+            udp_bound: BTreeMap::new(),
             next_fid: 1,
+            ephemeral_port_next: 49152,
             pending_ping: None,
             ping_reply: None,
             ping_ident: 0x9001,
@@ -768,6 +786,108 @@ impl NetworkStrate {
         true
     }
 
+    fn create_udp_socket(&mut self) -> SocketHandle {
+        let rx_buf = udp::PacketBuffer::new(
+            alloc::vec![udp::PacketMetadata::EMPTY; 8],
+            alloc::vec![0u8; 4096],
+        );
+        let tx_buf = udp::PacketBuffer::new(
+            alloc::vec![udp::PacketMetadata::EMPTY; 8],
+            alloc::vec![0u8; 4096],
+        );
+        let sock = udp::Socket::new(rx_buf, tx_buf);
+        self.sockets.add(sock)
+    }
+
+    fn next_ephemeral_port(&mut self) -> u16 {
+        let port = self.ephemeral_port_next;
+        self.ephemeral_port_next = if self.ephemeral_port_next >= 65535 { 49152 } else { self.ephemeral_port_next + 1 };
+        port
+    }
+
+    // CRITICAL: This function is BLOCKING — it spins inside the IPC event loop for up to
+    // 3 seconds waiting for a UDP response from the NTP server.  While it runs, no other
+    // IPC requests (reads, writes, opens) are processed.  Side effects to be aware of:
+    //   - DNS resolution (resolve_hostname_blocking) may add additional blocking time.
+    //   - Callers on the scheme path must accept the latency hit (NTP is typically called
+    //     once at boot or on-demand via /net/ntp/<hostname>, not in a tight loop).
+    // If low-latency IPC handling becomes a requirement, this function must be refactored
+    // into an asynchronous state machine stored in NetworkStrate.
+    fn query_ntp_blocking(&mut self, name: &str) -> core::result::Result<u64, i32> {
+        let server = self.resolve_hostname_blocking(name)?;
+        let handle = self.create_udp_socket();
+
+        let local_port = self.next_ephemeral_port();
+        {
+            let socket = self.sockets.get_mut::<udp::Socket>(handle);
+            if socket.bind(local_port).is_err() {
+                self.sockets.remove(handle);
+                return Err(-98);
+            }
+
+            let mut packet = [0u8; 48];
+            packet[0] = 0x1B;
+            if socket
+                .send_slice(
+                    &packet,
+                    IpEndpoint::new(IpAddress::Ipv4(server), 123),
+                )
+                .is_err()
+            {
+                self.sockets.remove(handle);
+                return Err(-11);
+            }
+        }
+
+        let deadline = clock_gettime_ns()
+            .unwrap_or(0)
+            .saturating_add(3_000_000_000);
+        loop {
+            let now = now_instant();
+            let _ = self.interface.poll(now, &mut self.device, &mut self.sockets);
+            self.process_dhcp();
+            self.process_icmp();
+
+            let recv = {
+                let socket = self.sockets.get_mut::<udp::Socket>(handle);
+                if !socket.can_recv() {
+                    None
+                } else {
+                    socket.recv().ok()
+                }
+            };
+
+            if let Some((payload, meta)) = recv {
+                if payload.len() >= 48 && meta.endpoint.port == 123 {
+                    let src = match meta.endpoint.addr {
+                        IpAddress::Ipv4(v4) => v4,
+                    };
+                    if src != server {
+                        // Under NAT the response may arrive from the gateway's external IP
+                        // rather than the NTP server address we resolved.  Silently dropping
+                        // it causes a 3-second timeout on every NTP query behind a NAT.
+                        // Log a warning and continue processing the packet rather than
+                        // discarding it; the NTP payload format is self-validating.
+                        debug_log("[strate-net] NTP: response src mismatch (possible NAT relay), processing anyway\n");
+                    }
+                    let ntp_secs =
+                        u32::from_be_bytes([payload[40], payload[41], payload[42], payload[43]])
+                            as u64;
+                    self.sockets.remove(handle);
+                    return ntp_secs
+                        .checked_sub(2_208_988_800)
+                        .ok_or(-74);
+                }
+            }
+
+            if clock_gettime_ns().unwrap_or(0) >= deadline {
+                self.sockets.remove(handle);
+                return Err(-110);
+            }
+            sleep_micros(10_000);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // VFS / IPC handlers
     // -----------------------------------------------------------------------
@@ -791,7 +911,7 @@ impl NetworkStrate {
                 reply_open(msg.sender, fid, u64::MAX, 1)
             }
             "ip" | "address" | "prefix" | "netmask" | "broadcast" | "gateway" | "route"
-            | "routes" | "dns" | "resolve" | "tcp" | "dhcp" => {
+            | "routes" | "dns" | "resolve" | "ping" | "tcp" | "udp" | "ntp" | "dhcp" => {
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
@@ -805,6 +925,14 @@ impl NetworkStrate {
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
             p if p.starts_with("ping/") => {
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("ntp/") => {
+                if p.len() <= 4 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
                 reply_open(msg.sender, fid, u64::MAX, 0)
@@ -827,7 +955,7 @@ impl NetworkStrate {
                 let sock = tcp::Socket::new(rx_buf, tx_buf);
                 let handle = self.sockets.add(sock);
 
-                let local_port = 49152 + (self.next_fid as u16 % 16384);
+                let local_port = self.next_ephemeral_port();
                 let remote = (smoltcp::wire::IpAddress::Ipv4(ip), port);
                 let conn_socket = self.sockets.get_mut::<tcp::Socket>(handle);
                 if conn_socket.connect(self.interface.context(), remote, local_port).is_err() {
@@ -861,6 +989,62 @@ impl NetworkStrate {
                 self.open_handles.insert(fid, String::from(path));
                 self.tcp_listeners
                     .insert(fid, TcpListenerState { socket, port });
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("udp/connect/") => {
+                let rest = &p[12..];
+                let parts: alloc::vec::Vec<&str> = rest.splitn(2, '/').collect();
+                if parts.len() != 2 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+                let Some(ip) = parse_ipv4(parts[0]) else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                let Some(port) = parts[1].parse::<u16>().ok() else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                if port == 0 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+
+                let handle = self.create_udp_socket();
+                let local_port = self.next_ephemeral_port();
+                let socket = self.sockets.get_mut::<udp::Socket>(handle);
+                if socket.bind(local_port).is_err() {
+                    self.sockets.remove(handle);
+                    return IpcMessage::error_reply(msg.sender, -98);
+                }
+
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                self.udp_connections.insert(
+                    fid,
+                    UdpConnState {
+                        socket: handle,
+                        remote: (ip, port),
+                    },
+                );
+                reply_open(msg.sender, fid, u64::MAX, 0)
+            }
+            p if p.starts_with("udp/bind/") => {
+                let port_str = &p[9..];
+                let Some(port) = port_str.parse::<u16>().ok() else {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                };
+                if port == 0 {
+                    return IpcMessage::error_reply(msg.sender, -22);
+                }
+
+                let handle = self.create_udp_socket();
+                let socket = self.sockets.get_mut::<udp::Socket>(handle);
+                if socket.bind(port).is_err() {
+                    self.sockets.remove(handle);
+                    return IpcMessage::error_reply(msg.sender, -98);
+                }
+
+                let fid = self.alloc_fid();
+                self.open_handles.insert(fid, String::from(path));
+                self.udp_bound.insert(fid, UdpBoundState { socket: handle });
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
             p if p.starts_with("route/add/") || p.starts_with("route/del/")
@@ -973,6 +1157,48 @@ impl NetworkStrate {
         if let Some(conn) = self.tcp_connections.get(&file_id).copied() {
             return self.handle_tcp_conn_read(msg.sender, conn);
         }
+        if let Some(conn) = self.udp_connections.get(&file_id).copied() {
+            let socket = self.sockets.get_mut::<udp::Socket>(conn.socket);
+            if !socket.can_recv() {
+                return IpcMessage::error_reply(msg.sender, -11);
+            }
+            let Ok((data, meta)) = socket.recv() else {
+                return IpcMessage::error_reply(msg.sender, -11);
+            };
+            if meta.endpoint.port != conn.remote.1 {
+                return IpcMessage::error_reply(msg.sender, -11);
+            }
+            let src = match meta.endpoint.addr {
+                IpAddress::Ipv4(v4) => v4,
+            };
+            if src != conn.remote.0 {
+                return IpcMessage::error_reply(msg.sender, -11);
+            }
+            let mut out = [0u8; 1472]; // max UDP payload at standard 1500-byte MTU
+            let n = core::cmp::min(data.len(), out.len());
+            out[..n].copy_from_slice(&data[..n]);
+            return reply_read(msg.sender, &out[..n]);
+        }
+        if let Some(bound) = self.udp_bound.get(&file_id).copied() {
+            let socket = self.sockets.get_mut::<udp::Socket>(bound.socket);
+            if !socket.can_recv() {
+                return IpcMessage::error_reply(msg.sender, -11);
+            }
+            let Ok((data, meta)) = socket.recv() else {
+                return IpcMessage::error_reply(msg.sender, -11);
+            };
+            let src = match meta.endpoint.addr {
+                IpAddress::Ipv4(v4) => v4,
+            };
+            // Layout: [src_ip: 4 bytes][src_port: 2 bytes][payload: up to 1472 bytes]
+            let mut out = [0u8; 1478];
+            out[0..4].copy_from_slice(&src.octets());
+            out[4..6].copy_from_slice(&meta.endpoint.port.to_le_bytes());
+            let payload_max = out.len() - 6;
+            let n = core::cmp::min(data.len(), payload_max);
+            out[6..6 + n].copy_from_slice(&data[..n]);
+            return reply_read(msg.sender, &out[..6 + n]);
+        }
 
         let path = match self.open_handles.get(&file_id) {
             Some(p) => p.clone(),
@@ -984,7 +1210,7 @@ impl NetworkStrate {
         match path.as_str() {
             "" => {
                 let listing =
-                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\nroutes\ndns\ndhcp\nresolve\nping\ntcp\n";
+                    b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\nroutes\ndns\ndhcp\nresolve\nping\ntcp\nudp\nntp\n";
                 let start = (offset as usize).min(listing.len());
                 reply_read(msg.sender, &listing[start..])
             }
@@ -1108,6 +1334,11 @@ impl NetworkStrate {
             }
             "resolve" => reply_read(msg.sender, b"use /net/resolve/<hostname>\n"),
             "tcp" => reply_read(msg.sender, b"use /net/tcp/listen/<port>\n"),
+            "udp" => reply_read(
+                msg.sender,
+                b"use /net/udp/connect/<ip>/<port> or /net/udp/bind/<port>\n",
+            ),
+            "ntp" => reply_read(msg.sender, b"use /net/ntp/<server>\n"),
             p if p.starts_with("resolve/") => {
                 let name = &p[8..];
                 match self.resolve_hostname_blocking(name) {
@@ -1130,6 +1361,26 @@ impl NetworkStrate {
                     reply_read(msg.sender, &[])
                 }
             }
+            p if p.starts_with("ntp/") => {
+                let name = &p[4..];
+                match self.query_ntp_blocking(name) {
+                    Ok(unix_secs) => {
+                        use core::fmt::Write;
+                        let mut out = [0u8; 64];
+                        let n = {
+                            let mut w = BufWriter {
+                                buf: &mut out,
+                                pos: 0,
+                            };
+                            let _ = write!(w, "{}\n", unix_secs);
+                            w.pos
+                        };
+                        let start = (offset as usize).min(n);
+                        reply_read(msg.sender, &out[start..n])
+                    }
+                    Err(e) => IpcMessage::error_reply(msg.sender, e),
+                }
+            }
             _ => IpcMessage::error_reply(msg.sender, -9),
         }
     }
@@ -1143,6 +1394,50 @@ impl NetworkStrate {
         }
         if let Some(conn) = self.tcp_connections.get(&file_id).copied() {
             return self.handle_tcp_conn_write(msg.sender, conn, msg);
+        }
+        if let Some(conn) = self.udp_connections.get(&file_id).copied() {
+            let socket = self.sockets.get_mut::<udp::Socket>(conn.socket);
+            if !socket.can_send() {
+                return IpcMessage::error_reply(msg.sender, -11);
+            }
+            let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+            let data_len = core::cmp::min(data_len, msg.payload.len().saturating_sub(18));
+            let data = &msg.payload[18..18 + data_len];
+            if socket
+                .send_slice(
+                    data,
+                    IpEndpoint::new(IpAddress::Ipv4(conn.remote.0), conn.remote.1),
+                )
+                .is_err()
+            {
+                return IpcMessage::error_reply(msg.sender, -11);
+            }
+            return reply_write(msg.sender, data_len);
+        }
+        if let Some(bound) = self.udp_bound.get(&file_id).copied() {
+            let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+            let data_len = core::cmp::min(data_len, msg.payload.len().saturating_sub(18));
+            let data = &msg.payload[18..18 + data_len];
+            if data.len() < 6 {
+                return IpcMessage::error_reply(msg.sender, -22);
+            }
+            let dst = Ipv4Address::new(data[0], data[1], data[2], data[3]);
+            let port = u16::from_le_bytes([data[4], data[5]]);
+            if port == 0 {
+                return IpcMessage::error_reply(msg.sender, -22);
+            }
+            let payload = &data[6..];
+            let socket = self.sockets.get_mut::<udp::Socket>(bound.socket);
+            if !socket.can_send() {
+                return IpcMessage::error_reply(msg.sender, -11);
+            }
+            if socket
+                .send_slice(payload, IpEndpoint::new(IpAddress::Ipv4(dst), port))
+                .is_err()
+            {
+                return IpcMessage::error_reply(msg.sender, -11);
+            }
+            return reply_write(msg.sender, data_len);
         }
 
         let path = match self.open_handles.get(&file_id) {
@@ -1338,6 +1633,16 @@ impl NetworkStrate {
             let sock = self.sockets.get_mut::<tcp::Socket>(conn.socket);
             sock.close();
             self.sockets.remove(conn.socket);
+        }
+        if let Some(conn) = self.udp_connections.remove(&file_id) {
+            let sock = self.sockets.get_mut::<udp::Socket>(conn.socket);
+            sock.close();
+            self.sockets.remove(conn.socket);
+        }
+        if let Some(bound) = self.udp_bound.remove(&file_id) {
+            let sock = self.sockets.get_mut::<udp::Socket>(bound.socket);
+            sock.close();
+            self.sockets.remove(bound.socket);
         }
         reply_ok(msg.sender)
     }

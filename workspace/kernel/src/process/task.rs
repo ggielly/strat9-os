@@ -129,21 +129,34 @@ impl ExtendedState {
 
     /// Create a new default state using the host's maximum capabilities.
     pub fn new() -> Self {
+        crate::serial_println!("[trace][fpu] ExtendedState::new enter");
         let (uses_xsave, size, default_xcr0) = if crate::arch::x86_64::cpuid::host_uses_xsave() {
+            crate::serial_println!("[trace][fpu] ExtendedState::new host_uses_xsave=true");
             let xcr0 = crate::arch::x86_64::cpuid::host_default_xcr0();
+            crate::serial_println!("[trace][fpu] ExtendedState::new host_default_xcr0={:#x}", xcr0);
             let sz = crate::arch::x86_64::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE);
+            crate::serial_println!("[trace][fpu] ExtendedState::new xsave_size={}", sz);
             (true, sz, xcr0)
         } else {
+            crate::serial_println!("[trace][fpu] ExtendedState::new host_uses_xsave=false");
             (false, Self::FXSAVE_SIZE, 0x3)
         };
 
+        crate::serial_println!(
+            "[trace][fpu] ExtendedState::new build state uses_xsave={} size={} xcr0={:#x}",
+            uses_xsave,
+            size,
+            default_xcr0
+        );
         let mut state = Self {
             data: [0u8; Self::MAX_XSAVE_SIZE],
             size,
             uses_xsave,
             xcr0_mask: default_xcr0,
         };
+        crate::serial_println!("[trace][fpu] ExtendedState::new state allocated");
         state.set_defaults();
+        crate::serial_println!("[trace][fpu] ExtendedState::new defaults set");
         state
     }
 
@@ -407,21 +420,36 @@ impl KernelStack {
         let pages = (size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
 
-        // Allocate physical frames from buddy allocator
+        crate::serial_println!("[trace][task] kstack allocate begin size={}", size);
+        crate::serial_println!("[trace][task] kstack allocate pages={} order={}", pages, order);
+
+        // Allocate physical frames from buddy allocator.
+        // SAFETY: Blocking lock is safe here — IF=0 during Phase 7 (before sti() in
+        // kernel_main), so no timer ISR can create a circular dependency. Using try_lock()
+        // in a loop is dangerous with panic="abort": if a debug_assert! fires inside
+        // alloc() while the guard is alive, the guard won't be dropped (no unwinding),
+        // leaving BUDDY_ALLOCATOR locked and silently deadlocking the panic handler.
+        crate::serial_println!("[trace][task] kstack allocate trying to get lock");
         let mut lock = get_allocator().lock();
+        
+        crate::serial_println!("[trace][task] kstack allocate lock acquired");
         let allocator = lock.as_mut().ok_or("Allocator not initialized")?;
+        crate::serial_println!("[trace][task] kstack allocate calling allocator.alloc order={}", order);
         let frame = allocator
             .alloc(order)
             .map_err(|_| "Failed to allocate kernel stack")?;
         drop(lock);
+        crate::serial_println!("[trace][task] kstack allocate frame phys={:#x}", frame.start_address.as_u64());
 
         let phys_base = frame.start_address;
         let virt_base = VirtAddr::new(crate::memory::phys_to_virt(phys_base.as_u64()));
+        crate::serial_println!("[trace][task] kstack allocate virt_base={:#x}", virt_base.as_u64());
 
         // Zero out the stack for safety
         unsafe {
             core::ptr::write_bytes(virt_base.as_mut_ptr::<u8>(), 0, size);
         }
+        crate::serial_println!("[trace][task] kstack allocate memset done");
 
         Ok(KernelStack {
             base: phys_base,
@@ -476,15 +504,35 @@ impl Task {
         priority: TaskPriority,
         stack_size: usize,
     ) -> Result<Arc<Self>, &'static str> {
+        crate::serial_println!(
+            "[trace][task] new_kernel_task_with_stack begin name={} stack_size={}",
+            name,
+            stack_size
+        );
         // Allocate a real kernel stack
         let kernel_stack = KernelStack::allocate(stack_size)?;
+        crate::serial_println!("[trace][task] new_kernel_task_with_stack kstack done");
 
         // Create CPU context with the allocated stack
         let context = CpuContext::new(entry_point as *const () as u64, &kernel_stack);
+        crate::serial_println!("[trace][task] new_kernel_task_with_stack context done");
         let id = TaskId::new();
         let (pid, tid, tgid) = Self::allocate_process_ids();
+        crate::serial_println!(
+            "[trace][task] new_kernel_task_with_stack ids done id={} pid={} tid={} tgid={}",
+            id.as_u64(),
+            pid,
+            tid,
+            tgid
+        );
         let fpu_state = ExtendedState::new();
         let xcr0_mask = fpu_state.xcr0_mask;
+
+        let process = Arc::new(crate::process::process::Process::new(
+            pid,
+            crate::memory::kernel_address_space().clone(),
+        ));
+        crate::serial_println!("[trace][task] new_kernel_task_with_stack process done");
 
         log::debug!(
             "[task][create] name={} id={} pid={} tid={} kstack={:?} kstack_kib={}",
@@ -513,7 +561,7 @@ impl Task {
             kernel_stack,
             user_stack: None,
             name,
-            process: Arc::new(crate::process::process::Process::new(pid, crate::memory::kernel_address_space().clone())),
+            process,
             pending_signals: super::signal::SignalSet::new(),
             blocked_signals: super::signal::SignalSet::new(),
             signal_stack: SyncUnsafeCell::new(None),

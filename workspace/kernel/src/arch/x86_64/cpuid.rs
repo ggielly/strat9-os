@@ -23,6 +23,7 @@ bitflags! {
         const AES_NI    = 1 << 6;
         const XSAVE     = 1 << 7;
         const AVX       = 1 << 8;
+        const X2APIC    = 1 << 21;
         const F16C      = 1 << 9;
         const VMX       = 1 << 10;
         // ── Leaf 0x01 EDX ──
@@ -197,6 +198,9 @@ fn detect() -> CpuInfo {
     }
     if ecx1 & (1 << 28) != 0 {
         features |= CpuFeatures::AVX;
+    }
+    if ecx1 & (1 << 21) != 0 {
+        features |= CpuFeatures::X2APIC;
     }
     if ecx1 & (1 << 29) != 0 {
         features |= CpuFeatures::F16C;
@@ -389,6 +393,7 @@ pub fn features_to_flags_string(f: CpuFeatures) -> String {
         (CpuFeatures::AVX512BW, "avx512bw"),
         (CpuFeatures::AVX512VL, "avx512vl"),
         (CpuFeatures::SHA, "sha_ni"),
+        (CpuFeatures::X2APIC, "x2apic"),
         (CpuFeatures::NX, "nx"),
         (CpuFeatures::PAGES_1G, "pdpe1gb"),
         (CpuFeatures::RDTSCP, "rdtscp"),

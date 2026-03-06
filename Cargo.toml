@@ -29,6 +29,7 @@ members = [
     "workspace/components/netutils/dhcp-client",
     "workspace/components/netutils/ping",
     "workspace/components/netutils/telnetd",
+    "workspace/components/netutils/ice-candidate",
     "workspace/components/strate-web-admin",
 ]
 exclude = [

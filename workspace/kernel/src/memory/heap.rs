@@ -37,14 +37,28 @@ const NUM_SLABS: usize = SLAB_SIZES.len();
 /// Allocations with effective size above this threshold bypass the slab.
 const MAX_SLAB_SIZE: usize = 2048;
 
-/// Enable heap corruption detection (slab poisoning + canary).
-/// Set to `true` to detect use-after-free and buffer overflows.
-/// Adds ~4 bytes overhead per slab allocation and fills freed blocks with 0xDE.
+// =============================================================================
+// CRITICAL: Slab corruption detection
+//
+// Set HEAP_POISON_ENABLED to true during debugging of heap-corruption crashes.
+// When enabled:
+//   - Every block carved by refill() is filled with POISON_BYTE in bytes [8..N-4]
+//     and stamped with SLAB_CANARY in the last 4 bytes.
+//   - dealloc_block() restores the canary and re-poisons before linking.
+//   - alloc_block() verifies poison and canary before handing the block out;
+//     a mismatch is logged immediately via serial_println! (non-allocating).
+//
+// This detects:
+//   - Use-after-free: a write to a freed slab block overwrites poison bytes.
+//   - Buffer overflow: a write past the end overwrites the canary or the next
+//     block's free-list pointer.
+//
+// Cost: one memset + canary write per alloc/dealloc for slab classes.
+// =============================================================================
 const HEAP_POISON_ENABLED: bool = true;
-/// Poison byte written to freed slab blocks.
+/// Byte pattern written to the body of freed slab blocks.
 const POISON_BYTE: u8 = 0xDE;
-/// Canary value stored at the end of each slab block to detect overflows.
-/// Only used when HEAP_POISON_ENABLED is true.
+/// Canary word placed at the last 4 bytes of each slab block.
 const SLAB_CANARY: u32 = 0xDEAD_BEEF;
 
 // ---------------------------------------------------------------------------
@@ -116,20 +130,15 @@ impl SlabState {
             let block = page_virt.add(i * slab_size);
             // Store the next-free pointer in the first word of the free block.
             *(block as *mut *mut u8) = head;
-
             if HEAP_POISON_ENABLED {
-                // Poison bytes [8..slab_size-4] and write canary at end.
-                let poison_start = 8;
-                let poison_end = slab_size.saturating_sub(4);
-                for off in poison_start..poison_end {
-                    *block.add(off) = POISON_BYTE;
-                }
+                // Poison bytes [8..slab_size-4] and place canary at the tail.
+                let end = slab_size.saturating_sub(4);
+                for off in 8..end { *block.add(off) = POISON_BYTE; }
                 if slab_size >= 12 {
-                    let canary_ptr = block.add(slab_size - 4) as *mut u32;
-                    *canary_ptr = SLAB_CANARY;
+                    let cp = block.add(slab_size - 4) as *mut u32;
+                    *cp = SLAB_CANARY;
                 }
             }
-
             head = block;
         }
         self.free_lists[ci] = head;
@@ -151,49 +160,29 @@ impl SlabState {
 
         if HEAP_POISON_ENABLED {
             let slab_size = SLAB_SIZES[ci];
-            // Verify the poison pattern is intact (skip the first 8 bytes
-            // which hold the free-list next pointer and are expected to be
-            // overwritten).
-            let check_start = 8; // after the free-list pointer
-            let check_end = slab_size.saturating_sub(4); // before canary
-            let mut corruption_offset: Option<usize> = None;
-            for off in check_start..check_end {
-                let byte = *head.add(off);
-                if byte != POISON_BYTE {
-                    corruption_offset = Some(off);
-                    break;
-                }
+            // Bytes [8..slab_size-4] should still hold POISON_BYTE.
+            // Bytes [0..8] held the free-list pointer, exempt from check.
+            let end = slab_size.saturating_sub(4);
+            let mut bad_off: Option<usize> = None;
+            for off in 8..end {
+                if *head.add(off) != POISON_BYTE { bad_off = Some(off); break; }
             }
-            if let Some(off) = corruption_offset {
-                // Read a few bytes around the corruption point
+            if let Some(off) = bad_off {
                 let b0 = *head.add(off);
-                let b1 = if off + 1 < slab_size {
-                    *head.add(off + 1)
-                } else {
-                    0
-                };
-                let b2 = if off + 2 < slab_size {
-                    *head.add(off + 2)
-                } else {
-                    0
-                };
-                let b3 = if off + 3 < slab_size {
-                    *head.add(off + 3)
-                } else {
-                    0
-                };
+                let b1 = if off + 1 < slab_size { *head.add(off + 1) } else { 0 };
+                let b2 = if off + 2 < slab_size { *head.add(off + 2) } else { 0 };
+                let b3 = if off + 3 < slab_size { *head.add(off + 3) } else { 0 };
                 crate::serial_println!(
-                    "\x1b[1;31m[HEAP] POISON CORRUPTED: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}]\x1b[0m",
+                    "\x1b[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}]\x1b[0m",
                     slab_size, head as u64, off, b0, b1, b2, b3
                 );
             }
-            // Check the canary at end of usable area
+            // Verify the canary at the tail of the block.
             if slab_size >= 12 {
-                let canary_ptr = head.add(slab_size - 4) as *const u32;
-                let canary = *canary_ptr;
+                let canary = *(head.add(slab_size - 4) as *const u32);
                 if canary != SLAB_CANARY {
                     crate::serial_println!(
-                        "\x1b[1;31m[HEAP] CANARY CORRUPTED: slab[{}] block={:#x} expected={:#x} got={:#x}\x1b[0m",
+                        "\x1b[1;31m[HEAP] CANARY OVERFLOW: slab[{}] block={:#x} expected={:#x} got={:#x}\x1b[0m",
                         slab_size, head as u64, SLAB_CANARY, canary
                     );
                 }
@@ -207,18 +196,14 @@ impl SlabState {
     unsafe fn dealloc_block(&mut self, ptr: *mut u8, ci: usize) {
         if HEAP_POISON_ENABLED {
             let slab_size = SLAB_SIZES[ci];
-            // Write a canary at the end of the block.
+            // Canary at tail, then poison the body (skip the first 8 bytes
+            // which will be overwritten by the free-list pointer below).
             if slab_size >= 12 {
-                let canary_ptr = ptr.add(slab_size - 4) as *mut u32;
-                *canary_ptr = SLAB_CANARY;
+                let cp = ptr.add(slab_size - 4) as *mut u32;
+                *cp = SLAB_CANARY;
             }
-            // Poison the block body (skip only the first 8 bytes where the
-            // free-list next pointer will be stored immediately after).
-            let poison_start = 8;
-            let poison_end = slab_size.saturating_sub(4); // preserve canary
-            for off in poison_start..poison_end {
-                *ptr.add(off) = POISON_BYTE;
-            }
+            let end = slab_size.saturating_sub(4);
+            for off in 8..end { *ptr.add(off) = POISON_BYTE; }
         }
         // Overwrite the first word of the freed block with the current head.
         *(ptr as *mut *mut u8) = self.free_lists[ci];

@@ -261,20 +261,22 @@ impl BuddyAllocator {
 
     /// Allocates from zone.
     fn alloc_from_zone(zone: &mut Zone, order: u8) -> Option<PhysFrame> {
+        crate::serial_println!(
+            "[trace][buddy] alloc_from_zone enter order={} zone_type={}",
+            order, zone.zone_type as usize
+        );
         for cur_order in order..=MAX_ORDER as u8 {
+            crate::serial_println!(
+                "[trace][buddy]   trying cur_order={} free_list={:x}",
+                cur_order, zone.free_lists[cur_order as usize]
+            );
             let Some(frame_phys) = Self::free_list_pop(zone, cur_order) else {
                 continue;
             };
+            crate::serial_println!("[trace][buddy]   popped frame_phys={:#x}", frame_phys);
             let block_size = PAGE_SIZE << cur_order;
             let block_end = frame_phys.saturating_add(block_size);
             if Self::protected_overlap_end(frame_phys, block_end).is_some() {
-                buddy_dbg!(
-                    "  Zone {:?}: dropped protected free block 0x{:x}..0x{:x} order={}",
-                    zone.zone_type,
-                    frame_phys,
-                    block_end,
-                    cur_order
-                );
                 continue;
             }
 
@@ -682,16 +684,25 @@ impl FrameAllocator for BuddyAllocator {
             return Err(AllocError::InvalidOrder);
         }
 
+        crate::serial_println!("[trace][buddy] alloc enter order={}", order);
+
         for zi in [
             ZoneType::Normal as usize,
             ZoneType::HighMem as usize,
             ZoneType::DMA as usize,
         ] {
+            crate::serial_println!("[trace][buddy] alloc trying zone zi={}", zi);
             if let Some(frame) = Self::alloc_from_zone(&mut self.zones[zi], order) {
+                crate::serial_println!(
+                    "[trace][buddy] alloc success zone={} phys={:#x}",
+                    zi, frame.start_address.as_u64()
+                );
                 return Ok(frame);
             }
+            crate::serial_println!("[trace][buddy] alloc zone={} empty for order={}", zi, order);
         }
 
+        crate::serial_println!("[trace][buddy] alloc FAILED out of memory");
         Err(AllocError::OutOfMemory)
     }
 

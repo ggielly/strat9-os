@@ -3,10 +3,20 @@ use super::{runtime_ops::idle_task_main, *};
 impl Scheduler {
     /// Create a new scheduler instance
     pub fn new(cpu_count: usize) -> Self {
+        crate::serial_println!("[trace][sched] Scheduler::new enter cpu_count={}", cpu_count);
         let mut cpus = alloc::vec::Vec::new();
-        for _ in 0..cpu_count {
+        for cpu_idx in 0..cpu_count {
+            crate::serial_println!(
+                "[trace][sched] Scheduler::new cpu={} create idle begin",
+                cpu_idx
+            );
             let idle_task = Task::new_kernel_task(idle_task_main, "idle", TaskPriority::Idle)
                 .expect("Failed to create idle task");
+            crate::serial_println!(
+                "[trace][sched] Scheduler::new cpu={} create idle done id={}",
+                cpu_idx,
+                idle_task.id.as_u64()
+            );
             idle_task.set_sched_policy(crate::process::sched::SchedPolicy::Idle);
             let mut class_rqs = PerCpuClassRqSet::new();
             class_rqs.enqueue(crate::process::sched::SchedClassId::Idle, idle_task.clone());
@@ -19,7 +29,9 @@ impl Scheduler {
                 task_to_drop: None,
                 need_resched: false,
             });
+            crate::serial_println!("[trace][sched] Scheduler::new cpu={} push done", cpu_idx);
         }
+        crate::serial_println!("[trace][sched] Scheduler::new cpus ready len={}", cpus.len());
 
         Scheduler {
             cpus,
