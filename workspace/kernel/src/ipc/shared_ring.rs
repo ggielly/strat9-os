@@ -146,7 +146,7 @@ pub fn destroy_ring(id: RingId) -> Result<(), RingError> {
     let len = map.len();
     if len > 10_000 {
         crate::serial_println!(
-            "\x1b[1;31m[ipc] RINGS BTreeMap corrupted: len={} for id={} \u2014 aborting remove\x1b[0m",
+            "\x1b[1;31m[ipc] RINGS BTreeMap corrupted: len={} for id={} \u{2014} aborting remove\x1b[0m",
             len, id.as_u64()
         );
         return Err(RingError::NotFound);

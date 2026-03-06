@@ -42,8 +42,10 @@ fn panic(info: &PanicInfo) -> ! {
         pos: 0,
     };
     let _ = write!(w, "{}", info.message());
-    if w.pos > 0 {
-        let _ = call::write(1, &buf[..w.pos]);
+    let len = w.pos;
+    drop(w); // release mutable borrow before reusing `buf`
+    if len > 0 {
+        let _ = call::write(1, &buf[..len]);
     }
     let _ = call::write(1, b"\n");
     call::exit(255)
@@ -175,9 +177,7 @@ fn read_stun_config<'a>(host_buf: &'a mut [u8; 253], port_out: &mut u16) -> &'a 
     };
     // Trim trailing whitespace / newlines.
     let mut end = n;
-    while end > 0 && (raw[end - 1] == b'
-' || raw[end - 1] == b'
-' || raw[end - 1] == b' ') {
+    while end > 0 && (raw[end - 1] == b'\n' || raw[end - 1] == b'\r' || raw[end - 1] == b' ') {
         end -= 1;
     }
     let line = &raw[..end];
