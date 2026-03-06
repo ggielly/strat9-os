@@ -863,7 +863,12 @@ impl NetworkStrate {
                         IpAddress::Ipv4(v4) => v4,
                     };
                     if src != server {
-                        continue;
+                        // Under NAT the response may arrive from the gateway's external IP
+                        // rather than the NTP server address we resolved.  Silently dropping
+                        // it causes a 3-second timeout on every NTP query behind a NAT.
+                        // Log a warning and continue processing the packet rather than
+                        // discarding it; the NTP payload format is self-validating.
+                        debug_log("[strate-net] NTP: response src mismatch (possible NAT relay), processing anyway\n");
                     }
                     let ntp_secs =
                         u32::from_be_bytes([payload[40], payload[41], payload[42], payload[43]])
