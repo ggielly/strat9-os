@@ -468,6 +468,8 @@ struct NetworkStrate {
     udp_connections: BTreeMap<u64, UdpConnState>,
     udp_bound: BTreeMap<u64, UdpBoundState>,
     next_fid: u64,
+    /// Monotonically incrementing ephemeral port counter; wraps within 49152..=65535.
+    ephemeral_port_next: u16,
     /// Last ping that was sent, waiting for reply
     pending_ping: Option<PendingPing>,
     /// Received reply: (seq, rtt_us)
@@ -515,6 +517,7 @@ impl NetworkStrate {
             udp_connections: BTreeMap::new(),
             udp_bound: BTreeMap::new(),
             next_fid: 1,
+            ephemeral_port_next: 49152,
             pending_ping: None,
             ping_reply: None,
             ping_ident: 0x9001,
@@ -796,8 +799,10 @@ impl NetworkStrate {
         self.sockets.add(sock)
     }
 
-    fn next_ephemeral_port(&self) -> u16 {
-        49152 + (self.next_fid as u16 % 16384)
+    fn next_ephemeral_port(&mut self) -> u16 {
+        let port = self.ephemeral_port_next;
+        self.ephemeral_port_next = if self.ephemeral_port_next >= 65535 { 49152 } else { self.ephemeral_port_next + 1 };
+        port
     }
 
     // CRITICAL: This function is BLOCKING — it spins inside the IPC event loop for up to
@@ -945,7 +950,7 @@ impl NetworkStrate {
                 let sock = tcp::Socket::new(rx_buf, tx_buf);
                 let handle = self.sockets.add(sock);
 
-                let local_port = 49152 + (self.next_fid as u16 % 16384);
+                let local_port = self.next_ephemeral_port();
                 let remote = (smoltcp::wire::IpAddress::Ipv4(ip), port);
                 let conn_socket = self.sockets.get_mut::<tcp::Socket>(handle);
                 if conn_socket.connect(self.interface.context(), remote, local_port).is_err() {
