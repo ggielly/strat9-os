@@ -13,6 +13,11 @@ const DEFAULT_STUN_HOST: &str = "stun.l.google.com";
 /// Default STUN port used when /net/stun-config does not specify one.
 const DEFAULT_STUN_PORT: u16 = 19302;
 
+// RFC 8445 §5.1.2 priority formula: (type_preference << 24) | (local_preference << 8) | (256 - component_id)
+// host type_pref=126, srflx type_pref=100; local_pref=65535 (single interface); comp_id=1.
+const ICE_HOST_PRIORITY: u32 = (126u32 << 24) | (65535u32 << 8) | (256 - 1);
+const ICE_SRFLX_PRIORITY: u32 = (100u32 << 24) | (65535u32 << 8) | (256 - 1);
+
 alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 64 * 1024;);
 
 #[global_allocator]
@@ -333,15 +338,15 @@ pub extern "C" fn _start() -> ! {
     let mut local_ip_buf = [0u8; 64];
     if let Some(local_ip) = read_local_ip(&mut local_ip_buf) {
         // RFC 8445 §5.1.1: use port 0 when the actual bound port is not known.
-        let host = format!("candidate:1 1 UDP 2130706431 {} 0 typ host\r\n", local_ip);
+        let host = format!("candidate:1 1 UDP {} {} 0 typ host\r\n", ICE_HOST_PRIORITY, local_ip);
         log(&host);
     }
 
     if let Some((ip, port)) = mapped {
         let srflx = format!(
             // RFC 8445 §5.1.1: rport 0 when the reflexive base port is not tracked.
-            "candidate:2 1 UDP 1694498815 {}.{}.{}.{} {} typ srflx raddr 0.0.0.0 rport 0\r\n",
-            ip[0], ip[1], ip[2], ip[3], port
+            "candidate:2 1 UDP {} {}.{}.{}.{} {} typ srflx raddr 0.0.0.0 rport 0\r\n",
+            ICE_SRFLX_PRIORITY, ip[0], ip[1], ip[2], ip[3], port
         );
         log(&srflx);
         let _ = call::close(fd as usize);
