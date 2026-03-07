@@ -14,8 +14,6 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 
-use crate::memory::FrameAllocator;
-
 /// Wrapper around our buddy allocator implementing the x86_64 crate's FrameAllocator trait.
 ///
 /// This is used by `OffsetPageTable` when it needs to allocate intermediate page tables.
@@ -26,10 +24,7 @@ pub struct BuddyFrameAllocator;
 unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     /// Performs the allocate frame operation.
     fn allocate_frame(&mut self) -> Option<X86PhysFrame<Size4KiB>> {
-        let lock = crate::memory::get_allocator();
-        let mut guard = lock.lock();
-        let allocator = guard.as_mut()?;
-        let frame = allocator.alloc_frame().ok()?;
+        let frame = crate::memory::allocate_frame().ok()?;
         X86PhysFrame::from_start_address(frame.start_address).ok()
     }
 }

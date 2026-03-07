@@ -20,10 +20,7 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 
-use crate::{
-    memory::{paging::BuddyFrameAllocator, FrameAllocator},
-    sync::SpinLock,
-};
+use crate::{memory::paging::BuddyFrameAllocator, sync::SpinLock};
 
 /// Flags describing permissions for a virtual memory region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,15 +146,9 @@ impl AddressSpace {
     /// kernel mapping changes propagate automatically.
     pub fn new_user() -> Result<Self, &'static str> {
         // Allocate a frame for the new PML4 table.
-        let new_l4_phys = {
-            let lock = crate::memory::get_allocator();
-            let mut guard = lock.lock();
-            let allocator = guard.as_mut().ok_or("Allocator not initialized")?;
-            let frame = allocator
-                .alloc_frame()
-                .map_err(|_| "Failed to allocate PML4 frame")?;
-            frame.start_address
-        };
+        let new_l4_phys = crate::memory::allocate_frame()
+            .map_err(|_| "Failed to allocate PML4 frame")?
+            .start_address;
 
         let new_l4_virt = VirtAddr::new(crate::memory::phys_to_virt(new_l4_phys.as_u64()));
 
@@ -387,13 +378,8 @@ impl AddressSpace {
             VmaPageSize::Huge => 9,
         };
 
-        let lock = crate::memory::get_allocator();
-        let mut guard = lock.lock();
-        let allocator = guard.as_mut().ok_or("Allocator not initialized")?;
-        let frame = allocator
-            .alloc(order)
-            .map_err(|_| "OOM during demand paging")?;
-        drop(guard);
+        let frame =
+            crate::memory::allocate_frames(order).map_err(|_| "OOM during demand paging")?;
 
         let mut page_flags = vma.flags.to_page_flags();
 
@@ -414,29 +400,11 @@ impl AddressSpace {
                             core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
-                            let lock = crate::memory::get_allocator();
-                            let mut guard = lock.lock();
-                            if let Some(allocator) = guard.as_mut() {
-                                allocator.free(
-                                    crate::memory::PhysFrame {
-                                        start_address: frame.start_address,
-                                    },
-                                    order,
-                                );
-                            }
+                            crate::memory::free_frames(frame, order);
                             return Ok(());
                         }
                         Err(_) => {
-                            let lock = crate::memory::get_allocator();
-                            let mut guard = lock.lock();
-                            if let Some(allocator) = guard.as_mut() {
-                                allocator.free(
-                                    crate::memory::PhysFrame {
-                                        start_address: frame.start_address,
-                                    },
-                                    order,
-                                );
-                            }
+                            crate::memory::free_frames(frame, order);
                             return Err("Failed to map demand page (4K)");
                         }
                     }
@@ -455,29 +423,11 @@ impl AddressSpace {
                             core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
-                            let lock = crate::memory::get_allocator();
-                            let mut guard = lock.lock();
-                            if let Some(allocator) = guard.as_mut() {
-                                allocator.free(
-                                    crate::memory::PhysFrame {
-                                        start_address: frame.start_address,
-                                    },
-                                    order,
-                                );
-                            }
+                            crate::memory::free_frames(frame, order);
                             return Ok(());
                         }
                         Err(_) => {
-                            let lock = crate::memory::get_allocator();
-                            let mut guard = lock.lock();
-                            if let Some(allocator) = guard.as_mut() {
-                                allocator.free(
-                                    crate::memory::PhysFrame {
-                                        start_address: frame.start_address,
-                                    },
-                                    order,
-                                );
-                            }
+                            crate::memory::free_frames(frame, order);
                             return Err("Failed to map demand page (2M)");
                         }
                     }
@@ -551,13 +501,8 @@ impl AddressSpace {
                 VmaPageSize::Huge => 9,
             };
 
-            let lock = crate::memory::get_allocator();
-            let mut guard = lock.lock();
-            let allocator = guard.as_mut().ok_or("Allocator not initialized")?;
-            let frame = allocator
-                .alloc(order)
-                .map_err(|_| "Failed to allocate frame")?;
-            drop(guard);
+            let frame =
+                crate::memory::allocate_frames(order).map_err(|_| "Failed to allocate frame")?;
 
             // Zero the frame
             unsafe {
@@ -609,12 +554,7 @@ impl AddressSpace {
                     page_size
                 );
                 // Free frame for this page that failed to map.
-                let lock = crate::memory::get_allocator();
-                let mut guard = lock.lock();
-                if let Some(allocator) = guard.as_mut() {
-                    allocator.free(frame, order);
-                }
-                drop(guard);
+                crate::memory::free_frames(frame, order);
 
                 // Roll back already mapped pages to keep state consistent.
                 for j in (0..mapped_pages).rev() {
@@ -1553,11 +1493,7 @@ impl Drop for AddressSpace {
         let phys_frame = crate::memory::PhysFrame {
             start_address: self.cr3_phys,
         };
-        let lock = crate::memory::get_allocator();
-        let mut guard = lock.lock();
-        if let Some(allocator) = guard.as_mut() {
-            allocator.free(phys_frame, 0);
-        }
+        crate::memory::free_frame(phys_frame);
 
         log::trace!("AddressSpace::drop end CR3={:#x}", self.cr3_phys.as_u64());
         log::debug!(
@@ -1576,11 +1512,7 @@ fn free_frame(phys: PhysAddr) {
     let phys_frame = crate::memory::PhysFrame {
         start_address: phys,
     };
-    let lock = crate::memory::get_allocator();
-    let mut guard = lock.lock();
-    if let Some(allocator) = guard.as_mut() {
-        allocator.free(phys_frame, 0);
-    }
+    crate::memory::free_frame(phys_frame);
 }
 
 /// Releases l1 table.

@@ -11,7 +11,7 @@ use crate::{
         common::{VirtioDevice, Virtqueue},
         status,
     },
-    memory::{get_allocator, FrameAllocator},
+    memory,
     sync::SpinLock,
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -198,10 +198,7 @@ impl VirtioBlockDevice {
         // To be safe and simple with the frame allocator, we'll alloc a frame.
         // In a real optimized driver, we would have a slab allocator or pre-allocated pool.
 
-        let mut lock = get_allocator().lock();
-        let allocator = lock.as_mut().ok_or(BlockError::NotReady)?;
-        let metadata_frame = allocator.alloc_frame().map_err(|_| BlockError::NotReady)?;
-        drop(lock);
+        let metadata_frame = memory::allocate_frame().map_err(|_| BlockError::NotReady)?;
 
         let metadata_phys = metadata_frame.start_address.as_u64();
         let metadata_virt = crate::memory::phys_to_virt(metadata_phys);
@@ -247,13 +244,10 @@ impl VirtioBlockDevice {
             let buf_pages = (buf_size + 4095) / 4096;
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
-            let mut lock = get_allocator().lock();
-            let allocator = lock.as_mut().ok_or(BlockError::NotReady)?;
-            let buf_frame = allocator.alloc(buf_order).map_err(|_| {
-                allocator.free(metadata_frame, 0);
+            let buf_frame = memory::allocate_frames(buf_order).map_err(|_| {
+                memory::free_frame(metadata_frame);
                 BlockError::NotReady
             })?;
-            drop(lock);
 
             let buf_phys = buf_frame.start_address.as_u64();
             let buf_virt = crate::memory::phys_to_virt(buf_phys);
@@ -285,12 +279,9 @@ impl VirtioBlockDevice {
             Err(_) => {
                 drop(queue);
                 // Cleanup
-                let mut lock = get_allocator().lock();
-                if let Some(allocator) = lock.as_mut() {
-                    allocator.free(metadata_frame, 0);
-                    if let Some((f, o)) = data_frame_info {
-                        allocator.free(f, o);
-                    }
+                memory::free_frame(metadata_frame);
+                if let Some((f, o)) = data_frame_info {
+                    memory::free_frames(f, o);
                 }
                 return Err(BlockError::IoError);
             }
@@ -350,21 +341,12 @@ impl VirtioBlockDevice {
                 }
 
                 // Free DMA buffer
-                let mut lock = get_allocator().lock();
-                if let Some(allocator) = lock.as_mut() {
-                    allocator.free(buf_frame, buf_order);
-                }
-                // drop(lock) implied at end of scope but explicit drop is better if reused
-                drop(lock);
+                memory::free_frames(buf_frame, buf_order);
             }
         }
 
         // Free metadata frame
-        let mut lock = get_allocator().lock();
-        if let Some(allocator) = lock.as_mut() {
-            allocator.free(metadata_frame, 0);
-        }
-        drop(lock);
+        memory::free_frame(metadata_frame);
 
         if status_byte == BlockStatus::Ok as u8 {
             Ok(())

@@ -1,12 +1,12 @@
 # Strat9-OS
 
-Strat9-OS is a modular microkernel written in Rust and assembly. The kernel provides scheduling, IPC, memory primitives, and interrupt routing. Everything else (filesystems, networking, drivers) runs as isolated userspace components called Silos, also written in Rust. 
+Strat9-OS is an Operating System based on a modular microkernel written in Rust. The kernel provides scheduling, IPC, memory primitives, and interrupt routing. Everything else (filesystems, networking, drivers...) runs as isolated userspace components called Silos, also written in Rust.
 
-The goal is to run various native binaries (ELF, JS, WASM..) inside the silo environment => IPC => kernel. And give features to silos like network stack, filesystem, etc. with Strates
+The goal is to run various native binaries (ELF, JS, WASM..) inside the silo environment => IPC => kernel. And give features to silos like network stack, filesystem, etc. with Strates.
 
-The Chevron shell can manage silos and strates.
+The Chevron shell can manage silos and strates with a bunch of commands.
 
-Architecture concept summary: Bedrock is the microkernel, Silos are isolated Ring 3 execution units, Strates are functional layers hosted inside Silos.
+Architecture concept summary: Bedrock is the microkernel, Silos are isolated Ring-3 execution units, Strates are functional layers hosted inside Silos and they can discuss together. Silos are isolated eachother.
 
 ## Architecture
 
@@ -18,7 +18,7 @@ Architecture concept summary: Bedrock is the microkernel, Silos are isolated Rin
 
 ## Status, some highlights
 
-This project is in active development and not production-ready.
+This project is in active development and not production-ready. The ABI is still not stabilized.
 
 ### Screenshots from QEMU : bootsequence and Chevron shell
 
@@ -36,20 +36,36 @@ This project is in active development and not production-ready.
 
 #### Kernel
 
-    - SMP boot with per-CPU data, TSS/GDT, GSBase SYSCALL, and per-CPU scheduler.
-    - Preemptive multitasking with APIC timer
+    - SMP boot with per-CPU data, TSS/GDT, GSBase-based SYSCALL, per-CPU caches and per-CPU scheduler
+    - Two-stage allocator: buddy allocator for early boot and a dedicated kernel allocator (CoW support, heap/kmalloc/slab)
+    - Virtual memory: 4-level paging, HHDM, CR3 switching, page-fault handling (COW, mmap), user/kernel mappings
+    - Preemptive multitasking with APIC/x2APIC and per-CPU timers
     - Limine boot path and bootable ISO
-    - IPC ports, capability manager, and VFS scheme router
-    - ELF loader and Ring 3 execution
-    - POSIX interval timers + signal infrastructure
-    - ACPI support
+    - Scheduler with priority/round-robin and CPU hotplug support
+    - IPC: synchronous ports, shared-memory rings (zero-copy), capability manager and VFS scheme router
+    - ELF loader and Ring-3 execution (userspace silos)
+    - POSIX interval timers and signal infrastructure
+    - Interrupts & exceptions: IDT, IRQ handling, exception dumps and backtraces
+    - Device model: PCI discovery, VirtIO and legacy drivers (block, net), console drivers
+    - Debugging & tooling: early serial/VGA output, configurable log levels, QEMU run targets and ISO tooling
+    - ACPI support and power management
+    - Optional Linux ABI compatibility shim for ELF binaries
 
 #### Userspace components
 
-    - EXT4 filesystem component (userspace server)
-    - XFS filesystem component (userspace server)
+    - EXT4 filesystem
+    - RamFS filesystem
+    - XFS filesystem (WiP and disabled) 
     - VirtIO block and net drivers (kernel-side)
     - libc (relibc from the Redox-OS project)
+    - IPv4 network stack with UDP/TCP/ICMP support, dhcp client, telnet server
+    - e1000/e1000e and virtio NIC drivers
+    - WASM native execution strate
+    - Remote access via SSHd or grapical with VNC
+    - CLI for managing silo and strate : memory management, start, stop, delete...
+    - Basic commands : cat, ls, uptime, reboot, shutdown, cd, top
+    - VFS with /proc /sys ...
+
 
 ```mermaid
 graph TD
@@ -120,6 +136,11 @@ or
 ```bash
 cargo make
 ```
+
+## Device list where Strat9-OS is booting
+
+- QEMU
+- Lenovo Thinkpad X13
 
 ## Repository way of life
 

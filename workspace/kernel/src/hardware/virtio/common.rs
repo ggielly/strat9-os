@@ -9,7 +9,7 @@
 use super::{vring_flags, VirtqDesc};
 use crate::{
     arch::x86_64::pci::{Bar, PciDevice},
-    memory::{get_allocator, FrameAllocator, PhysFrame},
+    memory::{self, PhysFrame},
 };
 use alloc::vec::Vec;
 use core::{
@@ -114,34 +114,26 @@ impl Virtqueue {
             return Err("Queue size must be power of 2");
         }
 
-        let mut lock = get_allocator().lock();
-        let allocator = lock.as_mut().ok_or("Allocator not initialized")?;
-
         // Allocate descriptor table (16 bytes per descriptor)
         let desc_size = queue_size as usize * core::mem::size_of::<VirtqDesc>();
         let desc_pages = (desc_size + 4095) / 4096;
         let desc_order = desc_pages.next_power_of_two().trailing_zeros() as u8;
-        let desc_area = allocator
-            .alloc(desc_order)
+        let desc_area = memory::allocate_frames(desc_order)
             .map_err(|_| "Failed to allocate descriptor table")?;
 
         // Allocate available ring (2 + 2 + queue_size * 2 + 2 bytes)
         let avail_size = 4 + queue_size as usize * 2 + 2;
         let avail_pages = (avail_size + 4095) / 4096;
         let avail_order = avail_pages.next_power_of_two().trailing_zeros() as u8;
-        let avail_area = allocator
-            .alloc(avail_order)
+        let avail_area = memory::allocate_frames(avail_order)
             .map_err(|_| "Failed to allocate available ring")?;
 
         // Allocate used ring (2 + 2 + queue_size * 8 + 2 bytes)
         let used_size = 4 + queue_size as usize * core::mem::size_of::<VirtqUsedElem>() + 2;
         let used_pages = (used_size + 4095) / 4096;
         let used_order = used_pages.next_power_of_two().trailing_zeros() as u8;
-        let used_area = allocator
-            .alloc(used_order)
-            .map_err(|_| "Failed to allocate used ring")?;
-
-        drop(lock);
+        let used_area =
+            memory::allocate_frames(used_order).map_err(|_| "Failed to allocate used ring")?;
 
         // SAFETY: we just allocated these frames; convert phys => virt via HHDM
         // With Limine HHDM, all physical memory is already mapped, so we can

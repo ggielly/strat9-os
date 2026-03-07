@@ -9,16 +9,12 @@
 // Large allocations (> 2048 B) go directly to the buddy allocator, exactly
 // as before.
 //
-// Lock ordering: SLAB_ALLOC (outer) → buddy allocator (inner, only when a slab
-// class needs a fresh page).  No code path holds the buddy lock and then tries
-// to acquire SLAB_ALLOC, so there is no deadlock.
+// Lock ordering: SLAB_ALLOC (outer) may call the frame-allocation helpers.
+// Those helpers can hit a CPU-local cache (no global buddy lock) or fall back
+// to the global buddy lock as needed.
 
 use crate::{
-    memory::{
-        buddy::get_allocator,
-        frame::{FrameAllocator, PhysFrame},
-        zone::MAX_ORDER,
-    },
+    memory::{self, frame::PhysFrame, zone::MAX_ORDER},
     sync::SpinLock,
 };
 use core::{
@@ -99,24 +95,14 @@ impl SlabState {
     /// Carve one buddy page into blocks of size `SLAB_SIZES[ci]` and prepend
     /// them all to the free list for that class.
     ///
-    /// Acquires the buddy allocator lock *inside* the caller's SLAB_ALLOC
-    /// lock — this is safe because the buddy allocator never calls back into
-    /// the heap allocator.
+    /// Requests one order-0 frame through the memory frame helpers.
     unsafe fn refill(&mut self, ci: usize) {
         let slab_size = SLAB_SIZES[ci];
 
         // Allocate one page (order-0) from the buddy allocator.
-        let frame = {
-            let buddy_lock = get_allocator();
-            let mut guard = buddy_lock.lock();
-            match guard.as_mut() {
-                Some(buddy) => match buddy.alloc(0) {
-                    Ok(f) => f,
-                    Err(_) => return, // OOM — caller will return null
-                },
-                None => return,
-            }
-            // `guard` (buddy lock) is released here
+        let frame = match memory::allocate_frame() {
+            Ok(f) => f,
+            Err(_) => return, // OOM — caller will return null
         };
 
         let page_virt = super::phys_to_virt(frame.start_address.as_u64()) as *mut u8;
@@ -258,15 +244,9 @@ unsafe impl GlobalAlloc for LockedHeap {
             }
             let order = pages_needed.next_power_of_two().trailing_zeros() as u8;
 
-            let buddy_lock = get_allocator();
-            let mut guard = buddy_lock.lock();
-            if let Some(ref mut buddy) = *guard {
-                match buddy.alloc(order) {
-                    Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,
-                    Err(_) => ptr::null_mut(),
-                }
-            } else {
-                ptr::null_mut()
+            match memory::allocate_frames(order) {
+                Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,
+                Err(_) => ptr::null_mut(),
             }
         }
     }
@@ -292,12 +272,8 @@ unsafe impl GlobalAlloc for LockedHeap {
             let hhdm = super::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
             let phys_addr = (ptr as u64).wrapping_sub(hhdm);
 
-            let buddy_lock = get_allocator();
-            let mut guard = buddy_lock.lock();
-            if let Some(ref mut buddy) = *guard {
-                if let Ok(frame) = PhysFrame::from_start_address(PhysAddr::new(phys_addr)) {
-                    buddy.free(frame, order);
-                }
+            if let Ok(frame) = PhysFrame::from_start_address(PhysAddr::new(phys_addr)) {
+                memory::free_frames(frame, order);
             }
         }
     }

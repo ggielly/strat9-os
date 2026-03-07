@@ -24,7 +24,7 @@
 
 use crate::{
     hardware::pci_client::{self as pci, ProbeCriteria},
-    memory::{buddy::get_allocator, phys_to_virt, FrameAllocator, PhysFrame},
+    memory::{self, phys_to_virt, PhysFrame},
     sync::{SpinLock, WaitQueue},
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -290,12 +290,7 @@ impl Bounce {
     fn alloc(bytes: usize) -> Result<Self, AhciError> {
         let pages = (bytes + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let mut lock = get_allocator().lock();
-        let frame = lock
-            .as_mut()
-            .ok_or(AhciError::Alloc)?
-            .alloc(order)
-            .map_err(|_| AhciError::Alloc)?;
+        let frame = memory::allocate_frames(order).map_err(|_| AhciError::Alloc)?;
         let phys = frame.start_address.as_u64();
         Ok(Self {
             frame,
@@ -307,10 +302,7 @@ impl Bounce {
 
     /// Performs the free operation.
     fn free(self) {
-        let mut lock = get_allocator().lock();
-        if let Some(a) = lock.as_mut() {
-            a.free(self.frame, self.order);
-        }
+        memory::free_frames(self.frame, self.order);
     }
 }
 
@@ -637,13 +629,7 @@ impl AhciController {
             }
 
             // Allocate one 4 KB frame for CLB + FIS + CTAB
-            let mut lock = get_allocator().lock();
-            let frame = lock
-                .as_mut()
-                .ok_or(AhciError::Alloc)?
-                .alloc_frame()
-                .map_err(|_| AhciError::Alloc)?;
-            drop(lock);
+            let frame = memory::allocate_frame().map_err(|_| AhciError::Alloc)?;
 
             let mem_phys = frame.start_address.as_u64();
             let mem_virt = phys_to_virt(mem_phys);
