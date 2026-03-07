@@ -8,7 +8,7 @@ use crate::{
         zone::{BuddyBitmap, Zone, ZoneType, MAX_ORDER},
     },
     serial_println,
-    sync::SpinLock,
+    sync::{SpinLock, SpinLockGuard},
 };
 use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use x86_64::PhysAddr;
@@ -583,7 +583,7 @@ impl BuddyAllocator {
             }
         }
         panic!(
-            "Buddy allocator: cannot reserve {} pages for zone {:?} bitmaps",
+            "Buddy allocator: damn, I cannot reserve {} pages for zone {:?} bitmaps",
             needed_pages, self.zones[zone_idx].zone_type
         );
     }
@@ -735,6 +735,55 @@ static LOCAL_CACHED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static LOCAL_CACHED_ZONE_FRAMES: [AtomicUsize; ZoneType::COUNT] =
     [const { AtomicUsize::new(0) }; ZoneType::COUNT];
 
+type GlobalGuard = SpinLockGuard<'static, Option<BuddyAllocator>>;
+
+struct OnDemandGlobalLock {
+    guard: Option<GlobalGuard>,
+}
+
+impl OnDemandGlobalLock {
+    fn new() -> Self {
+        Self { guard: None }
+    }
+
+    fn unlock(&mut self) {
+        self.guard = None;
+    }
+
+    fn get_allocator_opt(&mut self) -> Option<&mut BuddyAllocator> {
+        self.guard
+            .get_or_insert_with(|| BUDDY_ALLOCATOR.lock())
+            .as_mut()
+    }
+
+    fn alloc(&mut self, order: u8) -> Result<PhysFrame, AllocError> {
+        let allocator = self.get_allocator_opt().ok_or(AllocError::OutOfMemory)?;
+        allocator.alloc(order)
+    }
+
+    fn free(&mut self, frame: PhysFrame, order: u8) {
+        if let Some(allocator) = self.get_allocator_opt() {
+            allocator.free(frame, order);
+        }
+    }
+
+    fn free_phys_batch(&mut self, phys_batch: &[u64], count: usize) {
+        if count == 0 {
+            return;
+        }
+        if let Some(allocator) = self.get_allocator_opt() {
+            for phys in phys_batch.iter().take(count).copied() {
+                allocator.free(
+                    PhysFrame {
+                        start_address: PhysAddr::new(phys),
+                    },
+                    0,
+                );
+            }
+        }
+    }
+}
+
 #[inline]
 fn zone_index_for_phys(phys: u64) -> usize {
     if phys < DMA_MAX {
@@ -766,25 +815,7 @@ fn local_cached_dec_phys(phys: u64) {
     debug_assert!(prev_zone > 0);
 }
 
-fn free_phys_batch_global(phys_batch: &[u64], count: usize) {
-    if count == 0 {
-        return;
-    }
-
-    let mut guard = BUDDY_ALLOCATOR.lock();
-    if let Some(allocator) = guard.as_mut() {
-        for phys in phys_batch.iter().take(count).copied() {
-            allocator.free(
-                PhysFrame {
-                    start_address: PhysAddr::new(phys),
-                },
-                0,
-            );
-        }
-    }
-}
-
-fn drain_local_caches_to_global(max_pages: usize) -> usize {
+fn drain_local_caches_to_global(max_pages: usize, global: &mut OnDemandGlobalLock) -> usize {
     if max_pages == 0 {
         return 0;
     }
@@ -811,7 +842,7 @@ fn drain_local_caches_to_global(max_pages: usize) -> usize {
         for phys in batch.iter().take(popped).copied() {
             local_cached_dec_phys(phys);
         }
-        free_phys_batch_global(&batch, popped);
+        global.free_phys_batch(&batch, popped);
         drained += popped;
     }
 
@@ -838,28 +869,14 @@ pub fn get_allocator() -> &'static SpinLock<Option<BuddyAllocator>> {
     &BUDDY_ALLOCATOR
 }
 
-#[inline]
-fn global_alloc(order: u8) -> Result<PhysFrame, AllocError> {
-    let mut guard = BUDDY_ALLOCATOR.lock();
-    let allocator = guard.as_mut().ok_or(AllocError::OutOfMemory)?;
-    allocator.alloc(order)
-}
-
-#[inline]
-fn global_free(frame: PhysFrame, order: u8) {
-    let mut guard = BUDDY_ALLOCATOR.lock();
-    if let Some(allocator) = guard.as_mut() {
-        allocator.free(frame, order);
-    }
-}
-
-fn refill_local_cache(cpu_idx: usize) -> Result<PhysFrame, AllocError> {
+fn refill_local_cache(cpu_idx: usize, global: &mut OnDemandGlobalLock) -> Result<PhysFrame, AllocError> {
     // Critical path: refill in batches from the global allocator to amortize lock contention.
-    let (base, order) = match global_alloc(LOCAL_CACHE_REFILL_ORDER) {
+    let (base, order) = match global.alloc(LOCAL_CACHE_REFILL_ORDER) {
         Ok(frame) => (frame, LOCAL_CACHE_REFILL_ORDER),
-        Err(AllocError::OutOfMemory) => (global_alloc(0)?, 0),
+        Err(AllocError::OutOfMemory) => (global.alloc(0)?, 0),
         Err(e) => return Err(e),
     };
+    global.unlock();
 
     let frame_count = 1usize << order;
     let mut overflow = [0u64; LOCAL_CACHE_REFILL_FRAMES];
@@ -892,17 +909,7 @@ fn refill_local_cache(cpu_idx: usize) -> Result<PhysFrame, AllocError> {
     }
 
     if overflow_len != 0 {
-        let mut guard = BUDDY_ALLOCATOR.lock();
-        if let Some(allocator) = guard.as_mut() {
-            for phys in overflow.iter().take(overflow_len).copied() {
-                allocator.free(
-                    PhysFrame {
-                        start_address: PhysAddr::new(phys),
-                    },
-                    0,
-                );
-            }
-        }
+        global.free_phys_batch(&overflow, overflow_len);
     }
 
     ret.ok_or(AllocError::OutOfMemory)
@@ -935,20 +942,25 @@ fn alloc_order0_cached() -> Result<PhysFrame, AllocError> {
         }
     }
 
-    if let Ok(frame) = refill_local_cache(cpu_idx) {
+    let mut global = OnDemandGlobalLock::new();
+
+    if let Ok(frame) = refill_local_cache(cpu_idx, &mut global) {
         return Ok(frame);
     }
+    // Critical lock-order rule: never hold global while probing local caches.
+    global.unlock();
 
     if let Some(frame) = steal_from_other_caches(cpu_idx) {
         return Ok(frame);
     }
 
-    global_alloc(0)
+    global.alloc(0)
 }
 
 fn free_order0_cached(frame: PhysFrame) {
     if !is_cacheable_phys(frame.start_address.as_u64()) {
-        global_free(frame, 0);
+        let mut global = OnDemandGlobalLock::new();
+        global.free(frame, 0);
         return;
     }
 
@@ -977,17 +989,8 @@ fn free_order0_cached(frame: PhysFrame) {
     }
 
     if spill_len != 0 {
-        let mut guard = BUDDY_ALLOCATOR.lock();
-        if let Some(allocator) = guard.as_mut() {
-            for phys in spill.iter().take(spill_len).copied() {
-                allocator.free(
-                    PhysFrame {
-                        start_address: PhysAddr::new(phys),
-                    },
-                    0,
-                );
-            }
-        }
+        let mut global = OnDemandGlobalLock::new();
+        global.free_phys_batch(&spill, spill_len);
     }
 }
 
@@ -996,11 +999,14 @@ pub fn alloc(order: u8) -> Result<PhysFrame, AllocError> {
     if order == 0 {
         alloc_order0_cached()
     } else {
-        match global_alloc(order) {
+        let mut global = OnDemandGlobalLock::new();
+        match global.alloc(order) {
             Ok(frame) => Ok(frame),
             Err(AllocError::OutOfMemory) => {
-                let _ = drain_local_caches_to_global(usize::MAX);
-                global_alloc(order)
+                // Critical lock-order rule: release global before draining local caches.
+                global.unlock();
+                let _ = drain_local_caches_to_global(usize::MAX, &mut global);
+                global.alloc(order)
             }
             Err(e) => Err(e),
         }
@@ -1012,7 +1018,8 @@ pub fn free(frame: PhysFrame, order: u8) {
     if order == 0 {
         free_order0_cached(frame);
     } else {
-        global_free(frame, order);
+        let mut global = OnDemandGlobalLock::new();
+        global.free(frame, order);
     }
 }
 
@@ -1024,7 +1031,7 @@ impl FrameAllocator for BuddyAllocator {
         // timer interrupt tries to allocate while we hold the lock.
         debug_assert!(
             !crate::arch::x86_64::interrupts_enabled(),
-            "buddy alloc: interrupts must be disabled"
+            "buddy alloc(): interrupts must be disabled"
         );
 
         if order > MAX_ORDER as u8 {
@@ -1057,7 +1064,7 @@ impl FrameAllocator for BuddyAllocator {
     fn free(&mut self, frame: PhysFrame, order: u8) {
         debug_assert!(
             !crate::arch::x86_64::interrupts_enabled(),
-            "buddy free: interrupts must be disabled"
+            "buddy free(): interrupts must be disabled"
         );
 
         let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
@@ -1079,7 +1086,7 @@ impl BuddyAllocator {
     pub fn alloc_zone(&mut self, order: u8, zone: ZoneType) -> Result<PhysFrame, AllocError> {
         debug_assert!(
             !crate::arch::x86_64::interrupts_enabled(),
-            "buddy alloc_zone: interrupts must be disabled"
+            "buddy alloc_zone(): interrupts must be disabled"
         );
 
         if order > MAX_ORDER as u8 {
