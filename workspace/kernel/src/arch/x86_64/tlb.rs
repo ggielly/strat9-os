@@ -12,8 +12,7 @@
 //!
 //! This avoids global lock contention and race conditions on global counters.
 
-use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::VirtAddr;
 
 use crate::sync::SpinLock;
@@ -172,6 +171,13 @@ fn dispatch_op(op: TlbOp) {
         return;
     }
 
+    // `queued` tracks only the APIC IDs that were successfully pushed to a
+    // mailbox queue.  We must not send an IPI to, or wait for an ACK from,
+    // an AP whose queue was skipped — doing so would either waste cycles or
+    // spin-wait forever on an ACK that was never cleared.
+    let mut queued = [0u32; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut queued_count = 0usize;
+
     // 1. Push op to each target's mailbox and clear their ACK.
     for i in 0..count {
         let apic_id = targets[i];
@@ -192,16 +198,22 @@ fn dispatch_op(op: TlbOp) {
         queue.push(op);
         TLB_ACKS[cpu_idx].store(false, Ordering::Release);
         drop(queue);
+        // Record as a successfully-queued target.
+        queued[queued_count] = apic_id;
+        queued_count += 1;
     }
 
-    // 2. Send IPI to all targets.
-    for i in 0..count {
-        let apic_id = targets[i];
-        send_tlb_ipi(apic_id);
+    if queued_count == 0 {
+        return;
     }
 
-    // 3. Wait for ACKs.
-    wait_for_acks(&targets[..count]);
+    // 2. Send IPI only to targets that actually received a queued op.
+    for i in 0..queued_count {
+        send_tlb_ipi(queued[i]);
+    }
+
+    // 3. Wait for ACKs from the same set.
+    wait_for_acks(&queued[..queued_count]);
 }
 
 /// IPI handler for TLB shootdown (called on receiving CPU).

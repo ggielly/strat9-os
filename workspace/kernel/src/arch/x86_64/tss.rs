@@ -67,6 +67,11 @@ pub fn init_cpu(cpu_index: usize) {
 
 /// Get a reference to the TSS for a given CPU index (for GDT descriptor creation).
 pub fn tss_for(cpu_index: usize) -> &'static TaskStateSegment {
+    assert!(
+        cpu_index < crate::arch::x86_64::percpu::MAX_CPUS,
+        "tss_for: cpu_index {} >= MAX_CPUS",
+        cpu_index,
+    );
     if !TSS_INIT[cpu_index].load(Ordering::Acquire) {
         panic!("TSS for CPU{} not initialized", cpu_index);
     }
@@ -85,6 +90,10 @@ pub fn set_kernel_stack(stack_top: VirtAddr) {
 
 /// Update TSS.rsp0 for a specific CPU index.
 pub fn set_kernel_stack_for(cpu_index: usize, stack_top: VirtAddr) {
+    if cpu_index >= crate::arch::x86_64::percpu::MAX_CPUS {
+        log::warn!("set_kernel_stack_for: cpu_index {} out of range", cpu_index);
+        return;
+    }
     // SAFETY: privilege_stack_table[0] is a VirtAddr (u64), writes are atomic on x86_64.
     // Called with interrupts disabled or from the scheduler with lock held.
     if !TSS_INIT[cpu_index].load(Ordering::Acquire) {
