@@ -524,9 +524,9 @@ impl Scheduler {
             let stk_top = stk_base + next.kernel_stack.size as u64;
             crate::serial_println!(
                 "[sched] WARN: invalid ctx for task '{}' (id={}) cpu={}: {} \
-                 rsp={:#x} stack=[{:#x}..{:#x}] — restoring current task",
+                 rsp={:#x} stack=[{:#x}..{:#x}] - restoring current task",
                 next.name,
-                next.id.as_u64(),
+                next.id.as_u64(),restoring current task
                 cpu_index,
                 e,
                 bad_rsp,

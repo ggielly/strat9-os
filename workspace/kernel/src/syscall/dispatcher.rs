@@ -278,16 +278,12 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         Ok(val) => {
             if syscall_num == SYS_PROC_FORK {
                 crate::serial_println!("[syscall] FORK returning Ok({})", val);
-            } else if syscall_num == SYS_PROC_WAITPID {
-                crate::serial_println!("[syscall] WAITPID returning Ok({})", val);
             }
             frame.rax = val;
         }
         Err(e) => {
             if syscall_num == SYS_PROC_FORK {
                 crate::serial_println!("[syscall] FORK returning err");
-            } else if syscall_num == SYS_PROC_WAITPID {
-                crate::serial_println!("[syscall] WAITPID returning err {:?}", e);
             }
             frame.rax = e.to_raw();
         }

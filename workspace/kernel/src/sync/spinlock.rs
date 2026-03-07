@@ -6,6 +6,8 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+static DEBUG_WATCH_LOCK_ADDR: AtomicUsize = AtomicUsize::new(usize::MAX);
+
 /// A simple spinlock
 pub struct SpinLock<T> {
     locked: AtomicBool,
@@ -58,6 +60,7 @@ impl<T> SpinLock<T> {
         SpinLockGuard {
             lock: self,
             saved_flags,
+            restore_flags_on_drop: true,
         }
     }
 
@@ -74,9 +77,31 @@ impl<T> SpinLock<T> {
             Some(SpinLockGuard {
                 lock: self,
                 saved_flags,
+                restore_flags_on_drop: true,
             })
         } else {
             crate::arch::x86_64::restore_flags(saved_flags);
+            None
+        }
+    }
+
+    /// Try to acquire the lock without touching interrupt flags.
+    ///
+    /// Caller must enforce IRQ/preemption constraints.
+    pub fn try_lock_no_irqsave(&self) -> Option<SpinLockGuard<'_, T>> {
+        if self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.owner_cpu
+                .store(crate::arch::x86_64::percpu::current_cpu_index(), Ordering::Relaxed);
+            Some(SpinLockGuard {
+                lock: self,
+                saved_flags: 0,
+                restore_flags_on_drop: false,
+            })
+        } else {
             None
         }
     }
@@ -87,10 +112,21 @@ impl<T> SpinLock<T> {
     }
 }
 
+/// Set a lock address to trace during `SpinLockGuard::drop`.
+pub fn debug_set_watch_lock_addr(addr: usize) {
+    DEBUG_WATCH_LOCK_ADDR.store(addr, Ordering::Relaxed);
+}
+
+/// Clear the watched lock address.
+pub fn debug_clear_watch_lock_addr() {
+    DEBUG_WATCH_LOCK_ADDR.store(usize::MAX, Ordering::Relaxed);
+}
+
 /// RAII guard for SpinLock
 pub struct SpinLockGuard<'a, T> {
     lock: &'a SpinLock<T>,
     saved_flags: u64,
+    restore_flags_on_drop: bool,
 }
 
 impl<'a, T> Deref for SpinLockGuard<'a, T> {
@@ -114,9 +150,40 @@ impl<'a, T> DerefMut for SpinLockGuard<'a, T> {
 impl<'a, T> Drop for SpinLockGuard<'a, T> {
     /// Performs the drop operation.
     fn drop(&mut self) {
+        let lock_addr = self.lock as *const _ as usize;
+        let watched = DEBUG_WATCH_LOCK_ADDR.load(Ordering::Relaxed);
+        let trace = watched == lock_addr;
+        if trace {
+            crate::serial_force_println!(
+                "[trace][spin] drop begin lock={:#x} owner_cpu={} saved_flags={:#x}",
+                lock_addr,
+                self.lock.owner_cpu.load(Ordering::Relaxed),
+                self.saved_flags
+            );
+        }
         // Release the lock
         self.lock.owner_cpu.store(usize::MAX, Ordering::Relaxed);
         self.lock.locked.store(false, Ordering::Release);
-        crate::arch::x86_64::restore_flags(self.saved_flags);
+        if trace {
+            crate::serial_force_println!("[trace][spin] drop unlocked lock={:#x}", lock_addr);
+            crate::serial_force_println!(
+                "[trace][spin] drop restore_flags begin lock={:#x}",
+                lock_addr
+            );
+        }
+        if self.restore_flags_on_drop {
+            crate::arch::x86_64::restore_flags(self.saved_flags);
+            if trace {
+                crate::serial_force_println!(
+                    "[trace][spin] drop restore_flags done lock={:#x}",
+                    lock_addr
+                );
+            }
+        } else if trace {
+            crate::serial_force_println!(
+                "[trace][spin] drop restore_flags skipped lock={:#x}",
+                lock_addr
+            );
+        }
     }
 }

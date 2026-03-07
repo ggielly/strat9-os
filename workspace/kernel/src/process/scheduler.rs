@@ -342,11 +342,6 @@ impl PerCpuClassRqSet {
     /// Performs the enqueue operation.
     fn enqueue(&mut self, class: crate::process::sched::SchedClassId, task: Arc<Task>) {
         use crate::process::sched::SchedClassRq;
-        crate::serial_println!(
-            "[trace][sched] class_rq enqueue class={:?} tid={}",
-            class,
-            task.id.as_u64()
-        );
         match class {
             crate::process::sched::SchedClassId::Fair => self.fair.enqueue(task),
             crate::process::sched::SchedClassId::RealTime => self.real_time.enqueue(task),
