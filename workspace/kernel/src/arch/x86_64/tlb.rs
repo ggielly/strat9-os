@@ -255,14 +255,14 @@ fn send_tlb_ipi(target_apic_id: u32) {
 
 /// Collect target APIC IDs into a pre-allocated buffer.
 fn collect_tlb_targets(targets: &mut [u32]) -> usize {
-    let current_apic_id = crate::arch::x86_64::apic::lapic_id();
+    let my_cpu = crate::arch::x86_64::percpu::current_cpu_index();
     let mut count = 0;
     for cpu_idx in 0..crate::arch::x86_64::percpu::MAX_CPUS {
         if !crate::arch::x86_64::percpu::tlb_ready(cpu_idx) {
             continue;
         }
         if let Some(apic_id) = crate::arch::x86_64::percpu::apic_id_by_cpu_index(cpu_idx) {
-            if apic_id != current_apic_id {
+            if cpu_idx != my_cpu {
                 if count < targets.len() {
                     targets[count] = apic_id;
                     count += 1;
@@ -294,6 +294,5 @@ fn wait_for_acks(targets: &[u32]) {
 
 /// Current CPU index.
 fn current_cpu_index() -> usize {
-    let apic_id = crate::arch::x86_64::apic::lapic_id();
-    crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id).unwrap_or(0)
+    crate::arch::x86_64::percpu::current_cpu_index()
 }

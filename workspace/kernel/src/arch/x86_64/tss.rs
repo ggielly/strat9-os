@@ -72,8 +72,7 @@ pub fn tss_for(cpu_index: usize) -> &'static TaskStateSegment {
 ///
 /// Called on every context switch to point to the new task's kernel stack top.
 pub fn set_kernel_stack(stack_top: VirtAddr) {
-    let apic_id = super::apic::lapic_id();
-    let cpu_index = crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id).unwrap_or(0);
+    let cpu_index = crate::arch::x86_64::percpu::current_cpu_index();
     set_kernel_stack_for(cpu_index, stack_top);
 }
 

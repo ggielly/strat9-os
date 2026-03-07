@@ -334,10 +334,13 @@ pub extern "C" fn smp_main() -> ! {
         }
     };
 
-    // Initialize per-CPU TSS/GDT.
+    // Initialize per-CPU GS base.
+    crate::arch::x86_64::percpu::init_gs_base(cpu_index);
+
+    // Initialize per-CPU TSS/GDT (now uses O(1) current_cpu_index).
     crate::arch::x86_64::tss::init_cpu(cpu_index);
     crate::arch::x86_64::gdt::init_cpu(cpu_index);
-    crate::arch::x86_64::percpu::init_gs_base(cpu_index);
+    
     crate::arch::x86_64::syscall::init();
     crate::arch::x86_64::init_cpu_extensions();
 
@@ -348,8 +351,7 @@ pub extern "C" fn smp_main() -> ! {
     let _ = percpu::mark_online_by_apic(apic_id);
     BOOTED_CORES.fetch_add(1, Ordering::Release);
     crate::serial_println!(
-        "[trace][ap] online apic_id={} cpu_index={} entering ap scheduler",
-        apic_id,
+        "[trace][ap] online cpu_index={} entering ap scheduler",
         cpu_index
     );
 

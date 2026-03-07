@@ -172,6 +172,5 @@ fn selectors_for(cpu_index: usize) -> Selectors {
 
 /// Performs the current cpu index operation.
 fn current_cpu_index() -> usize {
-    let apic_id = super::apic::lapic_id();
-    crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id).unwrap_or(0)
+    crate::arch::x86_64::percpu::current_cpu_index()
 }

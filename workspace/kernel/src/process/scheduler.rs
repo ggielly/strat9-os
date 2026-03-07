@@ -259,13 +259,15 @@ fn send_resched_ipi_to_cpu(cpu_index: usize) {
     if !apic::is_initialized() {
         return;
     }
-    let my_apic = apic::lapic_id();
+    let my_cpu = current_cpu_index();
     if let Some(target_apic) = percpu::apic_id_by_cpu_index(cpu_index) {
-        if target_apic != my_apic {
-            if RESCHED_IPI_PENDING[cpu_index].swap(true, Ordering::AcqRel) {
-                return;
+        if let Some(my_apic) = percpu::apic_id_by_cpu_index(my_cpu) {
+            if target_apic != my_apic {
+                if RESCHED_IPI_PENDING[cpu_index].swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                apic::send_resched_ipi(target_apic);
             }
-            apic::send_resched_ipi(target_apic);
         }
     }
 }
@@ -315,12 +317,7 @@ pub enum WaitChildResult {
 
 /// Performs the current cpu index operation.
 fn current_cpu_index() -> usize {
-    if apic::is_initialized() {
-        let apic_id = apic::lapic_id();
-        percpu::cpu_index_by_apic(apic_id).unwrap_or(0)
-    } else {
-        0
-    }
+    crate::arch::x86_64::percpu::current_cpu_index()
 }
 
 struct PerCpuClassRqSet {

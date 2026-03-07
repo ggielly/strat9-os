@@ -12,20 +12,7 @@ use super::*;
 /// its own `try_lock`. These are separate acquisitions by design - the inner
 /// functions must not be called while the outer lock is held (that would deadlock).
 pub fn timer_tick() {
-    let cpu_idx = if let Some(idx) = percpu::cpu_index_from_gs() {
-        idx
-    } else if apic::is_initialized() {
-        let apic_id = apic::lapic_id();
-        match percpu::cpu_index_by_apic(apic_id) {
-            Some(idx) => idx,
-            None => {
-                log::trace!("timer_tick: unmapped LAPIC id {}", apic_id);
-                return;
-            }
-        }
-    } else {
-        return;
-    };
+    let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
 
     if cpu_is_valid(cpu_idx) {
         CPU_TOTAL_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
