@@ -36,6 +36,13 @@ pub fn init() {
 
 /// Initialize the TSS for a given CPU index.
 pub fn init_cpu(cpu_index: usize) {
+    // Bounds check: prevent OOB access into static arrays before any unsafe.
+    assert!(
+        cpu_index < crate::arch::x86_64::percpu::MAX_CPUS,
+        "TSS init_cpu: cpu_index {} >= MAX_CPUS {}",
+        cpu_index,
+        crate::arch::x86_64::percpu::MAX_CPUS,
+    );
     // SAFETY: Called during init (BSP) or AP bring-up before interrupts are enabled on that CPU.
     unsafe {
         let stack_ptr = &raw const IST_STACKS[cpu_index] as *const u8;

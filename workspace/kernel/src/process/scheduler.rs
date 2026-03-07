@@ -503,7 +503,9 @@ fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
     }
 
     // For our switch frame layout, return IP is at [saved_rsp + 48].
-    let ret_ip = unsafe { core::ptr::read((saved_rsp + 48) as *const u64) };
+    // Use read_unaligned: saved_rsp is only guaranteed to be within the stack
+    // bounds, not necessarily aligned to 8 bytes at this offset.
+    let ret_ip = unsafe { core::ptr::read_unaligned((saved_rsp + 48) as *const u64) };
     if ret_ip == 0 {
         return Err("null return IP in switch frame");
     }
