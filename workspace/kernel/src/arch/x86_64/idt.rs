@@ -64,19 +64,6 @@ pub fn init() {
     log::debug!("IDT initialized with {} entries", 256);
 }
 
-/// Register the TLB shootdown IPI handler.
-///
-/// This is called by the TLB system during initialization to provide
-/// the architecture-independent handler function.
-pub fn register_tlb_shootdown_handler(handler: extern "C" fn()) {
-    unsafe {
-        let idt = &raw mut IDT_STORAGE;
-        (&mut *idt)[super::apic::IPI_TLB_SHOOTDOWN_VECTOR as u8]
-            .set_handler_fn(core::mem::transmute(handler));
-        (*idt).load_unsafe();
-    }
-}
-
 /// Register the Local APIC timer IRQ vector to use the timer handler.
 pub fn register_lapic_timer_vector(vector: u8) {
     unsafe {
