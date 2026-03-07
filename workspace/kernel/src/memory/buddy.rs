@@ -261,19 +261,10 @@ impl BuddyAllocator {
 
     /// Allocates from zone.
     fn alloc_from_zone(zone: &mut Zone, order: u8) -> Option<PhysFrame> {
-        crate::serial_println!(
-            "[trace][buddy] alloc_from_zone enter order={} zone_type={}",
-            order, zone.zone_type as usize
-        );
         for cur_order in order..=MAX_ORDER as u8 {
-            crate::serial_println!(
-                "[trace][buddy]   trying cur_order={} free_list={:x}",
-                cur_order, zone.free_lists[cur_order as usize]
-            );
             let Some(frame_phys) = Self::free_list_pop(zone, cur_order) else {
                 continue;
             };
-            crate::serial_println!("[trace][buddy]   popped frame_phys={:#x}", frame_phys);
             let block_size = PAGE_SIZE << cur_order;
             let block_end = frame_phys.saturating_add(block_size);
             if Self::protected_overlap_end(frame_phys, block_end).is_some() {
@@ -704,15 +695,10 @@ impl FrameAllocator for BuddyAllocator {
             return Err(AllocError::InvalidOrder);
         }
 
-        let cpu_idx = crate::arch::x86_64::percpu::cpu_index_from_gs().unwrap_or(0);
+        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
         if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::SeqCst) {
-            // REENTRANT ALLOCATION DETECTED!
-            // This happens if log::trace! or an interrupt tries to allocate while
-            // the buddy allocator lock is held.
-            panic!("Recursive allocation detected on CPU {}! (Check if logs/interrupts are allocating memory)", cpu_idx);
+            panic!("Recursive allocation detected on CPU {}!", cpu_idx);
         }
-
-        crate::serial_println!("[trace][buddy] alloc enter order={}", order);
 
         let result = (|| {
             for zi in [
@@ -720,24 +706,14 @@ impl FrameAllocator for BuddyAllocator {
                 ZoneType::HighMem as usize,
                 ZoneType::DMA as usize,
             ] {
-                crate::serial_println!("[trace][buddy] alloc trying zone zi={}", zi);
                 if let Some(frame) = Self::alloc_from_zone(&mut self.zones[zi], order) {
-                    crate::serial_println!(
-                        "[trace][buddy] alloc success zone={} phys={:#x}",
-                        zi, frame.start_address.as_u64()
-                    );
                     return Ok(frame);
                 }
-                crate::serial_println!("[trace][buddy] alloc zone={} empty for order={}", zi, order);
             }
             Err(AllocError::OutOfMemory)
         })();
 
         ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::SeqCst);
-        
-        if result.is_err() {
-            crate::serial_println!("[trace][buddy] alloc FAILED out of memory");
-        }
         result
     }
 
@@ -747,6 +723,16 @@ impl FrameAllocator for BuddyAllocator {
         let zi = Self::zone_index_for_addr(frame_phys);
         let zone = &mut self.zones[zi];
         Self::free_to_zone(zone, frame, order);
+    }
+}
+
+impl BuddyAllocator {
+    /// Allocate explicitly from one zone (e.g. DMA-only callers).
+    pub fn alloc_zone(&mut self, order: u8, zone: ZoneType) -> Result<PhysFrame, AllocError> {
+        if order > MAX_ORDER as u8 {
+            return Err(AllocError::InvalidOrder);
+        }
+        Self::alloc_from_zone(&mut self.zones[zone as usize], order).ok_or(AllocError::OutOfMemory)
     }
 }
 
