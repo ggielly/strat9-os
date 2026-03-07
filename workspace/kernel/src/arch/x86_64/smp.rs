@@ -294,8 +294,11 @@ pub fn init() -> Result<usize, &'static str> {
             continue;
         }
 
-        let kernel_stack = KernelStack::allocate(crate::process::task::Task::DEFAULT_STACK_SIZE)?;
-        let stack_top = kernel_stack.virt_base.as_u64() + kernel_stack.size as u64;
+        // Allocate kernel stack using the simple BootAllocator (Asterinas style).
+        // This is safer during early bring-up than using the full Buddy Allocator.
+        let stack_size = crate::process::task::Task::DEFAULT_STACK_SIZE;
+        let stack_top = crate::memory::boot_alloc::alloc_stack(stack_size)
+            .ok_or("SMP: failed to allocate boot stack from pool")?;
 
         if apic_id as usize >= stacks.len() {
             log::warn!("SMP: APIC id {} out of stack array range", apic_id);
@@ -308,7 +311,7 @@ pub fn init() -> Result<usize, &'static str> {
             percpu::register_cpu(apic_id).ok_or("SMP: exceeded MAX_CPUS for per-CPU data")?;
         percpu::set_kernel_stack_top(cpu_index, stack_top);
 
-        AP_KERNEL_STACKS.lock().push(kernel_stack);
+        // We no longer need to push to AP_KERNEL_STACKS as these are static.
         targets.push(apic_id);
         expected += 1;
     }
@@ -372,7 +375,7 @@ pub extern "C" fn smp_main() -> ! {
     // Initialize per-CPU TSS/GDT (now uses O(1) current_cpu_index).
     crate::arch::x86_64::tss::init_cpu(cpu_index);
     crate::arch::x86_64::gdt::init_cpu(cpu_index);
-    
+
     crate::arch::x86_64::syscall::init();
     crate::arch::x86_64::init_cpu_extensions();
 
@@ -382,7 +385,7 @@ pub extern "C" fn smp_main() -> ! {
 
     let _ = percpu::mark_online_by_apic(apic_id);
     BOOTED_CORES.fetch_add(1, Ordering::Release);
-    
+
     // AP reaches the rendezvous point.
     rendezvous_barrier(BOOTED_CORES.load(Ordering::Acquire));
 

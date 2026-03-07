@@ -1,6 +1,7 @@
 // Memory management module
 
 pub mod address_space;
+pub mod boot_alloc;
 pub mod buddy;
 pub mod cow;
 pub mod frame;
