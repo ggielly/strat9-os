@@ -131,7 +131,10 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     // This allows serial_println! to bypass locks.
     crate::arch::x86_64::serial::enter_emergency_mode();
 
-    // 2. Prevent recursive panics.
+    // 2. Stop all other CPUs immediately to prevent log corruption.
+    crate::arch::x86_64::smp::broadcast_panic_halt();
+
+    // 3. Prevent recursive panics.
     if PANIC_IN_PROGRESS.swap(true, Ordering::SeqCst) {
         loop {
             crate::arch::x86_64::hlt();

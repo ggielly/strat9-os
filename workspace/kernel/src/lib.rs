@@ -341,6 +341,15 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     init_serial();
     init_logger();
 
+    // =============================================
+    // Phase 1c: IDT (Interrupt Descriptor Table) - EARLY (Asterinas style)
+    // =============================================
+    // We initialize the IDT as early as possible to catch any exceptions
+    // during the early memory management and hardware initialization phases.
+    serial_println!("[init] IDT (early)...");
+    arch::x86_64::idt::init();
+    serial_println!("[init] IDT initialized.");
+
     // Detect CPU features (must happen before init_cpu_extensions)
     crate::arch::x86_64::cpuid::init();
 
@@ -568,13 +577,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     vga_println!("[OK] Bootstrap components ready");
 
     // =============================================
-    // Phase 5: IDT (Interrupt Descriptor Table)
+    // Phase 5: IDT (Interrupt Descriptor Table) - ALREADY INITIALIZED EARLY
     // =============================================
-    serial_println!("[init] IDT...");
-    vga_println!("[..] Initializing IDT...");
-    arch::x86_64::idt::init();
-    serial_println!("[init] IDT initialized.");
-    vga_println!("[OK] IDT loaded");
+    // arch::x86_64::idt::init();
 
     // =============================================
     // Phase 5b: paging / VMM
@@ -706,6 +711,16 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] Initializing scheduler...");
     vga_println!("[..] Setting up multitasking...");
     process::init_scheduler();
+
+    // =============================================
+    // Phase 7+: Start Timer (Asterinas Style)
+    // =============================================
+    // The BSP timer only starts when the scheduler is ready to handle interrupts.
+    if apic_active {
+        serial_println!("[init] Starting APIC timer on BSP...");
+        arch::x86_64::timer::start_apic_timer_cached();
+    }
+
     arch::x86_64::smp::open_ap_scheduler_gate();
     serial_println!("[init] Scheduler initialized.");
     serial_println!("[trace][bsp] after init_scheduler");
@@ -1137,9 +1152,10 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     } else {
         serial_println!("[init]   6h. APIC timer calibrated successfully");
 
-        // Step 6i: start APIC timer in periodic mode
-        timer::start_apic_timer(ticks_per_10ms);
-        serial_println!("[init]   6i. APIC timer started ({}Hz)", TIMER_HZ);
+        // Step 6i: DO NOT start APIC timer yet. 
+        // We will start it only after the scheduler is ready.
+        // timer::start_apic_timer(ticks_per_10ms);
+        // serial_println!("[init]   6i. APIC timer calibrated ({}Hz)", TIMER_HZ);
 
         // Step 6i+: quench legacy PIT to prevent phantom timer interrupts.
         // The Limine bootloader leaves PIT channel 0 running (~100Hz).

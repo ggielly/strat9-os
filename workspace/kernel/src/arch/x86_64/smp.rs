@@ -28,6 +28,8 @@ pub const TRAMPOLINE_PHYS_ADDR: u64 = 0x8000;
 
 /// Number of booted cores (starts at 1 for BSP).
 static BOOTED_CORES: AtomicUsize = AtomicUsize::new(1);
+/// Counter for synchronization barriers.
+static SYNC_BARRIER: AtomicUsize = AtomicUsize::new(0);
 /// Gate used by BSP to release APs into scheduler/timer start.
 static AP_SCHED_GATE_OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -228,6 +230,31 @@ fn send_init_sipi(apic_id: u32) {
     }
 }
 
+/// Broadcast a halt command to all other CPUs.
+///
+/// Used during panic to stop the system and prevent log corruption.
+pub fn broadcast_panic_halt() {
+    if !apic::is_initialized() {
+        return;
+    }
+    unsafe {
+        apic::write_reg(apic::REG_ESR, 0);
+        // Destination Shorthand: 0b11 (All excluding self)
+        // Delivery Mode: 0b100 (NMI)
+        // Level: 1 (Assert)
+        let icr_low = (0b11 << 18) | (0b100 << 8) | (1 << 14);
+        apic::write_reg(apic::REG_ICR_LOW, icr_low);
+    }
+}
+
+/// Wait at a synchronization barrier until the expected number of CPUs arrive.
+pub fn rendezvous_barrier(expected: usize) {
+    SYNC_BARRIER.fetch_add(1, Ordering::SeqCst);
+    while SYNC_BARRIER.load(Ordering::Acquire) < expected {
+        core::hint::spin_loop();
+    }
+}
+
 /// Boot Application Processors.
 pub fn init() -> Result<usize, &'static str> {
     if !apic::is_initialized() {
@@ -235,6 +262,7 @@ pub fn init() -> Result<usize, &'static str> {
     }
 
     BOOTED_CORES.store(1, Ordering::Release);
+    SYNC_BARRIER.store(0, Ordering::Release);
 
     let madt_info = madt::parse_madt().ok_or("MADT not available")?;
     let bsp_apic_id = apic::lapic_id();
@@ -309,6 +337,10 @@ pub fn init() -> Result<usize, &'static str> {
 
     let online = BOOTED_CORES.load(Ordering::Acquire);
     log::info!("SMP: {} cores online (expected {})", online, expected);
+
+    // BSP reaches the rendezvous point.
+    rendezvous_barrier(online);
+
     Ok(online)
 }
 
@@ -350,6 +382,10 @@ pub extern "C" fn smp_main() -> ! {
 
     let _ = percpu::mark_online_by_apic(apic_id);
     BOOTED_CORES.fetch_add(1, Ordering::Release);
+    
+    // AP reaches the rendezvous point.
+    rendezvous_barrier(BOOTED_CORES.load(Ordering::Acquire));
+
     crate::serial_println!(
         "[trace][ap] online cpu_index={} entering ap scheduler",
         cpu_index
