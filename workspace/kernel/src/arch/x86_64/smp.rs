@@ -30,6 +30,8 @@ pub const TRAMPOLINE_PHYS_ADDR: u64 = 0x8000;
 static BOOTED_CORES: AtomicUsize = AtomicUsize::new(1);
 /// Counter for synchronization barriers.
 static SYNC_BARRIER: AtomicUsize = AtomicUsize::new(0);
+/// Target count for the rendezvous barrier (set by BSP before barrier).
+static BARRIER_TARGET: AtomicUsize = AtomicUsize::new(0);
 /// Gate used by BSP to release APs into scheduler/timer start.
 static AP_SCHED_GATE_OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -247,9 +249,13 @@ pub fn broadcast_panic_halt() {
     }
 }
 
-/// Wait at a synchronization barrier until the expected number of CPUs arrive.
-pub fn rendezvous_barrier(expected: usize) {
-    SYNC_BARRIER.fetch_add(1, Ordering::SeqCst);
+/// Wait at a synchronization barrier until all expected CPUs arrive.
+///
+/// Every CPU (BSP + APs) calls this once.  BSP must store the target count
+/// in `BARRIER_TARGET` before any CPU enters the barrier.
+fn rendezvous_barrier() {
+    let expected = BARRIER_TARGET.load(Ordering::Acquire);
+    SYNC_BARRIER.fetch_add(1, Ordering::AcqRel);
     while SYNC_BARRIER.load(Ordering::Acquire) < expected {
         core::hint::spin_loop();
     }
@@ -263,6 +269,7 @@ pub fn init() -> Result<usize, &'static str> {
 
     BOOTED_CORES.store(1, Ordering::Release);
     SYNC_BARRIER.store(0, Ordering::Release);
+    BARRIER_TARGET.store(0, Ordering::Release);
 
     let madt_info = madt::parse_madt().ok_or("MADT not available")?;
     let bsp_apic_id = apic::lapic_id();
@@ -341,8 +348,10 @@ pub fn init() -> Result<usize, &'static str> {
     let online = BOOTED_CORES.load(Ordering::Acquire);
     log::info!("SMP: {} cores online (expected {})", online, expected);
 
+    // Publish the barrier target so every CPU (BSP + APs) uses the same value.
+    BARRIER_TARGET.store(online, Ordering::Release);
     // BSP reaches the rendezvous point.
-    rendezvous_barrier(online);
+    rendezvous_barrier();
 
     Ok(online)
 }
@@ -386,8 +395,11 @@ pub extern "C" fn smp_main() -> ! {
     let _ = percpu::mark_online_by_apic(apic_id);
     BOOTED_CORES.fetch_add(1, Ordering::Release);
 
-    // AP reaches the rendezvous point.
-    rendezvous_barrier(BOOTED_CORES.load(Ordering::Acquire));
+    // AP spins until BSP publishes the barrier target, then enters barrier.
+    while BARRIER_TARGET.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    rendezvous_barrier();
 
     crate::serial_println!(
         "[trace][ap] online cpu_index={} entering ap scheduler",

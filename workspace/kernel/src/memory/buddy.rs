@@ -59,7 +59,9 @@ impl BuddyAllocator {
             "Buddy allocator: initializing with {} memory regions",
             memory_regions.len()
         );
-        for (_protected_base, _protected_size) in Self::protected_module_ranges().into_iter().flatten() {
+        for (_protected_base, _protected_size) in
+            Self::protected_module_ranges().into_iter().flatten()
+        {
             buddy_dbg!(
                 "  Protected module range: phys=0x{:x}..0x{:x}",
                 Self::align_down(_protected_base, PAGE_SIZE),
@@ -691,12 +693,20 @@ pub fn get_allocator() -> &'static SpinLock<Option<BuddyAllocator>> {
 impl FrameAllocator for BuddyAllocator {
     /// Performs the alloc operation.
     fn alloc(&mut self, order: u8) -> Result<PhysFrame, AllocError> {
+        // Invariant: the caller must hold the SpinLock, which disables interrupts.
+        // Allocating with interrupts enabled would deadlock on single-core if a
+        // timer interrupt tries to allocate while we hold the lock.
+        debug_assert!(
+            !crate::arch::x86_64::interrupts_enabled(),
+            "buddy alloc: interrupts must be disabled"
+        );
+
         if order > MAX_ORDER as u8 {
             return Err(AllocError::InvalidOrder);
         }
 
         let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
-        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::SeqCst) {
+        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
             panic!("Recursive allocation detected on CPU {}!", cpu_idx);
         }
 
@@ -713,26 +723,53 @@ impl FrameAllocator for BuddyAllocator {
             Err(AllocError::OutOfMemory)
         })();
 
-        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::SeqCst);
+        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
         result
     }
 
     /// Performs the free operation.
     fn free(&mut self, frame: PhysFrame, order: u8) {
+        debug_assert!(
+            !crate::arch::x86_64::interrupts_enabled(),
+            "buddy free: interrupts must be disabled"
+        );
+
+        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
+            panic!("Recursive deallocation detected on CPU {}!", cpu_idx);
+        }
+
         let frame_phys = frame.start_address.as_u64();
         let zi = Self::zone_index_for_addr(frame_phys);
         let zone = &mut self.zones[zi];
         Self::free_to_zone(zone, frame, order);
+
+        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
     }
 }
 
 impl BuddyAllocator {
     /// Allocate explicitly from one zone (e.g. DMA-only callers).
     pub fn alloc_zone(&mut self, order: u8, zone: ZoneType) -> Result<PhysFrame, AllocError> {
+        debug_assert!(
+            !crate::arch::x86_64::interrupts_enabled(),
+            "buddy alloc_zone: interrupts must be disabled"
+        );
+
         if order > MAX_ORDER as u8 {
             return Err(AllocError::InvalidOrder);
         }
-        Self::alloc_from_zone(&mut self.zones[zone as usize], order).ok_or(AllocError::OutOfMemory)
+
+        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
+            panic!("Recursive allocation detected on CPU {}!", cpu_idx);
+        }
+
+        let result = Self::alloc_from_zone(&mut self.zones[zone as usize], order)
+            .ok_or(AllocError::OutOfMemory);
+
+        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
+        result
     }
 }
 

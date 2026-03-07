@@ -141,10 +141,10 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
         }
     }
 
-    // 3. Disable interrupts to prevent further issues.
+    // 4. Disable interrupts to prevent further issues.
     crate::arch::x86_64::cli();
 
-    // 4. Print early serial message to confirm we caught the panic.
+    // 5. Print early serial message to confirm we caught the panic.
     crate::serial_println!("\n\x1b[31;1m!!! KERNEL PANIC !!!\x1b[0m");
 
     // Run custom panic hooks before trying complex rendering.
