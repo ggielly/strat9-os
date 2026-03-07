@@ -754,6 +754,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     serial_println!("[init] Initializing scheduler...");
     vga_println!("[..] Setting up multitasking...");
+    // Print struct layout for crash-site offset analysis (debug build only).
+    crate::process::task::Task::debug_print_layout();
     process::init_scheduler();
 
     debug_assert!(

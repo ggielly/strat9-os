@@ -671,6 +671,90 @@ impl Task {
         let tid = next_tid();
         (pid, tid, pid)
     }
+
+    /// Print the memory layout of Task and Process structs for debugging.
+    ///
+    /// Computes field offsets at runtime using addr_of! so the output is
+    /// accurate regardless of Rust's struct reordering decisions.
+    /// Call this early in kernel init to validate the crash-site offset analysis.
+    pub fn debug_print_layout() {
+        use core::mem;
+        crate::serial_println!("[layout] === Struct Layout Debug ===");
+        crate::serial_println!("[layout] sizeof(Task)          = {}", mem::size_of::<Task>());
+        crate::serial_println!("[layout] sizeof(ExtendedState) = {}", mem::size_of::<ExtendedState>());
+        crate::serial_println!("[layout] alignof(ExtendedState)= {}", mem::align_of::<ExtendedState>());
+        crate::serial_println!("[layout] sizeof(CpuContext)    = {}", mem::size_of::<CpuContext>());
+        crate::serial_println!("[layout] sizeof(KernelStack)   = {}", mem::size_of::<KernelStack>());
+        crate::serial_println!("[layout] sizeof(Process)       = {}", mem::size_of::<crate::process::process::Process>());
+        crate::serial_println!("[layout] sizeof(FileDescriptorTable) = {}", mem::size_of::<crate::vfs::fd::FileDescriptorTable>());
+        crate::serial_println!("[layout] sizeof(CapabilityTable)     = {}", mem::size_of::<crate::capability::CapabilityTable>());
+        crate::serial_println!("[layout] sizeof(SigActionData)       = {}", mem::size_of::<crate::process::signal::SigActionData>());
+
+        // Use heap-allocated MaybeUninit to avoid stack overflow from the ~3 KiB
+        // ExtendedState embedded in Task. We only take *addresses* (addr_of!),
+        // never read the uninitialized data itself, so this is sound.
+        let task_box: alloc::boxed::Box<core::mem::MaybeUninit<Task>> =
+            alloc::boxed::Box::new_uninit();
+        // Cast to *const Task — we never read Task data, only compute field addresses.
+        let task_ptr = task_box.as_ptr() as *const Task;
+        let base = task_ptr as u64;
+        // SAFETY: We only take addresses via addr_of!, no uninitialized reads.
+        unsafe {
+            let off_id       = core::ptr::addr_of!((*task_ptr).id) as u64 - base;
+            let off_pid      = core::ptr::addr_of!((*task_ptr).pid) as u64 - base;
+            let off_context  = core::ptr::addr_of!((*task_ptr).context) as u64 - base;
+            let off_kstack   = core::ptr::addr_of!((*task_ptr).kernel_stack) as u64 - base;
+            let off_process  = core::ptr::addr_of!((*task_ptr).process) as u64 - base;
+            let off_fpu      = core::ptr::addr_of!((*task_ptr).fpu_state) as u64 - base;
+            let off_xcr0     = core::ptr::addr_of!((*task_ptr).xcr0_mask) as u64 - base;
+            let off_ticks    = core::ptr::addr_of!((*task_ptr).ticks) as u64 - base;
+            let off_name     = core::ptr::addr_of!((*task_ptr).name) as u64 - base;
+            let off_vruntime = core::ptr::addr_of!((*task_ptr).vruntime) as u64 - base;
+            crate::serial_println!("[layout] Task field offsets (byte offset from Task data ptr):");
+            crate::serial_println!("[layout]   id           @ +{:#x}", off_id);
+            crate::serial_println!("[layout]   pid          @ +{:#x}", off_pid);
+            crate::serial_println!("[layout]   context      @ +{:#x}", off_context);
+            crate::serial_println!("[layout]   kernel_stack @ +{:#x}", off_kstack);
+            crate::serial_println!("[layout]   process      @ +{:#x}", off_process);
+            crate::serial_println!("[layout]   fpu_state    @ +{:#x}", off_fpu);
+            crate::serial_println!("[layout]   xcr0_mask    @ +{:#x}", off_xcr0);
+            crate::serial_println!("[layout]   ticks        @ +{:#x}", off_ticks);
+            crate::serial_println!("[layout]   name         @ +{:#x}", off_name);
+            crate::serial_println!("[layout]   vruntime     @ +{:#x}", off_vruntime);
+        }
+        // Arc<T> ArcInner overhead: strong(8)+weak(8)+data = data at offset 16.
+        // So the crash at [ArcInner<Task>+0xbf8] means Task.process is at offset
+        // 0xbf8 - 16 = 0xbe8 inside Task data. Check against off_process above.
+        crate::serial_println!("[layout] Expected task.process crash offset from Task data: {:#x}",
+            0xbf8u64.saturating_sub(16));
+
+        // Process field offsets
+        let proc_box: alloc::boxed::Box<core::mem::MaybeUninit<crate::process::process::Process>> =
+            alloc::boxed::Box::new_uninit();
+        #[allow(unused_variables)]
+        let proc_ptr = proc_box.as_ptr() as *const crate::process::process::Process;
+        let proc_base = proc_ptr as u64;
+        unsafe {
+            let off_pid      = core::ptr::addr_of!((*proc_ptr).pid) as u64 - proc_base;
+            let off_as       = core::ptr::addr_of!((*proc_ptr).address_space) as u64 - proc_base;
+            let off_fd       = core::ptr::addr_of!((*proc_ptr).fd_table) as u64 - proc_base;
+            let off_caps     = core::ptr::addr_of!((*proc_ptr).capabilities) as u64 - proc_base;
+            let off_sigs     = core::ptr::addr_of!((*proc_ptr).signal_actions) as u64 - proc_base;
+            let off_brk      = core::ptr::addr_of!((*proc_ptr).brk) as u64 - proc_base;
+            crate::serial_println!("[layout] Process field offsets (byte offset from Process data ptr):");
+            crate::serial_println!("[layout]   pid            @ +{:#x}", off_pid);
+            crate::serial_println!("[layout]   address_space  @ +{:#x}", off_as);
+            crate::serial_println!("[layout]   fd_table       @ +{:#x}", off_fd);
+            crate::serial_println!("[layout]   capabilities   @ +{:#x}", off_caps);
+            crate::serial_println!("[layout]   signal_actions @ +{:#x}", off_sigs);
+            crate::serial_println!("[layout]   brk            @ +{:#x}", off_brk);
+        }
+        // The crash reads [ArcInner<Process>+0x830].
+        // ArcInner<Process>.data is at ArcInner+16, so Process offset is 0x830-16 = 0x820.
+        crate::serial_println!("[layout] Expected process field crash offset from Process data: {:#x}",
+            0x830u64.saturating_sub(16));
+        crate::serial_println!("[layout] ===========================");
+    }
 }
 
 /// Context switch dispatcher. Picks the xsave or fxsave path based on host
