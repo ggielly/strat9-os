@@ -14,9 +14,13 @@ use crate::{
 };
 
 fn log_section(title: &str) {
-    crate::serial_println!("[errno-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[errno-test][STEP] ========================================================"
+    );
     crate::serial_println!("[errno-test][STEP] {}", title);
-    crate::serial_println!("[errno-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[errno-test][STEP] ========================================================"
+    );
 }
 
 fn record(name: &str, ok: bool, passed: &mut usize, total: &mut usize) {
@@ -31,7 +35,11 @@ fn record(name: &str, ok: bool, passed: &mut usize, total: &mut usize) {
     );
 }
 
-fn expect_err<T: core::fmt::Debug>(label: &str, result: Result<T, SyscallError>, expected: SyscallError) -> bool {
+fn expect_err<T: core::fmt::Debug>(
+    label: &str,
+    result: Result<T, SyscallError>,
+    expected: SyscallError,
+) -> bool {
     match result {
         Err(e) if e == expected => {
             crate::serial_println!("[errno-test][STEP] {} => {:?} ✓", label, e);
@@ -40,14 +48,18 @@ fn expect_err<T: core::fmt::Debug>(label: &str, result: Result<T, SyscallError>,
         Err(e) => {
             crate::serial_println!(
                 "[errno-test][ASSERT] FAIL: {} expected {:?}, got {:?}",
-                label, expected, e
+                label,
+                expected,
+                e
             );
             false
         }
         Ok(val) => {
             crate::serial_println!(
                 "[errno-test][ASSERT] FAIL: {} expected {:?}, got Ok({:?})",
-                label, expected, val
+                label,
+                expected,
+                val
             );
             false
         }
@@ -63,7 +75,8 @@ fn expect_any_err<T: core::fmt::Debug>(label: &str, result: Result<T, SyscallErr
         Ok(val) => {
             crate::serial_println!(
                 "[errno-test][ASSERT] FAIL: {} expected error, got Ok({:?})",
-                label, val
+                label,
+                val
             );
             false
         }
@@ -85,12 +98,20 @@ fn run_errno_suite() -> bool {
     // ── 2. read invalid fd → BadHandle ──────────────────────────────────────
     log_section("2. READ INVALID FD");
     let mut buf = [0u8; 8];
-    let s = expect_err("read(9999)", vfs::read(9999, &mut buf), SyscallError::BadHandle);
+    let s = expect_err(
+        "read(9999)",
+        vfs::read(9999, &mut buf),
+        SyscallError::BadHandle,
+    );
     record("read(9999) → EBADF", s, &mut passed, &mut total);
 
     // ── 3. write invalid fd → BadHandle ─────────────────────────────────────
     log_section("3. WRITE INVALID FD");
-    let s = expect_err("write(9999)", vfs::write(9999, b"x"), SyscallError::BadHandle);
+    let s = expect_err(
+        "write(9999)",
+        vfs::write(9999, b"x"),
+        SyscallError::BadHandle,
+    );
     record("write(9999) → EBADF", s, &mut passed, &mut total);
 
     // ── 4. fstat invalid fd → BadHandle ─────────────────────────────────────
@@ -100,7 +121,11 @@ fn run_errno_suite() -> bool {
 
     // ── 5. lseek invalid fd → BadHandle ─────────────────────────────────────
     log_section("5. LSEEK INVALID FD");
-    let s = expect_err("lseek(9999)", vfs::lseek(9999, 0, 0), SyscallError::BadHandle);
+    let s = expect_err(
+        "lseek(9999)",
+        vfs::lseek(9999, 0, 0),
+        SyscallError::BadHandle,
+    );
     record("lseek(9999) → EBADF", s, &mut passed, &mut total);
 
     // ── 6. dup invalid fd → BadHandle ───────────────────────────────────────
@@ -110,7 +135,11 @@ fn run_errno_suite() -> bool {
 
     // ── 7. dup2 invalid fd → BadHandle ──────────────────────────────────────
     log_section("7. DUP2 INVALID FD");
-    let s = expect_err("dup2(9999, 10)", vfs::dup2(9999, 10), SyscallError::BadHandle);
+    let s = expect_err(
+        "dup2(9999, 10)",
+        vfs::dup2(9999, 10),
+        SyscallError::BadHandle,
+    );
     record("dup2(9999, 10) → EBADF", s, &mut passed, &mut total);
 
     // ── 8. double close → BadHandle ─────────────────────────────────────────
@@ -121,9 +150,16 @@ fn run_errno_suite() -> bool {
     match vfs::open(&f, vfs::OpenFlags::READ) {
         Ok(fd) => {
             let _ = vfs::close(fd);
-            s = expect_err("close(fd) 2nd time", vfs::close(fd), SyscallError::BadHandle);
+            s = expect_err(
+                "close(fd) 2nd time",
+                vfs::close(fd),
+                SyscallError::BadHandle,
+            );
         }
-        Err(e) => { crate::serial_println!("[errno-test][STEP] open => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[errno-test][STEP] open => {:?}", e);
+            s = false;
+        }
     }
     let _ = vfs::unlink(&f);
     record("double close → EBADF", s, &mut passed, &mut total);
@@ -208,7 +244,12 @@ fn run_errno_suite() -> bool {
     let _ = vfs::create_file(&f_not_sym, 0o644);
     let s = expect_any_err("readlink(regular_file)", vfs::readlink(&f_not_sym));
     let _ = vfs::unlink(&f_not_sym);
-    record("readlink on regular file → error", s, &mut passed, &mut total);
+    record(
+        "readlink on regular file → error",
+        s,
+        &mut passed,
+        &mut total,
+    );
 
     // ── 17. truncate non-existent → error ───────────────────────────────────
     log_section("17. TRUNCATE NON-EXISTENT");
@@ -220,12 +261,20 @@ fn run_errno_suite() -> bool {
 
     // ── 18. fchmod invalid fd → BadHandle ───────────────────────────────────
     log_section("18. FCHMOD INVALID FD");
-    let s = expect_err("fchmod(9999)", vfs::fchmod(9999, 0o700), SyscallError::BadHandle);
+    let s = expect_err(
+        "fchmod(9999)",
+        vfs::fchmod(9999, 0o700),
+        SyscallError::BadHandle,
+    );
     record("fchmod(9999) → EBADF", s, &mut passed, &mut total);
 
     // ── 19. ftruncate invalid fd → BadHandle ────────────────────────────────
     log_section("19. FTRUNCATE INVALID FD");
-    let s = expect_err("ftruncate(9999)", vfs::ftruncate(9999, 0), SyscallError::BadHandle);
+    let s = expect_err(
+        "ftruncate(9999)",
+        vfs::ftruncate(9999, 0),
+        SyscallError::BadHandle,
+    );
     record("ftruncate(9999) → EBADF", s, &mut passed, &mut total);
 
     // ── 20. SyscallError::to_raw encodes correctly ──────────────────────────
@@ -254,12 +303,16 @@ fn run_errno_suite() -> bool {
         let as_i64 = raw as i64;
         crate::serial_println!(
             "[errno-test][STEP] {:?}.to_raw() = {:#x} (i64={})",
-            err, raw, as_i64
+            err,
+            raw,
+            as_i64
         );
         if as_i64 != expected_raw {
             crate::serial_println!(
                 "[errno-test][ASSERT] FAIL: {:?} expected raw {}, got {}",
-                err, expected_raw, as_i64
+                err,
+                expected_raw,
+                as_i64
             );
             s = false;
         }
@@ -273,17 +326,25 @@ fn run_errno_suite() -> bool {
         let recovered = SyscallError::from_code(expected_raw);
         crate::serial_println!(
             "[errno-test][STEP] from_code({}) => {:?}",
-            expected_raw, recovered
+            expected_raw,
+            recovered
         );
         if recovered != err {
             crate::serial_println!(
                 "[errno-test][ASSERT] FAIL: from_code({}) expected {:?}, got {:?}",
-                expected_raw, err, recovered
+                expected_raw,
+                err,
+                recovered
             );
             s = false;
         }
     }
-    record("SyscallError::from_code round-trip", s, &mut passed, &mut total);
+    record(
+        "SyscallError::from_code round-trip",
+        s,
+        &mut passed,
+        &mut total,
+    );
 
     // ── 22. SyscallError::name returns correct strings ──────────────────────
     log_section("22. SYSCALL ERROR NAMES");
@@ -310,7 +371,9 @@ fn run_errno_suite() -> bool {
         if name != expected_name {
             crate::serial_println!(
                 "[errno-test][ASSERT] FAIL: {:?}.name() expected '{}', got '{}'",
-                err, expected_name, name
+                err,
+                expected_name,
+                name
             );
             s = false;
         }
@@ -333,7 +396,9 @@ fn run_errno_suite() -> bool {
         s = false;
     }
     if SyscallError::InvalidArgument.is_retryable() {
-        crate::serial_println!("[errno-test][ASSERT] FAIL: InvalidArgument should NOT be retryable");
+        crate::serial_println!(
+            "[errno-test][ASSERT] FAIL: InvalidArgument should NOT be retryable"
+        );
         s = false;
     }
     record("is_retryable", s, &mut passed, &mut total);
@@ -344,16 +409,23 @@ fn run_errno_suite() -> bool {
     let mut s = true;
     match vfs::symlink("nonexistent_target_xyz", &sym_dangle) {
         Ok(()) => {
-            crate::serial_println!("[errno-test][STEP] symlink to non-existent target: ok (expected)");
+            crate::serial_println!(
+                "[errno-test][STEP] symlink to non-existent target: ok (expected)"
+            );
             match vfs::readlink(&sym_dangle) {
                 Ok(target) => {
                     crate::serial_println!("[errno-test][STEP] readlink => '{}'", target);
                     if target != "nonexistent_target_xyz" {
-                        crate::serial_println!("[errno-test][ASSERT] FAIL: readlink content mismatch");
+                        crate::serial_println!(
+                            "[errno-test][ASSERT] FAIL: readlink content mismatch"
+                        );
                         s = false;
                     }
                 }
-                Err(e) => { crate::serial_println!("[errno-test][STEP] readlink => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[errno-test][STEP] readlink => {:?}", e);
+                    s = false;
+                }
             }
             let _ = vfs::unlink(&sym_dangle);
         }
@@ -371,7 +443,11 @@ fn run_errno_suite() -> bool {
     // ── Summary ─────────────────────────────────────────────────────────────
     log_section("ERRNO TEST SUMMARY");
     let ok = passed == total;
-    crate::serial_println!("[errno-test][ASSERT] result: {}/{} scenarios PASS", passed, total);
+    crate::serial_println!(
+        "[errno-test][ASSERT] result: {}/{} scenarios PASS",
+        passed,
+        total
+    );
     crate::serial_println!(
         "[errno-test][ASSERT] final : {}",
         if ok { "PASS" } else { "FAIL" }

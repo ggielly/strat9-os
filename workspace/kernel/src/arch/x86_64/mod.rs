@@ -4,7 +4,6 @@
 
 pub mod apic;
 pub mod cpuid;
-pub mod x2apic;
 pub mod gdt;
 pub mod idt;
 pub mod io;
@@ -23,6 +22,7 @@ pub mod timer;
 pub mod tlb;
 pub mod tss;
 pub mod vga;
+pub mod x2apic;
 
 use core::arch::asm;
 

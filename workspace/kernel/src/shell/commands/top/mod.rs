@@ -112,7 +112,10 @@ fn collect_snapshot() -> TopSnapshot {
         } else {
             s.name.clone()
         };
-        if let Some((_, belongs)) = strate_index.iter_mut().find(|(name, _)| *name == strate_name) {
+        if let Some((_, belongs)) = strate_index
+            .iter_mut()
+            .find(|(name, _)| *name == strate_name)
+        {
             if !belongs.iter().any(|x| x == &s.name) {
                 belongs.push(s.name.clone());
             }
@@ -205,17 +208,14 @@ fn compute_scheduler_metrics_window(
     let mut steal_in_delta = 0u64;
     let mut steal_out_delta = 0u64;
     for i in 0..cpu_count {
-        rt_delta = rt_delta.saturating_add(
-            now.rt_runtime_ticks[i].saturating_sub(prev.rt_runtime_ticks[i]),
-        );
-        fair_delta = fair_delta.saturating_add(
-            now.fair_runtime_ticks[i].saturating_sub(prev.fair_runtime_ticks[i]),
-        );
-        idle_delta = idle_delta.saturating_add(
-            now.idle_runtime_ticks[i].saturating_sub(prev.idle_runtime_ticks[i]),
-        );
-        switch_delta = switch_delta
-            .saturating_add(now.switch_count[i].saturating_sub(prev.switch_count[i]));
+        rt_delta = rt_delta
+            .saturating_add(now.rt_runtime_ticks[i].saturating_sub(prev.rt_runtime_ticks[i]));
+        fair_delta = fair_delta
+            .saturating_add(now.fair_runtime_ticks[i].saturating_sub(prev.fair_runtime_ticks[i]));
+        idle_delta = idle_delta
+            .saturating_add(now.idle_runtime_ticks[i].saturating_sub(prev.idle_runtime_ticks[i]));
+        switch_delta =
+            switch_delta.saturating_add(now.switch_count[i].saturating_sub(prev.switch_count[i]));
         preempt_delta = preempt_delta
             .saturating_add(now.preempt_count[i].saturating_sub(prev.preempt_count[i]));
         steal_in_delta = steal_in_delta
@@ -223,7 +223,9 @@ fn compute_scheduler_metrics_window(
         steal_out_delta = steal_out_delta
             .saturating_add(now.steal_out_count[i].saturating_sub(prev.steal_out_count[i]));
     }
-    let total = rt_delta.saturating_add(fair_delta).saturating_add(idle_delta);
+    let total = rt_delta
+        .saturating_add(fair_delta)
+        .saturating_add(idle_delta);
     let to_ratio = |v: u64| {
         if total == 0 {
             0.0
@@ -280,11 +282,7 @@ fn scheduler_runtime_lines(
         } else {
             let c1 = format!(
                 "cpu1 cur={} rq={}/{}/{} nr={}",
-                s.current_task[1],
-                s.rq_rt[1],
-                s.rq_fair[1],
-                s.rq_idle[1],
-                s.need_resched[1]
+                s.current_task[1], s.rq_rt[1], s.rq_fair[1], s.rq_idle[1], s.need_resched[1]
             );
             format!("CPU: {} | {}", c0, c1)
         }

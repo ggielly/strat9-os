@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const INTEGRATOR_SC_DEC_OFFSET: usize = 0x10;
 const INTEGRATOR_AP_EXP_BASE: u64 = 0xC000_0000;
@@ -27,7 +26,9 @@ impl ArmIntegratorLm {
 
     /// Performs the detect modules operation.
     fn detect_modules(&mut self) {
-        if !self.syscon_regs.is_valid() { return; }
+        if !self.syscon_regs.is_valid() {
+            return;
+        }
         let val = self.syscon_regs.read32(INTEGRATOR_SC_DEC_OFFSET);
         for i in 0..NUM_SLOTS {
             self.slots_present[i] = (val & (1 << (4 + i))) != 0;
@@ -47,10 +48,14 @@ impl ArmIntegratorLm {
 
 impl BusDriver for ArmIntegratorLm {
     /// Performs the name operation.
-    fn name(&self) -> &str { "arm-integrator-lm" }
+    fn name(&self) -> &str {
+        "arm-integrator-lm"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {

@@ -113,7 +113,9 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         crate::process::task::do_restore_first_task(
             &raw const (*first_task.context.get()).saved_rsp,
             first_task.fpu_state.get() as *const u8,
-            first_task.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
+            first_task
+                .xcr0_mask
+                .load(core::sync::atomic::Ordering::Relaxed),
         );
     }
 }
@@ -397,10 +399,7 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
         let scheduler = SCHEDULER.lock();
         if let Some(ref sched) = *scheduler {
             use crate::process::sched::SchedClassRq;
-            let cpu_count = sched
-                .cpus
-                .len()
-                .min(crate::arch::x86_64::percpu::MAX_CPUS);
+            let cpu_count = sched.cpus.len().min(crate::arch::x86_64::percpu::MAX_CPUS);
             out.initialized = true;
             out.boot_phase = if cpu_count > 0 { 2 } else { 1 };
             out.cpu_count = cpu_count;

@@ -1,14 +1,15 @@
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::sync::SpinLock;
-use crate::syscall::error::SyscallError;
+use crate::{sync::SpinLock, syscall::error::SyscallError};
 
-use super::fd::FileDescriptorTable;
-use super::file::OpenFile;
-use super::scheme::{
-    finalize_pseudo_stat, DynScheme, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
-    DEV_CONSOLE,
+use super::{
+    fd::FileDescriptorTable,
+    file::OpenFile,
+    scheme::{
+        finalize_pseudo_stat, DynScheme, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
+        DEV_CONSOLE,
+    },
 };
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -71,15 +72,19 @@ impl Scheme for ConsoleScheme {
 
     /// Performs the stat operation.
     fn stat(&self, _file_id: u64) -> Result<FileStat, SyscallError> {
-        Ok(finalize_pseudo_stat(FileStat {
-            st_ino: 0,
-            st_mode: 0o020666,
-            st_nlink: 1,
-            st_size: 0,
-            st_blksize: 1,
-            st_blocks: 0,
-            ..FileStat::zeroed()
-        }, DEV_CONSOLE, 1))
+        Ok(finalize_pseudo_stat(
+            FileStat {
+                st_ino: 0,
+                st_mode: 0o020666,
+                st_nlink: 1,
+                st_size: 0,
+                st_blksize: 1,
+                st_blocks: 0,
+                ..FileStat::zeroed()
+            },
+            DEV_CONSOLE,
+            1,
+        ))
     }
 }
 

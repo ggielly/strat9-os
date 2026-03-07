@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const LPC_REG_STARTUP_SIGNAL: usize = 0x00;
 const LPC_REG_OP_STATUS: usize = 0x04;
@@ -72,7 +71,8 @@ impl HisiLpc {
         self.regs.write32(LPC_REG_ADDR, addr);
         self.regs.write32(LPC_REG_CMD, CMD_OP_READ);
         self.regs.write32(LPC_REG_OP_LEN, width);
-        self.regs.write32(LPC_REG_STARTUP_SIGNAL, STARTUP_SIGNAL_START);
+        self.regs
+            .write32(LPC_REG_STARTUP_SIGNAL, STARTUP_SIGNAL_START);
 
         self.wait_finish()?;
 
@@ -101,7 +101,8 @@ impl HisiLpc {
             self.regs.write32(LPC_REG_WDATA, (data >> (i * 8)) & 0xFF);
         }
 
-        self.regs.write32(LPC_REG_STARTUP_SIGNAL, STARTUP_SIGNAL_START);
+        self.regs
+            .write32(LPC_REG_STARTUP_SIGNAL, STARTUP_SIGNAL_START);
 
         self.wait_finish()?;
 
@@ -146,10 +147,14 @@ impl HisiLpc {
 
 impl BusDriver for HisiLpc {
     /// Performs the name operation.
-    fn name(&self) -> &str { "hisi-lpc" }
+    fn name(&self) -> &str {
+        "hisi-lpc"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -167,13 +172,17 @@ impl BusDriver for HisiLpc {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

@@ -605,13 +605,19 @@ struct SiloOutputBuf {
 
 impl core::fmt::Debug for SiloOutputBuf {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("SiloOutputBuf").field("count", &self.count).finish()
+        f.debug_struct("SiloOutputBuf")
+            .field("count", &self.count)
+            .finish()
     }
 }
 
 impl SiloOutputBuf {
     const fn new() -> Self {
-        Self { buf: [0; SILO_OUTPUT_CAPACITY], head: 0, count: 0 }
+        Self {
+            buf: [0; SILO_OUTPUT_CAPACITY],
+            head: 0,
+            count: 0,
+        }
     }
 
     fn push(&mut self, data: &[u8]) {
@@ -1290,7 +1296,7 @@ fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, Syscal
 
 /// Compute the effective XCR0 mask for a silo from its allowed CPU features.
 fn compute_silo_xcr0(config: &SiloConfig) -> u64 {
-    use crate::arch::x86_64::cpuid::{CpuFeatures, xcr0_for_features};
+    use crate::arch::x86_64::cpuid::{xcr0_for_features, CpuFeatures};
     let allowed = CpuFeatures::from_bits_truncate(config.cpu_features_allowed);
     xcr0_for_features(allowed)
 }
@@ -1390,7 +1396,8 @@ pub fn kernel_spawn_strate(
             .clone()
             .unwrap_or_else(|| alloc::format!("silo-{}", silo.id.sid))
     };
-    let task_name: &'static str = Box::leak(alloc::format!("strate-admin:{}", display).into_boxed_str());
+    let task_name: &'static str =
+        Box::leak(alloc::format!("strate-admin:{}", display).into_boxed_str());
     let task = crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps)
         .map_err(|_| SyscallError::InvalidArgument)?;
     let task_id = task.id;
@@ -2059,21 +2066,19 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         }
     };
 
-    let load_result = crate::process::elf::load_elf_task_with_caps(
-        &module_data,
-        task_name,
-        &seed_caps,
-    )
-    .map_err(|err| {
-        log::warn!(
-            "silo_start: sid={} module={} task='{}' load failed: {}",
-            silo_id,
-            module_id,
-            task_name,
-            err
+    let load_result =
+        crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps).map_err(
+            |err| {
+                log::warn!(
+                    "silo_start: sid={} module={} task='{}' load failed: {}",
+                    silo_id,
+                    module_id,
+                    task_name,
+                    err
+                );
+                map_elf_start_error(err)
+            },
         );
-        map_elf_start_error(err)
-    });
 
     let task = match load_result {
         Ok(task) => task,
@@ -2367,7 +2372,9 @@ pub fn register_current_task_granted_resource(
 ) -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let mut mgr = SILO_MANAGER.lock();
-    let silo_id = mgr.silo_for_task(task.id).ok_or(SyscallError::PermissionDenied)?;
+    let silo_id = mgr
+        .silo_for_task(task.id)
+        .ok_or(SyscallError::PermissionDenied)?;
     let silo = mgr.get_mut(silo_id)?;
     add_or_merge_granted_resource(
         &mut silo.granted_resources,
@@ -2422,7 +2429,9 @@ pub fn enforce_registry_bind_for_current_task() -> Result<(), SyscallError> {
         return Ok(());
     }
     let mgr = SILO_MANAGER.lock();
-    let silo_id = mgr.silo_for_task(task.id).ok_or(SyscallError::PermissionDenied)?;
+    let silo_id = mgr
+        .silo_for_task(task.id)
+        .ok_or(SyscallError::PermissionDenied)?;
     let silo = mgr.get(silo_id)?;
     if silo.sandboxed {
         return Err(SyscallError::PermissionDenied);
@@ -2764,7 +2773,8 @@ pub fn kernel_sandbox_silo(selector: &str) -> Result<u32, SyscallError> {
     silo.sandboxed = true;
     crate::audit::log(
         crate::audit::AuditCategory::Security,
-        0, silo_id,
+        0,
+        silo_id,
         alloc::format!("silo sandboxed"),
     );
     Ok(silo_id)
@@ -2829,7 +2839,8 @@ pub fn kernel_limit_silo(selector: &str, key: &str, value: u64) -> Result<u32, S
     silo.config.cpu_shares = next_cpu_shares;
     crate::audit::log(
         crate::audit::AuditCategory::Security,
-        0, silo_id,
+        0,
+        silo_id,
         alloc::format!("silo limit: {}={}", key, value),
     );
     Ok(silo_id)

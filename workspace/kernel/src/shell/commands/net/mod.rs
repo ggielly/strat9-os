@@ -362,4 +362,3 @@ pub(super) fn cmd_net_impl(args: &[String]) -> Result<(), ShellError> {
         }
     }
 }
-

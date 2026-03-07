@@ -14,12 +14,9 @@
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::sync::SpinLock;
-use crate::syscall::error::SyscallError;
+use crate::{sync::SpinLock, syscall::error::SyscallError};
 
-use super::scheme::{
-    DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_CHR,
-};
+use super::scheme::{DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DT_CHR};
 
 const PTY_BUF_SIZE: usize = 4096;
 

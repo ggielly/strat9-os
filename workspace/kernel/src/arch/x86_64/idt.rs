@@ -742,9 +742,8 @@ fn dump_page_fault_full(
             // returns a raw ptr into the Process data — always valid for a live Process.
             // However, reading the Arc<AddressSpace> *value* from that pointer may
             // fault if the memory is unmapped, so we use translate_via_raw_pt.
-            let as_cell_addr: u64 = unsafe {
-                (*alloc::sync::Arc::as_ptr(&t.process)).address_space.get() as u64
-            };
+            let as_cell_addr: u64 =
+                unsafe { (*alloc::sync::Arc::as_ptr(&t.process)).address_space.get() as u64 };
             // Step 3: read the 8-byte Arc<AddressSpace> inner pointer from as_cell_addr
             // via raw page table walk with current hardware CR3.
             let as_inner_u64: u64 = match translate_via_raw_pt(as_cell_addr, cr3_phys, hhdm) {
@@ -767,7 +766,9 @@ fn dump_page_fault_full(
             }
         };
         if task_cr3 == 0 {
-            crate::serial_println!("  Task CR3    : <unreadable — null/unmapped Arc<AddressSpace>>");
+            crate::serial_println!(
+                "  Task CR3    : <unreadable — null/unmapped Arc<AddressSpace>>"
+            );
         } else {
             crate::serial_println!(
                 "  Task CR3    : {:#018x}{}",

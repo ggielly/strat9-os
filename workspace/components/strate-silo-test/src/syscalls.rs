@@ -2,7 +2,9 @@
 #![no_main]
 
 use core::panic::PanicInfo;
-use strat9_syscall::{call, data, error::Error, number, number::*, syscall1, syscall2, syscall3, syscall4, syscall6};
+use strat9_syscall::{
+    call, data, error::Error, number, number::*, syscall1, syscall2, syscall3, syscall4, syscall6,
+};
 
 const PAGE_SIZE: usize = 4096;
 
@@ -149,7 +151,12 @@ fn check_expect_one_of(
 }
 
 /// Implements check expect err.
-fn check_expect_err(ctx: &mut Ctx, label: &str, res: core::result::Result<usize, Error>, expected: Error) {
+fn check_expect_err(
+    ctx: &mut Ctx,
+    label: &str,
+    res: core::result::Result<usize, Error>,
+    expected: Error,
+) {
     match res {
         Ok(v) => {
             ctx.fail += 1;
@@ -181,7 +188,13 @@ fn test_process_and_ids(ctx: &mut Ctx) {
     let _ = check_ok(ctx, "getpgid(0)", call::getpgid(0));
     let _ = check_ok(ctx, "getsid(0)", call::getsid(0));
     let _ = check_ok(ctx, "setpgid(0,0)", call::setpgid(0, 0));
-    check_expect_one_of(ctx, "setsid()", call::setsid(), Error::PermissionDenied, Error::InvalidArgument);
+    check_expect_one_of(
+        ctx,
+        "setsid()",
+        call::setsid(),
+        Error::PermissionDenied,
+        Error::InvalidArgument,
+    );
 
     let _ = check_ok(ctx, "raw SYS_GETUID", unsafe { syscall1(SYS_GETUID, 0) });
     let _ = check_ok(ctx, "raw SYS_GETEUID", unsafe { syscall1(SYS_GETEUID, 0) });
@@ -189,8 +202,12 @@ fn test_process_and_ids(ctx: &mut Ctx) {
     let _ = check_ok(ctx, "raw SYS_GETEGID", unsafe { syscall1(SYS_GETEGID, 0) });
     let cur_uid = unsafe { syscall1(SYS_GETUID, 0) }.unwrap_or(0);
     let cur_gid = unsafe { syscall1(SYS_GETGID, 0) }.unwrap_or(0);
-    let _ = check_ok(ctx, "raw SYS_SETUID(current uid)", unsafe { syscall1(SYS_SETUID, cur_uid) });
-    let _ = check_ok(ctx, "raw SYS_SETGID(current gid)", unsafe { syscall1(SYS_SETGID, cur_gid) });
+    let _ = check_ok(ctx, "raw SYS_SETUID(current uid)", unsafe {
+        syscall1(SYS_SETUID, cur_uid)
+    });
+    let _ = check_ok(ctx, "raw SYS_SETGID(current gid)", unsafe {
+        syscall1(SYS_SETGID, cur_gid)
+    });
 }
 
 /// Implements test memory.
@@ -202,21 +219,17 @@ fn test_memory(ctx: &mut Ctx) {
     let _ = check_ok(ctx, "brk(grow)", call::brk(grow));
     let _ = check_ok(ctx, "brk(shrink)", call::brk(base));
 
-    let mapped = check_ok(
-        ctx,
-        "SYS_MMAP anon private RW 2 pages",
-        unsafe {
-            syscall6(
-                number::SYS_MMAP,
-                0,
-                PAGE_SIZE * 2,
-                PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANON,
-                0,
-                0,
-            )
-        },
-    )
+    let mapped = check_ok(ctx, "SYS_MMAP anon private RW 2 pages", unsafe {
+        syscall6(
+            number::SYS_MMAP,
+            0,
+            PAGE_SIZE * 2,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANON,
+            0,
+            0,
+        )
+    })
     .unwrap_or(0);
 
     if mapped != 0 {
@@ -227,39 +240,39 @@ fn test_memory(ctx: &mut Ctx) {
         }
     }
 
-    let _ = check_ok(
-        ctx,
-        "SYS_MPROTECT RO",
-        unsafe { syscall3(number::SYS_MPROTECT, mapped, PAGE_SIZE * 2, PROT_READ) },
-    );
-    let _ = check_ok(
-        ctx,
-        "SYS_MPROTECT RW",
-        unsafe {
-            syscall3(
-                number::SYS_MPROTECT,
-                mapped,
-                PAGE_SIZE * 2,
-                PROT_READ | PROT_WRITE,
-            )
-        },
-    );
-    let remapped = check_ok(
-        ctx,
-        "SYS_MREMAP grow to 3 pages (MAYMOVE)",
-        unsafe { syscall4(number::SYS_MREMAP, mapped, PAGE_SIZE * 2, PAGE_SIZE * 3, MREMAP_MAYMOVE) },
-    )
+    let _ = check_ok(ctx, "SYS_MPROTECT RO", unsafe {
+        syscall3(number::SYS_MPROTECT, mapped, PAGE_SIZE * 2, PROT_READ)
+    });
+    let _ = check_ok(ctx, "SYS_MPROTECT RW", unsafe {
+        syscall3(
+            number::SYS_MPROTECT,
+            mapped,
+            PAGE_SIZE * 2,
+            PROT_READ | PROT_WRITE,
+        )
+    });
+    let remapped = check_ok(ctx, "SYS_MREMAP grow to 3 pages (MAYMOVE)", unsafe {
+        syscall4(
+            number::SYS_MREMAP,
+            mapped,
+            PAGE_SIZE * 2,
+            PAGE_SIZE * 3,
+            MREMAP_MAYMOVE,
+        )
+    })
     .unwrap_or(mapped);
-    let _ = check_ok(
-        ctx,
-        "SYS_MREMAP shrink back to 2 pages",
-        unsafe { syscall4(number::SYS_MREMAP, remapped, PAGE_SIZE * 3, PAGE_SIZE * 2, MREMAP_MAYMOVE) },
-    );
-    let _ = check_ok(
-        ctx,
-        "SYS_MUNMAP final",
-        unsafe { syscall2(number::SYS_MUNMAP, remapped, PAGE_SIZE * 2) },
-    );
+    let _ = check_ok(ctx, "SYS_MREMAP shrink back to 2 pages", unsafe {
+        syscall4(
+            number::SYS_MREMAP,
+            remapped,
+            PAGE_SIZE * 3,
+            PAGE_SIZE * 2,
+            MREMAP_MAYMOVE,
+        )
+    });
+    let _ = check_ok(ctx, "SYS_MUNMAP final", unsafe {
+        syscall2(number::SYS_MUNMAP, remapped, PAGE_SIZE * 2)
+    });
 }
 
 /// Implements test fs.
@@ -272,50 +285,45 @@ fn test_fs(ctx: &mut Ctx) {
     let _ = unsafe { syscall2(SYS_UNLINK, FILE.as_ptr() as usize, FILE.len()) };
     let _ = unsafe { syscall2(SYS_RMDIR, DIR.as_ptr() as usize, DIR.len()) };
 
-    let _ = check_ok(
-        ctx,
-        "SYS_MKDIR /tmp/iso_syscalls_suite",
-        unsafe { syscall3(SYS_MKDIR, DIR.as_ptr() as usize, DIR.len(), 0o755) },
-    );
+    let _ = check_ok(ctx, "SYS_MKDIR /tmp/iso_syscalls_suite", unsafe {
+        syscall3(SYS_MKDIR, DIR.as_ptr() as usize, DIR.len(), 0o755)
+    });
 
-    let file_fd = check_ok(
-        ctx,
-        "SYS_OPEN create RW file",
-        unsafe {
-            syscall3(
-                number::SYS_OPEN,
-                FILE.as_ptr() as usize,
-                FILE.len(),
-                O_READ | O_WRITE | O_CREATE | O_TRUNC,
-            )
-        },
-    )
+    let file_fd = check_ok(ctx, "SYS_OPEN create RW file", unsafe {
+        syscall3(
+            number::SYS_OPEN,
+            FILE.as_ptr() as usize,
+            FILE.len(),
+            O_READ | O_WRITE | O_CREATE | O_TRUNC,
+        )
+    })
     .unwrap_or(usize::MAX);
 
     if file_fd != usize::MAX {
         let msg = b"syscall-iso-test\n";
-        let _ = check_ok(
-            ctx,
-            "SYS_WRITE file",
-            unsafe { syscall3(number::SYS_WRITE, file_fd, msg.as_ptr() as usize, msg.len()) },
-        );
-        let _ = check_ok(
-            ctx,
-            "SYS_LSEEK file -> 0",
-            unsafe { syscall3(number::SYS_LSEEK, file_fd, 0, SEEK_SET) },
-        );
+        let _ = check_ok(ctx, "SYS_WRITE file", unsafe {
+            syscall3(number::SYS_WRITE, file_fd, msg.as_ptr() as usize, msg.len())
+        });
+        let _ = check_ok(ctx, "SYS_LSEEK file -> 0", unsafe {
+            syscall3(number::SYS_LSEEK, file_fd, 0, SEEK_SET)
+        });
         let mut buf = [0u8; 32];
-        let _ = check_ok(
-            ctx,
-            "SYS_READ file",
-            unsafe { syscall3(number::SYS_READ, file_fd, buf.as_mut_ptr() as usize, msg.len()) },
-        );
+        let _ = check_ok(ctx, "SYS_READ file", unsafe {
+            syscall3(
+                number::SYS_READ,
+                file_fd,
+                buf.as_mut_ptr() as usize,
+                msg.len(),
+            )
+        });
         let mut st = data::FileStat::zeroed();
-        let _ = check_ok(
-            ctx,
-            "SYS_FSTAT file",
-            unsafe { syscall2(number::SYS_FSTAT, file_fd, &mut st as *mut data::FileStat as usize) },
-        );
+        let _ = check_ok(ctx, "SYS_FSTAT file", unsafe {
+            syscall2(
+                number::SYS_FSTAT,
+                file_fd,
+                &mut st as *mut data::FileStat as usize,
+            )
+        });
         check_expect_err(
             ctx,
             "SYS_FCHMOD expected ENOSYS",
@@ -330,29 +338,32 @@ fn test_fs(ctx: &mut Ctx) {
         );
     }
 
-    let dir_fd = check_ok(
-        ctx,
-        "SYS_OPEN dir O_DIRECTORY",
-        unsafe { syscall3(number::SYS_OPEN, DIR.as_ptr() as usize, DIR.len(), O_READ | O_DIRECTORY) },
-    )
+    let dir_fd = check_ok(ctx, "SYS_OPEN dir O_DIRECTORY", unsafe {
+        syscall3(
+            number::SYS_OPEN,
+            DIR.as_ptr() as usize,
+            DIR.len(),
+            O_READ | O_DIRECTORY,
+        )
+    })
     .unwrap_or(usize::MAX);
 
-    let _ = check_ok(
-        ctx,
-        "SYS_CHDIR dir",
-        unsafe { syscall2(SYS_CHDIR, DIR.as_ptr() as usize, DIR.len()) },
-    );
+    let _ = check_ok(ctx, "SYS_CHDIR dir", unsafe {
+        syscall2(SYS_CHDIR, DIR.as_ptr() as usize, DIR.len())
+    });
     let mut cwd = [0u8; 128];
-    let _ = check_ok(
-        ctx,
-        "SYS_GETCWD",
-        unsafe { syscall2(SYS_GETCWD, cwd.as_mut_ptr() as usize, cwd.len()) },
-    );
+    let _ = check_ok(ctx, "SYS_GETCWD", unsafe {
+        syscall2(SYS_GETCWD, cwd.as_mut_ptr() as usize, cwd.len())
+    });
     if dir_fd != usize::MAX {
-        let _ = check_ok(ctx, "SYS_FCHDIR back", unsafe { syscall1(SYS_FCHDIR, dir_fd) });
+        let _ = check_ok(ctx, "SYS_FCHDIR back", unsafe {
+            syscall1(SYS_FCHDIR, dir_fd)
+        });
     }
 
-    let _ = check_ok(ctx, "SYS_UMASK set 022", unsafe { syscall1(SYS_UMASK, 0o022) });
+    let _ = check_ok(ctx, "SYS_UMASK set 022", unsafe {
+        syscall1(SYS_UMASK, 0o022)
+    });
     check_expect_err(
         ctx,
         "SYS_CHMOD expected ENOSYS",
@@ -418,32 +429,30 @@ fn test_fs(ctx: &mut Ctx) {
     );
 
     if file_fd != usize::MAX {
-        let _ = check_ok(ctx, "SYS_CLOSE file", unsafe { syscall1(number::SYS_CLOSE, file_fd) });
+        let _ = check_ok(ctx, "SYS_CLOSE file", unsafe {
+            syscall1(number::SYS_CLOSE, file_fd)
+        });
     }
     if dir_fd != usize::MAX {
-        let _ = check_ok(ctx, "SYS_CLOSE dir", unsafe { syscall1(number::SYS_CLOSE, dir_fd) });
+        let _ = check_ok(ctx, "SYS_CLOSE dir", unsafe {
+            syscall1(number::SYS_CLOSE, dir_fd)
+        });
     }
-    let _ = check_ok(
-        ctx,
-        "SYS_UNLINK file",
-        unsafe { syscall2(SYS_UNLINK, FILE.as_ptr() as usize, FILE.len()) },
-    );
-    let _ = check_ok(
-        ctx,
-        "SYS_RMDIR dir",
-        unsafe { syscall2(SYS_RMDIR, DIR.as_ptr() as usize, DIR.len()) },
-    );
+    let _ = check_ok(ctx, "SYS_UNLINK file", unsafe {
+        syscall2(SYS_UNLINK, FILE.as_ptr() as usize, FILE.len())
+    });
+    let _ = check_ok(ctx, "SYS_RMDIR dir", unsafe {
+        syscall2(SYS_RMDIR, DIR.as_ptr() as usize, DIR.len())
+    });
 }
 
 /// Implements test handles.
 fn test_handles(ctx: &mut Ctx) {
     section("Handle syscalls via semaphore handle");
 
-    let sem = check_ok(
-        ctx,
-        "SYS_SEM_CREATE initial=1",
-        unsafe { syscall1(number::SYS_SEM_CREATE, 1) },
-    )
+    let sem = check_ok(ctx, "SYS_SEM_CREATE initial=1", unsafe {
+        syscall1(number::SYS_SEM_CREATE, 1)
+    })
     .unwrap_or(usize::MAX);
     if sem == usize::MAX {
         return;
@@ -463,25 +472,44 @@ fn test_handles(ctx: &mut Ctx) {
     log_hex_u64(info.resource);
     log("\n");
 
-    let _ = check_ok(ctx, "handle_wait(sem immediate)", call::handle_wait_timeout(sem, 0));
-    let _ = check_ok(ctx, "SYS_SEM_WAIT consume token", unsafe { syscall1(number::SYS_SEM_WAIT, sem) });
+    let _ = check_ok(
+        ctx,
+        "handle_wait(sem immediate)",
+        call::handle_wait_timeout(sem, 0),
+    );
+    let _ = check_ok(ctx, "SYS_SEM_WAIT consume token", unsafe {
+        syscall1(number::SYS_SEM_WAIT, sem)
+    });
     check_expect_err(
         ctx,
         "handle_wait_timeout(sem empty, 1ms) -> ETIMEDOUT",
         call::handle_wait_timeout(sem, 1_000_000),
         Error::TimedOut,
     );
-    let _ = check_ok(ctx, "SYS_SEM_POST produce token", unsafe { syscall1(number::SYS_SEM_POST, sem) });
-    let _ = check_ok(ctx, "handle_wait(sem after post)", call::handle_wait_timeout(sem, 1_000_000));
+    let _ = check_ok(ctx, "SYS_SEM_POST produce token", unsafe {
+        syscall1(number::SYS_SEM_POST, sem)
+    });
+    let _ = check_ok(
+        ctx,
+        "handle_wait(sem after post)",
+        call::handle_wait_timeout(sem, 1_000_000),
+    );
 
     let self_pid = call::getpid().unwrap_or(0);
-    let dup = check_ok(ctx, "handle_grant(self_pid)", call::handle_grant(sem, self_pid)).unwrap_or(usize::MAX);
+    let dup = check_ok(
+        ctx,
+        "handle_grant(self_pid)",
+        call::handle_grant(sem, self_pid),
+    )
+    .unwrap_or(usize::MAX);
     if dup != usize::MAX {
         let _ = check_ok(ctx, "handle_revoke(dup)", call::handle_revoke(dup));
     }
     match unsafe { syscall1(number::SYS_SEM_CLOSE, sem) } {
         Ok(v) => ok(ctx, "SYS_SEM_CLOSE(original)", v),
-        Err(Error::NotFound) | Err(Error::BadHandle) => ok(ctx, "SYS_SEM_CLOSE(original already cleaned)", 0),
+        Err(Error::NotFound) | Err(Error::BadHandle) => {
+            ok(ctx, "SYS_SEM_CLOSE(original already cleaned)", 0)
+        }
         Err(e) => fail(ctx, "SYS_SEM_CLOSE(original)", e),
     }
 }

@@ -15,8 +15,7 @@ use crate::{
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_dma_frame, paging, phys_to_virt},
 };
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use spin::Mutex;
 
@@ -117,14 +116,18 @@ impl Trb {
             d0: (addr & 0xFFFFFFFF) as u32,
             d1: ((addr >> 32) & 0xFFFFFFFF) as u32,
             d2: 0,
-            d3: ((TRB_TYPE_LINK << TRB_TYPE_SHIFT) as u32) | TRB_CYCLE | (if toggle_cycle { TRB_TC } else { 0 }),
+            d3: ((TRB_TYPE_LINK << TRB_TYPE_SHIFT) as u32)
+                | TRB_CYCLE
+                | (if toggle_cycle { TRB_TC } else { 0 }),
         }
     }
 
     /// Performs the normal operation.
     fn normal(addr: u64, len: u32, cycle: bool, ioc: bool) -> Self {
         let mut d3 = (TRB_TYPE_NORMAL << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
-        if ioc { d3 |= TRB_IOC; }
+        if ioc {
+            d3 |= TRB_IOC;
+        }
         Self {
             d0: (addr & 0xFFFFFFFF) as u32,
             d1: ((addr >> 32) & 0xFFFFFFFF) as u32,
@@ -221,10 +224,10 @@ impl XhciController {
         let cap_regs = mmio_base as *const CapRegisters;
         let caplength = (*cap_regs).caplength;
         let op_regs = (mmio_base + caplength as usize) as *mut OpRegisters;
-        
+
         let dboff = (*cap_regs).dboff;
         let db_regs = (mmio_base + dboff as usize) as *mut u32;
-        
+
         let rtsoff = (*cap_regs).rtsoff;
         let rt_regs = (mmio_base + rtsoff as usize) as *mut RuntimeRegisters;
 
@@ -262,7 +265,9 @@ impl XhciController {
             let op = &mut *self.op_regs;
 
             for _ in 0..100_000 {
-                if op.usbsts & USBSTS_CNR == 0 { break; }
+                if op.usbsts & USBSTS_CNR == 0 {
+                    break;
+                }
                 core::hint::spin_loop();
             }
             if op.usbsts & USBSTS_CNR != 0 {
@@ -271,7 +276,9 @@ impl XhciController {
 
             op.usbcmd &= !USBCMD_RUN_STOP;
             for _ in 0..100_000 {
-                if op.usbsts & USBSTS_HCH != 0 { break; }
+                if op.usbsts & USBSTS_HCH != 0 {
+                    break;
+                }
                 core::hint::spin_loop();
             }
             if op.usbsts & USBSTS_HCH == 0 {
@@ -280,7 +287,9 @@ impl XhciController {
 
             op.usbcmd |= USBCMD_HCRST;
             for _ in 0..100_000 {
-                if op.usbcmd & USBCMD_HCRST == 0 { break; }
+                if op.usbcmd & USBCMD_HCRST == 0 {
+                    break;
+                }
                 core::hint::spin_loop();
             }
             if op.usbcmd & USBCMD_HCRST != 0 {
@@ -442,7 +451,7 @@ impl XhciController {
         for _ in 0..1000000 {
             let idx = self.event_ring_deq;
             let trb = core::ptr::read_volatile(self.event_ring.add(idx));
-            
+
             let expected_c = if self.event_ring_cycle { TRB_CYCLE } else { 0 };
             if (trb.d3 & TRB_CYCLE) == expected_c {
                 self.event_ring_deq = (idx + 1) % 64;
@@ -509,7 +518,10 @@ pub fn init() {
     }
 
     XHCI_INITIALIZED.store(true, Ordering::SeqCst);
-    log::info!("[xHCI] Found {} controller(s)", XHCI_CONTROLLERS.lock().len());
+    log::info!(
+        "[xHCI] Found {} controller(s)",
+        XHCI_CONTROLLERS.lock().len()
+    );
 }
 
 /// Returns controller.

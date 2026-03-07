@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const IMX_AIPSTZ_MPR0: usize = 0x00;
 
@@ -10,9 +9,7 @@ pub struct AipstzConfig {
     pub mpr0: u32,
 }
 
-pub const IMX8MP_DEFAULT_CFG: AipstzConfig = AipstzConfig {
-    mpr0: 0x7777_7777,
-};
+pub const IMX8MP_DEFAULT_CFG: AipstzConfig = AipstzConfig { mpr0: 0x7777_7777 };
 
 pub struct ImxAipstz {
     regs: MmioRegion,
@@ -34,7 +31,9 @@ impl ImxAipstz {
 
     /// Performs the apply config operation.
     fn apply_config(&self) {
-        if !self.regs.is_valid() { return; }
+        if !self.regs.is_valid() {
+            return;
+        }
         self.regs.write32(IMX_AIPSTZ_MPR0, self.config.mpr0);
     }
 
@@ -46,10 +45,14 @@ impl ImxAipstz {
 
 impl BusDriver for ImxAipstz {
     /// Performs the name operation.
-    fn name(&self) -> &str { "imx-aipstz" }
+    fn name(&self) -> &str {
+        "imx-aipstz"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -74,13 +77,17 @@ impl BusDriver for ImxAipstz {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

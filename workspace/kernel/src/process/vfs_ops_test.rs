@@ -14,9 +14,13 @@ use crate::{
 };
 
 fn log_section(title: &str) {
-    crate::serial_println!("[vfs-ops-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[vfs-ops-test][STEP] ========================================================"
+    );
     crate::serial_println!("[vfs-ops-test][STEP] {}", title);
-    crate::serial_println!("[vfs-ops-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[vfs-ops-test][STEP] ========================================================"
+    );
 }
 
 fn record(name: &str, ok: bool, passed: &mut usize, total: &mut usize) {
@@ -148,7 +152,10 @@ fn run_vfs_ops_suite() -> bool {
                 Ok(pos) => {
                     crate::serial_println!("[vfs-ops-test][STEP] lseek(SEEK_SET, 0) => {}", pos);
                     if pos != 0 {
-                        crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: SEEK_SET 0 returned {}", pos);
+                        crate::serial_println!(
+                            "[vfs-ops-test][ASSERT] FAIL: SEEK_SET 0 returned {}",
+                            pos
+                        );
                         s = false;
                     }
                 }
@@ -161,7 +168,10 @@ fn run_vfs_ops_suite() -> bool {
                 Ok(pos) => {
                     crate::serial_println!("[vfs-ops-test][STEP] lseek(SEEK_CUR, +5) => {}", pos);
                     if pos != 5 {
-                        crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: SEEK_CUR +5 returned {}", pos);
+                        crate::serial_println!(
+                            "[vfs-ops-test][ASSERT] FAIL: SEEK_CUR +5 returned {}",
+                            pos
+                        );
                         s = false;
                     }
                 }
@@ -199,7 +209,9 @@ fn run_vfs_ops_suite() -> bool {
                         s = false;
                     }
                     if st.st_size == 0 {
-                        crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: size == 0 after write");
+                        crate::serial_println!(
+                            "[vfs-ops-test][ASSERT] FAIL: size == 0 after write"
+                        );
                         s = false;
                     }
                     if st.st_nlink == 0 {
@@ -230,7 +242,9 @@ fn run_vfs_ops_suite() -> bool {
                 Ok(st) => {
                     crate::serial_println!(
                         "[vfs-ops-test][STEP] fstat dir: ino={} mode={:#o} nlink={}",
-                        st.st_ino, st.st_mode, st.st_nlink
+                        st.st_ino,
+                        st.st_mode,
+                        st.st_nlink
                     );
                     if !st.is_dir() {
                         crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: not is_dir()");
@@ -260,7 +274,10 @@ fn run_vfs_ops_suite() -> bool {
                 Ok(fd) => {
                     match vfs::fstat(fd) {
                         Ok(fs) => {
-                            if sp.st_ino != fs.st_ino || sp.st_mode != fs.st_mode || sp.st_size != fs.st_size {
+                            if sp.st_ino != fs.st_ino
+                                || sp.st_mode != fs.st_mode
+                                || sp.st_size != fs.st_size
+                            {
                                 crate::serial_println!(
                                     "[vfs-ops-test][ASSERT] FAIL: stat_path != fstat (ino {}/{}, mode {:#o}/{:#o}, size {}/{})",
                                     sp.st_ino, fs.st_ino, sp.st_mode, fs.st_mode, sp.st_size, fs.st_size
@@ -270,14 +287,23 @@ fn run_vfs_ops_suite() -> bool {
                                 crate::serial_println!("[vfs-ops-test][STEP] stat_path matches fstat (ino={}, size={})", sp.st_ino, sp.st_size);
                             }
                         }
-                        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] fstat => {:?}", e); s = false; }
+                        Err(e) => {
+                            crate::serial_println!("[vfs-ops-test][STEP] fstat => {:?}", e);
+                            s = false;
+                        }
                     }
                     let _ = vfs::close(fd);
                 }
-                Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+                    s = false;
+                }
             }
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] stat_path => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] stat_path => {:?}", e);
+            s = false;
+        }
     }
     record("stat_path vs fstat equivalence", s, &mut passed, &mut total);
 
@@ -294,16 +320,23 @@ fn run_vfs_ops_suite() -> bool {
             Ok(fd) => {
                 match vfs::getdents(fd) {
                     Ok(entries) => {
-                        crate::serial_println!("[vfs-ops-test][STEP] getdents: {} entries", entries.len());
+                        crate::serial_println!(
+                            "[vfs-ops-test][STEP] getdents: {} entries",
+                            entries.len()
+                        );
                         for e in &entries {
                             crate::serial_println!(
                                 "[vfs-ops-test][STEP]   entry: ino={} type={} name='{}'",
-                                e.ino, e.file_type, e.name
+                                e.ino,
+                                e.file_type,
+                                e.name
                             );
                         }
                         let found = entries.iter().any(|e| e.name == "subdir");
                         if !found {
-                            crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: 'subdir' not in getdents");
+                            crate::serial_println!(
+                                "[vfs-ops-test][ASSERT] FAIL: 'subdir' not in getdents"
+                            );
                             s = false;
                         }
                     }
@@ -314,7 +347,10 @@ fn run_vfs_ops_suite() -> bool {
                 }
                 let _ = vfs::close(fd);
             }
-            Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open dir => {:?}", e); s = false; }
+            Err(e) => {
+                crate::serial_println!("[vfs-ops-test][STEP] open dir => {:?}", e);
+                s = false;
+            }
         }
         if let Err(e) = vfs::unlink(&subdir) {
             crate::serial_println!("[vfs-ops-test][STEP] rmdir => {:?}", e);
@@ -358,9 +394,13 @@ fn run_vfs_ops_suite() -> bool {
         }
         if s {
             match vfs::open(&f_unl, vfs::OpenFlags::READ) {
-                Err(_) => crate::serial_println!("[vfs-ops-test][STEP] open after unlink correctly fails"),
+                Err(_) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] open after unlink correctly fails")
+                }
                 Ok(fd) => {
-                    crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: file still exists after unlink");
+                    crate::serial_println!(
+                        "[vfs-ops-test][ASSERT] FAIL: file still exists after unlink"
+                    );
                     let _ = vfs::close(fd);
                     s = false;
                 }
@@ -381,7 +421,9 @@ fn run_vfs_ops_suite() -> bool {
     }
     if s {
         match vfs::open(&f_ren_b, vfs::OpenFlags::READ) {
-            Ok(fd) => { let _ = vfs::close(fd); }
+            Ok(fd) => {
+                let _ = vfs::close(fd);
+            }
             Err(_) => {
                 crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: renamed file not found");
                 s = false;
@@ -418,7 +460,10 @@ fn run_vfs_ops_suite() -> bool {
                     s = false;
                 }
             }
-            Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] stat => {:?}", e); s = false; }
+            Err(e) => {
+                crate::serial_println!("[vfs-ops-test][STEP] stat => {:?}", e);
+                s = false;
+            }
         }
     }
     let _ = vfs::unlink(&f_hard);
@@ -444,7 +489,10 @@ fn run_vfs_ops_suite() -> bool {
                     s = false;
                 }
             }
-            Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] readlink => {:?}", e); s = false; }
+            Err(e) => {
+                crate::serial_println!("[vfs-ops-test][STEP] readlink => {:?}", e);
+                s = false;
+            }
         }
     }
     let _ = vfs::unlink(&f_sym_lnk);
@@ -470,7 +518,10 @@ fn run_vfs_ops_suite() -> bool {
                     s = false;
                 }
             }
-            Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] stat => {:?}", e); s = false; }
+            Err(e) => {
+                crate::serial_println!("[vfs-ops-test][STEP] stat => {:?}", e);
+                s = false;
+            }
         }
     }
     let _ = vfs::unlink(&f_chm);
@@ -486,7 +537,10 @@ fn run_vfs_ops_suite() -> bool {
             let _ = vfs::write(wfd, b"0123456789ABCDEF");
             let _ = vfs::close(wfd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open WRITE => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] open WRITE => {:?}", e);
+            s = false;
+        }
     }
     if s {
         if let Err(e) = vfs::truncate(&f_trunc, 4) {
@@ -496,13 +550,19 @@ fn run_vfs_ops_suite() -> bool {
         if s {
             match vfs::stat_path(&f_trunc) {
                 Ok(st) => {
-                    crate::serial_println!("[vfs-ops-test][STEP] size after truncate(4) = {}", st.st_size);
+                    crate::serial_println!(
+                        "[vfs-ops-test][STEP] size after truncate(4) = {}",
+                        st.st_size
+                    );
                     if st.st_size != 4 {
                         crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: size != 4");
                         s = false;
                     }
                 }
-                Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] stat => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] stat => {:?}", e);
+                    s = false;
+                }
             }
         }
     }
@@ -519,7 +579,10 @@ fn run_vfs_ops_suite() -> bool {
             let _ = vfs::write(wfd, b"duptest");
             let _ = vfs::close(wfd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+            s = false;
+        }
     }
     if s {
         match vfs::open(&f_dup, vfs::OpenFlags::READ) {
@@ -528,27 +591,43 @@ fn run_vfs_ops_suite() -> bool {
                     Ok(fd2) => {
                         crate::serial_println!("[vfs-ops-test][STEP] dup({}) => {}", fd1, fd2);
                         if fd1 == fd2 {
-                            crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: dup returned same fd");
+                            crate::serial_println!(
+                                "[vfs-ops-test][ASSERT] FAIL: dup returned same fd"
+                            );
                             s = false;
                         }
                         let mut buf = [0u8; 32];
                         match vfs::read(fd2, &mut buf) {
                             Ok(n) => {
-                                crate::serial_println!("[vfs-ops-test][STEP] read from dup'd fd: {} bytes", n);
+                                crate::serial_println!(
+                                    "[vfs-ops-test][STEP] read from dup'd fd: {} bytes",
+                                    n
+                                );
                                 if n == 0 {
-                                    crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: dup fd read 0 bytes");
+                                    crate::serial_println!(
+                                        "[vfs-ops-test][ASSERT] FAIL: dup fd read 0 bytes"
+                                    );
                                     s = false;
                                 }
                             }
-                            Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] read dup => {:?}", e); s = false; }
+                            Err(e) => {
+                                crate::serial_println!("[vfs-ops-test][STEP] read dup => {:?}", e);
+                                s = false;
+                            }
                         }
                         let _ = vfs::close(fd2);
                     }
-                    Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] dup => {:?}", e); s = false; }
+                    Err(e) => {
+                        crate::serial_println!("[vfs-ops-test][STEP] dup => {:?}", e);
+                        s = false;
+                    }
                 }
                 let _ = vfs::close(fd1);
             }
-            Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+            Err(e) => {
+                crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+                s = false;
+            }
         }
     }
     let _ = vfs::unlink(&f_dup);
@@ -564,7 +643,10 @@ fn run_vfs_ops_suite() -> bool {
             let _ = vfs::write(wfd, b"dup2test");
             let _ = vfs::close(wfd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+            s = false;
+        }
     }
     if s {
         match vfs::open(&f_dup2, vfs::OpenFlags::READ) {
@@ -572,22 +654,40 @@ fn run_vfs_ops_suite() -> bool {
                 let target_fd = fd1 + 10;
                 match vfs::dup2(fd1, target_fd) {
                     Ok(fd2) => {
-                        crate::serial_println!("[vfs-ops-test][STEP] dup2({}, {}) => {}", fd1, target_fd, fd2);
+                        crate::serial_println!(
+                            "[vfs-ops-test][STEP] dup2({}, {}) => {}",
+                            fd1,
+                            target_fd,
+                            fd2
+                        );
                         if fd2 != target_fd {
-                            crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: dup2 returned {}, expected {}", fd2, target_fd);
+                            crate::serial_println!(
+                                "[vfs-ops-test][ASSERT] FAIL: dup2 returned {}, expected {}",
+                                fd2,
+                                target_fd
+                            );
                             s = false;
                         }
                         let mut buf = [0u8; 32];
                         if let Ok(n) = vfs::read(fd2, &mut buf) {
-                            crate::serial_println!("[vfs-ops-test][STEP] read from dup2'd fd: {} bytes", n);
+                            crate::serial_println!(
+                                "[vfs-ops-test][STEP] read from dup2'd fd: {} bytes",
+                                n
+                            );
                         }
                         let _ = vfs::close(fd2);
                     }
-                    Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] dup2 => {:?}", e); s = false; }
+                    Err(e) => {
+                        crate::serial_println!("[vfs-ops-test][STEP] dup2 => {:?}", e);
+                        s = false;
+                    }
                 }
                 let _ = vfs::close(fd1);
             }
-            Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+            Err(e) => {
+                crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+                s = false;
+            }
         }
     }
     let _ = vfs::unlink(&f_dup2);
@@ -598,7 +698,11 @@ fn run_vfs_ops_suite() -> bool {
     let mut s = true;
     match vfs::pipe() {
         Ok((rfd, wfd)) => {
-            crate::serial_println!("[vfs-ops-test][STEP] pipe() => read_fd={}, write_fd={}", rfd, wfd);
+            crate::serial_println!(
+                "[vfs-ops-test][STEP] pipe() => read_fd={}, write_fd={}",
+                rfd,
+                wfd
+            );
             if rfd == wfd {
                 crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: pipe fds are identical");
                 s = false;
@@ -606,7 +710,10 @@ fn run_vfs_ops_suite() -> bool {
             let payload = b"pipe-data";
             match vfs::write(wfd, payload) {
                 Ok(n) => crate::serial_println!("[vfs-ops-test][STEP] pipe write: {} bytes", n),
-                Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] pipe write => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] pipe write => {:?}", e);
+                    s = false;
+                }
             }
             if s {
                 let mut buf = [0u8; 32];
@@ -614,17 +721,25 @@ fn run_vfs_ops_suite() -> bool {
                     Ok(n) => {
                         crate::serial_println!("[vfs-ops-test][STEP] pipe read: {} bytes", n);
                         if n != payload.len() || &buf[..n] != payload {
-                            crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: pipe content mismatch");
+                            crate::serial_println!(
+                                "[vfs-ops-test][ASSERT] FAIL: pipe content mismatch"
+                            );
                             s = false;
                         }
                     }
-                    Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] pipe read => {:?}", e); s = false; }
+                    Err(e) => {
+                        crate::serial_println!("[vfs-ops-test][STEP] pipe read => {:?}", e);
+                        s = false;
+                    }
                 }
             }
             let _ = vfs::close(wfd);
             let _ = vfs::close(rfd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] pipe => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] pipe => {:?}", e);
+            s = false;
+        }
     }
     record("pipe create + write + read", s, &mut passed, &mut total);
 
@@ -638,21 +753,34 @@ fn run_vfs_ops_suite() -> bool {
             let mut buf = [0u8; 16];
             match vfs::read(rfd, &mut buf) {
                 Ok(n) => {
-                    crate::serial_println!("[vfs-ops-test][STEP] first read after close_write: {} bytes", n);
+                    crate::serial_println!(
+                        "[vfs-ops-test][STEP] first read after close_write: {} bytes",
+                        n
+                    );
                 }
-                Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] read => {:?}", e); }
+                Err(e) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] read => {:?}", e);
+                }
             }
             match vfs::read(rfd, &mut buf) {
                 Ok(0) => crate::serial_println!("[vfs-ops-test][STEP] second read => EOF (0) ✓"),
                 Ok(n) => {
-                    crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: expected EOF, got {} bytes", n);
+                    crate::serial_println!(
+                        "[vfs-ops-test][ASSERT] FAIL: expected EOF, got {} bytes",
+                        n
+                    );
                     s = false;
                 }
-                Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] read => {:?} (acceptable)", e); }
+                Err(e) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] read => {:?} (acceptable)", e);
+                }
             }
             let _ = vfs::close(rfd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] pipe => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] pipe => {:?}", e);
+            s = false;
+        }
     }
     record("pipe write-end close → EOF", s, &mut passed, &mut total);
 
@@ -665,16 +793,27 @@ fn run_vfs_ops_suite() -> bool {
         Ok(fd) => {
             let mut buf = [0u8; 16];
             match vfs::read(fd, &mut buf) {
-                Ok(0) => crate::serial_println!("[vfs-ops-test][STEP] read empty file => 0 bytes ✓"),
+                Ok(0) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] read empty file => 0 bytes ✓")
+                }
                 Ok(n) => {
-                    crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: read empty got {} bytes", n);
+                    crate::serial_println!(
+                        "[vfs-ops-test][ASSERT] FAIL: read empty got {} bytes",
+                        n
+                    );
                     s = false;
                 }
-                Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] read => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] read => {:?}", e);
+                    s = false;
+                }
             }
             let _ = vfs::close(fd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+            s = false;
+        }
     }
     let _ = vfs::unlink(&f_empty);
     record("read empty file returns 0", s, &mut passed, &mut total);
@@ -689,17 +828,27 @@ fn run_vfs_ops_suite() -> bool {
             let _ = vfs::write(fd, b"ABCDE");
             match vfs::lseek(fd, 100, 0 /* SEEK_SET */) {
                 Ok(pos) => crate::serial_println!("[vfs-ops-test][STEP] lseek(100) => {}", pos),
-                Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] lseek => {:?}", e); }
+                Err(e) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] lseek => {:?}", e);
+                }
             }
             let mut buf = [0u8; 4];
             match vfs::read(fd, &mut buf) {
                 Ok(0) => crate::serial_println!("[vfs-ops-test][STEP] read beyond end => 0 ✓"),
-                Ok(n) => crate::serial_println!("[vfs-ops-test][STEP] read beyond end => {} bytes (may be padded)", n),
-                Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] read => {:?}", e); }
+                Ok(n) => crate::serial_println!(
+                    "[vfs-ops-test][STEP] read beyond end => {} bytes (may be padded)",
+                    n
+                ),
+                Err(e) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] read => {:?}", e);
+                }
             }
             let _ = vfs::close(fd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+            s = false;
+        }
     }
     let _ = vfs::unlink(&f_seek);
     record("seek beyond end + read", s, &mut passed, &mut total);
@@ -716,7 +865,10 @@ fn run_vfs_ops_suite() -> bool {
             let _ = vfs::write(wfd, b"CCC");
             let _ = vfs::close(wfd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+            s = false;
+        }
     }
     if s {
         match vfs::open(&f_multi, vfs::OpenFlags::READ) {
@@ -724,20 +876,32 @@ fn run_vfs_ops_suite() -> bool {
                 let mut buf = [0u8; 32];
                 match vfs::read(rfd, &mut buf) {
                     Ok(n) => {
-                        crate::serial_println!("[vfs-ops-test][STEP] read {} bytes after 3 writes", n);
+                        crate::serial_println!(
+                            "[vfs-ops-test][STEP] read {} bytes after 3 writes",
+                            n
+                        );
                         if n != 9 {
-                            crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: expected 9 bytes, got {}", n);
+                            crate::serial_println!(
+                                "[vfs-ops-test][ASSERT] FAIL: expected 9 bytes, got {}",
+                                n
+                            );
                             s = false;
                         } else if &buf[..9] != b"AAABBBCCC" {
                             crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: content mismatch");
                             s = false;
                         }
                     }
-                    Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] read => {:?}", e); s = false; }
+                    Err(e) => {
+                        crate::serial_println!("[vfs-ops-test][STEP] read => {:?}", e);
+                        s = false;
+                    }
                 }
                 let _ = vfs::close(rfd);
             }
-            Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+            Err(e) => {
+                crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+                s = false;
+            }
         }
     }
     let _ = vfs::unlink(&f_multi);
@@ -750,23 +914,36 @@ fn run_vfs_ops_suite() -> bool {
         Ok(fd) => {
             match vfs::getdents(fd) {
                 Ok(entries) => {
-                    crate::serial_println!("[vfs-ops-test][STEP] getdents('/') => {} entries", entries.len());
+                    crate::serial_println!(
+                        "[vfs-ops-test][STEP] getdents('/') => {} entries",
+                        entries.len()
+                    );
                     for e in &entries {
                         crate::serial_println!(
                             "[vfs-ops-test][STEP]   entry: ino={} type={} name='{}'",
-                            e.ino, e.file_type, e.name
+                            e.ino,
+                            e.file_type,
+                            e.name
                         );
                     }
                     let has_tmp = entries.iter().any(|e| e.name == "tmp");
                     if !has_tmp {
-                        crate::serial_println!("[vfs-ops-test][STEP] note: 'tmp' not in root entries (may be normal)");
+                        crate::serial_println!(
+                            "[vfs-ops-test][STEP] note: 'tmp' not in root entries (may be normal)"
+                        );
                     }
                 }
-                Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] getdents => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] getdents => {:?}", e);
+                    s = false;
+                }
             }
             let _ = vfs::close(fd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open '/' => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] open '/' => {:?}", e);
+            s = false;
+        }
     }
     record("getdents on root /", s, &mut passed, &mut total);
 
@@ -779,13 +956,23 @@ fn run_vfs_ops_suite() -> bool {
             match vfs::read(fd, &mut buf) {
                 Ok(n) => {
                     let content = core::str::from_utf8(&buf[..n]).unwrap_or("<binary>");
-                    crate::serial_println!("[vfs-ops-test][STEP] /sys/version => '{}' ({} bytes)", content, n);
+                    crate::serial_println!(
+                        "[vfs-ops-test][STEP] /sys/version => '{}' ({} bytes)",
+                        content,
+                        n
+                    );
                 }
-                Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] read => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[vfs-ops-test][STEP] read => {:?}", e);
+                    s = false;
+                }
             }
             let _ = vfs::close(fd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open /sys/version => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] open /sys/version => {:?}", e);
+            s = false;
+        }
     }
     record("open /sys/version", s, &mut passed, &mut total);
 
@@ -804,18 +991,27 @@ fn run_vfs_ops_suite() -> bool {
                 match vfs::fstat(fd) {
                     Ok(st) => {
                         let perm = st.st_mode & 0o777;
-                        crate::serial_println!("[vfs-ops-test][STEP] mode after fchmod = {:#o}", perm);
+                        crate::serial_println!(
+                            "[vfs-ops-test][STEP] mode after fchmod = {:#o}",
+                            perm
+                        );
                         if perm != 0o700 {
                             crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: mode != 0o700");
                             s = false;
                         }
                     }
-                    Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] fstat => {:?}", e); s = false; }
+                    Err(e) => {
+                        crate::serial_println!("[vfs-ops-test][STEP] fstat => {:?}", e);
+                        s = false;
+                    }
                 }
             }
             let _ = vfs::close(fd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+            s = false;
+        }
     }
     let _ = vfs::unlink(&f_fchmod);
     record("fchmod on open fd", s, &mut passed, &mut total);
@@ -835,18 +1031,27 @@ fn run_vfs_ops_suite() -> bool {
             if s {
                 match vfs::fstat(fd) {
                     Ok(st) => {
-                        crate::serial_println!("[vfs-ops-test][STEP] size after ftruncate(3) = {}", st.st_size);
+                        crate::serial_println!(
+                            "[vfs-ops-test][STEP] size after ftruncate(3) = {}",
+                            st.st_size
+                        );
                         if st.st_size != 3 {
                             crate::serial_println!("[vfs-ops-test][ASSERT] FAIL: size != 3");
                             s = false;
                         }
                     }
-                    Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] fstat => {:?}", e); s = false; }
+                    Err(e) => {
+                        crate::serial_println!("[vfs-ops-test][STEP] fstat => {:?}", e);
+                        s = false;
+                    }
                 }
             }
             let _ = vfs::close(fd);
         }
-        Err(e) => { crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[vfs-ops-test][STEP] open => {:?}", e);
+            s = false;
+        }
     }
     let _ = vfs::unlink(&f_ft);
     record("ftruncate on open fd", s, &mut passed, &mut total);
@@ -860,7 +1065,11 @@ fn run_vfs_ops_suite() -> bool {
     // ── Summary ─────────────────────────────────────────────────────────────
     log_section("VFS OPS TEST SUMMARY");
     let ok = passed == total;
-    crate::serial_println!("[vfs-ops-test][ASSERT] result: {}/{} scenarios PASS", passed, total);
+    crate::serial_println!(
+        "[vfs-ops-test][ASSERT] result: {}/{} scenarios PASS",
+        passed,
+        total
+    );
     crate::serial_println!(
         "[vfs-ops-test][ASSERT] final : {}",
         if ok { "PASS" } else { "FAIL" }
@@ -876,7 +1085,8 @@ extern "C" fn vfs_ops_test_main() -> ! {
 }
 
 pub fn create_vfs_ops_test_task() {
-    if let Ok(task) = Task::new_kernel_task(vfs_ops_test_main, "vfs-ops-test", TaskPriority::Normal) {
+    if let Ok(task) = Task::new_kernel_task(vfs_ops_test_main, "vfs-ops-test", TaskPriority::Normal)
+    {
         add_task(task);
     } else {
         crate::serial_println!("[vfs-ops-test][SETUP] failed to create task");

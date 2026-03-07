@@ -771,13 +771,17 @@ fn apply_dynamic_relocations(
     };
 
     let resolve_symbol_raw = |sym_idx: u32| -> Result<u64, &'static str> {
-        if sym_idx == 0 { return Ok(0); }
+        if sym_idx == 0 {
+            return Ok(0);
+        }
         let sym = read_sym_entry(sym_idx)?;
         Ok(sym.st_value)
     };
 
     let resolve_symbol_size = |sym_idx: u32| -> Result<u64, &'static str> {
-        if sym_idx == 0 { return Ok(0); }
+        if sym_idx == 0 {
+            return Ok(0);
+        }
         let sym = read_sym_entry(sym_idx)?;
         Ok(sym.st_size)
     };
@@ -839,7 +843,11 @@ fn apply_dynamic_relocations(
                         let mut off = 0usize;
                         while off < sym_sz as usize {
                             let chunk = core::cmp::min(256, sym_sz as usize - off);
-                            read_user_mapped_bytes(user_as, sym_val + off as u64, &mut tmp[..chunk])?;
+                            read_user_mapped_bytes(
+                                user_as,
+                                sym_val + off as u64,
+                                &mut tmp[..chunk],
+                            )?;
                             write_user_mapped_bytes(user_as, target + off as u64, &tmp[..chunk])?;
                             off += chunk;
                         }
@@ -857,11 +865,9 @@ fn apply_dynamic_relocations(
                         .checked_add(rela.r_addend as i128)
                         .ok_or("TPOFF64 value overflow")?
                 }
-                R_X86_64_IRELATIVE => {
-                    (load_bias as i128)
-                        .checked_add(rela.r_addend as i128)
-                        .ok_or("IRELATIVE value overflow")?
-                }
+                R_X86_64_IRELATIVE => (load_bias as i128)
+                    .checked_add(rela.r_addend as i128)
+                    .ok_or("IRELATIVE value overflow")?,
                 _ => {
                     log::warn!("[elf] Unsupported relocation type {}", r_type);
                     continue;
@@ -1124,14 +1130,11 @@ const AT_ENTRY: u64 = 9;
 const AT_RANDOM: u64 = 25;
 
 /// Performs the push auxv operation.
-fn push_auxv(
-    user_as: &AddressSpace,
-    sp: &mut u64,
-    tag: u64,
-    val: u64,
-) -> Result<(), &'static str> {
-    *sp -= 8; write_user_u64(user_as, *sp, val)?;
-    *sp -= 8; write_user_u64(user_as, *sp, tag)?;
+fn push_auxv(user_as: &AddressSpace, sp: &mut u64, tag: u64, val: u64) -> Result<(), &'static str> {
+    *sp -= 8;
+    write_user_u64(user_as, *sp, val)?;
+    *sp -= 8;
+    write_user_u64(user_as, *sp, tag)?;
     Ok(())
 }
 
@@ -1172,12 +1175,16 @@ fn setup_boot_user_stack(
     push_auxv(user_as, &mut sp, AT_PHDR, phdr_vaddr)?;
 
     // envp NULL terminator
-    sp -= 8; write_user_u64(user_as, sp, 0)?;
+    sp -= 8;
+    write_user_u64(user_as, sp, 0)?;
     // argv[0], argv NULL terminator
-    sp -= 8; write_user_u64(user_as, sp, 0)?;
-    sp -= 8; write_user_u64(user_as, sp, argv0_ptr)?;
+    sp -= 8;
+    write_user_u64(user_as, sp, 0)?;
+    sp -= 8;
+    write_user_u64(user_as, sp, argv0_ptr)?;
     // argc
-    sp -= 8; write_user_u64(user_as, sp, 1)?;
+    sp -= 8;
+    write_user_u64(user_as, sp, 1)?;
 
     // System V ABI: %rsp % 16 == 0 at process entry
     sp &= !0xF;
@@ -1415,15 +1422,23 @@ pub fn load_elf_task_with_caps(
             log::info!(
                 "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x} \
                  new_arc={:#x} new_fpu={:#x} cur_arc={:#x} cur_strong={}",
-                name, runtime_entry, boot_sp,
-                arc_data_ptr, fpu_ptr, cur_data_ptr, cur_strong,
+                name,
+                runtime_entry,
+                boot_sp,
+                arc_data_ptr,
+                fpu_ptr,
+                cur_data_ptr,
+                cur_strong,
             );
         } else {
             log::info!(
                 "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x} \
                  new_arc={:#x} new_fpu={:#x} (no current task)",
-                name, runtime_entry, boot_sp,
-                arc_data_ptr, fpu_ptr,
+                name,
+                runtime_entry,
+                boot_sp,
+                arc_data_ptr,
+                fpu_ptr,
             );
         }
     }

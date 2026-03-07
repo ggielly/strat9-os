@@ -11,9 +11,13 @@ use crate::{
 };
 
 fn log_section(title: &str) {
-    crate::serial_println!("[pipe-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[pipe-test][STEP] ========================================================"
+    );
     crate::serial_println!("[pipe-test][STEP] {}", title);
-    crate::serial_println!("[pipe-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[pipe-test][STEP] ========================================================"
+    );
 }
 
 fn record(name: &str, ok: bool, passed: &mut usize, total: &mut usize) {
@@ -65,7 +69,10 @@ fn run_pipe_suite() -> bool {
                     s = false;
                 }
             }
-            Err(e) => { crate::serial_println!("[pipe-test][STEP] write => {:?}", e); s = false; }
+            Err(e) => {
+                crate::serial_println!("[pipe-test][STEP] write => {:?}", e);
+                s = false;
+            }
         }
         if s {
             let mut buf = [0u8; 64];
@@ -80,7 +87,10 @@ fn run_pipe_suite() -> bool {
                         s = false;
                     }
                 }
-                Err(e) => { crate::serial_println!("[pipe-test][STEP] read => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[pipe-test][STEP] read => {:?}", e);
+                    s = false;
+                }
             }
         }
     }
@@ -105,9 +115,15 @@ fn run_pipe_suite() -> bool {
                 match vfs::read(rfd, &mut buf[total_read..]) {
                     Ok(0) => break,
                     Ok(n) => {
-                        crate::serial_println!("[pipe-test][STEP] read iteration {}: {} bytes", i, n);
+                        crate::serial_println!(
+                            "[pipe-test][STEP] read iteration {}: {} bytes",
+                            i,
+                            n
+                        );
                         total_read += n;
-                        if total_read >= 9 { break; }
+                        if total_read >= 9 {
+                            break;
+                        }
                     }
                     Err(e) => {
                         crate::serial_println!("[pipe-test][STEP] read => {:?}", e);
@@ -117,7 +133,10 @@ fn run_pipe_suite() -> bool {
             }
             crate::serial_println!("[pipe-test][STEP] total read: {} bytes", total_read);
             if total_read != 9 {
-                crate::serial_println!("[pipe-test][ASSERT] FAIL: expected 9 bytes, got {}", total_read);
+                crate::serial_println!(
+                    "[pipe-test][ASSERT] FAIL: expected 9 bytes, got {}",
+                    total_read
+                );
                 s = false;
             } else if &buf[..9] != b"AAABBBCCC" {
                 crate::serial_println!("[pipe-test][ASSERT] FAIL: content mismatch");
@@ -126,7 +145,10 @@ fn run_pipe_suite() -> bool {
             let _ = vfs::close(rfd);
             let _ = vfs::close(wfd);
         }
-        Err(e) => { crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e);
+            s = false;
+        }
     }
     record("multiple writes, single read", s, &mut passed, &mut total);
 
@@ -146,14 +168,23 @@ fn run_pipe_suite() -> bool {
             match vfs::read(rfd, &mut buf) {
                 Ok(0) => crate::serial_println!("[pipe-test][STEP] second read => EOF (0) ✓"),
                 Ok(n) => {
-                    crate::serial_println!("[pipe-test][ASSERT] FAIL: expected EOF, got {} bytes", n);
+                    crate::serial_println!(
+                        "[pipe-test][ASSERT] FAIL: expected EOF, got {} bytes",
+                        n
+                    );
                     s = false;
                 }
-                Err(e) => crate::serial_println!("[pipe-test][STEP] read error after close: {:?} (acceptable)", e),
+                Err(e) => crate::serial_println!(
+                    "[pipe-test][STEP] read error after close: {:?} (acceptable)",
+                    e
+                ),
             }
             let _ = vfs::close(rfd);
         }
-        Err(e) => { crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e);
+            s = false;
+        }
     }
     record("close write-end → EOF", s, &mut passed, &mut total);
 
@@ -169,22 +200,36 @@ fn run_pipe_suite() -> bool {
                     let mut buf = [0u8; 32];
                     match vfs::read(rfd2, &mut buf) {
                         Ok(n) => {
-                            crate::serial_println!("[pipe-test][STEP] read from dup'd fd: {} bytes", n);
+                            crate::serial_println!(
+                                "[pipe-test][STEP] read from dup'd fd: {} bytes",
+                                n
+                            );
                             if n == 0 {
-                                crate::serial_println!("[pipe-test][ASSERT] FAIL: dup'd read returned 0");
+                                crate::serial_println!(
+                                    "[pipe-test][ASSERT] FAIL: dup'd read returned 0"
+                                );
                                 s = false;
                             }
                         }
-                        Err(e) => { crate::serial_println!("[pipe-test][STEP] read => {:?}", e); s = false; }
+                        Err(e) => {
+                            crate::serial_println!("[pipe-test][STEP] read => {:?}", e);
+                            s = false;
+                        }
                     }
                     let _ = vfs::close(rfd2);
                 }
-                Err(e) => { crate::serial_println!("[pipe-test][STEP] dup => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[pipe-test][STEP] dup => {:?}", e);
+                    s = false;
+                }
             }
             let _ = vfs::close(rfd);
             let _ = vfs::close(wfd);
         }
-        Err(e) => { crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e);
+            s = false;
+        }
     }
     record("dup pipe read-end", s, &mut passed, &mut total);
 
@@ -200,22 +245,34 @@ fn run_pipe_suite() -> bool {
                     let mut buf = [0u8; 32];
                     match vfs::read(rfd, &mut buf) {
                         Ok(n) => {
-                            crate::serial_println!("[pipe-test][STEP] read data from dup'd write: {} bytes", n);
+                            crate::serial_println!(
+                                "[pipe-test][STEP] read data from dup'd write: {} bytes",
+                                n
+                            );
                             if n == 0 {
                                 crate::serial_println!("[pipe-test][ASSERT] FAIL: read returned 0");
                                 s = false;
                             }
                         }
-                        Err(e) => { crate::serial_println!("[pipe-test][STEP] read => {:?}", e); s = false; }
+                        Err(e) => {
+                            crate::serial_println!("[pipe-test][STEP] read => {:?}", e);
+                            s = false;
+                        }
                     }
                     let _ = vfs::close(wfd2);
                 }
-                Err(e) => { crate::serial_println!("[pipe-test][STEP] dup => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[pipe-test][STEP] dup => {:?}", e);
+                    s = false;
+                }
             }
             let _ = vfs::close(rfd);
             let _ = vfs::close(wfd);
         }
-        Err(e) => { crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e);
+            s = false;
+        }
     }
     record("dup pipe write-end", s, &mut passed, &mut total);
 
@@ -226,12 +283,17 @@ fn run_pipe_suite() -> bool {
         Ok((rfd, wfd)) => {
             match vfs::write(wfd, b"") {
                 Ok(n) => crate::serial_println!("[pipe-test][STEP] write(empty) => {} bytes", n),
-                Err(e) => crate::serial_println!("[pipe-test][STEP] write(empty) => {:?} (acceptable)", e),
+                Err(e) => {
+                    crate::serial_println!("[pipe-test][STEP] write(empty) => {:?} (acceptable)", e)
+                }
             }
             let _ = vfs::close(rfd);
             let _ = vfs::close(wfd);
         }
-        Err(e) => { crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e);
+            s = false;
+        }
     }
     record("zero-length write", s, &mut passed, &mut total);
 
@@ -244,7 +306,10 @@ fn run_pipe_suite() -> bool {
             match vfs::write(wfd, &data) {
                 Ok(n) => crate::serial_println!("[pipe-test][STEP] write 4000 bytes => {}", n),
                 Err(e) => {
-                    crate::serial_println!("[pipe-test][STEP] write 4000 => {:?} (may be bounded)", e);
+                    crate::serial_println!(
+                        "[pipe-test][STEP] write 4000 => {:?} (may be bounded)",
+                        e
+                    );
                 }
             }
             let mut buf = [0u8; 4096];
@@ -252,10 +317,14 @@ fn run_pipe_suite() -> bool {
             for _ in 0..10 {
                 match vfs::read(rfd, &mut buf[total_read..]) {
                     Ok(0) => break,
-                    Ok(n) => { total_read += n; }
+                    Ok(n) => {
+                        total_read += n;
+                    }
                     Err(_) => break,
                 }
-                if total_read >= 4000 { break; }
+                if total_read >= 4000 {
+                    break;
+                }
             }
             crate::serial_println!("[pipe-test][STEP] total read back: {} bytes", total_read);
             if total_read == 0 {
@@ -265,7 +334,10 @@ fn run_pipe_suite() -> bool {
             let _ = vfs::close(rfd);
             let _ = vfs::close(wfd);
         }
-        Err(e) => { crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e);
+            s = false;
+        }
     }
     record("large write 4000 bytes", s, &mut passed, &mut total);
 
@@ -278,7 +350,10 @@ fn run_pipe_suite() -> bool {
         (Ok((r1, w1)), Ok((r2, w2))) => {
             crate::serial_println!(
                 "[pipe-test][STEP] pipe1: r={}/w={}  pipe2: r={}/w={}",
-                r1, w1, r2, w2
+                r1,
+                w1,
+                r2,
+                w2
             );
             let _ = vfs::write(w1, b"pipe1");
             let _ = vfs::write(w2, b"pipe2");
@@ -287,12 +362,11 @@ fn run_pipe_suite() -> bool {
             let mut buf2 = [0u8; 16];
             let n1 = vfs::read(r1, &mut buf1).unwrap_or(0);
             let n2 = vfs::read(r2, &mut buf2).unwrap_or(0);
-            crate::serial_println!(
-                "[pipe-test][STEP] pipe1 read={} pipe2 read={}",
-                n1, n2
-            );
+            crate::serial_println!("[pipe-test][STEP] pipe1 read={} pipe2 read={}", n1, n2);
             if &buf1[..n1] != b"pipe1" || &buf2[..n2] != b"pipe2" {
-                crate::serial_println!("[pipe-test][ASSERT] FAIL: cross-contamination or data loss");
+                crate::serial_println!(
+                    "[pipe-test][ASSERT] FAIL: cross-contamination or data loss"
+                );
                 s = false;
             }
             let _ = vfs::close(r1);
@@ -316,22 +390,35 @@ fn run_pipe_suite() -> bool {
                 Ok(st) => {
                     crate::serial_println!(
                         "[pipe-test][STEP] fstat(pipe read): ino={} mode={:#o} size={} dev={}",
-                        st.st_ino, st.st_mode, st.st_size, st.st_dev
+                        st.st_ino,
+                        st.st_mode,
+                        st.st_size,
+                        st.st_dev
                     );
                 }
-                Err(e) => { crate::serial_println!("[pipe-test][STEP] fstat(pipe) => {:?}", e); s = false; }
+                Err(e) => {
+                    crate::serial_println!("[pipe-test][STEP] fstat(pipe) => {:?}", e);
+                    s = false;
+                }
             }
             let _ = vfs::close(rfd);
             let _ = vfs::close(wfd);
         }
-        Err(e) => { crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[pipe-test][STEP] pipe => {:?}", e);
+            s = false;
+        }
     }
     record("fstat on pipe fd", s, &mut passed, &mut total);
 
     // ── Summary ─────────────────────────────────────────────────────────────
     log_section("PIPE TEST SUMMARY");
     let ok = passed == total;
-    crate::serial_println!("[pipe-test][ASSERT] result: {}/{} scenarios PASS", passed, total);
+    crate::serial_println!(
+        "[pipe-test][ASSERT] result: {}/{} scenarios PASS",
+        passed,
+        total
+    );
     crate::serial_println!(
         "[pipe-test][ASSERT] final : {}",
         if ok { "PASS" } else { "FAIL" }

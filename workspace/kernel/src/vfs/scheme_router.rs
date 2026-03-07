@@ -13,7 +13,6 @@
 //! mount_scheme("my_scheme", "/my/path")?;
 //! ```
 
-use spin::RwLock;
 use crate::{
     ipc::port::PortId,
     sync::SpinLock,
@@ -21,6 +20,7 @@ use crate::{
     vfs::scheme::{DynScheme, IpcScheme, KernelScheme},
 };
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use spin::RwLock;
 
 /// Scheme registry entry
 pub struct SchemeEntry {

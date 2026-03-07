@@ -3,15 +3,14 @@
 //
 // Features:
 // - Boot protocol keyboard support
-// - Boot protocol mouse support  
+// - Boot protocol mouse support
 // - Event queue for key presses and mouse movements
 // - PS/2 to USB keycode translation
 
 #![allow(dead_code)]
 
 use crate::hardware::usb::xhci::XhciController;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
@@ -137,13 +136,13 @@ impl HidKeyboard {
         // report[2..7] = keycodes
 
         let modifiers = report[0];
-        
+
         for i in 2..8 {
             let keycode = report[i];
             if keycode == 0 {
                 continue;
             }
-            
+
             // Check if key was pressed (new in this report)
             let was_pressed = self.last_report[2..8].contains(&keycode);
             if !was_pressed {
@@ -242,7 +241,7 @@ impl HidMouse {
             let mask = 1 << i;
             let was_pressed = self.last_buttons & mask != 0;
             let is_pressed = buttons & mask != 0;
-            
+
             if was_pressed != is_pressed {
                 self.event_queue.push(MouseEvent {
                     dx: 0,
@@ -255,7 +254,12 @@ impl HidMouse {
 
         // Add movement event if there was movement
         if dx != 0 || dy != 0 || dz != 0 {
-            self.event_queue.push(MouseEvent { dx, dy, dz, buttons });
+            self.event_queue.push(MouseEvent {
+                dx,
+                dy,
+                dz,
+                buttons,
+            });
         }
 
         self.last_buttons = buttons;

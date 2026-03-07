@@ -41,7 +41,13 @@ pub(super) fn cmd_uptime_impl(_args: &[String]) -> Result<(), ShellError> {
 
     shell_println!(
         "up {:02}:{:02}:{:02}  ({} ticks @ {} Hz)  {} tasks, {} silos",
-        hours, minutes, secs, ticks, hz, task_count, silos
+        hours,
+        minutes,
+        secs,
+        ticks,
+        hz,
+        task_count,
+        silos
     );
     Ok(())
 }
@@ -66,7 +72,11 @@ struct KlogEntry {
 
 impl KlogEntry {
     const fn empty() -> Self {
-        Self { tick: 0, len: 0, data: [0; 120] }
+        Self {
+            tick: 0,
+            len: 0,
+            data: [0; 120],
+        }
     }
 }
 
@@ -114,7 +124,11 @@ pub(super) fn cmd_dmesg_impl(args: &[String]) -> Result<(), ShellError> {
 
     let log = KLOG.lock();
     let entries: alloc::vec::Vec<_> = log.iter().collect();
-    let start = if entries.len() > limit { entries.len() - limit } else { 0 };
+    let start = if entries.len() > limit {
+        entries.len() - limit
+    } else {
+        0
+    };
     let hz = crate::arch::x86_64::timer::TIMER_HZ;
 
     if entries.is_empty() {
@@ -131,18 +145,18 @@ pub(super) fn cmd_dmesg_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-
 pub(super) fn cmd_echo_impl(args: &[String]) -> Result<(), ShellError> {
     let mut first = true;
     for arg in args {
-        if !first { crate::shell_print!(" "); }
+        if !first {
+            crate::shell_print!(" ");
+        }
         crate::shell_print!("{}", arg);
         first = false;
     }
     shell_println!("");
     Ok(())
 }
-
 
 pub(super) fn cmd_whoami_impl(_args: &[String]) -> Result<(), ShellError> {
     if let Some(label) = crate::silo::current_task_silo_label() {
@@ -157,7 +171,6 @@ pub(super) fn cmd_whoami_impl(_args: &[String]) -> Result<(), ShellError> {
 
     Ok(())
 }
-
 
 /// Search for lines matching a pattern in a file or piped input.
 ///

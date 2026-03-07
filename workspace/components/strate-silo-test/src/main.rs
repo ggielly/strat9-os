@@ -436,26 +436,29 @@ pub extern "C" fn _start() -> ! {
     let arg_a = core::ptr::addr_of!(THREAD_CASE_A) as usize;
     let arg_b = core::ptr::addr_of!(THREAD_CASE_B) as usize;
 
-    let tid_a = if let Some(tid_created) =
-        log_result("thread_create(thread A)", call::thread_create(thread_entry_ptr, stack_a_top, arg_a, 0))
-    {
+    let tid_a = if let Some(tid_created) = log_result(
+        "thread_create(thread A)",
+        call::thread_create(thread_entry_ptr, stack_a_top, arg_a, 0),
+    ) {
         tid_created
     } else {
         exit_process(20);
     };
 
-    let tid_b = if let Some(tid_created) =
-        log_result("thread_create(thread B)", call::thread_create(thread_entry_ptr, stack_b_top, arg_b, 0))
-    {
+    let tid_b = if let Some(tid_created) = log_result(
+        "thread_create(thread B)",
+        call::thread_create(thread_entry_ptr, stack_b_top, arg_b, 0),
+    ) {
         tid_created
     } else {
         exit_process(21);
     };
 
     let mut join_status_a: i32 = -1;
-    let joined_a = if let Some(joined_tid) =
-        log_result("thread_join(thread A)", call::thread_join(tid_a, Some(&mut join_status_a)))
-    {
+    let joined_a = if let Some(joined_tid) = log_result(
+        "thread_join(thread A)",
+        call::thread_join(tid_a, Some(&mut join_status_a)),
+    ) {
         joined_tid
     } else {
         exit_process(22);
@@ -473,9 +476,10 @@ pub extern "C" fn _start() -> ! {
     }
 
     let mut join_status_b: i32 = -1;
-    let joined_b = if let Some(joined_tid) =
-        log_result("thread_join(thread B)", call::thread_join(tid_b, Some(&mut join_status_b)))
-    {
+    let joined_b = if let Some(joined_tid) = log_result(
+        "thread_join(thread B)",
+        call::thread_join(tid_b, Some(&mut join_status_b)),
+    ) {
         joined_tid
     } else {
         exit_process(25);

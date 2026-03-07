@@ -3,17 +3,17 @@
 //! Implements PID/TID retrieval per the Strat9-OS ABI.
 
 use super::{error::SyscallError, SyscallFrame};
-use crate::process::scheduler::add_task_with_parent;
 use crate::process::{
-    block_current_task, create_session, current_pgid, current_task_clone,
-    current_task_id, current_tid, get_parent_id, get_parent_pid, get_pgid_by_pid,
-    get_sid_by_pid, get_task_id_by_tid, set_process_group,
+    block_current_task, create_session, current_pgid, current_task_clone, current_task_id,
+    current_tid, get_parent_id, get_parent_pid, get_pgid_by_pid, get_sid_by_pid,
+    get_task_id_by_tid,
+    scheduler::add_task_with_parent,
+    set_process_group,
     task::{CpuContext, ExtendedState, KernelStack, SyncUnsafeCell, Task},
     WaitChildResult,
 };
 use alloc::{boxed::Box, sync::Arc};
-use core::mem::offset_of;
-use core::sync::atomic::Ordering;
+use core::{mem::offset_of, sync::atomic::Ordering};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -219,8 +219,8 @@ pub fn sys_thread_join(tid: u64, status_ptr: u64, flags: u64) -> Result<u64, Sys
         match crate::process::try_wait_child(parent_id, Some(child_id)) {
             WaitChildResult::Reaped { status, .. } => {
                 if status_ptr != 0 {
-                    let out =
-                        crate::memory::UserSliceWrite::new(status_ptr, 4).map_err(|_| SyscallError::Fault)?;
+                    let out = crate::memory::UserSliceWrite::new(status_ptr, 4)
+                        .map_err(|_| SyscallError::Fault)?;
                     out.copy_from(&(status as i32).to_ne_bytes());
                 }
                 return Ok(wait_tid as u64);

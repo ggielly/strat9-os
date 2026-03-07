@@ -372,8 +372,7 @@ pub fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, Syscall
     let cwd = unsafe { (&*task.process.cwd.get()).clone() };
     let path = resolve_path(&raw, &cwd);
 
-    let open_flags =
-        OpenFlags::from_bits_truncate(flags as u32);
+    let open_flags = OpenFlags::from_bits_truncate(flags as u32);
 
     let want_read =
         open_flags.contains(OpenFlags::READ) || open_flags.contains(OpenFlags::DIRECTORY);
@@ -632,7 +631,9 @@ fn normalize_path(path: &str) -> alloc::string::String {
     for seg in path.split('/') {
         match seg {
             "" | "." => {}
-            ".." => { parts.pop(); }
+            ".." => {
+                parts.pop();
+            }
             other => parts.push(other),
         }
     }
@@ -1032,25 +1033,49 @@ pub fn init() {
         // Expose at least 1 CPU (BSP) instead of showing 0.
         let cpu_count = crate::arch::x86_64::percpu::get_cpu_count().max(1);
 
-        let count_s = Box::leak(alloc::format!("{}\n", cpu_count).into_bytes().into_boxed_slice());
+        let count_s = Box::leak(
+            alloc::format!("{}\n", cpu_count)
+                .into_bytes()
+                .into_boxed_slice(),
+        );
         kernel_scheme.register("cpu/count", count_s.as_ptr(), count_s.len());
 
-        let vendor_s = Box::leak(alloc::format!("{}\n", host.vendor_string()).into_bytes().into_boxed_slice());
+        let vendor_s = Box::leak(
+            alloc::format!("{}\n", host.vendor_string())
+                .into_bytes()
+                .into_boxed_slice(),
+        );
         kernel_scheme.register("cpu/vendor", vendor_s.as_ptr(), vendor_s.len());
 
-        let model_s = Box::leak(alloc::format!("{}\n", host.model_name_str()).into_bytes().into_boxed_slice());
+        let model_s = Box::leak(
+            alloc::format!("{}\n", host.model_name_str())
+                .into_bytes()
+                .into_boxed_slice(),
+        );
         kernel_scheme.register("cpu/model", model_s.as_ptr(), model_s.len());
 
         let features_s = Box::leak(
-            alloc::format!("{}\n", crate::arch::x86_64::cpuid::features_to_flags_string(host.features))
-                .into_bytes().into_boxed_slice()
+            alloc::format!(
+                "{}\n",
+                crate::arch::x86_64::cpuid::features_to_flags_string(host.features)
+            )
+            .into_bytes()
+            .into_boxed_slice(),
         );
         kernel_scheme.register("cpu/features", features_s.as_ptr(), features_s.len());
 
-        let xcr0_s = Box::leak(alloc::format!("{:#x}\n", host.max_xcr0).into_bytes().into_boxed_slice());
+        let xcr0_s = Box::leak(
+            alloc::format!("{:#x}\n", host.max_xcr0)
+                .into_bytes()
+                .into_boxed_slice(),
+        );
         kernel_scheme.register("cpu/xcr0", xcr0_s.as_ptr(), xcr0_s.len());
 
-        let xsave_s = Box::leak(alloc::format!("{}\n", host.xsave_size).into_bytes().into_boxed_slice());
+        let xsave_s = Box::leak(
+            alloc::format!("{}\n", host.xsave_size)
+                .into_bytes()
+                .into_boxed_slice(),
+        );
         kernel_scheme.register("cpu/xsave_size", xsave_s.as_ptr(), xsave_s.len());
     }
 

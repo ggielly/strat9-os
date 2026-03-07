@@ -10,7 +10,10 @@ pub struct TimeSpec {
 impl TimeSpec {
     /// Return a zero-initialized timestamp.
     pub const fn zero() -> Self {
-        Self { tv_sec: 0, tv_nsec: 0 }
+        Self {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }
     }
 
     /// Convert the timestamp to nanoseconds with saturating arithmetic.

@@ -24,7 +24,8 @@ impl DmaAllocator for KernelDma {
     fn alloc_dma(&self, size: usize) -> Result<DmaRegion, nic_buffers::DmaAllocError> {
         let pages = (size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let frame = crate::memory::allocate_frames(order).map_err(|_| nic_buffers::DmaAllocError)?;
+        let frame =
+            crate::memory::allocate_frames(order).map_err(|_| nic_buffers::DmaAllocError)?;
         let phys = frame.start_address.as_u64();
         let virt = memory::phys_to_virt(phys) as *mut u8;
         Ok(DmaRegion {

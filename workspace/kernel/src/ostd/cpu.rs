@@ -9,7 +9,6 @@
 
 #![allow(unsafe_code)]
 
-
 /// CPU identifier
 ///
 /// Represents a logical CPU in the system. On x86_64, this corresponds

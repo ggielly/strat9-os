@@ -105,7 +105,9 @@ impl ProcScheme {
         let cpu_count = crate::arch::x86_64::percpu::get_cpu_count();
         let host = crate::arch::x86_64::cpuid::host();
         let flags = crate::arch::x86_64::cpuid::features_to_flags_string(host.features);
-        let has_fpu = host.features.contains(crate::arch::x86_64::cpuid::CpuFeatures::FPU);
+        let has_fpu = host
+            .features
+            .contains(crate::arch::x86_64::cpuid::CpuFeatures::FPU);
 
         for i in 0..cpu_count {
             let _ = writeln!(output, "processor\t: {}", i);
@@ -122,7 +124,11 @@ impl ProcScheme {
             let _ = writeln!(output, "cpu cores\t: 1");
             let _ = writeln!(output, "apicid\t\t: {}", i);
             let _ = writeln!(output, "fpu\t\t: {}", if has_fpu { "yes" } else { "no" });
-            let _ = writeln!(output, "fpu_exception\t: {}", if has_fpu { "yes" } else { "no" });
+            let _ = writeln!(
+                output,
+                "fpu_exception\t: {}",
+                if has_fpu { "yes" } else { "no" }
+            );
             let _ = writeln!(output, "cpuid level\t: 13");
             let _ = writeln!(output, "wp\t\t: yes");
             let _ = writeln!(output, "flags\t\t: {}", flags);
@@ -221,7 +227,9 @@ impl ProcScheme {
         let _ = writeln!(output, "Uid:\t{}\t{}\t{}\t{}", uid, euid, euid, euid);
         let _ = writeln!(output, "Gid:\t{}\t{}\t{}\t{}", gid, egid, egid, egid);
         let _ = writeln!(output, "Threads:\t1");
-        if let Some((silo_id, label, mem_used, mem_min, mem_max)) = silo::silo_info_for_task(task.id) {
+        if let Some((silo_id, label, mem_used, mem_min, mem_max)) =
+            silo::silo_info_for_task(task.id)
+        {
             let label = label.unwrap_or_else(|| String::from("-"));
             let _ = writeln!(output, "SiloId:\t{}", silo_id);
             let _ = writeln!(output, "SiloLabel:\t{}", label);

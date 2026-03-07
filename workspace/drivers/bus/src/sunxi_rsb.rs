@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const RSB_CTRL: usize = 0x00;
 const RSB_CCR: usize = 0x04;
@@ -41,13 +40,21 @@ const MAX_POLL: u32 = 10000;
 const COMPATIBLE: &[&str] = &["allwinner,sun8i-a23-rsb"];
 
 /// Performs the ccr sda out delay operation.
-fn ccr_sda_out_delay(v: u32) -> u32 { (v & 0x7) << 8 }
+fn ccr_sda_out_delay(v: u32) -> u32 {
+    (v & 0x7) << 8
+}
 /// Performs the ccr clk div operation.
-fn ccr_clk_div(v: u32) -> u32 { v & 0xFF }
+fn ccr_clk_div(v: u32) -> u32 {
+    v & 0xFF
+}
 /// Performs the dar rta operation.
-fn dar_rta(v: u32) -> u32 { (v & 0xFF) << 16 }
+fn dar_rta(v: u32) -> u32 {
+    (v & 0xFF) << 16
+}
 /// Performs the dar da operation.
-fn dar_da(v: u32) -> u32 { v & 0xFFFF }
+fn dar_da(v: u32) -> u32 {
+    v & 0xFFFF
+}
 
 pub struct RsbAddrMap {
     pub hwaddr: u16,
@@ -55,9 +62,18 @@ pub struct RsbAddrMap {
 }
 
 pub const DEFAULT_ADDR_MAP: &[RsbAddrMap] = &[
-    RsbAddrMap { hwaddr: 0x3A3, rtaddr: 0x2D },
-    RsbAddrMap { hwaddr: 0x745, rtaddr: 0x3A },
-    RsbAddrMap { hwaddr: 0xE89, rtaddr: 0x4E },
+    RsbAddrMap {
+        hwaddr: 0x3A3,
+        rtaddr: 0x2D,
+    },
+    RsbAddrMap {
+        hwaddr: 0x745,
+        rtaddr: 0x3A,
+    },
+    RsbAddrMap {
+        hwaddr: 0xE89,
+        rtaddr: 0x4E,
+    },
 ];
 
 pub struct SunxiRsb {
@@ -115,13 +131,15 @@ impl SunxiRsb {
 
     /// Starts transfer.
     fn start_transfer(&self) {
-        self.regs.write32(RSB_CTRL, RSB_CTRL_START_TRANS | RSB_CTRL_GLOBAL_INT_ENB);
+        self.regs
+            .write32(RSB_CTRL, RSB_CTRL_START_TRANS | RSB_CTRL_GLOBAL_INT_ENB);
     }
 
     /// Sets runtime address.
     pub fn set_runtime_address(&self, hwaddr: u16, rtaddr: u8) -> Result<(), BusError> {
         self.regs.write32(RSB_CMD, RSB_CMD_STRA);
-        self.regs.write32(RSB_DAR, dar_rta(rtaddr as u32) | dar_da(hwaddr as u32));
+        self.regs
+            .write32(RSB_DAR, dar_rta(rtaddr as u32) | dar_da(hwaddr as u32));
         self.start_transfer();
         self.wait_transfer_complete()?;
         Ok(())
@@ -129,7 +147,10 @@ impl SunxiRsb {
 
     /// Initializes device mode.
     pub fn init_device_mode(&self) -> Result<(), BusError> {
-        self.regs.write32(RSB_DMCR, RSB_DMCR_DEVICE_START | RSB_DMCR_MODE_DATA | RSB_DMCR_MODE_REG);
+        self.regs.write32(
+            RSB_DMCR,
+            RSB_DMCR_DEVICE_START | RSB_DMCR_MODE_DATA | RSB_DMCR_MODE_REG,
+        );
         for _ in 0..MAX_POLL {
             if self.regs.read32(RSB_DMCR) & RSB_DMCR_DEVICE_START == 0 {
                 return Ok(());
@@ -188,16 +209,21 @@ impl SunxiRsb {
 
 impl BusDriver for SunxiRsb {
     /// Performs the name operation.
-    fn name(&self) -> &str { "sunxi-rsb" }
+    fn name(&self) -> &str {
+        "sunxi-rsb"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
         self.regs.init(base, 0x40);
         self.soft_reset();
-        self.regs.write32(RSB_CCR, ccr_sda_out_delay(1) | ccr_clk_div(3));
+        self.regs
+            .write32(RSB_CCR, ccr_sda_out_delay(1) | ccr_clk_div(3));
         self.init_device_mode()?;
         self.power_state = PowerState::On;
         Ok(())
@@ -212,13 +238,17 @@ impl BusDriver for SunxiRsb {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

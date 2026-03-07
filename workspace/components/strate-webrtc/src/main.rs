@@ -257,7 +257,9 @@ fn refresh_policies(rt: &mut Runtime) {
         let max_sessions = cols.next().and_then(|v| v.parse::<u16>().ok());
         let ttl = cols.next().and_then(|v| v.parse::<u32>().ok());
 
-        let (Some(sid), Some(flags), Some(max_sessions), Some(ttl_sec)) = (sid, flags, max_sessions, ttl) else {
+        let (Some(sid), Some(flags), Some(max_sessions), Some(ttl_sec)) =
+            (sid, flags, max_sessions, ttl)
+        else {
             continue;
         };
         next.insert(
@@ -473,7 +475,9 @@ pub unsafe extern "C" fn _start() -> ! {
                     continue;
                 }
                 let active_for_sid = rt.sessions.values().filter(|s| s.silo_id == sid).count();
-                if rt.sessions.len() >= MAX_SESSIONS || active_for_sid >= policy.max_sessions as usize {
+                if rt.sessions.len() >= MAX_SESSIONS
+                    || active_for_sid >= policy.max_sessions as usize
+                {
                     send_response(msg.sender, RESP_FULL, |_| {});
                     continue;
                 }

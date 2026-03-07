@@ -17,10 +17,7 @@ pub fn init_shell_env() {
 
 /// Get a shell environment variable by key.
 pub fn shell_getenv(key: &str) -> Option<String> {
-    SHELL_ENV
-        .lock()
-        .as_ref()
-        .and_then(|m| m.get(key).cloned())
+    SHELL_ENV.lock().as_ref().and_then(|m| m.get(key).cloned())
 }
 
 /// Set a shell environment variable.

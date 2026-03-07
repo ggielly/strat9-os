@@ -294,7 +294,10 @@ pub fn cmd_scheduler(args: &[String]) -> Result<(), ShellError> {
             }
             let s = scheduler_state_snapshot();
             if kv {
-                shell_println!("scheduler.initialized={}", if s.initialized { 1 } else { 0 });
+                shell_println!(
+                    "scheduler.initialized={}",
+                    if s.initialized { 1 } else { 0 }
+                );
                 shell_println!("scheduler.boot_phase={}", s.boot_phase);
                 shell_println!("scheduler.cpu_count={}", s.cpu_count);
                 shell_println!("scheduler.pick.0={}", s.pick_order[0].as_str());

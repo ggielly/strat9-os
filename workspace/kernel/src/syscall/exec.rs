@@ -127,7 +127,13 @@ pub fn sys_execve(
             .find_free_vma_range(0x7FFF_E000_0000, n_pages, VmaPageSize::Small)
             .ok_or(SyscallError::OutOfMemory)?;
         new_as_arc
-            .map_region(tls_base, n_pages, tls_flags, VmaType::Anonymous, VmaPageSize::Small)
+            .map_region(
+                tls_base,
+                n_pages,
+                tls_flags,
+                VmaType::Anonymous,
+                VmaPageSize::Small,
+            )
             .map_err(|_| SyscallError::OutOfMemory)?;
         if load_info.tls_filesz > 0 && load_info.tls_vaddr != 0 {
             let src_vaddr = load_info.tls_vaddr;
@@ -135,10 +141,18 @@ pub fn sys_execve(
             let mut tmp = [0u8; 256];
             while off < load_info.tls_filesz {
                 let chunk = core::cmp::min(256, (load_info.tls_filesz - off) as usize);
-                crate::process::elf::read_user_mapped_bytes_pub(&new_as_arc, src_vaddr + off, &mut tmp[..chunk])
-                    .map_err(|_| SyscallError::Fault)?;
-                crate::process::elf::write_user_mapped_bytes_pub(&new_as_arc, tls_base + off, &tmp[..chunk])
-                    .map_err(|_| SyscallError::Fault)?;
+                crate::process::elf::read_user_mapped_bytes_pub(
+                    &new_as_arc,
+                    src_vaddr + off,
+                    &mut tmp[..chunk],
+                )
+                .map_err(|_| SyscallError::Fault)?;
+                crate::process::elf::write_user_mapped_bytes_pub(
+                    &new_as_arc,
+                    tls_base + off,
+                    &tmp[..chunk],
+                )
+                .map_err(|_| SyscallError::Fault)?;
                 off += chunk as u64;
             }
         }
@@ -190,8 +204,12 @@ pub fn sys_execve(
         );
     }
 
-    let old_as =
-        unsafe { core::mem::replace(&mut *current.process.address_space.get(), new_as_arc.clone()) };
+    let old_as = unsafe {
+        core::mem::replace(
+            &mut *current.process.address_space.get(),
+            new_as_arc.clone(),
+        )
+    };
 
     unsafe {
         (&*current.process.address_space.get()).switch_to();
@@ -411,7 +429,7 @@ fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(
     // `AddressSpace` is usually public. `translate` is on `Mapper` trait?
     // `AddressSpace` in `strat9` likely implements `Mapper` or has it.
     // `elf.rs` used `user_as.translate(...)`.
-    
+
     // I need to import Translate? `AddressSpace` usually has `translate`.
 
     while written < data.len() {

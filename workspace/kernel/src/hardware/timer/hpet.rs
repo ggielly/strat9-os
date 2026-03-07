@@ -7,8 +7,10 @@
 #![allow(dead_code)]
 
 use crate::memory::{self, phys_to_virt};
-use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    ptr,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use spin::Mutex;
 
 const HPET_GENERAL_CAP_ID: usize = 0x000;
@@ -55,15 +57,16 @@ unsafe fn hpet_write(mmio_base: usize, offset: usize, value: u64) {
 pub fn init() -> Result<(), &'static str> {
     log::info!("[HPET] Searching for HPET...");
 
-    let hpet_acpi = crate::acpi::hpet::HpetAcpiTable::get()
-        .ok_or("HPET ACPI table not found")?;
+    let hpet_acpi = crate::acpi::hpet::HpetAcpiTable::get().ok_or("HPET ACPI table not found")?;
 
     // Read packed fields safely using unaligned loads.
     let gas = unsafe { ptr::read_unaligned(core::ptr::addr_of!(hpet_acpi.gen_addr_struct)) };
     let base_addr = gas.phys_addr;
     let address_space = gas.address_space;
-    let comparator_desc = unsafe { ptr::read_unaligned(core::ptr::addr_of!(hpet_acpi.comparator_descriptor)) };
-    let min_tick = unsafe { ptr::read_unaligned(core::ptr::addr_of!(hpet_acpi.min_periodic_clock_tick)) };
+    let comparator_desc =
+        unsafe { ptr::read_unaligned(core::ptr::addr_of!(hpet_acpi.comparator_descriptor)) };
+    let min_tick =
+        unsafe { ptr::read_unaligned(core::ptr::addr_of!(hpet_acpi.min_periodic_clock_tick)) };
 
     log::info!(
         "[HPET] Found HPET: base=0x{:x}, comparators={}, min_tick={}",
@@ -148,7 +151,9 @@ pub fn tick_period_ns() -> u32 {
 pub fn frequency_hz() -> u64 {
     let info = HPET_INFO.lock();
     match *info {
-        Some(ref hpet) if hpet.tick_period_fs > 0 => 1_000_000_000_000_000u64 / hpet.tick_period_fs as u64,
+        Some(ref hpet) if hpet.tick_period_fs > 0 => {
+            1_000_000_000_000_000u64 / hpet.tick_period_fs as u64
+        }
         _ => 0,
     }
 }
@@ -176,7 +181,7 @@ pub fn delay_us(us: u64) {
         }
         return;
     }
-    
+
     let period_ns = tick_period_ns() as u64;
     if period_ns == 0 {
         return;
@@ -202,7 +207,7 @@ pub fn uptime_ms() -> u64 {
     if !is_available() {
         return 0;
     }
-    
+
     let counter = read_counter() as u128;
     let period_ns = tick_period_ns() as u128;
     ((counter.saturating_mul(period_ns)) / 1_000_000) as u64

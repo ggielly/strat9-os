@@ -1158,7 +1158,9 @@ impl VgaWriter {
                 let src = unsafe { buf_ptr.add(y * fb_width + sx) as *const u8 };
                 let dst_off = y * pitch + sx * 4;
                 // SAFETY: fb_addr points to the mapped framebuffer; dst_off is within bounds for same reason.
-                unsafe { core::ptr::copy_nonoverlapping(src, fb_addr.add(dst_off), row_bytes); }
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src, fb_addr.add(dst_off), row_bytes);
+                }
             }
         } else {
             for y in sy..(sy + sh) {
@@ -1215,10 +1217,13 @@ impl VgaWriter {
         for cy in 0..CURSOR_H {
             for cx in 0..CURSOR_W {
                 let p = CURSOR_PIXELS[cy * CURSOR_W + cx];
-                if p == 0 { continue; }
+                if p == 0 {
+                    continue;
+                }
                 let px = x + cx as i32;
                 let py = y + cy as i32;
-                if px < 0 || py < 0 || px as usize >= self.fb_width || py as usize >= self.fb_height {
+                if px < 0 || py < 0 || px as usize >= self.fb_width || py as usize >= self.fb_height
+                {
                     continue;
                 }
                 let color = if p == 1 { black } else { white };
@@ -1233,21 +1238,32 @@ impl VgaWriter {
         let y = self.mc_y;
         for cy in 0..CURSOR_H {
             for cx in 0..CURSOR_W {
-                if CURSOR_PIXELS[cy * CURSOR_W + cx] == 0 { continue; }
-                let px = x + cx as i32;
-                let py = y + cy as i32;
-                if px < 0 || py < 0 || px as usize >= self.fb_width || py as usize >= self.fb_height {
+                if CURSOR_PIXELS[cy * CURSOR_W + cx] == 0 {
                     continue;
                 }
-                self.write_hw_pixel_packed(px as usize, py as usize, self.mc_save[cy * CURSOR_W + cx]);
+                let px = x + cx as i32;
+                let py = y + cy as i32;
+                if px < 0 || py < 0 || px as usize >= self.fb_width || py as usize >= self.fb_height
+                {
+                    continue;
+                }
+                self.write_hw_pixel_packed(
+                    px as usize,
+                    py as usize,
+                    self.mc_save[cy * CURSOR_W + cx],
+                );
             }
         }
     }
 
     /// Updates mouse cursor.
     pub fn update_mouse_cursor(&mut self, x: i32, y: i32) {
-        if !self.enabled { return; }
-        if self.mc_visible && self.mc_x == x && self.mc_y == y { return; }
+        if !self.enabled {
+            return;
+        }
+        if self.mc_visible && self.mc_x == x && self.mc_y == y {
+            return;
+        }
         if self.mc_visible {
             self.mc_erase_hw();
         }
@@ -1270,19 +1286,34 @@ impl VgaWriter {
 
     /// Performs the sel normalized operation.
     fn sel_normalized(&self) -> (usize, usize, usize, usize) {
-        let (sr, sc, er, ec) = (self.sel_start_row, self.sel_start_col, self.sel_end_row, self.sel_end_col);
-        if sr < er || (sr == er && sc <= ec) { (sr, sc, er, ec) } else { (er, ec, sr, sc) }
+        let (sr, sc, er, ec) = (
+            self.sel_start_row,
+            self.sel_start_col,
+            self.sel_end_row,
+            self.sel_end_col,
+        );
+        if sr < er || (sr == er && sc <= ec) {
+            (sr, sc, er, ec)
+        } else {
+            (er, ec, sr, sc)
+        }
     }
 
     /// Performs the pixel to sb pos operation.
     pub fn pixel_to_sb_pos(&self, px: usize, py: usize) -> Option<(usize, usize)> {
-        if !self.enabled { return None; }
+        if !self.enabled {
+            return None;
+        }
         let gw = self.font_info.glyph_w;
         let gh = self.font_info.glyph_h;
-        if gw == 0 || gh == 0 { return None; }
+        if gw == 0 || gh == 0 {
+            return None;
+        }
         let text_h = self.text_area_height();
         let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
-        if px >= text_w || py >= text_h { return None; }
+        if px >= text_w || py >= text_h {
+            return None;
+        }
         let vis_row = py / gh;
         let vis_col = px / gw;
         if vis_col >= self.cols {
@@ -1317,9 +1348,13 @@ impl VgaWriter {
 
     /// Updates selection.
     pub fn update_selection(&mut self, px: usize, py: usize) {
-        if !self.sel_active { return; }
+        if !self.sel_active {
+            return;
+        }
         if let Some((row, col)) = self.pixel_to_sb_pos(px, py) {
-            if row == self.sel_end_row && col == self.sel_end_col { return; }
+            if row == self.sel_end_row && col == self.sel_end_col {
+                return;
+            }
             self.sel_end_row = row;
             self.sel_end_col = col;
             self.redraw_from_scrollback();
@@ -1328,7 +1363,9 @@ impl VgaWriter {
 
     /// Performs the end selection operation.
     pub fn end_selection(&mut self) {
-        if !self.sel_active { return; }
+        if !self.sel_active {
+            return;
+        }
         let (start_row, start_col, end_row, end_col) = self.sel_normalized();
         let mut bytes: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         for row in start_row..=end_row {
@@ -1339,8 +1376,16 @@ impl VgaWriter {
             } else {
                 break;
             };
-            let c0 = if row == start_row { start_col.min(len) } else { 0 };
-            let c1 = if row == end_row { end_col.min(len) } else { len };
+            let c0 = if row == start_row {
+                start_col.min(len)
+            } else {
+                0
+            };
+            let c1 = if row == end_row {
+                end_col.min(len)
+            } else {
+                len
+            };
             for col in c0..c1 {
                 let ch = if row < self.sb_rows.len() {
                     self.sb_rows[row][col].ch
@@ -1350,7 +1395,9 @@ impl VgaWriter {
                 let mut buf = [0u8; 4];
                 bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
             }
-            if row < end_row { bytes.push(b'\n'); }
+            if row < end_row {
+                bytes.push(b'\n');
+            }
         }
         if let Some(mut clip) = CLIPBOARD.try_lock() {
             let n = bytes.len().min(CLIPBOARD_CAP);
@@ -1390,7 +1437,9 @@ impl VgaWriter {
     /// Performs the pixel offset operation.
     #[inline]
     fn pixel_offset(&self, x: usize, y: usize) -> Option<usize> {
-        if x >= self.fb_width || y >= self.fb_height { return None; }
+        if x >= self.fb_width || y >= self.fb_height {
+            return None;
+        }
         let bytes_pp = self.fmt.bpp as usize / 8;
         let row = y.checked_mul(self.pitch)?;
         let col = x.checked_mul(bytes_pp)?;
@@ -2324,7 +2373,11 @@ impl VgaWriter {
                     } else {
                         true
                     };
-                    if in_sel { (sel_fg, sel_bg) } else { (cell.fg, cell.bg) }
+                    if in_sel {
+                        (sel_fg, sel_bg)
+                    } else {
+                        (cell.fg, cell.bg)
+                    }
                 } else {
                     (cell.fg, cell.bg)
                 };
@@ -3835,7 +3888,9 @@ pub fn scrollbar_hit_test(px_x: usize, px_y: usize) -> bool {
 
 /// Updates mouse cursor.
 pub fn update_mouse_cursor(x: i32, y: i32) {
-    if !is_available() { return; }
+    if !is_available() {
+        return;
+    }
     if let Some(mut w) = VGA_WRITER.try_lock() {
         w.update_mouse_cursor(x, y);
     }
@@ -3843,7 +3898,9 @@ pub fn update_mouse_cursor(x: i32, y: i32) {
 
 /// Performs the hide mouse cursor operation.
 pub fn hide_mouse_cursor() {
-    if !is_available() { return; }
+    if !is_available() {
+        return;
+    }
     if let Some(mut w) = VGA_WRITER.try_lock() {
         w.hide_mouse_cursor();
     }
@@ -3851,7 +3908,9 @@ pub fn hide_mouse_cursor() {
 
 /// Starts selection.
 pub fn start_selection(px: usize, py: usize) {
-    if !is_available() { return; }
+    if !is_available() {
+        return;
+    }
     if let Some(mut w) = VGA_WRITER.try_lock() {
         w.start_selection(px, py);
     }
@@ -3859,7 +3918,9 @@ pub fn start_selection(px: usize, py: usize) {
 
 /// Updates selection.
 pub fn update_selection(px: usize, py: usize) {
-    if !is_available() { return; }
+    if !is_available() {
+        return;
+    }
     if let Some(mut w) = VGA_WRITER.try_lock() {
         w.update_selection(px, py);
     }
@@ -3867,7 +3928,9 @@ pub fn update_selection(px: usize, py: usize) {
 
 /// Performs the end selection operation.
 pub fn end_selection() {
-    if !is_available() { return; }
+    if !is_available() {
+        return;
+    }
     if let Some(mut w) = VGA_WRITER.try_lock() {
         w.end_selection();
     }
@@ -3875,7 +3938,9 @@ pub fn end_selection() {
 
 /// Performs the clear selection operation.
 pub fn clear_selection() {
-    if !is_available() { return; }
+    if !is_available() {
+        return;
+    }
     if let Some(mut w) = VGA_WRITER.try_lock() {
         w.clear_selection();
     }

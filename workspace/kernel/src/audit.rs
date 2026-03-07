@@ -4,8 +4,8 @@
 //! capability violations, and syscall denials into a fixed-size ring
 //! buffer queryable via the `audit` shell command.
 
-use alloc::{string::String, vec::Vec};
 use crate::sync::SpinLock;
+use alloc::{string::String, vec::Vec};
 
 const AUDIT_CAPACITY: usize = 512;
 
@@ -64,7 +64,14 @@ impl AuditLog {
         let seq = self.next_seq;
         self.next_seq += 1;
 
-        let entry = AuditEntry { seq, tick, pid, silo_id, category, message };
+        let entry = AuditEntry {
+            seq,
+            tick,
+            pid,
+            silo_id,
+            category,
+            message,
+        };
         let idx = (self.head + self.count) % AUDIT_CAPACITY;
         self.entries[idx] = Some(entry);
         if self.count < AUDIT_CAPACITY {

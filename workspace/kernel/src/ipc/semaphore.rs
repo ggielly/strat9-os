@@ -54,7 +54,12 @@ impl PosixSemaphore {
             if cur <= 0 {
                 return None;
             }
-            match self.count.compare_exchange_weak(cur, cur - 1, Ordering::AcqRel, Ordering::Acquire) {
+            match self.count.compare_exchange_weak(
+                cur,
+                cur - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => Some(Ok(())),
                 Err(_) => None,
             }
@@ -91,7 +96,11 @@ impl PosixSemaphore {
             if cur >= i32::MAX {
                 return Err(SemaphoreError::InvalidValue);
             }
-            if self.count.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            if self
+                .count
+                .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
                 break;
             }
         }

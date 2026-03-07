@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const MAX_CS_REGS_COUNT: usize = 6;
 const MAX_CS_COUNT: usize = 6;
@@ -24,23 +23,39 @@ pub struct WeimDevtype {
 }
 
 pub const IMX1_WEIM: WeimDevtype = WeimDevtype {
-    cs_count: 6, cs_regs_count: 2, cs_stride: 0x08,
-    wcr_offset: 0, wcr_bcm: 0, wcr_cont_bclk: 0,
+    cs_count: 6,
+    cs_regs_count: 2,
+    cs_stride: 0x08,
+    wcr_offset: 0,
+    wcr_bcm: 0,
+    wcr_cont_bclk: 0,
 };
 
 pub const IMX27_WEIM: WeimDevtype = WeimDevtype {
-    cs_count: 6, cs_regs_count: 3, cs_stride: 0x10,
-    wcr_offset: 0, wcr_bcm: 0, wcr_cont_bclk: 0,
+    cs_count: 6,
+    cs_regs_count: 3,
+    cs_stride: 0x10,
+    wcr_offset: 0,
+    wcr_bcm: 0,
+    wcr_cont_bclk: 0,
 };
 
 pub const IMX50_WEIM: WeimDevtype = WeimDevtype {
-    cs_count: 4, cs_regs_count: 6, cs_stride: 0x18,
-    wcr_offset: 0x90, wcr_bcm: 1 << 0, wcr_cont_bclk: 1 << 3,
+    cs_count: 4,
+    cs_regs_count: 6,
+    cs_stride: 0x18,
+    wcr_offset: 0x90,
+    wcr_bcm: 1 << 0,
+    wcr_cont_bclk: 1 << 3,
 };
 
 pub const IMX51_WEIM: WeimDevtype = WeimDevtype {
-    cs_count: 6, cs_regs_count: 6, cs_stride: 0x18,
-    wcr_offset: 0, wcr_bcm: 0, wcr_cont_bclk: 0,
+    cs_count: 6,
+    cs_regs_count: 6,
+    cs_stride: 0x18,
+    wcr_offset: 0,
+    wcr_bcm: 0,
+    wcr_cont_bclk: 0,
 };
 
 pub struct CsTiming {
@@ -104,7 +119,9 @@ impl ImxWeim {
 
     /// Sets burst clock.
     pub fn set_burst_clock(&self, enable: bool) {
-        if self.devtype.wcr_offset == 0 { return; }
+        if self.devtype.wcr_offset == 0 {
+            return;
+        }
         let mut wcr = self.regs.read32(self.devtype.wcr_offset);
         if enable {
             wcr |= self.devtype.wcr_bcm;
@@ -122,10 +139,14 @@ impl ImxWeim {
 
 impl BusDriver for ImxWeim {
     /// Performs the name operation.
-    fn name(&self) -> &str { "imx-weim" }
+    fn name(&self) -> &str {
+        "imx-weim"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -144,13 +165,17 @@ impl BusDriver for ImxWeim {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

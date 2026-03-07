@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const IXP4XX_EXP_CS_EN: u32 = 1 << 31;
 const IXP456_EXP_PAR_EN: u32 = 1 << 30;
@@ -83,7 +82,9 @@ impl IntelIxp4xxEb {
     pub fn set_variant(&mut self, is_42x: bool, is_43x: bool) {
         self.is_42x = is_42x;
         self.is_43x = is_43x;
-        if is_43x { self.num_cs = 4; }
+        if is_43x {
+            self.num_cs = 4;
+        }
     }
 
     /// Performs the detect bus base operation.
@@ -112,12 +113,24 @@ impl IntelIxp4xxEb {
         val |= (config.t5 << IXP4XX_EXP_T5_SHIFT) & IXP4XX_EXP_T5_MASK;
         val |= (config.cycle_type << IXP4XX_EXP_CYC_TYPE_SHIFT) & IXP4XX_EXP_CYC_TYPE_MASK;
 
-        if config.byte_rd16 { val |= IXP4XX_EXP_BYTE_RD16; }
-        if config.mux_en { val |= IXP4XX_EXP_MUX_EN; }
-        if config.splt_en { val |= IXP4XX_EXP_SPLT_EN; }
-        if config.wr_en { val |= IXP4XX_EXP_WR_EN; }
-        if config.byte_en { val |= IXP4XX_EXP_BYTE_EN; }
-        if config.hrdy_pol && self.is_42x { val |= IXP4XX_EXP_HRDY_POL; }
+        if config.byte_rd16 {
+            val |= IXP4XX_EXP_BYTE_RD16;
+        }
+        if config.mux_en {
+            val |= IXP4XX_EXP_MUX_EN;
+        }
+        if config.splt_en {
+            val |= IXP4XX_EXP_SPLT_EN;
+        }
+        if config.wr_en {
+            val |= IXP4XX_EXP_WR_EN;
+        }
+        if config.byte_en {
+            val |= IXP4XX_EXP_BYTE_EN;
+        }
+        if config.hrdy_pol && self.is_42x {
+            val |= IXP4XX_EXP_HRDY_POL;
+        }
 
         self.regs.write32(offset, val);
         Ok(())
@@ -136,10 +149,14 @@ impl IntelIxp4xxEb {
 
 impl BusDriver for IntelIxp4xxEb {
     /// Performs the name operation.
-    fn name(&self) -> &str { "intel-ixp4xx-eb" }
+    fn name(&self) -> &str {
+        "intel-ixp4xx-eb"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -157,13 +174,17 @@ impl BusDriver for IntelIxp4xxEb {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

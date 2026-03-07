@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const CDMM_DRB_SIZE: usize = 64;
 
@@ -52,7 +51,9 @@ impl MipsCdmm {
     /// Performs the discover devices operation.
     pub fn discover_devices(&mut self) {
         self.devices.clear();
-        if !self.regs.is_valid() { return; }
+        if !self.regs.is_valid() {
+            return;
+        }
 
         let mut drb = 0;
         while drb < MAX_DRBS {
@@ -88,13 +89,24 @@ impl MipsCdmm {
 
     /// Performs the device read32 operation.
     pub fn device_read32(&self, dev_index: usize, offset: usize) -> Result<u32, BusError> {
-        let dev = self.devices.get(dev_index).ok_or(BusError::DeviceNotFound)?;
+        let dev = self
+            .devices
+            .get(dev_index)
+            .ok_or(BusError::DeviceNotFound)?;
         Ok(self.regs.read32(dev.drb_offset + offset))
     }
 
     /// Performs the device write32 operation.
-    pub fn device_write32(&self, dev_index: usize, offset: usize, val: u32) -> Result<(), BusError> {
-        let dev = self.devices.get(dev_index).ok_or(BusError::DeviceNotFound)?;
+    pub fn device_write32(
+        &self,
+        dev_index: usize,
+        offset: usize,
+        val: u32,
+    ) -> Result<(), BusError> {
+        let dev = self
+            .devices
+            .get(dev_index)
+            .ok_or(BusError::DeviceNotFound)?;
         self.regs.write32(dev.drb_offset + offset, val);
         Ok(())
     }
@@ -102,10 +114,14 @@ impl MipsCdmm {
 
 impl BusDriver for MipsCdmm {
     /// Performs the name operation.
-    fn name(&self) -> &str { "mips-cdmm" }
+    fn name(&self) -> &str {
+        "mips-cdmm"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -123,25 +139,31 @@ impl BusDriver for MipsCdmm {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }
 
     /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
-        self.devices.iter().enumerate().map(|(i, d)| {
-            BusChild {
+        self.devices
+            .iter()
+            .enumerate()
+            .map(|(i, d)| BusChild {
                 name: alloc::format!("cdmm-dev-{:02x}", d.dev_type),
                 base_addr: d.drb_offset as u64,
                 size: (d.dev_size.max(1) as u64) * (CDMM_DRB_SIZE as u64),
-            }
-        }).collect()
+            })
+            .collect()
     }
 }

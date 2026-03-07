@@ -1,7 +1,6 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const APB_EHB_ISR: usize = 0x00;
 const APB_EHB_ISR_PENDING: u32 = 1 << 0;
@@ -100,10 +99,14 @@ impl Bt1Apb {
 
 impl BusDriver for Bt1Apb {
     /// Performs the name operation.
-    fn name(&self) -> &str { "bt1-apb" }
+    fn name(&self) -> &str {
+        "bt1-apb"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {

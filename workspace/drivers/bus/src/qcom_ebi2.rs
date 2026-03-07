@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const EBI2_XMEM_CFG: usize = 0x0000;
 const EBI2_XMEM_CS0_SLOW_CFG: usize = 0x0008;
@@ -36,20 +35,27 @@ const FAST_ADDR_HOLD_ENA: u32 = 1 << 5;
 
 const NUM_CS: usize = 6;
 
-const CS_ENABLE_MASKS: [u32; NUM_CS] = [CS0_ENABLE, CS1_ENABLE, CS2_ENABLE, CS3_ENABLE, CS4_ENABLE, CS5_ENABLE];
+const CS_ENABLE_MASKS: [u32; NUM_CS] = [
+    CS0_ENABLE, CS1_ENABLE, CS2_ENABLE, CS3_ENABLE, CS4_ENABLE, CS5_ENABLE,
+];
 const CS_SLOW_OFFSETS: [usize; NUM_CS] = [
-    EBI2_XMEM_CS0_SLOW_CFG, EBI2_XMEM_CS1_SLOW_CFG, EBI2_XMEM_CS2_SLOW_CFG,
-    EBI2_XMEM_CS3_SLOW_CFG, EBI2_XMEM_CS4_SLOW_CFG, EBI2_XMEM_CS5_SLOW_CFG,
+    EBI2_XMEM_CS0_SLOW_CFG,
+    EBI2_XMEM_CS1_SLOW_CFG,
+    EBI2_XMEM_CS2_SLOW_CFG,
+    EBI2_XMEM_CS3_SLOW_CFG,
+    EBI2_XMEM_CS4_SLOW_CFG,
+    EBI2_XMEM_CS5_SLOW_CFG,
 ];
 const CS_FAST_OFFSETS: [usize; NUM_CS] = [
-    EBI2_XMEM_CS0_FAST_CFG, EBI2_XMEM_CS1_FAST_CFG, EBI2_XMEM_CS2_FAST_CFG,
-    EBI2_XMEM_CS3_FAST_CFG, EBI2_XMEM_CS4_FAST_CFG, EBI2_XMEM_CS5_FAST_CFG,
+    EBI2_XMEM_CS0_FAST_CFG,
+    EBI2_XMEM_CS1_FAST_CFG,
+    EBI2_XMEM_CS2_FAST_CFG,
+    EBI2_XMEM_CS3_FAST_CFG,
+    EBI2_XMEM_CS4_FAST_CFG,
+    EBI2_XMEM_CS5_FAST_CFG,
 ];
 
-const COMPATIBLE: &[&str] = &[
-    "qcom,msm8660-ebi2",
-    "qcom,apq8060-ebi2",
-];
+const COMPATIBLE: &[&str] = &["qcom,msm8660-ebi2", "qcom,apq8060-ebi2"];
 
 pub struct Ebi2CsConfig {
     pub recovery_cycles: u32,
@@ -134,10 +140,14 @@ impl QcomEbi2 {
 
 impl BusDriver for QcomEbi2 {
     /// Performs the name operation.
-    fn name(&self) -> &str { "qcom-ebi2" }
+    fn name(&self) -> &str {
+        "qcom-ebi2"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -155,13 +165,17 @@ impl BusDriver for QcomEbi2 {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

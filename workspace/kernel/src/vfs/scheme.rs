@@ -16,7 +16,7 @@ use alloc::{
 };
 
 pub use strat9_abi::data::{
-    DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK, DT_UNKNOWN, FileStat,
+    FileStat, DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK, DT_UNKNOWN,
 };
 
 /// A single directory entry returned by readdir.
@@ -654,26 +654,34 @@ impl Scheme for KernelScheme {
     /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         if file_id == 0 {
-            return Ok(finalize_pseudo_stat(FileStat {
-                st_ino: 0,
-                st_mode: 0o040555,
-                st_nlink: 2,
-                st_size: 0,
-                st_blksize: 512,
-                st_blocks: 0,
-                ..FileStat::zeroed()
-            }, DEV_SYSFS, 0));
+            return Ok(finalize_pseudo_stat(
+                FileStat {
+                    st_ino: 0,
+                    st_mode: 0o040555,
+                    st_nlink: 2,
+                    st_size: 0,
+                    st_blksize: 512,
+                    st_blocks: 0,
+                    ..FileStat::zeroed()
+                },
+                DEV_SYSFS,
+                0,
+            ));
         }
         let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
-        Ok(finalize_pseudo_stat(FileStat {
-            st_ino: file_id,
-            st_mode: 0o100444,
-            st_nlink: 1,
-            st_size: file.len as u64,
-            st_blksize: 512,
-            st_blocks: ((file.len as u64) + 511) / 512,
-            ..FileStat::zeroed()
-        }, DEV_SYSFS, 0))
+        Ok(finalize_pseudo_stat(
+            FileStat {
+                st_ino: file_id,
+                st_mode: 0o100444,
+                st_nlink: 1,
+                st_size: file.len as u64,
+                st_blksize: 512,
+                st_blocks: ((file.len as u64) + 511) / 512,
+                ..FileStat::zeroed()
+            },
+            DEV_SYSFS,
+            0,
+        ))
     }
 
     /// Performs the readdir operation.

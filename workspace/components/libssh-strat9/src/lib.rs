@@ -5,8 +5,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 pub use ssh_core::{
-    AuthProvider, ChannelStream, ConnectionState, CoreDirective, ExecSessionProvider, ExecSessionWiring,
-    HostKeyProvider, ParsedPacket, Result, SshBackend, SshCore, SshCoreError, Transport,
+    AuthProvider, ChannelStream, ConnectionState, CoreDirective, ExecSessionProvider,
+    ExecSessionWiring, HostKeyProvider, ParsedPacket, Result, SshBackend, SshCore, SshCoreError,
+    Transport,
 };
 
 pub struct Server<B, A, H, S>

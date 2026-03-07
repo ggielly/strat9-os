@@ -79,8 +79,7 @@
 
 use super::task::{Pid, Task, TaskId, TaskPriority, TaskState, Tid};
 use crate::{
-    arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer},
-    arch::x86_64::timer::NS_PER_TICK,
+    arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer, timer::NS_PER_TICK},
     sync::SpinLock,
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
@@ -287,7 +286,6 @@ fn sched_trace(args: core::fmt::Arguments<'_>) {
         log::debug!("[sched] {}", args);
     }
 }
-
 
 /// Information needed to perform a context switch after releasing the lock.
 pub(super) struct SwitchTarget {

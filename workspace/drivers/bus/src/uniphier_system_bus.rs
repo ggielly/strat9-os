@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const UNIPHIER_SBC_BASE: usize = 0x100;
 const UNIPHIER_SBC_CTRL0: usize = 0x200;
@@ -12,9 +11,7 @@ const UNIPHIER_SBC_BASE_DUMMY: u32 = 0xFFFF_FFFF;
 
 const MIN_BANK_SIZE: u32 = 128 * 1024;
 
-const COMPATIBLE: &[&str] = &[
-    "socionext,uniphier-system-bus",
-];
+const COMPATIBLE: &[&str] = &["socionext,uniphier-system-bus"];
 
 #[derive(Clone, Copy)]
 pub struct BankConfig {
@@ -95,9 +92,8 @@ impl UniphierSystemBus {
 
             let bank = &self.banks[i];
             let mask = !(bank.size() - 1);
-            let reg_val = (bank.base & 0xFFFE_0000)
-                | (((!mask) >> 16) & 0xFFFE)
-                | UNIPHIER_SBC_BASE_BE;
+            let reg_val =
+                (bank.base & 0xFFFE_0000) | (((!mask) >> 16) & 0xFFFE) | UNIPHIER_SBC_BASE_BE;
 
             self.regs.write32(offset, reg_val);
         }
@@ -111,10 +107,14 @@ impl UniphierSystemBus {
 
 impl BusDriver for UniphierSystemBus {
     /// Performs the name operation.
-    fn name(&self) -> &str { "uniphier-system-bus" }
+    fn name(&self) -> &str {
+        "uniphier-system-bus"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -140,13 +140,17 @@ impl BusDriver for UniphierSystemBus {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

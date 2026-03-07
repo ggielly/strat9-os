@@ -1,7 +1,4 @@
-use crate::{
-    memory::PhysFrame,
-    sync::SpinLock,
-};
+use crate::{memory::PhysFrame, sync::SpinLock};
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 

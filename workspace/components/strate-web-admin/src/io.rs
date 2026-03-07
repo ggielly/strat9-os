@@ -1,6 +1,8 @@
-use core::future::Future;
-use core::pin::pin;
-use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use core::{
+    future::Future,
+    pin::pin,
+    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+};
 use strat9_syscall::call;
 
 const EAGAIN: usize = 11;

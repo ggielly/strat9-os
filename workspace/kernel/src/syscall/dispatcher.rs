@@ -264,9 +264,10 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SILO_PLEDGE => silo::sys_silo_pledge(arg1),
         SYS_SILO_UNVEIL => silo::sys_silo_unveil(arg1, arg2, arg3),
         SYS_SILO_ENTER_SANDBOX => silo::sys_silo_enter_sandbox(),
-        SYS_ABI_VERSION => Ok(
-            ((strat9_abi::ABI_VERSION_MAJOR as u64) << 16) | (strat9_abi::ABI_VERSION_MINOR as u64)
-        ),
+        SYS_ABI_VERSION => {
+            Ok(((strat9_abi::ABI_VERSION_MAJOR as u64) << 16)
+                | (strat9_abi::ABI_VERSION_MINOR as u64))
+        }
         _ => {
             log::warn!("Unknown syscall: {} (0x{:x})", syscall_num, syscall_num);
             Err(SyscallError::NotImplemented)
@@ -364,7 +365,9 @@ const HANDLE_EVENT_WRITABLE: u64 = 1 << 1;
 fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
-    let cap = caps.get(CapId::from_raw(handle)).ok_or(SyscallError::BadHandle)?;
+    let cap = caps
+        .get(CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
 
     match cap.resource_type {
         ResourceType::Semaphore => {
@@ -383,7 +386,8 @@ fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
             }
         }
         ResourceType::IpcPort => {
-            let port = port::get_port(PortId::from_u64(cap.resource as u64)).ok_or(SyscallError::BadHandle)?;
+            let port = port::get_port(PortId::from_u64(cap.resource as u64))
+                .ok_or(SyscallError::BadHandle)?;
             if port.is_destroyed() {
                 return Err(SyscallError::Pipe);
             }
@@ -400,8 +404,8 @@ fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
             Ok(events)
         }
         ResourceType::Channel => {
-            let chan =
-                channel::get_channel(ChanId::from_u64(cap.resource as u64)).ok_or(SyscallError::BadHandle)?;
+            let chan = channel::get_channel(ChanId::from_u64(cap.resource as u64))
+                .ok_or(SyscallError::BadHandle)?;
             if chan.is_destroyed() {
                 return Err(SyscallError::Pipe);
             }
@@ -418,7 +422,8 @@ fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
             Ok(events)
         }
         ResourceType::SharedRing => {
-            let _ = shared_ring::get_ring(RingId::from_u64(cap.resource as u64)).ok_or(SyscallError::BadHandle)?;
+            let _ = shared_ring::get_ring(RingId::from_u64(cap.resource as u64))
+                .ok_or(SyscallError::BadHandle)?;
             let mut events = 0u64;
             if cap.permissions.read {
                 events |= HANDLE_EVENT_READABLE;
@@ -520,13 +525,17 @@ fn sys_handle_revoke(handle: u64) -> Result<u64, SyscallError> {
     let caps = unsafe { &mut *task.process.capabilities.get() };
 
     {
-        let cap = caps.get(CapId::from_raw(handle)).ok_or(SyscallError::BadHandle)?;
+        let cap = caps
+            .get(CapId::from_raw(handle))
+            .ok_or(SyscallError::BadHandle)?;
         if !cap.permissions.revoke {
             return Err(SyscallError::PermissionDenied);
         }
     }
 
-    let cap = caps.remove(CapId::from_raw(handle)).ok_or(SyscallError::BadHandle)?;
+    let cap = caps
+        .remove(CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
     cleanup_cap_resource(&cap);
     Ok(0)
 }
@@ -574,7 +583,9 @@ fn sys_handle_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     }
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
-    let cap = caps.get(CapId::from_raw(handle)).ok_or(SyscallError::BadHandle)?;
+    let cap = caps
+        .get(CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
 
     let info = HandleInfoAbi {
         resource_type: resource_type_code(cap.resource_type),
@@ -673,7 +684,10 @@ fn sys_uname(uts_ptr: u64) -> Result<u64, SyscallError> {
     write_field(&mut uts[2 * UTS_FIELD_LEN..3 * UTS_FIELD_LEN], b"0.1.0");
     write_field(&mut uts[3 * UTS_FIELD_LEN..4 * UTS_FIELD_LEN], b"Strat9-OS");
     write_field(&mut uts[4 * UTS_FIELD_LEN..5 * UTS_FIELD_LEN], b"x86_64");
-    write_field(&mut uts[5 * UTS_FIELD_LEN..6 * UTS_FIELD_LEN], b"localdomain");
+    write_field(
+        &mut uts[5 * UTS_FIELD_LEN..6 * UTS_FIELD_LEN],
+        b"localdomain",
+    );
 
     let user = UserSliceWrite::new(uts_ptr, UTS_TOTAL_LEN)?;
     user.copy_from(&uts);
@@ -1058,8 +1072,13 @@ fn sys_ipc_send(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
     msg.sender = task.id.as_u64();
 
     if msg.flags == 0 {
-        if let Some((sid, _label, _mem_used, _mem_min, _mem_max)) = crate::silo::silo_info_for_task(task.id) {
-            if let Some(snapshot) = crate::silo::list_silos_snapshot().into_iter().find(|s| s.id == sid) {
+        if let Some((sid, _label, _mem_used, _mem_min, _mem_max)) =
+            crate::silo::silo_info_for_task(task.id)
+        {
+            if let Some(snapshot) = crate::silo::list_silos_snapshot()
+                .into_iter()
+                .find(|s| s.id == sid)
+            {
                 let structured_label = crate::ipc::message::IpcLabel {
                     tier: snapshot.tier as u8,
                     family: 5,
@@ -1423,7 +1442,10 @@ fn sys_ipc_bind_port(port: u64, _path_ptr: u64, _path_len: u64) -> Result<u64, S
                     label_owned
                 );
             } else {
-                log::warn!("ipc_bind_port('{}'): failed to queue bootstrap message", path);
+                log::warn!(
+                    "ipc_bind_port('{}'): failed to queue bootstrap message",
+                    path
+                );
             }
         } else {
             log::warn!(
@@ -1694,7 +1716,8 @@ fn sys_pci_enum(criteria_ptr: u64, out_ptr: u64, max_entries: u64) -> Result<u64
         return Ok(0);
     }
     let max_entries = core::cmp::min(max_entries as usize, 4096);
-    let user_criteria = UserSliceRead::new(criteria_ptr, core::mem::size_of::<PciProbeCriteriaAbi>())?;
+    let user_criteria =
+        UserSliceRead::new(criteria_ptr, core::mem::size_of::<PciProbeCriteriaAbi>())?;
     let mut criteria_bytes = [0u8; core::mem::size_of::<PciProbeCriteriaAbi>()];
     user_criteria.copy_to(&mut criteria_bytes);
     let criteria_abi =
@@ -1756,9 +1779,8 @@ fn sys_pci_enum(criteria_ptr: u64, out_ptr: u64, max_entries: u64) -> Result<u64
         .checked_mul(core::mem::size_of::<PciDeviceInfoAbi>())
         .ok_or(SyscallError::InvalidArgument)?;
     let user_out = UserSliceWrite::new(out_ptr, out_bytes_len)?;
-    let out_bytes = unsafe {
-        core::slice::from_raw_parts(out.as_ptr() as *const u8, out_bytes_len)
-    };
+    let out_bytes =
+        unsafe { core::slice::from_raw_parts(out.as_ptr() as *const u8, out_bytes_len) };
     user_out.copy_from(out_bytes);
     Ok(out.len() as u64)
 }
@@ -1790,7 +1812,12 @@ fn sys_pci_cfg_read(addr_ptr: u64, offset: u64, width: u64) -> Result<u64, Sysca
 }
 
 /// Performs the sys pci cfg write operation.
-fn sys_pci_cfg_write(addr_ptr: u64, offset: u64, width: u64, value: u64) -> Result<u64, SyscallError> {
+fn sys_pci_cfg_write(
+    addr_ptr: u64,
+    offset: u64,
+    width: u64,
+    value: u64,
+) -> Result<u64, SyscallError> {
     let dev_addr = read_pci_address(addr_ptr)?;
     let offset = u8::try_from(offset).map_err(|_| SyscallError::InvalidArgument)?;
     let width = u8::try_from(width).map_err(|_| SyscallError::InvalidArgument)?;

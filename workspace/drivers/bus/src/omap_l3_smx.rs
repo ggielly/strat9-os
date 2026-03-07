@@ -1,7 +1,6 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const L3_AGENT_CONTROL: usize = 0x020;
 const L3_AGENT_STATUS: usize = 0x028;
@@ -34,8 +33,7 @@ const L3_ERROR_CODES: &[&str] = &[
 ];
 
 const L3_APP_BASES: &[usize] = &[
-    0x1400, 0x1800, 0x1C00, 0x4400, 0x4000,
-    0x5800, 0x5400, 0x4C00, 0x5000, 0x3000,
+    0x1400, 0x1800, 0x1C00, 0x4400, 0x4000, 0x5800, 0x5400, 0x4C00, 0x5000, 0x3000,
 ];
 
 const L3_DEBUG_BASES: &[usize] = &[0x1400, 0x5C00, 0x1800];
@@ -102,7 +100,11 @@ impl OmapL3Smx {
 
     /// Reads flag status.
     pub fn read_flag_status(&self, irq_type: usize) -> u32 {
-        let offset = if irq_type == 0 { L3_SI_FLAG_STATUS_0 } else { L3_SI_FLAG_STATUS_1 };
+        let offset = if irq_type == 0 {
+            L3_SI_FLAG_STATUS_0
+        } else {
+            L3_SI_FLAG_STATUS_1
+        };
         self.regs.read32(offset)
     }
 
@@ -114,7 +116,11 @@ impl OmapL3Smx {
         }
 
         let source = status.trailing_zeros() as usize;
-        let bases = if irq_type == 0 { L3_APP_BASES } else { L3_DEBUG_BASES };
+        let bases = if irq_type == 0 {
+            L3_APP_BASES
+        } else {
+            L3_DEBUG_BASES
+        };
 
         if source >= bases.len() {
             return None;
@@ -130,10 +136,14 @@ impl OmapL3Smx {
 
 impl BusDriver for OmapL3Smx {
     /// Performs the name operation.
-    fn name(&self) -> &str { "omap-l3-smx" }
+    fn name(&self) -> &str {
+        "omap-l3-smx"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -150,13 +160,17 @@ impl BusDriver for OmapL3Smx {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

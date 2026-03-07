@@ -1,7 +1,6 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const BT1_AXI_WERRL: usize = 0x110;
 const BT1_AXI_WERRH: usize = 0x114;
@@ -67,16 +66,24 @@ impl AxiErrorInfo {
 
     /// Performs the error type str operation.
     pub fn error_type_str(&self) -> &'static str {
-        if self.is_no_slave { "no slave" } else { "slave protocol error" }
+        if self.is_no_slave {
+            "no slave"
+        } else {
+            "slave protocol error"
+        }
     }
 }
 
 impl BusDriver for Bt1Axi {
     /// Performs the name operation.
-    fn name(&self) -> &str { "bt1-axi" }
+    fn name(&self) -> &str {
+        "bt1-axi"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {

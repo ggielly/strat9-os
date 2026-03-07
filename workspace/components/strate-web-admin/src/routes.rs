@@ -1,9 +1,11 @@
 use alloc::string::String;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use picoserve::extract::FromRequestParts;
-use picoserve::request::RequestParts;
-use picoserve::response::Response;
-use picoserve::routing::{get, parse_path_segment, post};
+use picoserve::{
+    extract::FromRequestParts,
+    request::RequestParts,
+    response::Response,
+    routing::{get, parse_path_segment, post},
+};
 
 use crate::{net, sysinfo};
 const ADMIN_TOKEN_PATH: &str = "/initfs/web-admin.token";
@@ -114,9 +116,7 @@ impl<'r, State> FromRequestParts<'r, State> for AdminAuth {
         if ok {
             Ok(Self)
         } else {
-            Err(String::from(
-                r#"{"killed":false,"error":"unauthorized"}"#,
-            ))
+            Err(String::from(r#"{"killed":false,"error":"unauthorized"}"#))
         }
     }
 }
@@ -207,8 +207,8 @@ async fn api_graphics_info(
 }
 
 /// Implements api all.
-async fn api_all(
-) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
+async fn api_all() -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body>
+{
     json_ok(sysinfo::json_all())
 }
 
@@ -218,9 +218,7 @@ async fn api_kill(
     _auth: AdminAuth,
 ) -> Response<impl picoserve::response::HeadersIter, impl picoserve::response::Body> {
     if !allow_kill_now() {
-        return json_admin(String::from(
-            r#"{"killed":false,"error":"rate limit"}"#,
-        ));
+        return json_admin(String::from(r#"{"killed":false,"error":"rate limit"}"#));
     }
     json_admin(sysinfo::json_kill_result(pid))
 }

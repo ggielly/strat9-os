@@ -694,10 +694,7 @@ impl AhciController {
         let ghc = rd32(abar_virt, HBA_GHC);
         wr32(abar_virt, HBA_GHC, ghc | GHC_IE);
 
-        log::info!(
-            "AHCI: global interrupts enabled (IRQ line {})",
-            irq_line
-        );
+        log::info!("AHCI: global interrupts enabled (IRQ line {})", irq_line);
 
         Ok(AhciController { abar_virt, ports })
     }

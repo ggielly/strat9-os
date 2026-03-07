@@ -1,5 +1,5 @@
-use alloc::{string::String, vec::Vec};
 use crate::{BusChild, BusDriver, BusError, PowerState};
+use alloc::{string::String, vec::Vec};
 
 const TS_NBUS_DIRECTION_IN: bool = false;
 const TS_NBUS_DIRECTION_OUT: bool = true;
@@ -18,15 +18,21 @@ pub struct GpioPin {
 
 impl GpioPin {
     /// Sets high.
-    pub fn set_high(&self) { /* MMIO GPIO set */ }
+    pub fn set_high(&self) { /* MMIO GPIO set */
+    }
     /// Sets low.
-    pub fn set_low(&self) { /* MMIO GPIO clear */ }
+    pub fn set_low(&self) { /* MMIO GPIO clear */
+    }
     /// Returns value.
-    pub fn get_value(&self) -> bool { false }
+    pub fn get_value(&self) -> bool {
+        false
+    }
     /// Sets direction input.
-    pub fn set_direction_input(&self) { /* configure as input */ }
+    pub fn set_direction_input(&self) { /* configure as input */
+    }
     /// Sets direction output.
-    pub fn set_direction_output(&self) { /* configure as output */ }
+    pub fn set_direction_output(&self) { /* configure as output */
+    }
 }
 
 pub struct TsNbus {
@@ -123,16 +129,26 @@ impl TsNbus {
     /// Performs the reset bus operation.
     fn reset_bus(&self) {
         self.write_byte(0);
-        if let Some(ref c) = self.csn { c.set_low(); }
-        if let Some(ref s) = self.strobe { s.set_low(); }
-        if let Some(ref a) = self.ale { a.set_low(); }
+        if let Some(ref c) = self.csn {
+            c.set_low();
+        }
+        if let Some(ref s) = self.strobe {
+            s.set_low();
+        }
+        if let Some(ref a) = self.ale {
+            a.set_low();
+        }
     }
 
     /// Performs the bus read operation.
     pub fn bus_read(&self, address: u16) -> Result<u16, BusError> {
         self.set_data_direction(true);
-        if let Some(ref t) = self.txrx { t.set_low(); }
-        if let Some(ref a) = self.ale { a.set_high(); }
+        if let Some(ref t) = self.txrx {
+            t.set_low();
+        }
+        if let Some(ref a) = self.ale {
+            a.set_high();
+        }
 
         self.write_byte((address >> 8) as u8);
         self.start_transaction();
@@ -142,10 +158,14 @@ impl TsNbus {
         self.start_transaction();
         self.end_transaction();
 
-        if let Some(ref a) = self.ale { a.set_low(); }
+        if let Some(ref a) = self.ale {
+            a.set_low();
+        }
         self.set_data_direction(false);
 
-        if let Some(ref c) = self.csn { c.set_high(); }
+        if let Some(ref c) = self.csn {
+            c.set_high();
+        }
         self.start_transaction();
         self.wait_rdy()?;
         let msb = self.read_byte();
@@ -156,7 +176,9 @@ impl TsNbus {
         let lsb = self.read_byte();
         self.end_transaction();
 
-        if let Some(ref c) = self.csn { c.set_low(); }
+        if let Some(ref c) = self.csn {
+            c.set_low();
+        }
 
         Ok(((msb as u16) << 8) | (lsb as u16))
     }
@@ -164,8 +186,12 @@ impl TsNbus {
     /// Performs the bus write operation.
     pub fn bus_write(&self, address: u16, value: u16) -> Result<(), BusError> {
         self.set_data_direction(true);
-        if let Some(ref t) = self.txrx { t.set_high(); }
-        if let Some(ref a) = self.ale { a.set_high(); }
+        if let Some(ref t) = self.txrx {
+            t.set_high();
+        }
+        if let Some(ref a) = self.ale {
+            a.set_high();
+        }
 
         self.write_byte((address >> 8) as u8);
         self.start_transaction();
@@ -175,8 +201,12 @@ impl TsNbus {
         self.start_transaction();
         self.end_transaction();
 
-        if let Some(ref a) = self.ale { a.set_low(); }
-        if let Some(ref c) = self.csn { c.set_high(); }
+        if let Some(ref a) = self.ale {
+            a.set_low();
+        }
+        if let Some(ref c) = self.csn {
+            c.set_high();
+        }
 
         self.write_byte((value >> 8) as u8);
         self.start_transaction();
@@ -188,7 +218,9 @@ impl TsNbus {
         self.wait_rdy()?;
         self.end_transaction();
 
-        if let Some(ref c) = self.csn { c.set_low(); }
+        if let Some(ref c) = self.csn {
+            c.set_low();
+        }
 
         Ok(())
     }
@@ -201,10 +233,14 @@ impl TsNbus {
 
 impl BusDriver for TsNbus {
     /// Performs the name operation.
-    fn name(&self) -> &str { "ts-nbus" }
+    fn name(&self) -> &str {
+        "ts-nbus"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, _base: usize) -> Result<(), BusError> {

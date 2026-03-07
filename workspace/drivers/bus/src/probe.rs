@@ -1,5 +1,5 @@
-use alloc::vec;
 use crate::mmio::{MmioRegion, memory_barrier};
+use alloc::vec;
 
 const REGION_SIZE: usize = 4096;
 const REGION_WORDS: usize = REGION_SIZE / core::mem::size_of::<u64>();
@@ -17,15 +17,26 @@ pub struct ProbeResult {
 
 impl ProbeResult {
     /// Creates a new instance.
-    fn new() -> Self { Self { passed: 0, failed: 0 } }
+    fn new() -> Self {
+        Self {
+            passed: 0,
+            failed: 0,
+        }
+    }
 
     /// Performs the check operation.
     fn check(&mut self, ok: bool) {
-        if ok { self.passed += 1; } else { self.failed += 1; }
+        if ok {
+            self.passed += 1;
+        } else {
+            self.failed += 1;
+        }
     }
 
     /// Performs the all passed operation.
-    pub fn all_passed(&self) -> bool { self.failed == 0 && self.passed > 0 }
+    pub fn all_passed(&self) -> bool {
+        self.failed == 0 && self.passed > 0
+    }
 }
 
 /// Performs the zero buf operation.
@@ -180,12 +191,16 @@ fn probe_read_write_32(r: &mut ProbeResult, base: usize) {
 
     for i in 0..32u32 {
         let off = (i as usize) * 4;
-        if off + 4 > REGION_SIZE { break; }
+        if off + 4 > REGION_SIZE {
+            break;
+        }
         reg.write32(off, i.wrapping_mul(0x11111111));
     }
     for i in 0..32u32 {
         let off = (i as usize) * 4;
-        if off + 4 > REGION_SIZE { break; }
+        if off + 4 > REGION_SIZE {
+            break;
+        }
         r.check(reg.read32(off) == i.wrapping_mul(0x11111111));
     }
 }
@@ -444,5 +459,4 @@ fn probe_reinit(r: &mut ProbeResult, base: usize) {
 
     reg.write32(0, 0x99887766);
     r.check(reg.read32(0) == 0x99887766);
-
 }

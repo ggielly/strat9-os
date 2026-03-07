@@ -53,8 +53,12 @@ pub fn sys_poll(fds_ptr: u64, nfds: u64, _timeout_ms: u64) -> Result<u64, Syscal
             match fd_table.get(fd as u32) {
                 Ok(_) => {
                     let mut r = 0i16;
-                    if events & POLLIN != 0 { r |= POLLIN; }
-                    if events & POLLOUT != 0 { r |= POLLOUT; }
+                    if events & POLLIN != 0 {
+                        r |= POLLIN;
+                    }
+                    if events & POLLOUT != 0 {
+                        r |= POLLOUT;
+                    }
                     r
                 }
                 Err(_) => POLLNVAL,

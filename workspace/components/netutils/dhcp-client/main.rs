@@ -13,10 +13,7 @@
 
 extern crate alloc;
 
-use core::{
-    alloc::Layout,
-    panic::PanicInfo,
-};
+use core::{alloc::Layout, panic::PanicInfo};
 use strat9_syscall::{call, data::TimeSpec, number};
 
 // ---------------------------------------------------------------------------
@@ -121,9 +118,7 @@ fn cidr_to_netmask(prefix_str: &str) -> Option<[u8; 20]> {
         if b < b'0' || b > b'9' {
             return None;
         }
-        prefix = prefix
-            .checked_mul(10)?
-            .checked_add((b - b'0') as u16)?;
+        prefix = prefix.checked_mul(10)?.checked_add((b - b'0') as u16)?;
     }
     if prefix > 32 {
         return None;
@@ -227,23 +222,33 @@ pub extern "C" fn _start() -> ! {
         log("\n  Netmask : ");
         if let Ok(s) = core::str::from_utf8(&netmask) {
             let s = s.trim_end_matches('\0');
-            if !s.is_empty() { log(s); } else { log("(none)"); }
+            if !s.is_empty() {
+                log(s);
+            } else {
+                log("(none)");
+            }
         }
         log("\n  Gateway : ");
         if gw_n > 0 {
-            if let Ok(s) = core::str::from_utf8(&gw_buf[..gw_n]) { log(s.trim()); }
+            if let Ok(s) = core::str::from_utf8(&gw_buf[..gw_n]) {
+                log(s.trim());
+            }
         } else {
             log("(none)");
         }
         log("\n  Route   : ");
         if route_n > 0 {
-            if let Ok(s) = core::str::from_utf8(&route_buf[..route_n]) { log(s.trim()); }
+            if let Ok(s) = core::str::from_utf8(&route_buf[..route_n]) {
+                log(s.trim());
+            }
         } else {
             log("(none)");
         }
         log("\n  DNS     : ");
         if dns_n > 0 {
-            if let Ok(s) = core::str::from_utf8(&dns_buf[..dns_n]) { log(s.trim()); }
+            if let Ok(s) = core::str::from_utf8(&dns_buf[..dns_n]) {
+                log(s.trim());
+            }
         } else {
             log("(none)");
         }

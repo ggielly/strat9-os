@@ -1,10 +1,7 @@
 // Legacy ATA/IDE Driver (PIOS and DMA)
 // Reference: ATA/ATAPI-7 Specification
 
-use alloc::string::String;
-use alloc::format;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
@@ -143,7 +140,11 @@ impl AtaChannel {
         let model = Self::decode_identify_string(&buffer, 27, 54);
         let capacity = (buffer[60] as u64) | ((buffer[61] as u64) << 16);
 
-        Some(AtaDriveInfo { model, serial, capacity })
+        Some(AtaDriveInfo {
+            model,
+            serial,
+            capacity,
+        })
     }
 
     /// Performs the decode identify string operation.
@@ -155,8 +156,12 @@ impl AtaChannel {
                 let c = buffer[i];
                 let hi = (c >> 8) as u8;
                 let lo = (c & 0xFF) as u8;
-                if hi != 0 { s.push(hi as char); }
-                if lo != 0 { s.push(lo as char); }
+                if hi != 0 {
+                    s.push(hi as char);
+                }
+                if lo != 0 {
+                    s.push(lo as char);
+                }
             }
         }
         s
@@ -241,8 +246,21 @@ impl AtaDrive {
     /// Creates a new instance.
     pub fn new(channel: AtaChannel, device: u8) -> Option<Self> {
         let info = channel.identify(device)?;
-        let name = format!("ata{}_{}", channel.bus, if device == ATA_DEVICE_MASTER { "master" } else { "slave" });
-        Some(Self { channel, device, info, name })
+        let name = format!(
+            "ata{}_{}",
+            channel.bus,
+            if device == ATA_DEVICE_MASTER {
+                "master"
+            } else {
+                "slave"
+            }
+        );
+        Some(Self {
+            channel,
+            device,
+            info,
+            name,
+        })
     }
 
     /// Performs the info operation.
@@ -254,12 +272,16 @@ impl AtaDrive {
 impl BlockDevice for AtaDrive {
     /// Reads sector.
     fn read_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-        self.channel.read_sector_pio(self.device, sector, buf).map_err(|_| BlockError::IoError)
+        self.channel
+            .read_sector_pio(self.device, sector, buf)
+            .map_err(|_| BlockError::IoError)
     }
 
     /// Writes sector.
     fn write_sector(&self, sector: u64, buf: &[u8]) -> Result<(), BlockError> {
-        self.channel.write_sector_pio(self.device, sector, buf).map_err(|_| BlockError::IoError)
+        self.channel
+            .write_sector_pio(self.device, sector, buf)
+            .map_err(|_| BlockError::IoError)
     }
 
     /// Performs the sector count operation.
@@ -286,7 +308,11 @@ pub fn init() {
                 log::info!(
                     "ATA: Found drive on bus{} device{}: {} ({} sectors)",
                     channel.bus,
-                    if device == ATA_DEVICE_MASTER { "master" } else { "slave" },
+                    if device == ATA_DEVICE_MASTER {
+                        "master"
+                    } else {
+                        "slave"
+                    },
                     drive.info().model,
                     drive.info().capacity
                 );

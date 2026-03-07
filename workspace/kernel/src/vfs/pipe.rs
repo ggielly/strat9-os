@@ -4,7 +4,10 @@
 //! The read end blocks when empty; the write end returns EPIPE when
 //! the read end is closed.
 
-use crate::{sync::{SpinLock, waitqueue::WaitQueue}, syscall::error::SyscallError};
+use crate::{
+    sync::{waitqueue::WaitQueue, SpinLock},
+    syscall::error::SyscallError,
+};
 use alloc::sync::Arc;
 
 const PIPE_BUF_SIZE: usize = 4096;
@@ -200,7 +203,9 @@ impl Pipe {
 // Pipe as a VFS Scheme
 // ============================================================================
 
-use super::scheme::{finalize_pseudo_stat, DirEntry, FileStat, OpenFlags, OpenResult, Scheme, DEV_PIPEFS};
+use super::scheme::{
+    finalize_pseudo_stat, DirEntry, FileStat, OpenFlags, OpenResult, Scheme, DEV_PIPEFS,
+};
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -293,15 +298,19 @@ impl Scheme for PipeScheme {
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         let pipe = self.get_pipe(file_id)?;
         let inner = pipe.inner.lock();
-        Ok(finalize_pseudo_stat(FileStat {
-            st_ino: file_id,
-            st_mode: 0o010600, // S_IFIFO | rw-------
-            st_nlink: 1,
-            st_size: inner.len as u64,
-            st_blksize: PIPE_BUF_SIZE as u64,
-            st_blocks: 0,
-            ..FileStat::zeroed()
-        }, DEV_PIPEFS, 0))
+        Ok(finalize_pseudo_stat(
+            FileStat {
+                st_ino: file_id,
+                st_mode: 0o010600, // S_IFIFO | rw-------
+                st_nlink: 1,
+                st_size: inner.len as u64,
+                st_blksize: PIPE_BUF_SIZE as u64,
+                st_blocks: 0,
+                ..FileStat::zeroed()
+            },
+            DEV_PIPEFS,
+            0,
+        ))
     }
 
     /// Performs the readdir operation.

@@ -233,12 +233,8 @@ static SEM_TEST_RESULT: SpinLock<Option<bool>> = SpinLock::new(None);
 
 /// Creates ipc 04 05 test task.
 pub fn create_ipc_04_05_test_task() {
-    let task = Task::new_kernel_task(
-        ipc_04_05_main,
-        "ipc-04-05-test",
-        TaskPriority::Normal,
-    )
-    .expect("Failed to create ipc-04-05-test task");
+    let task = Task::new_kernel_task(ipc_04_05_main, "ipc-04-05-test", TaskPriority::Normal)
+        .expect("Failed to create ipc-04-05-test task");
     add_task(task);
 }
 
@@ -273,7 +269,9 @@ extern "C" fn ipc_04_05_main() -> ! {
         crate::process::scheduler::exit_current_task(1);
     }
 
-    if ipc::shared_ring::destroy_ring(ring_id).is_err() || ipc::shared_ring::get_ring(ring_id).is_some() {
+    if ipc::shared_ring::destroy_ring(ring_id).is_err()
+        || ipc::shared_ring::get_ring(ring_id).is_some()
+    {
         crate::serial_println!("[ipc-04-05] FAIL ring destroy");
         crate::process::scheduler::exit_current_task(1);
     }
@@ -293,7 +291,10 @@ extern "C" fn ipc_04_05_main() -> ! {
 
     let sem = ipc::semaphore::get_semaphore(sem_id).expect("sem should exist");
 
-    if !matches!(sem.try_wait(), Err(ipc::semaphore::SemaphoreError::WouldBlock)) {
+    if !matches!(
+        sem.try_wait(),
+        Err(ipc::semaphore::SemaphoreError::WouldBlock)
+    ) {
         crate::serial_println!("[ipc-04-05] FAIL sem try_wait should block");
         let _ = ipc::semaphore::destroy_semaphore(sem_id);
         crate::process::scheduler::exit_current_task(1);

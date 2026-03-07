@@ -19,8 +19,8 @@ pub mod hpet;
 pub mod madt;
 pub mod mcfg;
 pub mod rsdt;
-pub mod slit;
 pub mod sdt;
+pub mod slit;
 pub mod waet;
 
 use crate::{memory, sync::SpinLock};

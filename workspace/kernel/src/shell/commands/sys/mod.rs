@@ -5,9 +5,9 @@ mod health;
 mod reboot;
 mod scheduler;
 mod shutdown;
+mod silo_attach;
 #[path = "silo.rs"]
 mod silo_cmd;
-mod silo_attach;
 mod silo_limit;
 mod silos;
 mod strate;
@@ -18,11 +18,11 @@ mod test_syscalls;
 mod trace;
 mod version;
 mod wasm_run;
-pub use scheduler::cmd_scheduler;
 pub use clear::cmd_clear;
 pub use cpuinfo::cmd_cpuinfo;
 pub use health::cmd_health;
 pub use reboot::cmd_reboot;
+pub use scheduler::cmd_scheduler;
 pub use shutdown::cmd_shutdown;
 pub use silo_cmd::cmd_silo;
 pub use silos::cmd_silos;
@@ -46,8 +46,7 @@ use crate::{
         output::{clear_screen, format_bytes},
         ShellError,
     },
-    shell_println, silo,
-    vfs,
+    shell_println, silo, vfs,
 };
 use alloc::{string::String, vec::Vec};
 use ratatui::{
@@ -458,7 +457,11 @@ fn render_silo_table_ratatui(
                 .split(area);
 
             let title = Paragraph::new("Silo List")
-                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .block(Block::default().borders(Borders::BOTTOM).title("Strat9"));
             f.render_widget(title, vertical[0]);
 
@@ -484,7 +487,11 @@ fn render_silo_table_ratatui(
                         Cell::from("Label"),
                         Cell::from("Strates"),
                     ])
-                    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    .style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 )
                 .block(
                     Block::default()
@@ -511,7 +518,11 @@ fn render_silo_table_ratatui(
                         Cell::from("Mode"),
                         Cell::from("Strates"),
                     ])
-                    .style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    .style(
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 )
                 .block(
                     Block::default()
@@ -589,7 +600,11 @@ fn render_strate_table_ratatui(
                 .split(area);
 
             let title = Paragraph::new("Strate List")
-                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .block(Block::default().borders(Borders::BOTTOM).title("Strat9"));
             f.render_widget(title, vertical[0]);
 
@@ -605,7 +620,11 @@ fn render_strate_table_ratatui(
                         Cell::from("BelongsTo"),
                         Cell::from("Status"),
                     ])
-                    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    .style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 )
                 .block(
                     Block::default()
@@ -619,8 +638,11 @@ fn render_strate_table_ratatui(
             let config_widths = [Constraint::Length(22), Constraint::Min(24)];
             let config_table = Table::new(config_table_rows, config_widths)
                 .header(
-                    Row::new(alloc::vec![Cell::from("Strate"), Cell::from("BelongsTo")])
-                        .style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Row::new(alloc::vec![Cell::from("Strate"), Cell::from("BelongsTo")]).style(
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 )
                 .block(
                     Block::default()
@@ -666,7 +688,10 @@ fn write_silo_toml_to_initfs(text: &str) -> Result<(), ShellError> {
 
 /// Performs the print strate state for sid operation.
 fn print_strate_state_for_sid(sid: u32) {
-    if let Some(s) = silo::list_silos_snapshot().into_iter().find(|s| s.id == sid) {
+    if let Some(s) = silo::list_silos_snapshot()
+        .into_iter()
+        .find(|s| s.id == sid)
+    {
         shell_println!("state: {:?}", s.state);
     } else {
         shell_println!("state: <unknown>");
@@ -729,9 +754,7 @@ pub(super) fn cmd_silo_impl(args: &[String]) -> Result<(), ShellError> {
         "attach" => cmd_silo_attach(args),
         "top" => cmd_silo_top(args),
         "logs" => cmd_silo_logs(args),
-        "spawn" | "start" | "stop" | "kill" | "destroy" | "rename" | "config" => {
-            cmd_strate(args)
-        }
+        "spawn" | "start" | "stop" | "kill" | "destroy" | "rename" | "config" => cmd_strate(args),
         _ => {
             print_silo_usage();
             Err(ShellError::InvalidArguments)
@@ -789,7 +812,6 @@ pub(super) fn cmd_reboot_impl(_args: &[String]) -> Result<(), ShellError> {
         }
     }
 }
-
 
 /// trace mem on|off|dump [n]|clear|serial on|off|mask
 pub(super) fn cmd_trace_impl(args: &[String]) -> Result<(), ShellError> {
@@ -1265,7 +1287,9 @@ fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: strate spawn <path|type> [--label <l>] [--dev <p>] [--type elf|wasm]");
+        shell_println!(
+            "Usage: strate spawn <path|type> [--label <l>] [--dev <p>] [--type elf|wasm]"
+        );
         return Err(ShellError::InvalidArguments);
     }
     let target = args[1].as_str();
@@ -1277,17 +1301,23 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
     while i < args.len() {
         match args[i].as_str() {
             "--label" => {
-                if i + 1 >= args.len() { return Err(ShellError::InvalidArguments); }
+                if i + 1 >= args.len() {
+                    return Err(ShellError::InvalidArguments);
+                }
                 label = Some(args[i + 1].as_str());
                 i += 2;
             }
             "--dev" => {
-                if i + 1 >= args.len() { return Err(ShellError::InvalidArguments); }
+                if i + 1 >= args.len() {
+                    return Err(ShellError::InvalidArguments);
+                }
                 dev = Some(args[i + 1].as_str());
                 i += 2;
             }
             "--type" => {
-                if i + 1 >= args.len() { return Err(ShellError::InvalidArguments); }
+                if i + 1 >= args.len() {
+                    return Err(ShellError::InvalidArguments);
+                }
                 spawn_type = Some(args[i + 1].as_str());
                 i += 2;
             }
@@ -1314,8 +1344,10 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
         return cmd_wasm_run(&[String::from(target)]);
     }
 
-    let fd = vfs::open(&module_path, vfs::OpenFlags::READ)
-        .map_err(|_| { shell_println!("strate spawn: cannot open '{}'", module_path); ShellError::ExecutionFailed })?;
+    let fd = vfs::open(&module_path, vfs::OpenFlags::READ).map_err(|_| {
+        shell_println!("strate spawn: cannot open '{}'", module_path);
+        ShellError::ExecutionFailed
+    })?;
     let data = match vfs::read_all(fd) {
         Ok(d) => d,
         Err(_) => {
@@ -1328,7 +1360,12 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
 
     match silo::kernel_spawn_strate(&data, label, dev) {
         Ok(sid) => {
-            shell_println!("strate spawn: started (sid={}, path={}, label={})", sid, module_path, label.unwrap_or("-"));
+            shell_println!(
+                "strate spawn: started (sid={}, path={}, label={})",
+                sid,
+                module_path,
+                label.unwrap_or("-")
+            );
             Ok(())
         }
         Err(e) => {
@@ -1492,7 +1529,11 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
         silos[idx].sid = s;
     }
 
-    if let Some(st) = silos[idx].strates.iter_mut().find(|st| st.name == strate_name) {
+    if let Some(st) = silos[idx]
+        .strates
+        .iter_mut()
+        .find(|st| st.name == strate_name)
+    {
         st.binary = String::from(binary);
         st.stype = stype;
         st.target = target;
@@ -1533,7 +1574,8 @@ fn cmd_strate_config_remove(args: &[String]) -> Result<(), ShellError> {
     let Some(strate_idx) = silos[silo_idx]
         .strates
         .iter()
-        .position(|st| st.name == strate_name) else {
+        .position(|st| st.name == strate_name)
+    else {
         shell_println!(
             "strate config remove: strate '{}' not found in silo '{}'",
             strate_name,
@@ -1713,7 +1755,14 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     shell_println!("Mode:       {:03o}", b.mode);
     shell_println!("Sandboxed:  {}", detail.sandboxed);
     shell_println!("Tasks:      {}", b.task_count);
-    shell_println!("Memory:     {} {} / {} {} / {}", used_v, used_u, min_v, min_u, mem_max);
+    shell_println!(
+        "Memory:     {} {} / {} {} / {}",
+        used_v,
+        used_u,
+        min_v,
+        min_u,
+        mem_max
+    );
     shell_println!("CPU shares: {}", detail.cpu_shares);
     shell_println!("CPU mask:   {:#x}", detail.cpu_affinity_mask);
     shell_println!("CPU req:    {:#x}", detail.cpu_features_required);
@@ -1740,7 +1789,14 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     );
     shell_println!("GFX sess:   {}", detail.graphics_max_sessions);
     shell_println!("GFX ttl:    {} sec", detail.graphics_session_ttl_sec);
-    shell_println!("Max tasks:  {}", if detail.max_tasks == 0 { String::from("unlimited") } else { alloc::format!("{}", detail.max_tasks) });
+    shell_println!(
+        "Max tasks:  {}",
+        if detail.max_tasks == 0 {
+            String::from("unlimited")
+        } else {
+            alloc::format!("{}", detail.max_tasks)
+        }
+    );
     shell_println!("Caps:       {} granted", detail.granted_caps_count);
 
     if !detail.task_ids.is_empty() {
@@ -1765,8 +1821,14 @@ fn cmd_silo_suspend(args: &[String]) -> Result<(), ShellError> {
         return Err(ShellError::InvalidArguments);
     }
     match silo::kernel_suspend_silo(args[1].as_str()) {
-        Ok(sid) => { shell_println!("silo suspend: ok (sid={})", sid); Ok(()) }
-        Err(e) => { shell_println!("silo suspend failed: {:?}", e); Err(ShellError::ExecutionFailed) }
+        Ok(sid) => {
+            shell_println!("silo suspend: ok (sid={})", sid);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("silo suspend failed: {:?}", e);
+            Err(ShellError::ExecutionFailed)
+        }
     }
 }
 
@@ -1776,8 +1838,14 @@ fn cmd_silo_resume(args: &[String]) -> Result<(), ShellError> {
         return Err(ShellError::InvalidArguments);
     }
     match silo::kernel_resume_silo(args[1].as_str()) {
-        Ok(sid) => { shell_println!("silo resume: ok (sid={})", sid); Ok(()) }
-        Err(e) => { shell_println!("silo resume failed: {:?}", e); Err(ShellError::ExecutionFailed) }
+        Ok(sid) => {
+            shell_println!("silo resume: ok (sid={})", sid);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("silo resume failed: {:?}", e);
+            Err(ShellError::ExecutionFailed)
+        }
     }
 }
 
@@ -1807,11 +1875,24 @@ fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
         return Ok(());
     }
 
-    shell_println!("{:<8} {:<10} {:<12} {:<12} {}", "SID", "Kind", "Data0", "Data1", "Tick");
+    shell_println!(
+        "{:<8} {:<10} {:<12} {:<12} {}",
+        "SID",
+        "Kind",
+        "Data0",
+        "Data1",
+        "Tick"
+    );
     shell_println!("────────────────────────────────────────────────────────");
     for ev in &events {
-        shell_println!("{:<8} {:<10} {:#010x}   {:#010x}   {}",
-            ev.silo_id, event_kind_str(ev.kind), ev.data0, ev.data1, ev.tick);
+        shell_println!(
+            "{:<8} {:<10} {:#010x}   {:#010x}   {}",
+            ev.silo_id,
+            event_kind_str(ev.kind),
+            ev.data0,
+            ev.data1,
+            ev.tick
+        );
     }
     Ok(())
 }
@@ -1847,7 +1928,12 @@ fn cmd_silo_unveil(args: &[String]) -> Result<(), ShellError> {
     let rights = args[3].as_str();
     match silo::kernel_unveil_silo(selector, path, rights) {
         Ok(sid) => {
-            shell_println!("silo unveil: ok (sid={}, path={}, rights={})", sid, path, rights);
+            shell_println!(
+                "silo unveil: ok (sid={}, path={}, rights={})",
+                sid,
+                path,
+                rights
+            );
             Ok(())
         }
         Err(e) => {
@@ -1863,11 +1949,16 @@ fn cmd_silo_sandbox(args: &[String]) -> Result<(), ShellError> {
         return Err(ShellError::InvalidArguments);
     }
     match silo::kernel_sandbox_silo(args[1].as_str()) {
-        Ok(sid) => { shell_println!("silo sandbox: ok (sid={})", sid); Ok(()) }
-        Err(e) => { shell_println!("silo sandbox failed: {:?}", e); Err(ShellError::ExecutionFailed) }
+        Ok(sid) => {
+            shell_println!("silo sandbox: ok (sid={})", sid);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("silo sandbox failed: {:?}", e);
+            Err(ShellError::ExecutionFailed)
+        }
     }
 }
-
 
 fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
     let mut silos = silo::list_silos_snapshot();
@@ -1876,22 +1967,47 @@ fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
     if sort_by_mem {
         silos.sort_by(|a, b| b.mem_usage_bytes.cmp(&a.mem_usage_bytes));
     } else {
-        silos.sort_by(|a, b| b.task_count.cmp(&a.task_count).then(b.mem_usage_bytes.cmp(&a.mem_usage_bytes)));
+        silos.sort_by(|a, b| {
+            b.task_count
+                .cmp(&a.task_count)
+                .then(b.mem_usage_bytes.cmp(&a.mem_usage_bytes))
+        });
     }
 
     let total_tasks: usize = silos.iter().map(|s| s.task_count).sum();
     let total_mem: u64 = silos.iter().map(|s| s.mem_usage_bytes).sum();
     let (tm_v, tm_u) = format_bytes(total_mem as usize);
 
-    shell_println!("Silos: {}   Tasks: {}   Memory: {} {}", silos.len(), total_tasks, tm_v, tm_u);
+    shell_println!(
+        "Silos: {}   Tasks: {}   Memory: {} {}",
+        silos.len(),
+        total_tasks,
+        tm_v,
+        tm_u
+    );
     shell_println!("");
-    shell_println!("{:<6} {:<14} {:<10} {:<7} {:<16} {:<6}", "SID", "Name", "State", "Tasks", "Memory", "Mode");
+    shell_println!(
+        "{:<6} {:<14} {:<10} {:<7} {:<16} {:<6}",
+        "SID",
+        "Name",
+        "State",
+        "Tasks",
+        "Memory",
+        "Mode"
+    );
     shell_println!("────────────────────────────────────────────────────────────────");
     for s in &silos {
         let (mv, mu) = format_bytes(s.mem_usage_bytes as usize);
         let mem_str = alloc::format!("{} {}", mv, mu);
-        shell_println!("{:<6} {:<14} {:<10} {:<7} {:<16} {:03o}",
-            s.id, s.name, alloc::format!("{:?}", s.state), s.task_count, mem_str, s.mode);
+        shell_println!(
+            "{:<6} {:<14} {:<10} {:<7} {:<16} {:03o}",
+            s.id,
+            s.name,
+            alloc::format!("{:?}", s.state),
+            s.task_count,
+            mem_str,
+            s.mode
+        );
     }
     Ok(())
 }
@@ -1912,7 +2028,13 @@ fn cmd_silo_logs(args: &[String]) -> Result<(), ShellError> {
     for ev in &events {
         let tick_s = ev.tick / 100;
         let tick_cs = ev.tick % 100;
-        shell_println!("[{:>6}.{:02}] sid={} {}", tick_s, tick_cs, ev.silo_id, event_kind_str(ev.kind));
+        shell_println!(
+            "[{:>6}.{:02}] sid={} {}",
+            tick_s,
+            tick_cs,
+            ev.silo_id,
+            event_kind_str(ev.kind)
+        );
     }
     Ok(())
 }
@@ -2022,7 +2144,13 @@ pub(super) fn cmd_health_impl(_args: &[String]) -> Result<(), ShellError> {
         shell_println!("  (none)");
     } else {
         for info in &silo_list {
-            shell_println!("  SID={} name={} state={:?} tasks={}", info.id, info.name, info.state, info.task_count);
+            shell_println!(
+                "  SID={} name={} state={:?} tasks={}",
+                info.id,
+                info.name,
+                info.state,
+                info.task_count
+            );
         }
     }
 

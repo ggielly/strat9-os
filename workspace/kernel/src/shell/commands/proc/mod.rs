@@ -21,7 +21,11 @@ pub fn cmd_kill(args: &[String]) -> Result<(), ShellError> {
     };
 
     if crate::process::kill_task(task_id) {
-        shell_println!("kill: terminated pid {} (tid={})", pid_val, task_id.as_u64());
+        shell_println!(
+            "kill: terminated pid {} (tid={})",
+            pid_val,
+            task_id.as_u64()
+        );
         Ok(())
     } else {
         shell_println!("kill: failed to terminate pid {}", pid_val);
