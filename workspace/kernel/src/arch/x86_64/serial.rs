@@ -169,6 +169,18 @@ pub fn _print(args: fmt::Arguments) {
     }
 }
 
+/// Print to serial port bypassing the shared mutex.
+#[doc(hidden)]
+pub fn _print_force(args: fmt::Arguments) {
+    use core::fmt::Write;
+
+    // SAFETY: This is debug-only style output intended for deadlock forensics.
+    // It may interleave with normal serial output, but it must never block on
+    // the SERIAL1 mutex.
+    let mut port = unsafe { SerialPort::new(0x3F8) };
+    let _ = port.write_fmt(args);
+}
+
 /// Print to serial port
 #[macro_export]
 macro_rules! serial_print {
@@ -182,4 +194,11 @@ macro_rules! serial_print {
 macro_rules! serial_println {
     () => ($crate::serial_print!("\n"));
     ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
+}
+
+/// Print to serial port with newline, bypassing the shared mutex.
+#[macro_export]
+macro_rules! serial_force_println {
+    () => ($crate::arch::x86_64::serial::_print_force(format_args!("\n")));
+    ($($arg:tt)*) => ($crate::arch::x86_64::serial::_print_force(format_args!("{}\n", format_args!($($arg)*))));
 }

@@ -65,9 +65,24 @@ impl Scheduler {
         key: Pid,
         task_id: TaskId,
     ) {
+        crate::serial_println!(
+            "[trace][sched] member_add enter key={} tid={}",
+            key,
+            task_id.as_u64()
+        );
         let members = map.entry(key).or_default();
+        crate::serial_println!(
+            "[trace][sched] member_add entry key={} len={}",
+            key,
+            members.len()
+        );
         if !members.iter().any(|id| *id == task_id) {
             members.push(task_id);
+            crate::serial_println!(
+                "[trace][sched] member_add pushed key={} tid={}",
+                key,
+                task_id.as_u64()
+            );
         }
     }
 
@@ -89,25 +104,33 @@ impl Scheduler {
 
     /// Performs the register identity locked operation.
     pub(crate) fn register_identity_locked(&mut self, task: &Arc<Task>) {
-        if (self as *mut Self).is_null() {
-            crate::serial_println!(
-                "[sched] WARN: register_identity_locked called on NULL scheduler!"
-            );
-            return;
-        }
-        let task_ptr = Arc::as_ptr(task);
-        if task_ptr.is_null() {
-            crate::serial_println!("[sched] WARN: register_identity_locked called with NULL task!");
-            return;
-        }
         let task_id = task.id;
         let pid = task.pid;
         let pgid = task.pgid.load(Ordering::Relaxed);
         let sid = task.sid.load(Ordering::Relaxed);
+        crate::serial_println!(
+            "[trace][sched] register_identity enter tid={} pid={} pgid={} sid={}",
+            task_id.as_u64(),
+            pid,
+            pgid,
+            sid
+        );
         self.pid_to_pgid.insert(pid, pgid);
+        crate::serial_println!(
+            "[trace][sched] register_identity pid_to_pgid inserted pid={}",
+            pid
+        );
         self.pid_to_sid.insert(pid, sid);
+        crate::serial_println!(
+            "[trace][sched] register_identity pid_to_sid inserted pid={}",
+            pid
+        );
         Self::member_add(&mut self.pgid_members, pgid, task_id);
         Self::member_add(&mut self.sid_members, sid, task_id);
+        crate::serial_println!(
+            "[trace][sched] register_identity done tid={}",
+            task_id.as_u64()
+        );
     }
 
     /// Performs the unregister identity locked operation.
@@ -139,25 +162,65 @@ impl Scheduler {
 
     /// Performs the add task on cpu operation.
     fn add_task_on_cpu(&mut self, task: Arc<Task>, cpu_index: usize) {
-        if (self as *mut Self).is_null() {
-            crate::serial_println!("[sched] ERROR: add_task_on_cpu called on NULL scheduler!");
-            return;
-        }
         let task_id = task.id;
+        crate::serial_println!(
+            "[trace][sched] add_task_on_cpu enter tid={} cpu={}",
+            task_id.as_u64(),
+            cpu_index
+        );
         // SAFETY: We have exclusive access via the scheduler lock
         unsafe {
             *task.state.get() = TaskState::Ready;
         }
+        crate::serial_println!(
+            "[trace][sched] add_task_on_cpu state ready tid={}",
+            task_id.as_u64()
+        );
 
-        self.all_tasks.insert(task_id, task.clone());
+        crate::serial_println!(
+            "[trace][sched] add_task_on_cpu before clone tid={} all_tasks_len={}",
+            task_id.as_u64(),
+            self.all_tasks.len()
+        );
+        let task_clone = task.clone();
+        crate::serial_println!(
+            "[trace][sched] add_task_on_cpu before all_tasks.insert tid={}",
+            task_id.as_u64()
+        );
+        self.all_tasks.insert(task_id, task_clone);
+        crate::serial_println!(
+            "[trace][sched] add_task_on_cpu all_tasks inserted tid={}",
+            task_id.as_u64()
+        );
         self.task_cpu.insert(task_id, cpu_index);
+        crate::serial_println!(
+            "[trace][sched] add_task_on_cpu task_cpu inserted tid={}",
+            task_id.as_u64()
+        );
         self.pid_to_task.insert(task.pid, task_id);
+        crate::serial_println!(
+            "[trace][sched] add_task_on_cpu pid map inserted tid={}",
+            task_id.as_u64()
+        );
         self.tid_to_task.insert(task.tid, task_id);
+        crate::serial_println!(
+            "[trace][sched] add_task_on_cpu tid map inserted tid={}",
+            task_id.as_u64()
+        );
         self.register_identity_locked(&task);
+        crate::serial_println!(
+            "[trace][sched] add_task_on_cpu identity registered tid={}",
+            task_id.as_u64()
+        );
         if let Some(cpu) = self.cpus.get_mut(cpu_index) {
             let class = self.class_table.class_for_task(&task);
             cpu.class_rqs.enqueue(class, task);
             cpu.need_resched = true;
+            crate::serial_println!(
+                "[trace][sched] add_task_on_cpu enqueued tid={} cpu={}",
+                task_id.as_u64(),
+                cpu_index
+            );
         }
         sched_trace(format_args!(
             "enqueue task={} cpu={}",
@@ -582,6 +645,11 @@ impl Scheduler {
                 best_load = load;
             }
         }
+        crate::serial_println!(
+            "[trace][sched] select_cpu_for_task best={} load={}",
+            best,
+            best_load
+        );
         best
     }
 

@@ -679,6 +679,11 @@ impl BuddyAllocator {
 
 static BUDDY_ALLOCATOR: SpinLock<Option<BuddyAllocator>> = SpinLock::new(None);
 
+/// Returns the global buddy lock address for deadlock tracing.
+pub fn debug_buddy_lock_addr() -> usize {
+    &BUDDY_ALLOCATOR as *const _ as usize
+}
+
 /// Per-CPU flag to detect recursive allocations (deadlocks from logs/interrupts)
 static ALLOC_IN_PROGRESS: [core::sync::atomic::AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
@@ -843,6 +848,9 @@ fn drain_local_caches_to_global(max_pages: usize, global: &mut OnDemandGlobalLoc
             local_cached_dec_phys(phys);
         }
         global.free_phys_batch(&batch, popped);
+
+        // Keep lock acquisition on-demand during cross-CPU draining.
+        global.unlock();
         drained += popped;
     }
 
@@ -869,7 +877,10 @@ pub fn get_allocator() -> &'static SpinLock<Option<BuddyAllocator>> {
     &BUDDY_ALLOCATOR
 }
 
-fn refill_local_cache(cpu_idx: usize, global: &mut OnDemandGlobalLock) -> Result<PhysFrame, AllocError> {
+fn refill_local_cache(
+    cpu_idx: usize,
+    global: &mut OnDemandGlobalLock,
+) -> Result<PhysFrame, AllocError> {
     // Critical path: refill in batches from the global allocator to amortize lock contention.
     let (base, order) = match global.alloc(LOCAL_CACHE_REFILL_ORDER) {
         Ok(frame) => (frame, LOCAL_CACHE_REFILL_ORDER),
@@ -996,6 +1007,13 @@ fn free_order0_cached(frame: PhysFrame) {
 
 /// Allocate frames with per-CPU caching on order-0 requests.
 pub fn alloc(order: u8) -> Result<PhysFrame, AllocError> {
+    if crate::silo::debug_boot_reg_active() {
+        crate::serial_println!(
+            "[trace][buddy] alloc enter order={} buddy_lock={:#x}",
+            order,
+            &BUDDY_ALLOCATOR as *const _ as usize
+        );
+    }
     if order == 0 {
         alloc_order0_cached()
     } else {

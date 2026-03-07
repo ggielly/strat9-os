@@ -274,6 +274,11 @@ fn send_resched_ipi_to_cpu(cpu_index: usize) {
 /// The global scheduler instance
 pub(crate) static SCHEDULER: SpinLock<Option<Scheduler>> = SpinLock::new(None);
 
+/// Returns the scheduler lock address for deadlock tracing.
+pub fn debug_scheduler_lock_addr() -> usize {
+    &SCHEDULER as *const _ as usize
+}
+
 /// Global tick counter (safe to increment from interrupt context)
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Verbose scheduler trace switch.
@@ -337,6 +342,11 @@ impl PerCpuClassRqSet {
     /// Performs the enqueue operation.
     fn enqueue(&mut self, class: crate::process::sched::SchedClassId, task: Arc<Task>) {
         use crate::process::sched::SchedClassRq;
+        crate::serial_println!(
+            "[trace][sched] class_rq enqueue class={:?} tid={}",
+            class,
+            task.id.as_u64()
+        );
         match class {
             crate::process::sched::SchedClassId::Fair => self.fair.enqueue(task),
             crate::process::sched::SchedClassId::RealTime => self.real_time.enqueue(task),

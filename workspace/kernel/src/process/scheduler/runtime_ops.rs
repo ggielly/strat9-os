@@ -29,9 +29,47 @@ pub fn init_scheduler() {
 
 /// Add a task to the scheduler
 pub fn add_task(task: Arc<Task>) {
-    let mut scheduler = SCHEDULER.lock();
+    let tid = task.id;
+    crate::serial_force_println!(
+        "[trace][sched] add_task enter tid={} name={}",
+        tid.as_u64(),
+        task.name
+    );
+    crate::serial_force_println!(
+        "[trace][sched] lock addrs sched={:#x} slab={:#x} buddy={:#x}",
+        crate::process::scheduler::debug_scheduler_lock_addr(),
+        crate::memory::heap::debug_slab_lock_addr(),
+        crate::memory::buddy::debug_buddy_lock_addr()
+    );
+    let mut spins = 0usize;
+    let mut scheduler = loop {
+        if let Some(guard) = SCHEDULER.try_lock() {
+            break guard;
+        }
+        spins = spins.saturating_add(1);
+        if spins == 2_000_000 {
+            crate::serial_force_println!(
+                "[trace][sched] add_task waiting lock tid={} owner_cpu={}",
+                tid.as_u64(),
+                SCHEDULER.owner_cpu()
+            );
+            spins = 0;
+        }
+        core::hint::spin_loop();
+    };
+    crate::serial_force_println!("[trace][sched] add_task lock acquired tid={}", tid.as_u64());
     if let Some(ref mut sched) = *scheduler {
+        crate::serial_force_println!(
+            "[trace][sched] add_task scheduler present tid={}",
+            tid.as_u64()
+        );
         sched.add_task(task);
+        crate::serial_force_println!("[trace][sched] add_task done tid={}", tid.as_u64());
+    } else {
+        crate::serial_force_println!(
+            "[trace][sched] add_task scheduler missing tid={}",
+            tid.as_u64()
+        );
     }
 }
 

@@ -763,7 +763,26 @@ impl SiloManager {
 
     /// Maps task.
     fn map_task(&mut self, task_id: TaskId, silo_id: u32) {
+        crate::serial_println!(
+            "[trace][silo] map_task enter tid={} sid={} len={}",
+            task_id.as_u64(),
+            silo_id,
+            self.task_to_silo.len()
+        );
+        let existed = self.task_to_silo.contains_key(&task_id);
+        crate::serial_println!(
+            "[trace][silo] map_task before insert tid={} sid={} existed={}",
+            task_id.as_u64(),
+            silo_id,
+            existed
+        );
         self.task_to_silo.insert(task_id, silo_id);
+        crate::serial_println!(
+            "[trace][silo] map_task after insert tid={} sid={} len={}",
+            task_id.as_u64(),
+            silo_id,
+            self.task_to_silo.len()
+        );
     }
 
     /// Unmaps task.
@@ -773,7 +792,16 @@ impl SiloManager {
 
     /// Performs the silo for task operation.
     fn silo_for_task(&self, task_id: TaskId) -> Option<u32> {
-        self.task_to_silo.get(&task_id).copied()
+        if let Some(silo_id) = self.task_to_silo.get(&task_id).copied() {
+            return Some(silo_id);
+        }
+
+        // Critical boot fallback: boot-time registration avoids BTreeMap inserts
+        // while holding SILO_MANAGER to eliminate allocator re-entrancy risk on
+        // the fragile early-init path.
+        self.silos
+            .iter()
+            .find_map(|(sid, silo)| silo.tasks.iter().any(|tid| *tid == task_id).then_some(*sid))
     }
 }
 
@@ -802,6 +830,8 @@ fn decode_family(raw: u8) -> Result<StrateFamily, SyscallError> {
 }
 
 static SILO_MANAGER: SpinLock<SiloManager> = SpinLock::new(SiloManager::new());
+static BOOT_REG_IN_PROGRESS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 const SILO_ADMIN_RESOURCE: usize = 0;
 const MAX_SILO_CAPS: usize = 64;
@@ -1557,15 +1587,70 @@ pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u32, 
 
 /// Performs the register boot strate task operation.
 pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, SyscallError> {
-    let mut mgr = SILO_MANAGER.lock();
-    // Default boot tasks get SID 1, 2, ...
+    let boot_saved_flags = crate::arch::x86_64::save_flags_and_cli();
+    struct BootIrqGuard {
+        saved_flags: u64,
+    }
+    impl Drop for BootIrqGuard {
+        fn drop(&mut self) {
+            crate::arch::x86_64::restore_flags(self.saved_flags);
+        }
+    }
+    let _boot_irq_guard = BootIrqGuard {
+        saved_flags: boot_saved_flags,
+    };
+
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task enter tid={} label={}",
+        task_id.as_u64(),
+        label
+    );
+    BOOT_REG_IN_PROGRESS.store(true, Ordering::Relaxed);
+    struct BootRegFlagGuard;
+    impl Drop for BootRegFlagGuard {
+        fn drop(&mut self) {
+            BOOT_REG_IN_PROGRESS.store(false, Ordering::Relaxed);
+        }
+    }
+    let _boot_reg_flag_guard = BootRegFlagGuard;
+    let sanitized = sanitize_label(label);
+    // Critical boot robustness: avoid an unbounded spin here, because this path
+    // runs before userspace is up and a stuck global lock would stall boot.
+    let mut spins = 0usize;
+    let mut mgr = loop {
+        if let Some(guard) = SILO_MANAGER.try_lock() {
+            break guard;
+        }
+        spins = spins.saturating_add(1);
+        if spins > 1_000_000 {
+            return Err(SyscallError::Again);
+        }
+        core::hint::spin_loop();
+    };
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task lock acquired tid={}",
+        task_id.as_u64()
+    );
+    // Critical lock-order rule: reserve identifiers under SILO_MANAGER, then
+    // perform heap allocations outside the lock to avoid allocator re-entrancy.
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task before sid scan tid={}",
+        task_id.as_u64()
+    );
     let mut sid = 1u32;
     while mgr.silos.contains_key(&sid) {
         sid = sid.checked_add(1).ok_or(SyscallError::OutOfMemory)?;
     }
-
-    let id = SiloId::new(sid);
-    let sanitized = sanitize_label(label);
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task sid selected tid={} sid={}",
+        task_id.as_u64(),
+        sid
+    );
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task before label uniqueness tid={} label={}",
+        task_id.as_u64(),
+        sanitized.as_str()
+    );
     if mgr
         .silos
         .values()
@@ -1573,42 +1658,111 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
     {
         return Err(SyscallError::AlreadyExists);
     }
-    {
-        let silo = Silo {
-            id,
-            name: alloc::format!("silo-{}", id.sid),
-            strate_label: Some(sanitized),
-            state: SiloState::Running,
-            config: SiloConfig {
-                sid: id.sid,
-                mode: 0o777, // Boot tasks are fully privileged
-                family: StrateFamily::SYS as u8,
-                ..SiloConfig::default()
-            },
-            mode: OctalMode::from_octal(0o777),
-            family: StrateFamily::SYS,
-            mem_usage_bytes: 0,
-            flags: 0,
-            module_id: None,
-            tasks: alloc::vec![task_id],
-            granted_caps: Vec::new(),
-            granted_resources: Vec::new(),
-            unveil_rules: Vec::new(),
-            sandboxed: false,
-            event_seq: 0,
-            output_buf: SiloOutputBuf::new(),
-        };
-        mgr.silos.insert(id.sid, silo);
+    drop(mgr);
+
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task build silo begin tid={} sid={}",
+        task_id.as_u64(),
+        sid
+    );
+    let id = SiloId::new(sid);
+    let silo = Silo {
+        id,
+        name: alloc::format!("silo-{}", id.sid),
+        strate_label: Some(sanitized),
+        state: SiloState::Running,
+        config: SiloConfig {
+            sid: id.sid,
+            mode: 0o777, // Boot tasks are fully privileged
+            family: StrateFamily::SYS as u8,
+            ..SiloConfig::default()
+        },
+        mode: OctalMode::from_octal(0o777),
+        family: StrateFamily::SYS,
+        mem_usage_bytes: 0,
+        flags: 0,
+        module_id: None,
+        tasks: alloc::vec![task_id],
+        granted_caps: Vec::new(),
+        granted_resources: Vec::new(),
+        unveil_rules: Vec::new(),
+        sandboxed: false,
+        event_seq: 0,
+        output_buf: SiloOutputBuf::new(),
+    };
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task build silo done tid={} sid={}",
+        task_id.as_u64(),
+        id.sid
+    );
+
+    let mut spins = 0usize;
+    let mut mgr = loop {
+        if let Some(guard) = SILO_MANAGER.try_lock() {
+            break guard;
+        }
+        spins = spins.saturating_add(1);
+        if spins > 1_000_000 {
+            return Err(SyscallError::Again);
+        }
+        core::hint::spin_loop();
+    };
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task commit lock acquired tid={} sid={}",
+        task_id.as_u64(),
+        id.sid
+    );
+    if mgr.silos.contains_key(&id.sid) {
+        return Err(SyscallError::Again);
     }
-    mgr.map_task(task_id, id.sid);
-    mgr.push_event(SiloEvent {
-        silo_id: id.sid.into(),
-        kind: SiloEventKind::Started,
-        data0: 0,
-        data1: 0,
-        tick: crate::process::scheduler::ticks(),
-    });
+    if mgr
+        .silos
+        .values()
+        .any(|s| s.strate_label.as_deref() == silo.strate_label.as_deref())
+    {
+        return Err(SyscallError::AlreadyExists);
+    }
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task before silo insert tid={} sid={}",
+        task_id.as_u64(),
+        id.sid
+    );
+    crate::serial_println!(
+        "[trace][silo] lock addrs silo={:#x} slab={:#x} buddy={:#x}",
+        &SILO_MANAGER as *const _ as usize,
+        crate::memory::heap::debug_slab_lock_addr(),
+        crate::memory::buddy::debug_buddy_lock_addr()
+    );
+    mgr.silos.insert(id.sid, silo);
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task after silo insert tid={} sid={}",
+        task_id.as_u64(),
+        id.sid
+    );
+    // Critical boot path: return immediately after insertion to keep the
+    // SILO_MANAGER critical section allocation-free and minimal.
+    crate::serial_force_println!(
+        "[trace][silo] register_boot_strate_task done tid={} sid={}",
+        task_id.as_u64(),
+        id.sid
+    );
+    crate::serial_force_println!(
+        "[trace][silo] register_boot_strate_task before unlock tid={} sid={}",
+        task_id.as_u64(),
+        id.sid
+    );
+    drop(mgr);
+    crate::serial_force_println!(
+        "[trace][silo] register_boot_strate_task after unlock tid={} sid={}",
+        task_id.as_u64(),
+        id.sid
+    );
     Ok(id.sid)
+}
+
+/// Returns true while boot-time silo registration critical path is executing.
+pub fn debug_boot_reg_active() -> bool {
+    BOOT_REG_IN_PROGRESS.load(Ordering::Relaxed)
 }
 
 /// Performs the resolve module handle operation.

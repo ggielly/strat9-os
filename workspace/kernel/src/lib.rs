@@ -995,9 +995,35 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
         if let Some((base, size)) = crate::boot::limine::strate_fs_ramfs_module() {
             let ram_data = boot_module_slice(base, size);
-            match process::elf::load_and_run_elf(ram_data, "strate-fs-ramfs") {
-                Ok(task_id) => {
-                    let _ = crate::silo::register_boot_strate_task(task_id, "ramfs-default");
+            match process::elf::load_elf_task_with_caps(ram_data, "strate-fs-ramfs", &[]) {
+                Ok(task) => {
+                    let task_id = task.id;
+                    crate::serial_force_println!(
+                        "[trace][boot] before register_boot_strate_task tid={} label=ramfs-default",
+                        task_id.as_u64()
+                    );
+                    if let Err(e) = crate::silo::register_boot_strate_task(task_id, "ramfs-default")
+                    {
+                        crate::serial_force_println!(
+                            "[trace][boot] register_boot_strate_task failed tid={} err={:?}",
+                            task_id.as_u64(),
+                            e
+                        );
+                    } else {
+                        crate::serial_force_println!(
+                            "[trace][boot] register_boot_strate_task ok tid={}",
+                            task_id.as_u64()
+                        );
+                    }
+                    crate::serial_force_println!(
+                        "[trace][boot] before add_task tid={} name=strate-fs-ramfs",
+                        task_id.as_u64()
+                    );
+                    process::add_task(task);
+                    crate::serial_force_println!(
+                        "[trace][boot] after add_task tid={} name=strate-fs-ramfs",
+                        task_id.as_u64()
+                    );
                     serial_println!("[init] Component 'strate-fs-ramfs' loaded.");
                 }
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
@@ -1005,9 +1031,35 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
         if let Some((base, size)) = crate::boot::limine::fs_ext4_module() {
             let ext4_data = boot_module_slice(base, size);
-            match process::elf::load_and_run_elf(ext4_data, "strate-fs-ext4") {
-                Ok(task_id) => {
-                    let _ = crate::silo::register_boot_strate_task(task_id, "ext4-default");
+            match process::elf::load_elf_task_with_caps(ext4_data, "strate-fs-ext4", &[]) {
+                Ok(task) => {
+                    let task_id = task.id;
+                    crate::serial_force_println!(
+                        "[trace][boot] before register_boot_strate_task tid={} label=ext4-default",
+                        task_id.as_u64()
+                    );
+                    if let Err(e) = crate::silo::register_boot_strate_task(task_id, "ext4-default")
+                    {
+                        crate::serial_force_println!(
+                            "[trace][boot] register_boot_strate_task failed tid={} err={:?}",
+                            task_id.as_u64(),
+                            e
+                        );
+                    } else {
+                        crate::serial_force_println!(
+                            "[trace][boot] register_boot_strate_task ok tid={}",
+                            task_id.as_u64()
+                        );
+                    }
+                    crate::serial_force_println!(
+                        "[trace][boot] before add_task tid={} name=strate-fs-ext4",
+                        task_id.as_u64()
+                    );
+                    process::add_task(task);
+                    crate::serial_force_println!(
+                        "[trace][boot] after add_task tid={} name=strate-fs-ext4",
+                        task_id.as_u64()
+                    );
                     serial_println!("[init] Component 'strate-fs-ext4' loaded.");
                 }
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ext4 component: {}", e),

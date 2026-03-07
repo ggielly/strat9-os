@@ -218,6 +218,11 @@ impl SlabState {
 
 static SLAB_ALLOC: SpinLock<SlabState> = SpinLock::new(SlabState::new());
 
+/// Returns the slab lock address for deadlock tracing.
+pub fn debug_slab_lock_addr() -> usize {
+    &SLAB_ALLOC as *const _ as usize
+}
+
 // ---------------------------------------------------------------------------
 // GlobalAlloc implementation
 // ---------------------------------------------------------------------------
@@ -229,11 +234,31 @@ unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Effective size must satisfy both the size and alignment requirements.
         let effective = layout.size().max(layout.align());
+        let boot_reg = crate::silo::debug_boot_reg_active();
+        if boot_reg {
+            crate::serial_println!(
+                "[trace][heap] alloc enter effective={} size={} align={}",
+                effective,
+                layout.size(),
+                layout.align()
+            );
+        }
 
         if effective <= MAX_SLAB_SIZE {
             // --- slab path ---
             let ci = SlabState::class_index(effective);
+            if boot_reg {
+                crate::serial_println!(
+                    "[trace][heap] alloc slab ci={} slab_size={} lock={:#x}",
+                    ci,
+                    SLAB_SIZES[ci],
+                    &SLAB_ALLOC as *const _ as usize
+                );
+            }
             let mut slab = SLAB_ALLOC.lock();
+            if boot_reg {
+                crate::serial_println!("[trace][heap] alloc slab lock acquired");
+            }
             slab.alloc_block(ci)
         } else {
             // --- buddy path (large allocation) ---
@@ -243,6 +268,13 @@ unsafe impl GlobalAlloc for LockedHeap {
                 return ptr::null_mut();
             }
             let order = pages_needed.next_power_of_two().trailing_zeros() as u8;
+            if boot_reg {
+                crate::serial_println!(
+                    "[trace][heap] alloc buddy order={} pages_needed={}",
+                    order,
+                    pages_needed
+                );
+            }
 
             match memory::allocate_frames(order) {
                 Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,

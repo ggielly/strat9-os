@@ -66,14 +66,17 @@ pub struct Virtqueue {
     /// Queue size (must be power of 2)
     queue_size: u16,
 
+    /// Contiguous legacy vring allocation backing desc+avail+used
+    _ring_area: PhysFrame,
+
     /// Physical address of descriptor table
-    desc_area: PhysFrame,
+    desc_area: u64,
 
     /// Physical address of available ring
-    avail_area: PhysFrame,
+    avail_area: u64,
 
     /// Physical address of used ring
-    used_area: PhysFrame,
+    used_area: u64,
 
     /// Virtual address of descriptor table
     desc_ptr: *mut VirtqDesc,
@@ -104,6 +107,12 @@ pub struct Virtqueue {
 unsafe impl Send for Virtqueue {}
 
 impl Virtqueue {
+    #[inline]
+    fn align_up(value: usize, align: usize) -> usize {
+        debug_assert!(align.is_power_of_two());
+        (value + align - 1) & !(align - 1)
+    }
+
     /// Create a new virtqueue with the specified size
     ///
     /// # Safety
@@ -114,35 +123,31 @@ impl Virtqueue {
             return Err("Queue size must be power of 2");
         }
 
-        // Allocate descriptor table (16 bytes per descriptor)
         let desc_size = queue_size as usize * core::mem::size_of::<VirtqDesc>();
-        let desc_pages = (desc_size + 4095) / 4096;
-        let desc_order = desc_pages.next_power_of_two().trailing_zeros() as u8;
-        let desc_area = memory::allocate_frames(desc_order)
-            .map_err(|_| "Failed to allocate descriptor table")?;
+        let avail_size = 6 + queue_size as usize * 2;
+        let used_size = 6 + queue_size as usize * core::mem::size_of::<VirtqUsedElem>();
+        let avail_offset = desc_size;
+        let used_offset = Self::align_up(avail_offset + avail_size, 4096);
+        let total_size = used_offset + used_size;
 
-        // Allocate available ring (2 + 2 + queue_size * 2 + 2 bytes)
-        let avail_size = 4 + queue_size as usize * 2 + 2;
-        let avail_pages = (avail_size + 4095) / 4096;
-        let avail_order = avail_pages.next_power_of_two().trailing_zeros() as u8;
-        let avail_area = memory::allocate_frames(avail_order)
-            .map_err(|_| "Failed to allocate available ring")?;
-
-        // Allocate used ring (2 + 2 + queue_size * 8 + 2 bytes)
-        let used_size = 4 + queue_size as usize * core::mem::size_of::<VirtqUsedElem>() + 2;
-        let used_pages = (used_size + 4095) / 4096;
-        let used_order = used_pages.next_power_of_two().trailing_zeros() as u8;
-        let used_area =
-            memory::allocate_frames(used_order).map_err(|_| "Failed to allocate used ring")?;
+        // Critical: legacy QUEUE_PFN describes one contiguous vring region.
+        let ring_pages = (total_size + 4095) / 4096;
+        let ring_order = ring_pages.next_power_of_two().trailing_zeros() as u8;
+        let ring_area =
+            memory::allocate_frames(ring_order).map_err(|_| "Failed to allocate virtqueue ring")?;
+        let ring_phys = ring_area.start_address.as_u64();
+        let desc_phys = ring_phys;
+        let avail_phys = ring_phys + avail_offset as u64;
+        let used_phys = ring_phys + used_offset as u64;
 
         // SAFETY: we just allocated these frames; convert phys => virt via HHDM
         // With Limine HHDM, all physical memory is already mapped, so we can
         // directly use phys_to_virt without additional page table modifications.
         // DO NOT call ensure_identity_map here - it can corrupt active page tables!
 
-        let desc_virt = crate::memory::phys_to_virt(desc_area.start_address.as_u64());
-        let avail_virt = crate::memory::phys_to_virt(avail_area.start_address.as_u64());
-        let used_virt = crate::memory::phys_to_virt(used_area.start_address.as_u64());
+        let desc_virt = crate::memory::phys_to_virt(desc_phys);
+        let avail_virt = crate::memory::phys_to_virt(avail_phys);
+        let used_virt = crate::memory::phys_to_virt(used_phys);
 
         let desc_ptr = desc_virt as *mut VirtqDesc;
         let avail_ptr = avail_virt as *mut VirtqAvail;
@@ -152,14 +157,7 @@ impl Virtqueue {
 
         // Zero out the memory
         // SAFETY: we allocated these pages and they're mapped via HHDM
-        // Each descriptor is 16 bytes, so we write queue_size * 16 bytes
-        core::ptr::write_bytes(
-            desc_ptr,
-            0,
-            queue_size as usize * core::mem::size_of::<VirtqDesc>(),
-        );
-        core::ptr::write_bytes(avail_ptr as *mut u8, 0, avail_size);
-        core::ptr::write_bytes(used_ptr as *mut u8, 0, used_size);
+        core::ptr::write_bytes(desc_ptr as *mut u8, 0, total_size);
 
         // Initialize free descriptor list
         let mut free_descriptors = Vec::with_capacity(queue_size as usize);
@@ -169,9 +167,10 @@ impl Virtqueue {
 
         Ok(Self {
             queue_size,
-            desc_area,
-            avail_area,
-            used_area,
+            _ring_area: ring_area,
+            desc_area: desc_phys,
+            avail_area: avail_phys,
+            used_area: used_phys,
             desc_ptr,
             avail_ptr,
             avail_ring_ptr,
@@ -185,17 +184,17 @@ impl Virtqueue {
 
     /// Get the physical address of the descriptor table
     pub fn desc_area(&self) -> u64 {
-        self.desc_area.start_address.as_u64()
+        self.desc_area
     }
 
     /// Get the physical address of the available ring
     pub fn avail_area(&self) -> u64 {
-        self.avail_area.start_address.as_u64()
+        self.avail_area
     }
 
     /// Get the physical address of the used ring
     pub fn used_area(&self) -> u64 {
-        self.used_area.start_address.as_u64()
+        self.used_area
     }
 
     /// Get the queue size
