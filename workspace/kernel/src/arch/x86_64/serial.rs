@@ -1,15 +1,27 @@
-use core::fmt;
+use core::{
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use spin::Mutex;
 use uart_16550::SerialPort;
 
 /// Global serial port instance
 static SERIAL1: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(0x3F8) });
 
+/// Flag indicating if the kernel is in a panic state.
+/// When true, serial output bypasses all locks to ensure messages are displayed.
+static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_RED: &str = "\x1b[31m";
 const ANSI_GREEN: &str = "\x1b[32m";
 const ANSI_VIOLET: &str = "\x1b[35m";
 const TOKEN_BUF_CAP: usize = 64;
+
+/// Signal that the kernel has entered an emergency panic state.
+pub fn enter_emergency_mode() {
+    PANIC_IN_PROGRESS.store(true, Ordering::SeqCst);
+}
 
 /// Returns whether token char.
 #[inline]
@@ -138,14 +150,23 @@ pub fn init() {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    // Use try_lock to avoid deadlock in interrupt/exception handlers
+
+    // Check if we are in emergency panic mode.
+    if PANIC_IN_PROGRESS.load(Ordering::Relaxed) {
+        // SAFETY: In emergency mode, we bypass the mutex to ensure output.
+        // We re-initialize a local SerialPort instance pointing to the same IO port.
+        let mut port = unsafe { SerialPort::new(0x3F8) };
+        // We don't use AnsiStylingWriter here to minimize risk of further panics/complex logic.
+        let _ = port.write_fmt(args);
+        return;
+    }
+
+    // Normal mode: Use try_lock to avoid deadlock in interrupt handlers.
     if let Some(mut port) = SERIAL1.try_lock() {
         let mut writer = AnsiStylingWriter::new(&mut *port);
         let _ = writer.write_fmt(args);
         let _ = writer.finish();
     }
-    // If locked, we drop the log message to keep the system running.
-    // Safety is more important than exhaustive logging in crash scenarios.
 }
 
 /// Print to serial port

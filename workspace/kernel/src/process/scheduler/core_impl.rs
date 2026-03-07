@@ -3,7 +3,10 @@ use super::{runtime_ops::idle_task_main, *};
 impl Scheduler {
     /// Create a new scheduler instance
     pub fn new(cpu_count: usize) -> Self {
-        crate::serial_println!("[trace][sched] Scheduler::new enter cpu_count={}", cpu_count);
+        crate::serial_println!(
+            "[trace][sched] Scheduler::new enter cpu_count={}",
+            cpu_count
+        );
         let mut cpus = alloc::vec::Vec::new();
         for cpu_idx in 0..cpu_count {
             crate::serial_println!(
@@ -31,7 +34,10 @@ impl Scheduler {
             });
             crate::serial_println!("[trace][sched] Scheduler::new cpu={} push done", cpu_idx);
         }
-        crate::serial_println!("[trace][sched] Scheduler::new cpus ready len={}", cpus.len());
+        crate::serial_println!(
+            "[trace][sched] Scheduler::new cpus ready len={}",
+            cpus.len()
+        );
 
         Scheduler {
             cpus,
@@ -84,7 +90,9 @@ impl Scheduler {
     /// Performs the register identity locked operation.
     pub(crate) fn register_identity_locked(&mut self, task: &Arc<Task>) {
         if (self as *mut Self).is_null() {
-            crate::serial_println!("[sched] WARN: register_identity_locked called on NULL scheduler!");
+            crate::serial_println!(
+                "[sched] WARN: register_identity_locked called on NULL scheduler!"
+            );
             return;
         }
         let task_ptr = Arc::as_ptr(task);
@@ -448,14 +456,12 @@ impl Scheduler {
         if let Err(e) = validate_task_context(&next) {
             // Do NOT panic here — the scheduler lock is held, which would
             // deadlock the panic hook (current_task_clone → SCHEDULER.lock()).
-            // Instead, log the problem and fall back to idle so the system
-            // survives and the serial log shows the problematic task.
             let bad_rsp = unsafe { (*next.context.get()).saved_rsp };
             let stk_base = next.kernel_stack.virt_base.as_u64();
             let stk_top = stk_base + next.kernel_stack.size as u64;
             crate::serial_println!(
                 "[sched] WARN: invalid ctx for task '{}' (id={}) cpu={}: {} \
-                 rsp={:#x} stack=[{:#x}..{:#x}] — falling back to idle",
+                 rsp={:#x} stack=[{:#x}..{:#x}] — restoring current task",
                 next.name,
                 next.id.as_u64(),
                 cpu_index,
@@ -475,9 +481,58 @@ impl Scheduler {
                 stk_base,
                 stk_top,
             );
-            // Re-assign next to idle so we keep a valid switch target *or*
-            // just bail out — returning None from yield_cpu stays on the
-            // current task until the next tick (safest option).
+
+            // ── Restore scheduler invariants ────────────────────────────────────────
+            // `pick_next_task` already mutated state before we reached this point:
+            //   1. Took `current_task`, set its state to Ready, placed it in
+            //      `task_to_requeue` (non-idle tasks only).
+            //   2. Set `current_task = Some(next_clone)` with next.state = Running.
+            //
+            // We are NOT performing the actual context switch. Both mutations must be
+            // undone so the truly running task stays scheduled and no Arc reference
+            // is silently lost (which would lead to corrupted saved_rsp on the next
+            // timer tick when the scheduler tries to save context for the wrong task).
+
+            // (a) Is `next` the per-CPU idle fallback (accessed via clone, never in
+            //     class_rqs)?  We need this before any borrow of self.cpus.
+            let is_idle_fallback = Arc::ptr_eq(&next, &self.cpus[cpu_index].idle_task);
+
+            // (b) Restore the old running task as current_task.
+            //     Non-idle current was placed in task_to_requeue by pick_next_task.
+            //     Idle current was not (it is accessed via idle_task.clone()), so use
+            //     the `current` Arc cloned at the start of yield_cpu.
+            if let Some(prev) = self.cpus[cpu_index].task_to_requeue.take() {
+                // SAFETY: scheduler lock held; exclusive access to task state.
+                unsafe {
+                    *prev.state.get() = TaskState::Running;
+                }
+                self.cpus[cpu_index].current_task = Some(prev);
+            } else {
+                // SAFETY: scheduler lock held.
+                unsafe {
+                    *current.state.get() = TaskState::Running;
+                }
+                self.cpus[cpu_index].current_task = Some(current.clone());
+            }
+
+            // (c) If `next` came from the class run queue (non-idle), re-enqueue it
+            //     so it can be retried on the next tick.  Its context may be
+            //     transiently invalid (e.g. stack not yet committed by a new task);
+            //     it will be validated again when next picked.
+            if !is_idle_fallback {
+                // SAFETY: scheduler lock held.
+                unsafe {
+                    *next.state.get() = TaskState::Ready;
+                }
+                let class = self.class_table.class_for_task(&next);
+                if let Some(cpu) = self.cpus.get_mut(cpu_index) {
+                    cpu.class_rqs.enqueue(class, next);
+                }
+            }
+            // For the idle fallback: state was set to Running by pick_next_task but the
+            // idle task lives in idle_task.clone() not in class_rqs, so no re-enqueue
+            // is needed.  The next pick_next_task will reset its state correctly.
+
             return None;
         }
 
