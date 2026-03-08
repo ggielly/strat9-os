@@ -1135,18 +1135,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if apic_active {
         arch::x86_64::smp::open_ap_scheduler_gate();
     }
-    serial_println!("[init] Enabling interrupts...");
-    vga_println!("[..] Enabling interrupts...");
-    arch::x86_64::sti();
-    serial_println!("[init] Interrupts enabled.");
-    vga_println!("[OK] Interrupts enabled");
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
 
-    // Diagnostic: verify RFLAGS.IF is set
-    let rflags: u64;
-    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags) };
-    serial_println!("[init] RFLAGS={:#018x} IF={}", rflags, (rflags >> 9) & 1);
+    // Keep interrupts disabled on the init stack. `schedule_on_cpu()` enters
+    // the first task with IF=0 and `task_entry_trampoline` executes `sti`
+    // after the task context is fully installed.
 
     // Start the scheduler - this will never return
     process::schedule();

@@ -228,15 +228,23 @@ pub fn init(madt_lapic_addr: u32) {
         );
     }
 
-    let mut target_msr = apic_base_msr | APIC_BASE_ENABLE;
-    let use_x2apic = is_x2apic_supported();
-    if use_x2apic {
-        target_msr |= APIC_BASE_EXTD;
-    }
-    if target_msr != apic_base_msr {
-        super::wrmsr(IA32_APIC_BASE_MSR, target_msr);
-    }
-    APIC_X2_MODE.store(use_x2apic, Ordering::Relaxed);
+    let use_x2apic = if is_x2apic_supported() {
+        if apic_base_msr & APIC_BASE_ENABLE == 0 {
+            super::wrmsr(IA32_APIC_BASE_MSR, apic_base_msr | APIC_BASE_ENABLE);
+        }
+        super::wrmsr(
+            IA32_APIC_BASE_MSR,
+            apic_base_msr | APIC_BASE_ENABLE | APIC_BASE_EXTD,
+        );
+        let verify = super::rdmsr(IA32_APIC_BASE_MSR);
+        verify & (APIC_BASE_ENABLE | APIC_BASE_EXTD) == (APIC_BASE_ENABLE | APIC_BASE_EXTD)
+    } else {
+        if apic_base_msr & APIC_BASE_ENABLE == 0 {
+            super::wrmsr(IA32_APIC_BASE_MSR, apic_base_msr | APIC_BASE_ENABLE);
+        }
+        false
+    };
+    APIC_X2_MODE.store(use_x2apic, Ordering::Release);
 
     // Convert physical base to virtual via HHDM
     let apic_virt = memory::phys_to_virt(apic_phys);
@@ -293,14 +301,24 @@ pub fn init_ap() {
         return;
     }
 
+    if APIC_X2_MODE.load(Ordering::Acquire) {
+        let base = super::rdmsr(IA32_APIC_BASE_MSR);
+        if base & (APIC_BASE_ENABLE | APIC_BASE_EXTD) != (APIC_BASE_ENABLE | APIC_BASE_EXTD) {
+            if base & APIC_BASE_ENABLE == 0 {
+                super::wrmsr(IA32_APIC_BASE_MSR, base | APIC_BASE_ENABLE);
+            }
+            super::wrmsr(
+                IA32_APIC_BASE_MSR,
+                base | APIC_BASE_ENABLE | APIC_BASE_EXTD,
+            );
+        }
+    }
+
     // SAFETY: APIC base is mapped via HHDM and APIC is enabled.
     unsafe {
-        // Clear ESR (twice per SDM)
         write_reg(REG_ESR, 0);
         write_reg(REG_ESR, 0);
-        // Accept all interrupts
         write_reg(REG_TPR, 0);
-        // Software enable APIC + spurious vector
         write_reg(REG_SPURIOUS, 0x100 | SPURIOUS_VECTOR as u32);
     }
 }
