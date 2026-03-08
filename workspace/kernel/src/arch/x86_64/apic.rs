@@ -66,6 +66,8 @@ pub const LVT_TIMER_VECTOR: u8 = 0xD2;
 
 /// MSR address for APIC base
 const IA32_APIC_BASE_MSR: u32 = 0x1B;
+/// IA32_APIC_BASE physical base address mask (up to MAXPHYADDR 52 bits).
+const APIC_BASE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 /// APIC global enable bit in IA32_APIC_BASE MSR
 const APIC_BASE_ENABLE: u64 = 1 << 11;
 /// x2APIC enable bit in IA32_APIC_BASE MSR
@@ -216,7 +218,7 @@ pub unsafe fn write_reg(offset: u32, value: u32) {
 pub fn init(madt_lapic_addr: u32) {
     // Read the APIC base MSR to get the actual physical address
     let apic_base_msr = super::rdmsr(IA32_APIC_BASE_MSR);
-    let apic_phys = apic_base_msr & 0xFFFF_F000; // Mask to get 4K-aligned base
+    let apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;
 
     if apic_phys != madt_lapic_addr as u64 {
         log::warn!(
