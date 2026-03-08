@@ -526,7 +526,7 @@ impl Scheduler {
                 "[sched] WARN: invalid ctx for task '{}' (id={}) cpu={}: {} \
                  rsp={:#x} stack=[{:#x}..{:#x}] - restoring current task",
                 next.name,
-                next.id.as_u64(),restoring current task
+                next.id.as_u64(),
                 cpu_index,
                 e,
                 bad_rsp,

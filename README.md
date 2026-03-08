@@ -22,11 +22,20 @@ This project is in active development and not production-ready. The ABI is still
 
 ### Screenshots from QEMU : bootsequence and Chevron shell
 
-![Scheme filesystem](doc/scheme.jpg)
-*Scheme-style filesystem paths inside Chevron shell*
+![Graphics test](doc/boot_welcome.png)
+*Chevron and boot*
 
-![Top - process monitor](doc/top.jpg)
+![Top - process monitor](doc/top.png)
 *2D framebuffered process monitor like (top command)*
+
+![ls and uptime](doc/ls_uptime.png)
+*ls and uptime*
+
+![Networking](doc/network.png)
+*Networking*
+
+![Strate](doc/strate.png)
+*strate screen management*
 
 ![Memory and CPU info](doc/mem_cpu.jpg)
 *Memory and CPU information*
