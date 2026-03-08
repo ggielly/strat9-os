@@ -124,12 +124,27 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         core::hint::spin_loop();
     }; // Lock is released here before jumping to first task
 
+    crate::serial_force_println!(
+        "[trace][sched] schedule_on_cpu first_task cpu={} tid={} name={} rsp={:#x} kstack=[{:#x}..{:#x}]",
+        cpu_index,
+        first_task.id.as_u64(),
+        first_task.name,
+        unsafe { (*first_task.context.get()).saved_rsp },
+        first_task.kernel_stack.virt_base.as_u64(),
+        first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64,
+    );
+
     // Set TSS.rsp0 and SYSCALL kernel RSP for the first task
     {
         let stack_top =
             first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64;
         crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
         crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+        crate::serial_force_println!(
+            "[trace][sched] schedule_on_cpu stacks set cpu={} rsp0={:#x}",
+            cpu_index,
+            stack_top
+        );
     }
 
     // Switch to the first task's address space (no-op for kernel tasks)
@@ -140,13 +155,28 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             first_task.name, first_task.id, e
         );
     }
+    crate::serial_force_println!(
+        "[trace][sched] schedule_on_cpu first_task ctx valid cpu={} tid={}",
+        cpu_index,
+        first_task.id.as_u64()
+    );
     unsafe {
         (*first_task.process.address_space.get()).switch_to();
     }
+    crate::serial_force_println!(
+        "[trace][sched] schedule_on_cpu switch_to done cpu={} tid={}",
+        cpu_index,
+        first_task.id.as_u64()
+    );
 
     // Jump to the first task (never returns)
     // SAFETY: The context was set up by CpuContext::new with a valid stack frame.
     // Interrupts are disabled; the trampoline's `sti` re-enables them.
+    crate::serial_force_println!(
+        "[trace][sched] schedule_on_cpu restore_first_task cpu={} tid={}",
+        cpu_index,
+        first_task.id.as_u64()
+    );
     unsafe {
         crate::process::task::do_restore_first_task(
             &raw const (*first_task.context.get()).saved_rsp,
@@ -162,6 +192,10 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 /// This safely re-queues the previously running task now that its state is fully saved.
 pub fn finish_switch() {
     let cpu_index = current_cpu_index();
+    crate::serial_force_println!(
+        "[trace][sched] finish_switch enter cpu={}",
+        cpu_index
+    );
     let mut task_to_requeue = None;
     let mut task_to_drop = None;
     {
