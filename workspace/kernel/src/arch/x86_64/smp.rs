@@ -351,8 +351,7 @@ pub fn init() -> Result<usize, &'static str> {
 /// First Rust function executed on APs after the trampoline.
 #[unsafe(no_mangle)]
 pub extern "C" fn smp_main() -> ! {
-    // Load IDT for this core (shared IDT is fine for now).
-    idt::init();
+    idt::load();
 
     // Re-initialize Local APIC for this core (per-core registers).
     apic::init_ap();

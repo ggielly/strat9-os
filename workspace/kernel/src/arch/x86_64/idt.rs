@@ -4,7 +4,7 @@
 //! Inspired by MaestroOS `idt.rs` and Redox-OS kernel.
 
 use super::{pic, tss};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 /// IRQ interrupt vector numbers (PIC1_OFFSET + IRQ number)
@@ -23,11 +23,26 @@ pub mod irq {
 
 /// Static IDT storage (must be 'static for load())
 static mut IDT_STORAGE: InterruptDescriptorTable = InterruptDescriptorTable::new();
+static IDT_STORAGE_LOCK: AtomicBool = AtomicBool::new(false);
 static USER_PF_TRACE_BUDGET: AtomicU32 = AtomicU32::new(64);
 
-/// Initialize the IDT with exception handlers and IRQ handlers
+#[inline]
+fn lock_idt_storage() {
+    while IDT_STORAGE_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline]
+fn unlock_idt_storage() {
+    IDT_STORAGE_LOCK.store(false, Ordering::Release);
+}
+
 pub fn init() {
-    // SAFETY: Called once during single-threaded kernel init, before interrupts are enabled.
+    lock_idt_storage();
     unsafe {
         let idt = &raw mut IDT_STORAGE;
 
@@ -37,6 +52,9 @@ pub fn init() {
         (*idt)
             .general_protection_fault
             .set_handler_fn(general_protection_fault_handler);
+        (*idt)
+            .non_maskable_interrupt
+            .set_handler_fn(non_maskable_interrupt_handler);
         (*idt).invalid_opcode.set_handler_fn(invalid_opcode_handler);
         (*idt)
             .double_fault
@@ -60,17 +78,29 @@ pub fn init() {
 
         (*idt).load_unsafe();
     }
+    unlock_idt_storage();
 
     log::debug!("IDT initialized with {} entries", 256);
 }
 
+pub fn load() {
+    lock_idt_storage();
+    unsafe {
+        let idt = &raw const IDT_STORAGE;
+        (*idt).load_unsafe();
+    }
+    unlock_idt_storage();
+}
+
 /// Register the Local APIC timer IRQ vector to use the timer handler.
 pub fn register_lapic_timer_vector(vector: u8) {
+    lock_idt_storage();
     unsafe {
         let idt = &raw mut IDT_STORAGE;
         (&mut *idt)[vector].set_handler_fn(lapic_timer_handler);
         (*idt).load_unsafe();
     }
+    unlock_idt_storage();
 }
 
 /// Register the AHCI storage controller IRQ handler.
@@ -83,12 +113,13 @@ pub fn register_ahci_irq(irq: u8) {
         irq
     };
 
-    // SAFETY: called during kernel init, before the scheduler starts
+    lock_idt_storage();
     unsafe {
         let idt = &raw mut IDT_STORAGE;
         (&mut *idt)[vector].set_handler_fn(ahci_handler);
         (*idt).load_unsafe();
     }
+    unlock_idt_storage();
     log::info!("AHCI IRQ {} registered on vector {:#x}", irq, vector);
 }
 
@@ -105,12 +136,13 @@ pub fn register_virtio_block_irq(irq: u8) {
         irq
     };
 
-    // SAFETY: called during kernel init, before interrupts are fully enabled
+    lock_idt_storage();
     unsafe {
         let idt = &raw mut IDT_STORAGE;
         (&mut *idt)[vector].set_handler_fn(virtio_block_handler);
         (*idt).load_unsafe();
     }
+    unlock_idt_storage();
     log::info!("VirtIO-blk IRQ {} registered on vector {:#x}", irq, vector);
 }
 
@@ -140,6 +172,13 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     }
     log::error!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
     panic!("Invalid opcode");
+}
+
+extern "x86-interrupt" fn non_maskable_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::arch::x86_64::cli();
+    loop {
+        crate::arch::x86_64::hlt();
+    }
 }
 
 /// Performs the page fault handler operation.

@@ -777,7 +777,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         arch::x86_64::timer::start_apic_timer_cached();
     }
 
-    arch::x86_64::smp::open_ap_scheduler_gate();
     serial_println!("[init] Scheduler initialized.");
     serial_println!("[trace][bsp] after init_scheduler");
     vga_println!("[OK] Multitasking enabled");
@@ -1133,6 +1132,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Boot complete — start preemptive multitasking
     // =============================================
+    if apic_active {
+        arch::x86_64::smp::open_ap_scheduler_gate();
+    }
     serial_println!("[init] Enabling interrupts...");
     vga_println!("[..] Enabling interrupts...");
     arch::x86_64::sti();
