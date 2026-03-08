@@ -1053,7 +1053,7 @@ extern "x86-interrupt" fn legacy_timer_handler(_stack_frame: InterruptStackFrame
     crate::process::scheduler::maybe_preempt();
 }
 
-/// Local APIC timer handler (dedicated vector, e.g. 0x22).
+/// Local APIC timer handler (dedicated vector, e.g. 0xD2).
 extern "x86-interrupt" fn lapic_timer_handler(_stack_frame: InterruptStackFrame) {
     crate::process::scheduler::timer_tick();
     super::apic::eoi();

@@ -396,12 +396,6 @@ pub unsafe extern "C" fn kmain() -> ! {
     // Verify the Limine base revision is supported
     assert!(BASE_REVISION.is_supported());
 
-    // Get memory map
-    let _memory_map = match MEMORY_MAP.get_response() {
-        Some(resp) => resp,
-        None => hlt_loop(),
-    };
-
     // Get framebuffer info (graphics mode provided by Limine)
     let (
         fb_addr,

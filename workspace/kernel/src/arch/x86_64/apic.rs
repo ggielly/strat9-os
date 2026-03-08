@@ -62,7 +62,7 @@ pub const LVT_TIMER_PERIODIC: u32 = 1 << 17;
 #[allow(dead_code)]
 pub const LVT_TIMER_MASKED: u32 = 1 << 16;
 /// Dedicated Local APIC timer interrupt vector (aligned with Theseus-style setup).
-pub const LVT_TIMER_VECTOR: u8 = 0x22;
+pub const LVT_TIMER_VECTOR: u8 = 0xD2;
 
 /// MSR address for APIC base
 const IA32_APIC_BASE_MSR: u32 = 0x1B;
