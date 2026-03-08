@@ -1045,10 +1045,22 @@ extern "C" fn elf_ring3_trampoline() -> ! {
 
     let task = crate::process::scheduler::current_task_clone()
         .expect("elf_ring3_trampoline: no current task");
+    crate::serial_force_println!(
+        "[trace][elf] ring3_trampoline enter tid={} name={}",
+        task.id.as_u64(),
+        task.name
+    );
 
     let user_rip = task.trampoline_entry.load(Ordering::Acquire);
     let user_rsp = task.trampoline_stack_top.load(Ordering::Acquire);
     let user_arg0 = task.trampoline_arg0.load(Ordering::Acquire);
+    crate::serial_force_println!(
+        "[trace][elf] ring3_trampoline args tid={} rip={:#x} rsp={:#x} arg0={:#x}",
+        task.id.as_u64(),
+        user_rip,
+        user_rsp,
+        user_arg0
+    );
 
     // Switch to the user address space stored in the task.
     // SAFETY: The address space was set up during task creation and is valid.
@@ -1056,10 +1068,21 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         let as_ref = &*task.process.address_space.get();
         as_ref.switch_to();
     }
+    crate::serial_force_println!(
+        "[trace][elf] ring3_trampoline switch_to done tid={}",
+        task.id.as_u64()
+    );
 
     let user_cs = gdt::user_code_selector().0 as u64;
     let user_ss = gdt::user_data_selector().0 as u64;
     let user_rflags: u64 = 0x202; // IF=1, reserved bit 1 = 1
+    crate::serial_force_println!(
+        "[trace][elf] ring3_trampoline iret tid={} cs={:#x} ss={:#x} rflags={:#x}",
+        task.id.as_u64(),
+        user_cs,
+        user_ss,
+        user_rflags
+    );
 
     // SAFETY: Valid user mappings have been set up. IRETQ switches to Ring 3.
     unsafe {

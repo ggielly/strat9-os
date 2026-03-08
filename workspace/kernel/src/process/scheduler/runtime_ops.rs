@@ -199,7 +199,31 @@ pub fn finish_switch() {
     let mut task_to_requeue = None;
     let mut task_to_drop = None;
     {
-        let mut scheduler = SCHEDULER.lock();
+        crate::serial_force_println!(
+            "[trace][sched] finish_switch before lock cpu={} sched_lock={:#x}",
+            cpu_index,
+            crate::process::scheduler::debug_scheduler_lock_addr()
+        );
+        let mut spins = 0usize;
+        let mut scheduler = loop {
+            if let Some(guard) = SCHEDULER.try_lock() {
+                break guard;
+            }
+            spins = spins.saturating_add(1);
+            if spins == 2_000_000 {
+                crate::serial_force_println!(
+                    "[trace][sched] finish_switch waiting lock cpu={} owner_cpu={}",
+                    cpu_index,
+                    SCHEDULER.owner_cpu()
+                );
+                spins = 0;
+            }
+            core::hint::spin_loop();
+        };
+        crate::serial_force_println!(
+            "[trace][sched] finish_switch lock acquired cpu={}",
+            cpu_index
+        );
         if let Some(ref mut sched) = *scheduler {
             if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
                 task_to_requeue = cpu.task_to_requeue.take();
@@ -207,12 +231,23 @@ pub fn finish_switch() {
             }
         }
     }
+    crate::serial_force_println!(
+        "[trace][sched] finish_switch after lock cpu={} requeue={} drop={}",
+        cpu_index,
+        task_to_requeue.is_some(),
+        task_to_drop.is_some()
+    );
 
     // Drop the previous task outside the scheduler lock (if it was the last ref).
     // This is safe because we are fully switched to the new task's stack and CR3.
     drop(task_to_drop);
 
     if let Some(task) = task_to_requeue {
+        crate::serial_force_println!(
+            "[trace][sched] finish_switch requeue lock cpu={} tid={}",
+            cpu_index,
+            task.id.as_u64()
+        );
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
             let class = sched.class_table.class_for_task(&task);
