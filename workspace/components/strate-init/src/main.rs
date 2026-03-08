@@ -5,10 +5,7 @@
 extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
-use core::{
-    alloc::Layout,
-    panic::PanicInfo,
-};
+use core::{alloc::Layout, panic::PanicInfo};
 use strat9_syscall::{call, data::IpcMessage, number};
 
 const EAGAIN: usize = 11;
@@ -241,7 +238,9 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
                         "graphics_enabled" => s.graphics_enabled = parse_toml_bool(val),
                         "graphics_mode" => s.graphics_mode = String::from(val),
                         "graphics_read_only" => s.graphics_read_only = parse_toml_bool(val),
-                        "graphics_max_sessions" => s.graphics_max_sessions = val.parse().unwrap_or(0),
+                        "graphics_max_sessions" => {
+                            s.graphics_max_sessions = val.parse().unwrap_or(0)
+                        }
                         "graphics_session_ttl_sec" => {
                             s.graphics_session_ttl_sec = val.parse().unwrap_or(0)
                         }
@@ -632,7 +631,8 @@ fn boot_silos(silos: Vec<SiloDef>) {
 
         log(&alloc::format!(
             "[init] Creating Silo: {} (SID={})\n",
-            s_def.name, final_sid
+            s_def.name,
+            final_sid
         ));
 
         let mut flags = 0u64;
@@ -738,7 +738,8 @@ fn boot_silos(silos: Vec<SiloDef>) {
                             Ok(pid) => {
                                 register_supervised(&str_def.name, pid as u64);
                                 if str_def.stype == "wasm-runtime" {
-                                    runtime_targets.push((str_def.name.clone(), str_def.target.clone()));
+                                    runtime_targets
+                                        .push((str_def.name.clone(), str_def.target.clone()));
                                 }
                             }
                         }
@@ -901,7 +902,13 @@ impl SupervisedChild {
         let mut buf = [0u8; 32];
         let n = core::cmp::min(name.len(), 32);
         buf[..n].copy_from_slice(&name.as_bytes()[..n]);
-        Self { name: buf, name_len: n as u8, pid, health: StrateHealth::Ready, restart_count: 0 }
+        Self {
+            name: buf,
+            name_len: n as u8,
+            pid,
+            health: StrateHealth::Ready,
+            restart_count: 0,
+        }
     }
 
     fn name_str(&self) -> &str {
@@ -910,8 +917,7 @@ impl SupervisedChild {
 }
 
 static mut SUPERVISED: [Option<SupervisedChild>; 16] = [
-    None, None, None, None, None, None, None, None,
-    None, None, None, None, None, None, None, None,
+    None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
 ];
 static mut SUPERVISED_COUNT: usize = 0;
 const SUPERVISED_CAPACITY: usize = 16;
@@ -930,15 +936,19 @@ fn register_supervised(name: &str, pid: u64) {
 fn supervisor_loop() -> ! {
     log("[init] Supervisor: entering watch loop\n");
     loop {
-        for _ in 0..SUPERVISOR_POLL_YIELDS { let _ = call::sched_yield(); }
+        for _ in 0..SUPERVISOR_POLL_YIELDS {
+            let _ = call::sched_yield();
+        }
 
         let mut wstatus: i32 = 0;
-        match call::waitpid(-1, Some(&mut wstatus), 1) { // WNOHANG = 1
+        match call::waitpid(-1, Some(&mut wstatus), 1) {
+            // WNOHANG = 1
             Ok(pid) if pid > 0 => {
                 let status = wstatus;
                 let mut found = false;
                 unsafe {
-                    let base = core::ptr::addr_of_mut!(SUPERVISED).cast::<Option<SupervisedChild>>();
+                    let base =
+                        core::ptr::addr_of_mut!(SUPERVISED).cast::<Option<SupervisedChild>>();
                     let count = SUPERVISED_COUNT;
                     for idx in 0..count {
                         let slot = base.add(idx);

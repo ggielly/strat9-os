@@ -7,10 +7,8 @@ use alloc::{boxed::Box, sync::Arc};
 use crate::{
     memory::address_space::{AddressSpace, VmaFlags, VmaType},
     process::{
-        current_task_id,
-        scheduler::add_task_with_parent,
-        task::Task,
-        try_wait_child, TaskId, TaskPriority, WaitChildResult,
+        current_task_id, scheduler::add_task_with_parent, task::Task, try_wait_child, TaskId,
+        TaskPriority, WaitChildResult,
     },
 };
 
@@ -477,7 +475,6 @@ extern "C" fn fork_test_main() -> ! {
 
     crate::serial_println!(
         "[fork-test] summary: {}",
-  
         if s0a && s0b && s2 && s4 {
             "PASS"
         } else {

@@ -105,7 +105,9 @@ fn main() {
             println!("Stage 2 assembled: {} bytes", stage2_size);
         }
         Ok(_) | Err(_) => {
-            println!("Note: Stage 2 standalone assembly failed; continuing with embedded stage2 path");
+            println!(
+                "Note: Stage 2 standalone assembly failed; continuing with embedded stage2 path"
+            );
             let _ = std::fs::write(&stage2_bin, []);
         }
     }

@@ -4,16 +4,13 @@
 
 extern crate alloc;
 
-use alloc::format;
-use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
-use core::alloc::Layout;
-use core::panic::PanicInfo;
-use strat9_syscall::call;
-use strat9_syscall::data::IpcMessage;
+use alloc::{format, string::String, vec, vec::Vec};
+use core::{alloc::Layout, panic::PanicInfo};
+use strat9_syscall::{call, data::IpcMessage};
 use talc::*;
-use wasmi::{Caller, Config, Engine, Linker, Module, Store, Instance, StoreLimits, StoreLimitsBuilder};
+use wasmi::{
+    Caller, Config, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
+};
 
 // ---------------------------------------------------------------------------
 // MEMORY MANAGEMENT (TALC + BRK)
@@ -156,8 +153,16 @@ struct HostState {
 }
 
 /// Implements wasi fd write.
-fn wasi_fd_write(mut caller: Caller<'_, HostState>, fd: u32, iovs_ptr: u32, iovs_len: u32, nwritten_ptr: u32) -> u32 {
-    let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else { return 1; };
+fn wasi_fd_write(
+    mut caller: Caller<'_, HostState>,
+    fd: u32,
+    iovs_ptr: u32,
+    iovs_len: u32,
+    nwritten_ptr: u32,
+) -> u32 {
+    let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+        return 1;
+    };
     if fd != 1 && fd != 2 {
         return 8; // WASI EBADF
     }
@@ -165,25 +170,39 @@ fn wasi_fd_write(mut caller: Caller<'_, HostState>, fd: u32, iovs_ptr: u32, iovs
     for i in 0..iovs_len {
         let base_addr = (iovs_ptr + i * 8) as usize;
         let mut iov_desc = [0u8; 8];
-        if memory.read(&caller, base_addr, &mut iov_desc).is_err() { break; }
-        let buf_ptr = u32::from_le_bytes([iov_desc[0], iov_desc[1], iov_desc[2], iov_desc[3]]) as usize;
-        let buf_len = u32::from_le_bytes([iov_desc[4], iov_desc[5], iov_desc[6], iov_desc[7]]) as usize;
+        if memory.read(&caller, base_addr, &mut iov_desc).is_err() {
+            break;
+        }
+        let buf_ptr =
+            u32::from_le_bytes([iov_desc[0], iov_desc[1], iov_desc[2], iov_desc[3]]) as usize;
+        let buf_len =
+            u32::from_le_bytes([iov_desc[4], iov_desc[5], iov_desc[6], iov_desc[7]]) as usize;
         let mut buffer = vec![0u8; buf_len];
-        if memory.read(&caller, buf_ptr, &mut buffer).is_err() { break; }
+        if memory.read(&caller, buf_ptr, &mut buffer).is_err() {
+            break;
+        }
         match call::write(fd as usize, &buffer) {
             Ok(n) => total_written += n as u32,
             Err(_) => break,
         }
     }
-    let _ = memory.write(&mut caller, nwritten_ptr as usize, &total_written.to_le_bytes());
+    let _ = memory.write(
+        &mut caller,
+        nwritten_ptr as usize,
+        &total_written.to_le_bytes(),
+    );
     0
 }
 
 /// Implements wasi environ get.
-fn wasi_environ_get(_caller: Caller<'_, HostState>, _environ: u32, _environ_buf: u32) -> u32 { 0 }
+fn wasi_environ_get(_caller: Caller<'_, HostState>, _environ: u32, _environ_buf: u32) -> u32 {
+    0
+}
 /// Implements wasi environ sizes get.
 fn wasi_environ_sizes_get(mut caller: Caller<'_, HostState>, count_ptr: u32, size_ptr: u32) -> u32 {
-    let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else { return 1; };
+    let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+        return 1;
+    };
     let _ = memory.write(&mut caller, count_ptr as usize, &0u32.to_le_bytes());
     let _ = memory.write(&mut caller, size_ptr as usize, &0u32.to_le_bytes());
     0
@@ -199,11 +218,11 @@ fn wasi_proc_exit(mut caller: Caller<'_, HostState>, code: u32) -> Result<(), wa
 // ---------------------------------------------------------------------------
 
 const OP_WASM_LOAD_PATH: u32 = 0x100;
-const OP_WASM_RUN_MAIN: u32  = 0x102;
-const OP_BOOTSTRAP: u32      = 0x10;
-const REPLY_MSG_TYPE: u32    = 0x80;
+const OP_WASM_RUN_MAIN: u32 = 0x102;
+const OP_BOOTSTRAP: u32 = 0x10;
+const REPLY_MSG_TYPE: u32 = 0x80;
 
-const RESP_OK: u32  = 0x0;
+const RESP_OK: u32 = 0x0;
 const RESP_ERR_OPEN: u32 = 0x10;
 const RESP_ERR_READ: u32 = 0x11;
 const RESP_ERR_MODULE: u32 = 0x12;
@@ -229,22 +248,47 @@ pub unsafe extern "C" fn _start() -> ! {
 
     let engine = Engine::new(&config);
     let mut linker = Linker::new(&engine);
-    let limits = StoreLimitsBuilder::new().memory_size(16 * 1024 * 1024).instances(1).build();
-    let mut store = Store::new(&engine, HostState { limits, exit_code: None });
+    let limits = StoreLimitsBuilder::new()
+        .memory_size(16 * 1024 * 1024)
+        .instances(1)
+        .build();
+    let mut store = Store::new(
+        &engine,
+        HostState {
+            limits,
+            exit_code: None,
+        },
+    );
     store.limiter(|state| &mut state.limits);
 
-    let _ = linker.define("wasi_snapshot_preview1", "fd_write", wasmi::Func::wrap(&mut store, wasi_fd_write));
-    let _ = linker.define("wasi_snapshot_preview1", "proc_exit", wasmi::Func::wrap(&mut store, wasi_proc_exit));
-    let _ = linker.define("wasi_snapshot_preview1", "environ_get", wasmi::Func::wrap(&mut store, wasi_environ_get));
-    let _ = linker.define("wasi_snapshot_preview1", "environ_sizes_get", wasmi::Func::wrap(&mut store, wasi_environ_sizes_get));
+    let _ = linker.define(
+        "wasi_snapshot_preview1",
+        "fd_write",
+        wasmi::Func::wrap(&mut store, wasi_fd_write),
+    );
+    let _ = linker.define(
+        "wasi_snapshot_preview1",
+        "proc_exit",
+        wasmi::Func::wrap(&mut store, wasi_proc_exit),
+    );
+    let _ = linker.define(
+        "wasi_snapshot_preview1",
+        "environ_get",
+        wasmi::Func::wrap(&mut store, wasi_environ_get),
+    );
+    let _ = linker.define(
+        "wasi_snapshot_preview1",
+        "environ_sizes_get",
+        wasmi::Func::wrap(&mut store, wasi_environ_sizes_get),
+    );
 
     let mut label = String::from("default");
     let mut queued_msg: Option<IpcMessage> = None;
-    
+
     // We need a port to bind to
     let port_h = call::ipc_create_port(0).expect("failed to create port");
     let _ = call::ipc_bind_port(port_h, b"/srv/strate-wasm/bootstrap");
-    
+
     let mut b_msg = IpcMessage::new(0);
     if let Ok(_) = call::ipc_try_recv(port_h, &mut b_msg) {
         if b_msg.msg_type == OP_BOOTSTRAP {

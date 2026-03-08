@@ -581,12 +581,7 @@ pub mod call {
     /// `path`: executable path as a nul-terminated C string byte slice.
     /// `argv` and `envp`: pointers to null-terminated C-style arrays.
     pub unsafe fn execve(path: &[u8], argv: usize, envp: usize) -> error::Result<usize> {
-        syscall3(
-            number::SYS_PROC_EXECVE,
-            path.as_ptr() as usize,
-            argv,
-            envp,
-        )
+        syscall3(number::SYS_PROC_EXECVE, path.as_ptr() as usize, argv, envp)
     }
 
     /// Return current process ID.
@@ -786,7 +781,13 @@ pub mod call {
 
     /// Query metadata about a capability handle.
     pub fn handle_info(handle: usize, out: &mut data::HandleInfo) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_HANDLE_INFO, handle, out as *mut data::HandleInfo as usize) }
+        unsafe {
+            syscall2(
+                number::SYS_HANDLE_INFO,
+                handle,
+                out as *mut data::HandleInfo as usize,
+            )
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -901,7 +902,13 @@ pub mod call {
 
     /// Unbind a namespace path from its IPC port.
     pub fn ipc_unbind_port(path: &[u8]) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_IPC_UNBIND_PORT, path.as_ptr() as usize, path.len()) }
+        unsafe {
+            syscall2(
+                number::SYS_IPC_UNBIND_PORT,
+                path.as_ptr() as usize,
+                path.len(),
+            )
+        }
     }
 
     /// Create a shared-memory ring buffer.

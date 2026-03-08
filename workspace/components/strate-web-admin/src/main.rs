@@ -11,9 +11,7 @@ mod net;
 mod routes;
 mod sysinfo;
 
-use core::alloc::Layout;
-use core::fmt::Write;
-use core::panic::PanicInfo;
+use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
 use strat9_syscall::call;
 
 const LISTEN_PORT: u16 = 8080;
@@ -34,7 +32,12 @@ fn alloc_error(layout: Layout) -> ! {
     let mut buf = [0u8; 80];
     let n = {
         let mut w = BufWriter::new(&mut buf);
-        let _ = write!(w, "[web-admin] OOM: {} bytes align {}\n", layout.size(), layout.align());
+        let _ = write!(
+            w,
+            "[web-admin] OOM: {} bytes align {}\n",
+            layout.size(),
+            layout.align()
+        );
         w.len()
     };
     let _ = call::debug_log(&buf[..n]);
@@ -87,7 +90,8 @@ pub fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
 
-static CONFIG: picoserve::Config = picoserve::Config::const_default().close_connection_after_response();
+static CONFIG: picoserve::Config =
+    picoserve::Config::const_default().close_connection_after_response();
 
 #[unsafe(no_mangle)]
 /// Implements start.

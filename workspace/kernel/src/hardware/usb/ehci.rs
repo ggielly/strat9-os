@@ -13,8 +13,7 @@ use crate::{
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_dma_frame, phys_to_virt},
 };
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
@@ -268,7 +267,10 @@ pub fn init() {
     }
 
     EHCI_INITIALIZED.store(true, Ordering::SeqCst);
-    log::info!("[EHCI] Found {} controller(s)", EHCI_CONTROLLERS.lock().len());
+    log::info!(
+        "[EHCI] Found {} controller(s)",
+        EHCI_CONTROLLERS.lock().len()
+    );
 }
 
 /// Returns controller.

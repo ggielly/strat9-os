@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const WIN_CTRL_OFF: usize = 0x00;
 const WIN_BASE_OFF: usize = 0x04;
@@ -74,7 +73,12 @@ impl MvebuMbus {
             num_wins,
             has_bridge,
             hw_io_coherency: false,
-            saved_wins: [MbusWindowData { ctrl: 0, base: 0, remap_lo: 0, remap_hi: 0 }; MAX_WINS],
+            saved_wins: [MbusWindowData {
+                ctrl: 0,
+                base: 0,
+                remap_lo: 0,
+                remap_hi: 0,
+            }; MAX_WINS],
             power_state: PowerState::Off,
         }
     }
@@ -115,23 +119,41 @@ impl MvebuMbus {
         MbusWindowData {
             ctrl: self.mbus_regs.read32(off + WIN_CTRL_OFF),
             base: self.mbus_regs.read32(off + WIN_BASE_OFF),
-            remap_lo: if self.has_remap(win) { self.mbus_regs.read32(off + WIN_REMAP_LO_OFF) } else { 0 },
-            remap_hi: if self.has_remap(win) { self.mbus_regs.read32(off + WIN_REMAP_HI_OFF) } else { 0 },
+            remap_lo: if self.has_remap(win) {
+                self.mbus_regs.read32(off + WIN_REMAP_LO_OFF)
+            } else {
+                0
+            },
+            remap_hi: if self.has_remap(win) {
+                self.mbus_regs.read32(off + WIN_REMAP_HI_OFF)
+            } else {
+                0
+            },
         }
     }
 
     /// Performs the setup window operation.
-    pub fn setup_window(&self, win: usize, base: u32, size: u32, target: u8, attr: u8, remap: Option<u64>) {
+    pub fn setup_window(
+        &self,
+        win: usize,
+        base: u32,
+        size: u32,
+        target: u8,
+        attr: u8,
+        remap: Option<u64>,
+    ) {
         let off = self.win_offset(win);
 
         self.mbus_regs.write32(off + WIN_CTRL_OFF, 0);
 
-        self.mbus_regs.write32(off + WIN_BASE_OFF, base & 0xFFFF_0000);
+        self.mbus_regs
+            .write32(off + WIN_BASE_OFF, base & 0xFFFF_0000);
 
         if self.has_remap(win) {
             if let Some(r) = remap {
                 self.mbus_regs.write32(off + WIN_REMAP_LO_OFF, r as u32);
-                self.mbus_regs.write32(off + WIN_REMAP_HI_OFF, (r >> 32) as u32);
+                self.mbus_regs
+                    .write32(off + WIN_REMAP_HI_OFF, (r >> 32) as u32);
             } else {
                 self.mbus_regs.write32(off + WIN_REMAP_LO_OFF, 0);
                 self.mbus_regs.write32(off + WIN_REMAP_HI_OFF, 0);
@@ -183,10 +205,14 @@ impl MvebuMbus {
 
 impl BusDriver for MvebuMbus {
     /// Performs the name operation.
-    fn name(&self) -> &str { "mvebu-mbus" }
+    fn name(&self) -> &str {
+        "mvebu-mbus"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -217,13 +243,17 @@ impl BusDriver for MvebuMbus {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.mbus_regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.mbus_regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.mbus_regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.mbus_regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.mbus_regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.mbus_regs.write32(offset, value);
         Ok(())
     }

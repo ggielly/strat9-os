@@ -79,8 +79,7 @@
 
 use super::task::{Pid, Task, TaskId, TaskPriority, TaskState, Tid};
 use crate::{
-    arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer},
-    arch::x86_64::timer::NS_PER_TICK,
+    arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer, timer::NS_PER_TICK},
     sync::SpinLock,
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
@@ -259,19 +258,26 @@ fn send_resched_ipi_to_cpu(cpu_index: usize) {
     if !apic::is_initialized() {
         return;
     }
-    let my_apic = apic::lapic_id();
+    let my_cpu = current_cpu_index();
     if let Some(target_apic) = percpu::apic_id_by_cpu_index(cpu_index) {
-        if target_apic != my_apic {
-            if RESCHED_IPI_PENDING[cpu_index].swap(true, Ordering::AcqRel) {
-                return;
+        if let Some(my_apic) = percpu::apic_id_by_cpu_index(my_cpu) {
+            if target_apic != my_apic {
+                if RESCHED_IPI_PENDING[cpu_index].swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                apic::send_resched_ipi(target_apic);
             }
-            apic::send_resched_ipi(target_apic);
         }
     }
 }
 
 /// The global scheduler instance
 pub(crate) static SCHEDULER: SpinLock<Option<Scheduler>> = SpinLock::new(None);
+
+/// Returns the scheduler lock address for deadlock tracing.
+pub fn debug_scheduler_lock_addr() -> usize {
+    &SCHEDULER as *const _ as usize
+}
 
 /// Global tick counter (safe to increment from interrupt context)
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -285,7 +291,6 @@ fn sched_trace(args: core::fmt::Arguments<'_>) {
         log::debug!("[sched] {}", args);
     }
 }
-
 
 /// Information needed to perform a context switch after releasing the lock.
 pub(super) struct SwitchTarget {
@@ -315,12 +320,7 @@ pub enum WaitChildResult {
 
 /// Performs the current cpu index operation.
 fn current_cpu_index() -> usize {
-    if apic::is_initialized() {
-        let apic_id = apic::lapic_id();
-        percpu::cpu_index_by_apic(apic_id).unwrap_or(0)
-    } else {
-        0
-    }
+    crate::arch::x86_64::percpu::current_cpu_index()
 }
 
 struct PerCpuClassRqSet {
@@ -506,7 +506,9 @@ fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
     }
 
     // For our switch frame layout, return IP is at [saved_rsp + 48].
-    let ret_ip = unsafe { core::ptr::read((saved_rsp + 48) as *const u64) };
+    // Use read_unaligned: saved_rsp is only guaranteed to be within the stack
+    // bounds, not necessarily aligned to 8 bytes at this offset.
+    let ret_ip = unsafe { core::ptr::read_unaligned((saved_rsp + 48) as *const u64) };
     if ret_ip == 0 {
         return Err("null return IP in switch frame");
     }

@@ -25,6 +25,8 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-03-07 `6191656` cargo fmt
+- 2026-03-07 `8cd1410` Refactor memory allocation and deallocation in the kernel : per-CPU frame cach and a CPU-local BuddySet avoids the global lock in the common case.
 - 2026-03-04 `04b384e` fix(build): improve stage assembly error handling and warnings
 - 2026-03-03 `2eb44c0` feat(task): replace FpuState with ExtendedState, support xsave/xrstor
 - 2026-03-03 `ae5480a` feat(silo): add silo attach for live debug output monitoring
@@ -53,8 +55,6 @@ See:
 - 2026-03-01 `84fdb29` Update zerocopy dependency and refactor related code
 - 2026-03-01 `34a1f24` Update dependencies and add web-admin component
 - 2026-03-01 `51c2a03` Update scheduler functionality and enhance shell command integration
-- 2026-03-01 `20e1849` Add SSH daemon support and enhance build tasks
-- 2026-03-01 `6966081` Implement WASM service connection and enhance IPC handling
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

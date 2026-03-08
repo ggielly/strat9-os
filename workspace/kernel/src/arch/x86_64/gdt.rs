@@ -65,6 +65,13 @@ pub fn init() {
 
 /// Initialize the GDT for a given CPU index.
 pub fn init_cpu(cpu_index: usize) {
+    // Bounds check: prevent OOB access into static arrays before any unsafe.
+    assert!(
+        cpu_index < crate::arch::x86_64::percpu::MAX_CPUS,
+        "GDT init_cpu: cpu_index {} >= MAX_CPUS {}",
+        cpu_index,
+        crate::arch::x86_64::percpu::MAX_CPUS,
+    );
     // SAFETY: Called during init (BSP) or AP bring-up before interrupts are enabled on that CPU.
     unsafe {
         let gdt = &mut *GDT[cpu_index].as_mut_ptr();
@@ -172,6 +179,5 @@ fn selectors_for(cpu_index: usize) -> Selectors {
 
 /// Performs the current cpu index operation.
 fn current_cpu_index() -> usize {
-    let apic_id = super::apic::lapic_id();
-    crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id).unwrap_or(0)
+    crate::arch::x86_64::percpu::current_cpu_index()
 }

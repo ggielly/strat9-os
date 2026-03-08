@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const CCI_PORT_CTRL: usize = 0x00;
 const CCI_CTRL_STATUS: usize = 0x0C;
@@ -15,11 +14,7 @@ const PORT_VALID: u32 = 1 << PORT_VALID_SHIFT;
 const MAX_PORTS: usize = 5;
 const MAX_POLL: u32 = 10000;
 
-const COMPATIBLE: &[&str] = &[
-    "arm,cci-400",
-    "arm,cci-500",
-    "arm,cci-550",
-];
+const COMPATIBLE: &[&str] = &["arm,cci-400", "arm,cci-500", "arm,cci-550"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CciPortType {
@@ -80,7 +75,8 @@ impl ArmCci {
             .as_ref()
             .ok_or(BusError::DeviceNotFound)?
             .base_offset;
-        self.regs.write32(base_offset + CCI_PORT_CTRL, CCI_ENABLE_REQ);
+        self.regs
+            .write32(base_offset + CCI_PORT_CTRL, CCI_ENABLE_REQ);
         self.wait_for_status_clear()?;
         let port = self.ports[index].as_mut().ok_or(BusError::DeviceNotFound)?;
         port.enabled = true;
@@ -117,10 +113,14 @@ impl ArmCci {
 
 impl BusDriver for ArmCci {
     /// Performs the name operation.
-    fn name(&self) -> &str { "arm-cci" }
+    fn name(&self) -> &str {
+        "arm-cci"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {

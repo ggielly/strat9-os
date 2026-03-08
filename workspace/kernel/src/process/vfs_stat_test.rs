@@ -24,9 +24,13 @@ fn ts_nanos(st: &vfs::FileStat) -> (u64, u64, u64) {
 
 /// Performs the log section operation.
 fn log_section(title: &str) {
-    crate::serial_println!("[vfs-stat-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[vfs-stat-test][STEP] ========================================================"
+    );
     crate::serial_println!("[vfs-stat-test][STEP] {}", title);
-    crate::serial_println!("[vfs-stat-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[vfs-stat-test][STEP] ========================================================"
+    );
 }
 
 /// Performs the record scenario operation.
@@ -141,7 +145,11 @@ fn run_vfs_stat_timestamp_suite() -> bool {
     crate::serial_println!("[vfs-stat-test][SETUP] base path: '{}'", base);
     crate::serial_println!(
         "[vfs-stat-test][SETUP] mode: {}",
-        if STRICT_MODE { "STRICT (>)" } else { "RELAXED (>=)" }
+        if STRICT_MODE {
+            "STRICT (>)"
+        } else {
+            "RELAXED (>=)"
+        }
     );
 
     if let Err(e) = vfs::mkdir(&base, 0o755) {
@@ -150,7 +158,11 @@ fn run_vfs_stat_timestamp_suite() -> bool {
     }
 
     if let Err(e) = vfs::create_file(&file, 0o644) {
-        crate::serial_println!("[vfs-stat-test][SETUP] FAIL: create_file('{}') => {:?}", file, e);
+        crate::serial_println!(
+            "[vfs-stat-test][SETUP] FAIL: create_file('{}') => {:?}",
+            file,
+            e
+        );
         let _ = vfs::unlink(&base);
         return false;
     }
@@ -209,7 +221,10 @@ fn run_vfs_stat_timestamp_suite() -> bool {
 
     // 2) WRITE should update mtime and ctime
     let mut s2_ok = true;
-    let prev = core::cmp::max(core::cmp::max(ts_nanos(&st).0, ts_nanos(&st).1), ts_nanos(&st).2);
+    let prev = core::cmp::max(
+        core::cmp::max(ts_nanos(&st).0, ts_nanos(&st).1),
+        ts_nanos(&st).2,
+    );
     if !wait_clock_advance(prev, "before write") {
         s2_ok = false;
         ok = false;
@@ -235,7 +250,10 @@ fn run_vfs_stat_timestamp_suite() -> bool {
 
     // 3) TRUNCATE should update mtime and ctime
     let mut s3_ok = true;
-    let prev = core::cmp::max(core::cmp::max(ts_nanos(&st).0, ts_nanos(&st).1), ts_nanos(&st).2);
+    let prev = core::cmp::max(
+        core::cmp::max(ts_nanos(&st).0, ts_nanos(&st).1),
+        ts_nanos(&st).2,
+    );
     if !wait_clock_advance(prev, "before truncate") {
         s3_ok = false;
         ok = false;
@@ -248,8 +266,16 @@ fn run_vfs_stat_timestamp_suite() -> bool {
             let st3 = vfs::fstat(fd_file).unwrap();
             log_stat("after truncate", &file, &st3);
             if STRICT_MODE {
-                s3_ok &= assert_gt("mtime after truncate (strict)", ts_nanos(&st3).1, ts_nanos(&st).1);
-                s3_ok &= assert_gt("ctime after truncate (strict)", ts_nanos(&st3).2, ts_nanos(&st).2);
+                s3_ok &= assert_gt(
+                    "mtime after truncate (strict)",
+                    ts_nanos(&st3).1,
+                    ts_nanos(&st).1,
+                );
+                s3_ok &= assert_gt(
+                    "ctime after truncate (strict)",
+                    ts_nanos(&st3).2,
+                    ts_nanos(&st).2,
+                );
             } else {
                 s3_ok &= assert_ge("mtime after truncate", ts_nanos(&st3).1, ts_nanos(&st).1);
                 s3_ok &= assert_ge("ctime after truncate", ts_nanos(&st3).2, ts_nanos(&st).2);
@@ -258,11 +284,19 @@ fn run_vfs_stat_timestamp_suite() -> bool {
         }
     }
     ok &= s3_ok;
-    record_scenario("truncate updates mtime/ctime", s3_ok, &mut passed, &mut total);
+    record_scenario(
+        "truncate updates mtime/ctime",
+        s3_ok,
+        &mut passed,
+        &mut total,
+    );
 
     // 4) CHMOD should update ctime
     let mut s4_ok = true;
-    let prev = core::cmp::max(core::cmp::max(ts_nanos(&st).0, ts_nanos(&st).1), ts_nanos(&st).2);
+    let prev = core::cmp::max(
+        core::cmp::max(ts_nanos(&st).0, ts_nanos(&st).1),
+        ts_nanos(&st).2,
+    );
     if !wait_clock_advance(prev, "before chmod") {
         s4_ok = false;
         ok = false;
@@ -275,8 +309,16 @@ fn run_vfs_stat_timestamp_suite() -> bool {
             let st4 = vfs::fstat(fd_file).unwrap();
             log_stat("after chmod", &file, &st4);
             if STRICT_MODE {
-                s4_ok &= assert_gt("ctime after chmod (strict)", ts_nanos(&st4).2, ts_nanos(&st).2);
-                s4_ok &= assert_eq_u64("mtime unchanged after chmod (strict)", ts_nanos(&st4).1, ts_nanos(&st).1);
+                s4_ok &= assert_gt(
+                    "ctime after chmod (strict)",
+                    ts_nanos(&st4).2,
+                    ts_nanos(&st).2,
+                );
+                s4_ok &= assert_eq_u64(
+                    "mtime unchanged after chmod (strict)",
+                    ts_nanos(&st4).1,
+                    ts_nanos(&st).1,
+                );
             } else {
                 s4_ok &= assert_ge("ctime after chmod", ts_nanos(&st4).2, ts_nanos(&st).2);
             }
@@ -288,7 +330,10 @@ fn run_vfs_stat_timestamp_suite() -> bool {
 
     // 5) LINK should raise link count and update ctime of source
     let mut s5_ok = true;
-    let prev = core::cmp::max(core::cmp::max(ts_nanos(&st).0, ts_nanos(&st).1), ts_nanos(&st).2);
+    let prev = core::cmp::max(
+        core::cmp::max(ts_nanos(&st).0, ts_nanos(&st).1),
+        ts_nanos(&st).2,
+    );
     if !wait_clock_advance(prev, "before link") {
         s5_ok = false;
         ok = false;
@@ -302,7 +347,11 @@ fn run_vfs_stat_timestamp_suite() -> bool {
             log_stat("after link(src)", &file, &st5);
             s5_ok &= st5.st_nlink >= 2;
             if STRICT_MODE {
-                s5_ok &= assert_gt("ctime after link (strict)", ts_nanos(&st5).2, ts_nanos(&st).2);
+                s5_ok &= assert_gt(
+                    "ctime after link (strict)",
+                    ts_nanos(&st5).2,
+                    ts_nanos(&st).2,
+                );
             } else {
                 s5_ok &= assert_ge("ctime after link", ts_nanos(&st5).2, ts_nanos(&st).2);
             }
@@ -314,7 +363,10 @@ fn run_vfs_stat_timestamp_suite() -> bool {
 
     // 6) RENAME should update ctime of inode
     let mut s6_ok = true;
-    let prev = core::cmp::max(core::cmp::max(ts_nanos(&st).0, ts_nanos(&st).1), ts_nanos(&st).2);
+    let prev = core::cmp::max(
+        core::cmp::max(ts_nanos(&st).0, ts_nanos(&st).1),
+        ts_nanos(&st).2,
+    );
     if !wait_clock_advance(prev, "before rename") {
         s6_ok = false;
         ok = false;
@@ -327,7 +379,11 @@ fn run_vfs_stat_timestamp_suite() -> bool {
             let st6 = vfs::stat_path(&file2).unwrap();
             log_stat("after rename(dst)", &file2, &st6);
             if STRICT_MODE {
-                s6_ok &= assert_gt("ctime after rename (strict)", ts_nanos(&st6).2, ts_nanos(&st).2);
+                s6_ok &= assert_gt(
+                    "ctime after rename (strict)",
+                    ts_nanos(&st6).2,
+                    ts_nanos(&st).2,
+                );
             } else {
                 s6_ok &= assert_ge("ctime after rename", ts_nanos(&st6).2, ts_nanos(&st).2);
             }
@@ -347,45 +403,49 @@ fn run_vfs_stat_timestamp_suite() -> bool {
     } else {
         match vfs::open(&sym, vfs::OpenFlags::READ) {
             Ok(fd_sym) => {
-        let st_sym_before = vfs::fstat(fd_sym).unwrap();
-        log_stat("symlink created", &sym, &st_sym_before);
-        let prev = core::cmp::max(
-            core::cmp::max(ts_nanos(&st_sym_before).0, ts_nanos(&st_sym_before).1),
-            ts_nanos(&st_sym_before).2,
-        );
-        if wait_clock_advance(prev, "before readlink") {
-            let target = vfs::readlink(&sym).unwrap_or_else(|_| String::from("<err>"));
-            crate::serial_println!("[vfs-stat-test][STEP] readlink('{}') => '{}'", sym, target);
-            let st_sym_after = vfs::fstat(fd_sym).unwrap();
-            log_stat("after readlink", &sym, &st_sym_after);
-            if STRICT_MODE {
-                s7_ok &= assert_gt(
-                    "symlink atime after readlink (strict)",
-                    ts_nanos(&st_sym_after).0,
-                    ts_nanos(&st_sym_before).0,
-                );
-                s7_ok &= assert_eq_u64(
-                    "symlink mtime unchanged after readlink (strict)",
-                    ts_nanos(&st_sym_after).1,
-                    ts_nanos(&st_sym_before).1,
-                );
-                s7_ok &= assert_eq_u64(
-                    "symlink ctime unchanged after readlink (strict)",
-                    ts_nanos(&st_sym_after).2,
+                let st_sym_before = vfs::fstat(fd_sym).unwrap();
+                log_stat("symlink created", &sym, &st_sym_before);
+                let prev = core::cmp::max(
+                    core::cmp::max(ts_nanos(&st_sym_before).0, ts_nanos(&st_sym_before).1),
                     ts_nanos(&st_sym_before).2,
                 );
-            } else {
-                s7_ok &= assert_ge(
-                    "symlink atime after readlink",
-                    ts_nanos(&st_sym_after).0,
-                    ts_nanos(&st_sym_before).0,
-                );
-            }
-        } else {
-            s7_ok = false;
-            ok = false;
-        }
-        let _ = vfs::close(fd_sym);
+                if wait_clock_advance(prev, "before readlink") {
+                    let target = vfs::readlink(&sym).unwrap_or_else(|_| String::from("<err>"));
+                    crate::serial_println!(
+                        "[vfs-stat-test][STEP] readlink('{}') => '{}'",
+                        sym,
+                        target
+                    );
+                    let st_sym_after = vfs::fstat(fd_sym).unwrap();
+                    log_stat("after readlink", &sym, &st_sym_after);
+                    if STRICT_MODE {
+                        s7_ok &= assert_gt(
+                            "symlink atime after readlink (strict)",
+                            ts_nanos(&st_sym_after).0,
+                            ts_nanos(&st_sym_before).0,
+                        );
+                        s7_ok &= assert_eq_u64(
+                            "symlink mtime unchanged after readlink (strict)",
+                            ts_nanos(&st_sym_after).1,
+                            ts_nanos(&st_sym_before).1,
+                        );
+                        s7_ok &= assert_eq_u64(
+                            "symlink ctime unchanged after readlink (strict)",
+                            ts_nanos(&st_sym_after).2,
+                            ts_nanos(&st_sym_before).2,
+                        );
+                    } else {
+                        s7_ok &= assert_ge(
+                            "symlink atime after readlink",
+                            ts_nanos(&st_sym_after).0,
+                            ts_nanos(&st_sym_before).0,
+                        );
+                    }
+                } else {
+                    s7_ok = false;
+                    ok = false;
+                }
+                let _ = vfs::close(fd_sym);
             }
             Err(e) => {
                 crate::serial_println!("[vfs-stat-test][STEP] FAIL: open symlink => {:?}", e);
@@ -395,7 +455,12 @@ fn run_vfs_stat_timestamp_suite() -> bool {
         }
     }
     ok &= s7_ok;
-    record_scenario("readlink updates symlink atime", s7_ok, &mut passed, &mut total);
+    record_scenario(
+        "readlink updates symlink atime",
+        s7_ok,
+        &mut passed,
+        &mut total,
+    );
 
     // 8) READDIR should update directory atime
     let mut s8_ok = true;
@@ -410,7 +475,10 @@ fn run_vfs_stat_timestamp_suite() -> bool {
     let st_dir_before = match vfs::fstat(fd_dir) {
         Ok(s) => s,
         Err(e) => {
-            crate::serial_println!("[vfs-stat-test][STEP] FAIL: fstat dir before readdir => {:?}", e);
+            crate::serial_println!(
+                "[vfs-stat-test][STEP] FAIL: fstat dir before readdir => {:?}",
+                e
+            );
             let _ = vfs::close(fd_dir);
             let _ = vfs::close(fd_file);
             return false;
@@ -508,4 +576,3 @@ pub fn create_vfs_stat_test_task() {
         crate::serial_println!("[vfs-stat-test][SETUP] failed to create task");
     }
 }
-

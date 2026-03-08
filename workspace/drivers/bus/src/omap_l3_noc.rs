@@ -1,7 +1,6 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const L3_TARG_STDERRLOG_MAIN: usize = 0x48;
 const L3_TARG_STDERRLOG_HDR: usize = 0x4C;
@@ -78,7 +77,11 @@ impl OmapL3Noc {
     }
 
     /// Handles target error.
-    pub fn handle_target_error(&self, module: usize, target_offset: usize) -> Result<ErrorInfo, BusError> {
+    pub fn handle_target_error(
+        &self,
+        module: usize,
+        target_offset: usize,
+    ) -> Result<ErrorInfo, BusError> {
         if module >= self.num_modules || !self.modules[module].is_valid() {
             return Err(BusError::InvalidArgument);
         }
@@ -96,7 +99,8 @@ impl OmapL3Noc {
 
         let info = match err_type {
             ErrorType::Standard => {
-                let slave_addr = self.modules[module].read32(base_offset + L3_TARG_STDERRLOG_SLVOFSLSB);
+                let slave_addr =
+                    self.modules[module].read32(base_offset + L3_TARG_STDERRLOG_SLVOFSLSB);
                 ErrorInfo {
                     err_type,
                     master_addr: mstaddr,
@@ -157,10 +161,14 @@ pub struct ErrorInfo {
 
 impl BusDriver for OmapL3Noc {
     /// Performs the name operation.
-    fn name(&self) -> &str { "omap-l3-noc" }
+    fn name(&self) -> &str {
+        "omap-l3-noc"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {

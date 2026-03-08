@@ -482,9 +482,8 @@ pub fn sys_rt_sigreturn(frame: &mut super::SyscallFrame) -> Result<u64, SyscallE
     }
 
     // SAFETY: SignalFrame is repr(C) and matches the byte layout
-    let sig_frame: SignalFrame = unsafe {
-        core::ptr::read_unaligned(bytes.as_ptr() as *const SignalFrame)
-    };
+    let sig_frame: SignalFrame =
+        unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const SignalFrame) };
 
     if sig_frame.magic != SIGNAL_FRAME_MAGIC {
         log::warn!("[sigreturn] bad magic, killing");

@@ -4,29 +4,15 @@
 
 extern crate alloc;
 
-use alloc::{
-    format,
-    string::String,
-    vec::Vec,
-};
+use alloc::{format, string::String, vec::Vec};
 use base64::Engine;
-use core::{
-    alloc::Layout,
-    panic::PanicInfo,
-};
-use libssh_strat9::{
-    Server,
-    SessionPump,
-};
+use core::{alloc::Layout, panic::PanicInfo};
+use libssh_strat9::{Server, SessionPump};
 use ssh_core::{
     AuthProvider, CoreDirective, ExecSessionProvider, ExecSessionWiring, HostKeyProvider, SshCore,
     SshCoreError, Transport,
 };
-use strat9_syscall::{
-    call,
-    error,
-    flag,
-};
+use strat9_syscall::{call, error, flag};
 
 const GLOBAL_AUTH_PATHS: [&str; 2] = ["/initfs/etc/ssh/authorized_keys", "/initfs/authorized_keys"];
 const USER_AUTH_DIR: &str = "/initfs/etc/ssh/authorized_keys.d";
@@ -62,7 +48,8 @@ fn panic(_info: &PanicInfo) -> ! {
 
 /// Opens log fd.
 fn open_log_fd() -> Option<usize> {
-    let flags = (flag::OpenFlags::WRONLY | flag::OpenFlags::CREATE | flag::OpenFlags::APPEND).bits() as usize;
+    let flags = (flag::OpenFlags::WRONLY | flag::OpenFlags::CREATE | flag::OpenFlags::APPEND).bits()
+        as usize;
     call::openat(0, LOG_PATH, flags, 0).ok()
 }
 
@@ -259,7 +246,11 @@ impl HostKeyProvider for FixedHostKey {
     }
 
     /// Implements sign exchange hash.
-    fn sign_exchange_hash(&mut self, exchange_hash: &[u8], out: &mut [u8]) -> ssh_core::Result<usize> {
+    fn sign_exchange_hash(
+        &mut self,
+        exchange_hash: &[u8],
+        out: &mut [u8],
+    ) -> ssh_core::Result<usize> {
         if out.is_empty() {
             return Err(SshCoreError::BufferTooSmall);
         }
@@ -290,7 +281,11 @@ struct PublicKeyAuth {
 
 impl PublicKeyAuth {
     /// Builds a value from paths.
-    fn from_paths(global_paths: &'static [&'static str], user_dir: &'static str, deny_root_login: bool) -> Self {
+    fn from_paths(
+        global_paths: &'static [&'static str],
+        user_dir: &'static str,
+        deny_root_login: bool,
+    ) -> Self {
         let mut auth = Self {
             global_paths,
             user_dir,
@@ -400,7 +395,8 @@ impl PublicKeyAuth {
             let algo = tokens[algo_idx];
             let blob_b64 = tokens[algo_idx + 1];
 
-            let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(blob_b64.as_bytes()) else {
+            let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(blob_b64.as_bytes())
+            else {
                 continue;
             };
 
@@ -672,7 +668,11 @@ impl ExecBridge {
 
 impl ExecSessionProvider for ExecBridge {
     /// Implements spawn exec.
-    fn spawn_exec(&mut self, _username: &[u8], command: &[u8]) -> ssh_core::Result<ExecSessionWiring> {
+    fn spawn_exec(
+        &mut self,
+        _username: &[u8],
+        command: &[u8],
+    ) -> ssh_core::Result<ExecSessionWiring> {
         let plan = self.parse_exec_plan(command)?;
 
         let pid = call::fork().map_err(|_| SshCoreError::Backend)?;
@@ -699,7 +699,13 @@ impl ExecSessionProvider for ExecBridge {
             let envp = [0usize];
 
             // SAFETY: path_c, argv and envp point to valid process-local buffers during execve.
-            let _ = unsafe { call::execve(path_c.as_slice(), argv.as_ptr() as usize, envp.as_ptr() as usize) };
+            let _ = unsafe {
+                call::execve(
+                    path_c.as_slice(),
+                    argv.as_ptr() as usize,
+                    envp.as_ptr() as usize,
+                )
+            };
             call::exit(127);
         }
 
@@ -719,7 +725,11 @@ impl ExecSessionProvider for ExecBridge {
 
     /// Closes exec.
     fn close_exec(&mut self, wiring: &ExecSessionWiring) -> ssh_core::Result<()> {
-        let Some(idx) = self.procs.iter().position(|p| p.session_id == wiring.session_id) else {
+        let Some(idx) = self
+            .procs
+            .iter()
+            .position(|p| p.session_id == wiring.session_id)
+        else {
             return Ok(());
         };
 

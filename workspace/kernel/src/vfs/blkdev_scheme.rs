@@ -36,11 +36,11 @@ use crate::{
 
 // ─── File-ID constants ────────────────────────────────────────────────────────
 
-const FID_ROOT:   u64 = 0;
-const FID_SDA:    u64 = 1;
-const FID_VDA:    u64 = 2;
-const FID_NULL:   u64 = 3;
-const FID_ZERO:   u64 = 4;
+const FID_ROOT: u64 = 0;
+const FID_SDA: u64 = 1;
+const FID_VDA: u64 = 2;
+const FID_NULL: u64 = 3;
+const FID_ZERO: u64 = 4;
 const FID_RANDOM: u64 = 5;
 const FID_URANDOM: u64 = 6;
 
@@ -116,10 +116,26 @@ impl Scheme for BlkDevScheme {
                     flags: FileFlags::DEVICE,
                 })
             }
-            "null" => Ok(OpenResult { file_id: FID_NULL,   size: Some(0), flags: FileFlags::DEVICE }),
-            "zero" => Ok(OpenResult { file_id: FID_ZERO,   size: None,   flags: FileFlags::DEVICE }),
-            "random"  => Ok(OpenResult { file_id: FID_RANDOM,  size: None, flags: FileFlags::DEVICE }),
-            "urandom" => Ok(OpenResult { file_id: FID_URANDOM, size: None, flags: FileFlags::DEVICE }),
+            "null" => Ok(OpenResult {
+                file_id: FID_NULL,
+                size: Some(0),
+                flags: FileFlags::DEVICE,
+            }),
+            "zero" => Ok(OpenResult {
+                file_id: FID_ZERO,
+                size: None,
+                flags: FileFlags::DEVICE,
+            }),
+            "random" => Ok(OpenResult {
+                file_id: FID_RANDOM,
+                size: None,
+                flags: FileFlags::DEVICE,
+            }),
+            "urandom" => Ok(OpenResult {
+                file_id: FID_URANDOM,
+                size: None,
+                flags: FileFlags::DEVICE,
+            }),
             _ => Err(SyscallError::NotFound),
         }
     }
@@ -132,20 +148,30 @@ impl Scheme for BlkDevScheme {
             FID_ROOT => {
                 let mut listing = String::new();
                 listing.push_str("null\nurandom\nzero\nrandom\n");
-                if ahci::get_device().is_some() { listing.push_str("sda\n"); }
+                if ahci::get_device().is_some() {
+                    listing.push_str("sda\n");
+                }
                 if crate::hardware::storage::virtio_block::get_device().is_some() {
                     listing.push_str("vda\n");
                 }
                 let bytes = listing.as_bytes();
                 let start = offset as usize;
-                if start >= bytes.len() { return Ok(0); }
+                if start >= bytes.len() {
+                    return Ok(0);
+                }
                 let n = (bytes.len() - start).min(buf.len());
                 buf[..n].copy_from_slice(&bytes[start..start + n]);
                 Ok(n)
             }
             FID_NULL => Ok(0),
-            FID_ZERO => { buf.fill(0); Ok(buf.len()) }
-            FID_RANDOM | FID_URANDOM => { prng_fill(buf); Ok(buf.len()) }
+            FID_ZERO => {
+                buf.fill(0);
+                Ok(buf.len())
+            }
+            FID_RANDOM | FID_URANDOM => {
+                prng_fill(buf);
+                Ok(buf.len())
+            }
             FID_SDA => {
                 let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
                 sector_read(dev, offset, buf).map_err(|_| SyscallError::IoError)
@@ -207,45 +233,105 @@ impl Scheme for BlkDevScheme {
     /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         match file_id {
-            FID_ROOT => Ok(finalize_pseudo_stat(FileStat {
-                st_ino: FID_ROOT,
-                st_mode: 0o040_755,
-                st_nlink: 2,
-                st_size: 0,
-                st_blksize: SECTOR_SIZE as u64,
-                st_blocks: 0,
-                ..FileStat::zeroed()
-            }, DEV_DEVFS, 0)),
-            FID_NULL => Ok(finalize_pseudo_stat(FileStat { st_ino: FID_NULL,   st_mode: 0o020_666, st_nlink: 1, st_size: 0,    st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }, DEV_DEVFS, RDEV_NULL)),
-            FID_ZERO => Ok(finalize_pseudo_stat(FileStat { st_ino: FID_ZERO,   st_mode: 0o020_444, st_nlink: 1, st_size: 0,    st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }, DEV_DEVFS, RDEV_ZERO)),
-            FID_RANDOM  => Ok(finalize_pseudo_stat(FileStat { st_ino: FID_RANDOM,  st_mode: 0o020_444, st_nlink: 1, st_size: 0, st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }, DEV_DEVFS, RDEV_RANDOM)),
-            FID_URANDOM => Ok(finalize_pseudo_stat(FileStat { st_ino: FID_URANDOM, st_mode: 0o020_444, st_nlink: 1, st_size: 0, st_blksize: 1, st_blocks: 0, ..FileStat::zeroed() }, DEV_DEVFS, RDEV_URANDOM)),
+            FID_ROOT => Ok(finalize_pseudo_stat(
+                FileStat {
+                    st_ino: FID_ROOT,
+                    st_mode: 0o040_755,
+                    st_nlink: 2,
+                    st_size: 0,
+                    st_blksize: SECTOR_SIZE as u64,
+                    st_blocks: 0,
+                    ..FileStat::zeroed()
+                },
+                DEV_DEVFS,
+                0,
+            )),
+            FID_NULL => Ok(finalize_pseudo_stat(
+                FileStat {
+                    st_ino: FID_NULL,
+                    st_mode: 0o020_666,
+                    st_nlink: 1,
+                    st_size: 0,
+                    st_blksize: 1,
+                    st_blocks: 0,
+                    ..FileStat::zeroed()
+                },
+                DEV_DEVFS,
+                RDEV_NULL,
+            )),
+            FID_ZERO => Ok(finalize_pseudo_stat(
+                FileStat {
+                    st_ino: FID_ZERO,
+                    st_mode: 0o020_444,
+                    st_nlink: 1,
+                    st_size: 0,
+                    st_blksize: 1,
+                    st_blocks: 0,
+                    ..FileStat::zeroed()
+                },
+                DEV_DEVFS,
+                RDEV_ZERO,
+            )),
+            FID_RANDOM => Ok(finalize_pseudo_stat(
+                FileStat {
+                    st_ino: FID_RANDOM,
+                    st_mode: 0o020_444,
+                    st_nlink: 1,
+                    st_size: 0,
+                    st_blksize: 1,
+                    st_blocks: 0,
+                    ..FileStat::zeroed()
+                },
+                DEV_DEVFS,
+                RDEV_RANDOM,
+            )),
+            FID_URANDOM => Ok(finalize_pseudo_stat(
+                FileStat {
+                    st_ino: FID_URANDOM,
+                    st_mode: 0o020_444,
+                    st_nlink: 1,
+                    st_size: 0,
+                    st_blksize: 1,
+                    st_blocks: 0,
+                    ..FileStat::zeroed()
+                },
+                DEV_DEVFS,
+                RDEV_URANDOM,
+            )),
             FID_SDA => {
                 let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
                 let size = dev.sector_count() * SECTOR_SIZE as u64;
-                Ok(finalize_pseudo_stat(FileStat {
-                    st_ino: FID_SDA,
-                    st_mode: 0o060_660, // brw-rw---- (block device)
-                    st_nlink: 1,
-                    st_size: size,
-                    st_blksize: SECTOR_SIZE as u64,
-                    st_blocks: dev.sector_count(),
-                    ..FileStat::zeroed()
-                }, DEV_DEVFS, RDEV_SDA))
+                Ok(finalize_pseudo_stat(
+                    FileStat {
+                        st_ino: FID_SDA,
+                        st_mode: 0o060_660, // brw-rw---- (block device)
+                        st_nlink: 1,
+                        st_size: size,
+                        st_blksize: SECTOR_SIZE as u64,
+                        st_blocks: dev.sector_count(),
+                        ..FileStat::zeroed()
+                    },
+                    DEV_DEVFS,
+                    RDEV_SDA,
+                ))
             }
             FID_VDA => {
                 let dev = crate::hardware::storage::virtio_block::get_device()
                     .ok_or(SyscallError::BadHandle)?;
                 let size = dev.sector_count() * SECTOR_SIZE as u64;
-                Ok(finalize_pseudo_stat(FileStat {
-                    st_ino: FID_VDA,
-                    st_mode: 0o060_660,
-                    st_nlink: 1,
-                    st_size: size,
-                    st_blksize: SECTOR_SIZE as u64,
-                    st_blocks: dev.sector_count(),
-                    ..FileStat::zeroed()
-                }, DEV_DEVFS, RDEV_VDA))
+                Ok(finalize_pseudo_stat(
+                    FileStat {
+                        st_ino: FID_VDA,
+                        st_mode: 0o060_660,
+                        st_nlink: 1,
+                        st_size: size,
+                        st_blksize: SECTOR_SIZE as u64,
+                        st_blocks: dev.sector_count(),
+                        ..FileStat::zeroed()
+                    },
+                    DEV_DEVFS,
+                    RDEV_VDA,
+                ))
             }
             _ => Err(SyscallError::BadHandle),
         }
@@ -259,15 +345,39 @@ impl Scheme for BlkDevScheme {
             return Err(SyscallError::InvalidArgument);
         }
         let mut entries = Vec::new();
-        entries.push(DirEntry { ino: FID_NULL,   file_type: DT_CHR, name: String::from("null") });
-        entries.push(DirEntry { ino: FID_ZERO,   file_type: DT_CHR, name: String::from("zero") });
-        entries.push(DirEntry { ino: FID_RANDOM,  file_type: DT_CHR, name: String::from("random") });
-        entries.push(DirEntry { ino: FID_URANDOM, file_type: DT_CHR, name: String::from("urandom") });
+        entries.push(DirEntry {
+            ino: FID_NULL,
+            file_type: DT_CHR,
+            name: String::from("null"),
+        });
+        entries.push(DirEntry {
+            ino: FID_ZERO,
+            file_type: DT_CHR,
+            name: String::from("zero"),
+        });
+        entries.push(DirEntry {
+            ino: FID_RANDOM,
+            file_type: DT_CHR,
+            name: String::from("random"),
+        });
+        entries.push(DirEntry {
+            ino: FID_URANDOM,
+            file_type: DT_CHR,
+            name: String::from("urandom"),
+        });
         if ahci::get_device().is_some() {
-            entries.push(DirEntry { ino: FID_SDA, file_type: DT_BLK, name: String::from("sda") });
+            entries.push(DirEntry {
+                ino: FID_SDA,
+                file_type: DT_BLK,
+                name: String::from("sda"),
+            });
         }
         if crate::hardware::storage::virtio_block::get_device().is_some() {
-            entries.push(DirEntry { ino: FID_VDA, file_type: DT_BLK, name: String::from("vda") });
+            entries.push(DirEntry {
+                ino: FID_VDA,
+                file_type: DT_BLK,
+                name: String::from("vda"),
+            });
         }
         Ok(entries)
     }

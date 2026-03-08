@@ -18,12 +18,9 @@
 //! - COW_LOCK protects flag changes and frame free
 //! - TLB shootdown is performed after modifying page table flags
 
-use crate::{
-    memory::frame::{FrameAllocator, PhysFrame},
-    sync::SpinLock,
-};
+use crate::{memory::frame::PhysFrame, sync::SpinLock};
 use alloc::{boxed::Box, vec::Vec};
-use core::sync::atomic::{AtomicU32, Ordering, fence};
+use core::sync::atomic::{fence, AtomicU32, Ordering};
 
 static COW_LOCK: SpinLock<()> = SpinLock::new(());
 
@@ -192,10 +189,7 @@ pub fn frame_dec_ref(frame: PhysFrame) {
         let old = meta.dec_ref();
         if old == 1 {
             fence(Ordering::Acquire);
-            let mut allocator = crate::memory::get_allocator().lock();
-            if let Some(alloc) = allocator.as_mut() {
-                alloc.free(frame, 0);
-            }
+            crate::memory::free_frame(frame);
         }
     }
 }

@@ -34,4 +34,3 @@ pub const O_DSYNC: u32 = 0o02000000;
 pub const O_RSYNC: u32 = 0o04010000;
 /// Access mask for read/write mode
 pub const O_ACCMODE: u32 = 0o3;
-

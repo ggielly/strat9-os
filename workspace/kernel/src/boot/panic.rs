@@ -26,9 +26,13 @@ pub fn register_panic_hook(hook: PanicHook) -> bool {
 
 /// Performs the run panic hooks operation.
 fn run_panic_hooks(info: &PanicInfo) {
-    let hooks = PANIC_HOOKS.lock();
-    for hook in hooks.iter().flatten() {
-        hook(info);
+    // In case of panic, we try to lock hooks but if it fails (deadlock during panic)
+    // we might skip them or use a more aggressive approach.
+    // For now, we try_lock to be safe.
+    if let Some(hooks) = PANIC_HOOKS.try_lock() {
+        for hook in hooks.iter().flatten() {
+            hook(info);
+        }
     }
 }
 
@@ -123,14 +127,25 @@ pub fn install_default_panic_hooks() {
 
 /// Panic handler for the kernel
 pub fn panic_handler(info: &PanicInfo) -> ! {
+    // 1. Enter emergency mode for serial output immediately.
+    // This allows serial_println! to bypass locks.
+    crate::arch::x86_64::serial::enter_emergency_mode();
+
+    // 2. Stop all other CPUs immediately to prevent log corruption.
+    crate::arch::x86_64::smp::broadcast_panic_halt();
+
+    // 3. Prevent recursive panics.
     if PANIC_IN_PROGRESS.swap(true, Ordering::SeqCst) {
         loop {
             crate::arch::x86_64::hlt();
         }
     }
 
-    // Disable interrupts to prevent further issues
+    // 4. Disable interrupts to prevent further issues.
     crate::arch::x86_64::cli();
+
+    // 5. Print early serial message to confirm we caught the panic.
+    crate::serial_println!("\n\x1b[31;1m!!! KERNEL PANIC !!!\x1b[0m");
 
     // Run custom panic hooks before trying complex rendering.
     run_panic_hooks(info);
@@ -158,7 +173,7 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
         }
     }
 
-    // Serial log (always works)
+    // Serial log (guaranteed to work now via emergency mode)
     crate::serial_println!("=== GURU MEDIATiON :: KERNEL PANiK ===");
     if let Some(location) = info.location() {
         crate::serial_println!(

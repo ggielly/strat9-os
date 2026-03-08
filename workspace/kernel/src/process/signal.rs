@@ -273,20 +273,33 @@ pub struct SigActionData {
 impl SigActionData {
     /// Builds a default instance.
     pub const fn default() -> Self {
-        Self { handler: SIG_DFL, flags: 0, restorer: 0, mask: 0 }
+        Self {
+            handler: SIG_DFL,
+            flags: 0,
+            restorer: 0,
+            mask: 0,
+        }
     }
 
     /// Returns whether default.
-    pub fn is_default(&self) -> bool { self.handler == SIG_DFL }
+    pub fn is_default(&self) -> bool {
+        self.handler == SIG_DFL
+    }
     /// Returns whether ignore.
-    pub fn is_ignore(&self) -> bool { self.handler == SIG_IGN }
+    pub fn is_ignore(&self) -> bool {
+        self.handler == SIG_IGN
+    }
     /// Returns whether user handler.
-    pub fn is_user_handler(&self) -> bool { self.handler > 1 }
+    pub fn is_user_handler(&self) -> bool {
+        self.handler > 1
+    }
 }
 
 impl Default for SigActionData {
     /// Builds a default instance.
-    fn default() -> Self { Self::default() }
+    fn default() -> Self {
+        Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,22 +315,36 @@ impl Signal {
     /// Performs the default action operation.
     pub fn default_action(self) -> DefaultAction {
         match self {
-            Signal::SIGHUP | Signal::SIGINT | Signal::SIGPIPE |
-            Signal::SIGALRM | Signal::SIGTERM | Signal::SIGUSR1 |
-            Signal::SIGUSR2 | Signal::SIGPROF | Signal::SIGVTALRM |
-            Signal::SIGIO | Signal::SIGPWR | Signal::SIGSYS => DefaultAction::Term,
+            Signal::SIGHUP
+            | Signal::SIGINT
+            | Signal::SIGPIPE
+            | Signal::SIGALRM
+            | Signal::SIGTERM
+            | Signal::SIGUSR1
+            | Signal::SIGUSR2
+            | Signal::SIGPROF
+            | Signal::SIGVTALRM
+            | Signal::SIGIO
+            | Signal::SIGPWR
+            | Signal::SIGSYS => DefaultAction::Term,
 
-            Signal::SIGQUIT | Signal::SIGILL | Signal::SIGABRT |
-            Signal::SIGFPE | Signal::SIGSEGV | Signal::SIGBUS |
-            Signal::SIGTRAP | Signal::SIGXCPU | Signal::SIGXFSZ => DefaultAction::Core,
+            Signal::SIGQUIT
+            | Signal::SIGILL
+            | Signal::SIGABRT
+            | Signal::SIGFPE
+            | Signal::SIGSEGV
+            | Signal::SIGBUS
+            | Signal::SIGTRAP
+            | Signal::SIGXCPU
+            | Signal::SIGXFSZ => DefaultAction::Core,
 
-            Signal::SIGSTOP | Signal::SIGTSTP |
-            Signal::SIGTTIN | Signal::SIGTTOU => DefaultAction::Stop,
+            Signal::SIGSTOP | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU => {
+                DefaultAction::Stop
+            }
 
             Signal::SIGCONT => DefaultAction::Cont,
 
-            Signal::SIGCHLD | Signal::SIGURG |
-            Signal::SIGWINCH => DefaultAction::Ign,
+            Signal::SIGCHLD | Signal::SIGURG | Signal::SIGWINCH => DefaultAction::Ign,
 
             Signal::SIGKILL => DefaultAction::Term,
         }
@@ -364,7 +391,10 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
         return false;
     }
 
-    let signal = match task.pending_signals.consume_one_unblocked(&task.blocked_signals) {
+    let signal = match task
+        .pending_signals
+        .consume_one_unblocked(&task.blocked_signals)
+    {
         Some(s) => s,
         None => return false,
     };
@@ -386,7 +416,11 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
                 return true;
             }
             DefaultAction::Term | DefaultAction::Core => {
-                log::info!("[signal] killing pid {} on SIG{}", task.pid, signal.as_u32());
+                log::info!(
+                    "[signal] killing pid {} on SIG{}",
+                    task.pid,
+                    signal.as_u32()
+                );
                 crate::process::kill_task(task.id);
                 return true;
             }
@@ -441,7 +475,9 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
     };
 
     match crate::memory::UserSliceWrite::new(new_rsp, bytes.len()) {
-        Ok(slice) => { slice.copy_from(bytes); }
+        Ok(slice) => {
+            slice.copy_from(bytes);
+        }
         Err(_) => {
             log::warn!("[signal] fault writing signal frame, killing");
             crate::process::kill_task(task.id);

@@ -1,6 +1,9 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use strat9_syscall::{call, data::{IpcMessage, TimeSpec}, flag, number};
+use alloc::{string::String, vec::Vec};
+use strat9_syscall::{
+    call,
+    data::{IpcMessage, TimeSpec},
+    flag, number,
+};
 
 const EAGAIN: usize = 11;
 const MAX_EAGAIN_RETRIES: usize = 50;

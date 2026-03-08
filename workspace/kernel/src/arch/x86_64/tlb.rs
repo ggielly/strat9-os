@@ -12,8 +12,7 @@
 //!
 //! This avoids global lock contention and race conditions on global counters.
 
-use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::VirtAddr;
 
 use crate::sync::SpinLock;
@@ -104,7 +103,7 @@ pub fn shootdown_page(vaddr: VirtAddr) {
         vaddr_start: vaddr.as_u64(),
         vaddr_end: vaddr.as_u64() + 4096,
     };
-    
+
     // Flush local TLB.
     unsafe { invlpg(vaddr) };
 
@@ -113,6 +112,18 @@ pub fn shootdown_page(vaddr: VirtAddr) {
 
 /// Invalidate a range of pages on all CPUs.
 pub fn shootdown_range(start: VirtAddr, end: VirtAddr) {
+    // Guard: end must be strictly after start; silently promote to full flush
+    // if the range is invalid rather than underflowing in u64 arithmetic.
+    if end.as_u64() <= start.as_u64() {
+        log::warn!(
+            "TLB shootdown_range: invalid range [{:#x}, {:#x}), using full flush",
+            start.as_u64(),
+            end.as_u64(),
+        );
+        shootdown_all();
+        return;
+    }
+
     let page_count = (end.as_u64() - start.as_u64()) / 4096;
     if page_count > 64 {
         shootdown_all();
@@ -160,30 +171,55 @@ fn dispatch_op(op: TlbOp) {
         return;
     }
 
+    // `queued` tracks only the APIC IDs that were successfully pushed to a
+    // mailbox queue.  We must not send an IPI to, or wait for an ACK from,
+    // an AP whose queue was skipped — doing so would either waste cycles or
+    // spin-wait forever on an ACK that was never cleared.
+    let mut queued = [0u32; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut queued_count = 0usize;
+
     // 1. Push op to each target's mailbox and clear their ACK.
     for i in 0..count {
         let apic_id = targets[i];
-        let cpu_idx = crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id).unwrap();
+        // cpu_index_by_apic can return None if the AP went offline between
+        // collect_tlb_targets and here; skip silently rather than panicking
+        // in an IPI-send path.
+        let cpu_idx = match crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id) {
+            Some(idx) => idx,
+            None => {
+                log::warn!(
+                    "TLB dispatch: APIC {} not in per-CPU table, skipping",
+                    apic_id
+                );
+                continue;
+            }
+        };
         let mut queue = TLB_QUEUES[cpu_idx].lock();
         queue.push(op);
         TLB_ACKS[cpu_idx].store(false, Ordering::Release);
         drop(queue);
+        // Record as a successfully-queued target.
+        queued[queued_count] = apic_id;
+        queued_count += 1;
     }
 
-    // 2. Send IPI to all targets.
-    for i in 0..count {
-        let apic_id = targets[i];
-        send_tlb_ipi(apic_id);
+    if queued_count == 0 {
+        return;
     }
 
-    // 3. Wait for ACKs.
-    wait_for_acks(&targets[..count]);
+    // 2. Send IPI only to targets that actually received a queued op.
+    for i in 0..queued_count {
+        send_tlb_ipi(queued[i]);
+    }
+
+    // 3. Wait for ACKs from the same set.
+    wait_for_acks(&queued[..queued_count]);
 }
 
 /// IPI handler for TLB shootdown (called on receiving CPU).
 pub extern "C" fn tlb_shootdown_ipi_handler() {
     let cpu_idx = current_cpu_index();
-    
+
     // 1. Take all pending ops from our mailbox.
     let mut local_ops = [TlbOp::NONE; 16];
     let mut count = 0;
@@ -207,10 +243,15 @@ pub extern "C" fn tlb_shootdown_ipi_handler() {
             TlbShootdownKind::Range => {
                 let start = op.vaddr_start;
                 let end = op.vaddr_end;
-                let page_count = (end - start) / 4096;
-                for j in 0..page_count {
-                    let addr = VirtAddr::new(start + j * 4096);
-                    unsafe { invlpg(addr) };
+                // Guard: corrupt TlbOp must not underflow in release build.
+                if end > start {
+                    let page_count = (end - start) / 4096;
+                    for j in 0..page_count {
+                        let addr = VirtAddr::new(start + j * 4096);
+                        unsafe { invlpg(addr) };
+                    }
+                } else {
+                    unsafe { flush_tlb_all() };
                 }
             }
             TlbShootdownKind::Full => {
@@ -255,14 +296,14 @@ fn send_tlb_ipi(target_apic_id: u32) {
 
 /// Collect target APIC IDs into a pre-allocated buffer.
 fn collect_tlb_targets(targets: &mut [u32]) -> usize {
-    let current_apic_id = crate::arch::x86_64::apic::lapic_id();
+    let my_cpu = crate::arch::x86_64::percpu::current_cpu_index();
     let mut count = 0;
     for cpu_idx in 0..crate::arch::x86_64::percpu::MAX_CPUS {
         if !crate::arch::x86_64::percpu::tlb_ready(cpu_idx) {
             continue;
         }
         if let Some(apic_id) = crate::arch::x86_64::percpu::apic_id_by_cpu_index(cpu_idx) {
-            if apic_id != current_apic_id {
+            if cpu_idx != my_cpu {
                 if count < targets.len() {
                     targets[count] = apic_id;
                     count += 1;
@@ -277,7 +318,15 @@ fn collect_tlb_targets(targets: &mut [u32]) -> usize {
 fn wait_for_acks(targets: &[u32]) {
     const MAX_WAIT_CYCLES: usize = 10_000_000;
     for &apic_id in targets {
-        let cpu_idx = crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id).unwrap();
+        // Use if-let: if the APIC ID is gone (AP offline after we sent the IPI)
+        // there is nothing to wait for — skip rather than panic in kernel context.
+        let cpu_idx = match crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id) {
+            Some(idx) => idx,
+            None => {
+                log::warn!("TLB wait_acks: APIC {} disappeared, skipping", apic_id);
+                continue;
+            }
+        };
         let mut success = false;
         for _ in 0..MAX_WAIT_CYCLES {
             if TLB_ACKS[cpu_idx].load(Ordering::Acquire) {
@@ -294,6 +343,5 @@ fn wait_for_acks(targets: &[u32]) {
 
 /// Current CPU index.
 fn current_cpu_index() -> usize {
-    let apic_id = crate::arch::x86_64::apic::lapic_id();
-    crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id).unwrap_or(0)
+    crate::arch::x86_64::percpu::current_cpu_index()
 }

@@ -40,12 +40,12 @@ const STATUS_B_24H: u8 = 0x02; // 24-hour mode
 
 // Status register C bits (read-only, clears interrupts)
 // RTC frequency options (Hz)
-const RTC_FREQ_1024: u8 = 6;  // 1024 Hz
-const RTC_FREQ_256: u8 = 8;   // 256 Hz
-const RTC_FREQ_64: u8 = 10;   // 64 Hz
-const RTC_FREQ_16: u8 = 12;   // 16 Hz
-const RTC_FREQ_4: u8 = 14;    // 4 Hz
-const RTC_FREQ_1: u8 = 15;    // 1 Hz
+const RTC_FREQ_1024: u8 = 6; // 1024 Hz
+const RTC_FREQ_256: u8 = 8; // 256 Hz
+const RTC_FREQ_64: u8 = 10; // 64 Hz
+const RTC_FREQ_16: u8 = 12; // 16 Hz
+const RTC_FREQ_4: u8 = 14; // 4 Hz
+const RTC_FREQ_1: u8 = 15; // 1 Hz
 
 const CENTURY_REG_CANDIDATES: &[u8] = &[0x32, 0x37];
 
@@ -55,7 +55,7 @@ pub struct RtcDateTime {
     pub second: u8,
     pub minute: u8,
     pub hour: u8,
-    pub weekday: u8,  // 0=Sunday, 6=Saturday
+    pub weekday: u8, // 0=Sunday, 6=Saturday
     pub day: u8,
     pub month: u8,
     pub year: u16,
@@ -76,7 +76,7 @@ impl RtcDateTime {
             century: 20,
         }
     }
-    
+
     /// Convert to Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
     pub fn to_timestamp(&self) -> u64 {
         let mut year = self.year as i64;
@@ -85,26 +85,28 @@ impl RtcDateTime {
         let hour = self.hour as i64;
         let minute = self.minute as i64;
         let second = self.second as i64;
-        
+
         // Adjust for months starting from March
         if month <= 2 {
             year -= 1;
             month += 12;
         }
-        
+
         // Calculate days since epoch (Howard Hinnant algorithm)
-        let days = 365 * year + year / 4 - year / 100 + year / 400
-            + (153 * (month - 3) + 2) / 5 + day - 1 - 719468;
-        
+        let days =
+            365 * year + year / 4 - year / 100 + year / 400 + (153 * (month - 3) + 2) / 5 + day
+                - 1
+                - 719468;
+
         // Convert to seconds
         (days * 86400 + hour * 3600 + minute * 60 + second) as u64
     }
-    
+
     /// Format as ISO 8601 string (simplified)
     pub fn to_string(&self) -> [u8; 19] {
         let mut buf = [0u8; 19];
         let year = self.year;
-        
+
         // YYYY-MM-DDTHH:MM:SS
         buf[0] = b'0' + ((year / 1000) % 10) as u8;
         buf[1] = b'0' + ((year / 100) % 10) as u8;
@@ -125,7 +127,7 @@ impl RtcDateTime {
         buf[16] = b':';
         buf[17] = b'0' + (self.second / 10);
         buf[18] = b'0' + (self.second % 10);
-        
+
         buf
     }
 }
@@ -219,7 +221,11 @@ fn read_rtc_time() -> RtcDateTime {
             day: cmos_read(CMOS_REG_DAY),
             month: cmos_read(CMOS_REG_MONTH),
             year: cmos_read(CMOS_REG_YEAR),
-            century: if century_reg != 0 { cmos_read(century_reg) } else { 0 },
+            century: if century_reg != 0 {
+                cmos_read(century_reg)
+            } else {
+                0
+            },
             status_b: cmos_read(CMOS_REG_STATUS_B),
         }
     }
@@ -247,7 +253,11 @@ fn read_rtc_time() -> RtcDateTime {
         }
     };
 
-    let use_binary = if raw.status_b == 0 { default_binary } else { (raw.status_b & STATUS_B_DM) != 0 };
+    let use_binary = if raw.status_b == 0 {
+        default_binary
+    } else {
+        (raw.status_b & STATUS_B_DM) != 0
+    };
     let pm_bit = raw.hour & 0x80;
     if !use_binary {
         raw.second = bcd_to_binary(raw.second);
@@ -298,40 +308,44 @@ fn read_rtc_time() -> RtcDateTime {
 /// Initialize RTC
 pub fn init() -> Result<(), &'static str> {
     log::info!("[RTC] Initializing RTC...");
-    
+
     // Read status B to check mode
     let status_b = cmos_read(CMOS_REG_STATUS_B);
     let use_binary = (status_b & STATUS_B_DM) != 0;
-    
+
     let cmos_century_reg = detect_century_register(use_binary);
-    
+
     let driver = RtcDriver {
         cmos_century_reg,
         use_binary,
         last_update_tick: AtomicU64::new(0),
     };
-    
+
     *RTC_DRIVER.lock() = Some(driver);
-    
+
     // Enable update interrupt (IRQ8)
     // This would be done in IDT setup
     // For now, just enable the interrupt in RTC
     let mut status_b = cmos_read(CMOS_REG_STATUS_B);
     status_b |= STATUS_B_UIE;
     cmos_write(CMOS_REG_STATUS_B, status_b);
-    
+
     // Clear any pending interrupts
     let _ = cmos_read(CMOS_REG_STATUS_C);
-    
+
     RTC_INITIALIZED.store(true, Ordering::SeqCst);
-    
+
     let time = RtcDriver::get_time();
     log::info!(
         "[RTC] Initialized: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        time.year, time.month, time.day,
-        time.hour, time.minute, time.second
+        time.year,
+        time.month,
+        time.day,
+        time.hour,
+        time.minute,
+        time.second
     );
-    
+
     Ok(())
 }
 
@@ -340,12 +354,12 @@ impl RtcDriver {
     pub fn get_time() -> RtcDateTime {
         read_rtc_time()
     }
-    
+
     /// Get Unix timestamp
     pub fn get_timestamp() -> u64 {
         Self::get_time().to_timestamp()
     }
-    
+
     /// Get last update tick
     pub fn last_update_tick() -> u64 {
         RTC_LAST_TICK.load(Ordering::Relaxed)
@@ -356,10 +370,10 @@ impl RtcDriver {
 pub fn rtc_interrupt_handler() {
     // Read status C to clear interrupt
     let _status_c = cmos_read(CMOS_REG_STATUS_C);
-    
+
     // Update tick counter
     RTC_LAST_TICK.fetch_add(1, Ordering::Relaxed);
-    
+
     // Notify driver
     let driver = RTC_DRIVER.lock();
     if let Some(ref drv) = *driver {
@@ -401,7 +415,7 @@ pub fn set_periodic_frequency(freq_hz: u16) {
             RTC_FREQ_1
         }
     };
-    
+
     let mut status_a = cmos_read(CMOS_REG_STATUS_A);
     status_a = (status_a & 0xF0) | (rate & 0x0F);
     cmos_write(CMOS_REG_STATUS_A, status_a);

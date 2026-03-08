@@ -81,7 +81,7 @@ impl X2Apic {
         unsafe {
             // Clear error status
             wrmsr(IA32_X2APIC_ESR, 0);
-            
+
             // Set ICR: vector in bits 0-7, delivery mode in bits 8-10
             let icr_low = vector as u64 | (0 << 8); // Fixed delivery mode
             wrmsr(IA32_X2APIC_ICR, icr_low);
@@ -94,7 +94,7 @@ impl X2Apic {
         unsafe {
             // Set timer initial count
             wrmsr(IA32_X2APIC_TIMER_INIT, initial_count);
-            
+
             // Configure LVT Timer register
             let mut lvt = vector as u64;
             if periodic {

@@ -179,13 +179,7 @@ pub fn sys_mmap(
 
         let vma_flags = prot_to_vma_flags(prot);
         addr_space
-            .map_region(
-                target,
-                n_pages,
-                vma_flags,
-                VmaType::Anonymous,
-                page_size,
-            )
+            .map_region(target, n_pages, vma_flags, VmaType::Anonymous, page_size)
             .map_err(|_| SyscallError::OutOfMemory)?;
 
         // Copy file content into the mapped pages via HHDM.
@@ -209,11 +203,7 @@ pub fn sys_mmap(
                     .ok_or(SyscallError::Fault)?;
                 let hhdm_ptr = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        kbuf.as_ptr().add(written),
-                        hhdm_ptr,
-                        to_write,
-                    );
+                    core::ptr::copy_nonoverlapping(kbuf.as_ptr().add(written), hhdm_ptr, to_write);
                 }
                 written += to_write;
             }
@@ -223,7 +213,10 @@ pub fn sys_mmap(
 
         if flags & MAP_FIXED == 0 {
             let new_hint = target.saturating_add(len_aligned);
-            let _ = task.process.mmap_hint.fetch_max(new_hint, Ordering::Relaxed);
+            let _ = task
+                .process
+                .mmap_hint
+                .fetch_max(new_hint, Ordering::Relaxed);
         }
 
         log::trace!(
@@ -314,7 +307,10 @@ pub fn sys_mmap(
     if flags & MAP_FIXED == 0 {
         let new_hint = target.saturating_add(len_aligned);
         // Atomically advance: only update if it moves forward.
-        let _ = task.process.mmap_hint.fetch_max(new_hint, Ordering::Relaxed);
+        let _ = task
+            .process
+            .mmap_hint
+            .fetch_max(new_hint, Ordering::Relaxed);
     }
 
     log::trace!(
@@ -375,7 +371,12 @@ pub fn sys_munmap(addr: u64, len: u64) -> Result<u64, SyscallError> {
 /// - Grow in place when the following range is free.
 /// - If `MREMAP_MAYMOVE` is set and growth in place fails, relocate only when
 ///   the source mapping is still fully lazy (no present pages yet).
-pub fn sys_mremap(old_addr: u64, old_size: u64, new_size: u64, flags: u64) -> Result<u64, SyscallError> {
+pub fn sys_mremap(
+    old_addr: u64,
+    old_size: u64,
+    new_size: u64,
+    flags: u64,
+) -> Result<u64, SyscallError> {
     if old_size == 0 || new_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
@@ -438,7 +439,13 @@ pub fn sys_mremap(old_addr: u64, old_size: u64, new_size: u64, flags: u64) -> Re
     if !addr_space.has_mapping_in_range(grow_start, grow_len) {
         let grow_pages = (grow_len / page_bytes) as usize;
         addr_space
-            .reserve_region(grow_start, grow_pages, vma.flags, vma.vma_type, vma.page_size)
+            .reserve_region(
+                grow_start,
+                grow_pages,
+                vma.flags,
+                vma.vma_type,
+                vma.page_size,
+            )
             .map_err(|_| SyscallError::OutOfMemory)?;
         return Ok(old_addr);
     }

@@ -1,5 +1,5 @@
-use alloc::{string::String, vec::Vec};
 use crate::{BusChild, BusDriver, BusError, PowerState};
+use alloc::{string::String, vec::Vec};
 
 const MAX_MODULES: usize = 6;
 
@@ -77,7 +77,9 @@ impl Moxtet {
         self.module_count = 0;
 
         for (i, &byte) in spi_data.iter().enumerate().skip(1) {
-            if i > MAX_MODULES { break; }
+            if i > MAX_MODULES {
+                break;
+            }
             let id = MoxtetModuleId::from_raw(byte);
             self.modules.push(MoxtetModule {
                 id,
@@ -114,10 +116,14 @@ impl Moxtet {
 
 impl BusDriver for Moxtet {
     /// Performs the name operation.
-    fn name(&self) -> &str { "moxtet" }
+    fn name(&self) -> &str {
+        "moxtet"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, _base: usize) -> Result<(), BusError> {
@@ -143,19 +149,22 @@ impl BusDriver for Moxtet {
 
     /// Performs the children operation.
     fn children(&self) -> Vec<BusChild> {
-        self.modules.iter().map(|m| {
-            BusChild {
+        self.modules
+            .iter()
+            .map(|m| BusChild {
                 name: String::from(m.id.name()),
                 base_addr: m.index as u64,
                 size: 1,
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Handles irq.
     fn handle_irq(&mut self) -> bool {
         for i in 0..self.module_count {
-            if self.irq_mask[i] { continue; }
+            if self.irq_mask[i] {
+                continue;
+            }
             let status = self.rx_buf[i + 1];
             if status & 0xF0 != 0 {
                 return true;

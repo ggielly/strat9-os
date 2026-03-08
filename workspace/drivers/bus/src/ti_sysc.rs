@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const SYSC_IDLE_SMART: u32 = 2;
 const SYSC_IDLE_NO: u32 = 1;
@@ -218,10 +217,14 @@ impl TiSysc {
 
 impl BusDriver for TiSysc {
     /// Performs the name operation.
-    fn name(&self) -> &str { "ti-sysc" }
+    fn name(&self) -> &str {
+        "ti-sysc"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -263,13 +266,17 @@ impl BusDriver for TiSysc {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

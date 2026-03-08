@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const TEGRA_GMI_CONFIG: usize = 0x00;
 const TEGRA_GMI_TIMING0: usize = 0x10;
@@ -17,27 +16,40 @@ const CS_ACTIVE_HIGH: u32 = 1 << 20;
 
 const MAX_CHIP_SELECT: u32 = 8;
 
-const COMPATIBLE: &[&str] = &[
-    "nvidia,tegra20-gmi",
-    "nvidia,tegra30-gmi",
-];
+const COMPATIBLE: &[&str] = &["nvidia,tegra20-gmi", "nvidia,tegra30-gmi"];
 
 /// Performs the cs select operation.
-fn cs_select(x: u32) -> u32 { (x & 0x7) << 4 }
+fn cs_select(x: u32) -> u32 {
+    (x & 0x7) << 4
+}
 /// Performs the muxed width operation.
-fn muxed_width(x: u32) -> u32 { (x & 0xF) << 12 }
+fn muxed_width(x: u32) -> u32 {
+    (x & 0xF) << 12
+}
 /// Performs the hold width operation.
-fn hold_width(x: u32) -> u32 { (x & 0xF) << 8 }
+fn hold_width(x: u32) -> u32 {
+    (x & 0xF) << 8
+}
 /// Performs the adv width operation.
-fn adv_width(x: u32) -> u32 { (x & 0xF) << 4 }
+fn adv_width(x: u32) -> u32 {
+    (x & 0xF) << 4
+}
 /// Performs the ce width operation.
-fn ce_width(x: u32) -> u32 { x & 0xF }
+fn ce_width(x: u32) -> u32 {
+    x & 0xF
+}
 /// Performs the we width operation.
-fn we_width(x: u32) -> u32 { (x & 0xFF) << 16 }
+fn we_width(x: u32) -> u32 {
+    (x & 0xFF) << 16
+}
 /// Performs the oe width operation.
-fn oe_width(x: u32) -> u32 { (x & 0xFF) << 8 }
+fn oe_width(x: u32) -> u32 {
+    (x & 0xFF) << 8
+}
 /// Performs the wait width operation.
-fn wait_width(x: u32) -> u32 { x & 0xFF }
+fn wait_width(x: u32) -> u32 {
+    x & 0xFF
+}
 
 pub struct GmiConfig {
     pub bus_width_32: bool,
@@ -83,13 +95,27 @@ impl TegraGmi {
     /// Performs the configure operation.
     pub fn configure(&mut self, cfg: &GmiConfig, timing: &GmiTiming) {
         let mut config = 0u32;
-        if cfg.bus_width_32 { config |= BUS_WIDTH_32BIT; }
-        if cfg.mux_mode { config |= MUX_MODE; }
-        if cfg.rdy_before_data { config |= RDY_BEFORE_DATA; }
-        if cfg.rdy_active_high { config |= RDY_ACTIVE_HIGH; }
-        if cfg.adv_active_high { config |= ADV_ACTIVE_HIGH; }
-        if cfg.oe_active_high { config |= OE_ACTIVE_HIGH; }
-        if cfg.cs_active_high { config |= CS_ACTIVE_HIGH; }
+        if cfg.bus_width_32 {
+            config |= BUS_WIDTH_32BIT;
+        }
+        if cfg.mux_mode {
+            config |= MUX_MODE;
+        }
+        if cfg.rdy_before_data {
+            config |= RDY_BEFORE_DATA;
+        }
+        if cfg.rdy_active_high {
+            config |= RDY_ACTIVE_HIGH;
+        }
+        if cfg.adv_active_high {
+            config |= ADV_ACTIVE_HIGH;
+        }
+        if cfg.oe_active_high {
+            config |= OE_ACTIVE_HIGH;
+        }
+        if cfg.cs_active_high {
+            config |= CS_ACTIVE_HIGH;
+        }
         if cfg.chip_select < MAX_CHIP_SELECT {
             config |= cs_select(cfg.chip_select);
         }
@@ -100,26 +126,32 @@ impl TegraGmi {
             | adv_width(timing.adv_width)
             | ce_width(timing.ce_width);
 
-        self.snor_timing1 = we_width(timing.we_width)
-            | oe_width(timing.oe_width)
-            | wait_width(timing.wait_width);
+        self.snor_timing1 =
+            we_width(timing.we_width) | oe_width(timing.oe_width) | wait_width(timing.wait_width);
     }
 
     /// Performs the apply config operation.
     pub fn apply_config(&self) {
-        if !self.regs.is_valid() { return; }
+        if !self.regs.is_valid() {
+            return;
+        }
         self.regs.write32(TEGRA_GMI_TIMING0, self.snor_timing0);
         self.regs.write32(TEGRA_GMI_TIMING1, self.snor_timing1);
-        self.regs.write32(TEGRA_GMI_CONFIG, self.snor_config | CONFIG_GO);
+        self.regs
+            .write32(TEGRA_GMI_CONFIG, self.snor_config | CONFIG_GO);
     }
 }
 
 impl BusDriver for TegraGmi {
     /// Performs the name operation.
-    fn name(&self) -> &str { "tegra-gmi" }
+    fn name(&self) -> &str {
+        "tegra-gmi"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {

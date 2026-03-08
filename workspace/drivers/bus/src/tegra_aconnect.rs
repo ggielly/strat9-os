@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const COMPATIBLE: &[&str] = &["nvidia,tegra210-aconnect"];
 
@@ -45,10 +44,14 @@ impl TegraAconnect {
 
 impl BusDriver for TegraAconnect {
     /// Performs the name operation.
-    fn name(&self) -> &str { "tegra-aconnect" }
+    fn name(&self) -> &str {
+        "tegra-aconnect"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {

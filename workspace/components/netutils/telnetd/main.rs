@@ -4,11 +4,7 @@
 
 extern crate alloc;
 
-use core::{
-    alloc::Layout,
-    fmt::Write,
-    panic::PanicInfo,
-};
+use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
 use strat9_syscall::{call, data::TimeSpec, number};
 
 alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 128 * 1024;);
@@ -284,7 +280,10 @@ pub extern "C" fn _start() -> ! {
                     let _ = write_all(fd, b"\r\nStrat9 Telnet\r\nType 'help' for commands.\r\n");
                     send_prompt(fd);
                 }
-                if matches!(handle_bytes(fd, &mut session, &buf[..n]), LineAction::Disconnect) {
+                if matches!(
+                    handle_bytes(fd, &mut session, &buf[..n]),
+                    LineAction::Disconnect
+                ) {
                     let _ = call::close(fd);
                     session.reset();
                     fd = open_listener();

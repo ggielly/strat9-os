@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const AXI_HALTREQ_REG: usize = 0x0;
 const AXI_HALTACK_REG: usize = 0x4;
@@ -47,8 +46,10 @@ impl QcomSscBlockBus {
 
     /// Performs the bus init operation.
     fn bus_init(&self) -> Result<(), BusError> {
-        self.config0_regs.clear_bits32(0, SSCAON_CONFIG0_CLAMP_EN_OVRD_VAL);
-        self.config0_regs.set_bits32(0, SSCAON_CONFIG0_CLAMP_EN_OVRD);
+        self.config0_regs
+            .clear_bits32(0, SSCAON_CONFIG0_CLAMP_EN_OVRD_VAL);
+        self.config0_regs
+            .set_bits32(0, SSCAON_CONFIG0_CLAMP_EN_OVRD);
         self.config1_regs.clear_bits32(0, SSCAON_CONFIG1_CFG);
 
         self.halt_regs.write32(AXI_HALTREQ_REG, 0);
@@ -69,10 +70,13 @@ impl QcomSscBlockBus {
 
         for _ in 0..MAX_HALT_WAIT {
             let ack = self.halt_regs.read32(AXI_HALTACK_REG);
-            if ack != 0 { break; }
+            if ack != 0 {
+                break;
+            }
         }
 
-        self.config0_regs.set_bits32(0, SSCAON_CONFIG0_CLAMP_EN_OVRD_VAL);
+        self.config0_regs
+            .set_bits32(0, SSCAON_CONFIG0_CLAMP_EN_OVRD_VAL);
         self.config1_regs.set_bits32(0, SSCAON_CONFIG1_CFG);
     }
 
@@ -84,10 +88,14 @@ impl QcomSscBlockBus {
 
 impl BusDriver for QcomSscBlockBus {
     /// Performs the name operation.
-    fn name(&self) -> &str { "qcom-ssc-block-bus" }
+    fn name(&self) -> &str {
+        "qcom-ssc-block-bus"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -106,13 +114,17 @@ impl BusDriver for QcomSscBlockBus {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.halt_regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.halt_regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.halt_regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.halt_regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.halt_regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.halt_regs.write32(offset, value);
         Ok(())
     }

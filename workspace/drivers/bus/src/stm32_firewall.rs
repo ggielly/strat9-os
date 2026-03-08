@@ -1,5 +1,5 @@
-use alloc::{string::String, vec::Vec};
 use crate::BusError;
+use alloc::{string::String, vec::Vec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirewallType {

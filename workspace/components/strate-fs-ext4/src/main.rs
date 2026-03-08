@@ -12,10 +12,7 @@ extern crate alloc;
 mod syscalls;
 
 use alloc::{format, string::String, vec, vec::Vec};
-use core::{
-    alloc::Layout,
-    panic::PanicInfo,
-};
+use core::{alloc::Layout, panic::PanicInfo};
 use fs_ext4::{BlockDevice, BlockDeviceError, Ext4FileSystem};
 use strat9_syscall::error::{EINVAL, ENOSYS};
 use syscalls::*;
@@ -98,7 +95,11 @@ fn bind_srv_alias(port_handle: u64, label: &str) {
             debug_log(&msg);
         }
         Err(e) => {
-            let msg = format!("[fs-ext4] Failed to bind port alias {}: {}\n", path, e.name());
+            let msg = format!(
+                "[fs-ext4] Failed to bind port alias {}: {}\n",
+                path,
+                e.name()
+            );
             debug_log(&msg);
         }
     }
@@ -112,9 +113,7 @@ struct Ext4Strate {
 impl Ext4Strate {
     /// Creates a new instance.
     fn new(fs: Ext4FileSystem) -> Self {
-        Ext4Strate {
-            _fs: fs,
-        }
+        Ext4Strate { _fs: fs }
     }
 
     /// Implements ok reply.

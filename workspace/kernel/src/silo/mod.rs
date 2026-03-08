@@ -592,7 +592,7 @@ struct Silo {
     sandboxed: bool,
     event_seq: u64,
     /// Ring buffer capturing debug output for `silo attach`.
-    output_buf: SiloOutputBuf,
+    output_buf: Option<Box<SiloOutputBuf>>,
 }
 
 const SILO_OUTPUT_CAPACITY: usize = 4096;
@@ -605,13 +605,19 @@ struct SiloOutputBuf {
 
 impl core::fmt::Debug for SiloOutputBuf {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("SiloOutputBuf").field("count", &self.count).finish()
+        f.debug_struct("SiloOutputBuf")
+            .field("count", &self.count)
+            .finish()
     }
 }
 
 impl SiloOutputBuf {
     const fn new() -> Self {
-        Self { buf: [0; SILO_OUTPUT_CAPACITY], head: 0, count: 0 }
+        Self {
+            buf: [0; SILO_OUTPUT_CAPACITY],
+            head: 0,
+            count: 0,
+        }
     }
 
     fn push(&mut self, data: &[u8]) {
@@ -683,7 +689,7 @@ pub struct SiloEventSnapshot {
 }
 
 struct SiloManager {
-    silos: BTreeMap<u32, Silo>,
+    silos: BTreeMap<u32, Box<Silo>>,
     events: VecDeque<SiloEvent>,
     task_to_silo: BTreeMap<TaskId, u32>,
 }
@@ -729,21 +735,27 @@ impl SiloManager {
             unveil_rules: Vec::new(),
             sandboxed: false,
             event_seq: 0,
-            output_buf: SiloOutputBuf::new(),
+            output_buf: None,
         };
 
-        self.silos.insert(id.sid, silo);
+        self.silos.insert(id.sid, Box::new(silo));
         Ok(id)
     }
 
     /// Returns mut.
     fn get_mut(&mut self, id: u32) -> Result<&mut Silo, SyscallError> {
-        self.silos.get_mut(&id).ok_or(SyscallError::BadHandle)
+        self.silos
+            .get_mut(&id)
+            .map(Box::as_mut)
+            .ok_or(SyscallError::BadHandle)
     }
 
     /// Performs the get operation.
     fn get(&self, id: u32) -> Result<&Silo, SyscallError> {
-        self.silos.get(&id).ok_or(SyscallError::BadHandle)
+        self.silos
+            .get(&id)
+            .map(Box::as_ref)
+            .ok_or(SyscallError::BadHandle)
     }
 
     /// Performs the push event operation.
@@ -757,7 +769,26 @@ impl SiloManager {
 
     /// Maps task.
     fn map_task(&mut self, task_id: TaskId, silo_id: u32) {
+        crate::serial_println!(
+            "[trace][silo] map_task enter tid={} sid={} len={}",
+            task_id.as_u64(),
+            silo_id,
+            self.task_to_silo.len()
+        );
+        let existed = self.task_to_silo.contains_key(&task_id);
+        crate::serial_println!(
+            "[trace][silo] map_task before insert tid={} sid={} existed={}",
+            task_id.as_u64(),
+            silo_id,
+            existed
+        );
         self.task_to_silo.insert(task_id, silo_id);
+        crate::serial_println!(
+            "[trace][silo] map_task after insert tid={} sid={} len={}",
+            task_id.as_u64(),
+            silo_id,
+            self.task_to_silo.len()
+        );
     }
 
     /// Unmaps task.
@@ -767,7 +798,16 @@ impl SiloManager {
 
     /// Performs the silo for task operation.
     fn silo_for_task(&self, task_id: TaskId) -> Option<u32> {
-        self.task_to_silo.get(&task_id).copied()
+        if let Some(silo_id) = self.task_to_silo.get(&task_id).copied() {
+            return Some(silo_id);
+        }
+
+        // Critical boot fallback: boot-time registration avoids BTreeMap inserts
+        // while holding SILO_MANAGER to eliminate allocator re-entrancy risk on
+        // the fragile early-init path.
+        self.silos
+            .iter()
+            .find_map(|(sid, silo)| silo.tasks.iter().any(|tid| *tid == task_id).then_some(*sid))
     }
 }
 
@@ -796,6 +836,8 @@ fn decode_family(raw: u8) -> Result<StrateFamily, SyscallError> {
 }
 
 static SILO_MANAGER: SpinLock<SiloManager> = SpinLock::new(SiloManager::new());
+static BOOT_REG_IN_PROGRESS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 const SILO_ADMIN_RESOURCE: usize = 0;
 const MAX_SILO_CAPS: usize = 64;
@@ -1290,7 +1332,7 @@ fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, Syscal
 
 /// Compute the effective XCR0 mask for a silo from its allowed CPU features.
 fn compute_silo_xcr0(config: &SiloConfig) -> u64 {
-    use crate::arch::x86_64::cpuid::{CpuFeatures, xcr0_for_features};
+    use crate::arch::x86_64::cpuid::{xcr0_for_features, CpuFeatures};
     let allowed = CpuFeatures::from_bits_truncate(config.cpu_features_allowed);
     xcr0_for_features(allowed)
 }
@@ -1353,10 +1395,10 @@ pub fn kernel_spawn_strate(
             unveil_rules: Vec::new(),
             sandboxed: false,
             event_seq: 0,
-            output_buf: SiloOutputBuf::new(),
+            output_buf: None,
         };
 
-        mgr.silos.insert(id.sid, silo);
+        mgr.silos.insert(id.sid, Box::new(silo));
         id.sid
     };
 
@@ -1390,7 +1432,8 @@ pub fn kernel_spawn_strate(
             .clone()
             .unwrap_or_else(|| alloc::format!("silo-{}", silo.id.sid))
     };
-    let task_name: &'static str = Box::leak(alloc::format!("strate-admin:{}", display).into_boxed_str());
+    let task_name: &'static str =
+        Box::leak(alloc::format!("strate-admin:{}", display).into_boxed_str());
     let task = crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps)
         .map_err(|_| SyscallError::InvalidArgument)?;
     let task_id = task.id;
@@ -1550,23 +1593,57 @@ pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u32, 
 
 /// Performs the register boot strate task operation.
 pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, SyscallError> {
-    let mut mgr = SILO_MANAGER.lock();
-    // Default boot tasks get SID 1, 2, ...
-    let mut sid = 1u32;
-    while mgr.silos.contains_key(&sid) {
-        sid = sid.checked_add(1).ok_or(SyscallError::OutOfMemory)?;
-    }
+    crate::serial_println!(
+        "[trace][silo] register_boot_strate_task enter tid={} label={}",
+        task_id.as_u64(),
+        label
+    );
+    BOOT_REG_IN_PROGRESS.store(true, Ordering::Relaxed);
+    let result = (|| -> Result<u32, SyscallError> {
+        let sanitized = sanitize_label(label);
+        let mut spins = 0usize;
+        let mut mgr = loop {
+            if let Some(guard) = SILO_MANAGER.try_lock_no_irqsave() {
+                break guard;
+            }
+            spins = spins.saturating_add(1);
+            if spins > 1_000_000 {
+                return Err(SyscallError::Again);
+            }
+            core::hint::spin_loop();
+        };
+        crate::serial_println!(
+            "[trace][silo] register_boot_strate_task lock acquired tid={}",
+            task_id.as_u64()
+        );
+        crate::serial_println!(
+            "[trace][silo] register_boot_strate_task before sid scan tid={}",
+            task_id.as_u64()
+        );
+        let mut sid = 1u32;
+        while mgr.silos.contains_key(&sid) {
+            sid = sid.checked_add(1).ok_or(SyscallError::OutOfMemory)?;
+        }
+        crate::serial_println!(
+            "[trace][silo] register_boot_strate_task sid selected tid={} sid={}",
+            task_id.as_u64(),
+            sid
+        );
+        crate::serial_println!(
+            "[trace][silo] register_boot_strate_task before label uniqueness tid={} label={}",
+            task_id.as_u64(),
+            sanitized.as_str()
+        );
+        if mgr
+            .silos
+            .values()
+            .any(|s| s.strate_label.as_deref() == Some(sanitized.as_str()))
+        {
+            return Err(SyscallError::AlreadyExists);
+        }
+        drop(mgr);
 
-    let id = SiloId::new(sid);
-    let sanitized = sanitize_label(label);
-    if mgr
-        .silos
-        .values()
-        .any(|s| s.strate_label.as_deref() == Some(sanitized.as_str()))
-    {
-        return Err(SyscallError::AlreadyExists);
-    }
-    {
+        let id = SiloId::new(sid);
         let silo = Silo {
             id,
             name: alloc::format!("silo-{}", id.sid),
@@ -1574,7 +1651,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             state: SiloState::Running,
             config: SiloConfig {
                 sid: id.sid,
-                mode: 0o777, // Boot tasks are fully privileged
+                mode: 0o777,
                 family: StrateFamily::SYS as u8,
                 ..SiloConfig::default()
             },
@@ -1589,19 +1666,46 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             unveil_rules: Vec::new(),
             sandboxed: false,
             event_seq: 0,
-            output_buf: SiloOutputBuf::new(),
+            output_buf: None,
         };
-        mgr.silos.insert(id.sid, silo);
-    }
-    mgr.map_task(task_id, id.sid);
-    mgr.push_event(SiloEvent {
-        silo_id: id.sid.into(),
-        kind: SiloEventKind::Started,
-        data0: 0,
-        data1: 0,
-        tick: crate::process::scheduler::ticks(),
-    });
-    Ok(id.sid)
+
+        let mut spins = 0usize;
+        let mut mgr = loop {
+            if let Some(guard) = SILO_MANAGER.try_lock_no_irqsave() {
+                break guard;
+            }
+            spins = spins.saturating_add(1);
+            if spins > 1_000_000 {
+                return Err(SyscallError::Again);
+            }
+            core::hint::spin_loop();
+        };
+        if mgr.silos.contains_key(&id.sid) {
+            return Err(SyscallError::Again);
+        }
+        if mgr
+            .silos
+            .values()
+            .any(|s| s.strate_label.as_deref() == silo.strate_label.as_deref())
+        {
+            return Err(SyscallError::AlreadyExists);
+        }
+        crate::serial_println!(
+            "[trace][silo] register_boot_strate_task before silo insert tid={} sid={}",
+            task_id.as_u64(),
+            id.sid
+        );
+        mgr.silos.insert(id.sid, Box::new(silo));
+        drop(mgr);
+        Ok(id.sid)
+    })();
+    BOOT_REG_IN_PROGRESS.store(false, Ordering::Relaxed);
+    result
+}
+
+/// Returns true while boot-time silo registration critical path is executing.
+pub fn debug_boot_reg_active() -> bool {
+    BOOT_REG_IN_PROGRESS.load(Ordering::Relaxed)
 }
 
 /// Performs the resolve module handle operation.
@@ -2059,21 +2163,19 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         }
     };
 
-    let load_result = crate::process::elf::load_elf_task_with_caps(
-        &module_data,
-        task_name,
-        &seed_caps,
-    )
-    .map_err(|err| {
-        log::warn!(
-            "silo_start: sid={} module={} task='{}' load failed: {}",
-            silo_id,
-            module_id,
-            task_name,
-            err
+    let load_result =
+        crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps).map_err(
+            |err| {
+                log::warn!(
+                    "silo_start: sid={} module={} task='{}' load failed: {}",
+                    silo_id,
+                    module_id,
+                    task_name,
+                    err
+                );
+                map_elf_start_error(err)
+            },
         );
-        map_elf_start_error(err)
-    });
 
     let task = match load_result {
         Ok(task) => task,
@@ -2367,7 +2469,9 @@ pub fn register_current_task_granted_resource(
 ) -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let mut mgr = SILO_MANAGER.lock();
-    let silo_id = mgr.silo_for_task(task.id).ok_or(SyscallError::PermissionDenied)?;
+    let silo_id = mgr
+        .silo_for_task(task.id)
+        .ok_or(SyscallError::PermissionDenied)?;
     let silo = mgr.get_mut(silo_id)?;
     add_or_merge_granted_resource(
         &mut silo.granted_resources,
@@ -2422,7 +2526,9 @@ pub fn enforce_registry_bind_for_current_task() -> Result<(), SyscallError> {
         return Ok(());
     }
     let mgr = SILO_MANAGER.lock();
-    let silo_id = mgr.silo_for_task(task.id).ok_or(SyscallError::PermissionDenied)?;
+    let silo_id = mgr
+        .silo_for_task(task.id)
+        .ok_or(SyscallError::PermissionDenied)?;
     let silo = mgr.get(silo_id)?;
     if silo.sandboxed {
         return Err(SyscallError::PermissionDenied);
@@ -2764,7 +2870,8 @@ pub fn kernel_sandbox_silo(selector: &str) -> Result<u32, SyscallError> {
     silo.sandboxed = true;
     crate::audit::log(
         crate::audit::AuditCategory::Security,
-        0, silo_id,
+        0,
+        silo_id,
         alloc::format!("silo sandboxed"),
     );
     Ok(silo_id)
@@ -2779,7 +2886,8 @@ pub fn task_silo_id(task_id: TaskId) -> Option<u32> {
 pub fn silo_output_write(silo_id: u32, data: &[u8]) {
     let mut mgr = SILO_MANAGER.lock();
     if let Ok(silo) = mgr.get_mut(silo_id) {
-        silo.output_buf.push(data);
+        let buf = silo.output_buf.get_or_insert_with(|| Box::new(SiloOutputBuf::new()));
+        buf.push(data);
     }
 }
 
@@ -2788,7 +2896,13 @@ pub fn silo_output_drain(selector: &str) -> Result<Vec<u8>, SyscallError> {
     let mut mgr = SILO_MANAGER.lock();
     let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
     let silo = mgr.get_mut(silo_id)?;
-    Ok(silo.output_buf.drain())
+    let mut buf = match silo.output_buf.take() {
+        Some(buf) => buf,
+        None => return Ok(Vec::new()),
+    };
+    let out = buf.drain();
+    silo.output_buf = Some(buf);
+    Ok(out)
 }
 
 /// Dynamically adjust resource quotas for a silo.
@@ -2829,7 +2943,8 @@ pub fn kernel_limit_silo(selector: &str, key: &str, value: u64) -> Result<u32, S
     silo.config.cpu_shares = next_cpu_shares;
     crate::audit::log(
         crate::audit::AuditCategory::Security,
-        0, silo_id,
+        0,
+        silo_id,
         alloc::format!("silo limit: {}={}", key, value),
     );
     Ok(silo_id)

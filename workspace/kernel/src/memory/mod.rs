@@ -1,6 +1,7 @@
 // Memory management module
 
 pub mod address_space;
+pub mod boot_alloc;
 pub mod buddy;
 pub mod cow;
 pub mod frame;
@@ -79,10 +80,33 @@ pub use buddy::get_allocator;
 pub use frame::{AllocError, FrameAllocator, PhysFrame};
 pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSliceWrite};
 
+/// Allocate `2^order` contiguous physical frames.
+#[inline]
+pub fn allocate_frames(order: u8) -> Result<PhysFrame, AllocError> {
+    buddy::alloc(order)
+}
+
+/// Free `2^order` contiguous physical frames.
+#[inline]
+pub fn free_frames(frame: PhysFrame, order: u8) {
+    buddy::free(frame, order);
+}
+
+/// Allocate a single physical frame.
+#[inline]
+pub fn allocate_frame() -> Result<PhysFrame, AllocError> {
+    allocate_frames(0)
+}
+
+/// Free a single physical frame.
+#[inline]
+pub fn free_frame(frame: PhysFrame) {
+    free_frames(frame, 0);
+}
+
 /// Allocate a zeroed 4KB frame suitable for DMA operations
 pub fn allocate_dma_frame() -> Option<PhysFrame> {
-    let mut allocator = get_allocator().lock();
-    let frame = allocator.as_mut()?.alloc_frame().ok()?;
+    let frame = allocate_frame().ok()?;
     // Zero the frame
     let virt = phys_to_virt(frame.start_address.as_u64()) as *mut u8;
     unsafe {

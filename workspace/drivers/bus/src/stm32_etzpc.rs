@@ -1,7 +1,9 @@
+use crate::{
+    BusChild, BusDriver, BusError, PowerState,
+    mmio::MmioRegion,
+    stm32_firewall::{FirewallController, FirewallType},
+};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
-use crate::stm32_firewall::{FirewallController, FirewallType};
 
 const ETZPC_DECPROT: usize = 0x10;
 const ETZPC_HWCFGR: usize = 0x3F0;
@@ -59,13 +61,19 @@ impl Stm32Etzpc {
 
 impl FirewallController for Stm32Etzpc {
     /// Performs the name operation.
-    fn name(&self) -> &str { "stm32-etzpc" }
+    fn name(&self) -> &str {
+        "stm32-etzpc"
+    }
 
     /// Performs the firewall type operation.
-    fn firewall_type(&self) -> FirewallType { FirewallType::Peripheral }
+    fn firewall_type(&self) -> FirewallType {
+        FirewallType::Peripheral
+    }
 
     /// Performs the max entries operation.
-    fn max_entries(&self) -> u32 { self.num_per + self.num_master }
+    fn max_entries(&self) -> u32 {
+        self.num_per + self.num_master
+    }
 
     /// Performs the grant access operation.
     fn grant_access(&self, firewall_id: u32) -> Result<(), BusError> {
@@ -89,10 +97,14 @@ impl FirewallController for Stm32Etzpc {
 
 impl BusDriver for Stm32Etzpc {
     /// Performs the name operation.
-    fn name(&self) -> &str { "stm32-etzpc" }
+    fn name(&self) -> &str {
+        "stm32-etzpc"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -110,13 +122,17 @@ impl BusDriver for Stm32Etzpc {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

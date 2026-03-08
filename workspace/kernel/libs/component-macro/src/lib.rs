@@ -295,9 +295,7 @@ fn parse_toml_deps(content: &str) -> Vec<(String, Vec<String>)> {
 
         // Extract `deps = [...]`.
         let deps = if let Some(di) = rest.find("deps") {
-            let after = rest[di + 4..]
-                .trim_start_matches([' ', '='])
-                .trim_start();
+            let after = rest[di + 4..].trim_start_matches([' ', '=']).trim_start();
             if let Some(bs) = after.find('[') {
                 if let Some(be) = after.find(']') {
                     after[bs + 1..be]

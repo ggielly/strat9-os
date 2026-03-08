@@ -8,13 +8,18 @@ use crate::{
         zone::{BuddyBitmap, Zone, ZoneType, MAX_ORDER},
     },
     serial_println,
-    sync::SpinLock,
+    sync::{SpinLock, SpinLockGuard},
 };
+use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use x86_64::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
 const DMA_MAX: u64 = 16 * 1024 * 1024;
 const NORMAL_MAX: u64 = 896 * 1024 * 1024;
+const LOCAL_CACHE_CAPACITY: usize = 256;
+const LOCAL_CACHE_REFILL_ORDER: u8 = 4;
+const LOCAL_CACHE_REFILL_FRAMES: usize = 1 << (LOCAL_CACHE_REFILL_ORDER as usize);
+const LOCAL_CACHE_FLUSH_BATCH: usize = 64;
 
 #[cfg(feature = "selftest")]
 macro_rules! buddy_dbg {
@@ -59,7 +64,9 @@ impl BuddyAllocator {
             "Buddy allocator: initializing with {} memory regions",
             memory_regions.len()
         );
-        for (_protected_base, _protected_size) in Self::protected_module_ranges().into_iter().flatten() {
+        for (_protected_base, _protected_size) in
+            Self::protected_module_ranges().into_iter().flatten()
+        {
             buddy_dbg!(
                 "  Protected module range: phys=0x{:x}..0x{:x}",
                 Self::align_down(_protected_base, PAGE_SIZE),
@@ -576,7 +583,7 @@ impl BuddyAllocator {
             }
         }
         panic!(
-            "Buddy allocator: cannot reserve {} pages for zone {:?} bitmaps",
+            "Buddy allocator: damn, I cannot reserve {} pages for zone {:?} bitmaps",
             needed_pages, self.zones[zone_idx].zone_type
         );
     }
@@ -672,12 +679,194 @@ impl BuddyAllocator {
 
 static BUDDY_ALLOCATOR: SpinLock<Option<BuddyAllocator>> = SpinLock::new(None);
 
+/// Returns the global buddy lock address for deadlock tracing.
+pub fn debug_buddy_lock_addr() -> usize {
+    &BUDDY_ALLOCATOR as *const _ as usize
+}
+
 /// Per-CPU flag to detect recursive allocations (deadlocks from logs/interrupts)
 static ALLOC_IN_PROGRESS: [core::sync::atomic::AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
 
+struct LocalFrameCache {
+    len: usize,
+    frames: [u64; LOCAL_CACHE_CAPACITY],
+}
+
+impl LocalFrameCache {
+    const fn new() -> Self {
+        Self {
+            len: 0,
+            frames: [0; LOCAL_CACHE_CAPACITY],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn pop(&mut self) -> Option<PhysFrame> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        Some(PhysFrame {
+            start_address: PhysAddr::new(self.frames[self.len]),
+        })
+    }
+
+    fn push(&mut self, frame: PhysFrame) -> Result<(), PhysFrame> {
+        if self.len >= LOCAL_CACHE_CAPACITY {
+            return Err(frame);
+        }
+        self.frames[self.len] = frame.start_address.as_u64();
+        self.len += 1;
+        Ok(())
+    }
+
+    fn pop_many(&mut self, out: &mut [u64]) -> usize {
+        let count = core::cmp::min(self.len, out.len());
+        for slot in out.iter_mut().take(count) {
+            self.len -= 1;
+            *slot = self.frames[self.len];
+        }
+        count
+    }
+}
+
+static LOCAL_FRAME_CACHES: [SpinLock<LocalFrameCache>; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { SpinLock::new(LocalFrameCache::new()) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static LOCAL_CACHED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+static LOCAL_CACHED_ZONE_FRAMES: [AtomicUsize; ZoneType::COUNT] =
+    [const { AtomicUsize::new(0) }; ZoneType::COUNT];
+
+type GlobalGuard = SpinLockGuard<'static, Option<BuddyAllocator>>;
+
+struct OnDemandGlobalLock {
+    guard: Option<GlobalGuard>,
+}
+
+impl OnDemandGlobalLock {
+    fn new() -> Self {
+        Self { guard: None }
+    }
+
+    fn unlock(&mut self) {
+        self.guard = None;
+    }
+
+    fn get_allocator_opt(&mut self) -> Option<&mut BuddyAllocator> {
+        self.guard
+            .get_or_insert_with(|| BUDDY_ALLOCATOR.lock())
+            .as_mut()
+    }
+
+    fn alloc(&mut self, order: u8) -> Result<PhysFrame, AllocError> {
+        let allocator = self.get_allocator_opt().ok_or(AllocError::OutOfMemory)?;
+        allocator.alloc(order)
+    }
+
+    fn free(&mut self, frame: PhysFrame, order: u8) {
+        if let Some(allocator) = self.get_allocator_opt() {
+            allocator.free(frame, order);
+        }
+    }
+
+    fn free_phys_batch(&mut self, phys_batch: &[u64], count: usize) {
+        if count == 0 {
+            return;
+        }
+        if let Some(allocator) = self.get_allocator_opt() {
+            for phys in phys_batch.iter().take(count).copied() {
+                allocator.free(
+                    PhysFrame {
+                        start_address: PhysAddr::new(phys),
+                    },
+                    0,
+                );
+            }
+        }
+    }
+}
+
+#[inline]
+fn zone_index_for_phys(phys: u64) -> usize {
+    if phys < DMA_MAX {
+        ZoneType::DMA as usize
+    } else if phys < NORMAL_MAX {
+        ZoneType::Normal as usize
+    } else {
+        ZoneType::HighMem as usize
+    }
+}
+
+#[inline]
+fn is_cacheable_phys(phys: u64) -> bool {
+    zone_index_for_phys(phys) == ZoneType::Normal as usize
+}
+
+#[inline]
+fn local_cached_inc_phys(phys: u64) {
+    LOCAL_CACHED_FRAMES.fetch_add(1, AtomicOrdering::Relaxed);
+    LOCAL_CACHED_ZONE_FRAMES[zone_index_for_phys(phys)].fetch_add(1, AtomicOrdering::Relaxed);
+}
+
+#[inline]
+fn local_cached_dec_phys(phys: u64) {
+    let prev_total = LOCAL_CACHED_FRAMES.fetch_sub(1, AtomicOrdering::Relaxed);
+    debug_assert!(prev_total > 0);
+    let zone = zone_index_for_phys(phys);
+    let prev_zone = LOCAL_CACHED_ZONE_FRAMES[zone].fetch_sub(1, AtomicOrdering::Relaxed);
+    debug_assert!(prev_zone > 0);
+}
+
+fn drain_local_caches_to_global(max_pages: usize, global: &mut OnDemandGlobalLock) -> usize {
+    if max_pages == 0 {
+        return 0;
+    }
+
+    let mut drained = 0usize;
+    let mut batch = [0u64; LOCAL_CACHE_FLUSH_BATCH];
+    for cpu in 0..crate::arch::x86_64::percpu::MAX_CPUS {
+        if drained >= max_pages {
+            break;
+        }
+        let target = core::cmp::min(batch.len(), max_pages.saturating_sub(drained));
+        if target == 0 {
+            break;
+        }
+
+        let popped = {
+            let mut cache = LOCAL_FRAME_CACHES[cpu].lock();
+            cache.pop_many(&mut batch[..target])
+        };
+        if popped == 0 {
+            continue;
+        }
+
+        for phys in batch.iter().take(popped).copied() {
+            local_cached_dec_phys(phys);
+        }
+        global.free_phys_batch(&batch, popped);
+
+        // Keep lock acquisition on-demand during cross-CPU draining.
+        global.unlock();
+        drained += popped;
+    }
+
+    drained
+}
+
 /// Initializes buddy allocator.
 pub fn init_buddy_allocator(memory_regions: &[MemoryRegion]) {
+    for cache in &LOCAL_FRAME_CACHES {
+        cache.lock().clear();
+    }
+    LOCAL_CACHED_FRAMES.store(0, AtomicOrdering::Relaxed);
+    for zone_cached in &LOCAL_CACHED_ZONE_FRAMES {
+        zone_cached.store(0, AtomicOrdering::Relaxed);
+    }
+
     let mut allocator = BuddyAllocator::new();
     allocator.init(memory_regions);
     *BUDDY_ALLOCATOR.lock() = Some(allocator);
@@ -688,15 +877,187 @@ pub fn get_allocator() -> &'static SpinLock<Option<BuddyAllocator>> {
     &BUDDY_ALLOCATOR
 }
 
+fn refill_local_cache(
+    cpu_idx: usize,
+    global: &mut OnDemandGlobalLock,
+) -> Result<PhysFrame, AllocError> {
+    // Critical path: refill in batches from the global allocator to amortize lock contention.
+    let (base, order) = match global.alloc(LOCAL_CACHE_REFILL_ORDER) {
+        Ok(frame) => (frame, LOCAL_CACHE_REFILL_ORDER),
+        Err(AllocError::OutOfMemory) => (global.alloc(0)?, 0),
+        Err(e) => return Err(e),
+    };
+    global.unlock();
+
+    let frame_count = 1usize << order;
+    let mut overflow = [0u64; LOCAL_CACHE_REFILL_FRAMES];
+    let mut overflow_len = 0usize;
+    let mut ret = None;
+
+    {
+        let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
+        for idx in 0..frame_count {
+            let phys = base.start_address.as_u64() + (idx as u64) * PAGE_SIZE;
+            let frame = PhysFrame {
+                start_address: PhysAddr::new(phys),
+            };
+            if !is_cacheable_phys(phys) {
+                overflow[overflow_len] = phys;
+                overflow_len += 1;
+                continue;
+            }
+            if ret.is_none() {
+                ret = Some(frame);
+                continue;
+            }
+            if cache.push(frame).is_ok() {
+                local_cached_inc_phys(phys);
+            } else {
+                overflow[overflow_len] = phys;
+                overflow_len += 1;
+            }
+        }
+    }
+
+    if overflow_len != 0 {
+        global.free_phys_batch(&overflow, overflow_len);
+    }
+
+    ret.ok_or(AllocError::OutOfMemory)
+}
+
+fn steal_from_other_caches(cpu_idx: usize) -> Option<PhysFrame> {
+    let cpu_count = crate::arch::x86_64::percpu::cpu_count()
+        .max(1)
+        .min(crate::arch::x86_64::percpu::MAX_CPUS);
+
+    for step in 1..cpu_count {
+        let peer = (cpu_idx + step) % cpu_count;
+        let mut cache = LOCAL_FRAME_CACHES[peer].lock();
+        if let Some(frame) = cache.pop() {
+            local_cached_dec_phys(frame.start_address.as_u64());
+            return Some(frame);
+        }
+    }
+    None
+}
+
+fn alloc_order0_cached() -> Result<PhysFrame, AllocError> {
+    let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+
+    {
+        let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
+        if let Some(frame) = cache.pop() {
+            local_cached_dec_phys(frame.start_address.as_u64());
+            return Ok(frame);
+        }
+    }
+
+    let mut global = OnDemandGlobalLock::new();
+
+    if let Ok(frame) = refill_local_cache(cpu_idx, &mut global) {
+        return Ok(frame);
+    }
+    // Critical lock-order rule: never hold global while probing local caches.
+    global.unlock();
+
+    if let Some(frame) = steal_from_other_caches(cpu_idx) {
+        return Ok(frame);
+    }
+
+    global.alloc(0)
+}
+
+fn free_order0_cached(frame: PhysFrame) {
+    if !is_cacheable_phys(frame.start_address.as_u64()) {
+        let mut global = OnDemandGlobalLock::new();
+        global.free(frame, 0);
+        return;
+    }
+
+    let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+    let mut spill = [0u64; LOCAL_CACHE_FLUSH_BATCH];
+    let mut spill_len = 0usize;
+
+    {
+        let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
+        if cache.push(frame).is_ok() {
+            local_cached_inc_phys(frame.start_address.as_u64());
+            return;
+        }
+
+        spill_len = cache.pop_many(&mut spill);
+        for phys in spill.iter().take(spill_len).copied() {
+            local_cached_dec_phys(phys);
+        }
+
+        if cache.push(frame).is_ok() {
+            local_cached_inc_phys(frame.start_address.as_u64());
+        } else {
+            spill[spill_len] = frame.start_address.as_u64();
+            spill_len += 1;
+        }
+    }
+
+    if spill_len != 0 {
+        let mut global = OnDemandGlobalLock::new();
+        global.free_phys_batch(&spill, spill_len);
+    }
+}
+
+/// Allocate frames with per-CPU caching on order-0 requests.
+pub fn alloc(order: u8) -> Result<PhysFrame, AllocError> {
+    if crate::silo::debug_boot_reg_active() {
+        crate::serial_println!(
+            "[trace][buddy] alloc enter order={} buddy_lock={:#x}",
+            order,
+            &BUDDY_ALLOCATOR as *const _ as usize
+        );
+    }
+    if order == 0 {
+        alloc_order0_cached()
+    } else {
+        let mut global = OnDemandGlobalLock::new();
+        match global.alloc(order) {
+            Ok(frame) => Ok(frame),
+            Err(AllocError::OutOfMemory) => {
+                // Critical lock-order rule: release global before draining local caches.
+                global.unlock();
+                let _ = drain_local_caches_to_global(usize::MAX, &mut global);
+                global.alloc(order)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Free frames with per-CPU caching on order-0 requests.
+pub fn free(frame: PhysFrame, order: u8) {
+    if order == 0 {
+        free_order0_cached(frame);
+    } else {
+        let mut global = OnDemandGlobalLock::new();
+        global.free(frame, order);
+    }
+}
+
 impl FrameAllocator for BuddyAllocator {
     /// Performs the alloc operation.
     fn alloc(&mut self, order: u8) -> Result<PhysFrame, AllocError> {
+        // Invariant: the caller must hold the SpinLock, which disables interrupts.
+        // Allocating with interrupts enabled would deadlock on single-core if a
+        // timer interrupt tries to allocate while we hold the lock.
+        debug_assert!(
+            !crate::arch::x86_64::interrupts_enabled(),
+            "buddy alloc(): interrupts must be disabled"
+        );
+
         if order > MAX_ORDER as u8 {
             return Err(AllocError::InvalidOrder);
         }
 
         let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
-        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::SeqCst) {
+        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
             panic!("Recursive allocation detected on CPU {}!", cpu_idx);
         }
 
@@ -713,26 +1074,53 @@ impl FrameAllocator for BuddyAllocator {
             Err(AllocError::OutOfMemory)
         })();
 
-        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::SeqCst);
+        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
         result
     }
 
     /// Performs the free operation.
     fn free(&mut self, frame: PhysFrame, order: u8) {
+        debug_assert!(
+            !crate::arch::x86_64::interrupts_enabled(),
+            "buddy free(): interrupts must be disabled"
+        );
+
+        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
+            panic!("Recursive deallocation detected on CPU {}!", cpu_idx);
+        }
+
         let frame_phys = frame.start_address.as_u64();
         let zi = Self::zone_index_for_addr(frame_phys);
         let zone = &mut self.zones[zi];
         Self::free_to_zone(zone, frame, order);
+
+        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
     }
 }
 
 impl BuddyAllocator {
     /// Allocate explicitly from one zone (e.g. DMA-only callers).
     pub fn alloc_zone(&mut self, order: u8, zone: ZoneType) -> Result<PhysFrame, AllocError> {
+        debug_assert!(
+            !crate::arch::x86_64::interrupts_enabled(),
+            "buddy alloc_zone(): interrupts must be disabled"
+        );
+
         if order > MAX_ORDER as u8 {
             return Err(AllocError::InvalidOrder);
         }
-        Self::alloc_from_zone(&mut self.zones[zone as usize], order).ok_or(AllocError::OutOfMemory)
+
+        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
+            panic!("Recursive allocation detected on CPU {}!", cpu_idx);
+        }
+
+        let result = Self::alloc_from_zone(&mut self.zones[zone as usize], order)
+            .ok_or(AllocError::OutOfMemory);
+
+        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
+        result
     }
 }
 
@@ -754,6 +1142,8 @@ impl BuddyAllocator {
             total_pages = total_pages.saturating_add(zone.page_count);
             allocated_pages = allocated_pages.saturating_add(zone.allocated);
         }
+        let cached_pages = LOCAL_CACHED_FRAMES.load(AtomicOrdering::Relaxed);
+        allocated_pages = allocated_pages.saturating_sub(cached_pages);
         (total_pages, allocated_pages)
     }
 
@@ -762,11 +1152,12 @@ impl BuddyAllocator {
     pub fn zone_snapshot(&self, out: &mut [(u8, u64, usize, usize)]) -> usize {
         let n = core::cmp::min(out.len(), self.zones.len());
         for (i, zone) in self.zones.iter().take(n).enumerate() {
+            let cached = LOCAL_CACHED_ZONE_FRAMES[i].load(AtomicOrdering::Relaxed);
             out[i] = (
                 zone.zone_type as u8,
                 zone.base.as_u64(),
                 zone.page_count,
-                zone.allocated,
+                zone.allocated.saturating_sub(cached),
             );
         }
         n

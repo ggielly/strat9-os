@@ -35,7 +35,8 @@
 use crate::{
     memory::UserSliceWrite,
     process::{
-        block_current_task, current_task_clone, current_task_id, get_task_id_by_pid, has_pending_signals,
+        block_current_task, current_task_clone, current_task_id, get_task_id_by_pid,
+        has_pending_signals,
         scheduler::{try_wait_child, WaitChildResult},
         TaskId,
     },
@@ -306,7 +307,8 @@ fn resolve_cow_for_range(ptr: u64, len: usize) -> Result<(), SyscallError> {
     let end = (ptr + (len as u64).saturating_sub(1)) & !0xfff;
     let mut page = start;
     loop {
-        crate::syscall::fork::handle_cow_fault(page, address_space).map_err(|_| SyscallError::Fault)?;
+        crate::syscall::fork::handle_cow_fault(page, address_space)
+            .map_err(|_| SyscallError::Fault)?;
         if page == end {
             break;
         }

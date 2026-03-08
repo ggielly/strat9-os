@@ -7,8 +7,12 @@
 //! - **While loops**: `while COMMAND ; do BODY ; done`
 //! - **If/then**: `if COMMAND ; then BODY ; fi` or `if COMMAND ; then A ; else B ; fi`
 
-use alloc::{collections::BTreeMap, string::{String, ToString}, vec::Vec};
 use crate::sync::SpinLock;
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 static SHELL_VARS: SpinLock<BTreeMap<String, String>> = SpinLock::new(BTreeMap::new());
 static LAST_EXIT: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
@@ -25,7 +29,9 @@ pub fn last_exit() -> i32 {
 
 /// Set a shell variable.
 pub fn set_var(key: &str, val: &str) {
-    SHELL_VARS.lock().insert(String::from(key), String::from(val));
+    SHELL_VARS
+        .lock()
+        .insert(String::from(key), String::from(val));
 }
 
 /// Get a shell variable.
@@ -85,11 +91,19 @@ pub enum ScriptConstruct {
     /// `unset VAR`
     UnsetVar(String),
     /// `for VAR in ITEMS ; do BODY ; done`
-    ForLoop { var: String, items: Vec<String>, body: Vec<String> },
+    ForLoop {
+        var: String,
+        items: Vec<String>,
+        body: Vec<String>,
+    },
     /// `while COND ; do BODY ; done`
     WhileLoop { cond: String, body: Vec<String> },
     /// `if COND ; then THEN_BODY [; else ELSE_BODY] ; fi`
-    IfElse { cond: String, then_body: Vec<String>, else_body: Vec<String> },
+    IfElse {
+        cond: String,
+        then_body: Vec<String>,
+        else_body: Vec<String>,
+    },
 }
 
 /// Parse a full line into a script construct.
@@ -141,7 +155,8 @@ fn parse_for_loop(parts: &[&str]) -> ScriptConstruct {
     }
 
     let var = tokens.get(1).unwrap_or(&"_").to_string();
-    let items: Vec<String> = tokens.iter()
+    let items: Vec<String> = tokens
+        .iter()
         .skip(3) // skip "for VAR in"
         .map(|s| String::from(*s))
         .collect();
@@ -162,7 +177,11 @@ fn parse_for_loop(parts: &[&str]) -> ScriptConstruct {
         .map(|s| String::from(*s))
         .collect();
 
-    ScriptConstruct::ForLoop { var: String::from(var), items, body }
+    ScriptConstruct::ForLoop {
+        var: String::from(var),
+        items,
+        body,
+    }
 }
 
 /// `while cond ; do body ; done`

@@ -736,7 +736,9 @@ impl NetworkStrate {
             }
         };
 
-        let deadline_ns = clock_gettime_ns().unwrap_or(0).saturating_add(3_000_000_000);
+        let deadline_ns = clock_gettime_ns()
+            .unwrap_or(0)
+            .saturating_add(3_000_000_000);
         loop {
             let now = now_instant();
             let _ = self
@@ -924,7 +926,10 @@ impl NetworkStrate {
                 };
                 let remote = (smoltcp::wire::IpAddress::Ipv4(ip), port);
                 let conn_socket = self.sockets.get_mut::<tcp::Socket>(handle);
-                if conn_socket.connect(self.interface.context(), remote, local_port).is_err() {
+                if conn_socket
+                    .connect(self.interface.context(), remote, local_port)
+                    .is_err()
+                {
                     self.sockets.remove(handle);
                     return IpcMessage::error_reply(msg.sender, -111);
                 }
@@ -1092,8 +1097,10 @@ impl NetworkStrate {
                 );
                 reply_open(msg.sender, fid, u64::MAX, 0)
             }
-            p if p.starts_with("route/add/") || p.starts_with("route/del/")
-                || p.starts_with("route/default/set/") || p == "route/default/clear" =>
+            p if p.starts_with("route/add/")
+                || p.starts_with("route/del/")
+                || p.starts_with("route/default/set/")
+                || p == "route/default/clear" =>
             {
                 let fid = self.alloc_fid();
                 self.open_handles.insert(fid, String::from(path));
@@ -1143,7 +1150,12 @@ impl NetworkStrate {
     }
 
     /// Implements handle tcp write.
-    fn handle_tcp_write(&mut self, sender: u64, listener: TcpListenerState, msg: &IpcMessage) -> IpcMessage {
+    fn handle_tcp_write(
+        &mut self,
+        sender: u64,
+        listener: TcpListenerState,
+        msg: &IpcMessage,
+    ) -> IpcMessage {
         let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
         if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
             if listener.auto_relisten {
@@ -1189,7 +1201,12 @@ impl NetworkStrate {
     }
 
     /// Write to an outgoing TCP connection.
-    fn handle_tcp_conn_write(&mut self, sender: u64, conn: TcpConnState, msg: &IpcMessage) -> IpcMessage {
+    fn handle_tcp_conn_write(
+        &mut self,
+        sender: u64,
+        conn: TcpConnState,
+        msg: &IpcMessage,
+    ) -> IpcMessage {
         let socket = self.sockets.get_mut::<tcp::Socket>(conn.socket);
         if !socket.is_open() {
             return IpcMessage::error_reply(sender, -104);
@@ -1238,7 +1255,12 @@ impl NetworkStrate {
     ///
     /// Use `/net/udp/connect/<ip>/<port>` for bidirectional traffic or
     /// `/net/udp/send/<ip>/<port>` for datagram sends with a fixed peer.
-    fn handle_udp_bound_write(&mut self, sender: u64, state: UdpBoundState, msg: &IpcMessage) -> IpcMessage {
+    fn handle_udp_bound_write(
+        &mut self,
+        sender: u64,
+        state: UdpBoundState,
+        msg: &IpcMessage,
+    ) -> IpcMessage {
         let _ = state;
         let _ = msg;
         IpcMessage::error_reply(sender, -95) // EOPNOTSUPP
@@ -1260,7 +1282,12 @@ impl NetworkStrate {
     }
 
     /// Write to a connected UDP scheme handle.
-    fn handle_udp_conn_write(&mut self, sender: u64, conn: UdpConnState, msg: &IpcMessage) -> IpcMessage {
+    fn handle_udp_conn_write(
+        &mut self,
+        sender: u64,
+        conn: UdpConnState,
+        msg: &IpcMessage,
+    ) -> IpcMessage {
         let socket = self.sockets.get_mut::<udp::Socket>(conn.socket);
         let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
         let data_len = core::cmp::min(data_len, msg.payload.len().saturating_sub(18));
@@ -1594,8 +1621,7 @@ impl NetworkStrate {
         if path.starts_with("ping/") {
             let ip_str = &path[5..];
             if let Some(target) = parse_ipv4(ip_str) {
-                let data_len =
-                    u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+                let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
                 let seq = if data_len >= 2 {
                     u16::from_le_bytes([msg.payload[18], msg.payload[19]])
                 } else {
@@ -1898,7 +1924,10 @@ fn log_error_code(e: strate_net::syscalls::Error) {
     use core::fmt::Write;
     let mut buf = [0u8; 32];
     let n = {
-        let mut w = BufWriter { buf: &mut buf, pos: 0 };
+        let mut w = BufWriter {
+            buf: &mut buf,
+            pos: 0,
+        };
         let _ = write!(w, "{}", e.to_errno());
         w.pos
     };

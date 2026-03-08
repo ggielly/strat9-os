@@ -36,6 +36,13 @@ pub fn init() {
 
 /// Initialize the TSS for a given CPU index.
 pub fn init_cpu(cpu_index: usize) {
+    // Bounds check: prevent OOB access into static arrays before any unsafe.
+    assert!(
+        cpu_index < crate::arch::x86_64::percpu::MAX_CPUS,
+        "TSS init_cpu: cpu_index {} >= MAX_CPUS {}",
+        cpu_index,
+        crate::arch::x86_64::percpu::MAX_CPUS,
+    );
     // SAFETY: Called during init (BSP) or AP bring-up before interrupts are enabled on that CPU.
     unsafe {
         let stack_ptr = &raw const IST_STACKS[cpu_index] as *const u8;
@@ -60,6 +67,11 @@ pub fn init_cpu(cpu_index: usize) {
 
 /// Get a reference to the TSS for a given CPU index (for GDT descriptor creation).
 pub fn tss_for(cpu_index: usize) -> &'static TaskStateSegment {
+    assert!(
+        cpu_index < crate::arch::x86_64::percpu::MAX_CPUS,
+        "tss_for: cpu_index {} >= MAX_CPUS",
+        cpu_index,
+    );
     if !TSS_INIT[cpu_index].load(Ordering::Acquire) {
         panic!("TSS for CPU{} not initialized", cpu_index);
     }
@@ -72,13 +84,16 @@ pub fn tss_for(cpu_index: usize) -> &'static TaskStateSegment {
 ///
 /// Called on every context switch to point to the new task's kernel stack top.
 pub fn set_kernel_stack(stack_top: VirtAddr) {
-    let apic_id = super::apic::lapic_id();
-    let cpu_index = crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id).unwrap_or(0);
+    let cpu_index = crate::arch::x86_64::percpu::current_cpu_index();
     set_kernel_stack_for(cpu_index, stack_top);
 }
 
 /// Update TSS.rsp0 for a specific CPU index.
 pub fn set_kernel_stack_for(cpu_index: usize, stack_top: VirtAddr) {
+    if cpu_index >= crate::arch::x86_64::percpu::MAX_CPUS {
+        log::warn!("set_kernel_stack_for: cpu_index {} out of range", cpu_index);
+        return;
+    }
     // SAFETY: privilege_stack_table[0] is a VirtAddr (u64), writes are atomic on x86_64.
     // Called with interrupts disabled or from the scheduler with lock held.
     if !TSS_INIT[cpu_index].load(Ordering::Acquire) {

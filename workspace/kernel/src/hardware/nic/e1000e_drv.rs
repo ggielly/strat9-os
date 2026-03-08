@@ -1,7 +1,7 @@
 use super::register_device;
 use crate::{
     hardware::pci_client::{self as pci, Bar},
-    memory::{self, get_allocator, FrameAllocator},
+    memory::{self},
     sync::SpinLock,
 };
 use alloc::sync::Arc;
@@ -24,9 +24,8 @@ impl DmaAllocator for KernelDma {
     fn alloc_dma(&self, size: usize) -> Result<DmaRegion, nic_buffers::DmaAllocError> {
         let pages = (size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let mut lock = get_allocator().lock();
-        let alloc = lock.as_mut().ok_or(nic_buffers::DmaAllocError)?;
-        let frame = alloc.alloc(order).map_err(|_| nic_buffers::DmaAllocError)?;
+        let frame =
+            crate::memory::allocate_frames(order).map_err(|_| nic_buffers::DmaAllocError)?;
         let phys = frame.start_address.as_u64();
         let virt = memory::phys_to_virt(phys) as *mut u8;
         Ok(DmaRegion {
@@ -42,10 +41,7 @@ impl DmaAllocator for KernelDma {
         let order = pages.next_power_of_two().trailing_zeros() as u8;
         let frame =
             crate::memory::PhysFrame::containing_address(x86_64::PhysAddr::new(region.phys));
-        let mut lock = get_allocator().lock();
-        if let Some(alloc) = lock.as_mut() {
-            alloc.free(frame, order);
-        }
+        crate::memory::free_frames(frame, order);
     }
 }
 

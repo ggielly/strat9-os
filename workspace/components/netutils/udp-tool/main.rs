@@ -12,11 +12,7 @@
 
 extern crate alloc;
 
-use core::{
-    alloc::Layout,
-    fmt::Write,
-    panic::PanicInfo,
-};
+use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
 use strat9_syscall::{call, data::TimeSpec, number};
 
 alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 96 * 1024;);

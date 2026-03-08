@@ -19,10 +19,7 @@ use crate::{
     shell_println,
     vfs::{self, scheme::DT_DIR, OpenFlags},
 };
-use alloc::{
-    string::String,
-    vec::Vec,
-};
+use alloc::{string::String, vec::Vec};
 use spin::Lazy;
 
 pub use cat::cmd_cat;
@@ -214,8 +211,7 @@ pub(super) fn cmd_cat_impl(args: &[String]) -> Result<(), ShellError> {
                 match vfs::read(fd, &mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let s = core::str::from_utf8(&buf[..n])
-                            .unwrap_or("(non-UTF8 data)");
+                        let s = core::str::from_utf8(&buf[..n]).unwrap_or("(non-UTF8 data)");
                         crate::shell_print!("{}", s);
                     }
                     Err(e) => {
@@ -430,11 +426,14 @@ pub(super) fn cmd_cp_impl(args: &[String]) -> Result<(), ShellError> {
     };
     let _ = vfs::close(fd_src);
 
-    let fd_dst = vfs::open(&dst, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
-        .map_err(|e| {
-            shell_println!("cp: cannot create '{}': {:?}", dst, e);
-            ShellError::ExecutionFailed
-        })?;
+    let fd_dst = vfs::open(
+        &dst,
+        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+    )
+    .map_err(|e| {
+        shell_println!("cp: cannot create '{}': {:?}", dst, e);
+        ShellError::ExecutionFailed
+    })?;
     match vfs::write(fd_dst, &data) {
         Ok(n) => shell_println!("cp: {} -> {} ({} bytes)", src, dst, n),
         Err(e) => shell_println!("cp: write to '{}': {:?}", dst, e),
@@ -482,7 +481,12 @@ pub(super) fn cmd_df_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("{:<20} {}", "Mount", "Status");
     shell_println!("────────────────────────────────────────");
     for m in &mounts {
-        let status = if vfs::open(m, OpenFlags::READ | OpenFlags::DIRECTORY).map(|fd| { let _ = vfs::close(fd); }).is_ok() {
+        let status = if vfs::open(m, OpenFlags::READ | OpenFlags::DIRECTORY)
+            .map(|fd| {
+                let _ = vfs::close(fd);
+            })
+            .is_ok()
+        {
             "accessible"
         } else {
             "unavailable"

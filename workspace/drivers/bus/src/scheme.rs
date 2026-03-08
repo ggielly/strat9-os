@@ -1,10 +1,11 @@
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
-use strat9_syscall::data::IpcMessage;
-use strat9_syscall::call;
-use strat9_syscall::error::{EBADF, EINVAL, ENOENT, ENOSYS, ENOTDIR};
-use strat9_syscall::data::{
-    DT_DIR, DT_REG, PciAddress, PciDeviceInfo, PciProbeCriteria, PCI_MATCH_DEVICE_ID,
-    PCI_MATCH_VENDOR_ID,
+use strat9_syscall::{
+    call,
+    data::{
+        DT_DIR, DT_REG, IpcMessage, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID, PciAddress,
+        PciDeviceInfo, PciProbeCriteria,
+    },
+    error::{EBADF, EINVAL, ENOENT, ENOSYS, ENOTDIR},
 };
 
 use crate::BusDriver;
@@ -197,7 +198,8 @@ impl<D: BusDriver> BusSchemeServer<D> {
 
         let file_id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        self.handles.insert(file_id, OpenHandle { path: path.clone() });
+        self.handles
+            .insert(file_id, OpenHandle { path: path.clone() });
 
         let mut reply = Self::ok_reply(sender);
         reply.payload[4..12].copy_from_slice(&file_id.to_le_bytes());
@@ -214,12 +216,18 @@ impl<D: BusDriver> BusSchemeServer<D> {
     /// Handles read.
     fn handle_read(&self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes([
-            payload[0], payload[1], payload[2], payload[3],
-            payload[4], payload[5], payload[6], payload[7],
+            payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+            payload[7],
         ]);
         let offset = u64::from_le_bytes([
-            payload[8], payload[9], payload[10], payload[11],
-            payload[12], payload[13], payload[14], payload[15],
+            payload[8],
+            payload[9],
+            payload[10],
+            payload[11],
+            payload[12],
+            payload[13],
+            payload[14],
+            payload[15],
         ]);
 
         let handle = match self.handles.get(&file_id) {
@@ -260,14 +268,13 @@ impl<D: BusDriver> BusSchemeServer<D> {
                 s.push_str(&format!("errors: {}\n", self.driver.error_count()));
                 s.into_bytes()
             }
-            "status" => {
-                format!("driver: {}\nerrors: {}\n",
-                    self.driver.name(), self.driver.error_count()
-                ).into_bytes()
-            }
-            "error_count" => {
-                format!("{}\n", self.driver.error_count()).into_bytes()
-            }
+            "status" => format!(
+                "driver: {}\nerrors: {}\n",
+                self.driver.name(),
+                self.driver.error_count()
+            )
+            .into_bytes(),
+            "error_count" => format!("{}\n", self.driver.error_count()).into_bytes(),
             "pci" => b"inventory\ncount\nrescan\nfind\ncfg\n".to_vec(),
             "pci/find" => b"usage: /bus/pci/find/<vendor>/<device>\n".to_vec(),
             "pci/cfg" => b"usage: /bus/pci/cfg/<bb:dd.f>/<offset>/<width>\n".to_vec(),
@@ -310,7 +317,11 @@ impl<D: BusDriver> BusSchemeServer<D> {
                         for d in matches.into_iter().take(n) {
                             let line = format!(
                                 "{:02x}:{:02x}.{} {:04x}:{:04x}\n",
-                                d.address.bus, d.address.device, d.address.function, d.vendor_id, d.device_id
+                                d.address.bus,
+                                d.address.device,
+                                d.address.function,
+                                d.vendor_id,
+                                d.device_id
                             );
                             out.extend_from_slice(line.as_bytes());
                         }
@@ -334,7 +345,9 @@ impl<D: BusDriver> BusSchemeServer<D> {
             }
             _ => {
                 if let Some(reg_str) = path.strip_prefix("reg/") {
-                    if let Ok(reg_offset) = usize::from_str_radix(reg_str.trim_start_matches("0x"), 16) {
+                    if let Ok(reg_offset) =
+                        usize::from_str_radix(reg_str.trim_start_matches("0x"), 16)
+                    {
                         match self.driver.read_reg(reg_offset) {
                             Ok(val) => format!("0x{:08x}\n", val).into_bytes(),
                             Err(_) => b"error\n".to_vec(),
@@ -402,8 +415,8 @@ impl<D: BusDriver> BusSchemeServer<D> {
     /// Handles write.
     fn handle_write(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes([
-            payload[0], payload[1], payload[2], payload[3],
-            payload[4], payload[5], payload[6], payload[7],
+            payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+            payload[7],
         ]);
         let len = u16::from_le_bytes([payload[16], payload[17]]) as usize;
 
@@ -442,9 +455,7 @@ impl<D: BusDriver> BusSchemeServer<D> {
             if len < 4 {
                 return Self::err_reply(sender, EINVAL);
             }
-            let val = u32::from_le_bytes([
-                payload[18], payload[19], payload[20], payload[21],
-            ]);
+            let val = u32::from_le_bytes([payload[18], payload[19], payload[20], payload[21]]);
             if self.driver.write_reg(reg_offset, val).is_err() {
                 return Self::err_reply(sender, EINVAL);
             }
@@ -458,8 +469,8 @@ impl<D: BusDriver> BusSchemeServer<D> {
     /// Handles close.
     fn handle_close(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes([
-            payload[0], payload[1], payload[2], payload[3],
-            payload[4], payload[5], payload[6], payload[7],
+            payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+            payload[7],
         ]);
         if self.handles.remove(&file_id).is_some() {
             Self::ok_reply(sender)
@@ -471,8 +482,8 @@ impl<D: BusDriver> BusSchemeServer<D> {
     /// Handles readdir.
     fn handle_readdir(&self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes([
-            payload[0], payload[1], payload[2], payload[3],
-            payload[4], payload[5], payload[6], payload[7],
+            payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+            payload[7],
         ]);
         let handle = match self.handles.get(&file_id) {
             Some(h) => h,

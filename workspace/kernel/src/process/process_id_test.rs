@@ -7,16 +7,20 @@
 
 use crate::{
     process::{
-        add_task, current_pid, current_task_clone, current_task_id, current_tid,
-        get_parent_pid, Task, TaskPriority,
+        add_task, current_pid, current_task_clone, current_task_id, current_tid, get_parent_pid,
+        Task, TaskPriority,
     },
     syscall::process as proc_sys,
 };
 
 fn log_section(title: &str) {
-    crate::serial_println!("[proc-id-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[proc-id-test][STEP] ========================================================"
+    );
     crate::serial_println!("[proc-id-test][STEP] {}", title);
-    crate::serial_println!("[proc-id-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[proc-id-test][STEP] ========================================================"
+    );
 }
 
 fn record(name: &str, ok: bool, passed: &mut usize, total: &mut usize) {
@@ -78,7 +82,9 @@ fn run_process_id_suite() -> bool {
     let tid = proc_sys::sys_gettid().unwrap_or(0);
     crate::serial_println!("[proc-id-test][STEP] pid={} tid={}", pid, tid);
     if pid != tid {
-        crate::serial_println!("[proc-id-test][STEP] note: pid != tid (may be expected for kernel tasks)");
+        crate::serial_println!(
+            "[proc-id-test][STEP] note: pid != tid (may be expected for kernel tasks)"
+        );
     }
     if pid == 0 || tid == 0 {
         s = false;
@@ -106,7 +112,8 @@ fn run_process_id_suite() -> bool {
     let sys_pid = proc_sys::sys_getpid().unwrap_or(0);
     crate::serial_println!(
         "[proc-id-test][STEP] scheduler pid={}, syscall pid={}",
-        sched_pid, sys_pid
+        sched_pid,
+        sys_pid
     );
     if sched_pid != sys_pid {
         crate::serial_println!("[proc-id-test][ASSERT] FAIL: pid mismatch");
@@ -121,16 +128,24 @@ fn run_process_id_suite() -> bool {
         Ok(uid) => {
             crate::serial_println!("[proc-id-test][STEP] sys_getuid() => {}", uid);
             if uid != 0 {
-                crate::serial_println!("[proc-id-test][STEP] note: uid != 0 (non-root kernel task)");
+                crate::serial_println!(
+                    "[proc-id-test][STEP] note: uid != 0 (non-root kernel task)"
+                );
             }
         }
-        Err(e) => { crate::serial_println!("[proc-id-test][STEP] getuid => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[proc-id-test][STEP] getuid => {:?}", e);
+            s = false;
+        }
     }
     match proc_sys::sys_geteuid() {
         Ok(euid) => {
             crate::serial_println!("[proc-id-test][STEP] sys_geteuid() => {}", euid);
         }
-        Err(e) => { crate::serial_println!("[proc-id-test][STEP] geteuid => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[proc-id-test][STEP] geteuid => {:?}", e);
+            s = false;
+        }
     }
     record("getuid / geteuid", s, &mut passed, &mut total);
 
@@ -141,13 +156,19 @@ fn run_process_id_suite() -> bool {
         Ok(gid) => {
             crate::serial_println!("[proc-id-test][STEP] sys_getgid() => {}", gid);
         }
-        Err(e) => { crate::serial_println!("[proc-id-test][STEP] getgid => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[proc-id-test][STEP] getgid => {:?}", e);
+            s = false;
+        }
     }
     match proc_sys::sys_getegid() {
         Ok(egid) => {
             crate::serial_println!("[proc-id-test][STEP] sys_getegid() => {}", egid);
         }
-        Err(e) => { crate::serial_println!("[proc-id-test][STEP] getegid => {:?}", e); s = false; }
+        Err(e) => {
+            crate::serial_println!("[proc-id-test][STEP] getegid => {:?}", e);
+            s = false;
+        }
     }
     record("getgid / getegid", s, &mut passed, &mut total);
 
@@ -212,7 +233,11 @@ fn run_process_id_suite() -> bool {
     let mut s = true;
     let pgid_0 = proc_sys::sys_getpgid(0).unwrap_or(u64::MAX);
     let pgrp = proc_sys::sys_getpgrp().unwrap_or(0);
-    crate::serial_println!("[proc-id-test][STEP] getpgid(0)={} getpgrp()={}", pgid_0, pgrp);
+    crate::serial_println!(
+        "[proc-id-test][STEP] getpgid(0)={} getpgrp()={}",
+        pgid_0,
+        pgrp
+    );
     if pgid_0 != pgrp {
         crate::serial_println!("[proc-id-test][ASSERT] FAIL: getpgrp != getpgid(0)");
         s = false;
@@ -246,7 +271,10 @@ fn run_process_id_suite() -> bool {
             }
         }
         Err(e) => {
-            crate::serial_println!("[proc-id-test][STEP] setsid => {:?} (may already be session leader)", e);
+            crate::serial_println!(
+                "[proc-id-test][STEP] setsid => {:?} (may already be session leader)",
+                e
+            );
         }
     }
     record("setsid", s, &mut passed, &mut total);
@@ -258,9 +286,15 @@ fn run_process_id_suite() -> bool {
         Ok(_) => {
             let my_pid = proc_sys::sys_getpid().unwrap_or(0);
             let my_pgid = proc_sys::sys_getpgid(0).unwrap_or(0);
-            crate::serial_println!("[proc-id-test][STEP] setpgid(0,0): pid={} pgid={}", my_pid, my_pgid);
+            crate::serial_println!(
+                "[proc-id-test][STEP] setpgid(0,0): pid={} pgid={}",
+                my_pid,
+                my_pgid
+            );
             if my_pgid != my_pid {
-                crate::serial_println!("[proc-id-test][ASSERT] FAIL: pgid != pid after setpgid(0,0)");
+                crate::serial_println!(
+                    "[proc-id-test][ASSERT] FAIL: pgid != pid after setpgid(0,0)"
+                );
                 s = false;
             }
         }
@@ -278,7 +312,9 @@ fn run_process_id_suite() -> bool {
         Some(task) => {
             crate::serial_println!(
                 "[proc-id-test][STEP] current task: name='{}' id={:?} pid={}",
-                task.name, task.id, task.pid
+                task.name,
+                task.id,
+                task.pid
             );
             if task.name != "proc-id-test" {
                 crate::serial_println!("[proc-id-test][ASSERT] FAIL: unexpected task name");
@@ -309,7 +345,11 @@ fn run_process_id_suite() -> bool {
     // ── Summary ─────────────────────────────────────────────────────────────
     log_section("PROCESS ID TEST SUMMARY");
     let ok = passed == total;
-    crate::serial_println!("[proc-id-test][ASSERT] result: {}/{} scenarios PASS", passed, total);
+    crate::serial_println!(
+        "[proc-id-test][ASSERT] result: {}/{} scenarios PASS",
+        passed,
+        total
+    );
     crate::serial_println!(
         "[proc-id-test][ASSERT] final : {}",
         if ok { "PASS" } else { "FAIL" }
@@ -325,7 +365,9 @@ extern "C" fn process_id_test_main() -> ! {
 }
 
 pub fn create_process_id_test_task() {
-    if let Ok(task) = Task::new_kernel_task(process_id_test_main, "proc-id-test", TaskPriority::Normal) {
+    if let Ok(task) =
+        Task::new_kernel_task(process_id_test_main, "proc-id-test", TaskPriority::Normal)
+    {
         add_task(task);
     } else {
         crate::serial_println!("[proc-id-test][SETUP] failed to create task");

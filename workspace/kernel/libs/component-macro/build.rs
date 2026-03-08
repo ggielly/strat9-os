@@ -69,9 +69,7 @@ fn validate_components_toml(path: &std::path::Path) {
         let rest = line[eq_pos + 1..].trim();
 
         let deps: Vec<String> = if let Some(di) = rest.find("deps") {
-            let after = rest[di + 4..]
-                .trim_start_matches([' ', '='])
-                .trim_start();
+            let after = rest[di + 4..].trim_start_matches([' ', '=']).trim_start();
             if let Some(bs) = after.find('[') {
                 if let Some(be) = after.find(']') {
                     after[bs + 1..be]

@@ -10,9 +10,13 @@ use crate::{
 };
 
 fn log_section(title: &str) {
-    crate::serial_println!("[time-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[time-test][STEP] ========================================================"
+    );
     crate::serial_println!("[time-test][STEP] {}", title);
-    crate::serial_println!("[time-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[time-test][STEP] ========================================================"
+    );
 }
 
 fn record(name: &str, ok: bool, passed: &mut usize, total: &mut usize) {
@@ -57,7 +61,9 @@ fn run_time_suite() -> bool {
     let expected = t * 10_000_000;
     crate::serial_println!(
         "[time-test][STEP] ticks={} current_time_ns={} expected={}",
-        t, ns, expected
+        t,
+        ns,
+        expected
     );
     if ns < expected {
         crate::serial_println!(
@@ -96,7 +102,9 @@ fn run_time_suite() -> bool {
     let after = current_time_ns();
     crate::serial_println!(
         "[time-test][STEP] before yields={} after yields={} delta={}",
-        before, after, after.saturating_sub(before)
+        before,
+        after,
+        after.saturating_sub(before)
     );
     if after < before {
         crate::serial_println!("[time-test][ASSERT] FAIL: time went backward across yields");
@@ -118,7 +126,9 @@ fn run_time_suite() -> bool {
     let t1 = current_time_ns();
     crate::serial_println!(
         "[time-test][STEP] t0={} t1={} delta={} ns",
-        t0, t1, t1.saturating_sub(t0)
+        t0,
+        t1,
+        t1.saturating_sub(t0)
     );
     if t1 <= t0 {
         crate::serial_println!("[time-test][ASSERT] FAIL: time did not advance after ~50 ticks");
@@ -132,7 +142,11 @@ fn run_time_suite() -> bool {
     let t1 = ticks();
     crate::process::yield_task();
     let t2 = ticks();
-    crate::serial_println!("[time-test][STEP] ticks before yield={} after yield={}", t1, t2);
+    crate::serial_println!(
+        "[time-test][STEP] ticks before yield={} after yield={}",
+        t1,
+        t2
+    );
     if t2 < t1 {
         crate::serial_println!("[time-test][ASSERT] FAIL: ticks went backward");
         s = false;
@@ -143,13 +157,23 @@ fn run_time_suite() -> bool {
     log_section("7. TIMESPEC ROUND-TRIP");
     use strat9_abi::data::TimeSpec;
     let mut s = true;
-    let test_values: &[u64] = &[0, 1, 999_999_999, 1_000_000_000, 5_500_000_000, u64::MAX / 2];
+    let test_values: &[u64] = &[
+        0,
+        1,
+        999_999_999,
+        1_000_000_000,
+        5_500_000_000,
+        u64::MAX / 2,
+    ];
     for &v in test_values {
         let ts = TimeSpec::from_nanos(v);
         let back = ts.to_nanos();
         crate::serial_println!(
             "[time-test][STEP] from_nanos({}) => sec={} nsec={} => to_nanos={}",
-            v, ts.tv_sec, ts.tv_nsec, back
+            v,
+            ts.tv_sec,
+            ts.tv_nsec,
+            back
         );
         if back != v {
             crate::serial_println!("[time-test][ASSERT] FAIL: round-trip mismatch for {}", v);
@@ -165,7 +189,9 @@ fn run_time_suite() -> bool {
     let syscall_val = sys_clock_gettime().unwrap_or(0);
     crate::serial_println!(
         "[time-test][STEP] internal={} syscall={} delta={}",
-        internal, syscall_val, syscall_val.saturating_sub(internal)
+        internal,
+        syscall_val,
+        syscall_val.saturating_sub(internal)
     );
     if syscall_val < internal {
         crate::serial_println!("[time-test][ASSERT] FAIL: syscall < internal");
@@ -205,7 +231,11 @@ fn run_time_suite() -> bool {
     // ── Summary ─────────────────────────────────────────────────────────────
     log_section("TIME TEST SUMMARY");
     let ok = passed == total;
-    crate::serial_println!("[time-test][ASSERT] result: {}/{} scenarios PASS", passed, total);
+    crate::serial_println!(
+        "[time-test][ASSERT] result: {}/{} scenarios PASS",
+        passed,
+        total
+    );
     crate::serial_println!(
         "[time-test][ASSERT] final : {}",
         if ok { "PASS" } else { "FAIL" }

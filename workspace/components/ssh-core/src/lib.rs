@@ -2,8 +2,7 @@
 
 extern crate alloc;
 
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 pub type Result<T> = core::result::Result<T, SshCoreError>;
 
@@ -110,7 +109,11 @@ pub trait SshBackend {
     /// Implements make server banner.
     fn make_server_banner(&mut self) -> Result<Vec<u8>>;
     /// Implements make kex reply.
-    fn make_kex_reply(&mut self, client_kex: &[u8], host_keys: &mut dyn HostKeyProvider) -> Result<Vec<u8>>;
+    fn make_kex_reply(
+        &mut self,
+        client_kex: &[u8],
+        host_keys: &mut dyn HostKeyProvider,
+    ) -> Result<Vec<u8>>;
     /// Implements make auth reply.
     fn make_auth_reply(&mut self, accepted: bool) -> Result<Vec<u8>>;
     /// Implements make exec reply.
@@ -121,7 +124,9 @@ pub trait SshBackend {
 
 pub enum CoreDirective {
     SendPacket(Vec<u8>),
-    AuthAccepted { username: Vec<u8> },
+    AuthAccepted {
+        username: Vec<u8>,
+    },
     AuthRejected,
     ExecStarted {
         channel_id: u32,
@@ -203,7 +208,9 @@ where
                     return Err(SshCoreError::InvalidState);
                 }
                 self.state = ConnectionState::KeyExchange;
-                out.push(CoreDirective::SendPacket(self.backend.make_server_banner()?));
+                out.push(CoreDirective::SendPacket(
+                    self.backend.make_server_banner()?,
+                ));
             }
             ParsedPacket::KexInit(client_kex) => {
                 if self.state != ConnectionState::KeyExchange {
@@ -211,7 +218,8 @@ where
                 }
                 self.state = ConnectionState::Authentication;
                 out.push(CoreDirective::SendPacket(
-                    self.backend.make_kex_reply(client_kex, &mut self.host_keys)?,
+                    self.backend
+                        .make_kex_reply(client_kex, &mut self.host_keys)?,
                 ));
             }
             ParsedPacket::UserAuthPublicKey {
@@ -233,7 +241,9 @@ where
                     signature,
                 )?;
 
-                out.push(CoreDirective::SendPacket(self.backend.make_auth_reply(accepted)?));
+                out.push(CoreDirective::SendPacket(
+                    self.backend.make_auth_reply(accepted)?,
+                ));
 
                 if accepted {
                     self.active_user = Some(username.to_vec());
@@ -441,7 +451,11 @@ impl SshBackend for MinimalBackend {
     }
 
     /// Implements make kex reply.
-    fn make_kex_reply(&mut self, client_kex: &[u8], host_keys: &mut dyn HostKeyProvider) -> Result<Vec<u8>> {
+    fn make_kex_reply(
+        &mut self,
+        client_kex: &[u8],
+        host_keys: &mut dyn HostKeyProvider,
+    ) -> Result<Vec<u8>> {
         let mut sig = [0u8; 128];
         let sig_len = host_keys.sign_exchange_hash(client_kex, &mut sig)?;
         let host_key = host_keys.host_public_key();
@@ -503,7 +517,11 @@ impl SshBackend for ZsshBackend {
     }
 
     /// Implements make kex reply.
-    fn make_kex_reply(&mut self, client_kex: &[u8], host_keys: &mut dyn HostKeyProvider) -> Result<Vec<u8>> {
+    fn make_kex_reply(
+        &mut self,
+        client_kex: &[u8],
+        host_keys: &mut dyn HostKeyProvider,
+    ) -> Result<Vec<u8>> {
         self.fallback.make_kex_reply(client_kex, host_keys)
     }
 

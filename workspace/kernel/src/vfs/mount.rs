@@ -4,8 +4,8 @@
 
 use super::scheme::DynScheme;
 use crate::syscall::error::SyscallError;
-use spin::{RwLock, Lazy};
 use alloc::{string::String, vec::Vec};
+use spin::{Lazy, RwLock};
 
 /// A mount point binding a path prefix to a scheme.
 #[derive(Clone)]
@@ -24,9 +24,7 @@ pub struct MountTable {
 impl MountTable {
     /// Creates a new instance.
     pub fn new() -> Self {
-        MountTable {
-            mounts: Vec::new(),
-        }
+        MountTable { mounts: Vec::new() }
     }
 
     /// Mount a scheme at a path prefix.

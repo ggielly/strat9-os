@@ -28,6 +28,10 @@ pub const TRAMPOLINE_PHYS_ADDR: u64 = 0x8000;
 
 /// Number of booted cores (starts at 1 for BSP).
 static BOOTED_CORES: AtomicUsize = AtomicUsize::new(1);
+/// Counter for synchronization barriers.
+static SYNC_BARRIER: AtomicUsize = AtomicUsize::new(0);
+/// Target count for the rendezvous barrier (set by BSP before barrier).
+static BARRIER_TARGET: AtomicUsize = AtomicUsize::new(0);
 /// Gate used by BSP to release APs into scheduler/timer start.
 static AP_SCHED_GATE_OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -228,6 +232,35 @@ fn send_init_sipi(apic_id: u32) {
     }
 }
 
+/// Broadcast a halt command to all other CPUs.
+///
+/// Used during panic to stop the system and prevent log corruption.
+pub fn broadcast_panic_halt() {
+    if !apic::is_initialized() {
+        return;
+    }
+    unsafe {
+        apic::write_reg(apic::REG_ESR, 0);
+        // Destination Shorthand: 0b11 (All excluding self)
+        // Delivery Mode: 0b100 (NMI)
+        // Level: 1 (Assert)
+        let icr_low = (0b11 << 18) | (0b100 << 8) | (1 << 14);
+        apic::write_reg(apic::REG_ICR_LOW, icr_low);
+    }
+}
+
+/// Wait at a synchronization barrier until all expected CPUs arrive.
+///
+/// Every CPU (BSP + APs) calls this once.  BSP must store the target count
+/// in `BARRIER_TARGET` before any CPU enters the barrier.
+fn rendezvous_barrier() {
+    let expected = BARRIER_TARGET.load(Ordering::Acquire);
+    SYNC_BARRIER.fetch_add(1, Ordering::AcqRel);
+    while SYNC_BARRIER.load(Ordering::Acquire) < expected {
+        core::hint::spin_loop();
+    }
+}
+
 /// Boot Application Processors.
 pub fn init() -> Result<usize, &'static str> {
     if !apic::is_initialized() {
@@ -235,6 +268,8 @@ pub fn init() -> Result<usize, &'static str> {
     }
 
     BOOTED_CORES.store(1, Ordering::Release);
+    SYNC_BARRIER.store(0, Ordering::Release);
+    BARRIER_TARGET.store(0, Ordering::Release);
 
     let madt_info = madt::parse_madt().ok_or("MADT not available")?;
     let bsp_apic_id = apic::lapic_id();
@@ -266,8 +301,11 @@ pub fn init() -> Result<usize, &'static str> {
             continue;
         }
 
-        let kernel_stack = KernelStack::allocate(crate::process::task::Task::DEFAULT_STACK_SIZE)?;
-        let stack_top = kernel_stack.virt_base.as_u64() + kernel_stack.size as u64;
+        // Allocate kernel stack using the simple BootAllocator (Asterinas style).
+        // This is safer during early bring-up than using the full Buddy Allocator.
+        let stack_size = crate::process::task::Task::DEFAULT_STACK_SIZE;
+        let stack_top = crate::memory::boot_alloc::alloc_stack(stack_size)
+            .ok_or("SMP: failed to allocate boot stack from pool")?;
 
         if apic_id as usize >= stacks.len() {
             log::warn!("SMP: APIC id {} out of stack array range", apic_id);
@@ -280,7 +318,7 @@ pub fn init() -> Result<usize, &'static str> {
             percpu::register_cpu(apic_id).ok_or("SMP: exceeded MAX_CPUS for per-CPU data")?;
         percpu::set_kernel_stack_top(cpu_index, stack_top);
 
-        AP_KERNEL_STACKS.lock().push(kernel_stack);
+        // We no longer need to push to AP_KERNEL_STACKS as these are static.
         targets.push(apic_id);
         expected += 1;
     }
@@ -309,6 +347,12 @@ pub fn init() -> Result<usize, &'static str> {
 
     let online = BOOTED_CORES.load(Ordering::Acquire);
     log::info!("SMP: {} cores online (expected {})", online, expected);
+
+    // Publish the barrier target so every CPU (BSP + APs) uses the same value.
+    BARRIER_TARGET.store(online, Ordering::Release);
+    // BSP reaches the rendezvous point.
+    rendezvous_barrier();
+
     Ok(online)
 }
 
@@ -334,10 +378,13 @@ pub extern "C" fn smp_main() -> ! {
         }
     };
 
-    // Initialize per-CPU TSS/GDT.
+    // Initialize per-CPU GS base.
+    crate::arch::x86_64::percpu::init_gs_base(cpu_index);
+
+    // Initialize per-CPU TSS/GDT (now uses O(1) current_cpu_index).
     crate::arch::x86_64::tss::init_cpu(cpu_index);
     crate::arch::x86_64::gdt::init_cpu(cpu_index);
-    crate::arch::x86_64::percpu::init_gs_base(cpu_index);
+
     crate::arch::x86_64::syscall::init();
     crate::arch::x86_64::init_cpu_extensions();
 
@@ -347,9 +394,15 @@ pub extern "C" fn smp_main() -> ! {
 
     let _ = percpu::mark_online_by_apic(apic_id);
     BOOTED_CORES.fetch_add(1, Ordering::Release);
+
+    // AP spins until BSP publishes the barrier target, then enters barrier.
+    while BARRIER_TARGET.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    rendezvous_barrier();
+
     crate::serial_println!(
-        "[trace][ap] online apic_id={} cpu_index={} entering ap scheduler",
-        apic_id,
+        "[trace][ap] online cpu_index={} entering ap scheduler",
         cpu_index
     );
 

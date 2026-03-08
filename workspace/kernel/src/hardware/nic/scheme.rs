@@ -121,24 +121,32 @@ impl Scheme for NetScheme {
         let h = self.handles.read();
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
         Ok(match handle {
-            Handle::Root => finalize_pseudo_stat(FileStat {
-                st_ino: 0,
-                st_mode: 0o040555,
-                st_nlink: 2,
-                st_size: 0,
-                st_blksize: 1514,
-                st_blocks: 0,
-                ..FileStat::zeroed()
-            }, DEV_NETFS, 0),
-            Handle::Iface(_) => finalize_pseudo_stat(FileStat {
-                st_ino: fid,
-                st_mode: 0o020666,
-                st_nlink: 1,
-                st_size: 0,
-                st_blksize: 1514,
-                st_blocks: 0,
-                ..FileStat::zeroed()
-            }, DEV_NETFS, fid),
+            Handle::Root => finalize_pseudo_stat(
+                FileStat {
+                    st_ino: 0,
+                    st_mode: 0o040555,
+                    st_nlink: 2,
+                    st_size: 0,
+                    st_blksize: 1514,
+                    st_blocks: 0,
+                    ..FileStat::zeroed()
+                },
+                DEV_NETFS,
+                0,
+            ),
+            Handle::Iface(_) => finalize_pseudo_stat(
+                FileStat {
+                    st_ino: fid,
+                    st_mode: 0o020666,
+                    st_nlink: 1,
+                    st_size: 0,
+                    st_blksize: 1514,
+                    st_blocks: 0,
+                    ..FileStat::zeroed()
+                },
+                DEV_NETFS,
+                fid,
+            ),
         })
     }
 

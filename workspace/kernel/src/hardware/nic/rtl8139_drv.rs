@@ -2,8 +2,10 @@
 // Reference: RTL8139/RTL8100 Series Data Sheet
 
 use crate::{
-    hardware::nic::NetworkDevice,
-    hardware::pci_client::{self as pci, Bar, ProbeCriteria},
+    hardware::{
+        nic::NetworkDevice,
+        pci_client::{self as pci, Bar, ProbeCriteria},
+    },
     memory::{allocate_dma_frame, phys_to_virt},
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
@@ -229,8 +231,7 @@ impl Rtl8139Device {
                     buf.set_len(length);
                 }
 
-                let new_offset = ((rx_offset + length + 4 + RX_BUFFER_PAD)
-                    & !(RX_BUFFER_PAD - 1))
+                let new_offset = ((rx_offset + length + 4 + RX_BUFFER_PAD) & !(RX_BUFFER_PAD - 1))
                     % RX_BUFFER_SIZE;
                 self.rx_offset.store(new_offset, Ordering::Relaxed);
                 ports.write16(0x38, (new_offset - RX_BUFFER_PAD) as u16);

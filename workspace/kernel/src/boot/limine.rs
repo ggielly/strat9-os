@@ -80,8 +80,7 @@ static TELNETD_MODULE: InternalModule = InternalModule::new().with_path(c"/initf
 /// Internal module: request Limine to load /initfs/bin/udp-tool (UDP scheme utility)
 static UDP_TOOL_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/udp-tool");
 /// Internal module: request Limine to load /initfs/strate-wasm (WASM runtime)
-static STRATE_WASM_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/strate-wasm");
+static STRATE_WASM_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-wasm");
 /// Internal module: request Limine to load /initfs/strate-webrtc (WebRTC-native graphics runtime)
 static STRATE_WEBRTC_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/strate-webrtc");
@@ -454,11 +453,7 @@ pub unsafe extern "C" fn kmain() -> ! {
         };
 
         if let Err(e) = crate::hardware::video::framebuffer::Framebuffer::init_limine(
-            fb_addr,
-            fb_width,
-            fb_height,
-            fb_stride,
-            format,
+            fb_addr, fb_width, fb_height, fb_stride, format,
         ) {
             serial_println!("[limine] Framebuffer init failed: {}", e);
         }
@@ -494,29 +489,32 @@ pub unsafe extern "C" fn kmain() -> ! {
 
     // Resolve loaded modules by exact path, not by index/order.
     // Limine may return modules from config and internal requests in any order.
-    let (initfs_base, initfs_size, ext4_base, ext4_size, ram_base, ram_size) =
-        if let Some(module_response) = MODULES.get_response() {
-            let modules = module_response.modules();
-            crate::serial_println!("[limine] modules reported: {}", modules.len());
-            for (idx, module) in modules.iter().enumerate() {
-                #[cfg(feature = "selftest")]
-                {
-                    let raw_addr = module.addr() as u64;
-                    let phys_addr = module_addr_to_phys(raw_addr, hhdm_offset);
-                    let (m0, m1, m2, m3) = if module.size() >= 4 {
-                        unsafe {
-                            let p = raw_addr as *const u8;
-                            (
-                                core::ptr::read_volatile(p),
-                                core::ptr::read_volatile(p.add(1)),
-                                core::ptr::read_volatile(p.add(2)),
-                                core::ptr::read_volatile(p.add(3)),
-                            )
-                        }
-                    } else {
-                        (0, 0, 0, 0)
-                    };
-                    crate::serial_println!(
+    let (initfs_base, initfs_size, ext4_base, ext4_size, ram_base, ram_size) = if let Some(
+        module_response,
+    ) =
+        MODULES.get_response()
+    {
+        let modules = module_response.modules();
+        crate::serial_println!("[limine] modules reported: {}", modules.len());
+        for (idx, module) in modules.iter().enumerate() {
+            #[cfg(feature = "selftest")]
+            {
+                let raw_addr = module.addr() as u64;
+                let phys_addr = module_addr_to_phys(raw_addr, hhdm_offset);
+                let (m0, m1, m2, m3) = if module.size() >= 4 {
+                    unsafe {
+                        let p = raw_addr as *const u8;
+                        (
+                            core::ptr::read_volatile(p),
+                            core::ptr::read_volatile(p.add(1)),
+                            core::ptr::read_volatile(p.add(2)),
+                            core::ptr::read_volatile(p.add(3)),
+                        )
+                    }
+                } else {
+                    (0, 0, 0, 0)
+                };
+                crate::serial_println!(
                         "[limine] module[{}]: path='{}' addr={:#x} phys={:#x} magic={:02x}{:02x}{:02x}{:02x} size={}",
                         idx,
                         module.path().to_string_lossy(),
@@ -528,206 +526,197 @@ pub unsafe extern "C" fn kmain() -> ! {
                         m3,
                         module.size()
                     );
-                }
-                #[cfg(not(feature = "selftest"))]
-                {
-                    crate::serial_println!(
-                        "[limine] module[{}]: path='{}' size={}",
-                        idx,
-                        module.path().to_string_lossy(),
-                        module.size()
-                    );
-                }
             }
-            let resolved = resolve_modules_once(modules, hhdm_offset);
-            let (init_base, init_size) = resolved.test_pid.unwrap_or((0, 0));
-            let (test_syscalls_base, test_syscalls_size) =
-                resolved.test_syscalls.unwrap_or((0, 0));
-            let (test_mem_base, test_mem_size) = resolved.test_mem.unwrap_or((0, 0));
-            let (test_mem_stressed_base, test_mem_stressed_size) =
-                resolved.test_mem_stressed.unwrap_or((0, 0));
-            let (ext4_base, ext4_size) = resolved.fs_ext4.unwrap_or((0, 0));
-            let (ram_base, ram_size) = resolved.fs_ram.unwrap_or((0, 0));
+            #[cfg(not(feature = "selftest"))]
+            {
+                crate::serial_println!(
+                    "[limine] module[{}]: path='{}' size={}",
+                    idx,
+                    module.path().to_string_lossy(),
+                    module.size()
+                );
+            }
+        }
+        let resolved = resolve_modules_once(modules, hhdm_offset);
+        let (init_base, init_size) = resolved.test_pid.unwrap_or((0, 0));
+        let (test_syscalls_base, test_syscalls_size) = resolved.test_syscalls.unwrap_or((0, 0));
+        let (test_mem_base, test_mem_size) = resolved.test_mem.unwrap_or((0, 0));
+        let (test_mem_stressed_base, test_mem_stressed_size) =
+            resolved.test_mem_stressed.unwrap_or((0, 0));
+        let (ext4_base, ext4_size) = resolved.fs_ext4.unwrap_or((0, 0));
+        let (ram_base, ram_size) = resolved.fs_ram.unwrap_or((0, 0));
 
-            if test_mem_base != 0 && test_mem_size != 0 {
-                unsafe { TEST_MEM_ELF_MODULE = Some((test_mem_base, test_mem_size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/test_mem found: base={:#x} size={}",
-                    test_mem_base,
-                    test_mem_size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/test_mem not found in modules");
-            }
-            if test_syscalls_base != 0 && test_syscalls_size != 0 {
-                unsafe { TEST_SYSCALLS_ELF_MODULE = Some((test_syscalls_base, test_syscalls_size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/test_syscalls found: base={:#x} size={}",
-                    test_syscalls_base,
-                    test_syscalls_size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/test_syscalls not found in modules");
-            }
-            if test_mem_stressed_base != 0 && test_mem_stressed_size != 0 {
-                unsafe {
-                    TEST_MEM_STRESSED_ELF_MODULE =
-                        Some((test_mem_stressed_base, test_mem_stressed_size))
-                };
-                crate::serial_println!(
-                    "[limine] /initfs/test_mem_stressed found: base={:#x} size={}",
-                    test_mem_stressed_base,
-                    test_mem_stressed_size
-                );
-            } else {
-                crate::serial_println!(
-                    "[limine] WARN: /initfs/test_mem_stressed not found in modules"
-                );
-            }
-
-            // New modules: init + console-admin
-            if let Some((base, size)) = resolved.init {
-                unsafe { INIT_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/init found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/init not found in modules");
-            }
-            if let Some((base, size)) = resolved.console_admin {
-                unsafe { CONSOLE_ADMIN_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/console-admin found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/console-admin not found in modules");
-            }
-            if let Some((base, size)) = resolved.strate_net {
-                unsafe { STRATE_NET_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/strate-net found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/strate-net not found in modules");
-            }
-            if let Some((base, size)) = resolved.strate_bus {
-                unsafe { STRATE_BUS_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/strate-bus found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/strate-bus not found in modules");
-            }
-            if let Some((base, size)) = resolved.dhcp_client {
-                unsafe { DHCP_CLIENT_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/bin/dhcp-client found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!(
-                    "[limine] WARN: /initfs/bin/dhcp-client not found in modules"
-                );
-            }
-            if let Some((base, size)) = resolved.ping {
-                unsafe { PING_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/bin/ping found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/bin/ping not found in modules");
-            }
-            if let Some((base, size)) = resolved.telnetd {
-                unsafe { TELNETD_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/bin/telnetd found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/bin/telnetd not found in modules");
-            }
-            if let Some((base, size)) = resolved.udp_tool {
-                unsafe { UDP_TOOL_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/bin/udp-tool found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/bin/udp-tool not found in modules");
-            }
-            if let Some((base, size)) = resolved.strate_wasm {
-                unsafe { STRATE_WASM_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/strate-wasm found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/strate-wasm not found in modules");
-            }
-            if let Some((base, size)) = resolved.strate_webrtc {
-                unsafe { STRATE_WEBRTC_ELF_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/strate-webrtc found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!(
-                    "[limine] WARN: /initfs/strate-webrtc not found in modules"
-                );
-            }
-            if let Some((base, size)) = resolved.hello_wasm {
-                unsafe { HELLO_WASM_FILE_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/bin/hello.wasm found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/bin/hello.wasm not found in modules");
-            }
-            if let Some((base, size)) = resolved.wasm_test_toml {
-                unsafe { WASM_TEST_TOML_FILE_MODULE = Some((base, size)) };
-                crate::serial_println!(
-                    "[limine] /initfs/wasm-test.toml found: base={:#x} size={}",
-                    base,
-                    size
-                );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/wasm-test.toml not found in modules");
-            }
-
-            if init_base == 0 {
-                crate::serial_println!("[limine] WARN: /initfs/test_pid not found in modules");
-            }
-            if ext4_base == 0 {
-                crate::serial_println!("[limine] WARN: /initfs/fs-ext4 not found in modules");
-            }
-            if ram_base == 0 {
-                crate::serial_println!(
-                    "[limine] WARN: /initfs/strate-fs-ramfs not found in modules"
-                );
-            }
-            (
-                init_base, init_size, ext4_base, ext4_size, ram_base, ram_size,
-            )
+        if test_mem_base != 0 && test_mem_size != 0 {
+            unsafe { TEST_MEM_ELF_MODULE = Some((test_mem_base, test_mem_size)) };
+            crate::serial_println!(
+                "[limine] /initfs/test_mem found: base={:#x} size={}",
+                test_mem_base,
+                test_mem_size
+            );
         } else {
-            (0u64, 0u64, 0u64, 0u64, 0u64, 0u64)
-        };
+            crate::serial_println!("[limine] WARN: /initfs/test_mem not found in modules");
+        }
+        if test_syscalls_base != 0 && test_syscalls_size != 0 {
+            unsafe { TEST_SYSCALLS_ELF_MODULE = Some((test_syscalls_base, test_syscalls_size)) };
+            crate::serial_println!(
+                "[limine] /initfs/test_syscalls found: base={:#x} size={}",
+                test_syscalls_base,
+                test_syscalls_size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/test_syscalls not found in modules");
+        }
+        if test_mem_stressed_base != 0 && test_mem_stressed_size != 0 {
+            unsafe {
+                TEST_MEM_STRESSED_ELF_MODULE =
+                    Some((test_mem_stressed_base, test_mem_stressed_size))
+            };
+            crate::serial_println!(
+                "[limine] /initfs/test_mem_stressed found: base={:#x} size={}",
+                test_mem_stressed_base,
+                test_mem_stressed_size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/test_mem_stressed not found in modules");
+        }
+
+        // New modules: init + console-admin
+        if let Some((base, size)) = resolved.init {
+            unsafe { INIT_ELF_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/init found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/init not found in modules");
+        }
+        if let Some((base, size)) = resolved.console_admin {
+            unsafe { CONSOLE_ADMIN_ELF_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/console-admin found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/console-admin not found in modules");
+        }
+        if let Some((base, size)) = resolved.strate_net {
+            unsafe { STRATE_NET_ELF_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/strate-net found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/strate-net not found in modules");
+        }
+        if let Some((base, size)) = resolved.strate_bus {
+            unsafe { STRATE_BUS_ELF_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/strate-bus found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/strate-bus not found in modules");
+        }
+        if let Some((base, size)) = resolved.dhcp_client {
+            unsafe { DHCP_CLIENT_ELF_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/bin/dhcp-client found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/bin/dhcp-client not found in modules");
+        }
+        if let Some((base, size)) = resolved.ping {
+            unsafe { PING_ELF_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/bin/ping found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/bin/ping not found in modules");
+        }
+        if let Some((base, size)) = resolved.telnetd {
+            unsafe { TELNETD_ELF_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/bin/telnetd found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/bin/telnetd not found in modules");
+        }
+        if let Some((base, size)) = resolved.udp_tool {
+            unsafe { UDP_TOOL_ELF_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/bin/udp-tool found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/bin/udp-tool not found in modules");
+        }
+        if let Some((base, size)) = resolved.strate_wasm {
+            unsafe { STRATE_WASM_ELF_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/strate-wasm found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/strate-wasm not found in modules");
+        }
+        if let Some((base, size)) = resolved.strate_webrtc {
+            unsafe { STRATE_WEBRTC_ELF_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/strate-webrtc found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/strate-webrtc not found in modules");
+        }
+        if let Some((base, size)) = resolved.hello_wasm {
+            unsafe { HELLO_WASM_FILE_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/bin/hello.wasm found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/bin/hello.wasm not found in modules");
+        }
+        if let Some((base, size)) = resolved.wasm_test_toml {
+            unsafe { WASM_TEST_TOML_FILE_MODULE = Some((base, size)) };
+            crate::serial_println!(
+                "[limine] /initfs/wasm-test.toml found: base={:#x} size={}",
+                base,
+                size
+            );
+        } else {
+            crate::serial_println!("[limine] WARN: /initfs/wasm-test.toml not found in modules");
+        }
+
+        if init_base == 0 {
+            crate::serial_println!("[limine] WARN: /initfs/test_pid not found in modules");
+        }
+        if ext4_base == 0 {
+            crate::serial_println!("[limine] WARN: /initfs/fs-ext4 not found in modules");
+        }
+        if ram_base == 0 {
+            crate::serial_println!("[limine] WARN: /initfs/strate-fs-ramfs not found in modules");
+        }
+        (
+            init_base, init_size, ext4_base, ext4_size, ram_base, ram_size,
+        )
+    } else {
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64)
+    };
 
     if ext4_base != 0 && ext4_size != 0 {
         // SAFETY: set once during early boot.

@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const DA8XX_MSTPRI0_OFFSET: usize = 0x0;
 const DA8XX_MSTPRI1_OFFSET: usize = 0x4;
@@ -15,22 +14,86 @@ pub struct MasterPriDescr {
     pub mask: u32,
 }
 
-pub const MSTPRI_ARM_I: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI0_OFFSET, shift: 0, mask: 0x0000_000F };
-pub const MSTPRI_ARM_D: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI0_OFFSET, shift: 4, mask: 0x0000_00F0 };
-pub const MSTPRI_UPP: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI0_OFFSET, shift: 16, mask: 0x000F_0000 };
-pub const MSTPRI_SATA: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI0_OFFSET, shift: 20, mask: 0x00F0_0000 };
-pub const MSTPRI_PRU0: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI1_OFFSET, shift: 0, mask: 0x0000_000F };
-pub const MSTPRI_PRU1: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI1_OFFSET, shift: 4, mask: 0x0000_00F0 };
-pub const MSTPRI_EDMA30TC0: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI1_OFFSET, shift: 8, mask: 0x0000_0F00 };
-pub const MSTPRI_EDMA30TC1: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI1_OFFSET, shift: 12, mask: 0x0000_F000 };
-pub const MSTPRI_EDMA31TC0: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI1_OFFSET, shift: 16, mask: 0x000F_0000 };
-pub const MSTPRI_VPIF_DMA0: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI1_OFFSET, shift: 24, mask: 0x0F00_0000 };
-pub const MSTPRI_VPIF_DMA1: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI1_OFFSET, shift: 28, mask: 0xF000_0000 };
-pub const MSTPRI_EMAC: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI2_OFFSET, shift: 0, mask: 0x0000_000F };
-pub const MSTPRI_USB0: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI2_OFFSET, shift: 8, mask: 0x0000_0F00 };
-pub const MSTPRI_USB1: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI2_OFFSET, shift: 12, mask: 0x0000_F000 };
-pub const MSTPRI_UHPI: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI2_OFFSET, shift: 20, mask: 0x00F0_0000 };
-pub const MSTPRI_LCDC: MasterPriDescr = MasterPriDescr { reg: DA8XX_MSTPRI2_OFFSET, shift: 28, mask: 0xF000_0000 };
+pub const MSTPRI_ARM_I: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI0_OFFSET,
+    shift: 0,
+    mask: 0x0000_000F,
+};
+pub const MSTPRI_ARM_D: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI0_OFFSET,
+    shift: 4,
+    mask: 0x0000_00F0,
+};
+pub const MSTPRI_UPP: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI0_OFFSET,
+    shift: 16,
+    mask: 0x000F_0000,
+};
+pub const MSTPRI_SATA: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI0_OFFSET,
+    shift: 20,
+    mask: 0x00F0_0000,
+};
+pub const MSTPRI_PRU0: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI1_OFFSET,
+    shift: 0,
+    mask: 0x0000_000F,
+};
+pub const MSTPRI_PRU1: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI1_OFFSET,
+    shift: 4,
+    mask: 0x0000_00F0,
+};
+pub const MSTPRI_EDMA30TC0: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI1_OFFSET,
+    shift: 8,
+    mask: 0x0000_0F00,
+};
+pub const MSTPRI_EDMA30TC1: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI1_OFFSET,
+    shift: 12,
+    mask: 0x0000_F000,
+};
+pub const MSTPRI_EDMA31TC0: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI1_OFFSET,
+    shift: 16,
+    mask: 0x000F_0000,
+};
+pub const MSTPRI_VPIF_DMA0: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI1_OFFSET,
+    shift: 24,
+    mask: 0x0F00_0000,
+};
+pub const MSTPRI_VPIF_DMA1: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI1_OFFSET,
+    shift: 28,
+    mask: 0xF000_0000,
+};
+pub const MSTPRI_EMAC: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI2_OFFSET,
+    shift: 0,
+    mask: 0x0000_000F,
+};
+pub const MSTPRI_USB0: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI2_OFFSET,
+    shift: 8,
+    mask: 0x0000_0F00,
+};
+pub const MSTPRI_USB1: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI2_OFFSET,
+    shift: 12,
+    mask: 0x0000_F000,
+};
+pub const MSTPRI_UHPI: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI2_OFFSET,
+    shift: 20,
+    mask: 0x00F0_0000,
+};
+pub const MSTPRI_LCDC: MasterPriDescr = MasterPriDescr {
+    reg: DA8XX_MSTPRI2_OFFSET,
+    shift: 28,
+    mask: 0xF000_0000,
+};
 
 pub struct MasterPriority {
     pub master: MasterPriDescr,
@@ -70,10 +133,14 @@ impl Da8xxMstpri {
 
 impl BusDriver for Da8xxMstpri {
     /// Performs the name operation.
-    fn name(&self) -> &str { "da8xx-mstpri" }
+    fn name(&self) -> &str {
+        "da8xx-mstpri"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -91,13 +158,17 @@ impl BusDriver for Da8xxMstpri {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

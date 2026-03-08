@@ -142,7 +142,6 @@ unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
     );
 }
 
-
 /// Performs the build child task operation.
 fn build_child_task(
     parent: &Arc<Task>,
@@ -184,13 +183,29 @@ fn build_child_task(
             fd_table: crate::process::task::SyncUnsafeCell::new(parent_fd),
             capabilities: crate::process::task::SyncUnsafeCell::new(parent_caps),
             signal_actions: crate::process::task::SyncUnsafeCell::new(parent_actions),
-            brk: core::sync::atomic::AtomicU64::new(parent.process.brk.load(core::sync::atomic::Ordering::Relaxed)),
-            mmap_hint: core::sync::atomic::AtomicU64::new(parent.process.mmap_hint.load(core::sync::atomic::Ordering::Relaxed)),
-            cwd: crate::process::task::SyncUnsafeCell::new(unsafe { &*parent.process.cwd.get() }.clone()),
-            umask: core::sync::atomic::AtomicU32::new(parent.process.umask.load(core::sync::atomic::Ordering::Relaxed)),
+            brk: core::sync::atomic::AtomicU64::new(
+                parent
+                    .process
+                    .brk
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            ),
+            mmap_hint: core::sync::atomic::AtomicU64::new(
+                parent
+                    .process
+                    .mmap_hint
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            ),
+            cwd: crate::process::task::SyncUnsafeCell::new(
+                unsafe { &*parent.process.cwd.get() }.clone(),
+            ),
+            umask: core::sync::atomic::AtomicU32::new(
+                parent
+                    .process
+                    .umask
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            ),
         }),
         // POSIX: pending signals are NOT inherited by the child.
-
         pending_signals: SignalSet::new(),
         // POSIX: signal mask IS inherited.
         blocked_signals: parent_blocked,
@@ -372,16 +387,9 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
         unsafe {
             let _ = mapper.map_to(page, phys_frame, flags, &mut frame_allocator);
         }
-        let lock = crate::memory::get_allocator();
-        let mut guard = lock.lock();
-        if let Some(allocator) = guard.as_mut() {
-            allocator.free(
-                crate::memory::PhysFrame {
-                    start_address: new_frame.start_address(),
-                },
-                0,
-            );
-        }
+        crate::memory::free_frame(crate::memory::PhysFrame {
+            start_address: new_frame.start_address(),
+        });
         return Err("Failed to map new COW frame");
     }
     match remap_res {

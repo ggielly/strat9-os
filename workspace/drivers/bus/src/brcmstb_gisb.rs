@@ -1,7 +1,6 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const ARB_ERR_CAP_CLEAR: u32 = 0x0001;
 const ARB_ERR_CAP_STATUS_TIMEOUT: u32 = 1 << 12;
@@ -37,24 +36,42 @@ pub struct GisbOffsets {
 }
 
 pub const BCM7038_OFFSETS: GisbOffsets = GisbOffsets {
-    arb_timer: 0x00C, arb_bp_cap_clr: 0x014, arb_bp_cap_addr: 0x0B8,
-    arb_bp_cap_status: 0x0C0, arb_bp_cap_master: None,
-    arb_err_cap_clr: 0x0C4, arb_err_cap_addr: 0x0C8,
-    arb_err_cap_status: 0x0D0, arb_err_cap_master: None, arb_err_cap_hi_addr: None,
+    arb_timer: 0x00C,
+    arb_bp_cap_clr: 0x014,
+    arb_bp_cap_addr: 0x0B8,
+    arb_bp_cap_status: 0x0C0,
+    arb_bp_cap_master: None,
+    arb_err_cap_clr: 0x0C4,
+    arb_err_cap_addr: 0x0C8,
+    arb_err_cap_status: 0x0D0,
+    arb_err_cap_master: None,
+    arb_err_cap_hi_addr: None,
 };
 
 pub const BCM7445_OFFSETS: GisbOffsets = GisbOffsets {
-    arb_timer: 0x008, arb_bp_cap_clr: 0x010, arb_bp_cap_addr: 0x1D8,
-    arb_bp_cap_status: 0x1E0, arb_bp_cap_master: Some(0x1E4),
-    arb_err_cap_clr: 0x7E4, arb_err_cap_addr: 0x7EC,
-    arb_err_cap_status: 0x7F4, arb_err_cap_master: Some(0x7F8), arb_err_cap_hi_addr: Some(0x7E8),
+    arb_timer: 0x008,
+    arb_bp_cap_clr: 0x010,
+    arb_bp_cap_addr: 0x1D8,
+    arb_bp_cap_status: 0x1E0,
+    arb_bp_cap_master: Some(0x1E4),
+    arb_err_cap_clr: 0x7E4,
+    arb_err_cap_addr: 0x7EC,
+    arb_err_cap_status: 0x7F4,
+    arb_err_cap_master: Some(0x7F8),
+    arb_err_cap_hi_addr: Some(0x7E8),
 };
 
 pub const BCM7278_OFFSETS: GisbOffsets = GisbOffsets {
-    arb_timer: 0x008, arb_bp_cap_clr: 0x01C, arb_bp_cap_addr: 0x220,
-    arb_bp_cap_status: 0x230, arb_bp_cap_master: Some(0x234),
-    arb_err_cap_clr: 0x7F8, arb_err_cap_addr: 0x7E0,
-    arb_err_cap_status: 0x7F0, arb_err_cap_master: Some(0x7F4), arb_err_cap_hi_addr: None,
+    arb_timer: 0x008,
+    arb_bp_cap_clr: 0x01C,
+    arb_bp_cap_addr: 0x220,
+    arb_bp_cap_status: 0x230,
+    arb_bp_cap_master: Some(0x234),
+    arb_err_cap_clr: 0x7F8,
+    arb_err_cap_addr: 0x7E0,
+    arb_err_cap_status: 0x7F0,
+    arb_err_cap_master: Some(0x7F4),
+    arb_err_cap_hi_addr: None,
 };
 
 pub struct GisbErrorInfo {
@@ -102,12 +119,20 @@ impl BrcmstbGisb {
     /// Reads gisb.
     fn read_gisb(&self, offset: usize) -> u32 {
         let val = self.regs.read32(offset);
-        if self.big_endian { val.swap_bytes() } else { val }
+        if self.big_endian {
+            val.swap_bytes()
+        } else {
+            val
+        }
     }
 
     /// Writes gisb.
     fn write_gisb(&self, offset: usize, val: u32) {
-        let val = if self.big_endian { val.swap_bytes() } else { val };
+        let val = if self.big_endian {
+            val.swap_bytes()
+        } else {
+            val
+        };
         self.regs.write32(offset, val);
     }
 
@@ -129,10 +154,14 @@ impl BrcmstbGisb {
         }
 
         let addr_lo = self.read_gisb(self.offsets.arb_err_cap_addr);
-        let addr_hi = self.offsets.arb_err_cap_hi_addr
+        let addr_hi = self
+            .offsets
+            .arb_err_cap_hi_addr
             .map(|off| self.read_gisb(off))
             .unwrap_or(0);
-        let master = self.offsets.arb_err_cap_master
+        let master = self
+            .offsets
+            .arb_err_cap_master
             .map(|off| self.read_gisb(off));
 
         let info = GisbErrorInfo {
@@ -156,7 +185,9 @@ impl BrcmstbGisb {
         }
 
         let addr = self.read_gisb(self.offsets.arb_bp_cap_addr);
-        let master = self.offsets.arb_bp_cap_master
+        let master = self
+            .offsets
+            .arb_bp_cap_master
             .map(|off| self.read_gisb(off));
 
         let info = GisbErrorInfo {
@@ -175,10 +206,14 @@ impl BrcmstbGisb {
 
 impl BusDriver for BrcmstbGisb {
     /// Performs the name operation.
-    fn name(&self) -> &str { "brcmstb-gisb" }
+    fn name(&self) -> &str {
+        "brcmstb-gisb"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -209,13 +244,17 @@ impl BusDriver for BrcmstbGisb {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.read_gisb(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.write_gisb(offset, value);
         Ok(())
     }

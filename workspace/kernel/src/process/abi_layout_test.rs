@@ -7,8 +7,8 @@ use crate::process::{add_task, Task, TaskPriority};
 use strat9_abi::{
     data::{
         DirentHeader, FileStat, HandleInfo, IpcMessage, Map, PciAddress, PciDeviceInfo,
-        PciProbeCriteria, Stat, StatVfs, TimeSpec, SEEK_CUR, SEEK_END, SEEK_SET,
-        DT_DIR, DT_REG, DT_LNK, DT_CHR, DT_BLK, DT_FIFO, DT_SOCK, DT_UNKNOWN,
+        PciProbeCriteria, Stat, StatVfs, TimeSpec, DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG,
+        DT_SOCK, DT_UNKNOWN, SEEK_CUR, SEEK_END, SEEK_SET,
     },
     ipc::{
         IpcHandshake, IpcHandshakeReply, IPC_HANDSHAKE_MAGIC, IPC_HANDSHAKE_OK,
@@ -18,9 +18,13 @@ use strat9_abi::{
 };
 
 fn log_section(title: &str) {
-    crate::serial_println!("[abi-layout-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[abi-layout-test][STEP] ========================================================"
+    );
     crate::serial_println!("[abi-layout-test][STEP] {}", title);
-    crate::serial_println!("[abi-layout-test][STEP] ========================================================");
+    crate::serial_println!(
+        "[abi-layout-test][STEP] ========================================================"
+    );
 }
 
 fn record(name: &str, ok: bool, passed: &mut usize, total: &mut usize) {
@@ -40,13 +44,16 @@ fn check_size<T>(label: &str, expected: usize) -> bool {
     if actual != expected {
         crate::serial_println!(
             "[abi-layout-test][ASSERT] FAIL: sizeof({}) expected {}, got {}",
-            label, expected, actual
+            label,
+            expected,
+            actual
         );
         false
     } else {
         crate::serial_println!(
             "[abi-layout-test][STEP] sizeof({}) = {} (ok)",
-            label, actual
+            label,
+            actual
         );
         true
     }
@@ -57,13 +64,16 @@ fn check_align<T>(label: &str, expected: usize) -> bool {
     if actual != expected {
         crate::serial_println!(
             "[abi-layout-test][ASSERT] FAIL: alignof({}) expected {}, got {}",
-            label, expected, actual
+            label,
+            expected,
+            actual
         );
         false
     } else {
         crate::serial_println!(
             "[abi-layout-test][STEP] alignof({}) = {} (ok)",
-            label, actual
+            label,
+            actual
         );
         true
     }
@@ -73,13 +83,16 @@ fn check_offset(label: &str, actual: usize, expected: usize) -> bool {
     if actual != expected {
         crate::serial_println!(
             "[abi-layout-test][ASSERT] FAIL: offset({}) expected {}, got {}",
-            label, expected, actual
+            label,
+            expected,
+            actual
         );
         false
     } else {
         crate::serial_println!(
             "[abi-layout-test][STEP] offset({}) = {} (ok)",
-            label, actual
+            label,
+            actual
         );
         true
     }
@@ -89,14 +102,13 @@ fn check_eq(label: &str, actual: u64, expected: u64) -> bool {
     if actual != expected {
         crate::serial_println!(
             "[abi-layout-test][ASSERT] FAIL: {} expected {}, got {}",
-            label, expected, actual
+            label,
+            expected,
+            actual
         );
         false
     } else {
-        crate::serial_println!(
-            "[abi-layout-test][STEP] {} = {} (ok)",
-            label, actual
-        );
+        crate::serial_println!("[abi-layout-test][STEP] {} = {} (ok)", label, actual);
         true
     }
 }
@@ -147,19 +159,71 @@ fn run_abi_layout_suite() -> bool {
     let base = FileStat::zeroed();
     let base_ptr = &base as *const FileStat as usize;
     let mut fo = true;
-    fo &= check_offset("FileStat::st_dev",     (&base.st_dev     as *const _ as usize) - base_ptr, 0);
-    fo &= check_offset("FileStat::st_ino",     (&base.st_ino     as *const _ as usize) - base_ptr, 8);
-    fo &= check_offset("FileStat::st_mode",    (&base.st_mode    as *const _ as usize) - base_ptr, 16);
-    fo &= check_offset("FileStat::st_nlink",   (&base.st_nlink   as *const _ as usize) - base_ptr, 20);
-    fo &= check_offset("FileStat::st_uid",     (&base.st_uid     as *const _ as usize) - base_ptr, 24);
-    fo &= check_offset("FileStat::st_gid",     (&base.st_gid     as *const _ as usize) - base_ptr, 28);
-    fo &= check_offset("FileStat::st_rdev",    (&base.st_rdev    as *const _ as usize) - base_ptr, 32);
-    fo &= check_offset("FileStat::st_size",    (&base.st_size    as *const _ as usize) - base_ptr, 40);
-    fo &= check_offset("FileStat::st_blksize", (&base.st_blksize as *const _ as usize) - base_ptr, 48);
-    fo &= check_offset("FileStat::st_blocks",  (&base.st_blocks  as *const _ as usize) - base_ptr, 56);
-    fo &= check_offset("FileStat::st_atime",   (&base.st_atime   as *const _ as usize) - base_ptr, 64);
-    fo &= check_offset("FileStat::st_mtime",   (&base.st_mtime   as *const _ as usize) - base_ptr, 80);
-    fo &= check_offset("FileStat::st_ctime",   (&base.st_ctime   as *const _ as usize) - base_ptr, 96);
+    fo &= check_offset(
+        "FileStat::st_dev",
+        (&base.st_dev as *const _ as usize) - base_ptr,
+        0,
+    );
+    fo &= check_offset(
+        "FileStat::st_ino",
+        (&base.st_ino as *const _ as usize) - base_ptr,
+        8,
+    );
+    fo &= check_offset(
+        "FileStat::st_mode",
+        (&base.st_mode as *const _ as usize) - base_ptr,
+        16,
+    );
+    fo &= check_offset(
+        "FileStat::st_nlink",
+        (&base.st_nlink as *const _ as usize) - base_ptr,
+        20,
+    );
+    fo &= check_offset(
+        "FileStat::st_uid",
+        (&base.st_uid as *const _ as usize) - base_ptr,
+        24,
+    );
+    fo &= check_offset(
+        "FileStat::st_gid",
+        (&base.st_gid as *const _ as usize) - base_ptr,
+        28,
+    );
+    fo &= check_offset(
+        "FileStat::st_rdev",
+        (&base.st_rdev as *const _ as usize) - base_ptr,
+        32,
+    );
+    fo &= check_offset(
+        "FileStat::st_size",
+        (&base.st_size as *const _ as usize) - base_ptr,
+        40,
+    );
+    fo &= check_offset(
+        "FileStat::st_blksize",
+        (&base.st_blksize as *const _ as usize) - base_ptr,
+        48,
+    );
+    fo &= check_offset(
+        "FileStat::st_blocks",
+        (&base.st_blocks as *const _ as usize) - base_ptr,
+        56,
+    );
+    fo &= check_offset(
+        "FileStat::st_atime",
+        (&base.st_atime as *const _ as usize) - base_ptr,
+        64,
+    );
+    fo &= check_offset(
+        "FileStat::st_mtime",
+        (&base.st_mtime as *const _ as usize) - base_ptr,
+        80,
+    );
+    fo &= check_offset(
+        "FileStat::st_ctime",
+        (&base.st_ctime as *const _ as usize) - base_ptr,
+        96,
+    );
     record("FileStat field offsets", fo, &mut passed, &mut total);
 
     // ── 4. Field offsets of IpcMessage ──────────────────────────────────────
@@ -168,10 +232,26 @@ fn run_abi_layout_suite() -> bool {
     let msg = IpcMessage::new(0);
     let msg_ptr = &msg as *const IpcMessage as usize;
     let mut mo = true;
-    mo &= check_offset("IpcMessage::sender",   (&msg.sender   as *const _ as usize) - msg_ptr, 0);
-    mo &= check_offset("IpcMessage::msg_type", (&msg.msg_type as *const _ as usize) - msg_ptr, 8);
-    mo &= check_offset("IpcMessage::flags",    (&msg.flags    as *const _ as usize) - msg_ptr, 12);
-    mo &= check_offset("IpcMessage::payload",  (&msg.payload  as *const _ as usize) - msg_ptr, 16);
+    mo &= check_offset(
+        "IpcMessage::sender",
+        (&msg.sender as *const _ as usize) - msg_ptr,
+        0,
+    );
+    mo &= check_offset(
+        "IpcMessage::msg_type",
+        (&msg.msg_type as *const _ as usize) - msg_ptr,
+        8,
+    );
+    mo &= check_offset(
+        "IpcMessage::flags",
+        (&msg.flags as *const _ as usize) - msg_ptr,
+        12,
+    );
+    mo &= check_offset(
+        "IpcMessage::payload",
+        (&msg.payload as *const _ as usize) - msg_ptr,
+        16,
+    );
     record("IpcMessage field offsets", mo, &mut passed, &mut total);
 
     // ── 5. Field offsets of IpcHandshake ────────────────────────────────────
@@ -180,13 +260,41 @@ fn run_abi_layout_suite() -> bool {
     let hs = IpcHandshake::new();
     let hs_ptr = &hs as *const IpcHandshake as usize;
     let mut ho = true;
-    ho &= check_offset("IpcHandshake::magic",              (&hs.magic              as *const _ as usize) - hs_ptr, 0);
-    ho &= check_offset("IpcHandshake::protocol_version",   (&hs.protocol_version   as *const _ as usize) - hs_ptr, 4);
-    ho &= check_offset("IpcHandshake::_reserved",          (&hs._reserved          as *const _ as usize) - hs_ptr, 6);
-    ho &= check_offset("IpcHandshake::client_abi_major",   (&hs.client_abi_major   as *const _ as usize) - hs_ptr, 8);
-    ho &= check_offset("IpcHandshake::client_abi_minor",   (&hs.client_abi_minor   as *const _ as usize) - hs_ptr, 10);
-    ho &= check_offset("IpcHandshake::nonce",              (&hs.nonce              as *const _ as usize) - hs_ptr, 12);
-    ho &= check_offset("IpcHandshake::flags",              (&hs.flags              as *const _ as usize) - hs_ptr, 16);
+    ho &= check_offset(
+        "IpcHandshake::magic",
+        (&hs.magic as *const _ as usize) - hs_ptr,
+        0,
+    );
+    ho &= check_offset(
+        "IpcHandshake::protocol_version",
+        (&hs.protocol_version as *const _ as usize) - hs_ptr,
+        4,
+    );
+    ho &= check_offset(
+        "IpcHandshake::_reserved",
+        (&hs._reserved as *const _ as usize) - hs_ptr,
+        6,
+    );
+    ho &= check_offset(
+        "IpcHandshake::client_abi_major",
+        (&hs.client_abi_major as *const _ as usize) - hs_ptr,
+        8,
+    );
+    ho &= check_offset(
+        "IpcHandshake::client_abi_minor",
+        (&hs.client_abi_minor as *const _ as usize) - hs_ptr,
+        10,
+    );
+    ho &= check_offset(
+        "IpcHandshake::nonce",
+        (&hs.nonce as *const _ as usize) - hs_ptr,
+        12,
+    );
+    ho &= check_offset(
+        "IpcHandshake::flags",
+        (&hs.flags as *const _ as usize) - hs_ptr,
+        16,
+    );
     record("IpcHandshake field offsets", ho, &mut passed, &mut total);
 
     // ── 6. ABI version constants ────────────────────────────────────────────
@@ -196,17 +304,29 @@ fn run_abi_layout_suite() -> bool {
     vc &= check_eq("ABI_VERSION_MAJOR", ABI_VERSION_MAJOR as u64, 0);
     vc &= check_eq("ABI_VERSION_MINOR", ABI_VERSION_MINOR as u64, 1);
     let expected_packed = ((ABI_VERSION_MAJOR as u32) << 16) | (ABI_VERSION_MINOR as u32);
-    vc &= check_eq("ABI_VERSION_PACKED", ABI_VERSION_PACKED as u64, expected_packed as u64);
+    vc &= check_eq(
+        "ABI_VERSION_PACKED",
+        ABI_VERSION_PACKED as u64,
+        expected_packed as u64,
+    );
     record("ABI version constants", vc, &mut passed, &mut total);
 
     // ── 7. IPC handshake constants ──────────────────────────────────────────
     log_section("IPC HANDSHAKE CONSTANTS");
 
     let mut ic = true;
-    ic &= check_eq("IPC_HANDSHAKE_MAGIC", IPC_HANDSHAKE_MAGIC as u64, 0x4950_4339);
+    ic &= check_eq(
+        "IPC_HANDSHAKE_MAGIC",
+        IPC_HANDSHAKE_MAGIC as u64,
+        0x4950_4339,
+    );
     ic &= check_eq("IPC_PROTOCOL_VERSION", IPC_PROTOCOL_VERSION as u64, 1);
     ic &= check_eq("IPC_HANDSHAKE_OK", IPC_HANDSHAKE_OK as u64, 0);
-    ic &= check_eq("IPC_HANDSHAKE_VERSION_MISMATCH", IPC_HANDSHAKE_VERSION_MISMATCH as u64, 1);
+    ic &= check_eq(
+        "IPC_HANDSHAKE_VERSION_MISMATCH",
+        IPC_HANDSHAKE_VERSION_MISMATCH as u64,
+        1,
+    );
     ic &= check_eq("IPC_HANDSHAKE_REJECTED", IPC_HANDSHAKE_REJECTED as u64, 2);
     record("IPC handshake constants", ic, &mut passed, &mut total);
 
@@ -221,7 +341,9 @@ fn run_abi_layout_suite() -> bool {
     }
     hl &= h.is_compatible();
     if !h.is_compatible() {
-        crate::serial_println!("[abi-layout-test][ASSERT] FAIL: IpcHandshake::new().is_compatible()");
+        crate::serial_println!(
+            "[abi-layout-test][ASSERT] FAIL: IpcHandshake::new().is_compatible()"
+        );
     }
     hl &= h.nonce == 0;
     let h42 = IpcHandshake::new_with_nonce(42);
@@ -311,7 +433,12 @@ fn run_abi_layout_suite() -> bool {
     let err = IpcMessage::error_reply(99, -22);
     mh &= err.sender == 99;
     mh &= err.msg_type == 0x80;
-    let status_bytes = [err.payload[0], err.payload[1], err.payload[2], err.payload[3]];
+    let status_bytes = [
+        err.payload[0],
+        err.payload[1],
+        err.payload[2],
+        err.payload[3],
+    ];
     let status_val = u32::from_le_bytes(status_bytes);
     mh &= status_val == (-22i32 as u32);
     if !mh {
@@ -372,7 +499,11 @@ fn run_abi_layout_suite() -> bool {
     sn &= check_eq("SYS_MODULE_LOAD", SYS_MODULE_LOAD as u64, 700);
     sn &= check_eq("SYS_SILO_CREATE", SYS_SILO_CREATE as u64, 800);
     sn &= check_eq("SYS_ABI_VERSION", SYS_ABI_VERSION as u64, 900);
-    sn &= check_eq("SYS_GETPPID alias", SYS_GETPPID as u64, SYS_PROC_GETPPID as u64);
+    sn &= check_eq(
+        "SYS_GETPPID alias",
+        SYS_GETPPID as u64,
+        SYS_PROC_GETPPID as u64,
+    );
     sn &= check_eq("SYS_GETPID", SYS_GETPID as u64, 311);
     sn &= check_eq("SYS_GETTID", SYS_GETTID as u64, 312);
     sn &= check_eq("SYS_PIPE", SYS_PIPE as u64, 431);
@@ -406,28 +537,32 @@ fn run_abi_layout_suite() -> bool {
 
     use strat9_abi::errno::*;
     let mut ev = true;
-    ev &= check_eq("EPERM",   EPERM as u64, 1);
-    ev &= check_eq("ENOENT",  ENOENT as u64, 2);
-    ev &= check_eq("ESRCH",   ESRCH as u64, 3);
-    ev &= check_eq("EINTR",   EINTR as u64, 4);
-    ev &= check_eq("EIO",     EIO as u64, 5);
-    ev &= check_eq("EBADF",   EBADF as u64, 9);
-    ev &= check_eq("EAGAIN",  EAGAIN as u64, 11);
-    ev &= check_eq("ENOMEM",  ENOMEM as u64, 12);
-    ev &= check_eq("EACCES",  EACCES as u64, 13);
-    ev &= check_eq("EFAULT",  EFAULT as u64, 14);
-    ev &= check_eq("EEXIST",  EEXIST as u64, 17);
-    ev &= check_eq("EINVAL",  EINVAL as u64, 22);
-    ev &= check_eq("ENOSYS",  ENOSYS as u64, 38);
+    ev &= check_eq("EPERM", EPERM as u64, 1);
+    ev &= check_eq("ENOENT", ENOENT as u64, 2);
+    ev &= check_eq("ESRCH", ESRCH as u64, 3);
+    ev &= check_eq("EINTR", EINTR as u64, 4);
+    ev &= check_eq("EIO", EIO as u64, 5);
+    ev &= check_eq("EBADF", EBADF as u64, 9);
+    ev &= check_eq("EAGAIN", EAGAIN as u64, 11);
+    ev &= check_eq("ENOMEM", ENOMEM as u64, 12);
+    ev &= check_eq("EACCES", EACCES as u64, 13);
+    ev &= check_eq("EFAULT", EFAULT as u64, 14);
+    ev &= check_eq("EEXIST", EEXIST as u64, 17);
+    ev &= check_eq("EINVAL", EINVAL as u64, 22);
+    ev &= check_eq("ENOSYS", ENOSYS as u64, 38);
     ev &= check_eq("ENOTSUP", ENOTSUP as u64, 52);
-    ev &= check_eq("EPIPE",   EPIPE as u64, 32);
-    ev &= check_eq("ENOSPC",  ENOSPC as u64, 28);
+    ev &= check_eq("EPIPE", EPIPE as u64, 32);
+    ev &= check_eq("ENOSPC", ENOSPC as u64, 28);
     record("errno values", ev, &mut passed, &mut total);
 
     // ── Summary ─────────────────────────────────────────────────────────────
     log_section("ABI LAYOUT TEST SUMMARY");
     let ok = passed == total;
-    crate::serial_println!("[abi-layout-test][ASSERT] result: {}/{} scenarios PASS", passed, total);
+    crate::serial_println!(
+        "[abi-layout-test][ASSERT] result: {}/{} scenarios PASS",
+        passed,
+        total
+    );
     crate::serial_println!(
         "[abi-layout-test][ASSERT] final : {}",
         if ok { "PASS" } else { "FAIL" }
@@ -443,7 +578,11 @@ extern "C" fn abi_layout_test_main() -> ! {
 }
 
 pub fn create_abi_layout_test_task() {
-    if let Ok(task) = Task::new_kernel_task(abi_layout_test_main, "abi-layout-test", TaskPriority::Normal) {
+    if let Ok(task) = Task::new_kernel_task(
+        abi_layout_test_main,
+        "abi-layout-test",
+        TaskPriority::Normal,
+    ) {
         add_task(task);
     } else {
         crate::serial_println!("[abi-layout-test][SETUP] failed to create task");

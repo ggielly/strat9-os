@@ -18,11 +18,7 @@
 //! `/` has already been stripped by the mount table resolver).  An empty
 //! string therefore means the root directory.
 
-use alloc::{
-    collections::BTreeMap,
-    string::String,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
@@ -30,8 +26,8 @@ use crate::{
     sync::SpinLock,
     syscall::error::SyscallError,
     vfs::scheme::{
-        DEV_RAMFS, DT_DIR, DT_LNK, DT_REG, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult,
-        Scheme,
+        DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DEV_RAMFS, DT_DIR, DT_LNK,
+        DT_REG,
     },
 };
 
@@ -321,8 +317,7 @@ impl Scheme for RamfsScheme {
             }
 
             // Create the new file.
-            let (parent_ino, name) =
-                st.lookup_parent(path).ok_or(SyscallError::NotFound)?;
+            let (parent_ino, name) = st.lookup_parent(path).ok_or(SyscallError::NotFound)?;
             if name.is_empty() {
                 return Err(SyscallError::InvalidArgument);
             }
@@ -621,7 +616,9 @@ impl Scheme for RamfsScheme {
         let (st_mode, st_size, st_nlink) = match &inode.kind {
             RamKind::Dir { children } => (inode.mode, 0u64, 2 + children.len() as u32),
             RamKind::File { data } => (inode.mode, data.len() as u64, st.link_count(file_id)),
-            RamKind::Symlink { target } => (inode.mode, target.len() as u64, st.link_count(file_id)),
+            RamKind::Symlink { target } => {
+                (inode.mode, target.len() as u64, st.link_count(file_id))
+            }
         };
 
         Ok(FileStat {
@@ -830,7 +827,9 @@ impl Scheme for RamfsScheme {
             new_ino,
             RamInode {
                 ino: new_ino,
-                kind: RamKind::Symlink { target: String::from(target) },
+                kind: RamKind::Symlink {
+                    target: String::from(target),
+                },
                 mode: 0o120_777,
                 uid,
                 gid,

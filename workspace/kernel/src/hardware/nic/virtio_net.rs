@@ -15,7 +15,7 @@ use crate::{
             status,
         },
     },
-    memory::{get_allocator, FrameAllocator, PhysFrame},
+    memory::{self, PhysFrame},
     sync::SpinLock,
 };
 use alloc::{collections::VecDeque, sync::Arc};
@@ -161,12 +161,11 @@ impl VirtioNetDevice {
     fn refill_rx_queue(&self) -> Result<(), &'static str> {
         let mut rx_queue = self.rx_queue.lock();
         let mut rx_frames = self.rx_frames.lock();
-        let mut lock = get_allocator().lock();
-        let allocator = lock.as_mut().ok_or("Allocator not initialized")?;
 
         // We want to keep some buffers in the RX queue
         let current_filled = rx_frames.len();
         let target_filled = 64;
+        let mut added = 0usize;
 
         if current_filled >= target_filled {
             return Ok(());
@@ -178,7 +177,7 @@ impl VirtioNetDevice {
             let buf_pages = (buf_size + 4095) / 4096;
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
-            let buf_frame = match allocator.alloc(buf_order) {
+            let buf_frame = match memory::allocate_frames(buf_order) {
                 Ok(frame) => frame,
                 Err(_) => break, // No more memory available
             };
@@ -195,19 +194,23 @@ impl VirtioNetDevice {
             match rx_queue.add_buffer(&[(buf_addr, buf_size as u32, true)]) {
                 Ok(_) => {
                     rx_frames.push_back((buf_frame, buf_order));
+                    added += 1;
                 }
                 Err(_) => {
                     // Queue full, free the buffer
-                    allocator.free(buf_frame, buf_order);
+                    memory::free_frames(buf_frame, buf_order);
                     break;
                 }
             }
         }
-        drop(lock);
 
         // Notify device about new RX buffers
         if rx_queue.should_notify() {
             self.device.notify_queue(0);
+        }
+
+        if rx_frames.is_empty() && current_filled == 0 && added == 0 {
+            return Err("Failed to allocate RX buffers");
         }
 
         Ok(())
@@ -260,11 +263,7 @@ impl NetworkDevice for VirtioNetDevice {
 
         if buf.len() < packet_len {
             // Buffer too small, packet lost
-            let mut lock = get_allocator().lock();
-            if let Some(allocator) = lock.as_mut() {
-                allocator.free(frame, order);
-            }
-            drop(lock);
+            memory::free_frames(frame, order);
             drop(rx_queue);
             // We still need to refill.
             let _ = self.refill_rx_queue();
@@ -279,11 +278,7 @@ impl NetworkDevice for VirtioNetDevice {
         }
 
         // Free the frame
-        let mut lock = get_allocator().lock();
-        if let Some(allocator) = lock.as_mut() {
-            allocator.free(frame, order);
-        }
-        drop(lock);
+        memory::free_frames(frame, order);
         drop(rx_queue);
 
         // Refill RX queue
@@ -303,10 +298,7 @@ impl NetworkDevice for VirtioNetDevice {
         let buf_pages = (buf_size + 4095) / 4096;
         let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
-        let mut lock = get_allocator().lock();
-        let allocator = lock.as_mut().ok_or(NetError::NotReady)?;
-        let buf_frame = allocator.alloc(buf_order).map_err(|_| NetError::NotReady)?;
-        drop(lock);
+        let buf_frame = memory::allocate_frames(buf_order).map_err(|_| NetError::NotReady)?;
 
         let buf_addr = buf_frame.start_address.as_u64();
         let virt_addr = crate::memory::phys_to_virt(buf_addr);
@@ -326,10 +318,7 @@ impl NetworkDevice for VirtioNetDevice {
             .add_buffer(&[(buf_addr, buf_size as u32, false)]) // Device Readable
             .map_err(|_| {
                 // Free buffer if failed
-                let mut lock = get_allocator().lock();
-                if let Some(allocator) = lock.as_mut() {
-                    allocator.free(buf_frame, buf_order);
-                }
+                memory::free_frames(buf_frame, buf_order);
                 NetError::TxQueueFull
             })?;
 
@@ -354,11 +343,7 @@ impl NetworkDevice for VirtioNetDevice {
         }
 
         // Free TX buffer
-        let mut lock = get_allocator().lock();
-        if let Some(allocator) = lock.as_mut() {
-            allocator.free(buf_frame, buf_order);
-        }
-        drop(lock);
+        memory::free_frames(buf_frame, buf_order);
 
         Ok(())
     }

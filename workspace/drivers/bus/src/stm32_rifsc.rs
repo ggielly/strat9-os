@@ -1,7 +1,9 @@
+use crate::{
+    BusChild, BusDriver, BusError, PowerState,
+    mmio::MmioRegion,
+    stm32_firewall::{FirewallController, FirewallType},
+};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
-use crate::stm32_firewall::{FirewallController, FirewallType};
 
 const RIFSC_RISC_SECCFGR0: usize = 0x10;
 const RIFSC_RISC_PRIVCFGR0: usize = 0x30;
@@ -26,10 +28,7 @@ const HWCFGR2_CONF3_SHIFT: u32 = 24;
 
 const EXPECTED_CID: u32 = 1;
 
-const COMPATIBLE: &[&str] = &[
-    "st,stm32mp25-rifsc",
-    "st,stm32mp21-rifsc",
-];
+const COMPATIBLE: &[&str] = &["st,stm32mp25-rifsc", "st,stm32mp21-rifsc"];
 
 pub struct Stm32Rifsc {
     regs: MmioRegion,
@@ -65,7 +64,9 @@ impl Stm32Rifsc {
     fn is_secure(&self, id: u32) -> bool {
         let reg_idx = id / 32;
         let bit = id % 32;
-        let val = self.regs.read32(RIFSC_RISC_SECCFGR0 + (reg_idx as usize) * 4);
+        let val = self
+            .regs
+            .read32(RIFSC_RISC_SECCFGR0 + (reg_idx as usize) * 4);
         (val & (1 << bit)) != 0
     }
 
@@ -73,7 +74,9 @@ impl Stm32Rifsc {
     fn is_privileged(&self, id: u32) -> bool {
         let reg_idx = id / 32;
         let bit = id % 32;
-        let val = self.regs.read32(RIFSC_RISC_PRIVCFGR0 + (reg_idx as usize) * 4);
+        let val = self
+            .regs
+            .read32(RIFSC_RISC_PRIVCFGR0 + (reg_idx as usize) * 4);
         (val & (1 << bit)) != 0
     }
 
@@ -113,13 +116,19 @@ impl Stm32Rifsc {
 
 impl FirewallController for Stm32Rifsc {
     /// Performs the name operation.
-    fn name(&self) -> &str { "stm32-rifsc" }
+    fn name(&self) -> &str {
+        "stm32-rifsc"
+    }
 
     /// Performs the firewall type operation.
-    fn firewall_type(&self) -> FirewallType { FirewallType::Peripheral }
+    fn firewall_type(&self) -> FirewallType {
+        FirewallType::Peripheral
+    }
 
     /// Performs the max entries operation.
-    fn max_entries(&self) -> u32 { self.nb_risup }
+    fn max_entries(&self) -> u32 {
+        self.nb_risup
+    }
 
     /// Performs the grant access operation.
     fn grant_access(&self, firewall_id: u32) -> Result<(), BusError> {
@@ -169,10 +178,14 @@ impl FirewallController for Stm32Rifsc {
 
 impl BusDriver for Stm32Rifsc {
     /// Performs the name operation.
-    fn name(&self) -> &str { "stm32-rifsc" }
+    fn name(&self) -> &str {
+        "stm32-rifsc"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {
@@ -190,13 +203,17 @@ impl BusDriver for Stm32Rifsc {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         Ok(self.regs.read32(offset))
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        if !self.regs.is_valid() { return Err(BusError::InitFailed); }
+        if !self.regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
         self.regs.write32(offset, value);
         Ok(())
     }

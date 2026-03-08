@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const SYS_MISC: usize = 0x00;
 const SYS_MISC_MASTERSITE: u32 = 1 << 14;
@@ -27,15 +26,25 @@ const MAX_POLL_TRIES: u32 = 100;
 const COMPATIBLE: &[&str] = &["vexpress-syscfg"];
 
 /// Performs the cfg ctrl dcc operation.
-fn cfg_ctrl_dcc(n: u32) -> u32 { (n & 0xF) << 26 }
+fn cfg_ctrl_dcc(n: u32) -> u32 {
+    (n & 0xF) << 26
+}
 /// Performs the cfg ctrl func operation.
-fn cfg_ctrl_func(n: u32) -> u32 { (n & 0x3F) << 20 }
+fn cfg_ctrl_func(n: u32) -> u32 {
+    (n & 0x3F) << 20
+}
 /// Performs the cfg ctrl site operation.
-fn cfg_ctrl_site(n: u32) -> u32 { (n & 0x3) << 16 }
+fn cfg_ctrl_site(n: u32) -> u32 {
+    (n & 0x3) << 16
+}
 /// Performs the cfg ctrl position operation.
-fn cfg_ctrl_position(n: u32) -> u32 { (n & 0xF) << 12 }
+fn cfg_ctrl_position(n: u32) -> u32 {
+    (n & 0xF) << 12
+}
 /// Performs the cfg ctrl device operation.
-fn cfg_ctrl_device(n: u32) -> u32 { n & 0xFFF }
+fn cfg_ctrl_device(n: u32) -> u32 {
+    n & 0xFFF
+}
 
 pub struct VexpressConfig {
     regs: MmioRegion,
@@ -65,7 +74,11 @@ impl VexpressConfig {
 
     /// Reads procid.
     pub fn read_procid(&self, site: u32) -> u32 {
-        let offset = if site == SITE_DB1 { SYS_PROCID0 } else { SYS_PROCID1 };
+        let offset = if site == SITE_DB1 {
+            SYS_PROCID0
+        } else {
+            SYS_PROCID1
+        };
         self.regs.read32(offset)
     }
 
@@ -76,14 +89,24 @@ impl VexpressConfig {
     }
 
     /// Performs the config read operation.
-    pub fn config_read(&self, site: u32, position: u32, dcc: u32,
-                       function: u32, device: u32) -> Result<u32, BusError> {
+    pub fn config_read(
+        &self,
+        site: u32,
+        position: u32,
+        dcc: u32,
+        function: u32,
+        device: u32,
+    ) -> Result<u32, BusError> {
         let command = self.regs.read32(SYS_CFGCTRL);
         if command & SYS_CFGCTRL_START != 0 {
             return Err(BusError::Timeout);
         }
 
-        let real_site = if site == SITE_MASTER { self.master_site } else { site };
+        let real_site = if site == SITE_MASTER {
+            self.master_site
+        } else {
+            site
+        };
 
         let cmd = SYS_CFGCTRL_START
             | cfg_ctrl_dcc(dcc)
@@ -111,14 +134,25 @@ impl VexpressConfig {
     }
 
     /// Performs the config write operation.
-    pub fn config_write(&self, site: u32, position: u32, dcc: u32,
-                        function: u32, device: u32, data: u32) -> Result<(), BusError> {
+    pub fn config_write(
+        &self,
+        site: u32,
+        position: u32,
+        dcc: u32,
+        function: u32,
+        device: u32,
+        data: u32,
+    ) -> Result<(), BusError> {
         let command = self.regs.read32(SYS_CFGCTRL);
         if command & SYS_CFGCTRL_START != 0 {
             return Err(BusError::Timeout);
         }
 
-        let real_site = if site == SITE_MASTER { self.master_site } else { site };
+        let real_site = if site == SITE_MASTER {
+            self.master_site
+        } else {
+            site
+        };
 
         let cmd = SYS_CFGCTRL_START
             | SYS_CFGCTRL_WRITE
@@ -149,10 +183,14 @@ impl VexpressConfig {
 
 impl BusDriver for VexpressConfig {
     /// Performs the name operation.
-    fn name(&self) -> &str { "vexpress-config" }
+    fn name(&self) -> &str {
+        "vexpress-config"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {

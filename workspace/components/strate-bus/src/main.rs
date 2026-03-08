@@ -6,10 +6,10 @@ extern crate alloc;
 
 use core::{alloc::Layout, panic::PanicInfo};
 use strat9_bus_drivers::{
+    BusDriver,
     probe::{self, ProbeMode},
     scheme::BusSchemeServer,
     simple_pm_bus::SimplePmBus,
-    BusDriver,
 };
 use strat9_syscall::call;
 
@@ -194,26 +194,38 @@ pub extern "C" fn _start() -> ! {
         let mut p = None;
         for attempt in 0..MAX_RETRIES {
             match call::ipc_create_port(0) {
-                Ok(h) => { p = Some(h as u64); break; }
+                Ok(h) => {
+                    p = Some(h as u64);
+                    break;
+                }
                 Err(_) => {
                     let _ = call::debug_log(b"[strate-bus] ipc_create_port retry\n");
-                    for _ in 0..(BACKOFF_YIELDS * (attempt + 1)) { let _ = call::sched_yield(); }
+                    for _ in 0..(BACKOFF_YIELDS * (attempt + 1)) {
+                        let _ = call::sched_yield();
+                    }
                 }
             }
         }
         match p {
             Some(h) => h,
-            None => { let _ = call::debug_log(b"[strate-bus] ipc_create_port failed after retries\n"); call::exit(1); }
+            None => {
+                let _ = call::debug_log(b"[strate-bus] ipc_create_port failed after retries\n");
+                call::exit(1);
+            }
         }
     };
 
     for attempt in 0..MAX_RETRIES {
-        if call::ipc_bind_port(port as usize, b"/srv/strate-bus/default").is_ok() { break; }
+        if call::ipc_bind_port(port as usize, b"/srv/strate-bus/default").is_ok() {
+            break;
+        }
         if attempt + 1 == MAX_RETRIES {
             let _ = call::debug_log(b"[strate-bus] ipc_bind_port failed after retries\n");
             call::exit(2);
         }
-        for _ in 0..(BACKOFF_YIELDS * (attempt + 1)) { let _ = call::sched_yield(); }
+        for _ in 0..(BACKOFF_YIELDS * (attempt + 1)) {
+            let _ = call::sched_yield();
+        }
     }
     let _ = call::ipc_bind_port(port as usize, b"/bus");
 

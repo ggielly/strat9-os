@@ -335,11 +335,33 @@ fn log_boot_module_magics(_stage: &str) {}
 
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
+    // Invariant: interrupts must stay disabled throughout kernel_main until the
+    // scheduler is ready and the APIC timer is started (Asterinas pattern:
+    // interrupts are only enabled once, at the very end of init).
+    debug_assert!(
+        !arch::x86_64::interrupts_enabled(),
+        "interrupts must be disabled at boot entry"
+    );
+
     // =============================================
     // Phase 1: serial output (earliest debug output)
     // =============================================
     init_serial();
     init_logger();
+
+    // =============================================
+    // Phase 1c: IDT (Interrupt Descriptor Table)
+    // =============================================
+    // We initialize the IDT as early as possible to catch any exceptions
+    // during the early memory management and hardware initialization phases.
+    serial_println!("[init] IDT (early)...");
+    arch::x86_64::idt::init();
+    serial_println!("[init] IDT initialized.");
+
+    debug_assert!(
+        !arch::x86_64::interrupts_enabled(),
+        "interrupts must be disabled after IDT init"
+    );
 
     // Detect CPU features (must happen before init_cpu_extensions)
     crate::arch::x86_64::cpuid::init();
@@ -352,13 +374,15 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     boot::panic::install_default_panic_hooks();
 
     // Nice logo :D
+    serial_println!();
+    serial_println!();
     serial_println!(r"          __                 __   ________                         ");
     serial_println!(r"  _______/  |_____________ _/  |_/   __   \           ____  ______ ");
     serial_println!(r" /  ___/\   __\_  __ \__  \\   __\____    /  ______  /  _ \/  ___/ ");
     serial_println!(r" \___ \  |  |  |  | \// __ \|  |    /    /  /_____/ (  <_> )___ \  ");
     serial_println!(r"/____  > |__|  |__|  (____  /__|   /____/            \____/____  > ");
     serial_println!(r"     \/                   \/                                   \/  ");
-    //serial_println!();
+    serial_println!();
 
     serial_println!("");
     serial_println!("=======================================================================================================");
@@ -373,6 +397,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     );
     serial_println!("  See the GNU General Public License for more details.");
     serial_println!("=======================================================================================================");
+    serial_println!();
 
     // Validate arguments
     if args.is_null() {
@@ -406,6 +431,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
     }
 
+    // Le's go !
+    //
     // =============================================
     // Phase 1b : HHDM offset (must be set before any physical memory access)
     // =============================================
@@ -505,8 +532,17 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
     }
 
+    // Here we are
+    // We have the memory map from the bootloader, with all modules reserved.
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
+
     serial_println!("[init] Buddy allocator ready.");
+
+    debug_assert!(
+        !arch::x86_64::interrupts_enabled(),
+        "interrupts must be disabled after buddy allocator init"
+    );
+
     log_boot_module_magics("post-buddy");
 
     // =============================================
@@ -568,13 +604,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     vga_println!("[OK] Bootstrap components ready");
 
     // =============================================
-    // Phase 5: IDT (Interrupt Descriptor Table)
+    // Phase 5: IDT (Interrupt Descriptor Table) - ALREADY INITIALIZED EARLY
     // =============================================
-    serial_println!("[init] IDT...");
-    vga_println!("[..] Initializing IDT...");
-    arch::x86_64::idt::init();
-    serial_println!("[init] IDT initialized.");
-    vga_println!("[OK] IDT loaded");
+    // arch::x86_64::idt::init();
 
     // =============================================
     // Phase 5b: paging / VMM
@@ -610,6 +642,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     vga_println!("[..] Initializing kernel address space...");
     memory::address_space::init_kernel_address_space();
     serial_println!("[init] Kernel address space initialized.");
+    debug_assert!(
+        !arch::x86_64::interrupts_enabled(),
+        "interrupts must be disabled after kernel address space init"
+    );
     vga_println!("[OK] Kernel address space initialized");
     log_boot_module_magics("post-kas");
 
@@ -618,15 +654,21 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     serial_println!("[init] VFS...");
     vga_println!("[..] Initializing virtual file system...");
+
     vfs::init();
+
     serial_println!("[init] VFS initialized.");
     vga_println!("[OK] VFS initialized");
     register_boot_initfs_modules(args.initfs_base, args.initfs_size);
+
     #[cfg(feature = "selftest")]
     serial_println!("[init] Initializing COW metadata...");
+
     memory::init_cow_subsystem(&mmap_work[..mmap_work_len]);
+
     #[cfg(feature = "selftest")]
     serial_println!("[init] COW metadata initialized.");
+
     log_boot_module_magics("post-cow");
 
     // =============================================
@@ -640,6 +682,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     let rsdp_virt = memory::phys_to_virt(args.acpi_rsdp_base);
     let apic_active = init_apic_subsystem(rsdp_virt);
+
     if !apic_active {
         // Fallback: legacy PIC + PIT
         serial_println!("[init] APIC unavailable, falling back to legacy PIC");
@@ -662,6 +705,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if apic_active {
         arch::x86_64::tlb::init();
         serial_println!("[init] TLB shootdown system initialized.");
+        debug_assert!(
+            !arch::x86_64::interrupts_enabled(),
+            "interrupts must be disabled after TLB init"
+        );
     }
 
     // ================================================
@@ -673,6 +720,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         arch::x86_64::percpu::init_gs_base(0);
         serial_println!("[init] SMP: booting secondary cores...");
         vga_println!("[..] SMP: starting APs...");
+
         match arch::x86_64::smp::init() {
             Ok(count) => {
                 serial_println!("[init] SMP: {} core(s) online", count);
@@ -692,6 +740,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     if apic_active {
         let mouse_ok = arch::x86_64::mouse::init();
+
         if mouse_ok {
             serial_println!("[init] PS/2 mouse initialized.");
             vga_println!("[OK] PS/2 mouse ready");
@@ -705,7 +754,29 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     serial_println!("[init] Initializing scheduler...");
     vga_println!("[..] Setting up multitasking...");
+    // Print struct layout for crash-site offset analysis (debug build only).
+    crate::process::task::Task::debug_print_layout();
     process::init_scheduler();
+
+    debug_assert!(
+        !arch::x86_64::interrupts_enabled(),
+        "interrupts must be disabled after scheduler init"
+    );
+
+    // =============================================
+    // Phase 7+: Start timer
+    // =============================================
+    // The BSP timer only starts when the scheduler is ready to handle interrupts.
+    // This is the last point where interrupts are guaranteed disabled on BSP.
+    if apic_active {
+        debug_assert!(
+            !arch::x86_64::interrupts_enabled(),
+            "interrupts must be disabled before APIC timer start"
+        );
+        serial_println!("[init] Starting APIC timer on BSP...");
+        arch::x86_64::timer::start_apic_timer_cached();
+    }
+
     arch::x86_64::smp::open_ap_scheduler_gate();
     serial_println!("[init] Scheduler initialized.");
     serial_println!("[trace][bsp] after init_scheduler");
@@ -717,9 +788,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[trace][bsp] before kthread init_all");
     serial_println!("[init] Components (kthread)...");
     vga_println!("[..] Initializing kthread components...");
+
     if let Err(e) = component::init_all(component::InitStage::Kthread) {
         serial_println!("[WARN] Some kthread components failed: {:?}", e);
     }
+
     serial_println!("[trace][bsp] after kthread init_all");
     serial_println!("[init] Kthread components initialized.");
     vga_println!("[OK] Kthread components ready");
@@ -840,7 +913,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             serial_println!(
                 "[INFO] AHCI SATA device found. Capacity: {} sectors ({} MiB)",
                 ahci.sector_count(),
-                (ahci.sector_count() * 512) / (1024 * 1024),
+                (ahci.sector_count() * 512) / 1048576, // 1024*1024 bytes per MiB, 512 bytes per sector
             );
             vga_println!("[OK] AHCI SATA driver loaded");
         } else {
@@ -854,7 +927,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                     ns.nsid,
                     ns.size,
                     ns.block_size,
-                    (ns.size * ns.block_size as u64) / (1024 * 1024),
+                    (ns.size * ns.block_size as u64) / 1048576, // 1024*1024 bytes per MiB
                 );
                 vga_println!("[OK] NVMe driver loaded");
             }
@@ -922,9 +995,49 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
         if let Some((base, size)) = crate::boot::limine::strate_fs_ramfs_module() {
             let ram_data = boot_module_slice(base, size);
-            match process::elf::load_and_run_elf(ram_data, "strate-fs-ramfs") {
-                Ok(task_id) => {
-                    let _ = crate::silo::register_boot_strate_task(task_id, "ramfs-default");
+            match process::elf::load_elf_task_with_caps(ram_data, "strate-fs-ramfs", &[]) {
+                Ok(task) => {
+                    let task_id = task.id;
+                    crate::serial_force_println!(
+                        "[trace][boot] before register_boot_strate_task tid={} label=ramfs-default",
+                        task_id.as_u64()
+                    );
+                    let saved = crate::arch::x86_64::save_flags_and_cli();
+                    crate::serial_force_println!(
+                        "[trace][boot] irq-off before register_boot_strate_task tid={}",
+                        task_id.as_u64()
+                    );
+                    let reg_res =
+                        crate::silo::register_boot_strate_task(task_id, "ramfs-default");
+                    crate::serial_force_println!(
+                        "[trace][boot] marker: returned from register_boot_strate_task"
+                    );
+                    crate::serial_force_println!(
+                        "[trace][boot] irq-off after register_boot_strate_task tid={}",
+                        task_id.as_u64()
+                    );
+                    crate::arch::x86_64::restore_flags(saved);
+                    if let Err(e) = reg_res {
+                        crate::serial_force_println!(
+                            "[trace][boot] register_boot_strate_task failed tid={} err={:?}",
+                            task_id.as_u64(),
+                            e
+                        );
+                    } else {
+                        crate::serial_force_println!(
+                            "[trace][boot] register_boot_strate_task ok tid={}",
+                            task_id.as_u64()
+                        );
+                    }
+                    crate::serial_force_println!(
+                        "[trace][boot] before add_task tid={} name=strate-fs-ramfs",
+                        task_id.as_u64()
+                    );
+                    process::add_task(task);
+                    crate::serial_force_println!(
+                        "[trace][boot] after add_task tid={} name=strate-fs-ramfs",
+                        task_id.as_u64()
+                    );
                     serial_println!("[init] Component 'strate-fs-ramfs' loaded.");
                 }
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
@@ -932,9 +1045,35 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
         if let Some((base, size)) = crate::boot::limine::fs_ext4_module() {
             let ext4_data = boot_module_slice(base, size);
-            match process::elf::load_and_run_elf(ext4_data, "strate-fs-ext4") {
-                Ok(task_id) => {
-                    let _ = crate::silo::register_boot_strate_task(task_id, "ext4-default");
+            match process::elf::load_elf_task_with_caps(ext4_data, "strate-fs-ext4", &[]) {
+                Ok(task) => {
+                    let task_id = task.id;
+                    crate::serial_force_println!(
+                        "[trace][boot] before register_boot_strate_task tid={} label=ext4-default",
+                        task_id.as_u64()
+                    );
+                    if let Err(e) = crate::silo::register_boot_strate_task(task_id, "ext4-default")
+                    {
+                        crate::serial_force_println!(
+                            "[trace][boot] register_boot_strate_task failed tid={} err={:?}",
+                            task_id.as_u64(),
+                            e
+                        );
+                    } else {
+                        crate::serial_force_println!(
+                            "[trace][boot] register_boot_strate_task ok tid={}",
+                            task_id.as_u64()
+                        );
+                    }
+                    crate::serial_force_println!(
+                        "[trace][boot] before add_task tid={} name=strate-fs-ext4",
+                        task_id.as_u64()
+                    );
+                    process::add_task(task);
+                    crate::serial_force_println!(
+                        "[trace][boot] after add_task tid={} name=strate-fs-ext4",
+                        task_id.as_u64()
+                    );
                     serial_println!("[init] Component 'strate-fs-ext4' loaded.");
                 }
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ext4 component: {}", e),
@@ -960,10 +1099,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             }
         }
 
-        match process::Task::new_kernel_task(
+        match process::Task::new_kernel_task_with_stack(
             shell::shell_main,
             "chevron-shell",
             process::TaskPriority::Normal,
+            64 * 1024,
         ) {
             Ok(shell_task) => {
                 process::add_task(shell_task);
@@ -1137,14 +1277,11 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     } else {
         serial_println!("[init]   6h. APIC timer calibrated successfully");
 
-        // Step 6i: start APIC timer in periodic mode
-        timer::start_apic_timer(ticks_per_10ms);
-        serial_println!("[init]   6i. APIC timer started ({}Hz)", TIMER_HZ);
+        // Step 6i: DO NOT start APIC timer yet. (Asterinas style)
+        // We will start it only after the scheduler is ready.
+        // timer::start_apic_timer(ticks_per_10ms);
 
         // Step 6i+: quench legacy PIT to prevent phantom timer interrupts.
-        // The Limine bootloader leaves PIT channel 0 running (~100Hz).
-        // Even though legacy_timer_handler guards against double-counting,
-        // masking the source eliminates wasted interrupt cycles entirely.
         timer::stop_pit();
         ioapic::mask_legacy_irq(0, &madt_info.overrides);
         serial_println!("[init]   6i+. Legacy PIT stopped and masked in IOAPIC");

@@ -82,7 +82,9 @@ impl RamFileSystem {
     /// Implements allocate inode.
     fn allocate_inode(&self, node: RamNode) -> u64 {
         let id = self.next_inode.fetch_add(1, Ordering::SeqCst);
-        self.inodes.write().insert(id, Arc::new(RamInode::new(node)));
+        self.inodes
+            .write()
+            .insert(id, Arc::new(RamInode::new(node)));
         id
     }
 

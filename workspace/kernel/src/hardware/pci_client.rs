@@ -1,10 +1,12 @@
 use alloc::{format, string::String, vec::Vec};
 
-use crate::arch::x86_64::pci as arch_pci;
 pub use crate::arch::x86_64::pci::{
     class, command, config, device, intel_eth, net_subclass, sata_progif, storage_subclass, vendor,
 };
-use crate::vfs::{self, OpenFlags};
+use crate::{
+    arch::x86_64::pci as arch_pci,
+    vfs::{self, OpenFlags},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bar {

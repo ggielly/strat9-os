@@ -40,8 +40,8 @@ pub use channel::{
     SyncChan,
 };
 pub use message::IpcMessage;
+pub use port::{create_port, destroy_port, get_port, IpcError, Port, PortId};
 pub use semaphore::{
     create_semaphore, destroy_semaphore, get_semaphore, PosixSemaphore, SemId, SemaphoreError,
 };
 pub use shared_ring::{create_ring, destroy_ring, get_ring, RingError, RingId, SharedRing};
-pub use port::{create_port, destroy_port, get_port, IpcError, Port, PortId};

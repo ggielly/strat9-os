@@ -712,8 +712,6 @@ fn dump_page_fault_full(
     // --- Task context ---
     crate::serial_println!("\x1b[1;33m--- Task Context ---\x1b[0m");
     if let Some(ref t) = *task {
-        let as_ref = unsafe { &*t.process.address_space.get() };
-        let task_cr3 = as_ref.cr3().as_u64();
         crate::serial_println!(
             "  ID={} PID={} TID={} TGID={} name=\"{}\" prio={:?} ticks={}",
             t.id.as_u64(),
@@ -724,15 +722,64 @@ fn dump_page_fault_full(
             t.priority,
             t.ticks.load(core::sync::atomic::Ordering::Relaxed)
         );
-        crate::serial_println!(
-            "  Task CR3    : {:#018x}{}",
-            task_cr3,
-            if task_cr3 != cr3_phys {
-                " *** DIFFERS from hardware CR3! ***"
+        // SAFETY: Read task CR3 safely using the hardware page-table walker
+        // (translate_via_raw_pt) to prevent recursive page faults if the
+        // process's Arc<AddressSpace> is partially initialized or corrupted.
+        //
+        // Chain: &t.process → Arc<Process> data ptr (Arc::as_ptr)
+        //      → (*process).address_space.get() → *mut Arc<AddressSpace>
+        //      → Arc::as_ptr(arc_as) → *const AddressSpace
+        //      → (*addr_space).cr3_phys
+        //
+        // Each step uses translate_via_raw_pt to verify the pointer is mapped
+        // before dereferencing, using the hardware CR3 (cr3_phys) which always
+        // maps the kernel's HHDM region.
+        let task_cr3: u64 = {
+            let hhdm = crate::memory::hhdm_offset();
+            // Step 1: Arc<Process> data (Arc::as_ptr is always valid for a live Arc)
+            let proc_ptr: u64 = alloc::sync::Arc::as_ptr(&t.process) as u64;
+            // Step 2: address_space field in Process = SyncUnsafeCell whose .get()
+            // returns a raw ptr into the Process data — always valid for a live Process.
+            // However, reading the Arc<AddressSpace> *value* from that pointer may
+            // fault if the memory is unmapped, so we use translate_via_raw_pt.
+            let as_cell_addr: u64 =
+                unsafe { (*alloc::sync::Arc::as_ptr(&t.process)).address_space.get() as u64 };
+            // Step 3: read the 8-byte Arc<AddressSpace> inner pointer from as_cell_addr
+            // via raw page table walk with current hardware CR3.
+            let as_inner_u64: u64 = match translate_via_raw_pt(as_cell_addr, cr3_phys, hhdm) {
+                Some(phys) => unsafe { *((phys + hhdm) as *const u64) },
+                None => 0,
+            };
+            if as_inner_u64 == 0 {
+                0u64
             } else {
-                " (matches hardware CR3)"
+                // as_inner_u64 is the NonNull ptr inside Arc<AddressSpace>
+                // = pointer to ArcInner<AddressSpace>.
+                // ArcInner = strong(8) + weak(8) + data(AddressSpace).
+                // So AddressSpace data is at as_inner_u64 + 16.
+                let as_data_ptr: u64 = as_inner_u64 + 2 * core::mem::size_of::<usize>() as u64;
+                // cr3_phys is the first field of AddressSpace (PhysAddr = u64, 8 bytes).
+                match translate_via_raw_pt(as_data_ptr, cr3_phys, hhdm) {
+                    Some(phys) => unsafe { *((phys + hhdm) as *const u64) },
+                    None => 0,
+                }
             }
-        );
+        };
+        if task_cr3 == 0 {
+            crate::serial_println!(
+                "  Task CR3    : <unreadable — null/unmapped Arc<AddressSpace>>"
+            );
+        } else {
+            crate::serial_println!(
+                "  Task CR3    : {:#018x}{}",
+                task_cr3,
+                if task_cr3 != cr3_phys {
+                    " *** DIFFERS from hardware CR3! ***"
+                } else {
+                    " (matches hardware CR3)"
+                }
+            );
+        }
     } else {
         crate::serial_println!("  (no current task — scheduler idle or unavailable)");
     }
@@ -801,8 +848,42 @@ fn dump_page_fault_full(
     // --- VMA regions near fault ---
     if let Some(ref t) = *task {
         crate::serial_println!("\x1b[1;33m--- VMA Regions Near Fault ---\x1b[0m");
-        let as_ref = unsafe { &*t.process.address_space.get() };
-        dump_nearby_vma_regions(as_ref, fault_vaddr);
+        // SAFETY: Use the same safe ptr-chain read strategy as the Task CR3 section above:
+        // Arc::as_ptr gives a valid *const AddressSpace if the Arc is alive, but the
+        // Arc<AddressSpace> stored inside the SyncUnsafeCell might be corrupted.
+        // We validate via translate_via_raw_pt before reading the inner ptr.
+        let hhdm_vma = crate::memory::hhdm_offset();
+        let safe_as: Option<*const crate::memory::AddressSpace> = unsafe {
+            let as_cell_addr: u64 =
+                (*alloc::sync::Arc::as_ptr(&t.process)).address_space.get() as u64;
+            match translate_via_raw_pt(as_cell_addr, cr3_phys, hhdm_vma) {
+                Some(phys) => {
+                    // Read the Arc<AddressSpace> inner pointer (a NonNull ptr stored at this phys)
+                    let as_inner_u64 = *((phys + hhdm_vma) as *const u64);
+                    if as_inner_u64 == 0 {
+                        None
+                    } else {
+                        // ArcInner<AddressSpace>.data at +16
+                        let as_data_ptr = (as_inner_u64 + 2 * core::mem::size_of::<usize>() as u64)
+                            as *const crate::memory::AddressSpace;
+                        // Validate the AddressSpace pointer is mapped before returning it
+                        if translate_via_raw_pt(as_data_ptr as u64, cr3_phys, hhdm_vma).is_some() {
+                            Some(as_data_ptr)
+                        } else {
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        };
+        if let Some(as_ptr) = safe_as {
+            // SAFETY: We verified above that as_ptr is mapped and readable.
+            let as_ref = unsafe { &*as_ptr };
+            dump_nearby_vma_regions(as_ref, fault_vaddr);
+        } else {
+            crate::serial_println!("  (AddressSpace unreadable — skipping VMA dump)");
+        }
     }
 
     crate::serial_println!(

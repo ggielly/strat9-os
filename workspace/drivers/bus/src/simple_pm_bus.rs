@@ -1,6 +1,5 @@
+use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
-use crate::{BusChild, BusDriver, BusError, PowerState};
-use crate::mmio::MmioRegion;
 
 const COMPATIBLE: &[&str] = &[
     "simple-pm-bus",
@@ -41,10 +40,14 @@ impl SimplePmBus {
 
 impl BusDriver for SimplePmBus {
     /// Performs the name operation.
-    fn name(&self) -> &str { "simple-pm-bus" }
+    fn name(&self) -> &str {
+        "simple-pm-bus"
+    }
 
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str] { COMPATIBLE }
+    fn compatible(&self) -> &[&str] {
+        COMPATIBLE
+    }
 
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError> {

@@ -2,13 +2,13 @@
 // Reference: AMD PCnet-PCI II Data Sheet
 
 use crate::{
-    hardware::nic::NetworkDevice,
-    hardware::pci_client::{self as pci, Bar, ProbeCriteria},
+    hardware::{
+        nic::NetworkDevice,
+        pci_client::{self as pci, Bar, ProbeCriteria},
+    },
     memory::{allocate_dma_frame, phys_to_virt},
 };
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use alloc::{format, string::String};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -244,8 +244,12 @@ impl PcnetDevice {
         unsafe {
             init_virt.write(0);
             init_virt.add(1).write(0);
-            init_virt.add(2).write((log2(RX_BUFFERS_COUNT as u8) as u8) << 4);
-            init_virt.add(3).write((log2(TX_BUFFERS_COUNT as u8) as u8) << 4);
+            init_virt
+                .add(2)
+                .write((log2(RX_BUFFERS_COUNT as u8) as u8) << 4);
+            init_virt
+                .add(3)
+                .write((log2(TX_BUFFERS_COUNT as u8) as u8) << 4);
 
             init_virt.add(4).write(self.mac[0]);
             init_virt.add(5).write(self.mac[1]);
@@ -255,14 +259,26 @@ impl PcnetDevice {
             init_virt.add(9).write(self.mac[5]);
 
             init_virt.add(20).write((self.rx_des_phys & 0xFF) as u8);
-            init_virt.add(21).write(((self.rx_des_phys >> 8) & 0xFF) as u8);
-            init_virt.add(22).write(((self.rx_des_phys >> 16) & 0xFF) as u8);
-            init_virt.add(23).write(((self.rx_des_phys >> 24) & 0xFF) as u8);
+            init_virt
+                .add(21)
+                .write(((self.rx_des_phys >> 8) & 0xFF) as u8);
+            init_virt
+                .add(22)
+                .write(((self.rx_des_phys >> 16) & 0xFF) as u8);
+            init_virt
+                .add(23)
+                .write(((self.rx_des_phys >> 24) & 0xFF) as u8);
 
             init_virt.add(24).write((self.tx_des_phys & 0xFFFF) as u8);
-            init_virt.add(25).write(((self.tx_des_phys >> 8) & 0xFF) as u8);
-            init_virt.add(26).write(((self.tx_des_phys >> 16) & 0xFF) as u8);
-            init_virt.add(27).write(((self.tx_des_phys >> 24) & 0xFF) as u8);
+            init_virt
+                .add(25)
+                .write(((self.tx_des_phys >> 8) & 0xFF) as u8);
+            init_virt
+                .add(26)
+                .write(((self.tx_des_phys >> 16) & 0xFF) as u8);
+            init_virt
+                .add(27)
+                .write(((self.tx_des_phys >> 24) & 0xFF) as u8);
         }
 
         ports.write_csr(1, (init_phys & 0xFFFF) as u32);
@@ -280,8 +296,12 @@ impl PcnetDevice {
 
         log::info!(
             "PCnet: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            self.mac[0], self.mac[1], self.mac[2],
-            self.mac[3], self.mac[4], self.mac[5]
+            self.mac[0],
+            self.mac[1],
+            self.mac[2],
+            self.mac[3],
+            self.mac[4],
+            self.mac[5]
         );
     }
 
@@ -346,14 +366,16 @@ impl PcnetDevice {
                     let desc = self.rx_des.add(rx_id * DESC_LEN + 7);
                     desc.write_volatile(0x80);
 
-                    self.rx_id.store((rx_id + 1) % RX_BUFFERS_COUNT, Ordering::Relaxed);
+                    self.rx_id
+                        .store((rx_id + 1) % RX_BUFFERS_COUNT, Ordering::Relaxed);
                     return Some(buf);
                 }
             }
 
             let desc = self.rx_des.add(rx_id * DESC_LEN + 7);
             desc.write_volatile(0x80);
-            self.rx_id.store((rx_id + 1) % RX_BUFFERS_COUNT, Ordering::Relaxed);
+            self.rx_id
+                .store((rx_id + 1) % RX_BUFFERS_COUNT, Ordering::Relaxed);
         }
 
         None
@@ -391,7 +413,8 @@ impl PcnetDevice {
             desc.add(6).write(0);
             desc.add(7).write(0x83);
 
-            self.tx_id.store((tx_id + 1) % TX_BUFFERS_COUNT, Ordering::Relaxed);
+            self.tx_id
+                .store((tx_id + 1) % TX_BUFFERS_COUNT, Ordering::Relaxed);
 
             let mut ports = self.ports.lock();
             let mut csr_0 = ports.read_csr(0);

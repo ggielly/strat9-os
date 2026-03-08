@@ -1,7 +1,4 @@
-use crate::{
-    memory::{frame::FrameAllocator, get_allocator, PhysFrame},
-    sync::SpinLock,
-};
+use crate::{memory::PhysFrame, sync::SpinLock};
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -84,25 +81,20 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
     }
 
     let mut frames = Vec::with_capacity(page_count);
-    let alloc_failed = {
-        let mut guard = get_allocator().lock();
-        let alloc = guard.as_mut().ok_or(RingError::Alloc)?;
-        let mut failed = false;
-        for _ in 0..page_count {
-            let frame = match alloc.alloc_frame() {
-                Ok(f) => f,
-                Err(_) => {
-                    failed = true;
-                    break;
-                }
-            };
-            let v = crate::memory::phys_to_virt(frame.start_address.as_u64());
-            unsafe { core::ptr::write_bytes(v as *mut u8, 0, 4096) };
-            crate::memory::cow::frame_inc_ref(frame);
-            frames.push(frame);
-        }
-        failed
-    };
+    let mut alloc_failed = false;
+    for _ in 0..page_count {
+        let frame = match crate::memory::allocate_frame() {
+            Ok(f) => f,
+            Err(_) => {
+                alloc_failed = true;
+                break;
+            }
+        };
+        let v = crate::memory::phys_to_virt(frame.start_address.as_u64());
+        unsafe { core::ptr::write_bytes(v as *mut u8, 0, 4096) };
+        crate::memory::cow::frame_inc_ref(frame);
+        frames.push(frame);
+    }
     if alloc_failed {
         for rollback in frames.drain(..) {
             crate::memory::cow::frame_dec_ref(rollback);

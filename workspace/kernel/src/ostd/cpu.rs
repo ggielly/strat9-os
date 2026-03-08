@@ -9,7 +9,6 @@
 
 #![allow(unsafe_code)]
 
-
 /// CPU identifier
 ///
 /// Represents a logical CPU in the system. On x86_64, this corresponds
@@ -47,8 +46,8 @@ impl CpuId {
         // This is safe if per-CPU data has been set up via
         // arch::x86_64::percpu::init_gs_base(). The "racy" suffix indicates
         // that no additional synchronization is performed.
-        let apic_id = crate::arch::x86_64::apic::lapic_id();
-        Self::new(apic_id as usize)
+        let cpu_index = crate::arch::x86_64::percpu::current_cpu_index();
+        Self::new(cpu_index)
     }
 
     /// Returns the number of CPUs in the system

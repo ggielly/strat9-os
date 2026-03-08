@@ -14,11 +14,7 @@
 
 extern crate alloc;
 
-use core::{
-    alloc::Layout,
-    fmt::Write,
-    panic::PanicInfo,
-};
+use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
 use strat9_syscall::{call, data::TimeSpec, number};
 
 // ---------------------------------------------------------------------------
@@ -188,7 +184,10 @@ fn resolve_target<'a>(target: &'a str, resolved_buf: &'a mut [u8; 64]) -> Option
     if n == 0 {
         return None;
     }
-    let end = resolved_buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
+    let end = resolved_buf[..n]
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(n);
     if end == 0 {
         return None;
     }
