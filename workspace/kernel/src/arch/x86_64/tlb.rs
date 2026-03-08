@@ -283,15 +283,8 @@ unsafe fn flush_tlb_all() {
 
 /// Send TLB IPI.
 fn send_tlb_ipi(target_apic_id: u32) {
-    unsafe {
-        crate::arch::x86_64::apic::write_reg(crate::arch::x86_64::apic::REG_ESR, 0);
-        crate::arch::x86_64::apic::write_reg(
-            crate::arch::x86_64::apic::REG_ICR_HIGH,
-            target_apic_id << 24,
-        );
-        let icr_low = crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR as u32 | (1 << 14);
-        crate::arch::x86_64::apic::write_reg(crate::arch::x86_64::apic::REG_ICR_LOW, icr_low);
-    }
+    let icr_low = crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR as u32 | (1 << 14);
+    crate::arch::x86_64::apic::send_ipi_raw(target_apic_id, icr_low);
 }
 
 /// Collect target APIC IDs into a pre-allocated buffer.
