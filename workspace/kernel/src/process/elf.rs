@@ -1070,6 +1070,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "push {cs}",
             "push {rip}",
             "mov rdi, {arg0}",
+            "swapgs",
             "iretq",
             ss = in(reg) user_ss,
             rsp_val = in(reg) user_rsp,

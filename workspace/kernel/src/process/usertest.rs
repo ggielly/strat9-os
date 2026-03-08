@@ -243,6 +243,7 @@ extern "C" fn ring3_trampoline() -> ! {
             "push {rflags}",   // RFLAGS
             "push {cs}",       // CS
             "push {rip}",      // RIP
+            "swapgs",
             "iretq",
             ss = in(reg) user_ss,
             rsp = in(reg) user_rsp,
