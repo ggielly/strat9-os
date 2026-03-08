@@ -9,6 +9,7 @@ PHDRS
     text    PT_LOAD;
     rodata  PT_LOAD;
     data    PT_LOAD;
+    bss     PT_LOAD;
 }
 
 SECTIONS
@@ -51,7 +52,7 @@ SECTIONS
         *(.bss .bss.*)
         *(COMMON)
         __bss_end = .;
-    } :data
+    } :bss
 
     /* Discard unneeded sections */
     /DISCARD/ :

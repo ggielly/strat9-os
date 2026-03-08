@@ -119,10 +119,6 @@ long_mode_entry:
     # RDI = multiboot info (System V ABI first arg)
     movl    %esi, %edi
     
-    # DEBUG: Write 'L' to top-left of VGA buffer to indicate Long Mode entry
-    movq    $0xB8000, %rax
-    movw    $0x2F4C, (%rax)  # 'L' with white on green
-    
     call    kernel_main
 
 .halt_loop:

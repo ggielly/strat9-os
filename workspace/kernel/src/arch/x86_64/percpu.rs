@@ -36,6 +36,9 @@ pub struct PerCpuArch {
     pub kernel_rsp: AtomicU64, // offset 16
 }
 
+const _: () = assert!(core::mem::offset_of!(PerCpuArch, user_rsp) == USER_RSP_OFFSET);
+const _: () = assert!(core::mem::offset_of!(PerCpuArch, kernel_rsp) == KERNEL_RSP_OFFSET);
+
 /// Per-CPU state.
 #[repr(C)]
 pub struct PerCpu {
