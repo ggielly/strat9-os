@@ -223,6 +223,54 @@ pub fn current_task_clone_try() -> Option<Arc<Task>> {
     task
 }
 
+/// Debug-only blocking variant used to diagnose early ring3 entry stalls.
+///
+/// Spins with `try_lock()` so we can emit progress logs instead of blocking
+/// silently on `SCHEDULER.lock()`.
+pub fn current_task_clone_spin_debug(trace_label: &str) -> Option<Arc<Task>> {
+    let cpu_index = current_cpu_index();
+    let mut spins = 0usize;
+    loop {
+        if let Some(mut scheduler) = SCHEDULER.try_lock() {
+            return if let Some(ref mut sched) = *scheduler {
+                sched.cpus.get_mut(cpu_index).and_then(|cpu| {
+                    let arc = cpu.current_task.as_ref()?;
+                    let strong = Arc::strong_count(arc);
+                    if strong == 0 || strong > (isize::MAX as usize) / 2 {
+                        let ptr = Arc::as_ptr(arc) as *const u8;
+                        crate::serial_force_println!(
+                            "[trace][sched] {} corrupt current_task cpu={} strong={:#x} ptr={:p}",
+                            trace_label,
+                            cpu_index,
+                            strong,
+                            ptr,
+                        );
+                        let idle = cpu.idle_task.clone();
+                        cpu.current_task = Some(idle.clone());
+                        Some(idle)
+                    } else {
+                        Some(arc.clone())
+                    }
+                })
+            } else {
+                None
+            };
+        }
+
+        spins = spins.saturating_add(1);
+        if spins == 2_000_000 {
+            crate::serial_force_println!(
+                "[trace][sched] {} waiting current_task cpu={} owner_cpu={}",
+                trace_label,
+                cpu_index,
+                SCHEDULER.owner_cpu()
+            );
+            spins = 0;
+        }
+        core::hint::spin_loop();
+    }
+}
+
 /// Resolve a POSIX pid to internal TaskId.
 pub fn get_task_id_by_pid(pid: Pid) -> Option<TaskId> {
     let saved_flags = save_flags_and_cli();

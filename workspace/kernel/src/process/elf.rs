@@ -1043,7 +1043,8 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     use crate::arch::x86_64::gdt;
     use core::sync::atomic::Ordering;
 
-    let task = crate::process::scheduler::current_task_clone()
+    crate::serial_force_println!("[trace][elf] ring3_trampoline before current_task");
+    let task = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
         .expect("elf_ring3_trampoline: no current task");
     crate::serial_force_println!(
         "[trace][elf] ring3_trampoline enter tid={} name={}",

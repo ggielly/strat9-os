@@ -385,6 +385,8 @@ pub fn start_apic_timer(ticks_per_10ms: u32) {
         let lvt_after = apic::read_reg(apic::REG_LVT_TIMER);
         log::info!("LVT Timer register after: 0x{:08X}", lvt_after);
 
+        stop_pit();
+
         // Set initial count (fires every ~10ms = 100Hz)
         log::info!(
             "Setting timer initial count to: {} (0x{:08X})",
