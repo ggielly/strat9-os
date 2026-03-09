@@ -534,6 +534,27 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     // Here we are
     // We have the memory map from the bootloader, with all modules reserved.
+    memory::boot_alloc::init_boot_allocator(&mmap_work[..mmap_work_len]);
+    serial_println!("[init] Boot allocator ready.");
+
+    let total_ram = mmap_work[..mmap_work_len]
+        .iter()
+        .filter(|region| {
+            matches!(
+                region.kind,
+                boot::entry::MemoryKind::Free | boot::entry::MemoryKind::Reclaim
+            )
+        })
+        .map(|region| region.base.saturating_add(region.size))
+        .max()
+        .unwrap_or(0);
+
+    {
+        let mut boot_alloc = memory::boot_alloc::get_boot_allocator().lock();
+        memory::frame::init_metadata_array(total_ram, &mut *boot_alloc);
+    }
+    serial_println!("[init] Frame metadata ready.");
+
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
 
     serial_println!("[init] Buddy allocator ready.");
@@ -660,14 +681,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] VFS initialized.");
     vga_println!("[OK] VFS initialized");
     register_boot_initfs_modules(args.initfs_base, args.initfs_size);
-
-    #[cfg(feature = "selftest")]
-    serial_println!("[init] Initializing COW metadata...");
-
-    memory::init_cow_subsystem(&mmap_work[..mmap_work_len]);
-
-    #[cfg(feature = "selftest")]
-    serial_println!("[init] COW metadata initialized.");
 
     log_boot_module_magics("post-cow");
 

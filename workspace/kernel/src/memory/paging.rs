@@ -24,7 +24,12 @@ pub struct BuddyFrameAllocator;
 unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     /// Performs the allocate frame operation.
     fn allocate_frame(&mut self) -> Option<X86PhysFrame<Size4KiB>> {
-        let frame = crate::memory::allocate_frame().ok()?;
+        // SAFETY: BuddyFrameAllocator is called from OffsetPageTable during page-table
+        // operations, which always occur either in early single-threaded init or while
+        // holding the scheduler SpinLock (which disables IRQs). IRQs are therefore
+        // guaranteed to be off at this point.
+        let token = unsafe { crate::sync::IrqDisabledToken::new_unchecked() };
+        let frame = crate::memory::allocate_frame(&token).ok()?;
         X86PhysFrame::from_start_address(frame.start_address).ok()
     }
 }

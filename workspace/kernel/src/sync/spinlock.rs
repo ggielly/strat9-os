@@ -94,7 +94,9 @@ impl<T> SpinLock<T> {
 
     /// Try to acquire the lock without touching interrupt flags.
     ///
-    /// Caller must enforce IRQ/preemption constraints.
+    /// Returns `None` if IRQs are currently enabled (i.e. no `IrqDisabledToken`
+    /// can be constructed) or if the lock is already held.
+    /// Caller must ensure IRQs remain disabled for the lifetime of the guard.
     pub fn try_lock_no_irqsave(&self) -> Option<SpinLockGuard<'_, T>> {
         let irq_token = IrqDisabledToken::verify()?;
         if self

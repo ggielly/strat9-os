@@ -100,7 +100,11 @@ impl SlabState {
         let slab_size = SLAB_SIZES[ci];
 
         // Allocate one page (order-0) from the buddy allocator.
-        let frame = match memory::allocate_frame() {
+        // SAFETY: refill is called while SLAB_ALLOC is locked; SpinLock::lock()
+        // disables IRQs via save_flags_and_cli before acquiring the lock, so
+        // IRQs are guaranteed to be disabled here.
+        let token = unsafe { crate::sync::IrqDisabledToken::new_unchecked() };
+        let frame = match memory::allocate_frame(&token) {
             Ok(f) => f,
             Err(_) => return, // OOM — caller will return null
         };
@@ -276,10 +280,12 @@ unsafe impl GlobalAlloc for LockedHeap {
                 );
             }
 
-            match memory::allocate_frames(order) {
-                Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,
-                Err(_) => ptr::null_mut(),
-            }
+            crate::sync::with_irqs_disabled(|token| {
+                match memory::allocate_frames(token, order) {
+                    Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,
+                    Err(_) => ptr::null_mut(),
+                }
+            })
         }
     }
 
@@ -305,7 +311,9 @@ unsafe impl GlobalAlloc for LockedHeap {
             let phys_addr = (ptr as u64).wrapping_sub(hhdm);
 
             if let Ok(frame) = PhysFrame::from_start_address(PhysAddr::new(phys_addr)) {
-                memory::free_frames(frame, order);
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_frames(token, frame, order);
+                });
             }
         }
     }

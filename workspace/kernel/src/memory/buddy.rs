@@ -3,7 +3,10 @@
 use crate::{
     boot::entry::{MemoryKind, MemoryRegion},
     memory::{
-        frame::{AllocError, FrameAllocator, PhysFrame},
+        boot_alloc,
+        frame::{
+            frame_flags, get_meta, AllocError, FrameAllocator, PhysFrame, FRAME_META_LINK_NONE,
+        },
         hhdm_offset, phys_to_virt,
         zone::{BuddyBitmap, Zone, ZoneType, MAX_ORDER},
     },
@@ -77,11 +80,17 @@ impl BuddyAllocator {
         // Pass 1: compute per-zone address span (base + span_pages)
         self.pass_count(memory_regions);
 
-        // Pass 2: steal bitmap storage from free regions and wire bitmap pointers
-        self.pass_steal_and_setup_bitmaps(memory_regions);
+        // Pass 2: reserve bitmap storage via the boot allocator.
+        self.pass_boot_alloc_and_setup_bitmaps();
 
-        // Pass 3: populate free lists from free memory excluding stolen pages
-        self.pass_populate(memory_regions);
+        // Pass 3: populate free lists from the boot allocator's remaining ranges.
+        let mut remaining = [MemoryRegion {
+            base: 0,
+            size: 0,
+            kind: MemoryKind::Reserved,
+        }; boot_alloc::MAX_BOOT_ALLOC_REGIONS];
+        let remaining_len = boot_alloc::snapshot_free_regions(&mut remaining);
+        self.pass_populate(&remaining[..remaining_len]);
 
         for zone in &self.zones {
             serial_println!(
@@ -130,27 +139,34 @@ impl BuddyAllocator {
     }
 
     /// Performs the pass steal and setup bitmaps operation.
-    fn pass_steal_and_setup_bitmaps(&mut self, memory_regions: &[MemoryRegion]) {
+    fn pass_boot_alloc_and_setup_bitmaps(&mut self) {
         for zi in 0..ZoneType::COUNT {
             let zone_span = self.zones[zi].span_pages;
             let needed_bytes = Self::bitmap_bytes_for_span(zone_span);
-            let needed_pages = needed_bytes.div_ceil(PAGE_SIZE as usize);
+            let reserved_bytes = Self::align_up(needed_bytes as u64, PAGE_SIZE);
 
-            if needed_pages == 0 {
+            if reserved_bytes == 0 {
                 self.bitmap_pool[zi] = (0, 0);
                 self.clear_zone_bitmaps(zi);
                 continue;
             }
 
-            let (pool_start, pool_end) =
-                self.steal_contiguous_pool(memory_regions, zi, needed_pages as u64);
+            let pool_start = boot_alloc::alloc_bytes(needed_bytes, PAGE_SIZE as usize)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Buddy allocator: unable to reserve {} bytes for zone {:?} bitmaps",
+                        needed_bytes, self.zones[zi].zone_type
+                    )
+                })
+                .as_u64();
+            let pool_end = pool_start.saturating_add(reserved_bytes);
             self.bitmap_pool[zi] = (pool_start, pool_end);
             buddy_dbg!(
-                "  Zone {:?}: bitmap pool phys=0x{:x}..0x{:x} ({} pages)",
+                "  Zone {:?}: bitmap pool phys=0x{:x}..0x{:x} ({} bytes)",
                 self.zones[zi].zone_type,
                 pool_start,
                 pool_end,
-                needed_pages
+                needed_bytes
             );
 
             // Zero stolen pages to initialize all bitmaps to 0.
@@ -173,23 +189,7 @@ impl BuddyAllocator {
                 let Some((start, end)) = Self::zone_intersection_aligned(region, zi) else {
                     continue;
                 };
-
-                let (stolen_start, stolen_end) = self.bitmap_pool[zi];
-                if stolen_start == 0
-                    || stolen_end == 0
-                    || end <= stolen_start
-                    || start >= stolen_end
-                {
-                    self.seed_range_as_free(zi, start, end);
-                    continue;
-                }
-
-                if start < stolen_start {
-                    self.seed_range_as_free(zi, start, stolen_start);
-                }
-                if stolen_end < end {
-                    self.seed_range_as_free(zi, stolen_end, end);
-                }
+                self.seed_range_as_free(zi, start, end);
             }
         }
     }
@@ -267,11 +267,7 @@ impl BuddyAllocator {
     }
 
     /// Allocates from zone.
-    fn alloc_from_zone(
-        zone: &mut Zone,
-        order: u8,
-        _token: &IrqDisabledToken,
-    ) -> Option<PhysFrame> {
+    fn alloc_from_zone(zone: &mut Zone, order: u8, _token: &IrqDisabledToken) -> Option<PhysFrame> {
         for cur_order in order..=MAX_ORDER as u8 {
             let Some(frame_phys) = Self::free_list_pop(zone, cur_order) else {
                 continue;
@@ -292,12 +288,14 @@ impl BuddyAllocator {
             while split_order > order {
                 split_order -= 1;
                 let buddy_phys = frame_phys + ((1u64 << split_order) * PAGE_SIZE);
+                Self::mark_block_free(buddy_phys, split_order);
                 Self::free_list_push(zone, buddy_phys, split_order);
                 // Pair at split_order becomes (allocated, free).
                 let _ = Self::toggle_pair(zone, frame_phys, split_order);
             }
 
             zone.allocated += 1usize << order;
+            Self::mark_block_allocated(frame_phys, order);
 
             #[cfg(debug_assertions)]
             Self::mark_allocated(zone, frame_phys, order, true);
@@ -331,6 +329,7 @@ impl BuddyAllocator {
         #[cfg(debug_assertions)]
         Self::mark_allocated(zone, frame_phys, order, false);
 
+        Self::mark_block_free(frame_phys, order);
         Self::insert_free_block(zone, frame_phys, order);
         zone.allocated = zone.allocated.saturating_sub(1usize << order);
     }
@@ -343,11 +342,13 @@ impl BuddyAllocator {
         loop {
             let bit_is_set = Self::toggle_pair(zone, current, order);
             if bit_is_set || order == MAX_ORDER as u8 {
+                Self::mark_block_free(current, order);
                 Self::free_list_push(zone, current, order);
                 break;
             }
 
             let Some(buddy) = Self::buddy_phys(zone, current, order) else {
+                Self::mark_block_free(current, order);
                 Self::free_list_push(zone, current, order);
                 break;
             };
@@ -356,6 +357,7 @@ impl BuddyAllocator {
             if !removed {
                 // Inconsistency fallback: keep allocator consistent.
                 debug_assert!(false, "buddy bitmap/list inconsistency while freeing");
+                Self::mark_block_free(current, order);
                 Self::free_list_push(zone, current, order);
                 break;
             }
@@ -484,29 +486,43 @@ impl BuddyAllocator {
     /// Reads free next.
     #[inline]
     fn read_free_next(phys: u64) -> u64 {
-        unsafe { *(phys_to_virt(phys) as *const u64) }
+        let next = get_meta(PhysAddr::new(phys)).next();
+        if next == FRAME_META_LINK_NONE {
+            0
+        } else {
+            next
+        }
     }
 
     /// Writes free next.
     #[inline]
     fn write_free_next(phys: u64, next: u64) {
-        unsafe {
-            *(phys_to_virt(phys) as *mut u64) = next;
-        }
+        get_meta(PhysAddr::new(phys)).set_next(if next == 0 {
+            FRAME_META_LINK_NONE
+        } else {
+            next
+        });
     }
 
     /// Reads free prev.
     #[inline]
     fn read_free_prev(phys: u64) -> u64 {
-        unsafe { *((phys_to_virt(phys) + 8) as *const u64) }
+        let prev = get_meta(PhysAddr::new(phys)).prev();
+        if prev == FRAME_META_LINK_NONE {
+            0
+        } else {
+            prev
+        }
     }
 
     /// Writes free prev.
     #[inline]
     fn write_free_prev(phys: u64, prev: u64) {
-        unsafe {
-            *((phys_to_virt(phys) + 8) as *mut u64) = prev;
-        }
+        get_meta(PhysAddr::new(phys)).set_prev(if prev == 0 {
+            FRAME_META_LINK_NONE
+        } else {
+            prev
+        });
     }
 
     /// Performs the zone index for addr operation.
@@ -555,43 +571,6 @@ impl BuddyAllocator {
         }
     }
 
-    /// Performs the steal contiguous pool operation.
-    fn steal_contiguous_pool(
-        &self,
-        memory_regions: &[MemoryRegion],
-        zone_idx: usize,
-        needed_pages: u64,
-    ) -> (u64, u64) {
-        let needed_bytes = needed_pages * PAGE_SIZE;
-        for region in memory_regions {
-            let Some((start, end)) = Self::zone_intersection_aligned(region, zone_idx) else {
-                continue;
-            };
-            if end - start < needed_bytes {
-                continue;
-            }
-            let mut candidate = start;
-            while candidate + needed_bytes <= end {
-                let candidate_end = candidate + needed_bytes;
-                if let Some(overlap_end) = Self::protected_overlap_end(candidate, candidate_end) {
-                    candidate = Self::align_up(overlap_end, PAGE_SIZE);
-                    continue;
-                }
-                buddy_dbg!(
-                    "  Zone {:?}: steal candidate accepted 0x{:x}..0x{:x}",
-                    self.zones[zone_idx].zone_type,
-                    candidate,
-                    candidate_end
-                );
-                return (candidate, candidate_end);
-            }
-        }
-        panic!(
-            "Buddy allocator: damn, I cannot reserve {} pages for zone {:?} bitmaps",
-            needed_pages, self.zones[zone_idx].zone_type
-        );
-    }
-
     /// Performs the protected overlap end operation.
     fn protected_overlap_end(start: u64, end: u64) -> Option<u64> {
         for (base, size) in Self::protected_module_ranges().into_iter().flatten() {
@@ -625,19 +604,8 @@ impl BuddyAllocator {
     }
 
     /// Performs the protected module ranges operation.
-    fn protected_module_ranges() -> [Option<(u64, u64)>; 10] {
-        [
-            crate::boot::limine::fs_ext4_module(),
-            crate::boot::limine::strate_fs_ramfs_module(),
-            crate::boot::limine::init_module(),
-            crate::boot::limine::console_admin_module(),
-            crate::boot::limine::strate_net_module(),
-            crate::boot::limine::dhcp_client_module(),
-            crate::boot::limine::ping_module(),
-            crate::boot::limine::test_syscalls_module(),
-            crate::boot::limine::test_mem_module(),
-            crate::boot::limine::test_mem_stressed_module(),
-        ]
+    fn protected_module_ranges() -> [Option<(u64, u64)>; boot_alloc::MAX_PROTECTED_RANGES] {
+        boot_alloc::protected_module_ranges()
     }
 
     /// Performs the pairs for order operation.
@@ -678,6 +646,26 @@ impl BuddyAllocator {
     fn align_down(value: u64, align: u64) -> u64 {
         debug_assert!(align.is_power_of_two());
         value & !(align - 1)
+    }
+
+    fn mark_block_allocated(frame_phys: u64, order: u8) {
+        Self::set_block_meta(frame_phys, order, frame_flags::ALLOCATED);
+    }
+
+    fn mark_block_free(frame_phys: u64, order: u8) {
+        Self::set_block_meta(frame_phys, order, frame_flags::FREE);
+    }
+
+    fn set_block_meta(frame_phys: u64, order: u8, flags: u32) {
+        let page_count = 1usize << order;
+        for page_idx in 0..page_count {
+            let phys = frame_phys + page_idx as u64 * PAGE_SIZE;
+            let meta = get_meta(PhysAddr::new(phys));
+            meta.set_flags(flags);
+            meta.set_order(order);
+            meta.set_next(FRAME_META_LINK_NONE);
+            meta.set_prev(FRAME_META_LINK_NONE);
+        }
     }
 }
 
@@ -1011,7 +999,10 @@ fn free_order0_cached(frame: PhysFrame) {
 }
 
 /// Allocate frames with per-CPU caching on order-0 requests.
-pub fn alloc(order: u8) -> Result<PhysFrame, AllocError> {
+///
+/// `_token` is a compile-time proof that interrupts are disabled on the calling CPU,
+/// preventing re-entrant allocation through an interrupt handler on the same lock.
+pub fn alloc(_token: &IrqDisabledToken, order: u8) -> Result<PhysFrame, AllocError> {
     if crate::silo::debug_boot_reg_active() {
         crate::serial_println!(
             "[trace][buddy] alloc enter order={} buddy_lock={:#x}",
@@ -1037,7 +1028,9 @@ pub fn alloc(order: u8) -> Result<PhysFrame, AllocError> {
 }
 
 /// Free frames with per-CPU caching on order-0 requests.
-pub fn free(frame: PhysFrame, order: u8) {
+///
+/// `_token` is a compile-time proof that interrupts are disabled on the calling CPU.
+pub fn free(_token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
     if order == 0 {
         free_order0_cached(frame);
     } else {

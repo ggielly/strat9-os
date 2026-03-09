@@ -146,9 +146,11 @@ impl AddressSpace {
     /// kernel mapping changes propagate automatically.
     pub fn new_user() -> Result<Self, &'static str> {
         // Allocate a frame for the new PML4 table.
-        let new_l4_phys = crate::memory::allocate_frame()
-            .map_err(|_| "Failed to allocate PML4 frame")?
-            .start_address;
+        let new_l4_phys = crate::sync::with_irqs_disabled(|token| {
+            crate::memory::allocate_frame(token)
+        })
+        .map_err(|_| "Failed to allocate PML4 frame")?
+        .start_address;
 
         let new_l4_virt = VirtAddr::new(crate::memory::phys_to_virt(new_l4_phys.as_u64()));
 
@@ -378,8 +380,10 @@ impl AddressSpace {
             VmaPageSize::Huge => 9,
         };
 
-        let frame =
-            crate::memory::allocate_frames(order).map_err(|_| "OOM during demand paging")?;
+        let frame = crate::sync::with_irqs_disabled(|token| {
+            crate::memory::allocate_frames(token, order)
+        })
+        .map_err(|_| "OOM during demand paging")?;
 
         let mut page_flags = vma.flags.to_page_flags();
 
@@ -400,11 +404,15 @@ impl AddressSpace {
                             core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
-                            crate::memory::free_frames(frame, order);
+                            crate::sync::with_irqs_disabled(|token| {
+                                crate::memory::free_frames(token, frame, order);
+                            });
                             return Ok(());
                         }
                         Err(_) => {
-                            crate::memory::free_frames(frame, order);
+                            crate::sync::with_irqs_disabled(|token| {
+                                crate::memory::free_frames(token, frame, order);
+                            });
                             return Err("Failed to map demand page (4K)");
                         }
                     }
@@ -423,11 +431,15 @@ impl AddressSpace {
                             core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
-                            crate::memory::free_frames(frame, order);
+                            crate::sync::with_irqs_disabled(|token| {
+                                crate::memory::free_frames(token, frame, order);
+                            });
                             return Ok(());
                         }
                         Err(_) => {
-                            crate::memory::free_frames(frame, order);
+                            crate::sync::with_irqs_disabled(|token| {
+                                crate::memory::free_frames(token, frame, order);
+                            });
                             return Err("Failed to map demand page (2M)");
                         }
                     }
@@ -501,8 +513,10 @@ impl AddressSpace {
                 VmaPageSize::Huge => 9,
             };
 
-            let frame =
-                crate::memory::allocate_frames(order).map_err(|_| "Failed to allocate frame")?;
+            let frame = crate::sync::with_irqs_disabled(|token| {
+                crate::memory::allocate_frames(token, order)
+            })
+            .map_err(|_| "Failed to allocate frame")?;
 
             // Zero the frame
             unsafe {
@@ -554,7 +568,9 @@ impl AddressSpace {
                     page_size
                 );
                 // Free frame for this page that failed to map.
-                crate::memory::free_frames(frame, order);
+                crate::sync::with_irqs_disabled(|token| {
+                    crate::memory::free_frames(token, frame, order);
+                });
 
                 // Roll back already mapped pages to keep state consistent.
                 for j in (0..mapped_pages).rev() {
@@ -1493,7 +1509,9 @@ impl Drop for AddressSpace {
         let phys_frame = crate::memory::PhysFrame {
             start_address: self.cr3_phys,
         };
-        crate::memory::free_frame(phys_frame);
+        crate::sync::with_irqs_disabled(|token| {
+            crate::memory::free_frame(token, phys_frame);
+        });
 
         log::trace!("AddressSpace::drop end CR3={:#x}", self.cr3_phys.as_u64());
         log::debug!(
@@ -1512,7 +1530,9 @@ fn free_frame(phys: PhysAddr) {
     let phys_frame = crate::memory::PhysFrame {
         start_address: phys,
     };
-    crate::memory::free_frame(phys_frame);
+    crate::sync::with_irqs_disabled(|token| {
+        crate::memory::free_frame(token, phys_frame);
+    });
 }
 
 /// Releases l1 table.

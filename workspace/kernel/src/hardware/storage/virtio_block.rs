@@ -198,7 +198,10 @@ impl VirtioBlockDevice {
         // To be safe and simple with the frame allocator, we'll alloc a frame.
         // In a real optimized driver, we would have a slab allocator or pre-allocated pool.
 
-        let metadata_frame = memory::allocate_frame().map_err(|_| BlockError::NotReady)?;
+        let metadata_frame = crate::sync::with_irqs_disabled(|token| {
+            memory::allocate_frame(token)
+        })
+        .map_err(|_| BlockError::NotReady)?;
 
         let metadata_phys = metadata_frame.start_address.as_u64();
         let metadata_virt = crate::memory::phys_to_virt(metadata_phys);
@@ -244,8 +247,13 @@ impl VirtioBlockDevice {
             let buf_pages = (buf_size + 4095) / 4096;
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
-            let buf_frame = memory::allocate_frames(buf_order).map_err(|_| {
-                memory::free_frame(metadata_frame);
+            let buf_frame = crate::sync::with_irqs_disabled(|token| {
+                memory::allocate_frames(token, buf_order)
+            })
+            .map_err(|_| {
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_frame(token, metadata_frame);
+                });
                 BlockError::NotReady
             })?;
 
@@ -279,10 +287,12 @@ impl VirtioBlockDevice {
             Err(_) => {
                 drop(queue);
                 // Cleanup
-                memory::free_frame(metadata_frame);
-                if let Some((f, o)) = data_frame_info {
-                    memory::free_frames(f, o);
-                }
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_frame(token, metadata_frame);
+                    if let Some((f, o)) = data_frame_info {
+                        memory::free_frames(token, f, o);
+                    }
+                });
                 return Err(BlockError::IoError);
             }
         };
@@ -341,12 +351,16 @@ impl VirtioBlockDevice {
                 }
 
                 // Free DMA buffer
-                memory::free_frames(buf_frame, buf_order);
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_frames(token, buf_frame, buf_order);
+                });
             }
         }
 
         // Free metadata frame
-        memory::free_frame(metadata_frame);
+        crate::sync::with_irqs_disabled(|token| {
+            memory::free_frame(token, metadata_frame);
+        });
 
         if status_byte == BlockStatus::Ok as u8 {
             Ok(())

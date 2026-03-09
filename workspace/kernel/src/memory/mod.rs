@@ -10,7 +10,7 @@ pub mod paging;
 pub mod userslice;
 pub mod zone;
 
-use crate::boot::entry::MemoryRegion;
+use crate::{boot::entry::MemoryRegion, sync::IrqDisabledToken};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Higher Half Direct Map offset.
@@ -46,73 +46,58 @@ pub fn init_memory_manager(memory_regions: &[MemoryRegion]) {
 }
 
 /// Initialize copy-on-write metadata.
-pub fn init_cow_subsystem(memory_regions: &[MemoryRegion]) {
-    init_cow_metadata(memory_regions);
-}
-
-/// Initializes cow metadata.
-fn init_cow_metadata(memory_regions: &[MemoryRegion]) {
-    use crate::boot::entry::MemoryKind;
-
-    let max_end = memory_regions
-        .iter()
-        .filter(|r| matches!(r.kind, MemoryKind::Free | MemoryKind::Reclaim))
-        .map(|r| r.base.saturating_add(r.size))
-        .max()
-        .unwrap_or(0);
-
-    if max_end == 0 {
-        log::warn!("COW metadata not initialized: no usable memory regions");
-        return;
-    }
-
-    let max_pfn = ((max_end.saturating_add(4095)) / 4096) as usize;
-
-    // SAFETY: Called once during boot.
-    unsafe {
-        cow::init_frame_metadata(max_pfn);
-    }
-}
+pub fn init_cow_subsystem(_memory_regions: &[MemoryRegion]) {}
 
 // Re-exports
 pub use address_space::{kernel_address_space, AddressSpace, VmaFlags, VmaPageSize, VmaType};
 pub use buddy::get_allocator;
 pub use frame::{AllocError, FrameAllocator, PhysFrame};
 pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSliceWrite};
+pub use crate::sync::with_irqs_disabled;
 
 /// Allocate `2^order` contiguous physical frames.
+///
+/// Requires an `IrqDisabledToken` proving that IRQs are disabled on the calling CPU,
+/// preventing re-entrant allocation from an interrupt handler on the same lock.
 #[inline]
-pub fn allocate_frames(order: u8) -> Result<PhysFrame, AllocError> {
-    buddy::alloc(order)
+pub fn allocate_frames(token: &IrqDisabledToken, order: u8) -> Result<PhysFrame, AllocError> {
+    buddy::alloc(token, order)
 }
 
 /// Free `2^order` contiguous physical frames.
+///
+/// Requires an `IrqDisabledToken` proving that IRQs are disabled on the calling CPU.
 #[inline]
-pub fn free_frames(frame: PhysFrame, order: u8) {
-    buddy::free(frame, order);
+pub fn free_frames(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
+    buddy::free(token, frame, order);
 }
 
 /// Allocate a single physical frame.
 #[inline]
-pub fn allocate_frame() -> Result<PhysFrame, AllocError> {
-    allocate_frames(0)
+pub fn allocate_frame(token: &IrqDisabledToken) -> Result<PhysFrame, AllocError> {
+    allocate_frames(token, 0)
 }
 
 /// Free a single physical frame.
 #[inline]
-pub fn free_frame(frame: PhysFrame) {
-    free_frames(frame, 0);
+pub fn free_frame(token: &IrqDisabledToken, frame: PhysFrame) {
+    free_frames(token, frame, 0);
 }
 
-/// Allocate a zeroed 4KB frame suitable for DMA operations
+/// Allocate a zeroed 4KB frame suitable for DMA operations.
+///
+/// Disables IRQs internally to satisfy the allocator contract.
 pub fn allocate_dma_frame() -> Option<PhysFrame> {
-    let frame = allocate_frame().ok()?;
-    // Zero the frame
-    let virt = phys_to_virt(frame.start_address.as_u64()) as *mut u8;
-    unsafe {
-        core::ptr::write_bytes(virt, 0, 4096);
-    }
-    Some(frame)
+    with_irqs_disabled(|token| {
+        let frame = allocate_frame(token).ok()?;
+        // Zero the frame
+        let virt = phys_to_virt(frame.start_address.as_u64()) as *mut u8;
+        // SAFETY: frame is freshly allocated and HHDM-mapped; we own it exclusively.
+        unsafe {
+            core::ptr::write_bytes(virt, 0, 4096);
+        }
+        Some(frame)
+    })
 }
 
 // TODO: Implement slab allocator
