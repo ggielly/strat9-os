@@ -1432,9 +1432,8 @@ pub fn kernel_spawn_strate(
             .clone()
             .unwrap_or_else(|| alloc::format!("silo-{}", silo.id.sid))
     };
-    let task_name: &'static str = Box::leak(
-        alloc::format!("silo-{}/strate-admin-{}", silo_id, display).into_boxed_str(),
-    );
+    let task_name: &'static str =
+        Box::leak(alloc::format!("silo-{}/strate-admin-{}", silo_id, display).into_boxed_str());
     let task = crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps)
         .map_err(|_| SyscallError::InvalidArgument)?;
     let task_id = task.id;
@@ -1602,17 +1601,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
     BOOT_REG_IN_PROGRESS.store(true, Ordering::Relaxed);
     let result = (|| -> Result<u32, SyscallError> {
         let sanitized = sanitize_label(label);
-        let mut spins = 0usize;
-        let mut mgr = loop {
-            if let Some(guard) = SILO_MANAGER.try_lock_no_irqsave() {
-                break guard;
-            }
-            spins = spins.saturating_add(1);
-            if spins > 1_000_000 {
-                return Err(SyscallError::Again);
-            }
-            core::hint::spin_loop();
-        };
+        let mut mgr = SILO_MANAGER.lock();
         crate::serial_println!(
             "[trace][silo] register_boot_strate_task lock acquired tid={}",
             task_id.as_u64()
@@ -1670,17 +1659,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             output_buf: None,
         };
 
-        let mut spins = 0usize;
-        let mut mgr = loop {
-            if let Some(guard) = SILO_MANAGER.try_lock_no_irqsave() {
-                break guard;
-            }
-            spins = spins.saturating_add(1);
-            if spins > 1_000_000 {
-                return Err(SyscallError::Again);
-            }
-            core::hint::spin_loop();
-        };
+        let mut mgr = SILO_MANAGER.lock();
         if mgr.silos.contains_key(&id.sid) {
             return Err(SyscallError::Again);
         }
@@ -2887,7 +2866,9 @@ pub fn task_silo_id(task_id: TaskId) -> Option<u32> {
 pub fn silo_output_write(silo_id: u32, data: &[u8]) {
     let mut mgr = SILO_MANAGER.lock();
     if let Ok(silo) = mgr.get_mut(silo_id) {
-        let buf = silo.output_buf.get_or_insert_with(|| Box::new(SiloOutputBuf::new()));
+        let buf = silo
+            .output_buf
+            .get_or_insert_with(|| Box::new(SiloOutputBuf::new()));
         buf.push(data);
     }
 }

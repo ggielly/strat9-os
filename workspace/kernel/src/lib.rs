@@ -1001,21 +1001,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                         "[trace][boot] before register_boot_strate_task tid={} label=ramfs-default",
                         task_id.as_u64()
                     );
-                    let saved = crate::arch::x86_64::save_flags_and_cli();
-                    crate::serial_force_println!(
-                        "[trace][boot] irq-off before register_boot_strate_task tid={}",
-                        task_id.as_u64()
-                    );
-                    let reg_res =
-                        crate::silo::register_boot_strate_task(task_id, "ramfs-default");
+                    let reg_res = crate::silo::register_boot_strate_task(task_id, "ramfs-default");
                     crate::serial_force_println!(
                         "[trace][boot] marker: returned from register_boot_strate_task"
                     );
-                    crate::serial_force_println!(
-                        "[trace][boot] irq-off after register_boot_strate_task tid={}",
-                        task_id.as_u64()
-                    );
-                    crate::arch::x86_64::restore_flags(saved);
                     if let Err(e) = reg_res {
                         crate::serial_force_println!(
                             "[trace][boot] register_boot_strate_task failed tid={} err={:?}",
