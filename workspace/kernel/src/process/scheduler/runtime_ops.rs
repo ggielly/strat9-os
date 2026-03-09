@@ -196,7 +196,6 @@ pub fn finish_switch() {
         "[trace][sched] finish_switch enter cpu={}",
         cpu_index
     );
-    let mut task_to_requeue = None;
     let mut task_to_drop = None;
     {
         crate::serial_force_println!(
@@ -225,37 +224,33 @@ pub fn finish_switch() {
             cpu_index
         );
         if let Some(ref mut sched) = *scheduler {
+            let mut requeue_task = None;
             if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                task_to_requeue = cpu.task_to_requeue.take();
                 task_to_drop = cpu.task_to_drop.take();
+                requeue_task = cpu.task_to_requeue.take();
+            }
+            if let Some(task) = requeue_task {
+                crate::serial_force_println!(
+                    "[trace][sched] finish_switch requeue cpu={} tid={}",
+                    cpu_index,
+                    task.id.as_u64()
+                );
+                let class = sched.class_table.class_for_task(&task);
+                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                    cpu.class_rqs.enqueue(class, task);
+                }
             }
         }
     }
     crate::serial_force_println!(
-        "[trace][sched] finish_switch after lock cpu={} requeue={} drop={}",
+        "[trace][sched] finish_switch after lock cpu={} drop={}",
         cpu_index,
-        task_to_requeue.is_some(),
         task_to_drop.is_some()
     );
 
     // Drop the previous task outside the scheduler lock (if it was the last ref).
     // This is safe because we are fully switched to the new task's stack and CR3.
     drop(task_to_drop);
-
-    if let Some(task) = task_to_requeue {
-        crate::serial_force_println!(
-            "[trace][sched] finish_switch requeue lock cpu={} tid={}",
-            cpu_index,
-            task.id.as_u64()
-        );
-        let mut scheduler = SCHEDULER.lock();
-        if let Some(ref mut sched) = *scheduler {
-            let class = sched.class_table.class_for_task(&task);
-            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                cpu.class_rqs.enqueue(class, task);
-            }
-        }
-    }
 
     // Temporary safety mode: skip FS.base restore in finish_switch.
     // This avoids cloning current_task() on a path that currently trips
