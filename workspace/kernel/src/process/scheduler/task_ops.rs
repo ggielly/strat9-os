@@ -27,6 +27,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
 
     let cpu_index = current_cpu_index();
     let mut parent_to_signal: Option<TaskId> = None;
+    let mut ipi_to_cpu: Option<usize> = None;
     {
         let saved_flags = save_flags_and_cli();
         let mut scheduler = SCHEDULER.lock();
@@ -54,19 +55,25 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 sched.unregister_identity_locked(current_id, current_pid, current.tid);
                 sched.parent_of.remove(&current_id);
 
-                reparent_children(sched, current_id);
+                ipi_to_cpu = reparent_children(sched, current_id);
 
                 if parent.is_some() {
                     sched.zombies.insert(current_id, (exit_code, current_pid));
                 }
                 if let Some(parent_id) = parent {
-                    let _ = sched.wake_task_locked(parent_id);
+                    let (_, ipi_wake) = sched.wake_task_locked(parent_id);
+                    if ipi_to_cpu.is_none() {
+                        ipi_to_cpu = ipi_wake;
+                    }
                     parent_to_signal = Some(parent_id);
                 }
             }
         }
         drop(scheduler);
         restore_flags(saved_flags);
+    }
+    if let Some(ci) = ipi_to_cpu {
+        send_resched_ipi_to_cpu(ci);
     }
 
     if let Some(parent_id) = parent_to_signal {
@@ -657,14 +664,17 @@ pub fn block_current_task() {
 /// the pending wakeup and return immediately without actually blocking.
 pub fn wake_task(id: TaskId) -> bool {
     let saved_flags = save_flags_and_cli();
-    let woken = {
+    let (woken, ipi_cpu) = {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
             sched.wake_task_locked(id)
         } else {
-            false
+            (false, None)
         }
     };
+    if let Some(ci) = ipi_cpu {
+        send_resched_ipi_to_cpu(ci);
+    }
     restore_flags(saved_flags);
     woken
 }
@@ -867,14 +877,17 @@ pub fn kill_task(id: TaskId) -> bool {
                 // the cleanup when it moves the task to task_to_drop.
                 sched.task_cpu.remove(&id);
                 sched.unregister_identity_locked(id, task_pid, current.tid);
-                parent_to_signal =
+                let (parent, ipi_death) =
                     finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
+                parent_to_signal = parent;
                 killed = true;
                 if ci == my_cpu {
                     switch_target = sched.yield_cpu(ci);
                 } else {
-                    // Cross-CPU: IPI makes the remote CPU preempt.
                     ipi_to_cpu = Some(ci);
+                }
+                if ipi_to_cpu.is_none() {
+                    ipi_to_cpu = ipi_death;
                 }
             }
 
@@ -899,8 +912,12 @@ pub fn kill_task(id: TaskId) -> bool {
                         cleanup_task_resources(&task);
                         sched.task_cpu.remove(&id);
                         sched.unregister_identity_locked(id, task_pid, task.tid);
-                        parent_to_signal =
+                        let (parent, ipi_death) =
                             finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
+                        parent_to_signal = parent;
+                        if ipi_to_cpu.is_none() {
+                            ipi_to_cpu = ipi_death;
+                        }
                     }
                     killed = true;
                 }
@@ -919,8 +936,12 @@ pub fn kill_task(id: TaskId) -> bool {
                     sched.all_tasks.remove(&id);
                     sched.task_cpu.remove(&id);
                     sched.unregister_identity_locked(id, task_pid, task.tid);
-                    parent_to_signal =
+                    let (parent, ipi_death) =
                         finalize_forced_death(sched, id, FORCED_KILL_EXIT_CODE, task_pid);
+                    parent_to_signal = parent;
+                    if ipi_to_cpu.is_none() {
+                        ipi_to_cpu = ipi_death;
+                    }
                     killed = true;
                 }
             }
@@ -954,24 +975,23 @@ fn finalize_forced_death(
     task_id: TaskId,
     exit_code: i32,
     task_pid: Pid,
-) -> Option<TaskId> {
-    reparent_children(sched, task_id);
-
-    let parent = sched.parent_of.get(&task_id).copied();
+) -> (Option<TaskId>, Option<usize>) {
+    let ipi_reparent = reparent_children(sched, task_id);
+    let parent = sched.parent_of.remove(&task_id);
     if let Some(parent_id) = parent {
         sched.zombies.insert(task_id, (exit_code, task_pid));
-        let _ = sched.wake_task_locked(parent_id);
-        Some(parent_id)
+        let (_, ipi_wake) = sched.wake_task_locked(parent_id);
+        (Some(parent_id), ipi_reparent.or(ipi_wake))
     } else {
-        None
+        (None, ipi_reparent)
     }
 }
 
 /// Performs the reparent children operation.
-fn reparent_children(sched: &mut Scheduler, dying: TaskId) {
+fn reparent_children(sched: &mut Scheduler, dying: TaskId) -> Option<usize> {
     let children = match sched.children_of.remove(&dying) {
         Some(c) => c,
-        None => return,
+        None => return None,
     };
     let init_id = sched
         .pid_to_task
@@ -982,13 +1002,13 @@ fn reparent_children(sched: &mut Scheduler, dying: TaskId) {
         for child in &children {
             sched.parent_of.remove(child);
         }
-        return;
+        return None;
     };
     if init_id == dying {
         for child in &children {
             sched.parent_of.remove(child);
         }
-        return;
+        return None;
     }
     let mut has_zombie = false;
     let init_children = sched.children_of.entry(init_id).or_default();
@@ -1000,7 +1020,10 @@ fn reparent_children(sched: &mut Scheduler, dying: TaskId) {
         init_children.push(child);
     }
     if has_zombie {
-        let _ = sched.wake_task_locked(init_id);
+        let (_, ipi) = sched.wake_task_locked(init_id);
+        ipi
+    } else {
+        None
     }
 }
 

@@ -58,26 +58,39 @@ pub fn add_task(task: Arc<Task>) {
         core::hint::spin_loop();
     };
     crate::serial_force_println!("[trace][sched] add_task lock acquired tid={}", tid.as_u64());
-    if let Some(ref mut sched) = *scheduler {
+    let ipi_to_cpu = if let Some(ref mut sched) = *scheduler {
         crate::serial_force_println!(
             "[trace][sched] add_task scheduler present tid={}",
             tid.as_u64()
         );
-        sched.add_task(task);
+        let ipi = sched.add_task(task);
         crate::serial_force_println!("[trace][sched] add_task done tid={}", tid.as_u64());
+        ipi
     } else {
         crate::serial_force_println!(
             "[trace][sched] add_task scheduler missing tid={}",
             tid.as_u64()
         );
+        None
+    };
+    drop(scheduler);
+    if let Some(ci) = ipi_to_cpu {
+        send_resched_ipi_to_cpu(ci);
     }
 }
 
 /// Add a task and register a parent/child relation.
 pub fn add_task_with_parent(task: Arc<Task>, parent: TaskId) {
-    let mut scheduler = SCHEDULER.lock();
-    if let Some(ref mut sched) = *scheduler {
-        sched.add_task_with_parent(task, parent);
+    let ipi_to_cpu = {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
+            sched.add_task_with_parent(task, parent)
+        } else {
+            None
+        }
+    };
+    if let Some(ci) = ipi_to_cpu {
+        send_resched_ipi_to_cpu(ci);
     }
 }
 
@@ -192,10 +205,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 /// This safely re-queues the previously running task now that its state is fully saved.
 pub fn finish_switch() {
     let cpu_index = current_cpu_index();
-    crate::serial_force_println!(
-        "[trace][sched] finish_switch enter cpu={}",
-        cpu_index
-    );
+    crate::serial_force_println!("[trace][sched] finish_switch enter cpu={}", cpu_index);
     let mut task_to_drop = None;
     {
         crate::serial_force_println!(

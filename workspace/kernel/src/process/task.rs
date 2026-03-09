@@ -388,20 +388,33 @@ impl CpuContext {
 /// Trampoline for newly created tasks.
 ///
 /// When a new task is first scheduled, `switch_context()` pops the fake
-/// callee-saved registers and `ret`s here. We enable interrupts (the new
-/// task starts with IF=0 because the scheduler disables interrupts) and
-/// jump to the real entry point stored in r12.
+/// callee-saved registers and `ret`s here, then tail-jumps into the actual
+/// post-switch entry helper.
 #[unsafe(naked)]
 unsafe extern "C" fn task_entry_trampoline() {
     core::arch::naked_asm!(
         "call {finish_switch}",
-        "sti",          // Enable interrupts for the new task
-        "call {mark_tlb_ready}",
-        "mov rdi, r13", // Bootstrap arg (seeded cap handle)
-        "jmp r12",      // Jump to real entry point (loaded from initial stack frame)
+        "mov rdi, r12",
+        "mov rsi, r13",
+        "jmp {post_switch_enter}",
         finish_switch = sym crate::process::scheduler::finish_switch,
-        mark_tlb_ready = sym crate::arch::x86_64::percpu::mark_tlb_ready_current,
+        post_switch_enter = sym task_post_switch_enter,
     );
+}
+
+fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
+    crate::arch::x86_64::percpu::mark_tlb_ready_current();
+
+    let is_user_entry = crate::process::scheduler::current_task_clone_try()
+        .map(|task| task.trampoline_entry.load(Ordering::Relaxed) != 0)
+        .unwrap_or(false);
+
+    if !is_user_entry {
+        crate::arch::x86_64::sti();
+    }
+
+    let entry_fn: extern "C" fn(u64) -> ! = unsafe { core::mem::transmute(entry as usize) };
+    entry_fn(arg0)
 }
 
 /// Kernel stack for a task
