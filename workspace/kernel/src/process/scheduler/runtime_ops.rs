@@ -58,26 +58,39 @@ pub fn add_task(task: Arc<Task>) {
         core::hint::spin_loop();
     };
     crate::serial_force_println!("[trace][sched] add_task lock acquired tid={}", tid.as_u64());
-    if let Some(ref mut sched) = *scheduler {
+    let ipi_to_cpu = if let Some(ref mut sched) = *scheduler {
         crate::serial_force_println!(
             "[trace][sched] add_task scheduler present tid={}",
             tid.as_u64()
         );
-        sched.add_task(task);
+        let ipi = sched.add_task(task);
         crate::serial_force_println!("[trace][sched] add_task done tid={}", tid.as_u64());
+        ipi
     } else {
         crate::serial_force_println!(
             "[trace][sched] add_task scheduler missing tid={}",
             tid.as_u64()
         );
+        None
+    };
+    drop(scheduler);
+    if let Some(ci) = ipi_to_cpu {
+        send_resched_ipi_to_cpu(ci);
     }
 }
 
 /// Add a task and register a parent/child relation.
 pub fn add_task_with_parent(task: Arc<Task>, parent: TaskId) {
-    let mut scheduler = SCHEDULER.lock();
-    if let Some(ref mut sched) = *scheduler {
-        sched.add_task_with_parent(task, parent);
+    let ipi_to_cpu = {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(ref mut sched) = *scheduler {
+            sched.add_task_with_parent(task, parent)
+        } else {
+            None
+        }
+    };
+    if let Some(ci) = ipi_to_cpu {
+        send_resched_ipi_to_cpu(ci);
     }
 }
 
@@ -124,12 +137,27 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         core::hint::spin_loop();
     }; // Lock is released here before jumping to first task
 
+    crate::serial_force_println!(
+        "[trace][sched] schedule_on_cpu first_task cpu={} tid={} name={} rsp={:#x} kstack=[{:#x}..{:#x}]",
+        cpu_index,
+        first_task.id.as_u64(),
+        first_task.name,
+        unsafe { (*first_task.context.get()).saved_rsp },
+        first_task.kernel_stack.virt_base.as_u64(),
+        first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64,
+    );
+
     // Set TSS.rsp0 and SYSCALL kernel RSP for the first task
     {
         let stack_top =
             first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64;
         crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
         crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+        crate::serial_force_println!(
+            "[trace][sched] schedule_on_cpu stacks set cpu={} rsp0={:#x}",
+            cpu_index,
+            stack_top
+        );
     }
 
     // Switch to the first task's address space (no-op for kernel tasks)
@@ -140,13 +168,28 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             first_task.name, first_task.id, e
         );
     }
+    crate::serial_force_println!(
+        "[trace][sched] schedule_on_cpu first_task ctx valid cpu={} tid={}",
+        cpu_index,
+        first_task.id.as_u64()
+    );
     unsafe {
         (*first_task.process.address_space.get()).switch_to();
     }
+    crate::serial_force_println!(
+        "[trace][sched] schedule_on_cpu switch_to done cpu={} tid={}",
+        cpu_index,
+        first_task.id.as_u64()
+    );
 
     // Jump to the first task (never returns)
     // SAFETY: The context was set up by CpuContext::new with a valid stack frame.
     // Interrupts are disabled; the trampoline's `sti` re-enables them.
+    crate::serial_force_println!(
+        "[trace][sched] schedule_on_cpu restore_first_task cpu={} tid={}",
+        cpu_index,
+        first_task.id.as_u64()
+    );
     unsafe {
         crate::process::task::do_restore_first_task(
             &raw const (*first_task.context.get()).saved_rsp,
@@ -162,31 +205,62 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 /// This safely re-queues the previously running task now that its state is fully saved.
 pub fn finish_switch() {
     let cpu_index = current_cpu_index();
-    let mut task_to_requeue = None;
+    crate::serial_force_println!("[trace][sched] finish_switch enter cpu={}", cpu_index);
     let mut task_to_drop = None;
     {
-        let mut scheduler = SCHEDULER.lock();
+        crate::serial_force_println!(
+            "[trace][sched] finish_switch before lock cpu={} sched_lock={:#x}",
+            cpu_index,
+            crate::process::scheduler::debug_scheduler_lock_addr()
+        );
+        let mut spins = 0usize;
+        let mut scheduler = loop {
+            if let Some(guard) = SCHEDULER.try_lock() {
+                break guard;
+            }
+            spins = spins.saturating_add(1);
+            if spins == 2_000_000 {
+                crate::serial_force_println!(
+                    "[trace][sched] finish_switch waiting lock cpu={} owner_cpu={}",
+                    cpu_index,
+                    SCHEDULER.owner_cpu()
+                );
+                spins = 0;
+            }
+            core::hint::spin_loop();
+        };
+        crate::serial_force_println!(
+            "[trace][sched] finish_switch lock acquired cpu={}",
+            cpu_index
+        );
         if let Some(ref mut sched) = *scheduler {
+            let mut requeue_task = None;
             if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                task_to_requeue = cpu.task_to_requeue.take();
                 task_to_drop = cpu.task_to_drop.take();
+                requeue_task = cpu.task_to_requeue.take();
+            }
+            if let Some(task) = requeue_task {
+                crate::serial_force_println!(
+                    "[trace][sched] finish_switch requeue cpu={} tid={}",
+                    cpu_index,
+                    task.id.as_u64()
+                );
+                let class = sched.class_table.class_for_task(&task);
+                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                    cpu.class_rqs.enqueue(class, task);
+                }
             }
         }
     }
+    crate::serial_force_println!(
+        "[trace][sched] finish_switch after lock cpu={} drop={}",
+        cpu_index,
+        task_to_drop.is_some()
+    );
 
     // Drop the previous task outside the scheduler lock (if it was the last ref).
     // This is safe because we are fully switched to the new task's stack and CR3.
     drop(task_to_drop);
-
-    if let Some(task) = task_to_requeue {
-        let mut scheduler = SCHEDULER.lock();
-        if let Some(ref mut sched) = *scheduler {
-            let class = sched.class_table.class_for_task(&task);
-            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                cpu.class_rqs.enqueue(class, task);
-            }
-        }
-    }
 
     // Temporary safety mode: skip FS.base restore in finish_switch.
     // This avoids cloning current_task() on a path that currently trips

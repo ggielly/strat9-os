@@ -23,9 +23,9 @@ bitflags! {
         const AES_NI    = 1 << 6;
         const XSAVE     = 1 << 7;
         const AVX       = 1 << 8;
-        const X2APIC    = 1 << 21;
         const F16C      = 1 << 9;
         const VMX       = 1 << 10;
+        const X2APIC    = 1 << 11;
         // ── Leaf 0x01 EDX ──
         const FPU       = 1 << 16;
         const TSC       = 1 << 17;

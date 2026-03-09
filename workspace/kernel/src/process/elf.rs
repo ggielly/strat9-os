@@ -1043,12 +1043,25 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     use crate::arch::x86_64::gdt;
     use core::sync::atomic::Ordering;
 
-    let task = crate::process::scheduler::current_task_clone()
+    crate::serial_force_println!("[trace][elf] ring3_trampoline before current_task");
+    let task = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
         .expect("elf_ring3_trampoline: no current task");
+    crate::serial_force_println!(
+        "[trace][elf] ring3_trampoline enter tid={} name={}",
+        task.id.as_u64(),
+        task.name
+    );
 
     let user_rip = task.trampoline_entry.load(Ordering::Acquire);
     let user_rsp = task.trampoline_stack_top.load(Ordering::Acquire);
     let user_arg0 = task.trampoline_arg0.load(Ordering::Acquire);
+    crate::serial_force_println!(
+        "[trace][elf] ring3_trampoline args tid={} rip={:#x} rsp={:#x} arg0={:#x}",
+        task.id.as_u64(),
+        user_rip,
+        user_rsp,
+        user_arg0
+    );
 
     // Switch to the user address space stored in the task.
     // SAFETY: The address space was set up during task creation and is valid.
@@ -1056,10 +1069,21 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         let as_ref = &*task.process.address_space.get();
         as_ref.switch_to();
     }
+    crate::serial_force_println!(
+        "[trace][elf] ring3_trampoline switch_to done tid={}",
+        task.id.as_u64()
+    );
 
     let user_cs = gdt::user_code_selector().0 as u64;
     let user_ss = gdt::user_data_selector().0 as u64;
     let user_rflags: u64 = 0x202; // IF=1, reserved bit 1 = 1
+    crate::serial_force_println!(
+        "[trace][elf] ring3_trampoline iret tid={} cs={:#x} ss={:#x} rflags={:#x}",
+        task.id.as_u64(),
+        user_cs,
+        user_ss,
+        user_rflags
+    );
 
     // SAFETY: Valid user mappings have been set up. IRETQ switches to Ring 3.
     unsafe {
@@ -1070,6 +1094,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "push {cs}",
             "push {rip}",
             "mov rdi, {arg0}",
+            "swapgs",
             "iretq",
             ss = in(reg) user_ss,
             rsp_val = in(reg) user_rsp,
@@ -1409,7 +1434,11 @@ pub fn load_elf_task_with_caps(
     }
 
     // Bootstrapping: grant Silo Admin capability to the initial userspace task.
-    if name == "init" || name == "silo-admin" || name.starts_with("strate-admin:") {
+    if name == "init"
+        || name == "silo-admin"
+        || name.starts_with("strate-admin:")
+        || name.contains("/strate-admin-")
+    {
         let _ = crate::silo::grant_silo_admin_to_task(&task);
     }
 

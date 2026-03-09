@@ -36,6 +36,9 @@ pub struct PerCpuArch {
     pub kernel_rsp: AtomicU64, // offset 16
 }
 
+const _: () = assert!(core::mem::offset_of!(PerCpuArch, user_rsp) == USER_RSP_OFFSET);
+const _: () = assert!(core::mem::offset_of!(PerCpuArch, kernel_rsp) == KERNEL_RSP_OFFSET);
+
 /// Per-CPU state.
 #[repr(C)]
 pub struct PerCpu {
@@ -170,8 +173,9 @@ pub fn set_kernel_rsp_current(rsp: u64) {
 
 /// Initialize GS base for this CPU to point at its per-CPU block.
 ///
-/// Sets both `IA32_GS_BASE` (0xC000_0101, current GS base) and
-/// `IA32_KERNEL_GS_BASE` (0xC000_0102) to `&PERCPU[cpu_index].arch`.
+/// Sets `IA32_GS_BASE` (0xC000_0101, current GS base) to
+/// `&PERCPU[cpu_index].arch` for kernel execution, and initializes
+/// `IA32_KERNEL_GS_BASE` (0xC000_0102) to 0 as the initial user GS base.
 ///
 /// For the BSP (cpu_index == 0) this also sets `BSP_GS_INITIALIZED`, enabling
 /// the fast (non-serialising) path in `current_cpu_index()`.
@@ -182,11 +186,10 @@ pub fn set_kernel_rsp_current(rsp: u64) {
 pub fn init_gs_base(cpu_index: usize) {
     let base = &PERCPU[cpu_index].arch as *const PerCpuArch as u64;
     // IA32_GS_BASE = 0xC000_0101, IA32_KERNEL_GS_BASE = 0xC000_0102.
-    // Both are set to the kernel per-CPU block.  When user-space TLS is
-    // added, only KERNEL_GS_BASE should be set here; GS_BASE will be
-    // managed by the context switcher.
+    // Keep GS_BASE on kernel per-CPU for Ring 0; seed KERNEL_GS_BASE with 0
+    // so the first Ring 0->3 transition can restore a non-kernel user GS.
     crate::arch::x86_64::wrmsr(0xC000_0101, base);
-    crate::arch::x86_64::wrmsr(0xC000_0102, base);
+    crate::arch::x86_64::wrmsr(0xC000_0102, 0);
 
     if cpu_index == 0 {
         // Release ordering: all prior init writes must be visible before any

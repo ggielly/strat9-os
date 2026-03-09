@@ -206,12 +206,7 @@ fn wait_delivery() {
 
 /// Performs the send ipi operation.
 fn send_ipi(apic_id: u32, value: u32) {
-    unsafe {
-        apic::write_reg(apic::REG_ESR, 0);
-        apic::write_reg(apic::REG_ESR, 0);
-        apic::write_reg(apic::REG_ICR_HIGH, apic_id << 24);
-        apic::write_reg(apic::REG_ICR_LOW, value);
-    }
+    apic::send_ipi_raw(apic_id, value);
     wait_delivery();
 }
 
@@ -239,14 +234,11 @@ pub fn broadcast_panic_halt() {
     if !apic::is_initialized() {
         return;
     }
-    unsafe {
-        apic::write_reg(apic::REG_ESR, 0);
-        // Destination Shorthand: 0b11 (All excluding self)
-        // Delivery Mode: 0b100 (NMI)
-        // Level: 1 (Assert)
-        let icr_low = (0b11 << 18) | (0b100 << 8) | (1 << 14);
-        apic::write_reg(apic::REG_ICR_LOW, icr_low);
-    }
+    // Destination Shorthand: 0b11 (All excluding self)
+    // Delivery Mode: 0b100 (NMI)
+    // Level: 1 (Assert)
+    let icr_low = (0b11 << 18) | (0b100 << 8) | (1 << 14);
+    apic::send_ipi_raw(0, icr_low);
 }
 
 /// Wait at a synchronization barrier until all expected CPUs arrive.
@@ -359,8 +351,7 @@ pub fn init() -> Result<usize, &'static str> {
 /// First Rust function executed on APs after the trampoline.
 #[unsafe(no_mangle)]
 pub extern "C" fn smp_main() -> ! {
-    // Load IDT for this core (shared IDT is fine for now).
-    idt::init();
+    idt::load();
 
     // Re-initialize Local APIC for this core (per-core registers).
     apic::init_ap();

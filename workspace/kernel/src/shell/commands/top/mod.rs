@@ -70,6 +70,83 @@ struct SchedulerMetricsWindow {
     steal_out_delta: u64,
 }
 
+fn collect_silos_from_proc_scheme() -> Option<(Vec<SiloRowData>, Vec<StrateRowData>)> {
+    let fd = crate::vfs::open("/proc/silos", crate::vfs::OpenFlags::READ).ok()?;
+    let bytes = match crate::vfs::read_all(fd) {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = crate::vfs::close(fd);
+            return None;
+        }
+    };
+    let _ = crate::vfs::close(fd);
+    let body = core::str::from_utf8(&bytes).ok()?;
+
+    let mut silos = Vec::new();
+    let mut strate_index: Vec<(String, Vec<String>)> = Vec::new();
+    for (line_idx, line) in body.lines().enumerate() {
+        if line_idx == 0 || line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let sid = fields.next()?;
+        let state = fields.next()?;
+        let tasks = fields.next()?;
+        let _mem_used = fields.next()?;
+        let _mem_min = fields.next()?;
+        let _mem_max = fields.next()?;
+        let _gfx_flags = fields.next()?;
+        let _gfx_sessions = fields.next()?;
+        let _gfx_ttl = fields.next()?;
+        let label = fields.next()?;
+        let name = fields.next()?;
+
+        let strate_name = if label != "-" && !label.is_empty() {
+            String::from(label)
+        } else {
+            String::from(name)
+        };
+        if let Some((_, belongs)) = strate_index
+            .iter_mut()
+            .find(|(entry_name, _)| *entry_name == strate_name)
+        {
+            if !belongs.iter().any(|x| x == name) {
+                belongs.push(String::from(name));
+            }
+        } else {
+            strate_index.push((strate_name, vec![String::from(name)]));
+        }
+
+        silos.push(SiloRowData {
+            sid: String::from(sid),
+            name: String::from(name),
+            state: String::from(state),
+            tasks: String::from(tasks),
+            label: String::from(label),
+        });
+    }
+
+    silos.sort_by_key(|s| s.sid.parse::<u32>().unwrap_or(u32::MAX));
+    strate_index.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut strates = Vec::with_capacity(strate_index.len());
+    for (name, belongs) in strate_index {
+        let mut silos_csv = String::new();
+        for (i, silo_name) in belongs.iter().enumerate() {
+            if i != 0 {
+                silos_csv.push_str(", ");
+            }
+            silos_csv.push_str(silo_name);
+        }
+        strates.push(StrateRowData {
+            name,
+            silos: silos_csv,
+        });
+    }
+
+    Some((silos, strates))
+}
+
 /// Performs the collect snapshot operation.
 fn collect_snapshot() -> TopSnapshot {
     let cpu_count = crate::arch::x86_64::percpu::cpu_count();
@@ -101,55 +178,59 @@ fn collect_snapshot() -> TopSnapshot {
     // Top-like behavior: most CPU-consumed tasks first.
     tasks.sort_by(|a, b| b.ticks.cmp(&a.ticks));
 
-    let mut silos = Vec::new();
-    let mut strate_index: Vec<(String, Vec<String>)> = Vec::new();
-    let mut silo_snapshots = crate::silo::list_silos_snapshot();
-    silo_snapshots.sort_by_key(|s| s.id);
-    for s in silo_snapshots {
-        let label = s.strate_label.unwrap_or_default();
-        let strate_name = if !label.is_empty() {
-            label.clone()
-        } else {
-            s.name.clone()
-        };
-        if let Some((_, belongs)) = strate_index
-            .iter_mut()
-            .find(|(name, _)| *name == strate_name)
-        {
-            if !belongs.iter().any(|x| x == &s.name) {
-                belongs.push(s.name.clone());
-            }
-        } else {
-            strate_index.push((strate_name, vec![s.name.clone()]));
-        }
-        silos.push(SiloRowData {
-            sid: format!("{}", s.id),
-            name: s.name,
-            state: format!("{:?}", s.state),
-            tasks: format!("{}", s.task_count),
-            label: if label.is_empty() {
-                String::from("-")
+    let (silos, strates) = collect_silos_from_proc_scheme().unwrap_or_else(|| {
+        let mut silos = Vec::new();
+        let mut strate_index: Vec<(String, Vec<String>)> = Vec::new();
+        let mut silo_snapshots = crate::silo::list_silos_snapshot();
+        silo_snapshots.sort_by_key(|s| s.id);
+        for s in silo_snapshots {
+            let label = s.strate_label.unwrap_or_default();
+            let strate_name = if !label.is_empty() {
+                label.clone()
             } else {
-                label
-            },
-        });
-    }
-
-    strate_index.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut strates = Vec::with_capacity(strate_index.len());
-    for (name, belongs) in strate_index {
-        let mut silos_csv = String::new();
-        for (i, silo_name) in belongs.iter().enumerate() {
-            if i != 0 {
-                silos_csv.push_str(", ");
+                s.name.clone()
+            };
+            if let Some((_, belongs)) = strate_index
+                .iter_mut()
+                .find(|(name, _)| *name == strate_name)
+            {
+                if !belongs.iter().any(|x| x == &s.name) {
+                    belongs.push(s.name.clone());
+                }
+            } else {
+                strate_index.push((strate_name, vec![s.name.clone()]));
             }
-            silos_csv.push_str(silo_name);
+            silos.push(SiloRowData {
+                sid: format!("{}", s.id),
+                name: s.name,
+                state: format!("{:?}", s.state),
+                tasks: format!("{}", s.task_count),
+                label: if label.is_empty() {
+                    String::from("-")
+                } else {
+                    label
+                },
+            });
         }
-        strates.push(StrateRowData {
-            name,
-            silos: silos_csv,
-        });
-    }
+
+        strate_index.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut strates = Vec::with_capacity(strate_index.len());
+        for (name, belongs) in strate_index {
+            let mut silos_csv = String::new();
+            for (i, silo_name) in belongs.iter().enumerate() {
+                if i != 0 {
+                    silos_csv.push_str(", ");
+                }
+                silos_csv.push_str(silo_name);
+            }
+            strates.push(StrateRowData {
+                name,
+                silos: silos_csv,
+            });
+        }
+
+        (silos, strates)
+    });
 
     TopSnapshot {
         cpu_count,

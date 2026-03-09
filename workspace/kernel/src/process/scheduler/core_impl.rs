@@ -146,22 +146,23 @@ impl Scheduler {
     }
 
     /// Add a task to the scheduler
-    pub fn add_task(&mut self, task: Arc<Task>) {
+    pub fn add_task(&mut self, task: Arc<Task>) -> Option<usize> {
         let cpu_index = self.select_cpu_for_task();
-        self.add_task_on_cpu(task, cpu_index);
+        self.add_task_on_cpu(task, cpu_index)
     }
 
     /// Performs the add task with parent operation.
-    pub fn add_task_with_parent(&mut self, task: Arc<Task>, parent: TaskId) {
+    pub fn add_task_with_parent(&mut self, task: Arc<Task>, parent: TaskId) -> Option<usize> {
         let child = task.id;
         let cpu_index = self.select_cpu_for_task();
-        self.add_task_on_cpu(task, cpu_index);
+        let ipi = self.add_task_on_cpu(task, cpu_index);
         self.parent_of.insert(child, parent);
         self.children_of.entry(parent).or_default().push(child);
+        ipi
     }
 
     /// Performs the add task on cpu operation.
-    fn add_task_on_cpu(&mut self, task: Arc<Task>, cpu_index: usize) {
+    fn add_task_on_cpu(&mut self, task: Arc<Task>, cpu_index: usize) -> Option<usize> {
         let task_id = task.id;
         crate::serial_println!(
             "[trace][sched] add_task_on_cpu enter tid={} cpu={}",
@@ -228,7 +229,9 @@ impl Scheduler {
             cpu_index
         ));
         if cpu_index != current_cpu_index() {
-            send_resched_ipi_to_cpu(cpu_index);
+            Some(cpu_index)
+        } else {
+            None
         }
     }
 
@@ -256,7 +259,10 @@ impl Scheduler {
     }
 
     /// Performs the wake task locked operation.
-    pub fn wake_task_locked(&mut self, id: TaskId) -> bool {
+    ///
+    /// Returns `(was_woken, ipi_cpu)`. The caller must send a resched IPI to
+    /// `ipi_cpu` after releasing the scheduler lock.
+    pub fn wake_task_locked(&mut self, id: TaskId) -> (bool, Option<usize>) {
         self.clear_task_wake_deadline_locked(id);
         if let Some(task) = self.blocked_tasks.remove(&id) {
             // SAFETY: scheduler lock held.
@@ -269,16 +275,18 @@ impl Scheduler {
                 cpu.class_rqs.enqueue(class, task);
                 cpu.need_resched = true;
             }
-            if cpu_index != current_cpu_index() {
-                send_resched_ipi_to_cpu(cpu_index);
-            }
-            true
+            let ipi = if cpu_index != current_cpu_index() {
+                Some(cpu_index)
+            } else {
+                None
+            };
+            (true, ipi)
         } else if let Some(task) = self.all_tasks.get(&id) {
             task.wake_pending
                 .store(true, core::sync::atomic::Ordering::Release);
-            true
+            (true, None)
         } else {
-            false
+            (false, None)
         }
     }
 
@@ -309,7 +317,10 @@ impl Scheduler {
 
         if let Some(child) = zombie {
             let (status, child_pid) = self.zombies.remove(&child).unwrap_or((0, 0));
-            let child_tid = self.all_tasks.get(&child).map(|task| task.tid);
+            // Remove from all_tasks now so that pick_next_task (if it races with
+            // reaping) will see was_registered=false and skip cleanup_task_resources.
+            let reaped_task = self.all_tasks.remove(&child);
+            let child_tid = reaped_task.as_ref().map(|t| t.tid);
             if child_pid != 0 {
                 if let Some(tid) = child_tid {
                     self.unregister_identity_locked(child, child_pid, tid);
@@ -362,21 +373,22 @@ impl Scheduler {
                     self.cpus[cpu_index].task_to_requeue = Some(task);
                 }
             } else if task_state == TaskState::Dead {
-                // Task is Dead. Clean up before deferring the drop.
-                // We must remove from all_tasks NOW to prevent double-cleanup
-                // if the task is also being killed via kill_task().
                 let task_id = task.id;
                 let task_pid = task.pid;
                 let task_tid = task.tid;
 
-                // Remove from global maps - this is the canonical cleanup point
-                self.all_tasks.remove(&task_id);
+                // Remove from global maps. `try_reap_child_locked` may have
+                // already removed the task; in that case `remove` is a no-op
+                // and we must skip `cleanup_task_resources` to avoid running
+                // port/silo teardown twice.
+                let was_registered = self.all_tasks.remove(&task_id).is_some();
                 self.task_cpu.remove(&task_id);
                 self.unregister_identity_locked(task_id, task_pid, task_tid);
 
-                // Run resource cleanup (ports, capabilities, etc.)
-                // SAFETY: scheduler lock held, task is no longer accessible
-                super::task_ops::cleanup_task_resources(&task);
+                if was_registered {
+                    // SAFETY: scheduler lock held, task is no longer accessible
+                    super::task_ops::cleanup_task_resources(&task);
+                }
 
                 // Defer the actual Arc drop to finish_switch()
                 self.cpus[cpu_index].task_to_drop = Some(task);
@@ -560,7 +572,14 @@ impl Scheduler {
             //     class_rqs)?  We need this before any borrow of self.cpus.
             let is_idle_fallback = Arc::ptr_eq(&next, &self.cpus[cpu_index].idle_task);
 
-            // (b) Restore the old running task as current_task.
+            // (b) If pick_next_task moved a Dead task into task_to_drop, we are NOT
+            //     performing the switch so finish_switch() will never run.  Drop the
+            //     Arc here (inside the lock) as a last resort.  cleanup_task_resources
+            //     was already called by pick_next_task, so the only allocation cost is
+            //     the final Arc refcount decrement + deallocation of the Task struct.
+            drop(self.cpus[cpu_index].task_to_drop.take());
+
+            // (c) Restore the old running task as current_task.
             //     Non-idle current was placed in task_to_requeue by pick_next_task.
             //     Idle current was not (it is accessed via idle_task.clone()), so use
             //     the `current` Arc cloned at the start of yield_cpu.
@@ -578,7 +597,7 @@ impl Scheduler {
                 self.cpus[cpu_index].current_task = Some(current.clone());
             }
 
-            // (c) If `next` came from the class run queue (non-idle), re-enqueue it
+            // (d) If `next` came from the class run queue (non-idle), re-enqueue it
             //     so it can be retried on the next tick.  Its context may be
             //     transiently invalid (e.g. stack not yet committed by a new task);
             //     it will be validated again when next picked.

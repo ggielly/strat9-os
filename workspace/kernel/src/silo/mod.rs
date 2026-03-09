@@ -1432,8 +1432,9 @@ pub fn kernel_spawn_strate(
             .clone()
             .unwrap_or_else(|| alloc::format!("silo-{}", silo.id.sid))
     };
-    let task_name: &'static str =
-        Box::leak(alloc::format!("strate-admin:{}", display).into_boxed_str());
+    let task_name: &'static str = Box::leak(
+        alloc::format!("silo-{}/strate-admin-{}", silo_id, display).into_boxed_str(),
+    );
     let task = crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps)
         .map_err(|_| SyscallError::InvalidArgument)?;
     let task_id = task.id;
@@ -2144,9 +2145,9 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
 
     let display = silo_label.unwrap_or(silo_name);
     let task_name_owned = if silo_flags & SILO_FLAG_ADMIN != 0 {
-        alloc::format!("strate-admin:{}", display)
+        alloc::format!("silo-{}/strate-admin-{}", silo_id, display)
     } else {
-        alloc::format!("strate:{}", display)
+        alloc::format!("silo-{}/strate-{}", silo_id, display)
     };
     // Intentional leak: task names are expected to live for the task lifetime.
     // This avoids generic "silo" labels in process viewers.

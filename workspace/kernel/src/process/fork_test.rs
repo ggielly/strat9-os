@@ -41,6 +41,7 @@ extern "C" fn ring3_test_trampoline(ctx_ptr: u64) -> ! {
             "push {rflags}",
             "push {cs}",
             "push {rip}",
+            "swapgs",
             "iretq",
             ss = in(reg) user_ss,
             rsp_val = in(reg) user_rsp,

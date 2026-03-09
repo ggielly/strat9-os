@@ -396,12 +396,6 @@ pub unsafe extern "C" fn kmain() -> ! {
     // Verify the Limine base revision is supported
     assert!(BASE_REVISION.is_supported());
 
-    // Get memory map
-    let _memory_map = match MEMORY_MAP.get_response() {
-        Some(resp) => resp,
-        None => hlt_loop(),
-    };
-
     // Get framebuffer info (graphics mode provided by Limine)
     let (
         fb_addr,
@@ -489,7 +483,14 @@ pub unsafe extern "C" fn kmain() -> ! {
 
     // Resolve loaded modules by exact path, not by index/order.
     // Limine may return modules from config and internal requests in any order.
-    let (initfs_base, initfs_size, ext4_base, ext4_size, ram_base, ram_size) = if let Some(
+    let (
+        fallback_elf_base,
+        fallback_elf_size,
+        ext4_base,
+        ext4_size,
+        ram_base,
+        ram_size,
+    ) = if let Some(
         module_response,
     ) =
         MODULES.get_response()
@@ -751,8 +752,8 @@ pub unsafe extern "C" fn kmain() -> ! {
         acpi_rsdp_size: if rsdp_addr != 0 { 36 } else { 0 },
         memory_map_base,
         memory_map_size,
-        initfs_base,
-        initfs_size,
+        initfs_base: fallback_elf_base,
+        initfs_size: fallback_elf_size,
         framebuffer_addr: fb_addr,
         framebuffer_width: fb_width,
         framebuffer_height: fb_height,

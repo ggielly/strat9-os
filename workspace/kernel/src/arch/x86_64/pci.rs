@@ -393,7 +393,10 @@ impl PciDevice {
 
 /// Iterator for scanning PCI bus
 pub struct PciScanner {
-    bus: u16,
+    bus_queue: [u8; 256],
+    queue_head: usize,
+    queue_tail: usize,
+    seen_buses: [bool; 256],
     device: u8,
     function: u8,
 }
@@ -401,10 +404,23 @@ pub struct PciScanner {
 impl PciScanner {
     /// Creates a new instance.
     pub fn new() -> Self {
-        Self {
-            bus: 0,
+        let mut s = Self {
+            bus_queue: [0u8; 256],
+            queue_head: 0,
+            queue_tail: 1,
+            seen_buses: [false; 256],
             device: 0,
             function: 0,
+        };
+        s.seen_buses[0] = true;
+        s
+    }
+
+    fn enqueue_bus(&mut self, bus: u8) {
+        if !self.seen_buses[bus as usize] && self.queue_tail < 256 {
+            self.seen_buses[bus as usize] = true;
+            self.bus_queue[self.queue_tail] = bus;
+            self.queue_tail += 1;
         }
     }
 }
@@ -412,73 +428,55 @@ impl PciScanner {
 impl Iterator for PciScanner {
     type Item = PciDevice;
 
-    /// Performs the next operation.
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if self.bus > 255 {
-                // serial_println!("[PCI] Scan Complete");
+            if self.queue_head >= self.queue_tail {
                 return None;
             }
+            let bus = self.bus_queue[self.queue_head];
 
-            // if self.bus == 0 && self.device == 0 && self.function == 0 {
-            //     serial_println!("[PCI] Starting Scan 00:00.0");
-            // }
+            if self.device >= 32 {
+                self.queue_head += 1;
+                self.device = 0;
+                self.function = 0;
+                continue;
+            }
 
-            let address = PciAddress::new(self.bus as u8, self.device, self.function);
-
-            // Advance counters for next iteration
+            let address = PciAddress::new(bus, self.device, self.function);
             let current_function = self.function;
+
             self.function += 1;
             if self.function >= 8 {
                 self.function = 0;
                 self.device += 1;
-                if self.device >= 32 {
-                    self.device = 0;
-                    self.bus += 1;
-                }
             }
 
-            // Check if device exists at current address (before increment)
-            let vendor_id = read_vendor_id(address);
-            if is_absent_vendor(vendor_id) {
-                // If function 0 doesn't exist, skip the rest of the functions for this device
+            let Some(dev) = probe_device_full(address) else {
                 if current_function == 0 {
                     self.function = 0;
                     self.device += 1;
-                    if self.device >= 32 {
-                        self.device = 0;
-                        self.bus += 1;
-                    }
                 }
                 continue;
-            }
+            };
 
-            if let Some(dev) = probe_device(address, vendor_id) {
-                // serial_println!("[PCI] Found device at {:?}", address);
-                // Return found device
-                // If it's not a multi-function device and we are at function 0, skip other functions
-                if current_function == 0 && (dev.header_type & 0x80 == 0) {
-                    self.function = 0;
-                    self.device += 1;
-                    if self.device >= 32 {
-                        self.device = 0;
-                        self.bus += 1;
+            if dev.header_type & 0x7F == 0x01 {
+                let secondary = {
+                    let _lock = PCI_IO_LOCK.lock();
+                    unsafe {
+                        outl(CONFIG_ADDRESS, address.config_address(0x18));
+                        ((inl(CONFIG_DATA) >> 8) & 0xFF) as u8
                     }
-                }
-                return Some(dev);
+                };
+                self.enqueue_bus(secondary);
             }
+
+            if current_function == 0 && (dev.header_type & 0x80 == 0) {
+                self.function = 0;
+                self.device += 1;
+            }
+
+            return Some(dev);
         }
-    }
-}
-
-/// Read vendor ID at a specific PCI address
-fn read_vendor_id(address: PciAddress) -> u16 {
-    let addr = address.config_address(config::VENDOR_ID);
-
-    let _lock = PCI_IO_LOCK.lock();
-    unsafe {
-        outl(CONFIG_ADDRESS, addr);
-        (inl(CONFIG_DATA) & 0xFFFF) as u16
     }
 }
 
@@ -511,39 +509,52 @@ fn is_ghost_device(class_code: u8, subclass: u8, prog_if: u8) -> bool {
     class_code == 0xFF && subclass == 0xFF && prog_if == 0xFF
 }
 
-/// Probe a specific PCI address and return device info if present
-fn probe_device(address: PciAddress, vendor_id: u16) -> Option<PciDevice> {
-    let dev = PciDevice {
-        address,
-        vendor_id,
-        device_id: 0, // Will read below
-        class_code: 0,
-        subclass: 0,
-        prog_if: 0,
-        revision: 0,
-        header_type: 0,
-        interrupt_line: 0,
-        interrupt_pin: 0,
-    };
+/// Probe a PCI address using 4 batched dword reads under a single lock hold.
+///
+/// Reads: 0x00 (vendor+device), 0x08 (rev+progif+subclass+class),
+///        0x0C (cacheline+latency+headertype+bist), 0x3C (intline+intpin+mingnt+maxlat).
+fn probe_device_full(address: PciAddress) -> Option<PciDevice> {
+    let _lock = PCI_IO_LOCK.lock();
 
-    let device_id = dev.read_config_u16(config::DEVICE_ID);
+    let word00 = unsafe {
+        outl(CONFIG_ADDRESS, address.config_address(0x00));
+        inl(CONFIG_DATA)
+    };
+    let vendor_id = (word00 & 0xFFFF) as u16;
+    if is_absent_vendor(vendor_id) {
+        return None;
+    }
+    let device_id = (word00 >> 16) as u16;
     if device_id == 0xFFFF || device_id == 0x0000 {
         return None;
     }
-    let class_rev_grp = dev.read_config_u32(config::REVISION_ID);
-    let header_type = dev.read_config_u8(config::HEADER_TYPE);
+
+    let word08 = unsafe {
+        outl(CONFIG_ADDRESS, address.config_address(0x08));
+        inl(CONFIG_DATA)
+    };
+    let word0c = unsafe {
+        outl(CONFIG_ADDRESS, address.config_address(0x0C));
+        inl(CONFIG_DATA)
+    };
+
+    let header_type = ((word0c >> 16) & 0xFF) as u8;
     if !valid_header_type(header_type) {
         return None;
     }
-    let int_grp = dev.read_config_u32(config::INTERRUPT_LINE);
 
-    let class_code = ((class_rev_grp >> 24) & 0xFF) as u8;
-    let subclass = ((class_rev_grp >> 16) & 0xFF) as u8;
-    let prog_if = ((class_rev_grp >> 8) & 0xFF) as u8;
+    let class_code = ((word08 >> 24) & 0xFF) as u8;
+    let subclass = ((word08 >> 16) & 0xFF) as u8;
+    let prog_if = ((word08 >> 8) & 0xFF) as u8;
     if is_ghost_device(class_code, subclass, prog_if) {
         return None;
     }
-    let interrupt_line = quirk_zero_irq_line(vendor_id, device_id, (int_grp & 0xFF) as u8);
+
+    let word3c = unsafe {
+        outl(CONFIG_ADDRESS, address.config_address(0x3C));
+        inl(CONFIG_DATA)
+    };
+    let interrupt_line = quirk_zero_irq_line(vendor_id, device_id, (word3c & 0xFF) as u8);
 
     Some(PciDevice {
         address,
@@ -552,10 +563,10 @@ fn probe_device(address: PciAddress, vendor_id: u16) -> Option<PciDevice> {
         class_code,
         subclass,
         prog_if,
-        revision: (class_rev_grp & 0xFF) as u8,
+        revision: (word08 & 0xFF) as u8,
         header_type,
         interrupt_line,
-        interrupt_pin: ((int_grp >> 8) & 0xFF) as u8,
+        interrupt_pin: ((word3c >> 8) & 0xFF) as u8,
     })
 }
 
