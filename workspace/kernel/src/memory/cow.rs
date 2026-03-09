@@ -18,74 +18,14 @@
 //! - COW_LOCK protects flag changes and frame free
 //! - TLB shootdown is performed after modifying page table flags
 
-use crate::{memory::frame::PhysFrame, sync::SpinLock};
+use crate::{
+    memory::frame::{frame_flags, FrameMeta, PhysFrame},
+    sync::SpinLock,
+};
 use alloc::{boxed::Box, vec::Vec};
-use core::sync::atomic::{fence, AtomicU32, Ordering};
+use core::sync::atomic::{fence, Ordering};
 
 static COW_LOCK: SpinLock<()> = SpinLock::new(());
-
-#[repr(C)]
-pub struct FrameMeta {
-    refcount: AtomicU32,
-    flags: AtomicU32,
-}
-
-/// Frame flags
-pub mod frame_flags {
-    /// Frame is copy-on-write eligible
-    pub const COW: u32 = 1 << 0;
-    /// Frame is part of a shared DLL (never COW)
-    pub const DLL: u32 = 1 << 1;
-    /// Frame is anonymous (heap/stack, not file-backed)
-    pub const ANONYMOUS: u32 = 1 << 2;
-}
-
-impl FrameMeta {
-    /// Creates a new instance.
-    pub const fn new() -> Self {
-        FrameMeta {
-            refcount: AtomicU32::new(0),
-            flags: AtomicU32::new(0),
-        }
-    }
-
-    /// Performs the inc ref operation.
-    #[inline]
-    pub fn inc_ref(&self) {
-        self.refcount.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Performs the dec ref operation.
-    #[inline]
-    pub fn dec_ref(&self) -> u32 {
-        self.refcount.fetch_sub(1, Ordering::Release)
-    }
-
-    /// Returns refcount.
-    pub fn get_refcount(&self) -> u32 {
-        self.refcount.load(Ordering::Acquire)
-    }
-
-    /// Set frame flags (requires COW_LOCK held by caller).
-    pub fn set_flags(&self, flags: u32) {
-        self.flags.store(flags, Ordering::Release);
-    }
-
-    /// Get frame flags.
-    pub fn get_flags(&self) -> u32 {
-        self.flags.load(Ordering::Acquire)
-    }
-
-    /// Check if frame is COW.
-    pub fn is_cow(&self) -> bool {
-        self.get_flags() & frame_flags::COW != 0
-    }
-
-    /// Check if frame is DLL.
-    pub fn is_dll(&self) -> bool {
-        self.get_flags() & frame_flags::DLL != 0
-    }
-}
 
 /// Global frame metadata array pointer
 /// Initialized during boot with the number of available frames

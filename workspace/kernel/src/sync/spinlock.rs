@@ -1,5 +1,6 @@
 // Spinlock implementation for kernel synchronization
 
+use super::IrqDisabledToken;
 use core::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
@@ -33,6 +34,8 @@ impl<T> SpinLock<T> {
     /// Acquire the lock, spinning until it's available
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
         let saved_flags = crate::arch::x86_64::save_flags_and_cli();
+        // SAFETY: `save_flags_and_cli()` has just disabled interrupts on this CPU.
+        let irq_token = unsafe { IrqDisabledToken::new_unchecked() };
         let mut spins: usize = 0;
         let this_cpu = crate::arch::x86_64::percpu::current_cpu_index();
         // Spin until we can set locked from false to true
@@ -61,12 +64,15 @@ impl<T> SpinLock<T> {
             lock: self,
             saved_flags,
             restore_flags_on_drop: true,
+            irq_token,
         }
     }
 
     /// Try to acquire the lock without spinning.
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         let saved_flags = crate::arch::x86_64::save_flags_and_cli();
+        // SAFETY: `save_flags_and_cli()` has just disabled interrupts on this CPU.
+        let irq_token = unsafe { IrqDisabledToken::new_unchecked() };
         if self
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -78,6 +84,7 @@ impl<T> SpinLock<T> {
                 lock: self,
                 saved_flags,
                 restore_flags_on_drop: true,
+                irq_token,
             })
         } else {
             crate::arch::x86_64::restore_flags(saved_flags);
@@ -89,6 +96,7 @@ impl<T> SpinLock<T> {
     ///
     /// Caller must enforce IRQ/preemption constraints.
     pub fn try_lock_no_irqsave(&self) -> Option<SpinLockGuard<'_, T>> {
+        let irq_token = IrqDisabledToken::verify()?;
         if self
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -100,6 +108,7 @@ impl<T> SpinLock<T> {
                 lock: self,
                 saved_flags: 0,
                 restore_flags_on_drop: false,
+                irq_token,
             })
         } else {
             None
@@ -127,6 +136,26 @@ pub struct SpinLockGuard<'a, T> {
     lock: &'a SpinLock<T>,
     saved_flags: u64,
     restore_flags_on_drop: bool,
+    irq_token: IrqDisabledToken,
+}
+
+impl<'a, T> SpinLockGuard<'a, T> {
+    /// Retourne la preuve typée que les interruptions sont désactivées.
+    #[inline]
+    pub fn token(&self) -> &IrqDisabledToken {
+        &self.irq_token
+    }
+
+    #[inline]
+    pub(crate) fn with_mut_and_token<R>(
+        &mut self,
+        f: impl FnOnce(&mut T, &IrqDisabledToken) -> R,
+    ) -> R {
+        let token = &self.irq_token;
+        // SAFETY: ce guard possède le verrou et protège l'accès exclusif à `data`.
+        let data = unsafe { &mut *self.lock.data.get() };
+        f(data, token)
+    }
 }
 
 impl<'a, T> Deref for SpinLockGuard<'a, T> {

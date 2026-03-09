@@ -8,7 +8,7 @@ use crate::{
         zone::{BuddyBitmap, Zone, ZoneType, MAX_ORDER},
     },
     serial_println,
-    sync::{SpinLock, SpinLockGuard},
+    sync::{IrqDisabledToken, SpinLock, SpinLockGuard},
 };
 use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use x86_64::PhysAddr;
@@ -267,7 +267,11 @@ impl BuddyAllocator {
     }
 
     /// Allocates from zone.
-    fn alloc_from_zone(zone: &mut Zone, order: u8) -> Option<PhysFrame> {
+    fn alloc_from_zone(
+        zone: &mut Zone,
+        order: u8,
+        _token: &IrqDisabledToken,
+    ) -> Option<PhysFrame> {
         for cur_order in order..=MAX_ORDER as u8 {
             let Some(frame_phys) = Self::free_list_pop(zone, cur_order) else {
                 continue;
@@ -304,7 +308,7 @@ impl BuddyAllocator {
     }
 
     /// Releases to zone.
-    fn free_to_zone(zone: &mut Zone, frame: PhysFrame, order: u8) {
+    fn free_to_zone(zone: &mut Zone, frame: PhysFrame, order: u8, _token: &IrqDisabledToken) {
         let frame_phys = frame.start_address.as_u64();
         let block_size = PAGE_SIZE << order;
         let block_end = frame_phys.saturating_add(block_size);
@@ -755,37 +759,38 @@ impl OnDemandGlobalLock {
         self.guard = None;
     }
 
-    fn get_allocator_opt(&mut self) -> Option<&mut BuddyAllocator> {
-        self.guard
-            .get_or_insert_with(|| BUDDY_ALLOCATOR.lock())
-            .as_mut()
+    fn with_allocator<R>(
+        &mut self,
+        f: impl FnOnce(&mut BuddyAllocator, &IrqDisabledToken) -> R,
+    ) -> Option<R> {
+        let guard = self.guard.get_or_insert_with(|| BUDDY_ALLOCATOR.lock());
+        guard.with_mut_and_token(|slot, token| slot.as_mut().map(|allocator| f(allocator, token)))
     }
 
     fn alloc(&mut self, order: u8) -> Result<PhysFrame, AllocError> {
-        let allocator = self.get_allocator_opt().ok_or(AllocError::OutOfMemory)?;
-        allocator.alloc(order)
+        self.with_allocator(|allocator, token| allocator.alloc(order, token))
+            .unwrap_or(Err(AllocError::OutOfMemory))
     }
 
     fn free(&mut self, frame: PhysFrame, order: u8) {
-        if let Some(allocator) = self.get_allocator_opt() {
-            allocator.free(frame, order);
-        }
+        let _ = self.with_allocator(|allocator, token| allocator.free(frame, order, token));
     }
 
     fn free_phys_batch(&mut self, phys_batch: &[u64], count: usize) {
         if count == 0 {
             return;
         }
-        if let Some(allocator) = self.get_allocator_opt() {
+        let _ = self.with_allocator(|allocator, token| {
             for phys in phys_batch.iter().take(count).copied() {
                 allocator.free(
                     PhysFrame {
                         start_address: PhysAddr::new(phys),
                     },
                     0,
+                    token,
                 );
             }
-        }
+        });
     }
 }
 
@@ -977,16 +982,15 @@ fn free_order0_cached(frame: PhysFrame) {
 
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
     let mut spill = [0u64; LOCAL_CACHE_FLUSH_BATCH];
-    let mut spill_len = 0usize;
 
-    {
+    let spill_len = {
         let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
         if cache.push(frame).is_ok() {
             local_cached_inc_phys(frame.start_address.as_u64());
             return;
         }
 
-        spill_len = cache.pop_many(&mut spill);
+        let mut spill_len = cache.pop_many(&mut spill);
         for phys in spill.iter().take(spill_len).copied() {
             local_cached_dec_phys(phys);
         }
@@ -997,7 +1001,8 @@ fn free_order0_cached(frame: PhysFrame) {
             spill[spill_len] = frame.start_address.as_u64();
             spill_len += 1;
         }
-    }
+        spill_len
+    };
 
     if spill_len != 0 {
         let mut global = OnDemandGlobalLock::new();
@@ -1043,15 +1048,7 @@ pub fn free(frame: PhysFrame, order: u8) {
 
 impl FrameAllocator for BuddyAllocator {
     /// Performs the alloc operation.
-    fn alloc(&mut self, order: u8) -> Result<PhysFrame, AllocError> {
-        // Invariant: the caller must hold the SpinLock, which disables interrupts.
-        // Allocating with interrupts enabled would deadlock on single-core if a
-        // timer interrupt tries to allocate while we hold the lock.
-        debug_assert!(
-            !crate::arch::x86_64::interrupts_enabled(),
-            "buddy alloc(): interrupts must be disabled"
-        );
-
+    fn alloc(&mut self, order: u8, token: &IrqDisabledToken) -> Result<PhysFrame, AllocError> {
         if order > MAX_ORDER as u8 {
             return Err(AllocError::InvalidOrder);
         }
@@ -1067,7 +1064,7 @@ impl FrameAllocator for BuddyAllocator {
                 ZoneType::HighMem as usize,
                 ZoneType::DMA as usize,
             ] {
-                if let Some(frame) = Self::alloc_from_zone(&mut self.zones[zi], order) {
+                if let Some(frame) = Self::alloc_from_zone(&mut self.zones[zi], order, token) {
                     return Ok(frame);
                 }
             }
@@ -1079,12 +1076,7 @@ impl FrameAllocator for BuddyAllocator {
     }
 
     /// Performs the free operation.
-    fn free(&mut self, frame: PhysFrame, order: u8) {
-        debug_assert!(
-            !crate::arch::x86_64::interrupts_enabled(),
-            "buddy free(): interrupts must be disabled"
-        );
-
+    fn free(&mut self, frame: PhysFrame, order: u8, token: &IrqDisabledToken) {
         let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
         if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
             panic!("Recursive deallocation detected on CPU {}!", cpu_idx);
@@ -1093,7 +1085,7 @@ impl FrameAllocator for BuddyAllocator {
         let frame_phys = frame.start_address.as_u64();
         let zi = Self::zone_index_for_addr(frame_phys);
         let zone = &mut self.zones[zi];
-        Self::free_to_zone(zone, frame, order);
+        Self::free_to_zone(zone, frame, order, token);
 
         ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
     }
@@ -1101,12 +1093,12 @@ impl FrameAllocator for BuddyAllocator {
 
 impl BuddyAllocator {
     /// Allocate explicitly from one zone (e.g. DMA-only callers).
-    pub fn alloc_zone(&mut self, order: u8, zone: ZoneType) -> Result<PhysFrame, AllocError> {
-        debug_assert!(
-            !crate::arch::x86_64::interrupts_enabled(),
-            "buddy alloc_zone(): interrupts must be disabled"
-        );
-
+    pub fn alloc_zone(
+        &mut self,
+        order: u8,
+        zone: ZoneType,
+        token: &IrqDisabledToken,
+    ) -> Result<PhysFrame, AllocError> {
         if order > MAX_ORDER as u8 {
             return Err(AllocError::InvalidOrder);
         }
@@ -1116,7 +1108,7 @@ impl BuddyAllocator {
             panic!("Recursive allocation detected on CPU {}!", cpu_idx);
         }
 
-        let result = Self::alloc_from_zone(&mut self.zones[zone as usize], order)
+        let result = Self::alloc_from_zone(&mut self.zones[zone as usize], order, token)
             .ok_or(AllocError::OutOfMemory);
 
         ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
