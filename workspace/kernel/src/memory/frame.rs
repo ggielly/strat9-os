@@ -12,7 +12,7 @@ pub const FRAME_META_ALIGN: usize = 64;
 pub const FRAME_META_SIZE: usize = 64;
 pub const FRAME_META_LINK_NONE: u64 = u64::MAX;
 
-/// Flags persistants stockés dans [`FrameMeta`].
+/// Persistent flags stored in [`FrameMeta`].
 pub mod frame_flags {
     /// La frame est allouée.
     pub const ALLOCATED: u32 = 1 << 8;
@@ -35,7 +35,10 @@ pub mod frame_flags {
 /// Bytes used by the named fields of [`FrameMeta`] before the padding.
 const FRAME_META_FIELDS_SIZE: usize = 8 + 8 + 4 + 1 + 3 + 4; // next+prev+flags+order+_reserved0+refcount
 
-/// Métadonnées intrusives d'une frame physique.
+
+/// Intriside metadata for a physical frame.
+/// - 64 bytes (one cache line) for efficient atomic access and to avoid false sharing.
+
 #[repr(C, align(64))]
 pub struct FrameMeta {
     pub(crate) next: AtomicU64,
@@ -48,16 +51,17 @@ pub struct FrameMeta {
 }
 
 impl FrameMeta {
-    /// Crée des métadonnées vides prêtes à être initialisées par le boot allocator.
+    
+    /// Create emplty metadata ready to be initialized by the boot allocator.
     pub const fn new() -> Self {
         Self {
             next: AtomicU64::new(FRAME_META_LINK_NONE),
             prev: AtomicU64::new(FRAME_META_LINK_NONE),
             flags: AtomicU32::new(0),
-            order: AtomicU8::new(0),
+            order: AtomicU8::new(0),    /// 
             _reserved0: [0; 3],
             refcount: AtomicU32::new(0),
-            _cacheline_pad: [0; 36],
+            _cacheline_pad: [0; FRAME_META_SIZE - FRAME_META_FIELDS_SIZE],
         }
     }
 
@@ -132,7 +136,12 @@ const _: () = {
     assert!(mem::size_of::<FrameMeta>() == FRAME_META_SIZE);
 };
 
-/// Taille du tableau de métadonnées nécessaire pour couvrir `ram_size` octets.
+
+/// The metadata array size for `ram_size` bytes, rounded up to the nearest page since each frame 
+/// has a dedicated metadata entry.
+
+/// @param ram_size Total RAM size to be covered by the metadata (in bytes).
+/// 
 pub const fn metadata_size_for(ram_size: u64) -> u64 {
     let frames = (ram_size / PAGE_SIZE) + if ram_size % PAGE_SIZE == 0 { 0 } else { 1 };
     frames * FRAME_META_SIZE as u64
@@ -141,6 +150,7 @@ pub const fn metadata_size_for(ram_size: u64) -> u64 {
 static METADATA_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
 static METADATA_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Initialize the global metadata array for all physical frames.
 pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     let frame_count = (total_ram / PAGE_SIZE) + if total_ram % PAGE_SIZE == 0 { 0 } else { 1 };
     if frame_count == 0 {
@@ -165,6 +175,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     METADATA_BASE_VIRT.store(virt as u64, Ordering::Release);
 }
 
+/// Get the metadata for a given physical frame.
 pub fn get_meta(phys: PhysAddr) -> &'static FrameMeta {
     let base = METADATA_BASE_VIRT.load(Ordering::Acquire);
     let frame_count = METADATA_FRAME_COUNT.load(Ordering::Acquire);
@@ -185,6 +196,7 @@ pub struct PhysFrame {
     pub start_address: PhysAddr,
 }
 
+/// Performs the phys frame containing address operation.
 impl PhysFrame {
     /// Create a PhysFrame containing the given physical address
     pub fn containing_address(addr: PhysAddr) -> Self {
@@ -216,6 +228,7 @@ pub struct FrameRangeInclusive {
     pub end: PhysFrame,
 }
 
+/// Performs the iterator operation for FrameRangeInclusive.
 impl Iterator for FrameRangeInclusive {
     type Item = PhysFrame;
 

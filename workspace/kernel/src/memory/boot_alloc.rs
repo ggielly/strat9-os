@@ -45,7 +45,7 @@ impl BootAllocator {
         self.reset();
 
         for region in regions {
-            if !matches!(region.kind, MemoryKind::Free) {
+            if !matches!(region.kind, MemoryKind::Free | MemoryKind::Reclaim) {
                 continue;
             }
 
@@ -242,6 +242,16 @@ pub fn alloc_bytes(size: usize, align: usize) -> Option<PhysAddr> {
 
 pub fn snapshot_free_regions(out: &mut [MemoryRegion]) -> usize {
     BOOT_ALLOCATOR.lock().snapshot_free_regions(out)
+}
+
+/// Seal the boot allocator so no further allocations can be made from it.
+///
+/// Called immediately after the buddy allocator consumes the remaining free
+/// regions via `snapshot_free_regions`. Any subsequent `alloc_stack` call
+/// would otherwise double-allocate pages that are already tracked in the
+/// buddy allocator's free lists.
+pub fn seal() {
+    BOOT_ALLOCATOR.lock().reset();
 }
 
 pub fn alloc_stack(size: usize) -> Option<u64> {

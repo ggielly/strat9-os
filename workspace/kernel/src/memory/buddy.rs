@@ -92,6 +92,11 @@ impl BuddyAllocator {
         let remaining_len = boot_alloc::snapshot_free_regions(&mut remaining);
         self.pass_populate(&remaining[..remaining_len]);
 
+        // Seal the boot allocator: all its remaining free regions are now managed
+        // by buddy.  Any later boot_alloc::alloc_stack() call would otherwise
+        // double-allocate pages that buddy already tracks in its free lists.
+        boot_alloc::seal();
+
         for zone in &self.zones {
             serial_println!(
                 "  Zone {:?}: managed={} pages span={} pages ({} MB managed)",
@@ -547,7 +552,7 @@ impl BuddyAllocator {
 
     /// Performs the zone intersection aligned operation.
     fn zone_intersection_aligned(region: &MemoryRegion, zone_idx: usize) -> Option<(u64, u64)> {
-        if !matches!(region.kind, MemoryKind::Free) {
+        if !matches!(region.kind, MemoryKind::Free | MemoryKind::Reclaim) {
             return None;
         }
 
