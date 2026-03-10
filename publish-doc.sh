@@ -14,6 +14,9 @@ PAGES_REPO="${PAGES_REPO:-ggielly/ggielly.github.io}"
 PAGES_BRANCH="${PAGES_BRANCH:-main}"
 PAGES_SUBDIR="${PAGES_SUBDIR:-strat9-os-docs}"
 NO_PAGES_UPLOAD=0
+NO_VHOST_UPLOAD=0
+VHOST_SSH_ALIAS="${VHOST_SSH_ALIAS:-strat9web}"
+VHOST_REMOTE_PATH="${VHOST_REMOTE_PATH:-/usr/local/www/strat9/api.strat9-os.org/public}"
 
 usage() {
   cat <<'EOF'
@@ -24,6 +27,7 @@ Options:
   --no-push           Build/commit, but do not push to remote
   --no-dispatch       Do not trigger the GitHub Actions workflow manually
   --no-pages-upload   Do not upload docs to github.io repository
+  --no-vhost-upload   Do not upload docs to remote vhost via SSH
   --all-changes       Stage all changes (git add -A) before commit
   -m, --message MSG   Commit message (default: docs: update published documentation)
   -h, --help          Show this help
@@ -33,6 +37,8 @@ Environment:
   PAGES_REPO          Target pages repository (default: ggielly/ggielly.github.io)
   PAGES_BRANCH        Target pages branch (default: main)
   PAGES_SUBDIR        Target docs directory in pages repo (default: strat9-os-docs)
+  VHOST_SSH_ALIAS     SSH alias for the remote vhost (default: strat9web)
+  VHOST_REMOTE_PATH   Remote path on the vhost (default: /usr/local/www/strat9/api.strat9-os.org/public)
 
 Examples:
   ./publish-doc.sh
@@ -40,6 +46,7 @@ Examples:
   ./publish-doc.sh --all-changes
   ./publish-doc.sh --no-pages-upload
   ./publish-doc.sh --no-dispatch
+  ./publish-doc.sh --no-vhost-upload
 EOF
 }
 
@@ -63,6 +70,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-pages-upload)
       NO_PAGES_UPLOAD=1
+      shift
+      ;;
+    --no-vhost-upload)
+      NO_VHOST_UPLOAD=1
       shift
       ;;
     -m|--message)
@@ -204,6 +215,22 @@ PY
   popd >/dev/null
 else
   echo "==> Skipping github.io upload (--no-pages-upload)"
+fi
+
+if [[ "${NO_VHOST_UPLOAD}" -eq 0 ]]; then
+  echo "==> Déploiement vers ${VHOST_SSH_ALIAS}:${VHOST_REMOTE_PATH}"
+  if ! ssh -q -o BatchMode=yes -o ConnectTimeout=5 "${VHOST_SSH_ALIAS}" exit 2>/dev/null; then
+    echo "Warning: impossible de joindre '${VHOST_SSH_ALIAS}' — déploiement vhost ignoré." >&2
+  else
+    ssh "${VHOST_SSH_ALIAS}" "mkdir -p '${VHOST_REMOTE_PATH}'"
+    rsync -az --delete --checksum \
+      -e ssh \
+      "build/docs-site/" \
+      "${VHOST_SSH_ALIAS}:${VHOST_REMOTE_PATH}/"
+    echo "==> Documentation déployée sur ${VHOST_SSH_ALIAS}:${VHOST_REMOTE_PATH}"
+  fi
+else
+  echo "==> Déploiement vhost ignoré (--no-vhost-upload)"
 fi
 
 PAGES_URL="$(gh api "repos/${REPO_FULL_NAME}/pages" -q .html_url 2>/dev/null || true)"
