@@ -121,6 +121,11 @@ impl FrameMeta {
     }
 
     #[inline]
+    pub fn reset_refcount(&self) {
+        self.refcount.store(0, Ordering::Release);
+    }
+
+    #[inline]
     pub fn is_cow(&self) -> bool {
         self.get_flags() & frame_flags::COW != 0
     }

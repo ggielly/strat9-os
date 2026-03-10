@@ -136,6 +136,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         drop(scheduler);
         core::hint::spin_loop();
     }; // Lock is released here before jumping to first task
+    super::task_ops::flush_deferred_silo_cleanups();
 
     crate::serial_force_println!(
         "[trace][sched] schedule_on_cpu first_task cpu={} tid={} name={} rsp={:#x} kstack=[{:#x}..{:#x}]",
@@ -257,6 +258,7 @@ pub fn finish_switch() {
         cpu_index,
         task_to_drop.is_some()
     );
+    super::task_ops::flush_deferred_silo_cleanups();
 
     // Drop the previous task outside the scheduler lock (if it was the last ref).
     // This is safe because we are fully switched to the new task's stack and CR3.

@@ -317,10 +317,9 @@ pub fn init() -> Result<usize, &'static str> {
         unsafe { core::ptr::write_bytes(stack_virt as *mut u8, 0, stack_size) };
 
         // Stack grows downward: top = base_virt + size.
+        // The PhysFrame is Copy (no Drop): buddy keeps it marked as allocated
+        // since we never call free_frames : permanent kernel allocation.
         let stack_top = stack_virt.saturating_add(stack_size as u64);
-
-        // Intentionally forget the PhysFrame to prevent buddy from reclaiming it.
-        core::mem::forget(frame);
 
         if apic_id as usize >= stacks.len() {
             log::warn!("SMP: APIC id {} out of stack array range", apic_id);

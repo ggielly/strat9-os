@@ -1,5 +1,7 @@
 use super::{runtime_ops::finish_switch, *};
 
+static PENDING_SILO_CLEANUPS: SpinLock<Vec<TaskId>> = SpinLock::new(Vec::new());
+
 /// Mark the current task as Dead and yield to the scheduler.
 ///
 /// Called by SYS_PROC_EXIT. The task will not be re-queued because
@@ -1035,9 +1037,27 @@ fn reparent_children(sched: &mut Scheduler, dying: TaskId) -> Option<usize> {
 /// # Safety
 /// Must be called with the scheduler lock held and the task no longer
 /// accessible from any global map (all_tasks, current_task, etc.).
+fn queue_silo_cleanup(task_id: TaskId) {
+    let mut guard = PENDING_SILO_CLEANUPS.lock();
+    guard.push(task_id);
+}
+
+pub fn flush_deferred_silo_cleanups() {
+    let mut guard = PENDING_SILO_CLEANUPS.lock();
+    if guard.is_empty() {
+        return;
+    }
+    let mut drained = Vec::new();
+    drained.append(&mut *guard);
+    drop(guard);
+    for task_id in drained {
+        crate::silo::on_task_terminated(task_id);
+    }
+}
+
 pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     crate::ipc::port::cleanup_ports_for_task(task.id);
-    crate::silo::on_task_terminated(task.id);
+    queue_silo_cleanup(task.id);
 
     // SAFETY: strong_count is racy (a concurrent get_task_by_id may temporarily
     // hold an extra Arc ref). Worst case: cleanup is deferred until the last ref

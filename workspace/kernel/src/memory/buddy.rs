@@ -670,6 +670,7 @@ impl BuddyAllocator {
             meta.set_order(order);
             meta.set_next(FRAME_META_LINK_NONE);
             meta.set_prev(FRAME_META_LINK_NONE);
+            meta.reset_refcount();
         }
     }
 }
