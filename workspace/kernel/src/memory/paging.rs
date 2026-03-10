@@ -202,19 +202,59 @@ pub fn ensure_identity_map(phys_addr: u64) {
 }
 
 /// Ensure a physical range is mapped in the HHDM region.
+///
+/// Builds a single `OffsetPageTable` for the entire range instead of
+/// one per page, and emits a single summary log instead of per-page noise.
 pub fn ensure_identity_map_range(phys_base: u64, size: u64) {
-    if size == 0 {
+    if size == 0 || !is_initialized() {
         return;
     }
+
     let page_size = 4096u64;
     let start = phys_base & !(page_size - 1);
-    let end = phys_base
-        .saturating_add(size.saturating_sub(1))
-        .saturating_add(page_size)
-        & !(page_size - 1);
+    let end = (phys_base.saturating_add(size).saturating_add(page_size - 1)) & !(page_size - 1);
+    if start >= end {
+        return;
+    }
+
+    let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
+    let (level_4_frame, _) = Cr3::read();
+    let level_4_virt = phys_offset + level_4_frame.start_address().as_u64();
+
+    // SAFETY: level_4_virt points to the active CR3 PML4 via HHDM.
+    let l4_table = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
+    let mut mapper = unsafe { OffsetPageTable::new(l4_table, phys_offset) };
+    let mut allocator = BuddyFrameAllocator;
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+
+    let mut mapped_count: u64 = 0;
     let mut p = start;
     while p < end {
-        ensure_identity_map(p);
+        let virt = VirtAddr::new(crate::memory::phys_to_virt(p));
+        // Only map if not already present.
+        if mapper.translate_addr(virt).is_none() {
+            let page = Page::<Size4KiB>::containing_address(virt);
+            let frame = X86PhysFrame::containing_address(PhysAddr::new(p));
+            // SAFETY: frame is a valid physical page; mapper uses HHDM offset.
+            match unsafe { mapper.map_to(page, frame, flags, &mut allocator) } {
+                Ok(flush) => {
+                    flush.flush();
+                    mapped_count += 1;
+                }
+                Err(_) => {
+                    log::error!("ensure_identity_map_range: failed to map {:#x}", p);
+                }
+            }
+        }
         p = p.saturating_add(page_size);
+    }
+
+    if mapped_count > 0 {
+        log::debug!(
+            "Identity mapped {} pages: phys {:#x}..{:#x}",
+            mapped_count,
+            start,
+            end,
+        );
     }
 }
