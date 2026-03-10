@@ -567,6 +567,36 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     log_boot_module_magics("post-buddy");
 
     // =============================================
+    // Phase 2.5: paging / VMM (Must be before Console if FB is not already mapped)
+    // =============================================
+    serial_println!("[init] Paging...");
+    memory::paging::init(hhdm);
+
+    // Map all RAM into HHDM to ensure buddy/heap allocations are accessible.
+    // VMware Limine HHDM may be sparse, causing PF on new heap pages.
+    memory::paging::map_all_ram(&mmap_work[..mmap_work_len]);
+
+    // Framebuffer is often backed by MMIO memory outside RAM (e.g. around 0xFDxxxxxx),
+    // or sometimes at the very end of RAM that might be missed by the bootloader's initial map.
+    // Explicitly map its full range in HHDM for all later graphics access.
+    if args.framebuffer_addr != 0 && args.framebuffer_stride != 0 && args.framebuffer_height != 0 {
+        let fb_phys = if args.framebuffer_addr >= hhdm {
+            args.framebuffer_addr - hhdm
+        } else {
+            args.framebuffer_addr
+        };
+        let fb_size =
+            (args.framebuffer_stride as u64).saturating_mul(args.framebuffer_height as u64);
+        memory::paging::ensure_identity_map_range(fb_phys, fb_size);
+        serial_println!(
+            "[init] Framebuffer mapped: phys=0x{:x} size={} bytes",
+            fb_phys,
+            fb_size
+        );
+    }
+    serial_println!("[init] Paging initialized.");
+
+    // =============================================
     // Phase 3: console output (VGA or serial fallback)
     // =============================================
     serial_println!("[init] Console...");
@@ -583,6 +613,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         args.framebuffer_blue_mask_size,
         args.framebuffer_blue_mask_shift,
     );
+    vga_println!("[OK] Paging initialized");
     vga_println!("[OK] Serial port initialized");
     vga_println!("[OK] Memory manager active");
 
@@ -630,30 +661,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // arch::x86_64::idt::init();
 
     // =============================================
-    // Phase 5b: paging / VMM
+    // Phase 5b: paging / VMM - (Moved earlier to prevent PF on VGA init)
     // =============================================
-    serial_println!("[init] Paging...");
-    vga_println!("[..] Initializing page mapper...");
-    memory::paging::init(hhdm);
-    // Framebuffer is often backed by MMIO memory outside RAM (e.g. around 0xFDxxxxxx),
-    // so explicitly map its full range in HHDM for all later graphics access.
-    if args.framebuffer_addr != 0 && args.framebuffer_stride != 0 && args.framebuffer_height != 0 {
-        let fb_phys = if args.framebuffer_addr >= hhdm {
-            args.framebuffer_addr - hhdm
-        } else {
-            args.framebuffer_addr
-        };
-        let fb_size =
-            (args.framebuffer_stride as u64).saturating_mul(args.framebuffer_height as u64);
-        memory::paging::ensure_identity_map_range(fb_phys, fb_size);
-        serial_println!(
-            "[init] Framebuffer mapped: phys=0x{:x} size={} bytes",
-            fb_phys,
-            fb_size
-        );
-    }
-    serial_println!("[init] Paging initialized.");
-    vga_println!("[OK] Paging initialized");
     log_boot_module_magics("post-paging");
 
     // =============================================

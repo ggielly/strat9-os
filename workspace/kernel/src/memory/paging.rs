@@ -75,6 +75,33 @@ pub fn init(hhdm_offset: u64) {
     );
 }
 
+/// Map all RAM regions from the memory map into the HHDM.
+///
+/// This ensures that every byte of physical RAM is accessible through the
+/// higher-half direct map. Should be called after paging::init.
+/// Fix for VMWare Workstation which doesn't identity-map all RAM by default, causing
+/// the kernel to crash when it tries to access unmapped RAM (e.g. for the buddy allocator's
+/// metadata array). Limine's initial map only covers the first 1GB of RAM, which is not enough
+/// for our 2GB test VM. This function lazily maps any missing RAM regions on
+/// demand using `ensure_identity_map_range()`, which checks if the region is already mapped
+/// before mapping it. This allows the kernel to boot successfully on VMWare Workstation without
+/// requiring changes to the bootloader or Limine configuration.
+/// 
+pub fn map_all_ram(memory_regions: &[crate::boot::entry::MemoryRegion]) {
+    use crate::boot::entry::MemoryKind;
+
+    for region in memory_regions {
+        if matches!(region.kind, MemoryKind::Free | MemoryKind::Reclaim) {
+            log::debug!(
+                "Mapping RAM region to HHDM: phys=0x{:x}..0x{:x}",
+                region.base,
+                region.base + region.size
+            );
+            ensure_identity_map_range(region.base, region.size);
+        }
+    }
+}
+
 /// Map a virtual page to a physical frame with the given flags.
 ///
 /// Intermediate page tables are allocated from the buddy allocator as needed.
