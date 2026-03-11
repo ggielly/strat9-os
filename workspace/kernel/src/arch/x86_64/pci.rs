@@ -388,7 +388,7 @@ impl PciDevice {
 // Fast PCI bus scanner (BFS with early-exit)
 // ---------------------------------------------------------------------------
 //
-// The scan follows the Asterinas pattern:
+// Insipired by asterinas OS's PCI scanner:
 //
 //  1. For each (bus, device), probe function 0 first.
 //     If vendor == 0xFFFF → skip all 8 functions (early exit).

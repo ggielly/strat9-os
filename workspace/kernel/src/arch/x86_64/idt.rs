@@ -1319,7 +1319,9 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
     if ticks < 3 {
         crate::serial_force_println!("[heartbeat] tick={} cpu={} step=pre_timer_tick", ticks, cpu);
     }
+    crate::e9_println!("T0 tick={} cpu={}", ticks, cpu); // E9: entering timer_tick()
     crate::process::scheduler::timer_tick();
+    crate::e9_println!("T1 tick={} cpu={}", ticks, cpu); // E9: timer_tick() returned
     if ticks < 3 {
         crate::serial_force_println!("[heartbeat] tick={} cpu={} step=pre_eoi", ticks, cpu);
     }

@@ -12,7 +12,9 @@ use super::*;
 /// its own `try_lock`. These are separate acquisitions by design - the inner
 /// functions must not be called while the outer lock is held (that would deadlock).
 pub fn timer_tick() {
+    crate::e9_println!("TA cpu_idx?");                    // E9-A: very start, before any GS access
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+    crate::e9_println!("TB cpu={}", cpu_idx);             // E9-B: current_cpu_index() survived
 
     if cpu_is_valid(cpu_idx) {
         CPU_TOTAL_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
@@ -22,6 +24,7 @@ pub fn timer_tick() {
     if cpu_idx == 0 {
         TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     }
+    crate::e9_println!("TC cpu={}", cpu_idx);             // E9-C: tick counters updated
 
     // BSP-only secondary bookkeeping: interval timers and sleep wakeups.
     // NS_PER_TICK = 1_000_000_000 / TIMER_HZ (10_000_000 ns at 100 Hz).
@@ -30,12 +33,17 @@ pub fn timer_tick() {
     if cpu_idx == 0 {
         let tick = TICK_COUNT.load(Ordering::Relaxed);
         let current_time_ns = tick * NS_PER_TICK;
+        crate::e9_println!("TD tick_all_timers enter cpu={}", cpu_idx); // E9-D
         crate::process::timer::tick_all_timers(current_time_ns);
+        crate::e9_println!("TE tick_all_timers done cpu={}", cpu_idx);  // E9-E
         check_wake_deadlines(current_time_ns);
+        crate::e9_println!("TF check_wake_deadlines done cpu={}", cpu_idx); // E9-F
     }
 
+    crate::e9_println!("TG sched try_lock cpu={}", cpu_idx); // E9-G: about to acquire scheduler
     // Per-task accounting on this CPU.
     if let Some(mut guard) = SCHEDULER.try_lock() {
+        crate::e9_println!("TH sched locked cpu={}", cpu_idx); // E9-H: lock acquired
         if let Some(ref mut sched) = *guard {
             if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
                 let should_resched = if let Some(ref current_task) = cpu.current_task {
