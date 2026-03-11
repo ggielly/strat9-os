@@ -66,44 +66,45 @@ impl Drop for SwapGsGuard {
     }
 }
 
+/// Determine whether `swapgs` is needed at interrupt/exception entry.
+///
+/// In the normal case, `code_segment & 3 == 3` (Ring 3) means we need
+/// swapgs.  However, between `swapgs` and `iretq` in
+/// `elf_ring3_trampoline`, CS is still Ring 0 but `IA32_GS_BASE` is
+/// already the user value (0).  If `iretq` itself faults, the exception
+/// handler sees CS=Ring 0 but GS=user — the simple ring check misses
+/// this.  Reading `IA32_GS_BASE` via `rdmsr` catches both cases.
+///
+/// Cost: ~20-30 cycles for the `rdmsr` — acceptable in exception paths
+/// (not used for high-frequency IRQ handlers where IF=0 prevents
+/// firing in the swapgs→iretq window).
+#[inline(always)]
+fn needs_swapgs(cs: u16) -> bool {
+    // Fast path: Ring 3 → always need swapgs.
+    if (cs & 3) == 3 {
+        return true;
+    }
+    // Slow path: check if GS_BASE unexpectedly points to user space.
+    // SAFETY: rdmsr is privileged but we are in Ring 0 (exception handler).
+    let gs_base: u64 = unsafe {
+        let lo: u32;
+        let hi: u32;
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") 0xC000_0101u32,  // IA32_GS_BASE
+            out("eax") lo,
+            out("edx") hi,
+            options(nostack, preserves_flags),
+        );
+        (lo as u64) | ((hi as u64) << 32)
+    };
+    gs_base < 0xFFFF_8000_0000_0000
+}
+
 /// Static IDT storage (must be 'static for load())
 static mut IDT_STORAGE: InterruptDescriptorTable = InterruptDescriptorTable::new();
 static IDT_STORAGE_LOCK: AtomicBool = AtomicBool::new(false);
 static USER_PF_TRACE_BUDGET: AtomicU32 = AtomicU32::new(64);
-
-/// RAII guard: performs a conditional `swapgs` on construction (when the
-/// interrupted code was in Ring 3) and reverses it on `drop` (before `iretq`).
-///
-/// Every interrupt/exception handler that may fire while in user mode MUST
-/// begin with `let _gs = SwapgsGuard::enter_from(stack_frame.code_segment.0);`
-/// so that `current_cpu_index()` (which reads `gs:[0]`) is safe throughout,
-/// including all early-`return` paths.
-struct SwapgsGuard(bool);
-
-impl SwapgsGuard {
-    #[inline(always)]
-    fn enter_from(cs: u16) -> Self {
-        let from_user = (cs & 3) == 3;
-        if from_user {
-            // SAFETY: interrupt fired from Ring 3. GS holds the user GS base
-            // (installed by `swapgs` in elf_ring3_trampoline). Swap now so GS
-            // points to the kernel per-CPU block for the entire handler body.
-            unsafe { core::arch::asm!("swapgs", options(nostack, preserves_flags)); }
-        }
-        SwapgsGuard(from_user)
-    }
-}
-
-impl Drop for SwapgsGuard {
-    #[inline(always)]
-    fn drop(&mut self) {
-        if self.0 {
-            // SAFETY: restore user GS before `iretq` returns to Ring 3;
-            // mirrors the `swapgs` done in `enter_from`.
-            unsafe { core::arch::asm!("swapgs", options(nostack, preserves_flags)); }
-        }
-    }
-}
 
 #[inline]
 fn lock_idt_storage() {
@@ -234,15 +235,15 @@ pub fn register_virtio_block_irq(irq: u8) {
 
 /// Performs the breakpoint handler operation.
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
+    let _gs = SwapGsGuard::new(needs_swapgs(stack_frame.code_segment.0));
     log::warn!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
 /// Performs the invalid opcode handler operation.
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    let _gs = SwapgsGuard::enter_from(stack_frame.code_segment.0);
-    let is_user = (stack_frame.code_segment.0 & 3) == 3;
-    // Restore kernel GS if interrupted Ring 3 (before any gs:[...] access).
-    let _gs = SwapGsGuard::new(is_user);
+    let cs = stack_frame.code_segment.0;
+    let is_user = (cs & 3) == 3;
+    let _gs = SwapGsGuard::new(needs_swapgs(cs));
     if is_user {
         if let Some(tid) = crate::process::current_task_id() {
             crate::silo::handle_user_fault(
@@ -259,7 +260,15 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     panic!("Invalid opcode");
 }
 
-extern "x86-interrupt" fn non_maskable_interrupt_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn non_maskable_interrupt_handler(stack_frame: InterruptStackFrame) {
+    // NMI can fire at any point — including the swapgs→iretq window.
+    // Use rdmsr to safely restore kernel GS if needed.
+    let _gs = SwapGsGuard::new(needs_swapgs(stack_frame.code_segment.0));
+    crate::serial_force_println!(
+        "[NMI] rip={:#x} cs={:#x}",
+        stack_frame.instruction_pointer.as_u64(),
+        stack_frame.code_segment.0
+    );
     crate::arch::x86_64::cli();
     loop {
         crate::arch::x86_64::hlt();
@@ -271,13 +280,31 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    // SAFETY: must be the very first operation – GS may point to user memory
-    // if the fault fired from Ring 3 (after swapgs in elf_ring3_trampoline).
-    let _gs = SwapgsGuard::enter_from(stack_frame.code_segment.0);
     use x86_64::registers::control::{Cr2, Cr3};
-    let is_user = (stack_frame.code_segment.0 & 3) == 3;
-    // Restore kernel GS if interrupted Ring 3 (before any gs:[...] access).
-    let _gs = SwapGsGuard::new(is_user);
+    let cs = stack_frame.code_segment.0;
+    let is_user = (cs & 3) == 3;
+    // SAFETY: must be before any gs:[...] access – GS may point to user memory
+    // if the fault fired from Ring 3 (after swapgs in elf_ring3_trampoline),
+    // OR during the swapgs→iretq window (CS=Ring0 but GS=user).
+    // needs_swapgs() uses rdmsr to catch both cases.
+    let swapgs_needed = needs_swapgs(cs);
+    let _gs = SwapGsGuard::new(swapgs_needed);
+
+    // Detect the swapgs→iretq window: CS=Ring0 but GS was user (0).
+    if swapgs_needed && !is_user {
+        let fault_addr = x86_64::registers::control::Cr2::read()
+            .as_ref()
+            .map(|v| v.as_u64())
+            .unwrap_or(0);
+        crate::serial_force_println!(
+            "\x1b[31;1m[pagefault]\x1b[0m SWAPGS-WINDOW: CS={:#x} (Ring0) but GS was user! rip={:#x} addr={:#x} err={:#x}",
+            cs,
+            stack_frame.instruction_pointer.as_u64(),
+            fault_addr,
+            error_code.bits()
+        );
+        panic!("#PF in swapgs→iretq window");
+    }
 
     // Get the faulting address
     let fault_addr = Cr2::read();
@@ -1107,10 +1134,24 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    let _gs = SwapgsGuard::enter_from(stack_frame.code_segment.0);
-    let is_user = (stack_frame.code_segment.0 & 3) == 3;
-    // Restore kernel GS if interrupted Ring 3 (before any gs:[...] access).
-    let _gs = SwapGsGuard::new(is_user);
+    let cs = stack_frame.code_segment.0;
+    let is_user = (cs & 3) == 3;
+    // Use rdmsr-based check: catches the swapgs→iretq window where
+    // CS=Ring0 but GS=user (0).  Without this, #GP from a bad iretq
+    // would escalate to double fault → triple fault.
+    let swapgs_needed = needs_swapgs(cs);
+    let _gs = SwapGsGuard::new(swapgs_needed);
+    // Detect the swapgs→iretq window case: CS says Ring 0 but GS was user.
+    if swapgs_needed && !is_user {
+        crate::serial_force_println!(
+            "\x1b[31;1m[GPF]\x1b[0m SWAPGS-WINDOW: CS={:#x} (Ring0) but GS was user! rip={:#x} err={:#x} rsp={:#x}",
+            cs,
+            stack_frame.instruction_pointer.as_u64(),
+            error_code,
+            stack_frame.stack_pointer.as_u64()
+        );
+        panic!("#GP in swapgs→iretq window (iretq frame invalid?)");
+    }
     if is_user {
         if let Some(tid) = crate::process::current_task_id() {
             crate::serial_force_println!(
@@ -1144,7 +1185,9 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    let _gs = SwapgsGuard::enter_from(stack_frame.code_segment.0);
+    // Use rdmsr-based check: iretq can trigger #SS if the user SS is bad,
+    // and at that point GS is already swapped to user.
+    let _gs = SwapGsGuard::new(needs_swapgs(stack_frame.code_segment.0));
     crate::serial_force_println!(
         "\x1b[31;1m[STACK_FAULT]\x1b[0m rip={:#x} err={:#x} cs={:#x} rsp={:#x}",
         stack_frame.instruction_pointer.as_u64(),
@@ -1156,10 +1199,44 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
 }
 
 /// Performs the double fault handler operation.
+///
+/// Uses IST stack so the handler always runs on a known-good stack, even
+/// when RSP0 is corrupt.  We must still do `swapgs` if the fault originated
+/// from Ring 3 (or from Ring 0 code that already did `swapgs`, e.g. the
+/// `iretq` path in `elf_ring3_trampoline`).
+///
+/// # Note on divergent handler
+/// This handler is `-> !`, so `SwapGsGuard::drop` will never run.  That is
+/// fine because we never return to the interrupted context.
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
+    // Best-effort swapgs: if GS currently points at user space (address 0)
+    // we need to swap to kernel GS so that any code below that touches
+    // `gs:[0]` (e.g. via `current_cpu_index`) does not page-fault again.
+    // We use a raw read of IA32_GS_BASE via rdmsr to decide.
+    //
+    // During `elf_ring3_trampoline`, `swapgs` is executed *before* `iretq`.
+    // If `iretq` itself faults, `code_segment` is still Ring 0 (0x08) but
+    // GS_BASE is already the user value (0).  The normal `cs & 3 == 3` test
+    // would miss this case.  Reading the MSR catches it.
+    unsafe {
+        let lo: u32;
+        let hi: u32;
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") 0xC000_0101u32,  // IA32_GS_BASE
+            out("eax") lo,
+            out("edx") hi,
+            options(nostack, preserves_flags),
+        );
+        let gs_base = (lo as u64) | ((hi as u64) << 32);
+        // If GS_BASE is in the low half (user space) or zero, swap to kernel.
+        if gs_base < 0xFFFF_8000_0000_0000 {
+            core::arch::asm!("swapgs", options(nostack, preserves_flags));
+        }
+    }
     crate::serial_force_println!(
         "\x1b[31;1m[DOUBLE_FAULT]\x1b[0m rip={:#x} err={:#x} cs={:#x} rsp={:#x}",
         stack_frame.instruction_pointer.as_u64(),
@@ -1223,17 +1300,37 @@ extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame)
 /// Local APIC timer handler (dedicated vector, e.g. 0xD2).
 extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) {
     // Restore kernel GS if the timer fired while Ring 3 was running.
-    let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
+    let cs = stack_frame.code_segment.0;
+    let _gs = SwapGsGuard::new((cs & 3) == 3);
+    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
     let ticks = crate::process::scheduler::ticks();
-    // Trace first 5 ticks unconditionally to confirm timer fires after Ring-3 entry,
-    // then one-per-100 heartbeat to avoid flooding.
-    if ticks < 5 || ticks % 100 == 0 {
-        crate::serial_force_println!("[heartbeat] APIC timer tick={}", ticks);
+    // Trace first 10 ticks per CPU unconditionally to confirm timer fires
+    // after Ring-3 entry, then one-per-100 heartbeat to avoid flooding.
+    if ticks < 10 || ticks % 100 == 0 {
+        crate::serial_force_println!(
+            "[heartbeat] APIC timer tick={} cpu={} cs={:#x} rip={:#x}",
+            ticks,
+            cpu,
+            cs,
+            stack_frame.instruction_pointer.as_u64()
+        );
     }
 
+    if ticks < 3 {
+        crate::serial_force_println!("[heartbeat] tick={} cpu={} step=pre_timer_tick", ticks, cpu);
+    }
     crate::process::scheduler::timer_tick();
+    if ticks < 3 {
+        crate::serial_force_println!("[heartbeat] tick={} cpu={} step=pre_eoi", ticks, cpu);
+    }
     super::apic::eoi();
+    if ticks < 3 {
+        crate::serial_force_println!("[heartbeat] tick={} cpu={} step=pre_preempt", ticks, cpu);
+    }
     crate::process::scheduler::maybe_preempt();
+    if ticks < 10 {
+        crate::serial_force_println!("[heartbeat] APIC timer tick={} cpu={} preempt_done", ticks, cpu);
+    }
 }
 
 /// PS/2 Mouse IRQ12 handler.

@@ -1085,6 +1085,40 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_rflags
     );
 
+    // ----- Pre-iret LAPIC timer diagnostic -----
+    // Verify that the APIC timer is actually running on this CPU before we
+    // enter Ring 3 (if it is not, no timer tick = no heartbeat = silent hang).
+    unsafe {
+        let lvt = crate::arch::x86_64::apic::read_reg(
+            crate::arch::x86_64::apic::REG_LVT_TIMER,
+        );
+        let init_cnt = crate::arch::x86_64::apic::read_reg(
+            crate::arch::x86_64::apic::REG_TIMER_INIT,
+        );
+        let cur_cnt = crate::arch::x86_64::apic::read_reg(
+            crate::arch::x86_64::apic::REG_TIMER_CURRENT,
+        );
+        let rflags_now: u64;
+        core::arch::asm!("pushfq; pop {}", out(reg) rflags_now, options(nostack));
+        crate::serial_force_println!(
+            "[trace][elf] pre-iret LAPIC: LVT={:#x} init={} cur={} IF={}",
+            lvt,
+            init_cnt,
+            cur_cnt,
+            (rflags_now >> 9) & 1
+        );
+        if lvt & (1 << 16) != 0 {
+            crate::serial_force_println!(
+                "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) — no ticks will fire!"
+            );
+        }
+        if init_cnt == 0 {
+            crate::serial_force_println!(
+                "[trace][elf] WARNING: LAPIC timer init_count=0 — timer not started!"
+            );
+        }
+    }
+
     // SAFETY: Valid user mappings have been set up. IRETQ switches to Ring 3.
     unsafe {
         core::arch::asm!(
