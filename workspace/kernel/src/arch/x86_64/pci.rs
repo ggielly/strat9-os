@@ -183,7 +183,6 @@ pub struct PciAddress {
 }
 
 impl fmt::Debug for PciAddress {
-    /// Performs the fmt operation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:02x}:{:02x}.{}", self.bus, self.device, self.function)
     }
@@ -226,7 +225,6 @@ pub struct PciDevice {
 }
 
 impl fmt::Debug for PciDevice {
-    /// Performs the fmt operation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -330,31 +328,26 @@ impl PciDevice {
 
         // Check if it's an I/O BAR (bit 0 set)
         if bar_low & 0x1 != 0 {
-            // I/O space BAR
-            // Bits 0-1 are reserved/type, address starts at bit 2
             let port = (bar_low & 0xFFFF_FFFC) as u16;
             Some(Bar::Io { port })
         } else {
-            // Memory space BAR
             let bar_type = (bar_low >> 1) & 0x3;
             let prefetchable = (bar_low >> 3) & 0x1 != 0;
 
             match bar_type {
                 0 => {
-                    // 32-bit memory space
                     let addr = bar_low & 0xFFFF_FFF0;
                     Some(Bar::Memory32 { addr, prefetchable })
                 }
                 2 => {
-                    // 64-bit memory space
                     if bar_index >= 5 {
-                        return None; // Can't read next BAR as high part
+                        return None;
                     }
                     let bar_high = self.read_config_u32(offset + 4);
                     let addr = ((bar_high as u64) << 32) | ((bar_low & 0xFFFF_FFF0) as u64);
                     Some(Bar::Memory64 { addr, prefetchable })
                 }
-                _ => None, // Reserved types
+                _ => None,
             }
         }
     }
@@ -391,6 +384,33 @@ impl PciDevice {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fast PCI bus scanner (BFS with early-exit)
+// ---------------------------------------------------------------------------
+//
+// The scan follows the Asterinas pattern:
+//
+//  1. For each (bus, device), probe function 0 first.
+//     If vendor == 0xFFFF → skip all 8 functions (early exit).
+//
+//  2. Read the Header Type from the function-0 dword at offset 0x0C.
+//     Bit 7 (multi-function flag) tells whether functions 1..7 can exist.
+//     If bit 7 is clear → skip functions 1..7 entirely.
+//
+//  3. If header_type & 0x7F == 0x01 (PCI-to-PCI bridge), read the
+//     secondary bus number and enqueue it.  The `seen_buses` bitmap
+//     prevents re-scanning a bus already visited.
+//
+// This reduces the worst-case probes from 256 × 32 × 8 = 65 536 down to
+// 256 × 32 × 1 = 8 192 for a topology with no multi-function devices
+// (the common case on QEMU / VMware).
+//
+// I/O cost per probe:
+//   Old: 4 dword reads under 4 separate lock acquisitions.
+//   New: 1 dword read (vendor check, early exit) + 3 dword reads only
+//        for devices that actually exist, all under a single lock hold
+//        via `probe_device_full`.
+
 /// Iterator for scanning PCI bus
 pub struct PciScanner {
     bus_queue: [u8; 256],
@@ -399,10 +419,12 @@ pub struct PciScanner {
     seen_buses: [bool; 256],
     device: u8,
     function: u8,
+    /// Cached multi-function flag for the current device (from function 0).
+    /// When `function > 0`, this tells us whether to keep scanning.
+    is_multi_function: bool,
 }
 
 impl PciScanner {
-    /// Creates a new instance.
     pub fn new() -> Self {
         let mut s = Self {
             bus_queue: [0u8; 256],
@@ -411,6 +433,7 @@ impl PciScanner {
             seen_buses: [false; 256],
             device: 0,
             function: 0,
+            is_multi_function: false,
         };
         s.seen_buses[0] = true;
         s
@@ -423,6 +446,13 @@ impl PciScanner {
             self.queue_tail += 1;
         }
     }
+
+    #[inline]
+    fn advance_to_next_device(&mut self) {
+        self.function = 0;
+        self.device += 1;
+        self.is_multi_function = false;
+    }
 }
 
 impl Iterator for PciScanner {
@@ -430,6 +460,7 @@ impl Iterator for PciScanner {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
+            // Advance to next bus if we exhausted all 32 devices.
             if self.queue_head >= self.queue_tail {
                 return None;
             }
@@ -439,40 +470,68 @@ impl Iterator for PciScanner {
                 self.queue_head += 1;
                 self.device = 0;
                 self.function = 0;
+                self.is_multi_function = false;
                 continue;
             }
 
-            let address = PciAddress::new(bus, self.device, self.function);
             let current_function = self.function;
+
+            // --- Function 0: fast vendor check + early exit ---
+            if current_function == 0 {
+                // Single dword read: vendor+device at offset 0x00.
+                // If 0xFFFF → no device at this slot, skip all 8 functions.
+                let word00 = raw_config_read(bus, self.device, 0, 0x00);
+                let vendor_id = (word00 & 0xFFFF) as u16;
+                if is_absent_vendor(vendor_id) {
+                    self.advance_to_next_device();
+                    continue;
+                }
+
+                // Device exists at function 0 — do the full probe.
+                let Some(dev) = probe_from_word00(
+                    PciAddress::new(bus, self.device, 0),
+                    word00,
+                ) else {
+                    self.advance_to_next_device();
+                    continue;
+                };
+
+                // Cache multi-function status from header_type bit 7.
+                self.is_multi_function = dev.header_type & 0x80 != 0;
+
+                // If it's a PCI-to-PCI bridge, enqueue the secondary bus.
+                if dev.header_type & 0x7F == 0x01 {
+                    let secondary = raw_config_read_u8(bus, self.device, 0, 0x19);
+                    self.enqueue_bus(secondary);
+                }
+
+                // Advance: if multi-function, move to function 1;
+                // otherwise skip straight to the next device.
+                if self.is_multi_function {
+                    self.function = 1;
+                } else {
+                    self.advance_to_next_device();
+                }
+
+                return Some(dev);
+            }
+
+            // --- Functions 1..7 (only reached if multi-function) ---
+            debug_assert!(self.is_multi_function);
 
             self.function += 1;
             if self.function >= 8 {
-                self.function = 0;
-                self.device += 1;
+                self.advance_to_next_device();
             }
 
+            let address = PciAddress::new(bus, self.device, current_function);
             let Some(dev) = probe_device_full(address) else {
-                if current_function == 0 {
-                    self.function = 0;
-                    self.device += 1;
-                }
                 continue;
             };
 
             if dev.header_type & 0x7F == 0x01 {
-                let secondary = {
-                    let _lock = PCI_IO_LOCK.lock();
-                    unsafe {
-                        outl(CONFIG_ADDRESS, address.config_address(0x18));
-                        ((inl(CONFIG_DATA) >> 8) & 0xFF) as u8
-                    }
-                };
+                let secondary = raw_config_read_u8(bus, self.device, current_function, 0x19);
                 self.enqueue_bus(secondary);
-            }
-
-            if current_function == 0 && (dev.header_type & 0x80 == 0) {
-                self.function = 0;
-                self.device += 1;
             }
 
             return Some(dev);
@@ -480,12 +539,14 @@ impl Iterator for PciScanner {
     }
 }
 
-/// Returns whether absent vendor.
+// ---------------------------------------------------------------------------
+// Low-level config-space helpers
+// ---------------------------------------------------------------------------
+
 fn is_absent_vendor(vendor_id: u16) -> bool {
     vendor_id == 0xFFFF || vendor_id == 0x0000
 }
 
-/// Performs the quirk zero irq line operation.
 fn quirk_zero_irq_line(vendor_id: u16, device_id: u16, irq_line: u8) -> u8 {
     if irq_line != 0xFF {
         return irq_line;
@@ -499,20 +560,42 @@ fn quirk_zero_irq_line(vendor_id: u16, device_id: u16, irq_line: u8) -> u8 {
     0
 }
 
-/// Performs the valid header type operation.
 fn valid_header_type(header_type: u8) -> bool {
     matches!(header_type & 0x7F, 0x00..=0x02)
 }
 
-/// Returns whether ghost device.
 fn is_ghost_device(class_code: u8, subclass: u8, prog_if: u8) -> bool {
     class_code == 0xFF && subclass == 0xFF && prog_if == 0xFF
+}
+
+/// Single dword config read without building a PciDevice/PciAddress.
+/// Acquires PCI_IO_LOCK once.
+#[inline]
+fn raw_config_read(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+    let addr = 0x8000_0000u32
+        | ((bus as u32) << 16)
+        | (((device as u32) & 0x1F) << 11)
+        | (((function as u32) & 0x07) << 8)
+        | ((offset as u32) & 0xFC);
+    let _lock = PCI_IO_LOCK.lock();
+    unsafe {
+        outl(CONFIG_ADDRESS, addr);
+        inl(CONFIG_DATA)
+    }
+}
+
+/// Read a single byte from config space (derived from a dword read).
+#[inline]
+fn raw_config_read_u8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
+    let dword = raw_config_read(bus, device, function, offset & !0x03);
+    let shift = (offset & 0x03) * 8;
+    ((dword >> shift) & 0xFF) as u8
 }
 
 /// Probe a PCI address using 4 batched dword reads under a single lock hold.
 ///
 /// Reads: 0x00 (vendor+device), 0x08 (rev+progif+subclass+class),
-///        0x0C (cacheline+latency+headertype+bist), 0x3C (intline+intpin+mingnt+maxlat).
+///        0x0C (cacheline+latency+headertype+bist), 0x3C (intline+intpin).
 fn probe_device_full(address: PciAddress) -> Option<PciDevice> {
     let _lock = PCI_IO_LOCK.lock();
 
@@ -570,13 +653,85 @@ fn probe_device_full(address: PciAddress) -> Option<PciDevice> {
     })
 }
 
-/// Helper to find a device by vendor and device ID
-pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
+/// Build a PciDevice when `word00` (vendor+device dword) was already read
+/// by the caller's fast-path vendor check, avoiding a redundant I/O cycle.
+fn probe_from_word00(address: PciAddress, word00: u32) -> Option<PciDevice> {
+    let vendor_id = (word00 & 0xFFFF) as u16;
+    let device_id = (word00 >> 16) as u16;
+    if device_id == 0xFFFF || device_id == 0x0000 {
+        return None;
+    }
+
+    let _lock = PCI_IO_LOCK.lock();
+
+    let word08 = unsafe {
+        outl(CONFIG_ADDRESS, address.config_address(0x08));
+        inl(CONFIG_DATA)
+    };
+    let word0c = unsafe {
+        outl(CONFIG_ADDRESS, address.config_address(0x0C));
+        inl(CONFIG_DATA)
+    };
+
+    let header_type = ((word0c >> 16) & 0xFF) as u8;
+    if !valid_header_type(header_type) {
+        return None;
+    }
+
+    let class_code = ((word08 >> 24) & 0xFF) as u8;
+    let subclass = ((word08 >> 16) & 0xFF) as u8;
+    let prog_if = ((word08 >> 8) & 0xFF) as u8;
+    if is_ghost_device(class_code, subclass, prog_if) {
+        return None;
+    }
+
+    let word3c = unsafe {
+        outl(CONFIG_ADDRESS, address.config_address(0x3C));
+        inl(CONFIG_DATA)
+    };
+    let interrupt_line = quirk_zero_irq_line(vendor_id, device_id, (word3c & 0xFF) as u8);
+
+    Some(PciDevice {
+        address,
+        vendor_id,
+        device_id,
+        class_code,
+        subclass,
+        prog_if,
+        revision: (word08 & 0xFF) as u8,
+        header_type,
+        interrupt_line,
+        interrupt_pin: ((word3c >> 8) & 0xFF) as u8,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Cached device inventory
+// ---------------------------------------------------------------------------
+
+/// Cached PCI device inventory.
+///
+/// The first lookup performs a full bus scan, then all subsequent lookups reuse
+/// this snapshot. Every query function borrows the cache through the lock and
+/// operates on the `&[PciDevice]` directly — no `clone()` of the Vec.
+static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
+
+/// Populate the cache if empty, then run `f` on the device slice.
+///
+/// All query functions route through here so that only a single scan ever
+/// happens, and the lock is held for the duration of the filter — not for
+/// the entire boot.
+fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
     let mut cache = PCI_DEVICE_CACHE.lock();
     if cache.is_none() {
         *cache = Some(PciScanner::new().collect());
     }
-    cache.as_ref().and_then(|devs| {
+    f(cache.as_deref().unwrap_or(&[]))
+}
+
+/// Helper to find a device by vendor and device ID
+pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
+    with_cache(|devs| {
         devs.iter()
             .copied()
             .find(|dev| dev.vendor_id == vendor_id && dev.device_id == device_id)
@@ -593,40 +748,29 @@ pub fn find_virtio_device(device_id: u16) -> Option<PciDevice> {
     find_device(vendor::VIRTIO, device_id)
 }
 
-/// Cached PCI device inventory.
-///
-/// The first lookup performs a full bus scan, then all subsequent lookups reuse
-/// this snapshot. This is ideal during boot when multiple controllers probe PCI.
-static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
-
 /// Return a snapshot of all discovered PCI devices.
-///
-/// This uses a cached bus scan to avoid repeated O(bus*device*function) probes.
 pub fn all_devices() -> Vec<PciDevice> {
-    let mut cache = PCI_DEVICE_CACHE.lock();
-    if cache.is_none() {
-        *cache = Some(PciScanner::new().collect());
-    }
-    cache.as_ref().cloned().unwrap_or_default()
+    with_cache(|devs| devs.to_vec())
 }
 
 /// Return all devices for a given vendor from the cached PCI inventory.
 pub fn find_devices_by_vendor(vendor_id: u16) -> Vec<PciDevice> {
-    all_devices()
-        .into_iter()
-        .filter(|dev| dev.vendor_id == vendor_id)
-        .collect()
+    with_cache(|devs| {
+        devs.iter()
+            .copied()
+            .filter(|dev| dev.vendor_id == vendor_id)
+            .collect()
+    })
 }
 
 /// Return all devices matching a PCI class/subclass pair.
-///
-/// This is useful for future controller families (storage, USB, display, etc.)
-/// where matching by class is more stable than matching specific device IDs.
 pub fn find_devices_by_class(class_code: u8, subclass: u8) -> Vec<PciDevice> {
-    all_devices()
-        .into_iter()
-        .filter(|dev| dev.class_code == class_code && dev.subclass == subclass)
-        .collect()
+    with_cache(|devs| {
+        devs.iter()
+            .copied()
+            .filter(|dev| dev.class_code == class_code && dev.subclass == subclass)
+            .collect()
+    })
 }
 
 /// Full PCI probe criteria.
@@ -642,7 +786,6 @@ pub struct ProbeCriteria {
 }
 
 impl ProbeCriteria {
-    /// Performs the any operation.
     pub const fn any() -> Self {
         Self {
             vendor_id: None,
@@ -653,7 +796,6 @@ impl ProbeCriteria {
         }
     }
 
-    /// Performs the matches operation.
     fn matches(&self, dev: &PciDevice) -> bool {
         if self.vendor_id.is_some_and(|v| dev.vendor_id != v) {
             return false;
@@ -676,15 +818,17 @@ impl ProbeCriteria {
 
 /// Return all devices matching `criteria`.
 pub fn probe_all(criteria: ProbeCriteria) -> Vec<PciDevice> {
-    all_devices()
-        .into_iter()
-        .filter(|dev| criteria.matches(dev))
-        .collect()
+    with_cache(|devs| {
+        devs.iter()
+            .copied()
+            .filter(|dev| criteria.matches(dev))
+            .collect()
+    })
 }
 
 /// Return the first device matching `criteria`.
 pub fn probe_first(criteria: ProbeCriteria) -> Option<PciDevice> {
-    all_devices().into_iter().find(|dev| criteria.matches(dev))
+    with_cache(|devs| devs.iter().copied().find(|dev| criteria.matches(dev)))
 }
 
 /// Invalidate PCI cache.
