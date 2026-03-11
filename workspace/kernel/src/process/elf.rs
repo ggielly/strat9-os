@@ -1119,23 +1119,101 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         }
     }
 
+
+    crate::arch::x86_64::ring3_diag::validate_ring3_state(
+        user_rip,
+        user_rsp,
+        user_cs as u16,
+        user_ss as u16,
+    );
+
+    // Probe E9 Rust : validate_ring3_state passé, on entre dans l'asm.
+    // Si '0' est visible mais pas '1', le compilateur a inséré du code entre
+    // les deux qui a planté (peu probable, mais élimine cette hypothèse).
+    crate::e9_println!(
+        "E9[0] pre-asm rip={:#x} rsp={:#x} cs={:#x} ss={:#x}",
+        user_rip, user_rsp, user_cs, user_ss,
+    );
+
     // SAFETY: Valid user mappings have been set up. IRETQ switches to Ring 3.
+    //
+    // ── E9-hack probes ────────────────────────────────────────────────────
+    // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port
+    // (visible with `-debugcon stdio` or `-debugcon file:e9.log`).
+    // The push/pop rax around each probe protects registers allocated by the
+    // compiler for the `in(reg)` constraints; the net effect on RSP is zero.
+    //
+    //   '1' (0x31): start of the asm block, input registers in place
+    //   '2' (0x32): iretq frame fully on stack (5 words)
+    //   '3' (0x33): RDI loaded with arg0, just before SWAPGS
+    //   '4' (0x34): SWAPGS done — if CPU crashes on iretq the last char is '4'
+    //
+    // If output stops at:
+    //   '1' → RSP/alignment problem before any pushes
+    //   '2' → a push faulted (kernel mapping broken?)
+    //   '3' → bug in arg0 value or in RDI
+    //   '4' → iretq is indeed triple-faulting (GDT/paging/TSS issue)
+    //   nothing → E9 port not enabled in QEMU (add `-debugcon stdio`)
     unsafe {
         core::arch::asm!(
+            // ── Probe 1 : entrée dans le bloc asm ─────────────────────────
+            // Les registres d'entrée sont déjà alloués par le compilateur ;
+            // push/pop rax les laisse intacts.
+            "push rax",
+            "mov al, 0x31",     // '1'
+            "out 0xe9, al",
+            "pop rax",
+
+            // ── Construction de la frame iretq ────────────────────────────
+            // Ordre requis par IRETQ (dépilé dans l'ordre inverse) :
+            //   [RSP+32] SS
+            //   [RSP+24] user RSP
+            //   [RSP+16] RFLAGS
+            //   [RSP+8]  CS
+            //   [RSP+0]  RIP  ← RSP ici après les 5 push
             "push {ss}",
             "push {rsp_val}",
             "push {rflags}",
             "push {cs}",
             "push {rip}",
+
+            // ── Probe 2 : frame iretq complète ────────────────────────────
+            "push rax",
+            "mov al, 0x32",     // '2'
+            "out 0xe9, al",
+            "pop rax",
+
+            // ── Chargement de arg0 dans RDI ───────────────────────────────
             "mov rdi, {arg0}",
+
+            // ── Probe 3 : RDI chargé, juste avant SWAPGS ─────────────────
+            "push rax",
+            "mov al, 0x33",     // '3'
+            "out 0xe9, al",
+            "pop rax",
+
+            // ── SWAPGS : GS.base kernel ↔ GS.base user ───────────────────
+            // Après cette instruction, GS pointe vers le bloc per-thread user.
+            // Le push/pop ci-dessous ne touche pas GS, il est sûr.
             "swapgs",
+
+            // ── Probe 4 : SWAPGS réussi, IRETQ imminent ──────────────────
+            // Si le double-fault survient sur iretq, '4' sera le DERNIER
+            // caractère visible dans la console E9.
+            "push rax",
+            "mov al, 0x34",     // '4'
+            "out 0xe9, al",
+            "pop rax",
+
+            // ── IRETQ : point de non-retour ───────────────────────────────
             "iretq",
-            ss = in(reg) user_ss,
+
+            ss      = in(reg) user_ss,
             rsp_val = in(reg) user_rsp,
-            rflags = in(reg) user_rflags,
-            cs = in(reg) user_cs,
-            rip = in(reg) user_rip,
-            arg0 = in(reg) user_arg0,
+            rflags  = in(reg) user_rflags,
+            cs      = in(reg) user_cs,
+            rip     = in(reg) user_rip,
+            arg0    = in(reg) user_arg0,
             options(noreturn),
         );
     }

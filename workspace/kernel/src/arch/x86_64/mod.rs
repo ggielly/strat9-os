@@ -15,6 +15,7 @@ pub mod mouse;
 pub mod pci;
 pub mod percpu;
 pub mod pic;
+pub mod ring3_diag;
 pub mod serial;
 pub mod smp;
 pub mod syscall;

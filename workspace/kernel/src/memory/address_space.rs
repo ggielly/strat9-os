@@ -373,7 +373,16 @@ impl AddressSpace {
             return Ok(());
         }
 
-        // 4. Allocate and map a single page of the required size
+        // 4. Allocate and map a single page of the required size.
+        //
+        // IMPORTANT: `allocate_frame` (order-0) now goes through
+        // `FrameAllocOptions::new()` which zeroes by default.  For order > 0
+        // (huge pages) we still need a manual zero via the HHDM.
+        //
+        // The zero MUST go through phys_to_virt (HHDM), NOT through the user
+        // virtual address, because the user address space is not necessarily
+        // the currently active CR3.  Writing through `page_addr as *mut u8`
+        // would either write into a different process's memory or fault.
         let mut frame_allocator = crate::memory::paging::BuddyFrameAllocator;
         let order = match vma.page_size {
             VmaPageSize::Small => 0,
@@ -381,7 +390,21 @@ impl AddressSpace {
         };
 
         let frame = crate::sync::with_irqs_disabled(|token| {
-            crate::memory::allocate_frames(token, order)
+            if order == 0 {
+                crate::memory::allocate_frame(token)
+            } else {
+                let f = crate::memory::allocate_frames(token, order)?;
+                // SAFETY: phys_to_virt gives a valid HHDM pointer for this
+                // frame; we have exclusive ownership from the buddy allocator.
+                unsafe {
+                    core::ptr::write_bytes(
+                        crate::memory::phys_to_virt(f.start_address.as_u64()) as *mut u8,
+                        0,
+                        page_bytes as usize,
+                    );
+                }
+                Ok(f)
+            }
         })
         .map_err(|_| "OOM during demand paging")?;
 
@@ -401,7 +424,6 @@ impl AddressSpace {
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
                         Ok(flush) => {
                             flush.flush();
-                            core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             crate::sync::with_irqs_disabled(|token| {
@@ -428,7 +450,6 @@ impl AddressSpace {
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
                         Ok(flush) => {
                             flush.flush();
-                            core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             crate::sync::with_irqs_disabled(|token| {
@@ -508,21 +529,27 @@ impl AddressSpace {
                 .ok_or("Page address overflow")?;
 
             // Allocate a physical frame of appropriate size.
+            //
+            // order-0 frames go through FrameAllocOptions (zeroed + metadata
+            // stamped).  order > 0 (huge pages) are zeroed manually via HHDM.
             let order = match page_size {
                 VmaPageSize::Small => 0,
                 VmaPageSize::Huge => 9,
             };
 
             let frame = crate::sync::with_irqs_disabled(|token| {
-                crate::memory::allocate_frames(token, order)
+                if order == 0 {
+                    crate::memory::allocate_frame(token)
+                } else {
+                    let f = crate::memory::allocate_frames(token, order)?;
+                    unsafe {
+                        let virt = crate::memory::phys_to_virt(f.start_address.as_u64());
+                        core::ptr::write_bytes(virt as *mut u8, 0, page_bytes as usize);
+                    }
+                    Ok(f)
+                }
             })
             .map_err(|_| "Failed to allocate frame")?;
-
-            // Zero the frame
-            unsafe {
-                let frame_virt = crate::memory::phys_to_virt(frame.start_address.as_u64());
-                core::ptr::write_bytes(frame_virt as *mut u8, 0, page_bytes as usize);
-            }
 
             // Map the page.
             let map_ok = match page_size {

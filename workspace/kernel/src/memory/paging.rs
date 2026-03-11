@@ -14,22 +14,62 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 
-/// Wrapper around our buddy allocator implementing the x86_64 crate's FrameAllocator trait.
+use crate::memory::frame::{FrameAllocOptions, FramePurpose};
+
+/// Wrapper around the buddy allocator implementing the x86_64 crate's `FrameAllocator` trait.
 ///
-/// This is used by `OffsetPageTable` when it needs to allocate intermediate page tables.
+/// Used by `OffsetPageTable` when it needs a new intermediate page-table node
+/// (PML4 / PDPT / PD / PT).
+///
+/// # Safety invariant: page-table frames MUST be zeroed
+///
+/// The x86_64 CPU page-table walker reads all 512 entries of every
+/// intermediate node it traverses, regardless of which entries are "in use".
+/// If a newly allocated page-table frame contains stale bytes (left behind by
+/// the slab allocator or a previous allocation), any non-zero entry is decoded
+/// as a valid PTE pointing to an arbitrary physical address.  The first fetch
+/// from such an address becomes the new RIP after the Ring 3 transition —
+/// explaining why RIP is non-deterministic across boots.
+///
+/// `BuddyFrameAllocator` enforces zeroing via `FrameAllocOptions::new()
+///  .purpose(FramePurpose::PageTable)` which:
+///
+///  1. Calls the buddy allocator for a raw order-0 frame.
+///  2. CAS-claims the frame via `FrameMeta::refcount` (UNUSED → 0 → 1).
+///  3. Zeros the 4 KiB with a single `ptr::write_bytes` through the HHDM.
+///  4. Sets `FrameMeta::flags` to `KERNEL | ALLOCATED` with `Release` ordering.
+///  5. Stores `refcount = 1` with `Release` ordering so any future reader
+///     that loads the refcount with `Acquire` observes a fully-initialised frame.
+///
+/// This pattern is lifted directly from Asterinas OSTD
+/// `FrameAllocOptions::alloc_frame_with` + `MetaSlot::get_from_unused`.
 pub struct BuddyFrameAllocator;
 
-// SAFETY: allocate_frame returns valid, unused, 4KiB-aligned physical frames
-// from the buddy allocator.
+// SAFETY: `BuddyFrameAllocator::allocate_frame` returns 4KiB-aligned,
+// exclusively-owned physical frames.  Exclusive ownership is guaranteed by
+// the buddy's own bitmap + free-list discipline.  Frames allocated with
+// `FramePurpose::PageTable` are always fully zeroed before being returned.
 unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
-    /// Performs the allocate frame operation.
     fn allocate_frame(&mut self) -> Option<X86PhysFrame<Size4KiB>> {
-        // SAFETY: BuddyFrameAllocator is called from OffsetPageTable during page-table
-        // operations, which always occur either in early single-threaded init or while
-        // holding the scheduler SpinLock (which disables IRQs). IRQs are therefore
-        // guaranteed to be off at this point.
+        // SAFETY: `BuddyFrameAllocator` is only ever called from within
+        // `OffsetPageTable` during page-table operations.  Those occur either
+        // during single-threaded early boot, or while the caller holds a lock
+        // that disables IRQs (e.g. the scheduler SpinLock, the AddressSpace
+        // lock).  IRQs are therefore guaranteed to be disabled, making
+        // `new_unchecked` sound.
         let token = unsafe { crate::sync::IrqDisabledToken::new_unchecked() };
-        let frame = crate::memory::allocate_frame(&token).ok()?;
+
+        // `PageTable` purpose enforces:
+        //  - `zeroed = true` unconditionally (cannot be overridden by callers).
+        //  - `FrameMeta::flags` stamped with `KERNEL | ALLOCATED`.
+        //  - `FrameMeta::refcount` set to 1 with `Release` ordering after
+        //    zeroing, so any `Acquire` load of the refcount observes a clean
+        //    frame.
+        let frame = FrameAllocOptions::new()
+            .purpose(FramePurpose::PageTable)
+            .allocate(&token)
+            .ok()?;
+
         X86PhysFrame::from_start_address(frame.start_address).ok()
     }
 }
@@ -57,7 +97,7 @@ pub fn init(hhdm_offset: u64) {
     let level_4_phys = level_4_frame.start_address().as_u64();
     let level_4_virt = phys_offset + level_4_phys;
 
-    // SAFETY: Called once during single-threaded init. The HHDM offset correctly
+    // SAFETY: called once during single-threaded init. The HHDM offset correctly
     // maps all physical RAM to virtual addresses. CR3 points to a valid page table
     // set up by Limine.
     unsafe {

@@ -7,6 +7,257 @@ use core::{
 };
 use x86_64::PhysAddr;
 
+// ──────────────────────────────────────────────────────────────────────────────
+// FrameAllocOptions  (Asterinas OSTD pattern)
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// DESIGN NOTES — why this wrapper exists:
+//
+//  * In Asterinas OSTD, `FrameAllocOptions::new()` defaults to `zeroed: true`.
+//    This means callers can never accidentally hand out a frame that still holds
+//    data from a previous lifetime.  The only way to skip zeroing is an
+//    explicit `.zeroed(false)` call at the site that *knows* it is safe to do
+//    so (e.g. a frame that will be fully overwritten before any read).
+//
+//  * The critical failure mode we are fixing:
+//    `BuddyFrameAllocator::allocate_frame` (used by `OffsetPageTable` when it
+//    needs a new intermediate page-table node) was returning raw, unzeroed
+//    frames.  A freshly-split buddy block can contain bytes left behind by the
+//    slab allocator (POISON_BYTE = 0xDE) or by whatever previously lived in
+//    that memory.  The CPU page-table walker reads all 512 entries of every
+//    intermediate node it traverses.  A random non-zero entry is decoded as a
+//    valid PTE pointing to an arbitrary physical address — which explains why
+//    RIP (the first fetch address the CPU tries after entering Ring 3) changes
+//    on every boot.
+//
+//  * The `flags` field mirrors OSTD's per-frame metadata: we stamp the purpose
+//    (kernel / user / page-table) into `FrameMeta::flags` atomically using
+//    `Ordering::Release` so that any CPU that later reads the frame through
+//    `get_meta` observes the correct flags.
+//
+//  * Refcount state machine (OSTD target, partially implemented):
+//
+//    OSTD uses a CAS(REFCOUNT_UNUSED → 0) transition here so that a frame
+//    appearing twice in the buddy free list is caught immediately rather than
+//    silently aliasing.  That check requires `mark_block_free` in `buddy.rs`
+//    to stamp `REFCOUNT_UNUSED` (not 0) into every freed frame's metadata.
+//
+//    Current state of `buddy.rs`: both `mark_block_free` and
+//    `mark_block_allocated` call `reset_refcount()` which writes 0.
+//    The CAS would always fail ─ crashing the kernel at the very first
+//    page-table allocation.  The CAS is therefore omitted for now; the
+//    transition implemented here is simply:
+//
+//       buddy alloc ──▶ optional zero ──▶ set flags ──▶ refcount = 1 (live)
+//
+//    TODO: once `buddy.rs` stamps REFCOUNT_UNUSED on free, reinstate the CAS.
+
+/// Sentinel refcount for a frame that is in the buddy free list.
+///
+/// Mirrors `REF_COUNT_UNUSED` in Asterinas OSTD `meta.rs`.
+///
+/// Currently **not** written by `buddy.rs` (both `mark_block_free` and
+/// `mark_block_allocated` call `reset_refcount()` → 0).  Once `buddy.rs` is
+/// updated, the CAS in `FrameAllocOptions::allocate` can be reinstated.
+pub const REFCOUNT_UNUSED: u32 = u32::MAX;
+
+/// Options controlling how a physical frame is allocated.
+///
+/// The default configuration (`FrameAllocOptions::new()`) produces a
+/// **zeroed** frame.  Callers that need a non-zeroed frame (e.g. DMA buffers
+/// that are immediately filled by hardware, or frames that will be fully
+/// overwritten before any read) must explicitly call `.zeroed(false)`.
+///
+/// # Example
+///
+/// ```ignore
+/// // Allocate a zeroed page-table frame (the safe default).
+/// let frame = FrameAllocOptions::new()
+///     .purpose(FramePurpose::PageTable)
+///     .allocate(token)?;
+///
+/// // Allocate a user-data frame without zeroing (caller guarantees it will
+/// // be fully overwritten, e.g. by an ELF segment load).
+/// let frame = FrameAllocOptions::new()
+///     .zeroed(false)
+///     .purpose(FramePurpose::UserData)
+///     .allocate(token)?;
+/// ```
+pub struct FrameAllocOptions {
+    /// Whether the frame content should be zeroed before being returned.
+    ///
+    /// Defaults to `true`.  Setting this to `false` is only safe when the
+    /// caller guarantees the frame will be fully written before any read.
+    zeroed: bool,
+    /// The logical purpose of the frame, encoded as `frame_flags` bits.
+    purpose_flags: u32,
+}
+
+/// Describes the intended purpose of an allocated frame.
+///
+/// Purpose is written into `FrameMeta::flags` with `Ordering::Release` so
+/// that any concurrent reader of the metadata (e.g. a TLB-shootdown handler
+/// deciding whether a frame holds a page-table node) sees a consistent view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FramePurpose {
+    /// Frame will hold a kernel page-table node (PML4/PDPT/PD/PT).
+    ///
+    /// These frames MUST be zeroed — unzeroed page-table nodes are the primary
+    /// source of non-deterministic RIP at Ring 3 transition.
+    PageTable,
+    /// Frame belongs to kernel address-space (e.g. heap, stack, metadata).
+    KernelData,
+    /// Frame belongs to a user-space address-space (anonymous or file-backed).
+    UserData,
+    /// Caller-managed; raw flags are passed through unchanged.
+    Custom(u32),
+}
+
+impl FramePurpose {
+    fn to_flags(self) -> u32 {
+        match self {
+            // Page-table frames are always kernel-owned.
+            Self::PageTable => frame_flags::KERNEL | frame_flags::ALLOCATED,
+            Self::KernelData => frame_flags::KERNEL | frame_flags::ALLOCATED,
+            Self::UserData => frame_flags::USER | frame_flags::ALLOCATED,
+            Self::Custom(f) => f | frame_flags::ALLOCATED,
+        }
+    }
+
+    /// Returns `true` if this purpose requires zeroing regardless of the
+    /// `zeroed` option.  Page-table nodes must always be zeroed.
+    pub fn requires_zero(self) -> bool {
+        matches!(self, Self::PageTable)
+    }
+}
+
+impl Default for FrameAllocOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FrameAllocOptions {
+    /// Creates allocation options with safe defaults:
+    ///  - `zeroed = true`
+    ///  - purpose = `KernelData`
+    pub fn new() -> Self {
+        Self {
+            zeroed: true,
+            purpose_flags: FramePurpose::KernelData.to_flags(),
+        }
+    }
+
+    /// Override the zero-initialisation policy.
+    ///
+    /// # Safety contract (enforced by convention, not the type system)
+    ///
+    /// If `zeroed` is set to `false`, the caller MUST fully overwrite every
+    /// byte of the frame before allowing any other CPU or subsystem to read it.
+    /// Violating this rule is a memory-safety hazard: stale bytes in an
+    /// intermediate page-table node cause the CPU to follow arbitrary PTEs.
+    pub fn zeroed(mut self, zeroed: bool) -> Self {
+        self.zeroed = zeroed;
+        self
+    }
+
+    /// Set the intended purpose of the frame.
+    ///
+    /// `PageTable` purpose forces zeroing even if `.zeroed(false)` was called.
+    pub fn purpose(mut self, p: FramePurpose) -> Self {
+        self.purpose_flags = p.to_flags();
+        // Page-table nodes must always be zeroed — override any caller setting.
+        if p.requires_zero() {
+            self.zeroed = true;
+        }
+        self
+    }
+
+    /// Allocate a single 4 KiB frame according to the configured options.
+    ///
+    /// The allocation path is:
+    ///
+    /// 1. Ask the buddy allocator for an order-0 frame (exclusive ownership is
+    ///    guaranteed by the buddy's own bitmap + free-list discipline).
+    /// 2. Optionally zero the 4 KiB frame contents via the HHDM.
+    /// 3. Stamp `FrameMeta::flags` with the purpose flags using `Release`
+    ///    ordering.
+    /// 4. Store `refcount = 1` with `Release` ordering so any later `Acquire`
+    ///    load of the refcount observes the fully-initialised metadata and
+    ///    (if zeroed) zeroed content.
+    ///
+    /// # Why there is no CAS here (and why `REFCOUNT_UNUSED` is not checked)
+    ///
+    /// Asterinas OSTD performs a `CAS(REFCOUNT_UNUSED → 0)` at this point to
+    /// detect buddy free-list corruption (a frame appearing twice in the list).
+    /// That pattern requires the buddy allocator to maintain the invariant:
+    ///
+    ///   > A frame in the free list always has `refcount == REFCOUNT_UNUSED`.
+    ///
+    /// Our buddy allocator does not yet maintain this invariant: both
+    /// `mark_block_free` and `mark_block_allocated` call `reset_refcount()`
+    /// which writes `0`, not `REFCOUNT_UNUSED`.  Until `buddy.rs` is updated
+    /// to stamp `REFCOUNT_UNUSED` on every `mark_block_free` call (and to
+    /// leave the refcount untouched in `mark_block_allocated`), the CAS would
+    /// always observe `0` instead of `REFCOUNT_UNUSED` and fail — starving the
+    /// slab of pages and crashing the kernel on the very first heap allocation.
+    ///
+    /// The exclusive-ownership guarantee is fully provided by the buddy
+    /// allocator itself; the CAS is purely a belt-and-suspenders consistency
+    /// check.  It is left as a future hardening step once `buddy.rs` is aligned.
+    pub fn allocate(self, token: &IrqDisabledToken) -> Result<PhysFrame, AllocError> {
+        // Step 1 — exclusive frame from the buddy allocator.
+        let frame = crate::memory::buddy::alloc(token, 0)?;
+        let phys = frame.start_address.as_u64();
+
+        // SAFETY: `get_meta` panics only if `phys` is out-of-bounds, which
+        // would be a buddy-level invariant violation (it returned an address
+        // beyond the metadata array).  That is a kernel bug, not UB here.
+        let meta = get_meta(frame.start_address);
+
+        // Step 2 — zero the frame content if required.
+        //
+        // The zeroing MUST happen before the `Release` store of `refcount = 1`
+        // (step 4) so that any thread performing an `Acquire` load of the
+        // refcount and then reading frame bytes observes zeros.
+        //
+        // For `FramePurpose::PageTable` this is unconditional: the CPU's
+        // page-table walker reads all 512 entries of every intermediate node it
+        // visits.  Stale non-zero bytes would be decoded as valid PTEs pointing
+        // to arbitrary physical addresses, producing a non-deterministic RIP on
+        // Ring 3 entry (the root cause of the original bug).
+        //
+        // SAFETY: `phys_to_virt(phys)` is a valid HHDM address covering exactly
+        // `PAGE_SIZE` bytes.  The buddy allocator guarantees we have exclusive
+        // ownership of these bytes for the duration of this function.
+        if self.zeroed {
+            unsafe {
+                ptr::write_bytes(
+                    crate::memory::phys_to_virt(phys) as *mut u8,
+                    0,
+                    PAGE_SIZE as usize,
+                );
+            }
+        }
+
+        // Step 3 — stamp purpose flags with `Release` ordering.
+        //
+        // Any reader that subsequently loads `refcount` with `Acquire` (step 4)
+        // is guaranteed to observe these flags as well.
+        meta.flags.store(self.purpose_flags, Ordering::Release);
+        meta.set_order(0);
+
+        // Step 4 — publish the frame as live.
+        //
+        // `Release` ensures steps 2 and 3 happen-before any `Acquire` load of
+        // this refcount by another thread or CPU.  This mirrors the final store
+        // in OSTD `MetaSlot::get_from_unused`.
+        meta.refcount.store(1, Ordering::Release);
+
+        Ok(frame)
+    }
+}
+
 pub const PAGE_SIZE: u64 = 4096;
 pub const FRAME_META_ALIGN: usize = 64;
 pub const FRAME_META_SIZE: usize = 64;

@@ -25,6 +25,7 @@ pub mod audit;
 pub mod boot;
 pub mod capability;
 pub mod components;
+pub mod debug;
 pub mod hardware;
 pub mod ipc;
 pub mod memory;
