@@ -1,6 +1,6 @@
 use core::{
     fmt,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use spin::Mutex;
 use uart_16550::SerialPort;
@@ -11,6 +11,25 @@ static SERIAL1: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(0x3F8) }
 /// Flag indicating if the kernel is in a panic state.
 /// When true, serial output bypasses all locks to ensure messages are displayed.
 static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Raw spinlock for `_print_force` to prevent multi-core character interleaving.
+/// Uses a ticket-style test-and-set: 0 = free, 1 = locked.
+static FORCE_LOCK: AtomicU8 = AtomicU8::new(0);
+
+#[inline(always)]
+fn force_lock_acquire() {
+    while FORCE_LOCK
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline(always)]
+fn force_lock_release() {
+    FORCE_LOCK.store(0, Ordering::Release);
+}
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_RED: &str = "\x1b[31m";
@@ -170,15 +189,20 @@ pub fn _print(args: fmt::Arguments) {
 }
 
 /// Print to serial port bypassing the shared mutex.
+///
+/// Uses a dedicated raw spinlock so that multiple CPUs cannot interleave
+/// their output at the character level.
 #[doc(hidden)]
 pub fn _print_force(args: fmt::Arguments) {
     use core::fmt::Write;
 
-    // SAFETY: This is debug-only style output intended for deadlock forensics.
-    // It may interleave with normal serial output, but it must never block on
-    // the SERIAL1 mutex.
+    // Acquire the raw force-lock so concurrent callers on different CPUs
+    // don't interleave their characters.
+    force_lock_acquire();
+    // SAFETY: We hold `FORCE_LOCK`, giving us exclusive access to the UART.
     let mut port = unsafe { SerialPort::new(0x3F8) };
     let _ = port.write_fmt(args);
+    force_lock_release();
 }
 
 /// Print to serial port

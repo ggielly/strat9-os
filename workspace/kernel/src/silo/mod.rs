@@ -2952,7 +2952,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
     });
 
     if let Some((pid, tid, name, state, as_cr3, as_is_kernel)) = task_meta {
-        crate::serial_println!(
+        crate::serial_force_println!(
             "\x1b[31m[handle_user_fault]\x1b[0m task={} \x1b[36mpid={}\x1b[0m tid={} name='{}' state={:?} reason={:?} \x1b[35mrip={:#x}\x1b[0m \x1b[35mextra={:#x}\x1b[0m subcode={:#x} as_cr3={:#x} as_kernel={}",
             task_id.as_u64(),
             pid,
@@ -2967,7 +2967,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
             as_is_kernel
         );
     } else {
-        crate::serial_println!(
+        crate::serial_force_println!(
             "\x1b[31m[handle_user_fault]\x1b[0m task={} reason={:?} \x1b[35mrip={:#x}\x1b[0m \x1b[35mextra={:#x}\x1b[0m subcode={:#x} (task metadata unavailable)",
             task_id.as_u64(),
             reason,
@@ -2986,7 +2986,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
         let pkey = (subcode & 0x20) != 0;
         let shadow_stack = (subcode & 0x40) != 0;
         let sgx = (subcode & 0x8000) != 0;
-        crate::serial_println!(
+        crate::serial_force_println!(
             "\x1b[31m[handle_user_fault]\x1b[0m \x1b[31mpagefault\x1b[0m \x1b[35maddr={:#x}\x1b[0m \x1b[35mrip={:#x}\x1b[0m ec={:#x} present={} write={} user={} reserved={} ifetch={} pkey={} shadow_stack={} sgx={}",
             extra,
             rip,
@@ -3001,13 +3001,13 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
             sgx
         );
         if user && extra < 0x1000 {
-            crate::serial_println!(
+            crate::serial_force_println!(
                 "\x1b[31m[handle_user_fault]\x1b[0m \x1b[33mhint: low user address fault ({:#x}) -> probable NULL/near-NULL dereference\x1b[0m",
                 extra
             );
         }
     } else {
-        crate::serial_println!(
+        crate::serial_force_println!(
             "\x1b[31m[handle_user_fault]\x1b[0m \x1b[31mfault detail\x1b[0m \x1b[35mrip={:#x}\x1b[0m code={:#x}",
             rip,
             subcode
@@ -3023,6 +3023,16 @@ pub fn handle_user_fault(
     subcode: u64,
     rip: u64,
 ) {
+    // FORCE OUTPUT for user fault - bypasses normal logging mutexes
+    crate::serial_force_println!(
+        "\x1b[31;1m[handle_user_fault] CRITICAL FAULT\x1b[0m: tid={} reason={:?} rip={:#x} addr={:#x} err={:#x}",
+        task_id.as_u64(),
+        reason,
+        rip,
+        extra,
+        subcode
+    );
+
     dump_user_fault(task_id, reason, extra, subcode, rip);
 
     // Best-effort: map task to silo, mark crashed, emit event, kill tasks.
@@ -3031,7 +3041,7 @@ pub fn handle_user_fault(
         let silo_id = match mgr.silo_for_task(task_id) {
             Some(id) => id,
             None => {
-                crate::serial_println!(
+                crate::serial_force_println!(
                     "[handle_user_fault] Non-silo task {} crashed (reason={:?})! Killing it.",
                     task_id.as_u64(),
                     reason

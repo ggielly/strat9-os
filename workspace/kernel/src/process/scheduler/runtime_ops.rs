@@ -371,6 +371,30 @@ pub fn maybe_preempt() {
 
     if let Some(ref target) = switch_target {
         if cpu_is_valid(cpu_index) {
+            // One-shot per-CPU: trace the very first real preemption.
+            if !FIRST_PREEMPT_LOGGED[cpu_index].swap(true, Ordering::Relaxed) {
+                let preempt_n = CPU_PREEMPT_COUNT[cpu_index].load(Ordering::Relaxed);
+                let cur_tid = {
+                    let saved = crate::arch::x86_64::save_flags_and_cli();
+                    let tid = {
+                        let guard = SCHEDULER.try_lock();
+                        guard.as_ref()
+                            .and_then(|g| g.as_ref())
+                            .and_then(|s| s.cpus.get(cpu_index))
+                            .and_then(|c| c.current_task.as_ref())
+                            .map(|t| t.id.as_u64())
+                            .unwrap_or(u64::MAX)
+                    };
+                    crate::arch::x86_64::restore_flags(saved);
+                    tid
+                };
+                crate::serial_force_println!(
+                    "[trace][sched] maybe_preempt FIRST cpu={} total_count={} cur_tid={}",
+                    cpu_index,
+                    preempt_n,
+                    cur_tid
+                );
+            }
             CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
         }
         unsafe {
@@ -540,7 +564,8 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
 
 /// The main function for the idle task
 pub(super) extern "C" fn idle_task_main() -> ! {
-    log::info!("[sched][idle] started");
+    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    crate::serial_force_println!("[trace][sched] idle_task_main start cpu={}", cpu);
     loop {
         // Be explicit on SMP: never rely on inherited IF state.
         // If IF=0, HLT can deadlock that CPU forever.

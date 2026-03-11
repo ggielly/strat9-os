@@ -1129,12 +1129,26 @@ pub fn load_and_run_elf_with_caps(
     name: &'static str,
     seed_caps: &[Capability],
 ) -> Result<TaskId, &'static str> {
+    crate::serial_force_println!(
+        "[trace][elf] load_and_run_elf enter name={} size={}",
+        name,
+        elf_data.len()
+    );
     let task = load_elf_task_with_caps(elf_data, name, seed_caps)?;
     let task_id = task.id;
     let runtime_entry = task
         .trampoline_entry
         .load(core::sync::atomic::Ordering::Acquire);
+    crate::serial_force_println!(
+        "[trace][elf] load_and_run_elf add_task begin tid={} entry={:#x}",
+        task_id.as_u64(),
+        runtime_entry
+    );
     crate::process::add_task(task);
+    crate::serial_force_println!(
+        "[trace][elf] load_and_run_elf add_task done tid={}",
+        task_id.as_u64()
+    );
 
     log::info!(
         "[elf] Task '{}' created: entry={:#x}, stack_top={:#x}",
@@ -1222,12 +1236,24 @@ pub fn load_elf_task_with_caps(
     name: &'static str,
     seed_caps: &[Capability],
 ) -> Result<Arc<Task>, &'static str> {
+    crate::serial_force_println!(
+        "[trace][elf] load_elf_task enter name={} size={}",
+        name,
+        elf_data.len()
+    );
     log::info!("[elf] Loading ELF '{}'...", name);
 
     // Step 1: Parse and validate ELF header
+    crate::serial_force_println!("[trace][elf] load_elf_task parse_header begin");
     let header = parse_header(elf_data)?;
+    crate::serial_force_println!(
+        "[trace][elf] load_elf_task parse_header ok type={}",
+        if header.e_type == ET_DYN { "ET_DYN" } else { "ET_EXEC" }
+    );
     // Step 2: Create user address space
+    crate::serial_force_println!("[trace][elf] load_elf_task user_as begin");
     let user_as = Arc::new(AddressSpace::new_user()?);
+    crate::serial_force_println!("[trace][elf] load_elf_task user_as done");
 
     let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
@@ -1235,6 +1261,12 @@ pub fn load_elf_task_with_caps(
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
 
     let phnum = header.e_phnum;
+    crate::serial_force_println!(
+        "[trace][elf] load_elf_task layout entry={:#x} bias={:#x} phdrs={}",
+        entry,
+        load_bias,
+        phnum
+    );
     log::info!(
         "[elf] ELF '{}': type={}, entry={:#x}, bias={:#x}, {} program headers",
         name,
@@ -1260,6 +1292,11 @@ pub fn load_elf_task_with_caps(
         apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
     }
 
+    crate::serial_force_println!(
+        "[trace][elf] load_elf_task segments_done count={} has_interp={}",
+        load_count,
+        interp_path.is_some()
+    );
     log::info!("[elf] Loaded {} PT_LOAD segment(s)", load_count);
 
     let mut runtime_entry = entry;
@@ -1362,7 +1399,16 @@ pub fn load_elf_task_with_caps(
 
     // Step 5: Create kernel task — trampoline params are stored inside the task
     // itself so that concurrent SMP execution of multiple trampolines is safe.
+    crate::serial_force_println!(
+        "[trace][elf] load_elf_task kstack_begin size={}",
+        Task::DEFAULT_STACK_SIZE
+    );
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
+    crate::serial_force_println!(
+        "[trace][elf] load_elf_task kstack_done virt={:#x} top={:#x}",
+        kernel_stack.virt_base.as_u64(),
+        kernel_stack.virt_base.as_u64() + kernel_stack.size as u64
+    );
     let context = CpuContext::new(elf_ring3_trampoline as *const () as u64, &kernel_stack);
     let (pid, tid, tgid) = Task::allocate_process_ids();
     let fpu_state = crate::process::task::ExtendedState::new();
@@ -1406,6 +1452,13 @@ pub fn load_elf_task_with_caps(
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
     });
 
+    crate::serial_force_println!(
+        "[trace][elf] load_elf_task task_built tid={} pid={} entry={:#x} sp={:#x}",
+        task.id.as_u64(),
+        task.pid,
+        runtime_entry,
+        boot_sp
+    );
     // Seed capabilities into the new task (before scheduling).
     let mut bootstrap_handle: Option<u64> = None;
     if !seed_caps.is_empty() {

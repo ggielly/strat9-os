@@ -114,6 +114,10 @@ static RESCHED_IPI_PENDING: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] 
     [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
 static LAST_STEAL_TICK: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+/// One-shot flag per CPU: set to true after the first preemption is logged.
+/// Prevents flooding the serial port with a preempt trace on every tick.
+pub(crate) static FIRST_PREEMPT_LOGGED: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
 
 const STEAL_IMBALANCE_MIN: usize = 2;
 const STEAL_COOLDOWN_TICKS: u64 = 2;

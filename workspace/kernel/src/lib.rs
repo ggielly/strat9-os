@@ -1154,6 +1154,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // after the task context is fully installed.
 
     // Start the scheduler - this will never return
+    serial_force_println!("[trace][bsp] schedule start (never returns)");
     process::schedule();
 }
 

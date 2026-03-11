@@ -28,8 +28,20 @@ use crate::{
 use alloc::{sync::Arc, vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+/// One-shot diagnostic flag to confirm syscalls reach the dispatcher.
+static SYSCALL_DIAG_DONE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Rate-limit counter for the per-syscall ENTER trace (avoid flooding FORCE_LOCK under SMP).
+/// Prints first 20 dispatches unconditionally, then every 10_000.
+static SYSCALL_TRACE_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Budget for logging network send errors to prevent log spam.
 static NET_SEND_ERR_LOG_BUDGET: AtomicU32 = AtomicU32::new(32);
+/// Budget for logging network receive errors to prevent log spam.
 static NET_RECV_ERR_LOG_BUDGET: AtomicU32 = AtomicU32::new(32);
+/// Budget for logging DHCP trace frames to prevent log spam.
 static DHCP_TRACE_LOG_BUDGET: AtomicU32 = AtomicU32::new(64);
 
 /// Performs the trace dhcp frame operation.
@@ -98,9 +110,39 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
     let arg1 = frame.rdi;
     let arg2 = frame.rsi;
     let arg3 = frame.rdx;
+
+    // One-shot diagnostic: confirm first syscall reaches the dispatcher.
+    if !SYSCALL_DIAG_DONE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        crate::serial_force_println!(
+            "[syscall] first dispatch nr={} rip={:#x} cpu={}",
+            syscall_num,
+            frame.rcx,
+            crate::arch::x86_64::percpu::current_cpu_index()
+        );
+    }
     let arg4 = frame.r10;
     let _arg5 = frame.r8;
     let _arg6 = frame.r9;
+
+    // Rate-limited trace to avoid saturating FORCE_LOCK under SMP.
+    // First 20 calls unconditional, then a sample every 10_000.
+    {
+        let n = SYSCALL_TRACE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 20 || n % 10_000 == 0 {
+            if let Some(tid) = crate::process::current_task_id() {
+                crate::serial_force_println!(
+                    "[syscall] ENTER n={} tid={} nr={} arg1={:#x} arg2={:#x} rip={:#x} cpu={}",
+                    n,
+                    tid,
+                    syscall_num,
+                    arg1,
+                    arg2,
+                    frame.rcx,
+                    crate::arch::x86_64::percpu::current_cpu_index()
+                );
+            }
+        }
+    }
 
     let result = match syscall_num {
         SYS_NULL => sys_null(),
@@ -945,12 +987,12 @@ fn sys_debug_log(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let mut kbuf = [0u8; 4096];
     let copied = user_buf.copy_to(&mut kbuf);
 
-    // Write to serial with a prefix
-    crate::serial_print!("[user-debug] ");
-    for &byte in &kbuf[..copied] {
-        crate::serial_print!("{}", byte as char);
-    }
-    crate::serial_println!();
+    // Write to serial with a prefix — use force output so user messages are
+    // never silently dropped when SERIAL1 is momentarily contended.
+    crate::arch::x86_64::serial::_print_force(format_args!(
+        "[user-debug] {}\n",
+        core::str::from_utf8(&kbuf[..copied]).unwrap_or("<non-utf8>")
+    ));
 
     if let Some(task) = crate::process::current_task_clone() {
         if let Some(silo_id) = crate::silo::task_silo_id(task.id) {

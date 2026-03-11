@@ -21,10 +21,89 @@ pub mod irq {
     pub const ATA_SECONDARY: u8 = super::pic::PIC1_OFFSET + 15; // IRQ15 = 0x2F
 }
 
+/// RAII guard: swap GS to kernel on entry if we came from Ring 3, and restore
+/// user GS automatically on drop (covers every exit path including early returns).
+///
+/// # Why this is needed
+/// After `swapgs ; iretq` in the Ring-3 trampoline:
+///   - `IA32_GS_BASE`        = 0  (user GS base, inactive)
+///   - `IA32_KERNEL_GS_BASE` = kernel per-CPU pointer
+/// When an interrupt fires from Ring 3, the CPU does NOT automatically call
+/// swapgs.  The first `gs:[0]` access (e.g. in `current_cpu_index`) would
+/// dereference virtual address 0 → page fault → double fault → triple fault.
+///
+/// # Safety
+/// Must be constructed **before** any `gs:[…]` access in the handler.
+/// `InterruptStackFrame::code_segment` is a plain memory read from the
+/// interrupt stack — it does not access GS.
+struct SwapGsGuard {
+    from_ring3: bool,
+}
+
+impl SwapGsGuard {
+    /// Construct.  If `from_ring3` is true, executes `swapgs` immediately to
+    /// restore the kernel per-CPU GS base.
+    #[inline(always)]
+    fn new(from_ring3: bool) -> Self {
+        if from_ring3 {
+            // SAFETY: We are in Ring 0 with interrupts disabled (standard for
+            // interrupt handlers).  GS_BASE currently points at user space (0);
+            // swapgs gives us the kernel per-CPU block via KERNEL_GS_BASE.
+            unsafe { core::arch::asm!("swapgs", options(nostack, preserves_flags)) };
+        }
+        Self { from_ring3 }
+    }
+}
+
+impl Drop for SwapGsGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if self.from_ring3 {
+            // SAFETY: Symmetric to the constructor.  Restores user GS_BASE so
+            // that iretq returns to Ring 3 with the correct GS state.
+            unsafe { core::arch::asm!("swapgs", options(nostack, preserves_flags)) };
+        }
+    }
+}
+
 /// Static IDT storage (must be 'static for load())
 static mut IDT_STORAGE: InterruptDescriptorTable = InterruptDescriptorTable::new();
 static IDT_STORAGE_LOCK: AtomicBool = AtomicBool::new(false);
 static USER_PF_TRACE_BUDGET: AtomicU32 = AtomicU32::new(64);
+
+/// RAII guard: performs a conditional `swapgs` on construction (when the
+/// interrupted code was in Ring 3) and reverses it on `drop` (before `iretq`).
+///
+/// Every interrupt/exception handler that may fire while in user mode MUST
+/// begin with `let _gs = SwapgsGuard::enter_from(stack_frame.code_segment.0);`
+/// so that `current_cpu_index()` (which reads `gs:[0]`) is safe throughout,
+/// including all early-`return` paths.
+struct SwapgsGuard(bool);
+
+impl SwapgsGuard {
+    #[inline(always)]
+    fn enter_from(cs: u16) -> Self {
+        let from_user = (cs & 3) == 3;
+        if from_user {
+            // SAFETY: interrupt fired from Ring 3. GS holds the user GS base
+            // (installed by `swapgs` in elf_ring3_trampoline). Swap now so GS
+            // points to the kernel per-CPU block for the entire handler body.
+            unsafe { core::arch::asm!("swapgs", options(nostack, preserves_flags)); }
+        }
+        SwapgsGuard(from_user)
+    }
+}
+
+impl Drop for SwapgsGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if self.0 {
+            // SAFETY: restore user GS before `iretq` returns to Ring 3;
+            // mirrors the `swapgs` done in `enter_from`.
+            unsafe { core::arch::asm!("swapgs", options(nostack, preserves_flags)); }
+        }
+    }
+}
 
 #[inline]
 fn lock_idt_storage() {
@@ -52,6 +131,9 @@ pub fn init() {
         (*idt)
             .general_protection_fault
             .set_handler_fn(general_protection_fault_handler);
+        (*idt)
+            .stack_segment_fault
+            .set_handler_fn(stack_segment_fault_handler);
         (*idt)
             .non_maskable_interrupt
             .set_handler_fn(non_maskable_interrupt_handler);
@@ -157,7 +239,10 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 
 /// Performs the invalid opcode handler operation.
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    let _gs = SwapgsGuard::enter_from(stack_frame.code_segment.0);
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
+    // Restore kernel GS if interrupted Ring 3 (before any gs:[...] access).
+    let _gs = SwapGsGuard::new(is_user);
     if is_user {
         if let Some(tid) = crate::process::current_task_id() {
             crate::silo::handle_user_fault(
@@ -186,8 +271,13 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    // SAFETY: must be the very first operation – GS may point to user memory
+    // if the fault fired from Ring 3 (after swapgs in elf_ring3_trampoline).
+    let _gs = SwapgsGuard::enter_from(stack_frame.code_segment.0);
     use x86_64::registers::control::{Cr2, Cr3};
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
+    // Restore kernel GS if interrupted Ring 3 (before any gs:[...] access).
+    let _gs = SwapGsGuard::new(is_user);
 
     // Get the faulting address
     let fault_addr = Cr2::read();
@@ -283,14 +373,35 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
-    // Try Demand Paging (lazy allocation) if page is not present
-    if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) && is_user {
+    if is_user {
         if let Some(task) = crate::process::current_task_clone() {
             let address_space = unsafe { &*task.process.address_space.get() };
             if let Ok(vaddr) = fault_addr {
+                // FORCE OUTPUT for user fault - bypasses normal logging mutexes
+                crate::serial_force_println!(
+                    "\x1b[33m[pagefault] USER fault\x1b[0m: tid={} rip={:#x} addr={:#x} err={:#x}",
+                    task.tid,
+                    rip,
+                    vaddr.as_u64(),
+                    error_code.bits()
+                );
+
                 match address_space.handle_fault(vaddr.as_u64()) {
-                    Ok(()) => return,
-                    Err(_) => {
+                    Ok(()) => {
+                        crate::serial_force_println!(
+                            "\x1b[32m[pagefault] USER fault resolved\x1b[0m: tid={} addr={:#x}",
+                            task.tid,
+                            vaddr.as_u64()
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        crate::serial_force_println!(
+                            "\x1b[31m[pagefault] USER fault resolution FAILED\x1b[0m: tid={} addr={:#x} err={:?}",
+                            task.tid,
+                            vaddr.as_u64(),
+                            e
+                        );
                         dump_user_pf_context(address_space, rip, user_rsp);
                     }
                 }
@@ -303,12 +414,20 @@ extern "x86-interrupt" fn page_fault_handler(
             crate::silo::handle_user_fault(
                 tid,
                 crate::silo::SiloFaultReason::PageFault,
-                fault_addr.map(|v| v.as_u64()).unwrap_or(0),
+                fault_addr.as_ref().map(|v| v.as_u64()).unwrap_or(0),
                 error_code.bits() as u64,
                 stack_frame.instruction_pointer.as_u64(),
             );
             return;
         }
+    } else {
+        // FORCE OUTPUT for kernel fault
+        crate::serial_force_println!(
+            "\x1b[31;1m[pagefault] KERNEL fault\x1b[0m: rip={:#x} addr={:#x} err={:#x}",
+            rip,
+            fault_addr.as_ref().map(|v| v.as_u64()).unwrap_or(0),
+            error_code.bits()
+        );
     }
 
     // Capture current task (non-blocking, safe from IRQ context) for the diagnostic dump.
@@ -988,9 +1107,18 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    let _gs = SwapgsGuard::enter_from(stack_frame.code_segment.0);
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
+    // Restore kernel GS if interrupted Ring 3 (before any gs:[...] access).
+    let _gs = SwapGsGuard::new(is_user);
     if is_user {
         if let Some(tid) = crate::process::current_task_id() {
+            crate::serial_force_println!(
+                "\x1b[31;1m[GPF]\x1b[0m USER tid={} rip={:#x} err={:#x}",
+                tid,
+                stack_frame.instruction_pointer.as_u64(),
+                error_code
+            );
             crate::silo::handle_user_fault(
                 tid,
                 crate::silo::SiloFaultReason::GeneralProtection,
@@ -1001,10 +1129,30 @@ extern "x86-interrupt" fn general_protection_fault_handler(
             return;
         }
     }
-    log::error!("EXCEPTION: GENERAL PROTECTION FAULT");
-    log::error!("Error code: {:#x}", error_code);
-    log::error!("{:#?}", stack_frame);
+    crate::serial_force_println!(
+        "\x1b[31;1m[GPF]\x1b[0m KERNEL rip={:#x} err={:#x} cs={:#x} rsp={:#x}",
+        stack_frame.instruction_pointer.as_u64(),
+        error_code,
+        stack_frame.code_segment.0,
+        stack_frame.stack_pointer.as_u64()
+    );
     panic!("General protection fault");
+}
+
+/// Performs the stack segment fault handler operation.
+extern "x86-interrupt" fn stack_segment_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    let _gs = SwapgsGuard::enter_from(stack_frame.code_segment.0);
+    crate::serial_force_println!(
+        "\x1b[31;1m[STACK_FAULT]\x1b[0m rip={:#x} err={:#x} cs={:#x} rsp={:#x}",
+        stack_frame.instruction_pointer.as_u64(),
+        error_code,
+        stack_frame.code_segment.0,
+        stack_frame.stack_pointer.as_u64()
+    );
+    panic!("Stack segment fault");
 }
 
 /// Performs the double fault handler operation.
@@ -1012,6 +1160,13 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
+    crate::serial_force_println!(
+        "\x1b[31;1m[DOUBLE_FAULT]\x1b[0m rip={:#x} err={:#x} cs={:#x} rsp={:#x}",
+        stack_frame.instruction_pointer.as_u64(),
+        error_code,
+        stack_frame.code_segment.0,
+        stack_frame.stack_pointer.as_u64()
+    );
     panic!(
         "EXCEPTION: DOUBLE FAULT (error code: {:#x})\n{:#?}",
         error_code, stack_frame
@@ -1025,7 +1180,9 @@ extern "x86-interrupt" fn double_fault_handler(
 /// Legacy external timer IRQ handler (PIC/IOAPIC IRQ0 path, vector 0x20).
 ///
 /// When the LAPIC timer is active, we ignore this source to avoid double-ticking.
-extern "x86-interrupt" fn legacy_timer_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame) {
+    // Restore kernel GS if the timer fired while Ring 3 was running.
+    let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
     if crate::arch::x86_64::timer::is_apic_timer_active() {
         // Ignore legacy timer source once LAPIC timer is running.
         if super::apic::is_initialized() {
@@ -1034,6 +1191,13 @@ extern "x86-interrupt" fn legacy_timer_handler(_stack_frame: InterruptStackFrame
             pic::end_of_interrupt(0);
         }
         return;
+    }
+
+    // FORCE OUTPUT for heartbeat (every 100 ticks to avoid flooding,
+    // plus first 10 ticks to confirm timer fires after Ring-3 entry)
+    let ticks = crate::process::scheduler::ticks();
+    if ticks < 10 || ticks % 100 == 0 {
+        crate::serial_force_println!("[heartbeat] PIC timer tick={}", ticks);
     }
 
     // Increment tick counter
@@ -1051,10 +1215,22 @@ extern "x86-interrupt" fn legacy_timer_handler(_stack_frame: InterruptStackFrame
     // Try to preempt the current task (no-op if scheduler lock is held
     // or no task is running yet)
     crate::process::scheduler::maybe_preempt();
+    if ticks < 10 {
+        crate::serial_force_println!("[heartbeat] PIC timer tick={} preempt_done", ticks);
+    }
 }
 
 /// Local APIC timer handler (dedicated vector, e.g. 0xD2).
-extern "x86-interrupt" fn lapic_timer_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) {
+    // Restore kernel GS if the timer fired while Ring 3 was running.
+    let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
+    let ticks = crate::process::scheduler::ticks();
+    // Trace first 5 ticks unconditionally to confirm timer fires after Ring-3 entry,
+    // then one-per-100 heartbeat to avoid flooding.
+    if ticks < 5 || ticks % 100 == 0 {
+        crate::serial_force_println!("[heartbeat] APIC timer tick={}", ticks);
+    }
+
     crate::process::scheduler::timer_tick();
     super::apic::eoi();
     crate::process::scheduler::maybe_preempt();
@@ -1134,13 +1310,17 @@ extern "x86-interrupt" fn virtio_block_handler(_stack_frame: InterruptStackFrame
 ///
 /// EOI is sent ***before*** ` maybe_preempt()` so the APIC can accept further
 /// IPIs before the potentially long context-switch path runs.
-extern "x86-interrupt" fn resched_ipi_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn resched_ipi_handler(stack_frame: InterruptStackFrame) {
+    // Restore kernel GS if the IPI arrived while Ring 3 was running.
+    let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
     super::apic::eoi();
     crate::process::scheduler::maybe_preempt();
 }
 
 /// Cross-CPU TLB shootdown IPI handler (vector 0xF0).
-extern "x86-interrupt" fn tlb_shootdown_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn tlb_shootdown_handler(stack_frame: InterruptStackFrame) {
+    // Restore kernel GS if the IPI arrived while Ring 3 was running.
+    let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
     // Note: EOI is sent by the architecture-independent handler.
     super::tlb::tlb_shootdown_ipi_handler();
 }
