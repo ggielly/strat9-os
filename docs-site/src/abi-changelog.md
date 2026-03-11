@@ -25,6 +25,7 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-03-11 `7e66e69` refactor: enhance interrupt handling and logging mechanisms across the kernel
 - 2026-03-09 `ff0a36b` Refactor memory management to use IRQ-disabled tokens
 - 2026-03-07 `c3e8969` Fix race condition and lock
 - 2026-03-07 `6191656` cargo fmt
@@ -54,7 +55,6 @@ See:
 - 2026-03-03 `259bb9d` Enhance PCI support and update related components
 - 2026-03-02 `c57b44d` Add `strate-bus` component and related build tasks.
 - 2026-03-01 `8c7a98d` Enhance QEMU GUI support and update related scripts
-- 2026-03-01 `84fdb29` Update zerocopy dependency and refactor related code
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 
