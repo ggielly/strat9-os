@@ -191,15 +191,29 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         cpu_index,
         first_task.id.as_u64()
     );
+    crate::serial_force_println!(
+        "[trace][sched] schedule_on_cpu calling do_restore_first_task cpu={} tid={} rsp={:#x}",
+        cpu_index,
+        first_task.id.as_u64(),
+        unsafe { (*first_task.context.get()).saved_rsp }
+    );
     unsafe {
+        // Pass the stack frame pointer (saved_rsp points TO the frame, not the context struct)
+        let frame_ptr = (*first_task.context.get()).saved_rsp as *const u64;
         crate::process::task::do_restore_first_task(
-            &raw const (*first_task.context.get()).saved_rsp,
+            frame_ptr,
             first_task.fpu_state.get() as *const u8,
             first_task
                 .xcr0_mask
                 .load(core::sync::atomic::Ordering::Relaxed),
         );
     }
+    // Should never reach here
+    crate::serial_force_println!(
+        "[PANIC] restore_first_task returned! cpu={} tid={}",
+        cpu_index,
+        first_task.id.as_u64()
+    );
 }
 
 /// Called immediately after a context switch completes (in the new task's context).
@@ -310,11 +324,129 @@ fn drain_post_switch_locked(
 /// complete, so another CPU cannot steal the old task while its FPU/stack state
 /// is still in flight.
 pub fn finish_interrupt_switch() {
+    // Debug: track call depth
+    static FINISH_SWITCH_DEPTH: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let depth = FINISH_SWITCH_DEPTH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if depth > 5 {
+        crate::serial_force_println!("[PANIC] finish_interrupt_switch depth={} - infinite recursion?", depth);
+    }
+    
     let cpu_index = current_cpu_index();
-    crate::e9_println!("IFS0 cpu={}", cpu_index);
+    crate::e9_println!("IFS0 cpu={} depth={}", cpu_index, depth);
+
+    // Debug: check IRQ state
+    let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+    crate::e9_println!("IFS0-irq cpu={} irq_enabled={}", cpu_index, irq_enabled);
+
+    // Debug: check lock state
+    let lock_addr = &SCHEDULER as *const _ as usize;
+    crate::e9_println!("IFS0-lock cpu={} lock_addr={:#x}", cpu_index, lock_addr);
+    
+    // Debug: validate current task state
+    if let Some(current) = current_task_clone_try() {
+        let state = unsafe { *current.state.get() };
+        let stack_base = current.kernel_stack.virt_base.as_u64();
+        let stack_size = current.kernel_stack.size;
+        let stack_top = stack_base + stack_size as u64;
+        
+        // Estimate stack usage by scanning for non-zero values
+        let mut stack_used = 0usize;
+        unsafe {
+            let stack_ptr = stack_top as *const u64;
+            for i in 0..(stack_size / 8) {
+                if *stack_ptr.offset(-(i as isize)) != 0 {
+                    stack_used = (i + 1) * 8;
+                }
+            }
+        }
+        
+        crate::e9_println!(
+            "IFS0-task cpu={} tid={} state={:?} stack={:#x}+{} used={}",
+            cpu_index,
+            current.id.as_u64(),
+            state,
+            stack_base,
+            stack_size,
+            stack_used
+        );
+        
+        // Warn if stack usage exceeds 50%
+        if stack_used > stack_size / 2 {
+            crate::serial_force_println!(
+                "IFS0-STACK-WARNING cpu={} tid={} used={}/{} ({}%)",
+                cpu_index,
+                current.id.as_u64(),
+                stack_used,
+                stack_size,
+                stack_used * 100 / stack_size
+            );
+        }
+        
+        // Check stack canary (placed at stack_top - 8 in CpuContext::new)
+        let canary_addr = stack_top - 8;
+        let canary = unsafe { *(canary_addr as *const u64) };
+        const STACK_CANARY: u64 = 0xDEADBEEFCAFEBABE;
+        if canary != STACK_CANARY {
+            // Also check nearby locations
+            let canary_below = unsafe { *(canary_addr as *const u64).offset(-1) };
+            let canary_at = unsafe { *(canary_addr as *const u64) };
+            let canary_above = unsafe { *(stack_top as *const u64) };
+            crate::serial_force_println!(
+                "IFS0-STACK-CORRUPT cpu={} tid={} canary={:#x} expected={:#x} used={}/{} addr={:#x}",
+                cpu_index,
+                current.id.as_u64(),
+                canary,
+                STACK_CANARY,
+                stack_used,
+                stack_size,
+                canary_addr
+            );
+            crate::serial_force_println!(
+                "IFS0-STACK-DEBUG cpu={} below={:#x} at={:#x} top={:#x}",
+                cpu_index,
+                canary_below,
+                canary_at,
+                canary_above
+            );
+        }
+        
+        // Check underflow canary (placed at stack_base + 256 in seed_interrupt_frame)
+        let underflow_canary_addr = stack_base + 256;
+        let underflow_canary = unsafe { *(underflow_canary_addr as *const u64) };
+        const UNDERFLOW_CANARY: u64 = 0xBAD57ACBAD57AC;
+        if underflow_canary != UNDERFLOW_CANARY {
+            crate::serial_force_println!(
+                "IFS0-STACK-UNDERFLOW cpu={} tid={} canary={:#x} expected={:#x} addr={:#x}",
+                cpu_index,
+                current.id.as_u64(),
+                underflow_canary,
+                UNDERFLOW_CANARY,
+                underflow_canary_addr
+            );
+        }
+        
+        // Also check a few bytes below stack_top for overflow
+        let overflow_check = unsafe { *(stack_top as *const u64).offset(-1) };
+        if overflow_check != 0 && overflow_check != STACK_CANARY {
+            crate::serial_force_println!(
+                "IFS0-STACK-OVERFLOW cpu={} tid={} overflow_val={:#x}",
+                cpu_index,
+                current.id.as_u64(),
+                overflow_check
+            );
+        }
+    }
+
     let mut task_to_drop = None;
     let mut spins = 0usize;
+    let mut max_spins = 100_000_000; // Limit spins to detect hang
     loop {
+        // Debug: check IRQ state on each iteration
+        if spins % 10_000_000 == 0 && spins > 0 {
+            let irq = crate::arch::x86_64::interrupts_enabled();
+            crate::e9_println!("IFS1-spin cpu={} spins={} irq={}", cpu_index, spins, irq);
+        }
+
         if let Some(mut scheduler) = SCHEDULER.try_lock_no_irqsave() {
             crate::e9_println!("IFS1 cpu={} acquired", cpu_index);
             if let Some(ref mut sched) = *scheduler {
@@ -323,9 +455,16 @@ pub fn finish_interrupt_switch() {
             break;
         }
         spins = spins.saturating_add(1);
-        if spins == 2_000_000 {
-            crate::e9_println!("IFS1 cpu={} waiting", cpu_index);
-            spins = 0;
+        if spins >= max_spins {
+            crate::serial_force_println!("IFS1-HANG cpu={} spins={} irq={}", cpu_index, spins, crate::arch::x86_64::interrupts_enabled());
+            // Debug: try to get lock state
+            unsafe {
+                let lock_ptr = &SCHEDULER as *const _ as *const u8;
+                let locked = core::ptr::read_volatile(lock_ptr.add(0x10) as *const bool);
+                let owner = core::ptr::read_volatile(lock_ptr.add(0x11) as *const usize);
+                crate::serial_force_println!("IFS1-DEBUG cpu={} locked={} owner={}", cpu_index, locked, owner);
+            }
+            panic!("IFS1 hang detected - scheduler lock unavailable");
         }
         core::hint::spin_loop();
     }
@@ -624,34 +763,112 @@ pub fn maybe_preempt_from_interrupt(
                 // post-switch hooks used by Redox and Maestro.
 
                 let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
-                crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
-                crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
-                unsafe {
-                    (*next.process.address_space.get()).switch_to();
+                let stack_base = next.kernel_stack.virt_base.as_u64();
+
+                // Debug: validate next_rsp is within stack bounds
+                if next_rsp < stack_base || next_rsp > stack_top {
+                    crate::serial_force_println!(
+                        "IRQSW-STACK-BOUNDS cpu={} next_rsp={:#x} base={:#x} top={:#x} size={}",
+                        cpu_index,
+                        next_rsp,
+                        stack_base,
+                        stack_top,
+                        next.kernel_stack.size
+                    );
                 }
+
+                // Extract frame info before switch
                 let (next_cs, next_rip) = unsafe {
                     let frame = &*(next_rsp as *const crate::syscall::SyscallFrame);
                     (frame.iret_cs, frame.iret_rip)
                 };
 
+                // Debug: check distance from stack top
+                let dist_from_top = stack_top - next_rsp;
                 crate::e9_println!(
-                    "IRQSW cpu={} prev={} next={} rsp={:#x} cs={:#x} rip={:#x}",
+                    "IRQSW cpu={} prev={} next={} rsp={:#x} cs={:#x} rip={:#x} stack_base={:#x} dist_from_top={}",
                     cpu_index,
                     current.id.as_u64(),
                     next.id.as_u64(),
                     next_rsp,
                     next_cs,
-                    next_rip
+                    next_rip,
+                    stack_base,
+                    dist_from_top
                 );
+
+                crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+                crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+                unsafe {
+                    (*next.process.address_space.get()).switch_to();
+                }
+
+                // Debug: validate FPU pointers before switch
+                let old_fpu_ptr = current.fpu_state.get();
+                let new_fpu_ptr = next.fpu_state.get();
+                let old_fpu = old_fpu_ptr as *mut u8;
+                let new_fpu = new_fpu_ptr as *const u8;
+                let old_fpu_aligned = (old_fpu as usize) & 0x3F;  // 64-byte alignment
+                let new_fpu_aligned = (new_fpu as usize) & 0x3F;
+                
+                // Get ExtendedState metadata
+                let old_size = unsafe { (*old_fpu_ptr).size };
+                let new_size = unsafe { (*new_fpu_ptr).size };
+                let old_uses_xsave = unsafe { (*old_fpu_ptr).uses_xsave };
+                let new_uses_xsave = unsafe { (*new_fpu_ptr).uses_xsave };
+                
+                crate::e9_println!(
+                    "IRQFPU cpu={} old={:#x}(align={},size={},xsave={}) new={:#x}(align={},size={},xsave={})",
+                    cpu_index,
+                    old_fpu as usize,
+                    old_fpu_aligned,
+                    old_size,
+                    old_uses_xsave,
+                    new_fpu as usize,
+                    new_fpu_aligned,
+                    new_size,
+                    new_uses_xsave
+                );
+                
+                // Validate pointers are non-null and aligned for FXSAVE (16-byte min)
+                if old_fpu.is_null() || new_fpu.is_null() {
+                    crate::serial_force_println!(
+                        "IRQFPU-NULL cpu={} old_null={} new_null={}",
+                        cpu_index,
+                        old_fpu.is_null(),
+                        new_fpu.is_null()
+                    );
+                }
+                if (old_fpu as usize) & 0xF != 0 || (new_fpu as usize) & 0xF != 0 {
+                    crate::serial_force_println!(
+                        "IRQFPU-MISALIGN-16 cpu={} old_align={} new_align={}",
+                        cpu_index,
+                        (old_fpu as usize) & 0xF,
+                        (new_fpu as usize) & 0xF
+                    );
+                }
+                if old_fpu_aligned != 0 || new_fpu_aligned != 0 {
+                    crate::serial_force_println!(
+                        "IRQFPU-MISALIGN-64 cpu={} old_align={} new_align={}",
+                        cpu_index,
+                        old_fpu_aligned,
+                        new_fpu_aligned
+                    );
+                }
 
                 Some(crate::arch::x86_64::idt::InterruptReturnDecision {
                     next_rsp,
-                    old_fpu: current.fpu_state.get() as *mut u8,
-                    new_fpu: next.fpu_state.get() as *const u8,
+                    old_fpu,
+                    new_fpu,
                 })
             }
         }
-    };
+    };  // <- scheduler guard dropped here
+
+    // Debug: confirm lock was released
+    if decision.is_some() {
+        crate::e9_println!("MPI-unlock cpu={} decision=SWITCH", cpu_index);
+    }
 
     drop(task_to_drop);
 

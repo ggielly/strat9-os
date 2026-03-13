@@ -301,7 +301,16 @@ impl Task {
     /// Reserved bootstrap slot near the bottom of the kernel stack for a
     /// synthetic `SyscallFrame`. This stays away from the normal downward-growing
     /// call stack used by the legacy `ret` bootstrap path.
-    const BOOTSTRAP_INTERRUPT_FRAME_OFFSET: usize = 0x200;
+    /// Offset from stack base for bootstrap interrupt frame.
+    /// 
+    /// Placed at 4KB from base to maximize room for interrupt handler stack growth.
+    /// Interrupt handlers grow DOWN from this address, so we want it as low as possible
+    /// while leaving room for the underflow canary at 256 bytes.
+    const BOOTSTRAP_INTERRUPT_FRAME_OFFSET: usize = 0x1000;  // 4KB from base
+    
+    /// Canary placed below the interrupt frame to detect stack underflow
+    /// (interrupt handler overflowing downward past the frame)
+    const STACK_UNDERFLOW_CANARY_OFFSET: usize = 0x100;  // 256 bytes from base
 
     /// Performs the default sched policy operation.
     pub fn default_sched_policy(priority: TaskPriority) -> crate::process::sched::SchedPolicy {
@@ -365,6 +374,11 @@ impl Task {
         );
         unsafe {
             (frame_addr as *mut crate::syscall::SyscallFrame).write(frame);
+            
+            // Place underflow canary below the frame (at lower address)
+            // This detects if interrupt handler overflows downward past expected range
+            let canary_addr = stack_base + Self::STACK_UNDERFLOW_CANARY_OFFSET as u64;
+            *(canary_addr as *mut u64) = 0xBAD57ACBAD57AC;
         }
         self.set_interrupt_rsp(frame_addr);
     }
@@ -441,6 +455,7 @@ impl CpuContext {
     /// Stack layout (growing downward):
     /// ```text
     /// [stack_top]
+    ///   0xDEADBEEFCAFEBABE      <- stack canary
     ///   task_entry_trampoline   <- ret target
     ///   0  (r15)
     ///   0  (r14)
@@ -453,8 +468,10 @@ impl CpuContext {
     pub fn new(entry_point: u64, kernel_stack: &KernelStack) -> Self {
         let stack_top = kernel_stack.virt_base.as_u64() + kernel_stack.size as u64;
 
-        // We need to push 7 values (each 8 bytes) onto the stack
-        let initial_rsp = stack_top - 7 * 8;
+        // Reserve space for the stack canary before building the fake frame.
+        const STACK_CANARY: u64 = 0xDEADBEEFCAFEBABE;
+        let canary_addr = stack_top - 8;
+        let initial_rsp = canary_addr - 7 * 8;
 
         // SAFETY: We own this stack memory and it's properly allocated and zeroed.
         // The stack region [virt_base, virt_base + size) is valid.
@@ -475,6 +492,59 @@ impl CpuContext {
             *stack.add(4) = 0; // rbp
             *stack.add(5) = 0; // rbx
             *stack.add(6) = task_entry_trampoline as *const () as u64; // ret address
+        }
+        
+        // Add stack canary at the very top (leave the frame below it so `ret` still points
+        // to `task_entry_trampoline`). The canary slot must be reserved before writing the
+        // frame to avoid overwriting the trampoline address.
+        unsafe {
+            let canary_ptr = canary_addr as *mut u64;
+            *canary_ptr = STACK_CANARY;
+        }
+
+        // Verify canary is still intact
+        unsafe {
+            let canary_ptr = canary_addr as *const u64;
+            let canary = *canary_ptr;
+            if canary != STACK_CANARY {
+                crate::serial_force_println!(
+                    "[PANIC] Stack canary corrupted at setup! entry_point={:#x} canary={:#x}",
+                    entry_point,
+                    canary
+                );
+            }
+        }
+        
+        // Debug: verify entire stack frame
+        unsafe {
+            let stack = initial_rsp as *const u64;
+            crate::serial_println!(
+                "[CpuContext] frame verify: r15={:#x} r14={:#x} r13={:#x} r12={:#x} rbp={:#x} rbx={:#x} ret={:#x}",
+                *stack.add(0),
+                *stack.add(1),
+                *stack.add(2),
+                *stack.add(3),
+                *stack.add(4),
+                *stack.add(5),
+                *stack.add(6)
+            );
+            // Verify canary one more time
+            let canary_ptr = canary_addr as *const u64;
+            let canary = *canary_ptr;
+            if canary != STACK_CANARY {
+                crate::serial_force_println!(
+                    "[CpuContext] CANARY CORRUPTED AFTER FRAME SETUP! canary={:#x}",
+                    canary
+                );
+            }
+            
+            // Debug: check if stack memory overlaps with another task
+            crate::serial_println!(
+                "[CpuContext] stack range: base={:#x} top={:#x} initial_rsp={:#x}",
+                kernel_stack.virt_base.as_u64(),
+                stack_top,
+                initial_rsp
+            );
         }
 
         CpuContext {
@@ -564,12 +634,34 @@ impl KernelStack {
             core::ptr::write_bytes(virt_base.as_mut_ptr::<u8>(), 0, size);
         }
         crate::serial_println!("[trace][task] kstack allocate memset done");
+        
+        // Debug: verify zeroing worked
+        unsafe {
+            let first_word = *(virt_base.as_ptr::<u64>());
+            let mid_offset = size / 2;
+            let mid_word = *((virt_base.as_u64() + mid_offset as u64) as *const u64);
+            let last_offset = size - 8;
+            let last_word = *((virt_base.as_u64() + last_offset as u64) as *const u64);
+            if first_word != 0 || mid_word != 0 || last_word != 0 {
+                crate::serial_force_println!(
+                    "[WARN] kstack zeroing failed! first={:#x} mid={:#x} last={:#x}",
+                    first_word, mid_word, last_word
+                );
+            }
+        }
 
         Ok(KernelStack {
             base: phys_base,
             virt_base,
             size,
         })
+    }
+    
+    /// Debug: check if this stack overlaps with another range
+    pub fn overlaps(&self, other_base: u64, other_size: usize) -> bool {
+        let self_end = self.virt_base.as_u64() + self.size as u64;
+        let other_end = other_base + other_size as u64;
+        !(self_end <= other_base || other_end <= self.virt_base.as_u64())
     }
 }
 
@@ -599,8 +691,8 @@ pub struct UserStack {
 }
 
 impl Task {
-    /// Default kernel stack size (16 KB)
-    pub const DEFAULT_STACK_SIZE: usize = 16384;
+    /// Default kernel stack size (64 KB - increased from 16KB due to overflow)
+    pub const DEFAULT_STACK_SIZE: usize = 65536;
 
     /// Create a new kernel task with a real allocated stack
     pub fn new_kernel_task(
@@ -934,12 +1026,40 @@ pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) 
 /// # Safety
 /// Caller must ensure pointers are valid and interrupts are disabled. Never returns.
 pub(super) unsafe fn do_restore_first_task(
-    rsp_ptr: *const u64,
+    frame_ptr: *const u64,  // Points to the stack frame (r15, r14, r13, r12, rbp, rbx, ret)
     fpu_ptr: *const u8,
     xcr0: u64,
 ) -> ! {
+    // Debug: verify frame pointer
+    crate::serial_force_println!(
+        "[task] do_restore_first_task frame_ptr={:#x} fpu_ptr={:#x}",
+        frame_ptr as u64,
+        fpu_ptr as u64
+    );
+    
+    // Verify the stack frame contains expected values
+    crate::serial_force_println!(
+        "[task] do_restore_first_task stack frame: r15={:#x} r14={:#x} r13={:#x} r12={:#x} rbp={:#x} rbx={:#x} ret={:#x}",
+        *frame_ptr.add(0),
+        *frame_ptr.add(1),
+        *frame_ptr.add(2),
+        *frame_ptr.add(3),
+        *frame_ptr.add(4),
+        *frame_ptr.add(5),
+        *frame_ptr.add(6)
+    );
+    
+    // Verify canary immediately above the fake frame (frame is 7 words long).
+    let canary_addr = frame_ptr as u64 + 56;
+    let canary = *(canary_addr as *const u64);
+    crate::serial_force_println!(
+        "[task] do_restore_first_task canary at {:#x} = {:#x} (expected 0xdeadbeefcafebabe)",
+        canary_addr,
+        canary
+    );
+    
     let _ = xcr0;
-    restore_first_task_fxsave(rsp_ptr, fpu_ptr);
+    restore_first_task_fxsave(frame_ptr, fpu_ptr);
 }
 
 // ── FXSAVE path (legacy, no XSAVE support) ──
@@ -973,11 +1093,15 @@ unsafe extern "C" fn switch_context_fxsave(
     );
 }
 
-/// rdi=rsp_ptr, rsi=fpu_ptr
+/// rdi=frame_ptr, rsi=fpu_ptr
 #[unsafe(naked)]
 unsafe extern "C" fn restore_first_task_fxsave(_rsp_ptr: *const u64, _fpu_ptr: *const u8) -> ! {
+    // Debug: output pointers before restore (will be last serial output)
+    // We can't use serial_println in naked functions, so this is just a marker
+    // The actual debug output is in do_restore_first_task
     core::arch::naked_asm!(
-        "mov rsp, [rdi]",
+        // `do_restore_first_task` passes the frame address directly.
+        "mov rsp, rdi",
         "pop r15",
         "pop r14",
         "pop r13",
@@ -1047,7 +1171,7 @@ unsafe extern "C" fn switch_context_xsave(
     );
 }
 
-/// rdi=rsp_ptr, rsi=fpu_ptr, rdx=xcr0
+/// rdi=frame_ptr, rsi=fpu_ptr, rdx=xcr0
 #[unsafe(naked)]
 unsafe extern "C" fn restore_first_task_xsave(
     _rsp_ptr: *const u64,
@@ -1055,7 +1179,8 @@ unsafe extern "C" fn restore_first_task_xsave(
     _xcr0: u64,
 ) -> ! {
     core::arch::naked_asm!(
-        "mov rsp, [rdi]",
+        // `do_restore_first_task` passes the frame address directly.
+        "mov rsp, rdi",
         "pop r15",
         "pop r14",
         "pop r13",

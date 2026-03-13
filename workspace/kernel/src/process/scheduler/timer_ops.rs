@@ -19,9 +19,13 @@ static FIRST_TICK_FORCE_RESCHED: [AtomicBool; crate::arch::x86_64::percpu::MAX_C
 /// its own `try_lock`. These are separate acquisitions by design - the inner
 /// functions must not be called while the outer lock is held (that would deadlock).
 pub fn timer_tick() {
-    crate::e9_println!("TA cpu_idx?");                    // E9-A: very start, before any GS access
+    // Debug: track stack depth on each timer entry
+    let dummy_var = 0u64;
+    let current_rsp = &dummy_var as *const u64 as u64;
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
-    crate::e9_println!("TB cpu={}", cpu_idx);             // E9-B: current_cpu_index() survived
+    crate::e9_println!("TIMER-STACK cpu={} rsp={:#x}", cpu_idx, current_rsp);
+    
+    crate::e9_println!("TA cpu_idx?");                    // E9-A: very start, before any GS access
 
     if cpu_is_valid(cpu_idx) {
         CPU_TOTAL_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);

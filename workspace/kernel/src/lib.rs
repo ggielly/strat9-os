@@ -881,6 +881,18 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
         serial_println!("[init] Initializing AHCI...");
         vga_println!("[..] Looking for AHCI SATA controller...");
+        // Debug: check BSP stack usage before AHCI init
+        {
+            let dummy = 0u64;
+            let rsp = &dummy as *const u64 as u64;
+            serial_println!("[DEBUG] BSP stack before AHCI: rsp={:#x}", rsp);
+            // Stack grows downward from high address. Check distance from typical low addresses.
+            // With 512KB stack at 0x80000, top is around 0x80000 + 0x80000 = 0x100000
+            // If rsp is below 0xC0000, we've used more than 256KB
+            if rsp < 0xC0000 {
+                serial_println!("[WARN] BSP stack usage high! rsp={:#x}", rsp);
+            }
+        }
         hardware::storage::ahci::init();
         serial_println!("[init] AHCI probe done.");
         vga_println!("[OK] AHCI probe done");

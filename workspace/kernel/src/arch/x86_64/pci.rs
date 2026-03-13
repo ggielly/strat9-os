@@ -724,7 +724,12 @@ static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
     let mut cache = PCI_DEVICE_CACHE.lock();
     if cache.is_none() {
+        // Debug: check stack before PCI scan
+        let dummy = 0u64;
+        let rsp = &dummy as *const u64 as u64;
+        crate::serial_println!("[PCI] Scanning PCI bus, rsp={:#x}", rsp);
         *cache = Some(PciScanner::new().collect());
+        crate::serial_println!("[PCI] PCI scan complete, found {} devices", cache.as_ref().unwrap().len());
     }
     f(cache.as_deref().unwrap_or(&[]))
 }

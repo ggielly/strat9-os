@@ -45,7 +45,7 @@ static HHDM: HhdmRequest = HhdmRequest::new();
 /// Request the stack size
 #[used]
 #[link_section = ".requests"]
-static STACK_SIZE: StackSizeRequest = StackSizeRequest::new().with_size(0x10000); // 64KB
+static STACK_SIZE: StackSizeRequest = StackSizeRequest::new().with_size(0x80000); // 512KB - increased due to AHCI/PCI scanner stack usage
 
 /// Internal module: request Limine to load /initfs/test_pid (first userspace PID test binary)
 static TEST_PID_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_pid");
