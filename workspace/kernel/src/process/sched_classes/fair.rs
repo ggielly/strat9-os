@@ -6,6 +6,7 @@ use alloc::{collections::BinaryHeap, sync::Arc};
 use core::cmp::{self, Reverse};
 
 const WEIGHT_0: u64 = 1024;
+const FAIR_PREALLOC_SLOTS: usize = 64;
 
 /// Base time slice per task in ticks for the CFS fair scheduler.
 ///
@@ -97,8 +98,13 @@ pub struct FairClassRq {
 impl FairClassRq {
     /// Creates a new instance.
     pub fn new() -> Self {
+        let mut entities = BinaryHeap::new();
+        // Keep the timer/preemption fast path allocation-free: once tasks are
+        // in circulation, requeueing a preempted FAIR task must not grow the
+        // heap from IRQ context.
+        entities.reserve(FAIR_PREALLOC_SLOTS);
         Self {
-            entities: BinaryHeap::new(),
+            entities,
             min_vruntime: 0,
             total_weight: 0,
         }

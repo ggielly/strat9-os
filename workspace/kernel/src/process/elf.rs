@@ -18,7 +18,7 @@ use crate::{
     capability::Capability,
     memory::address_space::{AddressSpace, VmaFlags, VmaPageSize, VmaType},
     process::{
-        task::{CpuContext, KernelStack, SyncUnsafeCell, Task},
+        task::{CpuContext, KernelStack, ResumeKind, SyncUnsafeCell, Task},
         TaskId, TaskPriority, TaskState,
     },
 };
@@ -1051,6 +1051,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         task.id.as_u64(),
         task.name
     );
+    task.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
 
     let user_rip = task.trampoline_entry.load(Ordering::Acquire);
     let user_rsp = task.trampoline_stack_top.load(Ordering::Acquire);
@@ -1540,6 +1541,8 @@ pub fn load_elf_task_with_caps(
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),
+        resume_kind: SyncUnsafeCell::new(ResumeKind::RetFrame),
+        interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: None,
         name,
@@ -1597,6 +1600,29 @@ pub fn load_elf_task_with_caps(
         task.trampoline_arg0
             .store(h, core::sync::atomic::Ordering::Release);
     }
+
+    task.seed_interrupt_frame(crate::syscall::SyscallFrame {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        rbp: 0,
+        rbx: 0,
+        r11: 0x202,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rsi: 0,
+        rdi: task.trampoline_arg0.load(core::sync::atomic::Ordering::Acquire),
+        rdx: 0,
+        rcx: runtime_entry,
+        rax: 0,
+        iret_rip: runtime_entry,
+        iret_cs: crate::arch::x86_64::gdt::user_code_selector().0 as u64,
+        iret_rflags: 0x202,
+        iret_rsp: boot_sp,
+        iret_ss: crate::arch::x86_64::gdt::user_data_selector().0 as u64,
+    });
 
     // Bootstrapping: grant Silo Admin capability to the initial userspace task.
     if name == "init"

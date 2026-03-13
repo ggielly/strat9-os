@@ -906,7 +906,7 @@ pub fn kill_task(id: TaskId) -> bool {
                 }
                 if removed_from_ready {
                     let _ = sched.clear_task_wake_deadline_locked(id);
-                    if let Some(task) = sched.all_tasks.remove(&id) {
+                    if let Some(task) = sched.remove_all_task_locked(id) {
                         let task_pid = task.pid;
                         unsafe {
                             *task.state.get() = TaskState::Dead;
@@ -935,7 +935,7 @@ pub fn kill_task(id: TaskId) -> bool {
                         *task.state.get() = TaskState::Dead;
                     }
                     cleanup_task_resources(&task);
-                    sched.all_tasks.remove(&id);
+                    let _ = sched.remove_all_task_locked(id);
                     sched.task_cpu.remove(&id);
                     sched.unregister_identity_locked(id, task_pid, task.tid);
                     let (parent, ipi_death) =

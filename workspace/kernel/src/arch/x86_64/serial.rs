@@ -14,21 +14,33 @@ static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Raw spinlock for `_print_force` to prevent multi-core character interleaving.
 /// Uses a ticket-style test-and-set: 0 = free, 1 = locked.
+///
+/// **Interrupt safety**: `force_lock_acquire` saves and disables IRQs before
+/// spinning, and `force_lock_release` restores them. This prevents a nested
+/// timer IRQ on the same CPU from trying to acquire `FORCE_LOCK` while it is
+/// already held by an outer `serial_force_println!` call, which would deadlock.
 static FORCE_LOCK: AtomicU8 = AtomicU8::new(0);
 
+
 #[inline(always)]
-fn force_lock_acquire() {
+fn force_lock_acquire() -> u64 {
+    // Disable IRQs before spinning to prevent a timer IRQ on this CPU from
+    // re-entering _print_force while FORCE_LOCK is held (nested IRQ deadlock).
+    let saved = crate::arch::x86_64::save_flags_and_cli();
     while FORCE_LOCK
         .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
         core::hint::spin_loop();
     }
+    saved
 }
 
 #[inline(always)]
-fn force_lock_release() {
+fn force_lock_release(saved_flags: u64) {
     FORCE_LOCK.store(0, Ordering::Release);
+    // Restore RFLAGS (re-enables IRQs if they were enabled before the acquire).
+    crate::arch::x86_64::restore_flags(saved_flags);
 }
 
 const ANSI_RESET: &str = "\x1b[0m";
@@ -190,19 +202,21 @@ pub fn _print(args: fmt::Arguments) {
 
 /// Print to serial port bypassing the shared mutex.
 ///
-/// Uses a dedicated raw spinlock so that multiple CPUs cannot interleave
-/// their output at the character level.
+/// Uses a dedicated raw spinlock (with IRQs disabled) so that multiple CPUs
+/// cannot interleave their output at the character level, and so that a timer
+/// IRQ firing on the same CPU while this function is in progress cannot cause
+/// a deadlock by trying to re-acquire `FORCE_LOCK`.
 #[doc(hidden)]
 pub fn _print_force(args: fmt::Arguments) {
     use core::fmt::Write;
 
-    // Acquire the raw force-lock so concurrent callers on different CPUs
-    // don't interleave their characters.
-    force_lock_acquire();
-    // SAFETY: We hold `FORCE_LOCK`, giving us exclusive access to the UART.
+    // Acquire the raw force-lock (saves + clears IF, then spins until free).
+    let saved_flags = force_lock_acquire();
+    // SAFETY: We hold `FORCE_LOCK` with IRQs disabled, giving exclusive UART access.
     let mut port = unsafe { SerialPort::new(0x3F8) };
     let _ = port.write_fmt(args);
-    force_lock_release();
+    // Release lock and restore RFLAGS (re-enables IRQs if they were on before).
+    force_lock_release(saved_flags);
 }
 
 /// Print to serial port

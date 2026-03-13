@@ -1318,6 +1318,8 @@ args = [
     "guest_errors",
 ]
 
+#####################################################################################################################################################################################
+##############################################################################################################################################################
 [tasks.run-gui-smp-release]
 description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs (release profile)"
 dependencies = ["limine-image-release"]
@@ -1341,16 +1343,20 @@ args = [
     "gtk,grab-on-hover=off,zoom-to-fit=on",
     "-no-reboot",
     "-no-shutdown",
-    "-serial",    "mon:stdio",
-
-"-netdev", "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1,hostfwd=tcp::8080-:8080",
-    "-device",    "e1000,netdev=net0,mac=52:54:00:12:34:56",
-"-chardev", "file,id=debug_log,path=build/e9_debug.log",
-"-device", "isa-debugcon,iobase=0xe9,chardev=debug_log",
+    "-serial",
+    "mon:stdio",
+    "-netdev",
+    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1,hostfwd=tcp::8080-:8080",
+    "-device",
+    "e1000,netdev=net0,mac=52:54:00:12:34:56",
+    "-chardev",
+    "file,id=debug_log,path=build/e9_debug.log",
+    "-device",
+    "isa-debugcon,iobase=0xe9,chardev=debug_log",
     "-D",
     "build/qemu.log",
     "-d",
-    "guest_errors",
+    "int,cpu_reset,guest_errors",
 ]
 
 [tasks.run-gui-smp-dev-opt]
@@ -1434,27 +1440,35 @@ args = [
     "mon:stdio",
     "-netdev",
     "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1,hostfwd=tcp::8080-:8080",
-    "-device", "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-chardev", "stdio,id=con0",
-    "-device", "isa-debugcon,iobase=0xe9,chardev=con0",
+    "-device",
+    "e1000,netdev=net0,mac=52:54:00:12:34:56",
+    "-chardev",
+    "stdio,id=con0",
+    "-device",
+    "isa-debugcon,iobase=0xe9,chardev=con0",
     "-D",
-    "-d", "int,cpu_reset",
+    "-d",
+    "int,cpu_reset",
     "build/qemu.log",
 ]
 
 [tasks.net-setup-routed]
 description = "Setup routed TAP network on host (requires sudo): DHCP + NAT forwarding"
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 sudo bash tools/scripts/net/setup-tap-routed.sh "${STRAT9_UPLINK_IFACE}" "${STRAT9_TAP_IFACE}"
-''']
+''',
+]
 
 [tasks.net-teardown-routed]
 description = "Teardown routed TAP network on host (requires sudo)"
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 sudo bash tools/scripts/net/teardown-tap-routed.sh "${STRAT9_TAP_IFACE}" "${STRAT9_UPLINK_IFACE}"
-''']
+''',
+]
 
 [tasks.run-net-tap]
 description = "Load QEMU in text mode using TAP passthrough (requires net-setup-routed)"

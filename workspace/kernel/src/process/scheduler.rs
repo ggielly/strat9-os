@@ -112,6 +112,11 @@ static CPU_TRY_LOCK_FAIL_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPU
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
 static RESCHED_IPI_PENDING: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+/// Lock-free per-CPU hint: request a local preemption as soon as maybe_preempt
+/// can observe scheduler state. Written from IRQ paths without touching
+/// `SCHEDULER`, consumed under scheduler lock in `maybe_preempt`.
+static FORCE_RESCHED_HINT: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
 static LAST_STEAL_TICK: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
 /// One-shot flag per CPU: set to true after the first preemption is logged.
@@ -272,6 +277,24 @@ fn send_resched_ipi_to_cpu(cpu_index: usize) {
                 apic::send_resched_ipi(target_apic);
             }
         }
+    }
+}
+
+/// Request a local force-reschedule hint for `cpu`.
+#[inline]
+pub(crate) fn request_force_resched_hint(cpu: usize) {
+    if cpu_is_valid(cpu) {
+        FORCE_RESCHED_HINT[cpu].store(true, Ordering::Release);
+    }
+}
+
+/// Consume and clear the local force-reschedule hint for `cpu`.
+#[inline]
+pub(crate) fn take_force_resched_hint(cpu: usize) -> bool {
+    if cpu_is_valid(cpu) {
+        FORCE_RESCHED_HINT[cpu].swap(false, Ordering::AcqRel)
+    } else {
+        false
     }
 }
 
@@ -465,6 +488,12 @@ pub struct Scheduler {
     blocked_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// All tasks in the system (for lookup by TaskId)
     pub(crate) all_tasks: BTreeMap<TaskId, Arc<Task>>,
+    /// Flat task snapshot used by IRQ-safe scans such as `tick_all_timers`.
+    ///
+    /// Unlike `BTreeMap::iter()`, iterating a contiguous `Vec<Arc<Task>>` avoids
+    /// tree-walk pointer chasing in hard-IRQ context. The authoritative storage
+    /// remains `all_tasks`; this mirror is updated under the same scheduler lock.
+    pub(crate) all_tasks_scan: Vec<Arc<Task>>,
     /// Map TaskId -> CPU index (for wake/resume routing)
     task_cpu: BTreeMap<TaskId, usize>,
     /// Map userspace PID -> internal TaskId (process leader in current model).

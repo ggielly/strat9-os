@@ -135,6 +135,8 @@ pub fn create_user_test_task() {
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),
+        resume_kind: SyncUnsafeCell::new(crate::process::task::ResumeKind::RetFrame),
+        interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: None,
 
@@ -159,6 +161,29 @@ pub fn create_user_test_task() {
         user_fs_base: core::sync::atomic::AtomicU64::new(0),
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
+    });
+
+    task.seed_interrupt_frame(crate::syscall::SyscallFrame {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        rbp: 0,
+        rbx: 0,
+        r11: 0x202,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rsi: 0,
+        rdi: 0,
+        rdx: 0,
+        rcx: USER_CODE_ADDR,
+        rax: 0,
+        iret_rip: USER_CODE_ADDR,
+        iret_cs: crate::arch::x86_64::gdt::user_code_selector().0 as u64,
+        iret_rflags: 0x202,
+        iret_rsp: USER_STACK_TOP,
+        iret_ss: crate::arch::x86_64::gdt::user_data_selector().0 as u64,
     });
 
     crate::process::add_task(task);

@@ -9,6 +9,7 @@ use alloc::{collections::VecDeque, sync::Arc};
 /// POSIX specifies a minimum of 100ms for SCHED_RR (Linux default: 100ms).
 /// At TIMER_HZ=100: 10 ticks x 10 ms/tick = 100 ms.
 const RT_RR_QUANTUM_TICKS: u64 = TIMER_HZ / 10;
+const RT_PREALLOC_PER_PRIO: usize = 4;
 
 /// Real-time priority (0-99). Higher value means higher priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,8 +39,15 @@ impl RealTimeClassRq {
     /// Creates a new instance.
     pub fn new() -> Self {
         const EMPTY: VecDeque<Arc<Task>> = VecDeque::new();
+        let mut queues = [EMPTY; 100];
+        for q in &mut queues {
+            // Same rationale as FAIR: avoid VecDeque growth from IRQ-driven
+            // requeue paths. RT queues are per-priority, so a tiny reserve is
+            // enough for current workloads.
+            q.reserve(RT_PREALLOC_PER_PRIO);
+        }
         Self {
-            queues: [EMPTY; 100],
+            queues,
             bitmap: 0,
         }
     }

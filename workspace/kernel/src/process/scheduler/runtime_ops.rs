@@ -245,22 +245,7 @@ pub fn finish_switch() {
             cpu_index
         );
         if let Some(ref mut sched) = *scheduler {
-            let mut requeue_task = None;
-            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                task_to_drop = cpu.task_to_drop.take();
-                requeue_task = cpu.task_to_requeue.take();
-            }
-            if let Some(task) = requeue_task {
-                crate::serial_force_println!(
-                    "[trace][sched] finish_switch requeue cpu={} tid={}",
-                    cpu_index,
-                    task.id.as_u64()
-                );
-                let class = sched.class_table.class_for_task(&task);
-                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                    cpu.class_rqs.enqueue(class, task);
-                }
-            }
+            task_to_drop = drain_post_switch_locked(sched, cpu_index, true, true);
         }
     }
     crate::serial_force_println!(
@@ -277,6 +262,75 @@ pub fn finish_switch() {
     // Temporary safety mode: skip FS.base restore in finish_switch.
     // This avoids cloning current_task() on a path that currently trips
     // an Arc refcount invariant under heavy early context-switch churn.
+}
+
+fn drain_post_switch_locked(
+    sched: &mut Scheduler,
+    cpu_index: usize,
+    verbose_trace: bool,
+    take_drop: bool,
+) -> Option<Arc<Task>> {
+    let mut task_to_drop = None;
+    let mut requeue_task = None;
+    if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+        if take_drop {
+            task_to_drop = cpu.task_to_drop.take();
+        }
+        requeue_task = cpu.task_to_requeue.take();
+    }
+    if let Some(task) = requeue_task {
+        if verbose_trace {
+            crate::serial_force_println!(
+                "[trace][sched] finish_switch requeue cpu={} tid={}",
+                cpu_index,
+                task.id.as_u64()
+            );
+        } else {
+            crate::e9_println!("IFSQ cpu={} tid={}", cpu_index, task.id.as_u64());
+        }
+        let class = sched.class_table.class_for_task(&task);
+        if !verbose_trace {
+            crate::e9_println!("IFSC cpu={} class={:?}", cpu_index, class);
+        }
+        if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+            cpu.class_rqs.enqueue(class, task);
+            if !verbose_trace {
+                crate::e9_println!("IFSE cpu={} enqueued", cpu_index);
+            }
+        }
+    }
+    task_to_drop
+}
+
+/// Finalize a preemption-driven switch once the raw timer stub has already
+/// moved onto the next task's kernel stack.
+///
+/// This mirrors Redox's `switch_finish_hook` and Maestro's `switch_finish`:
+/// requeue/drop of the old task happens only after the architectural switch is
+/// complete, so another CPU cannot steal the old task while its FPU/stack state
+/// is still in flight.
+pub fn finish_interrupt_switch() {
+    let cpu_index = current_cpu_index();
+    crate::e9_println!("IFS0 cpu={}", cpu_index);
+    let mut task_to_drop = None;
+    let mut spins = 0usize;
+    loop {
+        if let Some(mut scheduler) = SCHEDULER.try_lock_no_irqsave() {
+            crate::e9_println!("IFS1 cpu={} acquired", cpu_index);
+            if let Some(ref mut sched) = *scheduler {
+                task_to_drop = drain_post_switch_locked(sched, cpu_index, false, false);
+            }
+            break;
+        }
+        spins = spins.saturating_add(1);
+        if spins == 2_000_000 {
+            crate::e9_println!("IFS1 cpu={} waiting", cpu_index);
+            spins = 0;
+        }
+        core::hint::spin_loop();
+    }
+    let _ = task_to_drop;
+    crate::e9_println!("IFS2 cpu={} done", cpu_index);
 }
 
 /// Yield the current task to allow other tasks to run (cooperative).
@@ -321,6 +375,14 @@ pub fn yield_task() {
     restore_flags(saved_flags);
 }
 
+#[inline]
+fn interrupt_frame_fits(task: &Arc<Task>, rsp: u64) -> bool {
+    let stack_base = task.kernel_stack.virt_base.as_u64();
+    let stack_top = stack_base + task.kernel_stack.size as u64;
+    let frame_size = core::mem::size_of::<crate::syscall::SyscallFrame>() as u64;
+    rsp >= stack_base && rsp.saturating_add(frame_size) <= stack_top
+}
+
 /// Called from the timer interrupt handler (or a resched IPI) to potentially
 /// preempt the current task.
 ///
@@ -344,7 +406,7 @@ pub fn maybe_preempt() {
     // Try to lock the scheduler. If it's already locked (yield_task in
     // progress), just skip this tick - we'll preempt on the next one.
     let switch_target = {
-        let mut scheduler = match SCHEDULER.try_lock() {
+        let mut scheduler = match SCHEDULER.try_lock_no_irqsave() {
             Some(guard) => guard,
             None => {
                 note_try_lock_fail_on_cpu(cpu_index);
@@ -358,6 +420,10 @@ pub fn maybe_preempt() {
                 Some(cpu) => cpu,
                 None => return,
             };
+            if take_force_resched_hint(cpu_index) {
+                cpu.need_resched = true;
+                crate::e9_println!("MP force-resched hint cpu={}", cpu_index);
+            }
             if cpu.current_task.is_none() {
                 return;
             }
@@ -382,27 +448,19 @@ pub fn maybe_preempt() {
     if let Some(ref target) = switch_target {
         if cpu_is_valid(cpu_index) {
             // One-shot per-CPU: trace the very first real preemption.
+            // NOTE: do NOT acquire SCHEDULER here — we are between the lock
+            // release (end of the block above) and do_switch_context. A
+            // nested try_lock in this window re-enters the guardian (CLI +
+            // CAS) on a CPU that is about to switch stacks, producing a
+            // spurious second "locked_raw=true" observation in finish_switch
+            // diagnostics and, if the lock happens to be free, a redundant
+            // owner_cpu store on the wrong context.
             if !FIRST_PREEMPT_LOGGED[cpu_index].swap(true, Ordering::Relaxed) {
                 let preempt_n = CPU_PREEMPT_COUNT[cpu_index].load(Ordering::Relaxed);
-                let cur_tid = {
-                    let saved = crate::arch::x86_64::save_flags_and_cli();
-                    let tid = {
-                        let guard = SCHEDULER.try_lock();
-                        guard.as_ref()
-                            .and_then(|g| g.as_ref())
-                            .and_then(|s| s.cpus.get(cpu_index))
-                            .and_then(|c| c.current_task.as_ref())
-                            .map(|t| t.id.as_u64())
-                            .unwrap_or(u64::MAX)
-                    };
-                    crate::arch::x86_64::restore_flags(saved);
-                    tid
-                };
-                crate::serial_force_println!(
-                    "[trace][sched] maybe_preempt FIRST cpu={} total_count={} cur_tid={}",
+                crate::e9_println!(
+                    "FIRST_PREEMPT cpu={} count={}",
                     cpu_index,
                     preempt_n,
-                    cur_tid
                 );
             }
             CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
@@ -412,6 +470,200 @@ pub fn maybe_preempt() {
         }
         finish_switch();
     }
+}
+
+/// Interrupt-aware preemption path.
+///
+/// Unlike the legacy `ret`-based scheduler path, the full interrupted user
+/// context is already materialized as a `SyscallFrame` on the current kernel
+/// stack. This lets us save the outgoing task immediately, select the next
+/// runnable task under the scheduler lock, and return an `iretq`-compatible
+/// frame pointer for the raw timer stub.
+pub fn maybe_preempt_from_interrupt(
+    cpu_index: usize,
+    current_frame: &mut crate::syscall::SyscallFrame,
+) -> Option<crate::arch::x86_64::idt::InterruptReturnDecision> {
+    if cpu_is_valid(cpu_index) {
+        RESCHED_IPI_PENDING[cpu_index].store(false, Ordering::Release);
+    }
+
+    if !percpu::is_preemptible() {
+        crate::e9_println!("IRQNP cpu={}", cpu_index);
+        return None;
+    }
+
+    let current_frame_rsp = current_frame as *mut crate::syscall::SyscallFrame as u64;
+    let mut task_to_drop: Option<Arc<Task>> = None;
+
+    let decision = {
+        let mut scheduler = match SCHEDULER.try_lock_no_irqsave() {
+            Some(guard) => guard,
+            None => {
+                note_try_lock_fail_on_cpu(cpu_index);
+                return None;
+            }
+        };
+
+        let Some(ref mut sched) = *scheduler else {
+            return None;
+        };
+
+        {
+            let cpu = match sched.cpus.get_mut(cpu_index) {
+                Some(cpu) => cpu,
+                None => return None,
+            };
+            if take_force_resched_hint(cpu_index) {
+                cpu.need_resched = true;
+                crate::e9_println!("MPI force-resched hint cpu={}", cpu_index);
+            }
+            if cpu.current_task.is_none() || !cpu.need_resched {
+                crate::e9_println!(
+                    "IRQSKIP cpu={} current={} need={}",
+                    cpu_index,
+                    cpu.current_task
+                        .as_ref()
+                        .map(|t| t.id.as_u64())
+                        .unwrap_or(0),
+                    cpu.need_resched
+                );
+                return None;
+            }
+            if let Some(current) = cpu.current_task.as_ref() {
+                sched_trace(format_args!(
+                    "cpu={} irq-preempt request task={} rt_delta={}",
+                    cpu_index,
+                    current.id.as_u64(),
+                    cpu.current_runtime.period_delta_ticks
+                ));
+            }
+        }
+
+        let current = sched.cpus[cpu_index]
+            .current_task
+            .as_ref()
+            .cloned()
+            .expect("irq-preempt current_task disappeared");
+        current.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
+        current.set_interrupt_rsp(current_frame_rsp);
+        crate::e9_println!(
+            "IRQSAVE cpu={} tid={} rsp={:#x}",
+            cpu_index,
+            current.id.as_u64(),
+            current_frame_rsp
+        );
+
+        let next = sched.pick_next_task(cpu_index);
+
+        if Arc::ptr_eq(&current, &next) {
+            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                cpu.need_resched = false;
+            }
+            task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
+            crate::e9_println!("IRQNOSW cpu={} tid={}", cpu_index, current.id.as_u64());
+            None
+        } else {
+            let mut next_rsp = next.interrupt_rsp();
+            if next.resume_kind() == crate::process::task::ResumeKind::RetFrame {
+                if next.is_kernel() {
+                    next.seed_kernel_interrupt_frame_from_context();
+                    next_rsp = next.interrupt_rsp();
+                    let seed_rip = unsafe {
+                        let saved_rsp = (*next.context.get()).saved_rsp as *const u64;
+                        *saved_rsp.add(6)
+                    };
+                    crate::e9_println!(
+                        "IRQSEED cpu={} tid={} rip={:#x}",
+                        cpu_index,
+                        next.id.as_u64(),
+                        seed_rip
+                    );
+                } else {
+                    crate::e9_println!(
+                        "IRQMISS cpu={} tid={} kind={:?}",
+                        cpu_index,
+                        next.id.as_u64(),
+                        next.resume_kind()
+                    );
+                }
+            }
+            if next_rsp == 0 || !interrupt_frame_fits(&next, next_rsp) {
+                let is_idle_fallback = Arc::ptr_eq(&next, &sched.cpus[cpu_index].idle_task);
+                task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
+
+                if let Some(prev) = sched.cpus[cpu_index].task_to_requeue.take() {
+                    unsafe {
+                        *prev.state.get() = TaskState::Running;
+                    }
+                    sched.cpus[cpu_index].current_task = Some(prev);
+                } else {
+                    unsafe {
+                        *current.state.get() = TaskState::Running;
+                    }
+                    sched.cpus[cpu_index].current_task = Some(current.clone());
+                }
+
+                if !is_idle_fallback {
+                    unsafe {
+                        *next.state.get() = TaskState::Ready;
+                    }
+                    let class = sched.class_table.class_for_task(&next);
+                    sched.cpus[cpu_index].class_rqs.enqueue(class, next);
+                }
+                crate::e9_println!("IRQABORT cpu={} prev={}", cpu_index, current.id.as_u64());
+                None
+            } else {
+                next.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
+                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                    cpu.need_resched = false;
+                }
+                // Do NOT drain `task_to_requeue` / `task_to_drop` here.
+                // The raw timer stub still has to save the outgoing FPU state and
+                // pivot onto the next task's stack. Defer that finalization to
+                // `finish_interrupt_switch()` on the new stack, matching the
+                // post-switch hooks used by Redox and Maestro.
+
+                let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
+                crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+                crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+                unsafe {
+                    (*next.process.address_space.get()).switch_to();
+                }
+                let (next_cs, next_rip) = unsafe {
+                    let frame = &*(next_rsp as *const crate::syscall::SyscallFrame);
+                    (frame.iret_cs, frame.iret_rip)
+                };
+
+                crate::e9_println!(
+                    "IRQSW cpu={} prev={} next={} rsp={:#x} cs={:#x} rip={:#x}",
+                    cpu_index,
+                    current.id.as_u64(),
+                    next.id.as_u64(),
+                    next_rsp,
+                    next_cs,
+                    next_rip
+                );
+
+                Some(crate::arch::x86_64::idt::InterruptReturnDecision {
+                    next_rsp,
+                    old_fpu: current.fpu_state.get() as *mut u8,
+                    new_fpu: next.fpu_state.get() as *const u8,
+                })
+            }
+        }
+    };
+
+    drop(task_to_drop);
+
+    if decision.is_some() && cpu_is_valid(cpu_index) {
+        if !FIRST_PREEMPT_LOGGED[cpu_index].swap(true, Ordering::Relaxed) {
+            let preempt_n = CPU_PREEMPT_COUNT[cpu_index].load(Ordering::Relaxed);
+            crate::e9_println!("FIRST_IRQ_PREEMPT cpu={} count={}", cpu_index, preempt_n);
+        }
+        CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    decision
 }
 
 /// Enable or disable verbose scheduler tracing.

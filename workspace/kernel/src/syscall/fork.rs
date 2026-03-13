@@ -1,7 +1,7 @@
 //! `fork()` syscall implementation with copy-on-write (COW).
 
 use crate::{
-    memory::{AddressSpace, FrameAllocator as _},
+    memory::AddressSpace,
     process::{
         current_task_clone,
         scheduler::add_task_with_parent,
@@ -157,6 +157,28 @@ fn build_child_task(
     let parent_blocked = parent.blocked_signals.clone();
     let parent_actions: [SigActionData; 64] = unsafe { *parent.process.signal_actions.get() };
     let parent_sigstack: Option<SigStack> = unsafe { *parent.signal_stack.get() };
+    let interrupt_frame = crate::syscall::SyscallFrame {
+        r15: bootstrap_ctx.r15,
+        r14: bootstrap_ctx.r14,
+        r13: bootstrap_ctx.r13,
+        r12: bootstrap_ctx.r12,
+        rbp: bootstrap_ctx.rbp,
+        rbx: bootstrap_ctx.rbx,
+        r11: bootstrap_ctx.r11,
+        r10: bootstrap_ctx.r10,
+        r9: bootstrap_ctx.r9,
+        r8: bootstrap_ctx.r8,
+        rsi: bootstrap_ctx.rsi,
+        rdi: bootstrap_ctx.rdi,
+        rdx: bootstrap_ctx.rdx,
+        rcx: bootstrap_ctx.rcx,
+        rax: 0,
+        iret_rip: bootstrap_ctx.user_rip,
+        iret_cs: bootstrap_ctx.user_cs,
+        iret_rflags: bootstrap_ctx.user_rflags,
+        iret_rsp: bootstrap_ctx.user_rsp,
+        iret_ss: bootstrap_ctx.user_ss,
+    };
 
     let (pid, tid, tgid) = Task::allocate_process_ids();
     let task = Arc::new(Task {
@@ -173,6 +195,8 @@ fn build_child_task(
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: parent.priority,
         context: SyncUnsafeCell::new(context),
+        resume_kind: SyncUnsafeCell::new(crate::process::task::ResumeKind::RetFrame),
+        interrupt_rsp: AtomicU64::new(0),
         kernel_stack,
         user_stack: None,
 
@@ -240,6 +264,8 @@ fn build_child_task(
         let frame = ctx.saved_rsp as *mut u64;
         *frame.add(2) = Box::into_raw(bootstrap_ctx) as u64;
     }
+
+    task.seed_interrupt_frame(interrupt_frame);
 
     Ok(task)
 }

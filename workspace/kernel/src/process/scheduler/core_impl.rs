@@ -43,6 +43,7 @@ impl Scheduler {
             cpus,
             blocked_tasks: BTreeMap::new(),
             all_tasks: BTreeMap::new(),
+            all_tasks_scan: Vec::new(),
             task_cpu: BTreeMap::new(),
             pid_to_task: BTreeMap::new(),
             tid_to_task: BTreeMap::new(),
@@ -188,7 +189,7 @@ impl Scheduler {
             "[trace][sched] add_task_on_cpu before all_tasks.insert tid={}",
             task_id.as_u64()
         );
-        self.all_tasks.insert(task_id, task_clone);
+        self.insert_all_task_locked(task_id, task_clone);
         crate::serial_println!(
             "[trace][sched] add_task_on_cpu all_tasks inserted tid={}",
             task_id.as_u64()
@@ -233,6 +234,25 @@ impl Scheduler {
         } else {
             None
         }
+    }
+
+    pub(super) fn insert_all_task_locked(&mut self, task_id: TaskId, task: Arc<Task>) {
+        self.all_tasks.insert(task_id, task.clone());
+        self.all_tasks_scan.push(task);
+    }
+
+    pub(super) fn remove_all_task_locked(&mut self, task_id: TaskId) -> Option<Arc<Task>> {
+        let removed = self.all_tasks.remove(&task_id);
+        if removed.is_some() {
+            if let Some(idx) = self
+                .all_tasks_scan
+                .iter()
+                .position(|task| task.id == task_id)
+            {
+                self.all_tasks_scan.swap_remove(idx);
+            }
+        }
+        removed
     }
 
     /// Performs the clear task wake deadline locked operation.
@@ -319,7 +339,7 @@ impl Scheduler {
             let (status, child_pid) = self.zombies.remove(&child).unwrap_or((0, 0));
             // Remove from all_tasks now so that pick_next_task (if it races with
             // reaping) will see was_registered=false and skip cleanup_task_resources.
-            let reaped_task = self.all_tasks.remove(&child);
+            let reaped_task = self.remove_all_task_locked(child);
             let child_tid = reaped_task.as_ref().map(|t| t.tid);
             if child_pid != 0 {
                 if let Some(tid) = child_tid {
@@ -381,7 +401,7 @@ impl Scheduler {
                 // already removed the task; in that case `remove` is a no-op
                 // and we must skip `cleanup_task_resources` to avoid running
                 // port/silo teardown twice.
-                let was_registered = self.all_tasks.remove(&task_id).is_some();
+                let was_registered = self.remove_all_task_locked(task_id).is_some();
                 self.task_cpu.remove(&task_id);
                 self.unregister_identity_locked(task_id, task_pid, task_tid);
 

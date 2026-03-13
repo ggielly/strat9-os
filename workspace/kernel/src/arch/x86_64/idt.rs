@@ -5,6 +5,7 @@
 
 use super::{pic, tss};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use x86_64::VirtAddr;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 /// IRQ interrupt vector numbers (PIC1_OFFSET + IRQ number)
@@ -106,6 +107,202 @@ static mut IDT_STORAGE: InterruptDescriptorTable = InterruptDescriptorTable::new
 static IDT_STORAGE_LOCK: AtomicBool = AtomicBool::new(false);
 static USER_PF_TRACE_BUDGET: AtomicU32 = AtomicU32::new(64);
 
+/// Decision returned by the raw interrupt trampolines.
+///
+/// Phase 1 of the preemptive scheduler refactor only wires the raw timer/IPI
+/// stubs and returns `next_rsp = 0`, which means "restore the current
+/// interrupt frame and return with iretq". The future interrupt-aware scheduler
+/// path will return a non-zero `next_rsp` and matching FPU buffers.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InterruptReturnDecision {
+    pub next_rsp: u64,
+    pub old_fpu: *mut u8,
+    pub new_fpu: *const u8,
+}
+
+/// Raw Local APIC timer interrupt entry.
+///
+/// Saves registers in exactly the same order as `SyscallFrame`, calls the Rust
+/// inner handler, then restores the interrupted context and returns with
+/// `iretq`. This avoids the `extern "x86-interrupt"` ABI mismatch with the
+/// legacy `ret`-based scheduler switch path.
+#[unsafe(naked)]
+unsafe extern "C" fn lapic_timer_entry() -> ! {
+    core::arch::naked_asm!(
+        "cld",
+        // E9 breadcrumb: emit '!' (0x21) to port 0xE9 before touching any state.
+        // This confirms the CPU entered the stub even if it triple-faults later.
+        "push rax",
+        "mov al, 0x21",
+        "out 0xe9, al",
+        "pop rax",
+        // Hardware IRQ stack frame at entry:
+        //   [rsp+0]  = RIP
+        //   [rsp+8]  = CS
+        //   [rsp+16] = RFLAGS
+        //   [rsp+24] = RSP
+        //   [rsp+32] = SS
+        // If interrupted from Ring 3, restore kernel GS before any percpu use.
+        "test qword ptr [rsp + 8], 0x3",
+        "jz 2f",
+        "swapgs",
+        "2:",
+        // Save GPRs in reverse order so that final RSP points at a SyscallFrame.
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rdi",
+        "push rsi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push rbx",
+        "push rbp",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        // SysV large-struct return uses an implicit out-pointer in RDI.
+        // Reserve 32 bytes to keep 16-byte alignment before `call`.
+        "sub rsp, 32",
+        "mov rdi, rsp",
+        "lea rsi, [rsp + 32]",
+        "call {inner}",
+        // Load returned InterruptReturnDecision fields.
+        "mov rax, [rsp + 0]",
+        "mov rdx, [rsp + 8]",
+        "mov rcx, [rsp + 16]",
+        "add rsp, 32",
+        "test rax, rax",
+        "jz 3f",
+        "fxsave [rdx]",
+        "mov rsp, rax",
+        "fxrstor [rcx]",
+        "call {switch_finish}",
+        "3:",
+        // Restore current SyscallFrame.
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbp",
+        "pop rbx",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rsi",
+        "pop rdi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        // Restore user GS iff we are returning to Ring 3.
+        "test qword ptr [rsp + 8], 0x3",
+        "jz 4f",
+        "swapgs",
+        "4:",
+        "iretq",
+        inner = sym lapic_timer_inner,
+        switch_finish = sym crate::process::scheduler::finish_interrupt_switch,
+    );
+}
+
+/// Raw reschedule IPI entry.
+///
+/// Uses the same `SyscallFrame` layout as the timer entry. Phase 1 only marks
+/// a reschedule hint and returns to the interrupted context.
+#[unsafe(naked)]
+unsafe extern "C" fn resched_ipi_entry() -> ! {
+    core::arch::naked_asm!(
+        "cld",
+        "test qword ptr [rsp + 8], 0x3",
+        "jz 2f",
+        "swapgs",
+        "2:",
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rdi",
+        "push rsi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push rbx",
+        "push rbp",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        "sub rsp, 32",
+        "mov rdi, rsp",
+        "lea rsi, [rsp + 32]",
+        "call {inner}",
+        "mov rax, [rsp + 0]",
+        "mov rdx, [rsp + 8]",
+        "mov rcx, [rsp + 16]",
+        "add rsp, 32",
+        "test rax, rax",
+        "jz 3f",
+        "ud2",
+        "3:",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbp",
+        "pop rbx",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rsi",
+        "pop rdi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "test qword ptr [rsp + 8], 0x3",
+        "jz 4f",
+        "swapgs",
+        "4:",
+        "iretq",
+        inner = sym resched_ipi_inner,
+    );
+}
+
+extern "C" fn lapic_timer_inner(
+    frame: &mut crate::syscall::SyscallFrame,
+) -> InterruptReturnDecision {
+    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    crate::e9_println!(
+        "TIRQ cpu={} cs={:#x} rip={:#x} rflags={:#x}",
+        cpu,
+        frame.iret_cs,
+        frame.iret_rip,
+        frame.iret_rflags
+    );
+    crate::process::scheduler::timer_tick();
+    super::apic::eoi();
+    let decision =
+        crate::process::scheduler::maybe_preempt_from_interrupt(cpu, frame).unwrap_or_default();
+    if decision.next_rsp != 0 {
+        crate::e9_println!("IRRET cpu={} next_rsp={:#x}", cpu, decision.next_rsp);
+    }
+    decision
+}
+
+extern "C" fn resched_ipi_inner(
+    frame: &mut crate::syscall::SyscallFrame,
+) -> InterruptReturnDecision {
+    let _ = frame;
+    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    super::apic::eoi();
+    crate::process::scheduler::request_force_resched_hint(cpu);
+    InterruptReturnDecision::default()
+}
+
 #[inline]
 fn lock_idt_storage() {
     while IDT_STORAGE_LOCK
@@ -154,7 +351,10 @@ pub fn init() {
         idt_ref[0xFF_u8].set_handler_fn(spurious_handler);
 
         // Cross-CPU reschedule IPI (vector 0xE0)
-        idt_ref[super::apic::IPI_RESCHED_VECTOR as u8].set_handler_fn(resched_ipi_handler);
+        unsafe {
+            idt_ref[super::apic::IPI_RESCHED_VECTOR as u8]
+                .set_handler_addr(VirtAddr::from_ptr(resched_ipi_entry as *const ()));
+        }
 
         // Cross-CPU TLB shootdown IPI (vector 0xF0)
         idt_ref[super::apic::IPI_TLB_SHOOTDOWN_VECTOR as u8].set_handler_fn(tlb_shootdown_handler);
@@ -180,7 +380,7 @@ pub fn register_lapic_timer_vector(vector: u8) {
     lock_idt_storage();
     unsafe {
         let idt = &raw mut IDT_STORAGE;
-        (&mut *idt)[vector].set_handler_fn(lapic_timer_handler);
+        (&mut *idt)[vector].set_handler_addr(VirtAddr::from_ptr(lapic_timer_entry as *const ()));
         (*idt).load_unsafe();
     }
     unlock_idt_storage();
@@ -1316,22 +1516,30 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
         );
     }
 
-    if ticks < 3 {
-        crate::serial_force_println!("[heartbeat] tick={} cpu={} step=pre_timer_tick", ticks, cpu);
-    }
+    // serial_force_println holds FORCE_LOCK (IRQ-disabled spinlock) while writing
+    // to the UART. At 115200 baud each byte takes ~87 µs; a 60-char message is
+    // ~5 ms of IRQs-off time — long enough to miss ticks and corrupt scheduling.
+    // Keep serial output out of the hot IRQ path; use e9 port (µs-range) instead.
     crate::e9_println!("T0 tick={} cpu={}", ticks, cpu); // E9: entering timer_tick()
     crate::process::scheduler::timer_tick();
     crate::e9_println!("T1 tick={} cpu={}", ticks, cpu); // E9: timer_tick() returned
-    if ticks < 3 {
-        crate::serial_force_println!("[heartbeat] tick={} cpu={} step=pre_eoi", ticks, cpu);
-    }
     super::apic::eoi();
-    if ticks < 3 {
-        crate::serial_force_println!("[heartbeat] tick={} cpu={} step=pre_preempt", ticks, cpu);
-    }
-    crate::process::scheduler::maybe_preempt();
-    if ticks < 10 {
-        crate::serial_force_println!("[heartbeat] APIC timer tick={} cpu={} preempt_done", ticks, cpu);
+    // IMPORTANT:
+    // Do not run `maybe_preempt()` directly from a Ring-3-origin timer IRQ.
+    //
+    // Current scheduler switch path (`do_switch_context` + `ret`) is built for
+    // task context frames, while this function is an `extern "x86-interrupt"`
+    // frame that the compiler expects to unwind with iretq.
+    //
+    // On first user-mode preemption (CPU1), switching away from this frame can
+    // corrupt the interrupt return state and trigger #DF/#TF. Instead, mark a
+    // lock-free resched hint and return through the normal interrupt epilogue.
+    // The scheduler will consume the hint on a safe path.
+    if (cs & 3) == 3 {
+        crate::process::scheduler::request_force_resched_hint(cpu);
+        crate::e9_println!("TP defer-preempt-from-ring3 cpu={}", cpu);
+    } else {
+        crate::process::scheduler::maybe_preempt();
     }
 }
 

@@ -78,6 +78,16 @@ pub enum TaskState {
     Dead,
 }
 
+/// How this task must be resumed the next time the scheduler selects it.
+///
+/// - `RetFrame`: legacy kernel-only context switch using `ret`
+/// - `IretFrame`: interrupt/syscall-like frame restored with `iretq`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeKind {
+    RetFrame,
+    IretFrame,
+}
+
 use core::cell::UnsafeCell;
 
 /// A wrapper around UnsafeCell that implements Sync for TaskState
@@ -227,6 +237,10 @@ pub struct Task {
     pub priority: TaskPriority,
     /// Saved CPU context for this task (just the stack pointer)
     pub context: SyncUnsafeCell<CpuContext>,
+    /// Resume convention for this task's saved kernel stack frame.
+    pub resume_kind: SyncUnsafeCell<ResumeKind>,
+    /// Saved interrupt/syscall-compatible frame pointer for `iretq`-based resume.
+    pub interrupt_rsp: AtomicU64,
     /// Kernel stack for this task
     pub kernel_stack: KernelStack,
     /// User stack for this task (if applicable)
@@ -284,6 +298,11 @@ pub struct Task {
 }
 
 impl Task {
+    /// Reserved bootstrap slot near the bottom of the kernel stack for a
+    /// synthetic `SyscallFrame`. This stays away from the normal downward-growing
+    /// call stack used by the legacy `ret` bootstrap path.
+    const BOOTSTRAP_INTERRUPT_FRAME_OFFSET: usize = 0x200;
+
     /// Performs the default sched policy operation.
     pub fn default_sched_policy(priority: TaskPriority) -> crate::process::sched::SchedPolicy {
         use crate::process::sched::{nice::Nice, real_time::RealTimePriority, SchedPolicy};
@@ -308,6 +327,85 @@ impl Task {
         unsafe {
             *self.sched_policy.get() = policy;
         }
+    }
+
+    /// Returns the current resume convention for this task.
+    pub fn resume_kind(&self) -> ResumeKind {
+        unsafe { *self.resume_kind.get() }
+    }
+
+    /// Sets the resume convention for this task.
+    pub fn set_resume_kind(&self, kind: ResumeKind) {
+        unsafe {
+            *self.resume_kind.get() = kind;
+        }
+    }
+
+    /// Returns the saved `iretq`-compatible frame pointer for this task.
+    pub fn interrupt_rsp(&self) -> u64 {
+        self.interrupt_rsp.load(Ordering::Acquire)
+    }
+
+    /// Updates the saved `iretq`-compatible frame pointer for this task.
+    pub fn set_interrupt_rsp(&self, rsp: u64) {
+        self.interrupt_rsp.store(rsp, Ordering::Release);
+    }
+
+    /// Seed a synthetic interrupt frame for tasks that have not yet been
+    /// preempted from an IRQ path but must still be resumable via `iretq`.
+    pub fn seed_interrupt_frame(&self, frame: crate::syscall::SyscallFrame) {
+        let stack_base = self.kernel_stack.virt_base.as_u64();
+        let stack_top = stack_base + self.kernel_stack.size as u64;
+        let frame_addr =
+            ((stack_base + Self::BOOTSTRAP_INTERRUPT_FRAME_OFFSET as u64) + 0xF) & !0xF;
+        let frame_end = frame_addr + core::mem::size_of::<crate::syscall::SyscallFrame>() as u64;
+        assert!(
+            frame_end <= stack_top,
+            "kernel stack too small for bootstrap interrupt frame"
+        );
+        unsafe {
+            (frame_addr as *mut crate::syscall::SyscallFrame).write(frame);
+        }
+        self.set_interrupt_rsp(frame_addr);
+    }
+
+    /// Seed an `iretq`-compatible frame from the legacy `CpuContext` bootstrap
+    /// layout used by kernel tasks (`ret` into `task_entry_trampoline`).
+    ///
+    /// If the task has already been running (its `ret` target is no longer
+    /// `task_entry_trampoline`), the synthesised frame sets IF=1 so the
+    /// resumed task keeps receiving timer interrupts. First-launch tasks
+    /// keep IF=0 because `task_post_switch_enter` enables interrupts itself.
+    pub fn seed_kernel_interrupt_frame_from_context(&self) {
+        let saved_rsp = unsafe { (*self.context.get()).saved_rsp as *const u64 };
+        let ret_target = unsafe { *saved_rsp.add(6) };
+        let is_first_launch = ret_target == task_entry_trampoline as *const () as u64;
+        let rflags = if is_first_launch { 0x2 } else { 0x202 };
+        let frame = unsafe {
+            crate::syscall::SyscallFrame {
+                r15: *saved_rsp.add(0),
+                r14: *saved_rsp.add(1),
+                r13: *saved_rsp.add(2),
+                r12: *saved_rsp.add(3),
+                rbp: *saved_rsp.add(4),
+                rbx: *saved_rsp.add(5),
+                r11: 0,
+                r10: 0,
+                r9: 0,
+                r8: 0,
+                rsi: 0,
+                rdi: 0,
+                rdx: 0,
+                rcx: 0,
+                rax: 0,
+                iret_rip: ret_target,
+                iret_cs: crate::arch::x86_64::gdt::kernel_code_selector().0 as u64,
+                iret_rflags: rflags,
+                iret_rsp: self.kernel_stack.virt_base.as_u64() + self.kernel_stack.size as u64,
+                iret_ss: crate::arch::x86_64::gdt::kernel_data_selector().0 as u64,
+            }
+        };
+        self.seed_interrupt_frame(frame);
     }
 
     /// Get virtual runtime
@@ -560,7 +658,7 @@ impl Task {
             kernel_stack.size / 1024
         );
 
-        Ok(Arc::new(Task {
+        let task = Arc::new(Task {
             id,
             pid,
             tid,
@@ -574,6 +672,8 @@ impl Task {
             state: SyncUnsafeCell::new(TaskState::Ready),
             priority,
             context: SyncUnsafeCell::new(context),
+            resume_kind: SyncUnsafeCell::new(ResumeKind::RetFrame),
+            interrupt_rsp: AtomicU64::new(0),
             kernel_stack,
             user_stack: None,
             name,
@@ -594,7 +694,9 @@ impl Task {
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
-        }))
+        });
+        task.seed_kernel_interrupt_frame_from_context();
+        Ok(task)
     }
 
     /// Create a new user task with its own address space (stub for future use).
@@ -636,6 +738,8 @@ impl Task {
             state: SyncUnsafeCell::new(TaskState::Ready),
             priority,
             context: SyncUnsafeCell::new(context),
+            resume_kind: SyncUnsafeCell::new(ResumeKind::RetFrame),
+            interrupt_rsp: AtomicU64::new(0),
             kernel_stack,
             user_stack: None,
             name,
