@@ -214,11 +214,21 @@ pub fn finish_switch() {
             cpu_index,
             crate::process::scheduler::debug_scheduler_lock_addr()
         );
+        // E9: check if lock is already held before attempting acquire
+        let lock_is_held = SCHEDULER.owner_cpu() != usize::MAX;
+        crate::e9_println!("FS0 cpu={} lock_held={} locked_raw={}", cpu_index, lock_is_held, {
+            let addr = crate::process::scheduler::debug_scheduler_lock_addr() as *const core::sync::atomic::AtomicBool;
+            // SAFETY: address is the locked field of SCHEDULER (first field, offset 0)
+            unsafe { (*addr).load(core::sync::atomic::Ordering::Relaxed) }
+        });
         let mut spins = 0usize;
         let mut scheduler = loop {
+            crate::e9_println!("FS1 cpu={} spin={}", cpu_index, spins);
             if let Some(guard) = SCHEDULER.try_lock() {
+                crate::e9_println!("FS2 cpu={} acquired", cpu_index);
                 break guard;
             }
+            crate::e9_println!("FS3 cpu={} try failed", cpu_index);
             spins = spins.saturating_add(1);
             if spins == 2_000_000 {
                 crate::serial_force_println!(

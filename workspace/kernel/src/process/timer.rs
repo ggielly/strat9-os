@@ -239,13 +239,20 @@ impl ITimers {
 pub fn tick_all_timers(current_time_ns: u64) {
     use crate::process::{scheduler::SCHEDULER, signal::Signal};
 
+    crate::e9_println!("TAT-1 try_lock");                      // E9: about to lock SCHEDULER
     let scheduler = match SCHEDULER.try_lock() {
-        Some(guard) => guard,
-        None => return,
+        Some(guard) => { crate::e9_println!("TAT-2 locked"); guard }
+        None => { crate::e9_println!("TAT-2 contended"); return; }
     };
-    let Some(ref sched) = *scheduler else { return };
-
+    crate::e9_println!("TAT-3 deref scheduler");               // E9: about to deref Option<Sched>
+    let Some(ref sched) = *scheduler else {
+        crate::e9_println!("TAT-3 None");
+        return;
+    };
+    crate::e9_println!("TAT-4 all_tasks len={}", sched.all_tasks.len()); // E9: map size
+    let mut task_n: usize = 0;
     for (_, task) in sched.all_tasks.iter() {
+        crate::e9_println!("TAT-5 task={}", task_n);           // E9: iteration index
         for which in [ITimerWhich::Real, ITimerWhich::Virtual, ITimerWhich::Prof] {
             if task.itimers.get(which).check_expired(current_time_ns) {
                 if let Some(sig) = Signal::from_u32(which.signal()) {
@@ -253,5 +260,7 @@ pub fn tick_all_timers(current_time_ns: u64) {
                 }
             }
         }
+        task_n += 1;
     }
+    crate::e9_println!("TAT-6 done tasks={}", task_n);         // E9: loop completed
 }
