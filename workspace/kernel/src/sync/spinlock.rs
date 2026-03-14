@@ -105,6 +105,20 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
             core::hint::spin_loop();
         }
         self.owner_cpu.store(this_cpu, Ordering::Relaxed);
+        // Race/corruption diagnostic: E9 trace when watched locks are acquired.
+        let self_addr = self as *const _ as *const () as usize;
+        let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
+        if trace_addr != usize::MAX && trace_addr == self_addr {
+            crate::e9_println!("LOCK-A sched cpu={}", this_cpu);
+        }
+        let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
+        if buddy_addr != usize::MAX && buddy_addr == self_addr {
+            crate::e9_println!("LOCK-A buddy cpu={}", this_cpu);
+        }
+        let slab_addr = DEBUG_TRACE_SLAB_ADDR.load(Ordering::Relaxed);
+        if slab_addr != usize::MAX && slab_addr == self_addr {
+            crate::e9_println!("LOCK-A slab cpu={}", this_cpu);
+        }
 
         SpinLockGuard { lock: self, state: ManuallyDrop::new(state) }
     }
@@ -117,8 +131,21 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            self.owner_cpu
-                .store(crate::arch::x86_64::percpu::current_cpu_index(), Ordering::Relaxed);
+            let this_cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            self.owner_cpu.store(this_cpu, Ordering::Relaxed);
+            let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
+            let self_addr = self as *const _ as *const () as usize;
+            if trace_addr != usize::MAX && trace_addr == self_addr {
+                crate::e9_println!("LOCK-A sched cpu={}", this_cpu);
+            }
+            let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
+            if buddy_addr != usize::MAX && buddy_addr == self_addr {
+                crate::e9_println!("LOCK-A buddy cpu={}", this_cpu);
+            }
+            let slab_addr = DEBUG_TRACE_SLAB_ADDR.load(Ordering::Relaxed);
+            if slab_addr != usize::MAX && slab_addr == self_addr {
+                crate::e9_println!("LOCK-A slab cpu={}", this_cpu);
+            }
             Some(SpinLockGuard { lock: self, state: ManuallyDrop::new(state) })
         } else {
             G::exit(state);
@@ -156,8 +183,21 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            self.owner_cpu
-                .store(crate::arch::x86_64::percpu::current_cpu_index(), Ordering::Relaxed);
+            let this_cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            self.owner_cpu.store(this_cpu, Ordering::Relaxed);
+            let self_addr = self as *const _ as *const () as usize;
+            let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
+            if trace_addr != usize::MAX && trace_addr == self_addr {
+                crate::e9_println!("LOCK-A sched cpu={}", this_cpu);
+            }
+            let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
+            if buddy_addr != usize::MAX && buddy_addr == self_addr {
+                crate::e9_println!("LOCK-A buddy cpu={}", this_cpu);
+            }
+            let slab_addr = DEBUG_TRACE_SLAB_ADDR.load(Ordering::Relaxed);
+            if slab_addr != usize::MAX && slab_addr == self_addr {
+                crate::e9_println!("LOCK-A slab cpu={}", this_cpu);
+            }
             Some(SpinLockGuard {
                 lock: self,
                 state: ManuallyDrop::new(GuardianState {
@@ -177,6 +217,29 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
 /// Register a lock address to trace on every drop (serial console output).
 pub fn debug_set_watch_lock_addr(addr: usize) {
     DEBUG_WATCH_LOCK_ADDR.store(addr, Ordering::Relaxed);
+}
+
+/// Address of the scheduler lock for E9 trace on drop (race/corruption diagnostic).
+/// Set by scheduler init. When a SpinLock at this addr is dropped, we emit LOCK-R.
+static DEBUG_TRACE_LOCK_ADDR: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Address of the buddy lock for E9 trace (lock ordering diagnostic).
+static DEBUG_TRACE_BUDDY_ADDR: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Address of the slab lock for E9 trace.
+static DEBUG_TRACE_SLAB_ADDR: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Register a lock address for E9 trace on drop (e.g. scheduler lock).
+pub fn debug_set_trace_lock_addr(addr: usize) {
+    DEBUG_TRACE_LOCK_ADDR.store(addr, Ordering::Relaxed);
+}
+
+/// Register buddy lock address for E9 trace (lock ordering vs scheduler).
+pub fn debug_set_trace_buddy_addr(addr: usize) {
+    DEBUG_TRACE_BUDDY_ADDR.store(addr, Ordering::Relaxed);
+}
+
+/// Register slab lock address for E9 trace.
+pub fn debug_set_trace_slab_addr(addr: usize) {
+    DEBUG_TRACE_SLAB_ADDR.store(addr, Ordering::Relaxed);
 }
 
 /// Clear the watched lock address.
@@ -250,6 +313,17 @@ impl<'a, T: ?Sized, G: Guardian> Drop for SpinLockGuard<'a, T, G> {
 
         if trace {
             crate::serial_force_println!("[trace][spin] drop unlocked lock={:#x}", lock_addr);
+        }
+        // Race/corruption diagnostic: E9 trace when watched locks are released.
+        let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
+        if trace_addr != usize::MAX && trace_addr == lock_addr {
+            let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            crate::e9_println!("LOCK-R sched cpu={}", cpu);
+        }
+        let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
+        if buddy_addr != usize::MAX && buddy_addr == lock_addr {
+            let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            crate::e9_println!("LOCK-R buddy cpu={}", cpu);
         }
 
         // SAFETY: `state` is valid and initialised. We move it out of its

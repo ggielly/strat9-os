@@ -13,6 +13,9 @@ pub fn init_scheduler() {
     let new_sched = Scheduler::new(cpu_count);
     crate::serial_println!("[trace][sched] init_scheduler new() done");
 
+    // Race/corruption diagnostic: register scheduler lock for E9 LOCK-A/LOCK-R traces.
+    crate::sync::debug_set_trace_lock_addr(debug_scheduler_lock_addr());
+
     let mut scheduler = SCHEDULER.lock();
     *scheduler = Some(new_sched);
     drop(scheduler); // Release the lock
@@ -260,18 +263,32 @@ pub fn finish_switch() {
         );
         if let Some(ref mut sched) = *scheduler {
             task_to_drop = drain_post_switch_locked(sched, cpu_index, true, true);
-        }
+        };
     }
     crate::serial_force_println!(
         "[trace][sched] finish_switch after lock cpu={} drop={}",
         cpu_index,
         task_to_drop.is_some()
     );
+    crate::serial_force_println!(
+        "[trace][sched] finish_switch EXIT cpu={}",
+        cpu_index
+    );
+    
+    // Memory barrier to ensure all writes are visible
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    
     super::task_ops::flush_deferred_silo_cleanups();
 
     // Drop the previous task outside the scheduler lock (if it was the last ref).
     // This is safe because we are fully switched to the new task's stack and CR3.
     drop(task_to_drop);
+    
+    // Debug: verify we're about to return
+    crate::serial_force_println!(
+        "[trace][sched] finish_switch about to RETURN cpu={}",
+        cpu_index
+    );
 
     // Temporary safety mode: skip FS.base restore in finish_switch.
     // This avoids cloning current_task() on a path that currently trips
@@ -293,14 +310,35 @@ fn drain_post_switch_locked(
         requeue_task = cpu.task_to_requeue.take();
     }
     if let Some(task) = requeue_task {
+        // Race/corruption diagnostic: validate Arc before enqueue.
+        let strong_before = Arc::strong_count(&task);
+        if strong_before == 0 || strong_before > (isize::MAX as usize) {
+            crate::e9_println!(
+                "DRAIN-ARC-BAD cpu={} tid={} strong={} CORRUPT",
+                cpu_index,
+                task.id.as_u64(),
+                strong_before
+            );
+            crate::serial_force_println!(
+                "[RACE] drain_post_switch_locked: corrupt Arc tid={} strong_count={}",
+                task.id.as_u64(),
+                strong_before
+            );
+        }
         if verbose_trace {
             crate::serial_force_println!(
-                "[trace][sched] finish_switch requeue cpu={} tid={}",
+                "[trace][sched] finish_switch requeue cpu={} tid={} strong={}",
                 cpu_index,
-                task.id.as_u64()
+                task.id.as_u64(),
+                strong_before
             );
         } else {
-            crate::e9_println!("IFSQ cpu={} tid={}", cpu_index, task.id.as_u64());
+            crate::e9_println!(
+                "IFSQ cpu={} tid={} strong={}",
+                cpu_index,
+                task.id.as_u64(),
+                strong_before
+            );
         }
         let class = sched.class_table.class_for_task(&task);
         if !verbose_trace {
@@ -349,24 +387,28 @@ pub fn finish_interrupt_switch() {
         let stack_size = current.kernel_stack.size;
         let stack_top = stack_base + stack_size as u64;
         
-        // Estimate stack usage by scanning for non-zero values
-        let mut stack_used = 0usize;
-        unsafe {
-            let stack_ptr = stack_top as *const u64;
-            for i in 0..(stack_size / 8) {
-                if *stack_ptr.offset(-(i as isize)) != 0 {
-                    stack_used = (i + 1) * 8;
-                }
-            }
-        }
+        // Estimate stack usage from the live stack pointer.
+        // Scanning for non-zero bytes produces false positives because we keep
+        // sentinels/canaries in low stack addresses and task stacks can retain
+        // historical data between calls.
+        let rsp_now = {
+            let marker = 0u64;
+            &marker as *const u64 as u64
+        };
+        let stack_used = if rsp_now >= stack_base && rsp_now <= stack_top {
+            (stack_top - rsp_now) as usize
+        } else {
+            0
+        };
         
         crate::e9_println!(
-            "IFS0-task cpu={} tid={} state={:?} stack={:#x}+{} used={}",
+            "IFS0-task cpu={} tid={} state={:?} stack={:#x}+{} rsp={:#x} used={}",
             cpu_index,
             current.id.as_u64(),
             state,
             stack_base,
             stack_size,
+            rsp_now,
             stack_used
         );
         

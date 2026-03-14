@@ -869,6 +869,8 @@ pub fn init_buddy_allocator(memory_regions: &[MemoryRegion]) {
     let mut allocator = BuddyAllocator::new();
     allocator.init(memory_regions);
     *BUDDY_ALLOCATOR.lock() = Some(allocator);
+    // Race/corruption diagnostic: register buddy lock for E9 LOCK-A/LOCK-R traces.
+    crate::sync::debug_set_trace_buddy_addr(debug_buddy_lock_addr());
 }
 
 /// Returns allocator.

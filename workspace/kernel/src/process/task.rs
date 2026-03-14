@@ -298,15 +298,12 @@ pub struct Task {
 }
 
 impl Task {
-    /// Reserved bootstrap slot near the bottom of the kernel stack for a
-    /// synthetic `SyscallFrame`. This stays away from the normal downward-growing
-    /// call stack used by the legacy `ret` bootstrap path.
-    /// Offset from stack base for bootstrap interrupt frame.
-    /// 
-    /// Placed at 4KB from base to maximize room for interrupt handler stack growth.
-    /// Interrupt handlers grow DOWN from this address, so we want it as low as possible
-    /// while leaving room for the underflow canary at 256 bytes.
-    const BOOTSTRAP_INTERRUPT_FRAME_OFFSET: usize = 0x1000;  // 4KB from base
+    /// Leave this much headroom above the synthetic `SyscallFrame`.
+    ///
+    /// The raw IRQ switch path does `mov rsp, next_rsp` and then `call
+    /// finish_interrupt_switch`, so `next_rsp` must be close to the top of the
+    /// kernel stack to preserve downward growth room for the call chain.
+    const BOOTSTRAP_INTERRUPT_FRAME_TOP_HEADROOM: usize = 0x1000;
     
     /// Canary placed below the interrupt frame to detect stack underflow
     /// (interrupt handler overflowing downward past the frame)
@@ -365,11 +362,14 @@ impl Task {
     pub fn seed_interrupt_frame(&self, frame: crate::syscall::SyscallFrame) {
         let stack_base = self.kernel_stack.virt_base.as_u64();
         let stack_top = stack_base + self.kernel_stack.size as u64;
-        let frame_addr =
-            ((stack_base + Self::BOOTSTRAP_INTERRUPT_FRAME_OFFSET as u64) + 0xF) & !0xF;
+        let frame_size = core::mem::size_of::<crate::syscall::SyscallFrame>() as u64;
+        let raw_frame_addr = stack_top
+            .saturating_sub(Self::BOOTSTRAP_INTERRUPT_FRAME_TOP_HEADROOM as u64)
+            .saturating_sub(frame_size);
+        let frame_addr = raw_frame_addr & !0xF;
         let frame_end = frame_addr + core::mem::size_of::<crate::syscall::SyscallFrame>() as u64;
         assert!(
-            frame_end <= stack_top,
+            frame_addr >= stack_base && frame_end <= stack_top,
             "kernel stack too small for bootstrap interrupt frame"
         );
         unsafe {
@@ -560,10 +560,42 @@ impl CpuContext {
 /// post-switch entry helper.
 #[unsafe(naked)]
 unsafe extern "C" fn task_entry_trampoline() {
+    // Debug: output marker that we reached the trampoline
+    // Can't use serial_println in naked functions, but we can use inline assembly
     core::arch::naked_asm!(
+        "push rax",
+        "push rbx",
+        "mov al, 'T'",  // T = reached trampoline
+        "out 0xe9, al",
+        "pop rbx",
+        "pop rax",
         "call {finish_switch}",
+        "push rax",
+        "push rbx",
+        "mov al, '1'",  // 1 = after finish_switch call returns
+        "out 0xe9, al",
+        "pop rbx",
+        "pop rax",
         "mov rdi, r12",
+        "push rax",
+        "push rbx",
+        "mov al, '2'",  // 2 = after mov rdi, r12
+        "out 0xe9, al",
+        "pop rbx",
+        "pop rax",
         "mov rsi, r13",
+        "push rax",
+        "push rbx",
+        "mov al, '3'",  // 3 = after mov rsi, r13
+        "out 0xe9, al",
+        "pop rbx",
+        "pop rax",
+        "push rax",
+        "push rbx",
+        "mov al, 'J'",  // J = about to jump
+        "out 0xe9, al",
+        "pop rbx",
+        "pop rax",
         "jmp {post_switch_enter}",
         finish_switch = sym crate::process::scheduler::finish_switch,
         post_switch_enter = sym task_post_switch_enter,
@@ -571,17 +603,77 @@ unsafe extern "C" fn task_entry_trampoline() {
 }
 
 fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
+    // Debug: marker that we reached this function
+    unsafe {
+        let mut al: u8;
+        core::arch::asm!(
+            "mov al, 'P'",  // P = post_switch_enter
+            "out 0xe9, al",
+            out("al") al,
+        );
+    }
+    
+    // Save and display r12/r13 values (entry and arg0)
+    let r12_val: u64;
+    let r13_val: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, r12",
+            "mov {}, r13",
+            out(reg) r12_val,
+            out(reg) r13_val,
+        );
+    }
+    crate::serial_force_println!(
+        "[task] post_switch_enter r12={:#x} r13={:#x} entry={:#x} arg0={:#x}",
+        r12_val, r13_val, entry, arg0
+    );
+    
     crate::arch::x86_64::percpu::mark_tlb_ready_current();
+    
+    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    crate::serial_force_println!(
+        "[task] post_switch_enter cpu={} entry={:#x} arg0={:#x}",
+        cpu, entry, arg0
+    );
 
     let is_user_entry = crate::process::scheduler::current_task_clone_try()
         .map(|task| task.trampoline_entry.load(Ordering::Relaxed) != 0)
         .unwrap_or(false);
 
-    if !is_user_entry {
-        crate::arch::x86_64::sti();
+    if let Some(task) = crate::process::scheduler::current_task_clone_try() {
+        crate::serial_force_println!(
+            "[trace][task] post_switch_enter cpu={} tid={} user_entry={} entry={:#x} arg0={:#x}",
+            cpu,
+            task.id.as_u64(),
+            is_user_entry,
+            entry,
+            arg0
+        );
     }
 
+    if !is_user_entry {
+        crate::serial_force_println!(
+            "[task] post_switch_enter calling sti cpu={}",
+            cpu
+        );
+        crate::arch::x86_64::sti();
+        crate::serial_force_println!(
+            "[task] post_switch_enter sti done cpu={}",
+            cpu
+        );
+    }
+
+    crate::serial_force_println!(
+        "[task] post_switch_enter jumping to entry={:#x} cpu={}",
+        entry,
+        cpu
+    );
     let entry_fn: extern "C" fn(u64) -> ! = unsafe { core::mem::transmute(entry as usize) };
+    crate::serial_force_println!(
+        "[task] post_switch_enter ABOUT TO CALL ENTRY cpu={}",
+        cpu
+    );
     entry_fn(arg0)
 }
 

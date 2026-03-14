@@ -43,6 +43,8 @@ pub fn virt_to_phys(virt: u64) -> u64 {
 /// Initialize the memory management subsystem
 pub fn init_memory_manager(memory_regions: &[MemoryRegion]) {
     buddy::init_buddy_allocator(memory_regions);
+    // Race/corruption diagnostic: register slab lock for E9 LOCK-A/LOCK-R traces.
+    heap::debug_register_slab_trace();
 }
 
 /// Initialize copy-on-write metadata.
