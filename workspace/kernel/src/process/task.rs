@@ -393,8 +393,12 @@ impl Task {
     pub fn seed_kernel_interrupt_frame_from_context(&self) {
         let saved_rsp = unsafe { (*self.context.get()).saved_rsp as *const u64 };
         let ret_target = unsafe { *saved_rsp.add(6) };
-        let is_first_launch = ret_target == task_entry_trampoline as *const () as u64;
-        let rflags = if is_first_launch { 0x2 } else { 0x202 };
+        // Always set IF=1 (bit 9) so the task starts with interrupts enabled.
+        // Previously first-launch tasks used 0x2 (IF=0) and relied on an explicit
+        // sti() in task_post_switch_enter, which caused a FORCE_LOCK deadlock window.
+        // Now we match how Redox/Maestro handle this: let RFLAGS carry IF=1 from
+        // the seed frame, and omit the explicit sti() entirely.
+        let rflags = 0x202u64; // bit 9 = IF, bit 1 = reserved (always 1)
         let frame = unsafe {
             crate::syscall::SyscallFrame {
                 r15: *saved_rsp.add(0),
@@ -596,6 +600,16 @@ unsafe extern "C" fn task_entry_trampoline() {
         "out 0xe9, al",
         "pop rbx",
         "pop rax",
+        // Normalize RSP to match the x86-64 SysV CALL convention (RSP%16 == 8 at
+        // function entry). Two paths arrive here with different RSP alignments:
+        //   - Cooperative switch (via switch_context_fxsave + ret): RSP%16 == 8 ✓
+        //   - Interrupt/IRQSEED (via iretq kernel-to-kernel): RSP%16 == 0 ✗
+        // `and rsp, -16` drops bit 3, giving RSP%16 == 0 in all cases.
+        // `sub rsp, 8`  then gives RSP%16 == 8, matching what a `call` would leave.
+        // Since task_post_switch_enter is `-> !` (never returns), the "fake" return
+        // slot below RSP is never read, so this is safe for both paths.
+        "and rsp, -16",
+        "sub rsp, 8",
         "jmp {post_switch_enter}",
         finish_switch = sym crate::process::scheduler::finish_switch,
         post_switch_enter = sym task_post_switch_enter,
@@ -603,77 +617,31 @@ unsafe extern "C" fn task_entry_trampoline() {
 }
 
 fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
-    // Debug: marker that we reached this function
-    unsafe {
-        let mut al: u8;
-        core::arch::asm!(
-            "mov al, 'P'",  // P = post_switch_enter
-            "out 0xe9, al",
-            out("al") al,
-        );
-    }
-    
-    // Save and display r12/r13 values (entry and arg0)
-    let r12_val: u64;
-    let r13_val: u64;
-    unsafe {
-        core::arch::asm!(
-            "mov {}, r12",
-            "mov {}, r13",
-            out(reg) r12_val,
-            out(reg) r13_val,
-        );
-    }
-    crate::serial_force_println!(
-        "[task] post_switch_enter r12={:#x} r13={:#x} entry={:#x} arg0={:#x}",
-        r12_val, r13_val, entry, arg0
-    );
-    
+    // E9 breadcrumb: 'P' = reached post_switch_enter (no serial lock needed).
+    unsafe { core::arch::asm!("out 0xe9, al", in("al") b'P', options(nomem, nostack)); }
+
     crate::arch::x86_64::percpu::mark_tlb_ready_current();
-    
+
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-    crate::serial_force_println!(
-        "[task] post_switch_enter cpu={} entry={:#x} arg0={:#x}",
-        cpu, entry, arg0
-    );
 
     let is_user_entry = crate::process::scheduler::current_task_clone_try()
         .map(|task| task.trampoline_entry.load(Ordering::Relaxed) != 0)
         .unwrap_or(false);
 
+    // Single diagnostic print (IF may be 0 or 1 depending on RFLAGS seed; either
+    // way FORCE_LOCK is IRQ-safe and this is the LAST serial call before entry_fn).
     if let Some(task) = crate::process::scheduler::current_task_clone_try() {
         crate::serial_force_println!(
-            "[trace][task] post_switch_enter cpu={} tid={} user_entry={} entry={:#x} arg0={:#x}",
-            cpu,
-            task.id.as_u64(),
-            is_user_entry,
-            entry,
-            arg0
+            "[pse] cpu={} tid={} user={} entry={:#x}",
+            cpu, task.id.as_u64(), is_user_entry, entry
         );
     }
 
-    if !is_user_entry {
-        crate::serial_force_println!(
-            "[task] post_switch_enter calling sti cpu={}",
-            cpu
-        );
-        crate::arch::x86_64::sti();
-        crate::serial_force_println!(
-            "[task] post_switch_enter sti done cpu={}",
-            cpu
-        );
-    }
+    // NOTE: no explicit sti() here. The seed frame now uses RFLAGS=0x202 (IF=1)
+    // so first-launch kernel tasks already start with interrupts enabled.
+    // User tasks return via iretq which restores their own RFLAGS (also IF=1).
 
-    crate::serial_force_println!(
-        "[task] post_switch_enter jumping to entry={:#x} cpu={}",
-        entry,
-        cpu
-    );
     let entry_fn: extern "C" fn(u64) -> ! = unsafe { core::mem::transmute(entry as usize) };
-    crate::serial_force_println!(
-        "[task] post_switch_enter ABOUT TO CALL ENTRY cpu={}",
-        cpu
-    );
     entry_fn(arg0)
 }
 

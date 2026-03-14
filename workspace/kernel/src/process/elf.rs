@@ -1128,6 +1128,14 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_ss as u16,
     );
 
+    crate::serial_force_println!(
+        "[elf] PRE-IRETQ tid={} rip={:#x} rsp={:#x} rflags={:#x}",
+        task.id.as_u64(),
+        user_rip,
+        user_rsp,
+        user_rflags
+    );
+
     // Probe E9 Rust : validate_ring3_state passé, on entre dans l'asm.
     // Si '0' est visible mais pas '1', le compilateur a inséré du code entre
     // les deux qui a planté (peu probable, mais élimine cette hypothèse).

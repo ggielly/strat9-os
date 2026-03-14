@@ -241,11 +241,16 @@ fn delete_next_char_at_cursor(
 /// This function never returns. It continuously reads keyboard input,
 /// parses commands, and executes them.
 pub extern "C" fn shell_main() -> ! {
+    // E9 'Q' (0x51) = first instruction, before any lock/serial. Confirms we reached shell.
+    let q: u8 = 0x51;
+    unsafe { core::arch::asm!("out 0xe9, al", in("al") q) }
+    crate::serial_force_println!("[shell] shell_main ENTER");
     let registry = CommandRegistry::new();
     commands::util::init_shell_env();
     let mut input_buf = [0u8; 256];
     let mut input_len = 0;
     let mut cursor_pos = 0;
+    crate::serial_force_println!("[shell] Initialization complete, entering main loop");
 
     // Command history
     let mut history = VecDeque::new();

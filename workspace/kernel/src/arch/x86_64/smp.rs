@@ -347,10 +347,12 @@ pub fn init() -> Result<usize, &'static str> {
     // Keep booting with available CPUs and report partial bring-up.
     let mut spins: u64 = 0;
     const MAX_SPINS: u64 = 200_000_000;
+    crate::e9_println!("BE SMP wait APs expected={}", expected);
     while BOOTED_CORES.load(Ordering::Acquire) < expected && spins < MAX_SPINS {
         core::hint::spin_loop();
         spins = spins.saturating_add(1);
     }
+    crate::e9_println!("BF SMP done online={}", BOOTED_CORES.load(Ordering::Acquire));
     if BOOTED_CORES.load(Ordering::Acquire) < expected {
         log::warn!(
             "SMP: timeout waiting APs (online={} expected={}), continuing",

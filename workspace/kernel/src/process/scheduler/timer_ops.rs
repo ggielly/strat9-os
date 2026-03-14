@@ -1,11 +1,21 @@
 use super::*;
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU64};
 
 // One-shot bootstrap nudge: ensure each CPU requests at least one preemption
 // after entering Ring 3. This breaks "first task runs forever" scenarios when
 // class accounting has not yet accumulated enough runtime to trigger resched.
 static FIRST_TICK_FORCE_RESCHED: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+
+// Per-CPU local tick counter (incremented every timer tick, independent of
+// the BSP-only global TICK_COUNT). Used for periodic force-resched below.
+static CPU_LOCAL_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+
+// Force a reschedule at least every N ticks per CPU, regardless of SCHEDULER
+// lock availability. This guarantees kernel tasks (shell, idle) get CPU time
+// even if timer_tick consistently loses the scheduler lock race with the other CPU.
+const PERIODIC_RESCHED_TICKS: u64 = 5;
 
 /// Timer interrupt handler - called from interrupt context.
 ///
@@ -19,13 +29,7 @@ static FIRST_TICK_FORCE_RESCHED: [AtomicBool; crate::arch::x86_64::percpu::MAX_C
 /// its own `try_lock`. These are separate acquisitions by design - the inner
 /// functions must not be called while the outer lock is held (that would deadlock).
 pub fn timer_tick() {
-    // Debug: track stack depth on each timer entry
-    let dummy_var = 0u64;
-    let current_rsp = &dummy_var as *const u64 as u64;
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
-    crate::e9_println!("TIMER-STACK cpu={} rsp={:#x}", cpu_idx, current_rsp);
-    
-    crate::e9_println!("TA cpu_idx?");                    // E9-A: very start, before any GS access
 
     if cpu_is_valid(cpu_idx) {
         CPU_TOTAL_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
@@ -35,7 +39,13 @@ pub fn timer_tick() {
     if cpu_idx == 0 {
         TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     }
-    crate::e9_println!("TC cpu={}", cpu_idx);             // E9-C: tick counters updated
+
+    // Per-CPU local tick counter (all CPUs, not just BSP).
+    let local_tick = if cpu_is_valid(cpu_idx) {
+        CPU_LOCAL_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed) + 1
+    } else {
+        0
+    };
 
     // Lock-free bootstrap nudge: first local timer tick requests one resched
     // without touching SCHEDULER. This avoids pathological boot windows where
@@ -48,6 +58,14 @@ pub fn timer_tick() {
         crate::e9_println!("TI first-tick hint cpu={}", cpu_idx);
     }
 
+    // Periodic force-resched: guarantee every CPU reschedules at least every
+    // PERIODIC_RESCHED_TICKS ticks. This prevents starvation of kernel tasks
+    // when timer_tick fails to acquire the scheduler lock repeatedly, or when
+    // FairClassRq::update_current returns false (e.g., single-task queue).
+    if cpu_is_valid(cpu_idx) && local_tick > 0 && local_tick % PERIODIC_RESCHED_TICKS == 0 {
+        request_force_resched_hint(cpu_idx);
+    }
+
     // BSP-only secondary bookkeeping: interval timers and sleep wakeups.
     // NS_PER_TICK = 1_000_000_000 / TIMER_HZ (10_000_000 ns at 100 Hz).
     // Both helpers acquire the scheduler lock internally via try_lock and
@@ -55,23 +73,16 @@ pub fn timer_tick() {
     if cpu_idx == 0 {
         let tick = TICK_COUNT.load(Ordering::Relaxed);
         let current_time_ns = tick * NS_PER_TICK;
-        crate::e9_println!("TD tick_all_timers enter cpu={}", cpu_idx); // E9-D
         crate::process::timer::tick_all_timers(current_time_ns);
-        crate::e9_println!("TE tick_all_timers done cpu={}", cpu_idx);  // E9-E
         check_wake_deadlines(current_time_ns);
-        crate::e9_println!("TF check_wake_deadlines done cpu={}", cpu_idx); // E9-F
     }
 
-    crate::e9_println!("TG sched try_lock cpu={}", cpu_idx); // E9-G: about to acquire scheduler
     // Per-task accounting on this CPU.
     if let Some(mut guard) = SCHEDULER.try_lock_no_irqsave() {
-        crate::e9_println!("TH sched locked cpu={}", cpu_idx); // E9-H: lock acquired
         if let Some(ref mut sched) = *guard {
             if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
                 let should_resched = if let Some(ref current_task) = cpu.current_task {
-                    crate::e9_println!("TI0 cpu={} task={}", cpu_idx, current_task.id.as_u64());
                     let class = sched.class_table.class_for_task(current_task);
-                    crate::e9_println!("TI1 cpu={} class={:?}", cpu_idx, class);
                     if cpu_is_valid(cpu_idx) {
                         match class {
                             crate::process::sched::SchedClassId::RealTime => {
@@ -86,29 +97,18 @@ pub fn timer_tick() {
                         }
                     }
                     current_task.ticks.fetch_add(1, Ordering::Relaxed);
-                    crate::e9_println!("TI2 cpu={} task_ticks", cpu_idx);
                     cpu.current_runtime.update();
-                    crate::e9_println!(
-                        "TI3 cpu={} delta={} period={}",
-                        cpu_idx,
-                        cpu.current_runtime.delta_ticks,
-                        cpu.current_runtime.period_delta_ticks
-                    );
-                    let should = cpu.class_rqs.update_current(
+                    cpu.class_rqs.update_current(
                         &cpu.current_runtime,
                         current_task,
                         false,
                         &sched.class_table,
-                    );
-                    crate::e9_println!("TI4 cpu={} should={}", cpu_idx, should);
-                    should
+                    )
                 } else {
-                    crate::e9_println!("TI0 cpu={} no-current", cpu_idx);
                     false
                 };
                 if should_resched {
                     cpu.need_resched = true;
-                    crate::e9_println!("TI5 cpu={} set-need-resched", cpu_idx);
                 }
             }
         }

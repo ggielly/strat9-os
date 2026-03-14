@@ -348,6 +348,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 1: serial output (earliest debug output)
     // =============================================
+    crate::e9_println!("B0 kernel_main");
     init_serial();
     init_logger();
 
@@ -356,9 +357,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // We initialize the IDT as early as possible to catch any exceptions
     // during the early memory management and hardware initialization phases.
+    crate::e9_println!("B1 pre-IDT");
     serial_println!("[init] IDT (early)...");
     arch::x86_64::idt::init();
     serial_println!("[init] IDT initialized.");
+    crate::e9_println!("B2 post-IDT");
 
     debug_assert!(
         !arch::x86_64::interrupts_enabled(),
@@ -571,8 +574,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 2.5: paging / VMM (Must be before Console if FB is not already mapped)
     // =============================================
+    crate::e9_println!("B5 pre-paging");
     serial_println!("[init] Paging...");
     memory::paging::init(hhdm);
+    crate::e9_println!("B6 post-paging");
 
     // Map all RAM into HHDM to ensure buddy/heap allocations are accessible.
     // VMware Limine HHDM may be sparse, causing PF on new heap pages.
@@ -776,11 +781,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 7: initialize scheduler
     // =============================================
+    crate::e9_println!("B7 pre-sched");
     serial_println!("[init] Initializing scheduler...");
     vga_println!("[..] Setting up multitasking...");
     // Print struct layout for crash-site offset analysis (debug build only).
     crate::process::task::Task::debug_print_layout();
     process::init_scheduler();
+    crate::e9_println!("B8 post-sched");
 
     debug_assert!(
         !arch::x86_64::interrupts_enabled(),
@@ -808,6 +815,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 7b: component system - Kthread stage
     // =============================================
+    crate::e9_println!("B9 pre-kthread");
     serial_println!("[trace][bsp] before kthread init_all");
     serial_println!("[init] Components (kthread)...");
     vga_println!("[..] Initializing kthread components...");
@@ -842,6 +850,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         // =============================================
         let mut init_task_id: Option<crate::process::TaskId> = None;
 
+        crate::e9_println!("BB pre-process");
         serial_println!("[init] Components (process)...");
         vga_println!("[..] Initializing process components...");
         if let Err(e) = component::init_all(component::InitStage::Process) {
@@ -857,9 +866,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         // PCI consumers now rely on /bus/pci/* exposed by userspace strate-bus.
         // The userspace boot sequence must start silo "bus" before PCI-dependent
         // silos, otherwise early probes can legitimately return no device.
+        crate::e9_println!("BG pre-hardware");
         serial_println!("[init] Loading hardware drivers...");
         vga_println!("[..] Initializing hardware drivers...");
         hardware::init();
+        crate::e9_println!("BH post-hardware");
 
         serial_println!("[init] Initializing timers...");
         vga_println!("[..] Initializing HPET and RTC...");
@@ -1160,6 +1171,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if apic_active {
         arch::x86_64::smp::open_ap_scheduler_gate();
     }
+    crate::e9_println!("BC pre-schedule");
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
 

@@ -356,6 +356,10 @@ impl Scheduler {
     }
 
     /// Attempts to reap child locked.
+    /// If `target` is `Some(tid)`, only reaps that child; otherwise, reaps any child.
+    /// Returns `WaitChildResult` indicating the outcome.
+    /// Must be called with the scheduler lock held.
+    /// 
     pub fn try_reap_child_locked(
         &mut self,
         parent: TaskId,

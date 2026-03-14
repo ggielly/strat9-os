@@ -197,13 +197,18 @@ unsafe extern "C" fn lapic_timer_entry() -> ! {
         "pop rdx",
         "pop rax",
         "mov rsp, rax",
-        // Debug: emit 'W' after stack switch
+        // Debug: emit 'W' after stack switch (0x57)
         "push rax",
         "mov al, 'W'",
         "out 0xe9, al",
         "pop rax",
+        // fxrstor can #NM or fault if buffer invalid — emit 'X' (0x58) before
+        "push rax",
+        "mov al, 'X'",
+        "out 0xe9, al",
+        "pop rax",
         "fxrstor [rcx]",
-        // Debug: emit 'R' after fxrstor
+        // Debug: emit 'R' after fxrstor (0x52)
         "push rax",
         "mov al, 'R'",
         "out 0xe9, al",
@@ -236,6 +241,11 @@ unsafe extern "C" fn lapic_timer_entry() -> ! {
         "jz 4f",
         "swapgs",
         "4:",
+        // E9 'I' (0x49) = just before iretq. If we see I but shell never runs, iretq faults.
+        "push rax",
+        "mov al, 'I'",
+        "out 0xe9, al",
+        "pop rax",
         "iretq",
         inner = sym lapic_timer_inner,
         switch_finish = sym crate::process::scheduler::finish_interrupt_switch,
@@ -309,6 +319,18 @@ extern "C" fn lapic_timer_inner(
     frame: &mut crate::syscall::SyscallFrame,
 ) -> InterruptReturnDecision {
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    let ticks = crate::process::scheduler::ticks();
+    // Heartbeat: confirm timer fires after Ring 3 entry (serial, rate-limited)
+    let from_ring3 = (frame.iret_cs & 3) == 3;
+    if from_ring3 && (ticks < 5 || ticks % 50 == 0) {
+        crate::serial_force_println!(
+            "[heartbeat] APIC tick={} cpu={} cs={:#x} rip={:#x}",
+            ticks,
+            cpu,
+            frame.iret_cs,
+            frame.iret_rip
+        );
+    }
     crate::e9_println!(
         "TIRQ cpu={} cs={:#x} rip={:#x} rflags={:#x}",
         cpu,

@@ -102,6 +102,7 @@ pub fn add_to_buffer(ch: u8) {
     if ch == 0x03 {
         crate::shell::SHELL_INTERRUPTED.store(true, core::sync::atomic::Ordering::Relaxed);
     }
+    crate::serial_force_println!("[keyboard] Adding to buffer: {:#x}", ch);
     KEYBOARD_BUFFER.push(ch);
 }
 

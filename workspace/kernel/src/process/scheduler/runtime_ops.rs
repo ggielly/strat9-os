@@ -107,6 +107,7 @@ pub fn schedule() -> ! {
 
 /// Performs the schedule on cpu operation.
 pub fn schedule_on_cpu(cpu_index: usize) -> ! {
+    crate::e9_println!("BD-ENTER cpu={}", cpu_index);
     // Disable interrupts for the entire critical section.
     //
     // On the BSP, IF may be 1 (interrupts were enabled in Phase 9).
@@ -118,16 +119,20 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     // APs already arrive here with IF=0 (from the trampoline), but the
     // explicit CLI makes the contract clear for all callers.
     //
-    // `task_entry_trampoline` executes `sti` when the first task starts,
-    // so interrupts are re-enabled at exactly the right moment.
+    // Interrupts are re-enabled by the RFLAGS seed (0x202, IF=1) stored in
+    // each task's bootstrap interrupt frame, so no explicit sti() is needed.
     crate::arch::x86_64::cli();
 
     // APs may arrive here before the BSP has called init_scheduler().
     // Spin-wait (releasing the lock each iteration) until the scheduler
     // is initialized, then pick the first task.
+    let mut wait_iters: u64 = 0;
     let first_task = loop {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
+            if wait_iters > 0 {
+                crate::e9_println!("BD first_task cpu={} waited={}", cpu_index, wait_iters);
+            }
             let idx = if cpu_index < sched.cpus.len() {
                 cpu_index
             } else {
@@ -137,6 +142,10 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         }
         // Drop lock before spinning so the BSP can initialize the scheduler.
         drop(scheduler);
+        wait_iters = wait_iters.saturating_add(1);
+        if wait_iters == 1 || (wait_iters % 1_000_000 == 0 && wait_iters > 0) {
+            crate::e9_println!("BD-WAIT cpu={} iters={}", cpu_index, wait_iters);
+        }
         core::hint::spin_loop();
     }; // Lock is released here before jumping to first task
     super::task_ops::flush_deferred_silo_cleanups();
@@ -221,78 +230,33 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 
 /// Called immediately after a context switch completes (in the new task's context).
 /// This safely re-queues the previously running task now that its state is fully saved.
+///
+/// Mirrors Redox switch_finish_hook: minimal work, no serial (avoids lock contention).
 pub fn finish_switch() {
     let cpu_index = current_cpu_index();
-    crate::serial_force_println!("[trace][sched] finish_switch enter cpu={}", cpu_index);
+    crate::e9_println!("FS cpu={}", cpu_index);
     let mut task_to_drop = None;
     {
-        crate::serial_force_println!(
-            "[trace][sched] finish_switch before lock cpu={} sched_lock={:#x}",
-            cpu_index,
-            crate::process::scheduler::debug_scheduler_lock_addr()
-        );
-        // E9: check if lock is already held before attempting acquire
-        let lock_is_held = SCHEDULER.owner_cpu() != usize::MAX;
-        crate::e9_println!("FS0 cpu={} lock_held={} locked_raw={}", cpu_index, lock_is_held, {
-            let addr = crate::process::scheduler::debug_scheduler_lock_addr() as *const core::sync::atomic::AtomicBool;
-            // SAFETY: address is the locked field of SCHEDULER (first field, offset 0)
-            unsafe { (*addr).load(core::sync::atomic::Ordering::Relaxed) }
-        });
         let mut spins = 0usize;
         let mut scheduler = loop {
-            crate::e9_println!("FS1 cpu={} spin={}", cpu_index, spins);
             if let Some(guard) = SCHEDULER.try_lock() {
-                crate::e9_println!("FS2 cpu={} acquired", cpu_index);
                 break guard;
             }
-            crate::e9_println!("FS3 cpu={} try failed", cpu_index);
             spins = spins.saturating_add(1);
-            if spins == 2_000_000 {
-                crate::serial_force_println!(
-                    "[trace][sched] finish_switch waiting lock cpu={} owner_cpu={}",
-                    cpu_index,
-                    SCHEDULER.owner_cpu()
-                );
-                spins = 0;
+            if spins % 1_000_000 == 0 {
+                crate::e9_println!("FS-spin cpu={} n={}", cpu_index, spins);
             }
             core::hint::spin_loop();
         };
-        crate::serial_force_println!(
-            "[trace][sched] finish_switch lock acquired cpu={}",
-            cpu_index
-        );
         if let Some(ref mut sched) = *scheduler {
-            task_to_drop = drain_post_switch_locked(sched, cpu_index, true, true);
+            task_to_drop = drain_post_switch_locked(sched, cpu_index, false, true);
         };
     }
-    crate::serial_force_println!(
-        "[trace][sched] finish_switch after lock cpu={} drop={}",
-        cpu_index,
-        task_to_drop.is_some()
-    );
-    crate::serial_force_println!(
-        "[trace][sched] finish_switch EXIT cpu={}",
-        cpu_index
-    );
-    
-    // Memory barrier to ensure all writes are visible
+
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    
     super::task_ops::flush_deferred_silo_cleanups();
-
-    // Drop the previous task outside the scheduler lock (if it was the last ref).
-    // This is safe because we are fully switched to the new task's stack and CR3.
     drop(task_to_drop);
-    
-    // Debug: verify we're about to return
-    crate::serial_force_println!(
-        "[trace][sched] finish_switch about to RETURN cpu={}",
-        cpu_index
-    );
-
-    // Temporary safety mode: skip FS.base restore in finish_switch.
-    // This avoids cloning current_task() on a path that currently trips
-    // an Arc refcount invariant under heavy early context-switch churn.
+    crate::e9_println!("FS-DONE cpu={}", cpu_index);
 }
 
 fn drain_post_switch_locked(
@@ -362,156 +326,29 @@ fn drain_post_switch_locked(
 /// complete, so another CPU cannot steal the old task while its FPU/stack state
 /// is still in flight.
 pub fn finish_interrupt_switch() {
-    // Debug: track call depth
-    static FINISH_SWITCH_DEPTH: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    let depth = FINISH_SWITCH_DEPTH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    if depth > 5 {
-        crate::serial_force_println!("[PANIC] finish_interrupt_switch depth={} - infinite recursion?", depth);
-    }
-    
     let cpu_index = current_cpu_index();
-    crate::e9_println!("IFS0 cpu={} depth={}", cpu_index, depth);
+    crate::e9_println!("IFS cpu={}", cpu_index);
 
-    // Debug: check IRQ state
-    let irq_enabled = crate::arch::x86_64::interrupts_enabled();
-    crate::e9_println!("IFS0-irq cpu={} irq_enabled={}", cpu_index, irq_enabled);
-
-    // Debug: check lock state
-    let lock_addr = &SCHEDULER as *const _ as usize;
-    crate::e9_println!("IFS0-lock cpu={} lock_addr={:#x}", cpu_index, lock_addr);
-    
-    // Debug: validate current task state
-    if let Some(current) = current_task_clone_try() {
-        let state = unsafe { *current.state.get() };
-        let stack_base = current.kernel_stack.virt_base.as_u64();
-        let stack_size = current.kernel_stack.size;
-        let stack_top = stack_base + stack_size as u64;
-        
-        // Estimate stack usage from the live stack pointer.
-        // Scanning for non-zero bytes produces false positives because we keep
-        // sentinels/canaries in low stack addresses and task stacks can retain
-        // historical data between calls.
-        let rsp_now = {
-            let marker = 0u64;
-            &marker as *const u64 as u64
-        };
-        let stack_used = if rsp_now >= stack_base && rsp_now <= stack_top {
-            (stack_top - rsp_now) as usize
-        } else {
-            0
-        };
-        
-        crate::e9_println!(
-            "IFS0-task cpu={} tid={} state={:?} stack={:#x}+{} rsp={:#x} used={}",
-            cpu_index,
-            current.id.as_u64(),
-            state,
-            stack_base,
-            stack_size,
-            rsp_now,
-            stack_used
-        );
-        
-        // Warn if stack usage exceeds 50%
-        if stack_used > stack_size / 2 {
-            crate::serial_force_println!(
-                "IFS0-STACK-WARNING cpu={} tid={} used={}/{} ({}%)",
-                cpu_index,
-                current.id.as_u64(),
-                stack_used,
-                stack_size,
-                stack_used * 100 / stack_size
-            );
-        }
-        
-        // Check stack canary (placed at stack_top - 8 in CpuContext::new)
-        let canary_addr = stack_top - 8;
-        let canary = unsafe { *(canary_addr as *const u64) };
-        const STACK_CANARY: u64 = 0xDEADBEEFCAFEBABE;
-        if canary != STACK_CANARY {
-            // Also check nearby locations
-            let canary_below = unsafe { *(canary_addr as *const u64).offset(-1) };
-            let canary_at = unsafe { *(canary_addr as *const u64) };
-            let canary_above = unsafe { *(stack_top as *const u64) };
-            crate::serial_force_println!(
-                "IFS0-STACK-CORRUPT cpu={} tid={} canary={:#x} expected={:#x} used={}/{} addr={:#x}",
-                cpu_index,
-                current.id.as_u64(),
-                canary,
-                STACK_CANARY,
-                stack_used,
-                stack_size,
-                canary_addr
-            );
-            crate::serial_force_println!(
-                "IFS0-STACK-DEBUG cpu={} below={:#x} at={:#x} top={:#x}",
-                cpu_index,
-                canary_below,
-                canary_at,
-                canary_above
-            );
-        }
-        
-        // Check underflow canary (placed at stack_base + 256 in seed_interrupt_frame)
-        let underflow_canary_addr = stack_base + 256;
-        let underflow_canary = unsafe { *(underflow_canary_addr as *const u64) };
-        const UNDERFLOW_CANARY: u64 = 0xBAD57ACBAD57AC;
-        if underflow_canary != UNDERFLOW_CANARY {
-            crate::serial_force_println!(
-                "IFS0-STACK-UNDERFLOW cpu={} tid={} canary={:#x} expected={:#x} addr={:#x}",
-                cpu_index,
-                current.id.as_u64(),
-                underflow_canary,
-                UNDERFLOW_CANARY,
-                underflow_canary_addr
-            );
-        }
-        
-        // Also check a few bytes below stack_top for overflow
-        let overflow_check = unsafe { *(stack_top as *const u64).offset(-1) };
-        if overflow_check != 0 && overflow_check != STACK_CANARY {
-            crate::serial_force_println!(
-                "IFS0-STACK-OVERFLOW cpu={} tid={} overflow_val={:#x}",
-                cpu_index,
-                current.id.as_u64(),
-                overflow_check
-            );
-        }
-    }
-
+    // Spin until SCHEDULER is available (released by maybe_preempt_from_interrupt
+    // before returning to this assembly stub).  We must not block with IRQs enabled
+    // because we are still inside the timer interrupt handler.  try_lock_no_irqsave
+    // requires IRQs already disabled, which is guaranteed here.
     let mut task_to_drop = None;
     let mut spins = 0usize;
-    let mut max_spins = 100_000_000; // Limit spins to detect hang
     loop {
-        // Debug: check IRQ state on each iteration
-        if spins % 10_000_000 == 0 && spins > 0 {
-            let irq = crate::arch::x86_64::interrupts_enabled();
-            crate::e9_println!("IFS1-spin cpu={} spins={} irq={}", cpu_index, spins, irq);
-        }
-
         if let Some(mut scheduler) = SCHEDULER.try_lock_no_irqsave() {
-            crate::e9_println!("IFS1 cpu={} acquired", cpu_index);
             if let Some(ref mut sched) = *scheduler {
                 task_to_drop = drain_post_switch_locked(sched, cpu_index, false, false);
             }
             break;
         }
         spins = spins.saturating_add(1);
-        if spins >= max_spins {
-            crate::serial_force_println!("IFS1-HANG cpu={} spins={} irq={}", cpu_index, spins, crate::arch::x86_64::interrupts_enabled());
-            // Debug: try to get lock state
-            unsafe {
-                let lock_ptr = &SCHEDULER as *const _ as *const u8;
-                let locked = core::ptr::read_volatile(lock_ptr.add(0x10) as *const bool);
-                let owner = core::ptr::read_volatile(lock_ptr.add(0x11) as *const usize);
-                crate::serial_force_println!("IFS1-DEBUG cpu={} locked={} owner={}", cpu_index, locked, owner);
-            }
-            panic!("IFS1 hang detected - scheduler lock unavailable");
+        if spins % 10_000_000 == 0 {
+            crate::e9_println!("IFS-spin cpu={} n={}", cpu_index, spins);
         }
         core::hint::spin_loop();
     }
     let _ = task_to_drop;
-    crate::e9_println!("IFS2 cpu={} done", cpu_index);
 }
 
 /// Yield the current task to allow other tasks to run (cooperative).
@@ -768,7 +605,16 @@ pub fn maybe_preempt_from_interrupt(
                     );
                 }
             }
-            if next_rsp == 0 || !interrupt_frame_fits(&next, next_rsp) {
+            let fits = interrupt_frame_fits(&next, next_rsp);
+            crate::e9_println!(
+                "IRQCHK cpu={} next={} rsp={:#x} fits={} zero={}",
+                cpu_index,
+                next.id.as_u64(),
+                next_rsp,
+                fits,
+                next_rsp == 0
+            );
+            if next_rsp == 0 || !fits {
                 let is_idle_fallback = Arc::ptr_eq(&next, &sched.cpus[cpu_index].idle_task);
                 task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
 
@@ -820,6 +666,7 @@ pub fn maybe_preempt_from_interrupt(
                 }
 
                 // Extract frame info before switch
+                crate::e9_println!("IRQSW-PRE cpu={} next_rsp={:#x}", cpu_index, next_rsp);
                 let (next_cs, next_rip) = unsafe {
                     let frame = &*(next_rsp as *const crate::syscall::SyscallFrame);
                     (frame.iret_cs, frame.iret_rip)
