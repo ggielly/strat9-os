@@ -563,51 +563,15 @@ impl CpuContext {
 /// callee-saved registers and `ret`s here, then tail-jumps into the actual
 /// post-switch entry helper.
 #[unsafe(naked)]
-unsafe extern "C" fn task_entry_trampoline() {
-    // Debug: output marker that we reached the trampoline
-    // Can't use serial_println in naked functions, but we can use inline assembly
+pub unsafe extern "C" fn task_entry_trampoline() -> ! {
     core::arch::naked_asm!(
-        "push rax",
-        "push rbx",
-        "mov al, 'T'",  // T = reached trampoline
+        "mov al, 'T'",
         "out 0xe9, al",
-        "pop rbx",
-        "pop rax",
         "call {finish_switch}",
-        "push rax",
-        "push rbx",
-        "mov al, '1'",  // 1 = after finish_switch call returns
+        "mov al, '1'",
         "out 0xe9, al",
-        "pop rbx",
-        "pop rax",
-        "mov rdi, r12",
-        "push rax",
-        "push rbx",
-        "mov al, '2'",  // 2 = after mov rdi, r12
-        "out 0xe9, al",
-        "pop rbx",
-        "pop rax",
-        "mov rsi, r13",
-        "push rax",
-        "push rbx",
-        "mov al, '3'",  // 3 = after mov rsi, r13
-        "out 0xe9, al",
-        "pop rbx",
-        "pop rax",
-        "push rax",
-        "push rbx",
-        "mov al, 'J'",  // J = about to jump
-        "out 0xe9, al",
-        "pop rbx",
-        "pop rax",
-        // Normalize RSP to match the x86-64 SysV CALL convention (RSP%16 == 8 at
-        // function entry). Two paths arrive here with different RSP alignments:
-        //   - Cooperative switch (via switch_context_fxsave + ret): RSP%16 == 8 ✓
-        //   - Interrupt/IRQSEED (via iretq kernel-to-kernel): RSP%16 == 0 ✗
-        // `and rsp, -16` drops bit 3, giving RSP%16 == 0 in all cases.
-        // `sub rsp, 8`  then gives RSP%16 == 8, matching what a `call` would leave.
-        // Since task_post_switch_enter is `-> !` (never returns), the "fake" return
-        // slot below RSP is never read, so this is safe for both paths.
+        "mov rdi, r12", // entry_point
+        "mov rsi, r13", // arg0
         "and rsp, -16",
         "sub rsp, 8",
         "jmp {post_switch_enter}",
@@ -629,9 +593,9 @@ fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
         .unwrap_or(false);
 
     // Single diagnostic print (IF may be 0 or 1 depending on RFLAGS seed; either
-    // way FORCE_LOCK is IRQ-safe and this is the LAST serial call before entry_fn).
+    // way E9 is IRQ-safe and this is the LAST trace call before entry_fn).
     if let Some(task) = crate::process::scheduler::current_task_clone_try() {
-        crate::serial_force_println!(
+        crate::e9_println!(
             "[pse] cpu={} tid={} user={} entry={:#x}",
             cpu, task.id.as_u64(), is_user_entry, entry
         );

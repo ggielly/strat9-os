@@ -243,7 +243,11 @@ pub fn current_task_clone_spin_debug(trace_label: &str) -> Option<Arc<Task>> {
         if let Some(mut scheduler) = SCHEDULER.try_lock() {
             return if let Some(ref mut sched) = *scheduler {
                 sched.cpus.get_mut(cpu_index).and_then(|cpu| {
-                    let arc = cpu.current_task.as_ref()?;
+                    if cpu.current_task.is_none() {
+                        crate::e9_println!("CUR-NONE cpu={} lbl={}", cpu_index, trace_label);
+                        return None;
+                    }
+                    let arc = cpu.current_task.as_ref().unwrap();
                     let strong = Arc::strong_count(arc);
                     if strong == 0 || strong > (isize::MAX as usize) / 2 {
                         let ptr = Arc::as_ptr(arc) as *const u8;
@@ -1043,7 +1047,10 @@ fn queue_silo_cleanup(task_id: TaskId) {
 }
 
 pub fn flush_deferred_silo_cleanups() {
-    let mut guard = PENDING_SILO_CLEANUPS.lock();
+    let mut guard = match PENDING_SILO_CLEANUPS.try_lock() {
+        Some(g) => g,
+        None => return, // Lock held by preempted task or other CPU, skip safely
+    };
     if guard.is_empty() {
         return;
     }

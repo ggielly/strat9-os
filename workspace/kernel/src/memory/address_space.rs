@@ -1237,7 +1237,9 @@ impl AddressSpace {
         unsafe {
             let frame =
                 X86PhysFrame::from_start_address(self.cr3_phys).expect("CR3 address not aligned");
+            crate::e9_println!("CR3-WRITE {:#x}", self.cr3_phys.as_u64());
             Cr3::write(frame, Cr3Flags::empty());
+            crate::e9_println!("CR3-OK");
         }
     }
 

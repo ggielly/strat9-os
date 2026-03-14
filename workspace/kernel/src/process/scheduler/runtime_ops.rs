@@ -233,6 +233,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 ///
 /// Mirrors Redox switch_finish_hook: minimal work, no serial (avoids lock contention).
 pub fn finish_switch() {
+    crate::e9_println!("FS-START");
     let cpu_index = current_cpu_index();
     crate::e9_println!("FS cpu={}", cpu_index);
     let mut task_to_drop = None;
@@ -249,6 +250,17 @@ pub fn finish_switch() {
             core::hint::spin_loop();
         };
         if let Some(ref mut sched) = *scheduler {
+            // Activate the address space for the current task on this CPU.
+            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                if let Some(ref task) = cpu.current_task {
+                    let as_ptr = unsafe { task.process.address_space.get() };
+                    crate::e9_println!("FS-AS-PRE cpu={} tid={} as={:p}", cpu_index, task.id.as_u64(), as_ptr);
+                    unsafe {
+                        (*as_ptr).switch_to();
+                    }
+                    crate::e9_println!("FS-AS-OK cpu={}", cpu_index);
+                }
+            }
             task_to_drop = drain_post_switch_locked(sched, cpu_index, false, true);
         };
     }
@@ -305,14 +317,8 @@ fn drain_post_switch_locked(
             );
         }
         let class = sched.class_table.class_for_task(&task);
-        if !verbose_trace {
-            crate::e9_println!("IFSC cpu={} class={:?}", cpu_index, class);
-        }
         if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
             cpu.class_rqs.enqueue(class, task);
-            if !verbose_trace {
-                crate::e9_println!("IFSE cpu={} enqueued", cpu_index);
-            }
         }
     }
     task_to_drop
@@ -326,6 +332,7 @@ fn drain_post_switch_locked(
 /// complete, so another CPU cannot steal the old task while its FPU/stack state
 /// is still in flight.
 pub fn finish_interrupt_switch() {
+    unsafe { core::arch::asm!("mov al, 'I'; out 0xe9, al; mov al, 'F'; out 0xe9, al; mov al, 'S'; out 0xe9, al; mov al, ' '; out 0xe9, al", out("al") _) };
     let cpu_index = current_cpu_index();
     crate::e9_println!("IFS cpu={}", cpu_index);
 
@@ -337,8 +344,24 @@ pub fn finish_interrupt_switch() {
     let mut spins = 0usize;
     loop {
         if let Some(mut scheduler) = SCHEDULER.try_lock_no_irqsave() {
+            crate::e9_println!("IFS-LOCK-OK");
             if let Some(ref mut sched) = *scheduler {
+                crate::e9_println!("IFS-SCHED-OK");
+                // REQUEUE OLD TASK FIRST (while current AS is still active/stable)
                 task_to_drop = drain_post_switch_locked(sched, cpu_index, false, false);
+                crate::e9_println!("IFS-DRAIN-OK");
+
+                // NOW SWITCH TO NEW ADDRESS SPACE
+                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                    if let Some(ref task) = cpu.current_task {
+                        let as_ptr = unsafe { task.process.address_space.get() };
+                        crate::e9_println!("IFS-AS-PTR {:p}", as_ptr);
+                        unsafe {
+                            (*as_ptr).switch_to();
+                        }
+                        crate::e9_println!("IFS-AS-OK");
+                    }
+                }
             }
             break;
         }
@@ -349,6 +372,7 @@ pub fn finish_interrupt_switch() {
         core::hint::spin_loop();
     }
     let _ = task_to_drop;
+    crate::e9_println!("IFS-DONE cpu={}", cpu_index);
 }
 
 /// Yield the current task to allow other tasks to run (cooperative).
@@ -536,85 +560,62 @@ pub fn maybe_preempt_from_interrupt(
                 crate::e9_println!("MPI force-resched hint cpu={}", cpu_index);
             }
             if cpu.current_task.is_none() || !cpu.need_resched {
-                crate::e9_println!(
-                    "IRQSKIP cpu={} current={} need={}",
-                    cpu_index,
-                    cpu.current_task
-                        .as_ref()
-                        .map(|t| t.id.as_u64())
-                        .unwrap_or(0),
-                    cpu.need_resched
-                );
                 return None;
-            }
-            if let Some(current) = cpu.current_task.as_ref() {
-                sched_trace(format_args!(
-                    "cpu={} irq-preempt request task={} rt_delta={}",
-                    cpu_index,
-                    current.id.as_u64(),
-                    cpu.current_runtime.period_delta_ticks
-                ));
             }
         }
 
-        let current = sched.cpus[cpu_index]
-            .current_task
-            .as_ref()
-            .cloned()
-            .expect("irq-preempt current_task disappeared");
+        crate::e9_println!("MPI-P1 cpu={}", cpu_index);
+        let current = match sched.cpus[cpu_index].current_task.as_ref() {
+            Some(t) => t.clone(),
+            None => {
+                crate::e9_println!("IRQ-ERROR: current_task is None on cpu={}", cpu_index);
+                return None;
+            }
+        };
+        crate::e9_println!("MPI-P2 cpu={} tid={}", cpu_index, current.id.as_u64());
         current.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
         current.set_interrupt_rsp(current_frame_rsp);
-        crate::e9_println!(
-            "IRQSAVE cpu={} tid={} rsp={:#x}",
-            cpu_index,
-            current.id.as_u64(),
-            current_frame_rsp
-        );
-
+        
         let next = sched.pick_next_task(cpu_index);
+        crate::e9_println!("MPI-P3 cpu={} next={}", cpu_index, next.id.as_u64());
 
         if Arc::ptr_eq(&current, &next) {
             if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
                 cpu.need_resched = false;
             }
             task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
-            crate::e9_println!("IRQNOSW cpu={} tid={}", cpu_index, current.id.as_u64());
+            // Optional: trace only occasionally to avoid spam
+            // crate::e9_println!("IRQNOSW cpu={} tid={}", cpu_index, current.id.as_u64());
             None
         } else {
             let mut next_rsp = next.interrupt_rsp();
             if next.resume_kind() == crate::process::task::ResumeKind::RetFrame {
-                if next.is_kernel() {
-                    next.seed_kernel_interrupt_frame_from_context();
-                    next_rsp = next.interrupt_rsp();
-                    let seed_rip = unsafe {
-                        let saved_rsp = (*next.context.get()).saved_rsp as *const u64;
-                        *saved_rsp.add(6)
-                    };
-                    crate::e9_println!(
-                        "IRQSEED cpu={} tid={} rip={:#x}",
-                        cpu_index,
-                        next.id.as_u64(),
-                        seed_rip
-                    );
-                } else {
-                    crate::e9_println!(
-                        "IRQMISS cpu={} tid={} kind={:?}",
-                        cpu_index,
-                        next.id.as_u64(),
-                        next.resume_kind()
-                    );
-                }
+                // All tasks (kernel and ELF user tasks) start their first execution
+                // in Ring 0 via the task_entry_trampoline. We must seed a kernel
+                // interrupt frame so that the interrupt return path (iretq) can
+                // safely jump to the trampoline.
+                next.seed_kernel_interrupt_frame_from_context();
+                next_rsp = next.interrupt_rsp();
+                let seed_rip = unsafe {
+                    let saved_rsp = (*next.context.get()).saved_rsp as *const u64;
+                    *saved_rsp.add(6)
+                };
+                crate::e9_println!(
+                    "IRQSEED cpu={} next={} rip={:#x}",
+                    cpu_index,
+                    next.id.as_u64(),
+                    seed_rip
+                );
             }
             let fits = interrupt_frame_fits(&next, next_rsp);
-            crate::e9_println!(
-                "IRQCHK cpu={} next={} rsp={:#x} fits={} zero={}",
-                cpu_index,
-                next.id.as_u64(),
-                next_rsp,
-                fits,
-                next_rsp == 0
-            );
             if next_rsp == 0 || !fits {
+                crate::e9_println!(
+                    "IRQABORT cpu={} next={} rsp={:#x} fits={}",
+                    cpu_index,
+                    next.id.as_u64(),
+                    next_rsp,
+                    fits
+                );
                 let is_idle_fallback = Arc::ptr_eq(&next, &sched.cpus[cpu_index].idle_task);
                 task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
 
@@ -653,98 +654,23 @@ pub fn maybe_preempt_from_interrupt(
                 let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
                 let stack_base = next.kernel_stack.virt_base.as_u64();
 
-                // Debug: validate next_rsp is within stack bounds
-                if next_rsp < stack_base || next_rsp > stack_top {
-                    crate::serial_force_println!(
-                        "IRQSW-STACK-BOUNDS cpu={} next_rsp={:#x} base={:#x} top={:#x} size={}",
-                        cpu_index,
-                        next_rsp,
-                        stack_base,
-                        stack_top,
-                        next.kernel_stack.size
-                    );
-                }
-
-                // Extract frame info before switch
-                crate::e9_println!("IRQSW-PRE cpu={} next_rsp={:#x}", cpu_index, next_rsp);
-                let (next_cs, next_rip) = unsafe {
-                    let frame = &*(next_rsp as *const crate::syscall::SyscallFrame);
-                    (frame.iret_cs, frame.iret_rip)
+                // Extract frame info
+                let (n_cs, n_rip) = unsafe {
+                    let f = &*(next_rsp as *const crate::syscall::SyscallFrame);
+                    (f.iret_cs, f.iret_rip)
                 };
 
-                // Debug: check distance from stack top
-                let dist_from_top = stack_top - next_rsp;
                 crate::e9_println!(
-                    "IRQSW cpu={} prev={} next={} rsp={:#x} cs={:#x} rip={:#x} stack_base={:#x} dist_from_top={}",
-                    cpu_index,
-                    current.id.as_u64(),
-                    next.id.as_u64(),
-                    next_rsp,
-                    next_cs,
-                    next_rip,
-                    stack_base,
-                    dist_from_top
+                    "IRQSW cpu={} prev={} next={} rsp={:#x} rip={:#x}",
+                    cpu_index, current.id.as_u64(), next.id.as_u64(), next_rsp, n_rip
                 );
 
                 crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
                 crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
-                unsafe {
-                    (*next.process.address_space.get()).switch_to();
-                }
 
-                // Debug: validate FPU pointers before switch
-                let old_fpu_ptr = current.fpu_state.get();
-                let new_fpu_ptr = next.fpu_state.get();
-                let old_fpu = old_fpu_ptr as *mut u8;
-                let new_fpu = new_fpu_ptr as *const u8;
-                let old_fpu_aligned = (old_fpu as usize) & 0x3F;  // 64-byte alignment
-                let new_fpu_aligned = (new_fpu as usize) & 0x3F;
+                let old_fpu = current.fpu_state.get() as *mut u8;
+                let new_fpu = next.fpu_state.get() as *const u8;
                 
-                // Get ExtendedState metadata
-                let old_size = unsafe { (*old_fpu_ptr).size };
-                let new_size = unsafe { (*new_fpu_ptr).size };
-                let old_uses_xsave = unsafe { (*old_fpu_ptr).uses_xsave };
-                let new_uses_xsave = unsafe { (*new_fpu_ptr).uses_xsave };
-                
-                crate::e9_println!(
-                    "IRQFPU cpu={} old={:#x}(align={},size={},xsave={}) new={:#x}(align={},size={},xsave={})",
-                    cpu_index,
-                    old_fpu as usize,
-                    old_fpu_aligned,
-                    old_size,
-                    old_uses_xsave,
-                    new_fpu as usize,
-                    new_fpu_aligned,
-                    new_size,
-                    new_uses_xsave
-                );
-                
-                // Validate pointers are non-null and aligned for FXSAVE (16-byte min)
-                if old_fpu.is_null() || new_fpu.is_null() {
-                    crate::serial_force_println!(
-                        "IRQFPU-NULL cpu={} old_null={} new_null={}",
-                        cpu_index,
-                        old_fpu.is_null(),
-                        new_fpu.is_null()
-                    );
-                }
-                if (old_fpu as usize) & 0xF != 0 || (new_fpu as usize) & 0xF != 0 {
-                    crate::serial_force_println!(
-                        "IRQFPU-MISALIGN-16 cpu={} old_align={} new_align={}",
-                        cpu_index,
-                        (old_fpu as usize) & 0xF,
-                        (new_fpu as usize) & 0xF
-                    );
-                }
-                if old_fpu_aligned != 0 || new_fpu_aligned != 0 {
-                    crate::serial_force_println!(
-                        "IRQFPU-MISALIGN-64 cpu={} old_align={} new_align={}",
-                        cpu_index,
-                        old_fpu_aligned,
-                        new_fpu_aligned
-                    );
-                }
-
                 Some(crate::arch::x86_64::idt::InterruptReturnDecision {
                     next_rsp,
                     old_fpu,
@@ -752,21 +678,17 @@ pub fn maybe_preempt_from_interrupt(
                 })
             }
         }
-    };  // <- scheduler guard dropped here
-
-    // Debug: confirm lock was released
-    if decision.is_some() {
-        crate::e9_println!("MPI-unlock cpu={} decision=SWITCH", cpu_index);
-    }
-
-    drop(task_to_drop);
+    };
 
     if decision.is_some() && cpu_is_valid(cpu_index) {
-        if !FIRST_PREEMPT_LOGGED[cpu_index].swap(true, Ordering::Relaxed) {
-            let preempt_n = CPU_PREEMPT_COUNT[cpu_index].load(Ordering::Relaxed);
-            crate::e9_println!("FIRST_IRQ_PREEMPT cpu={} count={}", cpu_index, preempt_n);
+        let n = CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
+        if n == 0 {
+            crate::e9_println!("FIRST_IRQ_PREEMPT cpu={}", cpu_index);
         }
-        CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    if decision.is_some() {
+        crate::e9_println!("MPI-DONE cpu={}", cpu_index);
     }
 
     decision

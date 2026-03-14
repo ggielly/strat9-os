@@ -210,6 +210,14 @@ pub fn _print(args: fmt::Arguments) {
 pub fn _print_force(args: fmt::Arguments) {
     use core::fmt::Write;
 
+    // Check if we are in emergency panic mode.
+    if PANIC_IN_PROGRESS.load(Ordering::Relaxed) {
+        // SAFETY: In emergency mode, we bypass the lock to ensure output.
+        let mut port = unsafe { SerialPort::new(0x3F8) };
+        let _ = port.write_fmt(args);
+        return;
+    }
+
     // Acquire the raw force-lock (saves + clears IF, then spins until free).
     let saved_flags = force_lock_acquire();
     // SAFETY: We hold `FORCE_LOCK` with IRQs disabled, giving exclusive UART access.

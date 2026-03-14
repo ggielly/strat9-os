@@ -1043,10 +1043,10 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     use crate::arch::x86_64::gdt;
     use core::sync::atomic::Ordering;
 
-    crate::serial_force_println!("[trace][elf] ring3_trampoline before current_task");
+    crate::e9_println!("[trace][elf] ring3_trampoline before current_task");
     let task = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
         .expect("elf_ring3_trampoline: no current task");
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] ring3_trampoline enter tid={} name={}",
         task.id.as_u64(),
         task.name
@@ -1056,7 +1056,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     let user_rip = task.trampoline_entry.load(Ordering::Acquire);
     let user_rsp = task.trampoline_stack_top.load(Ordering::Acquire);
     let user_arg0 = task.trampoline_arg0.load(Ordering::Acquire);
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] ring3_trampoline args tid={} rip={:#x} rsp={:#x} arg0={:#x}",
         task.id.as_u64(),
         user_rip,
@@ -1070,7 +1070,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         let as_ref = &*task.process.address_space.get();
         as_ref.switch_to();
     }
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] ring3_trampoline switch_to done tid={}",
         task.id.as_u64()
     );
@@ -1078,7 +1078,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     let user_cs = gdt::user_code_selector().0 as u64;
     let user_ss = gdt::user_data_selector().0 as u64;
     let user_rflags: u64 = 0x202; // IF=1, reserved bit 1 = 1
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] ring3_trampoline iret tid={} cs={:#x} ss={:#x} rflags={:#x}",
         task.id.as_u64(),
         user_cs,
@@ -1101,7 +1101,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         );
         let rflags_now: u64;
         core::arch::asm!("pushfq; pop {}", out(reg) rflags_now, options(nostack));
-        crate::serial_force_println!(
+        crate::e9_println!(
             "[trace][elf] pre-iret LAPIC: LVT={:#x} init={} cur={} IF={}",
             lvt,
             init_cnt,
@@ -1109,12 +1109,12 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             (rflags_now >> 9) & 1
         );
         if lvt & (1 << 16) != 0 {
-            crate::serial_force_println!(
+            crate::e9_println!(
                 "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) — no ticks will fire!"
             );
         }
         if init_cnt == 0 {
-            crate::serial_force_println!(
+            crate::e9_println!(
                 "[trace][elf] WARNING: LAPIC timer init_count=0 — timer not started!"
             );
         }
@@ -1128,7 +1128,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_ss as u16,
     );
 
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[elf] PRE-IRETQ tid={} rip={:#x} rsp={:#x} rflags={:#x}",
         task.id.as_u64(),
         user_rip,

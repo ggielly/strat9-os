@@ -73,11 +73,16 @@ unused_unsafe = "deny"
 unused_variables = "allow" # TODO review occurrences (too many for now :D)
 
 [profile.release]
-opt-level = "z"   # Optimize for size
-lto = true        # Link-Time Optimization
-codegen-units = 1 # Single codegen unit for max LTO
+#opt-level = "z"   # Optimize for size
+opt-level = 2
+#lto = true        # Link-Time Optimization
+lto=false
+#codegen-units = 1 # Single codegen unit for max LTO
 panic = "abort"   # No unwinding in kernel
-strip = true      # Strip debug symbols from release
+#strip = true      # Strip debug symbols from release
+strip=false
+debug=2
+incremental = true # Faster recompilation
 
 [profile.dev]
 opt-level = 0      # No optimization for faster compilation

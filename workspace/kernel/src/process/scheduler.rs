@@ -369,11 +369,22 @@ impl PerCpuClassRqSet {
     /// Performs the enqueue operation.
     fn enqueue(&mut self, class: crate::process::sched::SchedClassId, task: Arc<Task>) {
         use crate::process::sched::SchedClassRq;
+        unsafe { core::arch::asm!("mov al, 'q'; out 0xe9, al", out("al") _) };
         match class {
-            crate::process::sched::SchedClassId::Fair => self.fair.enqueue(task),
-            crate::process::sched::SchedClassId::RealTime => self.real_time.enqueue(task),
-            crate::process::sched::SchedClassId::Idle => self.idle.enqueue(task),
+            crate::process::sched::SchedClassId::Fair => {
+                unsafe { core::arch::asm!("mov al, 'f'; out 0xe9, al", out("al") _) };
+                self.fair.enqueue(task);
+            }
+            crate::process::sched::SchedClassId::RealTime => {
+                unsafe { core::arch::asm!("mov al, 'r'; out 0xe9, al", out("al") _) };
+                self.real_time.enqueue(task);
+            }
+            crate::process::sched::SchedClassId::Idle => {
+                unsafe { core::arch::asm!("mov al, 'i'; out 0xe9, al", out("al") _) };
+                self.idle.enqueue(task);
+            }
         }
+        unsafe { core::arch::asm!("mov al, 'Q'; out 0xe9, al", out("al") _) };
     }
 
     /// Performs the len by class operation.
