@@ -1,5 +1,8 @@
 use super::*;
 
+static FINISH_INTERRUPT_TRACE_BUDGET: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(32);
+
 /// Initialize the scheduler
 pub fn init_scheduler() {
     let cpu_count = percpu::cpu_count().max(1);
@@ -233,9 +236,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 ///
 /// Mirrors Redox switch_finish_hook: minimal work, no serial (avoids lock contention).
 pub fn finish_switch() {
-    crate::e9_println!("FS-START");
     let cpu_index = current_cpu_index();
-    crate::e9_println!("FS cpu={}", cpu_index);
     let mut task_to_drop = None;
     {
         let mut spins = 0usize;
@@ -245,7 +246,7 @@ pub fn finish_switch() {
             }
             spins = spins.saturating_add(1);
             if spins % 1_000_000 == 0 {
-                crate::e9_println!("FS-spin cpu={} n={}", cpu_index, spins);
+                unsafe { core::arch::asm!("mov al, 'W'; out 0xe9, al", out("al") _) };
             }
             core::hint::spin_loop();
         };
@@ -254,11 +255,7 @@ pub fn finish_switch() {
             if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
                 if let Some(ref task) = cpu.current_task {
                     let as_ptr = unsafe { task.process.address_space.get() };
-                    crate::e9_println!("FS-AS-PRE cpu={} tid={} as={:p}", cpu_index, task.id.as_u64(), as_ptr);
-                    unsafe {
-                        (*as_ptr).switch_to();
-                    }
-                    crate::e9_println!("FS-AS-OK cpu={}", cpu_index);
+                    unsafe { (*as_ptr).switch_to() };
                 }
             }
             task_to_drop = drain_post_switch_locked(sched, cpu_index, false, true);
@@ -268,7 +265,6 @@ pub fn finish_switch() {
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     super::task_ops::flush_deferred_silo_cleanups();
     drop(task_to_drop);
-    crate::e9_println!("FS-DONE cpu={}", cpu_index);
 }
 
 fn drain_post_switch_locked(
@@ -289,12 +285,6 @@ fn drain_post_switch_locked(
         // Race/corruption diagnostic: validate Arc before enqueue.
         let strong_before = Arc::strong_count(&task);
         if strong_before == 0 || strong_before > (isize::MAX as usize) {
-            crate::e9_println!(
-                "DRAIN-ARC-BAD cpu={} tid={} strong={} CORRUPT",
-                cpu_index,
-                task.id.as_u64(),
-                strong_before
-            );
             crate::serial_force_println!(
                 "[RACE] drain_post_switch_locked: corrupt Arc tid={} strong_count={}",
                 task.id.as_u64(),
@@ -304,13 +294,6 @@ fn drain_post_switch_locked(
         if verbose_trace {
             crate::serial_force_println!(
                 "[trace][sched] finish_switch requeue cpu={} tid={} strong={}",
-                cpu_index,
-                task.id.as_u64(),
-                strong_before
-            );
-        } else {
-            crate::e9_println!(
-                "IFSQ cpu={} tid={} strong={}",
                 cpu_index,
                 task.id.as_u64(),
                 strong_before
@@ -332,9 +315,24 @@ fn drain_post_switch_locked(
 /// complete, so another CPU cannot steal the old task while its FPU/stack state
 /// is still in flight.
 pub fn finish_interrupt_switch() {
-    unsafe { core::arch::asm!("mov al, 'I'; out 0xe9, al; mov al, 'F'; out 0xe9, al; mov al, 'S'; out 0xe9, al; mov al, ' '; out 0xe9, al", out("al") _) };
     let cpu_index = current_cpu_index();
-    crate::e9_println!("IFS cpu={}", cpu_index);
+    let should_trace = FINISH_INTERRUPT_TRACE_BUDGET
+        .fetch_update(
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+            |budget| budget.checked_sub(1),
+        )
+        .is_ok();
+    let entry_rsp0 = crate::arch::x86_64::tss::kernel_stack_for(cpu_index)
+        .map(|addr| addr.as_u64())
+        .unwrap_or(0);
+    if should_trace {
+        crate::e9_println!(
+            "[ifs-enter] cpu={} rsp0={:#x}",
+            cpu_index,
+            entry_rsp0
+        );
+    }
 
     // Spin until SCHEDULER is available (released by maybe_preempt_from_interrupt
     // before returning to this assembly stub).  We must not block with IRQs enabled
@@ -344,35 +342,44 @@ pub fn finish_interrupt_switch() {
     let mut spins = 0usize;
     loop {
         if let Some(mut scheduler) = SCHEDULER.try_lock_no_irqsave() {
-            crate::e9_println!("IFS-LOCK-OK");
             if let Some(ref mut sched) = *scheduler {
-                crate::e9_println!("IFS-SCHED-OK");
                 // REQUEUE OLD TASK FIRST (while current AS is still active/stable)
                 task_to_drop = drain_post_switch_locked(sched, cpu_index, false, false);
-                crate::e9_println!("IFS-DRAIN-OK");
 
                 // NOW SWITCH TO NEW ADDRESS SPACE
                 if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
                     if let Some(ref task) = cpu.current_task {
-                        let as_ptr = unsafe { task.process.address_space.get() };
-                        crate::e9_println!("IFS-AS-PTR {:p}", as_ptr);
-                        unsafe {
-                            (*as_ptr).switch_to();
+                        let task_stack_top =
+                            task.kernel_stack.virt_base.as_u64() + task.kernel_stack.size as u64;
+                        if should_trace {
+                            crate::e9_println!(
+                                "[ifs-task] cpu={} tid={} rsp0={:#x} expected={:#x}",
+                                cpu_index,
+                                task.id.as_u64(),
+                                entry_rsp0,
+                                task_stack_top
+                            );
                         }
-                        crate::e9_println!("IFS-AS-OK");
+                        if should_trace && entry_rsp0 != 0 && entry_rsp0 != task_stack_top {
+                            crate::e9_println!(
+                                "[ifs-rsp0-mismatch] cpu={} tid={} rsp0={:#x} expected={:#x}",
+                                cpu_index,
+                                task.id.as_u64(),
+                                entry_rsp0,
+                                task_stack_top
+                            );
+                        }
+                        let as_ptr = unsafe { task.process.address_space.get() };
+                        unsafe { (*as_ptr).switch_to() };
                     }
                 }
             }
             break;
         }
         spins = spins.saturating_add(1);
-        if spins % 10_000_000 == 0 {
-            crate::e9_println!("IFS-spin cpu={} n={}", cpu_index, spins);
-        }
         core::hint::spin_loop();
     }
     let _ = task_to_drop;
-    crate::e9_println!("IFS-DONE cpu={}", cpu_index);
 }
 
 /// Yield the current task to allow other tasks to run (cooperative).
@@ -464,7 +471,6 @@ pub fn maybe_preempt() {
             };
             if take_force_resched_hint(cpu_index) {
                 cpu.need_resched = true;
-                crate::e9_println!("MP force-resched hint cpu={}", cpu_index);
             }
             if cpu.current_task.is_none() {
                 return;
@@ -498,12 +504,7 @@ pub fn maybe_preempt() {
             // diagnostics and, if the lock happens to be free, a redundant
             // owner_cpu store on the wrong context.
             if !FIRST_PREEMPT_LOGGED[cpu_index].swap(true, Ordering::Relaxed) {
-                let preempt_n = CPU_PREEMPT_COUNT[cpu_index].load(Ordering::Relaxed);
-                crate::e9_println!(
-                    "FIRST_PREEMPT cpu={} count={}",
-                    cpu_index,
-                    preempt_n,
-                );
+                let _preempt_n = CPU_PREEMPT_COUNT[cpu_index].load(Ordering::Relaxed);
             }
             CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
         }
@@ -530,7 +531,6 @@ pub fn maybe_preempt_from_interrupt(
     }
 
     if !percpu::is_preemptible() {
-        crate::e9_println!("IRQNP cpu={}", cpu_index);
         return None;
     }
 
@@ -557,36 +557,38 @@ pub fn maybe_preempt_from_interrupt(
             };
             if take_force_resched_hint(cpu_index) {
                 cpu.need_resched = true;
-                crate::e9_println!("MPI force-resched hint cpu={}", cpu_index);
             }
             if cpu.current_task.is_none() || !cpu.need_resched {
                 return None;
             }
         }
 
-        crate::e9_println!("MPI-P1 cpu={}", cpu_index);
+        unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
         let current = match sched.cpus[cpu_index].current_task.as_ref() {
             Some(t) => t.clone(),
             None => {
-                crate::e9_println!("IRQ-ERROR: current_task is None on cpu={}", cpu_index);
+                unsafe { core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _) };
                 return None;
             }
         };
-        crate::e9_println!("MPI-P2 cpu={} tid={}", cpu_index, current.id.as_u64());
+        unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
         current.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
         current.set_interrupt_rsp(current_frame_rsp);
-        
+
         let next = sched.pick_next_task(cpu_index);
-        crate::e9_println!("MPI-P3 cpu={} next={}", cpu_index, next.id.as_u64());
 
         if Arc::ptr_eq(&current, &next) {
             if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
                 cpu.need_resched = false;
             }
             task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
-            // Optional: trace only occasionally to avoid spam
-            // crate::e9_println!("IRQNOSW cpu={} tid={}", cpu_index, current.id.as_u64());
-            None
+            // No context switch: return current task's FPU area for save/restore.
+            let current_fpu = current.fpu_state.get() as *mut u8;
+            Some(crate::arch::x86_64::idt::InterruptReturnDecision {
+                next_rsp: 0,
+                old_fpu: current_fpu,
+                new_fpu: current_fpu,
+            })
         } else {
             let mut next_rsp = next.interrupt_rsp();
             if next.resume_kind() == crate::process::task::ResumeKind::RetFrame {
@@ -596,26 +598,10 @@ pub fn maybe_preempt_from_interrupt(
                 // safely jump to the trampoline.
                 next.seed_kernel_interrupt_frame_from_context();
                 next_rsp = next.interrupt_rsp();
-                let seed_rip = unsafe {
-                    let saved_rsp = (*next.context.get()).saved_rsp as *const u64;
-                    *saved_rsp.add(6)
-                };
-                crate::e9_println!(
-                    "IRQSEED cpu={} next={} rip={:#x}",
-                    cpu_index,
-                    next.id.as_u64(),
-                    seed_rip
-                );
             }
             let fits = interrupt_frame_fits(&next, next_rsp);
             if next_rsp == 0 || !fits {
-                crate::e9_println!(
-                    "IRQABORT cpu={} next={} rsp={:#x} fits={}",
-                    cpu_index,
-                    next.id.as_u64(),
-                    next_rsp,
-                    fits
-                );
+                unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
                 let is_idle_fallback = Arc::ptr_eq(&next, &sched.cpus[cpu_index].idle_task);
                 task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
 
@@ -638,8 +624,13 @@ pub fn maybe_preempt_from_interrupt(
                     let class = sched.class_table.class_for_task(&next);
                     sched.cpus[cpu_index].class_rqs.enqueue(class, next);
                 }
-                crate::e9_println!("IRQABORT cpu={} prev={}", cpu_index, current.id.as_u64());
-                None
+                // Abort switch: return current task's FPU area for save/restore.
+                let current_fpu = current.fpu_state.get() as *mut u8;
+                return Some(crate::arch::x86_64::idt::InterruptReturnDecision {
+                    next_rsp: 0,
+                    old_fpu: current_fpu,
+                    new_fpu: current_fpu,
+                });
             } else {
                 next.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
                 if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
@@ -652,25 +643,13 @@ pub fn maybe_preempt_from_interrupt(
                 // post-switch hooks used by Redox and Maestro.
 
                 let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
-                let stack_base = next.kernel_stack.virt_base.as_u64();
-
-                // Extract frame info
-                let (n_cs, n_rip) = unsafe {
-                    let f = &*(next_rsp as *const crate::syscall::SyscallFrame);
-                    (f.iret_cs, f.iret_rip)
-                };
-
-                crate::e9_println!(
-                    "IRQSW cpu={} prev={} next={} rsp={:#x} rip={:#x}",
-                    cpu_index, current.id.as_u64(), next.id.as_u64(), next_rsp, n_rip
-                );
 
                 crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
                 crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
 
                 let old_fpu = current.fpu_state.get() as *mut u8;
                 let new_fpu = next.fpu_state.get() as *const u8;
-                
+
                 Some(crate::arch::x86_64::idt::InterruptReturnDecision {
                     next_rsp,
                     old_fpu,
@@ -681,14 +660,7 @@ pub fn maybe_preempt_from_interrupt(
     };
 
     if decision.is_some() && cpu_is_valid(cpu_index) {
-        let n = CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
-        if n == 0 {
-            crate::e9_println!("FIRST_IRQ_PREEMPT cpu={}", cpu_index);
-        }
-    }
-
-    if decision.is_some() {
-        crate::e9_println!("MPI-DONE cpu={}", cpu_index);
+        CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
     }
 
     decision

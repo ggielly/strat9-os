@@ -243,13 +243,9 @@ impl Scheduler {
         let bt_len = self.all_tasks.len();
         let scan_len = self.all_tasks_scan.len();
         if bt_len != scan_len {
-            crate::e9_println!(
-                "RC-BAD cpu={} tid={} all_tasks={} all_tasks_scan={} MISMATCH",
-                crate::arch::x86_64::percpu::current_cpu_index(),
-                task_id.as_u64(),
-                bt_len,
-                scan_len
-            );
+            unsafe {
+                core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _);
+            }
             crate::serial_force_println!(
                 "[RACE] insert_all_task_locked: all_tasks={} != all_tasks_scan={} tid={}",
                 bt_len,
@@ -269,11 +265,7 @@ impl Scheduler {
             {
                 self.all_tasks_scan.swap_remove(idx);
             } else {
-                crate::e9_println!(
-                    "RC-RMV-NF cpu={} tid={} task not in all_tasks_scan",
-                    crate::arch::x86_64::percpu::current_cpu_index(),
-                    task_id.as_u64()
-                );
+                unsafe { core::arch::asm!("mov al, 'Z'; out 0xe9, al", out("al") _) };
                 crate::serial_force_println!(
                     "[RACE] remove_all_task_locked: tid={} in all_tasks but NOT in all_tasks_scan",
                     task_id.as_u64()
@@ -283,13 +275,9 @@ impl Scheduler {
         let bt_len = self.all_tasks.len();
         let scan_len = self.all_tasks_scan.len();
         if bt_len != scan_len {
-            crate::e9_println!(
-                "RC-BAD cpu={} tid={} all_tasks={} all_tasks_scan={} MISMATCH",
-                crate::arch::x86_64::percpu::current_cpu_index(),
-                task_id.as_u64(),
-                bt_len,
-                scan_len
-            );
+            unsafe {
+                core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _);
+            }
             crate::serial_force_println!(
                 "[RACE] remove_all_task_locked: all_tasks={} != all_tasks_scan={} tid={}",
                 bt_len,
@@ -486,12 +474,9 @@ impl Scheduler {
         let strong_after = Arc::strong_count(&cloned);
         // Race/corruption diagnostic: validate Arc after pick.
         if strong_after == 0 || strong_after > (isize::MAX as usize) {
-            crate::e9_println!(
-                "PICK-ARC-BAD cpu={} tid={} strong={} CORRUPT",
-                cpu_index,
-                next_task.id.as_u64(),
-                strong_after
-            );
+            unsafe {
+                core::arch::asm!("mov al, 'C'; out 0xe9, al", out("al") _);
+            }
             crate::serial_force_println!(
                 "[RACE] pick_next_task: corrupt Arc tid={} strong_count={}",
                 next_task.id.as_u64(),

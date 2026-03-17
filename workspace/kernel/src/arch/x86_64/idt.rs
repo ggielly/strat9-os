@@ -6,7 +6,24 @@
 use super::{pic, tss};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use x86_64::VirtAddr;
+use x86_64::structures::gdt::SegmentSelector;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+
+const KERNEL_CODE_SELECTOR: SegmentSelector = SegmentSelector(0x08);
+
+#[repr(C, packed)]
+struct Idtr {
+    limit: u16,
+    base: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LiveIdtGateInfo {
+    pub vector: u8,
+    pub selector: u16,
+    pub options: u16,
+    pub offset: u64,
+}
 
 /// IRQ interrupt vector numbers (PIC1_OFFSET + IRQ number)
 #[allow(dead_code)]
@@ -106,6 +123,46 @@ fn needs_swapgs(cs: u16) -> bool {
 static mut IDT_STORAGE: InterruptDescriptorTable = InterruptDescriptorTable::new();
 static IDT_STORAGE_LOCK: AtomicBool = AtomicBool::new(false);
 static USER_PF_TRACE_BUDGET: AtomicU32 = AtomicU32::new(64);
+static RESCHED_IPI_TRACE_BUDGET: AtomicU32 = AtomicU32::new(32);
+
+pub fn live_gate_info(vector: u8) -> Option<LiveIdtGateInfo> {
+    let mut idtr = Idtr { limit: 0, base: 0 };
+    // SAFETY: `sidt` is a privileged register read with no side effect.
+    unsafe {
+        core::arch::asm!(
+            "sidt [{}]",
+            in(reg) &mut idtr,
+            options(nostack, preserves_flags),
+        );
+    }
+
+    let entry_offset = vector as usize * 16;
+    if entry_offset + 16 > idtr.limit as usize + 1 {
+        return None;
+    }
+
+    // SAFETY: The IDTR base/limit were read from the CPU and bounds-checked above.
+    let (low, high) = unsafe {
+        let entry_ptr = (idtr.base + entry_offset as u64) as *const u64;
+        (
+            core::ptr::read_unaligned(entry_ptr),
+            core::ptr::read_unaligned(entry_ptr.add(1)),
+        )
+    };
+
+    let offset = (low & 0xFFFF)
+        | (((low >> 48) & 0xFFFF) << 16)
+        | ((high & 0xFFFF_FFFF) << 32);
+    let selector = ((low >> 16) & 0xFFFF) as u16;
+    let options = ((low >> 32) & 0xFFFF) as u16;
+
+    Some(LiveIdtGateInfo {
+        vector,
+        selector,
+        options,
+        offset,
+    })
+}
 
 /// Decision returned by the raw interrupt trampolines.
 ///
@@ -131,12 +188,6 @@ pub struct InterruptReturnDecision {
 unsafe extern "C" fn lapic_timer_entry() -> ! {
     core::arch::naked_asm!(
         "cld",
-        // E9 breadcrumb: emit '!' (0x21) to port 0xE9 before touching any state.
-        // This confirms the CPU entered the stub even if it triple-faults later.
-        "push rax",
-        "mov al, 0x21",
-        "out 0xe9, al",
-        "pop rax",
         // Hardware IRQ stack frame at entry:
         //   [rsp+0]  = RIP
         //   [rsp+8]  = CS
@@ -177,49 +228,14 @@ unsafe extern "C" fn lapic_timer_entry() -> ! {
         "add rsp, 32",
         "test rax, rax",
         "jz 3f",
-        // Debug: emit 'F' before fxsave
-        "push rax",
-        "push rdx",
-        "push rcx",
-        "mov al, 'F'",
-        "out 0xe9, al",
-        "pop rcx",
-        "pop rdx",
-        "pop rax",
+        // Context switch path: save old task's FPU, switch stack, restore new task's FPU.
         "fxsave [rdx]",
-        // Debug: emit 'S' after fxsave, before stack switch
-        "push rax",
-        "push rdx",
-        "push rcx",
-        "mov al, 'S'",
-        "out 0xe9, al",
-        "pop rcx",
-        "pop rdx",
-        "pop rax",
         "mov rsp, rax",
-        // Debug: emit 'W' after stack switch (0x57)
-        "push rax",
-        "mov al, 'W'",
-        "out 0xe9, al",
-        "pop rax",
-        // fxrstor can #NM or fault if buffer invalid — emit 'X' (0x58) before
-        "push rax",
-        "mov al, 'X'",
-        "out 0xe9, al",
-        "pop rax",
         "fxrstor [rcx]",
-        // Debug: emit 'R' after fxrstor (0x52)
-        "push rax",
-        "mov al, 'R'",
-        "out 0xe9, al",
-        "pop rax",
         "call {switch_finish}",
-        // Debug: emit 'C' after switch_finish
-        "push rax",
-        "mov al, 'C'",
-        "out 0xe9, al",
-        "pop rax",
         "3:",
+        // No context switch (rax == 0): skip FPU save/restore entirely.
+        // The interrupted task's FPU state remains unchanged.
         // Restore current SyscallFrame.
         "pop r15",
         "pop r14",
@@ -241,11 +257,6 @@ unsafe extern "C" fn lapic_timer_entry() -> ! {
         "jz 4f",
         "swapgs",
         "4:",
-        // E9 'I' (0x49) = just before iretq. If we see I but shell never runs, iretq faults.
-        "push rax",
-        "mov al, 'I'",
-        "out 0xe9, al",
-        "pop rax",
         "iretq",
         inner = sym lapic_timer_inner,
         switch_finish = sym crate::process::scheduler::finish_interrupt_switch,
@@ -265,6 +276,8 @@ unsafe extern "C" fn resched_ipi_entry() -> ! {
         "swapgs",
         "2:",
         "push rax",
+        "mov al, 0x65",
+        "out 0xe9, al",
         "push rcx",
         "push rdx",
         "push rdi",
@@ -280,6 +293,8 @@ unsafe extern "C" fn resched_ipi_entry() -> ! {
         "push r14",
         "push r15",
         "sub rsp, 32",
+        "mov al, 0x45",
+        "out 0xe9, al",
         "mov rdi, rsp",
         "lea rsi, [rsp + 32]",
         "call {inner}",
@@ -320,39 +335,59 @@ extern "C" fn lapic_timer_inner(
 ) -> InterruptReturnDecision {
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
     let ticks = crate::process::scheduler::ticks();
-    // Heartbeat: confirm timer fires after Ring 3 entry (serial, rate-limited)
+    // Heartbeat: single byte only. e9_println!/format_args in IRQ can cause issues.
     let from_ring3 = (frame.iret_cs & 3) == 3;
-    if from_ring3 && (ticks < 5 || ticks % 50 == 0) {
-        crate::serial_force_println!(
-            "[heartbeat] APIC tick={} cpu={} cs={:#x} rip={:#x}",
-            ticks,
-            cpu,
-            frame.iret_cs,
-            frame.iret_rip
-        );
+    if from_ring3 && (ticks < 5 || ticks % 100 == 0) {
+        unsafe { core::arch::asm!("mov al, 0x48; out 0xe9, al", out("al") _) } // 'H'
     }
-    crate::e9_println!(
-        "TIRQ cpu={} cs={:#x} rip={:#x} rflags={:#x}",
-        cpu,
-        frame.iret_cs,
-        frame.iret_rip,
-        frame.iret_rflags
-    );
     crate::process::scheduler::timer_tick();
     super::apic::eoi();
     let decision =
         crate::process::scheduler::maybe_preempt_from_interrupt(cpu, frame).unwrap_or_default();
-    if decision.next_rsp != 0 {
-        crate::e9_println!("IRRET cpu={} next_rsp={:#x}", cpu, decision.next_rsp);
-    }
     decision
 }
 
 extern "C" fn resched_ipi_inner(
     frame: &mut crate::syscall::SyscallFrame,
 ) -> InterruptReturnDecision {
-    let _ = frame;
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    let should_trace = RESCHED_IPI_TRACE_BUDGET
+        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |budget| budget.checked_sub(1))
+        .is_ok();
+    if should_trace {
+        let rsp0 = crate::arch::x86_64::tss::kernel_stack_for(cpu)
+            .map(|addr| addr.as_u64())
+            .unwrap_or(0);
+        let (slot_rip, slot_cs, slot_rsp, slot_ss) = if rsp0 >= 40 {
+            // SAFETY: rsp0 points at the top of the current CPU's kernel stack.
+            // During a Ring3->Ring0 interrupt, the CPU-saved IRET frame lives at
+            // [rsp0-40 .. rsp0-8]. We only read those 5 u64 words for diagnosis.
+            unsafe {
+                let frame_base = (rsp0 - 40) as *const u64;
+                (
+                    *frame_base.add(0),
+                    *frame_base.add(1),
+                    *frame_base.add(3),
+                    *frame_base.add(4),
+                )
+            }
+        } else {
+            (0, 0, 0, 0)
+        };
+        crate::e9_println!(
+            "[ipi-rsp0] cpu={} rsp0={:#x} slot_rip={:#x} slot_cs={:#x} slot_rsp={:#x} slot_ss={:#x} frame_rip={:#x} frame_cs={:#x} frame_rsp={:#x} frame_ss={:#x}",
+            cpu,
+            rsp0,
+            slot_rip,
+            slot_cs,
+            slot_rsp,
+            slot_ss,
+            frame.iret_rip,
+            frame.iret_cs,
+            frame.iret_rsp,
+            frame.iret_ss,
+        );
+    }
     super::apic::eoi();
     crate::process::scheduler::request_force_resched_hint(cpu);
     InterruptReturnDecision::default()
@@ -408,7 +443,8 @@ pub fn init() {
         // Cross-CPU reschedule IPI (vector 0xE0)
         unsafe {
             idt_ref[super::apic::IPI_RESCHED_VECTOR as u8]
-                .set_handler_addr(VirtAddr::from_ptr(resched_ipi_entry as *const ()));
+                .set_handler_addr(VirtAddr::from_ptr(resched_ipi_entry as *const ()))
+                .set_code_selector(KERNEL_CODE_SELECTOR);
         }
 
         // Cross-CPU TLB shootdown IPI (vector 0xF0)
@@ -435,7 +471,9 @@ pub fn register_lapic_timer_vector(vector: u8) {
     lock_idt_storage();
     unsafe {
         let idt = &raw mut IDT_STORAGE;
-        (&mut *idt)[vector].set_handler_addr(VirtAddr::from_ptr(lapic_timer_entry as *const ()));
+        (&mut *idt)[vector]
+            .set_handler_addr(VirtAddr::from_ptr(lapic_timer_entry as *const ()))
+            .set_code_selector(KERNEL_CODE_SELECTOR);
         (*idt).load_unsafe();
     }
     unlock_idt_storage();
@@ -667,6 +705,11 @@ extern "x86-interrupt" fn page_fault_handler(
                     vaddr.as_u64(),
                     error_code.bits()
                 );
+                // Mirror to e9 so it shows up in e9_debug.log alongside scheduler traces.
+                crate::e9_println!(
+                    "[PF] tid={} rip={:#x} addr={:#x} err={:#x}",
+                    task.tid, rip, vaddr.as_u64(), error_code.bits()
+                );
 
                 match address_space.handle_fault(vaddr.as_u64()) {
                     Ok(()) => {
@@ -683,6 +726,10 @@ extern "x86-interrupt" fn page_fault_handler(
                             task.tid,
                             vaddr.as_u64(),
                             e
+                        );
+                        crate::e9_println!(
+                            "[PF-FAIL] tid={} rip={:#x} addr={:#x}",
+                            task.tid, rip, vaddr.as_u64()
                         );
                         dump_user_pf_context(address_space, rip, user_rsp);
                     }
@@ -1575,9 +1622,9 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
     // to the UART. At 115200 baud each byte takes ~87 µs; a 60-char message is
     // ~5 ms of IRQs-off time — long enough to miss ticks and corrupt scheduling.
     // Keep serial output out of the hot IRQ path; use e9 port (µs-range) instead.
-    crate::e9_println!("T0 tick={} cpu={}", ticks, cpu); // E9: entering timer_tick()
+    unsafe { core::arch::asm!("mov al, '0'; out 0xe9, al", out("al") _) };
     crate::process::scheduler::timer_tick();
-    crate::e9_println!("T1 tick={} cpu={}", ticks, cpu); // E9: timer_tick() returned
+    unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
     super::apic::eoi();
     // IMPORTANT:
     // Do not run `maybe_preempt()` directly from a Ring-3-origin timer IRQ.
@@ -1592,7 +1639,7 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
     // The scheduler will consume the hint on a safe path.
     if (cs & 3) == 3 {
         crate::process::scheduler::request_force_resched_hint(cpu);
-        crate::e9_println!("TP defer-preempt-from-ring3 cpu={}", cpu);
+        unsafe { core::arch::asm!("mov al, 'P'; out 0xe9, al", out("al") _) };
     } else {
         crate::process::scheduler::maybe_preempt();
     }

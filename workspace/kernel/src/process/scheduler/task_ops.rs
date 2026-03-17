@@ -244,7 +244,7 @@ pub fn current_task_clone_spin_debug(trace_label: &str) -> Option<Arc<Task>> {
             return if let Some(ref mut sched) = *scheduler {
                 sched.cpus.get_mut(cpu_index).and_then(|cpu| {
                     if cpu.current_task.is_none() {
-                        crate::e9_println!("CUR-NONE cpu={} lbl={}", cpu_index, trace_label);
+                        unsafe { core::arch::asm!("mov al, 'N'; out 0xe9, al", out("al") _) };
                         return None;
                     }
                     let arc = cpu.current_task.as_ref().unwrap();

@@ -109,15 +109,15 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
         let self_addr = self as *const _ as *const () as usize;
         let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
         if trace_addr != usize::MAX && trace_addr == self_addr {
-            crate::e9_println!("LOCK-A sched cpu={}", this_cpu);
+            unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
         }
         let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
         if buddy_addr != usize::MAX && buddy_addr == self_addr {
-            crate::e9_println!("LOCK-A buddy cpu={}", this_cpu);
+            unsafe { core::arch::asm!("mov al, 'B'; out 0xe9, al", out("al") _) };
         }
         let slab_addr = DEBUG_TRACE_SLAB_ADDR.load(Ordering::Relaxed);
         if slab_addr != usize::MAX && slab_addr == self_addr {
-            crate::e9_println!("LOCK-A slab cpu={}", this_cpu);
+            unsafe { core::arch::asm!("mov al, 'S'; out 0xe9, al", out("al") _) };
         }
 
         SpinLockGuard { lock: self, state: ManuallyDrop::new(state) }
@@ -136,15 +136,15 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
             let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
             let self_addr = self as *const _ as *const () as usize;
             if trace_addr != usize::MAX && trace_addr == self_addr {
-                crate::e9_println!("LOCK-A sched cpu={}", this_cpu);
+                unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
             }
             let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
             if buddy_addr != usize::MAX && buddy_addr == self_addr {
-                crate::e9_println!("LOCK-A buddy cpu={}", this_cpu);
+                unsafe { core::arch::asm!("mov al, 'B'; out 0xe9, al", out("al") _) };
             }
             let slab_addr = DEBUG_TRACE_SLAB_ADDR.load(Ordering::Relaxed);
             if slab_addr != usize::MAX && slab_addr == self_addr {
-                crate::e9_println!("LOCK-A slab cpu={}", this_cpu);
+                unsafe { core::arch::asm!("mov al, 'S'; out 0xe9, al", out("al") _) };
             }
             Some(SpinLockGuard { lock: self, state: ManuallyDrop::new(state) })
         } else {
@@ -188,15 +188,15 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
             let self_addr = self as *const _ as *const () as usize;
             let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
             if trace_addr != usize::MAX && trace_addr == self_addr {
-                crate::e9_println!("LOCK-A sched cpu={}", this_cpu);
+                unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
             }
             let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
             if buddy_addr != usize::MAX && buddy_addr == self_addr {
-                crate::e9_println!("LOCK-A buddy cpu={}", this_cpu);
+                unsafe { core::arch::asm!("mov al, 'B'; out 0xe9, al", out("al") _) };
             }
             let slab_addr = DEBUG_TRACE_SLAB_ADDR.load(Ordering::Relaxed);
             if slab_addr != usize::MAX && slab_addr == self_addr {
-                crate::e9_println!("LOCK-A slab cpu={}", this_cpu);
+                unsafe { core::arch::asm!("mov al, 'S'; out 0xe9, al", out("al") _) };
             }
             Some(SpinLockGuard {
                 lock: self,
@@ -318,12 +318,12 @@ impl<'a, T: ?Sized, G: Guardian> Drop for SpinLockGuard<'a, T, G> {
         let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
         if trace_addr != usize::MAX && trace_addr == lock_addr {
             let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-            crate::e9_println!("LOCK-R sched cpu={}", cpu);
+            unsafe { core::arch::asm!("mov al, 'a'; out 0xe9, al", out("al") _) };
         }
         let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
         if buddy_addr != usize::MAX && buddy_addr == lock_addr {
             let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-            crate::e9_println!("LOCK-R buddy cpu={}", cpu);
+            unsafe { core::arch::asm!("mov al, 'b'; out 0xe9, al", out("al") _) };
         }
 
         // SAFETY: `state` is valid and initialised. We move it out of its

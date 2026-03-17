@@ -98,11 +98,15 @@ impl KeyboardBuffer {
 /// Ctrl+C (0x03) is also pushed to the buffer but additionally sets the
 /// global [`crate::shell::SHELL_INTERRUPTED`] flag so that long-running
 /// commands can detect cancellation.
+///
+/// Must NOT call serial_force_println! or any lock that could contend with
+/// the interrupted task (e.g. FORCE_LOCK). Redox/Maestro/Asterinas keep
+/// IRQ handlers minimal; printing here can deadlock if the preempted task
+/// was holding FORCE_LOCK.
 pub fn add_to_buffer(ch: u8) {
     if ch == 0x03 {
         crate::shell::SHELL_INTERRUPTED.store(true, core::sync::atomic::Ordering::Relaxed);
     }
-    crate::serial_force_println!("[keyboard] Adding to buffer: {:#x}", ch);
     KEYBOARD_BUFFER.push(ch);
 }
 

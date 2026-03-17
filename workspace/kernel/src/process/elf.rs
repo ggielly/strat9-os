@@ -876,13 +876,47 @@ fn apply_dynamic_relocations(
             if value < 0 || value > u64::MAX as i128 {
                 return Err("Relocation value out of range");
             }
-            write_user_mapped_bytes(user_as, target, &(value as u64).to_le_bytes())?;
+            let val_u64 = value as u64;
+            // Read back before write for diagnosis
+            if applied < 5 {
+                let r_addend_copy = rela.r_addend; // copy packed field to local
+                let mut before = [0u8; 8];
+                let _ = read_user_mapped_bytes(user_as, target, &mut before);
+                let before_val = u64::from_le_bytes(before);
+                crate::e9_println!(
+                    "[reloc] [{i}] r_type={} target={:#x} r_addend={:#x} value={:#x} before={:#x}",
+                    r_type, target, r_addend_copy, val_u64, before_val
+                );
+            }
+            write_user_mapped_bytes(user_as, target, &val_u64.to_le_bytes())?;
+            // Read back after write for diagnosis
+            if applied < 5 {
+                let mut after = [0u8; 8];
+                let _ = read_user_mapped_bytes(user_as, target, &mut after);
+                let after_val = u64::from_le_bytes(after);
+                crate::e9_println!(
+                    "[reloc] [{i}] after_write={:#x} (expected={:#x})",
+                    after_val, val_u64
+                );
+            }
+            // Catch any relocation that writes a kernel-range address into user space.
+            if val_u64 >= 0xffff_8000_0000_0000 {
+                let r_addend_copy = rela.r_addend;
+                crate::e9_println!(
+                    "[reloc-KERNEL-ADDR] [{i}] r_type={} target={:#x} r_addend={:#x} val={:#x} bias={:#x}",
+                    r_type, target, r_addend_copy, val_u64, load_bias
+                );
+            }
             applied += 1;
         }
         Ok(applied)
     };
 
     let mut total_applied = 0usize;
+    crate::e9_println!(
+        "[reloc] apply_dynamic_relocations: bias={:#x} rela_addr={:?} rela_size={} rela_count={:?}",
+        load_bias, rela_addr, rela_size, rela_count_hint
+    );
     if let Some(rela_base) = rela_addr {
         total_applied += apply_rela_table(rela_base, rela_size, rela_count_hint)?;
     }
@@ -891,7 +925,7 @@ fn apply_dynamic_relocations(
     }
 
     if total_applied > 0 {
-        log::debug!("[elf] Applied {} RELA relocations", total_applied);
+        crate::e9_println!("[reloc] applied {} RELA relocations (bias={:#x})", total_applied, load_bias);
     }
     if relr_applied > 0 {
         log::debug!("[elf] Applied {} RELR relocations", relr_applied);
@@ -1063,6 +1097,34 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_rsp,
         user_arg0
     );
+
+    // Probe: read GOT entries via HHDM before switching to user AS.
+    // This is the last kernel-owned moment before user execution begins.
+    // If values here are wrong, the bug is in load/relocation, not in
+    // something that happens after this point.
+    {
+        // SAFETY: Kernel still holds the boot/kernel CR3. HHDM is valid.
+        unsafe {
+            let as_ref = &*task.process.address_space.get();
+            let task_name: &str = &task.name;
+            for test_off in [0x12920u64, 0x12928u64, 0x12930u64] {
+                let vaddr = 0x100000000u64.wrapping_add(test_off);
+                if let Some(phys) = as_ref.translate(VirtAddr::new(vaddr)) {
+                    let ptr = crate::memory::phys_to_virt(phys.as_u64()) as *const u64;
+                    let val = core::ptr::read_unaligned(ptr);
+                    crate::e9_println!(
+                        "[trampoline-got] tid={} name={} GOT[{:#x}]=phys={:#x} val={:#x}",
+                        task.id.as_u64(), task_name, vaddr, phys.as_u64(), val
+                    );
+                } else {
+                    crate::e9_println!(
+                        "[trampoline-got] tid={} name={} GOT[{:#x}]=<not mapped>",
+                        task.id.as_u64(), task_name, vaddr
+                    );
+                }
+            }
+        }
+    }
 
     // Switch to the user address space stored in the task.
     // SAFETY: The address space was set up during task creation and is valid.
@@ -1250,7 +1312,7 @@ pub fn load_and_run_elf_with_caps(
     name: &'static str,
     seed_caps: &[Capability],
 ) -> Result<TaskId, &'static str> {
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] load_and_run_elf enter name={} size={}",
         name,
         elf_data.len()
@@ -1260,13 +1322,13 @@ pub fn load_and_run_elf_with_caps(
     let runtime_entry = task
         .trampoline_entry
         .load(core::sync::atomic::Ordering::Acquire);
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] load_and_run_elf add_task begin tid={} entry={:#x}",
         task_id.as_u64(),
         runtime_entry
     );
     crate::process::add_task(task);
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] load_and_run_elf add_task done tid={}",
         task_id.as_u64()
     );
@@ -1357,7 +1419,7 @@ pub fn load_elf_task_with_caps(
     name: &'static str,
     seed_caps: &[Capability],
 ) -> Result<Arc<Task>, &'static str> {
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] load_elf_task enter name={} size={}",
         name,
         elf_data.len()
@@ -1365,16 +1427,16 @@ pub fn load_elf_task_with_caps(
     log::info!("[elf] Loading ELF '{}'...", name);
 
     // Step 1: Parse and validate ELF header
-    crate::serial_force_println!("[trace][elf] load_elf_task parse_header begin");
+    crate::e9_println!("[trace][elf] load_elf_task parse_header begin");
     let header = parse_header(elf_data)?;
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] load_elf_task parse_header ok type={}",
         if header.e_type == ET_DYN { "ET_DYN" } else { "ET_EXEC" }
     );
     // Step 2: Create user address space
-    crate::serial_force_println!("[trace][elf] load_elf_task user_as begin");
+    crate::e9_println!("[trace][elf] load_elf_task user_as begin");
     let user_as = Arc::new(AddressSpace::new_user()?);
-    crate::serial_force_println!("[trace][elf] load_elf_task user_as done");
+    crate::e9_println!("[trace][elf] load_elf_task user_as done");
 
     let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
@@ -1382,7 +1444,7 @@ pub fn load_elf_task_with_caps(
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
 
     let phnum = header.e_phnum;
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] load_elf_task layout entry={:#x} bias={:#x} phdrs={}",
         entry,
         load_bias,
@@ -1413,7 +1475,28 @@ pub fn load_elf_task_with_caps(
         apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
     }
 
-    crate::serial_force_println!(
+    // Diagnostic: read back key GOT entries after relocation to verify they were applied.
+    for test_offset in [0x12920u64, 0x12928u64, 0x12930u64] {
+        let vaddr = load_bias.wrapping_add(test_offset);
+        if vaddr < USER_ADDR_MAX {
+            if let Some(phys) = user_as.translate(VirtAddr::new(vaddr)) {
+                let ptr = crate::memory::phys_to_virt(phys.as_u64()) as *const u64;
+                // SAFETY: HHDM access to a mapped user page, owned exclusively during ELF loading.
+                let val = unsafe { core::ptr::read_unaligned(ptr) };
+                crate::e9_println!(
+                    "[reloc-check] GOT[{:#x}]=phys={:#x} val={:#x} ({})",
+                    vaddr, phys.as_u64(), val, name
+                );
+            } else {
+                crate::e9_println!(
+                    "[reloc-check] GOT[{:#x}] = <not mapped> ({})",
+                    vaddr, name
+                );
+            }
+        }
+    }
+
+    crate::e9_println!(
         "[trace][elf] load_elf_task segments_done count={} has_interp={}",
         load_count,
         interp_path.is_some()
@@ -1520,12 +1603,12 @@ pub fn load_elf_task_with_caps(
 
     // Step 5: Create kernel task — trampoline params are stored inside the task
     // itself so that concurrent SMP execution of multiple trampolines is safe.
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] load_elf_task kstack_begin size={}",
         Task::DEFAULT_STACK_SIZE
     );
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] load_elf_task kstack_done virt={:#x} top={:#x}",
         kernel_stack.virt_base.as_u64(),
         kernel_stack.virt_base.as_u64() + kernel_stack.size as u64
@@ -1575,7 +1658,7 @@ pub fn load_elf_task_with_caps(
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
     });
 
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] load_elf_task task_built tid={} pid={} entry={:#x} sp={:#x}",
         task.id.as_u64(),
         task.pid,

@@ -119,6 +119,12 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             frame.rcx,
             crate::arch::x86_64::percpu::current_cpu_index()
         );
+        crate::e9_println!(
+            "[syscall-FIRST] nr={} rip={:#x} tid={:?}",
+            syscall_num,
+            frame.rcx,
+            crate::process::current_task_id().map(|t| t.as_u64())
+        );
     }
     let arg4 = frame.r10;
     let _arg5 = frame.r8;
@@ -140,6 +146,12 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
                     frame.rcx,
                     crate::arch::x86_64::percpu::current_cpu_index()
                 );
+                if n < 10 {
+                    crate::e9_println!(
+                        "[SC] n={} tid={} nr={} a1={:#x} rip={:#x}",
+                        n, tid, syscall_num, arg1, frame.rcx
+                    );
+                }
             }
         }
     }

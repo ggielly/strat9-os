@@ -55,7 +55,6 @@ pub fn timer_tick() {
         && !FIRST_TICK_FORCE_RESCHED[cpu_idx].swap(true, Ordering::AcqRel)
     {
         request_force_resched_hint(cpu_idx);
-        crate::e9_println!("TI first-tick hint cpu={}", cpu_idx);
     }
 
     // Periodic force-resched: guarantee every CPU reschedules at least every
@@ -201,6 +200,7 @@ fn check_wake_deadlines(current_time_ns: u64) {
         // Arc<Task> drop and BEFORE send_resched_ipi_to_cpu.
         // --- end critical section ---
     }
+    unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
 
     // Drop orphaned task Arcs outside the scheduler lock so that
     // KernelStack::drop → free_frames → buddy_alloc.lock() does not race

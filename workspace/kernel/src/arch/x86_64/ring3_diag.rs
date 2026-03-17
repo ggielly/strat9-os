@@ -421,6 +421,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     let cpu_index = crate::arch::x86_64::percpu::current_cpu_index();
     let tss = crate::arch::x86_64::tss::tss_for(cpu_index);
     let rsp0 = tss.privilege_stack_table[0].as_u64();
+    let loaded_tss = crate::arch::x86_64::tss::loaded_tss_info();
 
     if rsp0 == 0 {
         panic!(
@@ -451,6 +452,59 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
         rsp0,
         cpu_index,
     );
+    crate::e9_println!(
+        "[validate_ring3] [4/4] TSS OK TR={:#x} rsp0={:#x} cpu={}",
+        tr_sel,
+        rsp0,
+        cpu_index,
+    );
+    if let Some(info) = loaded_tss {
+        crate::serial_force_println!(
+            "[validate_ring3] TSS live — TR={:#x} base={:#x} rsp0={:#x}",
+            info.tr_selector,
+            info.tss_base,
+            info.rsp0,
+        );
+        crate::e9_println!(
+            "[validate_ring3] TSS live TR={:#x} base={:#x} rsp0={:#x}",
+            info.tr_selector,
+            info.tss_base,
+            info.rsp0,
+        );
+        if info.rsp0 != rsp0 {
+            crate::serial_force_println!(
+                "[validate_ring3] TSS MISMATCH — software_rsp0={:#x} live_rsp0={:#x} cpu={}",
+                rsp0,
+                info.rsp0,
+                cpu_index,
+            );
+            crate::e9_println!(
+                "[validate_ring3] TSS MISMATCH sw={:#x} live={:#x} cpu={}",
+                rsp0,
+                info.rsp0,
+                cpu_index,
+            );
+        }
+    }
+
+    for vector in [crate::arch::x86_64::apic::LVT_TIMER_VECTOR, crate::arch::x86_64::apic::IPI_RESCHED_VECTOR] {
+        if let Some(gate) = crate::arch::x86_64::idt::live_gate_info(vector) {
+            crate::serial_force_println!(
+                "[validate_ring3] IDT live vec={:#x} sel={:#x} opts={:#x} off={:#x}",
+                gate.vector,
+                gate.selector,
+                gate.options,
+                gate.offset,
+            );
+            crate::e9_println!(
+                "[validate_ring3] IDT live vec={:#x} sel={:#x} opts={:#x} off={:#x}",
+                gate.vector,
+                gate.selector,
+                gate.options,
+                gate.offset,
+            );
+        }
+    }
 
     // ====================================================
     // SYNTHÈSE

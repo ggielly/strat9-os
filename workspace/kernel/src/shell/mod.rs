@@ -244,13 +244,15 @@ pub extern "C" fn shell_main() -> ! {
     // E9 'Q' (0x51) = first instruction, before any lock/serial. Confirms we reached shell.
     let q: u8 = 0x51;
     unsafe { core::arch::asm!("out 0xe9, al", in("al") q) }
-    crate::serial_force_println!("[shell] shell_main ENTER");
+    // E9 'S' = shell entered (no serial_force_println here - avoids FORCE_LOCK contention with timer)
+    unsafe { core::arch::asm!("mov al, 0x53; out 0xe9, al") }
     let registry = CommandRegistry::new();
     commands::util::init_shell_env();
     let mut input_buf = [0u8; 256];
     let mut input_len = 0;
     let mut cursor_pos = 0;
-    crate::serial_force_println!("[shell] Initialization complete, entering main loop");
+    // E9 'L' = init complete, entering main loop
+    unsafe { core::arch::asm!("mov al, 0x4C; out 0xe9, al") }
 
     // Command history
     let mut history = VecDeque::new();

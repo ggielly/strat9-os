@@ -112,6 +112,7 @@ static CPU_TRY_LOCK_FAIL_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPU
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
 static RESCHED_IPI_PENDING: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static IPI_SEND_TRACE_BUDGET: AtomicU64 = AtomicU64::new(64);
 /// Lock-free per-CPU hint: request a local preemption as soon as maybe_preempt
 /// can observe scheduler state. Written from IRQ paths without touching
 /// `SCHEDULER`, consumed under scheduler lock in `maybe_preempt`.
@@ -268,11 +269,31 @@ fn send_resched_ipi_to_cpu(cpu_index: usize) {
         return;
     }
     let my_cpu = current_cpu_index();
+    let should_trace = IPI_SEND_TRACE_BUDGET
+        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |budget| budget.checked_sub(1))
+        .is_ok();
     if let Some(target_apic) = percpu::apic_id_by_cpu_index(cpu_index) {
         if let Some(my_apic) = percpu::apic_id_by_cpu_index(my_cpu) {
             if target_apic != my_apic {
                 if RESCHED_IPI_PENDING[cpu_index].swap(true, Ordering::AcqRel) {
+                    if should_trace {
+                        crate::e9_println!(
+                            "[ipi-send-skip] from_cpu={} to_cpu={} to_apic={:#x} pending=1",
+                            my_cpu,
+                            cpu_index,
+                            target_apic
+                        );
+                    }
                     return;
+                }
+                if should_trace {
+                    crate::e9_println!(
+                        "[ipi-send] from_cpu={} from_apic={:#x} to_cpu={} to_apic={:#x}",
+                        my_cpu,
+                        my_apic,
+                        cpu_index,
+                        target_apic
+                    );
                 }
                 apic::send_resched_ipi(target_apic);
             }
