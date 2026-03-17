@@ -25,6 +25,7 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-03-13 `29c6f3d` Refactor scheduler task management and introduce interrupt frame handling
 - 2026-03-11 `7e66e69` refactor: enhance interrupt handling and logging mechanisms across the kernel
 - 2026-03-09 `ff0a36b` Refactor memory management to use IRQ-disabled tokens
 - 2026-03-07 `c3e8969` Fix race condition and lock
@@ -54,7 +55,6 @@ See:
 - 2026-03-03 `eb5de02` Refactor variable names in BuddyAllocator and sys_sigtimedwait for clarity
 - 2026-03-03 `259bb9d` Enhance PCI support and update related components
 - 2026-03-02 `c57b44d` Add `strate-bus` component and related build tasks.
-- 2026-03-01 `8c7a98d` Enhance QEMU GUI support and update related scripts
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 
