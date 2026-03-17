@@ -304,12 +304,18 @@ fn log_sys_err(prefix: &str, err: Error) {
 
 /// Implements validate volume handle.
 fn validate_volume_handle(handle: u64) -> Result<u64> {
+    let msg = format!("[fs-ext4] Probing volume handle={}\n", handle);
+    debug_log(&msg);
     let sectors = volume_info(handle)?;
     if sectors == 0 {
         return Err(Error::InvalidArgument);
     }
+    let msg = format!("[fs-ext4] Volume info OK: handle={} sectors={}\n", handle, sectors);
+    debug_log(&msg);
     let mut probe = [0u8; SECTOR_SIZE];
     let _ = volume_read(handle, 0, &mut probe, 1)?;
+    let msg = format!("[fs-ext4] Sector-0 probe OK: handle={}\n", handle);
+    debug_log(&msg);
     Ok(sectors)
 }
 
@@ -481,6 +487,13 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
     let mut attempts: u64 = 0;
     loop {
         attempts = attempts.wrapping_add(1);
+        if attempts <= 4 || attempts % 16 == 0 {
+            let msg = format!(
+                "[fs-ext4] Mount loop attempt={} handle={} label={}\n",
+                attempts, volume_handle, bootstrap_label
+            );
+            debug_log(&msg);
+        }
         match validate_volume_handle(volume_handle) {
             Ok(sectors) => {
                 let msg = format!(
@@ -524,6 +537,12 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
                 continue;
             }
         };
+
+        let msg = format!(
+            "[fs-ext4] Block device ready: handle={} (attempt={})\n",
+            volume_handle, attempts
+        );
+        debug_log(&msg);
 
         let fs = match Ext4FileSystem::mount(device) {
             Ok(fs) => fs,

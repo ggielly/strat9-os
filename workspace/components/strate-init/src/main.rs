@@ -9,8 +9,8 @@ use core::{alloc::Layout, panic::PanicInfo};
 use strat9_syscall::{call, data::IpcMessage, number};
 
 const EAGAIN: usize = 11;
-const MAX_READ_BYTES: usize = 512 * 1024;
-const MAX_READ_ITERS: usize = 4096;
+const MAX_READ_BYTES: usize = 64 * 1024 * 1024;
+const MAX_READ_ITERS: usize = 32768;
 const MAX_READ_EAGAIN: usize = 256;
 const SUPERVISOR_POLL_YIELDS: usize = 512;
 
@@ -21,7 +21,7 @@ const SUPERVISOR_POLL_YIELDS: usize = 512;
 alloc_freelist::define_freelist_brk_allocator!(
     pub struct BumpAllocator;
     brk = strat9_syscall::call::brk;
-    heap_max = 16 * 1024 * 1024;
+    heap_max = 64 * 1024 * 1024;
 );
 
 #[global_allocator]
@@ -121,6 +121,7 @@ fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
                 out.extend_from_slice(&chunk[..take]);
                 eagain = 0;
                 if take < n {
+                    log("[init] read_file: truncated at MAX_READ_BYTES\n");
                     break;
                 }
             }
@@ -692,6 +693,45 @@ fn boot_silos(silos: Vec<SiloDef>) {
             match str_def.stype.as_str() {
                 "elf" | "wasm-runtime" => {
                     log(&alloc::format!("[init]   -> Strate: {}\n", str_def.name));
+                    if str_def.binary.starts_with("/initfs/") {
+                        log(&alloc::format!("[init]     module path {}\n", str_def.binary));
+                        let mod_h = match unsafe {
+                            strat9_syscall::syscall2(
+                                number::SYS_MODULE_LOAD,
+                                str_def.binary.as_ptr() as usize,
+                                str_def.binary.len(),
+                            )
+                        } {
+                            Ok(h) => h,
+                            Err(_) => {
+                                log(&alloc::format!(
+                                    "[init] module_load failed for {}\n",
+                                    str_def.binary
+                                ));
+                                continue;
+                            }
+                        };
+                        if let Err(e) = call::silo_attach_module(silo_handle, mod_h) {
+                            log(&alloc::format!(
+                                "[init] silo_attach_module failed: {}\n",
+                                e.name()
+                            ));
+                            continue;
+                        }
+                        match call::silo_start(silo_handle) {
+                            Err(e) => {
+                                log(&alloc::format!("[init] silo_start failed: {}\n", e.name()));
+                            }
+                            Ok(pid) => {
+                                register_supervised(&str_def.name, pid as u64);
+                                if str_def.stype == "wasm-runtime" {
+                                    runtime_targets
+                                        .push((str_def.name.clone(), str_def.target.clone()));
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     if let Ok(data) = read_file(&str_def.binary) {
                         if data.len() >= 4 {
                             log(&alloc::format!(

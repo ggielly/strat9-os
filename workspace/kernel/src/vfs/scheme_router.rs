@@ -126,6 +126,13 @@ pub fn register_initfs_file(path: &str, base: *const u8, len: usize) -> Result<(
     Ok(())
 }
 
+/// Returns the static bytes of a registered /initfs file.
+pub fn get_initfs_file_bytes(path: &str) -> Option<&'static [u8]> {
+    let rel = path.strip_prefix("/initfs/")?;
+    let scheme = INITFS_KERNEL_SCHEME.lock().clone()?;
+    scheme.lookup_bytes(rel)
+}
+
 /// Create and register an IPC scheme for a userspace server
 pub fn register_ipc_scheme(name: &str, port_id: PortId) -> Result<u64, SyscallError> {
     let ipc_scheme = Arc::new(IpcScheme::new(port_id));

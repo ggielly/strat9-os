@@ -841,7 +841,7 @@ static BOOT_REG_IN_PROGRESS: core::sync::atomic::AtomicBool =
 
 const SILO_ADMIN_RESOURCE: usize = 0;
 const MAX_SILO_CAPS: usize = 64;
-const MAX_MODULE_BLOB_LEN: usize = 16 * 1024 * 1024; // 16 MiB (UserSlice limit)
+const MAX_MODULE_BLOB_LEN: usize = 64 * 1024 * 1024; // 64 MiB for large preloaded user modules such as strate-wasm
 const IPC_STREAM_DATA: u32 = 0xFFFF_FFFE;
 const IPC_STREAM_EOF: u32 = 0xFFFF_FFFF;
 const MODULE_FLAG_SIGNED: u32 = 1 << 0;
@@ -1041,14 +1041,14 @@ fn resolve_export_offset(module: &ModuleImage, ordinal: u64) -> Result<u64, Sysc
         return Err(SyscallError::NotFound);
     }
     let table_off = header.export_table_offset as usize;
-    let count = read_u32_le(&module.data, table_off)? as u64;
+    let count = read_u32_le(module.data.as_slice(), table_off)? as u64;
     if ordinal >= count {
         return Err(SyscallError::InvalidArgument);
     }
     // Layout: u32 count + u32 reserved, then u64 entries.
     let entries_off = table_off + 8;
     let entry_off = entries_off + (ordinal as usize * 8);
-    let rva = read_u64_le(&module.data, entry_off)?;
+    let rva = read_u64_le(module.data.as_slice(), entry_off)?;
     Ok(rva)
 }
 
@@ -1100,10 +1100,29 @@ fn resolve_silo_handle(handle: u64, required: CapPermissions) -> Result<u32, Sys
 // Module registry (temporary blob store for .cmod/ELF)
 // ============================================================================
 
+#[derive(Debug, Clone)]
+enum ModuleData {
+    Owned(Arc<[u8]>),
+    Static(&'static [u8]),
+}
+
+impl ModuleData {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            ModuleData::Owned(data) => data,
+            ModuleData::Static(data) => data,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+}
+
 #[derive(Debug)]
 struct ModuleImage {
     id: u64,
-    data: Arc<[u8]>,
+    data: ModuleData,
     header: Option<Strat9ModuleHeader>,
 }
 
@@ -1128,7 +1147,22 @@ impl ModuleRegistry {
             id,
             ModuleImage {
                 id,
-                data: Arc::from(data.into_boxed_slice()),
+                data: ModuleData::Owned(Arc::from(data.into_boxed_slice())),
+                header,
+            },
+        );
+        Ok(id)
+    }
+
+    fn register_static(&mut self, data: &'static [u8]) -> Result<u64, SyscallError> {
+        let header = parse_module_header(data)?;
+        static NEXT_MOD: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_MOD.fetch_add(1, Ordering::Relaxed);
+        self.modules.insert(
+            id,
+            ModuleImage {
+                id,
+                data: ModuleData::Static(data),
                 header,
             },
         );
@@ -1434,7 +1468,7 @@ pub fn kernel_spawn_strate(
     };
     let task_name: &'static str =
         Box::leak(alloc::format!("silo-{}/strate-admin-{}", silo_id, display).into_boxed_str());
-    let task = crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps)
+    let task = crate::process::elf::load_elf_task_with_caps(module_data.as_slice(), task_name, &seed_caps)
         .map_err(|_| SyscallError::InvalidArgument)?;
     let task_id = task.id;
 
@@ -1738,6 +1772,30 @@ pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
         let len = len as usize;
         if len == 0 || len > MAX_MODULE_BLOB_LEN {
             return Err(SyscallError::InvalidArgument);
+        }
+
+        if len <= 4096 {
+            let user = UserSliceRead::new(fd_or_ptr, len)?;
+            if matches!(user.read_u8(0), Ok(b'/')) {
+                let path_buf = user.read_to_vec();
+                if let Ok(path) = core::str::from_utf8(&path_buf) {
+                    if let Some(data) = crate::vfs::get_initfs_file_bytes(path) {
+                        let mut registry = MODULE_REGISTRY.lock();
+                        let id = registry.register_static(data)?;
+                        drop(registry);
+
+                        let cap = get_capability_manager().create_capability(
+                            ResourceType::Module,
+                            id as usize,
+                            CapPermissions::all(),
+                        );
+
+                        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+                        let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+                        return Ok(cap_id.as_u64());
+                    }
+                }
+            }
         }
 
         let user = UserSliceRead::new(fd_or_ptr, len)?;
@@ -2144,7 +2202,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
     };
 
     let load_result =
-        crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps).map_err(
+        crate::process::elf::load_elf_task_with_caps(module_data.as_slice(), task_name, &seed_caps).map_err(
             |err| {
                 log::warn!(
                     "silo_start: sid={} module={} task='{}' load failed: {}",

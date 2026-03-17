@@ -487,7 +487,12 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
         }
     }
 
-    for vector in [crate::arch::x86_64::apic::LVT_TIMER_VECTOR, crate::arch::x86_64::apic::IPI_RESCHED_VECTOR] {
+    for vector in [
+        crate::arch::x86_64::apic::LVT_TIMER_VECTOR,
+        crate::arch::x86_64::apic::IPI_RESCHED_VECTOR,
+        crate::arch::x86_64::idt::irq::MOUSE,
+        0x0e,
+    ] {
         if let Some(gate) = crate::arch::x86_64::idt::live_gate_info(vector) {
             crate::serial_force_println!(
                 "[validate_ring3] IDT live vec={:#x} sel={:#x} opts={:#x} off={:#x}",

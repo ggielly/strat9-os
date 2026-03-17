@@ -342,9 +342,19 @@ extern "C" fn lapic_timer_inner(
     }
     crate::process::scheduler::timer_tick();
     super::apic::eoi();
-    let decision =
-        crate::process::scheduler::maybe_preempt_from_interrupt(cpu, frame).unwrap_or_default();
-    decision
+    let _ = frame;
+
+    // Temporarily keep timer IRQs side-effect free with respect to stack
+    // switching. The raw `iretq`-based resume path is not yet correct for all
+    // contexts:
+    // - Ring 3 resumes can return with a shifted IRET frame under SMP load.
+    // - Ring 0 resumes are fundamentally different because same-CPL `iretq`
+    //   does not restore RSP/SS, so synthetic `SyscallFrame` resumes of kernel
+    //   tasks can continue with a bogus stack pointer and RIP=0.
+    // Keep only the reschedule hint here and let tasks switch on safer paths
+    // (blocking syscalls, explicit yields, future validated return path).
+    crate::process::scheduler::request_force_resched_hint(cpu);
+    InterruptReturnDecision::default()
 }
 
 extern "C" fn resched_ipi_inner(
@@ -414,31 +424,52 @@ pub fn init() {
         let idt = &raw mut IDT_STORAGE;
 
         // CPU exceptions
-        (*idt).breakpoint.set_handler_fn(breakpoint_handler);
-        (*idt).page_fault.set_handler_fn(page_fault_handler);
+        (*idt)
+            .breakpoint
+            .set_handler_fn(breakpoint_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        (*idt)
+            .page_fault
+            .set_handler_fn(page_fault_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
         (*idt)
             .general_protection_fault
-            .set_handler_fn(general_protection_fault_handler);
+            .set_handler_fn(general_protection_fault_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
         (*idt)
             .stack_segment_fault
-            .set_handler_fn(stack_segment_fault_handler);
+            .set_handler_fn(stack_segment_fault_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
         (*idt)
             .non_maskable_interrupt
-            .set_handler_fn(non_maskable_interrupt_handler);
-        (*idt).invalid_opcode.set_handler_fn(invalid_opcode_handler);
+            .set_handler_fn(non_maskable_interrupt_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        (*idt)
+            .invalid_opcode
+            .set_handler_fn(invalid_opcode_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
         (*idt)
             .double_fault
             .set_handler_fn(double_fault_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR)
             .set_stack_index(tss::DOUBLE_FAULT_IST_INDEX);
 
         // Hardware IRQs (PIC remapped to 0x20+)
         let idt_ref = &mut *idt;
-        idt_ref[irq::TIMER as u8].set_handler_fn(legacy_timer_handler);
-        idt_ref[irq::KEYBOARD as u8].set_handler_fn(keyboard_handler);
-        idt_ref[irq::MOUSE as u8].set_handler_fn(mouse_handler);
+        idt_ref[irq::TIMER as u8]
+            .set_handler_fn(legacy_timer_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        idt_ref[irq::KEYBOARD as u8]
+            .set_handler_fn(keyboard_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        idt_ref[irq::MOUSE as u8]
+            .set_handler_fn(mouse_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
 
         // Spurious interrupt handler at vector 0xFF (APIC spurious vector)
-        idt_ref[0xFF_u8].set_handler_fn(spurious_handler);
+        idt_ref[0xFF_u8]
+            .set_handler_fn(spurious_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
 
         // Cross-CPU reschedule IPI (vector 0xE0)
         unsafe {
@@ -448,7 +479,9 @@ pub fn init() {
         }
 
         // Cross-CPU TLB shootdown IPI (vector 0xF0)
-        idt_ref[super::apic::IPI_TLB_SHOOTDOWN_VECTOR as u8].set_handler_fn(tlb_shootdown_handler);
+        idt_ref[super::apic::IPI_TLB_SHOOTDOWN_VECTOR as u8]
+            .set_handler_fn(tlb_shootdown_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
 
         (*idt).load_unsafe();
     }
@@ -492,7 +525,9 @@ pub fn register_ahci_irq(irq: u8) {
     lock_idt_storage();
     unsafe {
         let idt = &raw mut IDT_STORAGE;
-        (&mut *idt)[vector].set_handler_fn(ahci_handler);
+        (&mut *idt)[vector]
+            .set_handler_fn(ahci_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
         (*idt).load_unsafe();
     }
     unlock_idt_storage();
@@ -515,7 +550,9 @@ pub fn register_virtio_block_irq(irq: u8) {
     lock_idt_storage();
     unsafe {
         let idt = &raw mut IDT_STORAGE;
-        (&mut *idt)[vector].set_handler_fn(virtio_block_handler);
+        (&mut *idt)[vector]
+            .set_handler_fn(virtio_block_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
         (*idt).load_unsafe();
     }
     unlock_idt_storage();

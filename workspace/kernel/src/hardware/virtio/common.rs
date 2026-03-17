@@ -301,6 +301,13 @@ impl Virtqueue {
         self.last_used_idx != used_idx
     }
 
+    /// Return a snapshot of `(device_used_idx, driver_last_used_idx)` for diagnostics.
+    pub fn used_indices(&self) -> (u16, u16) {
+        // SAFETY: Atomic load from the used ring header.
+        let used_idx = unsafe { (*self.used_ptr).idx.load(Ordering::Acquire) };
+        (used_idx, self.last_used_idx)
+    }
+
     /// Get the next used buffer
     ///
     /// Returns (descriptor_index, length_written)
@@ -453,12 +460,15 @@ impl VirtioDevice {
         // Select queue
         self.write_reg_u16(14, queue_index); // VIRTIO_PCI_QUEUE_SEL
 
-        // Set queue size
-        self.write_reg_u16(12, queue.size()); // VIRTIO_PCI_QUEUE_NUM
-
         // Set queue addresses (page-aligned physical addresses >> 12)
         let desc_pfn = (queue.desc_area() >> 12) as u32;
         self.write_reg_u32(8, desc_pfn); // VIRTIO_PCI_QUEUE_PFN
+    }
+
+    /// Read the queue size exposed by the selected legacy PCI queue.
+    pub fn queue_max_size(&self, queue_index: u16) -> u16 {
+        self.write_reg_u16(14, queue_index); // VIRTIO_PCI_QUEUE_SEL
+        self.read_reg_u16(12) // VIRTIO_PCI_QUEUE_NUM
     }
 
     /// Notify a queue
