@@ -6,10 +6,16 @@
 // - Boot protocol mouse support
 // - Event queue for key presses and mouse movements
 // - PS/2 to USB keycode translation
+// - Unification with PS/2: events feed into the same keyboard/mouse buffers
+//
+// Inspired by Redox usbhid, Asterinas input subsystem, Maestro device manager.
 
 #![allow(dead_code)]
 
-use crate::hardware::usb::xhci::XhciController;
+use crate::{
+    arch::x86_64::{keyboard, mouse},
+    hardware::usb::xhci::XhciController,
+};
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
@@ -173,6 +179,13 @@ impl HidKeyboard {
     pub fn is_modifier_pressed(&self, modifier: u8) -> bool {
         self.last_report[0] & modifier != 0
     }
+
+    /// Drain event queue and inject into the unified keyboard buffer.
+    pub fn drain_into_unified(&mut self) {
+        while let Some(ev) = self.event_queue.pop() {
+            keyboard::inject_hid_scancode(ev.keycode, ev.pressed);
+        }
+    }
 }
 
 pub struct HidMouse {
@@ -269,6 +282,16 @@ impl HidMouse {
     pub fn is_button_pressed(&self, button: u8) -> bool {
         self.last_buttons & (1 << button) != 0
     }
+
+    /// Drain event queue and inject into the unified mouse buffer.
+    pub fn drain_into_unified(&mut self) {
+        while let Some(ev) = self.event_queue.pop() {
+            let left = ev.buttons & 0x01 != 0;
+            let right = ev.buttons & 0x02 != 0;
+            let middle = ev.buttons & 0x04 != 0;
+            mouse::push_event_from_hid(ev.dx as i16, ev.dy as i16, ev.dz, left, right, middle);
+        }
+    }
 }
 
 static KEYBOARDS: Mutex<Vec<Arc<Mutex<HidKeyboard>>>> = Mutex::new(Vec::new());
@@ -302,7 +325,15 @@ pub fn init() {
 }
 
 /// Performs the probe hid device operation.
+///
+/// TODO: Full implementation requires:
+/// 1. xHCI control transfers (GET_DESCRIPTOR, SET_ADDRESS, SET_CONFIGURATION)
+/// 2. Parse device/configuration/HID descriptors to find interface + endpoint
+/// 3. SET_PROTOCOL(boot) for keyboard/mouse
+/// 4. Set up interrupt transfer ring and submit recurring IN transfers
+/// 5. On transfer completion: call process_report(), then poll_all() drains to unified buffers
 fn probe_hid_device(controller: Arc<XhciController>, port: usize) {
+    // Placeholder: assume port 0 = keyboard, port 1 = mouse (QEMU usb-kbd, usb-tablet).
     // In a full implementation, this would:
     // 1. Get device descriptor
     // 2. Get configuration descriptor
@@ -317,8 +348,11 @@ fn probe_hid_device(controller: Arc<XhciController>, port: usize) {
         KEYBOARDS.lock().push(Arc::new(Mutex::new(keyboard)));
         log::info!("[USB-HID] Found keyboard on port {}", port);
     } else if port == 1 {
-        let mouse = HidMouse::new(controller, port, 0, 0x81, 4, 10);
-        MICE.lock().push(Arc::new(Mutex::new(mouse)));
+        let mouse_dev = HidMouse::new(controller, port, 0, 0x81, 4, 10);
+        MICE.lock().push(Arc::new(Mutex::new(mouse_dev)));
+        // TODO: Set MOUSE_READY when USB HID interrupt transfers work and we actually
+        // receive mouse reports. Until then, only PS/2 mouse sets MOUSE_READY.
+        // mouse::MOUSE_READY.store(true, core::sync::atomic::Ordering::Relaxed);
         log::info!("[USB-HID] Found mouse on port {}", port);
     }
 }
@@ -346,4 +380,20 @@ pub fn mouse_count() -> usize {
 /// Returns whether available.
 pub fn is_available() -> bool {
     HID_INITIALIZED.load(Ordering::Relaxed)
+}
+
+/// Poll all HID devices and inject events into the unified keyboard/mouse buffers.
+///
+/// Call from the shell loop (task context) to drain USB HID event queues and
+/// feed them into the same buffers used by PS/2. This enables USB keyboards
+/// and mice to work alongside or instead of PS/2.
+pub fn poll_all() {
+    for kbd in KEYBOARDS.lock().iter() {
+        let mut k = kbd.lock();
+        k.drain_into_unified();
+    }
+    for m in MICE.lock().iter() {
+        let mut dev = m.lock();
+        dev.drain_into_unified();
+    }
 }

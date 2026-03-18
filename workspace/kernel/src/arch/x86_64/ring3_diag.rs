@@ -15,12 +15,10 @@
 //! If any check fails the function `panic!`s with a detailed description.
 
 use x86_64::{
-    instructions::tables::sgdt,
-    registers::control::Cr3,
-    structures::paging::PageTableFlags,
+    instructions::tables::sgdt, registers::control::Cr3, structures::paging::PageTableFlags,
 };
 
-//  GDT descriptor decoding constants 
+//  GDT descriptor decoding constants
 
 /// Bit 47 : Present.
 const DESC_PRESENT_BIT: u64 = 1 << 47;
@@ -34,7 +32,7 @@ const DESC_S_BIT: u64 = 1 << 44;
 /// Bit 43 : Executable (type bit for code segments).
 const DESC_EXEC_BIT: u64 = 1 << 43;
 
-//  Raw GDT descriptor access 
+//  Raw GDT descriptor access
 
 /// Reads an 8-byte GDT descriptor at the given `index` (base 0).
 ///
@@ -47,7 +45,7 @@ unsafe fn read_gdt_raw(gdt_base: *const u64, index: usize) -> u64 {
     unsafe { *gdt_base.add(index) }
 }
 
-//  Descriptor field accessors 
+//  Descriptor field accessors
 
 #[inline]
 fn desc_present(raw: u64) -> bool {
@@ -115,9 +113,9 @@ fn check_user_mapping(vaddr: u64) -> Result<(), &'static str> {
         return Err("PDPT: entrée non présente (PRESENT=0)");
     }
     if !fp.contains(PageTableFlags::USER_ACCESSIBLE) {
-        return Err("PDPT: bit USER_ACCESSIBLE manquant");
+        return Err("PDPT: bit USER_ACCESSIBLE missing");
     }
-    // Huge page 1 Go pas besoin de descendre plus loin
+    // Huge page 1 GiB no need to descend further
     if fp.contains(PageTableFlags::HUGE_PAGE) {
         return Ok(());
     }
@@ -134,7 +132,7 @@ fn check_user_mapping(vaddr: u64) -> Result<(), &'static str> {
         return Err("PD: entry not preset (PRESENT=0)");
     }
     if !fd.contains(PageTableFlags::USER_ACCESSIBLE) {
-        return Err("PD: bit USER_ACCESSIBLE manquant");
+        return Err("PD: bit USER_ACCESSIBLE missing");
     }
     // Huge page 2 Mo pas besoin de descendre plus loin
     if fd.contains(PageTableFlags::HUGE_PAGE) {
@@ -196,7 +194,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     // ==================================================================
 
     // SAFETY: `sgdt` only reads the GDTR register — no side effects.
-    let gdtr = unsafe { sgdt() };
+    let gdtr = sgdt();
     let gdt_base = gdtr.base.as_u64() as *const u64;
     let gdt_limit = gdtr.limit as usize; // in bytes, inclusive
 
@@ -223,8 +221,8 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     }
     if ss_byte_offset + 7 > gdt_limit {
         panic!(
-            "[validate_ring3] GDT: sélecteur SS {:#x} (offset octet {}) \
-             dépasse la limite GDTR ({:#x}). GDT trop petite ou sélecteur invalide.",
+            "[validate_ring3] GDT: selector SS {:#x} (byte offset {}) \
+             exceeds GDTR limit ({:#x}). GDT too small or invalid selector.",
             ss, ss_byte_offset, gdt_limit,
         );
     }
@@ -235,7 +233,10 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
 
     crate::serial_force_println!(
         "[validate_ring3] GDT[{}] CS raw={:#018x}  GDT[{}] SS raw={:#018x}",
-        cs_index, cs_raw, ss_index, ss_raw,
+        cs_index,
+        cs_raw,
+        ss_index,
+        ss_raw,
     );
 
     //  CS : Present ======================================
@@ -276,7 +277,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
         panic!(
             "[validate_ring3] GDT CS {:#x} (index {}): bit L (Long Mode 64-bit) = 0 ! \
              In 64-bit mode, all Ring 3 code segments must have L=1. \
-             Without L=1, the CPU switches to 32-bit compatibility mode → TRIPLE FAULT guaranteed. \
+             Without L=1, the CPU switches to 32-bit compatibility mode -> TRIPLE FAULT guaranteed. \
              raw={:#018x}",
             cs, cs_index, cs_raw,
         );
@@ -304,7 +305,10 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     crate::serial_force_println!(
         "[validate_ring3] [1/4] GDT OK — \
          CS={:#x} P=1 DPL={} L=1 | SS={:#x} P=1 DPL={}",
-        cs, cs_dpl, ss, ss_dpl,
+        cs,
+        cs_dpl,
+        ss,
+        ss_dpl,
     );
 
     // ====================================================
@@ -512,10 +516,10 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     }
 
     // ====================================================
-    // SYNTHÈSE
+    // End of checks
     // ====================================================
     crate::serial_force_println!(
-        "[validate_ring3] ALL RING 3 PREREQUISiTES VALIDATED !@#% \
+        "[validate_ring3] === ALL RING 3 PREREQUISiTES VALIDATED === \
          RIP={:#x} RSP={:#x} CS={:#x} SS={:#x} → iretq",
         target_rip,
         target_rsp,

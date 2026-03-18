@@ -304,10 +304,10 @@ impl Task {
     /// finish_interrupt_switch`, so `next_rsp` must be close to the top of the
     /// kernel stack to preserve downward growth room for the call chain.
     const BOOTSTRAP_INTERRUPT_FRAME_TOP_HEADROOM: usize = 0x1000;
-    
+
     /// Canary placed below the interrupt frame to detect stack underflow
     /// (interrupt handler overflowing downward past the frame)
-    const STACK_UNDERFLOW_CANARY_OFFSET: usize = 0x100;  // 256 bytes from base
+    const STACK_UNDERFLOW_CANARY_OFFSET: usize = 0x100; // 256 bytes from base
 
     /// Performs the default sched policy operation.
     pub fn default_sched_policy(priority: TaskPriority) -> crate::process::sched::SchedPolicy {
@@ -374,7 +374,7 @@ impl Task {
         );
         unsafe {
             (frame_addr as *mut crate::syscall::SyscallFrame).write(frame);
-            
+
             // Place underflow canary below the frame (at lower address)
             // This detects if interrupt handler overflows downward past expected range
             let canary_addr = stack_base + Self::STACK_UNDERFLOW_CANARY_OFFSET as u64;
@@ -386,18 +386,17 @@ impl Task {
     /// Seed an `iretq`-compatible frame from the legacy `CpuContext` bootstrap
     /// layout used by kernel tasks (`ret` into `task_entry_trampoline`).
     ///
-    /// If the task has already been running (its `ret` target is no longer
-    /// `task_entry_trampoline`), the synthesised frame sets IF=1 so the
-    /// resumed task keeps receiving timer interrupts. First-launch tasks
-    /// keep IF=0 because `task_post_switch_enter` enables interrupts itself.
+    /// The synthesised frame always sets IF=1 so that IRQ-driven resumes keep
+    /// receiving timer interrupts. First-launch tasks still enter through the
+    /// legacy `ret` trampoline and must explicitly re-enable interrupts in
+    /// `task_post_switch_enter`.
     pub fn seed_kernel_interrupt_frame_from_context(&self) {
         let saved_rsp = unsafe { (*self.context.get()).saved_rsp as *const u64 };
         let ret_target = unsafe { *saved_rsp.add(6) };
-        // Always set IF=1 (bit 9) so the task starts with interrupts enabled.
-        // Previously first-launch tasks used 0x2 (IF=0) and relied on an explicit
-        // sti() in task_post_switch_enter, which caused a FORCE_LOCK deadlock window.
-        // Now we match how Redox/Maestro handle this: let RFLAGS carry IF=1 from
-        // the seed frame, and omit the explicit sti() entirely.
+        // Always set IF=1 (bit 9) so IRQ-driven resumes keep interrupts enabled.
+        // First-launch tasks still need an explicit sti() in
+        // task_post_switch_enter because the legacy bootstrap path reaches the
+        // entry point through a plain ret, not an iretq restoring RFLAGS.
         let rflags = 0x202u64; // bit 9 = IF, bit 1 = reserved (always 1)
         let frame = unsafe {
             crate::syscall::SyscallFrame {
@@ -497,7 +496,7 @@ impl CpuContext {
             *stack.add(5) = 0; // rbx
             *stack.add(6) = task_entry_trampoline as *const () as u64; // ret address
         }
-        
+
         // Add stack canary at the very top (leave the frame below it so `ret` still points
         // to `task_entry_trampoline`). The canary slot must be reserved before writing the
         // frame to avoid overwriting the trampoline address.
@@ -518,7 +517,7 @@ impl CpuContext {
                 );
             }
         }
-        
+
         // Debug: verify entire stack frame
         unsafe {
             let stack = initial_rsp as *const u64;
@@ -541,7 +540,7 @@ impl CpuContext {
                     canary
                 );
             }
-            
+
             // Debug: check if stack memory overlaps with another task
             crate::serial_println!(
                 "[CpuContext] stack range: base={:#x} top={:#x} initial_rsp={:#x}",
@@ -582,7 +581,9 @@ pub unsafe extern "C" fn task_entry_trampoline() -> ! {
 
 fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
     // E9 breadcrumb: 'P' = reached post_switch_enter (no serial lock needed).
-    unsafe { core::arch::asm!("out 0xe9, al", in("al") b'P', options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'P', options(nomem, nostack));
+    }
 
     crate::arch::x86_64::percpu::mark_tlb_ready_current();
 
@@ -597,13 +598,20 @@ fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
     if let Some(task) = crate::process::scheduler::current_task_clone_try() {
         crate::e9_println!(
             "[pse] cpu={} tid={} user={} entry={:#x}",
-            cpu, task.id.as_u64(), is_user_entry, entry
+            cpu,
+            task.id.as_u64(),
+            is_user_entry,
+            entry
         );
     }
 
-    // NOTE: no explicit sti() here. The seed frame now uses RFLAGS=0x202 (IF=1)
-    // so first-launch kernel tasks already start with interrupts enabled.
-    // User tasks return via iretq which restores their own RFLAGS (also IF=1).
+    // First-launch tasks arrive here via the legacy `ret` bootstrap path, which
+    // does not restore RFLAGS. Re-enable interrupts now that `finish_switch()`
+    // has completed and the task is running on its own stack.
+    crate::arch::x86_64::sti();
+
+    // User tasks still transition to Ring 3 via iretq later and will restore
+    // their own RFLAGS there.
 
     let entry_fn: extern "C" fn(u64) -> ! = unsafe { core::mem::transmute(entry as usize) };
     entry_fn(arg0)
@@ -637,10 +645,9 @@ impl KernelStack {
             "[trace][task] kstack allocate calling allocate_frames order={}",
             order
         );
-        let frame = crate::sync::with_irqs_disabled(|token| {
-            crate::memory::allocate_frames(token, order)
-        })
-        .map_err(|_| "Failed to allocate kernel stack")?;
+        let frame =
+            crate::sync::with_irqs_disabled(|token| crate::memory::allocate_frames(token, order))
+                .map_err(|_| "Failed to allocate kernel stack")?;
         crate::serial_println!(
             "[trace][task] kstack allocate frame phys={:#x}",
             frame.start_address.as_u64()
@@ -658,7 +665,7 @@ impl KernelStack {
             core::ptr::write_bytes(virt_base.as_mut_ptr::<u8>(), 0, size);
         }
         crate::serial_println!("[trace][task] kstack allocate memset done");
-        
+
         // Debug: verify zeroing worked
         unsafe {
             let first_word = *(virt_base.as_ptr::<u64>());
@@ -669,7 +676,9 @@ impl KernelStack {
             if first_word != 0 || mid_word != 0 || last_word != 0 {
                 crate::serial_force_println!(
                     "[WARN] kstack zeroing failed! first={:#x} mid={:#x} last={:#x}",
-                    first_word, mid_word, last_word
+                    first_word,
+                    mid_word,
+                    last_word
                 );
             }
         }
@@ -680,7 +689,7 @@ impl KernelStack {
             size,
         })
     }
-    
+
     /// Debug: check if this stack overlaps with another range
     pub fn overlaps(&self, other_base: u64, other_size: usize) -> bool {
         let self_end = self.virt_base.as_u64() + self.size as u64;
@@ -1050,7 +1059,7 @@ pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) 
 /// # Safety
 /// Caller must ensure pointers are valid and interrupts are disabled. Never returns.
 pub(super) unsafe fn do_restore_first_task(
-    frame_ptr: *const u64,  // Points to the stack frame (r15, r14, r13, r12, rbp, rbx, ret)
+    frame_ptr: *const u64, // Points to the stack frame (r15, r14, r13, r12, rbp, rbx, ret)
     fpu_ptr: *const u8,
     xcr0: u64,
 ) -> ! {
@@ -1060,7 +1069,7 @@ pub(super) unsafe fn do_restore_first_task(
         frame_ptr as u64,
         fpu_ptr as u64
     );
-    
+
     // Verify the stack frame contains expected values
     crate::serial_force_println!(
         "[task] do_restore_first_task stack frame: r15={:#x} r14={:#x} r13={:#x} r12={:#x} rbp={:#x} rbx={:#x} ret={:#x}",
@@ -1072,7 +1081,7 @@ pub(super) unsafe fn do_restore_first_task(
         *frame_ptr.add(5),
         *frame_ptr.add(6)
     );
-    
+
     // Verify canary immediately above the fake frame (frame is 7 words long).
     let canary_addr = frame_ptr as u64 + 56;
     let canary = *(canary_addr as *const u64);
@@ -1081,7 +1090,7 @@ pub(super) unsafe fn do_restore_first_task(
         canary_addr,
         canary
     );
-    
+
     let _ = xcr0;
     restore_first_task_fxsave(frame_ptr, fpu_ptr);
 }

@@ -768,6 +768,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         arch::x86_64::percpu::init_boot_cpu(0);
     }
 
+    arch::x86_64::keyboard::init();
+    serial_println!("[init] PS/2 keyboard controller initialized.");
+
     // =============================================
     // Phase 6k: PS/2 mouse driver
     // =============================================
@@ -1266,18 +1269,25 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     ioapic::init(io_apic_entry.address, io_apic_entry.gsi_base);
     serial_println!("[init]   6e. I/O APIC initialized");
 
-    // Step 6f: remap PIC to 0x20+ then disable permanently
-    // Must remap first to avoid stray interrupts at exception vectors (0-31)
+    // Step 6f: remap PIC to 0x20+ then keep only PS/2 input IRQs enabled.
+    // Must remap first to avoid stray interrupts at exception vectors (0-31).
+    // On the current q35 + SMP path, LAPIC timer delivery is fine but legacy
+    // PS/2 IRQs are not reliably arriving through the I/O APIC. Keep keyboard
+    // and mouse on the remapped PIC while using APIC for the timer.
     pic::init(pic::PIC1_OFFSET, pic::PIC2_OFFSET);
     pic::disable_permanently();
-    serial_println!("[init]   6f. Legacy PIC remapped and disabled");
+    pic::enable_irq(1);
+    pic::enable_irq(2);
+    pic::enable_irq(12);
+    serial_println!("[init]   6f. Legacy PIC remapped; PS/2 IRQ1/IRQ12 left enabled");
 
-    // Step 6g: route IRQ0 (timer) and IRQ1 (keyboard) via I/O APIC
+    // Step 6g: route only the legacy timer IRQ via I/O APIC.
+    // Keyboard (IRQ1) and mouse (IRQ12) stay on the remapped PIC path above.
     let lapic_id = apic::lapic_id();
     ioapic::route_legacy_irq(0, lapic_id, 0x20, &madt_info.overrides);
-    ioapic::route_legacy_irq(1, lapic_id, 0x21, &madt_info.overrides);
-    ioapic::route_legacy_irq(12, lapic_id, 0x2C, &madt_info.overrides);
-    serial_println!("[init]   6g. IRQ0->vec 0x20, IRQ1->vec 0x21, IRQ12->vec 0x2C routed");
+    ioapic::mask_legacy_irq(1, &madt_info.overrides);
+    ioapic::mask_legacy_irq(12, &madt_info.overrides);
+    serial_println!("[init]   6g. IRQ0->vec 0x20 via IOAPIC; IRQ1/IRQ12 via PIC");
 
     // Step 6h: calibrate APIC timer using PIT channel 2
     serial_println!("[init]   6h. Calibrating APIC timer using PIT channel 2...");

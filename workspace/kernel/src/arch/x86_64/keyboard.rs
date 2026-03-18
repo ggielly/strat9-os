@@ -3,7 +3,7 @@
 //! Handles IRQ1 keyboard interrupts, reads scancodes from port 0x60,
 //! and converts them to characters for the VGA console.
 
-use super::io::inb;
+use super::io::{inb, outb};
 use spin::Mutex;
 
 /// Keyboard input buffer size
@@ -120,8 +120,97 @@ pub fn has_input() -> bool {
     KEYBOARD_BUFFER.has_data()
 }
 
+/// Inject a PS/2 scancode from USB HID or other non-PS/2 source.
+///
+/// Must be called from task context. Converts scancode to character via
+/// the current layout and pushes to the buffer if applicable.
+/// Used by hid::poll_all() when USB HID reports arrive.
+///
+/// - `scancode`: PS/2 Set 1 scancode (0x00-0x7F for press, or 0x80|code for release)
+/// - `pressed`: true = key press, false = key release
+pub fn inject_hid_scancode(scancode: u8, pressed: bool) {
+    let raw = if pressed { scancode } else { scancode | 0x80 };
+    if let Some(ch) = super::keyboard_layout::handle_scancode_raw(raw) {
+        let saved = super::save_flags_and_cli();
+        KEYBOARD_BUFFER.push(ch);
+        super::restore_flags(saved);
+    }
+}
+
 /// PS/2 keyboard data port
 const KEYBOARD_DATA_PORT: u16 = 0x60;
+const PS2_CMD_PORT: u16 = 0x64;
+
+const CMD_READ_CFG: u8 = 0x20;
+const CMD_WRITE_CFG: u8 = 0x60;
+const CMD_ENABLE_KBD: u8 = 0xAE;
+
+const STATUS_OUTPUT_FULL: u8 = 0x01;
+const STATUS_INPUT_FULL: u8 = 0x02;
+
+#[inline]
+fn wait_write() {
+    for _ in 0..100_000u32 {
+        if unsafe { inb(PS2_CMD_PORT) } & STATUS_INPUT_FULL == 0 {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+#[inline]
+fn wait_read() {
+    for _ in 0..100_000u32 {
+        if unsafe { inb(PS2_CMD_PORT) } & STATUS_OUTPUT_FULL != 0 {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+fn ps2_read() -> u8 {
+    wait_read();
+    unsafe { inb(KEYBOARD_DATA_PORT) }
+}
+
+fn ps2_write_cmd(cmd: u8) {
+    wait_write();
+    unsafe { outb(PS2_CMD_PORT, cmd) };
+}
+
+fn ps2_write_data(data: u8) {
+    wait_write();
+    unsafe { outb(KEYBOARD_DATA_PORT, data) };
+}
+
+fn flush_output() {
+    for _ in 0..16 {
+        if unsafe { inb(PS2_CMD_PORT) } & STATUS_OUTPUT_FULL == 0 {
+            break;
+        }
+        unsafe { inb(KEYBOARD_DATA_PORT) };
+    }
+}
+
+/// Initialize the PS/2 keyboard controler
+///
+/// The firmware typically leaves IRQ1 enabled, but this is not guaranteed.
+/// After APIC/IOAPIC reconfiguration and mouse initialization, we explicitly
+/// enable the keyboard port, IRQ1, and the keyboard clock.
+pub fn init() {
+    flush_output();
+
+    ps2_write_cmd(CMD_ENABLE_KBD);
+
+    ps2_write_cmd(CMD_READ_CFG);
+    let mut cfg = ps2_read();
+    cfg |= 0x01;
+    cfg &= !0x10;
+    ps2_write_cmd(CMD_WRITE_CFG);
+    ps2_write_data(cfg);
+
+    flush_output();
+}
 
 /// Keyboard state
 pub struct KeyboardState {

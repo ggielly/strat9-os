@@ -5,9 +5,13 @@
 
 use super::{pic, tss};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use x86_64::VirtAddr;
-use x86_64::structures::gdt::SegmentSelector;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::{
+    structures::{
+        gdt::SegmentSelector,
+        idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
+    },
+    VirtAddr,
+};
 
 const KERNEL_CODE_SELECTOR: SegmentSelector = SegmentSelector(0x08);
 
@@ -150,9 +154,7 @@ pub fn live_gate_info(vector: u8) -> Option<LiveIdtGateInfo> {
         )
     };
 
-    let offset = (low & 0xFFFF)
-        | (((low >> 48) & 0xFFFF) << 16)
-        | ((high & 0xFFFF_FFFF) << 32);
+    let offset = (low & 0xFFFF) | (((low >> 48) & 0xFFFF) << 16) | ((high & 0xFFFF_FFFF) << 32);
     let selector = ((low >> 16) & 0xFFFF) as u16;
     let options = ((low >> 32) & 0xFFFF) as u16;
 
@@ -362,7 +364,9 @@ extern "C" fn resched_ipi_inner(
 ) -> InterruptReturnDecision {
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
     let should_trace = RESCHED_IPI_TRACE_BUDGET
-        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |budget| budget.checked_sub(1))
+        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |budget| {
+            budget.checked_sub(1)
+        })
         .is_ok();
     if should_trace {
         let rsp0 = crate::arch::x86_64::tss::kernel_stack_for(cpu)
@@ -472,11 +476,10 @@ pub fn init() {
             .set_code_selector(KERNEL_CODE_SELECTOR);
 
         // Cross-CPU reschedule IPI (vector 0xE0)
-        unsafe {
-            idt_ref[super::apic::IPI_RESCHED_VECTOR as u8]
-                .set_handler_addr(VirtAddr::from_ptr(resched_ipi_entry as *const ()))
-                .set_code_selector(KERNEL_CODE_SELECTOR);
-        }
+
+        idt_ref[super::apic::IPI_RESCHED_VECTOR as u8]
+            .set_handler_addr(VirtAddr::from_ptr(resched_ipi_entry as *const ()))
+            .set_code_selector(KERNEL_CODE_SELECTOR);
 
         // Cross-CPU TLB shootdown IPI (vector 0xF0)
         idt_ref[super::apic::IPI_TLB_SHOOTDOWN_VECTOR as u8]
@@ -734,27 +737,35 @@ extern "x86-interrupt" fn page_fault_handler(
         if let Some(task) = crate::process::current_task_clone() {
             let address_space = unsafe { &*task.process.address_space.get() };
             if let Ok(vaddr) = fault_addr {
-                // FORCE OUTPUT for user fault - bypasses normal logging mutexes
-                crate::serial_force_println!(
-                    "\x1b[33m[pagefault] USER fault\x1b[0m: tid={} rip={:#x} addr={:#x} err={:#x}",
-                    task.tid,
-                    rip,
-                    vaddr.as_u64(),
-                    error_code.bits()
-                );
-                // Mirror to e9 so it shows up in e9_debug.log alongside scheduler traces.
-                crate::e9_println!(
-                    "[PF] tid={} rip={:#x} addr={:#x} err={:#x}",
-                    task.tid, rip, vaddr.as_u64(), error_code.bits()
-                );
+                if do_pf_trace {
+                    // FORCE OUTPUT for the first user faults only; lazy demand paging can
+                    // legitimately fault thousands of times during boot and flood serial.
+                    crate::serial_force_println!(
+                        "\x1b[33m[pagefault] USER fault\x1b[0m: tid={} rip={:#x} addr={:#x} err={:#x}",
+                        task.tid,
+                        rip,
+                        vaddr.as_u64(),
+                        error_code.bits()
+                    );
+                    // Mirror to e9 so the first handled faults stay visible in e9_debug.log.
+                    crate::e9_println!(
+                        "[PF] tid={} rip={:#x} addr={:#x} err={:#x}",
+                        task.tid,
+                        rip,
+                        vaddr.as_u64(),
+                        error_code.bits()
+                    );
+                }
 
                 match address_space.handle_fault(vaddr.as_u64()) {
                     Ok(()) => {
-                        crate::serial_force_println!(
-                            "\x1b[32m[pagefault] USER fault resolved\x1b[0m: tid={} addr={:#x}",
-                            task.tid,
-                            vaddr.as_u64()
-                        );
+                        if do_pf_trace {
+                            crate::serial_force_println!(
+                                "\x1b[32m[pagefault] USER fault resolved\x1b[0m: tid={} addr={:#x}",
+                                task.tid,
+                                vaddr.as_u64()
+                            );
+                        }
                         return;
                     }
                     Err(e) => {
@@ -766,7 +777,9 @@ extern "x86-interrupt" fn page_fault_handler(
                         );
                         crate::e9_println!(
                             "[PF-FAIL] tid={} rip={:#x} addr={:#x}",
-                            task.tid, rip, vaddr.as_u64()
+                            task.tid,
+                            rip,
+                            vaddr.as_u64()
                         );
                         dump_user_pf_context(address_space, rip, user_rsp);
                     }
