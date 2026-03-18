@@ -1720,11 +1720,10 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
 /// PS/2 Mouse IRQ12 handler.
 extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
     crate::arch::x86_64::mouse::handle_irq();
-    if super::apic::is_initialized() {
-        super::apic::eoi();
-    } else {
-        pic::end_of_interrupt(12);
-    }
+    // PS/2 mouse IRQ12 is intentionally kept on the remapped legacy PIC path.
+    // Even when LAPIC/IOAPIC are active for timer/IPI traffic, this source must
+    // still be acknowledged via the 8259 PIC.
+    pic::end_of_interrupt(12);
 }
 
 /// Performs the keyboard handler operation.
@@ -1735,11 +1734,10 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
         crate::arch::x86_64::keyboard::add_to_buffer(ch);
     }
 
-    if super::apic::is_initialized() {
-        super::apic::eoi();
-    } else {
-        pic::end_of_interrupt(1);
-    }
+    // PS/2 keyboard IRQ1 is intentionally kept on the remapped legacy PIC path.
+    // A LAPIC EOI here leaves the PIC request in service and stalls keyboard
+    // delivery after the first edge.
+    pic::end_of_interrupt(1);
 }
 
 /// Spurious interrupt handler (APIC vector 0xFF).
