@@ -562,6 +562,28 @@ pub fn register_virtio_block_irq(irq: u8) {
     log::info!("VirtIO-blk IRQ {} registered on vector {:#x}", irq, vector);
 }
 
+/// Register the xHCI USB controller IRQ handler.
+///
+/// Called after xHCI initialization once the PCI interrupt line is known.
+pub fn register_xhci_irq(irq: u8) {
+    let vector = if irq < 16 {
+        super::pic::PIC1_OFFSET + irq
+    } else {
+        irq
+    };
+
+    lock_idt_storage();
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[vector]
+            .set_handler_fn(xhci_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        (*idt).load_unsafe();
+    }
+    unlock_idt_storage();
+    log::info!("xHCI IRQ {} registered on vector {:#x}", irq, vector);
+}
+
 // =============================================
 // CPU Exception Handlers
 // =============================================
@@ -613,7 +635,7 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    use x86_64::registers::control::{Cr2, Cr3};
+    use x86_64::registers::control::Cr2;
     let cs = stack_frame.code_segment.0;
     let is_user = (cs & 3) == 3;
     // SAFETY: must be before any gs:[...] access – GS may point to user memory
@@ -1756,6 +1778,22 @@ extern "x86-interrupt" fn virtio_block_handler(_stack_frame: InterruptStackFrame
     } else {
         // Get the IRQ number from the device
         let irq = crate::hardware::storage::virtio_block::get_irq();
+        pic::end_of_interrupt(irq);
+    }
+}
+
+/// xHCI USB controller IRQ handler
+///
+/// Handles interrupts from the xHCI host controller.
+/// Processes event ring completions for control transfers and HID reports.
+extern "x86-interrupt" fn xhci_handler(_stack_frame: InterruptStackFrame) {
+    crate::hardware::usb::xhci::handle_interrupt();
+
+    if super::apic::is_initialized() {
+        super::apic::eoi();
+    } else {
+        let irq = crate::hardware::usb::xhci::XHCI_IRQ_LINE
+            .load(core::sync::atomic::Ordering::Relaxed);
         pic::end_of_interrupt(irq);
     }
 }

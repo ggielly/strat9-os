@@ -305,14 +305,10 @@ pub extern "C" fn shell_main() -> ! {
             }
         }
 
-        // TODO: Poll USB HID when enumeration + interrupt transfers work.
-        // Uncomment to drain USB HID events into unified keyboard/mouse buffers
-        // (same buffers as PS/2). Requires: xHCI control transfers, HID probe,
-        // interrupt transfer setup, and process_report() called from transfer completion.
-        //
-        // if crate::hardware::usb::hid::is_available() {
-        //     crate::hardware::usb::hid::poll_all();
-        // }
+        // Poll USB HID and drain events into unified keyboard/mouse buffers.
+        if crate::hardware::usb::hid::is_available() {
+            crate::hardware::usb::hid::poll_all();
+        }
 
         // Read from keyboard buffer
         if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {

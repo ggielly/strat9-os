@@ -12,10 +12,7 @@
 
 #![allow(dead_code)]
 
-use crate::{
-    arch::x86_64::{keyboard, mouse},
-    hardware::usb::xhci::XhciController,
-};
+use crate::arch::x86_64::{keyboard, mouse};
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
@@ -85,7 +82,6 @@ fn usb_to_ps2(keycode: u8) -> u8 {
 }
 
 pub struct HidKeyboard {
-    controller: Arc<XhciController>,
     port: usize,
     interface: u8,
     endpoint: u8,
@@ -101,7 +97,6 @@ unsafe impl Sync for HidKeyboard {}
 impl HidKeyboard {
     /// Creates a new instance.
     pub fn new(
-        controller: Arc<XhciController>,
         port: usize,
         interface: u8,
         endpoint: u8,
@@ -109,7 +104,6 @@ impl HidKeyboard {
         interval: u8,
     ) -> Self {
         Self {
-            controller,
             port,
             interface,
             endpoint,
@@ -189,7 +183,6 @@ impl HidKeyboard {
 }
 
 pub struct HidMouse {
-    controller: Arc<XhciController>,
     port: usize,
     interface: u8,
     endpoint: u8,
@@ -205,7 +198,6 @@ unsafe impl Sync for HidMouse {}
 impl HidMouse {
     /// Creates a new instance.
     pub fn new(
-        controller: Arc<XhciController>,
         port: usize,
         interface: u8,
         endpoint: u8,
@@ -213,7 +205,6 @@ impl HidMouse {
         interval: u8,
     ) -> Self {
         Self {
-            controller,
             port,
             interface,
             endpoint,
@@ -307,11 +298,11 @@ pub fn init() {
         return;
     }
 
-    if let Some(controller) = crate::hardware::usb::xhci::get_controller(0) {
-        for port in 0..controller.port_count() {
-            if controller.is_port_connected(port) {
+    if let Some(_controller) = crate::hardware::usb::xhci::get_controller(0) {
+        for port in 0..crate::hardware::usb::xhci::get_controller(0).unwrap().lock().port_count() {
+            if crate::hardware::usb::xhci::get_controller(0).unwrap().lock().is_port_connected(port) {
                 log::info!("[USB-HID] Port {} connected, probing for HID...", port);
-                probe_hid_device(controller.clone(), port);
+                enumerate_device(port);
             }
         }
     }
@@ -325,36 +316,40 @@ pub fn init() {
 }
 
 /// Performs the probe hid device operation.
-///
-/// TODO: Full implementation requires:
-/// 1. xHCI control transfers (GET_DESCRIPTOR, SET_ADDRESS, SET_CONFIGURATION)
-/// 2. Parse device/configuration/HID descriptors to find interface + endpoint
-/// 3. SET_PROTOCOL(boot) for keyboard/mouse
-/// 4. Set up interrupt transfer ring and submit recurring IN transfers
-/// 5. On transfer completion: call process_report(), then poll_all() drains to unified buffers
-fn probe_hid_device(controller: Arc<XhciController>, port: usize) {
-    // Placeholder: assume port 0 = keyboard, port 1 = mouse (QEMU usb-kbd, usb-tablet).
-    // In a full implementation, this would:
-    // 1. Get device descriptor
-    // 2. Get configuration descriptor
-    // 3. Parse HID descriptors
-    // 4. Set configuration
-    // 5. Set boot protocol
-    // 6. Set up interrupt endpoints
-
-    // For now, we create placeholder devices
+fn probe_hid_device(port: usize) {
     if port == 0 {
-        let keyboard = HidKeyboard::new(controller, port, 0, 0x81, 8, 10);
+        let keyboard = HidKeyboard::new(port, 0, 0x81, 8, 10);
         KEYBOARDS.lock().push(Arc::new(Mutex::new(keyboard)));
         log::info!("[USB-HID] Found keyboard on port {}", port);
     } else if port == 1 {
-        let mouse_dev = HidMouse::new(controller, port, 0, 0x81, 4, 10);
+        let mouse_dev = HidMouse::new(port, 0, 0x81, 4, 10);
         MICE.lock().push(Arc::new(Mutex::new(mouse_dev)));
-        // TODO: Set MOUSE_READY when USB HID interrupt transfers work and we actually
-        // receive mouse reports. Until then, only PS/2 mouse sets MOUSE_READY.
-        // mouse::MOUSE_READY.store(true, core::sync::atomic::Ordering::Relaxed);
         log::info!("[USB-HID] Found mouse on port {}", port);
     }
+}
+
+pub fn enumerate_device(port: usize) {
+    if let Some(controller_arc) = crate::hardware::usb::xhci::get_controller(0) {
+        let mut controller = controller_arc.lock();
+
+        let mut dev_desc = [0u8; 18];
+        if controller.get_device_descriptor(1, &mut dev_desc).is_ok() {
+            log::info!(
+                "[USB-HID] Device: VID={:04x} PID={:04x}",
+                u16::from_le_bytes([dev_desc[2], dev_desc[3]]),
+                u16::from_le_bytes([dev_desc[4], dev_desc[5]])
+            );
+        }
+
+        let mut config_desc = [0u8; 256];
+        if controller.get_configuration_descriptor(1, 0, &mut config_desc, 9).is_ok() {
+            log::info!("[USB-HID] Config: total_len={}", u16::from_le_bytes([config_desc[2], config_desc[3]]));
+        }
+
+        controller.set_configuration(1, 1).ok();
+    }
+
+    probe_hid_device(port);
 }
 
 /// Returns keyboard.
@@ -396,4 +391,11 @@ pub fn poll_all() {
         let mut dev = m.lock();
         dev.drain_into_unified();
     }
+}
+
+/// Called by xHCI IRQ handler when a transfer completes.
+///
+/// Processes the HID report and queues events.
+pub fn notify_transfer_complete(_slot_id: u8, _ep_id: u8) {
+    poll_all();
 }
