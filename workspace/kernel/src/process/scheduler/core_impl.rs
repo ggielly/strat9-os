@@ -716,6 +716,16 @@ impl Scheduler {
         if (self as *const Self).is_null() {
             return 0;
         }
+        // Early boot: before the first real task is running, keep all new tasks
+        // on the BSP. Spreading init/shell/status across CPUs at this point can
+        // strand boot-critical work on AP scheduler instances that have not yet
+        // entered their steady-state scheduling loop.
+        if self.cpus.iter().all(|cpu| cpu.current_task.is_none()) {
+            crate::serial_println!(
+                "[trace][sched] select_cpu_for_task early-boot best=0"
+            );
+            return 0;
+        }
         let mut best = 0usize;
         let mut best_load = usize::MAX;
         for (idx, cpu) in self.cpus.iter().enumerate() {

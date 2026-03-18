@@ -16,12 +16,14 @@ use crate::{
     memory::{allocate_dma_frame, paging, phys_to_virt},
 };
 use alloc::{sync::Arc, vec::Vec};
+use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use spin::Mutex;
 
 const XHCI_MMIO_SIZE: usize = 0x10000;
 const XHCI_PORT_REG_BASE: usize = 0x400;
 const XHCI_PORT_REG_STRIDE: usize = 0x10;
+const XHCI_RING_TRBS: usize = 64;
 
 const USBCMD_RUN_STOP: u32 = 1 << 0;
 const USBCMD_HCRST: u32 = 1 << 1;
@@ -263,6 +265,7 @@ pub struct XhciController {
     ctrl_ring_phys: u64,
     ctrl_ring_deq: usize,
     ctrl_ring_cycle: bool,
+    enumeration_ready: bool,
 }
 
 unsafe impl Send for XhciController {}
@@ -316,6 +319,7 @@ impl XhciController {
             ctrl_ring_phys: 0,
             ctrl_ring_deq: 0,
             ctrl_ring_cycle: true,
+            enumeration_ready: false,
         };
 
         controller.init()?;
@@ -325,41 +329,41 @@ impl XhciController {
     /// Performs the init operation.
     fn init(&mut self) -> Result<(), &'static str> {
         unsafe {
-            let op = &mut *self.op_regs;
-
             for _ in 0..100_000 {
-                if op.usbsts & USBSTS_CNR == 0 {
+                if self.read_usbsts() & USBSTS_CNR == 0 {
                     break;
                 }
                 core::hint::spin_loop();
             }
-            if op.usbsts & USBSTS_CNR != 0 {
+            if self.read_usbsts() & USBSTS_CNR != 0 {
                 return Err("xHCI: controller not ready (CNR)");
             }
 
-            op.usbcmd &= !USBCMD_RUN_STOP;
+            let mut usbcmd = self.read_usbcmd();
+            usbcmd &= !USBCMD_RUN_STOP;
+            self.write_usbcmd(usbcmd);
             for _ in 0..100_000 {
-                if op.usbsts & USBSTS_HCH != 0 {
+                if self.read_usbsts() & USBSTS_HCH != 0 {
                     break;
                 }
                 core::hint::spin_loop();
             }
-            if op.usbsts & USBSTS_HCH == 0 {
+            if self.read_usbsts() & USBSTS_HCH == 0 {
                 return Err("xHCI: controller did not halt");
             }
 
-            op.usbcmd |= USBCMD_HCRST;
+            self.write_usbcmd(self.read_usbcmd() | USBCMD_HCRST);
             for _ in 0..100_000 {
-                if op.usbcmd & USBCMD_HCRST == 0 {
+                if self.read_usbcmd() & USBCMD_HCRST == 0 {
                     break;
                 }
                 core::hint::spin_loop();
             }
-            if op.usbcmd & USBCMD_HCRST != 0 {
+            if self.read_usbcmd() & USBCMD_HCRST != 0 {
                 return Err("xHCI: controller reset timed out");
             }
             let mut cnr_timeout = 1_000_000u32;
-            while op.usbsts & USBSTS_CNR != 0 {
+            while self.read_usbsts() & USBSTS_CNR != 0 {
                 if cnr_timeout == 0 {
                     return Err("xHCI: CNR did not clear after reset");
                 }
@@ -381,12 +385,14 @@ impl XhciController {
             self.init_interrupter()?;
             self.init_ctrl_ring()?;
 
-            op.usbcmd |= USBCMD_RUN_STOP;
-            op.usbcmd |= USBCMD_INTE;
-            let max_slots = (*self.cap_regs).hcsparams1 & 0xFF;
-            op.config = max_slots;
+            let max_slots = self.max_device_slots();
+            self.write_config(max_slots);
+            self.write_usbcmd(self.read_usbcmd() | USBCMD_RUN_STOP | USBCMD_INTE);
 
-            self.enable_slot()?;
+            // The command/event path is initialized, but full slot/device
+            // enumeration is not stable yet. Do not issue Enable Slot during
+            // boot: a broken command path must not block the whole kernel.
+            self.enumeration_ready = false;
         }
         Ok(())
     }
@@ -397,19 +403,22 @@ impl XhciController {
         self.cmd_ring_phys = cmd_frame.start_address.as_u64();
         self.cmd_ring = phys_to_virt(self.cmd_ring_phys) as *mut Trb;
         core::ptr::write_bytes(self.cmd_ring as *mut u8, 0, 4096);
+        core::ptr::write(
+            self.cmd_ring.add(XHCI_RING_TRBS - 1),
+            Trb::link(self.cmd_ring_phys, true),
+        );
+        self.write_crcr(self.cmd_ring_phys | 1);
 
         let event_frame = allocate_dma_frame().ok_or("Failed to allocate event ring")?;
         self.event_ring_phys = event_frame.start_address.as_u64();
         self.event_ring = phys_to_virt(self.event_ring_phys) as *mut Trb;
         core::ptr::write_bytes(self.event_ring as *mut u8, 0, 4096);
 
-        let dev_frame = allocate_dma_frame().ok_or("Failed to allocate device context")?;
+        let dev_frame = allocate_dma_frame().ok_or("Failed to allocate DCBAA")?;
         self.device_ctx_phys = dev_frame.start_address.as_u64();
         self.device_ctx = phys_to_virt(self.device_ctx_phys) as *mut u8;
         core::ptr::write_bytes(self.device_ctx, 0, 4096);
-
-        let dcbaap = &mut (*self.op_regs).dcbaap;
-        *dcbaap = self.device_ctx_phys;
+        self.write_dcbaap(self.device_ctx_phys);
 
         Ok(())
     }
@@ -424,16 +433,16 @@ impl XhciController {
         let erst_entry = erst_virt as *mut u8;
         let addr_bytes = self.event_ring_phys.to_le_bytes();
         core::ptr::copy_nonoverlapping(addr_bytes.as_ptr(), erst_entry, 8);
-        let seg_size: u32 = 64;
+        let seg_size: u32 = XHCI_RING_TRBS as u32;
         let size_bytes = seg_size.to_le_bytes();
         core::ptr::copy_nonoverlapping(size_bytes.as_ptr(), erst_entry.add(8), 4);
 
         let ir = &mut (*self.rt_regs).ir[0];
-        ir.erstsz = 1;
+        write_volatile(core::ptr::addr_of_mut!(ir.erstsz), 1);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        ir.erstba = erst_phys;
-        ir.iman = 3;
-        ir.erdp = self.event_ring_phys;
+        write_volatile(core::ptr::addr_of_mut!(ir.erstba), erst_phys);
+        write_volatile(core::ptr::addr_of_mut!(ir.erdp), self.event_ring_phys);
+        write_volatile(core::ptr::addr_of_mut!(ir.iman), 3);
 
         Ok(())
     }
@@ -465,6 +474,34 @@ impl XhciController {
         let port_offset = XHCI_PORT_REG_BASE + (port * XHCI_PORT_REG_STRIDE);
         let portsc_ptr = (self.op_regs as *const u8).add(port_offset) as *mut u32;
         portsc_ptr.write_volatile(val);
+    }
+
+    unsafe fn read_usbcmd(&self) -> u32 {
+        read_volatile(core::ptr::addr_of!((*self.op_regs).usbcmd))
+    }
+
+    unsafe fn write_usbcmd(&self, value: u32) {
+        write_volatile(core::ptr::addr_of_mut!((*self.op_regs).usbcmd), value);
+    }
+
+    unsafe fn read_usbsts(&self) -> u32 {
+        read_volatile(core::ptr::addr_of!((*self.op_regs).usbsts))
+    }
+
+    unsafe fn write_crcr(&self, value: u64) {
+        write_volatile(core::ptr::addr_of_mut!((*self.op_regs).crcr), value);
+    }
+
+    unsafe fn write_dcbaap(&self, value: u64) {
+        write_volatile(core::ptr::addr_of_mut!((*self.op_regs).dcbaap), value);
+    }
+
+    unsafe fn write_config(&self, value: u32) {
+        write_volatile(core::ptr::addr_of_mut!((*self.op_regs).config), value);
+    }
+
+    fn max_device_slots(&self) -> u32 {
+        unsafe { read_volatile(core::ptr::addr_of!((*self.cap_regs).hcsparams1)) & 0xFF }
     }
 
     /// Enables slot.
@@ -685,6 +722,10 @@ impl XhciController {
         slot_id: u8,
         buf: &mut [u8; 18],
     ) -> Result<usize, &'static str> {
+        if !self.enumeration_ready {
+            let _ = slot_id;
+            return Err("xHCI enumeration is not ready");
+        }
         let setup = [
             0x80,
             0x06,
@@ -705,6 +746,9 @@ impl XhciController {
         buf: &mut [u8],
         len: usize,
     ) -> Result<usize, &'static str> {
+        if !self.enumeration_ready {
+            return Err("xHCI enumeration is not ready");
+        }
         let setup = [
             0x80,
             0x06,
@@ -719,6 +763,10 @@ impl XhciController {
     }
 
     pub fn set_address(&mut self, slot_id: u8, address: u8) -> Result<(), &'static str> {
+        if !self.enumeration_ready {
+            let _ = (slot_id, address);
+            return Err("xHCI enumeration is not ready");
+        }
         unsafe {
             self.cmd_ring_enqueue(Trb {
                 d0: 0,
@@ -736,6 +784,10 @@ impl XhciController {
     }
 
     pub fn set_configuration(&mut self, slot_id: u8, config_value: u8) -> Result<(), &'static str> {
+        if !self.enumeration_ready {
+            let _ = (slot_id, config_value);
+            return Err("xHCI enumeration is not ready");
+        }
         let setup = [
             0x00,
             0x09,
@@ -783,6 +835,7 @@ pub fn init() {
         );
 
         let irq = pci_dev.interrupt_line;
+        pci_dev.enable_memory_space();
         pci_dev.enable_bus_master();
 
         match unsafe { XhciController::new(pci_dev) } {
@@ -812,7 +865,7 @@ pub fn get_controller(index: usize) -> Option<Arc<Mutex<XhciController>>> {
 
 /// Returns whether available.
 pub fn is_available() -> bool {
-    XHCI_INITIALIZED.load(Ordering::Relaxed)
+    XHCI_INITIALIZED.load(Ordering::Relaxed) && !XHCI_CONTROLLERS.lock().is_empty()
 }
 
 /// Handles xHCI interrupts.

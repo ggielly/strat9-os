@@ -131,7 +131,7 @@ const STEAL_COOLDOWN_TICKS: u64 = 2;
 /// Performs the active cpu count operation.
 #[inline]
 fn active_cpu_count() -> usize {
-    percpu::cpu_count()
+    crate::arch::x86_64::smp::cpu_count()
         .max(1)
         .min(crate::arch::x86_64::percpu::MAX_CPUS)
 }

@@ -5,7 +5,10 @@ static FINISH_INTERRUPT_TRACE_BUDGET: core::sync::atomic::AtomicU32 =
 
 /// Initialize the scheduler
 pub fn init_scheduler() {
-    let cpu_count = percpu::cpu_count().max(1);
+    // Build scheduler state only for CPUs that are actually online. Using the
+    // registered per-CPU count here can strand runnable tasks on AP slots that
+    // never reached the scheduler gate.
+    let cpu_count = crate::arch::x86_64::smp::cpu_count().max(1);
     crate::serial_println!(
         "[trace][sched] init_scheduler enter cpu_count={}",
         cpu_count

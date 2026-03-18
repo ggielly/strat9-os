@@ -298,14 +298,10 @@ pub fn init() {
         return;
     }
 
-    if let Some(_controller) = crate::hardware::usb::xhci::get_controller(0) {
-        for port in 0..crate::hardware::usb::xhci::get_controller(0).unwrap().lock().port_count() {
-            if crate::hardware::usb::xhci::get_controller(0).unwrap().lock().is_port_connected(port) {
-                log::info!("[USB-HID] Port {} connected, probing for HID...", port);
-                enumerate_device(port);
-            }
-        }
-    }
+    // xHCI host bring-up is present, but slot/endpoint enumeration is not yet
+    // robust enough to run during kernel boot. Keep HID disabled until the
+    // command path is completed.
+    log::warn!("[USB-HID] xHCI enumeration not enabled yet, skipping HID probe");
 
     HID_INITIALIZED.store(true, Ordering::SeqCst);
     log::info!(
