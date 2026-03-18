@@ -1,4 +1,27 @@
 // Buddy allocator implementation
+//
+// DIAGNOSTIC NOTE — free-list refcount sentinel not yet enforced:
+//
+// This allocator currently resets `FrameMeta::refcount` to 0 in both
+// `mark_block_free()` and `mark_block_allocated()`. That means it does NOT yet
+// maintain the stronger OSTD-style invariant:
+//
+//   free-list frame => refcount == REFCOUNT_UNUSED
+//
+// As a result, `FrameAllocOptions::allocate()` in `frame.rs` cannot safely use
+// the defensive `CAS(REFCOUNT_UNUSED -> 0)` that would catch a frame appearing
+// twice in the buddy free list. The allocator still works through its own
+// bitmap + free-list discipline, but it currently lacks that extra fail-fast
+// corruption check.
+//
+// Planned hardening:
+// - `mark_block_free()` should stamp `REFCOUNT_UNUSED`
+// - `mark_block_allocated()` should stop clobbering the sentinel prematurely
+// - `FrameAllocOptions::allocate()` can then reinstate the CAS-based check
+//
+// This is primarily a robustness / integrity hardening item. It is not the
+// cause of the earlier unzeroed page-table bug, but it would make allocator
+// corruption fail fast instead of silently aliasing memory.
 
 use crate::{
     boot::entry::{MemoryKind, MemoryRegion},

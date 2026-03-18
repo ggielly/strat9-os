@@ -347,7 +347,7 @@ impl Scheduler {
     /// If `target` is `Some(tid)`, only reaps that child; otherwise, reaps any child.
     /// Returns `WaitChildResult` indicating the outcome.
     /// Must be called with the scheduler lock held.
-    /// 
+    ///
     pub fn try_reap_child_locked(
         &mut self,
         parent: TaskId,
@@ -472,13 +472,15 @@ impl Scheduler {
         }
         let cloned = next_task.clone();
         let strong_after = Arc::strong_count(&cloned);
-        // Race/corruption diagnostic: validate Arc after pick.
+        // Racy, pifometric diagnostic only: strong_count is heuristic here,
+        // not a correctness proof. We keep it as an early signal for obviously
+        // absurd Arc states while debugging scheduler corruption.
         if strong_after == 0 || strong_after > (isize::MAX as usize) {
             unsafe {
                 core::arch::asm!("mov al, 'C'; out 0xe9, al", out("al") _);
             }
             crate::serial_force_println!(
-                "[RACE] pick_next_task: corrupt Arc tid={} strong_count={}",
+                "[RACE] pick_next_task: suspicious Arc heuristic tid={} strong_count={}",
                 next_task.id.as_u64(),
                 strong_after
             );
@@ -721,9 +723,7 @@ impl Scheduler {
         // strand boot-critical work on AP scheduler instances that have not yet
         // entered their steady-state scheduling loop.
         if self.cpus.iter().all(|cpu| cpu.current_task.is_none()) {
-            crate::serial_println!(
-                "[trace][sched] select_cpu_for_task early-boot best=0"
-            );
+            crate::serial_println!("[trace][sched] select_cpu_for_task early-boot best=0");
             return 0;
         }
         let mut best = 0usize;

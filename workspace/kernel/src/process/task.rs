@@ -1043,6 +1043,14 @@ impl Task {
 pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) {
     // Temporary safety mode: force legacy FXSAVE/FXRSTOR path.
     // This avoids XSAVE/XRSTOR state-size mismatches that can corrupt task memory.
+    //
+    // TODO : re-enable XSAVE only after the kernel has a proven-stable end-to-end path
+    // for: 
+    //     (1) xsave area sizing/allocation, 
+    //     (2) XCR0 transitions per task,
+    //     (3) save/restore across scheduler, syscall, and interrupt returns.
+    //
+    // Until then old_xcr0/new_xcr0 stay intentionally unused in this path.
     let _ = target.old_xcr0;
     let _ = target.new_xcr0;
     switch_context_fxsave(

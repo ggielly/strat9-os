@@ -25,7 +25,10 @@
 //! trace on every `drop` of a specific lock instance — useful when hunting
 //! deadlocks.
 
-use super::{guardian::{Guardian, GuardianState, IrqDisabled}, IrqDisabledToken};
+use super::{
+    guardian::{Guardian, GuardianState, IrqDisabled},
+    IrqDisabledToken,
+};
 use core::{
     cell::UnsafeCell,
     marker::PhantomData,
@@ -36,7 +39,7 @@ use core::{
 
 static DEBUG_WATCH_LOCK_ADDR: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-// ─── SpinLock ──────────────────────────────────────────────────────────────────
+// =========================== SpinLock ========================================
 
 /// A spinlock parameterised by a [`Guardian`].
 ///
@@ -120,7 +123,10 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
             unsafe { core::arch::asm!("mov al, 'S'; out 0xe9, al", out("al") _) };
         }
 
-        SpinLockGuard { lock: self, state: ManuallyDrop::new(state) }
+        SpinLockGuard {
+            lock: self,
+            state: ManuallyDrop::new(state),
+        }
     }
 
     /// Try to acquire the lock without spinning.
@@ -146,7 +152,10 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
             if slab_addr != usize::MAX && slab_addr == self_addr {
                 unsafe { core::arch::asm!("mov al, 'S'; out 0xe9, al", out("al") _) };
             }
-            Some(SpinLockGuard { lock: self, state: ManuallyDrop::new(state) })
+            Some(SpinLockGuard {
+                lock: self,
+                state: ManuallyDrop::new(state),
+            })
         } else {
             G::exit(state);
             None
@@ -168,7 +177,7 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
     }
 }
 
-// ─── IrqDisabled-specific extensions ────────────────────────────────────────────
+// =========================== IrqDisabled-specific extensions 
 
 impl<T: ?Sized> SpinLock<T, IrqDisabled> {
     /// Try to acquire without touching RFLAGS.
@@ -177,7 +186,16 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
     /// be produced) or the lock is already held. The caller must ensure that
     /// IRQs remain disabled for the entire lifetime of the returned guard.
     pub fn try_lock_no_irqsave(&self) -> Option<SpinLockGuard<'_, T, IrqDisabled>> {
-        let token = IrqDisabledToken::verify()?;
+        let token = match IrqDisabledToken::verify() {
+            Some(token) => token,
+            None => {
+                // Diagnostic only: distinguish "IRQs enabled" from ordinary
+                // lock contention at call sites that intentionally treat both
+                // as a best-effort `None` return in hot paths.
+                unsafe { core::arch::asm!("mov al, 'V'; out 0xe9, al", out("al") _) };
+                return None;
+            }
+        };
         if self
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -212,7 +230,7 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
     }
 }
 
-// ─── Debug helpers ─────────────────────────────────────────────────────────────
+// =========================== Debug helpers 
 
 /// Register a lock address to trace on every drop (serial console output).
 pub fn debug_set_watch_lock_addr(addr: usize) {
@@ -247,7 +265,7 @@ pub fn debug_clear_watch_lock_addr() {
     DEBUG_WATCH_LOCK_ADDR.store(usize::MAX, Ordering::Relaxed);
 }
 
-// ─── SpinLockGuard ────────────────────────────────────────────────────────────
+// =========================== SpinLockGuard ====================================
 
 /// RAII guard that holds the lock and carries the guardian state.
 pub struct SpinLockGuard<'a, T: ?Sized, G: Guardian = IrqDisabled> {

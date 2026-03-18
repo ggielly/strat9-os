@@ -285,11 +285,13 @@ fn drain_post_switch_locked(
         requeue_task = cpu.task_to_requeue.take();
     }
     if let Some(task) = requeue_task {
-        // Race/corruption diagnostic: validate Arc before enqueue.
+        // Racy, pifometric diagnostic only: strong_count is heuristic here and
+        // may change concurrently. Keep it as a debugging hint, not as a proof
+        // that the Arc is actually corrupted.
         let strong_before = Arc::strong_count(&task);
         if strong_before == 0 || strong_before > (isize::MAX as usize) {
             crate::serial_force_println!(
-                "[RACE] drain_post_switch_locked: corrupt Arc tid={} strong_count={}",
+                "[RACE] drain_post_switch_locked: suspicious Arc heuristic tid={} strong_count={}",
                 task.id.as_u64(),
                 strong_before
             );
@@ -330,11 +332,7 @@ pub fn finish_interrupt_switch() {
         .map(|addr| addr.as_u64())
         .unwrap_or(0);
     if should_trace {
-        crate::e9_println!(
-            "[ifs-enter] cpu={} rsp0={:#x}",
-            cpu_index,
-            entry_rsp0
-        );
+        crate::e9_println!("[ifs-enter] cpu={} rsp0={:#x}", cpu_index, entry_rsp0);
     }
 
     // Spin until SCHEDULER is available (released by maybe_preempt_from_interrupt
@@ -645,7 +643,8 @@ pub fn maybe_preempt_from_interrupt(
                 // `finish_interrupt_switch()` on the new stack, matching the
                 // post-switch hooks used by Redox and Maestro.
 
-                let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
+                let stack_top =
+                    next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
 
                 crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
                 crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);

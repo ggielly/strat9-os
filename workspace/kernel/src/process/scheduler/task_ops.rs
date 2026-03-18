@@ -249,10 +249,13 @@ pub fn current_task_clone_spin_debug(trace_label: &str) -> Option<Arc<Task>> {
                     }
                     let arc = cpu.current_task.as_ref().unwrap();
                     let strong = Arc::strong_count(arc);
+                    // Racy, pifometric diagnostic only: strong_count can move
+                    // concurrently, so this is a heuristic for suspicious
+                    // scheduler state, not a formal corruption proof.
                     if strong == 0 || strong > (isize::MAX as usize) / 2 {
                         let ptr = Arc::as_ptr(arc) as *const u8;
                         crate::serial_force_println!(
-                            "[trace][sched] {} corrupt current_task cpu={} strong={:#x} ptr={:p}",
+                            "[trace][sched] {} suspicious current_task heuristic cpu={} strong={:#x} ptr={:p}",
                             trace_label,
                             cpu_index,
                             strong,
