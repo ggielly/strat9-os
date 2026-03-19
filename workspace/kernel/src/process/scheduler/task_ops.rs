@@ -1,4 +1,5 @@
 use super::{runtime_ops::finish_switch, *};
+use crate::memory::UserSliceWrite;
 
 static PENDING_SILO_CLEANUPS: SpinLock<Vec<TaskId>> = SpinLock::new(Vec::new());
 
@@ -16,11 +17,14 @@ pub fn exit_current_task(exit_code: i32) -> ! {
             .clear_child_tid
             .load(core::sync::atomic::Ordering::Relaxed);
         if tidptr != 0 {
-            // Safety: tidptr is a user address in the still-active address space.
-            let ptr = tidptr as *mut u32;
-            // Use is_aligned (pointer alignment check, not user-mapped check).
-            if (tidptr & 3) == 0 && tidptr < 0xFFFF_8000_0000_0000 {
-                unsafe { ptr.write_volatile(0) };
+            let zero = 0u32.to_ne_bytes();
+            // POSIX clear_child_tid targets a userspace u32; keep the existing
+            // alignment check for futex semantics, but validate the mapping via
+            // UserSliceWrite instead of dereferencing the raw userspace pointer.
+            if (tidptr & 3) == 0 {
+                if let Ok(user) = UserSliceWrite::new(tidptr, zero.len()) {
+                    user.copy_from(&zero);
+                }
                 // Futex wake: wake all threads waiting on this address (e.g. pthread_join).
                 let _ = crate::syscall::futex::sys_futex_wake(tidptr, u32::MAX);
             }

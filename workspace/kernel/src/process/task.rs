@@ -391,7 +391,14 @@ impl Task {
     /// legacy `ret` trampoline and must explicitly re-enable interrupts in
     /// `task_post_switch_enter`.
     pub fn seed_kernel_interrupt_frame_from_context(&self) {
+        let stack_base = self.kernel_stack.virt_base.as_u64();
+        let stack_top = stack_base + self.kernel_stack.size as u64;
         let saved_rsp = unsafe { (*self.context.get()).saved_rsp as *const u64 };
+        let saved_rsp_val = saved_rsp as u64;
+        debug_assert!(
+            saved_rsp_val >= stack_base && saved_rsp_val.saturating_add(7 * 8) <= stack_top,
+            "saved_rsp outside kernel stack while seeding interrupt frame"
+        );
         let ret_target = unsafe { *saved_rsp.add(6) };
         // Always set IF=1 (bit 9) so IRQ-driven resumes keep interrupts enabled.
         // First-launch tasks still need an explicit sti() in

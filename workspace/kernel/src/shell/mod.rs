@@ -274,8 +274,8 @@ pub extern "C" fn shell_main() -> ! {
     // Display welcome message using ASCII for robust terminal rendering.
     shell_println!("");
     shell_println!("+--------------------------------------------------------------+");
-    shell_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)            |");
-    shell_println!("|         Type 'help' for available commands                  |");
+    shell_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)             |");
+    shell_println!("|         Type 'help' for available commands                   |");
     shell_println!("+--------------------------------------------------------------+");
     shell_println!("");
 
@@ -283,6 +283,7 @@ pub extern "C" fn shell_main() -> ! {
 
     let mut last_blink_tick = 0;
     let mut cursor_visible = false;
+
     // Cap per-loop mouse work to avoid starving timer ticks when dragging.
     const MAX_MOUSE_EVENTS_PER_TURN: usize = 16;
     const SCROLLBAR_DRAG_MIN_TICKS: u64 = 1;
