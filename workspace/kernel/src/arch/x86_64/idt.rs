@@ -1790,8 +1790,8 @@ extern "x86-interrupt" fn xhci_handler(_stack_frame: InterruptStackFrame) {
     if super::apic::is_initialized() {
         super::apic::eoi();
     } else {
-        let irq = crate::hardware::usb::xhci::XHCI_IRQ_LINE
-            .load(core::sync::atomic::Ordering::Relaxed);
+        let irq =
+            crate::hardware::usb::xhci::XHCI_IRQ_LINE.load(core::sync::atomic::Ordering::Relaxed);
         pic::end_of_interrupt(irq);
     }
 }

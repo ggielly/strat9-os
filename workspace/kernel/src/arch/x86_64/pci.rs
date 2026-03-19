@@ -488,10 +488,8 @@ impl Iterator for PciScanner {
                 }
 
                 // Device exists at function 0 — do the full probe.
-                let Some(dev) = probe_from_word00(
-                    PciAddress::new(bus, self.device, 0),
-                    word00,
-                ) else {
+                let Some(dev) = probe_from_word00(PciAddress::new(bus, self.device, 0), word00)
+                else {
                     self.advance_to_next_device();
                     continue;
                 };
@@ -729,7 +727,10 @@ fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
         let rsp = &dummy as *const u64 as u64;
         crate::serial_println!("[PCI] Scanning PCI bus, rsp={:#x}", rsp);
         *cache = Some(PciScanner::new().collect());
-        crate::serial_println!("[PCI] PCI scan complete, found {} devices", cache.as_ref().unwrap().len());
+        crate::serial_println!(
+            "[PCI] PCI scan complete, found {} devices",
+            cache.as_ref().unwrap().len()
+        );
     }
     f(cache.as_deref().unwrap_or(&[]))
 }

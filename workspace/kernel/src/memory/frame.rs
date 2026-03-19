@@ -286,7 +286,6 @@ pub mod frame_flags {
 /// Bytes used by the named fields of [`FrameMeta`] before the padding.
 const FRAME_META_FIELDS_SIZE: usize = 8 + 8 + 4 + 1 + 3 + 4; // next+prev+flags+order+_reserved0+refcount
 
-
 /// Intriside metadata for a physical frame.
 /// - 64 bytes (one cache line) for efficient atomic access and to avoid false sharing.
 
@@ -302,14 +301,14 @@ pub struct FrameMeta {
 }
 
 impl FrameMeta {
-    
     /// Create emplty metadata ready to be initialized by the boot allocator.
     pub const fn new() -> Self {
         Self {
             next: AtomicU64::new(FRAME_META_LINK_NONE),
             prev: AtomicU64::new(FRAME_META_LINK_NONE),
             flags: AtomicU32::new(0),
-            order: AtomicU8::new(0),    /// 
+            order: AtomicU8::new(0),
+            ///
             _reserved0: [0; 3],
             refcount: AtomicU32::new(0),
             _cacheline_pad: [0; FRAME_META_SIZE - FRAME_META_FIELDS_SIZE],
@@ -392,12 +391,11 @@ const _: () = {
     assert!(mem::size_of::<FrameMeta>() == FRAME_META_SIZE);
 };
 
-
-/// The metadata array size for `ram_size` bytes, rounded up to the nearest page since each frame 
+/// The metadata array size for `ram_size` bytes, rounded up to the nearest page since each frame
 /// has a dedicated metadata entry.
 
 /// @param ram_size Total RAM size to be covered by the metadata (in bytes).
-/// 
+///
 pub const fn metadata_size_for(ram_size: u64) -> u64 {
     let frames = (ram_size / PAGE_SIZE) + if ram_size % PAGE_SIZE == 0 { 0 } else { 1 };
     frames * FRAME_META_SIZE as u64

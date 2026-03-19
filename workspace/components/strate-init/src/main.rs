@@ -694,7 +694,10 @@ fn boot_silos(silos: Vec<SiloDef>) {
                 "elf" | "wasm-runtime" => {
                     log(&alloc::format!("[init]   -> Strate: {}\n", str_def.name));
                     if str_def.binary.starts_with("/initfs/") {
-                        log(&alloc::format!("[init]     module path {}\n", str_def.binary));
+                        log(&alloc::format!(
+                            "[init]     module path {}\n",
+                            str_def.binary
+                        ));
                         let mod_h = match unsafe {
                             strat9_syscall::syscall2(
                                 number::SYS_MODULE_LOAD,

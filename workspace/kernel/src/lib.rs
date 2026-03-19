@@ -352,10 +352,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 1: serial output (earliest debug output)
     // =============================================
+    arch::x86_64::boot_timestamp::init();
     crate::e9_println!("B0 kernel_main");
     init_serial();
     init_logger();
-    arch::x86_64::boot_timestamp::init();
     boot_milestone!("Kernel entry");
 
     // =============================================

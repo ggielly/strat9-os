@@ -142,6 +142,7 @@ pub fn calibrate_apic_timer() -> u32 {
 
     // PIT channel 2 count for ~10ms: 1193182 / 100 = 11932
     const PIT_10MS_COUNT: u16 = 11932;
+    const PIT_WINDOW_NS: u64 = (PIT_10MS_COUNT as u64) * 1_000_000_000 / (PIT_FREQUENCY as u64);
     // Maximum poll iterations to prevent infinite loop
     const MAX_POLL_ITERATIONS: u32 = 10_000_000;
 
@@ -217,6 +218,7 @@ pub fn calibrate_apic_timer() -> u32 {
     // Step 4: Enable PIT channel 2 gate — starts PIT counting
     // APIC timer is already counting from step 3, so the measurement
     // window begins precisely here.  NO LOG MESSAGES until poll completes.
+    let tsc_start = super::rdtsc();
     unsafe {
         let val = inb(0x61);
         outb(0x61, (val | 0x01) & 0xFD); // Set bit 0 (gate), clear bit 1 (speaker)
@@ -246,6 +248,7 @@ pub fn calibrate_apic_timer() -> u32 {
             return 0;
         }
     }
+    let tsc_delta = super::rdtsc().wrapping_sub(tsc_start);
 
     // Step 6: Read APIC timer current count — end of critical section
     // SAFETY: APIC is initialized
@@ -326,6 +329,13 @@ pub fn calibrate_apic_timer() -> u32 {
     log::info!(
         "Estimated CPU frequency: {} MHz (based on APIC ticks)",
         estimated_cpu_freq_mhz
+    );
+    super::boot_timestamp::calibrate(PIT_WINDOW_NS, tsc_delta);
+    log::info!(
+        "Measured TSC frequency: {} KHz (window={} ns, delta={})",
+        super::boot_timestamp::tsc_khz(),
+        PIT_WINDOW_NS,
+        tsc_delta
     );
 
     // Store calibration result

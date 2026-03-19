@@ -16,8 +16,10 @@ use crate::{
     memory::{allocate_dma_frame, paging, phys_to_virt},
 };
 use alloc::{sync::Arc, vec::Vec};
-use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::{
+    ptr::{read_volatile, write_volatile},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+};
 use spin::Mutex;
 
 const XHCI_MMIO_SIZE: usize = 0x10000;
@@ -151,7 +153,8 @@ impl Trb {
     }
 
     fn setup_stage(addr: u64, cycle: bool) -> Self {
-        let mut d3 = (TRB_TYPE_SETUP_STAGE << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
+        let mut d3 =
+            (TRB_TYPE_SETUP_STAGE << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
         d3 |= TRB_IDT;
         Self {
             d0: (addr & 0xFFFFFFFF) as u32,
@@ -162,7 +165,8 @@ impl Trb {
     }
 
     fn data_stage(addr: u64, len: u32, dir_in: bool, cycle: bool, ioc: bool) -> Self {
-        let mut d3 = (TRB_TYPE_DATA_STAGE << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
+        let mut d3 =
+            (TRB_TYPE_DATA_STAGE << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
         if dir_in {
             d3 |= TRB_DIR_IN;
         }
@@ -180,7 +184,8 @@ impl Trb {
     }
 
     fn status_stage(cycle: bool, dir_in: bool) -> Self {
-        let mut d3 = (TRB_TYPE_STATUS_STAGE << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
+        let mut d3 =
+            (TRB_TYPE_STATUS_STAGE << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
         if dir_in {
             d3 |= TRB_DIR_IN;
         }
@@ -571,8 +576,10 @@ impl XhciController {
                 let new_deq = (idx + 1) % 64;
                 self.event_ring_deq.store(new_deq, Ordering::Release);
                 if new_deq == 0 {
-                    self.event_ring_cycle
-                        .store(!self.event_ring_cycle.load(Ordering::Acquire), Ordering::Release);
+                    self.event_ring_cycle.store(
+                        !self.event_ring_cycle.load(Ordering::Acquire),
+                        Ordering::Release,
+                    );
                 }
                 let ir = &mut (*self.rt_regs).ir[0];
                 ir.erdp = (self.event_ring_phys + (new_deq as u64) * 16) | (1 << 3);
@@ -726,16 +733,7 @@ impl XhciController {
             let _ = slot_id;
             return Err("xHCI enumeration is not ready");
         }
-        let setup = [
-            0x80,
-            0x06,
-            0x00,
-            0x01,
-            0x00,
-            0x00,
-            18,
-            0x00,
-        ];
+        let setup = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
         self.ctrl_transfer(slot_id, &setup, Some(buf), 18)
     }
 
@@ -788,16 +786,7 @@ impl XhciController {
             let _ = (slot_id, config_value);
             return Err("xHCI enumeration is not ready");
         }
-        let setup = [
-            0x00,
-            0x09,
-            config_value,
-            0x00,
-            0x00,
-            0x00,
-            0x00,
-            0x00,
-        ];
+        let setup = [0x00, 0x09, config_value, 0x00, 0x00, 0x00, 0x00, 0x00];
         self.ctrl_transfer(slot_id, &setup, None, 0)?;
         Ok(())
     }
@@ -842,7 +831,9 @@ pub fn init() {
             Ok(controller) => {
                 log::info!("[xHCI] Initialized with {} ports", controller.port_count());
                 XHCI_IRQ_LINE.store(irq, Ordering::Relaxed);
-                XHCI_CONTROLLERS.lock().push(Arc::new(Mutex::new(controller)));
+                XHCI_CONTROLLERS
+                    .lock()
+                    .push(Arc::new(Mutex::new(controller)));
                 crate::arch::x86_64::idt::register_xhci_irq(irq);
             }
             Err(e) => {
@@ -882,12 +873,11 @@ pub fn handle_interrupt() {
                     let idx = controller.event_ring_deq.load(Ordering::Acquire);
                     let trb = core::ptr::read_volatile(controller.event_ring.add(idx));
 
-                    let expected_c =
-                        if controller.event_ring_cycle.load(Ordering::Acquire) {
-                            TRB_CYCLE
-                        } else {
-                            0
-                        };
+                    let expected_c = if controller.event_ring_cycle.load(Ordering::Acquire) {
+                        TRB_CYCLE
+                    } else {
+                        0
+                    };
                     if (trb.d3 & TRB_CYCLE) != expected_c {
                         break;
                     }

@@ -302,11 +302,9 @@ unsafe impl GlobalAlloc for LockedHeap {
                 );
             }
 
-            crate::sync::with_irqs_disabled(|token| {
-                match memory::allocate_frames(token, order) {
-                    Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,
-                    Err(_) => ptr::null_mut(),
-                }
+            crate::sync::with_irqs_disabled(|token| match memory::allocate_frames(token, order) {
+                Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,
+                Err(_) => ptr::null_mut(),
             })
         }
     }

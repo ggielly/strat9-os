@@ -239,6 +239,10 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 ///
 /// Mirrors Redox switch_finish_hook: minimal work, no serial (avoids lock contention).
 pub fn finish_switch() {
+    let _perf = super::perf_counters::PerfScope::new(
+        &super::perf_counters::CTX_SWITCH_TSC,
+        &super::perf_counters::CTX_SWITCH_COUNT,
+    );
     let cpu_index = current_cpu_index();
     let mut task_to_drop = None;
     {
@@ -349,7 +353,7 @@ pub fn finish_interrupt_switch() {
     // lock corruption).  Panic so we get a stack trace instead of a silent
     // hang.
     // This is around few seconds on recent CPU.
-    
+
     const MAX_IFS_SPINS: usize = 50_000_000;
     let mut task_to_drop = None;
     let mut spins = 0usize;

@@ -55,9 +55,7 @@ pub fn timer_tick() {
     // without touching SCHEDULER. This avoids pathological boot windows where
     // another CPU holds SCHEDULER and this CPU would otherwise defer the first
     // `need_resched` update indefinitely.
-    if cpu_is_valid(cpu_idx)
-        && !FIRST_TICK_FORCE_RESCHED[cpu_idx].swap(true, Ordering::AcqRel)
-    {
+    if cpu_is_valid(cpu_idx) && !FIRST_TICK_FORCE_RESCHED[cpu_idx].swap(true, Ordering::AcqRel) {
         request_force_resched_hint(cpu_idx);
     }
 

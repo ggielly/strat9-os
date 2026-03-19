@@ -414,9 +414,12 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             let _ = mapper.map_to(page, phys_frame, flags, &mut frame_allocator);
         }
         crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_frame(token, crate::memory::PhysFrame {
-                start_address: new_frame.start_address(),
-            });
+            crate::memory::free_frame(
+                token,
+                crate::memory::PhysFrame {
+                    start_address: new_frame.start_address(),
+                },
+            );
         });
         return Err("Failed to map new COW frame");
     }

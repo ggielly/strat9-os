@@ -21,7 +21,6 @@ static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 /// already held by an outer `serial_force_println!` call, which would deadlock.
 static FORCE_LOCK: AtomicU8 = AtomicU8::new(0);
 
-
 #[inline(always)]
 fn force_lock_acquire() -> u64 {
     // Disable IRQs before spinning to prevent a timer IRQ on this CPU from

@@ -34,8 +34,7 @@ static SYSCALL_DIAG_DONE: core::sync::atomic::AtomicBool =
 
 /// Rate-limit counter for the per-syscall ENTER trace (avoid flooding FORCE_LOCK under SMP).
 /// Prints first 20 dispatches unconditionally, then every 10_000.
-static SYSCALL_TRACE_COUNT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static SYSCALL_TRACE_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Budget for logging network send errors to prevent log spam.
 static NET_SEND_ERR_LOG_BUDGET: AtomicU32 = AtomicU32::new(32);
@@ -1053,7 +1052,10 @@ fn sys_debug_log(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let copied = user_buf.copy_to(&mut kbuf);
 
     // Write to E9 (lock-free) to prevent deadlocks
-    crate::e9_println!("[user-debug] {}", core::str::from_utf8(&kbuf[..copied]).unwrap_or("<invalid utf8>"));
+    crate::e9_println!(
+        "[user-debug] {}",
+        core::str::from_utf8(&kbuf[..copied]).unwrap_or("<invalid utf8>")
+    );
 
     if let Some(task) = crate::process::current_task_clone() {
         if let Some(silo_id) = crate::silo::task_silo_id(task.id) {
