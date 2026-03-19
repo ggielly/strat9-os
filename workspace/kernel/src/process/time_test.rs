@@ -6,7 +6,7 @@
 
 use crate::{
     process::{add_task, scheduler::ticks, Task, TaskPriority},
-    syscall::time::{current_time_ns, sys_clock_gettime},
+    syscall::time::{current_time_ns, sys_clock_gettime, CLOCK_MONOTONIC},
 };
 
 fn log_section(title: &str) {
@@ -38,9 +38,12 @@ fn run_time_suite() -> bool {
     // ── 1. clock_gettime returns non-zero ───────────────────────────────────
     log_section("1. CLOCK_GETTIME NON-ZERO");
     let mut s = true;
-    match sys_clock_gettime() {
-        Ok(ns) => {
-            crate::serial_println!("[time-test][STEP] clock_gettime() => {} ns", ns);
+    let mut ts = TimeSpec::from_nanos(0);
+    let ts_ptr = &mut ts as *mut TimeSpec as u64;
+    match sys_clock_gettime(CLOCK_MONOTONIC, ts_ptr) {
+        Ok(ret) => {
+            let ns = ts.to_nanos();
+            crate::serial_println!("[time-test][STEP] clock_gettime() => {} ns (ret={})", ns, ret);
             if ns == 0 {
                 crate::serial_println!("[time-test][ASSERT] FAIL: clock_gettime returned 0");
                 s = false;
@@ -186,7 +189,10 @@ fn run_time_suite() -> bool {
     log_section("8. SYSCALL vs INTERNAL API");
     let mut s = true;
     let internal = current_time_ns();
-    let syscall_val = sys_clock_gettime().unwrap_or(0);
+    let mut ts = TimeSpec::from_nanos(0);
+    let ts_ptr = &mut ts as *mut TimeSpec as u64;
+    let syscall_ret = sys_clock_gettime(CLOCK_MONOTONIC, ts_ptr);
+    let syscall_val = if syscall_ret.is_ok() { ts.to_nanos() } else { 0 };
     crate::serial_println!(
         "[time-test][STEP] internal={} syscall={} delta={}",
         internal,

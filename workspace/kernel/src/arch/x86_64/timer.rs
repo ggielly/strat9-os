@@ -131,6 +131,7 @@ pub fn calibrate_apic_timer() -> u32 {
         apic,
         io::{inb, outb},
     };
+    let saved_flags = super::save_flags_and_cli();
 
     // ========================================================================
     // DEBUG: Verbose logging for timer calibration
@@ -241,6 +242,7 @@ pub fn calibrate_apic_timer() -> u32 {
             unsafe {
                 apic::write_reg(apic::REG_TIMER_INIT, 0);
             }
+            super::restore_flags(saved_flags);
             return 0;
         }
     }
@@ -268,6 +270,7 @@ pub fn calibrate_apic_timer() -> u32 {
     if elapsed == 0 {
         log::error!("APIC timer calibration: ZERO ticks measured!");
         log::error!("  This indicates a serious problem with the APIC timer");
+        super::restore_flags(saved_flags);
         return 0;
     }
 
@@ -294,6 +297,7 @@ pub fn calibrate_apic_timer() -> u32 {
         log::warn!("    - PIT frequency mismatch");
         log::warn!("    - hardware issue");
         log::warn!("  Forcing fallback to PIT timer");
+        super::restore_flags(saved_flags);
         return 0;
     }
 
@@ -312,6 +316,7 @@ pub fn calibrate_apic_timer() -> u32 {
         log::warn!("    - APIC timer running at wrong frequency");
         log::warn!("    - hardware issue");
         log::warn!("  Forcing fallback to PIT timer");
+        super::restore_flags(saved_flags);
         return 0;
     }
 
@@ -333,6 +338,7 @@ pub fn calibrate_apic_timer() -> u32 {
     log::info!("  Estimated CPU: {} MHz", estimated_cpu_freq_mhz);
     log::info!("========================================");
 
+    super::restore_flags(saved_flags);
     elapsed
 }
 

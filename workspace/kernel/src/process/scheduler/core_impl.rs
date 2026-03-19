@@ -237,6 +237,27 @@ impl Scheduler {
     }
 
     pub(super) fn insert_all_task_locked(&mut self, task_id: TaskId, task: Arc<Task>) {
+        assert_eq!(
+            task.id, task_id,
+            "scheduler corruption: insert_all_task_locked task.id={} != task_id={}",
+            task.id.as_u64(),
+            task_id.as_u64()
+        );
+        if self.all_tasks.contains_key(&task_id) {
+            unsafe {
+                core::arch::asm!("mov al, 'D'; out 0xe9, al", out("al") _);
+            }
+            crate::serial_force_println!(
+                "[RACE] insert_all_task_locked: duplicate tid={} all_tasks={} all_tasks_scan={}",
+                task_id.as_u64(),
+                self.all_tasks.len(),
+                self.all_tasks_scan.len()
+            );
+            panic!(
+                "scheduler corruption: duplicate insert_all_task_locked tid={}",
+                task_id.as_u64()
+            );
+        }
         self.all_tasks.insert(task_id, task.clone());
         self.all_tasks_scan.push(task);
         // Race/corruption diagnostic: all_tasks and all_tasks_scan must stay in sync.
@@ -248,6 +269,12 @@ impl Scheduler {
             }
             crate::serial_force_println!(
                 "[RACE] insert_all_task_locked: all_tasks={} != all_tasks_scan={} tid={}",
+                bt_len,
+                scan_len,
+                task_id.as_u64()
+            );
+            panic!(
+                "scheduler corruption: insert_all_task_locked len mismatch all_tasks={} all_tasks_scan={} tid={}",
                 bt_len,
                 scan_len,
                 task_id.as_u64()
@@ -270,6 +297,10 @@ impl Scheduler {
                     "[RACE] remove_all_task_locked: tid={} in all_tasks but NOT in all_tasks_scan",
                     task_id.as_u64()
                 );
+                panic!(
+                    "scheduler corruption: remove_all_task_locked missing scan entry tid={}",
+                    task_id.as_u64()
+                );
             }
         }
         let bt_len = self.all_tasks.len();
@@ -280,6 +311,12 @@ impl Scheduler {
             }
             crate::serial_force_println!(
                 "[RACE] remove_all_task_locked: all_tasks={} != all_tasks_scan={} tid={}",
+                bt_len,
+                scan_len,
+                task_id.as_u64()
+            );
+            panic!(
+                "scheduler corruption: remove_all_task_locked len mismatch all_tasks={} all_tasks_scan={} tid={}",
                 bt_len,
                 scan_len,
                 task_id.as_u64()

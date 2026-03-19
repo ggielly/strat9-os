@@ -167,7 +167,7 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
             sched.cpus.get_mut(cpu_index).and_then(|cpu| {
                 let arc = cpu.current_task.as_ref()?;
                 let strong = Arc::strong_count(arc);
-                // Treat insane refcounts as corruption and fall back to idle.
+                // Heuristic only: keep the warning, but do not mutate scheduler state here.
                 if strong == 0 || strong > (isize::MAX as usize) / 2 {
                     let ptr = Arc::as_ptr(arc) as *const u8;
                     let caller = core::panic::Location::caller();
@@ -179,12 +179,8 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
                         caller.file(),
                         caller.line(),
                     );
-                    let idle = cpu.idle_task.clone();
-                    cpu.current_task = Some(idle.clone());
-                    Some(idle)
-                } else {
-                    Some(arc.clone())
                 }
+                Some(arc.clone())
             })
         } else {
             None
@@ -207,7 +203,7 @@ pub fn current_task_clone_try() -> Option<Arc<Task>> {
             sched.cpus.get_mut(cpu_index).and_then(|cpu| {
                 let arc = cpu.current_task.as_ref()?;
                 let strong = Arc::strong_count(arc);
-                // Treat insane refcounts as corruption and fall back to idle.
+                // Heuristic only: keep the warning, but do not mutate scheduler state here.
                 if strong == 0 || strong > (isize::MAX as usize) / 2 {
                     let ptr = Arc::as_ptr(arc) as *const u8;
                     let caller = core::panic::Location::caller();
@@ -219,12 +215,8 @@ pub fn current_task_clone_try() -> Option<Arc<Task>> {
                         caller.file(),
                         caller.line(),
                     );
-                    let idle = cpu.idle_task.clone();
-                    cpu.current_task = Some(idle.clone());
-                    Some(idle)
-                } else {
-                    Some(arc.clone())
                 }
+                Some(arc.clone())
             })
         } else {
             None
@@ -265,12 +257,8 @@ pub fn current_task_clone_spin_debug(trace_label: &str) -> Option<Arc<Task>> {
                             strong,
                             ptr,
                         );
-                        let idle = cpu.idle_task.clone();
-                        cpu.current_task = Some(idle.clone());
-                        Some(idle)
-                    } else {
-                        Some(arc.clone())
                     }
+                    Some(arc.clone())
                 })
             } else {
                 None

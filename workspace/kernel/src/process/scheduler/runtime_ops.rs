@@ -339,6 +339,14 @@ pub fn finish_interrupt_switch() {
     // before returning to this assembly stub).  We must not block with IRQs enabled
     // because we are still inside the timer interrupt handler.  try_lock_no_irqsave
     // requires IRQs already disabled, which is guaranteed here.
+    //
+    // The spin is bounded: if the lock is not released within MAX_IFS_SPINS
+    // iterations something is fundamentally broken (holder deadlocked, or
+    // lock corruption).  Panic so we get a stack trace instead of a silent
+    // hang.
+    // This is around few seconds on recent CPU.
+    
+    const MAX_IFS_SPINS: usize = 50_000_000;
     let mut task_to_drop = None;
     let mut spins = 0usize;
     loop {
@@ -378,6 +386,17 @@ pub fn finish_interrupt_switch() {
             break;
         }
         spins = spins.saturating_add(1);
+        if spins >= MAX_IFS_SPINS {
+            crate::e9_println!(
+                "[BUG] finish_interrupt_switch: SCHEDULER lock not released after {} spins, cpu={}",
+                spins,
+                cpu_index
+            );
+            panic!(
+                "finish_interrupt_switch: SCHEDULER lock stuck after {} spins on cpu {}",
+                spins, cpu_index
+            );
+        }
         core::hint::spin_loop();
     }
     let _ = task_to_drop;
