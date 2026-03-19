@@ -372,8 +372,23 @@ impl FrameMeta {
     }
 
     #[inline]
+    pub fn set_refcount(&self, count: u32) {
+        self.refcount.store(count, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn cas_refcount(&self, expect: u32, new: u32) -> Result<u32, u32> {
+        self.refcount.compare_exchange(
+            expect,
+            new,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+    }
+
+    #[inline]
     pub fn reset_refcount(&self) {
-        self.refcount.store(0, Ordering::Release);
+        self.set_refcount(0);
     }
 
     #[inline]

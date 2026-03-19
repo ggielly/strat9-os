@@ -677,14 +677,27 @@ impl BuddyAllocator {
     }
 
     fn mark_block_allocated(frame_phys: u64, order: u8) {
-        Self::set_block_meta(frame_phys, order, frame_flags::ALLOCATED);
+        let page_count = 1usize << order;
+        for page_idx in 0..page_count {
+            let phys = frame_phys + page_idx as u64 * PAGE_SIZE;
+            let meta = get_meta(PhysAddr::new(phys));
+            meta.set_flags(frame_flags::ALLOCATED);
+            meta.set_order(order);
+            // Leave refcount as REFCOUNT_UNUSED; the high-level allocator
+            // (e.g. FrameAllocOptions) will perform CAS(UNUSED -> 0).
+        }
     }
 
     fn mark_block_free(frame_phys: u64, order: u8) {
-        Self::set_block_meta(frame_phys, order, frame_flags::FREE);
+        Self::set_block_meta(
+            frame_phys,
+            order,
+            frame_flags::FREE,
+            crate::memory::frame::REFCOUNT_UNUSED,
+        );
     }
 
-    fn set_block_meta(frame_phys: u64, order: u8, flags: u32) {
+    fn set_block_meta(frame_phys: u64, order: u8, flags: u32, refcount: u32) {
         let page_count = 1usize << order;
         for page_idx in 0..page_count {
             let phys = frame_phys + page_idx as u64 * PAGE_SIZE;
@@ -693,7 +706,7 @@ impl BuddyAllocator {
             meta.set_order(order);
             meta.set_next(FRAME_META_LINK_NONE);
             meta.set_prev(FRAME_META_LINK_NONE);
-            meta.reset_refcount();
+            meta.set_refcount(refcount);
         }
     }
 }
