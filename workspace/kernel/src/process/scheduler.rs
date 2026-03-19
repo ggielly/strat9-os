@@ -582,6 +582,7 @@ fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
 }
 
 mod core_impl;
+pub mod perf_counters;
 mod runtime_ops;
 mod task_ops;
 mod timer_ops;

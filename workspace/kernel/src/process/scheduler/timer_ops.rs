@@ -29,6 +29,10 @@ const PERIODIC_RESCHED_TICKS: u64 = 5;
 /// its own `try_lock`. These are separate acquisitions by design - the inner
 /// functions must not be called while the outer lock is held (that would deadlock).
 pub fn timer_tick() {
+    let _perf = super::perf_counters::PerfScope::new(
+        &super::perf_counters::IRQ_TIMER_TSC,
+        &super::perf_counters::IRQ_TIMER_COUNT,
+    );
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
 
     if cpu_is_valid(cpu_idx) {

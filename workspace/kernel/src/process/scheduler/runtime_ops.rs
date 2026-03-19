@@ -320,6 +320,10 @@ fn drain_post_switch_locked(
 /// complete, so another CPU cannot steal the old task while its FPU/stack state
 /// is still in flight.
 pub fn finish_interrupt_switch() {
+    let _perf = super::perf_counters::PerfScope::new(
+        &super::perf_counters::CTX_SWITCH_TSC,
+        &super::perf_counters::CTX_SWITCH_COUNT,
+    );
     let cpu_index = current_cpu_index();
     let should_trace = FINISH_INTERRUPT_TRACE_BUDGET
         .fetch_update(
@@ -413,6 +417,10 @@ pub fn yield_task() {
     if !percpu::is_preemptible() {
         return;
     }
+    let _perf = super::perf_counters::PerfScope::new(
+        &super::perf_counters::SCHED_YIELD_TSC,
+        &super::perf_counters::SCHED_YIELD_COUNT,
+    );
 
     // Save RFLAGS and disable interrupts to prevent timer from
     // trying to lock the scheduler while we hold it
@@ -462,6 +470,10 @@ fn interrupt_frame_fits(task: &Arc<Task>, rsp: u64) -> bool {
 ///    for this tick.
 /// 3. We honour the `PreemptGuard`: if preemption is disabled, we return.
 pub fn maybe_preempt() {
+    let _perf = super::perf_counters::PerfScope::new(
+        &super::perf_counters::SCHED_PREEMPT_TSC,
+        &super::perf_counters::SCHED_PREEMPT_COUNT,
+    );
     let cpu_index = current_cpu_index();
     if cpu_is_valid(cpu_index) {
         RESCHED_IPI_PENDING[cpu_index].store(false, Ordering::Release);
