@@ -11,6 +11,8 @@ static SERIAL1: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(0x3F8) }
 /// Flag indicating if the kernel is in a panic state.
 /// When true, serial output bypasses all locks to ensure messages are displayed.
 static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static BOOT_LOG_PREFIX_ENABLED: AtomicBool = AtomicBool::new(false);
+static SERIAL_AT_LINE_START: AtomicBool = AtomicBool::new(true);
 
 /// Raw spinlock for `_print_force` to prevent multi-core character interleaving.
 /// Uses a ticket-style test-and-set: 0 = free, 1 = locked.
@@ -51,6 +53,12 @@ const TOKEN_BUF_CAP: usize = 64;
 /// Signal that the kernel has entered an emergency panic state.
 pub fn enter_emergency_mode() {
     PANIC_IN_PROGRESS.store(true, Ordering::SeqCst);
+}
+
+/// Enable or disable Linux-style boot timestamps at the beginning of each line.
+pub fn set_boot_log_prefix_enabled(enabled: bool) {
+    BOOT_LOG_PREFIX_ENABLED.store(enabled, Ordering::SeqCst);
+    SERIAL_AT_LINE_START.store(true, Ordering::SeqCst);
 }
 
 /// Returns whether token char.
@@ -171,6 +179,52 @@ impl<W: fmt::Write> fmt::Write for AnsiStylingWriter<'_, W> {
     }
 }
 
+struct BootPrefixWriter<'a, W: fmt::Write> {
+    inner: &'a mut W,
+    line_start: bool,
+    prefix_enabled: bool,
+}
+
+impl<'a, W: fmt::Write> BootPrefixWriter<'a, W> {
+    fn new(inner: &'a mut W) -> Self {
+        Self {
+            inner,
+            line_start: SERIAL_AT_LINE_START.load(Ordering::Relaxed),
+            prefix_enabled: BOOT_LOG_PREFIX_ENABLED.load(Ordering::Relaxed),
+        }
+    }
+
+    fn write_prefix(&mut self) -> fmt::Result {
+        if !self.prefix_enabled {
+            return Ok(());
+        }
+        let elapsed_us = crate::arch::x86_64::boot_timestamp::elapsed_us();
+        let secs = elapsed_us / 1_000_000;
+        let micros = elapsed_us % 1_000_000;
+        write!(self.inner, "[{:>5}.{:06}] ", secs, micros)
+    }
+
+    fn finish(&mut self) {
+        SERIAL_AT_LINE_START.store(self.line_start, Ordering::Relaxed);
+    }
+}
+
+impl<W: fmt::Write> fmt::Write for BootPrefixWriter<'_, W> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for ch in s.chars() {
+            if self.line_start && ch != '\n' {
+                self.write_prefix()?;
+                self.line_start = false;
+            }
+            self.inner.write_char(ch)?;
+            if ch == '\n' {
+                self.line_start = true;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Initialize the serial port
 pub fn init() {
     SERIAL1.lock().init();
@@ -193,9 +247,11 @@ pub fn _print(args: fmt::Arguments) {
 
     // Normal mode: Use try_lock to avoid deadlock in interrupt handlers.
     if let Some(mut port) = SERIAL1.try_lock() {
-        let mut writer = AnsiStylingWriter::new(&mut *port);
+        let mut prefix_writer = BootPrefixWriter::new(&mut *port);
+        let mut writer = AnsiStylingWriter::new(&mut prefix_writer);
         let _ = writer.write_fmt(args);
         let _ = writer.finish();
+        prefix_writer.finish();
     }
 }
 
@@ -221,7 +277,9 @@ pub fn _print_force(args: fmt::Arguments) {
     let saved_flags = force_lock_acquire();
     // SAFETY: We hold `FORCE_LOCK` with IRQs disabled, giving exclusive UART access.
     let mut port = unsafe { SerialPort::new(0x3F8) };
-    let _ = port.write_fmt(args);
+    let mut prefix_writer = BootPrefixWriter::new(&mut port);
+    let _ = prefix_writer.write_fmt(args);
+    prefix_writer.finish();
     // Release lock and restore RFLAGS (re-enables IRQs if they were on before).
     force_lock_release(saved_flags);
 }

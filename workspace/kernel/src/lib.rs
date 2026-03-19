@@ -355,6 +355,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     arch::x86_64::boot_timestamp::init();
     crate::e9_println!("B0 kernel_main");
     init_serial();
+
+    // Enable boot log prefix (timestamp) by default; can be disabled later if needed.
+    arch::x86_64::serial::set_boot_log_prefix_enabled(true);
+
     init_logger();
     boot_milestone!("Kernel entry");
 
@@ -1190,6 +1194,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     boot_milestone!("Boot complete ! Now entering in scheduler");
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
+    arch::x86_64::serial::set_boot_log_prefix_enabled(false);
 
     // Keep interrupts disabled on the init stack. `schedule_on_cpu()` enters
     // the first task with IF=0 and `task_entry_trampoline` executes `sti`
