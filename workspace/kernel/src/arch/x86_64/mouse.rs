@@ -394,3 +394,42 @@ pub fn mouse_pos() -> (i32, i32) {
         MOUSE_ABS_Y.load(Ordering::Relaxed),
     )
 }
+
+/// Push a mouse event from USB HID or other non-PS/2 source.
+///
+/// Must be called from task context only. Updates absolute position and
+/// enqueues the event for consumption by `read_event()`.
+/// Used by hid::poll_all() when USB HID mouse reports arrive.
+pub fn push_event_from_hid(dx: i16, dy: i16, dz: i8, left: bool, right: bool, middle: bool) {
+    let saved = super::save_flags_and_cli();
+    {
+        let scr_w = SCREEN_W.load(Ordering::Relaxed);
+        let scr_h = SCREEN_H.load(Ordering::Relaxed);
+        let max_x = if scr_w > 0 { scr_w - 1 } else { 1279 };
+        let max_y = if scr_h > 0 { scr_h - 1 } else { 799 };
+        let prev_x = MOUSE_ABS_X.load(Ordering::Relaxed);
+        let prev_y = MOUSE_ABS_Y.load(Ordering::Relaxed);
+        let new_x = (prev_x + dx as i32).clamp(0, max_x);
+        let new_y = (prev_y + dy as i32).clamp(0, max_y);
+        MOUSE_ABS_X.store(new_x, Ordering::Relaxed);
+        MOUSE_ABS_Y.store(new_y, Ordering::Relaxed);
+
+        let event = MouseEvent {
+            dx,
+            dy,
+            dz,
+            left,
+            right,
+            middle,
+        };
+        if let Some(mut q) = EVENT_BUF.try_lock() {
+            let tail = q.tail;
+            let next_tail = (tail + 1) % EVENT_BUF_SIZE;
+            if next_tail != q.head {
+                q.buf[tail] = event;
+                q.tail = next_tail;
+            }
+        }
+    }
+    super::restore_flags(saved);
+}

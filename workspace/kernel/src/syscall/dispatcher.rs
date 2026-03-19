@@ -28,8 +28,20 @@ use crate::{
 use alloc::{sync::Arc, vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+/// One-shot diagnostic flag to confirm syscalls reach the dispatcher.
+static SYSCALL_DIAG_DONE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Rate-limit counter for the per-syscall ENTER trace (avoid flooding FORCE_LOCK under SMP).
+/// Prints first 20 dispatches unconditionally, then every 10_000.
+static SYSCALL_TRACE_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Budget for logging network send errors to prevent log spam.
 static NET_SEND_ERR_LOG_BUDGET: AtomicU32 = AtomicU32::new(32);
+/// Budget for logging network receive errors to prevent log spam.
 static NET_RECV_ERR_LOG_BUDGET: AtomicU32 = AtomicU32::new(32);
+/// Budget for logging DHCP trace frames to prevent log spam.
 static DHCP_TRACE_LOG_BUDGET: AtomicU32 = AtomicU32::new(64);
 
 /// Performs the trace dhcp frame operation.
@@ -98,9 +110,39 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
     let arg1 = frame.rdi;
     let arg2 = frame.rsi;
     let arg3 = frame.rdx;
+
+    // One-shot diagnostic: confirm first syscall reaches the dispatcher.
+    if !SYSCALL_DIAG_DONE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        crate::e9_println!(
+            "[syscall-FIRST] nr={} rip={:#x} tid={:?}",
+            syscall_num,
+            frame.rcx,
+            crate::process::current_task_id().map(|t| t.as_u64())
+        );
+    }
     let arg4 = frame.r10;
     let _arg5 = frame.r8;
     let _arg6 = frame.r9;
+
+    // Rate-limited trace to avoid saturating FORCE_LOCK under SMP.
+    // First 20 calls unconditional, then a sample every 10_000.
+    {
+        let n = SYSCALL_TRACE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 20 || n % 10_000 == 0 {
+            if let Some(tid) = crate::process::current_task_id() {
+                crate::e9_println!(
+                    "[syscall] ENTER n={} tid={} nr={} arg1={:#x} arg2={:#x} rip={:#x} cpu={}",
+                    n,
+                    tid,
+                    syscall_num,
+                    arg1,
+                    arg2,
+                    frame.rcx,
+                    crate::arch::x86_64::percpu::current_cpu_index()
+                );
+            }
+        }
+    }
 
     let result = match syscall_num {
         SYS_NULL => sys_null(),
@@ -847,18 +889,83 @@ fn sys_volume_read(
         return Err(SyscallError::InvalidArgument);
     }
 
+    let probe_trace = sector == 0 && sector_count == 1;
+    if probe_trace {
+        crate::serial_println!(
+            "[volume-read] start handle={} sector={} total_sectors={} buf_ptr={:#x}",
+            handle,
+            sector,
+            total_sectors,
+            buf_ptr
+        );
+    }
+
     let mut kbuf = [0u8; SECTOR_SIZE];
     for i in 0..sector_count {
         let cur_sector = sector.checked_add(i).ok_or(SyscallError::InvalidArgument)?;
-        device.read_sector(cur_sector, &mut kbuf)?;
+        if probe_trace {
+            crate::serial_println!(
+                "[volume-read] before read_sector handle={} sector={}",
+                handle,
+                cur_sector
+            );
+        }
+        match device.read_sector(cur_sector, &mut kbuf) {
+            Ok(()) => {
+                if probe_trace {
+                    crate::serial_println!(
+                        "[volume-read] after read_sector handle={} sector={} magic={:02x}{:02x}{:02x}{:02x}",
+                        handle,
+                        cur_sector,
+                        kbuf[0],
+                        kbuf[1],
+                        kbuf[2],
+                        kbuf[3]
+                    );
+                }
+            }
+            Err(err) => {
+                if probe_trace {
+                    crate::serial_println!(
+                        "[volume-read] read_sector failed handle={} sector={} err={:?}",
+                        handle,
+                        cur_sector,
+                        err
+                    );
+                }
+                return Err(err);
+            }
+        }
         let offset = (i as usize)
             .checked_mul(SECTOR_SIZE)
             .ok_or(SyscallError::InvalidArgument)?;
         let ptr = buf_ptr
             .checked_add(offset as u64)
             .ok_or(SyscallError::Fault)?;
-        let user = UserSliceWrite::new(ptr, SECTOR_SIZE)?;
+        let user = match UserSliceWrite::new(ptr, SECTOR_SIZE) {
+            Ok(user) => user,
+            Err(err) => {
+                if probe_trace {
+                    crate::serial_println!(
+                        "[volume-read] user slice failed handle={} sector={} ptr={:#x} err={:?}",
+                        handle,
+                        cur_sector,
+                        ptr,
+                        err
+                    );
+                }
+                return Err(SyscallError::from(err));
+            }
+        };
         user.copy_from(&kbuf);
+        if probe_trace {
+            crate::serial_println!(
+                "[volume-read] copied to user handle={} sector={} ptr={:#x}",
+                handle,
+                cur_sector,
+                ptr
+            );
+        }
     }
 
     Ok(sector_count)
@@ -945,12 +1052,8 @@ fn sys_debug_log(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let mut kbuf = [0u8; 4096];
     let copied = user_buf.copy_to(&mut kbuf);
 
-    // Write to serial with a prefix
-    crate::serial_print!("[user-debug] ");
-    for &byte in &kbuf[..copied] {
-        crate::serial_print!("{}", byte as char);
-    }
-    crate::serial_println!();
+    // Write to E9 (lock-free) to prevent deadlocks
+    crate::e9_println!("[user-debug] {}", core::str::from_utf8(&kbuf[..copied]).unwrap_or("<invalid utf8>"));
 
     if let Some(task) = crate::process::current_task_clone() {
         if let Some(silo_id) = crate::silo::task_silo_id(task.id) {

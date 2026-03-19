@@ -100,7 +100,11 @@ impl SlabState {
         let slab_size = SLAB_SIZES[ci];
 
         // Allocate one page (order-0) from the buddy allocator.
-        let frame = match memory::allocate_frame() {
+        // SAFETY: refill is called while SLAB_ALLOC is locked; SpinLock::lock()
+        // disables IRQs via save_flags_and_cli before acquiring the lock, so
+        // IRQs are guaranteed to be disabled here.
+        let token = unsafe { crate::sync::IrqDisabledToken::new_unchecked() };
+        let frame = match memory::allocate_frame(&token) {
             Ok(f) => f,
             Err(_) => return, // OOM — caller will return null
         };
@@ -223,6 +227,11 @@ pub fn debug_slab_lock_addr() -> usize {
     &SLAB_ALLOC as *const _ as usize
 }
 
+/// Register slab lock for E9 trace (call from init).
+pub fn debug_register_slab_trace() {
+    crate::sync::debug_set_trace_slab_addr(debug_slab_lock_addr());
+}
+
 // ---------------------------------------------------------------------------
 // GlobalAlloc implementation
 // ---------------------------------------------------------------------------
@@ -247,6 +256,23 @@ unsafe impl GlobalAlloc for LockedHeap {
         if effective <= MAX_SLAB_SIZE {
             // --- slab path ---
             let ci = SlabState::class_index(effective);
+            // Race/corruption diagnostic: log alloc when IRQs disabled (rate-limited).
+            let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+            if !irq_enabled {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static HEAP_A_COUNT: AtomicUsize = AtomicUsize::new(0);
+                let n = HEAP_A_COUNT.fetch_add(1, Ordering::Relaxed);
+                if n % 100 == 0 {
+                    crate::e9_println!(
+                        "HEAP-A cpu={} irq=0 size={} ci={} n={}",
+                        cpu,
+                        effective,
+                        ci,
+                        n
+                    );
+                }
+            }
             if boot_reg {
                 crate::serial_println!(
                     "[trace][heap] alloc slab ci={} slab_size={} lock={:#x}",
@@ -276,10 +302,12 @@ unsafe impl GlobalAlloc for LockedHeap {
                 );
             }
 
-            match memory::allocate_frames(order) {
-                Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,
-                Err(_) => ptr::null_mut(),
-            }
+            crate::sync::with_irqs_disabled(|token| {
+                match memory::allocate_frames(token, order) {
+                    Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,
+                    Err(_) => ptr::null_mut(),
+                }
+            })
         }
     }
 
@@ -290,6 +318,23 @@ unsafe impl GlobalAlloc for LockedHeap {
         if effective <= MAX_SLAB_SIZE {
             // --- slab path: return block to free list ---
             let ci = SlabState::class_index(effective);
+            // Race/corruption diagnostic: log dealloc when IRQs disabled (rate-limited).
+            let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+            if !irq_enabled {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static HEAP_D_COUNT: AtomicUsize = AtomicUsize::new(0);
+                let n = HEAP_D_COUNT.fetch_add(1, Ordering::Relaxed);
+                if n % 100 == 0 {
+                    crate::e9_println!(
+                        "HEAP-D cpu={} irq=0 size={} ci={} n={}",
+                        cpu,
+                        effective,
+                        ci,
+                        n
+                    );
+                }
+            }
             let mut slab = SLAB_ALLOC.lock();
             slab.dealloc_block(ptr, ci);
         } else {
@@ -305,7 +350,9 @@ unsafe impl GlobalAlloc for LockedHeap {
             let phys_addr = (ptr as u64).wrapping_sub(hhdm);
 
             if let Ok(frame) = PhysFrame::from_start_address(PhysAddr::new(phys_addr)) {
-                memory::free_frames(frame, order);
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_frames(token, frame, order);
+                });
             }
         }
     }

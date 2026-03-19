@@ -146,9 +146,11 @@ impl AddressSpace {
     /// kernel mapping changes propagate automatically.
     pub fn new_user() -> Result<Self, &'static str> {
         // Allocate a frame for the new PML4 table.
-        let new_l4_phys = crate::memory::allocate_frame()
-            .map_err(|_| "Failed to allocate PML4 frame")?
-            .start_address;
+        let new_l4_phys = crate::sync::with_irqs_disabled(|token| {
+            crate::memory::allocate_frame(token)
+        })
+        .map_err(|_| "Failed to allocate PML4 frame")?
+        .start_address;
 
         let new_l4_virt = VirtAddr::new(crate::memory::phys_to_virt(new_l4_phys.as_u64()));
 
@@ -371,15 +373,40 @@ impl AddressSpace {
             return Ok(());
         }
 
-        // 4. Allocate and map a single page of the required size
+        // 4. Allocate and map a single page of the required size.
+        //
+        // IMPORTANT: `allocate_frame` (order-0) now goes through
+        // `FrameAllocOptions::new()` which zeroes by default.  For order > 0
+        // (huge pages) we still need a manual zero via the HHDM.
+        //
+        // The zero MUST go through phys_to_virt (HHDM), NOT through the user
+        // virtual address, because the user address space is not necessarily
+        // the currently active CR3.  Writing through `page_addr as *mut u8`
+        // would either write into a different process's memory or fault.
         let mut frame_allocator = crate::memory::paging::BuddyFrameAllocator;
         let order = match vma.page_size {
             VmaPageSize::Small => 0,
             VmaPageSize::Huge => 9,
         };
 
-        let frame =
-            crate::memory::allocate_frames(order).map_err(|_| "OOM during demand paging")?;
+        let frame = crate::sync::with_irqs_disabled(|token| {
+            if order == 0 {
+                crate::memory::allocate_frame(token)
+            } else {
+                let f = crate::memory::allocate_frames(token, order)?;
+                // SAFETY: phys_to_virt gives a valid HHDM pointer for this
+                // frame; we have exclusive ownership from the buddy allocator.
+                unsafe {
+                    core::ptr::write_bytes(
+                        crate::memory::phys_to_virt(f.start_address.as_u64()) as *mut u8,
+                        0,
+                        page_bytes as usize,
+                    );
+                }
+                Ok(f)
+            }
+        })
+        .map_err(|_| "OOM during demand paging")?;
 
         let mut page_flags = vma.flags.to_page_flags();
 
@@ -397,14 +424,17 @@ impl AddressSpace {
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
                         Ok(flush) => {
                             flush.flush();
-                            core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
-                            crate::memory::free_frames(frame, order);
+                            crate::sync::with_irqs_disabled(|token| {
+                                crate::memory::free_frames(token, frame, order);
+                            });
                             return Ok(());
                         }
                         Err(_) => {
-                            crate::memory::free_frames(frame, order);
+                            crate::sync::with_irqs_disabled(|token| {
+                                crate::memory::free_frames(token, frame, order);
+                            });
                             return Err("Failed to map demand page (4K)");
                         }
                     }
@@ -420,14 +450,17 @@ impl AddressSpace {
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
                         Ok(flush) => {
                             flush.flush();
-                            core::ptr::write_bytes(page_addr as *mut u8, 0, page_bytes as usize);
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
-                            crate::memory::free_frames(frame, order);
+                            crate::sync::with_irqs_disabled(|token| {
+                                crate::memory::free_frames(token, frame, order);
+                            });
                             return Ok(());
                         }
                         Err(_) => {
-                            crate::memory::free_frames(frame, order);
+                            crate::sync::with_irqs_disabled(|token| {
+                                crate::memory::free_frames(token, frame, order);
+                            });
                             return Err("Failed to map demand page (2M)");
                         }
                     }
@@ -496,19 +529,27 @@ impl AddressSpace {
                 .ok_or("Page address overflow")?;
 
             // Allocate a physical frame of appropriate size.
+            //
+            // order-0 frames go through FrameAllocOptions (zeroed + metadata
+            // stamped).  order > 0 (huge pages) are zeroed manually via HHDM.
             let order = match page_size {
                 VmaPageSize::Small => 0,
                 VmaPageSize::Huge => 9,
             };
 
-            let frame =
-                crate::memory::allocate_frames(order).map_err(|_| "Failed to allocate frame")?;
-
-            // Zero the frame
-            unsafe {
-                let frame_virt = crate::memory::phys_to_virt(frame.start_address.as_u64());
-                core::ptr::write_bytes(frame_virt as *mut u8, 0, page_bytes as usize);
-            }
+            let frame = crate::sync::with_irqs_disabled(|token| {
+                if order == 0 {
+                    crate::memory::allocate_frame(token)
+                } else {
+                    let f = crate::memory::allocate_frames(token, order)?;
+                    unsafe {
+                        let virt = crate::memory::phys_to_virt(f.start_address.as_u64());
+                        core::ptr::write_bytes(virt as *mut u8, 0, page_bytes as usize);
+                    }
+                    Ok(f)
+                }
+            })
+            .map_err(|_| "Failed to allocate frame")?;
 
             // Map the page.
             let map_ok = match page_size {
@@ -554,7 +595,9 @@ impl AddressSpace {
                     page_size
                 );
                 // Free frame for this page that failed to map.
-                crate::memory::free_frames(frame, order);
+                crate::sync::with_irqs_disabled(|token| {
+                    crate::memory::free_frames(token, frame, order);
+                });
 
                 // Roll back already mapped pages to keep state consistent.
                 for j in (0..mapped_pages).rev() {
@@ -1194,7 +1237,9 @@ impl AddressSpace {
         unsafe {
             let frame =
                 X86PhysFrame::from_start_address(self.cr3_phys).expect("CR3 address not aligned");
+            crate::e9_println!("C");
             Cr3::write(frame, Cr3Flags::empty());
+            crate::e9_println!("c");
         }
     }
 
@@ -1493,7 +1538,9 @@ impl Drop for AddressSpace {
         let phys_frame = crate::memory::PhysFrame {
             start_address: self.cr3_phys,
         };
-        crate::memory::free_frame(phys_frame);
+        crate::sync::with_irqs_disabled(|token| {
+            crate::memory::free_frame(token, phys_frame);
+        });
 
         log::trace!("AddressSpace::drop end CR3={:#x}", self.cr3_phys.as_u64());
         log::debug!(
@@ -1512,7 +1559,9 @@ fn free_frame(phys: PhysAddr) {
     let phys_frame = crate::memory::PhysFrame {
         start_address: phys,
     };
-    crate::memory::free_frame(phys_frame);
+    crate::sync::with_irqs_disabled(|token| {
+        crate::memory::free_frame(token, phys_frame);
+    });
 }
 
 /// Releases l1 table.

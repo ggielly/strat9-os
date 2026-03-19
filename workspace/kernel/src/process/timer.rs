@@ -239,19 +239,55 @@ impl ITimers {
 pub fn tick_all_timers(current_time_ns: u64) {
     use crate::process::{scheduler::SCHEDULER, signal::Signal};
 
-    let scheduler = match SCHEDULER.try_lock() {
-        Some(guard) => guard,
-        None => return,
+    unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
+    // IRQ context contract: timer handlers run with IF=0 already.
+    // Use no-irqsave variant to avoid any extra RFLAGS save/restore in hot path.
+    let mut scheduler = match SCHEDULER.try_lock_no_irqsave() {
+        Some(guard) => {
+            unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
+            guard
+        }
+        None => {
+            unsafe { core::arch::asm!("mov al, 'C'; out 0xe9, al", out("al") _) };
+            return;
+        }
     };
-    let Some(ref sched) = *scheduler else { return };
-
-    for (_, task) in sched.all_tasks.iter() {
-        for which in [ITimerWhich::Real, ITimerWhich::Virtual, ITimerWhich::Prof] {
-            if task.itimers.get(which).check_expired(current_time_ns) {
-                if let Some(sig) = Signal::from_u32(which.signal()) {
-                    task.pending_signals.add(sig);
+    unsafe { core::arch::asm!("mov al, '3'; out 0xe9, al", out("al") _) };
+    scheduler.with_mut_and_token(|slot, _token| {
+        unsafe { core::arch::asm!("mov al, 'w'; out 0xe9, al", out("al") _) };
+        let Some(sched) = slot.as_ref() else {
+            unsafe { core::arch::asm!("mov al, 'N'; out 0xe9, al", out("al") _) };
+            return;
+        };
+        unsafe { core::arch::asm!("mov al, '4'; out 0xe9, al", out("al") _) };
+        let n_tasks = sched.all_tasks_scan.len();
+        if n_tasks == 0 {
+            unsafe { core::arch::asm!("mov al, '0'; out 0xe9, al", out("al") _) };
+            return;
+        }
+        let mut task_n: usize = 0;
+        for task in sched.all_tasks_scan.iter() {
+            unsafe {
+                core::arch::asm!("mov al, '5'; out 0xe9, al", out("al") _);
+            }
+            for which in [ITimerWhich::Real, ITimerWhich::Virtual, ITimerWhich::Prof] {
+                if task.itimers.get(which).check_expired(current_time_ns) {
+                    if let Some(sig) = Signal::from_u32(which.signal()) {
+                        task.pending_signals.add(sig);
+                    }
                 }
             }
+            task_n += 1;
+            // Safety-fence: if task_n somehow exceeds the known map length, the
+            // BTreeMap is corrupt. Bail out rather than spinning forever.
+            if task_n > n_tasks.saturating_add(1) {
+                unsafe {
+                    core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _);
+                }
+                break;
+            }
         }
-    }
+        unsafe { core::arch::asm!("mov al, '6'; out 0xe9, al", out("al") _) };
+    });
+    unsafe { core::arch::asm!("mov al, '7'; out 0xe9, al", out("al") _) };
 }

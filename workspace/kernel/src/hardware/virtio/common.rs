@@ -133,8 +133,10 @@ impl Virtqueue {
         // Critical: legacy QUEUE_PFN describes one contiguous vring region.
         let ring_pages = (total_size + 4095) / 4096;
         let ring_order = ring_pages.next_power_of_two().trailing_zeros() as u8;
-        let ring_area =
-            memory::allocate_frames(ring_order).map_err(|_| "Failed to allocate virtqueue ring")?;
+        let ring_area = crate::sync::with_irqs_disabled(|token| {
+            memory::allocate_frames(token, ring_order)
+        })
+        .map_err(|_| "Failed to allocate virtqueue ring")?;
         let ring_phys = ring_area.start_address.as_u64();
         let desc_phys = ring_phys;
         let avail_phys = ring_phys + avail_offset as u64;
@@ -299,6 +301,13 @@ impl Virtqueue {
         self.last_used_idx != used_idx
     }
 
+    /// Return a snapshot of `(device_used_idx, driver_last_used_idx)` for diagnostics.
+    pub fn used_indices(&self) -> (u16, u16) {
+        // SAFETY: Atomic load from the used ring header.
+        let used_idx = unsafe { (*self.used_ptr).idx.load(Ordering::Acquire) };
+        (used_idx, self.last_used_idx)
+    }
+
     /// Get the next used buffer
     ///
     /// Returns (descriptor_index, length_written)
@@ -451,12 +460,15 @@ impl VirtioDevice {
         // Select queue
         self.write_reg_u16(14, queue_index); // VIRTIO_PCI_QUEUE_SEL
 
-        // Set queue size
-        self.write_reg_u16(12, queue.size()); // VIRTIO_PCI_QUEUE_NUM
-
         // Set queue addresses (page-aligned physical addresses >> 12)
         let desc_pfn = (queue.desc_area() >> 12) as u32;
         self.write_reg_u32(8, desc_pfn); // VIRTIO_PCI_QUEUE_PFN
+    }
+
+    /// Read the queue size exposed by the selected legacy PCI queue.
+    pub fn queue_max_size(&self, queue_index: u16) -> u16 {
+        self.write_reg_u16(14, queue_index); // VIRTIO_PCI_QUEUE_SEL
+        self.read_reg_u16(12) // VIRTIO_PCI_QUEUE_NUM
     }
 
     /// Notify a queue

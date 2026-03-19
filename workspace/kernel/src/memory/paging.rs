@@ -14,17 +14,62 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 
-/// Wrapper around our buddy allocator implementing the x86_64 crate's FrameAllocator trait.
+use crate::memory::frame::{FrameAllocOptions, FramePurpose};
+
+/// Wrapper around the buddy allocator implementing the x86_64 crate's `FrameAllocator` trait.
 ///
-/// This is used by `OffsetPageTable` when it needs to allocate intermediate page tables.
+/// Used by `OffsetPageTable` when it needs a new intermediate page-table node
+/// (PML4 / PDPT / PD / PT).
+///
+/// # Safety invariant: page-table frames MUST be zeroed
+///
+/// The x86_64 CPU page-table walker reads all 512 entries of every
+/// intermediate node it traverses, regardless of which entries are "in use".
+/// If a newly allocated page-table frame contains stale bytes (left behind by
+/// the slab allocator or a previous allocation), any non-zero entry is decoded
+/// as a valid PTE pointing to an arbitrary physical address.  The first fetch
+/// from such an address becomes the new RIP after the Ring 3 transition —
+/// explaining why RIP is non-deterministic across boots.
+///
+/// `BuddyFrameAllocator` enforces zeroing via `FrameAllocOptions::new()
+///  .purpose(FramePurpose::PageTable)` which:
+///
+///  1. Calls the buddy allocator for a raw order-0 frame.
+///  2. CAS-claims the frame via `FrameMeta::refcount` (UNUSED → 0 → 1).
+///  3. Zeros the 4 KiB with a single `ptr::write_bytes` through the HHDM.
+///  4. Sets `FrameMeta::flags` to `KERNEL | ALLOCATED` with `Release` ordering.
+///  5. Stores `refcount = 1` with `Release` ordering so any future reader
+///     that loads the refcount with `Acquire` observes a fully-initialised frame.
+///
+/// This pattern is lifted directly from Asterinas OSTD
+/// `FrameAllocOptions::alloc_frame_with` + `MetaSlot::get_from_unused`.
 pub struct BuddyFrameAllocator;
 
-// SAFETY: allocate_frame returns valid, unused, 4KiB-aligned physical frames
-// from the buddy allocator.
+// SAFETY: `BuddyFrameAllocator::allocate_frame` returns 4KiB-aligned,
+// exclusively-owned physical frames.  Exclusive ownership is guaranteed by
+// the buddy's own bitmap + free-list discipline.  Frames allocated with
+// `FramePurpose::PageTable` are always fully zeroed before being returned.
 unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
-    /// Performs the allocate frame operation.
     fn allocate_frame(&mut self) -> Option<X86PhysFrame<Size4KiB>> {
-        let frame = crate::memory::allocate_frame().ok()?;
+        // SAFETY: `BuddyFrameAllocator` is only ever called from within
+        // `OffsetPageTable` during page-table operations.  Those occur either
+        // during single-threaded early boot, or while the caller holds a lock
+        // that disables IRQs (e.g. the scheduler SpinLock, the AddressSpace
+        // lock).  IRQs are therefore guaranteed to be disabled, making
+        // `new_unchecked` sound.
+        let token = unsafe { crate::sync::IrqDisabledToken::new_unchecked() };
+
+        // `PageTable` purpose enforces:
+        //  - `zeroed = true` unconditionally (cannot be overridden by callers).
+        //  - `FrameMeta::flags` stamped with `KERNEL | ALLOCATED`.
+        //  - `FrameMeta::refcount` set to 1 with `Release` ordering after
+        //    zeroing, so any `Acquire` load of the refcount observes a clean
+        //    frame.
+        let frame = FrameAllocOptions::new()
+            .purpose(FramePurpose::PageTable)
+            .allocate(&token)
+            .ok()?;
+
         X86PhysFrame::from_start_address(frame.start_address).ok()
     }
 }
@@ -52,7 +97,7 @@ pub fn init(hhdm_offset: u64) {
     let level_4_phys = level_4_frame.start_address().as_u64();
     let level_4_virt = phys_offset + level_4_phys;
 
-    // SAFETY: Called once during single-threaded init. The HHDM offset correctly
+    // SAFETY: called once during single-threaded init. The HHDM offset correctly
     // maps all physical RAM to virtual addresses. CR3 points to a valid page table
     // set up by Limine.
     unsafe {
@@ -68,6 +113,33 @@ pub fn init(hhdm_offset: u64) {
         hhdm_offset,
         level_4_virt.as_u64(),
     );
+}
+
+/// Map all RAM regions from the memory map into the HHDM.
+///
+/// This ensures that every byte of physical RAM is accessible through the
+/// higher-half direct map. Should be called after paging::init.
+/// Fix for VMWare Workstation which doesn't identity-map all RAM by default, causing
+/// the kernel to crash when it tries to access unmapped RAM (e.g. for the buddy allocator's
+/// metadata array). Limine's initial map only covers the first 1GB of RAM, which is not enough
+/// for our 2GB test VM. This function lazily maps any missing RAM regions on
+/// demand using `ensure_identity_map_range()`, which checks if the region is already mapped
+/// before mapping it. This allows the kernel to boot successfully on VMWare Workstation without
+/// requiring changes to the bootloader or Limine configuration.
+/// 
+pub fn map_all_ram(memory_regions: &[crate::boot::entry::MemoryRegion]) {
+    use crate::boot::entry::MemoryKind;
+
+    for region in memory_regions {
+        if matches!(region.kind, MemoryKind::Free | MemoryKind::Reclaim) {
+            log::debug!(
+                "Mapping RAM region to HHDM: phys=0x{:x}..0x{:x}",
+                region.base,
+                region.base + region.size
+            );
+            ensure_identity_map_range(region.base, region.size);
+        }
+    }
 }
 
 /// Map a virtual page to a physical frame with the given flags.
@@ -170,19 +242,59 @@ pub fn ensure_identity_map(phys_addr: u64) {
 }
 
 /// Ensure a physical range is mapped in the HHDM region.
+///
+/// Builds a single `OffsetPageTable` for the entire range instead of
+/// one per page, and emits a single summary log instead of per-page noise.
 pub fn ensure_identity_map_range(phys_base: u64, size: u64) {
-    if size == 0 {
+    if size == 0 || !is_initialized() {
         return;
     }
+
     let page_size = 4096u64;
     let start = phys_base & !(page_size - 1);
-    let end = phys_base
-        .saturating_add(size.saturating_sub(1))
-        .saturating_add(page_size)
-        & !(page_size - 1);
+    let end = (phys_base.saturating_add(size).saturating_add(page_size - 1)) & !(page_size - 1);
+    if start >= end {
+        return;
+    }
+
+    let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
+    let (level_4_frame, _) = Cr3::read();
+    let level_4_virt = phys_offset + level_4_frame.start_address().as_u64();
+
+    // SAFETY: level_4_virt points to the active CR3 PML4 via HHDM.
+    let l4_table = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
+    let mut mapper = unsafe { OffsetPageTable::new(l4_table, phys_offset) };
+    let mut allocator = BuddyFrameAllocator;
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+
+    let mut mapped_count: u64 = 0;
     let mut p = start;
     while p < end {
-        ensure_identity_map(p);
+        let virt = VirtAddr::new(crate::memory::phys_to_virt(p));
+        // Only map if not already present.
+        if mapper.translate_addr(virt).is_none() {
+            let page = Page::<Size4KiB>::containing_address(virt);
+            let frame = X86PhysFrame::containing_address(PhysAddr::new(p));
+            // SAFETY: frame is a valid physical page; mapper uses HHDM offset.
+            match unsafe { mapper.map_to(page, frame, flags, &mut allocator) } {
+                Ok(flush) => {
+                    flush.flush();
+                    mapped_count += 1;
+                }
+                Err(_) => {
+                    log::error!("ensure_identity_map_range: failed to map {:#x}", p);
+                }
+            }
+        }
         p = p.saturating_add(page_size);
+    }
+
+    if mapped_count > 0 {
+        log::debug!(
+            "Identity mapped {} pages: phys {:#x}..{:#x}",
+            mapped_count,
+            start,
+            end,
+        );
     }
 }

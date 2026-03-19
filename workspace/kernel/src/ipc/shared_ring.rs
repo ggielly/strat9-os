@@ -83,7 +83,9 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
     let mut frames = Vec::with_capacity(page_count);
     let mut alloc_failed = false;
     for _ in 0..page_count {
-        let frame = match crate::memory::allocate_frame() {
+        let frame = match crate::sync::with_irqs_disabled(|token| {
+            crate::memory::allocate_frame(token)
+        }) {
             Ok(f) => f,
             Err(_) => {
                 alloc_failed = true;

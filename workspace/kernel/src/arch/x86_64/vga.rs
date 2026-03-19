@@ -2730,9 +2730,22 @@ pub fn init(
         blue_shift,
     };
 
+    // Ensure fb_addr is a virtual address in the HHDM.
+    // If it's already higher-half (>= HHDM), use it as-is.
+    // Otherwise, convert it via phys_to_virt.
+    //
+    // This fix works on VMWare Workstation
+    //
+    let hhdm = crate::memory::hhdm_offset();
+    let fb_virt = if hhdm != 0 && fb_addr < hhdm {
+        crate::memory::phys_to_virt(fb_addr)
+    } else {
+        fb_addr
+    };
+
     let mut writer = VGA_WRITER.lock();
     if writer.configure(
-        fb_addr as *mut u8,
+        fb_virt as *mut u8,
         fb_width as usize,
         fb_height as usize,
         pitch as usize,

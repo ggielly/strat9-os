@@ -13,6 +13,7 @@
 #![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
 #![feature(alloc_error_handler)]
+#![feature(negative_impls)]
 
 extern crate alloc;
 
@@ -25,6 +26,7 @@ pub mod audit;
 pub mod boot;
 pub mod capability;
 pub mod components;
+pub mod debug;
 pub mod hardware;
 pub mod ipc;
 pub mod memory;
@@ -262,7 +264,9 @@ fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
+        ("bin/sshd", crate::boot::limine::sshd_module()),
         ("bin/udp-tool", crate::boot::limine::udp_tool_module()),
+        ("bin/web-admin", crate::boot::limine::web_admin_module()),
         ("strate-wasm", crate::boot::limine::strate_wasm_module()),
         ("strate-webrtc", crate::boot::limine::strate_webrtc_module()),
         ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
@@ -294,7 +298,9 @@ fn log_boot_module_magics(stage: &str) {
         ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
         ("bin/ping", crate::boot::limine::ping_module()),
         ("bin/telnetd", crate::boot::limine::telnetd_module()),
+        ("bin/sshd", crate::boot::limine::sshd_module()),
         ("bin/udp-tool", crate::boot::limine::udp_tool_module()),
+        ("bin/web-admin", crate::boot::limine::web_admin_module()),
         ("strate-wasm", crate::boot::limine::strate_wasm_module()),
         ("strate-webrtc", crate::boot::limine::strate_webrtc_module()),
         ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
@@ -346,6 +352,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 1: serial output (earliest debug output)
     // =============================================
+    crate::e9_println!("B0 kernel_main");
     init_serial();
     init_logger();
 
@@ -354,9 +361,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // We initialize the IDT as early as possible to catch any exceptions
     // during the early memory management and hardware initialization phases.
+    crate::e9_println!("B1 pre-IDT");
     serial_println!("[init] IDT (early)...");
     arch::x86_64::idt::init();
     serial_println!("[init] IDT initialized.");
+    crate::e9_println!("B2 post-IDT");
 
     debug_assert!(
         !arch::x86_64::interrupts_enabled(),
@@ -534,6 +543,27 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     // Here we are
     // We have the memory map from the bootloader, with all modules reserved.
+    memory::boot_alloc::init_boot_allocator(&mmap_work[..mmap_work_len]);
+    serial_println!("[init] Boot allocator ready.");
+
+    let total_ram = mmap_work[..mmap_work_len]
+        .iter()
+        .filter(|region| {
+            matches!(
+                region.kind,
+                boot::entry::MemoryKind::Free | boot::entry::MemoryKind::Reclaim
+            )
+        })
+        .map(|region| region.base.saturating_add(region.size))
+        .max()
+        .unwrap_or(0);
+
+    {
+        let mut boot_alloc = memory::boot_alloc::get_boot_allocator().lock();
+        memory::frame::init_metadata_array(total_ram, &mut *boot_alloc);
+    }
+    serial_println!("[init] Frame metadata ready.");
+
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
 
     serial_println!("[init] Buddy allocator ready.");
@@ -544,6 +574,38 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     );
 
     log_boot_module_magics("post-buddy");
+
+    // =============================================
+    // Phase 2.5: paging / VMM (Must be before Console if FB is not already mapped)
+    // =============================================
+    crate::e9_println!("B5 pre-paging");
+    serial_println!("[init] Paging...");
+    memory::paging::init(hhdm);
+    crate::e9_println!("B6 post-paging");
+
+    // Map all RAM into HHDM to ensure buddy/heap allocations are accessible.
+    // VMware Limine HHDM may be sparse, causing PF on new heap pages.
+    memory::paging::map_all_ram(&mmap_work[..mmap_work_len]);
+
+    // Framebuffer is often backed by MMIO memory outside RAM (e.g. around 0xFDxxxxxx),
+    // or sometimes at the very end of RAM that might be missed by the bootloader's initial map.
+    // Explicitly map its full range in HHDM for all later graphics access.
+    if args.framebuffer_addr != 0 && args.framebuffer_stride != 0 && args.framebuffer_height != 0 {
+        let fb_phys = if args.framebuffer_addr >= hhdm {
+            args.framebuffer_addr - hhdm
+        } else {
+            args.framebuffer_addr
+        };
+        let fb_size =
+            (args.framebuffer_stride as u64).saturating_mul(args.framebuffer_height as u64);
+        memory::paging::ensure_identity_map_range(fb_phys, fb_size);
+        serial_println!(
+            "[init] Framebuffer mapped: phys=0x{:x} size={} bytes",
+            fb_phys,
+            fb_size
+        );
+    }
+    serial_println!("[init] Paging initialized.");
 
     // =============================================
     // Phase 3: console output (VGA or serial fallback)
@@ -562,6 +624,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         args.framebuffer_blue_mask_size,
         args.framebuffer_blue_mask_shift,
     );
+    vga_println!("[OK] Paging initialized");
     vga_println!("[OK] Serial port initialized");
     vga_println!("[OK] Memory manager active");
 
@@ -609,30 +672,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // arch::x86_64::idt::init();
 
     // =============================================
-    // Phase 5b: paging / VMM
+    // Phase 5b: paging / VMM - (Moved earlier to prevent PF on VGA init)
     // =============================================
-    serial_println!("[init] Paging...");
-    vga_println!("[..] Initializing page mapper...");
-    memory::paging::init(hhdm);
-    // Framebuffer is often backed by MMIO memory outside RAM (e.g. around 0xFDxxxxxx),
-    // so explicitly map its full range in HHDM for all later graphics access.
-    if args.framebuffer_addr != 0 && args.framebuffer_stride != 0 && args.framebuffer_height != 0 {
-        let fb_phys = if args.framebuffer_addr >= hhdm {
-            args.framebuffer_addr - hhdm
-        } else {
-            args.framebuffer_addr
-        };
-        let fb_size =
-            (args.framebuffer_stride as u64).saturating_mul(args.framebuffer_height as u64);
-        memory::paging::ensure_identity_map_range(fb_phys, fb_size);
-        serial_println!(
-            "[init] Framebuffer mapped: phys=0x{:x} size={} bytes",
-            fb_phys,
-            fb_size
-        );
-    }
-    serial_println!("[init] Paging initialized.");
-    vga_println!("[OK] Paging initialized");
     log_boot_module_magics("post-paging");
 
     // =============================================
@@ -660,14 +701,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] VFS initialized.");
     vga_println!("[OK] VFS initialized");
     register_boot_initfs_modules(args.initfs_base, args.initfs_size);
-
-    #[cfg(feature = "selftest")]
-    serial_println!("[init] Initializing COW metadata...");
-
-    memory::init_cow_subsystem(&mmap_work[..mmap_work_len]);
-
-    #[cfg(feature = "selftest")]
-    serial_println!("[init] COW metadata initialized.");
 
     log_boot_module_magics("post-cow");
 
@@ -735,6 +768,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         arch::x86_64::percpu::init_boot_cpu(0);
     }
 
+    arch::x86_64::keyboard::init();
+    serial_println!("[init] PS/2 keyboard controller initialized.");
+
     // =============================================
     // Phase 6k: PS/2 mouse driver
     // =============================================
@@ -752,11 +788,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 7: initialize scheduler
     // =============================================
+    crate::e9_println!("B7 pre-sched");
     serial_println!("[init] Initializing scheduler...");
     vga_println!("[..] Setting up multitasking...");
     // Print struct layout for crash-site offset analysis (debug build only).
     crate::process::task::Task::debug_print_layout();
     process::init_scheduler();
+    crate::e9_println!("B8 post-sched");
 
     debug_assert!(
         !arch::x86_64::interrupts_enabled(),
@@ -784,6 +822,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 7b: component system - Kthread stage
     // =============================================
+    crate::e9_println!("B9 pre-kthread");
     serial_println!("[trace][bsp] before kthread init_all");
     serial_println!("[init] Components (kthread)...");
     vga_println!("[..] Initializing kthread components...");
@@ -818,6 +857,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         // =============================================
         let mut init_task_id: Option<crate::process::TaskId> = None;
 
+        crate::e9_println!("BB pre-process");
         serial_println!("[init] Components (process)...");
         vga_println!("[..] Initializing process components...");
         if let Err(e) = component::init_all(component::InitStage::Process) {
@@ -833,9 +873,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         // PCI consumers now rely on /bus/pci/* exposed by userspace strate-bus.
         // The userspace boot sequence must start silo "bus" before PCI-dependent
         // silos, otherwise early probes can legitimately return no device.
+        crate::e9_println!("BG pre-hardware");
         serial_println!("[init] Loading hardware drivers...");
         vga_println!("[..] Initializing hardware drivers...");
         hardware::init();
+        crate::e9_println!("BH post-hardware");
 
         serial_println!("[init] Initializing timers...");
         vga_println!("[..] Initializing HPET and RTC...");
@@ -857,6 +899,18 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
         serial_println!("[init] Initializing AHCI...");
         vga_println!("[..] Looking for AHCI SATA controller...");
+        // Debug: check BSP stack usage before AHCI init
+        {
+            let dummy = 0u64;
+            let rsp = &dummy as *const u64 as u64;
+            serial_println!("[DEBUG] BSP stack before AHCI: rsp={:#x}", rsp);
+            // Stack grows downward from high address. Check distance from typical low addresses.
+            // With 512KB stack at 0x80000, top is around 0x80000 + 0x80000 = 0x100000
+            // If rsp is below 0xC0000, we've used more than 256KB
+            if rsp < 0xC0000 {
+                serial_println!("[WARN] BSP stack usage high! rsp={:#x}", rsp);
+            }
+        }
         hardware::storage::ahci::init();
         serial_println!("[init] AHCI probe done.");
         vga_println!("[OK] AHCI probe done");
@@ -1001,21 +1055,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                         "[trace][boot] before register_boot_strate_task tid={} label=ramfs-default",
                         task_id.as_u64()
                     );
-                    let saved = crate::arch::x86_64::save_flags_and_cli();
-                    crate::serial_force_println!(
-                        "[trace][boot] irq-off before register_boot_strate_task tid={}",
-                        task_id.as_u64()
-                    );
-                    let reg_res =
-                        crate::silo::register_boot_strate_task(task_id, "ramfs-default");
+                    let reg_res = crate::silo::register_boot_strate_task(task_id, "ramfs-default");
                     crate::serial_force_println!(
                         "[trace][boot] marker: returned from register_boot_strate_task"
                     );
-                    crate::serial_force_println!(
-                        "[trace][boot] irq-off after register_boot_strate_task tid={}",
-                        task_id.as_u64()
-                    );
-                    crate::arch::x86_64::restore_flags(saved);
                     if let Err(e) = reg_res {
                         crate::serial_force_println!(
                             "[trace][boot] register_boot_strate_task failed tid={} err={:?}",
@@ -1135,6 +1178,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if apic_active {
         arch::x86_64::smp::open_ap_scheduler_gate();
     }
+    crate::e9_println!("BC pre-schedule");
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
 
@@ -1143,6 +1187,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // after the task context is fully installed.
 
     // Start the scheduler - this will never return
+    serial_force_println!("[trace][bsp] schedule start (never returns)");
     process::schedule();
 }
 
@@ -1224,18 +1269,25 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     ioapic::init(io_apic_entry.address, io_apic_entry.gsi_base);
     serial_println!("[init]   6e. I/O APIC initialized");
 
-    // Step 6f: remap PIC to 0x20+ then disable permanently
-    // Must remap first to avoid stray interrupts at exception vectors (0-31)
+    // Step 6f: remap PIC to 0x20+ then keep only PS/2 input IRQs enabled.
+    // Must remap first to avoid stray interrupts at exception vectors (0-31).
+    // On the current q35 + SMP path, LAPIC timer delivery is fine but legacy
+    // PS/2 IRQs are not reliably arriving through the I/O APIC. Keep keyboard
+    // and mouse on the remapped PIC while using APIC for the timer.
     pic::init(pic::PIC1_OFFSET, pic::PIC2_OFFSET);
     pic::disable_permanently();
-    serial_println!("[init]   6f. Legacy PIC remapped and disabled");
+    pic::enable_irq(1);
+    pic::enable_irq(2);
+    pic::enable_irq(12);
+    serial_println!("[init]   6f. Legacy PIC remapped; PS/2 IRQ1/IRQ12 left enabled");
 
-    // Step 6g: route IRQ0 (timer) and IRQ1 (keyboard) via I/O APIC
+    // Step 6g: route only the legacy timer IRQ via I/O APIC.
+    // Keyboard (IRQ1) and mouse (IRQ12) stay on the remapped PIC path above.
     let lapic_id = apic::lapic_id();
     ioapic::route_legacy_irq(0, lapic_id, 0x20, &madt_info.overrides);
-    ioapic::route_legacy_irq(1, lapic_id, 0x21, &madt_info.overrides);
-    ioapic::route_legacy_irq(12, lapic_id, 0x2C, &madt_info.overrides);
-    serial_println!("[init]   6g. IRQ0->vec 0x20, IRQ1->vec 0x21, IRQ12->vec 0x2C routed");
+    ioapic::mask_legacy_irq(1, &madt_info.overrides);
+    ioapic::mask_legacy_irq(12, &madt_info.overrides);
+    serial_println!("[init]   6g. IRQ0->vec 0x20 via IOAPIC; IRQ1/IRQ12 via PIC");
 
     // Step 6h: calibrate APIC timer using PIT channel 2
     serial_println!("[init]   6h. Calibrating APIC timer using PIT channel 2...");

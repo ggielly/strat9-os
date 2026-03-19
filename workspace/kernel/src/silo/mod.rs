@@ -841,7 +841,7 @@ static BOOT_REG_IN_PROGRESS: core::sync::atomic::AtomicBool =
 
 const SILO_ADMIN_RESOURCE: usize = 0;
 const MAX_SILO_CAPS: usize = 64;
-const MAX_MODULE_BLOB_LEN: usize = 16 * 1024 * 1024; // 16 MiB (UserSlice limit)
+const MAX_MODULE_BLOB_LEN: usize = 64 * 1024 * 1024; // 64 MiB for large preloaded user modules such as strate-wasm
 const IPC_STREAM_DATA: u32 = 0xFFFF_FFFE;
 const IPC_STREAM_EOF: u32 = 0xFFFF_FFFF;
 const MODULE_FLAG_SIGNED: u32 = 1 << 0;
@@ -1041,14 +1041,14 @@ fn resolve_export_offset(module: &ModuleImage, ordinal: u64) -> Result<u64, Sysc
         return Err(SyscallError::NotFound);
     }
     let table_off = header.export_table_offset as usize;
-    let count = read_u32_le(&module.data, table_off)? as u64;
+    let count = read_u32_le(module.data.as_slice(), table_off)? as u64;
     if ordinal >= count {
         return Err(SyscallError::InvalidArgument);
     }
     // Layout: u32 count + u32 reserved, then u64 entries.
     let entries_off = table_off + 8;
     let entry_off = entries_off + (ordinal as usize * 8);
-    let rva = read_u64_le(&module.data, entry_off)?;
+    let rva = read_u64_le(module.data.as_slice(), entry_off)?;
     Ok(rva)
 }
 
@@ -1100,10 +1100,29 @@ fn resolve_silo_handle(handle: u64, required: CapPermissions) -> Result<u32, Sys
 // Module registry (temporary blob store for .cmod/ELF)
 // ============================================================================
 
+#[derive(Debug, Clone)]
+enum ModuleData {
+    Owned(Arc<[u8]>),
+    Static(&'static [u8]),
+}
+
+impl ModuleData {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            ModuleData::Owned(data) => data,
+            ModuleData::Static(data) => data,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+}
+
 #[derive(Debug)]
 struct ModuleImage {
     id: u64,
-    data: Arc<[u8]>,
+    data: ModuleData,
     header: Option<Strat9ModuleHeader>,
 }
 
@@ -1128,7 +1147,22 @@ impl ModuleRegistry {
             id,
             ModuleImage {
                 id,
-                data: Arc::from(data.into_boxed_slice()),
+                data: ModuleData::Owned(Arc::from(data.into_boxed_slice())),
+                header,
+            },
+        );
+        Ok(id)
+    }
+
+    fn register_static(&mut self, data: &'static [u8]) -> Result<u64, SyscallError> {
+        let header = parse_module_header(data)?;
+        static NEXT_MOD: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_MOD.fetch_add(1, Ordering::Relaxed);
+        self.modules.insert(
+            id,
+            ModuleImage {
+                id,
+                data: ModuleData::Static(data),
                 header,
             },
         );
@@ -1432,10 +1466,9 @@ pub fn kernel_spawn_strate(
             .clone()
             .unwrap_or_else(|| alloc::format!("silo-{}", silo.id.sid))
     };
-    let task_name: &'static str = Box::leak(
-        alloc::format!("silo-{}/strate-admin-{}", silo_id, display).into_boxed_str(),
-    );
-    let task = crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps)
+    let task_name: &'static str =
+        Box::leak(alloc::format!("silo-{}/strate-admin-{}", silo_id, display).into_boxed_str());
+    let task = crate::process::elf::load_elf_task_with_caps(module_data.as_slice(), task_name, &seed_caps)
         .map_err(|_| SyscallError::InvalidArgument)?;
     let task_id = task.id;
 
@@ -1602,17 +1635,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
     BOOT_REG_IN_PROGRESS.store(true, Ordering::Relaxed);
     let result = (|| -> Result<u32, SyscallError> {
         let sanitized = sanitize_label(label);
-        let mut spins = 0usize;
-        let mut mgr = loop {
-            if let Some(guard) = SILO_MANAGER.try_lock_no_irqsave() {
-                break guard;
-            }
-            spins = spins.saturating_add(1);
-            if spins > 1_000_000 {
-                return Err(SyscallError::Again);
-            }
-            core::hint::spin_loop();
-        };
+        let mut mgr = SILO_MANAGER.lock();
         crate::serial_println!(
             "[trace][silo] register_boot_strate_task lock acquired tid={}",
             task_id.as_u64()
@@ -1670,17 +1693,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             output_buf: None,
         };
 
-        let mut spins = 0usize;
-        let mut mgr = loop {
-            if let Some(guard) = SILO_MANAGER.try_lock_no_irqsave() {
-                break guard;
-            }
-            spins = spins.saturating_add(1);
-            if spins > 1_000_000 {
-                return Err(SyscallError::Again);
-            }
-            core::hint::spin_loop();
-        };
+        let mut mgr = SILO_MANAGER.lock();
         if mgr.silos.contains_key(&id.sid) {
             return Err(SyscallError::Again);
         }
@@ -1759,6 +1772,30 @@ pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
         let len = len as usize;
         if len == 0 || len > MAX_MODULE_BLOB_LEN {
             return Err(SyscallError::InvalidArgument);
+        }
+
+        if len <= 4096 {
+            let user = UserSliceRead::new(fd_or_ptr, len)?;
+            if matches!(user.read_u8(0), Ok(b'/')) {
+                let path_buf = user.read_to_vec();
+                if let Ok(path) = core::str::from_utf8(&path_buf) {
+                    if let Some(data) = crate::vfs::get_initfs_file_bytes(path) {
+                        let mut registry = MODULE_REGISTRY.lock();
+                        let id = registry.register_static(data)?;
+                        drop(registry);
+
+                        let cap = get_capability_manager().create_capability(
+                            ResourceType::Module,
+                            id as usize,
+                            CapPermissions::all(),
+                        );
+
+                        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+                        let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+                        return Ok(cap_id.as_u64());
+                    }
+                }
+            }
         }
 
         let user = UserSliceRead::new(fd_or_ptr, len)?;
@@ -2165,7 +2202,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
     };
 
     let load_result =
-        crate::process::elf::load_elf_task_with_caps(&module_data, task_name, &seed_caps).map_err(
+        crate::process::elf::load_elf_task_with_caps(module_data.as_slice(), task_name, &seed_caps).map_err(
             |err| {
                 log::warn!(
                     "silo_start: sid={} module={} task='{}' load failed: {}",
@@ -2887,7 +2924,9 @@ pub fn task_silo_id(task_id: TaskId) -> Option<u32> {
 pub fn silo_output_write(silo_id: u32, data: &[u8]) {
     let mut mgr = SILO_MANAGER.lock();
     if let Ok(silo) = mgr.get_mut(silo_id) {
-        let buf = silo.output_buf.get_or_insert_with(|| Box::new(SiloOutputBuf::new()));
+        let buf = silo
+            .output_buf
+            .get_or_insert_with(|| Box::new(SiloOutputBuf::new()));
         buf.push(data);
     }
 }
@@ -2971,7 +3010,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
     });
 
     if let Some((pid, tid, name, state, as_cr3, as_is_kernel)) = task_meta {
-        crate::serial_println!(
+        crate::serial_force_println!(
             "\x1b[31m[handle_user_fault]\x1b[0m task={} \x1b[36mpid={}\x1b[0m tid={} name='{}' state={:?} reason={:?} \x1b[35mrip={:#x}\x1b[0m \x1b[35mextra={:#x}\x1b[0m subcode={:#x} as_cr3={:#x} as_kernel={}",
             task_id.as_u64(),
             pid,
@@ -2986,7 +3025,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
             as_is_kernel
         );
     } else {
-        crate::serial_println!(
+        crate::serial_force_println!(
             "\x1b[31m[handle_user_fault]\x1b[0m task={} reason={:?} \x1b[35mrip={:#x}\x1b[0m \x1b[35mextra={:#x}\x1b[0m subcode={:#x} (task metadata unavailable)",
             task_id.as_u64(),
             reason,
@@ -3005,7 +3044,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
         let pkey = (subcode & 0x20) != 0;
         let shadow_stack = (subcode & 0x40) != 0;
         let sgx = (subcode & 0x8000) != 0;
-        crate::serial_println!(
+        crate::serial_force_println!(
             "\x1b[31m[handle_user_fault]\x1b[0m \x1b[31mpagefault\x1b[0m \x1b[35maddr={:#x}\x1b[0m \x1b[35mrip={:#x}\x1b[0m ec={:#x} present={} write={} user={} reserved={} ifetch={} pkey={} shadow_stack={} sgx={}",
             extra,
             rip,
@@ -3020,13 +3059,13 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
             sgx
         );
         if user && extra < 0x1000 {
-            crate::serial_println!(
+            crate::serial_force_println!(
                 "\x1b[31m[handle_user_fault]\x1b[0m \x1b[33mhint: low user address fault ({:#x}) -> probable NULL/near-NULL dereference\x1b[0m",
                 extra
             );
         }
     } else {
-        crate::serial_println!(
+        crate::serial_force_println!(
             "\x1b[31m[handle_user_fault]\x1b[0m \x1b[31mfault detail\x1b[0m \x1b[35mrip={:#x}\x1b[0m code={:#x}",
             rip,
             subcode
@@ -3042,6 +3081,16 @@ pub fn handle_user_fault(
     subcode: u64,
     rip: u64,
 ) {
+    // FORCE OUTPUT for user fault - bypasses normal logging mutexes
+    crate::serial_force_println!(
+        "\x1b[31;1m[handle_user_fault] CRITICAL FAULT\x1b[0m: tid={} reason={:?} rip={:#x} addr={:#x} err={:#x}",
+        task_id.as_u64(),
+        reason,
+        rip,
+        extra,
+        subcode
+    );
+
     dump_user_fault(task_id, reason, extra, subcode, rip);
 
     // Best-effort: map task to silo, mark crashed, emit event, kill tasks.
@@ -3050,7 +3099,7 @@ pub fn handle_user_fault(
         let silo_id = match mgr.silo_for_task(task_id) {
             Some(id) => id,
             None => {
-                crate::serial_println!(
+                crate::serial_force_println!(
                     "[handle_user_fault] Non-silo task {} crashed (reason={:?})! Killing it.",
                     task_id.as_u64(),
                     reason

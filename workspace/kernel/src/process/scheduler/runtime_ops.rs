@@ -1,8 +1,14 @@
 use super::*;
 
+static FINISH_INTERRUPT_TRACE_BUDGET: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(32);
+
 /// Initialize the scheduler
 pub fn init_scheduler() {
-    let cpu_count = percpu::cpu_count().max(1);
+    // Build scheduler state only for CPUs that are actually online. Using the
+    // registered per-CPU count here can strand runnable tasks on AP slots that
+    // never reached the scheduler gate.
+    let cpu_count = crate::arch::x86_64::smp::cpu_count().max(1);
     crate::serial_println!(
         "[trace][sched] init_scheduler enter cpu_count={}",
         cpu_count
@@ -12,6 +18,9 @@ pub fn init_scheduler() {
     // allocation in `Scheduler::new`.
     let new_sched = Scheduler::new(cpu_count);
     crate::serial_println!("[trace][sched] init_scheduler new() done");
+
+    // Race/corruption diagnostic: register scheduler lock for E9 LOCK-A/LOCK-R traces.
+    crate::sync::debug_set_trace_lock_addr(debug_scheduler_lock_addr());
 
     let mut scheduler = SCHEDULER.lock();
     *scheduler = Some(new_sched);
@@ -104,6 +113,7 @@ pub fn schedule() -> ! {
 
 /// Performs the schedule on cpu operation.
 pub fn schedule_on_cpu(cpu_index: usize) -> ! {
+    crate::e9_println!("BD-ENTER cpu={}", cpu_index);
     // Disable interrupts for the entire critical section.
     //
     // On the BSP, IF may be 1 (interrupts were enabled in Phase 9).
@@ -115,16 +125,20 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     // APs already arrive here with IF=0 (from the trampoline), but the
     // explicit CLI makes the contract clear for all callers.
     //
-    // `task_entry_trampoline` executes `sti` when the first task starts,
-    // so interrupts are re-enabled at exactly the right moment.
+    // Interrupts are re-enabled by the RFLAGS seed (0x202, IF=1) stored in
+    // each task's bootstrap interrupt frame, so no explicit sti() is needed.
     crate::arch::x86_64::cli();
 
     // APs may arrive here before the BSP has called init_scheduler().
     // Spin-wait (releasing the lock each iteration) until the scheduler
     // is initialized, then pick the first task.
+    let mut wait_iters: u64 = 0;
     let first_task = loop {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
+            if wait_iters > 0 {
+                crate::e9_println!("BD first_task cpu={} waited={}", cpu_index, wait_iters);
+            }
             let idx = if cpu_index < sched.cpus.len() {
                 cpu_index
             } else {
@@ -134,8 +148,13 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         }
         // Drop lock before spinning so the BSP can initialize the scheduler.
         drop(scheduler);
+        wait_iters = wait_iters.saturating_add(1);
+        if wait_iters == 1 || (wait_iters % 1_000_000 == 0 && wait_iters > 0) {
+            crate::e9_println!("BD-WAIT cpu={} iters={}", cpu_index, wait_iters);
+        }
         core::hint::spin_loop();
     }; // Lock is released here before jumping to first task
+    super::task_ops::flush_deferred_silo_cleanups();
 
     crate::serial_force_println!(
         "[trace][sched] schedule_on_cpu first_task cpu={} tid={} name={} rsp={:#x} kstack=[{:#x}..{:#x}]",
@@ -190,81 +209,178 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         cpu_index,
         first_task.id.as_u64()
     );
+    crate::serial_force_println!(
+        "[trace][sched] schedule_on_cpu calling do_restore_first_task cpu={} tid={} rsp={:#x}",
+        cpu_index,
+        first_task.id.as_u64(),
+        unsafe { (*first_task.context.get()).saved_rsp }
+    );
     unsafe {
+        // Pass the stack frame pointer (saved_rsp points TO the frame, not the context struct)
+        let frame_ptr = (*first_task.context.get()).saved_rsp as *const u64;
         crate::process::task::do_restore_first_task(
-            &raw const (*first_task.context.get()).saved_rsp,
+            frame_ptr,
             first_task.fpu_state.get() as *const u8,
             first_task
                 .xcr0_mask
                 .load(core::sync::atomic::Ordering::Relaxed),
         );
     }
+    // Should never reach here
+    crate::serial_force_println!(
+        "[PANIC] restore_first_task returned! cpu={} tid={}",
+        cpu_index,
+        first_task.id.as_u64()
+    );
 }
 
 /// Called immediately after a context switch completes (in the new task's context).
 /// This safely re-queues the previously running task now that its state is fully saved.
+///
+/// Mirrors Redox switch_finish_hook: minimal work, no serial (avoids lock contention).
 pub fn finish_switch() {
     let cpu_index = current_cpu_index();
-    crate::serial_force_println!("[trace][sched] finish_switch enter cpu={}", cpu_index);
     let mut task_to_drop = None;
     {
-        crate::serial_force_println!(
-            "[trace][sched] finish_switch before lock cpu={} sched_lock={:#x}",
-            cpu_index,
-            crate::process::scheduler::debug_scheduler_lock_addr()
-        );
         let mut spins = 0usize;
         let mut scheduler = loop {
             if let Some(guard) = SCHEDULER.try_lock() {
                 break guard;
             }
             spins = spins.saturating_add(1);
-            if spins == 2_000_000 {
-                crate::serial_force_println!(
-                    "[trace][sched] finish_switch waiting lock cpu={} owner_cpu={}",
-                    cpu_index,
-                    SCHEDULER.owner_cpu()
-                );
-                spins = 0;
+            if spins % 1_000_000 == 0 {
+                unsafe { core::arch::asm!("mov al, 'W'; out 0xe9, al", out("al") _) };
             }
             core::hint::spin_loop();
         };
-        crate::serial_force_println!(
-            "[trace][sched] finish_switch lock acquired cpu={}",
-            cpu_index
-        );
         if let Some(ref mut sched) = *scheduler {
-            let mut requeue_task = None;
+            // Activate the address space for the current task on this CPU.
             if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                task_to_drop = cpu.task_to_drop.take();
-                requeue_task = cpu.task_to_requeue.take();
-            }
-            if let Some(task) = requeue_task {
-                crate::serial_force_println!(
-                    "[trace][sched] finish_switch requeue cpu={} tid={}",
-                    cpu_index,
-                    task.id.as_u64()
-                );
-                let class = sched.class_table.class_for_task(&task);
-                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                    cpu.class_rqs.enqueue(class, task);
+                if let Some(ref task) = cpu.current_task {
+                    let as_ptr = unsafe { task.process.address_space.get() };
+                    unsafe { (*as_ptr).switch_to() };
                 }
             }
+            task_to_drop = drain_post_switch_locked(sched, cpu_index, false, true);
+        };
+    }
+
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    super::task_ops::flush_deferred_silo_cleanups();
+    drop(task_to_drop);
+}
+
+fn drain_post_switch_locked(
+    sched: &mut Scheduler,
+    cpu_index: usize,
+    verbose_trace: bool,
+    take_drop: bool,
+) -> Option<Arc<Task>> {
+    let mut task_to_drop = None;
+    let mut requeue_task = None;
+    if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+        if take_drop {
+            task_to_drop = cpu.task_to_drop.take();
+        }
+        requeue_task = cpu.task_to_requeue.take();
+    }
+    if let Some(task) = requeue_task {
+        // Racy, pifometric diagnostic only: strong_count is heuristic here and
+        // may change concurrently. Keep it as a debugging hint, not as a proof
+        // that the Arc is actually corrupted.
+        let strong_before = Arc::strong_count(&task);
+        if strong_before == 0 || strong_before > (isize::MAX as usize) {
+            crate::serial_force_println!(
+                "[RACE] drain_post_switch_locked: suspicious Arc heuristic tid={} strong_count={}",
+                task.id.as_u64(),
+                strong_before
+            );
+        }
+        if verbose_trace {
+            crate::serial_force_println!(
+                "[trace][sched] finish_switch requeue cpu={} tid={} strong={}",
+                cpu_index,
+                task.id.as_u64(),
+                strong_before
+            );
+        }
+        let class = sched.class_table.class_for_task(&task);
+        if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+            cpu.class_rqs.enqueue(class, task);
         }
     }
-    crate::serial_force_println!(
-        "[trace][sched] finish_switch after lock cpu={} drop={}",
-        cpu_index,
-        task_to_drop.is_some()
-    );
+    task_to_drop
+}
 
-    // Drop the previous task outside the scheduler lock (if it was the last ref).
-    // This is safe because we are fully switched to the new task's stack and CR3.
-    drop(task_to_drop);
+/// Finalize a preemption-driven switch once the raw timer stub has already
+/// moved onto the next task's kernel stack.
+///
+/// This mirrors Redox's `switch_finish_hook` and Maestro's `switch_finish`:
+/// requeue/drop of the old task happens only after the architectural switch is
+/// complete, so another CPU cannot steal the old task while its FPU/stack state
+/// is still in flight.
+pub fn finish_interrupt_switch() {
+    let cpu_index = current_cpu_index();
+    let should_trace = FINISH_INTERRUPT_TRACE_BUDGET
+        .fetch_update(
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+            |budget| budget.checked_sub(1),
+        )
+        .is_ok();
+    let entry_rsp0 = crate::arch::x86_64::tss::kernel_stack_for(cpu_index)
+        .map(|addr| addr.as_u64())
+        .unwrap_or(0);
+    if should_trace {
+        crate::e9_println!("[ifs-enter] cpu={} rsp0={:#x}", cpu_index, entry_rsp0);
+    }
 
-    // Temporary safety mode: skip FS.base restore in finish_switch.
-    // This avoids cloning current_task() on a path that currently trips
-    // an Arc refcount invariant under heavy early context-switch churn.
+    // Spin until SCHEDULER is available (released by maybe_preempt_from_interrupt
+    // before returning to this assembly stub).  We must not block with IRQs enabled
+    // because we are still inside the timer interrupt handler.  try_lock_no_irqsave
+    // requires IRQs already disabled, which is guaranteed here.
+    let mut task_to_drop = None;
+    let mut spins = 0usize;
+    loop {
+        if let Some(mut scheduler) = SCHEDULER.try_lock_no_irqsave() {
+            if let Some(ref mut sched) = *scheduler {
+                // REQUEUE OLD TASK FIRST (while current AS is still active/stable)
+                task_to_drop = drain_post_switch_locked(sched, cpu_index, false, false);
+
+                // NOW SWITCH TO NEW ADDRESS SPACE
+                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                    if let Some(ref task) = cpu.current_task {
+                        let task_stack_top =
+                            task.kernel_stack.virt_base.as_u64() + task.kernel_stack.size as u64;
+                        if should_trace {
+                            crate::e9_println!(
+                                "[ifs-task] cpu={} tid={} rsp0={:#x} expected={:#x}",
+                                cpu_index,
+                                task.id.as_u64(),
+                                entry_rsp0,
+                                task_stack_top
+                            );
+                        }
+                        if should_trace && entry_rsp0 != 0 && entry_rsp0 != task_stack_top {
+                            crate::e9_println!(
+                                "[ifs-rsp0-mismatch] cpu={} tid={} rsp0={:#x} expected={:#x}",
+                                cpu_index,
+                                task.id.as_u64(),
+                                entry_rsp0,
+                                task_stack_top
+                            );
+                        }
+                        let as_ptr = unsafe { task.process.address_space.get() };
+                        unsafe { (*as_ptr).switch_to() };
+                    }
+                }
+            }
+            break;
+        }
+        spins = spins.saturating_add(1);
+        core::hint::spin_loop();
+    }
+    let _ = task_to_drop;
 }
 
 /// Yield the current task to allow other tasks to run (cooperative).
@@ -309,6 +425,14 @@ pub fn yield_task() {
     restore_flags(saved_flags);
 }
 
+#[inline]
+fn interrupt_frame_fits(task: &Arc<Task>, rsp: u64) -> bool {
+    let stack_base = task.kernel_stack.virt_base.as_u64();
+    let stack_top = stack_base + task.kernel_stack.size as u64;
+    let frame_size = core::mem::size_of::<crate::syscall::SyscallFrame>() as u64;
+    rsp >= stack_base && rsp.saturating_add(frame_size) <= stack_top
+}
+
 /// Called from the timer interrupt handler (or a resched IPI) to potentially
 /// preempt the current task.
 ///
@@ -332,7 +456,7 @@ pub fn maybe_preempt() {
     // Try to lock the scheduler. If it's already locked (yield_task in
     // progress), just skip this tick - we'll preempt on the next one.
     let switch_target = {
-        let mut scheduler = match SCHEDULER.try_lock() {
+        let mut scheduler = match SCHEDULER.try_lock_no_irqsave() {
             Some(guard) => guard,
             None => {
                 note_try_lock_fail_on_cpu(cpu_index);
@@ -346,6 +470,9 @@ pub fn maybe_preempt() {
                 Some(cpu) => cpu,
                 None => return,
             };
+            if take_force_resched_hint(cpu_index) {
+                cpu.need_resched = true;
+            }
             if cpu.current_task.is_none() {
                 return;
             }
@@ -369,6 +496,17 @@ pub fn maybe_preempt() {
 
     if let Some(ref target) = switch_target {
         if cpu_is_valid(cpu_index) {
+            // One-shot per-CPU: trace the very first real preemption.
+            // NOTE: do NOT acquire SCHEDULER here — we are between the lock
+            // release (end of the block above) and do_switch_context. A
+            // nested try_lock in this window re-enters the guardian (CLI +
+            // CAS) on a CPU that is about to switch stacks, producing a
+            // spurious second "locked_raw=true" observation in finish_switch
+            // diagnostics and, if the lock happens to be free, a redundant
+            // owner_cpu store on the wrong context.
+            if !FIRST_PREEMPT_LOGGED[cpu_index].swap(true, Ordering::Relaxed) {
+                let _preempt_n = CPU_PREEMPT_COUNT[cpu_index].load(Ordering::Relaxed);
+            }
             CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
         }
         unsafe {
@@ -376,6 +514,158 @@ pub fn maybe_preempt() {
         }
         finish_switch();
     }
+}
+
+/// Interrupt-aware preemption path.
+///
+/// Unlike the legacy `ret`-based scheduler path, the full interrupted user
+/// context is already materialized as a `SyscallFrame` on the current kernel
+/// stack. This lets us save the outgoing task immediately, select the next
+/// runnable task under the scheduler lock, and return an `iretq`-compatible
+/// frame pointer for the raw timer stub.
+pub fn maybe_preempt_from_interrupt(
+    cpu_index: usize,
+    current_frame: &mut crate::syscall::SyscallFrame,
+) -> Option<crate::arch::x86_64::idt::InterruptReturnDecision> {
+    if cpu_is_valid(cpu_index) {
+        RESCHED_IPI_PENDING[cpu_index].store(false, Ordering::Release);
+    }
+
+    if !percpu::is_preemptible() {
+        return None;
+    }
+
+    let current_frame_rsp = current_frame as *mut crate::syscall::SyscallFrame as u64;
+    let mut task_to_drop: Option<Arc<Task>> = None;
+
+    let decision = {
+        let mut scheduler = match SCHEDULER.try_lock_no_irqsave() {
+            Some(guard) => guard,
+            None => {
+                note_try_lock_fail_on_cpu(cpu_index);
+                return None;
+            }
+        };
+
+        let Some(ref mut sched) = *scheduler else {
+            return None;
+        };
+
+        {
+            let cpu = match sched.cpus.get_mut(cpu_index) {
+                Some(cpu) => cpu,
+                None => return None,
+            };
+            if take_force_resched_hint(cpu_index) {
+                cpu.need_resched = true;
+            }
+            if cpu.current_task.is_none() || !cpu.need_resched {
+                return None;
+            }
+        }
+
+        unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
+        let current = match sched.cpus[cpu_index].current_task.as_ref() {
+            Some(t) => t.clone(),
+            None => {
+                unsafe { core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _) };
+                return None;
+            }
+        };
+        unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
+        current.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
+        current.set_interrupt_rsp(current_frame_rsp);
+
+        let next = sched.pick_next_task(cpu_index);
+
+        if Arc::ptr_eq(&current, &next) {
+            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                cpu.need_resched = false;
+            }
+            task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
+            // No context switch: return current task's FPU area for save/restore.
+            let current_fpu = current.fpu_state.get() as *mut u8;
+            Some(crate::arch::x86_64::idt::InterruptReturnDecision {
+                next_rsp: 0,
+                old_fpu: current_fpu,
+                new_fpu: current_fpu,
+            })
+        } else {
+            let mut next_rsp = next.interrupt_rsp();
+            if next.resume_kind() == crate::process::task::ResumeKind::RetFrame {
+                // All tasks (kernel and ELF user tasks) start their first execution
+                // in Ring 0 via the task_entry_trampoline. We must seed a kernel
+                // interrupt frame so that the interrupt return path (iretq) can
+                // safely jump to the trampoline.
+                next.seed_kernel_interrupt_frame_from_context();
+                next_rsp = next.interrupt_rsp();
+            }
+            let fits = interrupt_frame_fits(&next, next_rsp);
+            if next_rsp == 0 || !fits {
+                unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
+                let is_idle_fallback = Arc::ptr_eq(&next, &sched.cpus[cpu_index].idle_task);
+                task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
+
+                if let Some(prev) = sched.cpus[cpu_index].task_to_requeue.take() {
+                    unsafe {
+                        *prev.state.get() = TaskState::Running;
+                    }
+                    sched.cpus[cpu_index].current_task = Some(prev);
+                } else {
+                    unsafe {
+                        *current.state.get() = TaskState::Running;
+                    }
+                    sched.cpus[cpu_index].current_task = Some(current.clone());
+                }
+
+                if !is_idle_fallback {
+                    unsafe {
+                        *next.state.get() = TaskState::Ready;
+                    }
+                    let class = sched.class_table.class_for_task(&next);
+                    sched.cpus[cpu_index].class_rqs.enqueue(class, next);
+                }
+                // Abort switch: return current task's FPU area for save/restore.
+                let current_fpu = current.fpu_state.get() as *mut u8;
+                return Some(crate::arch::x86_64::idt::InterruptReturnDecision {
+                    next_rsp: 0,
+                    old_fpu: current_fpu,
+                    new_fpu: current_fpu,
+                });
+            } else {
+                next.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
+                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+                    cpu.need_resched = false;
+                }
+                // Do NOT drain `task_to_requeue` / `task_to_drop` here.
+                // The raw timer stub still has to save the outgoing FPU state and
+                // pivot onto the next task's stack. Defer that finalization to
+                // `finish_interrupt_switch()` on the new stack, matching the
+                // post-switch hooks used by Redox and Maestro.
+
+                let stack_top =
+                    next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
+
+                crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+                crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+
+                let old_fpu = current.fpu_state.get() as *mut u8;
+                let new_fpu = next.fpu_state.get() as *const u8;
+
+                Some(crate::arch::x86_64::idt::InterruptReturnDecision {
+                    next_rsp,
+                    old_fpu,
+                    new_fpu,
+                })
+            }
+        }
+    };
+
+    if decision.is_some() && cpu_is_valid(cpu_index) {
+        CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    decision
 }
 
 /// Enable or disable verbose scheduler tracing.
@@ -538,7 +828,8 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
 
 /// The main function for the idle task
 pub(super) extern "C" fn idle_task_main() -> ! {
-    log::info!("[sched][idle] started");
+    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    crate::serial_force_println!("[trace][sched] idle_task_main start cpu={}", cpu);
     loop {
         // Be explicit on SMP: never rely on inherited IF state.
         // If IF=0, HLT can deadlock that CPU forever.

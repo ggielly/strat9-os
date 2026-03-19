@@ -87,6 +87,28 @@ fn build_user_thread_task(
     let parent_fpu = unsafe { &*parent.fpu_state.get() };
     let mut child_fpu = ExtendedState::new();
     child_fpu.copy_from(parent_fpu);
+    let interrupt_frame = crate::syscall::SyscallFrame {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        rbp: 0,
+        rbx: 0,
+        r11: bootstrap_ctx.user_rflags,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rsi: 0,
+        rdi: bootstrap_ctx.arg0,
+        rdx: 0,
+        rcx: bootstrap_ctx.entry,
+        rax: 0,
+        iret_rip: bootstrap_ctx.entry,
+        iret_cs: bootstrap_ctx.user_cs,
+        iret_rflags: bootstrap_ctx.user_rflags,
+        iret_rsp: bootstrap_ctx.stack_top,
+        iret_ss: bootstrap_ctx.user_ss,
+    };
 
     let task = Arc::new(Task {
         id: crate::process::TaskId::new(),
@@ -102,6 +124,8 @@ fn build_user_thread_task(
         state: SyncUnsafeCell::new(crate::process::TaskState::Ready),
         priority: parent.priority,
         context: SyncUnsafeCell::new(context),
+        resume_kind: SyncUnsafeCell::new(crate::process::task::ResumeKind::RetFrame),
+        interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: None,
         name: "user-thread",
@@ -131,6 +155,8 @@ fn build_user_thread_task(
         let frame = ctx.saved_rsp as *mut u64;
         *frame.add(2) = Box::into_raw(bootstrap_ctx) as u64;
     }
+
+    task.seed_interrupt_frame(interrupt_frame);
 
     Ok(task)
 }

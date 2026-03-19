@@ -18,7 +18,7 @@ use crate::{
     capability::Capability,
     memory::address_space::{AddressSpace, VmaFlags, VmaPageSize, VmaType},
     process::{
-        task::{CpuContext, KernelStack, SyncUnsafeCell, Task},
+        task::{CpuContext, KernelStack, ResumeKind, SyncUnsafeCell, Task},
         TaskId, TaskPriority, TaskState,
     },
 };
@@ -876,13 +876,47 @@ fn apply_dynamic_relocations(
             if value < 0 || value > u64::MAX as i128 {
                 return Err("Relocation value out of range");
             }
-            write_user_mapped_bytes(user_as, target, &(value as u64).to_le_bytes())?;
+            let val_u64 = value as u64;
+            // Read back before write for diagnosis
+            if applied < 5 {
+                let r_addend_copy = rela.r_addend; // copy packed field to local
+                let mut before = [0u8; 8];
+                let _ = read_user_mapped_bytes(user_as, target, &mut before);
+                let before_val = u64::from_le_bytes(before);
+                crate::e9_println!(
+                    "[reloc] [{i}] r_type={} target={:#x} r_addend={:#x} value={:#x} before={:#x}",
+                    r_type, target, r_addend_copy, val_u64, before_val
+                );
+            }
+            write_user_mapped_bytes(user_as, target, &val_u64.to_le_bytes())?;
+            // Read back after write for diagnosis
+            if applied < 5 {
+                let mut after = [0u8; 8];
+                let _ = read_user_mapped_bytes(user_as, target, &mut after);
+                let after_val = u64::from_le_bytes(after);
+                crate::e9_println!(
+                    "[reloc] [{i}] after_write={:#x} (expected={:#x})",
+                    after_val, val_u64
+                );
+            }
+            // Catch any relocation that writes a kernel-range address into user space.
+            if val_u64 >= 0xffff_8000_0000_0000 {
+                let r_addend_copy = rela.r_addend;
+                crate::e9_println!(
+                    "[reloc-KERNEL-ADDR] [{i}] r_type={} target={:#x} r_addend={:#x} val={:#x} bias={:#x}",
+                    r_type, target, r_addend_copy, val_u64, load_bias
+                );
+            }
             applied += 1;
         }
         Ok(applied)
     };
 
     let mut total_applied = 0usize;
+    crate::e9_println!(
+        "[reloc] apply_dynamic_relocations: bias={:#x} rela_addr={:?} rela_size={} rela_count={:?}",
+        load_bias, rela_addr, rela_size, rela_count_hint
+    );
     if let Some(rela_base) = rela_addr {
         total_applied += apply_rela_table(rela_base, rela_size, rela_count_hint)?;
     }
@@ -891,7 +925,7 @@ fn apply_dynamic_relocations(
     }
 
     if total_applied > 0 {
-        log::debug!("[elf] Applied {} RELA relocations", total_applied);
+        crate::e9_println!("[reloc] applied {} RELA relocations (bias={:#x})", total_applied, load_bias);
     }
     if relr_applied > 0 {
         log::debug!("[elf] Applied {} RELR relocations", relr_applied);
@@ -1043,19 +1077,20 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     use crate::arch::x86_64::gdt;
     use core::sync::atomic::Ordering;
 
-    crate::serial_force_println!("[trace][elf] ring3_trampoline before current_task");
+    crate::e9_println!("[trace][elf] ring3_trampoline before current_task");
     let task = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
         .expect("elf_ring3_trampoline: no current task");
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] ring3_trampoline enter tid={} name={}",
         task.id.as_u64(),
         task.name
     );
+    task.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
 
     let user_rip = task.trampoline_entry.load(Ordering::Acquire);
     let user_rsp = task.trampoline_stack_top.load(Ordering::Acquire);
     let user_arg0 = task.trampoline_arg0.load(Ordering::Acquire);
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] ring3_trampoline args tid={} rip={:#x} rsp={:#x} arg0={:#x}",
         task.id.as_u64(),
         user_rip,
@@ -1063,13 +1098,41 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_arg0
     );
 
+    // Probe: read GOT entries via HHDM before switching to user AS.
+    // This is the last kernel-owned moment before user execution begins.
+    // If values here are wrong, the bug is in load/relocation, not in
+    // something that happens after this point.
+    {
+        // SAFETY: Kernel still holds the boot/kernel CR3. HHDM is valid.
+        unsafe {
+            let as_ref = &*task.process.address_space.get();
+            let task_name: &str = &task.name;
+            for test_off in [0x12920u64, 0x12928u64, 0x12930u64] {
+                let vaddr = 0x100000000u64.wrapping_add(test_off);
+                if let Some(phys) = as_ref.translate(VirtAddr::new(vaddr)) {
+                    let ptr = crate::memory::phys_to_virt(phys.as_u64()) as *const u64;
+                    let val = core::ptr::read_unaligned(ptr);
+                    crate::e9_println!(
+                        "[trampoline-got] tid={} name={} GOT[{:#x}]=phys={:#x} val={:#x}",
+                        task.id.as_u64(), task_name, vaddr, phys.as_u64(), val
+                    );
+                } else {
+                    crate::e9_println!(
+                        "[trampoline-got] tid={} name={} GOT[{:#x}]=<not mapped>",
+                        task.id.as_u64(), task_name, vaddr
+                    );
+                }
+            }
+        }
+    }
+
     // Switch to the user address space stored in the task.
     // SAFETY: The address space was set up during task creation and is valid.
     unsafe {
         let as_ref = &*task.process.address_space.get();
         as_ref.switch_to();
     }
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] ring3_trampoline switch_to done tid={}",
         task.id.as_u64()
     );
@@ -1077,7 +1140,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     let user_cs = gdt::user_code_selector().0 as u64;
     let user_ss = gdt::user_data_selector().0 as u64;
     let user_rflags: u64 = 0x202; // IF=1, reserved bit 1 = 1
-    crate::serial_force_println!(
+    crate::e9_println!(
         "[trace][elf] ring3_trampoline iret tid={} cs={:#x} ss={:#x} rflags={:#x}",
         task.id.as_u64(),
         user_cs,
@@ -1085,23 +1148,143 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_rflags
     );
 
+    // ----- Pre-iret LAPIC timer diagnostic -----
+    // Verify that the APIC timer is actually running on this CPU before we
+    // enter Ring 3 (if it is not, no timer tick = no heartbeat = silent hang).
+    unsafe {
+        let lvt = crate::arch::x86_64::apic::read_reg(
+            crate::arch::x86_64::apic::REG_LVT_TIMER,
+        );
+        let init_cnt = crate::arch::x86_64::apic::read_reg(
+            crate::arch::x86_64::apic::REG_TIMER_INIT,
+        );
+        let cur_cnt = crate::arch::x86_64::apic::read_reg(
+            crate::arch::x86_64::apic::REG_TIMER_CURRENT,
+        );
+        let rflags_now: u64;
+        core::arch::asm!("pushfq; pop {}", out(reg) rflags_now, options(nostack));
+        crate::e9_println!(
+            "[trace][elf] pre-iret LAPIC: LVT={:#x} init={} cur={} IF={}",
+            lvt,
+            init_cnt,
+            cur_cnt,
+            (rflags_now >> 9) & 1
+        );
+        if lvt & (1 << 16) != 0 {
+            crate::e9_println!(
+                "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) — no ticks will fire!"
+            );
+        }
+        if init_cnt == 0 {
+            crate::e9_println!(
+                "[trace][elf] WARNING: LAPIC timer init_count=0 — timer not started!"
+            );
+        }
+    }
+
+
+    crate::arch::x86_64::ring3_diag::validate_ring3_state(
+        user_rip,
+        user_rsp,
+        user_cs as u16,
+        user_ss as u16,
+    );
+
+    crate::e9_println!(
+        "[elf] PRE-IRETQ tid={} rip={:#x} rsp={:#x} rflags={:#x}",
+        task.id.as_u64(),
+        user_rip,
+        user_rsp,
+        user_rflags
+    );
+
+    // Probe E9 Rust : validate_ring3_state passé, on entre dans l'asm.
+    // Si '0' est visible mais pas '1', le compilateur a inséré du code entre
+    // les deux qui a planté (peu probable, mais élimine cette hypothèse).
+    crate::e9_println!(
+        "E9[0] pre-asm rip={:#x} rsp={:#x} cs={:#x} ss={:#x}",
+        user_rip, user_rsp, user_cs, user_ss,
+    );
+
     // SAFETY: Valid user mappings have been set up. IRETQ switches to Ring 3.
+    //
+    // ── E9-hack probes ────────────────────────────────────────────────────
+    // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port
+    // (visible with `-debugcon stdio` or `-debugcon file:e9.log`).
+    // The push/pop rax around each probe protects registers allocated by the
+    // compiler for the `in(reg)` constraints; the net effect on RSP is zero.
+    //
+    //   '1' (0x31): start of the asm block, input registers in place
+    //   '2' (0x32): iretq frame fully on stack (5 words)
+    //   '3' (0x33): RDI loaded with arg0, just before SWAPGS
+    //   '4' (0x34): SWAPGS done — if CPU crashes on iretq the last char is '4'
+    //
+    // If output stops at:
+    //   '1' → RSP/alignment problem before any pushes
+    //   '2' → a push faulted (kernel mapping broken?)
+    //   '3' → bug in arg0 value or in RDI
+    //   '4' → iretq is indeed triple-faulting (GDT/paging/TSS issue)
+    //   nothing → E9 port not enabled in QEMU (add `-debugcon stdio`)
     unsafe {
         core::arch::asm!(
+            // ── Probe 1 : entrée dans le bloc asm ─────────────────────────
+            // Les registres d'entrée sont déjà alloués par le compilateur ;
+            // push/pop rax les laisse intacts.
+            "push rax",
+            "mov al, 0x31",     // '1'
+            "out 0xe9, al",
+            "pop rax",
+
+            // ── Construction de la frame iretq ────────────────────────────
+            // Ordre requis par IRETQ (dépilé dans l'ordre inverse) :
+            //   [RSP+32] SS
+            //   [RSP+24] user RSP
+            //   [RSP+16] RFLAGS
+            //   [RSP+8]  CS
+            //   [RSP+0]  RIP  ← RSP ici après les 5 push
             "push {ss}",
             "push {rsp_val}",
             "push {rflags}",
             "push {cs}",
             "push {rip}",
+
+            // ── Probe 2 : frame iretq complète ────────────────────────────
+            "push rax",
+            "mov al, 0x32",     // '2'
+            "out 0xe9, al",
+            "pop rax",
+
+            // ── Chargement de arg0 dans RDI ───────────────────────────────
             "mov rdi, {arg0}",
+
+            // ── Probe 3 : RDI chargé, juste avant SWAPGS ─────────────────
+            "push rax",
+            "mov al, 0x33",     // '3'
+            "out 0xe9, al",
+            "pop rax",
+
+            // ── SWAPGS : GS.base kernel ↔ GS.base user ───────────────────
+            // Après cette instruction, GS pointe vers le bloc per-thread user.
+            // Le push/pop ci-dessous ne touche pas GS, il est sûr.
             "swapgs",
+
+            // ── Probe 4 : SWAPGS réussi, IRETQ imminent ──────────────────
+            // Si le double-fault survient sur iretq, '4' sera le DERNIER
+            // caractère visible dans la console E9.
+            "push rax",
+            "mov al, 0x34",     // '4'
+            "out 0xe9, al",
+            "pop rax",
+
+            // ── IRETQ : point de non-retour ───────────────────────────────
             "iretq",
-            ss = in(reg) user_ss,
+
+            ss      = in(reg) user_ss,
             rsp_val = in(reg) user_rsp,
-            rflags = in(reg) user_rflags,
-            cs = in(reg) user_cs,
-            rip = in(reg) user_rip,
-            arg0 = in(reg) user_arg0,
+            rflags  = in(reg) user_rflags,
+            cs      = in(reg) user_cs,
+            rip     = in(reg) user_rip,
+            arg0    = in(reg) user_arg0,
             options(noreturn),
         );
     }
@@ -1129,12 +1312,26 @@ pub fn load_and_run_elf_with_caps(
     name: &'static str,
     seed_caps: &[Capability],
 ) -> Result<TaskId, &'static str> {
+    crate::e9_println!(
+        "[trace][elf] load_and_run_elf enter name={} size={}",
+        name,
+        elf_data.len()
+    );
     let task = load_elf_task_with_caps(elf_data, name, seed_caps)?;
     let task_id = task.id;
     let runtime_entry = task
         .trampoline_entry
         .load(core::sync::atomic::Ordering::Acquire);
+    crate::e9_println!(
+        "[trace][elf] load_and_run_elf add_task begin tid={} entry={:#x}",
+        task_id.as_u64(),
+        runtime_entry
+    );
     crate::process::add_task(task);
+    crate::e9_println!(
+        "[trace][elf] load_and_run_elf add_task done tid={}",
+        task_id.as_u64()
+    );
 
     log::info!(
         "[elf] Task '{}' created: entry={:#x}, stack_top={:#x}",
@@ -1222,12 +1419,24 @@ pub fn load_elf_task_with_caps(
     name: &'static str,
     seed_caps: &[Capability],
 ) -> Result<Arc<Task>, &'static str> {
+    crate::e9_println!(
+        "[trace][elf] load_elf_task enter name={} size={}",
+        name,
+        elf_data.len()
+    );
     log::info!("[elf] Loading ELF '{}'...", name);
 
     // Step 1: Parse and validate ELF header
+    crate::e9_println!("[trace][elf] load_elf_task parse_header begin");
     let header = parse_header(elf_data)?;
+    crate::e9_println!(
+        "[trace][elf] load_elf_task parse_header ok type={}",
+        if header.e_type == ET_DYN { "ET_DYN" } else { "ET_EXEC" }
+    );
     // Step 2: Create user address space
+    crate::e9_println!("[trace][elf] load_elf_task user_as begin");
     let user_as = Arc::new(AddressSpace::new_user()?);
+    crate::e9_println!("[trace][elf] load_elf_task user_as done");
 
     let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
@@ -1235,6 +1444,12 @@ pub fn load_elf_task_with_caps(
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
 
     let phnum = header.e_phnum;
+    crate::e9_println!(
+        "[trace][elf] load_elf_task layout entry={:#x} bias={:#x} phdrs={}",
+        entry,
+        load_bias,
+        phnum
+    );
     log::info!(
         "[elf] ELF '{}': type={}, entry={:#x}, bias={:#x}, {} program headers",
         name,
@@ -1260,6 +1475,32 @@ pub fn load_elf_task_with_caps(
         apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
     }
 
+    // Diagnostic: read back key GOT entries after relocation to verify they were applied.
+    for test_offset in [0x12920u64, 0x12928u64, 0x12930u64] {
+        let vaddr = load_bias.wrapping_add(test_offset);
+        if vaddr < USER_ADDR_MAX {
+            if let Some(phys) = user_as.translate(VirtAddr::new(vaddr)) {
+                let ptr = crate::memory::phys_to_virt(phys.as_u64()) as *const u64;
+                // SAFETY: HHDM access to a mapped user page, owned exclusively during ELF loading.
+                let val = unsafe { core::ptr::read_unaligned(ptr) };
+                crate::e9_println!(
+                    "[reloc-check] GOT[{:#x}]=phys={:#x} val={:#x} ({})",
+                    vaddr, phys.as_u64(), val, name
+                );
+            } else {
+                crate::e9_println!(
+                    "[reloc-check] GOT[{:#x}] = <not mapped> ({})",
+                    vaddr, name
+                );
+            }
+        }
+    }
+
+    crate::e9_println!(
+        "[trace][elf] load_elf_task segments_done count={} has_interp={}",
+        load_count,
+        interp_path.is_some()
+    );
     log::info!("[elf] Loaded {} PT_LOAD segment(s)", load_count);
 
     let mut runtime_entry = entry;
@@ -1362,7 +1603,16 @@ pub fn load_elf_task_with_caps(
 
     // Step 5: Create kernel task — trampoline params are stored inside the task
     // itself so that concurrent SMP execution of multiple trampolines is safe.
+    crate::e9_println!(
+        "[trace][elf] load_elf_task kstack_begin size={}",
+        Task::DEFAULT_STACK_SIZE
+    );
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
+    crate::e9_println!(
+        "[trace][elf] load_elf_task kstack_done virt={:#x} top={:#x}",
+        kernel_stack.virt_base.as_u64(),
+        kernel_stack.virt_base.as_u64() + kernel_stack.size as u64
+    );
     let context = CpuContext::new(elf_ring3_trampoline as *const () as u64, &kernel_stack);
     let (pid, tid, tgid) = Task::allocate_process_ids();
     let fpu_state = crate::process::task::ExtendedState::new();
@@ -1382,6 +1632,8 @@ pub fn load_elf_task_with_caps(
         state: SyncUnsafeCell::new(TaskState::Ready),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),
+        resume_kind: SyncUnsafeCell::new(ResumeKind::RetFrame),
+        interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: None,
         name,
@@ -1406,6 +1658,13 @@ pub fn load_elf_task_with_caps(
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
     });
 
+    crate::e9_println!(
+        "[trace][elf] load_elf_task task_built tid={} pid={} entry={:#x} sp={:#x}",
+        task.id.as_u64(),
+        task.pid,
+        runtime_entry,
+        boot_sp
+    );
     // Seed capabilities into the new task (before scheduling).
     let mut bootstrap_handle: Option<u64> = None;
     if !seed_caps.is_empty() {
@@ -1432,6 +1691,29 @@ pub fn load_elf_task_with_caps(
         task.trampoline_arg0
             .store(h, core::sync::atomic::Ordering::Release);
     }
+
+    task.seed_interrupt_frame(crate::syscall::SyscallFrame {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        rbp: 0,
+        rbx: 0,
+        r11: 0x202,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rsi: 0,
+        rdi: task.trampoline_arg0.load(core::sync::atomic::Ordering::Acquire),
+        rdx: 0,
+        rcx: runtime_entry,
+        rax: 0,
+        iret_rip: runtime_entry,
+        iret_cs: crate::arch::x86_64::gdt::user_code_selector().0 as u64,
+        iret_rflags: 0x202,
+        iret_rsp: boot_sp,
+        iret_ss: crate::arch::x86_64::gdt::user_data_selector().0 as u64,
+    });
 
     // Bootstrapping: grant Silo Admin capability to the initial userspace task.
     if name == "init"

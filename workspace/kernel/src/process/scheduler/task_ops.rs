@@ -1,4 +1,7 @@
 use super::{runtime_ops::finish_switch, *};
+use crate::memory::UserSliceWrite;
+
+static PENDING_SILO_CLEANUPS: SpinLock<Vec<TaskId>> = SpinLock::new(Vec::new());
 
 /// Mark the current task as Dead and yield to the scheduler.
 ///
@@ -14,11 +17,14 @@ pub fn exit_current_task(exit_code: i32) -> ! {
             .clear_child_tid
             .load(core::sync::atomic::Ordering::Relaxed);
         if tidptr != 0 {
-            // Safety: tidptr is a user address in the still-active address space.
-            let ptr = tidptr as *mut u32;
-            // Use is_aligned (pointer alignment check, not user-mapped check).
-            if (tidptr & 3) == 0 && tidptr < 0xFFFF_8000_0000_0000 {
-                unsafe { ptr.write_volatile(0) };
+            let zero = 0u32.to_ne_bytes();
+            // POSIX clear_child_tid targets a userspace u32; keep the existing
+            // alignment check for futex semantics, but validate the mapping via
+            // UserSliceWrite instead of dereferencing the raw userspace pointer.
+            if (tidptr & 3) == 0 {
+                if let Ok(user) = UserSliceWrite::new(tidptr, zero.len()) {
+                    user.copy_from(&zero);
+                }
                 // Futex wake: wake all threads waiting on this address (e.g. pthread_join).
                 let _ = crate::syscall::futex::sys_futex_wake(tidptr, u32::MAX);
             }
@@ -241,12 +247,19 @@ pub fn current_task_clone_spin_debug(trace_label: &str) -> Option<Arc<Task>> {
         if let Some(mut scheduler) = SCHEDULER.try_lock() {
             return if let Some(ref mut sched) = *scheduler {
                 sched.cpus.get_mut(cpu_index).and_then(|cpu| {
-                    let arc = cpu.current_task.as_ref()?;
+                    if cpu.current_task.is_none() {
+                        unsafe { core::arch::asm!("mov al, 'N'; out 0xe9, al", out("al") _) };
+                        return None;
+                    }
+                    let arc = cpu.current_task.as_ref().unwrap();
                     let strong = Arc::strong_count(arc);
+                    // Racy, pifometric diagnostic only: strong_count can move
+                    // concurrently, so this is a heuristic for suspicious
+                    // scheduler state, not a formal corruption proof.
                     if strong == 0 || strong > (isize::MAX as usize) / 2 {
                         let ptr = Arc::as_ptr(arc) as *const u8;
                         crate::serial_force_println!(
-                            "[trace][sched] {} corrupt current_task cpu={} strong={:#x} ptr={:p}",
+                            "[trace][sched] {} suspicious current_task heuristic cpu={} strong={:#x} ptr={:p}",
                             trace_label,
                             cpu_index,
                             strong,
@@ -904,7 +917,7 @@ pub fn kill_task(id: TaskId) -> bool {
                 }
                 if removed_from_ready {
                     let _ = sched.clear_task_wake_deadline_locked(id);
-                    if let Some(task) = sched.all_tasks.remove(&id) {
+                    if let Some(task) = sched.remove_all_task_locked(id) {
                         let task_pid = task.pid;
                         unsafe {
                             *task.state.get() = TaskState::Dead;
@@ -933,7 +946,7 @@ pub fn kill_task(id: TaskId) -> bool {
                         *task.state.get() = TaskState::Dead;
                     }
                     cleanup_task_resources(&task);
-                    sched.all_tasks.remove(&id);
+                    let _ = sched.remove_all_task_locked(id);
                     sched.task_cpu.remove(&id);
                     sched.unregister_identity_locked(id, task_pid, task.tid);
                     let (parent, ipi_death) =
@@ -1035,9 +1048,30 @@ fn reparent_children(sched: &mut Scheduler, dying: TaskId) -> Option<usize> {
 /// # Safety
 /// Must be called with the scheduler lock held and the task no longer
 /// accessible from any global map (all_tasks, current_task, etc.).
+fn queue_silo_cleanup(task_id: TaskId) {
+    let mut guard = PENDING_SILO_CLEANUPS.lock();
+    guard.push(task_id);
+}
+
+pub fn flush_deferred_silo_cleanups() {
+    let mut guard = match PENDING_SILO_CLEANUPS.try_lock() {
+        Some(g) => g,
+        None => return, // Lock held by preempted task or other CPU, skip safely
+    };
+    if guard.is_empty() {
+        return;
+    }
+    let mut drained = Vec::new();
+    drained.append(&mut *guard);
+    drop(guard);
+    for task_id in drained {
+        crate::silo::on_task_terminated(task_id);
+    }
+}
+
 pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     crate::ipc::port::cleanup_ports_for_task(task.id);
-    crate::silo::on_task_terminated(task.id);
+    queue_silo_cleanup(task.id);
 
     // SAFETY: strong_count is racy (a concurrent get_task_by_id may temporarily
     // hold an extra Arc ref). Worst case: cleanup is deferred until the last ref

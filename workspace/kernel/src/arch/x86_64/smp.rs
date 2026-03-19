@@ -38,6 +38,11 @@ static AP_SCHED_GATE_OPEN: AtomicBool = AtomicBool::new(false);
 /// Keep AP kernel stacks alive.
 static AP_KERNEL_STACKS: SpinLock<Vec<KernelStack>> = SpinLock::new(Vec::new());
 
+// Boot Application Processors using the legacy INIT+SIPI sequence.
+// Returns the number of online CPUs (including BSP) or an error string on failure.
+// - BSP must have already initialized the APIC and parsed MADT to get APIC IDs.
+// - APs are parked in an idle loop after booting, waiting for the scheduler gate
+// to open before starting the scheduler and timer on each AP.
 #[cfg(target_arch = "x86_64")]
 global_asm!(
     r#"
@@ -293,11 +298,28 @@ pub fn init() -> Result<usize, &'static str> {
             continue;
         }
 
-        // Allocate kernel stack using the simple BootAllocator (Asterinas style).
-        // This is safer during early bring-up than using the full Buddy Allocator.
+        // Allocate AP kernel stack from the buddy allocator.
+        // boot_alloc is sealed after buddy init (to prevent double-allocation),
+        // so AP stacks must come from buddy.  
+        // AP stacks are permanent kernel allocations: we intentionally leak the frame so buddy never reclaims it.
+        
         let stack_size = crate::process::task::Task::DEFAULT_STACK_SIZE;
-        let stack_top = crate::memory::boot_alloc::alloc_stack(stack_size)
-            .ok_or("SMP: failed to allocate boot stack from pool")?;
+        let pages = (stack_size + 4095) / 4096;
+        let order = pages.next_power_of_two().trailing_zeros() as u8;
+        let frame = crate::sync::with_irqs_disabled(|token| {
+            crate::memory::allocate_frames(token, order)
+        })
+        .map_err(|_| "SMP: failed to allocate AP stack from buddy")?;
+        let stack_phys = frame.start_address.as_u64();
+        let stack_virt = crate::memory::phys_to_virt(stack_phys);
+
+        // SAFETY: buddy gave us a valid, exclusive physical frame; phys_to_virt maps it.
+        unsafe { core::ptr::write_bytes(stack_virt as *mut u8, 0, stack_size) };
+
+        // Stack grows downward: top = base_virt + size.
+        // The PhysFrame is Copy (no Drop): buddy keeps it marked as allocated
+        // since we never call free_frames : permanent kernel allocation.
+        let stack_top = stack_virt.saturating_add(stack_size as u64);
 
         if apic_id as usize >= stacks.len() {
             log::warn!("SMP: APIC id {} out of stack array range", apic_id);
@@ -325,10 +347,12 @@ pub fn init() -> Result<usize, &'static str> {
     // Keep booting with available CPUs and report partial bring-up.
     let mut spins: u64 = 0;
     const MAX_SPINS: u64 = 200_000_000;
+    crate::e9_println!("BE SMP wait APs expected={}", expected);
     while BOOTED_CORES.load(Ordering::Acquire) < expected && spins < MAX_SPINS {
         core::hint::spin_loop();
         spins = spins.saturating_add(1);
     }
+    crate::e9_println!("BF SMP done online={}", BOOTED_CORES.load(Ordering::Acquire));
     if BOOTED_CORES.load(Ordering::Acquire) < expected {
         log::warn!(
             "SMP: timeout waiting APs (online={} expected={}), continuing",

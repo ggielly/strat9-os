@@ -10,7 +10,7 @@ pub mod paging;
 pub mod userslice;
 pub mod zone;
 
-use crate::boot::entry::MemoryRegion;
+use crate::{boot::entry::MemoryRegion, sync::IrqDisabledToken};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Higher Half Direct Map offset.
@@ -43,76 +43,70 @@ pub fn virt_to_phys(virt: u64) -> u64 {
 /// Initialize the memory management subsystem
 pub fn init_memory_manager(memory_regions: &[MemoryRegion]) {
     buddy::init_buddy_allocator(memory_regions);
+    // Race/corruption diagnostic: register slab lock for E9 LOCK-A/LOCK-R traces.
+    heap::debug_register_slab_trace();
 }
 
 /// Initialize copy-on-write metadata.
-pub fn init_cow_subsystem(memory_regions: &[MemoryRegion]) {
-    init_cow_metadata(memory_regions);
-}
-
-/// Initializes cow metadata.
-fn init_cow_metadata(memory_regions: &[MemoryRegion]) {
-    use crate::boot::entry::MemoryKind;
-
-    let max_end = memory_regions
-        .iter()
-        .filter(|r| matches!(r.kind, MemoryKind::Free | MemoryKind::Reclaim))
-        .map(|r| r.base.saturating_add(r.size))
-        .max()
-        .unwrap_or(0);
-
-    if max_end == 0 {
-        log::warn!("COW metadata not initialized: no usable memory regions");
-        return;
-    }
-
-    let max_pfn = ((max_end.saturating_add(4095)) / 4096) as usize;
-
-    // SAFETY: Called once during boot.
-    unsafe {
-        cow::init_frame_metadata(max_pfn);
-    }
-}
+pub fn init_cow_subsystem(_memory_regions: &[MemoryRegion]) {}
 
 // Re-exports
 pub use address_space::{kernel_address_space, AddressSpace, VmaFlags, VmaPageSize, VmaType};
 pub use buddy::get_allocator;
-pub use frame::{AllocError, FrameAllocator, PhysFrame};
+pub use frame::{AllocError, FrameAllocOptions, FrameAllocator, FramePurpose, PhysFrame};
 pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSliceWrite};
+pub use crate::sync::with_irqs_disabled;
 
-/// Allocate `2^order` contiguous physical frames.
+/// Allocate `2^order` contiguous physical frames (raw, no zeroing).
+///
+/// Prefer `FrameAllocOptions::new().allocate(token)` for order-0 allocations
+/// where zeroing or metadata stamping is needed (page tables, anonymous pages).
+/// This raw path is kept for multi-page / DMA bulk allocations where the caller
+/// manages zeroing explicitly.
 #[inline]
-pub fn allocate_frames(order: u8) -> Result<PhysFrame, AllocError> {
-    buddy::alloc(order)
+pub fn allocate_frames(token: &IrqDisabledToken, order: u8) -> Result<PhysFrame, AllocError> {
+    buddy::alloc(token, order)
 }
 
 /// Free `2^order` contiguous physical frames.
+///
+/// Requires an `IrqDisabledToken` proving that IRQs are disabled on the calling CPU.
 #[inline]
-pub fn free_frames(frame: PhysFrame, order: u8) {
-    buddy::free(frame, order);
+pub fn free_frames(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
+    buddy::free(token, frame, order);
 }
 
-/// Allocate a single physical frame.
+/// Allocate a single **zeroed** physical frame with `KernelData` purpose.
+///
+/// This is the standard allocation path for all kernel-internal frames.  It
+/// uses `FrameAllocOptions::new()` (zeroed = true, purpose = KernelData) and
+/// performs the UNUSED → 0 → 1 refcount CAS (Asterinas OSTD pattern).
+///
+/// For page-table node allocation use `BuddyFrameAllocator` (via paging.rs)
+/// or `FrameAllocOptions::new().purpose(FramePurpose::PageTable).allocate()`.
+/// For user-space frames use `FrameAllocOptions::new().purpose(FramePurpose::UserData)`.
 #[inline]
-pub fn allocate_frame() -> Result<PhysFrame, AllocError> {
-    allocate_frames(0)
+pub fn allocate_frame(token: &IrqDisabledToken) -> Result<PhysFrame, AllocError> {
+    FrameAllocOptions::new().allocate(token)
 }
 
 /// Free a single physical frame.
 #[inline]
-pub fn free_frame(frame: PhysFrame) {
-    free_frames(frame, 0);
+pub fn free_frame(token: &IrqDisabledToken, frame: PhysFrame) {
+    free_frames(token, frame, 0);
 }
 
-/// Allocate a zeroed 4KB frame suitable for DMA operations
+/// Allocate a zeroed 4 KiB frame suitable for DMA operations.
+///
+/// Disables IRQs internally.  The frame is zeroed before being returned
+/// (guaranteed by `FrameAllocOptions::new()` — zeroed = true by default).
 pub fn allocate_dma_frame() -> Option<PhysFrame> {
-    let frame = allocate_frame().ok()?;
-    // Zero the frame
-    let virt = phys_to_virt(frame.start_address.as_u64()) as *mut u8;
-    unsafe {
-        core::ptr::write_bytes(virt, 0, 4096);
-    }
-    Some(frame)
+    with_irqs_disabled(|token| {
+        // `FrameAllocOptions::new()` defaults to zeroed = true; no manual
+        // `write_bytes` call is needed here any more.
+        FrameAllocOptions::new()
+            .purpose(FramePurpose::KernelData)
+            .allocate(token)
+            .ok()
+    })
 }
-
-// TODO: Implement slab allocator

@@ -241,11 +241,18 @@ fn delete_next_char_at_cursor(
 /// This function never returns. It continuously reads keyboard input,
 /// parses commands, and executes them.
 pub extern "C" fn shell_main() -> ! {
+    // E9 'Q' (0x51) = first instruction, before any lock/serial. Confirms we reached shell.
+    let q: u8 = 0x51;
+    unsafe { core::arch::asm!("out 0xe9, al", in("al") q) }
+    // E9 'S' = shell entered (no serial_force_println here - avoids FORCE_LOCK contention with timer)
+    unsafe { core::arch::asm!("mov al, 0x53; out 0xe9, al") }
     let registry = CommandRegistry::new();
     commands::util::init_shell_env();
     let mut input_buf = [0u8; 256];
     let mut input_len = 0;
     let mut cursor_pos = 0;
+    // E9 'L' = init complete, entering main loop
+    unsafe { core::arch::asm!("mov al, 0x4C; out 0xe9, al") }
 
     // Command history
     let mut history = VecDeque::new();
@@ -267,8 +274,8 @@ pub extern "C" fn shell_main() -> ! {
     // Display welcome message using ASCII for robust terminal rendering.
     shell_println!("");
     shell_println!("+--------------------------------------------------------------+");
-    shell_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)            |");
-    shell_println!("|         Type 'help' for available commands                  |");
+    shell_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)             |");
+    shell_println!("|         Type 'help' for available commands                   |");
     shell_println!("+--------------------------------------------------------------+");
     shell_println!("");
 
@@ -276,6 +283,7 @@ pub extern "C" fn shell_main() -> ! {
 
     let mut last_blink_tick = 0;
     let mut cursor_visible = false;
+
     // Cap per-loop mouse work to avoid starving timer ticks when dragging.
     const MAX_MOUSE_EVENTS_PER_TURN: usize = 16;
     const SCROLLBAR_DRAG_MIN_TICKS: u64 = 1;
@@ -296,6 +304,11 @@ pub extern "C" fn shell_main() -> ! {
                 };
                 crate::arch::x86_64::vga::draw_text_cursor(color);
             }
+        }
+
+        // Poll USB HID and drain events into unified keyboard/mouse buffers.
+        if crate::hardware::usb::hid::is_available() {
+            crate::hardware::usb::hid::poll_all();
         }
 
         // Read from keyboard buffer

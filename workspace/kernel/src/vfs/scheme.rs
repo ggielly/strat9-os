@@ -573,6 +573,14 @@ impl KernelScheme {
         let name = self.by_id.lock().get(&file_id)?.clone();
         self.files.lock().get(&name).cloned()
     }
+
+    /// Returns the bytes of a registered static kernel file.
+    pub fn lookup_bytes(&self, path: &str) -> Option<&'static [u8]> {
+        let file = self.files.lock().get(path).cloned()?;
+        // SAFETY: initfs files are bootloader-provided mappings kept alive for
+        // the full kernel lifetime.
+        Some(unsafe { core::slice::from_raw_parts(file.base, file.len) })
+    }
 }
 
 impl Scheme for KernelScheme {

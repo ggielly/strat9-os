@@ -420,7 +420,15 @@ pub fn apic_ticks_per_10ms() -> u32 {
 }
 
 /// Start the APIC timer using the cached calibration value.
+///
+/// If calibration failed (ticks=0), falls back to PIT so the system always
+/// has a working timer. Prevents freeze when APIC calibration times out.
 pub fn start_apic_timer_cached() {
     let ticks = apic_ticks_per_10ms();
+    if ticks == 0 {
+        log::warn!("APIC timer: cached ticks=0, falling back to PIT");
+        init_pit(TIMER_HZ as u32);
+        return;
+    }
     start_apic_timer(ticks);
 }

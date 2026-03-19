@@ -6,10 +6,13 @@
 // - Boot protocol mouse support
 // - Event queue for key presses and mouse movements
 // - PS/2 to USB keycode translation
+// - Unification with PS/2: events feed into the same keyboard/mouse buffers
+//
+// Inspired by Redox usbhid, Asterinas input subsystem, Maestro device manager.
 
 #![allow(dead_code)]
 
-use crate::hardware::usb::xhci::XhciController;
+use crate::arch::x86_64::{keyboard, mouse};
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
@@ -79,7 +82,6 @@ fn usb_to_ps2(keycode: u8) -> u8 {
 }
 
 pub struct HidKeyboard {
-    controller: Arc<XhciController>,
     port: usize,
     interface: u8,
     endpoint: u8,
@@ -95,7 +97,6 @@ unsafe impl Sync for HidKeyboard {}
 impl HidKeyboard {
     /// Creates a new instance.
     pub fn new(
-        controller: Arc<XhciController>,
         port: usize,
         interface: u8,
         endpoint: u8,
@@ -103,7 +104,6 @@ impl HidKeyboard {
         interval: u8,
     ) -> Self {
         Self {
-            controller,
             port,
             interface,
             endpoint,
@@ -173,10 +173,16 @@ impl HidKeyboard {
     pub fn is_modifier_pressed(&self, modifier: u8) -> bool {
         self.last_report[0] & modifier != 0
     }
+
+    /// Drain event queue and inject into the unified keyboard buffer.
+    pub fn drain_into_unified(&mut self) {
+        while let Some(ev) = self.event_queue.pop() {
+            keyboard::inject_hid_scancode(ev.keycode, ev.pressed);
+        }
+    }
 }
 
 pub struct HidMouse {
-    controller: Arc<XhciController>,
     port: usize,
     interface: u8,
     endpoint: u8,
@@ -192,7 +198,6 @@ unsafe impl Sync for HidMouse {}
 impl HidMouse {
     /// Creates a new instance.
     pub fn new(
-        controller: Arc<XhciController>,
         port: usize,
         interface: u8,
         endpoint: u8,
@@ -200,7 +205,6 @@ impl HidMouse {
         interval: u8,
     ) -> Self {
         Self {
-            controller,
             port,
             interface,
             endpoint,
@@ -269,6 +273,16 @@ impl HidMouse {
     pub fn is_button_pressed(&self, button: u8) -> bool {
         self.last_buttons & (1 << button) != 0
     }
+
+    /// Drain event queue and inject into the unified mouse buffer.
+    pub fn drain_into_unified(&mut self) {
+        while let Some(ev) = self.event_queue.pop() {
+            let left = ev.buttons & 0x01 != 0;
+            let right = ev.buttons & 0x02 != 0;
+            let middle = ev.buttons & 0x04 != 0;
+            mouse::push_event_from_hid(ev.dx as i16, ev.dy as i16, ev.dz, left, right, middle);
+        }
+    }
 }
 
 static KEYBOARDS: Mutex<Vec<Arc<Mutex<HidKeyboard>>>> = Mutex::new(Vec::new());
@@ -284,14 +298,10 @@ pub fn init() {
         return;
     }
 
-    if let Some(controller) = crate::hardware::usb::xhci::get_controller(0) {
-        for port in 0..controller.port_count() {
-            if controller.is_port_connected(port) {
-                log::info!("[USB-HID] Port {} connected, probing for HID...", port);
-                probe_hid_device(controller.clone(), port);
-            }
-        }
-    }
+    // xHCI host bring-up is present, but slot/endpoint enumeration is not yet
+    // robust enough to run during kernel boot. Keep HID disabled until the
+    // command path is completed.
+    log::warn!("[USB-HID] xHCI enumeration not enabled yet, skipping HID probe");
 
     HID_INITIALIZED.store(true, Ordering::SeqCst);
     log::info!(
@@ -302,25 +312,40 @@ pub fn init() {
 }
 
 /// Performs the probe hid device operation.
-fn probe_hid_device(controller: Arc<XhciController>, port: usize) {
-    // In a full implementation, this would:
-    // 1. Get device descriptor
-    // 2. Get configuration descriptor
-    // 3. Parse HID descriptors
-    // 4. Set configuration
-    // 5. Set boot protocol
-    // 6. Set up interrupt endpoints
-
-    // For now, we create placeholder devices
+fn probe_hid_device(port: usize) {
     if port == 0 {
-        let keyboard = HidKeyboard::new(controller, port, 0, 0x81, 8, 10);
+        let keyboard = HidKeyboard::new(port, 0, 0x81, 8, 10);
         KEYBOARDS.lock().push(Arc::new(Mutex::new(keyboard)));
         log::info!("[USB-HID] Found keyboard on port {}", port);
     } else if port == 1 {
-        let mouse = HidMouse::new(controller, port, 0, 0x81, 4, 10);
-        MICE.lock().push(Arc::new(Mutex::new(mouse)));
+        let mouse_dev = HidMouse::new(port, 0, 0x81, 4, 10);
+        MICE.lock().push(Arc::new(Mutex::new(mouse_dev)));
         log::info!("[USB-HID] Found mouse on port {}", port);
     }
+}
+
+pub fn enumerate_device(port: usize) {
+    if let Some(controller_arc) = crate::hardware::usb::xhci::get_controller(0) {
+        let mut controller = controller_arc.lock();
+
+        let mut dev_desc = [0u8; 18];
+        if controller.get_device_descriptor(1, &mut dev_desc).is_ok() {
+            log::info!(
+                "[USB-HID] Device: VID={:04x} PID={:04x}",
+                u16::from_le_bytes([dev_desc[2], dev_desc[3]]),
+                u16::from_le_bytes([dev_desc[4], dev_desc[5]])
+            );
+        }
+
+        let mut config_desc = [0u8; 256];
+        if controller.get_configuration_descriptor(1, 0, &mut config_desc, 9).is_ok() {
+            log::info!("[USB-HID] Config: total_len={}", u16::from_le_bytes([config_desc[2], config_desc[3]]));
+        }
+
+        controller.set_configuration(1, 1).ok();
+    }
+
+    probe_hid_device(port);
 }
 
 /// Returns keyboard.
@@ -346,4 +371,27 @@ pub fn mouse_count() -> usize {
 /// Returns whether available.
 pub fn is_available() -> bool {
     HID_INITIALIZED.load(Ordering::Relaxed)
+}
+
+/// Poll all HID devices and inject events into the unified keyboard/mouse buffers.
+///
+/// Call from the shell loop (task context) to drain USB HID event queues and
+/// feed them into the same buffers used by PS/2. This enables USB keyboards
+/// and mice to work alongside or instead of PS/2.
+pub fn poll_all() {
+    for kbd in KEYBOARDS.lock().iter() {
+        let mut k = kbd.lock();
+        k.drain_into_unified();
+    }
+    for m in MICE.lock().iter() {
+        let mut dev = m.lock();
+        dev.drain_into_unified();
+    }
+}
+
+/// Called by xHCI IRQ handler when a transfer completes.
+///
+/// Processes the HID report and queues events.
+pub fn notify_transfer_complete(_slot_id: u8, _ep_id: u8) {
+    poll_all();
 }

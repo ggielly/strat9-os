@@ -43,6 +43,7 @@ impl Scheduler {
             cpus,
             blocked_tasks: BTreeMap::new(),
             all_tasks: BTreeMap::new(),
+            all_tasks_scan: Vec::new(),
             task_cpu: BTreeMap::new(),
             pid_to_task: BTreeMap::new(),
             tid_to_task: BTreeMap::new(),
@@ -188,7 +189,7 @@ impl Scheduler {
             "[trace][sched] add_task_on_cpu before all_tasks.insert tid={}",
             task_id.as_u64()
         );
-        self.all_tasks.insert(task_id, task_clone);
+        self.insert_all_task_locked(task_id, task_clone);
         crate::serial_println!(
             "[trace][sched] add_task_on_cpu all_tasks inserted tid={}",
             task_id.as_u64()
@@ -233,6 +234,58 @@ impl Scheduler {
         } else {
             None
         }
+    }
+
+    pub(super) fn insert_all_task_locked(&mut self, task_id: TaskId, task: Arc<Task>) {
+        self.all_tasks.insert(task_id, task.clone());
+        self.all_tasks_scan.push(task);
+        // Race/corruption diagnostic: all_tasks and all_tasks_scan must stay in sync.
+        let bt_len = self.all_tasks.len();
+        let scan_len = self.all_tasks_scan.len();
+        if bt_len != scan_len {
+            unsafe {
+                core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _);
+            }
+            crate::serial_force_println!(
+                "[RACE] insert_all_task_locked: all_tasks={} != all_tasks_scan={} tid={}",
+                bt_len,
+                scan_len,
+                task_id.as_u64()
+            );
+        }
+    }
+
+    pub(super) fn remove_all_task_locked(&mut self, task_id: TaskId) -> Option<Arc<Task>> {
+        let removed = self.all_tasks.remove(&task_id);
+        if removed.is_some() {
+            if let Some(idx) = self
+                .all_tasks_scan
+                .iter()
+                .position(|task| task.id == task_id)
+            {
+                self.all_tasks_scan.swap_remove(idx);
+            } else {
+                unsafe { core::arch::asm!("mov al, 'Z'; out 0xe9, al", out("al") _) };
+                crate::serial_force_println!(
+                    "[RACE] remove_all_task_locked: tid={} in all_tasks but NOT in all_tasks_scan",
+                    task_id.as_u64()
+                );
+            }
+        }
+        let bt_len = self.all_tasks.len();
+        let scan_len = self.all_tasks_scan.len();
+        if bt_len != scan_len {
+            unsafe {
+                core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _);
+            }
+            crate::serial_force_println!(
+                "[RACE] remove_all_task_locked: all_tasks={} != all_tasks_scan={} tid={}",
+                bt_len,
+                scan_len,
+                task_id.as_u64()
+            );
+        }
+        removed
     }
 
     /// Performs the clear task wake deadline locked operation.
@@ -291,6 +344,10 @@ impl Scheduler {
     }
 
     /// Attempts to reap child locked.
+    /// If `target` is `Some(tid)`, only reaps that child; otherwise, reaps any child.
+    /// Returns `WaitChildResult` indicating the outcome.
+    /// Must be called with the scheduler lock held.
+    ///
     pub fn try_reap_child_locked(
         &mut self,
         parent: TaskId,
@@ -319,7 +376,7 @@ impl Scheduler {
             let (status, child_pid) = self.zombies.remove(&child).unwrap_or((0, 0));
             // Remove from all_tasks now so that pick_next_task (if it races with
             // reaping) will see was_registered=false and skip cleanup_task_resources.
-            let reaped_task = self.all_tasks.remove(&child);
+            let reaped_task = self.remove_all_task_locked(child);
             let child_tid = reaped_task.as_ref().map(|t| t.tid);
             if child_pid != 0 {
                 if let Some(tid) = child_tid {
@@ -381,7 +438,7 @@ impl Scheduler {
                 // already removed the task; in that case `remove` is a no-op
                 // and we must skip `cleanup_task_resources` to avoid running
                 // port/silo teardown twice.
-                let was_registered = self.all_tasks.remove(&task_id).is_some();
+                let was_registered = self.remove_all_task_locked(task_id).is_some();
                 self.task_cpu.remove(&task_id);
                 self.unregister_identity_locked(task_id, task_pid, task_tid);
 
@@ -415,6 +472,19 @@ impl Scheduler {
         }
         let cloned = next_task.clone();
         let strong_after = Arc::strong_count(&cloned);
+        // Racy, pifometric diagnostic only: strong_count is heuristic here,
+        // not a correctness proof. We keep it as an early signal for obviously
+        // absurd Arc states while debugging scheduler corruption.
+        if strong_after == 0 || strong_after > (isize::MAX as usize) {
+            unsafe {
+                core::arch::asm!("mov al, 'C'; out 0xe9, al", out("al") _);
+            }
+            crate::serial_force_println!(
+                "[RACE] pick_next_task: suspicious Arc heuristic tid={} strong_count={}",
+                next_task.id.as_u64(),
+                strong_after
+            );
+        }
         self.cpus[cpu_index].current_task = Some(cloned);
         // Reset the runtime accounting for the new task
         self.cpus[cpu_index].current_runtime = crate::process::sched::CurrentRuntime::new();
@@ -646,6 +716,14 @@ impl Scheduler {
     /// Performs the select cpu for task operation.
     fn select_cpu_for_task(&self) -> usize {
         if (self as *const Self).is_null() {
+            return 0;
+        }
+        // Early boot: before the first real task is running, keep all new tasks
+        // on the BSP. Spreading init/shell/status across CPUs at this point can
+        // strand boot-critical work on AP scheduler instances that have not yet
+        // entered their steady-state scheduling loop.
+        if self.cpus.iter().all(|cpu| cpu.current_task.is_none()) {
+            crate::serial_println!("[trace][sched] select_cpu_for_task early-boot best=0");
             return 0;
         }
         let mut best = 0usize;

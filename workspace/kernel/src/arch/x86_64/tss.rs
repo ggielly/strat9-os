@@ -6,9 +6,23 @@
 
 use core::{
     mem::MaybeUninit,
+    panic::Location,
     sync::atomic::{AtomicBool, Ordering},
 };
 use x86_64::{structures::tss::TaskStateSegment, VirtAddr};
+
+#[repr(C, packed)]
+struct DescriptorTableRegister {
+    limit: u16,
+    base: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LoadedTssInfo {
+    pub tr_selector: u16,
+    pub tss_base: u64,
+    pub rsp0: u64,
+}
 
 /// IST index used for the double fault handler
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
@@ -79,16 +93,89 @@ pub fn tss_for(cpu_index: usize) -> &'static TaskStateSegment {
     unsafe { &*TSS[cpu_index].as_ptr() }
 }
 
+/// Return TSS.rsp0 for a specific CPU, if its TSS is initialized.
+pub fn kernel_stack_for(cpu_index: usize) -> Option<VirtAddr> {
+    if cpu_index >= crate::arch::x86_64::percpu::MAX_CPUS {
+        return None;
+    }
+    if !TSS_INIT[cpu_index].load(Ordering::Acquire) {
+        return None;
+    }
+    // SAFETY: The TSS for this CPU is initialized and lives for the whole kernel lifetime.
+    unsafe {
+        let tss = &*TSS[cpu_index].as_ptr();
+        Some(tss.privilege_stack_table[0])
+    }
+}
+
+/// Read the TSS currently loaded in TR by decoding the live GDT entry.
+pub fn loaded_tss_info() -> Option<LoadedTssInfo> {
+    let mut gdtr = DescriptorTableRegister { limit: 0, base: 0 };
+    let tr_selector: u16;
+    // SAFETY: `sgdt`/`str` are privileged register reads with no side effect.
+    unsafe {
+        core::arch::asm!(
+            "sgdt [{}]",
+            in(reg) &mut gdtr,
+            options(nostack, preserves_flags),
+        );
+        core::arch::asm!(
+            "str {0:x}",
+            out(reg) tr_selector,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+
+    if tr_selector == 0 {
+        return None;
+    }
+
+    let entry_offset = (tr_selector & !0x7) as usize;
+    if entry_offset + 16 > gdtr.limit as usize + 1 {
+        return None;
+    }
+
+    // SAFETY: The GDTR base/limit were read from the CPU and bounds-checked above.
+    let (low, high) = unsafe {
+        let entry_ptr = (gdtr.base + entry_offset as u64) as *const u64;
+        (
+            core::ptr::read_unaligned(entry_ptr),
+            core::ptr::read_unaligned(entry_ptr.add(1)),
+        )
+    };
+
+    let base_low =
+        ((low >> 16) & 0xFFFF) | (((low >> 32) & 0xFF) << 16) | (((low >> 56) & 0xFF) << 24);
+    let tss_base = base_low | (high << 32);
+    if tss_base == 0 {
+        return None;
+    }
+
+    // SAFETY: The live TSS base comes from the CPU's TSS descriptor.
+    let rsp0 = unsafe {
+        let tss = &*(tss_base as *const TaskStateSegment);
+        tss.privilege_stack_table[0].as_u64()
+    };
+
+    Some(LoadedTssInfo {
+        tr_selector,
+        tss_base,
+        rsp0,
+    })
+}
+
 /// Update TSS.rsp0 — the kernel stack pointer used when transitioning
 /// from Ring 3 to Ring 0 on interrupt/syscall.
 ///
 /// Called on every context switch to point to the new task's kernel stack top.
+#[track_caller]
 pub fn set_kernel_stack(stack_top: VirtAddr) {
     let cpu_index = crate::arch::x86_64::percpu::current_cpu_index();
     set_kernel_stack_for(cpu_index, stack_top);
 }
 
 /// Update TSS.rsp0 for a specific CPU index.
+#[track_caller]
 pub fn set_kernel_stack_for(cpu_index: usize, stack_top: VirtAddr) {
     if cpu_index >= crate::arch::x86_64::percpu::MAX_CPUS {
         log::warn!("set_kernel_stack_for: cpu_index {} out of range", cpu_index);
@@ -99,8 +186,18 @@ pub fn set_kernel_stack_for(cpu_index: usize, stack_top: VirtAddr) {
     if !TSS_INIT[cpu_index].load(Ordering::Acquire) {
         return;
     }
+    let caller = Location::caller();
     unsafe {
         let tss = &raw mut *TSS[cpu_index].as_mut_ptr();
+        let old_stack_top = (*tss).privilege_stack_table[0];
         (*tss).privilege_stack_table[0] = stack_top;
+        crate::e9_println!(
+            "[tss-set] cpu={} old={:#x} new={:#x} caller={}:{}",
+            cpu_index,
+            old_stack_top.as_u64(),
+            stack_top.as_u64(),
+            caller.file(),
+            caller.line()
+        );
     }
 }

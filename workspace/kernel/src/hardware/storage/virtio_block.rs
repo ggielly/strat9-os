@@ -153,8 +153,16 @@ impl VirtioBlockDevice {
             return Err("Device doesn't support our feature set");
         }
 
+        // Legacy PCI VirtIO exposes a fixed queue size in QUEUE_NUM.
+        // The vring layout must match exactly what the device expects.
+        let queue_size = device.queue_max_size(0);
+        if queue_size == 0 {
+            return Err("VirtIO-blk queue 0 is unavailable");
+        }
+        log::info!("VirtIO-blk: queue 0 size = {}", queue_size);
+
         // Create virtqueue (queue 0 is the request queue)
-        let queue = Virtqueue::new(128)?;
+        let queue = Virtqueue::new(queue_size)?;
 
         // Setup queue with device
         device.setup_queue(0, &queue);
@@ -198,7 +206,10 @@ impl VirtioBlockDevice {
         // To be safe and simple with the frame allocator, we'll alloc a frame.
         // In a real optimized driver, we would have a slab allocator or pre-allocated pool.
 
-        let metadata_frame = memory::allocate_frame().map_err(|_| BlockError::NotReady)?;
+        let metadata_frame = crate::sync::with_irqs_disabled(|token| {
+            memory::allocate_frame(token)
+        })
+        .map_err(|_| BlockError::NotReady)?;
 
         let metadata_phys = metadata_frame.start_address.as_u64();
         let metadata_virt = crate::memory::phys_to_virt(metadata_phys);
@@ -244,8 +255,13 @@ impl VirtioBlockDevice {
             let buf_pages = (buf_size + 4095) / 4096;
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
-            let buf_frame = memory::allocate_frames(buf_order).map_err(|_| {
-                memory::free_frame(metadata_frame);
+            let buf_frame = crate::sync::with_irqs_disabled(|token| {
+                memory::allocate_frames(token, buf_order)
+            })
+            .map_err(|_| {
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_frame(token, metadata_frame);
+                });
                 BlockError::NotReady
             })?;
 
@@ -279,10 +295,12 @@ impl VirtioBlockDevice {
             Err(_) => {
                 drop(queue);
                 // Cleanup
-                memory::free_frame(metadata_frame);
-                if let Some((f, o)) = data_frame_info {
-                    memory::free_frames(f, o);
-                }
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_frame(token, metadata_frame);
+                    if let Some((f, o)) = data_frame_info {
+                        memory::free_frames(token, f, o);
+                    }
+                });
                 return Err(BlockError::IoError);
             }
         };
@@ -299,6 +317,7 @@ impl VirtioBlockDevice {
         // Do not use HLT here. This path can run from syscall context where IF
         // may be masked, and HLT would deadlock the CPU.
         // TODO: replace with proper waitqueue + interrupt completion.
+        let mut spins = 0u32;
         loop {
             let mut queue = self.queue.lock();
             if queue.has_used() {
@@ -317,7 +336,35 @@ impl VirtioBlockDevice {
                     }
                 }
             }
+            let (used_idx, last_used_idx) = queue.used_indices();
             drop(queue);
+            spins = spins.saturating_add(1);
+            if spins == 5_000_000 {
+                let isr = self.device.read_isr_status();
+                log::error!(
+                    "VirtIO-blk: request timeout sector={} token={} used_idx={} last_used_idx={} isr={}",
+                    sector,
+                    token,
+                    used_idx,
+                    last_used_idx,
+                    isr
+                );
+                crate::serial_println!(
+                    "[virtio-blk] timeout sector={} token={} used_idx={} last_used_idx={} isr={}",
+                    sector,
+                    token,
+                    used_idx,
+                    last_used_idx,
+                    isr
+                );
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_frame(token, metadata_frame);
+                    if let Some((f, o)) = data_frame_info {
+                        memory::free_frames(token, f, o);
+                    }
+                });
+                return Err(BlockError::IoError);
+            }
             core::hint::spin_loop();
         }
 
@@ -341,12 +388,16 @@ impl VirtioBlockDevice {
                 }
 
                 // Free DMA buffer
-                memory::free_frames(buf_frame, buf_order);
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_frames(token, buf_frame, buf_order);
+                });
             }
         }
 
         // Free metadata frame
-        memory::free_frame(metadata_frame);
+        crate::sync::with_irqs_disabled(|token| {
+            memory::free_frame(token, metadata_frame);
+        });
 
         if status_byte == BlockStatus::Ok as u8 {
             Ok(())
