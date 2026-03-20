@@ -25,6 +25,8 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-03-17 `eb7818d` feat: Implement static module loading from initfs paths and increase module blob size limit.
+- 2026-03-17 `acfdbbd` feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.
 - 2026-03-13 `29c6f3d` Refactor scheduler task management and introduce interrupt frame handling
 - 2026-03-11 `7e66e69` refactor: enhance interrupt handling and logging mechanisms across the kernel
 - 2026-03-09 `ff0a36b` Refactor memory management to use IRQ-disabled tokens
@@ -53,8 +55,6 @@ See:
 - 2026-03-03 `deabb18` Enhance Strat9 ABI integration and update OpenFlags implementation
 - 2026-03-03 `92ba1c6` Add strat9-abi as a workspace dependency and refactor bootloader integration
 - 2026-03-03 `eb5de02` Refactor variable names in BuddyAllocator and sys_sigtimedwait for clarity
-- 2026-03-03 `259bb9d` Enhance PCI support and update related components
-- 2026-03-02 `c57b44d` Add `strate-bus` component and related build tasks.
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

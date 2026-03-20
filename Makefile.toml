@@ -102,7 +102,7 @@ script = [
         git pull origin strat9-os
     else
         rm -rf "$relibc_dir"
-        git clone https://github.com/ggielly/relibc "$relibc_dir"
+        git clone https://git.strat9-os.org/strat9-os/relibc.git "$relibc_dir"
         cd "$relibc_dir"
         git checkout strat9-os
         git submodule update --init --recursive
