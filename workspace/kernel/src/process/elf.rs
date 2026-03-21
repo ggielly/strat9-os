@@ -885,7 +885,11 @@ fn apply_dynamic_relocations(
                 let before_val = u64::from_le_bytes(before);
                 crate::e9_println!(
                     "[reloc] [{i}] r_type={} target={:#x} r_addend={:#x} value={:#x} before={:#x}",
-                    r_type, target, r_addend_copy, val_u64, before_val
+                    r_type,
+                    target,
+                    r_addend_copy,
+                    val_u64,
+                    before_val
                 );
             }
             write_user_mapped_bytes(user_as, target, &val_u64.to_le_bytes())?;
@@ -896,7 +900,8 @@ fn apply_dynamic_relocations(
                 let after_val = u64::from_le_bytes(after);
                 crate::e9_println!(
                     "[reloc] [{i}] after_write={:#x} (expected={:#x})",
-                    after_val, val_u64
+                    after_val,
+                    val_u64
                 );
             }
             // Catch any relocation that writes a kernel-range address into user space.
@@ -915,7 +920,10 @@ fn apply_dynamic_relocations(
     let mut total_applied = 0usize;
     crate::e9_println!(
         "[reloc] apply_dynamic_relocations: bias={:#x} rela_addr={:?} rela_size={} rela_count={:?}",
-        load_bias, rela_addr, rela_size, rela_count_hint
+        load_bias,
+        rela_addr,
+        rela_size,
+        rela_count_hint
     );
     if let Some(rela_base) = rela_addr {
         total_applied += apply_rela_table(rela_base, rela_size, rela_count_hint)?;
@@ -925,7 +933,11 @@ fn apply_dynamic_relocations(
     }
 
     if total_applied > 0 {
-        crate::e9_println!("[reloc] applied {} RELA relocations (bias={:#x})", total_applied, load_bias);
+        crate::e9_println!(
+            "[reloc] applied {} RELA relocations (bias={:#x})",
+            total_applied,
+            load_bias
+        );
     }
     if relr_applied > 0 {
         log::debug!("[elf] Applied {} RELR relocations", relr_applied);
@@ -1114,12 +1126,18 @@ extern "C" fn elf_ring3_trampoline() -> ! {
                     let val = core::ptr::read_unaligned(ptr);
                     crate::e9_println!(
                         "[trampoline-got] tid={} name={} GOT[{:#x}]=phys={:#x} val={:#x}",
-                        task.id.as_u64(), task_name, vaddr, phys.as_u64(), val
+                        task.id.as_u64(),
+                        task_name,
+                        vaddr,
+                        phys.as_u64(),
+                        val
                     );
                 } else {
                     crate::e9_println!(
                         "[trampoline-got] tid={} name={} GOT[{:#x}]=<not mapped>",
-                        task.id.as_u64(), task_name, vaddr
+                        task.id.as_u64(),
+                        task_name,
+                        vaddr
                     );
                 }
             }
@@ -1152,15 +1170,11 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // Verify that the APIC timer is actually running on this CPU before we
     // enter Ring 3 (if it is not, no timer tick = no heartbeat = silent hang).
     unsafe {
-        let lvt = crate::arch::x86_64::apic::read_reg(
-            crate::arch::x86_64::apic::REG_LVT_TIMER,
-        );
-        let init_cnt = crate::arch::x86_64::apic::read_reg(
-            crate::arch::x86_64::apic::REG_TIMER_INIT,
-        );
-        let cur_cnt = crate::arch::x86_64::apic::read_reg(
-            crate::arch::x86_64::apic::REG_TIMER_CURRENT,
-        );
+        let lvt = crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_LVT_TIMER);
+        let init_cnt =
+            crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_INIT);
+        let cur_cnt =
+            crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_CURRENT);
         let rflags_now: u64;
         core::arch::asm!("pushfq; pop {}", out(reg) rflags_now, options(nostack));
         crate::e9_println!(
@@ -1182,7 +1196,6 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         }
     }
 
-
     crate::arch::x86_64::ring3_diag::validate_ring3_state(
         user_rip,
         user_rsp,
@@ -1203,7 +1216,10 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // les deux qui a planté (peu probable, mais élimine cette hypothèse).
     crate::e9_println!(
         "E9[0] pre-asm rip={:#x} rsp={:#x} cs={:#x} ss={:#x}",
-        user_rip, user_rsp, user_cs, user_ss,
+        user_rip,
+        user_rsp,
+        user_cs,
+        user_ss,
     );
 
     // SAFETY: Valid user mappings have been set up. IRETQ switches to Ring 3.
@@ -1431,7 +1447,11 @@ pub fn load_elf_task_with_caps(
     let header = parse_header(elf_data)?;
     crate::e9_println!(
         "[trace][elf] load_elf_task parse_header ok type={}",
-        if header.e_type == ET_DYN { "ET_DYN" } else { "ET_EXEC" }
+        if header.e_type == ET_DYN {
+            "ET_DYN"
+        } else {
+            "ET_EXEC"
+        }
     );
     // Step 2: Create user address space
     crate::e9_println!("[trace][elf] load_elf_task user_as begin");
@@ -1485,13 +1505,13 @@ pub fn load_elf_task_with_caps(
                 let val = unsafe { core::ptr::read_unaligned(ptr) };
                 crate::e9_println!(
                     "[reloc-check] GOT[{:#x}]=phys={:#x} val={:#x} ({})",
-                    vaddr, phys.as_u64(), val, name
+                    vaddr,
+                    phys.as_u64(),
+                    val,
+                    name
                 );
             } else {
-                crate::e9_println!(
-                    "[reloc-check] GOT[{:#x}] = <not mapped> ({})",
-                    vaddr, name
-                );
+                crate::e9_println!("[reloc-check] GOT[{:#x}] = <not mapped> ({})", vaddr, name);
             }
         }
     }
@@ -1704,7 +1724,9 @@ pub fn load_elf_task_with_caps(
         r9: 0,
         r8: 0,
         rsi: 0,
-        rdi: task.trampoline_arg0.load(core::sync::atomic::Ordering::Acquire),
+        rdi: task
+            .trampoline_arg0
+            .load(core::sync::atomic::Ordering::Acquire),
         rdx: 0,
         rcx: runtime_entry,
         rax: 0,

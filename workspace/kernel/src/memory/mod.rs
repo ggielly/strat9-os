@@ -51,11 +51,11 @@ pub fn init_memory_manager(memory_regions: &[MemoryRegion]) {
 pub fn init_cow_subsystem(_memory_regions: &[MemoryRegion]) {}
 
 // Re-exports
+pub use crate::sync::with_irqs_disabled;
 pub use address_space::{kernel_address_space, AddressSpace, VmaFlags, VmaPageSize, VmaType};
 pub use buddy::get_allocator;
 pub use frame::{AllocError, FrameAllocOptions, FrameAllocator, FramePurpose, PhysFrame};
 pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSliceWrite};
-pub use crate::sync::with_irqs_disabled;
 
 /// Allocate `2^order` contiguous physical frames (raw, no zeroing).
 ///

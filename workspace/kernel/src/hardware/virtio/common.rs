@@ -133,10 +133,9 @@ impl Virtqueue {
         // Critical: legacy QUEUE_PFN describes one contiguous vring region.
         let ring_pages = (total_size + 4095) / 4096;
         let ring_order = ring_pages.next_power_of_two().trailing_zeros() as u8;
-        let ring_area = crate::sync::with_irqs_disabled(|token| {
-            memory::allocate_frames(token, ring_order)
-        })
-        .map_err(|_| "Failed to allocate virtqueue ring")?;
+        let ring_area =
+            crate::sync::with_irqs_disabled(|token| memory::allocate_frames(token, ring_order))
+                .map_err(|_| "Failed to allocate virtqueue ring")?;
         let ring_phys = ring_area.start_address.as_u64();
         let desc_phys = ring_phys;
         let avail_phys = ring_phys + avail_offset as u64;

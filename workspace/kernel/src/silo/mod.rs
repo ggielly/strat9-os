@@ -1468,8 +1468,9 @@ pub fn kernel_spawn_strate(
     };
     let task_name: &'static str =
         Box::leak(alloc::format!("silo-{}/strate-admin-{}", silo_id, display).into_boxed_str());
-    let task = crate::process::elf::load_elf_task_with_caps(module_data.as_slice(), task_name, &seed_caps)
-        .map_err(|_| SyscallError::InvalidArgument)?;
+    let task =
+        crate::process::elf::load_elf_task_with_caps(module_data.as_slice(), task_name, &seed_caps)
+            .map_err(|_| SyscallError::InvalidArgument)?;
     let task_id = task.id;
 
     let mut mgr = SILO_MANAGER.lock();
@@ -2202,8 +2203,8 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
     };
 
     let load_result =
-        crate::process::elf::load_elf_task_with_caps(module_data.as_slice(), task_name, &seed_caps).map_err(
-            |err| {
+        crate::process::elf::load_elf_task_with_caps(module_data.as_slice(), task_name, &seed_caps)
+            .map_err(|err| {
                 log::warn!(
                     "silo_start: sid={} module={} task='{}' load failed: {}",
                     silo_id,
@@ -2212,8 +2213,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
                     err
                 );
                 map_elf_start_error(err)
-            },
-        );
+            });
 
     let task = match load_result {
         Ok(task) => task,

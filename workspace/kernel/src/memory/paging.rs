@@ -125,7 +125,7 @@ pub fn init(hhdm_offset: u64) {
 /// demand using `ensure_identity_map_range()`, which checks if the region is already mapped
 /// before mapping it. This allows the kernel to boot successfully on VMWare Workstation without
 /// requiring changes to the bootloader or Limine configuration.
-/// 
+///
 pub fn map_all_ram(memory_regions: &[crate::boot::entry::MemoryRegion]) {
     use crate::boot::entry::MemoryKind;
 

@@ -1052,8 +1052,8 @@ pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) 
     // This avoids XSAVE/XRSTOR state-size mismatches that can corrupt task memory.
     //
     // TODO : re-enable XSAVE only after the kernel has a proven-stable end-to-end path
-    // for: 
-    //     (1) xsave area sizing/allocation, 
+    // for:
+    //     (1) xsave area sizing/allocation,
     //     (2) XCR0 transitions per task,
     //     (3) save/restore across scheduler, syscall, and interrupt returns.
     //

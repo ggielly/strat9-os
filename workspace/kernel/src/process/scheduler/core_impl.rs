@@ -238,7 +238,8 @@ impl Scheduler {
 
     pub(super) fn insert_all_task_locked(&mut self, task_id: TaskId, task: Arc<Task>) {
         assert_eq!(
-            task.id, task_id,
+            task.id,
+            task_id,
             "scheduler corruption: insert_all_task_locked task.id={} != task_id={}",
             task.id.as_u64(),
             task_id.as_u64()

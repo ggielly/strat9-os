@@ -300,16 +300,15 @@ pub fn init() -> Result<usize, &'static str> {
 
         // Allocate AP kernel stack from the buddy allocator.
         // boot_alloc is sealed after buddy init (to prevent double-allocation),
-        // so AP stacks must come from buddy.  
+        // so AP stacks must come from buddy.
         // AP stacks are permanent kernel allocations: we intentionally leak the frame so buddy never reclaims it.
-        
+
         let stack_size = crate::process::task::Task::DEFAULT_STACK_SIZE;
         let pages = (stack_size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let frame = crate::sync::with_irqs_disabled(|token| {
-            crate::memory::allocate_frames(token, order)
-        })
-        .map_err(|_| "SMP: failed to allocate AP stack from buddy")?;
+        let frame =
+            crate::sync::with_irqs_disabled(|token| crate::memory::allocate_frames(token, order))
+                .map_err(|_| "SMP: failed to allocate AP stack from buddy")?;
         let stack_phys = frame.start_address.as_u64();
         let stack_virt = crate::memory::phys_to_virt(stack_phys);
 
@@ -352,7 +351,10 @@ pub fn init() -> Result<usize, &'static str> {
         core::hint::spin_loop();
         spins = spins.saturating_add(1);
     }
-    crate::e9_println!("BF SMP done online={}", BOOTED_CORES.load(Ordering::Acquire));
+    crate::e9_println!(
+        "BF SMP done online={}",
+        BOOTED_CORES.load(Ordering::Acquire)
+    );
     if BOOTED_CORES.load(Ordering::Acquire) < expected {
         log::warn!(
             "SMP: timeout waiting APs (online={} expected={}), continuing",

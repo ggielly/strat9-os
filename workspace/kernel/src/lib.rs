@@ -352,9 +352,15 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 1: serial output (earliest debug output)
     // =============================================
+    arch::x86_64::boot_timestamp::init();
     crate::e9_println!("B0 kernel_main");
     init_serial();
+
+    // Enable boot log prefix (timestamp) by default; can be disabled later if needed.
+    arch::x86_64::serial::set_boot_log_prefix_enabled(true);
+
     init_logger();
+    boot_milestone!("Kernel entry");
 
     // =============================================
     // Phase 1c: IDT (Interrupt Descriptor Table)
@@ -366,6 +372,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     arch::x86_64::idt::init();
     serial_println!("[init] IDT initialized.");
     crate::e9_println!("B2 post-IDT");
+    boot_milestone!("IDT initialized");
 
     debug_assert!(
         !arch::x86_64::interrupts_enabled(),
@@ -573,6 +580,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         "interrupts must be disabled after buddy allocator init"
     );
 
+    boot_milestone!("Memory manager ready");
     log_boot_module_magics("post-buddy");
 
     // =============================================
@@ -606,6 +614,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         );
     }
     serial_println!("[init] Paging initialized.");
+    boot_milestone!("Paging initialized");
 
     // =============================================
     // Phase 3: console output (VGA or serial fallback)
@@ -767,6 +776,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     } else {
         arch::x86_64::percpu::init_boot_cpu(0);
     }
+    boot_milestone!("APIC + SMP ready");
 
     arch::x86_64::keyboard::init();
     serial_println!("[init] PS/2 keyboard controller initialized.");
@@ -817,6 +827,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     serial_println!("[init] Scheduler initialized.");
     serial_println!("[trace][bsp] after init_scheduler");
+    boot_milestone!("Scheduler + timer ready");
     vga_println!("[OK] Multitasking enabled");
 
     // =============================================
@@ -878,6 +889,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         vga_println!("[..] Initializing hardware drivers...");
         hardware::init();
         crate::e9_println!("BH post-hardware");
+        boot_milestone!("Hardware drivers ready");
 
         serial_println!("[init] Initializing timers...");
         vga_println!("[..] Initializing HPET and RTC...");
@@ -1179,8 +1191,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         arch::x86_64::smp::open_ap_scheduler_gate();
     }
     crate::e9_println!("BC pre-schedule");
+    boot_milestone!("Boot complete ! Now entering in scheduler");
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
+    arch::x86_64::serial::set_boot_log_prefix_enabled(false);
 
     // Keep interrupts disabled on the init stack. `schedule_on_cpu()` enters
     // the first task with IF=0 and `task_entry_trampoline` executes `sti`

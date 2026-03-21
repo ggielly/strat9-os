@@ -46,10 +46,7 @@ impl RealTimeClassRq {
             // enough for current workloads.
             q.reserve(RT_PREALLOC_PER_PRIO);
         }
-        Self {
-            queues,
-            bitmap: 0,
-        }
+        Self { queues, bitmap: 0 }
     }
 
     /// Sets bit.
