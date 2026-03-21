@@ -13,7 +13,7 @@ This script:
 1. builds docs (`cargo make docs-site`)
 2. regenerates ABI changelog auto section from git history
 3. commits/pushes current branch changes
-4. uploads built website to `ggielly.github.io/strat9-os-docs`
+4. uploads built website to the remote vhost via SSH
 
 The docs builder publishes:
 

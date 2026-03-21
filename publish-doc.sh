@@ -89,7 +89,7 @@ if [[ "${NO_COMMIT}" -eq 0 ]]; then
     git add \
       docs-site \
       tools/scripts/build-docs-site.sh \
-      .github/workflows/publish-docs.yml \
+      .gitlab-ci.yml \
       publish-doc.sh \
       Makefile.toml
   fi

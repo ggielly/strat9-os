@@ -1,0 +1,31 @@
+stages:
+  - build
+
+build-docs:
+  stage: build
+  before_script:
+    - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
+    - rustup component add rust-src llvm-tools-preview
+    - if ! command -v mdbook &> /dev/null; then cargo install mdbook --no-default-features --features search; fi
+  script:
+    - bash tools/scripts/build-docs-site.sh
+  artifacts:
+    paths:
+      - build/docs-site
+
+build-os-release:
+  stage: build
+  before_script:
+    # Sudo is required here ONLY if the runner isn't run as root and the tools aren't already installed:
+    # - sudo apt-get update && sudo apt-get install -y xorriso mtools
+    - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
+    - rustup component add rust-src llvm-tools-preview
+    - rustup target add x86_64-unknown-none
+    - if ! command -v cargo-make &> /dev/null; then cargo install cargo-make; fi
+  script:
+    - cargo make limine-image-release
+  artifacts:
+    paths:
+      - build/strat9-os.iso
+      - build/strat9-os.img
+    expire_in: 1 week

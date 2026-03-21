@@ -18,7 +18,7 @@ Architecture concept summary: Bedrock is the microkernel, Silos are isolated Rin
 
 ## Status, some highlights
 
-This project is in active development and not production-ready. The ABI is still not stabilized: the [ABI documentation is here|https://ggielly.github.io/strat9-os-docs/index.html].
+This project is in active development and not production-ready. The ABI is still not stabilized. The documentation can be built and published using the `publish-doc.sh` script.
 
 ### Screenshots from QEMU : bootsequence and Chevron shell
 
