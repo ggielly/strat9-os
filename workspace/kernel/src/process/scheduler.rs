@@ -270,7 +270,9 @@ fn send_resched_ipi_to_cpu(cpu_index: usize) {
     }
     let my_cpu = current_cpu_index();
     let should_trace = IPI_SEND_TRACE_BUDGET
-        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |budget| budget.checked_sub(1))
+        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |budget| {
+            budget.checked_sub(1)
+        })
         .is_ok();
     if let Some(target_apic) = percpu::apic_id_by_cpu_index(cpu_index) {
         if let Some(my_apic) = percpu::apic_id_by_cpu_index(my_cpu) {
@@ -582,6 +584,7 @@ fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
 }
 
 mod core_impl;
+pub mod perf_counters;
 mod runtime_ops;
 mod task_ops;
 mod timer_ops;

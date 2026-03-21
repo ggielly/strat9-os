@@ -30,3 +30,17 @@ macro_rules! e9_println {
     () => ($crate::e9_print!("\n"));
     ($($arg:tt)*) => ($crate::e9_print!("{}\n", format_args!($($arg)*)));
 }
+
+/// Log a boot milestone with elapsed time since kernel entry.
+///
+/// Output format: `[boot +     12ms] Paging initialized`
+#[macro_export]
+macro_rules! boot_milestone {
+    ($($arg:tt)*) => {
+        $crate::serial_println!(
+            "[boot +{:>6}ms] {}",
+            $crate::arch::x86_64::boot_timestamp::elapsed_ms(),
+            format_args!($($arg)*)
+        );
+    };
+}

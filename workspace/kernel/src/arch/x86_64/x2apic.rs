@@ -85,9 +85,7 @@ impl X2Apic {
         // 64-bit MSR write in x2APIC: bits[63:32]=destination, bits[31:0]=command.
         unsafe {
             wrmsr(IA32_X2APIC_ESR, 0);
-            let icr = ((target_id as u64) << 32)
-                | (vector as u64)
-                | (1 << 14);
+            let icr = ((target_id as u64) << 32) | (vector as u64) | (1 << 14);
             wrmsr(IA32_X2APIC_ICR, icr);
         }
     }

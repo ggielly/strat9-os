@@ -310,7 +310,10 @@ fn validate_volume_handle(handle: u64) -> Result<u64> {
     if sectors == 0 {
         return Err(Error::InvalidArgument);
     }
-    let msg = format!("[fs-ext4] Volume info OK: handle={} sectors={}\n", handle, sectors);
+    let msg = format!(
+        "[fs-ext4] Volume info OK: handle={} sectors={}\n",
+        handle, sectors
+    );
     debug_log(&msg);
     let mut probe = [0u8; SECTOR_SIZE];
     let _ = volume_read(handle, 0, &mut probe, 1)?;

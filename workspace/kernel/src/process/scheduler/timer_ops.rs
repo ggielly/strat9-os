@@ -29,6 +29,10 @@ const PERIODIC_RESCHED_TICKS: u64 = 5;
 /// its own `try_lock`. These are separate acquisitions by design - the inner
 /// functions must not be called while the outer lock is held (that would deadlock).
 pub fn timer_tick() {
+    let _perf = super::perf_counters::PerfScope::new(
+        &super::perf_counters::IRQ_TIMER_TSC,
+        &super::perf_counters::IRQ_TIMER_COUNT,
+    );
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
 
     if cpu_is_valid(cpu_idx) {
@@ -51,9 +55,7 @@ pub fn timer_tick() {
     // without touching SCHEDULER. This avoids pathological boot windows where
     // another CPU holds SCHEDULER and this CPU would otherwise defer the first
     // `need_resched` update indefinitely.
-    if cpu_is_valid(cpu_idx)
-        && !FIRST_TICK_FORCE_RESCHED[cpu_idx].swap(true, Ordering::AcqRel)
-    {
+    if cpu_is_valid(cpu_idx) && !FIRST_TICK_FORCE_RESCHED[cpu_idx].swap(true, Ordering::AcqRel) {
         request_force_resched_hint(cpu_idx);
     }
 

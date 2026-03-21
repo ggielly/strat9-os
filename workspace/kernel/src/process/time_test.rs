@@ -43,7 +43,11 @@ fn run_time_suite() -> bool {
     match sys_clock_gettime(CLOCK_MONOTONIC, ts_ptr) {
         Ok(ret) => {
             let ns = ts.to_nanos();
-            crate::serial_println!("[time-test][STEP] clock_gettime() => {} ns (ret={})", ns, ret);
+            crate::serial_println!(
+                "[time-test][STEP] clock_gettime() => {} ns (ret={})",
+                ns,
+                ret
+            );
             if ns == 0 {
                 crate::serial_println!("[time-test][ASSERT] FAIL: clock_gettime returned 0");
                 s = false;
@@ -192,7 +196,11 @@ fn run_time_suite() -> bool {
     let mut ts = TimeSpec::from_nanos(0);
     let ts_ptr = &mut ts as *mut TimeSpec as u64;
     let syscall_ret = sys_clock_gettime(CLOCK_MONOTONIC, ts_ptr);
-    let syscall_val = if syscall_ret.is_ok() { ts.to_nanos() } else { 0 };
+    let syscall_val = if syscall_ret.is_ok() {
+        ts.to_nanos()
+    } else {
+        0
+    };
     crate::serial_println!(
         "[time-test][STEP] internal={} syscall={} delta={}",
         internal,

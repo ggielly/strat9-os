@@ -52,8 +52,8 @@ pub use scheme::{
     DirEntry, DynScheme, FileFlags, FileStat, IpcScheme, KernelScheme, OpenFlags, Scheme,
 };
 pub use scheme_router::{
-    get_initfs_file_bytes, init_builtin_schemes, list_schemes, mount_scheme,
-    register_initfs_file, register_scheme,
+    get_initfs_file_bytes, init_builtin_schemes, list_schemes, mount_scheme, register_initfs_file,
+    register_scheme,
 };
 
 use crate::memory::{UserSliceRead, UserSliceWrite};

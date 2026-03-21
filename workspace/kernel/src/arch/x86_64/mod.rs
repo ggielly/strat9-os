@@ -3,6 +3,7 @@
 //! Inspired by MaestroOS `arch/x86/mod.rs`
 
 pub mod apic;
+pub mod boot_timestamp;
 pub mod cpuid;
 pub mod gdt;
 pub mod idt;
@@ -204,4 +205,19 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
         );
     }
     (eax, ebx, ecx, edx)
+}
+
+/// Read the Time Stamp Counter (TSC).
+///
+/// Returns the number of CPU cycles since reset. Available from the
+/// very first instruction — use this as the sole timing source during
+/// early boot (before APIC/PIT timers are configured).
+#[inline]
+pub fn rdtsc() -> u64 {
+    let eax: u32;
+    let edx: u32;
+    unsafe {
+        asm!("rdtsc", out("eax") eax, out("edx") edx, options(nomem, nostack));
+    }
+    ((edx as u64) << 32) | eax as u64
 }

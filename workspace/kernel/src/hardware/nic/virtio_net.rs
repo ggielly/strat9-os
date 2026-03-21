@@ -306,10 +306,9 @@ impl NetworkDevice for VirtioNetDevice {
         let buf_pages = (buf_size + 4095) / 4096;
         let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
-        let buf_frame = crate::sync::with_irqs_disabled(|token| {
-            memory::allocate_frames(token, buf_order)
-        })
-        .map_err(|_| NetError::NotReady)?;
+        let buf_frame =
+            crate::sync::with_irqs_disabled(|token| memory::allocate_frames(token, buf_order))
+                .map_err(|_| NetError::NotReady)?;
 
         let buf_addr = buf_frame.start_address.as_u64();
         let virt_addr = crate::memory::phys_to_virt(buf_addr);

@@ -96,13 +96,7 @@ unsafe impl Sync for HidKeyboard {}
 
 impl HidKeyboard {
     /// Creates a new instance.
-    pub fn new(
-        port: usize,
-        interface: u8,
-        endpoint: u8,
-        max_packet: u16,
-        interval: u8,
-    ) -> Self {
+    pub fn new(port: usize, interface: u8, endpoint: u8, max_packet: u16, interval: u8) -> Self {
         Self {
             port,
             interface,
@@ -197,13 +191,7 @@ unsafe impl Sync for HidMouse {}
 
 impl HidMouse {
     /// Creates a new instance.
-    pub fn new(
-        port: usize,
-        interface: u8,
-        endpoint: u8,
-        max_packet: u16,
-        interval: u8,
-    ) -> Self {
+    pub fn new(port: usize, interface: u8, endpoint: u8, max_packet: u16, interval: u8) -> Self {
         Self {
             port,
             interface,
@@ -338,8 +326,14 @@ pub fn enumerate_device(port: usize) {
         }
 
         let mut config_desc = [0u8; 256];
-        if controller.get_configuration_descriptor(1, 0, &mut config_desc, 9).is_ok() {
-            log::info!("[USB-HID] Config: total_len={}", u16::from_le_bytes([config_desc[2], config_desc[3]]));
+        if controller
+            .get_configuration_descriptor(1, 0, &mut config_desc, 9)
+            .is_ok()
+        {
+            log::info!(
+                "[USB-HID] Config: total_len={}",
+                u16::from_le_bytes([config_desc[2], config_desc[3]])
+            );
         }
 
         controller.set_configuration(1, 1).ok();

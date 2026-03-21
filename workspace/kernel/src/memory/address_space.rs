@@ -146,11 +146,10 @@ impl AddressSpace {
     /// kernel mapping changes propagate automatically.
     pub fn new_user() -> Result<Self, &'static str> {
         // Allocate a frame for the new PML4 table.
-        let new_l4_phys = crate::sync::with_irqs_disabled(|token| {
-            crate::memory::allocate_frame(token)
-        })
-        .map_err(|_| "Failed to allocate PML4 frame")?
-        .start_address;
+        let new_l4_phys =
+            crate::sync::with_irqs_disabled(|token| crate::memory::allocate_frame(token))
+                .map_err(|_| "Failed to allocate PML4 frame")?
+                .start_address;
 
         let new_l4_virt = VirtAddr::new(crate::memory::phys_to_virt(new_l4_phys.as_u64()));
 

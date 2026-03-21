@@ -49,6 +49,22 @@ pub(super) fn cmd_uptime_impl(_args: &[String]) -> Result<(), ShellError> {
         task_count,
         silos
     );
+
+    // Perf counters (TSC-based)
+    let tsc_khz = crate::arch::x86_64::boot_timestamp::tsc_khz();
+    let stats = crate::process::scheduler::perf_counters::snapshot();
+    shell_println!(
+        "perf: {}",
+        stats
+            .iter()
+            .map(|s| {
+                let avg = s.avg_us(tsc_khz);
+                alloc::format!("{} avg={}us ({})", s.name, avg, s.count)
+            })
+            .collect::<alloc::vec::Vec<_>>()
+            .join("  ")
+    );
+
     Ok(())
 }
 

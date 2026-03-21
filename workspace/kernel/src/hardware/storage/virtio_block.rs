@@ -206,10 +206,8 @@ impl VirtioBlockDevice {
         // To be safe and simple with the frame allocator, we'll alloc a frame.
         // In a real optimized driver, we would have a slab allocator or pre-allocated pool.
 
-        let metadata_frame = crate::sync::with_irqs_disabled(|token| {
-            memory::allocate_frame(token)
-        })
-        .map_err(|_| BlockError::NotReady)?;
+        let metadata_frame = crate::sync::with_irqs_disabled(|token| memory::allocate_frame(token))
+            .map_err(|_| BlockError::NotReady)?;
 
         let metadata_phys = metadata_frame.start_address.as_u64();
         let metadata_virt = crate::memory::phys_to_virt(metadata_phys);
@@ -255,15 +253,14 @@ impl VirtioBlockDevice {
             let buf_pages = (buf_size + 4095) / 4096;
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
-            let buf_frame = crate::sync::with_irqs_disabled(|token| {
-                memory::allocate_frames(token, buf_order)
-            })
-            .map_err(|_| {
-                crate::sync::with_irqs_disabled(|token| {
-                    memory::free_frame(token, metadata_frame);
-                });
-                BlockError::NotReady
-            })?;
+            let buf_frame =
+                crate::sync::with_irqs_disabled(|token| memory::allocate_frames(token, buf_order))
+                    .map_err(|_| {
+                        crate::sync::with_irqs_disabled(|token| {
+                            memory::free_frame(token, metadata_frame);
+                        });
+                        BlockError::NotReady
+                    })?;
 
             let buf_phys = buf_frame.start_address.as_u64();
             let buf_virt = crate::memory::phys_to_virt(buf_phys);

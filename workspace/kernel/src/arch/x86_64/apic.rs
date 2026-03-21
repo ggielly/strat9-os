@@ -307,10 +307,7 @@ pub fn init_ap() {
             if base & APIC_BASE_ENABLE == 0 {
                 super::wrmsr(IA32_APIC_BASE_MSR, base | APIC_BASE_ENABLE);
             }
-            super::wrmsr(
-                IA32_APIC_BASE_MSR,
-                base | APIC_BASE_ENABLE | APIC_BASE_EXTD,
-            );
+            super::wrmsr(IA32_APIC_BASE_MSR, base | APIC_BASE_ENABLE | APIC_BASE_EXTD);
         }
     }
 
