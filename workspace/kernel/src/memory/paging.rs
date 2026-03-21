@@ -55,9 +55,8 @@ unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
         // `OffsetPageTable` during page-table operations.  Those occur either
         // during single-threaded early boot, or while the caller holds a lock
         // that disables IRQs (e.g. the scheduler SpinLock, the AddressSpace
-        // lock).  IRQs are therefore guaranteed to be disabled, making
-        // `new_unchecked` sound.
-        let token = unsafe { crate::sync::IrqDisabledToken::new_unchecked() };
+        // lock).  IRQs are therefore guaranteed to be disabled.
+        let token = unsafe { crate::sync::IrqDisabledToken::token_from_trusted_context() };
 
         // `PageTable` purpose enforces:
         //  - `zeroed = true` unconditionally (cannot be overridden by callers).

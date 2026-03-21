@@ -96,15 +96,13 @@ impl SlabState {
     /// them all to the free list for that class.
     ///
     /// Requests one order-0 frame through the memory frame helpers.
-    unsafe fn refill(&mut self, ci: usize) {
+    /// Requires `token` from the SpinLockGuard that holds the slab lock.
+    unsafe fn refill(&mut self, ci: usize, token: &crate::sync::IrqDisabledToken) {
         let slab_size = SLAB_SIZES[ci];
 
         // Allocate one page (order-0) from the buddy allocator.
-        // SAFETY: refill is called while SLAB_ALLOC is locked; SpinLock::lock()
-        // disables IRQs via save_flags_and_cli before acquiring the lock, so
-        // IRQs are guaranteed to be disabled here.
-        let token = unsafe { crate::sync::IrqDisabledToken::new_unchecked() };
-        let frame = match memory::allocate_frame(&token) {
+        // IRQs are disabled via the SpinLock guardian; token proves it.
+        let frame = match memory::allocate_frame(token) {
             Ok(f) => f,
             Err(_) => return, // OOM — caller will return null
         };
@@ -138,9 +136,9 @@ impl SlabState {
 
     /// Pop a block from the free list for class `ci`, refilling from a buddy
     /// page if the list is empty.  Returns null on OOM.
-    unsafe fn alloc_block(&mut self, ci: usize) -> *mut u8 {
+    unsafe fn alloc_block(&mut self, ci: usize, token: &crate::sync::IrqDisabledToken) -> *mut u8 {
         if self.free_lists[ci].is_null() {
-            self.refill(ci);
+            self.refill(ci, token);
         }
         let head = self.free_lists[ci];
         if head.is_null() {
@@ -285,7 +283,7 @@ unsafe impl GlobalAlloc for LockedHeap {
             if boot_reg {
                 crate::serial_println!("[trace][heap] alloc slab lock acquired");
             }
-            slab.alloc_block(ci)
+            slab.with_mut_and_token(|s, token| s.alloc_block(ci, token))
         } else {
             // --- buddy path (large allocation) ---
             let pages_needed = (effective + 4095) / 4096;

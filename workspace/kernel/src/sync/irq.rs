@@ -23,15 +23,29 @@ impl IrqDisabledToken {
         }
     }
 
-    /// Construit la preuve sans relire `RFLAGS`.
+    /// Builds the proof without re-checking `RFLAGS`.
+    /// Reserved for internal producers of the `sync` module (guardian, with_irqs_disabled).
     ///
     /// # Safety
-    ///
-    /// L'appelant doit garantir que les interruptions sont bien désactivées sur
-    /// le CPU courant pendant toute la durée de validité logique du token.
+    /// The caller must guarantee that IRQs are indeed disabled on the current CPU for the entire
+    /// logical validity of the token.
+
     #[inline]
-    pub(crate) unsafe fn new_unchecked() -> Self {
+    pub(super) unsafe fn new_unchecked() -> Self {
         Self(())
+    }
+
+    /// Create a token when the caller guarantees that IRQs are already disabled.
+    /// Only to be used for implementing external traits (e.g. `X86FrameAllocator`)
+    /// whose signature cannot accept a token parameter. The caller MUST guarantee
+    /// that interrupts are disabled on the current CPU.
+    ///
+    /// # Safety
+    /// The caller must guarantee that IRQs are disabled on the current CPU.
+    ///
+    #[inline]
+    pub(crate) unsafe fn token_from_trusted_context() -> Self {
+        Self::new_unchecked()
     }
 }
 
