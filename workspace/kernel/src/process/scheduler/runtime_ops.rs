@@ -688,10 +688,15 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
         if let Some(ref mut sched) = *scheduler {
             let prev = sched.class_table;
             sched.class_table = table;
+            let n = active_cpu_count();
+            for cpu_idx in 0..n {
+                if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_idx].lock() {
+                    local_cpu.class_table = table;
+                }
+            }
             if prev.policy_map() != sched.class_table.policy_map() {
                 sched.migrate_ready_tasks_for_new_class_table();
             }
-            let n = active_cpu_count();
             for cpu_idx in 0..n {
                 if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_idx].lock() {
                     local_cpu.need_resched = true;

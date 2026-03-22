@@ -515,11 +515,8 @@ impl Scheduler {
 ///
 /// Called with `cpu` borrowed from `LOCAL_SCHEDULERS[cpu_index]` (our own
 /// LOCAL lock already held). Uses `try_lock_no_irqsave` on sibling entries —
-/// if a sibling is contended, we skip it rather than waiting.
-///
-/// Note: `task_cpu` in `GLOBAL_SCHED_STATE` is not updated here. The task's
-/// CPU affinity is corrected the next time it calls `block_current_task` or
-/// `exit_current_task`, which update `task_cpu` under the GLOBAL lock.
+/// if a sibling or the global scheduler state is contended, we skip stealing
+/// rather than waiting.
 pub(super) fn steal_task_local(
     cpu: &mut SchedulerCpu,
     cpu_index: usize,
@@ -528,6 +525,11 @@ pub(super) fn steal_task_local(
     if now_tick < LAST_STEAL_TICK[cpu_index].load(Ordering::Relaxed) + STEAL_COOLDOWN_TICKS {
         return None;
     }
+
+    // Best-effort only: if a cold path is holding the global scheduler, skip
+    // stealing instead of blocking the hot path.
+    let mut scheduler = SCHEDULER.try_lock_no_irqsave()?;
+    let sched = scheduler.as_mut()?;
 
     let n = active_cpu_count();
     let my_load = cpu.class_rqs.runnable_len();
@@ -563,6 +565,7 @@ pub(super) fn steal_task_local(
                 return None;
             }
             if let Some(task) = sib.class_rqs.steal_candidate(&sib.class_table) {
+                sched.task_cpu.insert(task.id, cpu_index);
                 if cpu_is_valid(cpu_index) {
                     CPU_STEAL_IN_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
                 }
@@ -615,17 +618,20 @@ pub(super) fn pick_next_task_local(
     }
 
     // Step 2: pick from local class_rqs.
-    if let Some(next) = cpu.class_rqs.pick_next(&cpu.class_table) {
-        return next;
-    }
+    let next = if let Some(next) = cpu.class_rqs.pick_next(&cpu.class_table) {
+        next
+    } else if let Some(stolen) = steal_task_local(cpu, cpu_index) {
+        // Step 3: try work-stealing from a sibling CPU.
+        stolen
+    } else {
+        // Step 4: idle fallback.
+        cpu.idle_task.clone()
+    };
 
-    // Step 3: try work-stealing from a sibling CPU.
-    if let Some(stolen) = steal_task_local(cpu, cpu_index) {
-        return stolen;
-    }
-
-    // Step 4: idle fallback.
-    cpu.idle_task.clone()
+    next.set_state(TaskState::Running);
+    cpu.current_task = Some(next.clone());
+    cpu.current_runtime = crate::process::sched::CurrentRuntime::new();
+    next
 }
 
 /// Prepare a LOCAL-only context switch.

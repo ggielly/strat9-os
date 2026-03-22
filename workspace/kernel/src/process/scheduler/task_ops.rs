@@ -572,51 +572,37 @@ pub fn block_current_task() {
     let cpu_index = current_cpu_index();
 
     let switch_target = {
-        // First, check current task and potentially block it under SCHEDULER lock.
-        // Then acquire LOCAL to perform the yield.
+        // Hold GLOBAL and LOCAL together through the state transition and task
+        // selection so a concurrent wake cannot observe the task as blocked,
+        // requeue it, and race with us tearing down current_task.
         let mut scheduler = SCHEDULER.lock();
-        let pending_wakeup_consumed;
-        let blocked_task_id;
-        {
-            let local = LOCAL_SCHEDULERS[cpu_index].lock();
-            if let Some(ref cpu) = *local {
+        let mut local = LOCAL_SCHEDULERS[cpu_index].lock();
+        let out = if let Some(ref mut sched) = *scheduler {
+            if let Some(ref mut cpu) = *local {
                 if let Some(ref current) = cpu.current_task {
-                    if current.wake_pending.swap(false, core::sync::atomic::Ordering::AcqRel) {
+                    if current
+                        .wake_pending
+                        .swap(false, core::sync::atomic::Ordering::AcqRel)
+                    {
                         // Pending wakeup consumed - do not block.
-                        pending_wakeup_consumed = true;
-                        blocked_task_id = None;
+                        None
                     } else {
                         current.set_state(TaskState::Blocked);
-                        pending_wakeup_consumed = false;
-                        blocked_task_id = Some((current.id, current.clone()));
+                        sched.blocked_tasks.insert(current.id, current.clone());
+                        super::core_impl::yield_cpu_local(cpu, cpu_index)
                     }
                 } else {
-                    pending_wakeup_consumed = false;
-                    blocked_task_id = None;
+                    None
                 }
-            } else {
-                pending_wakeup_consumed = false;
-                blocked_task_id = None;
-            }
-        }
-        if pending_wakeup_consumed {
-            drop(scheduler);
-            None
-        } else {
-            if let Some((bid, btask)) = blocked_task_id {
-                if let Some(ref mut sched) = *scheduler {
-                    sched.blocked_tasks.insert(bid, btask);
-                }
-            }
-            drop(scheduler);
-            // Now pick next task via LOCAL lock (now available).
-            let mut local = LOCAL_SCHEDULERS[cpu_index].lock();
-            if let Some(ref mut cpu) = *local {
-                super::core_impl::yield_cpu_local(cpu, cpu_index)
             } else {
                 None
             }
-        }
+        } else {
+            None
+        };
+        drop(local);
+        drop(scheduler);
+        out
     }; // Lock released
 
     if let Some(ref target) = switch_target {
