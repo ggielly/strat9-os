@@ -1,6 +1,9 @@
 stages:
   - build
 
+variables:
+  GIT_DEPTH: "0"
+
 build-docs:
   stage: build
   before_script:
