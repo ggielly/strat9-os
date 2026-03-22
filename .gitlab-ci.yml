@@ -44,18 +44,18 @@ release-latest:
       ISO_URL="${CI_PROJECT_URL}/-/jobs/artifacts/main/raw/build/strat9-os.iso?job=build-os-release"
       IMG_URL="${CI_PROJECT_URL}/-/jobs/artifacts/main/raw/build/strat9-os.img?job=build-os-release"
       curl --silent --request DELETE \
-        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        --header "PRIVATE-TOKEN: ${GITLAB_RELEASE_TOKEN}" \
         "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/latest" || true
       curl --silent --request DELETE \
-        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        --header "PRIVATE-TOKEN: ${GITLAB_RELEASE_TOKEN}" \
         "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/repository/tags/latest" || true
       curl --silent --fail --request POST \
-        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        --header "PRIVATE-TOKEN: ${GITLAB_RELEASE_TOKEN}" \
         --header "Content-Type: application/json" \
         --data "{\"tag_name\": \"latest\", \"ref\": \"${CI_COMMIT_SHA}\"}" \
         "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/repository/tags"
       curl --silent --fail --request POST \
-        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        --header "PRIVATE-TOKEN: ${GITLAB_RELEASE_TOKEN}" \
         --header "Content-Type: application/json" \
         --data "{\"name\": \"Latest build (pipeline ${CI_PIPELINE_ID})\", \"tag_name\": \"latest\", \"description\": \"Pipeline ${CI_PIPELINE_ID} - ${CI_COMMIT_SHORT_SHA}\", \"assets\": {\"links\": [{\"name\": \"strat9-os.iso\", \"url\": \"${ISO_URL}\", \"link_type\": \"other\"}, {\"name\": \"strat9-os.img\", \"url\": \"${IMG_URL}\", \"link_type\": \"other\"}]}}" \
         "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases"
