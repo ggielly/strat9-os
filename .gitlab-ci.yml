@@ -1,6 +1,6 @@
 stages:
   - build
-      - release
+  - release
 
 variables:
   GIT_DEPTH: "0"
