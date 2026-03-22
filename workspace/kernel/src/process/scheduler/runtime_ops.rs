@@ -689,21 +689,19 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
             let prev = sched.class_table;
             sched.class_table = table;
             let n = active_cpu_count();
+            // Propagate the new class table to every LOCAL and set need_resched
+            // in a single pass to avoid locking each LOCAL multiple times.
             for cpu_idx in 0..n {
                 if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_idx].lock() {
                     local_cpu.class_table = table;
-                }
-            }
-            if prev.policy_map() != sched.class_table.policy_map() {
-                sched.migrate_ready_tasks_for_new_class_table();
-            }
-            for cpu_idx in 0..n {
-                if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_idx].lock() {
                     local_cpu.need_resched = true;
                 }
                 if cpu_idx != my_cpu && cpu_is_valid(cpu_idx) {
                     ipi_targets[cpu_idx] = true;
                 }
+            }
+            if prev.policy_map() != sched.class_table.policy_map() {
+                sched.migrate_ready_tasks_for_new_class_table();
             }
             true
         } else {

@@ -447,9 +447,16 @@ impl Task {
     /// Read the current task state atomically.
     #[inline]
     pub fn get_state(&self) -> TaskState {
-        // SAFETY: AtomicU8 is always one of the four valid TaskState discriminants;
-        // the only writer is `set_state` which stores a cast from the same enum.
-        unsafe { core::mem::transmute(self.state.load(Ordering::Acquire)) }
+        let raw = self.state.load(Ordering::Acquire);
+        debug_assert!(
+            raw <= TaskState::Dead as u8,
+            "get_state: invalid TaskState discriminant {:#x}",
+            raw
+        );
+        // SAFETY: `raw` is always one of the four valid `#[repr(u8)]`
+        // discriminants (0..=3); the only writer is `set_state` which stores
+        // a cast from the same enum.
+        unsafe { core::mem::transmute(raw) }
     }
 
     /// Write the task state atomically. Uses Release ordering so the new state

@@ -428,7 +428,13 @@ impl Scheduler {
         WaitChildResult::StillRunning
     }
 
-    /// Performs the select cpu for task operation.
+    /// Select the least-loaded CPU for a newly created task.
+    ///
+    /// Uses **blocking** `LOCAL_SCHEDULERS[i].lock()` for each CPU while
+    /// `SCHEDULER` is already held by the caller.  This is safe because the
+    /// hot-path only ever does `try_lock_no_irqsave` on `SCHEDULER` (so it
+    /// cannot deadlock with us), but it may briefly stall behind a timer tick
+    /// that holds a LOCAL lock.  The stall is bounded by one tick period.
     fn select_cpu_for_task(&self) -> usize {
         // Early boot: before the first real task is running, keep all new tasks
         // on the BSP. Spreading init/shell/status across CPUs at this point can
@@ -504,12 +510,18 @@ impl Scheduler {
     }
 }
 
-//  LOCAL-only hot-path helpers 
+//  Per-CPU hot-path helpers 
 //
-// These functions operate exclusively on `SchedulerCpu` (acquired via
-// `LOCAL_SCHEDULERS[cpu_index]`) and never need the global `SCHEDULER` lock.
-// Lock order for steal: we hold our own LOCAL, then `try_lock_no_irqsave` on
-// sibling LOCALs (never blocking-wait, so no deadlock possible).
+// These functions operate primarily on `SchedulerCpu` (acquired via
+// `LOCAL_SCHEDULERS[cpu_index]`).  Most never touch the global `SCHEDULER`
+// lock.  The one exception is `steal_task_local`, which does a **non-blocking**
+// `SCHEDULER.try_lock_no_irqsave()` to update `task_cpu` after a successful
+// steal.  This is an intentional lock-order inversion (LOCAL held, then GLOBAL
+// attempted) that is safe because the try-lock never blocks — if SCHEDULER is
+// contended, we simply skip stealing.
+//
+// Lock order for steal: own LOCAL held → try_lock GLOBAL → try_lock sibling
+// LOCALs.  Never blocking-wait, so no deadlock possible.
 
 /// Steal a task from the busiest sibling CPU using per-CPU LOCAL locks.
 ///

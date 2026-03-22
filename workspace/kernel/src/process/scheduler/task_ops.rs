@@ -696,7 +696,10 @@ pub fn suspend_task(id: TaskId) -> bool {
                         sched.blocked_tasks.insert(current.id, current.clone());
                         suspended = true;
                         if ci == my_cpu {
-                            // Hold LOCAL to do yield_cpu_local
+                            // Re-acquire LOCAL to yield.  The gap between the
+                            // probe above and this lock is safe because IRQs
+                            // are disabled (save_flags_and_cli), so no timer
+                            // tick can preempt us or mutate current_task.
                             let mut local = LOCAL_SCHEDULERS[ci].lock();
                             if let Some(ref mut cpu) = *local {
                                 switch_target = super::core_impl::yield_cpu_local(cpu, ci);
