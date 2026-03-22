@@ -32,7 +32,7 @@ build-os-release:
     paths:
       - build/strat9-os.iso
       - build/strat9-os.img
-    expire_in: 1 week
+    expire_in: never
 
 release-latest:
   stage: release
