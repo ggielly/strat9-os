@@ -4,7 +4,7 @@
 
 use crate::memory::AddressSpace;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use x86_64::{PhysAddr, VirtAddr};
 
 /// POSIX process ID.
@@ -66,16 +66,17 @@ pub enum TaskPriority {
 }
 
 /// State of a task in the scheduler
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
     /// Task is ready to be scheduled
-    Ready,
+    Ready = 0,
     /// Task is currently running
-    Running,
+    Running = 1,
     /// Task is blocked waiting for an event
-    Blocked,
+    Blocked = 2,
     /// Task has exited
-    Dead,
+    Dead = 3,
 }
 
 /// How this task must be resumed the next time the scheduler selects it.
@@ -231,8 +232,9 @@ pub struct Task {
     pub gid: AtomicU32,
     /// effective group id.
     pub egid: AtomicU32,
-    /// Current state of the task
-    pub state: SyncUnsafeCell<TaskState>,
+    /// Current state of the task. Stored as AtomicU8 for lock-free cross-CPU visibility.
+    /// Use `get_state()` / `set_state()` for typed access.
+    pub state: AtomicU8,
     /// Priority level of the task
     pub priority: TaskPriority,
     /// Saved CPU context for this task (just the stack pointer)
@@ -440,6 +442,21 @@ impl Task {
     /// Set virtual runtime
     pub fn set_vruntime(&self, vruntime: u64) {
         self.vruntime.store(vruntime, Ordering::Relaxed);
+    }
+
+    /// Read the current task state atomically.
+    #[inline]
+    pub fn get_state(&self) -> TaskState {
+        // SAFETY: AtomicU8 is always one of the four valid TaskState discriminants;
+        // the only writer is `set_state` which stores a cast from the same enum.
+        unsafe { core::mem::transmute(self.state.load(Ordering::Acquire)) }
+    }
+
+    /// Write the task state atomically. Uses Release ordering so the new state
+    /// is visible to any CPU that subsequently does an Acquire load.
+    #[inline]
+    pub fn set_state(&self, new_state: TaskState) {
+        self.state.store(new_state as u8, Ordering::Release);
     }
 }
 
@@ -801,7 +818,7 @@ impl Task {
             euid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             egid: AtomicU32::new(0),
-            state: SyncUnsafeCell::new(TaskState::Ready),
+            state: AtomicU8::new(TaskState::Ready as u8),
             priority,
             context: SyncUnsafeCell::new(context),
             resume_kind: SyncUnsafeCell::new(ResumeKind::RetFrame),
@@ -867,7 +884,7 @@ impl Task {
             euid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             egid: AtomicU32::new(0),
-            state: SyncUnsafeCell::new(TaskState::Ready),
+            state: AtomicU8::new(TaskState::Ready as u8),
             priority,
             context: SyncUnsafeCell::new(context),
             resume_kind: SyncUnsafeCell::new(ResumeKind::RetFrame),

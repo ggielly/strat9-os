@@ -2997,7 +2997,7 @@ pub fn kernel_limit_silo(selector: &str, key: &str, value: u64) -> Result<u32, S
 /// Performs the dump user fault operation.
 fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode: u64, rip: u64) {
     let task_meta = crate::process::get_task_by_id(task_id).map(|task| {
-        let state = unsafe { *task.state.get() };
+        let state = task.get_state();
         let as_ref = unsafe { &*task.process.address_space.get() };
         (
             task.pid,

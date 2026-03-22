@@ -1,46 +1,38 @@
 use super::{runtime_ops::idle_task_main, *};
 
-impl Scheduler {
-    /// Create a new scheduler instance
-    pub fn new(cpu_count: usize) -> Self {
-        crate::serial_println!(
-            "[trace][sched] Scheduler::new enter cpu_count={}",
-            cpu_count
-        );
-        let mut cpus = alloc::vec::Vec::new();
-        for cpu_idx in 0..cpu_count {
-            crate::serial_println!(
-                "[trace][sched] Scheduler::new cpu={} create idle begin",
-                cpu_idx
-            );
-            let idle_task = Task::new_kernel_task(idle_task_main, "idle", TaskPriority::Idle)
-                .expect("Failed to create idle task");
-            crate::serial_println!(
-                "[trace][sched] Scheduler::new cpu={} create idle done id={}",
-                cpu_idx,
-                idle_task.id.as_u64()
-            );
-            idle_task.set_sched_policy(crate::process::sched::SchedPolicy::Idle);
-            let mut class_rqs = PerCpuClassRqSet::new();
-            class_rqs.enqueue(crate::process::sched::SchedClassId::Idle, idle_task.clone());
-            cpus.push(SchedulerCpu {
-                class_rqs,
-                current_task: None,
-                current_runtime: crate::process::sched::CurrentRuntime::new(),
-                idle_task,
-                task_to_requeue: None,
-                task_to_drop: None,
-                need_resched: false,
-            });
-            crate::serial_println!("[trace][sched] Scheduler::new cpu={} push done", cpu_idx);
-        }
-        crate::serial_println!(
-            "[trace][sched] Scheduler::new cpus ready len={}",
-            cpus.len()
-        );
+/// Create a `SchedulerCpu` for the given CPU index (creates its idle task).
+pub(super) fn create_cpu_scheduler(cpu_idx: usize) -> SchedulerCpu {
+    crate::serial_println!(
+        "[trace][sched] create_cpu_scheduler cpu={} create idle begin",
+        cpu_idx
+    );
+    let idle_task = Task::new_kernel_task(idle_task_main, "idle", TaskPriority::Idle)
+        .expect("Failed to create idle task");
+    crate::serial_println!(
+        "[trace][sched] create_cpu_scheduler cpu={} create idle done id={}",
+        cpu_idx,
+        idle_task.id.as_u64()
+    );
+    idle_task.set_sched_policy(crate::process::sched::SchedPolicy::Idle);
+    let mut class_rqs = PerCpuClassRqSet::new();
+    class_rqs.enqueue(crate::process::sched::SchedClassId::Idle, idle_task.clone());
+    SchedulerCpu {
+        class_rqs,
+        current_task: None,
+        current_runtime: crate::process::sched::CurrentRuntime::new(),
+        idle_task,
+        task_to_requeue: None,
+        task_to_drop: None,
+        need_resched: false,
+        class_table: crate::process::sched::SchedClassTable::default(),
+    }
+}
 
+impl Scheduler {
+    /// Create a new global scheduler state (no per-CPU runqueues — those live in LOCAL_SCHEDULERS).
+    pub fn new() -> Self {
+        crate::serial_println!("[trace][sched] Scheduler::new enter");
         Scheduler {
-            cpus,
             blocked_tasks: BTreeMap::new(),
             all_tasks: BTreeMap::new(),
             all_tasks_scan: Vec::new(),
@@ -170,10 +162,7 @@ impl Scheduler {
             task_id.as_u64(),
             cpu_index
         );
-        // SAFETY: We have exclusive access via the scheduler lock
-        unsafe {
-            *task.state.get() = TaskState::Ready;
-        }
+        task.set_state(TaskState::Ready);
         crate::serial_println!(
             "[trace][sched] add_task_on_cpu state ready tid={}",
             task_id.as_u64()
@@ -214,15 +203,17 @@ impl Scheduler {
             "[trace][sched] add_task_on_cpu identity registered tid={}",
             task_id.as_u64()
         );
-        if let Some(cpu) = self.cpus.get_mut(cpu_index) {
+        {
             let class = self.class_table.class_for_task(&task);
-            cpu.class_rqs.enqueue(class, task);
-            cpu.need_resched = true;
-            crate::serial_println!(
-                "[trace][sched] add_task_on_cpu enqueued tid={} cpu={}",
-                task_id.as_u64(),
-                cpu_index
-            );
+            if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
+                local_cpu.class_rqs.enqueue(class, task);
+                local_cpu.need_resched = true;
+                crate::serial_println!(
+                    "[trace][sched] add_task_on_cpu enqueued tid={} cpu={}",
+                    task_id.as_u64(),
+                    cpu_index
+                );
+            }
         }
         sched_trace(format_args!(
             "enqueue task={} cpu={}",
@@ -356,15 +347,14 @@ impl Scheduler {
     pub fn wake_task_locked(&mut self, id: TaskId) -> (bool, Option<usize>) {
         self.clear_task_wake_deadline_locked(id);
         if let Some(task) = self.blocked_tasks.remove(&id) {
-            // SAFETY: scheduler lock held.
-            unsafe {
-                *task.state.get() = TaskState::Ready;
-            }
+            task.set_state(TaskState::Ready);
             let cpu_index = self.task_cpu.get(&id).copied().unwrap_or(0);
-            if let Some(cpu) = self.cpus.get_mut(cpu_index) {
+            {
                 let class = self.class_table.class_for_task(&task);
-                cpu.class_rqs.enqueue(class, task);
-                cpu.need_resched = true;
+                if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
+                    local_cpu.class_rqs.enqueue(class, task);
+                    local_cpu.need_resched = true;
+                }
             }
             let ipi = if cpu_index != current_cpu_index() {
                 Some(cpu_index)
@@ -438,343 +428,43 @@ impl Scheduler {
         WaitChildResult::StillRunning
     }
 
-    /// Pick the next task to run on `cpu_index`.
-    ///
-    /// 1. Re-queues the current Running task (round-robin).
-    ///    The **idle task is never re-queued** — it is always available
-    ///    as the last-resort fallback.  Keeping it out of the ready queue
-    ///    ensures the queue becomes truly empty when there is no real work,
-    ///    which lets work-stealing kick in on other CPUs.
-    /// 2. Pops from the local ready queue.
-    /// 3. Falls back to **work-stealing** from the busiest other CPU.
-    /// 4. Falls back to the per-CPU idle task.
-    pub fn pick_next_task(&mut self, cpu_index: usize) -> Arc<Task> {
-        // Step 1: take current task and re-queue it if still alive.
-        let current_task = self.cpus[cpu_index].current_task.take();
-        if let Some(task) = current_task {
-            // SAFETY: scheduler lock held; we have exclusive access to state.
-            let task_state = unsafe { *task.state.get() };
-            if task_state == TaskState::Running {
-                unsafe {
-                    *task.state.get() = TaskState::Ready;
-                }
-                // Never re-queue the per-CPU idle task.  It lives in
-                // `cpus[cpu_index].idle_task` and is cloned as a fallback
-                // below.  Putting it in the ready queue prevents it from
-                // ever being empty, which breaks work-stealing.
-                if !Arc::ptr_eq(&task, &self.cpus[cpu_index].idle_task) {
-                    // DO NOT push to ready_queue yet!
-                    // Another CPU could steal it before its context is saved.
-                    self.cpus[cpu_index].task_to_requeue = Some(task);
-                }
-            } else if task_state == TaskState::Dead {
-                let task_id = task.id;
-                let task_pid = task.pid;
-                let task_tid = task.tid;
-
-                // Remove from global maps. `try_reap_child_locked` may have
-                // already removed the task; in that case `remove` is a no-op
-                // and we must skip `cleanup_task_resources` to avoid running
-                // port/silo teardown twice.
-                let was_registered = self.remove_all_task_locked(task_id).is_some();
-                self.task_cpu.remove(&task_id);
-                self.unregister_identity_locked(task_id, task_pid, task_tid);
-
-                if was_registered {
-                    // SAFETY: scheduler lock held, task is no longer accessible
-                    super::task_ops::cleanup_task_resources(&task);
-                }
-
-                // Defer the actual Arc drop to finish_switch()
-                self.cpus[cpu_index].task_to_drop = Some(task);
-            } else {
-                // Blocked task: leave bookkeeping intact; blocked_tasks holds the ref.
-                // Dropping the Arc here is fine; the blocked map keeps the task alive.
-            }
-        }
-
-        // Step 2: local queue, then work-steal, then idle.
-        let next_task = if let Some(task) =
-            self.cpus[cpu_index].class_rqs.pick_next(&self.class_table)
-        {
-            task
-        } else if let Some(task) = self.steal_task(cpu_index, TICK_COUNT.load(Ordering::Relaxed)) {
-            task
-        } else {
-            self.cpus[cpu_index].idle_task.clone()
-        };
-
-        // SAFETY: scheduler lock held.
-        unsafe {
-            *next_task.state.get() = TaskState::Running;
-        }
-        let cloned = next_task.clone();
-        let strong_after = Arc::strong_count(&cloned);
-        // Racy, pifometric diagnostic only: strong_count is heuristic here,
-        // not a correctness proof. We keep it as an early signal for obviously
-        // absurd Arc states while debugging scheduler corruption.
-        if strong_after == 0 || strong_after > (isize::MAX as usize) {
-            unsafe {
-                core::arch::asm!("mov al, 'C'; out 0xe9, al", out("al") _);
-            }
-            crate::serial_force_println!(
-                "[RACE] pick_next_task: suspicious Arc heuristic tid={} strong_count={}",
-                next_task.id.as_u64(),
-                strong_after
-            );
-        }
-        self.cpus[cpu_index].current_task = Some(cloned);
-        // Reset the runtime accounting for the new task
-        self.cpus[cpu_index].current_runtime = crate::process::sched::CurrentRuntime::new();
-        sched_trace(format_args!(
-            "cpu={} pick_next task={} policy={:?} strong={}",
-            cpu_index,
-            next_task.id.as_u64(),
-            next_task.sched_policy(),
-            strong_after,
-        ));
-        next_task
-    }
-
-    /// Try to steal one task from the most-loaded other CPU.
-    ///
-    /// We steal from the **back** of the source queue (the task added most
-    /// recently — least likely to have warm cache data on that CPU).
-    /// We only steal when the source has ≥ 2 tasks, so it keeps at least one.
-    pub fn steal_task(&mut self, dst_cpu: usize, now_tick: u64) -> Option<Arc<Task>> {
-        if !cpu_is_valid(dst_cpu) || dst_cpu >= self.cpus.len() {
-            return None;
-        }
-        let last = LAST_STEAL_TICK[dst_cpu].load(Ordering::Relaxed);
-        if now_tick.saturating_sub(last) < STEAL_COOLDOWN_TICKS {
-            return None;
-        }
-
-        let dst_load = {
-            let cpu = &self.cpus[dst_cpu];
-            cpu.class_rqs.runnable_len() + usize::from(cpu.current_task.is_some())
-        };
-
-        // Find the busiest CPU that isn't ourselves.
-        let (best_src, best_src_load) = (0..self.cpus.len())
-            .filter(|&i| i != dst_cpu)
-            .map(|i| {
-                let cpu = &self.cpus[i];
-                let load = cpu.class_rqs.runnable_len() + usize::from(cpu.current_task.is_some());
-                (i, load)
-            })
-            .max_by_key(|(_, load)| *load)?;
-
-        if best_src_load < dst_load.saturating_add(STEAL_IMBALANCE_MIN) {
-            return None;
-        }
-
-        // Only steal if source will still have work left.
-        if self.cpus[best_src].class_rqs.runnable_len() < 2 {
-            return None;
-        }
-
-        let task = self.cpus[best_src]
-            .class_rqs
-            .steal_candidate(&self.class_table)?;
-        // Update the task->CPU mapping so wake/resume route correctly.
-        self.task_cpu.insert(task.id, dst_cpu);
-        log::trace!(
-            "WS: CPU {} stole task {:?} from CPU {} (src had {} tasks)",
-            dst_cpu,
-            task.id,
-            best_src,
-            self.cpus[best_src].class_rqs.runnable_len() + 1
-        );
-        sched_trace(format_args!(
-            "work-steal dst_cpu={} src_cpu={} task={}",
-            dst_cpu,
-            best_src,
-            task.id.as_u64()
-        ));
-        if cpu_is_valid(dst_cpu) {
-            CPU_STEAL_IN_COUNT[dst_cpu].fetch_add(1, Ordering::Relaxed);
-        }
-        if cpu_is_valid(best_src) {
-            CPU_STEAL_OUT_COUNT[best_src].fetch_add(1, Ordering::Relaxed);
-        }
-        LAST_STEAL_TICK[dst_cpu].store(now_tick, Ordering::Relaxed);
-        Some(task)
-    }
-
-    /// Prepare a context switch: pick next task, update TSS and CR3,
-    /// return raw pointers for `switch_context()`.
-    ///
-    /// Returns `None` if there's nothing to switch to (same task selected,
-    /// or no current task).
-    pub(super) fn yield_cpu(&mut self, cpu_index: usize) -> Option<SwitchTarget> {
-        if cpu_index >= self.cpus.len() {
-            return None;
-        }
-        // Must have a current task to yield from
-        let current_ref = self.cpus[cpu_index].current_task.as_ref()?;
-        let strong_before = Arc::strong_count(current_ref);
-        if strong_before == 0 || strong_before > (isize::MAX as usize) {
-            log::error!(
-                "[sched] CORRUPT Arc in yield_cpu before clone! cpu={} strong={:#x} task={} ptr={:p}",
-                cpu_index, strong_before,
-                current_ref.id.as_u64(),
-                Arc::as_ptr(current_ref) as *const u8,
-            );
-            return None;
-        }
-        let current = current_ref.clone();
-
-        // Pick the next task
-        let next = self.pick_next_task(cpu_index);
-
-        // Don't switch to ourselves
-        if Arc::ptr_eq(&current, &next) {
-            return None;
-        }
-        if cpu_is_valid(cpu_index) {
-            CPU_SWITCH_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
-        }
-
-        if let Err(e) = validate_task_context(&next) {
-            // Do NOT panic here — the scheduler lock is held, which would
-            // deadlock the panic hook (current_task_clone → SCHEDULER.lock()).
-            let bad_rsp = unsafe { (*next.context.get()).saved_rsp };
-            let stk_base = next.kernel_stack.virt_base.as_u64();
-            let stk_top = stk_base + next.kernel_stack.size as u64;
-            crate::serial_println!(
-                "[sched] WARN: invalid ctx for task '{}' (id={}) cpu={}: {} \
-                 rsp={:#x} stack=[{:#x}..{:#x}] - restoring current task",
-                next.name,
-                next.id.as_u64(),
-                cpu_index,
-                e,
-                bad_rsp,
-                stk_base,
-                stk_top,
-            );
-            log::error!(
-                "[sched] invalid context for task '{}' (id={:?}) cpu={}: {} \
-                 rsp={:#x} stack=[{:#x}..{:#x}]",
-                next.name,
-                next.id,
-                cpu_index,
-                e,
-                bad_rsp,
-                stk_base,
-                stk_top,
-            );
-
-            // ── Restore scheduler invariants ────────────────────────────────────────
-            // `pick_next_task` already mutated state before we reached this point:
-            //   1. Took `current_task`, set its state to Ready, placed it in
-            //      `task_to_requeue` (non-idle tasks only).
-            //   2. Set `current_task = Some(next_clone)` with next.state = Running.
-            //
-            // We are NOT performing the actual context switch. Both mutations must be
-            // undone so the truly running task stays scheduled and no Arc reference
-            // is silently lost (which would lead to corrupted saved_rsp on the next
-            // timer tick when the scheduler tries to save context for the wrong task).
-
-            // (a) Is `next` the per-CPU idle fallback (accessed via clone, never in
-            //     class_rqs)?  We need this before any borrow of self.cpus.
-            let is_idle_fallback = Arc::ptr_eq(&next, &self.cpus[cpu_index].idle_task);
-
-            // (b) If pick_next_task moved a Dead task into task_to_drop, we are NOT
-            //     performing the switch so finish_switch() will never run.  Drop the
-            //     Arc here (inside the lock) as a last resort.  cleanup_task_resources
-            //     was already called by pick_next_task, so the only allocation cost is
-            //     the final Arc refcount decrement + deallocation of the Task struct.
-            drop(self.cpus[cpu_index].task_to_drop.take());
-
-            // (c) Restore the old running task as current_task.
-            //     Non-idle current was placed in task_to_requeue by pick_next_task.
-            //     Idle current was not (it is accessed via idle_task.clone()), so use
-            //     the `current` Arc cloned at the start of yield_cpu.
-            if let Some(prev) = self.cpus[cpu_index].task_to_requeue.take() {
-                // SAFETY: scheduler lock held; exclusive access to task state.
-                unsafe {
-                    *prev.state.get() = TaskState::Running;
-                }
-                self.cpus[cpu_index].current_task = Some(prev);
-            } else {
-                // SAFETY: scheduler lock held.
-                unsafe {
-                    *current.state.get() = TaskState::Running;
-                }
-                self.cpus[cpu_index].current_task = Some(current.clone());
-            }
-
-            // (d) If `next` came from the class run queue (non-idle), re-enqueue it
-            //     so it can be retried on the next tick.  Its context may be
-            //     transiently invalid (e.g. stack not yet committed by a new task);
-            //     it will be validated again when next picked.
-            if !is_idle_fallback {
-                // SAFETY: scheduler lock held.
-                unsafe {
-                    *next.state.get() = TaskState::Ready;
-                }
-                let class = self.class_table.class_for_task(&next);
-                if let Some(cpu) = self.cpus.get_mut(cpu_index) {
-                    cpu.class_rqs.enqueue(class, next);
-                }
-            }
-            // For the idle fallback: state was set to Running by pick_next_task but the
-            // idle task lives in idle_task.clone() not in class_rqs, so no re-enqueue
-            // is needed.  The next pick_next_task will reset its state correctly.
-
-            return None;
-        }
-
-        // Update TSS.rsp0 for the new task (needed for Ring 3 -> Ring 0 transitions)
-        let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
-        crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
-
-        // Update SYSCALL kernel RSP for the new task
-        crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
-
-        // Switch CR3 if the new task has a different address space
-        // SAFETY: The new task's address space has a valid PML4 with the kernel half mapped.
-        unsafe {
-            (*next.process.address_space.get()).switch_to();
-        }
-
-        Some(SwitchTarget {
-            old_rsp_ptr: unsafe { &raw mut (*current.context.get()).saved_rsp },
-            new_rsp_ptr: unsafe { &raw const (*next.context.get()).saved_rsp },
-            old_fpu_ptr: current.fpu_state.get() as *mut u8,
-            new_fpu_ptr: next.fpu_state.get() as *const u8,
-            old_xcr0: current
-                .xcr0_mask
-                .load(core::sync::atomic::Ordering::Relaxed),
-            new_xcr0: next.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
-        })
-    }
-
     /// Performs the select cpu for task operation.
     fn select_cpu_for_task(&self) -> usize {
-        if (self as *const Self).is_null() {
-            return 0;
-        }
         // Early boot: before the first real task is running, keep all new tasks
         // on the BSP. Spreading init/shell/status across CPUs at this point can
         // strand boot-critical work on AP scheduler instances that have not yet
         // entered their steady-state scheduling loop.
-        if self.cpus.iter().all(|cpu| cpu.current_task.is_none()) {
+        let n = active_cpu_count();
+        let all_idle = (0..n).all(|i| {
+            LOCAL_SCHEDULERS[i]
+                .lock()
+                .as_ref()
+                .map(|cpu| cpu.current_task.is_none())
+                .unwrap_or(true)
+        });
+        if all_idle {
             crate::serial_println!("[trace][sched] select_cpu_for_task early-boot best=0");
             return 0;
         }
         let mut best = 0usize;
         let mut best_load = usize::MAX;
-        for (idx, cpu) in self.cpus.iter().enumerate() {
-            let mut load = cpu.class_rqs.runnable_len();
-            if let Some(current) = cpu.current_task.as_ref() {
-                if self.class_table.class_for_task(current)
-                    != crate::process::sched::SchedClassId::Idle
-                {
-                    load += 1;
+        for idx in 0..n {
+            let load = {
+                let guard = LOCAL_SCHEDULERS[idx].lock();
+                if let Some(ref cpu) = *guard {
+                    let mut l = cpu.class_rqs.runnable_len();
+                    if let Some(current) = cpu.current_task.as_ref() {
+                        if self.class_table.class_for_task(current)
+                            != crate::process::sched::SchedClassId::Idle
+                        {
+                            l += 1;
+                        }
+                    }
+                    l
+                } else {
+                    0
                 }
-            }
+            };
             if load < best_load {
                 best = idx;
                 best_load = load;
@@ -792,8 +482,7 @@ impl Scheduler {
     pub fn migrate_ready_tasks_for_new_class_table(&mut self) {
         let mut ready: Vec<(TaskId, Arc<Task>, usize)> = Vec::new();
         for (id, task) in self.all_tasks.iter() {
-            // SAFETY: scheduler lock is held by caller; task state is synchronized by scheduler.
-            let state = unsafe { *task.state.get() };
+            let state = task.get_state();
             if state != TaskState::Ready {
                 continue;
             }
@@ -802,7 +491,8 @@ impl Scheduler {
         }
 
         for (id, task, cpu_idx) in ready {
-            let Some(cpu) = self.cpus.get_mut(cpu_idx) else {
+            let mut guard = LOCAL_SCHEDULERS[cpu_idx].lock();
+            let Some(ref mut cpu) = *guard else {
                 continue;
             };
             if cpu.class_rqs.remove(id) {
@@ -812,4 +502,212 @@ impl Scheduler {
             }
         }
     }
+}
+
+//  LOCAL-only hot-path helpers 
+//
+// These functions operate exclusively on `SchedulerCpu` (acquired via
+// `LOCAL_SCHEDULERS[cpu_index]`) and never need the global `SCHEDULER` lock.
+// Lock order for steal: we hold our own LOCAL, then `try_lock_no_irqsave` on
+// sibling LOCALs (never blocking-wait, so no deadlock possible).
+
+/// Steal a task from the busiest sibling CPU using per-CPU LOCAL locks.
+///
+/// Called with `cpu` borrowed from `LOCAL_SCHEDULERS[cpu_index]` (our own
+/// LOCAL lock already held). Uses `try_lock_no_irqsave` on sibling entries —
+/// if a sibling is contended, we skip it rather than waiting.
+///
+/// Note: `task_cpu` in `GLOBAL_SCHED_STATE` is not updated here. The task's
+/// CPU affinity is corrected the next time it calls `block_current_task` or
+/// `exit_current_task`, which update `task_cpu` under the GLOBAL lock.
+pub(super) fn steal_task_local(
+    cpu: &mut SchedulerCpu,
+    cpu_index: usize,
+) -> Option<Arc<Task>> {
+    let now_tick = TICK_COUNT.load(Ordering::Relaxed);
+    if now_tick < LAST_STEAL_TICK[cpu_index].load(Ordering::Relaxed) + STEAL_COOLDOWN_TICKS {
+        return None;
+    }
+
+    let n = active_cpu_count();
+    let my_load = cpu.class_rqs.runnable_len();
+
+    let mut best_cpu = None;
+    let mut best_load = 0usize;
+
+    for i in 0..n {
+        if i == cpu_index {
+            continue;
+        }
+        // try_lock_no_irqsave: returns immediately if contended (no deadlock).
+        if let Some(guard) = LOCAL_SCHEDULERS[i].try_lock_no_irqsave() {
+            if let Some(ref sib) = *guard {
+                let load = sib.class_rqs.runnable_len();
+                if load > best_load {
+                    best_load = load;
+                    best_cpu = Some(i);
+                }
+            }
+        }
+    }
+
+    if best_load < my_load.saturating_add(STEAL_IMBALANCE_MIN) {
+        return None;
+    }
+    let steal_from = best_cpu?;
+
+    // Re-acquire the sibling lock to perform the steal.
+    if let Some(mut guard) = LOCAL_SCHEDULERS[steal_from].try_lock_no_irqsave() {
+        if let Some(ref mut sib) = *guard {
+            if sib.class_rqs.runnable_len() < 2 {
+                return None;
+            }
+            if let Some(task) = sib.class_rqs.steal_candidate(&sib.class_table) {
+                if cpu_is_valid(cpu_index) {
+                    CPU_STEAL_IN_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
+                }
+                if cpu_is_valid(steal_from) {
+                    CPU_STEAL_OUT_COUNT[steal_from].fetch_add(1, Ordering::Relaxed);
+                }
+                LAST_STEAL_TICK[cpu_index].store(now_tick, Ordering::Relaxed);
+                return Some(task);
+            }
+        }
+    }
+    None
+}
+
+/// Pick the next task using only per-CPU LOCAL state.
+///
+/// Handles current task disposition (re-queue, drop-for-cleanup, or ignore if
+/// Blocked), then picks from the local class_rqs, falls back to work-stealing,
+/// and finally returns the idle task.
+///
+/// **Dead tasks**: if the current task is Dead, it goes into `task_to_drop`.
+/// Global map cleanup (`all_tasks`, `task_cpu`, etc.) must have been performed
+/// by the caller (e.g., `exit_current_task`) BEFORE reaching this point.
+pub(super) fn pick_next_task_local(
+    cpu: &mut SchedulerCpu,
+    cpu_index: usize,
+) -> Arc<Task> {
+    // Step 1: dispose of the current task.
+    if let Some(task) = cpu.current_task.take() {
+        match task.get_state() {
+            TaskState::Running => {
+                task.set_state(TaskState::Ready);
+                if !Arc::ptr_eq(&task, &cpu.idle_task) {
+                    // Defer re-queue to finish_switch (not yet safe to enqueue —
+                    // another CPU could steal it before our context is saved).
+                    cpu.task_to_requeue = Some(task);
+                }
+            }
+            TaskState::Dead => {
+                // Global maps already cleaned by exit_current_task / kill_task.
+                // Defer the Arc drop so KernelStack::drop → buddy_alloc runs
+                // outside any lock.
+                cpu.task_to_drop = Some(task);
+            }
+            TaskState::Blocked | TaskState::Ready => {
+                // Blocked: moved to blocked_tasks by block_current_task — do nothing.
+                // Ready: shouldn't normally occur for current_task; safe to ignore.
+            }
+        }
+    }
+
+    // Step 2: pick from local class_rqs.
+    if let Some(next) = cpu.class_rqs.pick_next(&cpu.class_table) {
+        return next;
+    }
+
+    // Step 3: try work-stealing from a sibling CPU.
+    if let Some(stolen) = steal_task_local(cpu, cpu_index) {
+        return stolen;
+    }
+
+    // Step 4: idle fallback.
+    cpu.idle_task.clone()
+}
+
+/// Prepare a LOCAL-only context switch.
+///
+/// Updates the TSS, SYSCALL RSP, and CR3 for the next task. Returns the
+/// raw pointer pair needed by `do_switch_context`.
+///
+/// Returns `None` if there is no task to switch to (same task or invalid context).
+pub(super) fn yield_cpu_local(
+    cpu: &mut SchedulerCpu,
+    cpu_index: usize,
+) -> Option<SwitchTarget> {
+    let current = cpu.current_task.as_ref()?.clone();
+
+    let next = pick_next_task_local(cpu, cpu_index);
+
+    if Arc::ptr_eq(&current, &next) {
+        return None;
+    }
+    if cpu_is_valid(cpu_index) {
+        CPU_SWITCH_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    if let Err(e) = validate_task_context(&next) {
+        let bad_rsp = unsafe { (*next.context.get()).saved_rsp };
+        let stk_base = next.kernel_stack.virt_base.as_u64();
+        let stk_top = stk_base + next.kernel_stack.size as u64;
+        crate::serial_println!(
+            "[sched-local] WARN: invalid ctx task='{}' id={} cpu={}: {} \
+             rsp={:#x} stack=[{:#x}..{:#x}] — restoring current",
+            next.name, next.id.as_u64(), cpu_index, e, bad_rsp, stk_base, stk_top,
+        );
+
+        // Restore invariants: undo what pick_next_task_local mutated.
+        let is_idle = Arc::ptr_eq(&next, &cpu.idle_task);
+        drop(cpu.task_to_drop.take());
+        if let Some(prev) = cpu.task_to_requeue.take() {
+            prev.set_state(TaskState::Running);
+            cpu.current_task = Some(prev);
+        } else {
+            current.set_state(TaskState::Running);
+            cpu.current_task = Some(current.clone());
+        }
+        if !is_idle {
+            next.set_state(TaskState::Ready);
+            let class = cpu.class_table.class_for_task(&next);
+            cpu.class_rqs.enqueue(class, next);
+        }
+        return None;
+    }
+
+    // Update TSS.rsp0 and SYSCALL kernel RSP for the new task.
+    let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
+    crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+    crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+
+    // Switch CR3 if the new task has a different address space.
+    // SAFETY: The new task's address space has a valid PML4 with the kernel half mapped.
+    unsafe {
+        (*next.process.address_space.get()).switch_to();
+    }
+
+    Some(SwitchTarget {
+        old_rsp_ptr: unsafe { &raw mut (*current.context.get()).saved_rsp },
+        new_rsp_ptr: unsafe { &raw const (*next.context.get()).saved_rsp },
+        old_fpu_ptr: current.fpu_state.get() as *mut u8,
+        new_fpu_ptr: next.fpu_state.get() as *const u8,
+        old_xcr0: current.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
+        new_xcr0: next.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
+    })
+}
+
+/// Post-switch cleanup using only LOCAL state: re-enqueue the previous task
+/// and optionally extract the task-to-drop for deferred deallocation.
+pub(super) fn drain_post_switch_local(
+    cpu: &mut SchedulerCpu,
+    take_drop: bool,
+) -> Option<Arc<Task>> {
+    let task_to_drop = if take_drop { cpu.task_to_drop.take() } else { None };
+    if let Some(task) = cpu.task_to_requeue.take() {
+        let class = cpu.class_table.class_for_task(&task);
+        cpu.class_rqs.enqueue(class, task);
+    }
+    task_to_drop
 }

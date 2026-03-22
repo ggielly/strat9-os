@@ -192,7 +192,7 @@ fn build_child_task(
         euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
         gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
         egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
-        state: SyncUnsafeCell::new(TaskState::Ready),
+        state: core::sync::atomic::AtomicU8::new(TaskState::Ready as u8),
         priority: parent.priority,
         context: SyncUnsafeCell::new(context),
         resume_kind: SyncUnsafeCell::new(crate::process::task::ResumeKind::RetFrame),

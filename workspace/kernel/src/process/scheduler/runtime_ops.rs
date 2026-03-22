@@ -16,7 +16,12 @@ pub fn init_scheduler() {
     // Build the scheduler outside the global scheduler lock to avoid
     // lock-order inversions (`SCHEDULER -> allocator`) during task/stack
     // allocation in `Scheduler::new`.
-    let new_sched = Scheduler::new(cpu_count);
+    let new_sched = Scheduler::new();
+    // Initialize per-CPU scheduler state for each active CPU.
+    for i in 0..cpu_count {
+        let cpu_sched = super::core_impl::create_cpu_scheduler(i);
+        *LOCAL_SCHEDULERS[i].lock() = Some(cpu_sched);
+    }
     crate::serial_println!("[trace][sched] init_scheduler new() done");
 
     // Race/corruption diagnostic: register scheduler lock for E9 LOCK-A/LOCK-R traces.
@@ -135,16 +140,25 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     let mut wait_iters: u64 = 0;
     let first_task = loop {
         let mut scheduler = SCHEDULER.lock();
-        if let Some(ref mut sched) = *scheduler {
+        if let Some(ref _sched) = *scheduler {
             if wait_iters > 0 {
                 crate::e9_println!("BD first_task cpu={} waited={}", cpu_index, wait_iters);
             }
-            let idx = if cpu_index < sched.cpus.len() {
-                cpu_index
-            } else {
-                0
-            };
-            break sched.pick_next_task(idx);
+            drop(scheduler);
+            // Pick first task via LOCAL per-CPU state.
+            let idx = if cpu_index < active_cpu_count() { cpu_index } else { 0 };
+            let mut local = LOCAL_SCHEDULERS[idx].lock();
+            if let Some(ref mut cpu) = *local {
+                break super::core_impl::pick_next_task_local(cpu, idx);
+            }
+            // LOCAL not ready yet — drop and spin.
+            drop(local);
+            wait_iters = wait_iters.saturating_add(1);
+            if wait_iters == 1 || (wait_iters % 1_000_000 == 0 && wait_iters > 0) {
+                crate::e9_println!("BD-WAIT-LOCAL cpu={} iters={}", cpu_index, wait_iters);
+            }
+            core::hint::spin_loop();
+            continue;
         }
         // Drop lock before spinning so the BSP can initialize the scheduler.
         drop(scheduler);
@@ -246,10 +260,11 @@ pub fn finish_switch() {
     let cpu_index = current_cpu_index();
     let mut task_to_drop = None;
     {
+        // Use LOCAL lock — no spinning on SCHEDULER needed.
         let mut spins = 0usize;
-        let mut scheduler = loop {
-            if let Some(guard) = SCHEDULER.try_lock() {
-                break guard;
+        let mut guard = loop {
+            if let Some(g) = LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
+                break g;
             }
             spins = spins.saturating_add(1);
             if spins % 1_000_000 == 0 {
@@ -257,16 +272,14 @@ pub fn finish_switch() {
             }
             core::hint::spin_loop();
         };
-        if let Some(ref mut sched) = *scheduler {
+        if let Some(ref mut cpu) = *guard {
             // Activate the address space for the current task on this CPU.
-            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                if let Some(ref task) = cpu.current_task {
-                    let as_ptr = unsafe { task.process.address_space.get() };
-                    unsafe { (*as_ptr).switch_to() };
-                }
+            if let Some(ref task) = cpu.current_task {
+                let as_ptr = unsafe { task.process.address_space.get() };
+                unsafe { (*as_ptr).switch_to() };
             }
-            task_to_drop = drain_post_switch_locked(sched, cpu_index, false, true);
-        };
+            task_to_drop = super::core_impl::drain_post_switch_local(cpu, true);
+        }
     }
 
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -274,47 +287,6 @@ pub fn finish_switch() {
     drop(task_to_drop);
 }
 
-fn drain_post_switch_locked(
-    sched: &mut Scheduler,
-    cpu_index: usize,
-    verbose_trace: bool,
-    take_drop: bool,
-) -> Option<Arc<Task>> {
-    let mut task_to_drop = None;
-    let mut requeue_task = None;
-    if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-        if take_drop {
-            task_to_drop = cpu.task_to_drop.take();
-        }
-        requeue_task = cpu.task_to_requeue.take();
-    }
-    if let Some(task) = requeue_task {
-        // Racy, pifometric diagnostic only: strong_count is heuristic here and
-        // may change concurrently. Keep it as a debugging hint, not as a proof
-        // that the Arc is actually corrupted.
-        let strong_before = Arc::strong_count(&task);
-        if strong_before == 0 || strong_before > (isize::MAX as usize) {
-            crate::serial_force_println!(
-                "[RACE] drain_post_switch_locked: suspicious Arc heuristic tid={} strong_count={}",
-                task.id.as_u64(),
-                strong_before
-            );
-        }
-        if verbose_trace {
-            crate::serial_force_println!(
-                "[trace][sched] finish_switch requeue cpu={} tid={} strong={}",
-                cpu_index,
-                task.id.as_u64(),
-                strong_before
-            );
-        }
-        let class = sched.class_table.class_for_task(&task);
-        if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-            cpu.class_rqs.enqueue(class, task);
-        }
-    }
-    task_to_drop
-}
 
 /// Finalize a preemption-driven switch once the raw timer stub has already
 /// moved onto the next task's kernel stack.
@@ -354,41 +326,41 @@ pub fn finish_interrupt_switch() {
     // hang.
     // This is around few seconds on recent CPU.
 
+    // Use LOCAL lock — no spinning on SCHEDULER. The LOCAL lock for this CPU
+    // is released quickly by maybe_preempt_from_interrupt before we get here.
     const MAX_IFS_SPINS: usize = 50_000_000;
     let mut task_to_drop = None;
     let mut spins = 0usize;
     loop {
-        if let Some(mut scheduler) = SCHEDULER.try_lock_no_irqsave() {
-            if let Some(ref mut sched) = *scheduler {
+        if let Some(mut guard) = LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
+            if let Some(ref mut cpu) = *guard {
                 // REQUEUE OLD TASK FIRST (while current AS is still active/stable)
-                task_to_drop = drain_post_switch_locked(sched, cpu_index, false, false);
+                task_to_drop = super::core_impl::drain_post_switch_local(cpu, false);
 
                 // NOW SWITCH TO NEW ADDRESS SPACE
-                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                    if let Some(ref task) = cpu.current_task {
-                        let task_stack_top =
-                            task.kernel_stack.virt_base.as_u64() + task.kernel_stack.size as u64;
-                        if should_trace {
-                            crate::e9_println!(
-                                "[ifs-task] cpu={} tid={} rsp0={:#x} expected={:#x}",
-                                cpu_index,
-                                task.id.as_u64(),
-                                entry_rsp0,
-                                task_stack_top
-                            );
-                        }
-                        if should_trace && entry_rsp0 != 0 && entry_rsp0 != task_stack_top {
-                            crate::e9_println!(
-                                "[ifs-rsp0-mismatch] cpu={} tid={} rsp0={:#x} expected={:#x}",
-                                cpu_index,
-                                task.id.as_u64(),
-                                entry_rsp0,
-                                task_stack_top
-                            );
-                        }
-                        let as_ptr = unsafe { task.process.address_space.get() };
-                        unsafe { (*as_ptr).switch_to() };
+                if let Some(ref task) = cpu.current_task {
+                    let task_stack_top =
+                        task.kernel_stack.virt_base.as_u64() + task.kernel_stack.size as u64;
+                    if should_trace {
+                        crate::e9_println!(
+                            "[ifs-task] cpu={} tid={} rsp0={:#x} expected={:#x}",
+                            cpu_index,
+                            task.id.as_u64(),
+                            entry_rsp0,
+                            task_stack_top
+                        );
                     }
+                    if should_trace && entry_rsp0 != 0 && entry_rsp0 != task_stack_top {
+                        crate::e9_println!(
+                            "[ifs-rsp0-mismatch] cpu={} tid={} rsp0={:#x} expected={:#x}",
+                            cpu_index,
+                            task.id.as_u64(),
+                            entry_rsp0,
+                            task_stack_top
+                        );
+                    }
+                    let as_ptr = unsafe { task.process.address_space.get() };
+                    unsafe { (*as_ptr).switch_to() };
                 }
             }
             break;
@@ -396,12 +368,12 @@ pub fn finish_interrupt_switch() {
         spins = spins.saturating_add(1);
         if spins >= MAX_IFS_SPINS {
             crate::e9_println!(
-                "[BUG] finish_interrupt_switch: SCHEDULER lock not released after {} spins, cpu={}",
+                "[BUG] finish_interrupt_switch: LOCAL lock not released after {} spins, cpu={}",
                 spins,
                 cpu_index
             );
             panic!(
-                "finish_interrupt_switch: SCHEDULER lock stuck after {} spins on cpu {}",
+                "finish_interrupt_switch: LOCAL lock stuck after {} spins on cpu {}",
                 spins, cpu_index
             );
         }
@@ -432,13 +404,9 @@ pub fn yield_task() {
     let cpu_index = current_cpu_index();
 
     let switch_target = {
-        let mut scheduler = SCHEDULER.lock();
-        if let Some(ref mut sched) = *scheduler {
-            if cpu_index < sched.cpus.len() {
-                sched.yield_cpu(cpu_index)
-            } else {
-                None
-            }
+        let mut local = LOCAL_SCHEDULERS[cpu_index].lock();
+        if let Some(ref mut cpu) = *local {
+            super::core_impl::yield_cpu_local(cpu, cpu_index)
         } else {
             None
         }
@@ -488,46 +456,37 @@ pub fn maybe_preempt() {
         return;
     }
 
-    // Try to lock the scheduler. If it's already locked (yield_task in
-    // progress), just skip this tick - we'll preempt on the next one.
+    // Use the per-CPU LOCAL lock — never blocked by another CPU's cold-path
+    // operations (fork, exit, wake) that hold SCHEDULER or GLOBAL_SCHED_STATE.
     let switch_target = {
-        let mut scheduler = match SCHEDULER.try_lock_no_irqsave() {
-            Some(guard) => guard,
+        let mut guard = match LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
+            Some(g) => g,
             None => {
                 note_try_lock_fail_on_cpu(cpu_index);
                 return;
-            } // Lock contended, skip this tick
+            }
         };
-
-        if let Some(ref mut sched) = *scheduler {
-            // Skip if no task is running yet (during early boot)
-            let cpu = match sched.cpus.get_mut(cpu_index) {
-                Some(cpu) => cpu,
-                None => return,
-            };
-            if take_force_resched_hint(cpu_index) {
-                cpu.need_resched = true;
-            }
-            if cpu.current_task.is_none() {
-                return;
-            }
-            if !cpu.need_resched {
-                return;
-            }
-            if let Some(current) = cpu.current_task.as_ref() {
-                sched_trace(format_args!(
-                    "cpu={} preempt request task={} rt_delta={}",
-                    cpu_index,
-                    current.id.as_u64(),
-                    cpu.current_runtime.period_delta_ticks
-                ));
-            }
-            cpu.need_resched = false;
-            sched.yield_cpu(cpu_index)
-        } else {
-            None
+        let cpu = match guard.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        if take_force_resched_hint(cpu_index) {
+            cpu.need_resched = true;
         }
-    }; // Lock released here
+        if cpu.current_task.is_none() || !cpu.need_resched {
+            return;
+        }
+        if let Some(current) = cpu.current_task.as_ref() {
+            sched_trace(format_args!(
+                "cpu={} preempt request task={} rt_delta={}",
+                cpu_index,
+                current.id.as_u64(),
+                cpu.current_runtime.period_delta_ticks
+            ));
+        }
+        cpu.need_resched = false;
+        super::core_impl::yield_cpu_local(cpu, cpu_index)
+    }; // LOCAL lock released here
 
     if let Some(ref target) = switch_target {
         if cpu_is_valid(cpu_index) {
@@ -574,33 +533,28 @@ pub fn maybe_preempt_from_interrupt(
     let mut task_to_drop: Option<Arc<Task>> = None;
 
     let decision = {
-        let mut scheduler = match SCHEDULER.try_lock_no_irqsave() {
-            Some(guard) => guard,
+        // Use per-CPU LOCAL lock — not blocked by cold-path global operations.
+        let mut guard = match LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
+            Some(g) => g,
             None => {
                 note_try_lock_fail_on_cpu(cpu_index);
                 return None;
             }
         };
-
-        let Some(ref mut sched) = *scheduler else {
-            return None;
+        let cpu = match guard.as_mut() {
+            Some(c) => c,
+            None => return None,
         };
 
-        {
-            let cpu = match sched.cpus.get_mut(cpu_index) {
-                Some(cpu) => cpu,
-                None => return None,
-            };
-            if take_force_resched_hint(cpu_index) {
-                cpu.need_resched = true;
-            }
-            if cpu.current_task.is_none() || !cpu.need_resched {
-                return None;
-            }
+        if take_force_resched_hint(cpu_index) {
+            cpu.need_resched = true;
+        }
+        if cpu.current_task.is_none() || !cpu.need_resched {
+            return None;
         }
 
         unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
-        let current = match sched.cpus[cpu_index].current_task.as_ref() {
+        let current = match cpu.current_task.as_ref() {
             Some(t) => t.clone(),
             None => {
                 unsafe { core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _) };
@@ -611,13 +565,11 @@ pub fn maybe_preempt_from_interrupt(
         current.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
         current.set_interrupt_rsp(current_frame_rsp);
 
-        let next = sched.pick_next_task(cpu_index);
+        let next = super::core_impl::pick_next_task_local(cpu, cpu_index);
 
         if Arc::ptr_eq(&current, &next) {
-            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                cpu.need_resched = false;
-            }
-            task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
+            cpu.need_resched = false;
+            task_to_drop = cpu.task_to_drop.take();
             // No context switch: return current task's FPU area for save/restore.
             let current_fpu = current.fpu_state.get() as *mut u8;
             Some(crate::arch::x86_64::idt::InterruptReturnDecision {
@@ -638,27 +590,21 @@ pub fn maybe_preempt_from_interrupt(
             let fits = interrupt_frame_fits(&next, next_rsp);
             if next_rsp == 0 || !fits {
                 unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
-                let is_idle_fallback = Arc::ptr_eq(&next, &sched.cpus[cpu_index].idle_task);
-                task_to_drop = sched.cpus[cpu_index].task_to_drop.take();
+                let is_idle_fallback = Arc::ptr_eq(&next, &cpu.idle_task);
+                task_to_drop = cpu.task_to_drop.take();
 
-                if let Some(prev) = sched.cpus[cpu_index].task_to_requeue.take() {
-                    unsafe {
-                        *prev.state.get() = TaskState::Running;
-                    }
-                    sched.cpus[cpu_index].current_task = Some(prev);
+                if let Some(prev) = cpu.task_to_requeue.take() {
+                    prev.set_state(TaskState::Running);
+                    cpu.current_task = Some(prev);
                 } else {
-                    unsafe {
-                        *current.state.get() = TaskState::Running;
-                    }
-                    sched.cpus[cpu_index].current_task = Some(current.clone());
+                    current.set_state(TaskState::Running);
+                    cpu.current_task = Some(current.clone());
                 }
 
                 if !is_idle_fallback {
-                    unsafe {
-                        *next.state.get() = TaskState::Ready;
-                    }
-                    let class = sched.class_table.class_for_task(&next);
-                    sched.cpus[cpu_index].class_rqs.enqueue(class, next);
+                    next.set_state(TaskState::Ready);
+                    let class = cpu.class_table.class_for_task(&next);
+                    cpu.class_rqs.enqueue(class, next);
                 }
                 // Abort switch: return current task's FPU area for save/restore.
                 let current_fpu = current.fpu_state.get() as *mut u8;
@@ -669,14 +615,11 @@ pub fn maybe_preempt_from_interrupt(
                 });
             } else {
                 next.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
-                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                    cpu.need_resched = false;
-                }
+                cpu.need_resched = false;
                 // Do NOT drain `task_to_requeue` / `task_to_drop` here.
                 // The raw timer stub still has to save the outgoing FPU state and
                 // pivot onto the next task's stack. Defer that finalization to
-                // `finish_interrupt_switch()` on the new stack, matching the
-                // post-switch hooks used by Redox and Maestro.
+                // `finish_interrupt_switch()` on the new stack.
 
                 let stack_top =
                     next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
@@ -694,7 +637,7 @@ pub fn maybe_preempt_from_interrupt(
                 })
             }
         }
-    };
+    }; // LOCAL lock released here
 
     if decision.is_some() && cpu_is_valid(cpu_index) {
         CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
@@ -748,8 +691,11 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
             if prev.policy_map() != sched.class_table.policy_map() {
                 sched.migrate_ready_tasks_for_new_class_table();
             }
-            for (cpu_idx, cpu) in sched.cpus.iter_mut().enumerate() {
-                cpu.need_resched = true;
+            let n = active_cpu_count();
+            for cpu_idx in 0..n {
+                if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_idx].lock() {
+                    local_cpu.need_resched = true;
+                }
                 if cpu_idx != my_cpu && cpu_is_valid(cpu_idx) {
                     ipi_targets[cpu_idx] = true;
                 }
@@ -784,24 +730,28 @@ pub fn log_state(label: &str) {
             steal[0].as_str(),
             steal[1].as_str()
         );
-        for (cpu_id, cpu) in sched.cpus.iter().enumerate() {
+        let n = active_cpu_count();
+        for cpu_id in 0..n {
             use crate::process::sched::SchedClassRq;
-            let current = cpu
-                .current_task
-                .as_ref()
-                .map(|t| t.id.as_u64())
-                .unwrap_or(u64::MAX);
-            log::info!(
-                "[sched][state] label={} cpu={} current={} rq_rt={} rq_fair={} rq_idle={} blocked={} need_resched={}",
-                label,
-                cpu_id,
-                current,
-                cpu.class_rqs.real_time.len(),
-                cpu.class_rqs.fair.len(),
-                cpu.class_rqs.idle.len(),
-                sched.blocked_tasks.len(),
-                cpu.need_resched
-            );
+            let local_guard = LOCAL_SCHEDULERS[cpu_id].lock();
+            if let Some(ref cpu) = *local_guard {
+                let current = cpu
+                    .current_task
+                    .as_ref()
+                    .map(|t| t.id.as_u64())
+                    .unwrap_or(u64::MAX);
+                log::info!(
+                    "[sched][state] label={} cpu={} current={} rq_rt={} rq_fair={} rq_idle={} blocked={} need_resched={}",
+                    label,
+                    cpu_id,
+                    current,
+                    cpu.class_rqs.real_time.len(),
+                    cpu.class_rqs.fair.len(),
+                    cpu.class_rqs.idle.len(),
+                    sched.blocked_tasks.len(),
+                    cpu.need_resched
+                );
+            }
         }
     }
     drop(scheduler);
@@ -836,7 +786,7 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
         let scheduler = SCHEDULER.lock();
         if let Some(ref sched) = *scheduler {
             use crate::process::sched::SchedClassRq;
-            let cpu_count = sched.cpus.len().min(crate::arch::x86_64::percpu::MAX_CPUS);
+            let cpu_count = active_cpu_count().min(crate::arch::x86_64::percpu::MAX_CPUS);
             out.initialized = true;
             out.boot_phase = if cpu_count > 0 { 2 } else { 1 };
             out.cpu_count = cpu_count;
@@ -844,16 +794,18 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
             out.steal_order = *sched.class_table.steal_order();
             out.blocked_tasks = sched.blocked_tasks.len();
             for i in 0..cpu_count {
-                let cpu = &sched.cpus[i];
-                out.current_task[i] = cpu
-                    .current_task
-                    .as_ref()
-                    .map(|t| t.id.as_u64())
-                    .unwrap_or(u64::MAX);
-                out.rq_rt[i] = cpu.class_rqs.real_time.len();
-                out.rq_fair[i] = cpu.class_rqs.fair.len();
-                out.rq_idle[i] = cpu.class_rqs.idle.len();
-                out.need_resched[i] = cpu.need_resched;
+                let local_guard = LOCAL_SCHEDULERS[i].lock();
+                if let Some(ref cpu) = *local_guard {
+                    out.current_task[i] = cpu
+                        .current_task
+                        .as_ref()
+                        .map(|t| t.id.as_u64())
+                        .unwrap_or(u64::MAX);
+                    out.rq_rt[i] = cpu.class_rqs.real_time.len();
+                    out.rq_fair[i] = cpu.class_rqs.fair.len();
+                    out.rq_idle[i] = cpu.class_rqs.idle.len();
+                    out.need_resched[i] = cpu.need_resched;
+                }
             }
         }
     }

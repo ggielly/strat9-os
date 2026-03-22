@@ -551,13 +551,12 @@ pub fn send_signal(
     pending.add(signal);
 
     // If the task is blocked and the signal is not blocked, wake it.
-    // SAFETY: Best-effort read of task.state without the scheduler lock.
-    // The state may change concurrently, but wake_task is idempotent —
-    // a spurious wake is harmless and a missed wake will be caught on
-    // the next scheduling point when pending_signals is checked.
-    unsafe {
-        let state = &*task.state.get();
-        if *state == crate::process::TaskState::Blocked {
+    // Best-effort read: state may change concurrently, but wake_task is
+    // idempotent — a spurious wake is harmless and a missed wake will be
+    // caught on the next scheduling point when pending_signals is checked.
+    {
+        let state = task.get_state();
+        if state == crate::process::TaskState::Blocked {
             let blocked = &task.blocked_signals;
             if !blocked.contains(signal) {
                 // Wake the task so it can handle the signal.

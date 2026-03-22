@@ -38,19 +38,16 @@ pub fn exit_current_task(exit_code: i32) -> ! {
         let saved_flags = save_flags_and_cli();
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
-            if let Some(current) = sched
-                .cpus
-                .get(cpu_index)
+            if let Some(current) = LOCAL_SCHEDULERS[cpu_index]
+                .lock()
+                .as_ref()
                 .and_then(|cpu| cpu.current_task.clone())
             {
                 let current_id = current.id;
                 let current_pid = current.pid;
                 let parent = sched.parent_of.get(&current_id).copied();
                 let _ = sched.clear_task_wake_deadline_locked(current_id);
-                // SAFETY: We hold the scheduler lock and interrupts are disabled.
-                unsafe {
-                    *current.state.get() = TaskState::Dead;
-                }
+                current.set_state(TaskState::Dead);
                 // Do NOT call cleanup_task_resources or all_tasks.remove() here!
                 // The task is still in current_task[cpu_index], and an interrupt
                 // could access it. Instead, mark it Dead and let pick_next_task
@@ -101,17 +98,10 @@ pub fn exit_current_task(exit_code: i32) -> ! {
 pub fn current_task_id() -> Option<TaskId> {
     let saved_flags = save_flags_and_cli();
     let cpu_index = current_cpu_index();
-    let id = {
-        let scheduler = SCHEDULER.lock();
-        if let Some(ref sched) = *scheduler {
-            sched
-                .cpus
-                .get(cpu_index)
-                .and_then(|cpu| cpu.current_task.as_ref().map(|t| t.id))
-        } else {
-            None
-        }
-    };
+    let id = LOCAL_SCHEDULERS[cpu_index]
+        .lock()
+        .as_ref()
+        .and_then(|cpu| cpu.current_task.as_ref().map(|t| t.id));
     restore_flags(saved_flags);
     id
 }
@@ -120,18 +110,9 @@ pub fn current_task_id() -> Option<TaskId> {
 pub fn current_task_id_try() -> Option<TaskId> {
     let saved_flags = save_flags_and_cli();
     let cpu_index = current_cpu_index();
-    let id = if let Some(scheduler) = SCHEDULER.try_lock() {
-        if let Some(ref sched) = *scheduler {
-            sched
-                .cpus
-                .get(cpu_index)
-                .and_then(|cpu| cpu.current_task.as_ref().map(|t| t.id))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let id = LOCAL_SCHEDULERS[cpu_index]
+        .try_lock_no_irqsave()
+        .and_then(|guard| guard.as_ref().and_then(|cpu| cpu.current_task.as_ref().map(|t| t.id)));
     restore_flags(saved_flags);
     id
 }
@@ -161,31 +142,24 @@ pub fn current_sid() -> Option<Pid> {
 pub fn current_task_clone() -> Option<Arc<Task>> {
     let saved_flags = save_flags_and_cli();
     let cpu_index = current_cpu_index();
-    let task = {
-        let mut scheduler = SCHEDULER.lock();
-        if let Some(ref mut sched) = *scheduler {
-            sched.cpus.get_mut(cpu_index).and_then(|cpu| {
-                let arc = cpu.current_task.as_ref()?;
-                let strong = Arc::strong_count(arc);
-                // Heuristic only: keep the warning, but do not mutate scheduler state here.
-                if strong == 0 || strong > (isize::MAX as usize) / 2 {
-                    let ptr = Arc::as_ptr(arc) as *const u8;
-                    let caller = core::panic::Location::caller();
-                    crate::serial_println!(
-                        "[sched] CORRUPT Arc refcount! cpu={} strong={:#x} ptr={:p} caller={}:{}",
-                        cpu_index,
-                        strong,
-                        ptr,
-                        caller.file(),
-                        caller.line(),
-                    );
-                }
-                Some(arc.clone())
-            })
-        } else {
-            None
+    let caller = core::panic::Location::caller();
+    let task = LOCAL_SCHEDULERS[cpu_index].lock().as_ref().and_then(|cpu| {
+        let arc = cpu.current_task.as_ref()?;
+        let strong = Arc::strong_count(arc);
+        // Heuristic only: keep the warning, but do not mutate scheduler state here.
+        if strong == 0 || strong > (isize::MAX as usize) / 2 {
+            let ptr = Arc::as_ptr(arc) as *const u8;
+            crate::serial_println!(
+                "[sched] CORRUPT Arc refcount! cpu={} strong={:#x} ptr={:p} caller={}:{}",
+                cpu_index,
+                strong,
+                ptr,
+                caller.file(),
+                caller.line(),
+            );
         }
-    };
+        Some(arc.clone())
+    });
     restore_flags(saved_flags);
     task
 }
@@ -198,15 +172,16 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
 pub fn current_task_clone_try() -> Option<Arc<Task>> {
     let saved_flags = save_flags_and_cli();
     let cpu_index = current_cpu_index();
-    let task = if let Some(mut scheduler) = SCHEDULER.try_lock() {
-        if let Some(ref mut sched) = *scheduler {
-            sched.cpus.get_mut(cpu_index).and_then(|cpu| {
+    let caller = core::panic::Location::caller();
+    let task = LOCAL_SCHEDULERS[cpu_index]
+        .try_lock_no_irqsave()
+        .and_then(|guard| {
+            guard.as_ref().and_then(|cpu| {
                 let arc = cpu.current_task.as_ref()?;
                 let strong = Arc::strong_count(arc);
                 // Heuristic only: keep the warning, but do not mutate scheduler state here.
                 if strong == 0 || strong > (isize::MAX as usize) / 2 {
                     let ptr = Arc::as_ptr(arc) as *const u8;
-                    let caller = core::panic::Location::caller();
                     crate::serial_println!(
                         "[sched] CORRUPT Arc refcount! cpu={} strong={:#x} ptr={:p} caller={}:{}",
                         cpu_index,
@@ -218,12 +193,7 @@ pub fn current_task_clone_try() -> Option<Arc<Task>> {
                 }
                 Some(arc.clone())
             })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+        });
     restore_flags(saved_flags);
     task
 }
@@ -236,33 +206,29 @@ pub fn current_task_clone_spin_debug(trace_label: &str) -> Option<Arc<Task>> {
     let cpu_index = current_cpu_index();
     let mut spins = 0usize;
     loop {
-        if let Some(mut scheduler) = SCHEDULER.try_lock() {
-            return if let Some(ref mut sched) = *scheduler {
-                sched.cpus.get_mut(cpu_index).and_then(|cpu| {
-                    if cpu.current_task.is_none() {
-                        unsafe { core::arch::asm!("mov al, 'N'; out 0xe9, al", out("al") _) };
-                        return None;
-                    }
-                    let arc = cpu.current_task.as_ref().unwrap();
-                    let strong = Arc::strong_count(arc);
-                    // Racy, pifometric diagnostic only: strong_count can move
-                    // concurrently, so this is a heuristic for suspicious
-                    // scheduler state, not a formal corruption proof.
-                    if strong == 0 || strong > (isize::MAX as usize) / 2 {
-                        let ptr = Arc::as_ptr(arc) as *const u8;
-                        crate::serial_force_println!(
-                            "[trace][sched] {} suspicious current_task heuristic cpu={} strong={:#x} ptr={:p}",
-                            trace_label,
-                            cpu_index,
-                            strong,
-                            ptr,
-                        );
-                    }
-                    Some(arc.clone())
-                })
-            } else {
-                None
-            };
+        if let Some(guard) = LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
+            return guard.as_ref().and_then(|cpu| {
+                if cpu.current_task.is_none() {
+                    unsafe { core::arch::asm!("mov al, 'N'; out 0xe9, al", out("al") _) };
+                    return None;
+                }
+                let arc = cpu.current_task.as_ref().unwrap();
+                let strong = Arc::strong_count(arc);
+                // Racy, pifometric diagnostic only: strong_count can move
+                // concurrently, so this is a heuristic for suspicious
+                // scheduler state, not a formal corruption proof.
+                if strong == 0 || strong > (isize::MAX as usize) / 2 {
+                    let ptr = Arc::as_ptr(arc) as *const u8;
+                    crate::serial_force_println!(
+                        "[trace][sched] {} suspicious current_task heuristic cpu={} strong={:#x} ptr={:p}",
+                        trace_label,
+                        cpu_index,
+                        strong,
+                        ptr,
+                    );
+                }
+                Some(arc.clone())
+            });
         }
 
         spins = spins.saturating_add(1);
@@ -519,12 +485,12 @@ pub fn set_task_sched_policy(id: TaskId, policy: crate::process::sched::SchedPol
             task.set_sched_policy(policy);
             let class = sched.class_table.class_for_task(&task);
 
-            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+            if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
                 // If task is queued in ready classes, migrate it to the new class.
-                if cpu.class_rqs.remove(id) {
-                    cpu.class_rqs.enqueue(class, task.clone());
+                if local_cpu.class_rqs.remove(id) {
+                    local_cpu.class_rqs.enqueue(class, task.clone());
                 }
-                cpu.need_resched = true;
+                local_cpu.need_resched = true;
             }
             if cpu_index != current_cpu_index() {
                 ipi_to_cpu = Some(cpu_index);
@@ -606,39 +572,50 @@ pub fn block_current_task() {
     let cpu_index = current_cpu_index();
 
     let switch_target = {
+        // First, check current task and potentially block it under SCHEDULER lock.
+        // Then acquire LOCAL to perform the yield.
         let mut scheduler = SCHEDULER.lock();
-        if let Some(ref mut sched) = *scheduler {
-            if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
+        let pending_wakeup_consumed;
+        let blocked_task_id;
+        {
+            let local = LOCAL_SCHEDULERS[cpu_index].lock();
+            if let Some(ref cpu) = *local {
                 if let Some(ref current) = cpu.current_task {
-                    // Check for a pending wakeup that raced with us before we
-                    // entered the scheduler lock. If set, clear it and skip
-                    // blocking - the task carries on as if it was woken normally.
-                    // SAFETY: AtomicBool::swap is safe to call from any context.
-                    if current
-                        .wake_pending
-                        .swap(false, core::sync::atomic::Ordering::AcqRel)
-                    {
+                    if current.wake_pending.swap(false, core::sync::atomic::Ordering::AcqRel) {
                         // Pending wakeup consumed - do not block.
-                        None
+                        pending_wakeup_consumed = true;
+                        blocked_task_id = None;
                     } else {
-                        // SAFETY: We hold the scheduler lock and interrupts are disabled.
-                        unsafe {
-                            *current.state.get() = TaskState::Blocked;
-                        }
-                        // Move it to the blocked map
-                        sched.blocked_tasks.insert(current.id, current.clone());
-                        // Now pick the next task (the blocked task won't be re-queued
-                        // because pick_next_task only re-queues Running tasks)
-                        sched.yield_cpu(cpu_index)
+                        current.set_state(TaskState::Blocked);
+                        pending_wakeup_consumed = false;
+                        blocked_task_id = Some((current.id, current.clone()));
                     }
                 } else {
-                    sched.yield_cpu(cpu_index)
+                    pending_wakeup_consumed = false;
+                    blocked_task_id = None;
                 }
+            } else {
+                pending_wakeup_consumed = false;
+                blocked_task_id = None;
+            }
+        }
+        if pending_wakeup_consumed {
+            drop(scheduler);
+            None
+        } else {
+            if let Some((bid, btask)) = blocked_task_id {
+                if let Some(ref mut sched) = *scheduler {
+                    sched.blocked_tasks.insert(bid, btask);
+                }
+            }
+            drop(scheduler);
+            // Now pick next task via LOCAL lock (now available).
+            let mut local = LOCAL_SCHEDULERS[cpu_index].lock();
+            if let Some(ref mut cpu) = *local {
+                super::core_impl::yield_cpu_local(cpu, cpu_index)
             } else {
                 None
             }
-        } else {
-            None
         }
     }; // Lock released
 
@@ -719,18 +696,25 @@ pub fn suspend_task(id: TaskId) -> bool {
         let mut scheduler = SCHEDULER.lock();
         if let Some(ref mut sched) = *scheduler {
             let my_cpu = current_cpu_index();
+            let n = active_cpu_count();
 
             // Check if the task is the current task on any CPU.
-            for (ci, cpu) in sched.cpus.iter_mut().enumerate() {
-                if let Some(ref current) = cpu.current_task {
-                    if current.id == id {
-                        unsafe {
-                            *current.state.get() = TaskState::Blocked;
-                        }
+            for ci in 0..n {
+                let task_id_on_cpu = LOCAL_SCHEDULERS[ci]
+                    .lock()
+                    .as_ref()
+                    .and_then(|cpu| cpu.current_task.as_ref().map(|t| (t.id, t.clone())));
+                if let Some((tid, current)) = task_id_on_cpu {
+                    if tid == id {
+                        current.set_state(TaskState::Blocked);
                         sched.blocked_tasks.insert(current.id, current.clone());
                         suspended = true;
                         if ci == my_cpu {
-                            switch_target = sched.yield_cpu(ci);
+                            // Hold LOCAL to do yield_cpu_local
+                            let mut local = LOCAL_SCHEDULERS[ci].lock();
+                            if let Some(ref mut cpu) = *local {
+                                switch_target = super::core_impl::yield_cpu_local(cpu, ci);
+                            }
                         } else {
                             // Cross-CPU: IPI will make the remote CPU preempt.
                             ipi_to_cpu = Some(ci);
@@ -742,12 +726,18 @@ pub fn suspend_task(id: TaskId) -> bool {
 
             // Remove from ready queues (task was not running anywhere).
             if !suspended {
-                for cpu in &mut sched.cpus {
-                    if cpu.class_rqs.remove(id) {
+                for ci in 0..n {
+                    let removed = {
+                        let mut local = LOCAL_SCHEDULERS[ci].lock();
+                        if let Some(ref mut cpu) = *local {
+                            cpu.class_rqs.remove(id)
+                        } else {
+                            false
+                        }
+                    };
+                    if removed {
                         if let Some(task) = sched.all_tasks.get(&id) {
-                            unsafe {
-                                *task.state.get() = TaskState::Blocked;
-                            }
+                            task.set_state(TaskState::Blocked);
                             sched.blocked_tasks.insert(task.id, task.clone());
                         }
                         suspended = true;
@@ -789,15 +779,12 @@ pub fn resume_task(id: TaskId) -> bool {
         if let Some(ref mut sched) = *scheduler {
             if let Some(task) = sched.blocked_tasks.remove(&id) {
                 let _ = sched.clear_task_wake_deadline_locked(id);
-                // SAFETY: scheduler lock held.
-                unsafe {
-                    *task.state.get() = TaskState::Ready;
-                }
+                task.set_state(TaskState::Ready);
                 let cpu_index = sched.task_cpu.get(&id).copied().unwrap_or(0);
                 let class = sched.class_table.class_for_task(&task);
-                if let Some(cpu) = sched.cpus.get_mut(cpu_index) {
-                    cpu.class_rqs.enqueue(class, task);
-                    cpu.need_resched = true;
+                if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
+                    local_cpu.class_rqs.enqueue(class, task);
+                    local_cpu.need_resched = true;
                 }
                 if cpu_index != current_cpu_index() {
                     ipi_to_cpu = Some(cpu_index);
@@ -853,14 +840,18 @@ pub fn kill_task(id: TaskId) -> bool {
             let my_cpu = current_cpu_index();
 
             // Check if the task is the current task on any CPU.
+            let n = active_cpu_count();
             let mut running_hit: Option<(usize, Arc<Task>)> = None;
-            for (ci, cpu) in sched.cpus.iter().enumerate() {
-                if let Some(current) = cpu.current_task.as_ref() {
-                    if current.id == id {
+            for ci in 0..n {
+                let hit = LOCAL_SCHEDULERS[ci]
+                    .lock()
+                    .as_ref()
+                    .and_then(|cpu| cpu.current_task.as_ref().map(|t| (t.id, t.get_state(), t.clone())));
+                if let Some((tid, state, current)) = hit {
+                    if tid == id {
                         // Check if already marked Dead by a previous kill attempt
-                        let state = unsafe { *current.state.get() };
                         if state != TaskState::Dead {
-                            running_hit = Some((ci, current.clone()));
+                            running_hit = Some((ci, current));
                         }
                         break;
                     }
@@ -869,9 +860,7 @@ pub fn kill_task(id: TaskId) -> bool {
             if let Some((ci, current)) = running_hit {
                 let task_pid = current.pid;
                 let _ = sched.clear_task_wake_deadline_locked(id);
-                unsafe {
-                    *current.state.get() = TaskState::Dead;
-                }
+                current.set_state(TaskState::Dead);
                 // Do NOT call cleanup_task_resources or all_tasks.remove() here!
                 // The task is still in current_task[ci], and an interrupt could
                 // access it. Instead, mark it Dead and let pick_next_task handle
@@ -883,7 +872,10 @@ pub fn kill_task(id: TaskId) -> bool {
                 parent_to_signal = parent;
                 killed = true;
                 if ci == my_cpu {
-                    switch_target = sched.yield_cpu(ci);
+                    let mut local = LOCAL_SCHEDULERS[ci].lock();
+                    if let Some(ref mut cpu) = *local {
+                        switch_target = super::core_impl::yield_cpu_local(cpu, ci);
+                    }
                 } else {
                     ipi_to_cpu = Some(ci);
                 }
@@ -895,21 +887,25 @@ pub fn kill_task(id: TaskId) -> bool {
             // Remove from ready queues.
             if !killed {
                 let mut removed_from_ready = false;
-                for ci in 0..sched.cpus.len() {
-                    if let Some(cpu) = sched.cpus.get_mut(ci) {
-                        if cpu.class_rqs.remove(id) {
-                            removed_from_ready = true;
-                            break;
+                for ci in 0..n {
+                    let removed = {
+                        let mut local = LOCAL_SCHEDULERS[ci].lock();
+                        if let Some(ref mut cpu) = *local {
+                            cpu.class_rqs.remove(id)
+                        } else {
+                            false
                         }
+                    };
+                    if removed {
+                        removed_from_ready = true;
+                        break;
                     }
                 }
                 if removed_from_ready {
                     let _ = sched.clear_task_wake_deadline_locked(id);
                     if let Some(task) = sched.remove_all_task_locked(id) {
                         let task_pid = task.pid;
-                        unsafe {
-                            *task.state.get() = TaskState::Dead;
-                        }
+                        task.set_state(TaskState::Dead);
                         cleanup_task_resources(&task);
                         sched.task_cpu.remove(&id);
                         sched.unregister_identity_locked(id, task_pid, task.tid);
@@ -929,10 +925,7 @@ pub fn kill_task(id: TaskId) -> bool {
                 if let Some(task) = sched.blocked_tasks.remove(&id) {
                     let task_pid = task.pid;
                     let _ = sched.clear_task_wake_deadline_locked(id);
-                    // SAFETY: scheduler lock held.
-                    unsafe {
-                        *task.state.get() = TaskState::Dead;
-                    }
+                    task.set_state(TaskState::Dead);
                     cleanup_task_resources(&task);
                     let _ = sched.remove_all_task_locked(id);
                     sched.task_cpu.remove(&id);

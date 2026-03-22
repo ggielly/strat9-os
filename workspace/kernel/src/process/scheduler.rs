@@ -512,12 +512,73 @@ struct SchedulerCpu {
     task_to_drop: Option<Arc<Task>>,
     /// Flag indicating if the current task's time slice has expired
     need_resched: bool,
+    /// Local copy of the class table for hot-path use without GLOBAL lock.
+    /// Updated atomically when the global class table changes.
+    class_table: crate::process::sched::SchedClassTable,
 }
 
-/// The round-robin scheduler (per-CPU queues)
+/// Global (cold-path) scheduler state: task registry, blocked tasks, identity maps.
+///
+/// Lock order: acquire `GLOBAL_SCHED_STATE` BEFORE `LOCAL_SCHEDULERS[n]` when
+/// both are needed. Never hold a LOCAL lock and then block-acquire GLOBAL.
+pub(crate) struct GlobalSchedState {
+    /// Tasks blocked waiting for an event (keyed by TaskId for O(log n) wake)
+    pub(crate) blocked_tasks: BTreeMap<TaskId, Arc<Task>>,
+    /// All tasks in the system (for lookup by TaskId)
+    pub(crate) all_tasks: BTreeMap<TaskId, Arc<Task>>,
+    /// Flat task snapshot used by IRQ-safe scans such as `tick_all_timers`.
+    pub(crate) all_tasks_scan: Vec<Arc<Task>>,
+    /// Map TaskId -> CPU index (for wake/resume routing)
+    pub(crate) task_cpu: BTreeMap<TaskId, usize>,
+    /// Map userspace PID -> internal TaskId
+    pub(crate) pid_to_task: BTreeMap<Pid, TaskId>,
+    /// Map userspace TID -> internal TaskId
+    pub(crate) tid_to_task: BTreeMap<Tid, TaskId>,
+    /// Map PID -> process group id
+    pub(crate) pid_to_pgid: BTreeMap<Pid, Pid>,
+    /// Map PID -> session id
+    pub(crate) pid_to_sid: BTreeMap<Pid, Pid>,
+    /// Group membership index: pgid -> task ids
+    pub(crate) pgid_members: BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
+    /// Session membership index: sid -> task ids
+    pub(crate) sid_members: BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
+    /// Deadline -> task ids map for sleeping tasks (ordered wakeups)
+    #[allow(dead_code)]
+    pub(crate) wake_deadlines: BTreeMap<u64, alloc::vec::Vec<TaskId>>,
+    /// Task -> deadline reverse index
+    #[allow(dead_code)]
+    pub(crate) wake_deadline_of: BTreeMap<TaskId, u64>,
+    /// Parent relationship: child -> parent
+    pub(crate) parent_of: BTreeMap<TaskId, TaskId>,
+    /// Children list: parent -> children
+    pub(crate) children_of: BTreeMap<TaskId, alloc::vec::Vec<TaskId>>,
+    /// Zombie exit statuses: child -> (exit_code, pid)
+    pub(crate) zombies: BTreeMap<TaskId, (i32, Pid)>,
+    /// Scheduler class table (pick order, steal order, class metadata)
+    pub(crate) class_table: crate::process::sched::SchedClassTable,
+}
+
+/// Per-CPU local scheduler locks — hot path: timer tick, preemption, yield.
+///
+/// Lock order: LOCAL before nothing; never hold two LOCAL locks simultaneously
+/// (use `try_lock` when touching a sibling CPU).
+#[allow(dead_code)]
+pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
+    crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { SpinLock::new(None) }; crate::arch::x86_64::percpu::MAX_CPUS];
+
+/// Global task registry — cold path: fork, exit, wake, block.
+///
+/// Lock order: acquire GLOBAL before LOCAL when both are needed.
+#[allow(dead_code)]
+pub(crate) static GLOBAL_SCHED_STATE: SpinLock<Option<GlobalSchedState>> = SpinLock::new(None);
+
+/// The round-robin scheduler — global (cold-path) state only.
+///
+/// Per-CPU runqueues and current-task tracking live in `LOCAL_SCHEDULERS`.
+/// This struct holds only data that is accessed by cold paths (fork, exit,
+/// wake, block) and is protected by the `SCHEDULER` lock.
 pub struct Scheduler {
-    /// Per-CPU scheduler state
-    cpus: alloc::vec::Vec<SchedulerCpu>,
     /// Tasks blocked waiting for an event (keyed by TaskId for O(log n) wake)
     blocked_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// All tasks in the system (for lookup by TaskId)
