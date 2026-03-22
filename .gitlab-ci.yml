@@ -1,5 +1,6 @@
 stages:
   - build
+    - release
 
 variables:
   GIT_DEPTH: "0"
@@ -32,3 +33,25 @@ build-os-release:
       - build/strat9-os.iso
       - build/strat9-os.img
     expire_in: 1 week
+
+release-latest:
+  stage: release
+  needs: [build-os-release]
+  only:
+    - main
+  script:
+    - echo "Publishing release latest"
+  release:
+    tag_name: latest
+    name: "Latest build (pipeline $CI_PIPELINE_ID)"
+    description: |
+      Automated release from pipeline $CI_PIPELINE_ID on $CI_COMMIT_SHORT_SHA.
+      $CI_COMMIT_MESSAGE
+    assets:
+      links:
+        - name: "strat9-os.iso"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/main/raw/build/strat9-os.iso?job=build-os-release"
+          link_type: other
+        - name: "strat9-os.img"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/main/raw/build/strat9-os.img?job=build-os-release"
+          link_type: other
