@@ -9,7 +9,7 @@ pub fn cmd_ps(_args: &[String]) -> Result<(), ShellError> {
 
     if let Some(tasks) = crate::process::get_all_tasks() {
         for task in tasks {
-            let state = unsafe { *task.state.get() };
+            let state = task.get_state();
             let state_str = match state {
                 crate::process::TaskState::Ready => "Ready",
                 crate::process::TaskState::Running => "Running",

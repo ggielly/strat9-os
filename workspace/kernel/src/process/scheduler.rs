@@ -115,7 +115,7 @@ static RESCHED_IPI_PENDING: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] 
 static IPI_SEND_TRACE_BUDGET: AtomicU64 = AtomicU64::new(64);
 /// Lock-free per-CPU hint: request a local preemption as soon as maybe_preempt
 /// can observe scheduler state. Written from IRQ paths without touching
-/// `SCHEDULER`, consumed under scheduler lock in `maybe_preempt`.
+/// `GLOBAL_SCHED_STATE`, consumed under scheduler lock in `maybe_preempt`.
 static FORCE_RESCHED_HINT: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
 static LAST_STEAL_TICK: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
@@ -321,12 +321,15 @@ pub(crate) fn take_force_resched_hint(cpu: usize) -> bool {
     }
 }
 
-/// The global scheduler instance
-pub(crate) static SCHEDULER: SpinLock<Option<Scheduler>> = SpinLock::new(None);
+/// Global scheduler state — cold path: fork, exit, wake, block.
+///
+/// Lock order: acquire `GLOBAL_SCHED_STATE` before `LOCAL_SCHEDULERS[n]`
+/// when both are needed. Never hold a LOCAL lock and then block-acquire GLOBAL.
+pub(crate) static GLOBAL_SCHED_STATE: SpinLock<Option<GlobalSchedState>> = SpinLock::new(None);
 
 /// Returns the scheduler lock address for deadlock tracing.
 pub fn debug_scheduler_lock_addr() -> usize {
-    &SCHEDULER as *const _ as usize
+    &GLOBAL_SCHED_STATE as *const _ as usize
 }
 
 /// Global tick counter (safe to increment from interrupt context)
@@ -512,12 +515,27 @@ struct SchedulerCpu {
     task_to_drop: Option<Arc<Task>>,
     /// Flag indicating if the current task's time slice has expired
     need_resched: bool,
+    /// Local copy of the class table for hot-path use without GLOBAL lock.
+    /// Updated atomically when the global class table changes.
+    class_table: crate::process::sched::SchedClassTable,
 }
 
-/// The round-robin scheduler (per-CPU queues)
-pub struct Scheduler {
-    /// Per-CPU scheduler state
-    cpus: alloc::vec::Vec<SchedulerCpu>,
+/// Per-CPU local scheduler locks — hot path: timer tick, preemption, yield.
+///
+/// Lock order: LOCAL before nothing; never hold two LOCAL locks simultaneously
+/// (use `try_lock` when touching a sibling CPU).
+#[allow(dead_code)]
+pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
+    crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { SpinLock::new(None) }; crate::arch::x86_64::percpu::MAX_CPUS];
+
+/// Global task registry — cold path: fork, exit, wake, block.
+///
+/// Lock order: acquire GLOBAL_SCHED_STATE before LOCAL when both are needed.
+/// Per-CPU runqueues and current-task tracking live in `LOCAL_SCHEDULERS`.
+/// This struct holds only data that is accessed by cold paths (fork, exit,
+/// wake, block) and is protected by the `GLOBAL_SCHED_STATE` lock.
+pub struct GlobalSchedState {
     /// Tasks blocked waiting for an event (keyed by TaskId for O(log n) wake)
     blocked_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// All tasks in the system (for lookup by TaskId)

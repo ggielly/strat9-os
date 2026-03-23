@@ -158,7 +158,7 @@ fn collect_snapshot() -> TopSnapshot {
     let mut tasks = Vec::new();
     if let Some(all_tasks) = crate::process::get_all_tasks() {
         for task in all_tasks {
-            let state = unsafe { *task.state.get() };
+            let state = task.get_state();
             let state_str = match state {
                 crate::process::TaskState::Ready => "Ready",
                 crate::process::TaskState::Running => "Running",

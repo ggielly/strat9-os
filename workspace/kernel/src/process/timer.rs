@@ -237,12 +237,12 @@ impl ITimers {
 /// and sets pending signals via atomic ops. This avoids Vec/heap allocation
 /// in interrupt context which would deadlock against the buddy allocator.
 pub fn tick_all_timers(current_time_ns: u64) {
-    use crate::process::{scheduler::SCHEDULER, signal::Signal};
+    use crate::process::{scheduler::GLOBAL_SCHED_STATE, signal::Signal};
 
     unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
     // IRQ context contract: timer handlers run with IF=0 already.
     // Use no-irqsave variant to avoid any extra RFLAGS save/restore in hot path.
-    let mut scheduler = match SCHEDULER.try_lock_no_irqsave() {
+    let mut scheduler = match GLOBAL_SCHED_STATE.try_lock_no_irqsave() {
         Some(guard) => {
             unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
             guard

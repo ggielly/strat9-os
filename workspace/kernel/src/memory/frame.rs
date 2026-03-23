@@ -35,30 +35,23 @@ use x86_64::PhysAddr;
 //    `Ordering::Release` so that any CPU that later reads the frame through
 //    `get_meta` observes the correct flags.
 //
-//  * Refcount state machine (OSTD target, partially implemented):
+//  * Refcount state machine (OSTD-style, fully enforced):
 //
-//    OSTD uses a CAS(REFCOUNT_UNUSED → 0) transition here so that a frame
-//    appearing twice in the buddy free list is caught immediately rather than
-//    silently aliasing.  That check requires `mark_block_free` in `buddy.rs`
-//    to stamp `REFCOUNT_UNUSED` (not 0) into every freed frame's metadata.
+//    `buddy.rs` maintains the invariant: free-list frame ⟹ refcount == REFCOUNT_UNUSED.
+//    `mark_block_free()` stamps REFCOUNT_UNUSED; `mark_block_allocated()` leaves it
+//    untouched.  `FrameAllocOptions::allocate()` performs CAS(REFCOUNT_UNUSED → 1)
+//    as a fail-fast corruption check before publishing the frame as live:
 //
-//    Current state of `buddy.rs`: both `mark_block_free` and
-//    `mark_block_allocated` call `reset_refcount()` which writes 0.
-//    The CAS would always fail ─ crashing the kernel at the very first
-//    page-table allocation.  The CAS is therefore omitted for now; the
-//    transition implemented here is simply:
-//
-//       buddy alloc ──▶ optional zero ──▶ set flags ──▶ refcount = 1 (live)
-//
-//    TODO: once `buddy.rs` stamps REFCOUNT_UNUSED on free, reinstate the CAS.
+//       buddy alloc ──▶ optional zero ──▶ set flags ──▶ CAS(UNUSED → 1) ──▶ live
 
 /// Sentinel refcount for a frame that is in the buddy free list.
 ///
 /// Mirrors `REF_COUNT_UNUSED` in Asterinas OSTD `meta.rs`.
 ///
-/// Currently **not** written by `buddy.rs` (both `mark_block_free` and
-/// `mark_block_allocated` call `reset_refcount()` → 0).  Once `buddy.rs` is
-/// updated, the CAS in `FrameAllocOptions::allocate` can be reinstated.
+/// `buddy.rs` stamps this value in `mark_block_free()` and leaves it intact in
+/// `mark_block_allocated()`.  `FrameAllocOptions::allocate()` performs
+/// `CAS(REFCOUNT_UNUSED → 1)` to atomically claim the frame and detect any
+/// double-free / free-list corruption.
 pub const REFCOUNT_UNUSED: u32 = u32::MAX;
 
 /// Options controlling how a physical frame is allocated.
@@ -186,25 +179,17 @@ impl FrameAllocOptions {
     ///    load of the refcount observes the fully-initialised metadata and
     ///    (if zeroed) zeroed content.
     ///
-    /// # Why there is no CAS here (and why `REFCOUNT_UNUSED` is not checked)
+    /// # Sentinel handoff: `CAS(REFCOUNT_UNUSED → 1)`
     ///
-    /// Asterinas OSTD performs a `CAS(REFCOUNT_UNUSED → 0)` at this point to
-    /// detect buddy free-list corruption (a frame appearing twice in the list).
-    /// That pattern requires the buddy allocator to maintain the invariant:
+    /// `buddy.rs` maintains the invariant that every frame on the free list has
+    /// `refcount == REFCOUNT_UNUSED`.  `mark_block_allocated()` leaves this
+    /// sentinel intact, so the frame arriving here still carries `REFCOUNT_UNUSED`.
     ///
-    ///   > A frame in the free list always has `refcount == REFCOUNT_UNUSED`.
-    ///
-    /// Our buddy allocator does not yet maintain this invariant: both
-    /// `mark_block_free` and `mark_block_allocated` call `reset_refcount()`
-    /// which writes `0`, not `REFCOUNT_UNUSED`.  Until `buddy.rs` is updated
-    /// to stamp `REFCOUNT_UNUSED` on every `mark_block_free` call (and to
-    /// leave the refcount untouched in `mark_block_allocated`), the CAS would
-    /// always observe `0` instead of `REFCOUNT_UNUSED` and fail — starving the
-    /// slab of pages and crashing the kernel on the very first heap allocation.
-    ///
-    /// The exclusive-ownership guarantee is fully provided by the buddy
-    /// allocator itself; the CAS is purely a belt-and-suspenders consistency
-    /// check.  It is left as a future hardening step once `buddy.rs` is aligned.
+    /// The CAS atomically claims the frame and acts as a fail-fast corruption
+    /// check: if the same frame appears twice in the buddy free list (double-free
+    /// or metadata corruption), the second allocation attempt will observe a
+    /// refcount of `1` (set by the first allocation) and panic immediately rather
+    /// than silently aliasing memory.
     pub fn allocate(self, token: &IrqDisabledToken) -> Result<PhysFrame, AllocError> {
         // Step 1 — exclusive frame from the buddy allocator.
         let frame = crate::memory::buddy::alloc(token, 0)?;
@@ -247,12 +232,24 @@ impl FrameAllocOptions {
         meta.flags.store(self.purpose_flags, Ordering::Release);
         meta.set_order(0);
 
-        // Step 4 — publish the frame as live.
+        // Step 4 — claim the frame and publish it as live.
         //
-        // `Release` ensures steps 2 and 3 happen-before any `Acquire` load of
-        // this refcount by another thread or CPU.  This mirrors the final store
-        // in OSTD `MetaSlot::get_from_unused`.
-        meta.refcount.store(1, Ordering::Release);
+        // CAS(REFCOUNT_UNUSED → 1): atomically transitions the frame from the
+        // buddy free-list sentinel to a live, exclusively-owned frame.  The
+        // `AcqRel` success ordering ensures steps 2 and 3 happen-before any
+        // `Acquire` load of this refcount by another CPU, and also observes
+        // the buddy's `Release` store of REFCOUNT_UNUSED.
+        //
+        // Failure means the frame's refcount was not REFCOUNT_UNUSED — either
+        // the frame is still live (double-alloc) or the buddy free list is
+        // corrupt (double-free).  Both are kernel bugs; panic immediately.
+        meta.cas_refcount(REFCOUNT_UNUSED, 1).unwrap_or_else(|actual| {
+            panic!(
+                "buddy corruption: frame {:#x} refcount is {:#x} (expected REFCOUNT_UNUSED); \
+                 double-free or free-list corruption",
+                phys, actual,
+            )
+        });
 
         Ok(frame)
     }

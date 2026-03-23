@@ -12,7 +12,7 @@ static FIRST_TICK_FORCE_RESCHED: [AtomicBool; crate::arch::x86_64::percpu::MAX_C
 static CPU_LOCAL_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
 
-// Force a reschedule at least every N ticks per CPU, regardless of SCHEDULER
+// Force a reschedule at least every N ticks per CPU, regardless of GLOBAL_SCHED_STATE
 // lock availability. This guarantees kernel tasks (shell, idle) get CPU time
 // even if timer_tick consistently loses the scheduler lock race with the other CPU.
 const PERIODIC_RESCHED_TICKS: u64 = 5;
@@ -52,8 +52,8 @@ pub fn timer_tick() {
     };
 
     // Lock-free bootstrap nudge: first local timer tick requests one resched
-    // without touching SCHEDULER. This avoids pathological boot windows where
-    // another CPU holds SCHEDULER and this CPU would otherwise defer the first
+    // without touching GLOBAL_SCHED_STATE. This avoids pathological boot windows where
+    // another CPU holds GLOBAL_SCHED_STATE and this CPU would otherwise defer the first
     // `need_resched` update indefinitely.
     if cpu_is_valid(cpu_idx) && !FIRST_TICK_FORCE_RESCHED[cpu_idx].swap(true, Ordering::AcqRel) {
         request_force_resched_hint(cpu_idx);
@@ -78,23 +78,22 @@ pub fn timer_tick() {
         check_wake_deadlines(current_time_ns);
     }
 
-    // Per-task accounting on this CPU.
-    if let Some(mut guard) = SCHEDULER.try_lock_no_irqsave() {
-        if let Some(ref mut sched) = *guard {
-            if let Some(cpu) = sched.cpus.get_mut(cpu_idx) {
+    // Per-task accounting on this CPU : uses LOCAL lock only (no global GLOBAL_SCHED_STATE).
+    // This ensures timer ticks are never dropped due to another CPU holding GLOBAL_SCHED_STATE.
+    if cpu_is_valid(cpu_idx) {
+        if let Some(mut guard) = LOCAL_SCHEDULERS[cpu_idx].try_lock_no_irqsave() {
+            if let Some(ref mut cpu) = *guard {
                 let should_resched = if let Some(ref current_task) = cpu.current_task {
-                    let class = sched.class_table.class_for_task(current_task);
-                    if cpu_is_valid(cpu_idx) {
-                        match class {
-                            crate::process::sched::SchedClassId::RealTime => {
-                                CPU_RT_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                            }
-                            crate::process::sched::SchedClassId::Fair => {
-                                CPU_FAIR_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                            }
-                            crate::process::sched::SchedClassId::Idle => {
-                                CPU_IDLE_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                            }
+                    let class = cpu.class_table.class_for_task(current_task);
+                    match class {
+                        crate::process::sched::SchedClassId::RealTime => {
+                            CPU_RT_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+                        }
+                        crate::process::sched::SchedClassId::Fair => {
+                            CPU_FAIR_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+                        }
+                        crate::process::sched::SchedClassId::Idle => {
+                            CPU_IDLE_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     current_task.ticks.fetch_add(1, Ordering::Relaxed);
@@ -103,7 +102,7 @@ pub fn timer_tick() {
                         &cpu.current_runtime,
                         current_task,
                         false,
-                        &sched.class_table,
+                        &cpu.class_table,
                     )
                 } else {
                     false
@@ -112,9 +111,9 @@ pub fn timer_tick() {
                     cpu.need_resched = true;
                 }
             }
+        } else {
+            note_try_lock_fail_on_cpu(cpu_idx);
         }
-    } else {
-        note_try_lock_fail_on_cpu(cpu_idx);
     }
 }
 
@@ -125,7 +124,7 @@ pub fn timer_tick() {
 ///
 /// # Lock discipline
 ///
-/// The SCHEDULER lock is held **only** during the scan + re-enqueue phase.
+/// The GLOBAL_SCHED_STATE lock is held **only** during the scan + re-enqueue phase.
 /// The lock is explicitly dropped before sending IPIs (which may acquire
 /// per-CPU data) and before any `Arc<Task>` drop (which reaches
 /// `KernelStack::drop → free_frames → buddy_alloc.lock()`).
@@ -146,8 +145,8 @@ fn check_wake_deadlines(current_time_ns: u64) {
     let mut drop_count = 0usize;
 
     {
-        // --- begin critical section (SCHEDULER lock held) ---
-        let mut scheduler = match SCHEDULER.try_lock_no_irqsave() {
+        // --- begin critical section (GLOBAL_SCHED_STATE lock held) ---
+        let mut scheduler = match GLOBAL_SCHED_STATE.try_lock_no_irqsave() {
             Some(guard) => guard,
             None => return,
         };
@@ -170,15 +169,14 @@ fn check_wake_deadlines(current_time_ns: u64) {
             for id in to_wake.iter().copied().take(count) {
                 if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
                     blocked_task.wake_deadline_ns.store(0, Ordering::Relaxed);
-                    // SAFETY: scheduler lock held.
-                    unsafe { *blocked_task.state.get() = TaskState::Ready };
+                    blocked_task.set_state(TaskState::Ready);
                     let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
                     let class = sched.class_table.class_for_task(&blocked_task);
-                    if let Some(cpu_sched) = sched.cpus.get_mut(cpu) {
+                    if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu].lock() {
                         // `enqueue` moves the Arc into the run-queue, so no
                         // drop occurs here; the Arc is alive in class_rqs.
-                        cpu_sched.class_rqs.enqueue(class, blocked_task);
-                        cpu_sched.need_resched = true;
+                        local_cpu.class_rqs.enqueue(class, blocked_task);
+                        local_cpu.need_resched = true;
                         if cpu != my_cpu && cpu_is_valid(cpu) {
                             ipi_targets[cpu] = true;
                         }
@@ -198,7 +196,7 @@ fn check_wake_deadlines(current_time_ns: u64) {
                 }
             }
         }
-        // `scheduler` guard drops here — SCHEDULER lock released BEFORE any
+        // `scheduler` guard drops here — GLOBAL_SCHED_STATE lock released BEFORE any
         // Arc<Task> drop and BEFORE send_resched_ipi_to_cpu.
         // --- end critical section ---
     }
@@ -206,7 +204,7 @@ fn check_wake_deadlines(current_time_ns: u64) {
 
     // Drop orphaned task Arcs outside the scheduler lock so that
     // KernelStack::drop → free_frames → buddy_alloc.lock() does not race
-    // with any other SCHEDULER lock acquisition on this or another CPU.
+    // with any other GLOBAL_SCHED_STATE lock acquisition on this or another CPU.
     for slot in deferred_drops[..drop_count].iter_mut() {
         drop(slot.take());
     }
@@ -227,7 +225,7 @@ pub fn ticks() -> u64 {
 /// Returns None if scheduler is not initialized or currently locked.
 pub fn get_all_tasks() -> Option<alloc::vec::Vec<Arc<Task>>> {
     use alloc::vec::Vec;
-    let scheduler = match SCHEDULER.try_lock() {
+    let scheduler = match GLOBAL_SCHED_STATE.try_lock() {
         Some(guard) => guard,
         None => {
             note_try_lock_fail();

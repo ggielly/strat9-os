@@ -132,7 +132,7 @@ pub fn create_user_test_task() {
         euid: core::sync::atomic::AtomicU32::new(0),
         gid: core::sync::atomic::AtomicU32::new(0),
         egid: core::sync::atomic::AtomicU32::new(0),
-        state: SyncUnsafeCell::new(TaskState::Ready),
+        state: core::sync::atomic::AtomicU8::new(TaskState::Ready as u8),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),
         resume_kind: SyncUnsafeCell::new(crate::process::task::ResumeKind::RetFrame),
