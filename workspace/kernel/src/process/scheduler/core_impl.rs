@@ -510,7 +510,7 @@ impl GlobalSchedState {
     }
 }
 
-//  Per-CPU hot-path helpers 
+//  Per-CPU hot-path helpers
 //
 // These functions operate primarily on `SchedulerCpu` (acquired via
 // `LOCAL_SCHEDULERS[cpu_index]`).  Most never touch the global `SCHEDULER`
@@ -529,10 +529,7 @@ impl GlobalSchedState {
 /// LOCAL lock already held). Uses `try_lock_no_irqsave` on sibling entries —
 /// if a sibling or the global scheduler state is contended, we skip stealing
 /// rather than waiting.
-pub(super) fn steal_task_local(
-    cpu: &mut SchedulerCpu,
-    cpu_index: usize,
-) -> Option<Arc<Task>> {
+pub(super) fn steal_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Option<Arc<Task>> {
     let now_tick = TICK_COUNT.load(Ordering::Relaxed);
     if now_tick < LAST_STEAL_TICK[cpu_index].load(Ordering::Relaxed) + STEAL_COOLDOWN_TICKS {
         return None;
@@ -601,10 +598,7 @@ pub(super) fn steal_task_local(
 /// **Dead tasks**: if the current task is Dead, it goes into `task_to_drop`.
 /// Global map cleanup (`all_tasks`, `task_cpu`, etc.) must have been performed
 /// by the caller (e.g., `exit_current_task`) BEFORE reaching this point.
-pub(super) fn pick_next_task_local(
-    cpu: &mut SchedulerCpu,
-    cpu_index: usize,
-) -> Arc<Task> {
+pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Arc<Task> {
     // Step 1: dispose of the current task.
     if let Some(task) = cpu.current_task.take() {
         match task.get_state() {
@@ -652,10 +646,7 @@ pub(super) fn pick_next_task_local(
 /// raw pointer pair needed by `do_switch_context`.
 ///
 /// Returns `None` if there is no task to switch to (same task or invalid context).
-pub(super) fn yield_cpu_local(
-    cpu: &mut SchedulerCpu,
-    cpu_index: usize,
-) -> Option<SwitchTarget> {
+pub(super) fn yield_cpu_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Option<SwitchTarget> {
     let current = cpu.current_task.as_ref()?.clone();
 
     let next = pick_next_task_local(cpu, cpu_index);
@@ -674,7 +665,13 @@ pub(super) fn yield_cpu_local(
         crate::serial_println!(
             "[sched-local] WARN: invalid ctx task='{}' id={} cpu={}: {} \
              rsp={:#x} stack=[{:#x}..{:#x}] — restoring current",
-            next.name, next.id.as_u64(), cpu_index, e, bad_rsp, stk_base, stk_top,
+            next.name,
+            next.id.as_u64(),
+            cpu_index,
+            e,
+            bad_rsp,
+            stk_base,
+            stk_top,
         );
 
         // Restore invariants: undo what pick_next_task_local mutated.
@@ -711,7 +708,9 @@ pub(super) fn yield_cpu_local(
         new_rsp_ptr: unsafe { &raw const (*next.context.get()).saved_rsp },
         old_fpu_ptr: current.fpu_state.get() as *mut u8,
         new_fpu_ptr: next.fpu_state.get() as *const u8,
-        old_xcr0: current.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
+        old_xcr0: current
+            .xcr0_mask
+            .load(core::sync::atomic::Ordering::Relaxed),
         new_xcr0: next.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed),
     })
 }
@@ -722,7 +721,11 @@ pub(super) fn drain_post_switch_local(
     cpu: &mut SchedulerCpu,
     take_drop: bool,
 ) -> Option<Arc<Task>> {
-    let task_to_drop = if take_drop { cpu.task_to_drop.take() } else { None };
+    let task_to_drop = if take_drop {
+        cpu.task_to_drop.take()
+    } else {
+        None
+    };
     if let Some(task) = cpu.task_to_requeue.take() {
         let class = cpu.class_table.class_for_task(&task);
         cpu.class_rqs.enqueue(class, task);

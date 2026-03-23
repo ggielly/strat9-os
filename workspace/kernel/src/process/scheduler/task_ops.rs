@@ -112,7 +112,11 @@ pub fn current_task_id_try() -> Option<TaskId> {
     let cpu_index = current_cpu_index();
     let id = LOCAL_SCHEDULERS[cpu_index]
         .try_lock_no_irqsave()
-        .and_then(|guard| guard.as_ref().and_then(|cpu| cpu.current_task.as_ref().map(|t| t.id)));
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .and_then(|cpu| cpu.current_task.as_ref().map(|t| t.id))
+        });
     restore_flags(saved_flags);
     id
 }
@@ -835,10 +839,11 @@ pub fn kill_task(id: TaskId) -> bool {
             let n = active_cpu_count();
             let mut running_hit: Option<(usize, Arc<Task>)> = None;
             for ci in 0..n {
-                let hit = LOCAL_SCHEDULERS[ci]
-                    .lock()
-                    .as_ref()
-                    .and_then(|cpu| cpu.current_task.as_ref().map(|t| (t.id, t.get_state(), t.clone())));
+                let hit = LOCAL_SCHEDULERS[ci].lock().as_ref().and_then(|cpu| {
+                    cpu.current_task
+                        .as_ref()
+                        .map(|t| (t.id, t.get_state(), t.clone()))
+                });
                 if let Some((tid, state, current)) = hit {
                     if tid == id {
                         // Check if already marked Dead by a previous kill attempt

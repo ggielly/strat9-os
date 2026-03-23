@@ -146,7 +146,11 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             }
             drop(scheduler);
             // Pick first task via LOCAL per-CPU state.
-            let idx = if cpu_index < active_cpu_count() { cpu_index } else { 0 };
+            let idx = if cpu_index < active_cpu_count() {
+                cpu_index
+            } else {
+                0
+            };
             let mut local = LOCAL_SCHEDULERS[idx].lock();
             if let Some(ref mut cpu) = *local {
                 break super::core_impl::pick_next_task_local(cpu, idx);
@@ -286,7 +290,6 @@ pub fn finish_switch() {
     super::task_ops::flush_deferred_silo_cleanups();
     drop(task_to_drop);
 }
-
 
 /// Finalize a preemption-driven switch once the raw timer stub has already
 /// moved onto the next task's kernel stack.

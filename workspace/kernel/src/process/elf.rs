@@ -1224,6 +1224,11 @@ extern "C" fn elf_ring3_trampoline() -> ! {
 
     // SAFETY: Valid user mappings have been set up. IRETQ switches to Ring 3.
     //
+    // Interrupts must be masked in the final kernel instructions before
+    // `swapgs ; iretq`. Otherwise a timer IRQ can land after `swapgs` but
+    // before `iretq`, with `CS=0x8` and `GS=user`, and the first `gs:[..]`
+    // access in the handler faults in the swapgs->iretq window.
+    //
     // ── E9-hack probes ────────────────────────────────────────────────────
     // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port
     // (visible with `-debugcon stdio` or `-debugcon file:e9.log`).
@@ -1243,6 +1248,11 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     //   nothing → E9 port not enabled in QEMU (add `-debugcon stdio`)
     unsafe {
         core::arch::asm!(
+            // Close the IRQ window before touching GS. `iretq` restores IF=1
+            // from the user RFLAGS frame, so user mode still starts with
+            // interrupts enabled.
+            "cli",
+
             // ── Probe 1 : entrée dans le bloc asm ─────────────────────────
             // Les registres d'entrée sont déjà alloués par le compilateur ;
             // push/pop rax les laisse intacts.
