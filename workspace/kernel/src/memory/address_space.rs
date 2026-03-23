@@ -467,10 +467,19 @@ impl AddressSpace {
             }
         }
 
-        // Track refcount for COW
-        crate::memory::cow::frame_inc_ref(crate::memory::PhysFrame {
-            start_address: frame.start_address,
-        });
+        // Initialize COW refcount.
+        //
+        // Order-0 frames come from FrameAllocOptions which stamps refcount=1
+        // via CAS(REFCOUNT_UNUSED → 1) — the frame is already "sole owner".
+        // Huge pages (order > 0) are raw-allocated with REFCOUNT_UNUSED still
+        // in the metadata; initialise explicitly to 1 here.
+        //
+        // Do NOT call frame_inc_ref for fresh allocations: that would push the
+        // count to 2, breaking the COW semantics (refcount==1 means sole owner).
+        // frame_inc_ref is correct only when sharing an existing frame (fork).
+        if order != 0 {
+            crate::memory::frame::get_meta(frame.start_address).set_refcount(1);
+        }
 
         Ok(())
     }
@@ -633,10 +642,10 @@ impl AddressSpace {
                 return Err("Failed to map page");
             }
 
-            // Track refcount for COW
-            crate::memory::cow::frame_inc_ref(crate::memory::PhysFrame {
-                start_address: frame.start_address,
-            });
+            // Initialize COW refcount (same logic as demand_page above).
+            if order != 0 {
+                crate::memory::frame::get_meta(frame.start_address).set_refcount(1);
+            }
 
             mapped_pages += 1;
         }

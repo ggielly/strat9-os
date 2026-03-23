@@ -93,7 +93,11 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
             };
         let v = crate::memory::phys_to_virt(frame.start_address.as_u64());
         unsafe { core::ptr::write_bytes(v as *mut u8, 0, 4096) };
-        crate::memory::cow::frame_inc_ref(frame);
+        // allocate_frame() (FrameAllocOptions) stamps refcount=1 via
+        // CAS(REFCOUNT_UNUSED → 1). Do NOT call frame_inc_ref here: a freshly
+        // allocated frame is already the sole owner (refcount=1). Calling
+        // frame_inc_ref would push it to 2, causing the Drop path to leak
+        // (frame_dec_ref would only bring it back to 1, never triggering free).
         frames.push(frame);
     }
     if alloc_failed {

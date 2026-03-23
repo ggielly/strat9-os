@@ -76,7 +76,10 @@ fn test_fault_maps_and_refcount() -> bool {
     if aspace.unmap_range(DP_ADDR_A, 4096).is_err() {
         return false;
     }
-    crate::memory::cow::frame_get_refcount(frame) == 0
+    // After the last unmap the frame is returned to the buddy allocator, which
+    // stamps REFCOUNT_UNUSED (u32::MAX) — the free-list sentinel. Reading 0
+    // here would indicate the old pre-sentinel behaviour.
+    crate::memory::cow::frame_get_refcount(frame) == crate::memory::frame::REFCOUNT_UNUSED
 }
 
 /// Performs the test repeat fault same page no leak operation.
@@ -136,7 +139,7 @@ fn test_repeat_fault_same_page_no_leak() -> bool {
         crate::serial_println!("[dp-test] t2: unmap failed");
         return false;
     }
-    crate::memory::cow::frame_get_refcount(frame) == 0
+    crate::memory::cow::frame_get_refcount(frame) == crate::memory::frame::REFCOUNT_UNUSED
 }
 
 /// Performs the test unmap lazy unfaulted region operation.

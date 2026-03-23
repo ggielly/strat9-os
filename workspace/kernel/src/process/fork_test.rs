@@ -252,9 +252,9 @@ fn cow_test_refcount_unmap() -> bool {
         return false;
     }
     let r4 = crate::memory::cow::frame_get_refcount(frame);
-    if r4 != 0 {
+    if r4 != crate::memory::frame::REFCOUNT_UNUSED {
         crate::serial_println!(
-            "[fork-test] cow refcount: expected 0 after child unmap, got {}",
+            "[fork-test] cow refcount: expected REFCOUNT_UNUSED after child unmap, got {}",
             r4
         );
         return false;
