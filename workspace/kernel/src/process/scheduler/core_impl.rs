@@ -28,11 +28,11 @@ pub(super) fn create_cpu_scheduler(cpu_idx: usize) -> SchedulerCpu {
     }
 }
 
-impl Scheduler {
+impl GlobalSchedState {
     /// Create a new global scheduler state (no per-CPU runqueues — those live in LOCAL_SCHEDULERS).
     pub fn new() -> Self {
-        crate::serial_println!("[trace][sched] Scheduler::new enter");
-        Scheduler {
+        crate::serial_println!("[trace][sched] GlobalSchedState::new enter");
+        GlobalSchedState {
             blocked_tasks: BTreeMap::new(),
             all_tasks: BTreeMap::new(),
             all_tasks_scan: Vec::new(),
@@ -431,8 +431,8 @@ impl Scheduler {
     /// Select the least-loaded CPU for a newly created task.
     ///
     /// Uses **blocking** `LOCAL_SCHEDULERS[i].lock()` for each CPU while
-    /// `SCHEDULER` is already held by the caller.  This is safe because the
-    /// hot-path only ever does `try_lock_no_irqsave` on `SCHEDULER` (so it
+    /// `GLOBAL_SCHED_STATE` is already held by the caller.  This is safe because the
+    /// hot-path only ever does `try_lock_no_irqsave` on `GLOBAL_SCHED_STATE` (so it
     /// cannot deadlock with us), but it may briefly stall behind a timer tick
     /// that holds a LOCAL lock.  The stall is bounded by one tick period.
     fn select_cpu_for_task(&self) -> usize {
@@ -515,9 +515,9 @@ impl Scheduler {
 // These functions operate primarily on `SchedulerCpu` (acquired via
 // `LOCAL_SCHEDULERS[cpu_index]`).  Most never touch the global `SCHEDULER`
 // lock.  The one exception is `steal_task_local`, which does a **non-blocking**
-// `SCHEDULER.try_lock_no_irqsave()` to update `task_cpu` after a successful
+// `GLOBAL_SCHED_STATE.try_lock_no_irqsave()` to update `task_cpu` after a successful
 // steal.  This is an intentional lock-order inversion (LOCAL held, then GLOBAL
-// attempted) that is safe because the try-lock never blocks — if SCHEDULER is
+// attempted) that is safe because the try-lock never blocks — if GLOBAL_SCHED_STATE is
 // contended, we simply skip stealing.
 //
 // Lock order for steal: own LOCAL held → try_lock GLOBAL → try_lock sibling
@@ -540,7 +540,7 @@ pub(super) fn steal_task_local(
 
     // Best-effort only: if a cold path is holding the global scheduler, skip
     // stealing instead of blocking the hot path.
-    let mut scheduler = SCHEDULER.try_lock_no_irqsave()?;
+    let mut scheduler = GLOBAL_SCHED_STATE.try_lock_no_irqsave()?;
     let sched = scheduler.as_mut()?;
 
     let n = active_cpu_count();

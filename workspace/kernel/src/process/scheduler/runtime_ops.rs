@@ -14,9 +14,9 @@ pub fn init_scheduler() {
         cpu_count
     );
     // Build the scheduler outside the global scheduler lock to avoid
-    // lock-order inversions (`SCHEDULER -> allocator`) during task/stack
-    // allocation in `Scheduler::new`.
-    let new_sched = Scheduler::new();
+    // lock-order inversions (`GLOBAL_SCHED_STATE -> allocator`) during task/stack
+    // allocation in `GlobalSchedState::new`.
+    let new_sched = GlobalSchedState::new();
     // Initialize per-CPU scheduler state for each active CPU.
     for i in 0..cpu_count {
         let cpu_sched = super::core_impl::create_cpu_scheduler(i);
@@ -27,7 +27,7 @@ pub fn init_scheduler() {
     // Race/corruption diagnostic: register scheduler lock for E9 LOCK-A/LOCK-R traces.
     crate::sync::debug_set_trace_lock_addr(debug_scheduler_lock_addr());
 
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = GLOBAL_SCHED_STATE.lock();
     *scheduler = Some(new_sched);
     drop(scheduler); // Release the lock
 
@@ -57,7 +57,7 @@ pub fn add_task(task: Arc<Task>) {
     );
     let mut spins = 0usize;
     let mut scheduler = loop {
-        if let Some(guard) = SCHEDULER.try_lock() {
+        if let Some(guard) = GLOBAL_SCHED_STATE.try_lock() {
             break guard;
         }
         spins = spins.saturating_add(1);
@@ -65,7 +65,7 @@ pub fn add_task(task: Arc<Task>) {
             crate::serial_force_println!(
                 "[trace][sched] add_task waiting lock tid={} owner_cpu={}",
                 tid.as_u64(),
-                SCHEDULER.owner_cpu()
+                GLOBAL_SCHED_STATE.owner_cpu()
             );
             spins = 0;
         }
@@ -96,7 +96,7 @@ pub fn add_task(task: Arc<Task>) {
 /// Add a task and register a parent/child relation.
 pub fn add_task_with_parent(task: Arc<Task>, parent: TaskId) {
     let ipi_to_cpu = {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref mut sched) = *scheduler {
             sched.add_task_with_parent(task, parent)
         } else {
@@ -139,7 +139,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     // is initialized, then pick the first task.
     let mut wait_iters: u64 = 0;
     let first_task = loop {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref _sched) = *scheduler {
             if wait_iters > 0 {
                 crate::e9_println!("BD first_task cpu={} waited={}", cpu_index, wait_iters);
@@ -260,7 +260,7 @@ pub fn finish_switch() {
     let cpu_index = current_cpu_index();
     let mut task_to_drop = None;
     {
-        // Use LOCAL lock — no spinning on SCHEDULER needed.
+        // Use LOCAL lock — no spinning on GLOBAL_SCHED_STATE needed.
         let mut spins = 0usize;
         let mut guard = loop {
             if let Some(g) = LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
@@ -315,7 +315,7 @@ pub fn finish_interrupt_switch() {
         crate::e9_println!("[ifs-enter] cpu={} rsp0={:#x}", cpu_index, entry_rsp0);
     }
 
-    // Spin until SCHEDULER is available (released by maybe_preempt_from_interrupt
+    // Spin until GLOBAL_SCHED_STATE is available (released by maybe_preempt_from_interrupt
     // before returning to this assembly stub).  We must not block with IRQs enabled
     // because we are still inside the timer interrupt handler.  try_lock_no_irqsave
     // requires IRQs already disabled, which is guaranteed here.
@@ -326,7 +326,7 @@ pub fn finish_interrupt_switch() {
     // hang.
     // This is around few seconds on recent CPU.
 
-    // Use LOCAL lock — no spinning on SCHEDULER. The LOCAL lock for this CPU
+    // Use LOCAL lock — no spinning on GLOBAL_SCHED_STATE. The LOCAL lock for this CPU
     // is released quickly by maybe_preempt_from_interrupt before we get here.
     const MAX_IFS_SPINS: usize = 50_000_000;
     let mut task_to_drop = None;
@@ -457,7 +457,7 @@ pub fn maybe_preempt() {
     }
 
     // Use the per-CPU LOCAL lock — never blocked by another CPU's cold-path
-    // operations (fork, exit, wake) that hold SCHEDULER or GLOBAL_SCHED_STATE.
+    // operations (fork, exit, wake) that hold GLOBAL_SCHED_STATE.
     let switch_target = {
         let mut guard = match LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
             Some(g) => g,
@@ -491,7 +491,7 @@ pub fn maybe_preempt() {
     if let Some(ref target) = switch_target {
         if cpu_is_valid(cpu_index) {
             // One-shot per-CPU: trace the very first real preemption.
-            // NOTE: do NOT acquire SCHEDULER here — we are between the lock
+            // NOTE: do NOT acquire GLOBAL_SCHED_STATE here — we are between the lock
             // release (end of the block above) and do_switch_context. A
             // nested try_lock in this window re-enters the guardian (CLI +
             // CAS) on a CPU that is about to switch stacks, producing a
@@ -664,7 +664,7 @@ pub fn verbose_enabled() -> bool {
 pub fn class_table() -> crate::process::sched::SchedClassTable {
     let saved_flags = save_flags_and_cli();
     let out = {
-        let scheduler = SCHEDULER.lock();
+        let scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref sched) = *scheduler {
             sched.class_table
         } else {
@@ -684,7 +684,7 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
     let mut ipi_targets = [false; crate::arch::x86_64::percpu::MAX_CPUS];
     let my_cpu = current_cpu_index();
     let applied = {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref mut sched) = *scheduler {
             let prev = sched.class_table;
             sched.class_table = table;
@@ -720,7 +720,7 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
 /// Dump per-cpu scheduler queues for tracing/debug.
 pub fn log_state(label: &str) {
     let saved_flags = save_flags_and_cli();
-    let scheduler = SCHEDULER.lock();
+    let scheduler = GLOBAL_SCHED_STATE.lock();
     if let Some(ref sched) = *scheduler {
         let pick = sched.class_table.pick_order();
         let steal = sched.class_table.steal_order();
@@ -786,7 +786,7 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
 
     let saved_flags = save_flags_and_cli();
     {
-        let scheduler = SCHEDULER.lock();
+        let scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref sched) = *scheduler {
             use crate::process::sched::SchedClassRq;
             let cpu_count = active_cpu_count().min(crate::arch::x86_64::percpu::MAX_CPUS);

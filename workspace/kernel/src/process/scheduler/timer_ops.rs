@@ -12,7 +12,7 @@ static FIRST_TICK_FORCE_RESCHED: [AtomicBool; crate::arch::x86_64::percpu::MAX_C
 static CPU_LOCAL_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
 
-// Force a reschedule at least every N ticks per CPU, regardless of SCHEDULER
+// Force a reschedule at least every N ticks per CPU, regardless of GLOBAL_SCHED_STATE
 // lock availability. This guarantees kernel tasks (shell, idle) get CPU time
 // even if timer_tick consistently loses the scheduler lock race with the other CPU.
 const PERIODIC_RESCHED_TICKS: u64 = 5;
@@ -52,8 +52,8 @@ pub fn timer_tick() {
     };
 
     // Lock-free bootstrap nudge: first local timer tick requests one resched
-    // without touching SCHEDULER. This avoids pathological boot windows where
-    // another CPU holds SCHEDULER and this CPU would otherwise defer the first
+    // without touching GLOBAL_SCHED_STATE. This avoids pathological boot windows where
+    // another CPU holds GLOBAL_SCHED_STATE and this CPU would otherwise defer the first
     // `need_resched` update indefinitely.
     if cpu_is_valid(cpu_idx) && !FIRST_TICK_FORCE_RESCHED[cpu_idx].swap(true, Ordering::AcqRel) {
         request_force_resched_hint(cpu_idx);
@@ -78,8 +78,8 @@ pub fn timer_tick() {
         check_wake_deadlines(current_time_ns);
     }
 
-    // Per-task accounting on this CPU : uses LOCAL lock only (no global SCHEDULER).
-    // This ensures timer ticks are never dropped due to another CPU holding SCHEDULER.
+    // Per-task accounting on this CPU : uses LOCAL lock only (no global GLOBAL_SCHED_STATE).
+    // This ensures timer ticks are never dropped due to another CPU holding GLOBAL_SCHED_STATE.
     if cpu_is_valid(cpu_idx) {
         if let Some(mut guard) = LOCAL_SCHEDULERS[cpu_idx].try_lock_no_irqsave() {
             if let Some(ref mut cpu) = *guard {
@@ -124,7 +124,7 @@ pub fn timer_tick() {
 ///
 /// # Lock discipline
 ///
-/// The SCHEDULER lock is held **only** during the scan + re-enqueue phase.
+/// The GLOBAL_SCHED_STATE lock is held **only** during the scan + re-enqueue phase.
 /// The lock is explicitly dropped before sending IPIs (which may acquire
 /// per-CPU data) and before any `Arc<Task>` drop (which reaches
 /// `KernelStack::drop → free_frames → buddy_alloc.lock()`).
@@ -145,8 +145,8 @@ fn check_wake_deadlines(current_time_ns: u64) {
     let mut drop_count = 0usize;
 
     {
-        // --- begin critical section (SCHEDULER lock held) ---
-        let mut scheduler = match SCHEDULER.try_lock_no_irqsave() {
+        // --- begin critical section (GLOBAL_SCHED_STATE lock held) ---
+        let mut scheduler = match GLOBAL_SCHED_STATE.try_lock_no_irqsave() {
             Some(guard) => guard,
             None => return,
         };
@@ -196,7 +196,7 @@ fn check_wake_deadlines(current_time_ns: u64) {
                 }
             }
         }
-        // `scheduler` guard drops here — SCHEDULER lock released BEFORE any
+        // `scheduler` guard drops here — GLOBAL_SCHED_STATE lock released BEFORE any
         // Arc<Task> drop and BEFORE send_resched_ipi_to_cpu.
         // --- end critical section ---
     }
@@ -204,7 +204,7 @@ fn check_wake_deadlines(current_time_ns: u64) {
 
     // Drop orphaned task Arcs outside the scheduler lock so that
     // KernelStack::drop → free_frames → buddy_alloc.lock() does not race
-    // with any other SCHEDULER lock acquisition on this or another CPU.
+    // with any other GLOBAL_SCHED_STATE lock acquisition on this or another CPU.
     for slot in deferred_drops[..drop_count].iter_mut() {
         drop(slot.take());
     }
@@ -225,7 +225,7 @@ pub fn ticks() -> u64 {
 /// Returns None if scheduler is not initialized or currently locked.
 pub fn get_all_tasks() -> Option<alloc::vec::Vec<Arc<Task>>> {
     use alloc::vec::Vec;
-    let scheduler = match SCHEDULER.try_lock() {
+    let scheduler = match GLOBAL_SCHED_STATE.try_lock() {
         Some(guard) => guard,
         None => {
             note_try_lock_fail();
