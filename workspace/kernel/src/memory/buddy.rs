@@ -1,27 +1,15 @@
 // Buddy allocator implementation
 //
-// DIAGNOSTIC NOTE — free-list refcount sentinel not yet enforced:
+// Refcount sentinel invariant (OSTD-style, fully enforced):
 //
-// This allocator currently resets `FrameMeta::refcount` to 0 in both
-// `mark_block_free()` and `mark_block_allocated()`. That means it does NOT yet
-// maintain the stronger OSTD-style invariant:
+//   free-list frame => refcount == REFCOUNT_UNUSED  (u32::MAX)
+//   live frame      => refcount >= 1
 //
-//   free-list frame => refcount == REFCOUNT_UNUSED
-//
-// As a result, `FrameAllocOptions::allocate()` in `frame.rs` cannot safely use
-// the defensive `CAS(REFCOUNT_UNUSED -> 0)` that would catch a frame appearing
-// twice in the buddy free list. The allocator still works through its own
-// bitmap + free-list discipline, but it currently lacks that extra fail-fast
-// corruption check.
-//
-// Planned hardening:
-// - `mark_block_free()` should stamp `REFCOUNT_UNUSED`
-// - `mark_block_allocated()` should stop clobbering the sentinel prematurely
-// - `FrameAllocOptions::allocate()` can then reinstate the CAS-based check
-//
-// This is primarily a robustness / integrity hardening item. It is not the
-// cause of the earlier unzeroed page-table bug, but it would make allocator
-// corruption fail fast instead of silently aliasing memory.
+// `mark_block_free()` stamps REFCOUNT_UNUSED on every free path.
+// `mark_block_allocated()` leaves refcount untouched (still REFCOUNT_UNUSED)
+// so that `FrameAllocOptions::allocate()` can perform a fail-fast
+// CAS(REFCOUNT_UNUSED → 1) that catches double-free / free-list corruption
+// immediately rather than silently aliasing memory.
 
 use crate::{
     boot::entry::{MemoryKind, MemoryRegion},
@@ -681,10 +669,18 @@ impl BuddyAllocator {
         for page_idx in 0..page_count {
             let phys = frame_phys + page_idx as u64 * PAGE_SIZE;
             let meta = get_meta(PhysAddr::new(phys));
+            // Sentinel must still be intact at this point — if not, the frame
+            // was never on the free list (double-alloc or metadata corruption).
+            debug_assert_eq!(
+                meta.get_refcount(),
+                crate::memory::frame::REFCOUNT_UNUSED,
+                "buddy: mark_block_allocated on frame {:#x} with unexpected refcount (corruption?)",
+                phys,
+            );
             meta.set_flags(frame_flags::ALLOCATED);
             meta.set_order(order);
-            // Leave refcount as REFCOUNT_UNUSED; the high-level allocator
-            // (e.g. FrameAllocOptions) will perform CAS(UNUSED -> 0).
+            // Leave refcount as REFCOUNT_UNUSED; FrameAllocOptions::allocate()
+            // will perform CAS(REFCOUNT_UNUSED → 1) as the fail-fast handoff.
         }
     }
 
