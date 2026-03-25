@@ -950,7 +950,9 @@ impl AddressSpace {
                                     let handle = self
                                         .unregister_effective_mapping(rb_addr)
                                         .map(|mapping| mapping.handle)
-                                        .unwrap_or_else(|| resolve_handle(rb_frame.start_address()));
+                                        .unwrap_or_else(|| {
+                                            resolve_handle(rb_frame.start_address())
+                                        });
                                     crate::memory::cow::handle_dec_ref(handle);
                                 }
                             }
@@ -964,7 +966,9 @@ impl AddressSpace {
                                     let handle = self
                                         .unregister_effective_mapping(rb_addr)
                                         .map(|mapping| mapping.handle)
-                                        .unwrap_or_else(|| resolve_handle(rb_frame.start_address()));
+                                        .unwrap_or_else(|| {
+                                            resolve_handle(rb_frame.start_address())
+                                        });
                                     crate::memory::cow::handle_dec_ref(handle);
                                 }
                             }

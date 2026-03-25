@@ -19,6 +19,7 @@ INIT_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_pid"
 SYSCALL_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_syscalls"
 MEM_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem"
 MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
+MEM_REGION_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_region"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/strate-init"
 CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
@@ -92,6 +93,12 @@ if [ "$INCLUDE_TESTS" = "1" ]; then
         echo "    mem-stressed: $mem_stressed_size bytes"
     else
         echo "    mem-stressed: (missing)"
+    fi
+    if [ -f "$MEM_REGION_TEST_ELF" ]; then
+        mem_region_test_size=$(stat -c%s "$MEM_REGION_TEST_ELF")
+        echo "    mem-region  : $mem_region_test_size bytes"
+    else
+        echo "    mem-region  : (missing)"
     fi
 fi
 if [ -f "$INIT_ELF" ]; then
@@ -206,6 +213,13 @@ else
     echo "  [WARN] strate-fs-ramfs not found at $FS_RAM_ELF"
 fi
 
+if [ -f "$MEM_REGION_TEST_ELF" ]; then
+    cp "$MEM_REGION_TEST_ELF" "$ISO_ROOT/initfs/test_mem_region"
+    echo "  [OK] Copied mem-region binary: /initfs/test_mem_region"
+else
+    echo "  [WARN] mem-region binary not found at $MEM_REGION_TEST_ELF"
+fi
+
 if [ "$INCLUDE_TESTS" = "1" ]; then
     if [ -f "$INIT_TEST_ELF" ]; then
         cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
@@ -236,6 +250,7 @@ if [ "$INCLUDE_TESTS" = "1" ]; then
     else
         echo "  [WARN] mem-stressed binary not found at $MEM_STRESSED_ELF"
     fi
+
 fi
 
 if [ -f "$INIT_ELF" ]; then

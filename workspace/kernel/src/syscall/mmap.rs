@@ -12,8 +12,8 @@ use crate::{
     process::current_task_clone,
     syscall::error::SyscallError,
 };
-use strat9_abi::data::MemoryRegionInfo as MemoryRegionInfoAbi;
 use core::sync::atomic::Ordering;
+use strat9_abi::data::MemoryRegionInfo as MemoryRegionInfoAbi;
 use x86_64::VirtAddr;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -568,7 +568,12 @@ pub fn sys_mem_region_map(handle: u64, addr_hint: u64, out_ptr: u64) -> Result<u
     };
     let address_space = unsafe { &*task.process.address_space.get() };
     let (base, size) = crate::memory::memory_region_registry()
-        .map_region(cap.resource as u64, address_space, addr_hint, requested_flags)
+        .map_region(
+            cap.resource as u64,
+            address_space,
+            addr_hint,
+            requested_flags,
+        )
         .map_err(|error| match error {
             crate::memory::RegionCapError::NotFound => SyscallError::NotFound,
             crate::memory::RegionCapError::InvalidRegion
@@ -608,7 +613,8 @@ pub fn sys_mem_region_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallErro
         flags: vma_flags_to_prot(info.flags),
         _reserved: 0,
     };
-    let user = crate::memory::UserSliceWrite::new(out_ptr, core::mem::size_of::<MemoryRegionInfoAbi>())?;
+    let user =
+        crate::memory::UserSliceWrite::new(out_ptr, core::mem::size_of::<MemoryRegionInfoAbi>())?;
     let bytes = unsafe {
         core::slice::from_raw_parts(
             &abi as *const MemoryRegionInfoAbi as *const u8,

@@ -57,6 +57,9 @@ static TEST_MEM_MODULE: InternalModule = InternalModule::new().with_path(c"/init
 /// Internal module: request Limine to load /initfs/test_mem_stressed (userspace stressed memory test)
 static TEST_MEM_STRESSED_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/test_mem_stressed");
+/// Internal module: request Limine to load /initfs/test_mem_region (userspace public MemoryRegion test)
+static TEST_MEM_REGION_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/test_mem_region");
 /// Internal module: request Limine to load /initfs/fs-ext4 (userspace EXT4 server)
 static EXT4_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/fs-ext4");
 /// Internal module: request Limine to load /initfs/strate-fs-ramfs (userspace RAMFS server)
@@ -103,6 +106,7 @@ static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
     &TEST_SYSCALLS_MODULE,
     &TEST_MEM_MODULE,
     &TEST_MEM_STRESSED_MODULE,
+    &TEST_MEM_REGION_MODULE,
     &EXT4_MODULE,
     &RAM_MODULE,
     &INIT_MODULE,
@@ -129,6 +133,8 @@ static mut TEST_MEM_ELF_MODULE: Option<(u64, u64)> = None;
 static mut TEST_SYSCALLS_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional test_mem_stressed module info (set during Limine entry).
 static mut TEST_MEM_STRESSED_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional test_mem_region module info (set during Limine entry).
+static mut TEST_MEM_REGION_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional strate-fs-ramfs module info (set during Limine entry).
 static mut STRATE_FS_RAMFS_MODULE: Option<(u64, u64)> = None;
 /// Optional init module info (set during Limine entry).
@@ -191,6 +197,12 @@ pub fn test_syscalls_module() -> Option<(u64, u64)> {
 pub fn test_mem_stressed_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
     unsafe { TEST_MEM_STRESSED_ELF_MODULE }
+}
+
+/// Return the test_mem_region module (addr, size) if present.
+pub fn test_mem_region_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { TEST_MEM_REGION_ELF_MODULE }
 }
 
 /// Return the strate-fs-ramfs module (addr, size) if present.
@@ -308,6 +320,7 @@ struct ResolvedModules {
     test_syscalls: Option<(u64, u64)>,
     test_mem: Option<(u64, u64)>,
     test_mem_stressed: Option<(u64, u64)>,
+    test_mem_region: Option<(u64, u64)>,
     fs_ext4: Option<(u64, u64)>,
     fs_ram: Option<(u64, u64)>,
     init: Option<(u64, u64)>,
@@ -343,6 +356,8 @@ fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> Re
             resolved.test_mem = Some(info);
         } else if path_matches(path, b"/initfs/test_mem_stressed") {
             resolved.test_mem_stressed = Some(info);
+        } else if path_matches(path, b"/initfs/test_mem_region") {
+            resolved.test_mem_region = Some(info);
         } else if path_matches(path, b"/initfs/fs-ext4") {
             resolved.fs_ext4 = Some(info);
         } else if path_matches(path, b"/initfs/strate-fs-ramfs") {
@@ -562,6 +577,8 @@ pub unsafe extern "C" fn kmain() -> ! {
             let (test_mem_base, test_mem_size) = resolved.test_mem.unwrap_or((0, 0));
             let (test_mem_stressed_base, test_mem_stressed_size) =
                 resolved.test_mem_stressed.unwrap_or((0, 0));
+            let (test_mem_region_base, test_mem_region_size) =
+                resolved.test_mem_region.unwrap_or((0, 0));
             let (ext4_base, ext4_size) = resolved.fs_ext4.unwrap_or((0, 0));
             let (ram_base, ram_size) = resolved.fs_ram.unwrap_or((0, 0));
 
@@ -572,8 +589,6 @@ pub unsafe extern "C" fn kmain() -> ! {
                     test_mem_base,
                     test_mem_size
                 );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/test_mem not found in modules");
             }
             if test_syscalls_base != 0 && test_syscalls_size != 0 {
                 unsafe {
@@ -584,8 +599,6 @@ pub unsafe extern "C" fn kmain() -> ! {
                     test_syscalls_base,
                     test_syscalls_size
                 );
-            } else {
-                crate::serial_println!("[limine] WARN: /initfs/test_syscalls not found in modules");
             }
             if test_mem_stressed_base != 0 && test_mem_stressed_size != 0 {
                 unsafe {
@@ -597,9 +610,19 @@ pub unsafe extern "C" fn kmain() -> ! {
                     test_mem_stressed_base,
                     test_mem_stressed_size
                 );
+            }
+            if test_mem_region_base != 0 && test_mem_region_size != 0 {
+                unsafe {
+                    TEST_MEM_REGION_ELF_MODULE = Some((test_mem_region_base, test_mem_region_size))
+                };
+                crate::serial_println!(
+                    "[limine] /initfs/test_mem_region found: base={:#x} size={}",
+                    test_mem_region_base,
+                    test_mem_region_size
+                );
             } else {
                 crate::serial_println!(
-                    "[limine] WARN: /initfs/test_mem_stressed not found in modules"
+                    "[limine] WARN: /initfs/test_mem_region not found in modules"
                 );
             }
 

@@ -332,8 +332,8 @@ pub fn release_capability(cap: &Capability, owner_task: Option<TaskId>) {
             let _ = shared_ring::destroy_ring(RingId::from_u64(cap.resource as u64));
         }
         ResourceType::MemoryRegion => {
-            let _ = crate::memory::memory_region_registry()
-                .release_handle(cap.resource as u64, cap.id);
+            let _ =
+                crate::memory::memory_region_registry().release_handle(cap.resource as u64, cap.id);
         }
         ResourceType::Semaphore => {
             let _ = semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64));

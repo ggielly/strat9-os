@@ -127,8 +127,14 @@ impl MemoryRegionRegistry {
     /// Adds one handle reference to an exported memory region.
     pub fn retain_handle(&self, resource_id: u64, handle_cap: CapId) -> Result<(), RegionCapError> {
         let mut entries = self.entries.lock();
-        let entry = entries.get_mut(&resource_id).ok_or(RegionCapError::NotFound)?;
-        if !entry.handle_caps.iter().any(|existing| *existing == handle_cap) {
+        let entry = entries
+            .get_mut(&resource_id)
+            .ok_or(RegionCapError::NotFound)?;
+        if !entry
+            .handle_caps
+            .iter()
+            .any(|existing| *existing == handle_cap)
+        {
             entry.handle_caps.push(handle_cap);
         }
         Ok(())
@@ -136,11 +142,14 @@ impl MemoryRegionRegistry {
 
     /// Returns public metadata about an exported memory region.
     pub fn info(&self, resource_id: u64) -> Option<PublicMemoryRegionInfo> {
-        self.entries.lock().get(&resource_id).map(|entry| PublicMemoryRegionInfo {
-            size: entry.size,
-            page_size: entry.page_size,
-            flags: entry.flags,
-        })
+        self.entries
+            .lock()
+            .get(&resource_id)
+            .map(|entry| PublicMemoryRegionInfo {
+                size: entry.size,
+                page_size: entry.page_size,
+                flags: entry.flags,
+            })
     }
 
     /// Maps an exported memory region into `address_space`.
@@ -209,7 +218,9 @@ impl MemoryRegionRegistry {
     ) -> Result<ReleaseRegionResult, RegionCapError> {
         let entry = {
             let mut entries = self.entries.lock();
-            let current = entries.get_mut(&resource_id).ok_or(RegionCapError::NotFound)?;
+            let current = entries
+                .get_mut(&resource_id)
+                .ok_or(RegionCapError::NotFound)?;
             let position = current
                 .handle_caps
                 .iter()
@@ -219,7 +230,9 @@ impl MemoryRegionRegistry {
             if !current.handle_caps.is_empty() {
                 return Ok(ReleaseRegionResult::Retained);
             }
-            entries.remove(&resource_id).ok_or(RegionCapError::NotFound)?
+            entries
+                .remove(&resource_id)
+                .ok_or(RegionCapError::NotFound)?
         };
 
         let mut revoked_mappings = 0usize;

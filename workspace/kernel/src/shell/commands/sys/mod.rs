@@ -12,6 +12,7 @@ mod silo_limit;
 mod silos;
 mod strate;
 mod test_mem;
+mod test_mem_region;
 mod test_mem_stressed;
 mod test_pid;
 mod test_syscalls;
@@ -28,6 +29,7 @@ pub use silo_cmd::cmd_silo;
 pub use silos::cmd_silos;
 pub use strate::cmd_strate;
 pub use test_mem::cmd_test_mem;
+pub use test_mem_region::cmd_test_mem_region;
 pub use test_mem_stressed::cmd_test_mem_stressed;
 pub use test_pid::cmd_test_pid;
 pub use test_syscalls::cmd_test_syscalls;
@@ -1066,6 +1068,43 @@ pub(super) fn cmd_test_mem_stressed_impl(_args: &[String]) -> Result<(), ShellEr
     match load_and_run_elf(&data, "init") {
         Ok(task_id) => {
             shell_println!("test_mem_stressed started (task id={})", task_id);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("load_and_run_elf failed: {}", e);
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
+/// Launch the userspace public MemoryRegion test binary from initfs.
+pub(super) fn cmd_test_mem_region_impl(_args: &[String]) -> Result<(), ShellError> {
+    let path = "/initfs/test_mem_region";
+    shell_println!("Launching {} ...", path);
+
+    let fd = match vfs::open(path, vfs::OpenFlags::READ) {
+        Ok(fd) => fd,
+        Err(e) => {
+            shell_println!("open failed: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+
+    let data = match vfs::read_all(fd) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = vfs::close(fd);
+            shell_println!("read failed: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+    let _ = vfs::close(fd);
+
+    shell_println!("ELF size: {} bytes", data.len());
+    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
+    match load_and_run_elf(&data, "init") {
+        Ok(task_id) => {
+            shell_println!("test_mem_region started (task id={})", task_id);
             Ok(())
         }
         Err(e) => {

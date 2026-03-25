@@ -32,7 +32,7 @@ Constants are defined in `kernel/src/syscall/numbers.rs`.
 <!-- SYS_MEM_ALLOC (brk) removed in v2.1: Libc must map anonymous pages via SYS_MEM_MAP -->
 | 105 | `SYS_MEM_REGION_EXPORT` | addr: u64 | Export a tracked region as a `MemoryRegion` handle. |
 | 106 | `SYS_MEM_REGION_MAP` | handle: u32, addr_hint: u64, out_ptr: *mut u64 | Map a `MemoryRegion` handle into the caller. |
-| 107 | `SYS_MEM_REGION_INFO` | handle: u32, out_ptr: *mut MemoryRegionInfo | Query size, page size, and protection bits. |
+| 107 | `SYS_MEM_REGION_INFO` | handle: u32, out_ptr:*mut MemoryRegionInfo | Query size, page size, and protection bits. |
 
 ---
 
@@ -54,7 +54,6 @@ Constants are defined in `kernel/src/syscall/numbers.rs`.
 | 222 │ `SYS_CHAN_RECV`     │ Reçoit un IpcMessage (bloquant si vide)  |
 | 223 │ `SYS_CHAN_TRY_RECV` │ Reçoit sans bloquer (EAGAIN si vide)    |
 | 224 │ `SYS_CHAN_CLOSE`    │ Détruit le canal, réveille tous les waiters |
-
 
 ---
 
