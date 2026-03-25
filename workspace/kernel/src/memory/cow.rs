@@ -19,7 +19,7 @@
 //! - TLB shootdown is performed after modifying page table flags
 
 use crate::{
-    memory::frame::{frame_flags, get_meta, PhysFrame},
+    memory::{frame::{frame_flags, get_meta, PhysFrame}, resolve_handle, BlockHandle},
     sync::SpinLock,
 };
 use core::sync::atomic::{fence, Ordering};
@@ -32,26 +32,53 @@ fn frame_meta(frame: PhysFrame) -> &'static crate::memory::frame::FrameMeta {
     get_meta(frame.start_address)
 }
 
-/// Performs the frame inc ref operation.
-pub fn frame_inc_ref(frame: PhysFrame) {
-    frame_meta(frame).inc_ref();
+/// Returns the metadata slot backing a physical block handle.
+#[inline]
+fn handle_meta(handle: BlockHandle) -> &'static crate::memory::frame::FrameMeta {
+    get_meta(handle.base)
 }
 
-/// Performs the frame dec ref operation.
-pub fn frame_dec_ref(frame: PhysFrame) {
-    let meta = frame_meta(frame);
+/// Increments the shared reference count of a physical block.
+pub fn handle_inc_ref(handle: BlockHandle) {
+    handle_meta(handle).inc_ref();
+}
+
+/// Decrements the shared reference count of a physical block.
+pub fn handle_dec_ref(handle: BlockHandle) {
+    let meta = handle_meta(handle);
     let old = meta.dec_ref();
     if old == 1 {
         fence(Ordering::Acquire);
         crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_frame(token, frame);
+            crate::memory::free_frames(
+                token,
+                PhysFrame {
+                    start_address: handle.base,
+                },
+                handle.order,
+            );
         });
     }
 }
 
+/// Returns the current shared reference count of a physical block.
+pub fn handle_get_refcount(handle: BlockHandle) -> u32 {
+    handle_meta(handle).get_refcount()
+}
+
+/// Performs the frame inc ref operation.
+pub fn frame_inc_ref(frame: PhysFrame) {
+    handle_inc_ref(resolve_handle(frame.start_address));
+}
+
+/// Performs the frame dec ref operation.
+pub fn frame_dec_ref(frame: PhysFrame) {
+    handle_dec_ref(resolve_handle(frame.start_address));
+}
+
 /// Performs the frame get refcount operation.
 pub fn frame_get_refcount(frame: PhysFrame) -> u32 {
-    frame_meta(frame).get_refcount()
+    handle_get_refcount(resolve_handle(frame.start_address))
 }
 
 /// Set COW flag on a frame (SMP-safe).

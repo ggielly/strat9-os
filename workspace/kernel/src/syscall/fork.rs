@@ -1,7 +1,7 @@
 //! `fork()` syscall implementation with copy-on-write (COW).
 
 use crate::{
-    memory::AddressSpace,
+    memory::{resolve_handle, AddressSpace, EffectiveMapping, VmaPageSize},
     process::{
         current_task_clone,
         scheduler::add_task_with_parent,
@@ -16,7 +16,7 @@ use core::{
     mem::offset_of,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
-use x86_64::structures::paging::{mapper::TranslateResult, FrameAllocator}; // Required for allocate_frame
+use x86_64::structures::paging::mapper::TranslateResult;
 
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
@@ -334,26 +334,27 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
 pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<(), &'static str> {
     use crate::memory::paging::BuddyFrameAllocator;
     use x86_64::{
-        structures::paging::{Mapper, Page, PageTableFlags, Size4KiB, Translate},
+        structures::paging::{Mapper, Page, PageTableFlags, Size2MiB, Size4KiB, Translate},
         VirtAddr,
     };
 
-    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_addr));
+    let mapping = address_space
+        .effective_mapping_containing(virt_addr)
+        .ok_or("Page not mapped")?;
+    let page_start = mapping.start;
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_start));
 
     // SAFETY: we are in an exception handler, address space is active.
     let mut mapper = unsafe { address_space.mapper() };
 
-    //Check if page is mapped and has COW flag
-    let (phys_frame, flags): (
-        x86_64::structures::paging::PhysFrame<Size4KiB>,
-        PageTableFlags,
-    ) = match mapper.translate(VirtAddr::new(virt_addr)) {
+    // Check if page is mapped and has COW flag.
+    let (phys_frame_addr, flags) = match mapper.translate(VirtAddr::new(page_start)) {
         TranslateResult::Mapped {
-            frame: x86_64::structures::paging::mapper::MappedFrame::Size4KiB(frame),
+            frame,
             offset: _,
             flags,
-        } => (frame, flags),
-        _ => return Err("Page not mapped or huge page"),
+        } => (frame.start_address(), flags),
+        _ => return Err("Page not mapped"),
     };
 
     // We use BIT_9 as software COW flag
@@ -363,22 +364,33 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
         return Err("Not a COW page");
     }
 
-    let old_frame = crate::memory::PhysFrame {
-        start_address: phys_frame.start_address(),
-    };
-
-    let refcount = crate::memory::cow::frame_get_refcount(old_frame);
+    let old_handle = mapping.handle;
+    let refcount = crate::memory::cow::handle_get_refcount(old_handle);
 
     if refcount == 1 {
         // Case 1: we are the sole owner. Just make it writable.
         let new_flags = (flags | PageTableFlags::WRITABLE) & !COW_BIT;
 
         unsafe {
-            mapper
-                .update_flags(page, new_flags)
-                .map_err(|_| "Failed to update flags")?
-                .flush();
+            match mapping.page_size {
+                VmaPageSize::Small => mapper
+                    .update_flags(page, new_flags)
+                    .map_err(|_| "Failed to update 4K flags")?
+                    .flush(),
+                VmaPageSize::Huge => mapper
+                    .update_flags(
+                        Page::<Size2MiB>::containing_address(VirtAddr::new(page_start)),
+                        new_flags | PageTableFlags::HUGE_PAGE,
+                    )
+                    .map_err(|_| "Failed to update 2M flags")?
+                    .flush(),
+            }
         }
+        let tracked_flags = match mapping.page_size {
+            VmaPageSize::Small => new_flags,
+            VmaPageSize::Huge => new_flags | PageTableFlags::HUGE_PAGE,
+        };
+        let _ = address_space.update_effective_mapping_flags(page_start, tracked_flags);
         // Only the current CPU can hold this CR3 in the current design.
         local_invlpg(virt_addr);
         return Ok(());
@@ -386,58 +398,124 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
 
     // Case 2: shared page. Copy to new frame.
     let mut frame_allocator = BuddyFrameAllocator;
-
-    let new_frame = frame_allocator
-        .allocate_frame()
-        .ok_or("OOM during COW copy")?;
+    let order = match mapping.page_size {
+        VmaPageSize::Small => 0,
+        VmaPageSize::Huge => 9,
+    };
+    let copy_bytes = mapping.page_size.bytes() as usize;
+    let new_frame = crate::sync::with_irqs_disabled(|token| {
+        if order == 0 {
+            crate::memory::allocate_frame(token)
+        } else {
+            crate::memory::allocate_frames(token, order)
+        }
+    })
+    .map_err(|_| "OOM during COW copy")?;
 
     // Copy content
     unsafe {
-        let src = crate::memory::phys_to_virt(old_frame.start_address.as_u64()) as *const u8;
-        let dst = crate::memory::phys_to_virt(new_frame.start_address().as_u64()) as *mut u8;
-        core::ptr::copy_nonoverlapping(src, dst, 4096);
+        let src = crate::memory::phys_to_virt(phys_frame_addr.as_u64()) as *const u8;
+        let dst = crate::memory::phys_to_virt(new_frame.start_address.as_u64()) as *mut u8;
+        core::ptr::copy_nonoverlapping(src, dst, copy_bytes);
     }
 
     // Update mapping to new frame, Writable, no COW
     let new_flags = (flags | PageTableFlags::WRITABLE) & !COW_BIT;
+    let tracked_flags = match mapping.page_size {
+        VmaPageSize::Small => new_flags,
+        VmaPageSize::Huge => new_flags | PageTableFlags::HUGE_PAGE,
+    };
+    let new_handle = resolve_handle(new_frame.start_address);
 
     // Replace existing mapping (present+COW) by the private writable mapping.
-    let old_unmapped = mapper
-        .unmap(page)
-        .map_err(|_| "Failed to unmap old COW frame")?
-        .0;
-    debug_assert_eq!(old_unmapped.start_address(), old_frame.start_address);
-
-    let remap_res = unsafe { mapper.map_to(page, new_frame, new_flags, &mut frame_allocator) };
+    let remap_res: Result<(), &'static str> = match mapping.page_size {
+        VmaPageSize::Small => {
+            let old_unmapped = mapper
+                .unmap(page)
+                .map_err(|_| "Failed to unmap old 4K COW frame")?
+                .0;
+            debug_assert_eq!(old_unmapped.start_address(), phys_frame_addr);
+            unsafe {
+                mapper.map_to(
+                    page,
+                    x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                        new_frame.start_address,
+                    ),
+                    new_flags,
+                    &mut frame_allocator,
+                )
+            }
+            .map(|flush| flush.flush())
+            .map_err(|_| "Failed to map new 4K COW frame")
+        }
+        VmaPageSize::Huge => {
+            let huge_page = Page::<Size2MiB>::containing_address(VirtAddr::new(page_start));
+            let old_unmapped = mapper
+                .unmap(huge_page)
+                .map_err(|_| "Failed to unmap old 2M COW frame")?
+                .0;
+            debug_assert_eq!(old_unmapped.start_address(), phys_frame_addr);
+            unsafe {
+                mapper.map_to(
+                    huge_page,
+                    x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                        new_frame.start_address,
+                    ),
+                    tracked_flags,
+                    &mut frame_allocator,
+                )
+            }
+            .map(|flush| flush.flush())
+            .map_err(|_| "Failed to map new 2M COW frame")
+        }
+    };
     if remap_res.is_err() {
-        unsafe {
-            let _ = mapper.map_to(page, phys_frame, flags, &mut frame_allocator);
+        match mapping.page_size {
+            VmaPageSize::Small => unsafe {
+                let _ = mapper.map_to(
+                    page,
+                    x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                        phys_frame_addr,
+                    ),
+                    flags,
+                    &mut frame_allocator,
+                );
+            },
+            VmaPageSize::Huge => unsafe {
+                let huge_page = Page::<Size2MiB>::containing_address(VirtAddr::new(page_start));
+                let _ = mapper.map_to(
+                    huge_page,
+                    x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                        phys_frame_addr,
+                    ),
+                    flags,
+                    &mut frame_allocator,
+                );
+            },
         }
         crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_frame(
-                token,
-                crate::memory::PhysFrame {
-                    start_address: new_frame.start_address(),
-                },
-            );
+            crate::memory::free_frames(token, new_frame, order);
         });
-        return Err("Failed to map new COW frame");
-    }
-    match remap_res {
-        Ok(flush) => flush.flush(),
-        Err(_) => unreachable!("checked remap result above"),
+        return Err(remap_res.err().unwrap_or("Failed to map new COW frame"));
     }
 
     // The new private frame is the sole owner; set refcount=1 directly.
     // BuddyFrameAllocator returns a raw frame (refcount still REFCOUNT_UNUSED).
     // frame_inc_ref would wrap REFCOUNT_UNUSED to 0 — use set_refcount instead.
-    crate::memory::frame::get_meta(new_frame.start_address()).set_refcount(1);
+    crate::memory::frame::get_meta(new_frame.start_address).set_refcount(1);
+
+    address_space.register_effective_mapping(EffectiveMapping {
+        start: page_start,
+        handle: new_handle,
+        flags: tracked_flags,
+        page_size: mapping.page_size,
+    });
 
     // Only the current CPU can hold this CR3 in the current design.
     local_invlpg(virt_addr);
 
     // Decrement refcount of old frame after the new mapping is installed.
-    crate::memory::cow::frame_dec_ref(old_frame);
+    crate::memory::cow::handle_dec_ref(old_handle);
 
     Ok(())
 }

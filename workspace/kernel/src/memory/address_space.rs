@@ -685,10 +685,11 @@ impl AddressSpace {
                                     .map_err(|_| "Rollback: invalid 4K page address")?;
                             if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
                                 rb_flush.flush();
-                                let _ = self.unregister_effective_mapping(rb_addr);
-                                crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
-                                    start_address: rb_frame.start_address(),
-                                });
+                                let handle = self
+                                    .unregister_effective_mapping(rb_addr)
+                                    .map(|mapping| mapping.handle)
+                                    .unwrap_or_else(|| resolve_handle(rb_frame.start_address()));
+                                crate::memory::cow::handle_dec_ref(handle);
                             }
                         }
                         VmaPageSize::Huge => {
@@ -698,10 +699,11 @@ impl AddressSpace {
                                     .map_err(|_| "Rollback: invalid 2M page address")?;
                             if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
                                 rb_flush.flush();
-                                let _ = self.unregister_effective_mapping(rb_addr);
-                                crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
-                                    start_address: rb_frame.start_address(),
-                                });
+                                let handle = self
+                                    .unregister_effective_mapping(rb_addr)
+                                    .map(|mapping| mapping.handle)
+                                    .unwrap_or_else(|| resolve_handle(rb_frame.start_address()));
+                                crate::memory::cow::handle_dec_ref(handle);
                             }
                         }
                     }
@@ -821,19 +823,18 @@ impl AddressSpace {
                     {
                         if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
                             rb_flush.flush();
-                            let _ = self.unregister_effective_mapping(rb_addr);
-                            crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
-                                start_address: rb_frame.start_address(),
-                            });
+                            let handle = self
+                                .unregister_effective_mapping(rb_addr)
+                                .map(|mapping| mapping.handle)
+                                .unwrap_or_else(|| resolve_handle(rb_frame.start_address()));
+                            crate::memory::cow::handle_dec_ref(handle);
                         }
                     }
                 }
                 return Err("Failed to map shared page");
             }
 
-            crate::memory::cow::frame_inc_ref(crate::memory::PhysFrame {
-                start_address: PhysAddr::new(phys_addr),
-            });
+            crate::memory::cow::handle_inc_ref(resolve_handle(PhysAddr::new(phys_addr)));
             self.register_effective_mapping(EffectiveMapping {
                 start: page_addr,
                 handle: resolve_handle(PhysAddr::new(phys_addr)),
@@ -893,11 +894,11 @@ impl AddressSpace {
             };
 
             // COW-aware refcount decrement: free only when last mapping disappears.
-            let phys_frame = crate::memory::PhysFrame {
-                start_address: frame_addr,
-            };
-            let _ = self.unregister_effective_mapping(page_addr);
-            crate::memory::cow::frame_dec_ref(phys_frame);
+            let handle = self
+                .unregister_effective_mapping(page_addr)
+                .map(|mapping| mapping.handle)
+                .unwrap_or_else(|| resolve_handle(frame_addr));
+            crate::memory::cow::handle_dec_ref(handle);
         }
 
         // Remove from VMA tracking.
@@ -1257,11 +1258,11 @@ impl AddressSpace {
                     }
                 };
 
-                let phys = crate::memory::PhysFrame {
-                    start_address: frame_addr,
-                };
-                let _ = self.unregister_effective_mapping(page_addr);
-                crate::memory::cow::frame_dec_ref(phys);
+                let handle = self
+                    .unregister_effective_mapping(page_addr)
+                    .map(|mapping| mapping.handle)
+                    .unwrap_or_else(|| resolve_handle(frame_addr));
+                crate::memory::cow::handle_dec_ref(handle);
                 page_addr += page_bytes;
             }
 
@@ -1475,10 +1476,11 @@ impl AddressSpace {
                         tlb_flush_needed = true;
                     }
 
-                    let phys = crate::memory::PhysFrame {
-                        start_address: phys_frame_addr,
-                    };
-                    crate::memory::cow::frame_inc_ref(phys);
+                    let handle = self
+                        .effective_mapping_by_start(vaddr.as_u64())
+                        .map(|mapping| mapping.handle)
+                        .unwrap_or_else(|| resolve_handle(phys_frame_addr));
+                    crate::memory::cow::handle_inc_ref(handle);
 
                     // Map in child. We map it as WRITABLE first to ensure intermediate
                     // page tables (PDPT, PD) are created with WRITABLE bit set.
@@ -1507,7 +1509,7 @@ impl AddressSpace {
                         };
 
                         if let Err(e) = map_res {
-                            crate::memory::cow::frame_dec_ref(phys);
+                            crate::memory::cow::handle_dec_ref(handle);
                             return Err(e);
                         }
 
@@ -1544,7 +1546,7 @@ impl AddressSpace {
                                 };
                                 if unmapped {
                                     let _ = child.unregister_effective_mapping(vaddr.as_u64());
-                                    crate::memory::cow::frame_dec_ref(phys);
+                                    crate::memory::cow::handle_dec_ref(handle);
                                 }
                                 return Err(e);
                             }
@@ -1553,12 +1555,12 @@ impl AddressSpace {
 
                     child.register_effective_mapping(EffectiveMapping {
                         start: vaddr.as_u64(),
-                        handle: resolve_handle(phys_frame_addr),
+                        handle,
                         flags: new_flags,
                         page_size: region.page_size,
                     });
 
-                    processed_pages.push((vaddr.as_u64(), flags, phys, region.page_size));
+                    processed_pages.push((vaddr.as_u64(), flags, handle, region.page_size));
                 }
             }
             Ok(())
@@ -1567,7 +1569,7 @@ impl AddressSpace {
         if let Err(e) = res {
             log::error!("clone_cow error: {}. Rolling back...", e);
             let mut parent_mapper = unsafe { self.mapper() };
-            for (vaddr, original_flags, phys, page_size) in processed_pages.into_iter().rev() {
+            for (vaddr, original_flags, handle, page_size) in processed_pages.into_iter().rev() {
                 if original_flags.contains(PageTableFlags::WRITABLE) {
                     unsafe {
                         match page_size {
@@ -1589,7 +1591,7 @@ impl AddressSpace {
                     }
                     let _ = self.update_effective_mapping_flags(vaddr, original_flags);
                 }
-                crate::memory::cow::frame_dec_ref(phys);
+                crate::memory::cow::handle_dec_ref(handle);
             }
             if tlb_flush_needed {
                 crate::arch::x86_64::tlb::shootdown_all();
