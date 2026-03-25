@@ -15,10 +15,7 @@ pub mod userslice;
 pub mod zone;
 
 use crate::{
-    boot::entry::MemoryRegion,
-    capability::CapId,
-    process::get_task_by_pid,
-    sync::IrqDisabledToken,
+    boot::entry::MemoryRegion, capability::CapId, process::get_task_by_pid, sync::IrqDisabledToken,
 };
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Once;

@@ -3,8 +3,18 @@
 //! Implements a capability-based security model for Strat9-OS.
 //! All kernel resources are accessed through unforgeable tokens (capabilities).
 
-use crate::sync::SpinLock;
-use alloc::collections::BTreeMap;
+use crate::{
+    ipc::{
+        channel::{self, ChanId},
+        port::{self, PortId},
+        semaphore::{self, SemId},
+        shared_ring::{self, RingId},
+    },
+    process::TaskId,
+    sync::SpinLock,
+    vfs,
+};
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Unique identifier for a capability
@@ -159,11 +169,17 @@ impl CapabilityTable {
     /// Does not allocate memory.
     pub fn revoke_all(&mut self) {
         let mgr = get_capability_manager();
-        // BTreeMap::clear() does not allocate
-        for (id, _) in self.capabilities.iter() {
+        for id in self.capabilities.keys() {
             mgr.revoke_capability(*id);
         }
         self.capabilities.clear();
+    }
+
+    /// Removes and returns every capability in this table.
+    pub fn take_all(&mut self) -> Vec<Capability> {
+        core::mem::take(&mut self.capabilities)
+            .into_values()
+            .collect()
     }
 
     /// Check whether any capability of the given resource type has required permissions.
@@ -300,4 +316,32 @@ static CAPABILITY_MANAGER: Once<CapabilityManager> = Once::new();
 /// Get a reference to the global capability manager
 pub fn get_capability_manager() -> &'static CapabilityManager {
     CAPABILITY_MANAGER.call_once(CapabilityManager::new)
+}
+
+/// Releases a capability and cleans up the underlying resource.
+pub fn release_capability(cap: &Capability, owner_task: Option<TaskId>) {
+    let _ = get_capability_manager().revoke_capability(cap.id);
+
+    match cap.resource_type {
+        ResourceType::File => {
+            if let Ok(fd) = u32::try_from(cap.resource) {
+                let _ = vfs::close(fd);
+            }
+        }
+        ResourceType::SharedRing => {
+            let _ = shared_ring::destroy_ring(RingId::from_u64(cap.resource as u64));
+        }
+        ResourceType::Semaphore => {
+            let _ = semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64));
+        }
+        ResourceType::Channel => {
+            let _ = channel::destroy_channel(ChanId::from_u64(cap.resource as u64));
+        }
+        ResourceType::IpcPort => {
+            if let Some(task_id) = owner_task {
+                let _ = port::destroy_port(PortId::from_u64(cap.resource as u64), task_id);
+            }
+        }
+        _ => {}
+    }
 }

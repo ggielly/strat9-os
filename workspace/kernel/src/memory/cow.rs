@@ -69,6 +69,11 @@ pub fn handle_get_refcount(handle: BlockHandle) -> u32 {
     handle_meta(handle).get_refcount()
 }
 
+/// Marks a freshly allocated physical block as exclusively owned.
+pub fn handle_init_ref(handle: BlockHandle) {
+    handle_meta(handle).set_refcount(1);
+}
+
 /// Performs the frame inc ref operation.
 pub fn frame_inc_ref(frame: PhysFrame) {
     handle_inc_ref(resolve_handle(frame.start_address));

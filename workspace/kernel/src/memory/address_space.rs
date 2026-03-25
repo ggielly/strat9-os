@@ -631,7 +631,7 @@ impl AddressSpace {
         // count to 2, breaking the COW semantics (refcount==1 means sole owner).
         // frame_inc_ref is correct only when sharing an existing frame (fork).
         if order != 0 {
-            crate::memory::frame::get_meta(frame.start_address).set_refcount(1);
+            crate::memory::cow::handle_init_ref(resolve_handle(frame.start_address));
         }
 
         Ok(())
@@ -801,7 +801,7 @@ impl AddressSpace {
 
             // Initialize COW refcount (same logic as demand_page above).
             if order != 0 {
-                crate::memory::frame::get_meta(frame.start_address).set_refcount(1);
+                crate::memory::cow::handle_init_ref(resolve_handle(frame.start_address));
             }
 
             let effective_flags = match page_size {

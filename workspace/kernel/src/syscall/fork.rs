@@ -503,7 +503,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
     // The new private frame is the sole owner; set refcount=1 directly.
     // BuddyFrameAllocator returns a raw frame (refcount still REFCOUNT_UNUSED).
     // frame_inc_ref would wrap REFCOUNT_UNUSED to 0 — use set_refcount instead.
-    crate::memory::frame::get_meta(new_frame.start_address).set_refcount(1);
+    crate::memory::cow::handle_init_ref(new_handle);
 
     address_space.register_effective_mapping(EffectiveMapping {
         start: page_start,

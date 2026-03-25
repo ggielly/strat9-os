@@ -1061,7 +1061,10 @@ pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
 
     unsafe {
         (&mut *task.process.fd_table.get()).close_all();
-        (&mut *task.process.capabilities.get()).revoke_all();
+        let capabilities = (&mut *task.process.capabilities.get()).take_all();
+        for capability in &capabilities {
+            crate::capability::release_capability(capability, Some(task.id));
+        }
     }
 
     let as_ref = unsafe { &*task.process.address_space.get() };

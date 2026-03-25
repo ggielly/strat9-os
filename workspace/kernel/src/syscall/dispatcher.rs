@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     arch::x86_64::pci,
-    capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
+    capability::{get_capability_manager, release_capability, CapId, CapPermissions, ResourceType},
     hardware::storage::{
         ahci,
         virtio_block::{self, BlockDevice, SECTOR_SIZE},
@@ -357,29 +357,11 @@ fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &mut *task.process.capabilities.get() };
     if let Some(cap) = caps.remove(CapId::from_raw(_handle)) {
-        cleanup_cap_resource(&cap);
+        release_capability(&cap, Some(task.id));
         log::trace!("syscall: HANDLE_CLOSE({})", _handle);
         Ok(0)
     } else {
         Err(SyscallError::BadHandle)
-    }
-}
-
-/// Performs the cleanup cap resource operation.
-fn cleanup_cap_resource(cap: &crate::capability::Capability) {
-    match cap.resource_type {
-        ResourceType::File => {
-            if let Ok(fd) = u32::try_from(cap.resource) {
-                let _ = crate::vfs::close(fd);
-            }
-        }
-        ResourceType::SharedRing => {
-            let _ = shared_ring::destroy_ring(RingId::from_u64(cap.resource as u64));
-        }
-        ResourceType::Semaphore => {
-            let _ = semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64));
-        }
-        _ => {}
     }
 }
 
@@ -573,7 +555,7 @@ fn sys_handle_revoke(handle: u64) -> Result<u64, SyscallError> {
     let cap = caps
         .remove(CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;
-    cleanup_cap_resource(&cap);
+    release_capability(&cap, Some(task.id));
     Ok(0)
 }
 
