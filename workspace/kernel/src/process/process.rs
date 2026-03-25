@@ -36,6 +36,7 @@ pub struct Process {
 impl Process {
     /// Creates a new instance.
     pub fn new(pid: crate::process::Pid, address_space: Arc<AddressSpace>) -> Self {
+        address_space.set_owner_pid(pid);
         Self {
             pid,
             address_space: SyncUnsafeCell::new(address_space),

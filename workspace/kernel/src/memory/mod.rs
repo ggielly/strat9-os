@@ -14,8 +14,9 @@ pub mod paging;
 pub mod userslice;
 pub mod zone;
 
-use crate::{boot::entry::MemoryRegion, sync::IrqDisabledToken};
+use crate::{boot::entry::MemoryRegion, capability::CapId, sync::IrqDisabledToken};
 use core::sync::atomic::{AtomicU64, Ordering};
+use spin::Once;
 
 /// Higher Half Direct Map offset.
 /// Set by Limine entry (non-zero) or left at 0 for BIOS/identity-mapped boot.
@@ -54,6 +55,9 @@ pub fn init_memory_manager(memory_regions: &[MemoryRegion]) {
 /// Initialize copy-on-write metadata.
 pub fn init_cow_subsystem(_memory_regions: &[MemoryRegion]) {}
 
+static OWNERSHIP_TABLE: Once<OwnershipTable> = Once::new();
+static GLOBAL_MAPPING_INDEX: Once<MappingIndex> = Once::new();
+
 // Re-exports
 pub use crate::sync::with_irqs_disabled;
 pub use address_space::{
@@ -68,6 +72,65 @@ pub use frame::{AllocError, FrameAllocOptions, FrameAllocator, FramePurpose, Phy
 pub use mapping_index::{MappingIndex, MappingRef};
 pub use ownership::{BlockState, OwnerEntry, OwnerError, OwnershipTable, RemoveRefResult};
 pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSliceWrite};
+
+/// Returns the global ownership table used by the memory runtime.
+pub fn ownership_table() -> &'static OwnershipTable {
+    OWNERSHIP_TABLE.call_once(OwnershipTable::new)
+}
+
+/// Returns the global reverse mapping index used by the memory runtime.
+pub fn mapping_index() -> &'static MappingIndex {
+    GLOBAL_MAPPING_INDEX.call_once(MappingIndex::new)
+}
+
+/// Allocates a fresh internal mapping capability identifier.
+pub fn allocate_mapping_cap_id() -> CapId {
+    CapId::new()
+}
+
+/// Records that `cap_id` now names `handle` in the ownership table.
+pub fn register_mapping_identity(handle: BlockHandle, cap_id: CapId) {
+    match ownership_table().claim(PhysBlock::<BuddyReserved>::from_handle(handle), cap_id) {
+        Ok(_) => {}
+        Err(OwnerError::DoubleClaim) => match ownership_table().add_ref(handle, cap_id) {
+            Ok(_) | Err(OwnerError::CapAlreadyPresent) => {}
+            Err(error) => {
+                log::warn!(
+                    "memory: failed to add mapping identity cap={} handle={:#x}/{}: {:?}",
+                    cap_id.as_u64(),
+                    handle.base.as_u64(),
+                    handle.order,
+                    error
+                );
+            }
+        },
+        Err(error) => {
+            log::warn!(
+                "memory: failed to claim mapping identity cap={} handle={:#x}/{}: {:?}",
+                cap_id.as_u64(),
+                handle.base.as_u64(),
+                handle.order,
+                error
+            );
+        }
+    }
+}
+
+/// Removes `cap_id` from the ownership table entry associated with `handle`.
+pub fn unregister_mapping_identity(handle: BlockHandle, cap_id: CapId) {
+    match ownership_table().remove_ref(handle, cap_id) {
+        Ok(_) | Err(OwnerError::NotFound) | Err(OwnerError::CapNotFound) => {}
+        Err(error) => {
+            log::warn!(
+                "memory: failed to unregister mapping identity cap={} handle={:#x}/{}: {:?}",
+                cap_id.as_u64(),
+                handle.base.as_u64(),
+                handle.order,
+                error
+            );
+        }
+    }
+}
 
 /// Allocate `2^order` contiguous physical frames (raw, no zeroing).
 ///

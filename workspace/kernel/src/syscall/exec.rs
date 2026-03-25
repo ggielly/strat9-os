@@ -82,6 +82,7 @@ pub fn sys_execve(
 
     let new_as = AddressSpace::new_user().map_err(|_| SyscallError::OutOfMemory)?;
     let new_as_arc = alloc::sync::Arc::new(new_as);
+    new_as_arc.set_owner_pid(current.pid);
 
     let load_info =
         load_elf_image(&elf_data, &new_as_arc).map_err(|_| SyscallError::ExecFormatError)?;

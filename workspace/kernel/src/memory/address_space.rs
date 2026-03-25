@@ -9,6 +9,7 @@
 //! - PML4[256..512] → Kernel space (shared, cloned from kernel L4)
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use spin::Once;
 use x86_64::{
@@ -21,7 +22,13 @@ use x86_64::{
 };
 
 use crate::{
-    memory::{paging::BuddyFrameAllocator, resolve_handle, BlockHandle},
+    capability::CapId,
+    memory::{
+        allocate_mapping_cap_id, mapping_index, paging::BuddyFrameAllocator,
+        register_mapping_identity, unregister_mapping_identity, MappingRef, resolve_handle,
+        BlockHandle,
+    },
+    process::task::Pid,
     sync::SpinLock,
 };
 
@@ -103,6 +110,8 @@ pub struct VirtualMemoryRegion {
 pub struct EffectiveMapping {
     /// Start virtual address of the mapping.
     pub start: u64,
+    /// Internal capability identifier associated with this mapping.
+    pub cap_id: CapId,
     /// Physical block currently backing this mapping.
     pub handle: BlockHandle,
     /// Hardware page-table flags currently installed for this mapping.
@@ -127,6 +136,8 @@ pub struct AddressSpace {
     regions: SpinLock<BTreeMap<u64, VirtualMemoryRegion>>,
     /// Tracked effective mappings (key = mapping start address).
     effective_mappings: SpinLock<BTreeMap<u64, EffectiveMapping>>,
+    /// Process identifier owning this address space, when bound to a process.
+    owner_pid: AtomicU32,
 }
 
 // SAFETY: AddressSpace is protected by the scheduler lock and per-task ownership.
@@ -155,6 +166,7 @@ impl AddressSpace {
             is_kernel: true,
             regions: SpinLock::new(BTreeMap::new()),
             effective_mappings: SpinLock::new(BTreeMap::new()),
+            owner_pid: AtomicU32::new(0),
         }
     }
 
@@ -253,19 +265,45 @@ impl AddressSpace {
             is_kernel: false,
             regions: SpinLock::new(BTreeMap::new()),
             effective_mappings: SpinLock::new(BTreeMap::new()),
+            owner_pid: AtomicU32::new(0),
         })
     }
 
     /// Registers an effective mapping in the address space tracking table.
     pub fn register_effective_mapping(&self, mapping: EffectiveMapping) {
-        self.effective_mappings
-            .lock()
-            .insert(mapping.start, mapping);
+        let replaced = self.effective_mappings.lock().insert(mapping.start, mapping);
+        if let Some(previous) = replaced {
+            unregister_mapping_identity(previous.handle, previous.cap_id);
+            if let Some(pid) = self.owner_pid() {
+                mapping_index().unregister(previous.cap_id, pid, VirtAddr::new(previous.start));
+            }
+        }
+
+        register_mapping_identity(mapping.handle, mapping.cap_id);
+        if let Some(pid) = self.owner_pid() {
+            mapping_index().register(
+                mapping.cap_id,
+                MappingRef {
+                    pid,
+                    vaddr: VirtAddr::new(mapping.start),
+                    page_size: mapping.page_size,
+                },
+            );
+        }
     }
 
     /// Removes an effective mapping from the address space tracking table.
     pub fn unregister_effective_mapping(&self, start: u64) -> Option<EffectiveMapping> {
-        self.effective_mappings.lock().remove(&start)
+        let mapping = self.effective_mappings.lock().remove(&start);
+        if let Some(mapping) = mapping {
+            unregister_mapping_identity(mapping.handle, mapping.cap_id);
+            if let Some(pid) = self.owner_pid() {
+                mapping_index().unregister(mapping.cap_id, pid, VirtAddr::new(mapping.start));
+            }
+            Some(mapping)
+        } else {
+            None
+        }
     }
 
     /// Updates the hardware flags recorded for an effective mapping.
@@ -294,6 +332,42 @@ impl AddressSpace {
         mappings
             .get(&(addr & !(VmaPageSize::Huge.bytes() - 1)))
             .copied()
+    }
+
+    /// Binds this address space to the given process identifier.
+    pub fn set_owner_pid(&self, pid: Pid) {
+        let previous = self.owner_pid.swap(pid, Ordering::Relaxed);
+        let mappings: Vec<EffectiveMapping> = {
+            let guard = self.effective_mappings.lock();
+            guard.values().copied().collect()
+        };
+
+        if previous != 0 && previous != pid {
+            for mapping in mappings.iter().copied() {
+                mapping_index().unregister(mapping.cap_id, previous, VirtAddr::new(mapping.start));
+            }
+        }
+
+        if pid != 0 {
+            for mapping in mappings {
+                mapping_index().register(
+                    mapping.cap_id,
+                    MappingRef {
+                        pid,
+                        vaddr: VirtAddr::new(mapping.start),
+                        page_size: mapping.page_size,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Returns the owning process identifier, if one has been assigned.
+    pub fn owner_pid(&self) -> Option<Pid> {
+        match self.owner_pid.load(Ordering::Relaxed) {
+            0 => None,
+            pid => Some(pid),
+        }
     }
 
     /// Construct a temporary `OffsetPageTable` mapper for this address space.
@@ -529,6 +603,7 @@ impl AddressSpace {
 
         self.register_effective_mapping(EffectiveMapping {
             start: page_addr,
+            cap_id: allocate_mapping_cap_id(),
             handle: resolve_handle(frame.start_address),
             flags: page_flags,
             page_size: vma.page_size,
@@ -724,6 +799,7 @@ impl AddressSpace {
             };
             self.register_effective_mapping(EffectiveMapping {
                 start: page_addr,
+                cap_id: allocate_mapping_cap_id(),
                 handle: resolve_handle(frame.start_address),
                 flags: effective_flags,
                 page_size,
@@ -837,6 +913,7 @@ impl AddressSpace {
             crate::memory::cow::handle_inc_ref(resolve_handle(PhysAddr::new(phys_addr)));
             self.register_effective_mapping(EffectiveMapping {
                 start: page_addr,
+                cap_id: allocate_mapping_cap_id(),
                 handle: resolve_handle(PhysAddr::new(phys_addr)),
                 flags: page_flags,
                 page_size: VmaPageSize::Small,
@@ -1383,7 +1460,10 @@ impl AddressSpace {
         loop {
             let first = {
                 let guard = self.regions.lock();
-                guard.iter().next().map(|(&start, region)| (start, region.clone()))
+                guard
+                    .iter()
+                    .next()
+                    .map(|(&start, region)| (start, region.clone()))
             };
 
             let Some((start, region)) = first else {
@@ -1540,6 +1620,7 @@ impl AddressSpace {
 
                 child.register_effective_mapping(EffectiveMapping {
                     start: vaddr.as_u64(),
+                    cap_id: allocate_mapping_cap_id(),
                     handle,
                     flags: new_flags,
                     page_size: mapping.page_size,

@@ -181,6 +181,7 @@ fn build_child_task(
     };
 
     let (pid, tid, tgid) = Task::allocate_process_ids();
+    child_as.set_owner_pid(pid);
     let task = Arc::new(Task {
         id: TaskId::new(),
         pid,
@@ -506,6 +507,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
 
     address_space.register_effective_mapping(EffectiveMapping {
         start: page_start,
+        cap_id: mapping.cap_id,
         handle: new_handle,
         flags: tracked_flags,
         page_size: mapping.page_size,
