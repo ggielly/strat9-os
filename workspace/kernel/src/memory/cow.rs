@@ -19,7 +19,10 @@
 //! - TLB shootdown is performed after modifying page table flags
 
 use crate::{
-    memory::{frame::{frame_flags, get_meta, PhysFrame}, resolve_handle, BlockHandle},
+    memory::{
+        frame::{frame_flags, get_meta, PhysFrame},
+        resolve_handle, BlockHandle,
+    },
     sync::SpinLock,
 };
 use core::sync::atomic::{fence, Ordering};
