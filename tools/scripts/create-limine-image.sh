@@ -20,6 +20,7 @@ SYSCALL_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_syscalls"
 MEM_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem"
 MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
 MEM_REGION_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_region"
+MEM_REGION_PROC_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_region_proc"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/strate-init"
 CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
@@ -218,6 +219,13 @@ if [ -f "$MEM_REGION_TEST_ELF" ]; then
     echo "  [OK] Copied mem-region binary: /initfs/test_mem_region"
 else
     echo "  [WARN] mem-region binary not found at $MEM_REGION_TEST_ELF"
+fi
+
+if [ -f "$MEM_REGION_PROC_TEST_ELF" ]; then
+    cp "$MEM_REGION_PROC_TEST_ELF" "$ISO_ROOT/initfs/test_mem_region_proc"
+    echo "  [OK] Copied mem-region-proc binary: /initfs/test_mem_region_proc"
+else
+    echo "  [WARN] mem-region-proc binary not found at $MEM_REGION_PROC_TEST_ELF"
 fi
 
 if [ "$INCLUDE_TESTS" = "1" ]; then

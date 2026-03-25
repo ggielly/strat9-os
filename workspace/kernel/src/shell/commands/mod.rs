@@ -104,6 +104,7 @@ impl CommandRegistry {
         registry.register("test_mem", sys::cmd_test_mem);
         registry.register("test_mem_stressed", sys::cmd_test_mem_stressed);
         registry.register("test_mem_region", sys::cmd_test_mem_region);
+        registry.register("test_mem_region_proc", sys::cmd_test_mem_region_proc);
         registry.register("wasm-run", sys::cmd_wasm_run);
 
         registry

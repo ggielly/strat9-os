@@ -256,6 +256,10 @@ fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
             "test_mem_region",
             crate::boot::limine::test_mem_region_module(),
         ),
+        (
+            "test_mem_region_proc",
+            crate::boot::limine::test_mem_region_proc_module(),
+        ),
         ("fs-ext4", crate::boot::limine::fs_ext4_module()),
         (
             "strate-fs-ramfs",

@@ -87,7 +87,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
 
     shell_println!("");
     shell_println!("-- Testing --");
-    shell_println!("  test_pid | test_syscalls | test_mem | test_mem_stressed | test_mem_region");
+    shell_println!("  test_pid | test_syscalls | test_mem | test_mem_stressed | test_mem_region | test_mem_region_proc");
     shell_println!("  wasm-run <path>   - Run a WASM application");
     shell_println!("  trace mem ...     - Memory trace control");
     shell_println!("");

@@ -17,5 +17,9 @@ path = "src/stressed.rs"
 name = "test_mem_region"
 path = "src/mem_region.rs"
 
+[[bin]]
+name = "test_mem_region_proc"
+path = "src/mem_region_proc.rs"
+
 [dependencies]
 strat9-syscall = { path = "../syscall", features = ["userspace"] }

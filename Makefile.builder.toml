@@ -229,6 +229,8 @@ echo "  copying initfs runtime binaries..."
     cp workspace/target/x86_64-unknown-none/release/dhcp-client build/iso_root/initfs/bin/dhcp-client
 [ -f workspace/target/x86_64-unknown-none/release/test_mem_region ] && \
     cp workspace/target/x86_64-unknown-none/release/test_mem_region build/iso_root/initfs/test_mem_region
+[ -f workspace/target/x86_64-unknown-none/release/test_mem_region_proc ] && \
+    cp workspace/target/x86_64-unknown-none/release/test_mem_region_proc build/iso_root/initfs/test_mem_region_proc
 [ -f workspace/assets/boot/silo.toml ] && \
     cp workspace/assets/boot/silo.toml build/iso_root/initfs/silo.toml
 
