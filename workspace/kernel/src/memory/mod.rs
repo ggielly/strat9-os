@@ -11,6 +11,7 @@ pub mod heap;
 pub mod mapping_index;
 pub mod ownership;
 pub mod paging;
+pub mod region_cap;
 pub mod userslice;
 pub mod zone;
 
@@ -59,6 +60,7 @@ pub fn init_cow_subsystem(_memory_regions: &[MemoryRegion]) {}
 
 static OWNERSHIP_TABLE: Once<OwnershipTable> = Once::new();
 static GLOBAL_MAPPING_INDEX: Once<MappingIndex> = Once::new();
+static MEMORY_REGION_REGISTRY: Once<MemoryRegionRegistry> = Once::new();
 
 // Re-exports
 pub use crate::sync::with_irqs_disabled;
@@ -73,6 +75,9 @@ pub use buddy::get_allocator;
 pub use frame::{AllocError, FrameAllocOptions, FrameAllocator, FramePurpose, PhysFrame};
 pub use mapping_index::{MappingIndex, MappingRef};
 pub use ownership::{BlockState, OwnerEntry, OwnerError, OwnershipTable, RemoveRefResult};
+pub use region_cap::{
+    MemoryRegionRegistry, PublicMemoryRegionInfo, RegionCapError, ReleaseRegionResult,
+};
 pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSliceWrite};
 
 /// Returns the global ownership table used by the memory runtime.
@@ -83,6 +88,11 @@ pub fn ownership_table() -> &'static OwnershipTable {
 /// Returns the global reverse mapping index used by the memory runtime.
 pub fn mapping_index() -> &'static MappingIndex {
     GLOBAL_MAPPING_INDEX.call_once(MappingIndex::new)
+}
+
+/// Returns the global public memory-region registry.
+pub fn memory_region_registry() -> &'static MemoryRegionRegistry {
+    MEMORY_REGION_REGISTRY.call_once(MemoryRegionRegistry::new)
 }
 
 /// Allocates a fresh internal mapping capability identifier.

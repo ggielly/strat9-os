@@ -13,6 +13,9 @@ pub const SYS_MUNMAP: usize = 101;
 pub const SYS_BRK: usize = 102;
 pub const SYS_MREMAP: usize = 103;
 pub const SYS_MPROTECT: usize = 104;
+pub const SYS_MEM_REGION_EXPORT: usize = 105;
+pub const SYS_MEM_REGION_MAP: usize = 106;
+pub const SYS_MEM_REGION_INFO: usize = 107;
 
 // Block 200-299: IPC
 pub const SYS_IPC_CREATE_PORT: usize = 200;

@@ -30,7 +30,9 @@ Constants are defined in `kernel/src/syscall/numbers.rs`.
 | 101 | `SYS_MEM_UNMAP` | addr: u64, size: u64 | Unmap a memory region. |
 | 102 | `SYS_MEM_PROTECT` | addr: u64, size: u64, flags: u32 | Change page protections. |
 <!-- SYS_MEM_ALLOC (brk) removed in v2.1: Libc must map anonymous pages via SYS_MEM_MAP -->
-| 104 | `SYS_MEM_GRANT` | addr: u64, size: u64, target_pid: u64 | Grant a memory region to another process via capability. |
+| 105 | `SYS_MEM_REGION_EXPORT` | addr: u64 | Export a tracked region as a `MemoryRegion` handle. |
+| 106 | `SYS_MEM_REGION_MAP` | handle: u32, addr_hint: u64, out_ptr: *mut u64 | Map a `MemoryRegion` handle into the caller. |
+| 107 | `SYS_MEM_REGION_INFO` | handle: u32, out_ptr: *mut MemoryRegionInfo | Query size, page size, and protection bits. |
 
 ---
 

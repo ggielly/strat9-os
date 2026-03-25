@@ -12,6 +12,7 @@ use crate::{
     process::current_task_clone,
     syscall::error::SyscallError,
 };
+use strat9_abi::data::MemoryRegionInfo as MemoryRegionInfoAbi;
 use core::sync::atomic::Ordering;
 use x86_64::VirtAddr;
 
@@ -73,6 +74,13 @@ fn prot_to_vma_flags(prot: u32) -> VmaFlags {
         executable: prot & PROT_EXEC != 0,
         user_accessible: true,
     }
+}
+
+/// Convert `VmaFlags` into ABI protection bits.
+fn vma_flags_to_prot(flags: VmaFlags) -> u32 {
+    (if flags.readable { PROT_READ } else { 0 })
+        | (if flags.writable { PROT_WRITE } else { 0 })
+        | (if flags.executable { PROT_EXEC } else { 0 })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -501,6 +509,113 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, SyscallError>
         .protect_range(addr, len_aligned, flags)
         .map_err(|_| SyscallError::InvalidArgument)?;
 
+    Ok(0)
+}
+
+/// SYS_MEM_REGION_EXPORT (105): export a tracked region as a public handle.
+pub fn sys_mem_region_export(addr: u64) -> Result<u64, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::Fault)?;
+    let address_space = unsafe { &*task.process.address_space.get() };
+    let handle_cap = crate::capability::CapId::new();
+    let resource_id = crate::memory::memory_region_registry()
+        .export_region(address_space, addr, handle_cap)
+        .map_err(|error| match error {
+            crate::memory::RegionCapError::InvalidRegion
+            | crate::memory::RegionCapError::IncompleteRegion
+            | crate::memory::RegionCapError::InvalidAddress => SyscallError::InvalidArgument,
+            crate::memory::RegionCapError::PermissionDenied => SyscallError::PermissionDenied,
+            crate::memory::RegionCapError::OutOfMemory => SyscallError::OutOfMemory,
+            crate::memory::RegionCapError::NotFound => SyscallError::NotFound,
+        })?;
+
+    let cap = crate::capability::Capability {
+        id: handle_cap,
+        resource_type: crate::capability::ResourceType::MemoryRegion,
+        permissions: crate::capability::CapPermissions {
+            read: true,
+            write: true,
+            execute: true,
+            grant: true,
+            revoke: true,
+        },
+        resource: resource_id as usize,
+    };
+    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+    Ok(cap_id.as_u64())
+}
+
+/// SYS_MEM_REGION_MAP (106): map an exported region into the caller.
+pub fn sys_mem_region_map(handle: u64, addr_hint: u64, out_ptr: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+    if out_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &*task.process.capabilities.get() };
+    let cap = caps
+        .get(crate::capability::CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
+    if cap.resource_type != crate::capability::ResourceType::MemoryRegion {
+        return Err(SyscallError::BadHandle);
+    }
+
+    let requested_flags = VmaFlags {
+        readable: cap.permissions.read,
+        writable: cap.permissions.write,
+        executable: cap.permissions.execute,
+        user_accessible: true,
+    };
+    let address_space = unsafe { &*task.process.address_space.get() };
+    let (base, size) = crate::memory::memory_region_registry()
+        .map_region(cap.resource as u64, address_space, addr_hint, requested_flags)
+        .map_err(|error| match error {
+            crate::memory::RegionCapError::NotFound => SyscallError::NotFound,
+            crate::memory::RegionCapError::InvalidRegion
+            | crate::memory::RegionCapError::IncompleteRegion
+            | crate::memory::RegionCapError::InvalidAddress => SyscallError::InvalidArgument,
+            crate::memory::RegionCapError::PermissionDenied => SyscallError::PermissionDenied,
+            crate::memory::RegionCapError::OutOfMemory => SyscallError::OutOfMemory,
+        })?;
+
+    let user = crate::memory::UserSliceWrite::new(out_ptr, core::mem::size_of::<u64>())?;
+    user.copy_from(&base.to_ne_bytes());
+    Ok(size)
+}
+
+/// SYS_MEM_REGION_INFO (107): query metadata about an exported region.
+pub fn sys_mem_region_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+    if out_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &*task.process.capabilities.get() };
+    let cap = caps
+        .get(crate::capability::CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
+    if cap.resource_type != crate::capability::ResourceType::MemoryRegion {
+        return Err(SyscallError::BadHandle);
+    }
+
+    let info = crate::memory::memory_region_registry()
+        .info(cap.resource as u64)
+        .ok_or(SyscallError::NotFound)?;
+    let abi = MemoryRegionInfoAbi {
+        size: info.size,
+        page_size: info.page_size.bytes(),
+        flags: vma_flags_to_prot(info.flags),
+        _reserved: 0,
+    };
+    let user = crate::memory::UserSliceWrite::new(out_ptr, core::mem::size_of::<MemoryRegionInfoAbi>())?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &abi as *const MemoryRegionInfoAbi as *const u8,
+            core::mem::size_of::<MemoryRegionInfoAbi>(),
+        )
+    };
+    user.copy_from(bytes);
     Ok(0)
 }
 

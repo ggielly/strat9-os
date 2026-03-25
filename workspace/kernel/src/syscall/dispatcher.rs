@@ -158,6 +158,9 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_BRK => super::mmap::sys_brk(arg1),
         SYS_MREMAP => super::mmap::sys_mremap(arg1, arg2, arg3, arg4),
         SYS_MPROTECT => super::mmap::sys_mprotect(arg1, arg2, arg3),
+        SYS_MEM_REGION_EXPORT => super::mmap::sys_mem_region_export(arg1),
+        SYS_MEM_REGION_MAP => super::mmap::sys_mem_region_map(arg1, arg2, arg3),
+        SYS_MEM_REGION_INFO => super::mmap::sys_mem_region_info(arg1, arg2),
 
         SYS_PROC_EXIT => sys_proc_exit(arg1),
         SYS_PROC_YIELD => sys_proc_yield(),
@@ -374,6 +377,13 @@ fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
         .duplicate(CapId::from_raw(handle))
         .ok_or(SyscallError::PermissionDenied)?;
     let id = caps.insert(dup);
+    if let Some(cap) = caps.get(id) {
+        if cap.resource_type == ResourceType::MemoryRegion {
+            crate::memory::memory_region_registry()
+                .retain_handle(cap.resource as u64, id)
+                .map_err(|_| SyscallError::BadHandle)?;
+        }
+    }
     Ok(id.as_u64())
 }
 
@@ -534,6 +544,13 @@ fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
     let target = crate::process::get_task_by_pid(pid).ok_or(SyscallError::NotFound)?;
     let target_caps = unsafe { &mut *target.process.capabilities.get() };
     let new_id = target_caps.insert(granted);
+    if let Some(cap) = target_caps.get(new_id) {
+        if cap.resource_type == ResourceType::MemoryRegion {
+            crate::memory::memory_region_registry()
+                .retain_handle(cap.resource as u64, new_id)
+                .map_err(|_| SyscallError::BadHandle)?;
+        }
+    }
     Ok(new_id.as_u64())
 }
 

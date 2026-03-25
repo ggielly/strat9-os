@@ -861,24 +861,26 @@ impl AddressSpace {
         self.map_shared_frames_with_cap_ids(start, frame_phys_addrs, None, flags, vma_type)
     }
 
-    /// Maps shared frames with optional stable mapping identities.
-    pub fn map_shared_frames_with_cap_ids(
+    /// Maps shared physical blocks with optional stable mapping identities.
+    pub fn map_shared_handles_with_cap_ids(
         &self,
         start: u64,
-        frame_phys_addrs: &[u64],
+        handles: &[BlockHandle],
         mapping_cap_ids: Option<&[CapId]>,
         flags: VmaFlags,
         vma_type: VmaType,
+        page_size: VmaPageSize,
     ) -> Result<(), &'static str> {
-        let page_count = frame_phys_addrs.len();
-        if page_count == 0 || start % 4096 != 0 {
+        let page_count = handles.len();
+        let page_bytes = page_size.bytes();
+        if page_count == 0 || start % page_bytes != 0 {
             return Err("Invalid shared region arguments");
         }
         if mapping_cap_ids.is_some_and(|cap_ids| cap_ids.len() != page_count) {
             return Err("Shared mapping identity count mismatch");
         }
         let len = (page_count as u64)
-            .checked_mul(4096)
+            .checked_mul(page_bytes)
             .ok_or("Shared region length overflow")?;
         let end = start.checked_add(len).ok_or("Shared region end overflow")?;
         const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
@@ -897,70 +899,129 @@ impl AddressSpace {
             }
         }
 
-        let page_flags = flags.to_page_flags();
+        let mut page_flags = flags.to_page_flags();
+        if page_size == VmaPageSize::Huge {
+            page_flags |= PageTableFlags::HUGE_PAGE;
+        }
         let mut frame_allocator = BuddyFrameAllocator;
         let mut mapper = unsafe { self.mapper() };
         let mut mapped_pages = 0usize;
 
-        for (i, phys_addr) in frame_phys_addrs.iter().copied().enumerate() {
+        for (index, handle) in handles.iter().copied().enumerate() {
             let page_addr = start
-                .checked_add((i as u64) * 4096)
+                .checked_add((index as u64) * page_bytes)
                 .ok_or("Shared page address overflow")?;
-            let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
-                .map_err(|_| "Map shared: invalid page address")?;
-            let frame = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys_addr));
 
-            let map_ok = unsafe {
-                mapper
-                    .map_to(page, frame, page_flags, &mut frame_allocator)
-                    .map(|flush| flush.flush())
-                    .is_ok()
+            let map_ok = match page_size {
+                VmaPageSize::Small => {
+                    let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                        .map_err(|_| "Map shared: invalid 4K page address")?;
+                    let frame = X86PhysFrame::<Size4KiB>::containing_address(handle.base);
+                    unsafe {
+                        mapper
+                            .map_to(page, frame, page_flags, &mut frame_allocator)
+                            .map(|flush| flush.flush())
+                            .is_ok()
+                    }
+                }
+                VmaPageSize::Huge => {
+                    let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
+                        .map_err(|_| "Map shared: invalid 2M page address")?;
+                    let frame = X86PhysFrame::<Size2MiB>::containing_address(handle.base);
+                    unsafe {
+                        mapper
+                            .map_to(page, frame, page_flags, &mut frame_allocator)
+                            .map(|flush| flush.flush())
+                            .is_ok()
+                    }
+                }
             };
 
             if !map_ok {
-                for j in (0..mapped_pages).rev() {
-                    let rb_addr = start + (j as u64) * 4096;
-                    if let Ok(rb_page) =
-                        Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
-                    {
-                        if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
-                            rb_flush.flush();
-                            let handle = self
-                                .unregister_effective_mapping(rb_addr)
-                                .map(|mapping| mapping.handle)
-                                .unwrap_or_else(|| resolve_handle(rb_frame.start_address()));
-                            crate::memory::cow::handle_dec_ref(handle);
+                for rollback in (0..mapped_pages).rev() {
+                    let rb_addr = start + (rollback as u64) * page_bytes;
+                    match page_size {
+                        VmaPageSize::Small => {
+                            if let Ok(rb_page) =
+                                Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
+                            {
+                                if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                                    rb_flush.flush();
+                                    let handle = self
+                                        .unregister_effective_mapping(rb_addr)
+                                        .map(|mapping| mapping.handle)
+                                        .unwrap_or_else(|| resolve_handle(rb_frame.start_address()));
+                                    crate::memory::cow::handle_dec_ref(handle);
+                                }
+                            }
+                        }
+                        VmaPageSize::Huge => {
+                            if let Ok(rb_page) =
+                                Page::<Size2MiB>::from_start_address(VirtAddr::new(rb_addr))
+                            {
+                                if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                                    rb_flush.flush();
+                                    let handle = self
+                                        .unregister_effective_mapping(rb_addr)
+                                        .map(|mapping| mapping.handle)
+                                        .unwrap_or_else(|| resolve_handle(rb_frame.start_address()));
+                                    crate::memory::cow::handle_dec_ref(handle);
+                                }
+                            }
                         }
                     }
                 }
                 return Err("Failed to map shared page");
             }
 
-            crate::memory::cow::handle_inc_ref(resolve_handle(PhysAddr::new(phys_addr)));
+            crate::memory::cow::handle_inc_ref(handle);
             self.register_effective_mapping(EffectiveMapping {
                 start: page_addr,
                 cap_id: mapping_cap_ids
-                    .and_then(|cap_ids| cap_ids.get(i).copied())
+                    .and_then(|cap_ids| cap_ids.get(index).copied())
                     .unwrap_or_else(allocate_mapping_cap_id),
-                handle: resolve_handle(PhysAddr::new(phys_addr)),
+                handle,
                 flags: page_flags,
-                page_size: VmaPageSize::Small,
+                page_size,
             });
             mapped_pages += 1;
         }
 
-        let mut regions = self.regions.lock();
-        regions.insert(
+        self.regions.lock().insert(
             start,
             VirtualMemoryRegion {
                 start,
                 page_count,
                 flags,
                 vma_type,
-                page_size: VmaPageSize::Small,
+                page_size,
             },
         );
         Ok(())
+    }
+
+    /// Maps shared frames with optional stable mapping identities.
+    pub fn map_shared_frames_with_cap_ids(
+        &self,
+        start: u64,
+        frame_phys_addrs: &[u64],
+        mapping_cap_ids: Option<&[CapId]>,
+        flags: VmaFlags,
+        vma_type: VmaType,
+    ) -> Result<(), &'static str> {
+        let handles = frame_phys_addrs
+            .iter()
+            .copied()
+            .map(|phys_addr| resolve_handle(PhysAddr::new(phys_addr)))
+            .collect::<Vec<_>>();
+        self.map_shared_handles_with_cap_ids(
+            start,
+            &handles,
+            mapping_cap_ids,
+            flags,
+            vma_type,
+            VmaPageSize::Small,
+        )
     }
 
     /// Unmap a previously mapped region and free the backing frames.
