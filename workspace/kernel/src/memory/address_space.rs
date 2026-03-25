@@ -25,8 +25,8 @@ use crate::{
     capability::CapId,
     memory::{
         allocate_mapping_cap_id, mapping_index, paging::BuddyFrameAllocator,
-        register_mapping_identity, unregister_mapping_identity, MappingRef, resolve_handle,
-        BlockHandle,
+        register_mapping_identity, resolve_handle, unregister_mapping_identity, BlockHandle,
+        MappingRef,
     },
     process::task::Pid,
     sync::SpinLock,
@@ -271,7 +271,10 @@ impl AddressSpace {
 
     /// Registers an effective mapping in the address space tracking table.
     pub fn register_effective_mapping(&self, mapping: EffectiveMapping) {
-        let replaced = self.effective_mappings.lock().insert(mapping.start, mapping);
+        let replaced = self
+            .effective_mappings
+            .lock()
+            .insert(mapping.start, mapping);
         if let Some(previous) = replaced {
             unregister_mapping_identity(previous.handle, previous.cap_id);
             if let Some(pid) = self.owner_pid() {
