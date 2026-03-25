@@ -919,17 +919,18 @@ impl Task {
         }))
     }
 
-    /// Reset all signal handlers to SIG_DFL (default).
+    /// Reset signal handlers during execve.
     ///
-    /// Called during execve to reset signal handlers as per POSIX:
-    /// handlers set to catch signals are reset to SIG_DFL, but SIG_IGN
-    /// remains ignored (implementation simplification: we reset all).
+    /// POSIX requires handlers installed by userspace to revert to SIG_DFL on
+    /// exec, while dispositions already set to SIG_IGN remain ignored.
     pub fn reset_signals(&self) {
         // SAFETY: We have a valid reference to the task.
         unsafe {
             let actions = &mut *self.process.signal_actions.get();
             for action in actions.iter_mut() {
-                *action = super::signal::SigActionData::default();
+                if !action.is_ignore() {
+                    *action = super::signal::SigActionData::default();
+                }
             }
         }
     }

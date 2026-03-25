@@ -175,6 +175,11 @@ pub fn sys_execve(
     // 2. Reset all signal handlers to SIG_DFL
     current.reset_signals();
 
+    // 2b. POSIX: exec disables the alternate signal stack for the new image.
+    unsafe {
+        *current.signal_stack.get() = None;
+    }
+
     // 3. Clear thread-local storage address and TID pointer : POSIX exec semantics.
     current
         .clear_child_tid

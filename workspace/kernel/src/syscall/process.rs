@@ -5,8 +5,7 @@
 use super::{error::SyscallError, SyscallFrame};
 use crate::process::{
     block_current_task, create_session, current_pgid, current_task_clone, current_task_id,
-    current_tid, get_parent_pid, get_pgid_by_pid, get_sid_by_pid,
-    get_child_task_id_by_tid,
+    current_tid, get_child_task_id_by_tid, get_parent_pid, get_pgid_by_pid, get_sid_by_pid,
     scheduler::add_task_with_parent,
     set_process_group,
     task::{CpuContext, ExtendedState, KernelStack, SyncUnsafeCell, Task},
