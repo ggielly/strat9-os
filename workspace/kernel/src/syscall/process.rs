@@ -47,6 +47,8 @@ extern "C" fn thread_child_start(ctx_ptr: u64) -> ! {
 #[unsafe(naked)]
 unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
     core::arch::naked_asm!(
+        // Mask IRQs before touching GS. The user RFLAGS frame re-enables IF.
+        "cli",
         "mov rsi, rdi",
         // Build iret frame: SS, RSP, RFLAGS, CS, RIP
         "mov r8, [rsi + {off_user_ss}]",
@@ -63,6 +65,7 @@ unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
         "mov rdi, [rsi + {off_arg0}]",
         // Child thread returns 0 if entry routine ever reads rax.
         "xor rax, rax",
+        "swapgs",
         "iretq",
         off_entry = const THREAD_OFF_ENTRY,
         off_stack_top = const THREAD_OFF_STACK_TOP,

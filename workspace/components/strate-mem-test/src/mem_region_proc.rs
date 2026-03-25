@@ -348,7 +348,8 @@ fn child_main(parent_to_child_read: usize, child_to_parent_write: usize) -> ! {
         child_abort(66, "mem_region_map(granted) failed");
     }
 
-    let child_slice = unsafe { core::slice::from_raw_parts_mut(mapped_addr as *mut u8, REGION_LEN) };
+    let child_slice =
+        unsafe { core::slice::from_raw_parts_mut(mapped_addr as *mut u8, REGION_LEN) };
     if child_slice[0] != expected_seed(0)
         || child_slice[17] != expected_seed(17)
         || child_slice[PAGE_SIZE] != expected_seed(PAGE_SIZE)
@@ -466,7 +467,11 @@ fn run_suite(ctx: &mut Ctx) {
     };
     seed_region(source);
 
-    let handle = match check_ok(ctx, "mem_region_export(source)", call::mem_region_export(source)) {
+    let handle = match check_ok(
+        ctx,
+        "mem_region_export(source)",
+        call::mem_region_export(source),
+    ) {
         Some(value) => value,
         None => return,
     };
@@ -476,7 +481,13 @@ fn run_suite(ctx: &mut Ctx) {
         permissions: 0,
         resource: 0,
     };
-    if check_ok(ctx, "handle_info(parent region)", call::handle_info(handle, &mut handle_info)).is_some() {
+    if check_ok(
+        ctx,
+        "handle_info(parent region)",
+        call::handle_info(handle, &mut handle_info),
+    )
+    .is_some()
+    {
         log_handle_info("parent-original", &handle_info);
     }
 
@@ -486,7 +497,13 @@ fn run_suite(ctx: &mut Ctx) {
         flags: 0,
         _reserved: 0,
     };
-    if check_ok(ctx, "mem_region_info(parent region)", call::mem_region_info(handle, &mut region_info)).is_some() {
+    if check_ok(
+        ctx,
+        "mem_region_info(parent region)",
+        call::mem_region_info(handle, &mut region_info),
+    )
+    .is_some()
+    {
         log_region_info("parent-original", &region_info);
     }
 
@@ -499,7 +516,11 @@ fn run_suite(ctx: &mut Ctx) {
         None => return,
     };
 
-    if let Some(value) = check_ok(ctx, "send granted handle to child", send_u64(parent_to_child_write, granted_handle as u64).map(|_| 0)) {
+    if let Some(value) = check_ok(
+        ctx,
+        "send granted handle to child",
+        send_u64(parent_to_child_write, granted_handle as u64).map(|_| 0),
+    ) {
         let _ = value;
     } else {
         return;
@@ -520,8 +541,20 @@ fn run_suite(ctx: &mut Ctx) {
         }
     }
 
-    verify_byte(ctx, "child write A visible in parent", source, OFF_CHILD_A, VAL_CHILD_A);
-    verify_byte(ctx, "child write B visible in parent", source, OFF_CHILD_B, VAL_CHILD_B);
+    verify_byte(
+        ctx,
+        "child write A visible in parent",
+        source,
+        OFF_CHILD_A,
+        VAL_CHILD_A,
+    );
+    verify_byte(
+        ctx,
+        "child write B visible in parent",
+        source,
+        OFF_CHILD_B,
+        VAL_CHILD_B,
+    );
 
     unsafe {
         core::ptr::write_volatile((source + OFF_PARENT_A) as *mut u8, VAL_PARENT_A);
@@ -529,7 +562,11 @@ fn run_suite(ctx: &mut Ctx) {
     }
     ok(ctx, "parent wrote reply markers", VAL_PARENT_B as usize);
 
-    if let Some(value) = check_ok(ctx, "send stage2 go", send_u8(parent_to_child_write, MSG_STAGE2_GO).map(|_| 0)) {
+    if let Some(value) = check_ok(
+        ctx,
+        "send stage2 go",
+        send_u8(parent_to_child_write, MSG_STAGE2_GO).map(|_| 0),
+    ) {
         let _ = value;
     } else {
         return;
@@ -583,7 +620,11 @@ fn run_suite(ctx: &mut Ctx) {
         None => return,
     }
 
-    let _ = check_ok(ctx, "handle_close(parent region)", call::handle_close(handle));
+    let _ = check_ok(
+        ctx,
+        "handle_close(parent region)",
+        call::handle_close(handle),
+    );
     check_expect_err(
         ctx,
         "handle_info(parent region after close)",

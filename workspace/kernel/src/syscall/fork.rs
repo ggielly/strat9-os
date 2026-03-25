@@ -88,6 +88,8 @@ extern "C" fn fork_child_start(ctx_ptr: u64) -> ! {
 #[unsafe(naked)]
 unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
     core::arch::naked_asm!(
+        // Mask IRQs before touching GS. The user RFLAGS frame re-enables IF.
+        "cli",
         "mov rsi, rdi",
 
         // ===== Build IRET frame FIRST, using r8 as scratch ===========
@@ -119,6 +121,7 @@ unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
         "mov rdi, [rsi + {off_rdi}]",
         "mov rax, 0",                         // child fork() returns 0
         "mov rsi, [rsi + {off_rsi}]",         // rsi restored last
+        "swapgs",
         "iretq",
         off_r15 = const OFF_R15,
         off_r14 = const OFF_R14,
