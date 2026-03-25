@@ -1,61 +1,11 @@
-stages:
-  - build
-  - release
-
-variables:
-  GIT_DEPTH: "0"
-
-build-docs:
-  stage: build
-  before_script:
-    - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
-    - rustup component add rust-src llvm-tools-preview
-    - if ! command -v mdbook &> /dev/null; then cargo install mdbook --no-default-features --features search; fi
-  script:
-    - bash tools/scripts/build-docs-site.sh
-  artifacts:
-    paths:
-      - build/docs-site
-
-build-os-release:
-  stage: build
-  before_script:
-    # Sudo is required here ONLY if the runner isn't run as root and the tools aren't already installed:
-    # - sudo apt-get update && sudo apt-get install -y xorriso mtools
-    - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
-    - rustup component add rust-src llvm-tools-preview
-    - rustup target add x86_64-unknown-none
-    - if ! command -v cargo-make &> /dev/null; then cargo install cargo-make; fi
-  script:
-    - cargo make limine-image-release
-  artifacts:
-    paths:
-      - build/strat9-os.iso
-      - build/strat9-os.img
-    expire_in: 12 week
-
-release-latest:
-  stage: release
-  needs: [build-os-release]
-  only:
-    - main
+fix-mirror-ssh-keys:
+  stage: .pre
   script:
     - |
-      ISO_URL="${CI_PROJECT_URL}/-/jobs/artifacts/main/raw/build/strat9-os.iso?job=build-os-release"
-      IMG_URL="${CI_PROJECT_URL}/-/jobs/artifacts/main/raw/build/strat9-os.img?job=build-os-release"
-      curl --silent --request DELETE \
-        --header "PRIVATE-TOKEN: ${GITLAB_RELEASE_TOKEN}" \
-        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/latest" || true
-      curl --silent --request DELETE \
-        --header "PRIVATE-TOKEN: ${GITLAB_RELEASE_TOKEN}" \
-        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/repository/tags/lat2est" || true
-      curl --silent --fail --request POST \
-        --header "PRIVATE-TOKEN: ${GITLAB_RELEASE_TOKEN}" \
+      curl --request PUT \
+        --header "PRIVATE-TOKEN: glpat-nyeE7BzumU2ezD0Ye3wDGW86MQp1OjIH.01.0w0auxh7a" \
         --header "Content-Type: application/json" \
-        --data "{\"tag_name\": \"latest\", \"ref\": \"${CI_COMMIT_SHA}\"}" \
-        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/repository/tags"
-      curl --silent --fail --request POST \
-        --header "PRIVATE-TOKEN: ${GITLAB_RELEASE_TOKEN}" \
-        --header "Content-Type: application/json" \
-        --data "{\"name\": \"Latest build (pipeline ${CI_PIPELINE_ID})\", \"tag_name\": \"latest\", \"description\": \"Pipeline ${CI_PIPELINE_ID} - ${CI_COMMIT_SHORT_SHA}\", \"assets\": {\"links\": [{\"name\": \"strat9-os.iso\", \"url\": \"${ISO_URL}\", \"link_type\": \"other\"}, {\"name\": \"strat9-os.img\", \"url\": \"${IMG_URL}\", \"link_type\": \"other\"}]}}" \
-        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases"
+        --data '{"ssh_known_hosts":"github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\ngithub.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=\ngithub.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SFbyWOLlVmMfZ/iz9OwHPAGVYDs39vinUFNWRgEhAiMkwGba7RcKGLbkFkZJhacksQ0QF2Dq3bJGa7pCFYMRBDvKS1Vfv8hRTWDaSnJ6aJCFIBtMzWnGo72pVwoFBMDAsWp0g64o09sASoP0QIDAQAB"}' \
+        "http://localhost/api/v4/projects/strat9-os%2Fstrat9-os/remote_mirrors/5"
+  tags:
+    - Cpl-j4jp
