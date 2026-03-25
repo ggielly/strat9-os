@@ -20,7 +20,10 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 
-use crate::{memory::paging::BuddyFrameAllocator, sync::SpinLock};
+use crate::{
+    memory::{paging::BuddyFrameAllocator, resolve_handle, BlockHandle},
+    sync::SpinLock,
+};
 
 /// Flags describing permissions for a virtual memory region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +98,19 @@ pub struct VirtualMemoryRegion {
     pub page_size: VmaPageSize,
 }
 
+/// An effective mapping currently installed in the page tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveMapping {
+    /// Start virtual address of the mapping.
+    pub start: u64,
+    /// Physical block currently backing this mapping.
+    pub handle: BlockHandle,
+    /// Hardware page-table flags currently installed for this mapping.
+    pub flags: PageTableFlags,
+    /// Page size of the mapping.
+    pub page_size: VmaPageSize,
+}
+
 /// A per-process address space backed by a PML4 page table.
 ///
 /// Kernel tasks share a single `AddressSpace` (the kernel AS).
@@ -109,6 +125,8 @@ pub struct AddressSpace {
     is_kernel: bool,
     /// Tracked virtual memory regions (key = start address).
     regions: SpinLock<BTreeMap<u64, VirtualMemoryRegion>>,
+    /// Tracked effective mappings (key = mapping start address).
+    effective_mappings: SpinLock<BTreeMap<u64, EffectiveMapping>>,
 }
 
 // SAFETY: AddressSpace is protected by the scheduler lock and per-task ownership.
@@ -136,6 +154,7 @@ impl AddressSpace {
             l4_table_virt,
             is_kernel: true,
             regions: SpinLock::new(BTreeMap::new()),
+            effective_mappings: SpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -233,7 +252,48 @@ impl AddressSpace {
             l4_table_virt: new_l4_virt,
             is_kernel: false,
             regions: SpinLock::new(BTreeMap::new()),
+            effective_mappings: SpinLock::new(BTreeMap::new()),
         })
+    }
+
+    /// Registers an effective mapping in the address space tracking table.
+    pub fn register_effective_mapping(&self, mapping: EffectiveMapping) {
+        self.effective_mappings
+            .lock()
+            .insert(mapping.start, mapping);
+    }
+
+    /// Removes an effective mapping from the address space tracking table.
+    pub fn unregister_effective_mapping(&self, start: u64) -> Option<EffectiveMapping> {
+        self.effective_mappings.lock().remove(&start)
+    }
+
+    /// Updates the hardware flags recorded for an effective mapping.
+    pub fn update_effective_mapping_flags(&self, start: u64, flags: PageTableFlags) -> bool {
+        if let Some(mapping) = self.effective_mappings.lock().get_mut(&start) {
+            mapping.flags = flags;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the effective mapping that starts exactly at `start`.
+    pub fn effective_mapping_by_start(&self, start: u64) -> Option<EffectiveMapping> {
+        self.effective_mappings.lock().get(&start).copied()
+    }
+
+    /// Returns the effective mapping covering `addr`, if any.
+    pub fn effective_mapping_containing(&self, addr: u64) -> Option<EffectiveMapping> {
+        let mappings = self.effective_mappings.lock();
+        if let Some(mapping) = mappings.get(&(addr & !(VmaPageSize::Small.bytes() - 1))) {
+            if mapping.page_size == VmaPageSize::Small {
+                return Some(*mapping);
+            }
+        }
+        mappings
+            .get(&(addr & !(VmaPageSize::Huge.bytes() - 1)))
+            .copied()
     }
 
     /// Construct a temporary `OffsetPageTable` mapper for this address space.
@@ -467,6 +527,13 @@ impl AddressSpace {
             }
         }
 
+        self.register_effective_mapping(EffectiveMapping {
+            start: page_addr,
+            handle: resolve_handle(frame.start_address),
+            flags: page_flags,
+            page_size: vma.page_size,
+        });
+
         // Initialize COW refcount.
         //
         // Order-0 frames come from FrameAllocOptions which stamps refcount=1
@@ -618,6 +685,7 @@ impl AddressSpace {
                                     .map_err(|_| "Rollback: invalid 4K page address")?;
                             if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
                                 rb_flush.flush();
+                                let _ = self.unregister_effective_mapping(rb_addr);
                                 crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
                                     start_address: rb_frame.start_address(),
                                 });
@@ -630,6 +698,7 @@ impl AddressSpace {
                                     .map_err(|_| "Rollback: invalid 2M page address")?;
                             if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
                                 rb_flush.flush();
+                                let _ = self.unregister_effective_mapping(rb_addr);
                                 crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
                                     start_address: rb_frame.start_address(),
                                 });
@@ -646,6 +715,17 @@ impl AddressSpace {
             if order != 0 {
                 crate::memory::frame::get_meta(frame.start_address).set_refcount(1);
             }
+
+            let effective_flags = match page_size {
+                VmaPageSize::Small => page_flags,
+                VmaPageSize::Huge => page_flags | PageTableFlags::HUGE_PAGE,
+            };
+            self.register_effective_mapping(EffectiveMapping {
+                start: page_addr,
+                handle: resolve_handle(frame.start_address),
+                flags: effective_flags,
+                page_size,
+            });
 
             mapped_pages += 1;
         }
@@ -741,6 +821,7 @@ impl AddressSpace {
                     {
                         if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
                             rb_flush.flush();
+                            let _ = self.unregister_effective_mapping(rb_addr);
                             crate::memory::cow::frame_dec_ref(crate::memory::PhysFrame {
                                 start_address: rb_frame.start_address(),
                             });
@@ -752,6 +833,12 @@ impl AddressSpace {
 
             crate::memory::cow::frame_inc_ref(crate::memory::PhysFrame {
                 start_address: PhysAddr::new(phys_addr),
+            });
+            self.register_effective_mapping(EffectiveMapping {
+                start: page_addr,
+                handle: resolve_handle(PhysAddr::new(phys_addr)),
+                flags: page_flags,
+                page_size: VmaPageSize::Small,
             });
             mapped_pages += 1;
         }
@@ -809,6 +896,7 @@ impl AddressSpace {
             let phys_frame = crate::memory::PhysFrame {
                 start_address: frame_addr,
             };
+            let _ = self.unregister_effective_mapping(page_addr);
             crate::memory::cow::frame_dec_ref(phys_frame);
         }
 
@@ -1006,6 +1094,7 @@ impl AddressSpace {
                                 .update_flags(page, new_pt_flags)
                                 .map(|f| f.ignore())
                                 .map_err(|_| "protect_range: update 4K flags failed")?;
+                            let _ = self.update_effective_mapping_flags(page_addr, new_pt_flags);
                         }
                         VmaPageSize::Huge => {
                             let mut huge_flags = new_pt_flags;
@@ -1017,6 +1106,7 @@ impl AddressSpace {
                                 .update_flags(page, huge_flags)
                                 .map(|f| f.ignore())
                                 .map_err(|_| "protect_range: update 2M flags failed")?;
+                            let _ = self.update_effective_mapping_flags(page_addr, huge_flags);
                         }
                     }
                 }
@@ -1170,6 +1260,7 @@ impl AddressSpace {
                 let phys = crate::memory::PhysFrame {
                     start_address: frame_addr,
                 };
+                let _ = self.unregister_effective_mapping(page_addr);
                 crate::memory::cow::frame_dec_ref(phys);
                 page_addr += page_bytes;
             }
@@ -1219,6 +1310,19 @@ impl AddressSpace {
         // SAFETY: Read-only access to the page tables.
         let mapper = unsafe { self.mapper() };
         mapper.translate_addr(vaddr)
+    }
+
+    /// Translate a virtual address to the current block handle and page-table flags.
+    pub fn translate_to_handle(&self, vaddr: VirtAddr) -> Option<(BlockHandle, PageTableFlags)> {
+        // SAFETY: Read-only access to the page tables.
+        let mapper = unsafe { self.mapper() };
+        let translated = mapper.translate(vaddr);
+        match translated {
+            TranslateResult::Mapped { frame, flags, .. } => {
+                Some((resolve_handle(frame.start_address()), flags))
+            }
+            TranslateResult::NotMapped | TranslateResult::InvalidFrameAddress(_) => None,
+        }
     }
 
     /// Get the physical address of this address space's PML4 table.
@@ -1367,6 +1471,7 @@ impl AddressSpace {
                                 return Err(e);
                             }
                         }
+                        let _ = self.update_effective_mapping_flags(vaddr.as_u64(), new_flags);
                         tlb_flush_needed = true;
                     }
 
@@ -1438,12 +1543,20 @@ impl AddressSpace {
                                     }
                                 };
                                 if unmapped {
+                                    let _ = child.unregister_effective_mapping(vaddr.as_u64());
                                     crate::memory::cow::frame_dec_ref(phys);
                                 }
                                 return Err(e);
                             }
                         }
                     }
+
+                    child.register_effective_mapping(EffectiveMapping {
+                        start: vaddr.as_u64(),
+                        handle: resolve_handle(phys_frame_addr),
+                        flags: new_flags,
+                        page_size: region.page_size,
+                    });
 
                     processed_pages.push((vaddr.as_u64(), flags, phys, region.page_size));
                 }
@@ -1474,6 +1587,7 @@ impl AddressSpace {
                             }
                         };
                     }
+                    let _ = self.update_effective_mapping_flags(vaddr, original_flags);
                 }
                 crate::memory::cow::frame_dec_ref(phys);
             }

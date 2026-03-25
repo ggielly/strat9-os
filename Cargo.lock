@@ -1194,6 +1194,7 @@ dependencies = [
  "nic-queues",
  "num_enum",
  "ratatui",
+ "smallvec",
  "spin 0.10.0",
  "static_assertions",
  "strat9-abi",

@@ -1,11 +1,15 @@
 // Memory management module
 
 pub mod address_space;
+pub mod block;
+pub mod block_meta;
 pub mod boot_alloc;
 pub mod buddy;
 pub mod cow;
 pub mod frame;
 pub mod heap;
+pub mod mapping_index;
+pub mod ownership;
 pub mod paging;
 pub mod userslice;
 pub mod zone;
@@ -52,9 +56,17 @@ pub fn init_cow_subsystem(_memory_regions: &[MemoryRegion]) {}
 
 // Re-exports
 pub use crate::sync::with_irqs_disabled;
-pub use address_space::{kernel_address_space, AddressSpace, VmaFlags, VmaPageSize, VmaType};
+pub use address_space::{
+    kernel_address_space, AddressSpace, EffectiveMapping, VmaFlags, VmaPageSize, VmaType,
+};
+pub use block::{
+    BlockHandle, BuddyReserved, Exclusive, MappedExclusive, MappedShared, PhysBlock, Released,
+};
+pub use block_meta::{get_block_meta, resolve_handle};
 pub use buddy::get_allocator;
 pub use frame::{AllocError, FrameAllocOptions, FrameAllocator, FramePurpose, PhysFrame};
+pub use mapping_index::{MappingIndex, MappingRef};
+pub use ownership::{BlockState, OwnerEntry, OwnerError, OwnershipTable, RemoveRefResult};
 pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSliceWrite};
 
 /// Allocate `2^order` contiguous physical frames (raw, no zeroing).
