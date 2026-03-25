@@ -324,6 +324,14 @@ impl AddressSpace {
         self.effective_mappings.lock().get(&start).copied()
     }
 
+    /// Unmaps the effective mapping that starts at `start`.
+    pub fn unmap_effective_mapping(&self, start: u64) -> Result<(), &'static str> {
+        let mapping = self
+            .effective_mapping_by_start(start)
+            .ok_or("Mapping not found")?;
+        self.unmap_range(start, mapping.page_size.bytes())
+    }
+
     /// Returns the effective mapping covering `addr`, if any.
     pub fn effective_mapping_containing(&self, addr: u64) -> Option<EffectiveMapping> {
         let mappings = self.effective_mappings.lock();
@@ -850,9 +858,24 @@ impl AddressSpace {
         flags: VmaFlags,
         vma_type: VmaType,
     ) -> Result<(), &'static str> {
+        self.map_shared_frames_with_cap_ids(start, frame_phys_addrs, None, flags, vma_type)
+    }
+
+    /// Maps shared frames with optional stable mapping identities.
+    pub fn map_shared_frames_with_cap_ids(
+        &self,
+        start: u64,
+        frame_phys_addrs: &[u64],
+        mapping_cap_ids: Option<&[CapId]>,
+        flags: VmaFlags,
+        vma_type: VmaType,
+    ) -> Result<(), &'static str> {
         let page_count = frame_phys_addrs.len();
         if page_count == 0 || start % 4096 != 0 {
             return Err("Invalid shared region arguments");
+        }
+        if mapping_cap_ids.is_some_and(|cap_ids| cap_ids.len() != page_count) {
+            return Err("Shared mapping identity count mismatch");
         }
         let len = (page_count as u64)
             .checked_mul(4096)
@@ -916,7 +939,9 @@ impl AddressSpace {
             crate::memory::cow::handle_inc_ref(resolve_handle(PhysAddr::new(phys_addr)));
             self.register_effective_mapping(EffectiveMapping {
                 start: page_addr,
-                cap_id: allocate_mapping_cap_id(),
+                cap_id: mapping_cap_ids
+                    .and_then(|cap_ids| cap_ids.get(i).copied())
+                    .unwrap_or_else(allocate_mapping_cap_id),
                 handle: resolve_handle(PhysAddr::new(phys_addr)),
                 flags: page_flags,
                 page_size: VmaPageSize::Small,

@@ -14,7 +14,12 @@ pub mod paging;
 pub mod userslice;
 pub mod zone;
 
-use crate::{boot::entry::MemoryRegion, capability::CapId, sync::IrqDisabledToken};
+use crate::{
+    boot::entry::MemoryRegion,
+    capability::CapId,
+    process::get_task_by_pid,
+    sync::IrqDisabledToken,
+};
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Once;
 
@@ -130,6 +135,28 @@ pub fn unregister_mapping_identity(handle: BlockHandle, cap_id: CapId) {
             );
         }
     }
+}
+
+/// Revokes every live mapping associated with `cap_id`.
+pub fn revoke_mapping_cap_id(cap_id: CapId) -> usize {
+    let mappings = mapping_index().remove_all(cap_id);
+    let mut revoked = 0usize;
+
+    for mapping in mappings {
+        let Some(task) = get_task_by_pid(mapping.pid) else {
+            continue;
+        };
+
+        let address_space = unsafe { &*task.process.address_space.get() };
+        if address_space
+            .unmap_effective_mapping(mapping.vaddr.as_u64())
+            .is_ok()
+        {
+            revoked = revoked.saturating_add(1);
+        }
+    }
+
+    revoked
 }
 
 /// Allocate `2^order` contiguous physical frames (raw, no zeroing).

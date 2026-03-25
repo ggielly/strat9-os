@@ -1,4 +1,8 @@
-use crate::{memory::PhysFrame, sync::SpinLock};
+use crate::{
+    capability::CapId,
+    memory::{allocate_mapping_cap_id, revoke_mapping_cap_id, PhysFrame},
+    sync::SpinLock,
+};
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,6 +33,7 @@ pub enum RingError {
 pub struct SharedRing {
     size: usize,
     frames: Vec<PhysFrame>,
+    mapping_cap_ids: Vec<CapId>,
 }
 
 impl SharedRing {
@@ -48,6 +53,11 @@ impl SharedRing {
             .iter()
             .map(|f| f.start_address.as_u64())
             .collect()
+    }
+
+    /// Returns stable mapping identities for every page in the ring.
+    pub fn mapping_cap_ids(&self) -> &[CapId] {
+        &self.mapping_cap_ids
     }
 }
 
@@ -108,7 +118,12 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
     }
 
     let id = RingId(NEXT_RING_ID.fetch_add(1, Ordering::Relaxed));
-    let ring = Arc::new(SharedRing { size, frames });
+    let mapping_cap_ids = (0..page_count).map(|_| allocate_mapping_cap_id()).collect();
+    let ring = Arc::new(SharedRing {
+        size,
+        frames,
+        mapping_cap_ids,
+    });
 
     let mut reg = RINGS.lock();
     ensure_registry(&mut *reg);
@@ -150,6 +165,11 @@ pub fn destroy_ring(id: RingId) -> Result<(), RingError> {
     }
     crate::serial_println!("[ipc] destroy_ring(id={}) map.len={}", id.as_u64(), len);
 
-    map.remove(&id).ok_or(RingError::NotFound)?;
+    let ring = map.remove(&id).ok_or(RingError::NotFound)?;
+    drop(reg);
+
+    for &cap_id in ring.mapping_cap_ids() {
+        let _ = revoke_mapping_cap_id(cap_id);
+    }
     Ok(())
 }

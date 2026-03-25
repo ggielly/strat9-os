@@ -1060,6 +1060,7 @@ pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     }
 
     unsafe {
+        (&mut *task.process.fd_table.get()).close_all();
         (&mut *task.process.capabilities.get()).revoke_all();
     }
 

@@ -1627,6 +1627,7 @@ fn sys_ipc_ring_map(ring: u64, _out_ptr: u64) -> Result<u64, SyscallError> {
     let ring_id = RingId::from_u64(cap.resource as u64);
     let ring_obj = shared_ring::get_ring(ring_id).ok_or(SyscallError::BadHandle)?;
     let frame_phys_addrs = ring_obj.frame_phys_addrs();
+    let mapping_cap_ids = ring_obj.mapping_cap_ids().to_vec();
     let page_count = ring_obj.page_count();
     let map_size = page_count
         .checked_mul(4096)
@@ -1642,9 +1643,10 @@ fn sys_ipc_ring_map(ring: u64, _out_ptr: u64) -> Result<u64, SyscallError> {
         .ok_or(SyscallError::OutOfMemory)?;
 
     addr_space
-        .map_shared_frames(
+        .map_shared_frames_with_cap_ids(
             base,
             &frame_phys_addrs,
+            Some(&mapping_cap_ids),
             crate::memory::address_space::VmaFlags {
                 readable: true,
                 writable: true,

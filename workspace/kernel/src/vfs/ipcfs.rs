@@ -8,7 +8,7 @@ use crate::{
         shared_ring::{self, RingId},
     },
     memory::address_space::{VmaFlags, VmaPageSize, VmaType},
-    process::current_task_clone,
+    process::{current_task_clone, get_task_by_pid, Pid},
     sync::SpinLock,
     syscall::error::SyscallError,
 };
@@ -26,7 +26,7 @@ enum HandleKind {
 
 struct HandleState {
     kind: HandleKind,
-    last_map: Option<(u64, u64)>,
+    last_map: Option<(Pid, u64, u64)>,
 }
 
 pub struct IpcControlScheme {
@@ -160,7 +160,7 @@ impl Scheme for IpcControlScheme {
                     ring.size(),
                     ring.page_count()
                 );
-                if let Some((addr, size)) = state.last_map {
+                if let Some((_, addr, size)) = state.last_map {
                     line.push_str(&alloc::format!(" mapped={:#x} mapped_size={}", addr, size));
                 }
                 line.push('\n');
@@ -207,6 +207,7 @@ impl Scheme for IpcControlScheme {
                 }
                 let ring = shared_ring::get_ring(id).ok_or(SyscallError::NotFound)?;
                 let frame_phys_addrs = ring.frame_phys_addrs();
+                let mapping_cap_ids = ring.mapping_cap_ids().to_vec();
                 let page_count = ring.page_count();
                 let map_size = page_count
                     .checked_mul(4096)
@@ -216,8 +217,11 @@ impl Scheme for IpcControlScheme {
                 let addr_space = unsafe { &*task.process.address_space.get() };
 
                 // Unmap the previous mapping if any, to avoid leaking VMA space.
-                if let Some((old_base, old_size)) = state.last_map.take() {
-                    let _ = addr_space.unmap_range(old_base, old_size);
+                if let Some((old_pid, old_base, old_size)) = state.last_map.take() {
+                    if let Some(old_task) = get_task_by_pid(old_pid) {
+                        let old_as = unsafe { &*old_task.process.address_space.get() };
+                        let _ = old_as.unmap_range(old_base, old_size);
+                    }
                 }
 
                 let base = addr_space
@@ -228,9 +232,10 @@ impl Scheme for IpcControlScheme {
                     )
                     .ok_or(SyscallError::OutOfMemory)?;
                 addr_space
-                    .map_shared_frames(
+                    .map_shared_frames_with_cap_ids(
                         base,
                         &frame_phys_addrs,
+                        Some(&mapping_cap_ids),
                         VmaFlags {
                             readable: true,
                             writable: true,
@@ -240,7 +245,7 @@ impl Scheme for IpcControlScheme {
                         VmaType::Anonymous,
                     )
                     .map_err(|_| SyscallError::OutOfMemory)?;
-                state.last_map = Some((base, map_size));
+                state.last_map = Some((task.pid, base, map_size));
                 Ok(buf.len())
             }
             HandleKind::Root | HandleKind::ShmDir | HandleKind::SemDir => {
@@ -258,8 +263,8 @@ impl Scheme for IpcControlScheme {
             .ok_or(SyscallError::BadHandle)?;
 
         // Unmap shared memory that was mapped into the caller's address space.
-        if let Some((base, size)) = state.last_map {
-            if let Some(task) = current_task_clone() {
+        if let Some((pid, base, size)) = state.last_map {
+            if let Some(task) = get_task_by_pid(pid) {
                 let addr_space = unsafe { &*task.process.address_space.get() };
                 let _ = addr_space.unmap_range(base, size);
             }
