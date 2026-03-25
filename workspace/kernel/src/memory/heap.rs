@@ -251,7 +251,7 @@ unsafe impl GlobalAlloc for LockedHeap {
             );
         }
 
-        if effective <= MAX_SLAB_SIZE {
+        let result = if effective <= MAX_SLAB_SIZE {
             // --- slab path ---
             let ci = SlabState::class_index(effective);
             // Race/corruption diagnostic: log alloc when IRQs disabled (rate-limited).
@@ -304,7 +304,9 @@ unsafe impl GlobalAlloc for LockedHeap {
                 Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,
                 Err(_) => ptr::null_mut(),
             })
-        }
+        };
+
+        result
     }
 
     /// Performs the dealloc operation.
@@ -360,5 +362,54 @@ static HEAP_ALLOCATOR: LockedHeap = LockedHeap;
 /// Allocates error handler.
 #[alloc_error_handler]
 fn alloc_error_handler(layout: Layout) -> ! {
+    let effective = layout.size().max(layout.align());
+    let pages_needed = (effective.saturating_add(4095)) / 4096;
+    let order = if pages_needed == 0 {
+        0
+    } else {
+        pages_needed.next_power_of_two().trailing_zeros() as u8
+    };
+    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+    if let Some(guard) = crate::memory::buddy::get_allocator().try_lock() {
+        if let Some(alloc) = guard.as_ref() {
+            let (total_pages, allocated_pages) = alloc.page_totals();
+            crate::serial_println!(
+                "[heap][oom] cpu={} irq={} size={} align={} effective={} pages={} order={} total_pages={} allocated_pages={} free_pages={}",
+                cpu,
+                irq_enabled,
+                layout.size(),
+                layout.align(),
+                effective,
+                pages_needed,
+                order,
+                total_pages,
+                allocated_pages,
+                total_pages.saturating_sub(allocated_pages)
+            );
+        } else {
+            crate::serial_println!(
+                "[heap][oom] cpu={} irq={} size={} align={} effective={} pages={} order={} allocator=uninitialized",
+                cpu,
+                irq_enabled,
+                layout.size(),
+                layout.align(),
+                effective,
+                pages_needed,
+                order
+            );
+        }
+    } else {
+        crate::serial_println!(
+            "[heap][oom] cpu={} irq={} size={} align={} effective={} pages={} order={} allocator=locked",
+            cpu,
+            irq_enabled,
+            layout.size(),
+            layout.align(),
+            effective,
+            pages_needed,
+            order
+        );
+    }
     panic!("allocation error: {:?}", layout)
 }

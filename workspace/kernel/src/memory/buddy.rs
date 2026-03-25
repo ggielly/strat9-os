@@ -940,9 +940,16 @@ fn refill_local_cache(
                 continue;
             }
             if ret.is_none() {
+                // Re-publish the returned page as an allocated order-0 block.
+                // The refcount must stay REFCOUNT_UNUSED so FrameAllocOptions
+                // can still claim it via CAS(UNUSED -> 1).
+                BuddyAllocator::mark_block_allocated(phys, 0);
                 ret = Some(frame);
                 continue;
             }
+            // Pages parked in the local cache are logically free and must
+            // therefore carry the free-list sentinel invariant.
+            BuddyAllocator::mark_block_free(phys, 0);
             if cache.push(frame).is_ok() {
                 local_cached_inc_phys(phys);
             } else {
@@ -968,6 +975,7 @@ fn steal_from_other_caches(cpu_idx: usize) -> Option<PhysFrame> {
         let peer = (cpu_idx + step) % cpu_count;
         let mut cache = LOCAL_FRAME_CACHES[peer].lock();
         if let Some(frame) = cache.pop() {
+            BuddyAllocator::mark_block_allocated(frame.start_address.as_u64(), 0);
             local_cached_dec_phys(frame.start_address.as_u64());
             return Some(frame);
         }
@@ -981,6 +989,7 @@ fn alloc_order0_cached() -> Result<PhysFrame, AllocError> {
     {
         let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
         if let Some(frame) = cache.pop() {
+            BuddyAllocator::mark_block_allocated(frame.start_address.as_u64(), 0);
             local_cached_dec_phys(frame.start_address.as_u64());
             return Ok(frame);
         }
@@ -1010,6 +1019,7 @@ fn free_order0_cached(frame: PhysFrame) {
 
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
     let mut spill = [0u64; LOCAL_CACHE_FLUSH_BATCH];
+    BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0);
 
     let spill_len = {
         let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();

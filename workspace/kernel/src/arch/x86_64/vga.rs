@@ -15,6 +15,8 @@ use spin::Mutex;
 static VGA_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static STATUS_LAST_REFRESH_TICK: AtomicU64 = AtomicU64::new(0);
 const STATUS_REFRESH_PERIOD_TICKS: u64 = 100; // 100Hz timer => 1s
+static STATUS_LAST_IP_REFRESH_TICK: AtomicU64 = AtomicU64::new(0);
+const STATUS_IP_REFRESH_PERIOD_TICKS: u64 = 3_000; // 100Hz timer => 30s
 static PRESENTED_FRAMES: AtomicU64 = AtomicU64::new(0);
 static FPS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
 static FPS_LAST_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -3618,6 +3620,18 @@ fn draw_boot_status_line(theme: UiTheme) {
 
 /// Performs the refresh status ip from net scheme operation.
 fn refresh_status_ip_from_net_scheme() {
+    let tick = crate::process::scheduler::ticks();
+    let last = STATUS_LAST_IP_REFRESH_TICK.load(Ordering::Relaxed);
+    if tick.saturating_sub(last) < STATUS_IP_REFRESH_PERIOD_TICKS {
+        return;
+    }
+    if STATUS_LAST_IP_REFRESH_TICK
+        .compare_exchange(last, tick, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
     let paths = ["/net/address", "/net/ip"];
     for path in paths {
         let fd = match crate::vfs::open(path, crate::vfs::OpenFlags::READ) {

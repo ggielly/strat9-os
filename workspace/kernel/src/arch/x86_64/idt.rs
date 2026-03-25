@@ -619,6 +619,12 @@ extern "x86-interrupt" fn non_maskable_interrupt_handler(stack_frame: InterruptS
     // NMI can fire at any point — including the swapgs→iretq window.
     // Use rdmsr to safely restore kernel GS if needed.
     let _gs = SwapGsGuard::new(needs_swapgs(stack_frame.code_segment.0));
+    if crate::boot::panic::panic_in_progress() {
+        crate::arch::x86_64::cli();
+        loop {
+            crate::arch::x86_64::hlt();
+        }
+    }
     crate::serial_force_println!(
         "[NMI] rip={:#x} cs={:#x}",
         stack_frame.instruction_pointer.as_u64(),
