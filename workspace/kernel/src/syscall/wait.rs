@@ -35,7 +35,7 @@
 use crate::{
     memory::UserSliceWrite,
     process::{
-        block_current_task, current_task_clone, current_task_id, get_task_id_by_pid,
+        block_current_task, current_task_clone, current_task_id, get_child_task_id_by_pid,
         has_pending_signals,
         scheduler::{try_wait_child, WaitChildResult},
         TaskId,
@@ -215,7 +215,7 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
     //   pid == 0  → process-group semantics (not supported)
     //   pid < -1  → wait for group |pid| (not supported)
     let target: Option<TaskId> = if pid > 0 {
-        match get_task_id_by_pid(pid as u32) {
+        match get_child_task_id_by_pid(parent_id, pid as u32) {
             Some(t) => Some(t),
             None => return Err(SyscallError::NoChildren),
         }

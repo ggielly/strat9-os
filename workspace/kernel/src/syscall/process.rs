@@ -5,8 +5,8 @@
 use super::{error::SyscallError, SyscallFrame};
 use crate::process::{
     block_current_task, create_session, current_pgid, current_task_clone, current_task_id,
-    current_tid, get_parent_id, get_parent_pid, get_pgid_by_pid, get_sid_by_pid,
-    get_task_id_by_tid,
+    current_tid, get_parent_pid, get_pgid_by_pid, get_sid_by_pid,
+    get_child_task_id_by_tid,
     scheduler::add_task_with_parent,
     set_process_group,
     task::{CpuContext, ExtendedState, KernelStack, SyncUnsafeCell, Task},
@@ -239,10 +239,7 @@ pub fn sys_thread_join(tid: u64, status_ptr: u64, flags: u64) -> Result<u64, Sys
     }
 
     let parent_id = current_task_id().ok_or(SyscallError::Fault)?;
-    let child_id = get_task_id_by_tid(wait_tid).ok_or(SyscallError::NotFound)?;
-    if get_parent_id(child_id) != Some(parent_id) {
-        return Err(SyscallError::NotFound);
-    }
+    let child_id = get_child_task_id_by_tid(parent_id, wait_tid).ok_or(SyscallError::NotFound)?;
 
     loop {
         match crate::process::try_wait_child(parent_id, Some(child_id)) {

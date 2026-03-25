@@ -273,6 +273,33 @@ pub fn get_task_by_pid(pid: Pid) -> Option<Arc<Task>> {
     get_task_by_id(tid)
 }
 
+/// Resolve a direct child of `parent` by POSIX pid.
+///
+/// Unlike the global pid index, this remains valid after the child has called
+/// exit and before it is reaped, because the task object stays in `all_tasks`
+/// until waitpid consumes the zombie.
+pub fn get_child_task_id_by_pid(parent: TaskId, pid: Pid) -> Option<TaskId> {
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        if let Some(ref sched) = *scheduler {
+            sched.children_of.get(&parent).and_then(|children| {
+                children.iter().copied().find(|child_id| {
+                    sched
+                        .all_tasks
+                        .get(child_id)
+                        .map(|task| task.pid == pid)
+                        .unwrap_or(false)
+                })
+            })
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
 /// Resolve a POSIX tid to the corresponding internal task id.
 pub fn get_task_id_by_tid(tid: Tid) -> Option<TaskId> {
     let saved_flags = save_flags_and_cli();
@@ -284,6 +311,33 @@ pub fn get_task_id_by_tid(tid: Tid) -> Option<TaskId> {
                 .get(&tid)
                 .copied()
                 .or_else(|| sched.pid_to_task.get(&(tid as Pid)).copied())
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
+/// Resolve a direct child of `parent` by POSIX tid.
+///
+/// This remains valid for dead-but-not-yet-reaped threads because it scans the
+/// caller's child set and the retained task object instead of relying on the
+/// global tid index removed during exit.
+pub fn get_child_task_id_by_tid(parent: TaskId, tid: Tid) -> Option<TaskId> {
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        if let Some(ref sched) = *scheduler {
+            sched.children_of.get(&parent).and_then(|children| {
+                children.iter().copied().find(|child_id| {
+                    sched
+                        .all_tasks
+                        .get(child_id)
+                        .map(|task| task.tid == tid)
+                        .unwrap_or(false)
+                })
+            })
         } else {
             None
         }

@@ -49,9 +49,10 @@ pub use sched_classes as sched;
 pub use scheduler::{
     add_task, block_current_task, class_table as scheduler_class_table, clear_task_wake_deadline,
     configure_class_table, cpu_usage_snapshot, create_session, current_pgid, current_pid,
-    current_sid, current_task_clone, current_task_id, current_tid, get_all_tasks, get_parent_id,
-    get_parent_pid, get_pgid_by_pid, get_sid_by_pid, get_task_by_id, get_task_by_pid,
-    get_task_id_by_pid, get_task_id_by_tid, get_task_ids_in_pgid, init_scheduler, kill_task,
+    current_sid, current_task_clone, current_task_id, current_tid, get_all_tasks,
+    get_child_task_id_by_pid, get_child_task_id_by_tid, get_parent_id, get_parent_pid,
+    get_pgid_by_pid, get_sid_by_pid, get_task_by_id, get_task_by_pid, get_task_id_by_pid,
+    get_task_id_by_tid, get_task_ids_in_pgid, init_scheduler, kill_task,
     log_state as log_scheduler_state, note_try_lock_fail, reset_scheduler_metrics, resume_task,
     schedule, schedule_on_cpu, scheduler_metrics_snapshot, set_process_group,
     set_task_sched_policy, set_task_wake_deadline, set_verbose as set_scheduler_verbose,
