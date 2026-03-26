@@ -3,8 +3,13 @@
 //! Implements a capability-based security model for Strat9-OS.
 //! All kernel resources are accessed through unforgeable tokens (capabilities).
 
-use crate::sync::SpinLock;
-use alloc::collections::BTreeMap;
+use crate::{
+    ipc::{self, MultiHandleResource},
+    process::TaskId,
+    sync::SpinLock,
+    vfs,
+};
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Unique identifier for a capability
@@ -141,13 +146,18 @@ impl CapabilityTable {
     /// Insert a capability into the table
     pub fn insert(&mut self, cap: Capability) -> CapId {
         let id = cap.id;
+        get_capability_manager().register_capability(cap.clone());
         self.capabilities.insert(id, cap);
         id
     }
 
     /// Remove a capability from the table
     pub fn remove(&mut self, id: CapId) -> Option<Capability> {
-        self.capabilities.remove(&id)
+        let removed = self.capabilities.remove(&id);
+        if removed.is_some() {
+            let _ = get_capability_manager().revoke_capability(id);
+        }
+        removed
     }
 
     /// Get a reference to a capability (no permission check).
@@ -158,12 +168,17 @@ impl CapabilityTable {
     /// Revoke all capabilities in this table and clear it.
     /// Does not allocate memory.
     pub fn revoke_all(&mut self) {
-        let mgr = get_capability_manager();
-        // BTreeMap::clear() does not allocate
-        for (id, _) in self.capabilities.iter() {
-            mgr.revoke_capability(*id);
+        let capabilities = self.take_all();
+        for capability in &capabilities {
+            release_capability(capability, None);
         }
-        self.capabilities.clear();
+    }
+
+    /// Removes and returns every capability in this table.
+    pub fn take_all(&mut self) -> Vec<Capability> {
+        core::mem::take(&mut self.capabilities)
+            .into_values()
+            .collect()
     }
 
     /// Check whether any capability of the given resource type has required permissions.
@@ -287,9 +302,30 @@ impl CapabilityManager {
         cap
     }
 
+    /// Register an already-created capability in the global table.
+    pub fn register_capability(&self, cap: Capability) {
+        self.all_capabilities.lock().insert(cap.id, cap);
+    }
+
     /// Revoke a capability (removes it from the global table)
     pub fn revoke_capability(&self, id: CapId) -> Option<Capability> {
         self.all_capabilities.lock().remove(&id)
+    }
+
+    /// Count remaining capabilities that still reference the same resource.
+    // TODO(migration): Replace this full-table scan with per-resource refcounts
+    // maintained transactionally on insert/remove/revoke_all. The current
+    // approach is correct for the hardened migration, but every close of a
+    // multi-handle IPC resource still walks the entire global capability map
+    // under one lock. When the system grows more handles, this becomes both a
+    // teardown hotspot and a place where future rollback bugs could desync the
+    // observed last-handle state from the real one.
+    pub fn resource_capability_count(&self, resource_type: ResourceType, resource: usize) -> usize {
+        self.all_capabilities
+            .lock()
+            .values()
+            .filter(|cap| cap.resource_type == resource_type && cap.resource == resource)
+            .count()
     }
 }
 
@@ -300,4 +336,48 @@ static CAPABILITY_MANAGER: Once<CapabilityManager> = Once::new();
 /// Get a reference to the global capability manager
 pub fn get_capability_manager() -> &'static CapabilityManager {
     CAPABILITY_MANAGER.call_once(CapabilityManager::new)
+}
+
+/// Releases a capability and cleans up the underlying resource.
+pub fn release_capability(cap: &Capability, owner_task: Option<TaskId>) {
+    let _ = get_capability_manager().revoke_capability(cap.id);
+    let remaining_caps =
+        get_capability_manager().resource_capability_count(cap.resource_type, cap.resource);
+
+    let shared_resource = match cap.resource_type {
+        ResourceType::SharedRing => Some(MultiHandleResource::SharedRing(ipc::RingId::from_u64(
+            cap.resource as u64,
+        ))),
+        ResourceType::Semaphore => Some(MultiHandleResource::Semaphore(ipc::SemId::from_u64(
+            cap.resource as u64,
+        ))),
+        ResourceType::Channel => Some(MultiHandleResource::Channel(ipc::ChanId::from_u64(
+            cap.resource as u64,
+        ))),
+        ResourceType::IpcPort => Some(MultiHandleResource::IpcPort {
+            id: ipc::PortId::from_u64(cap.resource as u64),
+            owner: owner_task,
+        }),
+        _ => None,
+    };
+
+    if let Some(resource) = shared_resource {
+        if remaining_caps == 0 {
+            let _ = resource.destroy();
+        }
+        return;
+    }
+
+    match cap.resource_type {
+        ResourceType::File => {
+            if let Ok(fd) = u32::try_from(cap.resource) {
+                let _ = vfs::close(fd);
+            }
+        }
+        ResourceType::MemoryRegion => {
+            let _ =
+                crate::memory::memory_region_registry().release_handle(cap.resource as u64, cap.id);
+        }
+        _ => {}
+    }
 }

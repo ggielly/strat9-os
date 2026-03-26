@@ -1,17 +1,25 @@
 // Memory management module
 
 pub mod address_space;
+pub mod block;
+pub mod block_meta;
 pub mod boot_alloc;
 pub mod buddy;
 pub mod cow;
 pub mod frame;
 pub mod heap;
+pub mod mapping_index;
+pub mod ownership;
 pub mod paging;
+pub mod region_cap;
 pub mod userslice;
 pub mod zone;
 
-use crate::{boot::entry::MemoryRegion, sync::IrqDisabledToken};
+use crate::{
+    boot::entry::MemoryRegion, capability::CapId, process::get_task_by_pid, sync::IrqDisabledToken,
+};
 use core::sync::atomic::{AtomicU64, Ordering};
+use spin::Once;
 
 /// Higher Half Direct Map offset.
 /// Set by Limine entry (non-zero) or left at 0 for BIOS/identity-mapped boot.
@@ -50,12 +58,145 @@ pub fn init_memory_manager(memory_regions: &[MemoryRegion]) {
 /// Initialize copy-on-write metadata.
 pub fn init_cow_subsystem(_memory_regions: &[MemoryRegion]) {}
 
+static OWNERSHIP_TABLE: Once<OwnershipTable> = Once::new();
+static GLOBAL_MAPPING_INDEX: Once<MappingIndex> = Once::new();
+static MEMORY_REGION_REGISTRY: Once<MemoryRegionRegistry> = Once::new();
+
 // Re-exports
 pub use crate::sync::with_irqs_disabled;
-pub use address_space::{kernel_address_space, AddressSpace, VmaFlags, VmaPageSize, VmaType};
+pub use address_space::{
+    kernel_address_space, AddressSpace, EffectiveMapping, VmaFlags, VmaPageSize, VmaType,
+};
+pub use block::{
+    BlockHandle, BuddyReserved, Exclusive, MappedExclusive, MappedShared, PhysBlock, Released,
+};
+pub use block_meta::{get_block_meta, resolve_handle};
 pub use buddy::get_allocator;
 pub use frame::{AllocError, FrameAllocOptions, FrameAllocator, FramePurpose, PhysFrame};
+pub use mapping_index::{MappingIndex, MappingRef};
+pub use ownership::{BlockState, OwnerEntry, OwnerError, OwnershipTable, RemoveRefResult};
+pub use region_cap::{
+    MemoryRegionRegistry, PublicMemoryRegionInfo, RegionCapError, ReleaseRegionResult,
+};
 pub use userslice::{UserSliceError, UserSliceRead, UserSliceReadWrite, UserSliceWrite};
+
+/// Returns the global ownership table used by the memory runtime.
+pub fn ownership_table() -> &'static OwnershipTable {
+    OWNERSHIP_TABLE.call_once(OwnershipTable::new)
+}
+
+/// Returns the global reverse mapping index used by the memory runtime.
+pub fn mapping_index() -> &'static MappingIndex {
+    GLOBAL_MAPPING_INDEX.call_once(MappingIndex::new)
+}
+
+/// Returns the global public memory-region registry.
+pub fn memory_region_registry() -> &'static MemoryRegionRegistry {
+    MEMORY_REGION_REGISTRY.call_once(MemoryRegionRegistry::new)
+}
+
+/// Allocates a fresh internal mapping capability identifier.
+pub fn allocate_mapping_cap_id() -> CapId {
+    CapId::new()
+}
+
+/// Records that `cap_id` now names `handle` in the ownership table.
+pub fn register_mapping_identity(handle: BlockHandle, cap_id: CapId) {
+    match try_register_mapping_identity(handle, cap_id) {
+        Ok(_) | Err(OwnerError::CapAlreadyPresent) => {}
+        Err(error) => {
+            log::warn!(
+                "memory: failed to register block identity cap={} handle={:#x}/{}: {:?}",
+                cap_id.as_u64(),
+                handle.base.as_u64(),
+                handle.order,
+                error
+            );
+        }
+    }
+}
+
+/// Fallible variant of mapping identity registration for transactional callers.
+pub fn try_register_mapping_identity(handle: BlockHandle, cap_id: CapId) -> Result<(), OwnerError> {
+    ownership_table().ensure_ref(handle, cap_id).map(|_| ())
+}
+
+/// Releases a block back to the buddy allocator.
+pub fn release_owned_block(block: PhysBlock<Released>) {
+    let handle = block.into_handle();
+    with_irqs_disabled(|token| {
+        free_frames(
+            token,
+            PhysFrame {
+                start_address: handle.base,
+            },
+            handle.order,
+        );
+    });
+}
+
+/// Removes `cap_id` from the ownership table entry associated with `handle`.
+pub fn unregister_mapping_identity(
+    handle: BlockHandle,
+    cap_id: CapId,
+) -> Option<PhysBlock<Released>> {
+    match ownership_table().remove_ref(handle, cap_id) {
+        Ok(RemoveRefResult::Freed(block)) => Some(block),
+        Ok(_) | Err(OwnerError::NotFound) | Err(OwnerError::CapNotFound) => None,
+        Err(error) => {
+            log::warn!(
+                "memory: failed to unregister mapping identity cap={} handle={:#x}/{}: {:?}",
+                cap_id.as_u64(),
+                handle.base.as_u64(),
+                handle.order,
+                error
+            );
+            None
+        }
+    }
+}
+
+/// Revokes every live mapping associated with `cap_id`.
+pub fn revoke_mapping_cap_id(cap_id: CapId) -> usize {
+    let mappings = mapping_index().lookup(cap_id);
+    let mut revoked = 0usize;
+
+    for mapping in mappings {
+        let Some(task) = get_task_by_pid(mapping.pid) else {
+            mapping_index().unregister(cap_id, mapping.pid, mapping.vaddr);
+            continue;
+        };
+
+        let address_space = task.process.address_space_arc();
+        match address_space.unmap_effective_mapping(mapping.vaddr.as_u64()) {
+            Ok(()) => {
+                revoked = revoked.saturating_add(1);
+            }
+            Err(error) => {
+                if address_space
+                    .effective_mapping_by_start(mapping.vaddr.as_u64())
+                    .is_none()
+                {
+                    mapping_index().unregister(cap_id, mapping.pid, mapping.vaddr);
+                } else {
+                    log::warn!(
+                        "memory: failed to revoke mapping cap={} pid={} vaddr={:#x}: {}",
+                        cap_id.as_u64(),
+                        mapping.pid,
+                        mapping.vaddr.as_u64(),
+                        error
+                    );
+                }
+            }
+        }
+    }
+
+    if revoked != 0 {
+        crate::arch::x86_64::tlb::shootdown_all();
+    }
+
+    revoked
+}
 
 /// Allocate `2^order` contiguous physical frames (raw, no zeroing).
 ///
@@ -91,6 +232,12 @@ pub fn allocate_frame(token: &IrqDisabledToken) -> Result<PhysFrame, AllocError>
 }
 
 /// Free a single physical frame.
+/// Requires an `IrqDisabledToken` proving that IRQs are disabled on the calling CPU.
+/// The caller must ensure that the frame is not currently mapped anywhere and that
+/// the buddy allocator's internal metadata is consistent with the frame's state (e.g. refcount = 0).
+/// Prefer `free_frames()` for multi-frame blocks or when the buddy allocator's internal state may need to be updated.
+/// This raw path is kept for symmetry with `allocate_frames()` and for special cases where the caller manages zeroing and metadata explicitly.
+/// For standard single-frame deallocation, prefer `release_owned_block()` which also handles ownership table updates and safety checks.
 #[inline]
 pub fn free_frame(token: &IrqDisabledToken, frame: PhysFrame) {
     free_frames(token, frame, 0);

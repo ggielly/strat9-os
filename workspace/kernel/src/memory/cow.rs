@@ -19,10 +19,13 @@
 //! - TLB shootdown is performed after modifying page table flags
 
 use crate::{
-    memory::frame::{frame_flags, get_meta, PhysFrame},
+    memory::{
+        frame::{frame_flags, get_meta, PhysFrame},
+        ownership_table, release_owned_block, resolve_handle, BlockHandle, OwnerError,
+        RemoveRefResult,
+    },
     sync::SpinLock,
 };
-use core::sync::atomic::{fence, Ordering};
 
 static COW_LOCK: SpinLock<()> = SpinLock::new(());
 
@@ -32,26 +35,62 @@ fn frame_meta(frame: PhysFrame) -> &'static crate::memory::frame::FrameMeta {
     get_meta(frame.start_address)
 }
 
+/// Returns the metadata slot backing a physical block handle.
+#[inline]
+fn handle_meta(handle: BlockHandle) -> &'static crate::memory::frame::FrameMeta {
+    get_meta(handle.base)
+}
+
+/// Increments the shared reference count of a physical block.
+pub fn handle_inc_ref(handle: BlockHandle) -> Result<u32, OwnerError> {
+    ownership_table().pin(handle)
+}
+
+/// Decrements the shared reference count of a physical block.
+pub fn handle_dec_ref(handle: BlockHandle) {
+    match ownership_table().unpin(handle) {
+        Ok(RemoveRefResult::Freed(block)) => release_owned_block(block),
+        Ok(RemoveRefResult::NowExclusive { .. })
+        | Ok(RemoveRefResult::StillPinned { .. })
+        | Ok(RemoveRefResult::StillShared { .. }) => {}
+        Err(error) => {
+            log::warn!(
+                "memory: failed to unpin shared handle {:#x}/{}: {:?}",
+                handle.base.as_u64(),
+                handle.order,
+                error
+            );
+        }
+    }
+}
+
+/// Returns the current shared reference count of a physical block.
+pub fn handle_get_refcount(handle: BlockHandle) -> u32 {
+    ownership_table()
+        .refcount(handle)
+        .unwrap_or_else(|| handle_meta(handle).get_refcount())
+}
+
+/// Marks a freshly allocated physical block as exclusively owned.
+pub fn handle_init_ref(handle: BlockHandle) {
+    let meta = handle_meta(handle);
+    meta.set_order(handle.order);
+    meta.set_refcount(1);
+}
+
 /// Performs the frame inc ref operation.
-pub fn frame_inc_ref(frame: PhysFrame) {
-    frame_meta(frame).inc_ref();
+pub fn frame_inc_ref(frame: PhysFrame) -> Result<u32, OwnerError> {
+    handle_inc_ref(resolve_handle(frame.start_address))
 }
 
 /// Performs the frame dec ref operation.
 pub fn frame_dec_ref(frame: PhysFrame) {
-    let meta = frame_meta(frame);
-    let old = meta.dec_ref();
-    if old == 1 {
-        fence(Ordering::Acquire);
-        crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_frame(token, frame);
-        });
-    }
+    handle_dec_ref(resolve_handle(frame.start_address));
 }
 
 /// Performs the frame get refcount operation.
 pub fn frame_get_refcount(frame: PhysFrame) -> u32 {
-    frame_meta(frame).get_refcount()
+    handle_get_refcount(resolve_handle(frame.start_address))
 }
 
 /// Set COW flag on a frame (SMP-safe).

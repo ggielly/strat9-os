@@ -35,7 +35,7 @@
 use crate::{
     memory::UserSliceWrite,
     process::{
-        block_current_task, current_task_clone, current_task_id, get_task_id_by_pid,
+        block_current_task, current_task_clone, current_task_id, get_child_task_id_by_pid,
         has_pending_signals,
         scheduler::{try_wait_child, WaitChildResult},
         TaskId,
@@ -215,7 +215,7 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
     //   pid == 0  → process-group semantics (not supported)
     //   pid < -1  → wait for group |pid| (not supported)
     let target: Option<TaskId> = if pid > 0 {
-        match get_task_id_by_pid(pid as u32) {
+        match get_child_task_id_by_pid(parent_id, pid as u32) {
             Some(t) => Some(t),
             None => return Err(SyscallError::NoChildren),
         }
@@ -302,12 +302,12 @@ fn resolve_cow_for_range(ptr: u64, len: usize) -> Result<(), SyscallError> {
         return Ok(());
     }
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    let address_space = unsafe { &*task.process.address_space.get() };
+    let address_space = task.process.address_space_arc();
     let start = ptr & !0xfff;
     let end = (ptr + (len as u64).saturating_sub(1)) & !0xfff;
     let mut page = start;
     loop {
-        crate::syscall::fork::handle_cow_fault(page, address_space)
+        crate::syscall::fork::handle_cow_fault(page, &address_space)
             .map_err(|_| SyscallError::Fault)?;
         if page == end {
             break;

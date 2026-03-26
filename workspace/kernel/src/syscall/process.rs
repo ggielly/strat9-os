@@ -5,8 +5,8 @@
 use super::{error::SyscallError, SyscallFrame};
 use crate::process::{
     block_current_task, create_session, current_pgid, current_task_clone, current_task_id,
-    current_tid, get_parent_id, get_parent_pid, get_pgid_by_pid, get_sid_by_pid,
-    get_task_id_by_tid,
+    current_tid, get_child_task_id_by_tid, get_parent_pid, get_pgid_by_pid, get_sid_by_pid,
+    get_task_ids_in_tgid, kill_task,
     scheduler::add_task_with_parent,
     set_process_group,
     task::{CpuContext, ExtendedState, KernelStack, SyncUnsafeCell, Task},
@@ -47,6 +47,8 @@ extern "C" fn thread_child_start(ctx_ptr: u64) -> ! {
 #[unsafe(naked)]
 unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
     core::arch::naked_asm!(
+        // Mask IRQs before touching GS. The user RFLAGS frame re-enables IF.
+        "cli",
         "mov rsi, rdi",
         // Build iret frame: SS, RSP, RFLAGS, CS, RIP
         "mov r8, [rsi + {off_user_ss}]",
@@ -63,6 +65,7 @@ unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
         "mov rdi, [rsi + {off_arg0}]",
         // Child thread returns 0 if entry routine ever reads rax.
         "xor rax, rax",
+        "swapgs",
         "iretq",
         off_entry = const THREAD_OFF_ENTRY,
         off_stack_top = const THREAD_OFF_STACK_TOP,
@@ -236,10 +239,7 @@ pub fn sys_thread_join(tid: u64, status_ptr: u64, flags: u64) -> Result<u64, Sys
     }
 
     let parent_id = current_task_id().ok_or(SyscallError::Fault)?;
-    let child_id = get_task_id_by_tid(wait_tid).ok_or(SyscallError::NotFound)?;
-    if get_parent_id(child_id) != Some(parent_id) {
-        return Err(SyscallError::NotFound);
-    }
+    let child_id = get_child_task_id_by_tid(parent_id, wait_tid).ok_or(SyscallError::NotFound)?;
 
     loop {
         match crate::process::try_wait_child(parent_id, Some(child_id)) {
@@ -397,10 +397,14 @@ pub fn sys_set_tid_address(tidptr: u64) -> Result<u64, SyscallError> {
 }
 
 /// SYS_EXIT_GROUP (334): Exit all threads in the thread group.
-///
-/// In the current single-threaded model this is identical to SYS_PROC_EXIT.
-/// When multi-threading is added, this must kill every task sharing the same TGID.
 pub fn sys_exit_group(exit_code: u64) -> Result<u64, SyscallError> {
+    let current = current_task_clone().ok_or(SyscallError::Fault)?;
+    for sibling_id in get_task_ids_in_tgid(current.tgid) {
+        if sibling_id != current.id {
+            let _ = kill_task(sibling_id);
+        }
+    }
+
     // Diverges — never returns.
     crate::process::scheduler::exit_current_task(exit_code as i32)
 }

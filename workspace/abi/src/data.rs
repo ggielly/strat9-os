@@ -85,6 +85,15 @@ pub struct HandleInfo {
     pub resource: u64,
 }
 
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[repr(C)]
+pub struct MemoryRegionInfo {
+    pub size: u64,
+    pub page_size: u64,
+    pub flags: u32,
+    pub _reserved: u32,
+}
+
 pub const PCI_MATCH_VENDOR_ID: u32 = 1 << 0;
 pub const PCI_MATCH_DEVICE_ID: u32 = 1 << 1;
 pub const PCI_MATCH_CLASS_CODE: u32 = 1 << 2;
@@ -268,6 +277,7 @@ assert_abi_struct!(FileStat, 112, 8);
 assert_abi_struct!(IpcMessage, 64, 64);
 assert_abi_struct!(TimeSpec, 16, 8);
 assert_abi_struct!(HandleInfo, 16, 8);
+assert_abi_struct!(MemoryRegionInfo, 24, 8);
 assert_abi_struct!(PciAddress, 4, 4);
 assert_abi_struct!(PciProbeCriteria, 12, 4);
 assert_abi_struct!(PciDeviceInfo, 16, 4);

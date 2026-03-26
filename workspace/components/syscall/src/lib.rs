@@ -562,6 +562,19 @@ pub mod call {
         }
     }
 
+    /// Terminate all threads in the current thread group with the given exit `code`.
+    ///
+    /// This function never returns.
+    pub fn exit_group(code: usize) -> ! {
+        unsafe {
+            syscall1(number::SYS_EXIT_GROUP, code).ok();
+        }
+        #[allow(clippy::empty_loop)]
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     /// Yield the process's time slice to the kernel
     ///
     /// This function will return Ok(0) on success
@@ -810,6 +823,41 @@ pub mod call {
         flags: usize,
     ) -> error::Result<usize> {
         syscall4(number::SYS_MREMAP, old_addr, old_size, new_size, flags)
+    }
+
+    /// Export a tracked mapped region as a public memory handle.
+    pub fn mem_region_export(addr: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_MEM_REGION_EXPORT, addr) }
+    }
+
+    /// Map a public memory handle into the current address space.
+    pub fn mem_region_map(
+        handle: usize,
+        addr_hint: usize,
+        out_addr: &mut usize,
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_MEM_REGION_MAP,
+                handle,
+                addr_hint,
+                out_addr as *mut usize as usize,
+            )
+        }
+    }
+
+    /// Query metadata about a public memory handle.
+    pub fn mem_region_info(
+        handle: usize,
+        out: &mut data::MemoryRegionInfo,
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_MEM_REGION_INFO,
+                handle,
+                out as *mut data::MemoryRegionInfo as usize,
+            )
+        }
     }
 
     // -----------------------------------------------------------------------

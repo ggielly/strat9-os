@@ -1117,7 +1117,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     {
         // SAFETY: Kernel still holds the boot/kernel CR3. HHDM is valid.
         unsafe {
-            let as_ref = &*task.process.address_space.get();
+            let as_ref = task.process.address_space_arc();
             let task_name: &str = &task.name;
             for test_off in [0x12920u64, 0x12928u64, 0x12930u64] {
                 let vaddr = 0x100000000u64.wrapping_add(test_off);
@@ -1147,7 +1147,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // Switch to the user address space stored in the task.
     // SAFETY: The address space was set up during task creation and is valid.
     unsafe {
-        let as_ref = &*task.process.address_space.get();
+        let as_ref = task.process.address_space_arc();
         as_ref.switch_to();
     }
     crate::e9_println!(
