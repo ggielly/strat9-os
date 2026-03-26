@@ -313,6 +313,13 @@ impl CapabilityManager {
     }
 
     /// Count remaining capabilities that still reference the same resource.
+    // TODO(migration): Replace this full-table scan with per-resource refcounts
+    // maintained transactionally on insert/remove/revoke_all. The current
+    // approach is correct for the hardened migration, but every close of a
+    // multi-handle IPC resource still walks the entire global capability map
+    // under one lock. When the system grows more handles, this becomes both a
+    // teardown hotspot and a place where future rollback bugs could desync the
+    // observed last-handle state from the real one.
     pub fn resource_capability_count(&self, resource_type: ResourceType, resource: usize) -> usize {
         self.all_capabilities
             .lock()

@@ -28,6 +28,13 @@ impl ReplyRegistry {
 
 static REPLIES: SpinLock<ReplyRegistry> = SpinLock::new(ReplyRegistry::new());
 
+// TODO(migration): Reply slots are still keyed only by caller TaskId, which
+// means the kernel implicitly supports at most one outstanding synchronous
+// ipc_call per task. If nested or concurrent synchronous calls are ever needed,
+// introduce a per-call correlation token, thread it through wait_for_reply /
+// deliver_reply / cleanup_ports_for_task, and make cancellation target the
+// exact call instance instead of the whole task slot.
+
 fn epipe_reply() -> IpcMessage {
     let mut err = IpcMessage::new(0x80);
     let epipe: u32 = 32;
