@@ -131,7 +131,10 @@ pub fn release_owned_block(block: PhysBlock<Released>) {
 }
 
 /// Removes `cap_id` from the ownership table entry associated with `handle`.
-pub fn unregister_mapping_identity(handle: BlockHandle, cap_id: CapId) -> Option<PhysBlock<Released>> {
+pub fn unregister_mapping_identity(
+    handle: BlockHandle,
+    cap_id: CapId,
+) -> Option<PhysBlock<Released>> {
     match ownership_table().remove_ref(handle, cap_id) {
         Ok(RemoveRefResult::Freed(block)) => Some(block),
         Ok(_) | Err(OwnerError::NotFound) | Err(OwnerError::CapNotFound) => None,

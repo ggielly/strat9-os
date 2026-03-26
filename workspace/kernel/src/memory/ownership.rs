@@ -6,7 +6,10 @@ use smallvec::{smallvec, SmallVec};
 
 use crate::{capability::CapId, sync::SpinLock};
 
-use super::{block::{BlockHandle, BuddyReserved, Exclusive, PhysBlock, Released}, block_meta::get_block_meta};
+use super::{
+    block::{BlockHandle, BuddyReserved, Exclusive, PhysBlock, Released},
+    block_meta::get_block_meta,
+};
 
 /// Runtime ownership state of a block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

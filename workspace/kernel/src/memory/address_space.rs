@@ -26,8 +26,7 @@ use crate::{
     memory::{
         allocate_mapping_cap_id, mapping_index, paging::BuddyFrameAllocator,
         register_mapping_identity, release_owned_block, resolve_handle,
-        unregister_mapping_identity, BlockHandle,
-        MappingRef,
+        unregister_mapping_identity, BlockHandle, MappingRef,
     },
     process::task::Pid,
     sync::SpinLock,
