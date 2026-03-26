@@ -151,13 +151,18 @@ impl CapabilityTable {
     /// Insert a capability into the table
     pub fn insert(&mut self, cap: Capability) -> CapId {
         let id = cap.id;
+        get_capability_manager().register_capability(cap.clone());
         self.capabilities.insert(id, cap);
         id
     }
 
     /// Remove a capability from the table
     pub fn remove(&mut self, id: CapId) -> Option<Capability> {
-        self.capabilities.remove(&id)
+        let removed = self.capabilities.remove(&id);
+        if removed.is_some() {
+            let _ = get_capability_manager().revoke_capability(id);
+        }
+        removed
     }
 
     /// Get a reference to a capability (no permission check).
@@ -168,11 +173,10 @@ impl CapabilityTable {
     /// Revoke all capabilities in this table and clear it.
     /// Does not allocate memory.
     pub fn revoke_all(&mut self) {
-        let mgr = get_capability_manager();
-        for id in self.capabilities.keys() {
-            mgr.revoke_capability(*id);
+        let capabilities = self.take_all();
+        for capability in &capabilities {
+            release_capability(capability, None);
         }
-        self.capabilities.clear();
     }
 
     /// Removes and returns every capability in this table.
@@ -303,9 +307,23 @@ impl CapabilityManager {
         cap
     }
 
+    /// Register an already-created capability in the global table.
+    pub fn register_capability(&self, cap: Capability) {
+        self.all_capabilities.lock().insert(cap.id, cap);
+    }
+
     /// Revoke a capability (removes it from the global table)
     pub fn revoke_capability(&self, id: CapId) -> Option<Capability> {
         self.all_capabilities.lock().remove(&id)
+    }
+
+    /// Count remaining capabilities that still reference the same resource.
+    pub fn resource_capability_count(&self, resource_type: ResourceType, resource: usize) -> usize {
+        self.all_capabilities
+            .lock()
+            .values()
+            .filter(|cap| cap.resource_type == resource_type && cap.resource == resource)
+            .count()
     }
 }
 
@@ -321,6 +339,8 @@ pub fn get_capability_manager() -> &'static CapabilityManager {
 /// Releases a capability and cleans up the underlying resource.
 pub fn release_capability(cap: &Capability, owner_task: Option<TaskId>) {
     let _ = get_capability_manager().revoke_capability(cap.id);
+    let remaining_caps = get_capability_manager()
+        .resource_capability_count(cap.resource_type, cap.resource);
 
     match cap.resource_type {
         ResourceType::File => {
@@ -329,21 +349,33 @@ pub fn release_capability(cap: &Capability, owner_task: Option<TaskId>) {
             }
         }
         ResourceType::SharedRing => {
-            let _ = shared_ring::destroy_ring(RingId::from_u64(cap.resource as u64));
+            if remaining_caps == 0 {
+                let _ = shared_ring::destroy_ring(RingId::from_u64(cap.resource as u64));
+            }
         }
         ResourceType::MemoryRegion => {
             let _ =
                 crate::memory::memory_region_registry().release_handle(cap.resource as u64, cap.id);
         }
         ResourceType::Semaphore => {
-            let _ = semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64));
+            if remaining_caps == 0 {
+                let _ = semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64));
+            }
         }
         ResourceType::Channel => {
-            let _ = channel::destroy_channel(ChanId::from_u64(cap.resource as u64));
+            if remaining_caps == 0 {
+                let _ = channel::destroy_channel(ChanId::from_u64(cap.resource as u64));
+            }
         }
         ResourceType::IpcPort => {
-            if let Some(task_id) = owner_task {
-                let _ = port::destroy_port(PortId::from_u64(cap.resource as u64), task_id);
+            if remaining_caps == 0 {
+                let port_id = PortId::from_u64(cap.resource as u64);
+                let owner = port::get_port(port_id)
+                    .map(|port| port.owner)
+                    .or(owner_task);
+                if let Some(task_id) = owner {
+                    let _ = port::destroy_port(port_id, task_id);
+                }
             }
         }
         _ => {}

@@ -158,20 +158,36 @@ pub fn unregister_mapping_identity(
 
 /// Revokes every live mapping associated with `cap_id`.
 pub fn revoke_mapping_cap_id(cap_id: CapId) -> usize {
-    let mappings = mapping_index().remove_all(cap_id);
+    let mappings = mapping_index().lookup(cap_id);
     let mut revoked = 0usize;
 
     for mapping in mappings {
         let Some(task) = get_task_by_pid(mapping.pid) else {
+            mapping_index().unregister(cap_id, mapping.pid, mapping.vaddr);
             continue;
         };
 
         let address_space = task.process.address_space_arc();
-        if address_space
-            .unmap_effective_mapping(mapping.vaddr.as_u64())
-            .is_ok()
-        {
-            revoked = revoked.saturating_add(1);
+        match address_space.unmap_effective_mapping(mapping.vaddr.as_u64()) {
+            Ok(()) => {
+                revoked = revoked.saturating_add(1);
+            }
+            Err(error) => {
+                if address_space
+                    .effective_mapping_by_start(mapping.vaddr.as_u64())
+                    .is_none()
+                {
+                    mapping_index().unregister(cap_id, mapping.pid, mapping.vaddr);
+                } else {
+                    log::warn!(
+                        "memory: failed to revoke mapping cap={} pid={} vaddr={:#x}: {}",
+                        cap_id.as_u64(),
+                        mapping.pid,
+                        mapping.vaddr.as_u64(),
+                        error
+                    );
+                }
+            }
         }
     }
 
@@ -216,6 +232,12 @@ pub fn allocate_frame(token: &IrqDisabledToken) -> Result<PhysFrame, AllocError>
 }
 
 /// Free a single physical frame.
+/// Requires an `IrqDisabledToken` proving that IRQs are disabled on the calling CPU.
+/// The caller must ensure that the frame is not currently mapped anywhere and that
+/// the buddy allocator's internal metadata is consistent with the frame's state (e.g. refcount = 0).
+/// Prefer `free_frames()` for multi-frame blocks or when the buddy allocator's internal state may need to be updated.
+/// This raw path is kept for symmetry with `allocate_frames()` and for special cases where the caller manages zeroing and metadata explicitly.
+/// For standard single-frame deallocation, prefer `release_owned_block()` which also handles ownership table updates and safety checks.
 #[inline]
 pub fn free_frame(token: &IrqDisabledToken, frame: PhysFrame) {
     free_frames(token, frame, 0);

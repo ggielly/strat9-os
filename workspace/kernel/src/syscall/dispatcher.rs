@@ -388,19 +388,15 @@ fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
     }
 }
 
-/// SYS_HANDLE_DUPLICATE (1): Duplicate a handle (grant required).
-fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
-    crate::silo::enforce_cap_for_current_task(handle)?;
-    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &mut *task.process.capabilities.get() };
-    let dup = caps
-        .duplicate(CapId::from_raw(handle))
-        .ok_or(SyscallError::PermissionDenied)?;
-    let id = caps.insert(dup);
-    if let Some(cap) = caps.get(id) {
-        if cap.resource_type == ResourceType::MemoryRegion {
+fn insert_capability_with_retention(
+    caps: &mut crate::capability::CapabilityTable,
+    cap: crate::capability::Capability,
+) -> Result<CapId, SyscallError> {
+    let id = caps.insert(cap);
+    if let Some(inserted) = caps.get(id) {
+        if inserted.resource_type == ResourceType::MemoryRegion {
             if let Err(error) =
-                crate::memory::memory_region_registry().retain_handle(cap.resource as u64, id)
+                crate::memory::memory_region_registry().retain_handle(inserted.resource as u64, id)
             {
                 let _ = caps.remove(id);
                 return Err(match error {
@@ -419,6 +415,18 @@ fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
             }
         }
     }
+    Ok(id)
+}
+
+/// SYS_HANDLE_DUPLICATE (1): Duplicate a handle (grant required).
+fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let caps = unsafe { &mut *task.process.capabilities.get() };
+    let dup = caps
+        .duplicate(CapId::from_raw(handle))
+        .ok_or(SyscallError::PermissionDenied)?;
+    let id = insert_capability_with_retention(caps, dup)?;
     Ok(id.as_u64())
 }
 
@@ -578,29 +586,7 @@ fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
 
     let target = crate::process::get_task_by_pid(pid).ok_or(SyscallError::NotFound)?;
     let target_caps = unsafe { &mut *target.process.capabilities.get() };
-    let new_id = target_caps.insert(granted);
-    if let Some(cap) = target_caps.get(new_id) {
-        if cap.resource_type == ResourceType::MemoryRegion {
-            if let Err(error) =
-                crate::memory::memory_region_registry().retain_handle(cap.resource as u64, new_id)
-            {
-                let _ = target_caps.remove(new_id);
-                return Err(match error {
-                    crate::memory::RegionCapError::NotFound => SyscallError::BadHandle,
-                    crate::memory::RegionCapError::InvalidRegion
-                    | crate::memory::RegionCapError::IncompleteRegion
-                    | crate::memory::RegionCapError::InvalidAddress => {
-                        SyscallError::InvalidArgument
-                    }
-                    crate::memory::RegionCapError::PermissionDenied => {
-                        SyscallError::PermissionDenied
-                    }
-                    crate::memory::RegionCapError::OutOfMemory => SyscallError::OutOfMemory,
-                    crate::memory::RegionCapError::InconsistentState => SyscallError::IoError,
-                });
-            }
-        }
-    }
+    let new_id = insert_capability_with_retention(target_caps, granted)?;
     Ok(new_id.as_u64())
 }
 
@@ -1279,7 +1265,7 @@ fn sys_ipc_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
         let receiver = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
         let receiver_caps = unsafe { &mut *receiver.process.capabilities.get() };
-        let new_id = receiver_caps.insert(dup);
+        let new_id = insert_capability_with_retention(receiver_caps, dup)?;
         if new_id.as_u64() > u32::MAX as u64 {
             return Err(SyscallError::InvalidArgument);
         }
@@ -1333,7 +1319,7 @@ fn sys_ipc_try_recv(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
         let receiver = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
         let receiver_caps = unsafe { &mut *receiver.process.capabilities.get() };
-        let new_id = receiver_caps.insert(dup);
+        let new_id = insert_capability_with_retention(receiver_caps, dup)?;
         if new_id.as_u64() > u32::MAX as u64 {
             return Err(SyscallError::InvalidArgument);
         }
@@ -1458,7 +1444,7 @@ fn sys_ipc_reply(_msg_ptr: u64) -> Result<u64, SyscallError> {
 
         let receiver = crate::process::get_task_by_id(target).ok_or(SyscallError::BadHandle)?;
         let receiver_caps = unsafe { &mut *receiver.process.capabilities.get() };
-        let new_id = receiver_caps.insert(dup);
+        let new_id = insert_capability_with_retention(receiver_caps, dup)?;
         if new_id.as_u64() > u32::MAX as u64 {
             return Err(SyscallError::InvalidArgument);
         }
@@ -1824,17 +1810,16 @@ fn sys_sem_close(handle: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &mut *task.process.capabilities.get() };
     let cap = caps
-        .remove(CapId::from_raw(handle))
+        .get(CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;
     if cap.resource_type != ResourceType::Semaphore {
         return Err(SyscallError::BadHandle);
     }
-    semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64)).map_err(|e| match e {
-        semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
-        semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
-        semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
-        semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
-    })?;
+    let cap = caps
+        .remove(CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
+    debug_assert_eq!(cap.resource_type, ResourceType::Semaphore);
+    release_capability(&cap, Some(task.id));
     Ok(0)
 }
 
@@ -2140,13 +2125,17 @@ fn sys_chan_close(handle: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &mut *task.process.capabilities.get() };
     let cap = caps
-        .remove(crate::capability::CapId::from_raw(handle))
+        .get(crate::capability::CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;
     if cap.resource_type != ResourceType::Channel {
         return Err(SyscallError::BadHandle);
     }
     let chan_id = ChanId::from_u64(cap.resource as u64);
-    channel::destroy_channel(chan_id).map_err(SyscallError::from)?;
+    let cap = caps
+        .remove(crate::capability::CapId::from_raw(handle))
+        .ok_or(SyscallError::BadHandle)?;
+    debug_assert_eq!(cap.resource_type, ResourceType::Channel);
+    release_capability(&cap, Some(task.id));
 
     log::debug!("syscall: CHAN_CLOSE(handle={}) → chan={}", handle, chan_id);
     Ok(0)
