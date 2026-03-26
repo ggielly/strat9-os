@@ -40,7 +40,7 @@ pub use channel::{
     channel, create_channel, destroy_channel, get_channel, ChanId, ChannelError, Receiver, Sender,
     SyncChan,
 };
-pub use lifecycle::MultiHandleResource;
+pub use lifecycle::{MultiHandleDestroyError, MultiHandleResource};
 pub use message::IpcMessage;
 pub use port::{create_port, destroy_port, get_port, IpcError, Port, PortId};
 pub use semaphore::{

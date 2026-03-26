@@ -356,7 +356,7 @@ pub fn release_capability(cap: &Capability, owner_task: Option<TaskId>) {
 
     if let Some(resource) = shared_resource {
         if remaining_caps == 0 {
-            resource.destroy();
+            let _ = resource.destroy();
         }
         return;
     }

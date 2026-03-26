@@ -6,6 +6,7 @@ use crate::{
     ipc::{
         semaphore::{self, SemId},
         shared_ring::{self, RingId},
+        MultiHandleResource,
     },
     memory::address_space::{VmaFlags, VmaPageSize, VmaType},
     process::{current_task_clone, get_task_by_pid, Pid},
@@ -278,12 +279,16 @@ impl Scheme for IpcControlScheme {
         let p = path.trim_matches('/');
         if let Some(rest) = p.strip_prefix("shm/") {
             let id = RingId::from_u64(Self::parse_u64(rest)?);
-            shared_ring::destroy_ring(id).map_err(|_| SyscallError::NotFound)?;
+            MultiHandleResource::SharedRing(id)
+                .destroy()
+                .map_err(|_| SyscallError::NotFound)?;
             return Ok(());
         }
         if let Some(rest) = p.strip_prefix("sem/") {
             let id = SemId::from_u64(Self::parse_u64(rest)?);
-            semaphore::destroy_semaphore(id).map_err(|_| SyscallError::NotFound)?;
+            MultiHandleResource::Semaphore(id)
+                .destroy()
+                .map_err(|_| SyscallError::NotFound)?;
             return Ok(());
         }
         Err(SyscallError::InvalidArgument)

@@ -7,6 +7,11 @@ use super::{
     shared_ring::{self, RingId},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultiHandleDestroyError {
+    NotFound,
+}
+
 /// Shared finalization path for IPC resources that remain live until their
 /// last handle disappears from the global capability set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,22 +24,19 @@ pub enum MultiHandleResource {
 
 impl MultiHandleResource {
     /// Destroy the underlying resource once the last handle is gone.
-    pub fn destroy(self) {
+    pub fn destroy(self) -> Result<(), MultiHandleDestroyError> {
         match self {
-            Self::Channel(id) => {
-                let _ = channel::destroy_channel(id);
-            }
-            Self::Semaphore(id) => {
-                let _ = semaphore::destroy_semaphore(id);
-            }
+            Self::Channel(id) => channel::destroy_channel(id)
+                .map_err(|_| MultiHandleDestroyError::NotFound),
+            Self::Semaphore(id) => semaphore::destroy_semaphore(id)
+                .map_err(|_| MultiHandleDestroyError::NotFound),
             Self::SharedRing(id) => {
-                let _ = shared_ring::destroy_ring(id);
+                shared_ring::destroy_ring(id).map_err(|_| MultiHandleDestroyError::NotFound)
             }
             Self::IpcPort { id, owner } => {
                 let owner = owner.or_else(|| port::get_port(id).map(|port| port.owner));
-                if let Some(task_id) = owner {
-                    let _ = port::destroy_port(id, task_id);
-                }
+                let task_id = owner.ok_or(MultiHandleDestroyError::NotFound)?;
+                port::destroy_port(id, task_id).map_err(|_| MultiHandleDestroyError::NotFound)
             }
         }
     }
