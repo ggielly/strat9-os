@@ -28,6 +28,7 @@
 //! - `SYS_CHAN_CLOSE`  (224) — destroy the channel
 
 pub mod channel;
+pub mod lifecycle;
 pub mod message;
 pub mod port;
 pub mod reply;
@@ -39,6 +40,7 @@ pub use channel::{
     channel, create_channel, destroy_channel, get_channel, ChanId, ChannelError, Receiver, Sender,
     SyncChan,
 };
+pub use lifecycle::MultiHandleResource;
 pub use message::IpcMessage;
 pub use port::{create_port, destroy_port, get_port, IpcError, Port, PortId};
 pub use semaphore::{

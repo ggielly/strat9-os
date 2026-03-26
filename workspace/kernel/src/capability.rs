@@ -4,12 +4,7 @@
 //! All kernel resources are accessed through unforgeable tokens (capabilities).
 
 use crate::{
-    ipc::{
-        channel::{self, ChanId},
-        port::{self, PortId},
-        semaphore::{self, SemId},
-        shared_ring::{self, RingId},
-    },
+    ipc::{self, MultiHandleResource},
     process::TaskId,
     sync::SpinLock,
     vfs,
@@ -342,41 +337,39 @@ pub fn release_capability(cap: &Capability, owner_task: Option<TaskId>) {
     let remaining_caps =
         get_capability_manager().resource_capability_count(cap.resource_type, cap.resource);
 
+    let shared_resource = match cap.resource_type {
+        ResourceType::SharedRing => Some(MultiHandleResource::SharedRing(ipc::RingId::from_u64(
+            cap.resource as u64,
+        ))),
+        ResourceType::Semaphore => Some(MultiHandleResource::Semaphore(ipc::SemId::from_u64(
+            cap.resource as u64,
+        ))),
+        ResourceType::Channel => Some(MultiHandleResource::Channel(ipc::ChanId::from_u64(
+            cap.resource as u64,
+        ))),
+        ResourceType::IpcPort => Some(MultiHandleResource::IpcPort {
+            id: ipc::PortId::from_u64(cap.resource as u64),
+            owner: owner_task,
+        }),
+        _ => None,
+    };
+
+    if let Some(resource) = shared_resource {
+        if remaining_caps == 0 {
+            resource.destroy();
+        }
+        return;
+    }
+
     match cap.resource_type {
         ResourceType::File => {
             if let Ok(fd) = u32::try_from(cap.resource) {
                 let _ = vfs::close(fd);
             }
         }
-        ResourceType::SharedRing => {
-            if remaining_caps == 0 {
-                let _ = shared_ring::destroy_ring(RingId::from_u64(cap.resource as u64));
-            }
-        }
         ResourceType::MemoryRegion => {
             let _ =
                 crate::memory::memory_region_registry().release_handle(cap.resource as u64, cap.id);
-        }
-        ResourceType::Semaphore => {
-            if remaining_caps == 0 {
-                let _ = semaphore::destroy_semaphore(SemId::from_u64(cap.resource as u64));
-            }
-        }
-        ResourceType::Channel => {
-            if remaining_caps == 0 {
-                let _ = channel::destroy_channel(ChanId::from_u64(cap.resource as u64));
-            }
-        }
-        ResourceType::IpcPort => {
-            if remaining_caps == 0 {
-                let port_id = PortId::from_u64(cap.resource as u64);
-                let owner = port::get_port(port_id)
-                    .map(|port| port.owner)
-                    .or(owner_task);
-                if let Some(task_id) = owner {
-                    let _ = port::destroy_port(port_id, task_id);
-                }
-            }
         }
         _ => {}
     }
