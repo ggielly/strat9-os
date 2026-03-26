@@ -65,6 +65,11 @@ pub enum RemoveRefResult {
         /// The last remaining capability.
         remaining_cap: CapId,
     },
+    /// No capability remains, but transient pins still keep the block alive.
+    StillPinned {
+        /// Current transient reference count.
+        transient_refs: u32,
+    },
     /// Multiple owners still reference the block.
     StillShared {
         /// Current shared reference count.
@@ -218,9 +223,13 @@ impl OwnershipTable {
             1 => {
                 entry.state = BlockState::Exclusive;
                 Self::sync_meta(handle, entry.refcount);
-                Ok(RemoveRefResult::NowExclusive {
-                    remaining_cap: entry.caps[0],
-                })
+                if let Some(&remaining_cap) = entry.caps.first() {
+                    Ok(RemoveRefResult::NowExclusive { remaining_cap })
+                } else {
+                    Ok(RemoveRefResult::StillPinned {
+                        transient_refs: entry.transient_refs,
+                    })
+                }
             }
             refcount => {
                 entry.state = BlockState::Shared;
@@ -250,9 +259,13 @@ impl OwnershipTable {
             1 => {
                 entry.state = BlockState::Exclusive;
                 Self::sync_meta(handle, entry.refcount);
-                Ok(RemoveRefResult::NowExclusive {
-                    remaining_cap: entry.caps[0],
-                })
+                if let Some(&remaining_cap) = entry.caps.first() {
+                    Ok(RemoveRefResult::NowExclusive { remaining_cap })
+                } else {
+                    Ok(RemoveRefResult::StillPinned {
+                        transient_refs: entry.transient_refs,
+                    })
+                }
             }
             refcount => {
                 entry.state = BlockState::Shared;
@@ -270,7 +283,9 @@ impl OwnershipTable {
     ) -> Result<PhysBlock<Released>, OwnerError> {
         match self.remove_ref(block.handle(), cap_id)? {
             RemoveRefResult::Freed(released) => Ok(released),
-            RemoveRefResult::NowExclusive { .. } | RemoveRefResult::StillShared { .. } => {
+            RemoveRefResult::NowExclusive { .. }
+            | RemoveRefResult::StillPinned { .. }
+            | RemoveRefResult::StillShared { .. } => {
                 Err(OwnerError::StillReferenced)
             }
         }
