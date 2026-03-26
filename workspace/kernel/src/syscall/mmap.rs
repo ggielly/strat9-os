@@ -526,6 +526,7 @@ pub fn sys_mem_region_export(addr: u64) -> Result<u64, SyscallError> {
             | crate::memory::RegionCapError::InvalidAddress => SyscallError::InvalidArgument,
             crate::memory::RegionCapError::PermissionDenied => SyscallError::PermissionDenied,
             crate::memory::RegionCapError::OutOfMemory => SyscallError::OutOfMemory,
+            crate::memory::RegionCapError::InconsistentState => SyscallError::IoError,
             crate::memory::RegionCapError::NotFound => SyscallError::NotFound,
         })?;
 
@@ -582,6 +583,7 @@ pub fn sys_mem_region_map(handle: u64, addr_hint: u64, out_ptr: u64) -> Result<u
             | crate::memory::RegionCapError::InvalidAddress => SyscallError::InvalidArgument,
             crate::memory::RegionCapError::PermissionDenied => SyscallError::PermissionDenied,
             crate::memory::RegionCapError::OutOfMemory => SyscallError::OutOfMemory,
+            crate::memory::RegionCapError::InconsistentState => SyscallError::IoError,
         })?;
 
     let user = crate::memory::UserSliceWrite::new(out_ptr, core::mem::size_of::<u64>())?;

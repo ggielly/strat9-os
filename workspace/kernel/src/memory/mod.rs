@@ -102,7 +102,7 @@ pub fn allocate_mapping_cap_id() -> CapId {
 
 /// Records that `cap_id` now names `handle` in the ownership table.
 pub fn register_mapping_identity(handle: BlockHandle, cap_id: CapId) {
-    match ownership_table().ensure_ref(handle, cap_id) {
+    match try_register_mapping_identity(handle, cap_id) {
         Ok(_) | Err(OwnerError::CapAlreadyPresent) => {}
         Err(error) => {
             log::warn!(
@@ -114,6 +114,11 @@ pub fn register_mapping_identity(handle: BlockHandle, cap_id: CapId) {
             );
         }
     }
+}
+
+/// Fallible variant of mapping identity registration for transactional callers.
+pub fn try_register_mapping_identity(handle: BlockHandle, cap_id: CapId) -> Result<(), OwnerError> {
+    ownership_table().ensure_ref(handle, cap_id).map(|_| ())
 }
 
 /// Releases a block back to the buddy allocator.

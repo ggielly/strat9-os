@@ -9,8 +9,8 @@ use crate::{capability::CapId, sync::SpinLock};
 
 use super::{
     address_space::{AddressSpace, VmaFlags, VmaPageSize, VmaType},
-    cow, ownership_table, register_mapping_identity, release_owned_block, revoke_mapping_cap_id,
-    unregister_mapping_identity, BlockHandle,
+    cow, ownership_table, release_owned_block, revoke_mapping_cap_id,
+    try_register_mapping_identity, unregister_mapping_identity, BlockHandle, OwnerError,
 };
 
 /// Public metadata about an exported memory region.
@@ -50,6 +50,8 @@ pub enum RegionCapError {
     PermissionDenied,
     /// The target address space cannot host the mapping.
     OutOfMemory,
+    /// Internal ownership state was inconsistent while publishing the region.
+    InconsistentState,
 }
 
 /// Result of releasing one public region-handle reference.
@@ -79,6 +81,14 @@ impl MemoryRegionRegistry {
         }
     }
 
+    fn rollback_registered_handles(handles: &[BlockHandle], handle_cap: CapId) {
+        for handle in handles.iter().copied() {
+            if let Some(block) = unregister_mapping_identity(handle, handle_cap) {
+                release_owned_block(block);
+            }
+        }
+    }
+
     /// Exports the tracked region starting at `start` into a public capability resource.
     pub fn export_region(
         &self,
@@ -104,7 +114,20 @@ impl MemoryRegionRegistry {
             let mapping = address_space
                 .effective_mapping_by_start(vaddr)
                 .ok_or(RegionCapError::IncompleteRegion)?;
-            register_mapping_identity(mapping.handle, handle_cap);
+            if let Err(error) = try_register_mapping_identity(mapping.handle, handle_cap) {
+                if error != OwnerError::CapAlreadyPresent {
+                    log::warn!(
+                        "memory: failed to export region start={:#x} handle cap={} block={:#x}/{}: {:?}",
+                        start,
+                        handle_cap.as_u64(),
+                        mapping.handle.base.as_u64(),
+                        mapping.handle.order,
+                        error
+                    );
+                    Self::rollback_registered_handles(&handles, handle_cap);
+                    return Err(RegionCapError::InconsistentState);
+                }
+            }
             handles.push(mapping.handle);
             mapping_cap_ids.push(mapping.cap_id);
         }
@@ -136,8 +159,26 @@ impl MemoryRegionRegistry {
             .iter()
             .any(|existing| *existing == handle_cap)
         {
+            let mut newly_registered = Vec::with_capacity(entry.handles.len());
             for handle in &entry.handles {
-                register_mapping_identity(*handle, handle_cap);
+                match try_register_mapping_identity(*handle, handle_cap) {
+                    Ok(()) => {
+                        newly_registered.push(*handle);
+                    }
+                    Err(OwnerError::CapAlreadyPresent) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "memory: failed to retain region={} cap={} block={:#x}/{}: {:?}",
+                            resource_id,
+                            handle_cap.as_u64(),
+                            handle.base.as_u64(),
+                            handle.order,
+                            error
+                        );
+                        Self::rollback_registered_handles(&newly_registered, handle_cap);
+                        return Err(RegionCapError::InconsistentState);
+                    }
+                }
             }
             entry.handle_caps.push(handle_cap);
         }
