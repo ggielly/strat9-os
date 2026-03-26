@@ -1611,7 +1611,16 @@ impl AddressSpace {
                 }
 
                 let handle = mapping.handle;
-                crate::memory::cow::handle_inc_ref(handle);
+                crate::memory::cow::handle_inc_ref(handle).map_err(|error| {
+                    log::warn!(
+                        "clone_cow: failed to pin source handle {:#x}/{} for vaddr={:#x}: {:?}",
+                        handle.base.as_u64(),
+                        handle.order,
+                        vaddr.as_u64(),
+                        error
+                    );
+                    "Failed to pin source COW frame"
+                })?;
 
                 // Map in child. We map it as WRITABLE first to ensure intermediate
                 // page tables (PDPT, PD) are created with WRITABLE bit set.

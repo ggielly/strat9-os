@@ -65,7 +65,7 @@ impl Drop for SharedRing {
     /// Performs the drop operation.
     fn drop(&mut self) {
         for frame in self.frames.drain(..) {
-            crate::memory::cow::frame_dec_ref(frame);
+            crate::sync::with_irqs_disabled(|token| crate::memory::free_frame(token, frame));
         }
     }
 }
@@ -112,7 +112,7 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
     }
     if alloc_failed {
         for rollback in frames.drain(..) {
-            crate::memory::cow::frame_dec_ref(rollback);
+            crate::sync::with_irqs_disabled(|token| crate::memory::free_frame(token, rollback));
         }
         return Err(RingError::Alloc);
     }

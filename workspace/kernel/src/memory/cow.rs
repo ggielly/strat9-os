@@ -21,7 +21,8 @@
 use crate::{
     memory::{
         frame::{frame_flags, get_meta, PhysFrame},
-        ownership_table, release_owned_block, resolve_handle, BlockHandle, RemoveRefResult,
+        ownership_table, release_owned_block, resolve_handle, BlockHandle, OwnerError,
+        RemoveRefResult,
     },
     sync::SpinLock,
 };
@@ -41,21 +42,25 @@ fn handle_meta(handle: BlockHandle) -> &'static crate::memory::frame::FrameMeta 
 }
 
 /// Increments the shared reference count of a physical block.
-pub fn handle_inc_ref(handle: BlockHandle) {
-    if let Err(error) = ownership_table().pin(handle) {
-        log::warn!(
-            "memory: failed to pin shared handle {:#x}/{}: {:?}",
-            handle.base.as_u64(),
-            handle.order,
-            error
-        );
-    }
+pub fn handle_inc_ref(handle: BlockHandle) -> Result<u32, OwnerError> {
+    ownership_table().pin(handle)
 }
 
 /// Decrements the shared reference count of a physical block.
 pub fn handle_dec_ref(handle: BlockHandle) {
-    if let Ok(RemoveRefResult::Freed(block)) = ownership_table().unpin(handle) {
-        release_owned_block(block);
+    match ownership_table().unpin(handle) {
+        Ok(RemoveRefResult::Freed(block)) => release_owned_block(block),
+        Ok(RemoveRefResult::NowExclusive { .. })
+        | Ok(RemoveRefResult::StillPinned { .. })
+        | Ok(RemoveRefResult::StillShared { .. }) => {}
+        Err(error) => {
+            log::warn!(
+                "memory: failed to unpin shared handle {:#x}/{}: {:?}",
+                handle.base.as_u64(),
+                handle.order,
+                error
+            );
+        }
     }
 }
 
@@ -74,8 +79,8 @@ pub fn handle_init_ref(handle: BlockHandle) {
 }
 
 /// Performs the frame inc ref operation.
-pub fn frame_inc_ref(frame: PhysFrame) {
-    handle_inc_ref(resolve_handle(frame.start_address));
+pub fn frame_inc_ref(frame: PhysFrame) -> Result<u32, OwnerError> {
+    handle_inc_ref(resolve_handle(frame.start_address))
 }
 
 /// Performs the frame dec ref operation.
