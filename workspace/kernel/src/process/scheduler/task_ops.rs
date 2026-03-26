@@ -396,6 +396,27 @@ pub fn get_task_ids_in_pgid(pgid: Pid) -> alloc::vec::Vec<TaskId> {
     out
 }
 
+/// Collect task IDs that currently belong to thread group `tgid`.
+pub fn get_task_ids_in_tgid(tgid: Pid) -> alloc::vec::Vec<TaskId> {
+    use alloc::vec::Vec;
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        if let Some(ref sched) = *scheduler {
+            sched
+                .all_tasks
+                .values()
+                .filter(|task| task.tgid == tgid)
+                .map(|task| task.id)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
 /// Set process group id for `target_pid` (or current if `None`).
 pub fn set_process_group(
     requester: TaskId,

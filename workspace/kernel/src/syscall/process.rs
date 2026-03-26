@@ -6,6 +6,7 @@ use super::{error::SyscallError, SyscallFrame};
 use crate::process::{
     block_current_task, create_session, current_pgid, current_task_clone, current_task_id,
     current_tid, get_child_task_id_by_tid, get_parent_pid, get_pgid_by_pid, get_sid_by_pid,
+    get_task_ids_in_tgid, kill_task,
     scheduler::add_task_with_parent,
     set_process_group,
     task::{CpuContext, ExtendedState, KernelStack, SyncUnsafeCell, Task},
@@ -396,10 +397,14 @@ pub fn sys_set_tid_address(tidptr: u64) -> Result<u64, SyscallError> {
 }
 
 /// SYS_EXIT_GROUP (334): Exit all threads in the thread group.
-///
-/// In the current single-threaded model this is identical to SYS_PROC_EXIT.
-/// When multi-threading is added, this must kill every task sharing the same TGID.
 pub fn sys_exit_group(exit_code: u64) -> Result<u64, SyscallError> {
+    let current = current_task_clone().ok_or(SyscallError::Fault)?;
+    for sibling_id in get_task_ids_in_tgid(current.tgid) {
+        if sibling_id != current.id {
+            let _ = kill_task(sibling_id);
+        }
+    }
+
     // Diverges — never returns.
     crate::process::scheduler::exit_current_task(exit_code as i32)
 }

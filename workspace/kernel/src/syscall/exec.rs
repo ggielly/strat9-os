@@ -6,6 +6,7 @@ use crate::{
     process::{
         current_task_clone,
         elf::{load_elf_image, LoadedElfInfo, USER_STACK_BASE, USER_STACK_PAGES, USER_STACK_TOP},
+        get_task_ids_in_tgid,
     },
     syscall::{error::SyscallError, SyscallFrame},
     vfs,
@@ -22,37 +23,14 @@ const AT_ENTRY: u64 = 9;
 const AT_RANDOM: u64 = 25;
 const AT_EXECFN: u64 = 31;
 
-/// SYS_PROC_EXECVE (301): replace current process image.
-pub fn sys_execve(
-    frame: &mut SyscallFrame,
-    path_ptr: u64,
-    argv_ptr: u64,
-    envp_ptr: u64,
-) -> Result<u64, SyscallError> {
-    let current = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-
-    let mut path_buf = [0u8; 4096];
-    let path_slice = UserSliceRead::new(path_ptr, 4096).map_err(|_| SyscallError::Fault)?;
-
-    let mut len = 0;
-
-    loop {
-        if len >= 4096 {
-            return Err(SyscallError::ArgumentListTooLong);
-        } // Reused error code
-        let b = path_slice.read_u8(len).map_err(|_| SyscallError::Fault)?;
-        if b == 0 {
-            break;
-        }
-        path_buf[len] = b;
-        len += 1;
+/// Read an executable image, borrowing static initfs bytes when available.
+fn read_exec_image(path: &str) -> Result<Option<Vec<u8>>, SyscallError> {
+    if crate::vfs::get_initfs_file_bytes(path).is_some() {
+        return Ok(None);
     }
-    let path_str =
-        core::str::from_utf8(&path_buf[..len]).map_err(|_| SyscallError::InvalidArgument)?;
 
-    let fd = vfs::open(path_str, vfs::OpenFlags::READ)?;
+    let fd = vfs::open(path, vfs::OpenFlags::READ)?;
 
-    // Read into memory
     const MAX_EXEC_SIZE: usize = 64 * 1024 * 1024;
     let mut elf_data = Vec::new();
     let mut buf = [0u8; 4096];
@@ -76,6 +54,63 @@ pub fn sys_execve(
     }
     let _ = vfs::close(fd);
 
+    Ok(Some(elf_data))
+}
+
+/// SYS_PROC_EXECVE (301): replace current process image.
+/// On success, does not return. On failure, returns an appropriate error code.
+/// This is the main syscall handler for execve, which performs the entire execve sequence:
+/// 1. Validate and read the executable image from the given path.
+/// 2. Create a new address space and load the ELF segments.
+/// 3. Set up the user stack with arguments, environment variables, and auxiliary vector.
+/// 4. Perform cleanup of the current process state (close fds, reset signals,
+///   clear TLS and TID pointer, etc) according to POSIX exec semantics.
+/// 5. Switch to the new address space and transfer control to the new image's entry point.
+/// The `setup_user_stack` function is a helper that performs step 3, which is complex enough to warrant its own function.
+/// The implementation assumes a simple model where sibling threads are not runnable during execve, which allows it to replace the entire address space without complex synchronization. This is a common approach in many kernels, but it does mean that multithreaded execve is not supported until the kernel can safely handle it.
+/// It also includes robust error handling to ensure that any failure during the execve sequence results in an appropriate error code without leaving the process in an inconsistent state.
+/// Note: This implementation does not currently support some features like setuid binaries, but it lays the groundwork for a full execve implementation with proper ELF loading and stack setup.
+///
+pub fn sys_execve(
+    frame: &mut SyscallFrame,
+    path_ptr: u64,
+    argv_ptr: u64,
+    envp_ptr: u64,
+) -> Result<u64, SyscallError> {
+    let current = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+
+    // Replacing a shared address space while sibling threads are still runnable
+    // is unsafe in the current model. Refuse multithreaded exec until the
+    // kernel can synchronize and reap sibling threads atomically.
+    if get_task_ids_in_tgid(current.tgid).len() > 1 {
+        return Err(SyscallError::NotSupported);
+    }
+
+    let mut path_buf = [0u8; 4096];
+    let path_slice = UserSliceRead::new(path_ptr, 4096).map_err(|_| SyscallError::Fault)?;
+
+    let mut len = 0;
+
+    loop {
+        if len >= 4096 {
+            return Err(SyscallError::ArgumentListTooLong);
+        } // Reused error code
+        let b = path_slice.read_u8(len).map_err(|_| SyscallError::Fault)?;
+        if b == 0 {
+            break;
+        }
+        path_buf[len] = b;
+        len += 1;
+    }
+    let path_str =
+        core::str::from_utf8(&path_buf[..len]).map_err(|_| SyscallError::InvalidArgument)?;
+
+    let owned_elf_data = read_exec_image(path_str)?;
+    let elf_data = owned_elf_data
+        .as_deref()
+        .or_else(|| crate::vfs::get_initfs_file_bytes(path_str))
+        .ok_or(SyscallError::NotFound)?;
+
     if elf_data.len() < 4 {
         return Err(SyscallError::ExecFormatError);
     }
@@ -85,7 +120,7 @@ pub fn sys_execve(
     new_as_arc.set_owner_pid(current.pid);
 
     let load_info =
-        load_elf_image(&elf_data, &new_as_arc).map_err(|_| SyscallError::ExecFormatError)?;
+        load_elf_image(elf_data, &new_as_arc).map_err(|_| SyscallError::ExecFormatError)?;
 
     let stack_flags = VmaFlags {
         readable: true,

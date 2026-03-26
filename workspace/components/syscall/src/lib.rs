@@ -562,6 +562,19 @@ pub mod call {
         }
     }
 
+    /// Terminate all threads in the current thread group with the given exit `code`.
+    ///
+    /// This function never returns.
+    pub fn exit_group(code: usize) -> ! {
+        unsafe {
+            syscall1(number::SYS_EXIT_GROUP, code).ok();
+        }
+        #[allow(clippy::empty_loop)]
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     /// Yield the process's time slice to the kernel
     ///
     /// This function will return Ok(0) on success

@@ -21,6 +21,8 @@ MEM_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem"
 MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
 MEM_REGION_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_region"
 MEM_REGION_PROC_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_region_proc"
+EXEC_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_exec"
+EXEC_TEST_HELPER_ELF="target/x86_64-unknown-none/${PROFILE}/test_exec_helper"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/strate-init"
 CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
@@ -100,6 +102,12 @@ if [ "$INCLUDE_TESTS" = "1" ]; then
         echo "    mem-region  : $mem_region_test_size bytes"
     else
         echo "    mem-region  : (missing)"
+    fi
+    if [ -f "$EXEC_TEST_ELF" ]; then
+        exec_test_size=$(stat -c%s "$EXEC_TEST_ELF")
+        echo "    exec-test   : $exec_test_size bytes"
+    else
+        echo "    exec-test   : (missing)"
     fi
 fi
 if [ -f "$INIT_ELF" ]; then
@@ -226,6 +234,20 @@ if [ -f "$MEM_REGION_PROC_TEST_ELF" ]; then
     echo "  [OK] Copied mem-region-proc binary: /initfs/test_mem_region_proc"
 else
     echo "  [WARN] mem-region-proc binary not found at $MEM_REGION_PROC_TEST_ELF"
+fi
+
+if [ -f "$EXEC_TEST_ELF" ]; then
+    cp "$EXEC_TEST_ELF" "$ISO_ROOT/initfs/test_exec"
+    echo "  [OK] Copied exec-test binary: /initfs/test_exec"
+else
+    echo "  [WARN] exec-test binary not found at $EXEC_TEST_ELF"
+fi
+
+if [ -f "$EXEC_TEST_HELPER_ELF" ]; then
+    cp "$EXEC_TEST_HELPER_ELF" "$ISO_ROOT/initfs/test_exec_helper"
+    echo "  [OK] Copied exec-test helper binary: /initfs/test_exec_helper"
+else
+    echo "  [WARN] exec-test helper binary not found at $EXEC_TEST_HELPER_ELF"
 fi
 
 if [ "$INCLUDE_TESTS" = "1" ]; then

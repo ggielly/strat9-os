@@ -63,6 +63,11 @@ static TEST_MEM_REGION_MODULE: InternalModule =
 /// Internal module: request Limine to load /initfs/test_mem_region_proc (userspace multi-process MemoryRegion test)
 static TEST_MEM_REGION_PROC_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/test_mem_region_proc");
+/// Internal module: request Limine to load /initfs/test_exec (userspace exec regression test)
+static TEST_EXEC_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_exec");
+/// Internal module: request Limine to load /initfs/test_exec_helper (userspace exec post-exec verifier)
+static TEST_EXEC_HELPER_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/test_exec_helper");
 /// Internal module: request Limine to load /initfs/fs-ext4 (userspace EXT4 server)
 static EXT4_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/fs-ext4");
 /// Internal module: request Limine to load /initfs/strate-fs-ramfs (userspace RAMFS server)
@@ -111,6 +116,8 @@ static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
     &TEST_MEM_STRESSED_MODULE,
     &TEST_MEM_REGION_MODULE,
     &TEST_MEM_REGION_PROC_MODULE,
+    &TEST_EXEC_MODULE,
+    &TEST_EXEC_HELPER_MODULE,
     &EXT4_MODULE,
     &RAM_MODULE,
     &INIT_MODULE,
@@ -141,6 +148,10 @@ static mut TEST_MEM_STRESSED_ELF_MODULE: Option<(u64, u64)> = None;
 static mut TEST_MEM_REGION_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional test_mem_region_proc module info (set during Limine entry).
 static mut TEST_MEM_REGION_PROC_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional test_exec module info (set during Limine entry).
+static mut TEST_EXEC_ELF_MODULE: Option<(u64, u64)> = None;
+/// Optional test_exec_helper module info (set during Limine entry).
+static mut TEST_EXEC_HELPER_ELF_MODULE: Option<(u64, u64)> = None;
 /// Optional strate-fs-ramfs module info (set during Limine entry).
 static mut STRATE_FS_RAMFS_MODULE: Option<(u64, u64)> = None;
 /// Optional init module info (set during Limine entry).
@@ -215,6 +226,18 @@ pub fn test_mem_region_module() -> Option<(u64, u64)> {
 pub fn test_mem_region_proc_module() -> Option<(u64, u64)> {
     // SAFETY: Written once during early boot, then read-only.
     unsafe { TEST_MEM_REGION_PROC_ELF_MODULE }
+}
+
+/// Return the test_exec module (addr, size) if present.
+pub fn test_exec_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { TEST_EXEC_ELF_MODULE }
+}
+
+/// Return the test_exec_helper module (addr, size) if present.
+pub fn test_exec_helper_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { TEST_EXEC_HELPER_ELF_MODULE }
 }
 
 /// Return the strate-fs-ramfs module (addr, size) if present.
@@ -334,6 +357,8 @@ struct ResolvedModules {
     test_mem_stressed: Option<(u64, u64)>,
     test_mem_region: Option<(u64, u64)>,
     test_mem_region_proc: Option<(u64, u64)>,
+    test_exec: Option<(u64, u64)>,
+    test_exec_helper: Option<(u64, u64)>,
     fs_ext4: Option<(u64, u64)>,
     fs_ram: Option<(u64, u64)>,
     init: Option<(u64, u64)>,
@@ -373,6 +398,10 @@ fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> Re
             resolved.test_mem_region = Some(info);
         } else if path_matches(path, b"/initfs/test_mem_region_proc") {
             resolved.test_mem_region_proc = Some(info);
+        } else if path_matches(path, b"/initfs/test_exec") {
+            resolved.test_exec = Some(info);
+        } else if path_matches(path, b"/initfs/test_exec_helper") {
+            resolved.test_exec_helper = Some(info);
         } else if path_matches(path, b"/initfs/fs-ext4") {
             resolved.fs_ext4 = Some(info);
         } else if path_matches(path, b"/initfs/strate-fs-ramfs") {
@@ -596,6 +625,9 @@ pub unsafe extern "C" fn kmain() -> ! {
                 resolved.test_mem_region.unwrap_or((0, 0));
             let (test_mem_region_proc_base, test_mem_region_proc_size) =
                 resolved.test_mem_region_proc.unwrap_or((0, 0));
+            let (test_exec_base, test_exec_size) = resolved.test_exec.unwrap_or((0, 0));
+            let (test_exec_helper_base, test_exec_helper_size) =
+                resolved.test_exec_helper.unwrap_or((0, 0));
             let (ext4_base, ext4_size) = resolved.fs_ext4.unwrap_or((0, 0));
             let (ram_base, ram_size) = resolved.fs_ram.unwrap_or((0, 0));
 
@@ -655,6 +687,31 @@ pub unsafe extern "C" fn kmain() -> ! {
             } else {
                 crate::serial_println!(
                     "[limine] WARN: /initfs/test_mem_region_proc not found in modules"
+                );
+            }
+            if test_exec_base != 0 && test_exec_size != 0 {
+                unsafe { TEST_EXEC_ELF_MODULE = Some((test_exec_base, test_exec_size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/test_exec found: base={:#x} size={}",
+                    test_exec_base,
+                    test_exec_size
+                );
+            } else {
+                crate::serial_println!("[limine] WARN: /initfs/test_exec not found in modules");
+            }
+            if test_exec_helper_base != 0 && test_exec_helper_size != 0 {
+                unsafe {
+                    TEST_EXEC_HELPER_ELF_MODULE =
+                        Some((test_exec_helper_base, test_exec_helper_size))
+                };
+                crate::serial_println!(
+                    "[limine] /initfs/test_exec_helper found: base={:#x} size={}",
+                    test_exec_helper_base,
+                    test_exec_helper_size
+                );
+            } else {
+                crate::serial_println!(
+                    "[limine] WARN: /initfs/test_exec_helper not found in modules"
                 );
             }
 
