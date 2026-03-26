@@ -1,6 +1,9 @@
 use crate::{
     capability::CapId,
-    memory::{allocate_mapping_cap_id, revoke_mapping_cap_id, PhysFrame},
+    memory::{
+        allocate_mapping_cap_id, register_mapping_identity, release_owned_block,
+        resolve_handle, revoke_mapping_cap_id, unregister_mapping_identity, PhysFrame,
+    },
     sync::SpinLock,
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
@@ -33,6 +36,7 @@ pub enum RingError {
 pub struct SharedRing {
     size: usize,
     frames: Vec<PhysFrame>,
+    owner_cap_ids: Vec<CapId>,
     mapping_cap_ids: Vec<CapId>,
 }
 
@@ -64,8 +68,11 @@ impl SharedRing {
 impl Drop for SharedRing {
     /// Performs the drop operation.
     fn drop(&mut self) {
-        for frame in self.frames.drain(..) {
-            crate::sync::with_irqs_disabled(|token| crate::memory::free_frame(token, frame));
+        for (frame, owner_cap_id) in self.frames.drain(..).zip(self.owner_cap_ids.drain(..)) {
+            let handle = resolve_handle(frame.start_address);
+            if let Some(block) = unregister_mapping_identity(handle, owner_cap_id) {
+                release_owned_block(block);
+            }
         }
     }
 }
@@ -103,11 +110,6 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
             };
         let v = crate::memory::phys_to_virt(frame.start_address.as_u64());
         unsafe { core::ptr::write_bytes(v as *mut u8, 0, 4096) };
-        // allocate_frame() (FrameAllocOptions) stamps refcount=1 via
-        // CAS(REFCOUNT_UNUSED → 1). Do NOT call frame_inc_ref here: a freshly
-        // allocated frame is already the sole owner (refcount=1). Calling
-        // frame_inc_ref would push it to 2, causing the Drop path to leak
-        // (frame_dec_ref would only bring it back to 1, never triggering free).
         frames.push(frame);
     }
     if alloc_failed {
@@ -118,10 +120,17 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
     }
 
     let id = RingId(NEXT_RING_ID.fetch_add(1, Ordering::Relaxed));
+    let owner_cap_ids = (0..page_count).map(|_| allocate_mapping_cap_id()).collect::<Vec<_>>();
     let mapping_cap_ids = (0..page_count).map(|_| allocate_mapping_cap_id()).collect();
+
+    for (frame, owner_cap_id) in frames.iter().zip(owner_cap_ids.iter().copied()) {
+        register_mapping_identity(resolve_handle(frame.start_address), owner_cap_id);
+    }
+
     let ring = Arc::new(SharedRing {
         size,
         frames,
+        owner_cap_ids,
         mapping_cap_ids,
     });
 

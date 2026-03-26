@@ -520,8 +520,9 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
     // Only the current CPU can hold this CR3 in the current design.
     local_invlpg(virt_addr);
 
-    // Decrement refcount of old frame after the new mapping is installed.
-    crate::memory::cow::handle_dec_ref(old_handle);
+    // Replacing the effective mapping at the same address already unregisters
+    // the previous mapping identity for old_handle. There is no transient pin
+    // to drop in this path.
 
     Ok(())
 }
