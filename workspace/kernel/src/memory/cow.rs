@@ -42,7 +42,14 @@ fn handle_meta(handle: BlockHandle) -> &'static crate::memory::frame::FrameMeta 
 
 /// Increments the shared reference count of a physical block.
 pub fn handle_inc_ref(handle: BlockHandle) {
-    let _ = ownership_table().pin(handle);
+    if let Err(error) = ownership_table().pin(handle) {
+        log::warn!(
+            "memory: failed to pin shared handle {:#x}/{}: {:?}",
+            handle.base.as_u64(),
+            handle.order,
+            error
+        );
+    }
 }
 
 /// Decrements the shared reference count of a physical block.

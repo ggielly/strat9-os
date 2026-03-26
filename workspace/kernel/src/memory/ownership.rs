@@ -181,12 +181,7 @@ impl OwnershipTable {
     /// Adds a temporary pin to keep the block alive while publishing a mapping.
     pub fn pin(&self, handle: BlockHandle) -> Result<u32, OwnerError> {
         let mut entries = self.entries.lock();
-        let entry = entries.entry(handle).or_insert_with(|| OwnerEntry {
-            state: BlockState::Exclusive,
-            refcount: 0,
-            caps: smallvec![],
-            transient_refs: 0,
-        });
+        let entry = entries.get_mut(&handle).ok_or(OwnerError::NotFound)?;
         entry.transient_refs = entry
             .transient_refs
             .checked_add(1)
@@ -285,9 +280,7 @@ impl OwnershipTable {
             RemoveRefResult::Freed(released) => Ok(released),
             RemoveRefResult::NowExclusive { .. }
             | RemoveRefResult::StillPinned { .. }
-            | RemoveRefResult::StillShared { .. } => {
-                Err(OwnerError::StillReferenced)
-            }
+            | RemoveRefResult::StillShared { .. } => Err(OwnerError::StillReferenced),
         }
     }
 

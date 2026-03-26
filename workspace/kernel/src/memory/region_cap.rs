@@ -167,59 +167,82 @@ impl MemoryRegionRegistry {
         let entry = {
             let entries = self.entries.lock();
             let entry = entries.get(&resource_id).ok_or(RegionCapError::NotFound)?;
+            let mut pinned = 0usize;
             for handle in &entry.handles {
-                ownership_table().pin(*handle).map_err(|_| RegionCapError::OutOfMemory)?;
+                match ownership_table().pin(*handle) {
+                    Ok(_) => {
+                        pinned += 1;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "memory: failed to pin exported handle resource={} block={:#x}/{}: {:?}",
+                            resource_id,
+                            handle.base.as_u64(),
+                            handle.order,
+                            error
+                        );
+                        for pinned_handle in entry.handles.iter().take(pinned) {
+                            cow::handle_dec_ref(*pinned_handle);
+                        }
+                        return Err(RegionCapError::OutOfMemory);
+                    }
+                }
             }
             entry.clone()
         };
 
-        let effective_flags = VmaFlags {
-            readable: entry.flags.readable && requested_flags.readable,
-            writable: entry.flags.writable && requested_flags.writable,
-            executable: entry.flags.executable && requested_flags.executable,
-            user_accessible: true,
-        };
-        let page_count = entry.handles.len();
-        let page_bytes = entry.page_size.bytes();
+        let map_result = (|| {
+            let effective_flags = VmaFlags {
+                readable: entry.flags.readable && requested_flags.readable,
+                writable: entry.flags.writable && requested_flags.writable,
+                executable: entry.flags.executable && requested_flags.executable,
+                user_accessible: true,
+            };
+            let page_count = entry.handles.len();
+            let page_bytes = entry.page_size.bytes();
 
-        let base = if addr_hint != 0 {
-            if addr_hint % page_bytes != 0 {
-                return Err(RegionCapError::InvalidAddress);
-            }
-            address_space
-                .find_free_vma_range(addr_hint, page_count, entry.page_size)
-                .or_else(|| {
-                    address_space.find_free_vma_range(
+            let base = if addr_hint != 0 {
+                if addr_hint % page_bytes != 0 {
+                    return Err(RegionCapError::InvalidAddress);
+                }
+                address_space
+                    .find_free_vma_range(addr_hint, page_count, entry.page_size)
+                    .or_else(|| {
+                        address_space.find_free_vma_range(
+                            crate::syscall::mmap::MMAP_BASE,
+                            page_count,
+                            entry.page_size,
+                        )
+                    })
+                    .ok_or(RegionCapError::OutOfMemory)?
+            } else {
+                address_space
+                    .find_free_vma_range(
                         crate::syscall::mmap::MMAP_BASE,
                         page_count,
                         entry.page_size,
                     )
-                })
-                .ok_or(RegionCapError::OutOfMemory)?
-        } else {
-            address_space
-                .find_free_vma_range(crate::syscall::mmap::MMAP_BASE, page_count, entry.page_size)
-                .ok_or(RegionCapError::OutOfMemory)?
-        };
+                    .ok_or(RegionCapError::OutOfMemory)?
+            };
 
-        let map_result = address_space
-            .map_shared_handles_with_cap_ids(
-                base,
-                &entry.handles,
-                Some(&entry.mapping_cap_ids),
-                effective_flags,
-                entry.vma_type,
-                entry.page_size,
-            )
-            .map_err(|_| RegionCapError::OutOfMemory);
+            address_space
+                .map_shared_handles_with_cap_ids(
+                    base,
+                    &entry.handles,
+                    Some(&entry.mapping_cap_ids),
+                    effective_flags,
+                    entry.vma_type,
+                    entry.page_size,
+                )
+                .map(|_| (base, entry.size))
+                .map_err(|_| RegionCapError::OutOfMemory)
+        })();
 
         for handle in &entry.handles {
             cow::handle_dec_ref(*handle);
         }
 
-        map_result?;
-
-        Ok((base, entry.size))
+        map_result
     }
 
     /// Releases one handle reference to an exported memory region.
