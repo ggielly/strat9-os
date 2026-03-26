@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+#[cfg(not(test))]
 use core::panic::PanicInfo;
 use strat9_syscall::{call, error::Error};
 
@@ -103,6 +104,7 @@ fn check_cloexec_closed() -> bool {
     }
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     log_err("[test_exec_helper] panic\n");

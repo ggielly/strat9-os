@@ -37,12 +37,12 @@ pub fn exit_current_task(exit_code: i32) -> ! {
     {
         let saved_flags = save_flags_and_cli();
         let mut scheduler = GLOBAL_SCHED_STATE.lock();
+        let current = {
+            let local = LOCAL_SCHEDULERS[cpu_index].lock();
+            local.as_ref().and_then(|cpu| cpu.current_task.clone())
+        };
         if let Some(ref mut sched) = *scheduler {
-            if let Some(current) = LOCAL_SCHEDULERS[cpu_index]
-                .lock()
-                .as_ref()
-                .and_then(|cpu| cpu.current_task.clone())
-            {
+            if let Some(current) = current {
                 let current_id = current.id;
                 let current_pid = current.pid;
                 let parent = sched.parent_of.get(&current_id).copied();
