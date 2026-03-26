@@ -302,12 +302,12 @@ fn resolve_cow_for_range(ptr: u64, len: usize) -> Result<(), SyscallError> {
         return Ok(());
     }
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    let address_space = unsafe { &*task.process.address_space.get() };
+    let address_space = task.process.address_space_arc();
     let start = ptr & !0xfff;
     let end = (ptr + (len as u64).saturating_sub(1)) & !0xfff;
     let mut page = start;
     loop {
-        crate::syscall::fork::handle_cow_fault(page, address_space)
+        crate::syscall::fork::handle_cow_fault(page, &address_space)
             .map_err(|_| SyscallError::Fault)?;
         if page == end {
             break;

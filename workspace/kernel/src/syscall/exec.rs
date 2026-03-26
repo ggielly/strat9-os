@@ -245,15 +245,10 @@ pub fn sys_execve(
         );
     }
 
-    let old_as = unsafe {
-        core::mem::replace(
-            &mut *current.process.address_space.get(),
-            new_as_arc.clone(),
-        )
-    };
+    let old_as = current.process.replace_address_space(new_as_arc.clone());
 
     unsafe {
-        (&*current.process.address_space.get()).switch_to();
+        current.process.address_space_arc().switch_to();
     }
 
     frame.iret_rip = load_info.runtime_entry;

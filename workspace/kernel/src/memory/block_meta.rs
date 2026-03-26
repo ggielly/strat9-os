@@ -6,7 +6,7 @@
 
 use x86_64::PhysAddr;
 
-use crate::memory::{block::BlockHandle, frame};
+use crate::memory::{block::BlockHandle, frame, ownership_table};
 
 /// Current metadata backing a block head.
 pub type BlockMeta = frame::FrameMeta;
@@ -21,6 +21,9 @@ pub fn get_block_meta(phys: PhysAddr) -> &'static BlockMeta {
 
 /// Resolves a physical address to the current block handle.
 pub fn resolve_handle(phys: PhysAddr) -> BlockHandle {
+    if let Some(handle) = ownership_table().handle_for_base(phys) {
+        return handle;
+    }
     let meta = get_block_meta(phys);
     BlockHandle::new(phys, meta.get_order())
 }

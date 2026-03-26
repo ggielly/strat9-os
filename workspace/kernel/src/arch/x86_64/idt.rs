@@ -676,7 +676,7 @@ extern "x86-interrupt" fn page_fault_handler(
     let mut trace_ctx = crate::trace::TraceTaskCtx::empty();
     if is_user {
         if let Some(task) = crate::process::current_task_clone() {
-            let as_ref = unsafe { &*task.process.address_space.get() };
+            let as_ref = task.process.address_space_arc();
             trace_ctx = crate::trace::TraceTaskCtx {
                 task_id: task.id.as_u64(),
                 pid: task.pid,
@@ -719,9 +719,9 @@ extern "x86-interrupt" fn page_fault_handler(
         && is_user
     {
         if let Some(task) = crate::process::current_task_clone() {
-            let address_space = unsafe { &*task.process.address_space.get() };
+            let address_space = task.process.address_space_arc();
             if let Ok(vaddr) = fault_addr {
-                match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), address_space) {
+                match crate::syscall::fork::handle_cow_fault(vaddr.as_u64(), &address_space) {
                     Ok(()) => {
                         crate::trace_mem!(
                             crate::trace::category::MEM_COW,
@@ -763,7 +763,7 @@ extern "x86-interrupt" fn page_fault_handler(
 
     if is_user {
         if let Some(task) = crate::process::current_task_clone() {
-            let address_space = unsafe { &*task.process.address_space.get() };
+            let address_space = task.process.address_space_arc();
             if let Ok(vaddr) = fault_addr {
                 if do_pf_trace {
                     // FORCE OUTPUT for the first user faults only; lazy demand paging can
@@ -809,7 +809,7 @@ extern "x86-interrupt" fn page_fault_handler(
                             rip,
                             vaddr.as_u64()
                         );
-                        dump_user_pf_context(address_space, rip, user_rsp);
+                        dump_user_pf_context(&address_space, rip, user_rsp);
                     }
                 }
             }
@@ -1252,7 +1252,7 @@ fn dump_page_fault_full(
     let (cr3_frame, cr3_flags) = Cr3::read();
     let cr3_phys = cr3_frame.start_address().as_u64();
     let cr4 = Cr4::read_raw();
-    let efer: u64 = unsafe { x86_64::registers::model_specific::Efer::read_raw() };
+    let efer: u64 = x86_64::registers::model_specific::Efer::read_raw();
     crate::serial_println!("  CR0         : {:#018x}", cr0);
     crate::serial_println!(
         "  CR3         : {:#018x}  (flags={:#x})",
@@ -1302,7 +1302,7 @@ fn dump_page_fault_full(
         let task_cr3: u64 = {
             let hhdm = crate::memory::hhdm_offset();
             // Step 1: Arc<Process> data (Arc::as_ptr is always valid for a live Arc)
-            let proc_ptr: u64 = alloc::sync::Arc::as_ptr(&t.process) as u64;
+            let _proc_ptr: u64 = alloc::sync::Arc::as_ptr(&t.process) as u64;
             // Step 2: address_space field in Process = SyncUnsafeCell whose .get()
             // returns a raw ptr into the Process data — always valid for a live Process.
             // However, reading the Arc<AddressSpace> *value* from that pointer may

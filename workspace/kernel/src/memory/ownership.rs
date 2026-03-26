@@ -6,7 +6,7 @@ use smallvec::{smallvec, SmallVec};
 
 use crate::{capability::CapId, sync::SpinLock};
 
-use super::block::{BlockHandle, BuddyReserved, Exclusive, PhysBlock, Released};
+use super::{block::{BlockHandle, BuddyReserved, Exclusive, PhysBlock, Released}, block_meta::get_block_meta};
 
 /// Runtime ownership state of a block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +31,8 @@ pub struct OwnerEntry {
     pub refcount: u32,
     /// Capabilities that currently reference the block.
     pub caps: SmallVec<[CapId; 4]>,
+    /// Temporary non-capability pins held while publishing or revoking a mapping.
+    pub transient_refs: u32,
 }
 
 /// Errors returned by the ownership layer.
@@ -80,6 +82,27 @@ impl OwnershipTable {
         }
     }
 
+    fn sync_meta(handle: BlockHandle, refcount: u32) {
+        let meta = get_block_meta(handle.base);
+        meta.set_order(handle.order);
+        meta.set_refcount(refcount);
+    }
+
+    fn classify_refcount(refcount: u32) -> BlockState {
+        if refcount <= 1 {
+            BlockState::Exclusive
+        } else {
+            BlockState::Shared
+        }
+    }
+
+    fn total_refs(entry: &OwnerEntry) -> Result<u32, OwnerError> {
+        let cap_refs = u32::try_from(entry.caps.len()).map_err(|_| OwnerError::CountOverflow)?;
+        cap_refs
+            .checked_add(entry.transient_refs)
+            .ok_or(OwnerError::CountOverflow)
+    }
+
     /// Claims a reserved block for the provided capability.
     pub fn claim(
         &self,
@@ -97,9 +120,38 @@ impl OwnershipTable {
                 state: BlockState::Exclusive,
                 refcount: 1,
                 caps: smallvec![cap_id],
+                transient_refs: 0,
             },
         );
+        Self::sync_meta(handle, 1);
         Ok(block.into_exclusive())
+    }
+
+    /// Ensures `cap_id` is recorded as a live reference on `handle`.
+    pub fn ensure_ref(&self, handle: BlockHandle, cap_id: CapId) -> Result<BlockState, OwnerError> {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.get_mut(&handle) {
+            if entry.caps.iter().any(|existing| *existing == cap_id) {
+                return Err(OwnerError::CapAlreadyPresent);
+            }
+            entry.caps.push(cap_id);
+            entry.refcount = Self::total_refs(entry)?;
+            entry.state = Self::classify_refcount(entry.refcount);
+            Self::sync_meta(handle, entry.refcount);
+            Ok(entry.state)
+        } else {
+            entries.insert(
+                handle,
+                OwnerEntry {
+                    state: BlockState::Exclusive,
+                    refcount: 1,
+                    caps: smallvec![cap_id],
+                    transient_refs: 0,
+                },
+            );
+            Self::sync_meta(handle, 1);
+            Ok(BlockState::Exclusive)
+        }
     }
 
     /// Adds a capability reference to an existing owned block.
@@ -111,14 +163,30 @@ impl OwnershipTable {
         }
 
         entry.caps.push(cap_id);
-        entry.refcount = u32::try_from(entry.caps.len()).map_err(|_| OwnerError::CountOverflow)?;
-        entry.state = if entry.refcount == 1 {
-            BlockState::Exclusive
-        } else {
-            BlockState::Shared
-        };
+        entry.refcount = Self::total_refs(entry)?;
+        entry.state = Self::classify_refcount(entry.refcount);
+        Self::sync_meta(handle, entry.refcount);
 
         Ok(entry.state)
+    }
+
+    /// Adds a temporary pin to keep the block alive while publishing a mapping.
+    pub fn pin(&self, handle: BlockHandle) -> Result<u32, OwnerError> {
+        let mut entries = self.entries.lock();
+        let entry = entries.entry(handle).or_insert_with(|| OwnerEntry {
+            state: BlockState::Exclusive,
+            refcount: 0,
+            caps: smallvec![],
+            transient_refs: 0,
+        });
+        entry.transient_refs = entry
+            .transient_refs
+            .checked_add(1)
+            .ok_or(OwnerError::CountOverflow)?;
+        entry.refcount = Self::total_refs(entry)?;
+        entry.state = Self::classify_refcount(entry.refcount);
+        Self::sync_meta(handle, entry.refcount);
+        Ok(entry.refcount)
     }
 
     /// Removes a capability reference from a block.
@@ -136,21 +204,56 @@ impl OwnershipTable {
             .ok_or(OwnerError::CapNotFound)?;
 
         entry.caps.remove(position);
-        entry.refcount = u32::try_from(entry.caps.len()).map_err(|_| OwnerError::CountOverflow)?;
+        entry.refcount = Self::total_refs(entry)?;
 
         match entry.refcount {
             0 => {
                 entries.remove(&handle);
+                Self::sync_meta(handle, 0);
                 Ok(RemoveRefResult::Freed(PhysBlock::from_handle(handle)))
             }
             1 => {
                 entry.state = BlockState::Exclusive;
+                Self::sync_meta(handle, entry.refcount);
                 Ok(RemoveRefResult::NowExclusive {
                     remaining_cap: entry.caps[0],
                 })
             }
             refcount => {
                 entry.state = BlockState::Shared;
+                Self::sync_meta(handle, entry.refcount);
+                Ok(RemoveRefResult::StillShared { refcount })
+            }
+        }
+    }
+
+    /// Removes one temporary pin and releases the block if this was the last live reference.
+    pub fn unpin(&self, handle: BlockHandle) -> Result<RemoveRefResult, OwnerError> {
+        let mut entries = self.entries.lock();
+        let entry = entries.get_mut(&handle).ok_or(OwnerError::NotFound)?;
+        if entry.transient_refs == 0 {
+            return Err(OwnerError::CapNotFound);
+        }
+
+        entry.transient_refs -= 1;
+        entry.refcount = Self::total_refs(entry)?;
+
+        match entry.refcount {
+            0 => {
+                entries.remove(&handle);
+                Self::sync_meta(handle, 0);
+                Ok(RemoveRefResult::Freed(PhysBlock::from_handle(handle)))
+            }
+            1 => {
+                entry.state = BlockState::Exclusive;
+                Self::sync_meta(handle, entry.refcount);
+                Ok(RemoveRefResult::NowExclusive {
+                    remaining_cap: entry.caps[0],
+                })
+            }
+            refcount => {
+                entry.state = BlockState::Shared;
+                Self::sync_meta(handle, entry.refcount);
                 Ok(RemoveRefResult::StillShared { refcount })
             }
         }
@@ -173,6 +276,15 @@ impl OwnershipTable {
     /// Returns a snapshot of the ownership entry for the given block.
     pub fn get(&self, handle: BlockHandle) -> Option<OwnerEntry> {
         self.entries.lock().get(&handle).cloned()
+    }
+
+    /// Returns the live handle whose base physical address matches `base`, if any.
+    pub fn handle_for_base(&self, base: x86_64::PhysAddr) -> Option<BlockHandle> {
+        self.entries
+            .lock()
+            .keys()
+            .find(|handle| handle.base == base)
+            .copied()
     }
 
     /// Returns the current reference count for the given block.

@@ -9,7 +9,8 @@ use crate::{capability::CapId, sync::SpinLock};
 
 use super::{
     address_space::{AddressSpace, VmaFlags, VmaPageSize, VmaType},
-    cow, revoke_mapping_cap_id, BlockHandle,
+    cow, ownership_table, register_mapping_identity, release_owned_block, revoke_mapping_cap_id,
+    unregister_mapping_identity, BlockHandle,
 };
 
 /// Public metadata about an exported memory region.
@@ -103,7 +104,7 @@ impl MemoryRegionRegistry {
             let mapping = address_space
                 .effective_mapping_by_start(vaddr)
                 .ok_or(RegionCapError::IncompleteRegion)?;
-            cow::handle_inc_ref(mapping.handle);
+            register_mapping_identity(mapping.handle, handle_cap);
             handles.push(mapping.handle);
             mapping_cap_ids.push(mapping.cap_id);
         }
@@ -135,6 +136,9 @@ impl MemoryRegionRegistry {
             .iter()
             .any(|existing| *existing == handle_cap)
         {
+            for handle in &entry.handles {
+                register_mapping_identity(*handle, handle_cap);
+            }
             entry.handle_caps.push(handle_cap);
         }
         Ok(())
@@ -160,12 +164,14 @@ impl MemoryRegionRegistry {
         addr_hint: u64,
         requested_flags: VmaFlags,
     ) -> Result<(u64, u64), RegionCapError> {
-        let entry = self
-            .entries
-            .lock()
-            .get(&resource_id)
-            .cloned()
-            .ok_or(RegionCapError::NotFound)?;
+        let entry = {
+            let entries = self.entries.lock();
+            let entry = entries.get(&resource_id).ok_or(RegionCapError::NotFound)?;
+            for handle in &entry.handles {
+                ownership_table().pin(*handle).map_err(|_| RegionCapError::OutOfMemory)?;
+            }
+            entry.clone()
+        };
 
         let effective_flags = VmaFlags {
             readable: entry.flags.readable && requested_flags.readable,
@@ -196,7 +202,7 @@ impl MemoryRegionRegistry {
                 .ok_or(RegionCapError::OutOfMemory)?
         };
 
-        address_space
+        let map_result = address_space
             .map_shared_handles_with_cap_ids(
                 base,
                 &entry.handles,
@@ -205,7 +211,13 @@ impl MemoryRegionRegistry {
                 entry.vma_type,
                 entry.page_size,
             )
-            .map_err(|_| RegionCapError::OutOfMemory)?;
+            .map_err(|_| RegionCapError::OutOfMemory);
+
+        for handle in &entry.handles {
+            cow::handle_dec_ref(*handle);
+        }
+
+        map_result?;
 
         Ok((base, entry.size))
     }
@@ -227,6 +239,11 @@ impl MemoryRegionRegistry {
                 .position(|existing| *existing == handle_cap)
                 .ok_or(RegionCapError::NotFound)?;
             current.handle_caps.remove(position);
+            for handle in &current.handles {
+                if let Some(block) = unregister_mapping_identity(*handle, handle_cap) {
+                    release_owned_block(block);
+                }
+            }
             if !current.handle_caps.is_empty() {
                 return Ok(ReleaseRegionResult::Retained);
             }
@@ -238,9 +255,6 @@ impl MemoryRegionRegistry {
         let mut revoked_mappings = 0usize;
         for cap_id in entry.mapping_cap_ids {
             revoked_mappings = revoked_mappings.saturating_add(revoke_mapping_cap_id(cap_id));
-        }
-        for handle in entry.handles {
-            cow::handle_dec_ref(handle);
         }
 
         Ok(ReleaseRegionResult::Destroyed { revoked_mappings })

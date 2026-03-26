@@ -1632,7 +1632,7 @@ fn sys_ipc_ring_map(ring: u64, _out_ptr: u64) -> Result<u64, SyscallError> {
         .checked_mul(4096)
         .ok_or(SyscallError::InvalidArgument)? as u64;
 
-    let addr_space = unsafe { &*task.process.address_space.get() };
+    let addr_space = task.process.address_space_arc();
     let base = addr_space
         .find_free_vma_range(
             super::mmap::MMAP_BASE,

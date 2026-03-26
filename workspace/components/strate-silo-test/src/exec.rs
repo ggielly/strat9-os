@@ -1,11 +1,9 @@
 #![no_std]
 #![no_main]
 
-use core::{
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
 #[cfg(not(test))]
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use strat9_syscall::{call, error::Error, flag};
 
 const F_SETFD: usize = 2;
@@ -210,7 +208,12 @@ fn test_multithread_exec_rejected() {
     MULTI_EXEC_THREAD_STOP.store(false, Ordering::SeqCst);
 
     let stack_top = stack_top(core::ptr::addr_of_mut!(MULTI_EXEC_STACK) as *mut u8, 8192);
-    let tid = match call::thread_create(multithread_exec_thread as *const () as usize, stack_top, 0, 0) {
+    let tid = match call::thread_create(
+        multithread_exec_thread as *const () as usize,
+        stack_top,
+        0,
+        0,
+    ) {
         Ok(tid) => tid,
         Err(err) => {
             fail_err("thread_create for exec rejection", err);
@@ -262,7 +265,9 @@ fn test_exit_group_kills_siblings() {
         Ok(0) => {
             EXIT_GROUP_THREAD_READY.store(false, Ordering::SeqCst);
             let stack_top = stack_top(core::ptr::addr_of_mut!(EXIT_GROUP_STACK) as *mut u8, 8192);
-            if call::thread_create(exit_group_thread as *const () as usize, stack_top, 0, 0).is_err() {
+            if call::thread_create(exit_group_thread as *const () as usize, stack_top, 0, 0)
+                .is_err()
+            {
                 call::exit(170);
             }
             for _ in 0..256 {

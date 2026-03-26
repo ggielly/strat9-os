@@ -214,12 +214,12 @@ impl Scheme for IpcControlScheme {
                     .ok_or(SyscallError::InvalidArgument)? as u64;
 
                 let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-                let addr_space = unsafe { &*task.process.address_space.get() };
+                let addr_space = task.process.address_space_arc();
 
                 // Unmap the previous mapping if any, to avoid leaking VMA space.
                 if let Some((old_pid, old_base, old_size)) = state.last_map.take() {
                     if let Some(old_task) = get_task_by_pid(old_pid) {
-                        let old_as = unsafe { &*old_task.process.address_space.get() };
+                        let old_as = old_task.process.address_space_arc();
                         let _ = old_as.unmap_range(old_base, old_size);
                     }
                 }
@@ -265,7 +265,7 @@ impl Scheme for IpcControlScheme {
         // Unmap shared memory that was mapped into the caller's address space.
         if let Some((pid, base, size)) = state.last_map {
             if let Some(task) = get_task_by_pid(pid) {
-                let addr_space = unsafe { &*task.process.address_space.get() };
+                let addr_space = task.process.address_space_arc();
                 let _ = addr_space.unmap_range(base, size);
             }
         }

@@ -208,6 +208,7 @@ fn build_child_task(
         process: alloc::sync::Arc::new(crate::process::process::Process {
             pid,
             address_space: crate::process::task::SyncUnsafeCell::new(child_as),
+            address_space_lock: crate::sync::SpinLock::new(()),
             fd_table: crate::process::task::SyncUnsafeCell::new(parent_fd),
             capabilities: crate::process::task::SyncUnsafeCell::new(parent_caps),
             signal_actions: crate::process::task::SyncUnsafeCell::new(parent_actions),
@@ -288,7 +289,7 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
     // For now, we allow fork for all user processes unless restricted.
     // TODO: implement ResourceType::Process/Task restricted capabilities.
 
-    let parent_as = unsafe { &*parent.process.address_space.get() };
+    let parent_as = parent.process.address_space_arc();
 
     // 3. Memory check: ensure parent has actual user-space mappings.
     if !parent_as.has_user_mappings() {

@@ -1636,7 +1636,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
     BOOT_REG_IN_PROGRESS.store(true, Ordering::Relaxed);
     let result = (|| -> Result<u32, SyscallError> {
         let sanitized = sanitize_label(label);
-        let mut mgr = SILO_MANAGER.lock();
+        let mgr = SILO_MANAGER.lock();
         crate::serial_println!(
             "[trace][silo] register_boot_strate_task lock acquired tid={}",
             task_id.as_u64()
@@ -2998,7 +2998,7 @@ pub fn kernel_limit_silo(selector: &str, key: &str, value: u64) -> Result<u32, S
 fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode: u64, rip: u64) {
     let task_meta = crate::process::get_task_by_id(task_id).map(|task| {
         let state = task.get_state();
-        let as_ref = unsafe { &*task.process.address_space.get() };
+        let as_ref = task.process.address_space_arc();
         (
             task.pid,
             task.tid,

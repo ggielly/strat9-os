@@ -102,23 +102,11 @@ pub fn allocate_mapping_cap_id() -> CapId {
 
 /// Records that `cap_id` now names `handle` in the ownership table.
 pub fn register_mapping_identity(handle: BlockHandle, cap_id: CapId) {
-    match ownership_table().claim(PhysBlock::<BuddyReserved>::from_handle(handle), cap_id) {
-        Ok(_) => {}
-        Err(OwnerError::DoubleClaim) => match ownership_table().add_ref(handle, cap_id) {
-            Ok(_) | Err(OwnerError::CapAlreadyPresent) => {}
-            Err(error) => {
-                log::warn!(
-                    "memory: failed to add mapping identity cap={} handle={:#x}/{}: {:?}",
-                    cap_id.as_u64(),
-                    handle.base.as_u64(),
-                    handle.order,
-                    error
-                );
-            }
-        },
+    match ownership_table().ensure_ref(handle, cap_id) {
+        Ok(_) | Err(OwnerError::CapAlreadyPresent) => {}
         Err(error) => {
             log::warn!(
-                "memory: failed to claim mapping identity cap={} handle={:#x}/{}: {:?}",
+                "memory: failed to register block identity cap={} handle={:#x}/{}: {:?}",
                 cap_id.as_u64(),
                 handle.base.as_u64(),
                 handle.order,
@@ -128,10 +116,25 @@ pub fn register_mapping_identity(handle: BlockHandle, cap_id: CapId) {
     }
 }
 
+/// Releases a block back to the buddy allocator.
+pub fn release_owned_block(block: PhysBlock<Released>) {
+    let handle = block.into_handle();
+    with_irqs_disabled(|token| {
+        free_frames(
+            token,
+            PhysFrame {
+                start_address: handle.base,
+            },
+            handle.order,
+        );
+    });
+}
+
 /// Removes `cap_id` from the ownership table entry associated with `handle`.
-pub fn unregister_mapping_identity(handle: BlockHandle, cap_id: CapId) {
+pub fn unregister_mapping_identity(handle: BlockHandle, cap_id: CapId) -> Option<PhysBlock<Released>> {
     match ownership_table().remove_ref(handle, cap_id) {
-        Ok(_) | Err(OwnerError::NotFound) | Err(OwnerError::CapNotFound) => {}
+        Ok(RemoveRefResult::Freed(block)) => Some(block),
+        Ok(_) | Err(OwnerError::NotFound) | Err(OwnerError::CapNotFound) => None,
         Err(error) => {
             log::warn!(
                 "memory: failed to unregister mapping identity cap={} handle={:#x}/{}: {:?}",
@@ -140,6 +143,7 @@ pub fn unregister_mapping_identity(handle: BlockHandle, cap_id: CapId) {
                 handle.order,
                 error
             );
+            None
         }
     }
 }
@@ -154,13 +158,17 @@ pub fn revoke_mapping_cap_id(cap_id: CapId) -> usize {
             continue;
         };
 
-        let address_space = unsafe { &*task.process.address_space.get() };
+        let address_space = task.process.address_space_arc();
         if address_space
             .unmap_effective_mapping(mapping.vaddr.as_u64())
             .is_ok()
         {
             revoked = revoked.saturating_add(1);
         }
+    }
+
+    if revoked != 0 {
+        crate::arch::x86_64::tlb::shootdown_all();
     }
 
     revoked

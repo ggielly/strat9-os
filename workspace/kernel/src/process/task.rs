@@ -937,9 +937,7 @@ impl Task {
 
     /// Returns true if this is a kernel task (shares the kernel address space).
     pub fn is_kernel(&self) -> bool {
-        // SAFETY: address_space is immutable for the lifetime of the Arc?
-        // Actually we just updated it to SyncUnsafeCell.
-        unsafe { (*self.process.address_space.get()).is_kernel() }
+        self.process.address_space_arc().is_kernel()
     }
 
     /// Allocate POSIX identifiers for a new process leader.

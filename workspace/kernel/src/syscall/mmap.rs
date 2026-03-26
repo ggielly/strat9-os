@@ -154,7 +154,7 @@ pub fn sys_mmap(
             let fd_table = unsafe { &*task.process.fd_table.get() };
             fd_table.get(fd)?
         };
-        let addr_space = unsafe { &*task.process.address_space.get() };
+        let addr_space = task.process.address_space_arc();
 
         let target = if flags & MAP_FIXED != 0 {
             if addr % page_bytes != 0 || addr == 0 {
@@ -268,7 +268,7 @@ pub fn sys_mmap(
 
     //  Determine the target virtual address
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    let addr_space = unsafe { &*task.process.address_space.get() };
+    let addr_space = task.process.address_space_arc();
 
     let target = if flags & MAP_FIXED != 0 {
         // MAP_FIXED: the caller demands this exact page-aligned address.
@@ -359,7 +359,8 @@ pub fn sys_munmap(addr: u64, len: u64) -> Result<u64, SyscallError> {
     }
 
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    unsafe { &*task.process.address_space.get() }
+    task.process
+        .address_space_arc()
         .unmap_range(addr, len_aligned)
         .map_err(|_| SyscallError::InvalidArgument)?;
 
@@ -393,7 +394,7 @@ pub fn sys_mremap(
     }
 
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    let addr_space = unsafe { &*task.process.address_space.get() };
+    let addr_space = task.process.address_space_arc();
     let vma = addr_space
         .region_by_start(old_addr)
         .ok_or(SyscallError::Fault)?;
@@ -502,7 +503,7 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, SyscallError>
     }
 
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    let addr_space = unsafe { &*task.process.address_space.get() };
+    let addr_space = task.process.address_space_arc();
     let flags = prot_to_vma_flags(prot_u32);
 
     addr_space
@@ -515,10 +516,10 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, SyscallError>
 /// SYS_MEM_REGION_EXPORT (105): export a tracked region as a public handle.
 pub fn sys_mem_region_export(addr: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
-    let address_space = unsafe { &*task.process.address_space.get() };
+    let address_space = task.process.address_space_arc();
     let handle_cap = crate::capability::CapId::new();
     let resource_id = crate::memory::memory_region_registry()
-        .export_region(address_space, addr, handle_cap)
+        .export_region(&address_space, addr, handle_cap)
         .map_err(|error| match error {
             crate::memory::RegionCapError::InvalidRegion
             | crate::memory::RegionCapError::IncompleteRegion
@@ -566,11 +567,11 @@ pub fn sys_mem_region_map(handle: u64, addr_hint: u64, out_ptr: u64) -> Result<u
         executable: cap.permissions.execute,
         user_accessible: true,
     };
-    let address_space = unsafe { &*task.process.address_space.get() };
+    let address_space = task.process.address_space_arc();
     let (base, size) = crate::memory::memory_region_registry()
         .map_region(
             cap.resource as u64,
-            address_space,
+            &address_space,
             addr_hint,
             requested_flags,
         )
@@ -685,7 +686,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             executable: false,
             user_accessible: true,
         };
-        if unsafe { &*task.process.address_space.get() }
+        if task.process.address_space_arc()
             .reserve_region(
                 old_page_end,
                 n_pages,
@@ -707,7 +708,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     } else if new_page_end < old_page_end {
         // ── Shrink: unmap [new_page_end, old_page_end) ───────────────────
         let len = old_page_end - new_page_end;
-        if unsafe { &*task.process.address_space.get() }
+        if task.process.address_space_arc()
             .unmap_range(new_page_end, len)
             .is_err()
         {

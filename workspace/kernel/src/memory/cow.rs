@@ -21,11 +21,10 @@
 use crate::{
     memory::{
         frame::{frame_flags, get_meta, PhysFrame},
-        resolve_handle, BlockHandle,
+        ownership_table, release_owned_block, resolve_handle, BlockHandle, RemoveRefResult,
     },
     sync::SpinLock,
 };
-use core::sync::atomic::{fence, Ordering};
 
 static COW_LOCK: SpinLock<()> = SpinLock::new(());
 
@@ -43,35 +42,28 @@ fn handle_meta(handle: BlockHandle) -> &'static crate::memory::frame::FrameMeta 
 
 /// Increments the shared reference count of a physical block.
 pub fn handle_inc_ref(handle: BlockHandle) {
-    handle_meta(handle).inc_ref();
+    let _ = ownership_table().pin(handle);
 }
 
 /// Decrements the shared reference count of a physical block.
 pub fn handle_dec_ref(handle: BlockHandle) {
-    let meta = handle_meta(handle);
-    let old = meta.dec_ref();
-    if old == 1 {
-        fence(Ordering::Acquire);
-        crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_frames(
-                token,
-                PhysFrame {
-                    start_address: handle.base,
-                },
-                handle.order,
-            );
-        });
+    if let Ok(RemoveRefResult::Freed(block)) = ownership_table().unpin(handle) {
+        release_owned_block(block);
     }
 }
 
 /// Returns the current shared reference count of a physical block.
 pub fn handle_get_refcount(handle: BlockHandle) -> u32 {
-    handle_meta(handle).get_refcount()
+    ownership_table()
+        .refcount(handle)
+        .unwrap_or_else(|| handle_meta(handle).get_refcount())
 }
 
 /// Marks a freshly allocated physical block as exclusively owned.
 pub fn handle_init_ref(handle: BlockHandle) {
-    handle_meta(handle).set_refcount(1);
+    let meta = handle_meta(handle);
+    meta.set_order(handle.order);
+    meta.set_refcount(1);
 }
 
 /// Performs the frame inc ref operation.

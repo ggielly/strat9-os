@@ -703,7 +703,7 @@ pub(super) fn yield_cpu_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Optio
     // Switch CR3 if the new task has a different address space.
     // SAFETY: The new task's address space has a valid PML4 with the kernel half mapped.
     unsafe {
-        (*next.process.address_space.get()).switch_to();
+        next.process.address_space_arc().switch_to();
     }
 
     Some(SwitchTarget {

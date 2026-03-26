@@ -25,7 +25,8 @@ use crate::{
     capability::CapId,
     memory::{
         allocate_mapping_cap_id, mapping_index, paging::BuddyFrameAllocator,
-        register_mapping_identity, resolve_handle, unregister_mapping_identity, BlockHandle,
+        register_mapping_identity, release_owned_block, resolve_handle,
+        unregister_mapping_identity, BlockHandle,
         MappingRef,
     },
     process::task::Pid,
@@ -276,7 +277,9 @@ impl AddressSpace {
             .lock()
             .insert(mapping.start, mapping);
         if let Some(previous) = replaced {
-            unregister_mapping_identity(previous.handle, previous.cap_id);
+            if let Some(block) = unregister_mapping_identity(previous.handle, previous.cap_id) {
+                release_owned_block(block);
+            }
             if let Some(pid) = self.owner_pid() {
                 mapping_index().unregister(previous.cap_id, pid, VirtAddr::new(previous.start));
             }
@@ -299,7 +302,9 @@ impl AddressSpace {
     pub fn unregister_effective_mapping(&self, start: u64) -> Option<EffectiveMapping> {
         let mapping = self.effective_mappings.lock().remove(&start);
         if let Some(mapping) = mapping {
-            unregister_mapping_identity(mapping.handle, mapping.cap_id);
+            if let Some(block) = unregister_mapping_identity(mapping.handle, mapping.cap_id) {
+                release_owned_block(block);
+            }
             if let Some(pid) = self.owner_pid() {
                 mapping_index().unregister(mapping.cap_id, pid, VirtAddr::new(mapping.start));
             }
@@ -769,13 +774,9 @@ impl AddressSpace {
                             let rb_page =
                                 Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
                                     .map_err(|_| "Rollback: invalid 4K page address")?;
-                            if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                            if let Ok((_, rb_flush)) = mapper.unmap(rb_page) {
                                 rb_flush.flush();
-                                let handle = self
-                                    .unregister_effective_mapping(rb_addr)
-                                    .map(|mapping| mapping.handle)
-                                    .unwrap_or_else(|| resolve_handle(rb_frame.start_address()));
-                                crate::memory::cow::handle_dec_ref(handle);
+                                let _ = self.unregister_effective_mapping(rb_addr);
                             }
                         }
                         VmaPageSize::Huge => {
@@ -783,13 +784,9 @@ impl AddressSpace {
                             let rb_page =
                                 Page::<Size2MiB>::from_start_address(VirtAddr::new(rb_addr))
                                     .map_err(|_| "Rollback: invalid 2M page address")?;
-                            if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                            if let Ok((_, rb_flush)) = mapper.unmap(rb_page) {
                                 rb_flush.flush();
-                                let handle = self
-                                    .unregister_effective_mapping(rb_addr)
-                                    .map(|mapping| mapping.handle)
-                                    .unwrap_or_else(|| resolve_handle(rb_frame.start_address()));
-                                crate::memory::cow::handle_dec_ref(handle);
+                                let _ = self.unregister_effective_mapping(rb_addr);
                             }
                         }
                     }
@@ -800,10 +797,6 @@ impl AddressSpace {
             }
 
             // Initialize COW refcount (same logic as demand_page above).
-            if order != 0 {
-                crate::memory::cow::handle_init_ref(resolve_handle(frame.start_address));
-            }
-
             let effective_flags = match page_size {
                 VmaPageSize::Small => page_flags,
                 VmaPageSize::Huge => page_flags | PageTableFlags::HUGE_PAGE,
@@ -945,15 +938,9 @@ impl AddressSpace {
                             if let Ok(rb_page) =
                                 Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
                             {
-                                if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                                if let Ok((_, rb_flush)) = mapper.unmap(rb_page) {
                                     rb_flush.flush();
-                                    let handle = self
-                                        .unregister_effective_mapping(rb_addr)
-                                        .map(|mapping| mapping.handle)
-                                        .unwrap_or_else(|| {
-                                            resolve_handle(rb_frame.start_address())
-                                        });
-                                    crate::memory::cow::handle_dec_ref(handle);
+                                    let _ = self.unregister_effective_mapping(rb_addr);
                                 }
                             }
                         }
@@ -961,15 +948,9 @@ impl AddressSpace {
                             if let Ok(rb_page) =
                                 Page::<Size2MiB>::from_start_address(VirtAddr::new(rb_addr))
                             {
-                                if let Ok((rb_frame, rb_flush)) = mapper.unmap(rb_page) {
+                                if let Ok((_, rb_flush)) = mapper.unmap(rb_page) {
                                     rb_flush.flush();
-                                    let handle = self
-                                        .unregister_effective_mapping(rb_addr)
-                                        .map(|mapping| mapping.handle)
-                                        .unwrap_or_else(|| {
-                                            resolve_handle(rb_frame.start_address())
-                                        });
-                                    crate::memory::cow::handle_dec_ref(handle);
+                                    let _ = self.unregister_effective_mapping(rb_addr);
                                 }
                             }
                         }
@@ -978,7 +959,6 @@ impl AddressSpace {
                 return Err("Failed to map shared page");
             }
 
-            crate::memory::cow::handle_inc_ref(handle);
             self.register_effective_mapping(EffectiveMapping {
                 start: page_addr,
                 cap_id: mapping_cap_ids
@@ -1042,7 +1022,7 @@ impl AddressSpace {
         for i in 0..page_count {
             let page_addr = start + (i as u64) * page_bytes;
 
-            let frame_addr = match page_size {
+            let _frame_addr = match page_size {
                 VmaPageSize::Small => {
                     use x86_64::structures::paging::Size4KiB;
                     let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
@@ -1064,11 +1044,7 @@ impl AddressSpace {
             };
 
             // COW-aware refcount decrement: free only when last mapping disappears.
-            let handle = self
-                .unregister_effective_mapping(page_addr)
-                .map(|mapping| mapping.handle)
-                .unwrap_or_else(|| resolve_handle(frame_addr));
-            crate::memory::cow::handle_dec_ref(handle);
+            let _ = self.unregister_effective_mapping(page_addr);
         }
 
         // Remove from VMA tracking.
@@ -1405,7 +1381,7 @@ impl AddressSpace {
                     continue;
                 }
 
-                let frame_addr = match vma.page_size {
+                let _frame_addr = match vma.page_size {
                     VmaPageSize::Small => {
                         use x86_64::structures::paging::Size4KiB;
                         let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
@@ -1428,11 +1404,7 @@ impl AddressSpace {
                     }
                 };
 
-                let handle = self
-                    .unregister_effective_mapping(page_addr)
-                    .map(|mapping| mapping.handle)
-                    .unwrap_or_else(|| resolve_handle(frame_addr));
-                crate::memory::cow::handle_dec_ref(handle);
+                let _ = self.unregister_effective_mapping(page_addr);
                 page_addr += page_bytes;
             }
 
@@ -1703,7 +1675,6 @@ impl AddressSpace {
                                 }
                             };
                             if unmapped {
-                                let _ = child.unregister_effective_mapping(vaddr.as_u64());
                                 crate::memory::cow::handle_dec_ref(handle);
                             }
                             return Err(e);
@@ -1719,7 +1690,9 @@ impl AddressSpace {
                     page_size: mapping.page_size,
                 });
 
-                processed_pages.push((vaddr.as_u64(), mapping.flags, handle, mapping.page_size));
+                crate::memory::cow::handle_dec_ref(handle);
+
+                processed_pages.push((vaddr.as_u64(), mapping.flags, mapping.page_size));
             }
             Ok(())
         })();
@@ -1727,7 +1700,7 @@ impl AddressSpace {
         if let Err(e) = res {
             log::error!("clone_cow error: {}. Rolling back...", e);
             let mut parent_mapper = unsafe { self.mapper() };
-            for (vaddr, original_flags, handle, page_size) in processed_pages.into_iter().rev() {
+            for (vaddr, original_flags, page_size) in processed_pages.into_iter().rev() {
                 if original_flags.contains(PageTableFlags::WRITABLE) {
                     unsafe {
                         match page_size {
@@ -1749,7 +1722,6 @@ impl AddressSpace {
                     }
                     let _ = self.update_effective_mapping_flags(vaddr, original_flags);
                 }
-                crate::memory::cow::handle_dec_ref(handle);
             }
             if tlb_flush_needed {
                 crate::arch::x86_64::tlb::shootdown_all();

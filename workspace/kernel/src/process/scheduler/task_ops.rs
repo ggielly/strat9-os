@@ -1142,8 +1142,8 @@ pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
         }
     }
 
-    let as_ref = unsafe { &*task.process.address_space.get() };
-    if !as_ref.is_kernel() && Arc::strong_count(as_ref) == 1 {
+    let as_ref = task.process.address_space_arc();
+    if !as_ref.is_kernel() && Arc::strong_count(&as_ref) == 1 {
         as_ref.unmap_all_user_regions();
     }
 }

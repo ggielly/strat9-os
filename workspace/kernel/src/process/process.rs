@@ -2,6 +2,7 @@ use crate::{
     capability::CapabilityTable,
     memory::AddressSpace,
     process::{signal::SigActionData, task::SyncUnsafeCell},
+    sync::SpinLock,
     vfs::FileDescriptorTable,
 };
 use alloc::{string::String, sync::Arc};
@@ -14,6 +15,8 @@ pub struct Process {
 
     /// Address space for this process
     pub address_space: SyncUnsafeCell<Arc<AddressSpace>>,
+    /// Serializes replacement and cloning of the process address space Arc.
+    pub address_space_lock: SpinLock<()>,
     /// File descriptor table for this process
     pub fd_table: SyncUnsafeCell<FileDescriptorTable>,
     /// Capabilities granted to this process
@@ -40,6 +43,7 @@ impl Process {
         Self {
             pid,
             address_space: SyncUnsafeCell::new(address_space),
+            address_space_lock: SpinLock::new(()),
             fd_table: SyncUnsafeCell::new(FileDescriptorTable::new()),
             capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
             signal_actions: SyncUnsafeCell::new([SigActionData::default(); 64]),
@@ -48,5 +52,17 @@ impl Process {
             cwd: SyncUnsafeCell::new(String::from("/")),
             umask: AtomicU32::new(0o022),
         }
+    }
+
+    /// Clone the current address-space Arc under the process slot lock.
+    pub fn address_space_arc(&self) -> Arc<AddressSpace> {
+        let _guard = self.address_space_lock.lock();
+        unsafe { (&*self.address_space.get()).clone() }
+    }
+
+    /// Replace the current address-space Arc and return the previous value.
+    pub fn replace_address_space(&self, new_address_space: Arc<AddressSpace>) -> Arc<AddressSpace> {
+        let _guard = self.address_space_lock.lock();
+        unsafe { core::mem::replace(&mut *self.address_space.get(), new_address_space) }
     }
 }
