@@ -19,11 +19,32 @@ pub fn get_block_meta(phys: PhysAddr) -> &'static BlockMeta {
     frame::get_meta(phys)
 }
 
+/// Returns the metadata entry associated with the given block handle.
+#[inline]
+fn align_down_to_block_base(phys: PhysAddr, order: u8) -> PhysAddr {
+    let size = 4096u64.checked_shl(order as u32).unwrap_or(0);
+    if size == 0 {
+        return phys;
+    }
+    PhysAddr::new(phys.as_u64() & !(size - 1))
+}
+
 /// Resolves a physical address to the current block handle.
+/// If the address is not currently owned, a new handle is reconstructed from the metadata.
+///
 pub fn resolve_handle(phys: PhysAddr) -> BlockHandle {
     if let Some(handle) = ownership_table().handle_containing(phys) {
         return handle;
     }
+
     let meta = get_block_meta(phys);
-    BlockHandle::new(phys, meta.get_order())
+    let order = meta.get_order();
+    let handle = BlockHandle::new(align_down_to_block_base(phys, order), order);
+    debug_assert!(
+        handle.is_valid(),
+        "block_meta: reconstructed invalid handle for phys={:#x} order={}",
+        phys.as_u64(),
+        order
+    );
+    handle
 }
