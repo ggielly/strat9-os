@@ -405,6 +405,9 @@ impl GlobalSchedState {
             // Remove from all_tasks now so that pick_next_task (if it races with
             // reaping) will see was_registered=false and skip cleanup_task_resources.
             let reaped_task = self.remove_all_task_locked(child);
+            if let Some(task) = reaped_task.as_ref() {
+                super::task_ops::cleanup_task_resources(task);
+            }
             let child_tid = reaped_task.as_ref().map(|t| t.tid);
             if child_pid != 0 {
                 if let Some(tid) = child_tid {
@@ -700,7 +703,7 @@ pub(super) fn yield_cpu_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Optio
     // Switch CR3 if the new task has a different address space.
     // SAFETY: The new task's address space has a valid PML4 with the kernel half mapped.
     unsafe {
-        (*next.process.address_space.get()).switch_to();
+        next.process.address_space_arc().switch_to();
     }
 
     Some(SwitchTarget {

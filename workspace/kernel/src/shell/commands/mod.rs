@@ -1,6 +1,5 @@
 //! Shell command registry and entry points
 //!
-//! Organizes shell commands into separate modules for better maintenance.
 
 pub mod gfx;
 pub mod help;
@@ -103,6 +102,9 @@ impl CommandRegistry {
         registry.register("test_syscalls", sys::cmd_test_syscalls);
         registry.register("test_mem", sys::cmd_test_mem);
         registry.register("test_mem_stressed", sys::cmd_test_mem_stressed);
+        registry.register("test_mem_region", sys::cmd_test_mem_region);
+        registry.register("test_mem_region_proc", sys::cmd_test_mem_region_proc);
+        registry.register("test_exec", sys::cmd_test_exec);
         registry.register("wasm-run", sys::cmd_wasm_run);
 
         registry

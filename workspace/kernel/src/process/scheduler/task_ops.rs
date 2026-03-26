@@ -37,12 +37,12 @@ pub fn exit_current_task(exit_code: i32) -> ! {
     {
         let saved_flags = save_flags_and_cli();
         let mut scheduler = GLOBAL_SCHED_STATE.lock();
+        let current = {
+            let local = LOCAL_SCHEDULERS[cpu_index].lock();
+            local.as_ref().and_then(|cpu| cpu.current_task.clone())
+        };
         if let Some(ref mut sched) = *scheduler {
-            if let Some(current) = LOCAL_SCHEDULERS[cpu_index]
-                .lock()
-                .as_ref()
-                .and_then(|cpu| cpu.current_task.clone())
-            {
+            if let Some(current) = current {
                 let current_id = current.id;
                 let current_pid = current.pid;
                 let parent = sched.parent_of.get(&current_id).copied();
@@ -273,6 +273,33 @@ pub fn get_task_by_pid(pid: Pid) -> Option<Arc<Task>> {
     get_task_by_id(tid)
 }
 
+/// Resolve a direct child of `parent` by POSIX pid.
+///
+/// Unlike the global pid index, this remains valid after the child has called
+/// exit and before it is reaped, because the task object stays in `all_tasks`
+/// until waitpid consumes the zombie.
+pub fn get_child_task_id_by_pid(parent: TaskId, pid: Pid) -> Option<TaskId> {
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        if let Some(ref sched) = *scheduler {
+            sched.children_of.get(&parent).and_then(|children| {
+                children.iter().copied().find(|child_id| {
+                    sched
+                        .all_tasks
+                        .get(child_id)
+                        .map(|task| task.pid == pid)
+                        .unwrap_or(false)
+                })
+            })
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
 /// Resolve a POSIX tid to the corresponding internal task id.
 pub fn get_task_id_by_tid(tid: Tid) -> Option<TaskId> {
     let saved_flags = save_flags_and_cli();
@@ -284,6 +311,33 @@ pub fn get_task_id_by_tid(tid: Tid) -> Option<TaskId> {
                 .get(&tid)
                 .copied()
                 .or_else(|| sched.pid_to_task.get(&(tid as Pid)).copied())
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
+/// Resolve a direct child of `parent` by POSIX tid.
+///
+/// This remains valid for dead-but-not-yet-reaped threads because it scans the
+/// caller's child set and the retained task object instead of relying on the
+/// global tid index removed during exit.
+pub fn get_child_task_id_by_tid(parent: TaskId, tid: Tid) -> Option<TaskId> {
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        if let Some(ref sched) = *scheduler {
+            sched.children_of.get(&parent).and_then(|children| {
+                children.iter().copied().find(|child_id| {
+                    sched
+                        .all_tasks
+                        .get(child_id)
+                        .map(|task| task.tid == tid)
+                        .unwrap_or(false)
+                })
+            })
         } else {
             None
         }
@@ -334,6 +388,27 @@ pub fn get_task_ids_in_pgid(pgid: Pid) -> alloc::vec::Vec<TaskId> {
                 .get(&pgid)
                 .cloned()
                 .unwrap_or_else(Vec::new)
+        } else {
+            Vec::new()
+        }
+    };
+    restore_flags(saved_flags);
+    out
+}
+
+/// Collect task IDs that currently belong to thread group `tgid`.
+pub fn get_task_ids_in_tgid(tgid: Pid) -> alloc::vec::Vec<TaskId> {
+    use alloc::vec::Vec;
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        if let Some(ref sched) = *scheduler {
+            sched
+                .all_tasks
+                .values()
+                .filter(|task| task.tgid == tgid)
+                .map(|task| task.id)
+                .collect::<Vec<_>>()
         } else {
             Vec::new()
         }
@@ -1060,11 +1135,15 @@ pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     }
 
     unsafe {
-        (&mut *task.process.capabilities.get()).revoke_all();
+        (&mut *task.process.fd_table.get()).close_all();
+        let capabilities = (&mut *task.process.capabilities.get()).take_all();
+        for capability in &capabilities {
+            crate::capability::release_capability(capability, Some(task.id));
+        }
     }
 
-    let as_ref = unsafe { &*task.process.address_space.get() };
-    if !as_ref.is_kernel() && Arc::strong_count(as_ref) == 1 {
+    let as_ref = task.process.address_space_arc();
+    if !as_ref.is_kernel() && Arc::strong_count(&as_ref) == 1 {
         as_ref.unmap_all_user_regions();
     }
 }

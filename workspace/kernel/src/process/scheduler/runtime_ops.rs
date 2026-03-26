@@ -139,7 +139,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     // is initialized, then pick the first task.
     let mut wait_iters: u64 = 0;
     let first_task = loop {
-        let mut scheduler = GLOBAL_SCHED_STATE.lock();
+        let scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref _sched) = *scheduler {
             if wait_iters > 0 {
                 crate::e9_println!("BD first_task cpu={} waited={}", cpu_index, wait_iters);
@@ -211,7 +211,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         first_task.id.as_u64()
     );
     unsafe {
-        (*first_task.process.address_space.get()).switch_to();
+        first_task.process.address_space_arc().switch_to();
     }
     crate::serial_force_println!(
         "[trace][sched] schedule_on_cpu switch_to done cpu={} tid={}",
@@ -279,8 +279,7 @@ pub fn finish_switch() {
         if let Some(ref mut cpu) = *guard {
             // Activate the address space for the current task on this CPU.
             if let Some(ref task) = cpu.current_task {
-                let as_ptr = unsafe { task.process.address_space.get() };
-                unsafe { (*as_ptr).switch_to() };
+                unsafe { task.process.address_space_arc().switch_to() };
             }
             task_to_drop = super::core_impl::drain_post_switch_local(cpu, true);
         }
@@ -362,8 +361,7 @@ pub fn finish_interrupt_switch() {
                             task_stack_top
                         );
                     }
-                    let as_ptr = unsafe { task.process.address_space.get() };
-                    unsafe { (*as_ptr).switch_to() };
+                    unsafe { task.process.address_space_arc().switch_to() };
                 }
             }
             break;
@@ -533,7 +531,7 @@ pub fn maybe_preempt_from_interrupt(
     }
 
     let current_frame_rsp = current_frame as *mut crate::syscall::SyscallFrame as u64;
-    let mut task_to_drop: Option<Arc<Task>> = None;
+    let mut _task_to_drop: Option<Arc<Task>> = None;
 
     let decision = {
         // Use per-CPU LOCAL lock — not blocked by cold-path global operations.
@@ -572,7 +570,7 @@ pub fn maybe_preempt_from_interrupt(
 
         if Arc::ptr_eq(&current, &next) {
             cpu.need_resched = false;
-            task_to_drop = cpu.task_to_drop.take();
+            _task_to_drop = cpu.task_to_drop.take();
             // No context switch: return current task's FPU area for save/restore.
             let current_fpu = current.fpu_state.get() as *mut u8;
             Some(crate::arch::x86_64::idt::InterruptReturnDecision {
@@ -594,7 +592,7 @@ pub fn maybe_preempt_from_interrupt(
             if next_rsp == 0 || !fits {
                 unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
                 let is_idle_fallback = Arc::ptr_eq(&next, &cpu.idle_task);
-                task_to_drop = cpu.task_to_drop.take();
+                _task_to_drop = cpu.task_to_drop.take();
 
                 if let Some(prev) = cpu.task_to_requeue.take() {
                     prev.set_state(TaskState::Running);

@@ -11,7 +11,10 @@ mod silo_cmd;
 mod silo_limit;
 mod silos;
 mod strate;
+mod test_exec;
 mod test_mem;
+mod test_mem_region;
+mod test_mem_region_proc;
 mod test_mem_stressed;
 mod test_pid;
 mod test_syscalls;
@@ -27,7 +30,10 @@ pub use shutdown::cmd_shutdown;
 pub use silo_cmd::cmd_silo;
 pub use silos::cmd_silos;
 pub use strate::cmd_strate;
+pub use test_exec::cmd_test_exec;
 pub use test_mem::cmd_test_mem;
+pub use test_mem_region::cmd_test_mem_region;
+pub use test_mem_region_proc::cmd_test_mem_region_proc;
 pub use test_mem_stressed::cmd_test_mem_stressed;
 pub use test_pid::cmd_test_pid;
 pub use test_syscalls::cmd_test_syscalls;
@@ -40,6 +46,7 @@ use silo_limit::cmd_silo_limit;
 
 use crate::{
     arch::x86_64::vga,
+    memory,
     process::elf::load_and_run_elf,
     shell::{
         commands::top::Strat9RatatuiBackend,
@@ -1066,6 +1073,162 @@ pub(super) fn cmd_test_mem_stressed_impl(_args: &[String]) -> Result<(), ShellEr
     match load_and_run_elf(&data, "init") {
         Ok(task_id) => {
             shell_println!("test_mem_stressed started (task id={})", task_id);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("load_and_run_elf failed: {}", e);
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
+/// Launch the userspace public MemoryRegion test binary from initfs.
+pub(super) fn cmd_test_mem_region_impl(_args: &[String]) -> Result<(), ShellError> {
+    let path = "/initfs/test_mem_region";
+    shell_println!("Launching {} ...", path);
+
+    let fd = match vfs::open(path, vfs::OpenFlags::READ) {
+        Ok(fd) => fd,
+        Err(e) => {
+            shell_println!("open failed: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+
+    let data = match vfs::read_all(fd) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = vfs::close(fd);
+            shell_println!("read failed: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+    let _ = vfs::close(fd);
+
+    shell_println!("ELF size: {} bytes", data.len());
+    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
+    match load_and_run_elf(&data, "init") {
+        Ok(task_id) => {
+            shell_println!("test_mem_region started (task id={})", task_id);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("load_and_run_elf failed: {}", e);
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
+/// Launch the userspace multi-process MemoryRegion test binary from initfs.
+pub(super) fn cmd_test_mem_region_proc_impl(_args: &[String]) -> Result<(), ShellError> {
+    let path = "/initfs/test_mem_region_proc";
+    shell_println!("Launching {} ...", path);
+
+    let fd = match vfs::open(path, vfs::OpenFlags::READ) {
+        Ok(fd) => fd,
+        Err(e) => {
+            shell_println!("open failed: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+
+    let data = match vfs::read_all(fd) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = vfs::close(fd);
+            shell_println!("read failed: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+    let _ = vfs::close(fd);
+
+    shell_println!("ELF size: {} bytes", data.len());
+    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
+    match load_and_run_elf(&data, "init") {
+        Ok(task_id) => {
+            shell_println!("test_mem_region_proc started (task id={})", task_id);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("load_and_run_elf failed: {}", e);
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
+/// Ensure a boot module is visible in /initfs and return its bytes.
+fn initfs_or_boot_module(path: &'static str, module: Option<(u64, u64)>) -> Option<&'static [u8]> {
+    if let Some(bytes) = vfs::get_initfs_file_bytes(path) {
+        return Some(bytes);
+    }
+
+    let (base, size) = module?;
+    if base == 0 || size == 0 {
+        return None;
+    }
+
+    let base_virt = memory::phys_to_virt(base) as *const u8;
+    if vfs::register_initfs_file(path, base_virt, size as usize).is_err() {
+        return None;
+    }
+
+    vfs::get_initfs_file_bytes(path)
+}
+
+/// Launch the userspace exec regression test binary from initfs.
+pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
+    let path = "/initfs/test_exec";
+    shell_println!("Launching {} ...", path);
+
+    let boot_bytes = initfs_or_boot_module(path, crate::boot::limine::test_exec_module());
+    let _ = initfs_or_boot_module(
+        "/initfs/test_exec_helper",
+        crate::boot::limine::test_exec_helper_module(),
+    );
+
+    if let Some(data) = boot_bytes {
+        shell_println!("ELF size: {} bytes", data.len());
+        shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
+        return match load_and_run_elf(data, "init") {
+            Ok(task_id) => {
+                shell_println!("test_exec started (task id={})", task_id);
+                Ok(())
+            }
+            Err(e) => {
+                shell_println!("load_and_run_elf failed: {}", e);
+                Err(ShellError::ExecutionFailed)
+            }
+        };
+    }
+
+    let fd = match vfs::open(path, vfs::OpenFlags::READ) {
+        Ok(fd) => fd,
+        Err(e) => {
+            shell_println!("open failed: {:?}", e);
+            if crate::boot::limine::test_exec_module().is_none() {
+                shell_println!(
+                    "test_exec boot module missing from current image; rebuild the userspace image so /initfs/test_exec is copied"
+                );
+            }
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+
+    let data = match vfs::read_all(fd) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = vfs::close(fd);
+            shell_println!("read failed: {:?}", e);
+            return Err(ShellError::ExecutionFailed);
+        }
+    };
+    let _ = vfs::close(fd);
+
+    shell_println!("ELF size: {} bytes", data.len());
+    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
+    match load_and_run_elf(&data, "init") {
+        Ok(task_id) => {
+            shell_println!("test_exec started (task id={})", task_id);
             Ok(())
         }
         Err(e) => {
