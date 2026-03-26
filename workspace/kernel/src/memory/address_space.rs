@@ -4,9 +4,16 @@
 //! Kernel tasks share a single kernel address space. User tasks get a fresh
 //! PML4 with the kernel half (entries 256..512) cloned from the kernel's table.
 //!
+//! PML4 is the Page Map Level 4, the top-level page table in x86_64's 4-level paging scheme. It
+//! contains 512 entries, each covering a 512 GiB region of the virtual address space. By cloning the
+//! kernel half of the PML4, each user address space automatically shares the kernel mappings without needing to duplicate them.
+//! Source : https://wiki.osdev.org/Memory_Management
+//!
+//!
 //! x86_64 virtual address space layout:
-//! - PML4[0..256]   → User space (per-process, zeroed for new AS)
-//! - PML4[256..512] → Kernel space (shared, cloned from kernel L4)
+//!   - PML4[0..256]   => user space (per-process, zeroed for new AS)
+//!   - PML4[256..512] => kernel space (shared, cloned from kernel L4)
+//!
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -24,9 +31,9 @@ use x86_64::{
 use crate::{
     capability::CapId,
     memory::{
-        allocate_mapping_cap_id, mapping_index, paging::BuddyFrameAllocator,
-        register_mapping_identity, release_owned_block, resolve_handle,
-        unregister_mapping_identity, BlockHandle, MappingRef,
+        allocate_mapping_cap_id, mapping_index, paging::BuddyFrameAllocator, release_owned_block,
+        resolve_handle, try_register_mapping_identity, unregister_mapping_identity, BlockHandle,
+        MappingRef,
     },
     process::task::Pid,
     sync::SpinLock,
@@ -270,7 +277,45 @@ impl AddressSpace {
     }
 
     /// Registers an effective mapping in the address space tracking table.
-    pub fn register_effective_mapping(&self, mapping: EffectiveMapping) {
+    pub fn register_effective_mapping(
+        &self,
+        mapping: EffectiveMapping,
+    ) -> Result<(), &'static str> {
+        let previous_at_start = self.effective_mapping_by_start(mapping.start);
+        if let Some(previous) = previous_at_start {
+            if previous.handle == mapping.handle && previous.cap_id == mapping.cap_id {
+                self.effective_mappings
+                    .lock()
+                    .insert(mapping.start, mapping);
+                if let Some(pid) = self.owner_pid() {
+                    mapping_index().unregister(mapping.cap_id, pid, VirtAddr::new(mapping.start));
+                    mapping_index().register(
+                        mapping.cap_id,
+                        MappingRef {
+                            pid,
+                            vaddr: VirtAddr::new(mapping.start),
+                            page_size: mapping.page_size,
+                        },
+                    );
+                }
+                return Ok(());
+            }
+        }
+
+        if let Err(error) = try_register_mapping_identity(mapping.handle, mapping.cap_id) {
+            if error != crate::memory::OwnerError::CapAlreadyPresent {
+                log::warn!(
+                    "memory: failed to register effective mapping identity cap={} block={:#x}/{} vaddr={:#x}: {:?}",
+                    mapping.cap_id.as_u64(),
+                    mapping.handle.base.as_u64(),
+                    mapping.handle.order,
+                    mapping.start,
+                    error
+                );
+                return Err("Failed to register effective mapping identity");
+            }
+        }
+
         let replaced = self
             .effective_mappings
             .lock()
@@ -284,7 +329,6 @@ impl AddressSpace {
             }
         }
 
-        register_mapping_identity(mapping.handle, mapping.cap_id);
         if let Some(pid) = self.owner_pid() {
             mapping_index().register(
                 mapping.cap_id,
@@ -295,6 +339,7 @@ impl AddressSpace {
                 },
             );
         }
+        Ok(())
     }
 
     /// Removes an effective mapping from the address space tracking table.
@@ -616,13 +661,40 @@ impl AddressSpace {
             }
         }
 
-        self.register_effective_mapping(EffectiveMapping {
-            start: page_addr,
-            cap_id: allocate_mapping_cap_id(),
-            handle: resolve_handle(frame.start_address),
-            flags: page_flags,
-            page_size: vma.page_size,
-        });
+        if self
+            .register_effective_mapping(EffectiveMapping {
+                start: page_addr,
+                cap_id: allocate_mapping_cap_id(),
+                handle: resolve_handle(frame.start_address),
+                flags: page_flags,
+                page_size: vma.page_size,
+            })
+            .is_err()
+        {
+            unsafe {
+                let mut mapper = self.mapper();
+                match vma.page_size {
+                    VmaPageSize::Small => {
+                        let page =
+                            Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
+                        if let Ok((_, flush)) = mapper.unmap(page) {
+                            flush.flush();
+                        }
+                    }
+                    VmaPageSize::Huge => {
+                        let page =
+                            Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
+                        if let Ok((_, flush)) = mapper.unmap(page) {
+                            flush.flush();
+                        }
+                    }
+                }
+            }
+            crate::sync::with_irqs_disabled(|token| {
+                crate::memory::free_frames(token, frame, order);
+            });
+            return Err("Failed to track demand page mapping");
+        }
 
         // Initialize COW refcount.
         //
@@ -800,13 +872,65 @@ impl AddressSpace {
                 VmaPageSize::Small => page_flags,
                 VmaPageSize::Huge => page_flags | PageTableFlags::HUGE_PAGE,
             };
-            self.register_effective_mapping(EffectiveMapping {
-                start: page_addr,
-                cap_id: allocate_mapping_cap_id(),
-                handle: resolve_handle(frame.start_address),
-                flags: effective_flags,
-                page_size,
-            });
+            if self
+                .register_effective_mapping(EffectiveMapping {
+                    start: page_addr,
+                    cap_id: allocate_mapping_cap_id(),
+                    handle: resolve_handle(frame.start_address),
+                    flags: effective_flags,
+                    page_size,
+                })
+                .is_err()
+            {
+                match page_size {
+                    VmaPageSize::Small => {
+                        use x86_64::structures::paging::Size4KiB;
+                        let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                            .map_err(|_| "Rollback: invalid 4K page address")?;
+                        if let Ok((_, flush)) = mapper.unmap(page) {
+                            flush.flush();
+                        }
+                    }
+                    VmaPageSize::Huge => {
+                        use x86_64::structures::paging::Size2MiB;
+                        let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
+                            .map_err(|_| "Rollback: invalid 2M page address")?;
+                        if let Ok((_, flush)) = mapper.unmap(page) {
+                            flush.flush();
+                        }
+                    }
+                }
+                crate::sync::with_irqs_disabled(|token| {
+                    crate::memory::free_frames(token, frame, order);
+                });
+                for j in (0..mapped_pages).rev() {
+                    let rb_addr = start + (j as u64) * page_bytes;
+                    match page_size {
+                        VmaPageSize::Small => {
+                            use x86_64::structures::paging::Size4KiB;
+                            let rb_page =
+                                Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
+                                    .map_err(|_| "Rollback: invalid 4K page address")?;
+                            if let Ok((_, rb_flush)) = mapper.unmap(rb_page) {
+                                rb_flush.flush();
+                                let _ = self.unregister_effective_mapping(rb_addr);
+                            }
+                        }
+                        VmaPageSize::Huge => {
+                            use x86_64::structures::paging::Size2MiB;
+                            let rb_page =
+                                Page::<Size2MiB>::from_start_address(VirtAddr::new(rb_addr))
+                                    .map_err(|_| "Rollback: invalid 2M page address")?;
+                            if let Ok((_, rb_flush)) = mapper.unmap(rb_page) {
+                                rb_flush.flush();
+                                let _ = self.unregister_effective_mapping(rb_addr);
+                            }
+                        }
+                    }
+                }
+                crate::silo::release_current_task_memory(len);
+                return Err("Failed to track mapped region page");
+            }
 
             mapped_pages += 1;
         }
@@ -958,15 +1082,65 @@ impl AddressSpace {
                 return Err("Failed to map shared page");
             }
 
-            self.register_effective_mapping(EffectiveMapping {
-                start: page_addr,
-                cap_id: mapping_cap_ids
-                    .and_then(|cap_ids| cap_ids.get(index).copied())
-                    .unwrap_or_else(allocate_mapping_cap_id),
-                handle,
-                flags: page_flags,
-                page_size,
-            });
+            if self
+                .register_effective_mapping(EffectiveMapping {
+                    start: page_addr,
+                    cap_id: mapping_cap_ids
+                        .and_then(|cap_ids| cap_ids.get(index).copied())
+                        .unwrap_or_else(allocate_mapping_cap_id),
+                    handle,
+                    flags: page_flags,
+                    page_size,
+                })
+                .is_err()
+            {
+                match page_size {
+                    VmaPageSize::Small => {
+                        if let Ok(page) =
+                            Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
+                        {
+                            if let Ok((_, flush)) = mapper.unmap(page) {
+                                flush.flush();
+                            }
+                        }
+                    }
+                    VmaPageSize::Huge => {
+                        if let Ok(page) =
+                            Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
+                        {
+                            if let Ok((_, flush)) = mapper.unmap(page) {
+                                flush.flush();
+                            }
+                        }
+                    }
+                }
+                for rollback in (0..mapped_pages).rev() {
+                    let rb_addr = start + (rollback as u64) * page_bytes;
+                    match page_size {
+                        VmaPageSize::Small => {
+                            if let Ok(rb_page) =
+                                Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
+                            {
+                                if let Ok((_, rb_flush)) = mapper.unmap(rb_page) {
+                                    rb_flush.flush();
+                                    let _ = self.unregister_effective_mapping(rb_addr);
+                                }
+                            }
+                        }
+                        VmaPageSize::Huge => {
+                            if let Ok(rb_page) =
+                                Page::<Size2MiB>::from_start_address(VirtAddr::new(rb_addr))
+                            {
+                                if let Ok((_, rb_flush)) = mapper.unmap(rb_page) {
+                                    rb_flush.flush();
+                                    let _ = self.unregister_effective_mapping(rb_addr);
+                                }
+                            }
+                        }
+                    }
+                }
+                return Err("Failed to track shared mapping");
+            }
             mapped_pages += 1;
         }
 
@@ -1512,6 +1686,63 @@ impl AddressSpace {
         regions.values().any(|vma| vma.vma_type != VmaType::Kernel)
     }
 
+    fn teardown_effective_mapping_for_drop(&self, mapping: EffectiveMapping) {
+        // SAFETY: the address space is being torn down; any remaining user mapping
+        // must be detached from ownership tracking before page-table reclamation.
+        unsafe {
+            let mut mapper = self.mapper();
+            if mapper
+                .translate_addr(VirtAddr::new(mapping.start))
+                .is_some()
+            {
+                match mapping.page_size {
+                    VmaPageSize::Small => {
+                        let page =
+                            Page::<Size4KiB>::from_start_address(VirtAddr::new(mapping.start))
+                                .unwrap();
+                        if let Err(error) = mapper.unmap(page) {
+                            log::warn!(
+                                "memory: drop cleanup failed to unmap 4K page at {:#x}: {:?}",
+                                mapping.start,
+                                error
+                            );
+                        }
+                    }
+                    VmaPageSize::Huge => {
+                        let page =
+                            Page::<Size2MiB>::from_start_address(VirtAddr::new(mapping.start))
+                                .unwrap();
+                        if let Err(error) = mapper.unmap(page) {
+                            log::warn!(
+                                "memory: drop cleanup failed to unmap 2M page at {:#x}: {:?}",
+                                mapping.start,
+                                error
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = self.unregister_effective_mapping(mapping.start);
+    }
+
+    fn teardown_region_for_drop(&self, start: u64, region: &VirtualMemoryRegion) {
+        let len = (region.page_count as u64).saturating_mul(region.page_size.bytes());
+        let mut page_addr = start;
+        let page_bytes = region.page_size.bytes();
+
+        while page_addr < start.saturating_add(len) {
+            if let Some(mapping) = self.effective_mapping_by_start(page_addr) {
+                self.teardown_effective_mapping_for_drop(mapping);
+            }
+            page_addr += page_bytes;
+        }
+
+        let _ = self.regions.lock().remove(&start);
+        crate::silo::release_current_task_memory(len);
+    }
+
     /// Unmap all tracked user regions (best-effort).
     ///
     /// This frees user frames and clears the VMA list. Kernel mappings are untouched.
@@ -1536,8 +1767,27 @@ impl AddressSpace {
 
             let len = (region.page_count as u64).saturating_mul(region.page_size.bytes());
             if self.unmap_range(region.start, len).is_err() {
-                let _ = self.regions.lock().remove(&start);
+                log::warn!(
+                    "memory: unmap_all_user_regions fallback cleanup for {:#x}..{:#x}",
+                    start,
+                    start.saturating_add(len)
+                );
+                self.teardown_region_for_drop(start, &region);
             }
+        }
+
+        let residual_mappings: Vec<EffectiveMapping> = {
+            let guard = self.effective_mappings.lock();
+            guard.values().copied().collect()
+        };
+        for mapping in residual_mappings {
+            log::warn!(
+                "memory: drop cleanup removing orphan effective mapping at {:#x} cap={}",
+                mapping.start,
+                mapping.cap_id.as_u64()
+            );
+            self.teardown_effective_mapping_for_drop(mapping);
+            crate::silo::release_current_task_memory(mapping.page_size.bytes());
         }
     }
 
@@ -1608,6 +1858,7 @@ impl AddressSpace {
                     }
                     let _ = self.update_effective_mapping_flags(vaddr.as_u64(), new_flags);
                     tlb_flush_needed = true;
+                    processed_pages.push((vaddr.as_u64(), mapping.flags, mapping.page_size));
                 }
 
                 let handle = mapping.handle;
@@ -1690,17 +1941,35 @@ impl AddressSpace {
                     }
                 }
 
-                child.register_effective_mapping(EffectiveMapping {
-                    start: vaddr.as_u64(),
-                    cap_id: allocate_mapping_cap_id(),
-                    handle,
-                    flags: new_flags,
-                    page_size: mapping.page_size,
-                });
+                if child
+                    .register_effective_mapping(EffectiveMapping {
+                        start: vaddr.as_u64(),
+                        cap_id: allocate_mapping_cap_id(),
+                        handle,
+                        flags: new_flags,
+                        page_size: mapping.page_size,
+                    })
+                    .is_err()
+                {
+                    match mapping.page_size {
+                        VmaPageSize::Small => {
+                            let page = Page::<Size4KiB>::from_start_address(vaddr).unwrap();
+                            if let Ok((_, flush)) = child_mapper.unmap(page) {
+                                flush.ignore();
+                            }
+                        }
+                        VmaPageSize::Huge => {
+                            let page = Page::<Size2MiB>::from_start_address(vaddr).unwrap();
+                            if let Ok((_, flush)) = child_mapper.unmap(page) {
+                                flush.ignore();
+                            }
+                        }
+                    }
+                    crate::memory::cow::handle_dec_ref(handle);
+                    return Err("Failed to track child COW mapping");
+                }
 
                 crate::memory::cow::handle_dec_ref(handle);
-
-                processed_pages.push((vaddr.as_u64(), mapping.flags, mapping.page_size));
             }
             Ok(())
         })();

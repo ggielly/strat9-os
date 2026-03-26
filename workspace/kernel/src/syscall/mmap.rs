@@ -688,7 +688,9 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             executable: false,
             user_accessible: true,
         };
-        if task.process.address_space_arc()
+        if task
+            .process
+            .address_space_arc()
             .reserve_region(
                 old_page_end,
                 n_pages,
@@ -710,7 +712,9 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     } else if new_page_end < old_page_end {
         // ── Shrink: unmap [new_page_end, old_page_end) ───────────────────
         let len = old_page_end - new_page_end;
-        if task.process.address_space_arc()
+        if task
+            .process
+            .address_space_arc()
             .unmap_range(new_page_end, len)
             .is_err()
         {

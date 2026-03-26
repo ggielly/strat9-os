@@ -1,4 +1,27 @@
 //! `fork()` syscall implementation with copy-on-write (COW).
+//!
+//! This module implements the `fork()` syscall, which creates a new child process by cloning the
+//! calling process. The child gets a copy of the parent's address space, but the actual physical
+//! memory is shared between parent and child until either of them writes to it, at which point
+//! the kernel transparently creates a private copy for the writing process (copy-on-write).
+//!
+//! The main entry point is `sys_fork`, which performs the necessary checks, clones the address space
+//! with COW semantics, and creates a new `Task` for the child process. The
+//! `handle_cow_fault` function is called from the page fault handler when a write fault occurs on a COW page, and it resolves the fault by either making the page writable (if the faulting process is the sole owner) or by copying the page to a new frame and updating the mapping.
+//!
+//! Source : https://man7.org/linux/man2/fork.2.html
+//!          https://man7.org/linux/man2/vfork.2.html
+//!          https://man7.org/linux/man2/clone.2.html
+//!
+//! TODO: implement `vfork()` and `clone()` with more fine-grained control over sharing.
+//!
+//! COW :
+//!   https://en.wikipedia.org/wiki/Copy-on-write
+//!   https://lwn.net/Articles/531114/
+//!   
+//!   
+//!   
+//!
 
 use crate::{
     memory::{resolve_handle, AddressSpace, EffectiveMapping, VmaPageSize},
@@ -509,13 +532,52 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
     // frame_inc_ref would wrap REFCOUNT_UNUSED to 0 — use set_refcount instead.
     crate::memory::cow::handle_init_ref(new_handle);
 
-    address_space.register_effective_mapping(EffectiveMapping {
-        start: page_start,
-        cap_id: mapping.cap_id,
-        handle: new_handle,
-        flags: tracked_flags,
-        page_size: mapping.page_size,
-    });
+    if address_space
+        .register_effective_mapping(EffectiveMapping {
+            start: page_start,
+            cap_id: mapping.cap_id,
+            handle: new_handle,
+            flags: tracked_flags,
+            page_size: mapping.page_size,
+        })
+        .is_err()
+    {
+        match mapping.page_size {
+            VmaPageSize::Small => {
+                let _ = mapper.unmap(page);
+                let _ = unsafe {
+                    mapper.map_to(
+                        page,
+                        x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                            phys_frame_addr,
+                        ),
+                        flags,
+                        &mut frame_allocator,
+                    )
+                }
+                .map(|flush| flush.flush());
+            }
+            VmaPageSize::Huge => {
+                let huge_page = Page::<Size2MiB>::containing_address(VirtAddr::new(page_start));
+                let _ = mapper.unmap(huge_page);
+                let _ = unsafe {
+                    mapper.map_to(
+                        huge_page,
+                        x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                            phys_frame_addr,
+                        ),
+                        flags,
+                        &mut frame_allocator,
+                    )
+                }
+                .map(|flush| flush.flush());
+            }
+        }
+        crate::sync::with_irqs_disabled(|token| {
+            crate::memory::free_frames(token, new_frame, order);
+        });
+        return Err("Failed to track new COW mapping");
+    }
 
     // Only the current CPU can hold this CR3 in the current design.
     local_invlpg(virt_addr);

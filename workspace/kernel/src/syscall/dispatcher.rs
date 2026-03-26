@@ -2,6 +2,13 @@
 //!
 //! Routes syscall numbers to handler functions and converts results to RAX values.
 //! Called from the naked `syscall_entry` assembly with a pointer to `SyscallFrame`.
+//!
+//! The main dispatch function is `__strat9_syscall_dispatch`, which matches on the syscall number and calls the appropriate handler. Each handler returns a `Result<u64, SyscallError>`, which is converted to a raw value in RAX (positive for success, negative for error).
+//! The `dispatch` function is an alias for `__strat9_syscall_dispatch` used by the assembly entry point.
+//! The syscall handlers are defined in this module and in submodules (e.g. `mmap`, `process`, `signal`, etc.) and cover a wide range of functionality including process management, memory management, IPC, file I/O, networking, and more.
+//! The dispatcher also includes diagnostic logging with rate-limiting to avoid log spam under high syscall rates. For example, it logs the first 20 syscalls unconditionally, then every 10,000 syscalls thereafter. It also has budgeted logging for network send/recv errors and DHCP frame tracing.
+//!
+//!
 use super::{
     error::SyscallError, exec::sys_execve, fork::sys_fork, numbers::*, process as proc_sys,
     SyscallFrame,
@@ -162,6 +169,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_MEM_REGION_MAP => super::mmap::sys_mem_region_map(arg1, arg2, arg3),
         SYS_MEM_REGION_INFO => super::mmap::sys_mem_region_info(arg1, arg2),
 
+        // Process management (block 300-399)
         SYS_PROC_EXIT => sys_proc_exit(arg1),
         SYS_PROC_YIELD => sys_proc_yield(),
         SYS_PROC_FORK => sys_fork(frame).map(|result| result.child_pid as u64),
@@ -173,13 +181,15 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         }
         SYS_PROC_WAIT => super::wait::sys_wait(arg1),
         SYS_PROC_EXECVE => sys_execve(frame, arg1, arg2, arg3),
+
+        // File I/O (block 400-499)
         SYS_FCNTL => super::fcntl::sys_fcntl(arg1, arg2, arg3),
         SYS_SETPGID => proc_sys::sys_setpgid(arg1 as i64, arg2 as i64),
         SYS_GETPGID => proc_sys::sys_getpgid(arg1 as i64),
         SYS_SETSID => proc_sys::sys_setsid(),
         SYS_GETPGRP => proc_sys::sys_getpgrp(),
         SYS_GETSID => proc_sys::sys_getsid(arg1 as i64),
-        // ── Credentials (335-340) ────────────────────────────────────────────
+
         SYS_GETUID => proc_sys::sys_getuid(),
         SYS_GETEUID => proc_sys::sys_geteuid(),
         SYS_GETGID => proc_sys::sys_getgid(),
@@ -190,14 +200,16 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_THREAD_JOIN => proc_sys::sys_thread_join(arg1, arg2, arg3),
         SYS_THREAD_EXIT => proc_sys::sys_thread_exit(arg1),
         SYS_UNAME => sys_uname(arg1),
-        // ── Thread lifecycle (333-334) ────────────────────────────────────────
+        //  Thread lifecycle (333-334) ===========================================
         SYS_SET_TID_ADDRESS => proc_sys::sys_set_tid_address(arg1),
         SYS_EXIT_GROUP => proc_sys::sys_exit_group(arg1),
-        // ── Architecture-specific (350) ───────────────────────────────────────
+        //  Architecture-specific (350) ==========================================
         SYS_ARCH_PRCTL => proc_sys::sys_arch_prctl(arg1, arg2),
-        // ── tgkill (352) ──────────────────────────────────────────────────────
+
+        //  tgkill (352) =========================================
         SYS_TGKILL => proc_sys::sys_tgkill(arg1, arg2, arg3),
         SYS_RT_SIGRETURN => super::signal::sys_rt_sigreturn(frame),
+        // Futex syscalls (400-409) ========================================
         SYS_FUTEX_WAIT => super::futex::sys_futex_wait(arg1, arg2 as u32, arg3),
         SYS_FUTEX_WAKE => super::futex::sys_futex_wake(arg1, arg2 as u32),
         SYS_FUTEX_REQUEUE => super::futex::sys_futex_requeue(arg1, arg2 as u32, arg3 as u32, arg4),
@@ -222,6 +234,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_KILLPG => super::signal::sys_killpg(arg1, arg2 as u32),
         SYS_GETITIMER => super::signal::sys_getitimer(arg1 as u32, arg2),
         SYS_SETITIMER => super::signal::sys_setitimer(arg1 as u32, arg2, arg3),
+
+        // IPC syscalls (600-699) ========================================
         SYS_IPC_CREATE_PORT => sys_ipc_create_port(arg1),
         SYS_IPC_SEND => sys_ipc_send(arg1, arg2),
         SYS_IPC_RECV => sys_ipc_recv(arg1, arg2),
@@ -242,7 +256,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PCI_CFG_READ => sys_pci_cfg_read(arg1, arg2, arg3),
         SYS_PCI_CFG_WRITE => sys_pci_cfg_write(arg1, arg2, arg3, arg4),
 
-        // Typed MPMC sync-channel (IPC-02)
+        // Typed MPMC sync-channel (IPC-02) ========================================
         SYS_CHAN_CREATE => sys_chan_create(arg1),
         SYS_CHAN_SEND => sys_chan_send(arg1, arg2),
         SYS_CHAN_RECV => sys_chan_recv(arg1, arg2),
@@ -263,7 +277,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PIPE => sys_pipe(arg1),
         SYS_DUP => sys_dup(arg1),
         SYS_DUP2 => sys_dup2(arg1, arg2),
-        // ── New VFS syscalls (440-455) ─────────────────────────────────────────
+
+        // VFS syscalls (440-455)  ========================================
         SYS_CHDIR => crate::vfs::sys_chdir(arg1, arg2),
         SYS_FCHDIR => crate::vfs::sys_fchdir(arg1 as u32),
         SYS_GETCWD => crate::vfs::sys_getcwd(arg1, arg2),
@@ -285,17 +300,20 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_POLL => super::poll::sys_poll(arg1, arg2, arg3),
         SYS_PPOLL => super::poll::sys_poll(arg1, arg2, 0),
 
-        // Network
+        // Network syscalls (500-599) ========================================
         SYS_NET_RECV => sys_net_recv(arg1, arg2),
         SYS_NET_SEND => sys_net_send(arg1, arg2),
         SYS_NET_INFO => sys_net_info(arg1, arg2),
 
+        // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => sys_volume_read(arg1, arg2, arg3, arg4),
         SYS_VOLUME_WRITE => sys_volume_write(arg1, arg2, arg3, arg4),
         SYS_VOLUME_INFO => sys_volume_info(arg1),
         SYS_CLOCK_GETTIME => super::time::sys_clock_gettime(arg1 as u32, arg2),
         SYS_NANOSLEEP => super::time::sys_nanosleep(arg1, arg2),
         SYS_DEBUG_LOG => sys_debug_log(arg1, arg2),
+
+        // Silo management (700-799) ========================================
         SYS_SILO_CREATE => silo::sys_silo_create(arg1),
         SYS_SILO_CONFIG => silo::sys_silo_config(arg1, arg2),
         SYS_SILO_ATTACH_MODULE => silo::sys_silo_attach_module(arg1, arg2),
@@ -308,6 +326,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SILO_PLEDGE => silo::sys_silo_pledge(arg1),
         SYS_SILO_UNVEIL => silo::sys_silo_unveil(arg1, arg2, arg3),
         SYS_SILO_ENTER_SANDBOX => silo::sys_silo_enter_sandbox(),
+
+        // Architecture-specific (900-999) =========================================
         SYS_ABI_VERSION => {
             Ok(((strat9_abi::ABI_VERSION_MAJOR as u64) << 16)
                 | (strat9_abi::ABI_VERSION_MINOR as u64))
@@ -379,9 +399,24 @@ fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
     let id = caps.insert(dup);
     if let Some(cap) = caps.get(id) {
         if cap.resource_type == ResourceType::MemoryRegion {
-            crate::memory::memory_region_registry()
-                .retain_handle(cap.resource as u64, id)
-                .map_err(|_| SyscallError::BadHandle)?;
+            if let Err(error) =
+                crate::memory::memory_region_registry().retain_handle(cap.resource as u64, id)
+            {
+                let _ = caps.remove(id);
+                return Err(match error {
+                    crate::memory::RegionCapError::NotFound => SyscallError::BadHandle,
+                    crate::memory::RegionCapError::InvalidRegion
+                    | crate::memory::RegionCapError::IncompleteRegion
+                    | crate::memory::RegionCapError::InvalidAddress => {
+                        SyscallError::InvalidArgument
+                    }
+                    crate::memory::RegionCapError::PermissionDenied => {
+                        SyscallError::PermissionDenied
+                    }
+                    crate::memory::RegionCapError::OutOfMemory => SyscallError::OutOfMemory,
+                    crate::memory::RegionCapError::InconsistentState => SyscallError::IoError,
+                });
+            }
         }
     }
     Ok(id.as_u64())
@@ -546,9 +581,24 @@ fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
     let new_id = target_caps.insert(granted);
     if let Some(cap) = target_caps.get(new_id) {
         if cap.resource_type == ResourceType::MemoryRegion {
-            crate::memory::memory_region_registry()
-                .retain_handle(cap.resource as u64, new_id)
-                .map_err(|_| SyscallError::BadHandle)?;
+            if let Err(error) =
+                crate::memory::memory_region_registry().retain_handle(cap.resource as u64, new_id)
+            {
+                let _ = target_caps.remove(new_id);
+                return Err(match error {
+                    crate::memory::RegionCapError::NotFound => SyscallError::BadHandle,
+                    crate::memory::RegionCapError::InvalidRegion
+                    | crate::memory::RegionCapError::IncompleteRegion
+                    | crate::memory::RegionCapError::InvalidAddress => {
+                        SyscallError::InvalidArgument
+                    }
+                    crate::memory::RegionCapError::PermissionDenied => {
+                        SyscallError::PermissionDenied
+                    }
+                    crate::memory::RegionCapError::OutOfMemory => SyscallError::OutOfMemory,
+                    crate::memory::RegionCapError::InconsistentState => SyscallError::IoError,
+                });
+            }
         }
     }
     Ok(new_id.as_u64())
