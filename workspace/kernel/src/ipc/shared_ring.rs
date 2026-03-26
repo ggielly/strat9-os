@@ -1,8 +1,8 @@
 use crate::{
     capability::CapId,
     memory::{
-        allocate_mapping_cap_id, register_mapping_identity, release_owned_block,
-        resolve_handle, revoke_mapping_cap_id, unregister_mapping_identity, PhysFrame,
+        allocate_mapping_cap_id, ownership_table, release_owned_block, resolve_handle,
+        revoke_mapping_cap_id, unregister_mapping_identity, OwnerError, PhysFrame,
     },
     sync::SpinLock,
 };
@@ -77,6 +77,24 @@ impl Drop for SharedRing {
     }
 }
 
+fn rollback_ring_frames(frames: Vec<PhysFrame>, owner_cap_ids: &[CapId], registered: usize) {
+    for (frame, owner_cap_id) in frames
+        .iter()
+        .copied()
+        .zip(owner_cap_ids.iter().copied())
+        .take(registered)
+    {
+        let handle = resolve_handle(frame.start_address);
+        if let Some(block) = unregister_mapping_identity(handle, owner_cap_id) {
+            release_owned_block(block);
+        }
+    }
+
+    for frame in frames.into_iter().skip(registered) {
+        crate::sync::with_irqs_disabled(|token| crate::memory::free_frame(token, frame));
+    }
+}
+
 static NEXT_RING_ID: AtomicU64 = AtomicU64::new(1);
 static RINGS: SpinLock<Option<BTreeMap<RingId, Arc<SharedRing>>>> = SpinLock::new(None);
 
@@ -120,11 +138,30 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
     }
 
     let id = RingId(NEXT_RING_ID.fetch_add(1, Ordering::Relaxed));
-    let owner_cap_ids = (0..page_count).map(|_| allocate_mapping_cap_id()).collect::<Vec<_>>();
+    let owner_cap_ids = (0..page_count)
+        .map(|_| allocate_mapping_cap_id())
+        .collect::<Vec<_>>();
     let mapping_cap_ids = (0..page_count).map(|_| allocate_mapping_cap_id()).collect();
 
+    let mut registered = 0usize;
     for (frame, owner_cap_id) in frames.iter().zip(owner_cap_ids.iter().copied()) {
-        register_mapping_identity(resolve_handle(frame.start_address), owner_cap_id);
+        let handle = resolve_handle(frame.start_address);
+        match ownership_table().ensure_ref(handle, owner_cap_id) {
+            Ok(_) | Err(OwnerError::CapAlreadyPresent) => {
+                registered += 1;
+            }
+            Err(error) => {
+                log::warn!(
+                    "ipc: failed to register shared ring owner cap={} block={:#x}/{}: {:?}",
+                    owner_cap_id.as_u64(),
+                    handle.base.as_u64(),
+                    handle.order,
+                    error
+                );
+                rollback_ring_frames(frames, &owner_cap_ids, registered);
+                return Err(RingError::Alloc);
+            }
+        }
     }
 
     let ring = Arc::new(SharedRing {

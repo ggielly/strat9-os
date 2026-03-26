@@ -21,7 +21,7 @@ pub fn get_block_meta(phys: PhysAddr) -> &'static BlockMeta {
 
 /// Resolves a physical address to the current block handle.
 pub fn resolve_handle(phys: PhysAddr) -> BlockHandle {
-    if let Some(handle) = ownership_table().handle_for_base(phys) {
+    if let Some(handle) = ownership_table().handle_containing(phys) {
         return handle;
     }
     let meta = get_block_meta(phys);

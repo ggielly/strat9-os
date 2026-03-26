@@ -298,6 +298,16 @@ impl OwnershipTable {
             .copied()
     }
 
+    /// Returns the live handle whose block currently contains `phys`, if any.
+    pub fn handle_containing(&self, phys: x86_64::PhysAddr) -> Option<BlockHandle> {
+        self.entries.lock().keys().find_map(|handle| {
+            let start = handle.base.as_u64();
+            let end = start.checked_add(handle.size_bytes())?;
+            let addr = phys.as_u64();
+            (addr >= start && addr < end).then_some(*handle)
+        })
+    }
+
     /// Returns the current reference count for the given block.
     pub fn refcount(&self, handle: BlockHandle) -> Option<u32> {
         self.entries.lock().get(&handle).map(|entry| entry.refcount)
