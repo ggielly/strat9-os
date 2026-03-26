@@ -292,12 +292,13 @@ impl IpcScheme {
         msg.sender = task_id.as_u64();
 
         let port = crate::ipc::port::get_port(self.port_id).ok_or(SyscallError::BadHandle)?;
+        let port_owner = port.owner;
         port.send(msg).map_err(|_| SyscallError::BadHandle)?;
         // Drop the Arc before blocking so we don't hold the port alive across
         // a potentially long sleep.
         drop(port);
 
-        Ok(crate::ipc::reply::wait_for_reply(task_id))
+        Ok(crate::ipc::reply::wait_for_reply(task_id, port_owner))
     }
 }
 

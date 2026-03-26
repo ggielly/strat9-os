@@ -10,6 +10,7 @@ use alloc::{collections::BTreeMap, sync::Arc};
 struct ReplySlot {
     msg: Option<IpcMessage>,
     waitq: Arc<WaitQueue>,
+    waiting_on: Option<TaskId>,
 }
 
 struct ReplyRegistry {
@@ -27,17 +28,26 @@ impl ReplyRegistry {
 
 static REPLIES: SpinLock<ReplyRegistry> = SpinLock::new(ReplyRegistry::new());
 
+fn epipe_reply() -> IpcMessage {
+    let mut err = IpcMessage::new(0x80);
+    let epipe: u32 = 32;
+    err.payload[0..4].copy_from_slice(&epipe.to_le_bytes());
+    err
+}
+
 /// Block the current task waiting for a reply message.
 ///
 /// Returns an EPIPE error reply if the slot was removed while waiting
 /// (e.g. the server died and cleanup ran).
-pub fn wait_for_reply(task_id: TaskId) -> IpcMessage {
+pub fn wait_for_reply(task_id: TaskId, waiting_on: TaskId) -> IpcMessage {
     let waitq = {
         let mut registry = REPLIES.lock();
         let slot = registry.slots.entry(task_id).or_insert_with(|| ReplySlot {
             msg: None,
             waitq: Arc::new(WaitQueue::new()),
+            waiting_on: Some(waiting_on),
         });
+        slot.waiting_on = Some(waiting_on);
         slot.waitq.clone()
     };
 
@@ -45,12 +55,7 @@ pub fn wait_for_reply(task_id: TaskId) -> IpcMessage {
         let mut registry = REPLIES.lock();
         match registry.slots.get_mut(&task_id) {
             Some(slot) => slot.msg.take(),
-            None => {
-                let mut err = IpcMessage::new(0x80);
-                let epipe: u32 = 32;
-                err.payload[0..4].copy_from_slice(&epipe.to_le_bytes());
-                Some(err)
-            }
+            None => Some(epipe_reply()),
         }
     });
 
@@ -65,15 +70,23 @@ pub fn wait_for_reply(task_id: TaskId) -> IpcMessage {
 /// Called during task cleanup to unblock any tasks waiting for a reply
 /// that this dying task should have delivered.
 pub fn cancel_replies_waiting_on(dead_task: TaskId) {
-    let registry = REPLIES.lock();
-    let has_slot = registry.slots.contains_key(&dead_task);
-    drop(registry);
-
-    if has_slot {
+    let waiters = {
         let mut registry = REPLIES.lock();
-        if let Some(slot) = registry.slots.remove(&dead_task) {
-            slot.waitq.wake_all();
+        let mut waitqs = alloc::vec::Vec::new();
+        for slot in registry.slots.values_mut() {
+            if slot.waiting_on != Some(dead_task) {
+                continue;
+            }
+            if slot.msg.is_none() {
+                slot.msg = Some(epipe_reply());
+            }
+            waitqs.push(slot.waitq.clone());
         }
+        waitqs
+    };
+
+    for waitq in waiters {
+        waitq.wake_all();
     }
 }
 
@@ -84,6 +97,7 @@ pub fn deliver_reply(target: TaskId, msg: IpcMessage) -> Result<(), ()> {
         let slot = registry.slots.entry(target).or_insert_with(|| ReplySlot {
             msg: None,
             waitq: Arc::new(WaitQueue::new()),
+            waiting_on: None,
         });
         slot.msg = Some(msg);
         slot.waitq.clone()

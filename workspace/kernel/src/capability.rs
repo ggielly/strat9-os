@@ -339,8 +339,8 @@ pub fn get_capability_manager() -> &'static CapabilityManager {
 /// Releases a capability and cleans up the underlying resource.
 pub fn release_capability(cap: &Capability, owner_task: Option<TaskId>) {
     let _ = get_capability_manager().revoke_capability(cap.id);
-    let remaining_caps = get_capability_manager()
-        .resource_capability_count(cap.resource_type, cap.resource);
+    let remaining_caps =
+        get_capability_manager().resource_capability_count(cap.resource_type, cap.resource);
 
     match cap.resource_type {
         ResourceType::File => {

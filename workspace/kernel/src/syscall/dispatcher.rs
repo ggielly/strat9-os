@@ -1412,9 +1412,10 @@ fn sys_ipc_call(port: u64, _msg_ptr: u64) -> Result<u64, SyscallError> {
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
+    let port_owner = port.owner;
     port.send(msg).map_err(SyscallError::from)?;
 
-    let reply_msg = reply::wait_for_reply(task.id);
+    let reply_msg = reply::wait_for_reply(task.id, port_owner);
     let mut out_buf = [0u8; MSG_SIZE];
     crate::ipc::message::ipc_message_to_raw(&reply_msg, &mut out_buf);
     let user = UserSliceWrite::new(_msg_ptr, MSG_SIZE)?;
