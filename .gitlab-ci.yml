@@ -43,14 +43,17 @@ release-latest:
   only:
     - main
   script:
-    - BUILD_DATE="$(date +%Y%m%d-%H%M%S)"
-    - TAG_NAME="build-${BUILD_DATE}"
-    - ISO_NAME="strat9-os-${BUILD_DATE}.iso"
-    - IMG_NAME="strat9-os-${BUILD_DATE}.img"
-    - RELEASE_NAME="Strat9-OS ${BUILD_DATE}"
-    - DESCRIPTION="Build automatique du ${BUILD_DATE} (pipeline ${CI_PIPELINE_ID} - ${CI_COMMIT_SHORT_SHA})"
+    # Use short commit SHA as build identifier (no timestamp)
+    - COMMIT="${CI_COMMIT_SHORT_SHA}"
+    - TAG_NAME="build-${COMMIT}"
+    - ISO_NAME="strat9-os-${COMMIT}.iso"
+    - IMG_NAME="strat9-os-${COMMIT}.img"
+    - RELEASE_NAME="Strat9-OS ${COMMIT}"
+    - DESCRIPTION="Automated build for commit ${CI_COMMIT_SHORT_SHA} (pipeline ${CI_PIPELINE_ID})"
+    # Verify artifacts are present
     - test -f build/strat9-os.iso
     - test -f build/strat9-os.img
+    # Rename with commit SHA
     - cp build/strat9-os.iso "${ISO_NAME}"
     - cp build/strat9-os.img "${IMG_NAME}"
     - |
@@ -58,21 +61,21 @@ release-latest:
       GITLAB_API="${CI_SERVER_URL}/api/v4"
       TOKEN="${GITLAB_RELEASE_TOKEN}"
 
-      # Creer le tag via l'API (pas de git push)
+      # Create the tag via REST API (no git push needed)
       curl --silent --fail --request POST \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --header "Content-Type: application/json" \
         --data "{\"tag_name\": \"${TAG_NAME}\", \"ref\": \"${CI_COMMIT_SHA}\"}" \
         "${GITLAB_API}/projects/${PROJECT_ID}/repository/tags"
 
-      # Creer la release associee au tag
+      # Create the release linked to the tag
       curl --silent --fail --request POST \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --header "Content-Type: application/json" \
         --data "{\"name\": \"${RELEASE_NAME}\", \"tag_name\": \"${TAG_NAME}\", \"description\": \"${DESCRIPTION}\"}" \
         "${GITLAB_API}/projects/${PROJECT_ID}/releases"
 
-      # Upload ISO
+      # Upload ISO and retrieve its URL
       ISO_UPLOAD="$(curl --silent --fail \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --form "file=@${ISO_NAME}" \
@@ -80,7 +83,7 @@ release-latest:
         "${GITLAB_API}/projects/${PROJECT_ID}/uploads")"
       ISO_URL="$(printf '%s' "${ISO_UPLOAD}" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
 
-      # Upload IMG
+      # Upload IMG and retrieve its URL
       IMG_UPLOAD="$(curl --silent --fail \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --form "file=@${IMG_NAME}" \
@@ -88,14 +91,14 @@ release-latest:
         "${GITLAB_API}/projects/${PROJECT_ID}/uploads")"
       IMG_URL="$(printf '%s' "${IMG_UPLOAD}" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
 
-      # Attacher ISO comme asset de la release
+      # Attach ISO as a release asset
       curl --silent --fail --request POST \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --header "Content-Type: application/json" \
         --data "{\"name\": \"${ISO_NAME}\", \"url\": \"${CI_SERVER_URL}${ISO_URL}\", \"link_type\": \"other\"}" \
         "${GITLAB_API}/projects/${PROJECT_ID}/releases/${TAG_NAME}/assets/links"
 
-      # Attacher IMG comme asset de la release
+      # Attach IMG as a release asset
       curl --silent --fail --request POST \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --header "Content-Type: application/json" \
