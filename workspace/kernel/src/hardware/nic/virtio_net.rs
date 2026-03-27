@@ -16,15 +16,16 @@ use crate::{
         },
     },
     memory::{self, PhysFrame},
-    sync::SpinLock,
+    sync::{FixedQueue, SpinLock},
 };
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::sync::Arc;
 use core::{mem, ptr};
 use net_core::{NetError, NetworkDevice};
 use spin::RwLock as SpinRwLock;
 
 /// VirtIO net header size
 const NET_HDR_SIZE: usize = mem::size_of::<VirtioNetHeader>();
+const RX_FRAME_TRACK_CAPACITY: usize = 128;
 
 /// VirtIO net device features
 pub mod features {
@@ -74,7 +75,7 @@ pub struct VirtioNetDevice {
     rx_queue: SpinLock<Virtqueue>,
     tx_queue: SpinLock<Virtqueue>,
     mac_address: [u8; 6],
-    pub rx_frames: SpinLock<VecDeque<(PhysFrame, u8)>>, // Track allocated RX frames
+    pub rx_frames: SpinLock<FixedQueue<(PhysFrame, u8), RX_FRAME_TRACK_CAPACITY>>, // Track allocated RX frames
 }
 
 // Send and Sync are safe because we use SpinLocks
@@ -148,7 +149,7 @@ impl VirtioNetDevice {
             rx_queue: SpinLock::new(rx_queue),
             tx_queue: SpinLock::new(tx_queue),
             mac_address,
-            rx_frames: SpinLock::new(VecDeque::new()),
+            rx_frames: SpinLock::new(FixedQueue::new()),
         };
 
         // Fill RX queue with buffers
@@ -195,7 +196,12 @@ impl VirtioNetDevice {
             // Add buffer to RX queue (device Writable)
             match rx_queue.add_buffer(&[(buf_addr, buf_size as u32, true)]) {
                 Ok(_) => {
-                    rx_frames.push_back((buf_frame, buf_order));
+                    if rx_frames.push_back((buf_frame, buf_order)).is_err() {
+                        crate::sync::with_irqs_disabled(|token| {
+                            memory::free_frames(token, buf_frame, buf_order);
+                        });
+                        break;
+                    }
                     added += 1;
                 }
                 Err(_) => {

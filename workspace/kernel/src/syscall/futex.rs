@@ -1,6 +1,6 @@
 //! Futex (Fast Userspace Mutex) syscall handlers
 use alloc::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     sync::Arc,
 };
 use core::sync::atomic::Ordering;
@@ -9,18 +9,20 @@ use super::error::SyscallError;
 use crate::{
     memory::userslice::{UserSliceRead, UserSliceReadWrite},
     process::{block_current_task, current_task_id, wake_task},
-    sync::{SpinLock, SpinLockGuard},
+    sync::{FixedQueue, SpinLock, SpinLockGuard},
 };
 
+const FUTEX_WAITERS_CAPACITY: usize = 256;
+
 struct FutexQueue {
-    waiters: SpinLock<VecDeque<crate::process::TaskId>>,
+    waiters: SpinLock<FixedQueue<crate::process::TaskId, FUTEX_WAITERS_CAPACITY>>,
 }
 
 impl FutexQueue {
     /// Creates a new instance.
     const fn new() -> Self {
         FutexQueue {
-            waiters: SpinLock::new(VecDeque::new()),
+            waiters: SpinLock::new(FixedQueue::new()),
         }
     }
 
@@ -33,9 +35,7 @@ impl FutexQueue {
     /// Performs the remove waiter operation.
     fn remove_waiter(&self, id: crate::process::TaskId) {
         let mut waiters = self.waiters.lock();
-        if let Some(pos) = waiters.iter().position(|&x| x == id) {
-            waiters.remove(pos);
-        }
+        let _ = waiters.remove_first_where(|queued| *queued == id);
     }
 
     /// Returns whether empty.
@@ -104,8 +104,8 @@ fn lock_two_queues<'a>(
     addr2: u64,
     q2: &'a FutexQueue,
 ) -> (
-    SpinLockGuard<'a, VecDeque<crate::process::TaskId>>,
-    SpinLockGuard<'a, VecDeque<crate::process::TaskId>>,
+    SpinLockGuard<'a, FixedQueue<crate::process::TaskId, FUTEX_WAITERS_CAPACITY>>,
+    SpinLockGuard<'a, FixedQueue<crate::process::TaskId, FUTEX_WAITERS_CAPACITY>>,
 ) {
     debug_assert_ne!(addr1, addr2, "lock_two_queues: same address would deadlock");
     if addr1 < addr2 {
@@ -120,7 +120,10 @@ fn lock_two_queues<'a>(
 }
 
 /// Performs the wake from waiters operation.
-fn wake_from_waiters(waiters: &mut VecDeque<crate::process::TaskId>, max_wake: u32) -> u64 {
+fn wake_from_waiters(
+    waiters: &mut FixedQueue<crate::process::TaskId, FUTEX_WAITERS_CAPACITY>,
+    max_wake: u32,
+) -> u64 {
     let mut woke = 0u64;
     while woke < max_wake as u64 {
         if let Some(id) = waiters.pop_front() {
@@ -300,7 +303,9 @@ pub fn sys_futex_wait(_addr: u64, _val: u32, _timeout_ns: u64) -> Result<u64, Sy
             }
             return Err(SyscallError::Again);
         }
-        waiters.push_back(id);
+        waiters
+            .push_back(id)
+            .map_err(|_| SyscallError::QueueFull)?;
     }
 
     block_current_task();

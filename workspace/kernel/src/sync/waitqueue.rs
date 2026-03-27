@@ -41,9 +41,10 @@
 
 use crate::{
     process::{block_current_task, current_task_id, wake_task, TaskId},
-    sync::SpinLock,
+    sync::{FixedQueue, SpinLock},
 };
-use alloc::collections::VecDeque;
+
+const WAITQUEUE_CAPACITY: usize = 256;
 
 // ── WaitQueue ────────────────────────────────────────────────────────────────
 
@@ -52,14 +53,14 @@ use alloc::collections::VecDeque;
 /// See the [module documentation](self) for usage notes and the lost-wakeup
 /// guarantee.
 pub struct WaitQueue {
-    waiters: SpinLock<VecDeque<TaskId>>,
+    waiters: SpinLock<FixedQueue<TaskId, WAITQUEUE_CAPACITY>>,
 }
 
 impl WaitQueue {
     /// Create a new empty wait queue.
     pub const fn new() -> Self {
         WaitQueue {
-            waiters: SpinLock::new(VecDeque::new()),
+            waiters: SpinLock::new(FixedQueue::new()),
         }
     }
 
@@ -81,7 +82,9 @@ impl WaitQueue {
         // block_current_task() has not been reached yet.
         {
             let mut waiters = self.waiters.lock();
-            waiters.push_back(id);
+            waiters
+                .push_back(id)
+                .expect("WaitQueue waiter queue overflow");
         }
 
         // Block — returns when wake_task(id) is called (or immediately if
@@ -126,7 +129,9 @@ impl WaitQueue {
 
                 // Condition not yet met: register ourselves as a waiter while
                 // the lock is still held, preventing a wakeup from being missed.
-                waiters.push_back(id);
+                waiters
+                    .push_back(id)
+                    .expect("WaitQueue waiter queue overflow");
             } // waiters lock released here
 
             // Sleep until woken.  If wake_task() already fired (racing with
@@ -159,13 +164,17 @@ impl WaitQueue {
     ///
     /// Returns the number of tasks that were woken.
     pub fn wake_all(&self) -> usize {
-        let ids: VecDeque<TaskId> = {
-            let mut waiters = self.waiters.lock();
-            core::mem::take(&mut *waiters)
-        };
-
         let mut count = 0;
-        for id in ids {
+        loop {
+            let id = {
+                let mut waiters = self.waiters.lock();
+                waiters.pop_front()
+            };
+
+            let Some(id) = id else {
+                break;
+            };
+
             if wake_task(id) {
                 count += 1;
             }
