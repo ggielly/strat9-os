@@ -56,51 +56,68 @@ release-latest:
     # Rename with commit SHA
     - cp build/strat9-os.iso "${ISO_NAME}"
     - cp build/strat9-os.img "${IMG_NAME}"
+    # Debug: check token is set
+    - if [ -z "${GITLAB_RELEASE_TOKEN}" ]; then echo "ERROR: GITLAB_RELEASE_TOKEN is empty"; exit 1; fi
+    - echo "Token is set (length ${#GITLAB_RELEASE_TOKEN})"
     - |
+      set -e
       PROJECT_ID="${CI_PROJECT_ID}"
       GITLAB_API="${CI_SERVER_URL}/api/v4"
       TOKEN="${GITLAB_RELEASE_TOKEN}"
 
       # Create the tag via REST API (no git push needed)
-      curl --silent --fail --request POST \
+      echo "==> Creating tag ${TAG_NAME}"
+      TAG_RESP=$(curl --silent --show-error --request POST \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --header "Content-Type: application/json" \
         --data "{\"tag_name\": \"${TAG_NAME}\", \"ref\": \"${CI_COMMIT_SHA}\"}" \
-        "${GITLAB_API}/projects/${PROJECT_ID}/repository/tags"
+        "${GITLAB_API}/projects/${PROJECT_ID}/repository/tags")
+      echo "Tag response: ${TAG_RESP}"
+      echo "${TAG_RESP}" | grep -qv '"message"' || { echo "Tag creation failed"; exit 1; }
 
       # Create the release linked to the tag
-      curl --silent --fail --request POST \
+      echo "==> Creating release ${RELEASE_NAME}"
+      REL_RESP=$(curl --silent --show-error --request POST \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --header "Content-Type: application/json" \
         --data "{\"name\": \"${RELEASE_NAME}\", \"tag_name\": \"${TAG_NAME}\", \"description\": \"${DESCRIPTION}\"}" \
-        "${GITLAB_API}/projects/${PROJECT_ID}/releases"
+        "${GITLAB_API}/projects/${PROJECT_ID}/releases")
+      echo "Release response: ${REL_RESP}"
 
       # Upload ISO and retrieve its URL
-      ISO_UPLOAD="$(curl --silent --fail \
+      echo "==> Uploading ${ISO_NAME}"
+      ISO_UPLOAD=$(curl --silent --show-error \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --form "file=@${ISO_NAME}" \
         --request POST \
-        "${GITLAB_API}/projects/${PROJECT_ID}/uploads")"
-      ISO_URL="$(printf '%s' "${ISO_UPLOAD}" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
+        "${GITLAB_API}/projects/${PROJECT_ID}/uploads")
+      echo "ISO upload response: ${ISO_UPLOAD}"
+      ISO_URL=$(printf '%s' "${ISO_UPLOAD}" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
 
       # Upload IMG and retrieve its URL
-      IMG_UPLOAD="$(curl --silent --fail \
+      echo "==> Uploading ${IMG_NAME}"
+      IMG_UPLOAD=$(curl --silent --show-error \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --form "file=@${IMG_NAME}" \
         --request POST \
-        "${GITLAB_API}/projects/${PROJECT_ID}/uploads")"
-      IMG_URL="$(printf '%s' "${IMG_UPLOAD}" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
+        "${GITLAB_API}/projects/${PROJECT_ID}/uploads")
+      echo "IMG upload response: ${IMG_UPLOAD}"
+      IMG_URL=$(printf '%s' "${IMG_UPLOAD}" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
 
       # Attach ISO as a release asset
-      curl --silent --fail --request POST \
+      echo "==> Attaching ISO asset"
+      curl --silent --show-error --request POST \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --header "Content-Type: application/json" \
         --data "{\"name\": \"${ISO_NAME}\", \"url\": \"${CI_SERVER_URL}${ISO_URL}\", \"link_type\": \"other\"}" \
         "${GITLAB_API}/projects/${PROJECT_ID}/releases/${TAG_NAME}/assets/links"
 
       # Attach IMG as a release asset
-      curl --silent --fail --request POST \
+      echo "==> Attaching IMG asset"
+      curl --silent --show-error --request POST \
         --header "PRIVATE-TOKEN: ${TOKEN}" \
         --header "Content-Type: application/json" \
         --data "{\"name\": \"${IMG_NAME}\", \"url\": \"${CI_SERVER_URL}${IMG_URL}\", \"link_type\": \"other\"}" \
         "${GITLAB_API}/projects/${PROJECT_ID}/releases/${TAG_NAME}/assets/links"
+
+      echo "==> Done"
