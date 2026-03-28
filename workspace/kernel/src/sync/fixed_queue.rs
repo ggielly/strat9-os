@@ -35,6 +35,30 @@ impl<T, const N: usize> FixedQueue<T, N> {
         self.len == N
     }
 
+    /// Returns a shared reference to the element at `index` from the front.
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index >= self.len {
+            return None;
+        }
+
+        let idx = (self.head + index) % N;
+        // SAFETY: `idx` lies within the initialized window of the queue.
+        Some(unsafe { self.entries[idx].assume_init_ref() })
+    }
+
+    /// Returns a shared reference to the last element.
+    pub fn back(&self) -> Option<&T> {
+        self.len.checked_sub(1).and_then(|index| self.get(index))
+    }
+
+    /// Returns an iterator from front to back.
+    pub fn iter(&self) -> FixedQueueIter<'_, T, N> {
+        FixedQueueIter {
+            queue: self,
+            index: 0,
+        }
+    }
+
     /// Appends an element to the tail of the queue.
     pub fn push_back(&mut self, value: T) -> Result<(), T> {
         if self.is_full() {
@@ -99,6 +123,23 @@ impl<T, const N: usize> FixedQueue<T, N> {
         }
 
         removed
+    }
+}
+
+pub struct FixedQueueIter<'a, T, const N: usize> {
+    queue: &'a FixedQueue<T, N>,
+    index: usize,
+}
+
+impl<'a, T, const N: usize> Iterator for FixedQueueIter<'a, T, N> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.queue.get(self.index);
+        if item.is_some() {
+            self.index += 1;
+        }
+        item
     }
 }
 

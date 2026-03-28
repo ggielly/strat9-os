@@ -16,7 +16,7 @@ use commands::CommandRegistry;
 use output::{print_char, print_prompt};
 use parser::{parse_pipeline, Redirect};
 
-use crate::{shell_print, shell_println, vfs};
+use crate::{shell_print, shell_println, sync::FixedQueue, vfs};
 use strat9_abi::flag::OpenFlags;
 
 /// Shell error types
@@ -32,10 +32,11 @@ pub enum ShellError {
 
 use crate::arch::x86_64::keyboard::{KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use alloc::{
-    collections::VecDeque,
     string::{String, ToString},
 };
 use core::sync::atomic::{AtomicBool, Ordering};
+
+const SHELL_HISTORY_CAPACITY: usize = 50;
 
 /// Global flag set by Ctrl+C. Long-running commands should poll this
 /// via [`is_interrupted`] and abort early when it returns `true`.
@@ -255,7 +256,7 @@ pub extern "C" fn shell_main() -> ! {
     unsafe { core::arch::asm!("mov al, 0x4C; out 0xe9, al") }
 
     // Command history
-    let mut history = VecDeque::new();
+    let mut history: FixedQueue<String, SHELL_HISTORY_CAPACITY> = FixedQueue::new();
     let mut history_idx: isize = -1;
     let mut current_input_saved = String::new();
     let mut utf8_pending = [0u8; 4];
@@ -338,10 +339,12 @@ pub extern "C" fn shell_main() -> ! {
                             if history.is_empty()
                                 || history.back().map(|s: &String| s.as_str()) != Some(line)
                             {
-                                history.push_back(line.to_string());
-                                if history.len() > 50 {
-                                    history.pop_front();
+                                if history.is_full() {
+                                    let _ = history.pop_front();
                                 }
+                                history
+                                    .push_back(line.to_string())
+                                    .expect("shell history push must succeed after dropping oldest entry");
                             }
                         }
 
@@ -432,7 +435,9 @@ pub extern "C" fn shell_main() -> ! {
                         clear_visible_line(&input_buf[..input_len]);
 
                         history_idx += 1;
-                        let hist_str = &history[history.len() - 1 - history_idx as usize];
+                        let hist_str = history
+                            .get(history.len() - 1 - history_idx as usize)
+                            .expect("shell history index must be in range");
                         let bytes = hist_str.as_bytes();
                         let copy_len = bytes.len().min(input_buf.len());
                         input_buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
@@ -460,7 +465,9 @@ pub extern "C" fn shell_main() -> ! {
                             input_buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
                             input_len = copy_len;
                         } else {
-                            let hist_str = &history[history.len() - 1 - history_idx as usize];
+                            let hist_str = history
+                                .get(history.len() - 1 - history_idx as usize)
+                                .expect("shell history index must be in range");
                             let bytes = hist_str.as_bytes();
                             let copy_len = bytes.len().min(input_buf.len());
                             input_buf[..copy_len].copy_from_slice(&bytes[..copy_len]);

@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{CurrentRuntime, SchedClassRq};
-use crate::{arch::x86_64::timer::TIMER_HZ, process::task::Task};
-use alloc::{collections::VecDeque, sync::Arc};
+use crate::{arch::x86_64::timer::TIMER_HZ, process::task::Task, sync::FixedQueue};
+use alloc::sync::Arc;
 
 /// RT Round-Robin quantum in ticks.
 ///
 /// POSIX specifies a minimum of 100ms for SCHED_RR (Linux default: 100ms).
 /// At TIMER_HZ=100: 10 ticks x 10 ms/tick = 100 ms.
 const RT_RR_QUANTUM_TICKS: u64 = TIMER_HZ / 10;
-const RT_PREALLOC_PER_PRIO: usize = 4;
+const RT_QUEUE_CAPACITY: usize = 64;
 
 /// Real-time priority (0-99). Higher value means higher priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -31,21 +31,15 @@ impl RealTimePriority {
 }
 
 pub struct RealTimeClassRq {
-    queues: [VecDeque<Arc<Task>>; 100],
+    queues: [FixedQueue<Arc<Task>, RT_QUEUE_CAPACITY>; 100],
     bitmap: u128, // 100 bits needed (0..=99)
 }
 
 impl RealTimeClassRq {
     /// Creates a new instance.
     pub fn new() -> Self {
-        const EMPTY: VecDeque<Arc<Task>> = VecDeque::new();
-        let mut queues = [EMPTY; 100];
-        for q in &mut queues {
-            // Same rationale as FAIR: avoid VecDeque growth from IRQ-driven
-            // requeue paths. RT queues are per-priority, so a tiny reserve is
-            // enough for current workloads.
-            q.reserve(RT_PREALLOC_PER_PRIO);
-        }
+        const EMPTY: FixedQueue<Arc<Task>, RT_QUEUE_CAPACITY> = FixedQueue::new();
+        let queues = [EMPTY; 100];
         Self { queues, bitmap: 0 }
     }
 
@@ -68,7 +62,11 @@ impl SchedClassRq for RealTimeClassRq {
             super::SchedPolicy::RealTimeFifo { prio } => prio.get(),
             _ => return, // Ignore tasks that shouldn't be here
         };
-        self.queues[prio as usize].push_back(task);
+        // TODO(scheduler): replace this bounded queue with an intrusive per-task
+        // list so RT runnable depth is no longer capped by a compile-time constant.
+        if self.queues[prio as usize].push_back(task).is_err() {
+            panic!("RT runqueue overflow: replace fixed-capacity queue with intrusive list");
+        }
         self.set_bit(prio);
     }
 
@@ -118,9 +116,7 @@ impl SchedClassRq for RealTimeClassRq {
         while bits != 0 {
             let i = bits.trailing_zeros() as usize;
             let q = &mut self.queues[i];
-            let old_len = q.len();
-            q.retain(|t| t.id != task_id);
-            if q.len() < old_len {
+            if q.remove_first_where(|t| t.id == task_id).is_some() {
                 removed = true;
                 if q.is_empty() {
                     self.clear_bit(i as u8);
