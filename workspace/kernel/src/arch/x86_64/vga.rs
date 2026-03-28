@@ -4,7 +4,7 @@
 //! Keeps the existing `vga_print!` / `vga_println!` API but renders text into
 //! the graphical framebuffer when available. Falls back to serial otherwise.
 
-use alloc::{collections::VecDeque, format, string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
@@ -316,7 +316,7 @@ pub struct TerminalWidget {
     pub bg: RgbColor,
     pub border: RgbColor,
     pub max_lines: usize,
-    lines: VecDeque<TerminalLine>,
+    lines: Vec<TerminalLine>,
 }
 
 impl TerminalWidget {
@@ -329,7 +329,7 @@ impl TerminalWidget {
             bg: RgbColor::new(0x0F, 0x14, 0x1B),
             border: RgbColor::new(0x3D, 0x52, 0x66),
             max_lines: core::cmp::max(1, max_lines),
-            lines: VecDeque::new(),
+            lines: Vec::new(),
         }
     }
 
@@ -347,9 +347,9 @@ impl TerminalWidget {
     /// Performs the push colored line operation.
     fn push_colored_line(&mut self, text: &str, fg: RgbColor) {
         if self.lines.len() >= self.max_lines {
-            self.lines.pop_front();
+            self.lines.remove(0);
         }
-        self.lines.push_back(TerminalLine {
+        self.lines.push(TerminalLine {
             text: String::from(text),
             fg,
         });
@@ -745,7 +745,7 @@ pub struct VgaWriter {
 
     // ── Scrollback buffer ────────────────────────────────────────────────────
     /// Completed screen rows kept for history scrolling.
-    sb_rows: VecDeque<Vec<SbCell>>,
+    sb_rows: Vec<Vec<SbCell>>,
     /// Current (incomplete) row being assembled by write_char.
     sb_cur_row: Vec<SbCell>,
     /// Lines scrolled back from the bottom (0 = live view).
@@ -812,7 +812,7 @@ impl VgaWriter {
             draw_to_back: false,
             dirty_rect: None,
             track_dirty: false,
-            sb_rows: VecDeque::new(),
+            sb_rows: Vec::new(),
             sb_cur_row: Vec::new(),
             scroll_offset: 0,
             mc_x: 0,
@@ -875,7 +875,7 @@ impl VgaWriter {
         self.draw_to_back = false;
         self.dirty_rect = None;
         self.track_dirty = false;
-        self.sb_rows = VecDeque::new();
+        self.sb_rows = Vec::new();
         self.sb_cur_row = Vec::new();
         self.scroll_offset = 0;
         self.mc_visible = false;
@@ -2193,7 +2193,7 @@ impl VgaWriter {
         match c {
             '\n' => {
                 let row = core::mem::take(&mut self.sb_cur_row);
-                self.sb_rows.push_back(row);
+                self.sb_rows.push(row);
                 self.sb_trim();
             }
             '\r' => {
@@ -2207,7 +2207,7 @@ impl VgaWriter {
                 }
                 if self.sb_cur_row.len() >= cols {
                     let row = core::mem::take(&mut self.sb_cur_row);
-                    self.sb_rows.push_back(row);
+                    self.sb_rows.push(row);
                     self.sb_trim();
                 }
             }
@@ -2219,7 +2219,7 @@ impl VgaWriter {
                 self.sb_cur_row.push(SbCell { ch, fg, bg });
                 if self.sb_cur_row.len() >= cols {
                     let row = core::mem::take(&mut self.sb_cur_row);
-                    self.sb_rows.push_back(row);
+                    self.sb_rows.push(row);
                     self.sb_trim();
                 }
             }
@@ -2231,7 +2231,7 @@ impl VgaWriter {
     fn sb_trim(&mut self) {
         let cap = MAX_SCROLLBACK + self.rows + 1;
         while self.sb_rows.len() > cap {
-            self.sb_rows.pop_front();
+            self.sb_rows.remove(0);
         }
     }
 

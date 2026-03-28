@@ -31,9 +31,7 @@ pub enum ShellError {
 }
 
 use crate::arch::x86_64::keyboard::{KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_UP};
-use alloc::{
-    string::{String, ToString},
-};
+use alloc::string::{String, ToString};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 const SHELL_HISTORY_CAPACITY: usize = 50;
@@ -342,9 +340,9 @@ pub extern "C" fn shell_main() -> ! {
                                 if history.is_full() {
                                     let _ = history.pop_front();
                                 }
-                                history
-                                    .push_back(line.to_string())
-                                    .expect("shell history push must succeed after dropping oldest entry");
+                                history.push_back(line.to_string()).expect(
+                                    "shell history push must succeed after dropping oldest entry",
+                                );
                             }
                         }
 

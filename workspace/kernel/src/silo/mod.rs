@@ -765,8 +765,7 @@ impl SiloManager {
         if self.events.is_full() {
             let _ = self.events.pop_front();
         }
-        self
-            .events
+        self.events
             .push_back(ev)
             .expect("silo event queue push must succeed after dropping oldest entry");
     }
