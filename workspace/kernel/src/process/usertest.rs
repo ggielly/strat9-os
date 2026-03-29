@@ -157,6 +157,8 @@ pub fn create_user_test_task() {
             TaskPriority::Normal,
         )),
         vruntime: core::sync::atomic::AtomicU64::new(0),
+        fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
+        fair_on_rq: core::sync::atomic::AtomicBool::new(false),
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
         user_fs_base: core::sync::atomic::AtomicU64::new(0),
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),

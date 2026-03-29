@@ -1,8 +1,5 @@
 //! Futex (Fast Userspace Mutex) syscall handlers
-use alloc::{
-    collections::BTreeMap,
-    sync::Arc,
-};
+use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::Ordering;
 
 use super::error::SyscallError;
@@ -303,9 +300,7 @@ pub fn sys_futex_wait(_addr: u64, _val: u32, _timeout_ns: u64) -> Result<u64, Sy
             }
             return Err(SyscallError::Again);
         }
-        waiters
-            .push_back(id)
-            .map_err(|_| SyscallError::QueueFull)?;
+        waiters.push_back(id).map_err(|_| SyscallError::QueueFull)?;
     }
 
     block_current_task();

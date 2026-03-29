@@ -271,6 +271,8 @@ fn build_child_task(
         ticks: AtomicU64::new(0),
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
         vruntime: AtomicU64::new(parent.vruntime()),
+        fair_rq_generation: AtomicU64::new(0),
+        fair_on_rq: AtomicBool::new(false),
         // POSIX: clear_child_tid is NOT inherited — child starts with 0.
         clear_child_tid: AtomicU64::new(0),
         // POSIX: cwd IS inherited.

@@ -1,14 +1,14 @@
 // Synchronization primitives module
 
-pub mod guardian;
 mod fixed_queue;
+pub mod guardian;
 mod irq;
 pub mod preempt;
 mod spinlock;
 pub mod waitqueue;
 
-pub use guardian::{Guardian, IrqDisabled, PreemptDisabled};
 pub use fixed_queue::FixedQueue;
+pub use guardian::{Guardian, IrqDisabled, PreemptDisabled};
 pub use irq::{with_irqs_disabled, IrqDisabledToken};
 pub use preempt::PreemptGuard;
 pub use spinlock::{

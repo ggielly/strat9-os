@@ -1682,6 +1682,8 @@ pub fn load_elf_task_with_caps(
             TaskPriority::Normal,
         )),
         vruntime: core::sync::atomic::AtomicU64::new(0),
+        fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
+        fair_on_rq: core::sync::atomic::AtomicBool::new(false),
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
         user_fs_base: core::sync::atomic::AtomicU64::new(user_fs_base_val),
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
