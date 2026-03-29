@@ -1,7 +1,10 @@
 use super::{runtime_ops::finish_switch, *};
-use crate::memory::UserSliceWrite;
+use crate::{memory::UserSliceWrite, sync::FixedQueue};
 
-static PENDING_SILO_CLEANUPS: SpinLock<Vec<TaskId>> = SpinLock::new(Vec::new());
+const PENDING_SILO_CLEANUPS_CAPACITY: usize = 256;
+
+static PENDING_SILO_CLEANUPS: SpinLock<FixedQueue<TaskId, PENDING_SILO_CLEANUPS_CAPACITY>> =
+    SpinLock::new(FixedQueue::new());
 
 /// Mark the current task as Dead and yield to the scheduler.
 ///
@@ -1103,7 +1106,9 @@ fn reparent_children(sched: &mut GlobalSchedState, dying: TaskId) -> Option<usiz
 /// accessible from any global map (all_tasks, current_task, etc.).
 fn queue_silo_cleanup(task_id: TaskId) {
     let mut guard = PENDING_SILO_CLEANUPS.lock();
-    guard.push(task_id);
+    guard
+        .push_back(task_id)
+        .unwrap_or_else(|_| panic!("pending silo cleanup queue overflow"));
 }
 
 pub fn flush_deferred_silo_cleanups() {
@@ -1114,10 +1119,10 @@ pub fn flush_deferred_silo_cleanups() {
     if guard.is_empty() {
         return;
     }
-    let mut drained = Vec::new();
-    drained.append(&mut *guard);
+    let mut drained = FixedQueue::<TaskId, PENDING_SILO_CLEANUPS_CAPACITY>::new();
+    core::mem::swap(&mut *guard, &mut drained);
     drop(guard);
-    for task_id in drained {
+    while let Some(task_id) = drained.pop_front() {
         crate::silo::on_task_terminated(task_id);
     }
 }

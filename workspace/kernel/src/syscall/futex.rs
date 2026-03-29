@@ -1,5 +1,5 @@
 //! Futex (Fast Userspace Mutex) syscall handlers
-use alloc::{collections::BTreeMap, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::Ordering;
 
 use super::error::SyscallError;
@@ -9,6 +9,8 @@ use crate::{
     sync::{FixedQueue, SpinLock, SpinLockGuard},
 };
 
+const FUTEX_QUEUE_BUCKETS: usize = 64;
+const FUTEX_BUCKET_CAPACITY: usize = 16;
 const FUTEX_WAITERS_CAPACITY: usize = 256;
 
 struct FutexQueue {
@@ -41,14 +43,95 @@ impl FutexQueue {
     }
 }
 
-static FUTEX_QUEUES: SpinLock<BTreeMap<u64, Arc<FutexQueue>>> = SpinLock::new(BTreeMap::new());
+struct FutexBucketEntry {
+    addr: u64,
+    queue: Arc<FutexQueue>,
+}
+
+struct FutexBucket {
+    entries: [Option<FutexBucketEntry>; FUTEX_BUCKET_CAPACITY],
+}
+
+impl FutexBucket {
+    const fn new() -> Self {
+        Self {
+            entries: [const { None }; FUTEX_BUCKET_CAPACITY],
+        }
+    }
+
+    fn lookup(&self, addr: u64) -> Option<Arc<FutexQueue>> {
+        self.entries.iter().find_map(|slot| match slot {
+            Some(entry) if entry.addr == addr => Some(entry.queue.clone()),
+            _ => None,
+        })
+    }
+
+    fn get_or_insert(&mut self, addr: u64) -> Result<Arc<FutexQueue>, SyscallError> {
+        let mut empty_slot = None;
+
+        for (index, slot) in self.entries.iter_mut().enumerate() {
+            match slot {
+                Some(entry) if entry.addr == addr => return Ok(entry.queue.clone()),
+                None if empty_slot.is_none() => empty_slot = Some(index),
+                _ => {}
+            }
+        }
+
+        let Some(index) = empty_slot else {
+            return Err(SyscallError::QueueFull);
+        };
+
+        let queue = Arc::new(FutexQueue::new());
+        self.entries[index] = Some(FutexBucketEntry {
+            addr,
+            queue: queue.clone(),
+        });
+        Ok(queue)
+    }
+
+    fn remove_if_empty(&mut self, addr: u64, queue: &Arc<FutexQueue>) {
+        for slot in &mut self.entries {
+            let should_remove = match slot {
+                Some(entry)
+                    if entry.addr == addr
+                        && Arc::ptr_eq(&entry.queue, queue)
+                        && entry.queue.is_empty() =>
+                {
+                    true
+                }
+                _ => false,
+            };
+
+            if should_remove {
+                *slot = None;
+                return;
+            }
+        }
+    }
+}
+
+static FUTEX_QUEUES: [SpinLock<FutexBucket>; FUTEX_QUEUE_BUCKETS] =
+    [const { SpinLock::new(FutexBucket::new()) }; FUTEX_QUEUE_BUCKETS];
+
+#[inline]
+fn futex_bucket_index(addr: u64) -> usize {
+    ((addr >> 2) as usize) & (FUTEX_QUEUE_BUCKETS - 1)
+}
+
+#[inline]
+fn futex_bucket(addr: u64) -> &'static SpinLock<FutexBucket> {
+    &FUTEX_QUEUES[futex_bucket_index(addr)]
+}
+
+fn lookup_queue(addr: u64) -> Option<Arc<FutexQueue>> {
+    let bucket = futex_bucket(addr).lock();
+    bucket.lookup(addr)
+}
 
 /// Returns queue.
-fn get_queue(addr: u64) -> Arc<FutexQueue> {
-    let mut map = FUTEX_QUEUES.lock();
-    map.entry(addr)
-        .or_insert_with(|| Arc::new(FutexQueue::new()))
-        .clone()
+fn get_queue(addr: u64) -> Result<Arc<FutexQueue>, SyscallError> {
+    let mut bucket = futex_bucket(addr).lock();
+    bucket.get_or_insert(addr)
 }
 
 /// Reads u32.
@@ -145,15 +228,12 @@ fn do_requeue(
         return sys_futex_wake(addr1, max_wake);
     }
 
-    let queue1 = {
-        let map = FUTEX_QUEUES.lock();
-        map.get(&addr1).cloned()
-    };
+    let queue1 = lookup_queue(addr1);
     let Some(queue1) = queue1 else {
         return Ok(0);
     };
 
-    let queue2 = get_queue(addr2);
+    let queue2 = get_queue(addr2)?;
 
     let mut woke = 0u64;
     let mut requeued = 0u64;
@@ -173,7 +253,10 @@ fn do_requeue(
 
         while requeued < max_requeue as u64 {
             if let Some(id) = w1.pop_front() {
-                w2.push_back(id);
+                if w2.push_back(id).is_err() {
+                    let _ = w1.push_back(id);
+                    break;
+                }
                 requeued += 1;
             } else {
                 break;
@@ -192,12 +275,8 @@ fn try_gc_queue(addr: u64, queue: &Arc<FutexQueue>) {
     let waiters = queue.waiters.lock();
     if waiters.is_empty() {
         drop(waiters);
-        let mut map = FUTEX_QUEUES.lock();
-        if let Some(q) = map.get(&addr) {
-            if q.is_empty() {
-                map.remove(&addr);
-            }
-        }
+        let mut bucket = futex_bucket(addr).lock();
+        bucket.remove_if_empty(addr, queue);
     }
 }
 
@@ -278,7 +357,7 @@ pub fn sys_futex_wait(_addr: u64, _val: u32, _timeout_ns: u64) -> Result<u64, Sy
     }
 
     let id = current_task_id().ok_or(SyscallError::PermissionDenied)?;
-    let queue = get_queue(addr);
+    let queue = get_queue(addr)?;
 
     let saved_deadline = if timeout_ns != 0 {
         let deadline = crate::syscall::time::current_time_ns().saturating_add(timeout_ns);
@@ -325,10 +404,7 @@ pub fn sys_futex_wait(_addr: u64, _val: u32, _timeout_ns: u64) -> Result<u64, Sy
 pub fn sys_futex_wake(_addr: u64, _max_wake: u32) -> Result<u64, SyscallError> {
     let addr = _addr;
     let max_wake = _max_wake;
-    let queue = {
-        let map = FUTEX_QUEUES.lock();
-        map.get(&addr).cloned()
-    };
+    let queue = lookup_queue(addr);
 
     let Some(queue) = queue else {
         return Ok(0);
@@ -376,10 +452,7 @@ pub fn sys_futex_cmp_requeue(
         return sys_futex_wake(_addr1, _max_wake);
     }
 
-    let queue1 = {
-        let map = FUTEX_QUEUES.lock();
-        map.get(&_addr1).cloned()
-    };
+    let queue1 = lookup_queue(_addr1);
     let Some(queue1) = queue1 else {
         let cur = read_u32(_addr1)?;
         if cur != _expected_val {
@@ -388,7 +461,7 @@ pub fn sys_futex_cmp_requeue(
         return Ok(0);
     };
 
-    let queue2 = get_queue(_addr2);
+    let queue2 = get_queue(_addr2)?;
     let mut woke = 0u64;
     let mut requeued = 0u64;
 
@@ -409,7 +482,10 @@ pub fn sys_futex_cmp_requeue(
         }
         while requeued < _max_requeue as u64 {
             if let Some(id) = w1.pop_front() {
-                w2.push_back(id);
+                if w2.push_back(id).is_err() {
+                    let _ = w1.push_back(id);
+                    break;
+                }
                 requeued += 1;
             } else {
                 break;
@@ -438,8 +514,8 @@ pub fn sys_futex_wake_op(
     let wake_op = FutexWakeOpEncode::decode(_op)?;
 
     // Materialize queues so wake and wait operations serialize on queue locks.
-    let q1 = get_queue(addr1);
-    let q2 = get_queue(addr2);
+    let q1 = get_queue(addr1)?;
+    let q2 = get_queue(addr2)?;
 
     let woke = if addr1 == addr2 {
         let mut waiters = q1.waiters.lock();

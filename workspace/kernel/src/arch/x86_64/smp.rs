@@ -19,8 +19,6 @@ use crate::{
     acpi::madt,
     arch::x86_64::{apic, idt, io::io_wait, percpu, timer},
     memory,
-    process::task::KernelStack,
-    sync::SpinLock,
 };
 
 /// Physical address where the SMP trampoline is copied.
@@ -34,9 +32,6 @@ static SYNC_BARRIER: AtomicUsize = AtomicUsize::new(0);
 static BARRIER_TARGET: AtomicUsize = AtomicUsize::new(0);
 /// Gate used by BSP to release APs into scheduler/timer start.
 static AP_SCHED_GATE_OPEN: AtomicBool = AtomicBool::new(false);
-
-/// Keep AP kernel stacks alive.
-static AP_KERNEL_STACKS: SpinLock<Vec<KernelStack>> = SpinLock::new(Vec::new());
 
 // Boot Application Processors using the legacy INIT+SIPI sequence.
 // Returns the number of online CPUs (including BSP) or an error string on failure.
