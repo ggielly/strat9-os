@@ -768,6 +768,7 @@ pub struct VgaWriter {
 
     font: &'static [u8],
     font_info: FontInfo,
+    glyph_mask_cache: Vec<u8>,
     unicode_map: Vec<(u32, usize)>,
     status_bar_height: usize,
     clip: ClipRect,
@@ -810,6 +811,44 @@ pub struct VgaWriter {
 unsafe impl Send for VgaWriter {}
 
 impl VgaWriter {
+    fn build_glyph_mask_cache(font: &'static [u8], info: &FontInfo) -> Vec<u8> {
+        let glyph_pixels = info.glyph_w.saturating_mul(info.glyph_h);
+        let total_pixels = info.glyph_count.saturating_mul(glyph_pixels);
+        let mut cache = Vec::with_capacity(total_pixels);
+        if glyph_pixels == 0 || info.glyph_count == 0 {
+            return cache;
+        }
+
+        let row_bytes = info.glyph_w.div_ceil(8);
+        for glyph_index in 0..info.glyph_count {
+            let start = info.data_offset + glyph_index * info.bytes_per_glyph;
+            let end = start.saturating_add(info.bytes_per_glyph);
+            if end > font.len() {
+                cache.resize(cache.len().saturating_add(glyph_pixels), 0);
+                continue;
+            }
+            let glyph_ptr = font[start..end].as_ptr();
+            for gy in 0..info.glyph_h {
+                for gx in 0..info.glyph_w {
+                    let byte = unsafe { *glyph_ptr.add(gy * row_bytes + gx / 8) };
+                    let mask = 0x80u8 >> (gx % 8);
+                    cache.push(if (byte & mask) != 0 { 1 } else { 0 });
+                }
+            }
+        }
+        cache
+    }
+
+    fn glyph_mask_slice(&self, glyph_index: usize) -> Option<&[u8]> {
+        let glyph_pixels = self.font_info.glyph_w.saturating_mul(self.font_info.glyph_h);
+        if glyph_pixels == 0 {
+            return None;
+        }
+        let start = glyph_index.checked_mul(glyph_pixels)?;
+        let end = start.checked_add(glyph_pixels)?;
+        self.glyph_mask_cache.get(start..end)
+    }
+
     /// Creates a new instance.
     pub const fn new() -> Self {
         Self {
@@ -842,6 +881,7 @@ impl VgaWriter {
                 data_offset: 0,
                 unicode_table_offset: None,
             },
+            glyph_mask_cache: Vec::new(),
             unicode_map: Vec::new(),
             status_bar_height: 0,
             clip: ClipRect {
@@ -914,6 +954,7 @@ impl VgaWriter {
         self.bg = fmt.pack_rgb(br, bg, bb);
         self.font = FONT_PSF;
         self.font_info = font_info;
+        self.glyph_mask_cache = Self::build_glyph_mask_cache(FONT_PSF, &self.font_info);
         self.unicode_map = parse_psf2_unicode_map(FONT_PSF, &self.font_info);
         self.status_bar_height = status_bar_height;
         self.clip = ClipRect {
@@ -2098,19 +2139,13 @@ impl VgaWriter {
             return;
         }
         let glyph_index = core::cmp::min(glyph_index, self.font_info.glyph_count.saturating_sub(1));
-        let start = self.font_info.data_offset + glyph_index * self.font_info.bytes_per_glyph;
-        if start
-            .checked_add(self.font_info.bytes_per_glyph)
-            .map_or(true, |end| end > self.font.len())
-        {
-            return;
-        }
-        // Extract raw pointer so self can be mutably borrowed below.
-        // SAFETY: self.font is &'static [u8]; pointer is valid for the program lifetime.
-        let glyph_ptr = self.font[start..start + self.font_info.bytes_per_glyph].as_ptr();
-        let row_bytes = self.font_info.glyph_w.div_ceil(8);
         let gw = self.font_info.glyph_w;
         let gh = self.font_info.glyph_h;
+        let glyph_pixels = gw.saturating_mul(gh);
+        let Some(mask) = self.glyph_mask_slice(glyph_index) else {
+            return;
+        };
+        let mask_ptr = mask.as_ptr();
 
         if self.draw_to_back_buffer()
             && pixel_x + gw <= self.fb_width
@@ -2120,11 +2155,16 @@ impl VgaWriter {
             if let Some(buf) = self.back_buffer.as_mut() {
                 for gy in 0..gh {
                     let row_start = (pixel_y + gy) * fb_width + pixel_x;
+                    buf[row_start..row_start + gw].fill(bg);
                     for gx in 0..gw {
-                        // SAFETY: glyph_ptr valid (static font data), index within bytes_per_glyph.
-                        let byte = unsafe { *glyph_ptr.add(gy * row_bytes + gx / 8) };
-                        let mask = 0x80u8 >> (gx % 8);
-                        buf[row_start + gx] = if (byte & mask) != 0 { fg } else { bg };
+                        let idx = gy * gw + gx;
+                        if idx >= glyph_pixels {
+                            continue;
+                        }
+                        let bit = unsafe { *mask_ptr.add(idx) };
+                        if bit != 0 {
+                            buf[row_start + gx] = fg;
+                        }
                     }
                 }
             }
@@ -2132,9 +2172,15 @@ impl VgaWriter {
         } else {
             for gy in 0..gh {
                 for gx in 0..gw {
-                    let byte = unsafe { *glyph_ptr.add(gy * row_bytes + gx / 8) };
-                    let mask = 0x80u8 >> (gx % 8);
-                    let color = if (byte & mask) != 0 { fg } else { bg };
+                    let idx = gy * gw + gx;
+                    if idx >= glyph_pixels {
+                        continue;
+                    }
+                    let color = if unsafe { *mask_ptr.add(idx) } != 0 {
+                        fg
+                    } else {
+                        bg
+                    };
                     self.put_pixel_raw(pixel_x + gx, pixel_y + gy, color);
                 }
             }
@@ -2147,10 +2193,32 @@ impl VgaWriter {
         self.draw_glyph_index_at_pixel(pixel_x, pixel_y, glyph_index, fg, bg);
     }
 
+    fn fill_text_span_bg(&mut self, pixel_x: usize, pixel_y: usize, width: usize, height: usize, bg: u32) {
+        if self.draw_to_back_buffer()
+            && pixel_x + width <= self.fb_width
+            && pixel_y + height <= self.fb_height
+        {
+            let fb_width = self.fb_width;
+            if let Some(buf) = self.back_buffer.as_mut() {
+                for row in 0..height {
+                    let start = (pixel_y + row) * fb_width + pixel_x;
+                    let end = start + width;
+                    buf[start..end].fill(bg);
+                }
+                self.mark_dirty_rect(pixel_x, pixel_y, width, height);
+                return;
+            }
+        }
+
+        let gh = height;
+        let color = self.unpack_color(bg);
+        self.fill_rect(pixel_x, pixel_y, width, gh, color);
+    }
+
     fn clear_text_line_pixels(&mut self, vis_row: usize) {
         let gh = self.font_info.glyph_h;
         let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
-        self.fill_rect(0, vis_row.saturating_mul(gh), text_w, gh, self.unpack_color(self.bg));
+        self.fill_text_span_bg(0, vis_row.saturating_mul(gh), text_w, gh, self.bg);
     }
 
     fn visible_virtual_bounds(&self) -> (usize, usize, usize, usize, bool) {
@@ -2214,7 +2282,6 @@ impl VgaWriter {
         let glyph_h = self.font_info.glyph_h;
         let glyph_w = self.font_info.glyph_w;
         let py = vis_row.saturating_mul(glyph_h);
-        self.clear_text_line_pixels(vis_row);
 
         let (row_ptr, row_len) = if virt_row < total_complete {
             let row = &self.sb_rows[virt_row];
@@ -2226,6 +2293,14 @@ impl VgaWriter {
         };
 
         let cell_count = row_len.min(self.cols);
+        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
+        let used_width = cell_count.saturating_mul(glyph_w).min(text_w);
+        if used_width > 0 {
+            self.fill_text_span_bg(0, py, used_width, glyph_h, self.bg);
+        }
+        if text_w > used_width {
+            self.fill_text_span_bg(used_width, py, text_w - used_width, glyph_h, self.bg);
+        }
         for col in 0..cell_count {
             let px = col.saturating_mul(glyph_w);
             let cell = unsafe { &*row_ptr.add(col) };
