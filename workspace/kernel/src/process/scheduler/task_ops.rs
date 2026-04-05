@@ -89,7 +89,11 @@ pub fn exit_current_task(exit_code: i32) -> ! {
     }
 
     // Yield to pick the next task. Since we're Dead, we won't come back.
-    yield_task();
+    // Use yield_dead_task() which bypasses the PreemptGuard check — the task
+    // is already marked Dead and will never run again, so the guard is irrelevant.
+    // Using yield_task() here would silently return if a PreemptGuard is active,
+    // leaving the dead task spinning in the hlt() loop below.
+    yield_dead_task();
 
     // Safety net - should never reach here
     loop {

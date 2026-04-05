@@ -286,6 +286,7 @@ fn build_child_task(
             SyncUnsafeCell::new(child_fpu)
         },
         xcr0_mask: AtomicU64::new(parent.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed)),
+        rt_link: intrusive_collections::LinkedListLink::new(),
     });
 
     // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret

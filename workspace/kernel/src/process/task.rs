@@ -5,6 +5,7 @@
 use crate::memory::AddressSpace;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use intrusive_collections::LinkedListLink;
 use x86_64::{PhysAddr, VirtAddr};
 
 /// POSIX process ID.
@@ -301,7 +302,17 @@ pub struct Task {
     pub fpu_state: SyncUnsafeCell<ExtendedState>,
     /// XCR0 mask for this task (inherited from its silo).
     pub xcr0_mask: AtomicU64,
+    /// Intrusive linked-list link for the RT run queue.
+    ///
+    /// Only touched while holding the per-CPU scheduler spinlock.
+    pub rt_link: LinkedListLink,
 }
+
+// SAFETY: `LinkedListLink` uses `UnsafeCell` internally and is therefore
+// `!Sync` by default, but all mutations to `rt_link` are performed under the
+// per-CPU scheduler spinlock.  Every other non-atomic field in `Task` is
+// similarly protected by the appropriate lock or by the task's own atomics.
+unsafe impl Sync for Task {}
 
 impl Task {
     /// Leave this much headroom above the synthetic `SyscallFrame`.
@@ -885,6 +896,7 @@ impl Task {
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
+            rt_link: LinkedListLink::new(),
         });
         task.seed_kernel_interrupt_frame_from_context();
         Ok(task)
@@ -953,6 +965,7 @@ impl Task {
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
+            rt_link: LinkedListLink::new(),
         }))
     }
 

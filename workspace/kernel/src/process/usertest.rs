@@ -163,6 +163,7 @@ pub fn create_user_test_task() {
         user_fs_base: core::sync::atomic::AtomicU64::new(0),
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
+        rt_link: intrusive_collections::LinkedListLink::new(),
     });
 
     task.seed_interrupt_frame(crate::syscall::SyscallFrame {

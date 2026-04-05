@@ -1688,6 +1688,7 @@ pub fn load_elf_task_with_caps(
         user_fs_base: core::sync::atomic::AtomicU64::new(user_fs_base_val),
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
+        rt_link: intrusive_collections::LinkedListLink::new(),
     });
 
     crate::e9_println!(
