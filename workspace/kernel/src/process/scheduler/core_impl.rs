@@ -33,20 +33,11 @@ impl GlobalSchedState {
     pub fn new() -> Self {
         crate::serial_println!("[trace][sched] GlobalSchedState::new enter");
         GlobalSchedState {
-            blocked_tasks: BTreeMap::new(),
             all_tasks: BTreeMap::new(),
             all_tasks_scan: Vec::new(),
             task_cpu: BTreeMap::new(),
-            pid_to_task: BTreeMap::new(),
-            tid_to_task: BTreeMap::new(),
-            pid_to_pgid: BTreeMap::new(),
-            pid_to_sid: BTreeMap::new(),
-            pgid_members: BTreeMap::new(),
-            sid_members: BTreeMap::new(),
             wake_deadlines: BTreeMap::new(),
             wake_deadline_of: BTreeMap::new(),
-            parent_of: BTreeMap::new(),
-            children_of: BTreeMap::new(),
             zombies: BTreeMap::new(),
             class_table: crate::process::sched::SchedClassTable::default(),
         }
@@ -58,24 +49,9 @@ impl GlobalSchedState {
         key: Pid,
         task_id: TaskId,
     ) {
-        crate::serial_println!(
-            "[trace][sched] member_add enter key={} tid={}",
-            key,
-            task_id.as_u64()
-        );
         let members = map.entry(key).or_default();
-        crate::serial_println!(
-            "[trace][sched] member_add entry key={} len={}",
-            key,
-            members.len()
-        );
         if !members.iter().any(|id| *id == task_id) {
             members.push(task_id);
-            crate::serial_println!(
-                "[trace][sched] member_add pushed key={} tid={}",
-                key,
-                task_id.as_u64()
-            );
         }
     }
 
@@ -96,7 +72,7 @@ impl GlobalSchedState {
     }
 
     /// Performs the register identity locked operation.
-    pub(crate) fn register_identity_locked(&mut self, task: &Arc<Task>) {
+    pub(crate) fn register_identity_locked(identity: &mut SchedIdentity, task: &Arc<Task>) {
         let task_id = task.id;
         let pid = task.pid;
         let pgid = task.pgid.load(Ordering::Relaxed);
@@ -108,18 +84,18 @@ impl GlobalSchedState {
             pgid,
             sid
         );
-        self.pid_to_pgid.insert(pid, pgid);
+        identity.pid_to_pgid.insert(pid, pgid);
         crate::serial_println!(
             "[trace][sched] register_identity pid_to_pgid inserted pid={}",
             pid
         );
-        self.pid_to_sid.insert(pid, sid);
+        identity.pid_to_sid.insert(pid, sid);
         crate::serial_println!(
             "[trace][sched] register_identity pid_to_sid inserted pid={}",
             pid
         );
-        Self::member_add(&mut self.pgid_members, pgid, task_id);
-        Self::member_add(&mut self.sid_members, sid, task_id);
+        Self::member_add(&mut identity.pgid_members, pgid, task_id);
+        Self::member_add(&mut identity.sid_members, sid, task_id);
         crate::serial_println!(
             "[trace][sched] register_identity done tid={}",
             task_id.as_u64()
@@ -127,14 +103,19 @@ impl GlobalSchedState {
     }
 
     /// Performs the unregister identity locked operation.
-    pub(crate) fn unregister_identity_locked(&mut self, task_id: TaskId, pid: Pid, tid: Tid) {
-        self.pid_to_task.remove(&pid);
-        self.tid_to_task.remove(&tid);
-        if let Some(pgid) = self.pid_to_pgid.remove(&pid) {
-            Self::member_remove(&mut self.pgid_members, pgid, task_id);
+    pub(crate) fn unregister_identity_locked(
+        identity: &mut SchedIdentity,
+        task_id: TaskId,
+        pid: Pid,
+        tid: Tid,
+    ) {
+        identity.pid_to_task.remove(&pid);
+        identity.tid_to_task.remove(&tid);
+        if let Some(pgid) = identity.pid_to_pgid.remove(&pid) {
+            Self::member_remove(&mut identity.pgid_members, pgid, task_id);
         }
-        if let Some(sid) = self.pid_to_sid.remove(&pid) {
-            Self::member_remove(&mut self.sid_members, sid, task_id);
+        if let Some(sid) = identity.pid_to_sid.remove(&pid) {
+            Self::member_remove(&mut identity.sid_members, sid, task_id);
         }
     }
 
@@ -149,8 +130,11 @@ impl GlobalSchedState {
         let child = task.id;
         let cpu_index = self.select_cpu_for_task();
         let ipi = self.add_task_on_cpu(task, cpu_index);
-        self.parent_of.insert(child, parent);
-        self.children_of.entry(parent).or_default().push(child);
+        {
+            let mut identity = SCHED_IDENTITY.lock();
+            identity.parent_of.insert(child, parent);
+            identity.children_of.entry(parent).or_default().push(child);
+        }
         ipi
     }
 
@@ -184,25 +168,29 @@ impl GlobalSchedState {
             task_id.as_u64()
         );
         self.task_cpu.insert(task_id, cpu_index);
+        task.home_cpu.store(cpu_index, core::sync::atomic::Ordering::Relaxed);
         crate::serial_println!(
             "[trace][sched] add_task_on_cpu task_cpu inserted tid={}",
             task_id.as_u64()
         );
-        self.pid_to_task.insert(task.pid, task_id);
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu pid map inserted tid={}",
-            task_id.as_u64()
-        );
-        self.tid_to_task.insert(task.tid, task_id);
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu tid map inserted tid={}",
-            task_id.as_u64()
-        );
-        self.register_identity_locked(&task);
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu identity registered tid={}",
-            task_id.as_u64()
-        );
+        {
+            let mut identity = SCHED_IDENTITY.lock();
+            identity.pid_to_task.insert(task.pid, task_id);
+            crate::serial_println!(
+                "[trace][sched] add_task_on_cpu pid map inserted tid={}",
+                task_id.as_u64()
+            );
+            identity.tid_to_task.insert(task.tid, task_id);
+            crate::serial_println!(
+                "[trace][sched] add_task_on_cpu tid map inserted tid={}",
+                task_id.as_u64()
+            );
+            Self::register_identity_locked(&mut identity, &task);
+            crate::serial_println!(
+                "[trace][sched] add_task_on_cpu identity registered tid={}",
+                task_id.as_u64()
+            );
+        }
         {
             let class = self.class_table.class_for_task(&task);
             if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
@@ -344,25 +332,15 @@ impl GlobalSchedState {
     ///
     /// Returns `(was_woken, ipi_cpu)`. The caller must send a resched IPI to
     /// `ipi_cpu` after releasing the scheduler lock.
+    ///
+    /// NOTE: `blocked_tasks` lives in the separate `BLOCKED_TASKS` lock.
+    /// This method now only handles the fallback path (task not yet blocked,
+    /// set `wake_pending`). The primary wake path is in `wake_task()`.
     pub fn wake_task_locked(&mut self, id: TaskId) -> (bool, Option<usize>) {
         self.clear_task_wake_deadline_locked(id);
-        if let Some(task) = self.blocked_tasks.remove(&id) {
-            task.set_state(TaskState::Ready);
-            let cpu_index = self.task_cpu.get(&id).copied().unwrap_or(0);
-            {
-                let class = self.class_table.class_for_task(&task);
-                if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
-                    local_cpu.class_rqs.enqueue(class, task);
-                    local_cpu.need_resched = true;
-                }
-            }
-            let ipi = if cpu_index != current_cpu_index() {
-                Some(cpu_index)
-            } else {
-                None
-            };
-            (true, ipi)
-        } else if let Some(task) = self.all_tasks.get(&id) {
+        // Fallback: task is not yet in BLOCKED_TASKS (still transitioning to
+        // Blocked). Set wake_pending so block_current_task will skip blocking.
+        if let Some(task) = self.all_tasks.get(&id) {
             task.wake_pending
                 .store(true, core::sync::atomic::Ordering::Release);
             (true, None)
@@ -381,24 +359,41 @@ impl GlobalSchedState {
         parent: TaskId,
         target: Option<TaskId>,
     ) -> WaitChildResult {
-        let Some(children_view) = self.children_of.get(&parent) else {
-            return WaitChildResult::NoChildren;
-        };
+        // First, check children under SCHED_IDENTITY lock.
+        let target_is_child = {
+            let identity = SCHED_IDENTITY.lock();
+            let Some(children_view) = identity.children_of.get(&parent) else {
+                return WaitChildResult::NoChildren;
+            };
 
-        if children_view.is_empty() {
-            return WaitChildResult::NoChildren;
-        }
-
-        if let Some(target_id) = target {
-            if !children_view.iter().any(|&id| id == target_id) {
+            if children_view.is_empty() {
                 return WaitChildResult::NoChildren;
             }
+
+            let target_is_child = if let Some(target_id) = target {
+                children_view.iter().any(|&id| id == target_id)
+            } else {
+                true
+            };
+            target_is_child
+        };
+
+        if !target_is_child {
+            return WaitChildResult::NoChildren;
         }
 
-        let zombie = children_view
-            .iter()
-            .copied()
-            .find(|id| target.map_or(true, |t| t == *id) && self.zombies.contains_key(id));
+        // Find the zombie child — re-check children under SCHED_IDENTITY.
+        let zombie = {
+            let identity = SCHED_IDENTITY.lock();
+            let children = match identity.children_of.get(&parent) {
+                Some(c) => c.clone(),
+                None => return WaitChildResult::NoChildren,
+            };
+            children
+                .iter()
+                .copied()
+                .find(|id| target.map_or(true, |t| t == *id) && self.zombies.contains_key(id))
+        };
 
         if let Some(child) = zombie {
             let (status, child_pid) = self.zombies.remove(&child).unwrap_or((0, 0));
@@ -411,16 +406,20 @@ impl GlobalSchedState {
             let child_tid = reaped_task.as_ref().map(|t| t.tid);
             if child_pid != 0 {
                 if let Some(tid) = child_tid {
-                    self.unregister_identity_locked(child, child_pid, tid);
+                    let mut identity = SCHED_IDENTITY.lock();
+                    Self::unregister_identity_locked(&mut identity, child, child_pid, tid);
                 }
             }
-            if let Some(children) = self.children_of.get_mut(&parent) {
-                children.retain(|&id| id != child);
-                if children.is_empty() {
-                    self.children_of.remove(&parent);
+            {
+                let mut identity = SCHED_IDENTITY.lock();
+                if let Some(children) = identity.children_of.get_mut(&parent) {
+                    children.retain(|&id| id != child);
+                    if children.is_empty() {
+                        identity.children_of.remove(&parent);
+                    }
                 }
+                identity.parent_of.remove(&child);
             }
-            self.parent_of.remove(&child);
             return WaitChildResult::Reaped {
                 child,
                 pid: child_pid,
@@ -578,6 +577,7 @@ pub(super) fn steal_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Opti
             }
             if let Some(task) = sib.class_rqs.steal_candidate(&sib.class_table) {
                 sched.task_cpu.insert(task.id, cpu_index);
+                task.home_cpu.store(cpu_index, core::sync::atomic::Ordering::Relaxed);
                 if cpu_is_valid(cpu_index) {
                     CPU_STEAL_IN_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
                 }

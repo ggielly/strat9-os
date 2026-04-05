@@ -23,6 +23,8 @@ use spin::Mutex;
 /// Maximum supported resolution
 const MAX_WIDTH: u32 = 3840;
 const MAX_HEIGHT: u32 = 2160;
+const MAX_DIRTY_RECTS: usize = 8;
+const PRESENT_MIN_TICKS: u64 = 1;
 
 /// Framebuffer source
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -71,6 +73,13 @@ pub struct FramebufferInfo {
     pub source: FramebufferSource,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct FramebufferRenderStats {
+    pub present_pending: bool,
+    pub dirty_region_count: usize,
+    pub last_present_tick: u64,
+}
+
 unsafe impl Send for FramebufferInfo {}
 unsafe impl Sync for FramebufferInfo {}
 
@@ -79,7 +88,9 @@ pub struct Framebuffer {
     info: FramebufferInfo,
     double_buffer: Option<*mut u8>,
     use_double_buffer: bool,
-    dirty: DirtyRect,
+    dirty: DirtyRectSet,
+    present_pending: bool,
+    last_present_tick: u64,
 }
 
 unsafe impl Send for Framebuffer {}
@@ -95,6 +106,12 @@ struct DirtyRect {
     y0: u32,
     x1: u32,
     y1: u32,
+}
+
+#[derive(Clone, Copy)]
+struct DirtyRectSet {
+    rects: [DirtyRect; MAX_DIRTY_RECTS],
+    len: usize,
 }
 
 impl DirtyRect {
@@ -144,7 +161,117 @@ impl DirtyRect {
     }
 }
 
+impl DirtyRectSet {
+    const fn empty() -> Self {
+        Self {
+            rects: [DirtyRect::empty(); MAX_DIRTY_RECTS],
+            len: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+        let mut i = 0;
+        while i < MAX_DIRTY_RECTS {
+            self.rects[i] = DirtyRect::empty();
+            i += 1;
+        }
+    }
+
+    fn include(&mut self, x: u32, y: u32, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let mut next = DirtyRect::empty();
+        next.include(x, y, width, height);
+
+        let mut idx = 0;
+        while idx < self.len {
+            let cur = self.rects[idx];
+            if !cur.valid {
+                idx += 1;
+                continue;
+            }
+            let overlaps = next.x0 <= cur.x1
+                && next.x1 >= cur.x0
+                && next.y0 <= cur.y1
+                && next.y1 >= cur.y0;
+            if overlaps {
+                next.include(
+                    cur.x0,
+                    cur.y0,
+                    cur.x1.saturating_sub(cur.x0),
+                    cur.y1.saturating_sub(cur.y0),
+                );
+                self.rects[idx] = self.rects[self.len - 1];
+                self.rects[self.len - 1] = DirtyRect::empty();
+                self.len -= 1;
+                idx = 0;
+                continue;
+            }
+            idx += 1;
+        }
+
+        if self.len < MAX_DIRTY_RECTS {
+            self.rects[self.len] = next;
+            self.len += 1;
+            return;
+        }
+
+        self.rects[0].include(
+            next.x0,
+            next.y0,
+            next.x1.saturating_sub(next.x0),
+            next.y1.saturating_sub(next.y0),
+        );
+    }
+}
+
 impl Framebuffer {
+    fn request_present(&mut self) {
+        self.present_pending = true;
+    }
+
+    fn present_if_due(&mut self, force: bool) {
+        if !self.present_pending {
+            return;
+        }
+        if self.use_double_buffer {
+            return;
+        }
+        let now = crate::process::scheduler::ticks();
+        if force || now.saturating_sub(self.last_present_tick) >= PRESENT_MIN_TICKS {
+            self.present_pending = false;
+            self.last_present_tick = now;
+        } else {
+            return;
+        }
+
+        if self.info.source != FramebufferSource::VirtioGpu {
+            self.dirty.clear();
+            return;
+        }
+
+        if let Some(gpu) = gpu::get_gpu() {
+            let mut idx = 0;
+            while idx < self.dirty.len {
+                let rect = self.dirty.rects[idx];
+                if rect.valid {
+                    let _ = gpu.present_from_linear(
+                        self.info.base_virt as *const u8,
+                        self.info.stride,
+                        rect.x0,
+                        rect.y0,
+                        rect.x1.saturating_sub(rect.x0),
+                        rect.y1.saturating_sub(rect.y0),
+                    );
+                }
+                idx += 1;
+            }
+        }
+        self.dirty.clear();
+    }
+
     /// Initialize framebuffer with Limine-provided buffer
     pub fn init_limine(
         addr: u64,
@@ -173,7 +300,9 @@ impl Framebuffer {
             info,
             double_buffer: None,
             use_double_buffer: false,
-            dirty: DirtyRect::empty(),
+            dirty: DirtyRectSet::empty(),
+            present_pending: false,
+            last_present_tick: 0,
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
@@ -235,7 +364,9 @@ impl Framebuffer {
             info,
             double_buffer: Some(db_virt),
             use_double_buffer: true,
-            dirty: DirtyRect::empty(),
+            dirty: DirtyRectSet::empty(),
+            present_pending: false,
+            last_present_tick: 0,
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
@@ -298,9 +429,16 @@ impl Framebuffer {
             .unwrap_or(FramebufferSource::None)
     }
 
+    pub fn render_stats() -> Option<FramebufferRenderStats> {
+        FRAMEBUFFER.lock().as_ref().map(|fb| FramebufferRenderStats {
+            present_pending: fb.present_pending,
+            dirty_region_count: fb.dirty.len,
+            last_present_tick: fb.last_present_tick,
+        })
+    }
+
     /// Set a pixel at (x, y) with RGB color
     pub fn set_pixel(x: u32, y: u32, r: u8, g: u8, b: u8) {
-        let mut flush_region = None;
         {
             let mut guard = FRAMEBUFFER.lock();
             let fb = match guard.as_mut() {
@@ -328,16 +466,8 @@ impl Framebuffer {
             }
 
             fb.dirty.include(x, y, 1, 1);
-            if fb.info.source == FramebufferSource::VirtioGpu && !fb.use_double_buffer {
-                flush_region = Some((x, y, 1, 1));
-            }
-        }
-
-        if let Some((fx, fy, fw, fh)) = flush_region {
-            if let Some(gpu) = gpu::get_gpu() {
-                gpu.flush(fx, fy, fw, fh);
-                gpu.flush_now();
-            }
+            fb.request_present();
+            fb.present_if_due(false);
         }
     }
 
@@ -347,7 +477,6 @@ impl Framebuffer {
             return;
         }
 
-        let mut flush_region = None;
         {
             let mut guard = FRAMEBUFFER.lock();
             let fb = match guard.as_mut() {
@@ -381,24 +510,14 @@ impl Framebuffer {
             for dy in 0..height as usize {
                 let row_ptr =
                     unsafe { offset.add((y as usize + dy) * stride + x as usize * 4) as *mut u32 };
-                for dx in 0..width as usize {
-                    unsafe {
-                        core::ptr::write(row_ptr.add(dx), pixel);
-                    }
+                unsafe {
+                    core::slice::from_raw_parts_mut(row_ptr, width as usize).fill(pixel);
                 }
             }
 
             fb.dirty.include(x, y, width, height);
-            if fb.info.source == FramebufferSource::VirtioGpu && !fb.use_double_buffer {
-                flush_region = Some((x, y, width, height));
-            }
-        }
-
-        if let Some((fx, fy, fw, fh)) = flush_region {
-            if let Some(gpu) = gpu::get_gpu() {
-                gpu.flush(fx, fy, fw, fh);
-                gpu.flush_now();
-            }
+            fb.request_present();
+            fb.present_if_due(false);
         }
     }
 
@@ -435,39 +554,63 @@ impl Framebuffer {
             }
 
             let db = fb.double_buffer.unwrap();
-            let dirty = match fb.dirty.take() {
-                Some(d) => d,
-                None => return,
-            };
-            let (x, y, width, height) = dirty;
-            if width == 0 || height == 0 {
+            if fb.dirty.len == 0 {
                 return;
             }
 
             if fb.info.source == FramebufferSource::VirtioGpu {
-                virtio_present = Some((db as *const u8, fb.info.stride, x, y, width, height));
+                let mut regions = [(0u32, 0u32, 0u32, 0u32); MAX_DIRTY_RECTS];
+                let mut idx = 0;
+                while idx < fb.dirty.len {
+                    let rect = fb.dirty.rects[idx];
+                    regions[idx] = (
+                        rect.x0,
+                        rect.y0,
+                        rect.x1.saturating_sub(rect.x0),
+                        rect.y1.saturating_sub(rect.y0),
+                    );
+                    idx += 1;
+                }
+                virtio_present = Some((db as *const u8, fb.info.stride, regions, fb.dirty.len));
             } else {
                 let dst = fb.info.base_virt as *mut u8;
-                let row_bytes = width as usize * 4;
                 let stride = fb.info.stride as usize;
-                for row in 0..height as usize {
-                    let row_y = y as usize + row;
-                    let src_off = row_y * stride + x as usize * 4;
-                    let dst_off = src_off;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            db.add(src_off),
-                            dst.add(dst_off),
-                            row_bytes,
-                        );
+                let mut idx = 0;
+                while idx < fb.dirty.len {
+                    let rect = fb.dirty.rects[idx];
+                    let x = rect.x0;
+                    let y = rect.y0;
+                    let width = rect.x1.saturating_sub(rect.x0);
+                    let height = rect.y1.saturating_sub(rect.y0);
+                    let row_bytes = width as usize * 4;
+                    for row in 0..height as usize {
+                        let row_y = y as usize + row;
+                        let src_off = row_y * stride + x as usize * 4;
+                        let dst_off = src_off;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                db.add(src_off),
+                                dst.add(dst_off),
+                                row_bytes,
+                            );
+                        }
                     }
+                    idx += 1;
                 }
             }
+            fb.dirty.clear();
+            fb.present_pending = false;
+            fb.last_present_tick = crate::process::scheduler::ticks();
         }
 
-        if let Some((src, src_stride, px, py, pw, ph)) = virtio_present {
+        if let Some((src, src_stride, regions, region_count)) = virtio_present {
             if let Some(gpu) = gpu::get_gpu() {
-                let _ = gpu.present_from_linear(src, src_stride, px, py, pw, ph);
+                let mut idx = 0;
+                while idx < region_count {
+                    let (px, py, pw, ph) = regions[idx];
+                    let _ = gpu.present_from_linear(src, src_stride, px, py, pw, ph);
+                    idx += 1;
+                }
             }
         }
     }

@@ -106,14 +106,18 @@ pub fn print_prompt() {
     shell_print!(">>> ");
 }
 
+/// Print raw text without per-character formatting overhead.
+pub fn print_text(text: &str) {
+    if crate::arch::x86_64::vga::is_available() {
+        crate::arch::x86_64::vga::write_text(text);
+    } else {
+        crate::serial_print!("{}", text);
+    }
+}
+
 /// Print a character (no newline).
 pub fn print_char(ch: char) {
-    if crate::arch::x86_64::vga::is_available() {
-        use core::fmt::Write;
-        let _ = write!(crate::arch::x86_64::vga::VGA_WRITER.lock(), "{}", ch);
-    } else {
-        crate::serial_print!("{}", ch);
-    }
+    crate::arch::x86_64::vga::write_char(ch);
 }
 
 /// Format bytes as human-readable size.

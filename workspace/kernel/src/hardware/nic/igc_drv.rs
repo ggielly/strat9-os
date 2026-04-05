@@ -141,11 +141,19 @@ pub fn init() {
 
         // Linux-like step: probe attempted with retries; if core init fails, keep going.
         let mut init_ok = None;
-        for _ in 0..3 {
+        for attempt in 0..3 {
+            log::info!(
+                "IGC: init attempt {} mmio_phys={:#x} mmio_virt={:#x}",
+                attempt + 1,
+                mmio_phys,
+                mmio_virt
+            );
             if let Ok(nic) = E1000Nic::init(mmio_virt, &KernelDma) {
+                log::info!("IGC: core init ok on attempt {}", attempt + 1);
                 init_ok = Some(nic);
                 break;
             }
+            log::warn!("IGC: core init attempt {} failed", attempt + 1);
             let mut cmd_retry = pci_dev.read_config_u16(pci::config::COMMAND);
             cmd_retry |= pci::command::BUS_MASTER | pci::command::MEMORY_SPACE;
             cmd_retry &= !pci::command::INTERRUPT_DISABLE;

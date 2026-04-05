@@ -169,12 +169,20 @@ pub fn init() {
         // Some firmware leaves NIC in a stale power/reset state; retry once.
         let mut init_ok = None;
         for attempt in 0..2 {
+            log::info!(
+                "E1000: init attempt {} mmio_phys={:#x} mmio_virt={:#x}",
+                attempt + 1,
+                mmio_phys,
+                mmio_virt
+            );
             match E1000Nic::init(mmio_virt, &KernelDma) {
                 Ok(nic) => {
+                    log::info!("E1000: core init ok on attempt {}", attempt + 1);
                     init_ok = Some(nic);
                     break;
                 }
                 Err(e) => {
+                    log::warn!("E1000: core init attempt {} failed: {}", attempt + 1, e);
                     if attempt == 0 {
                         let mut cmd_retry = pci_dev.read_config_u16(pci::config::COMMAND);
                         cmd_retry |= pci::command::BUS_MASTER | pci::command::MEMORY_SPACE;

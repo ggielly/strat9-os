@@ -529,15 +529,76 @@ pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
     crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { SpinLock::new(None) }; crate::arch::x86_64::percpu::MAX_CPUS];
 
-/// Global task registry — cold path: fork, exit, wake, block.
+/// Blocked tasks registry — hot path: block/wake.
+///
+/// This lock is **independent** of `GLOBAL_SCHED_STATE`. The block and wake
+/// paths acquire only this lock + the target CPU's `LOCAL_SCHEDULERS[cpu]`
+/// lock, avoiding contention with cold-path operations (fork, exit, kill).
+///
+/// Lock order: BLOCKED_TASKS before LOCAL (never the reverse).
+pub(crate) static BLOCKED_TASKS: SpinLock<BTreeMap<TaskId, Arc<Task>>> =
+    SpinLock::new(BTreeMap::new());
+
+/// Identity maps — cold path: PID/TID lookups, process groups, sessions, parent/child.
+///
+/// Separate from `GLOBAL_SCHED_STATE` so that identity lookups (getpid, getpgid,
+/// setpgid, etc.) never contend with fork/exit/zombie management.
+///
+/// Lock order: SCHED_IDENTITY before LOCAL (never the reverse).
+/// SCHED_IDENTITY and BLOCKED_TASKS are independent — never hold both.
+pub(crate) static SCHED_IDENTITY: SpinLock<SchedIdentity> = SpinLock::new(SchedIdentity::new());
+
+/// Identity maps for the scheduler: PID/TID routing, process groups,
+/// session membership, and parent/child relationships.
+///
+/// Lives behind the `SCHED_IDENTITY` lock, separate from `GLOBAL_SCHED_STATE`
+/// so that syscall lookups (`getpid`, `getpgid`, `setpgid`, `setsid`, etc.)
+/// never contend with fork/exit or block/wake paths.
+pub struct SchedIdentity {
+    /// Map userspace PID -> internal TaskId (process leader in current model).
+    pub pid_to_task: BTreeMap<Pid, TaskId>,
+    /// Map userspace TID -> internal TaskId (fast thread lookup).
+    pub tid_to_task: BTreeMap<Tid, TaskId>,
+    /// Map PID -> process group id.
+    pub pid_to_pgid: BTreeMap<Pid, Pid>,
+    /// Map PID -> session id.
+    pub pid_to_sid: BTreeMap<Pid, Pid>,
+    /// Group membership index: pgid -> task ids.
+    pub pgid_members: BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
+    /// Session membership index: sid -> task ids.
+    pub sid_members: BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
+    /// Parent relationship: child -> parent
+    pub parent_of: BTreeMap<TaskId, TaskId>,
+    /// Children list: parent -> children
+    pub children_of: BTreeMap<TaskId, alloc::vec::Vec<TaskId>>,
+}
+
+impl SchedIdentity {
+    /// Creates a new empty identity registry.
+    pub const fn new() -> Self {
+        Self {
+            pid_to_task: BTreeMap::new(),
+            tid_to_task: BTreeMap::new(),
+            pid_to_pgid: BTreeMap::new(),
+            pid_to_sid: BTreeMap::new(),
+            pgid_members: BTreeMap::new(),
+            sid_members: BTreeMap::new(),
+            parent_of: BTreeMap::new(),
+            children_of: BTreeMap::new(),
+        }
+    }
+}
+
+/// Global task registry — cold path: fork, exit, all_tasks scan.
 ///
 /// Lock order: acquire GLOBAL_SCHED_STATE before LOCAL when both are needed.
 /// Per-CPU runqueues and current-task tracking live in `LOCAL_SCHEDULERS`.
+/// Blocked tasks are tracked in `BLOCKED_TASKS` (separate lock).
+/// Identity maps (PID/TID, pgid, sid, parent/child) are in `SCHED_IDENTITY` (separate lock).
 /// This struct holds only data that is accessed by cold paths (fork, exit,
-/// wake, block) and is protected by the `GLOBAL_SCHED_STATE` lock.
+/// all_tasks scan, zombie management, wake deadlines) and is protected by the
+/// `GLOBAL_SCHED_STATE` lock.
 pub struct GlobalSchedState {
-    /// Tasks blocked waiting for an event (keyed by TaskId for O(log n) wake)
-    blocked_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// All tasks in the system (for lookup by TaskId)
     pub(crate) all_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// Flat task snapshot used by IRQ-safe scans such as `tick_all_timers`.
@@ -548,28 +609,12 @@ pub struct GlobalSchedState {
     pub(crate) all_tasks_scan: Vec<Arc<Task>>,
     /// Map TaskId -> CPU index (for wake/resume routing)
     task_cpu: BTreeMap<TaskId, usize>,
-    /// Map userspace PID -> internal TaskId (process leader in current model).
-    pid_to_task: BTreeMap<Pid, TaskId>,
-    /// Map userspace TID -> internal TaskId (fast thread lookup).
-    tid_to_task: BTreeMap<Tid, TaskId>,
-    /// Map PID -> process group id.
-    pid_to_pgid: BTreeMap<Pid, Pid>,
-    /// Map PID -> session id.
-    pid_to_sid: BTreeMap<Pid, Pid>,
-    /// Group membership index: pgid -> task ids.
-    pgid_members: BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
-    /// Session membership index: sid -> task ids.
-    sid_members: BTreeMap<Pid, alloc::vec::Vec<TaskId>>,
     /// Deadline -> task ids map for sleeping tasks (ordered wakeups).
     #[allow(dead_code)]
     wake_deadlines: BTreeMap<u64, alloc::vec::Vec<TaskId>>,
     /// Task -> deadline reverse index.
     #[allow(dead_code)]
     wake_deadline_of: BTreeMap<TaskId, u64>,
-    /// Parent relationship: child -> parent
-    parent_of: BTreeMap<TaskId, TaskId>,
-    /// Children list: parent -> children
-    children_of: BTreeMap<TaskId, alloc::vec::Vec<TaskId>>,
     /// Zombie exit statuses: child -> (exit_code, pid)
     zombies: BTreeMap<TaskId, (i32, Pid)>,
     /// Scheduler class table (pick order, steal order, class metadata)

@@ -9,12 +9,12 @@ use crate::{
     ipc::port::{self, PortId},
     memory::{UserSliceRead, UserSliceWrite},
     process::{current_task_clone, task::Task, TaskId},
-    sync::SpinLock,
+    sync::{FixedQueue, SpinLock},
     syscall::error::SyscallError,
 };
 use alloc::{
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     string::{String, ToString},
     sync::Arc,
     vec::Vec,
@@ -690,16 +690,18 @@ pub struct SiloEventSnapshot {
 
 struct SiloManager {
     silos: BTreeMap<u32, Box<Silo>>,
-    events: VecDeque<SiloEvent>,
+    events: FixedQueue<SiloEvent, SILO_EVENTS_CAPACITY>,
     task_to_silo: BTreeMap<TaskId, u32>,
 }
+
+const SILO_EVENTS_CAPACITY: usize = 256;
 
 impl SiloManager {
     /// Creates a new instance.
     const fn new() -> Self {
         SiloManager {
             silos: BTreeMap::new(),
-            events: VecDeque::new(),
+            events: FixedQueue::new(),
             task_to_silo: BTreeMap::new(),
         }
     }
@@ -760,11 +762,12 @@ impl SiloManager {
 
     /// Performs the push event operation.
     fn push_event(&mut self, ev: SiloEvent) {
-        const MAX_EVENTS: usize = 256;
-        if self.events.len() >= MAX_EVENTS {
-            self.events.pop_front();
+        if self.events.is_full() {
+            let _ = self.events.pop_front();
         }
-        self.events.push_back(ev);
+        self.events
+            .push_back(ev)
+            .expect("silo event queue push must succeed after dropping oldest entry");
     }
 
     /// Maps task.

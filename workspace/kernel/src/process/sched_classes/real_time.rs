@@ -2,14 +2,14 @@
 
 use super::{CurrentRuntime, SchedClassRq};
 use crate::{arch::x86_64::timer::TIMER_HZ, process::task::Task};
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::sync::Arc;
+use intrusive_collections::{intrusive_adapter, LinkedList, LinkedListLink};
 
 /// RT Round-Robin quantum in ticks.
 ///
 /// POSIX specifies a minimum of 100ms for SCHED_RR (Linux default: 100ms).
 /// At TIMER_HZ=100: 10 ticks x 10 ms/tick = 100 ms.
 const RT_RR_QUANTUM_TICKS: u64 = TIMER_HZ / 10;
-const RT_PREALLOC_PER_PRIO: usize = 4;
 
 /// Real-time priority (0-99). Higher value means higher priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -30,23 +30,74 @@ impl RealTimePriority {
     }
 }
 
+// Intrusive adapter: the list owns Arc<Task> references and navigates via
+// the `rt_link` field embedded directly in the Task control block.
+// Zero heap allocation on enqueue or dequeue; no fixed capacity limit.
+intrusive_adapter!(pub RtTaskAdapter = Arc<Task>: Task { rt_link: LinkedListLink });
+
+/// Single-priority FIFO backed by an intrusive doubly-linked list.
+struct RtPrioQueue {
+    list: LinkedList<RtTaskAdapter>,
+    len: usize,
+}
+
+impl RtPrioQueue {
+    fn new() -> Self {
+        Self {
+            list: LinkedList::new(RtTaskAdapter::new()),
+            len: 0,
+        }
+    }
+
+    fn push_back(&mut self, task: Arc<Task>) {
+        self.list.push_back(task);
+        self.len += 1;
+    }
+
+    fn pop_front(&mut self) -> Option<Arc<Task>> {
+        let task = self.list.pop_front()?;
+        self.len -= 1;
+        Some(task)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Remove the first task with `task_id`. Returns true when found.
+    ///
+    /// O(n) scan, but no allocation.  In practice each priority queue is short
+    /// (a handful of RT threads), so the scan terminates quickly.
+    fn remove_by_id(&mut self, task_id: crate::process::TaskId) -> bool {
+        let mut cursor = self.list.front_mut();
+        loop {
+            match cursor.get() {
+                None => return false,
+                Some(task) if task.id == task_id => {
+                    // remove() advances cursor to the successor; the returned
+                    // Arc is dropped here, decrementing the task refcount.
+                    let _ = cursor.remove();
+                    self.len -= 1;
+                    return true;
+                }
+                Some(_) => cursor.move_next(),
+            }
+        }
+    }
+}
+
 pub struct RealTimeClassRq {
-    queues: [VecDeque<Arc<Task>>; 100],
+    queues: [RtPrioQueue; 100],
     bitmap: u128, // 100 bits needed (0..=99)
 }
 
 impl RealTimeClassRq {
     /// Creates a new instance.
     pub fn new() -> Self {
-        const EMPTY: VecDeque<Arc<Task>> = VecDeque::new();
-        let mut queues = [EMPTY; 100];
-        for q in &mut queues {
-            // Same rationale as FAIR: avoid VecDeque growth from IRQ-driven
-            // requeue paths. RT queues are per-priority, so a tiny reserve is
-            // enough for current workloads.
-            q.reserve(RT_PREALLOC_PER_PRIO);
+        Self {
+            queues: core::array::from_fn(|_| RtPrioQueue::new()),
+            bitmap: 0,
         }
-        Self { queues, bitmap: 0 }
     }
 
     /// Sets bit.
@@ -74,7 +125,7 @@ impl SchedClassRq for RealTimeClassRq {
 
     /// Performs the len operation.
     fn len(&self) -> usize {
-        self.queues.iter().map(|q| q.len()).sum()
+        self.queues.iter().map(|q| q.len).sum()
     }
 
     /// Performs the pick next operation.
@@ -82,7 +133,7 @@ impl SchedClassRq for RealTimeClassRq {
         if self.bitmap == 0 {
             return None;
         }
-        // Highest priority first (99 down to 0)
+        // Highest priority first (99 down to 0).
         let highest = 127 - self.bitmap.leading_zeros() as u8;
         let q = &mut self.queues[highest as usize];
         let task = q.pop_front()?;
@@ -97,14 +148,13 @@ impl SchedClassRq for RealTimeClassRq {
         if is_yield {
             return true;
         }
-        let policy = task.sched_policy();
-        match policy {
+        match task.sched_policy() {
             super::SchedPolicy::RealTimeRR { .. } => {
                 // Round Robin: preempt after RT_RR_QUANTUM_TICKS (POSIX >= 100 ms).
                 rt.period_delta_ticks >= RT_RR_QUANTUM_TICKS
             }
             super::SchedPolicy::RealTimeFifo { .. } => {
-                // FIFO: Run until blocked or yielded
+                // FIFO: run until blocked or yielded.
                 false
             }
             _ => false,
@@ -113,21 +163,18 @@ impl SchedClassRq for RealTimeClassRq {
 
     /// Performs the remove operation.
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool {
-        let mut removed = false;
         let mut bits = self.bitmap;
         while bits != 0 {
             let i = bits.trailing_zeros() as usize;
-            let q = &mut self.queues[i];
-            let old_len = q.len();
-            q.retain(|t| t.id != task_id);
-            if q.len() < old_len {
-                removed = true;
-                if q.is_empty() {
+            if self.queues[i].remove_by_id(task_id) {
+                if self.queues[i].is_empty() {
                     self.clear_bit(i as u8);
                 }
+                // task_id is unique — stop scanning once found.
+                return true;
             }
             bits &= !(1u128 << i);
         }
-        removed
+        false
     }
 }

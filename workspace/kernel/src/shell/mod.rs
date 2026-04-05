@@ -13,10 +13,10 @@ pub mod parser;
 pub mod scripting;
 
 use commands::CommandRegistry;
-use output::{print_char, print_prompt};
+use output::{print_char, print_prompt, print_text};
 use parser::{parse_pipeline, Redirect};
 
-use crate::{shell_print, shell_println, vfs};
+use crate::{shell_print, shell_println, sync::FixedQueue, vfs};
 use strat9_abi::flag::OpenFlags;
 
 /// Shell error types
@@ -31,11 +31,10 @@ pub enum ShellError {
 }
 
 use crate::arch::x86_64::keyboard::{KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_UP};
-use alloc::{
-    collections::VecDeque,
-    string::{String, ToString},
-};
+use alloc::string::{String, ToString};
 use core::sync::atomic::{AtomicBool, Ordering};
+
+const SHELL_HISTORY_CAPACITY: usize = 50;
 
 /// Global flag set by Ctrl+C. Long-running commands should poll this
 /// via [`is_interrupted`] and abort early when it returns `true`.
@@ -98,42 +97,61 @@ fn char_count(input: &[u8]) -> usize {
 /// Performs the print bytes operation.
 fn print_bytes(input: &[u8]) {
     if let Ok(s) = core::str::from_utf8(input) {
-        for ch in s.chars() {
-            print_char(ch);
-        }
+        print_text(s);
     } else {
+        let mut tmp = String::with_capacity(input.len());
         for &b in input {
-            print_char(if b.is_ascii() { b as char } else { '?' });
+            tmp.push(if b.is_ascii() { b as char } else { '?' });
         }
+        print_text(&tmp);
     }
 }
 
 /// Performs the move cursor left chars operation.
 fn move_cursor_left_chars(n: usize) {
-    for _ in 0..n {
-        print_char('\x08');
+    if n == 0 {
+        return;
     }
+    let mut tmp = String::with_capacity(n);
+    for _ in 0..n {
+        tmp.push('\x08');
+    }
+    print_text(&tmp);
 }
 
 /// Performs the clear visible line operation.
 fn clear_visible_line(line: &[u8]) {
     let n = char_count(line);
-    move_cursor_left_chars(n);
-    for _ in 0..n {
-        print_char(' ');
+    if n == 0 {
+        return;
     }
-    move_cursor_left_chars(n);
+    let mut tmp = String::with_capacity(n.saturating_mul(3));
+    for _ in 0..n {
+        tmp.push('\x08');
+    }
+    for _ in 0..n {
+        tmp.push(' ');
+    }
+    for _ in 0..n {
+        tmp.push('\x08');
+    }
+    print_text(&tmp);
 }
 
 /// Redraw the current shell input line after the prompt
 fn redraw_line(input: &[u8], cursor_pos: usize) {
-    print_bytes(input);
+    let mut tmp = String::new();
+    if let Ok(s) = core::str::from_utf8(input) {
+        tmp.push_str(s);
+    } else {
+        tmp.reserve(input.len());
+        for &b in input {
+            tmp.push(if b.is_ascii() { b as char } else { '?' });
+        }
+    }
+    tmp.push(' ');
+    tmp.push('\x08');
 
-    // Print a trailing space to clear any leftover char from a longer previous line
-    print_char(' ');
-    print_char('\x08');
-
-    // Move visual cursor back to its logical position
     let back_moves = if cursor_pos <= input.len() {
         if let (Ok(full), Ok(prefix)) = (
             core::str::from_utf8(input),
@@ -146,22 +164,47 @@ fn redraw_line(input: &[u8], cursor_pos: usize) {
     } else {
         0
     };
+    tmp.reserve(back_moves);
     for _ in 0..back_moves {
-        print_char('\x08');
+        tmp.push('\x08');
     }
+    print_text(&tmp);
 }
 
 /// Performs the redraw full line operation.
 fn redraw_full_line(input: &[u8], cursor_pos: usize) {
-    clear_visible_line(input);
-    print_bytes(input);
-    if cursor_pos <= input.len() {
+    let n = char_count(input);
+    let back_moves = if cursor_pos <= input.len() {
         if let Ok(sfx) = core::str::from_utf8(&input[cursor_pos..]) {
-            move_cursor_left_chars(sfx.chars().count());
+            sfx.chars().count()
         } else {
-            move_cursor_left_chars(input.len().saturating_sub(cursor_pos));
+            input.len().saturating_sub(cursor_pos)
+        }
+    } else {
+        0
+    };
+
+    let mut tmp = String::with_capacity(n.saturating_mul(2).saturating_add(input.len()).saturating_add(back_moves));
+    for _ in 0..n {
+        tmp.push('\x08');
+    }
+    for _ in 0..n {
+        tmp.push(' ');
+    }
+    for _ in 0..n {
+        tmp.push('\x08');
+    }
+    if let Ok(s) = core::str::from_utf8(input) {
+        tmp.push_str(s);
+    } else {
+        for &b in input {
+            tmp.push(if b.is_ascii() { b as char } else { '?' });
         }
     }
+    for _ in 0..back_moves {
+        tmp.push('\x08');
+    }
+    print_text(&tmp);
 }
 
 /// Performs the insert bytes at cursor operation.
@@ -255,7 +298,7 @@ pub extern "C" fn shell_main() -> ! {
     unsafe { core::arch::asm!("mov al, 0x4C; out 0xe9, al") }
 
     // Command history
-    let mut history = VecDeque::new();
+    let mut history: FixedQueue<String, SHELL_HISTORY_CAPACITY> = FixedQueue::new();
     let mut history_idx: isize = -1;
     let mut current_input_saved = String::new();
     let mut utf8_pending = [0u8; 4];
@@ -268,13 +311,16 @@ pub extern "C" fn shell_main() -> ! {
     let mut scrollbar_dragging = false;
     let mut last_scrollbar_drag_tick = 0u64;
     let mut pending_scrollbar_drag_y: Option<usize> = None;
+    let mut pending_selection_pos: Option<(usize, usize)> = None;
+    let mut pending_mouse_cursor: Option<(i32, i32)> = None;
+    let mut pending_scroll_delta: i32 = 0;
     let mut mouse_x: i32 = 0;
     let mut mouse_y: i32 = 0;
 
     // Display welcome message using ASCII for robust terminal rendering.
     shell_println!("");
     shell_println!("+--------------------------------------------------------------+");
-    shell_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)             |");
+    shell_println!("|         Strat9-OS chevron shell v0.1.0                       |");
     shell_println!("|         Type 'help' for available commands                   |");
     shell_println!("+--------------------------------------------------------------+");
     shell_println!("");
@@ -287,6 +333,8 @@ pub extern "C" fn shell_main() -> ! {
     // Cap per-loop mouse work to avoid starving timer ticks when dragging.
     const MAX_MOUSE_EVENTS_PER_TURN: usize = 16;
     const SCROLLBAR_DRAG_MIN_TICKS: u64 = 1;
+    const MOUSE_RENDER_MIN_TICKS: u64 = 1;
+    let mut last_mouse_render_tick = 0u64;
 
     loop {
         // Handle cursor blinking (graphics only)
@@ -338,10 +386,12 @@ pub extern "C" fn shell_main() -> ! {
                             if history.is_empty()
                                 || history.back().map(|s: &String| s.as_str()) != Some(line)
                             {
-                                history.push_back(line.to_string());
-                                if history.len() > 50 {
-                                    history.pop_front();
+                                if history.is_full() {
+                                    let _ = history.pop_front();
                                 }
+                                history.push_back(line.to_string()).expect(
+                                    "shell history push must succeed after dropping oldest entry",
+                                );
                             }
                         }
 
@@ -432,7 +482,9 @@ pub extern "C" fn shell_main() -> ! {
                         clear_visible_line(&input_buf[..input_len]);
 
                         history_idx += 1;
-                        let hist_str = &history[history.len() - 1 - history_idx as usize];
+                        let hist_str = history
+                            .get(history.len() - 1 - history_idx as usize)
+                            .expect("shell history index must be in range");
                         let bytes = hist_str.as_bytes();
                         let copy_len = bytes.len().min(input_buf.len());
                         input_buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
@@ -460,7 +512,9 @@ pub extern "C" fn shell_main() -> ! {
                             input_buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
                             input_len = copy_len;
                         } else {
-                            let hist_str = &history[history.len() - 1 - history_idx as usize];
+                            let hist_str = history
+                                .get(history.len() - 1 - history_idx as usize)
+                                .expect("shell history index must be in range");
                             let bytes = hist_str.as_bytes();
                             let copy_len = bytes.len().min(input_buf.len());
                             input_buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
@@ -567,20 +621,21 @@ pub extern "C" fn shell_main() -> ! {
                     crate::process::scheduler::yield_task();
                 }
 
-                if had_events || left_held {
+                let has_pending_visual = pending_scroll_delta != 0
+                    || pending_scrollbar_drag_y.is_some()
+                    || pending_selection_pos.is_some()
+                    || pending_mouse_cursor.is_some();
+
+                if had_events || left_held || has_pending_visual {
                     let (new_mx, new_my) = crate::arch::x86_64::mouse::mouse_pos();
                     let moved = new_mx != mouse_x || new_my != mouse_y;
                     mouse_x = new_mx;
                     mouse_y = new_my;
+                    if had_events {
+                        pending_scroll_delta += scroll_delta;
+                    }
 
                     if crate::arch::x86_64::vga::is_available() {
-                        // Inverted wheel: wheel up (dz>0) → scroll down (history forward)
-                        if scroll_delta > 0 {
-                            crate::arch::x86_64::vga::scroll_view_down((scroll_delta as usize) * 3);
-                        } else if scroll_delta < 0 {
-                            crate::arch::x86_64::vga::scroll_view_up((-scroll_delta as usize) * 3);
-                        }
-
                         if left_pressed {
                             let (mx, my) = (new_mx as usize, new_my as usize);
                             if crate::arch::x86_64::vga::scrollbar_hit_test(mx, my) {
@@ -588,30 +643,23 @@ pub extern "C" fn shell_main() -> ! {
                                 crate::arch::x86_64::vga::clear_selection();
                                 selecting = false;
                                 scrollbar_dragging = true;
+                                pending_scrollbar_drag_y = None;
                             } else {
                                 crate::arch::x86_64::vga::start_selection(mx, my);
                                 selecting = true;
                                 scrollbar_dragging = false;
+                                pending_selection_pos = None;
                             }
+                            last_mouse_render_tick = ticks;
                         } else if left_held && scrollbar_dragging && moved {
                             pending_scrollbar_drag_y = Some(new_my as usize);
-                            if ticks.saturating_sub(last_scrollbar_drag_tick)
-                                >= SCROLLBAR_DRAG_MIN_TICKS
-                            {
-                                if let Some(py) = pending_scrollbar_drag_y.take() {
-                                    crate::arch::x86_64::vga::scrollbar_drag_to(py);
-                                    last_scrollbar_drag_tick = ticks;
-                                }
-                            }
                         } else if left_held && selecting && moved {
-                            crate::arch::x86_64::vga::update_selection(
-                                new_mx as usize,
-                                new_my as usize,
-                            );
+                            pending_selection_pos = Some((new_mx as usize, new_my as usize));
                         } else if left_released {
                             if selecting {
                                 crate::arch::x86_64::vga::end_selection();
                                 selecting = false;
+                                pending_selection_pos = None;
                             }
                             if scrollbar_dragging {
                                 if let Some(py) = pending_scrollbar_drag_y.take() {
@@ -619,10 +667,63 @@ pub extern "C" fn shell_main() -> ! {
                                 }
                             }
                             scrollbar_dragging = false;
+                            last_mouse_render_tick = ticks;
                         }
 
                         if moved {
-                            crate::arch::x86_64::vga::update_mouse_cursor(new_mx, new_my);
+                            pending_mouse_cursor = Some((new_mx, new_my));
+                        }
+
+                        let render_due =
+                            ticks.saturating_sub(last_mouse_render_tick) >= MOUSE_RENDER_MIN_TICKS;
+                        let drag_due = ticks.saturating_sub(last_scrollbar_drag_tick)
+                            >= SCROLLBAR_DRAG_MIN_TICKS;
+                        let has_pending_visual = pending_scroll_delta != 0
+                            || pending_scrollbar_drag_y.is_some()
+                            || pending_selection_pos.is_some()
+                            || pending_mouse_cursor.is_some();
+                        if has_pending_visual && (render_due || left_pressed || left_released) {
+                            let mut rendered = false;
+
+                            // Inverted wheel: wheel up (dz>0) -> scroll down (history forward)
+                            if pending_scroll_delta > 0 {
+                                crate::arch::x86_64::vga::scroll_view_down(
+                                    (pending_scroll_delta as usize) * 3,
+                                );
+                                pending_scroll_delta = 0;
+                                rendered = true;
+                            } else if pending_scroll_delta < 0 {
+                                crate::arch::x86_64::vga::scroll_view_up(
+                                    ((-pending_scroll_delta) as usize) * 3,
+                                );
+                                pending_scroll_delta = 0;
+                                rendered = true;
+                            }
+
+                            if drag_due {
+                                if selecting {
+                                    if let Some((sx, sy)) = pending_selection_pos.take() {
+                                        crate::arch::x86_64::vga::update_selection(sx, sy);
+                                        rendered = true;
+                                    }
+                                }
+                                if scrollbar_dragging {
+                                    if let Some(py) = pending_scrollbar_drag_y.take() {
+                                        crate::arch::x86_64::vga::scrollbar_drag_to(py);
+                                        last_scrollbar_drag_tick = ticks;
+                                        rendered = true;
+                                    }
+                                }
+                            }
+
+                            if let Some((cx, cy)) = pending_mouse_cursor.take() {
+                                crate::arch::x86_64::vga::update_mouse_cursor(cx, cy);
+                                rendered = true;
+                            }
+
+                            if rendered {
+                                last_mouse_render_tick = ticks;
+                            }
                         }
                     }
                 }

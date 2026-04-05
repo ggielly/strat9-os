@@ -40,7 +40,7 @@ static SYSCALL_DIAG_DONE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// Rate-limit counter for the per-syscall ENTER trace (avoid flooding FORCE_LOCK under SMP).
-/// Prints first 20 dispatches unconditionally, then every 10_000.
+/// Prints first 20 dispatches unconditionally, then every 10 000.
 static SYSCALL_TRACE_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Budget for logging network send errors to prevent log spam.
@@ -418,7 +418,7 @@ fn insert_capability_with_retention(
     Ok(id)
 }
 
-/// SYS_HANDLE_DUPLICATE (1): Duplicate a handle (grant required).
+/// SYS_HANDLE_DUPLICATE (1): duplicate a handle (grant required).
 fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;

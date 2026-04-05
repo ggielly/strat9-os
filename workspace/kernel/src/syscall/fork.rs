@@ -37,10 +37,9 @@ use crate::{
 use alloc::{boxed::Box, sync::Arc};
 use core::{
     mem::offset_of,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 use x86_64::structures::paging::mapper::TranslateResult;
-
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
     pub child_pid: Pid,
@@ -270,7 +269,10 @@ fn build_child_task(
         trampoline_arg0: AtomicU64::new(0),
         ticks: AtomicU64::new(0),
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
+        home_cpu: AtomicUsize::new(usize::MAX),
         vruntime: AtomicU64::new(parent.vruntime()),
+        fair_rq_generation: AtomicU64::new(0),
+        fair_on_rq: AtomicBool::new(false),
         // POSIX: clear_child_tid is NOT inherited — child starts with 0.
         clear_child_tid: AtomicU64::new(0),
         // POSIX: cwd IS inherited.
@@ -284,6 +286,7 @@ fn build_child_task(
             SyncUnsafeCell::new(child_fpu)
         },
         xcr0_mask: AtomicU64::new(parent.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed)),
+        rt_link: intrusive_collections::LinkedListLink::new(),
     });
 
     // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret
