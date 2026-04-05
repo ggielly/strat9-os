@@ -144,11 +144,15 @@ fn build_user_thread_task(
         trampoline_arg0: core::sync::atomic::AtomicU64::new(0),
         ticks: core::sync::atomic::AtomicU64::new(0),
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
+        home_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
         vruntime: core::sync::atomic::AtomicU64::new(parent.vruntime()),
+        fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
+        fair_on_rq: core::sync::atomic::AtomicBool::new(false),
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
         user_fs_base: core::sync::atomic::AtomicU64::new(tls_base),
         fpu_state: SyncUnsafeCell::new(child_fpu),
         xcr0_mask: core::sync::atomic::AtomicU64::new(parent.xcr0_mask.load(Ordering::Relaxed)),
+        rt_link: intrusive_collections::LinkedListLink::new(),
     });
 
     // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret

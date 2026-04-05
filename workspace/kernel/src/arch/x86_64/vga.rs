@@ -4,7 +4,7 @@
 //! Keeps the existing `vga_print!` / `vga_println!` API but renders text into
 //! the graphical framebuffer when available. Falls back to serial otherwise.
 
-use alloc::{collections::VecDeque, format, string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
@@ -21,6 +21,8 @@ static PRESENTED_FRAMES: AtomicU64 = AtomicU64::new(0);
 static FPS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
 static FPS_LAST_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 static FPS_ESTIMATE: AtomicU64 = AtomicU64::new(0);
+static VGA_PRESENT_REGION_COUNT: AtomicU64 = AtomicU64::new(0);
+static VGA_PRESENT_PIXEL_COUNT: AtomicU64 = AtomicU64::new(0);
 static DOUBLE_BUFFER_MODE: AtomicBool = AtomicBool::new(false);
 static UI_SCALE: AtomicU8 = AtomicU8::new(1);
 
@@ -316,7 +318,7 @@ pub struct TerminalWidget {
     pub bg: RgbColor,
     pub border: RgbColor,
     pub max_lines: usize,
-    lines: VecDeque<TerminalLine>,
+    lines: Vec<TerminalLine>,
 }
 
 impl TerminalWidget {
@@ -329,7 +331,7 @@ impl TerminalWidget {
             bg: RgbColor::new(0x0F, 0x14, 0x1B),
             border: RgbColor::new(0x3D, 0x52, 0x66),
             max_lines: core::cmp::max(1, max_lines),
-            lines: VecDeque::new(),
+            lines: Vec::new(),
         }
     }
 
@@ -347,9 +349,9 @@ impl TerminalWidget {
     /// Performs the push colored line operation.
     fn push_colored_line(&mut self, text: &str, fg: RgbColor) {
         if self.lines.len() >= self.max_lines {
-            self.lines.pop_front();
+            self.lines.remove(0);
         }
-        self.lines.push_back(TerminalLine {
+        self.lines.push(TerminalLine {
             text: String::from(text),
             fg,
         });
@@ -514,6 +516,14 @@ pub struct FramebufferInfo {
     pub ui_scale: UiScale,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RenderStats {
+    pub presented_frames: u64,
+    pub estimated_fps: u64,
+    pub present_region_count: u64,
+    pub present_pixel_count: u64,
+}
+
 impl PixelFormat {
     /// Performs the pack rgb operation.
     fn pack_rgb(&self, r: u8, g: u8, b: u8) -> u32 {
@@ -549,6 +559,26 @@ struct ClipRect {
     y: usize,
     w: usize,
     h: usize,
+}
+
+#[derive(Clone, Copy)]
+struct DirtyRegionSet {
+    rects: [ClipRect; MAX_DIRTY_RECTS],
+    len: usize,
+}
+
+impl DirtyRegionSet {
+    const fn empty() -> Self {
+        Self {
+            rects: [ClipRect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            }; MAX_DIRTY_RECTS],
+            len: 0,
+        }
+    }
 }
 
 /// Parses psf.
@@ -679,10 +709,13 @@ fn parse_psf2_unicode_map(font: &[u8], info: &FontInfo) -> Vec<(u32, usize)> {
 const SCROLLBAR_W: usize = 12;
 /// Maximum number of completed lines kept in the scrollback history.
 const MAX_SCROLLBACK: usize = 500;
+const MAX_DIRTY_RECTS: usize = 8;
 
 // ── Mouse cursor (X arrow, 12×16) ─────────────────────────────────────────
 const CURSOR_W: usize = 12;
 const CURSOR_H: usize = 16;
+const TEXT_CURSOR_MAX_DIM: usize = 32;
+const PRESENT_MIN_TICKS: u64 = 1;
 // 0=transparent, 1=black outline, 2=white fill
 #[rustfmt::skip]
 const CURSOR_PIXELS: [u8; CURSOR_W * CURSOR_H] = [
@@ -735,19 +768,21 @@ pub struct VgaWriter {
 
     font: &'static [u8],
     font_info: FontInfo,
+    glyph_mask_cache: Vec<u8>,
     unicode_map: Vec<(u32, usize)>,
     status_bar_height: usize,
     clip: ClipRect,
     back_buffer: Option<Vec<u32>>,
     draw_to_back: bool,
-    dirty_rect: Option<ClipRect>,
+    dirty_regions: DirtyRegionSet,
     track_dirty: bool,
 
     // ── Scrollback buffer ────────────────────────────────────────────────────
     /// Completed screen rows kept for history scrolling.
-    sb_rows: VecDeque<Vec<SbCell>>,
+    sb_rows: Vec<Vec<SbCell>>,
     /// Current (incomplete) row being assembled by write_char.
     sb_cur_row: Vec<SbCell>,
+    sb_row_head: usize,
     /// Lines scrolled back from the bottom (0 = live view).
     scroll_offset: usize,
 
@@ -756,6 +791,13 @@ pub struct VgaWriter {
     mc_y: i32,
     mc_visible: bool,
     mc_save: [u32; CURSOR_W * CURSOR_H],
+    tc_col: usize,
+    tc_row: usize,
+    tc_w: usize,
+    tc_h: usize,
+    tc_visible: bool,
+    tc_color: u32,
+    tc_save: [u32; TEXT_CURSOR_MAX_DIM * TEXT_CURSOR_MAX_DIM],
 
     // ── Text selection ────────────────────────────────────────────────────────
     sel_active: bool,
@@ -763,11 +805,82 @@ pub struct VgaWriter {
     sel_start_col: usize,
     sel_end_row: usize,
     sel_end_col: usize,
+    present_pending: bool,
+    last_present_tick: u64,
+    prepared_row_cells: Vec<(usize, u32, u32)>,
 }
 
 unsafe impl Send for VgaWriter {}
 
 impl VgaWriter {
+    fn sb_capacity(&self) -> usize {
+        MAX_SCROLLBACK + self.rows + 1
+    }
+
+    fn sb_row_at(&self, logical_idx: usize) -> Option<&Vec<SbCell>> {
+        if logical_idx >= self.sb_rows.len() {
+            return None;
+        }
+        let phys = (self.sb_row_head + logical_idx) % self.sb_rows.len();
+        self.sb_rows.get(phys)
+    }
+
+    fn sb_push_row(&mut self, row: Vec<SbCell>) {
+        let cap = self.sb_capacity();
+        if cap == 0 {
+            return;
+        }
+        if self.sb_rows.len() < cap {
+            self.sb_rows.push(row);
+            return;
+        }
+        if self.sb_rows.is_empty() {
+            self.sb_rows.push(row);
+            self.sb_row_head = 0;
+            return;
+        }
+        self.sb_rows[self.sb_row_head] = row;
+        self.sb_row_head = (self.sb_row_head + 1) % self.sb_rows.len();
+    }
+
+    fn build_glyph_mask_cache(font: &'static [u8], info: &FontInfo) -> Vec<u8> {
+        let glyph_pixels = info.glyph_w.saturating_mul(info.glyph_h);
+        let total_pixels = info.glyph_count.saturating_mul(glyph_pixels);
+        let mut cache = Vec::with_capacity(total_pixels);
+        if glyph_pixels == 0 || info.glyph_count == 0 {
+            return cache;
+        }
+
+        let row_bytes = info.glyph_w.div_ceil(8);
+        for glyph_index in 0..info.glyph_count {
+            let start = info.data_offset + glyph_index * info.bytes_per_glyph;
+            let end = start.saturating_add(info.bytes_per_glyph);
+            if end > font.len() {
+                cache.resize(cache.len().saturating_add(glyph_pixels), 0);
+                continue;
+            }
+            let glyph_ptr = font[start..end].as_ptr();
+            for gy in 0..info.glyph_h {
+                for gx in 0..info.glyph_w {
+                    let byte = unsafe { *glyph_ptr.add(gy * row_bytes + gx / 8) };
+                    let mask = 0x80u8 >> (gx % 8);
+                    cache.push(if (byte & mask) != 0 { 1 } else { 0 });
+                }
+            }
+        }
+        cache
+    }
+
+    fn glyph_mask_slice(&self, glyph_index: usize) -> Option<&[u8]> {
+        let glyph_pixels = self.font_info.glyph_w.saturating_mul(self.font_info.glyph_h);
+        if glyph_pixels == 0 {
+            return None;
+        }
+        let start = glyph_index.checked_mul(glyph_pixels)?;
+        let end = start.checked_add(glyph_pixels)?;
+        self.glyph_mask_cache.get(start..end)
+    }
+
     /// Creates a new instance.
     pub const fn new() -> Self {
         Self {
@@ -800,6 +913,7 @@ impl VgaWriter {
                 data_offset: 0,
                 unicode_table_offset: None,
             },
+            glyph_mask_cache: Vec::new(),
             unicode_map: Vec::new(),
             status_bar_height: 0,
             clip: ClipRect {
@@ -810,20 +924,31 @@ impl VgaWriter {
             },
             back_buffer: None,
             draw_to_back: false,
-            dirty_rect: None,
+            dirty_regions: DirtyRegionSet::empty(),
             track_dirty: false,
-            sb_rows: VecDeque::new(),
+            sb_rows: Vec::new(),
             sb_cur_row: Vec::new(),
+            sb_row_head: 0,
             scroll_offset: 0,
             mc_x: 0,
             mc_y: 0,
             mc_visible: false,
             mc_save: [0u32; CURSOR_W * CURSOR_H],
+            tc_col: 0,
+            tc_row: 0,
+            tc_w: 0,
+            tc_h: 0,
+            tc_visible: false,
+            tc_color: 0,
+            tc_save: [0u32; TEXT_CURSOR_MAX_DIM * TEXT_CURSOR_MAX_DIM],
             sel_active: false,
             sel_start_row: 0,
             sel_start_col: 0,
             sel_end_row: 0,
             sel_end_col: 0,
+            present_pending: false,
+            last_present_tick: 0,
+            prepared_row_cells: Vec::new(),
         }
     }
 
@@ -863,6 +988,7 @@ impl VgaWriter {
         self.bg = fmt.pack_rgb(br, bg, bb);
         self.font = FONT_PSF;
         self.font_info = font_info;
+        self.glyph_mask_cache = Self::build_glyph_mask_cache(FONT_PSF, &self.font_info);
         self.unicode_map = parse_psf2_unicode_map(FONT_PSF, &self.font_info);
         self.status_bar_height = status_bar_height;
         self.clip = ClipRect {
@@ -873,13 +999,23 @@ impl VgaWriter {
         };
         self.back_buffer = None;
         self.draw_to_back = false;
-        self.dirty_rect = None;
+        self.dirty_regions = DirtyRegionSet::empty();
         self.track_dirty = false;
-        self.sb_rows = VecDeque::new();
+        self.sb_rows = Vec::new();
         self.sb_cur_row = Vec::new();
+        self.sb_row_head = 0;
         self.scroll_offset = 0;
         self.mc_visible = false;
+        self.tc_visible = false;
+        self.tc_col = 0;
+        self.tc_row = 0;
+        self.tc_w = 0;
+        self.tc_h = 0;
+        self.tc_color = 0;
         self.sel_active = false;
+        self.present_pending = false;
+        self.last_present_tick = 0;
+        self.prepared_row_cells = Vec::new();
         true
     }
 
@@ -961,6 +1097,10 @@ impl VgaWriter {
         if !self.enabled || self.cols == 0 || self.rows == 0 {
             return;
         }
+        if self.tc_visible {
+            self.text_cursor_erase_hw();
+            self.tc_visible = false;
+        }
         self.col = core::cmp::min(col, self.cols - 1);
         self.row = core::cmp::min(row, self.rows - 1);
     }
@@ -1036,7 +1176,7 @@ impl VgaWriter {
 
     /// Performs the clear dirty operation.
     fn clear_dirty(&mut self) {
-        self.dirty_rect = None;
+        self.dirty_regions = DirtyRegionSet::empty();
     }
 
     /// Performs the mark dirty rect operation.
@@ -1053,21 +1193,62 @@ impl VgaWriter {
             w: sw,
             h: sh,
         };
-        self.dirty_rect = Some(match self.dirty_rect {
-            None => next,
-            Some(cur) => {
-                let x0 = core::cmp::min(cur.x, next.x);
-                let y0 = core::cmp::min(cur.y, next.y);
-                let x1 = core::cmp::max(cur.x.saturating_add(cur.w), next.x.saturating_add(next.w));
-                let y1 = core::cmp::max(cur.y.saturating_add(cur.h), next.y.saturating_add(next.h));
-                ClipRect {
+        let mut merged = next;
+        let mut idx = 0usize;
+        while idx < self.dirty_regions.len {
+            let cur = self.dirty_regions.rects[idx];
+            let overlaps = merged.x <= cur.x.saturating_add(cur.w)
+                && merged.x.saturating_add(merged.w) >= cur.x
+                && merged.y <= cur.y.saturating_add(cur.h)
+                && merged.y.saturating_add(merged.h) >= cur.y;
+            if overlaps {
+                let x0 = core::cmp::min(cur.x, merged.x);
+                let y0 = core::cmp::min(cur.y, merged.y);
+                let x1 = core::cmp::max(
+                    cur.x.saturating_add(cur.w),
+                    merged.x.saturating_add(merged.w),
+                );
+                let y1 = core::cmp::max(
+                    cur.y.saturating_add(cur.h),
+                    merged.y.saturating_add(merged.h),
+                );
+                merged = ClipRect {
                     x: x0,
                     y: y0,
                     w: x1.saturating_sub(x0),
                     h: y1.saturating_sub(y0),
-                }
+                };
+                self.dirty_regions.rects[idx] =
+                    self.dirty_regions.rects[self.dirty_regions.len - 1];
+                self.dirty_regions.rects[self.dirty_regions.len - 1] = ClipRect {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 0,
+                };
+                self.dirty_regions.len -= 1;
+                idx = 0;
+                continue;
             }
-        });
+            idx += 1;
+        }
+
+        if self.dirty_regions.len < MAX_DIRTY_RECTS {
+            self.dirty_regions.rects[self.dirty_regions.len] = merged;
+            self.dirty_regions.len += 1;
+        } else {
+            let cur = self.dirty_regions.rects[0];
+            let x0 = core::cmp::min(cur.x, merged.x);
+            let y0 = core::cmp::min(cur.y, merged.y);
+            let x1 = core::cmp::max(cur.x.saturating_add(cur.w), merged.x.saturating_add(merged.w));
+            let y1 = core::cmp::max(cur.y.saturating_add(cur.h), merged.y.saturating_add(merged.h));
+            self.dirty_regions.rects[0] = ClipRect {
+                x: x0,
+                y: y0,
+                w: x1.saturating_sub(x0),
+                h: y1.saturating_sub(y0),
+            };
+        }
     }
 
     /// Sets clip rect.
@@ -1135,15 +1316,7 @@ impl VgaWriter {
         let Some(buf) = self.back_buffer.as_ref() else {
             return;
         };
-        let (sx, sy, sw, sh) = if self.track_dirty {
-            let Some(dirty) = self.dirty_rect else {
-                return;
-            };
-            (dirty.x, dirty.y, dirty.w, dirty.h)
-        } else {
-            (0, 0, self.fb_width, self.fb_height)
-        };
-        if sw == 0 || sh == 0 {
+        if self.track_dirty && self.dirty_regions.len == 0 {
             return;
         }
 
@@ -1152,29 +1325,69 @@ impl VgaWriter {
         let fb_addr = self.fb_addr;
         let pitch = self.pitch;
         let fb_width = self.fb_width;
+        let region_count = if self.track_dirty {
+            self.dirty_regions.len
+        } else {
+            1
+        };
 
-        if bpp == 32 {
-            let row_bytes = sw * 4;
-            for y in sy..(sy + sh) {
-                // SAFETY: back buffer has fb_width * fb_height elements; y < fb_height, sx + sw <= fb_width.
-                let src = unsafe { buf_ptr.add(y * fb_width + sx) as *const u8 };
-                let dst_off = y * pitch + sx * 4;
-                // SAFETY: fb_addr points to the mapped framebuffer; dst_off is within bounds for same reason.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src, fb_addr.add(dst_off), row_bytes);
-                }
+        let mut regions = [ClipRect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }; MAX_DIRTY_RECTS];
+        if self.track_dirty {
+            let mut idx = 0;
+            while idx < self.dirty_regions.len {
+                regions[idx] = self.dirty_regions.rects[idx];
+                idx += 1;
             }
         } else {
-            for y in sy..(sy + sh) {
-                for x in sx..(sx + sw) {
-                    let packed = unsafe { *buf_ptr.add(y * fb_width + x) };
-                    self.write_hw_pixel_packed(x, y, packed);
+            regions[0] = ClipRect {
+                x: 0,
+                y: 0,
+                w: self.fb_width,
+                h: self.fb_height,
+            };
+        }
+
+        let mut region_idx = 0;
+        while region_idx < region_count {
+            let region = regions[region_idx];
+            if region.w == 0 || region.h == 0 {
+                region_idx += 1;
+                continue;
+            }
+
+            if bpp == 32 {
+                let row_bytes = region.w * 4;
+                for y in region.y..(region.y + region.h) {
+                    let src = unsafe { buf_ptr.add(y * fb_width + region.x) as *const u8 };
+                    let dst_off = y * pitch + region.x * 4;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(src, fb_addr.add(dst_off), row_bytes);
+                    }
+                }
+            } else {
+                for y in region.y..(region.y + region.h) {
+                    for x in region.x..(region.x + region.w) {
+                        let packed = unsafe { *buf_ptr.add(y * fb_width + x) };
+                        self.write_hw_pixel_packed(x, y, packed);
+                    }
                 }
             }
+
+            VGA_PRESENT_REGION_COUNT.fetch_add(1, Ordering::Relaxed);
+            VGA_PRESENT_PIXEL_COUNT
+                .fetch_add(region.w.saturating_mul(region.h) as u64, Ordering::Relaxed);
+            region_idx += 1;
         }
 
         PRESENTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         self.clear_dirty();
+        self.present_pending = false;
+        self.last_present_tick = crate::process::scheduler::ticks();
 
         if crate::hardware::virtio::gpu::is_available() {
             if let Some(gpu) = crate::hardware::virtio::gpu::get_gpu() {
@@ -1185,6 +1398,28 @@ impl VgaWriter {
         if self.mc_visible {
             self.mc_save_hw();
             self.mc_draw_hw();
+        }
+        if self.tc_visible {
+            self.text_cursor_save_hw();
+            self.text_cursor_draw_hw();
+        }
+    }
+
+    fn request_present(&mut self) {
+        if !self.draw_to_back_buffer() {
+            return;
+        }
+        self.present_pending = true;
+        self.present_if_due(false);
+    }
+
+    fn present_if_due(&mut self, force: bool) {
+        if !self.present_pending || !self.draw_to_back_buffer() {
+            return;
+        }
+        let now = crate::process::scheduler::ticks();
+        if force || now.saturating_sub(self.last_present_tick) >= PRESENT_MIN_TICKS {
+            self.present();
         }
     }
 
@@ -1264,6 +1499,7 @@ impl VgaWriter {
             return;
         }
         if self.mc_visible && self.mc_x == x && self.mc_y == y {
+            self.present_if_due(false);
             return;
         }
         if self.mc_visible {
@@ -1274,6 +1510,7 @@ impl VgaWriter {
         self.mc_save_hw();
         self.mc_draw_hw();
         self.mc_visible = true;
+        self.present_if_due(false);
     }
 
     /// Performs the hide mouse cursor operation.
@@ -1282,6 +1519,94 @@ impl VgaWriter {
             self.mc_erase_hw();
             self.mc_visible = false;
         }
+        self.present_if_due(false);
+    }
+
+    fn text_cursor_rect(&self) -> Option<(usize, usize, usize, usize)> {
+        if !self.enabled {
+            return None;
+        }
+        let (gw, gh) = self.glyph_size();
+        if gw == 0 || gh == 0 {
+            return None;
+        }
+        let x = self.tc_col.saturating_mul(gw);
+        let y = self.tc_row.saturating_mul(gh);
+        if x >= self.fb_width || y >= self.fb_height {
+            return None;
+        }
+        Some((
+            x,
+            y,
+            gw.min(TEXT_CURSOR_MAX_DIM).min(self.fb_width - x),
+            gh.min(TEXT_CURSOR_MAX_DIM).min(self.fb_height - y),
+        ))
+    }
+
+    fn text_cursor_save_hw(&mut self) {
+        let Some((x, y, w, h)) = self.text_cursor_rect() else {
+            self.tc_w = 0;
+            self.tc_h = 0;
+            return;
+        };
+        self.tc_w = w;
+        self.tc_h = h;
+        for cy in 0..h {
+            for cx in 0..w {
+                self.tc_save[cy * TEXT_CURSOR_MAX_DIM + cx] =
+                    self.read_hw_pixel_packed(x + cx, y + cy);
+            }
+        }
+    }
+
+    fn text_cursor_draw_hw(&mut self) {
+        let Some((x, y, w, h)) = self.text_cursor_rect() else {
+            return;
+        };
+        for cy in 0..h {
+            for cx in 0..w {
+                self.write_hw_pixel_packed(x + cx, y + cy, self.tc_color);
+            }
+        }
+    }
+
+    fn text_cursor_erase_hw(&mut self) {
+        let Some((x, y, w, h)) = self.text_cursor_rect() else {
+            return;
+        };
+        let restore_w = w.min(self.tc_w);
+        let restore_h = h.min(self.tc_h);
+        for cy in 0..restore_h {
+            for cx in 0..restore_w {
+                self.write_hw_pixel_packed(
+                    x + cx,
+                    y + cy,
+                    self.tc_save[cy * TEXT_CURSOR_MAX_DIM + cx],
+                );
+            }
+        }
+    }
+
+    fn draw_text_cursor_overlay(&mut self, color: RgbColor) {
+        if !self.enabled {
+            return;
+        }
+        let packed = self.pack_color(color);
+        if self.tc_visible {
+            self.text_cursor_erase_hw();
+            self.tc_visible = false;
+        }
+        if packed == self.bg {
+            self.present_if_due(false);
+            return;
+        }
+        self.tc_col = self.col;
+        self.tc_row = self.row;
+        self.tc_color = packed;
+        self.text_cursor_save_hw();
+        self.text_cursor_draw_hw();
+        self.tc_visible = true;
+        self.present_if_due(false);
     }
 
     // ── Text selection ────────────────────────────────────────────────────────
@@ -1344,7 +1669,7 @@ impl VgaWriter {
             self.sel_end_row = row;
             self.sel_end_col = col;
             self.sel_active = true;
-            self.redraw_from_scrollback();
+            self.render_viewport_full();
         }
     }
 
@@ -1359,7 +1684,7 @@ impl VgaWriter {
             }
             self.sel_end_row = row;
             self.sel_end_col = col;
-            self.redraw_from_scrollback();
+            self.render_viewport_full();
         }
     }
 
@@ -1372,7 +1697,7 @@ impl VgaWriter {
         let mut bytes: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         for row in start_row..=end_row {
             let len = if row < self.sb_rows.len() {
-                self.sb_rows[row].len()
+                self.sb_row_at(row).map(|r| r.len()).unwrap_or(0)
             } else if row == self.sb_rows.len() {
                 self.sb_cur_row.len()
             } else {
@@ -1390,7 +1715,10 @@ impl VgaWriter {
             };
             for col in c0..c1 {
                 let ch = if row < self.sb_rows.len() {
-                    self.sb_rows[row][col].ch
+                    self.sb_row_at(row)
+                        .and_then(|r| r.get(col))
+                        .map(|cell| cell.ch)
+                        .unwrap_or(' ')
                 } else {
                     self.sb_cur_row[col].ch
                 };
@@ -1412,7 +1740,7 @@ impl VgaWriter {
     pub fn clear_selection(&mut self) {
         if self.sel_active {
             self.sel_active = false;
-            self.redraw_from_scrollback();
+            self.render_viewport_full();
         }
     }
 
@@ -1855,19 +2183,13 @@ impl VgaWriter {
             return;
         }
         let glyph_index = core::cmp::min(glyph_index, self.font_info.glyph_count.saturating_sub(1));
-        let start = self.font_info.data_offset + glyph_index * self.font_info.bytes_per_glyph;
-        if start
-            .checked_add(self.font_info.bytes_per_glyph)
-            .map_or(true, |end| end > self.font.len())
-        {
-            return;
-        }
-        // Extract raw pointer so self can be mutably borrowed below.
-        // SAFETY: self.font is &'static [u8]; pointer is valid for the program lifetime.
-        let glyph_ptr = self.font[start..start + self.font_info.bytes_per_glyph].as_ptr();
-        let row_bytes = self.font_info.glyph_w.div_ceil(8);
         let gw = self.font_info.glyph_w;
         let gh = self.font_info.glyph_h;
+        let glyph_pixels = gw.saturating_mul(gh);
+        let Some(mask) = self.glyph_mask_slice(glyph_index) else {
+            return;
+        };
+        let mask_ptr = mask.as_ptr();
 
         if self.draw_to_back_buffer()
             && pixel_x + gw <= self.fb_width
@@ -1877,11 +2199,16 @@ impl VgaWriter {
             if let Some(buf) = self.back_buffer.as_mut() {
                 for gy in 0..gh {
                     let row_start = (pixel_y + gy) * fb_width + pixel_x;
+                    buf[row_start..row_start + gw].fill(bg);
                     for gx in 0..gw {
-                        // SAFETY: glyph_ptr valid (static font data), index within bytes_per_glyph.
-                        let byte = unsafe { *glyph_ptr.add(gy * row_bytes + gx / 8) };
-                        let mask = 0x80u8 >> (gx % 8);
-                        buf[row_start + gx] = if (byte & mask) != 0 { fg } else { bg };
+                        let idx = gy * gw + gx;
+                        if idx >= glyph_pixels {
+                            continue;
+                        }
+                        let bit = unsafe { *mask_ptr.add(idx) };
+                        if bit != 0 {
+                            buf[row_start + gx] = fg;
+                        }
                     }
                 }
             }
@@ -1889,9 +2216,15 @@ impl VgaWriter {
         } else {
             for gy in 0..gh {
                 for gx in 0..gw {
-                    let byte = unsafe { *glyph_ptr.add(gy * row_bytes + gx / 8) };
-                    let mask = 0x80u8 >> (gx % 8);
-                    let color = if (byte & mask) != 0 { fg } else { bg };
+                    let idx = gy * gw + gx;
+                    if idx >= glyph_pixels {
+                        continue;
+                    }
+                    let color = if unsafe { *mask_ptr.add(idx) } != 0 {
+                        fg
+                    } else {
+                        bg
+                    };
                     self.put_pixel_raw(pixel_x + gx, pixel_y + gy, color);
                 }
             }
@@ -1902,6 +2235,314 @@ impl VgaWriter {
     fn draw_glyph_at_pixel(&mut self, pixel_x: usize, pixel_y: usize, ch: char, fg: u32, bg: u32) {
         let glyph_index = self.glyph_index_for_char(ch);
         self.draw_glyph_index_at_pixel(pixel_x, pixel_y, glyph_index, fg, bg);
+    }
+
+    fn fill_text_span_bg(&mut self, pixel_x: usize, pixel_y: usize, width: usize, height: usize, bg: u32) {
+        if self.draw_to_back_buffer()
+            && pixel_x + width <= self.fb_width
+            && pixel_y + height <= self.fb_height
+        {
+            let fb_width = self.fb_width;
+            if let Some(buf) = self.back_buffer.as_mut() {
+                for row in 0..height {
+                    let start = (pixel_y + row) * fb_width + pixel_x;
+                    let end = start + width;
+                    buf[start..end].fill(bg);
+                }
+                self.mark_dirty_rect(pixel_x, pixel_y, width, height);
+                return;
+            }
+        }
+
+        let gh = height;
+        let color = self.unpack_color(bg);
+        self.fill_rect(pixel_x, pixel_y, width, gh, color);
+    }
+
+    fn clear_text_line_pixels(&mut self, vis_row: usize) {
+        let gh = self.font_info.glyph_h;
+        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
+        self.fill_text_span_bg(0, vis_row.saturating_mul(gh), text_w, gh, self.bg);
+    }
+
+    fn visible_virtual_bounds(&self) -> (usize, usize, usize, usize, bool) {
+        let total_complete = self.sb_rows.len();
+        let has_partial = !self.sb_cur_row.is_empty();
+        let total_virtual = total_complete + if has_partial { 1 } else { 0 };
+        let view_end = total_virtual.saturating_sub(self.scroll_offset);
+        let view_start = view_end.saturating_sub(self.rows);
+        (total_complete, total_virtual, view_start, view_end, has_partial)
+    }
+
+    fn sync_live_cursor_from_view(
+        &mut self,
+        total_complete: usize,
+        view_start: usize,
+        view_end: usize,
+    ) {
+        let display_len = view_end.saturating_sub(view_start);
+        self.row = if display_len > 0 { display_len - 1 } else { 0 };
+        let last_virt = view_start + display_len.saturating_sub(1);
+        let last_len = if last_virt < total_complete {
+            self.sb_row_at(last_virt).map(|row| row.len()).unwrap_or(0)
+        } else if last_virt == total_complete {
+            self.sb_cur_row.len()
+        } else {
+            0
+        };
+        self.col = last_len.min(self.cols);
+    }
+
+    fn selection_colors_for_cell(&self, virt_row: usize, col: usize, fg: u32, bg: u32) -> (u32, u32) {
+        if !self.sel_active {
+            return (fg, bg);
+        }
+        let (sel_sr, sel_sc, sel_er, sel_ec) = self.sel_normalized();
+        let in_sel = if virt_row < sel_sr || virt_row > sel_er {
+            false
+        } else if sel_sr == sel_er {
+            col >= sel_sc && col < sel_ec
+        } else if virt_row == sel_sr {
+            col >= sel_sc
+        } else if virt_row == sel_er {
+            col < sel_ec
+        } else {
+            true
+        };
+        if in_sel {
+            (self.pack_color(RgbColor::WHITE), self.pack_color(RgbColor::new(0x26, 0x5F, 0xCC)))
+        } else {
+            (fg, bg)
+        }
+    }
+
+    fn render_virtual_row(
+        &mut self,
+        virt_row: usize,
+        vis_row: usize,
+        total_complete: usize,
+        has_partial: bool,
+    ) {
+        let glyph_h = self.font_info.glyph_h;
+        let glyph_w = self.font_info.glyph_w;
+        let py = vis_row.saturating_mul(glyph_h);
+
+        let (row_ptr, row_len) = if virt_row < total_complete {
+            let row = match self.sb_row_at(virt_row) {
+                Some(row) => row,
+                None => return,
+            };
+            (row.as_ptr(), row.len())
+        } else if has_partial && virt_row == total_complete {
+            (self.sb_cur_row.as_ptr(), self.sb_cur_row.len())
+        } else {
+            (core::ptr::null(), 0)
+        };
+
+        let cell_count = row_len.min(self.cols);
+        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
+        let used_width = cell_count.saturating_mul(glyph_w).min(text_w);
+
+        if self.draw_to_back_buffer() && py + glyph_h <= self.fb_height {
+            let fb_width = self.fb_width;
+            let default_bg = self.bg;
+            let glyph_pixels = glyph_w.saturating_mul(glyph_h);
+            let glyph_cache_ptr = self.glyph_mask_cache.as_ptr();
+            self.prepared_row_cells.clear();
+            if self.prepared_row_cells.capacity() < cell_count {
+                self.prepared_row_cells
+                    .reserve(cell_count - self.prepared_row_cells.capacity());
+            }
+            for col in 0..cell_count {
+                let cell = unsafe { &*row_ptr.add(col) };
+                let glyph_index = self.glyph_index_for_char(cell.ch);
+                let (draw_fg, draw_bg) =
+                    self.selection_colors_for_cell(virt_row, col, cell.fg, cell.bg);
+                self.prepared_row_cells.push((glyph_index, draw_fg, draw_bg));
+            }
+            if let Some(buf) = self.back_buffer.as_mut() {
+                for gy in 0..glyph_h {
+                    let row_start = (py + gy) * fb_width;
+                    buf[row_start..row_start + text_w].fill(default_bg);
+                }
+
+                for (col, (glyph_index, draw_fg, draw_bg)) in
+                    self.prepared_row_cells.iter().copied().enumerate()
+                {
+                    let px = col.saturating_mul(glyph_w);
+                    if draw_bg != default_bg {
+                        for gy in 0..glyph_h {
+                            let row_start = (py + gy) * fb_width + px;
+                            buf[row_start..row_start + glyph_w].fill(draw_bg);
+                        }
+                    }
+
+                    let glyph_base = glyph_index.saturating_mul(glyph_pixels);
+                    for gy in 0..glyph_h {
+                        let row_start = (py + gy) * fb_width + px;
+                        for gx in 0..glyph_w {
+                            let idx = glyph_base + gy * glyph_w + gx;
+                            let bit = unsafe { *glyph_cache_ptr.add(idx) };
+                            if bit != 0 {
+                                buf[row_start + gx] = draw_fg;
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.mark_dirty_rect(0, py, text_w, glyph_h);
+            return;
+        }
+
+        for col in 0..cell_count {
+            let px = col.saturating_mul(glyph_w);
+            let cell = unsafe { &*row_ptr.add(col) };
+            let (draw_fg, draw_bg) = self.selection_colors_for_cell(virt_row, col, cell.fg, cell.bg);
+            self.draw_glyph_at_pixel(px, py, cell.ch, draw_fg, draw_bg);
+        }
+        if text_w > used_width {
+            self.fill_text_span_bg(used_width, py, text_w - used_width, glyph_h, self.bg);
+        }
+    }
+
+    fn redraw_visible_rows(&mut self, start_vis_row: usize, count: usize) {
+        let (total_complete, _, view_start, view_end, has_partial) = self.visible_virtual_bounds();
+        let display_len = view_end.saturating_sub(view_start);
+        let end_vis_row = start_vis_row.saturating_add(count).min(self.rows);
+        for vis_row in start_vis_row..end_vis_row {
+            if vis_row < display_len {
+                self.render_virtual_row(view_start + vis_row, vis_row, total_complete, has_partial);
+            } else {
+                self.clear_text_line_pixels(vis_row);
+            }
+        }
+    }
+
+    fn ensure_back_buffer_for_viewport(&mut self) {
+        if self.back_buffer.is_none() {
+            let total = self.fb_width.saturating_mul(self.fb_height);
+            if total > 0 {
+                self.back_buffer = Some(alloc::vec![0u32; total]);
+            }
+        }
+    }
+
+    fn begin_viewport_render(&mut self) -> (bool, bool) {
+        self.ensure_back_buffer_for_viewport();
+        let prev_draw_to_back = self.draw_to_back;
+        let prev_track_dirty = self.track_dirty;
+        if self.back_buffer.is_some() {
+            self.draw_to_back = true;
+            self.track_dirty = true;
+            self.clear_dirty();
+        }
+        (prev_draw_to_back, prev_track_dirty)
+    }
+
+    fn end_viewport_render(&mut self, prev_draw_to_back: bool, prev_track_dirty: bool) {
+        if self.back_buffer.is_some() {
+            self.request_present();
+            let now = crate::process::scheduler::ticks();
+            let force_present = self.last_present_tick == 0 || now == 0;
+            self.present_if_due(force_present);
+            self.draw_to_back = prev_draw_to_back;
+            self.track_dirty = prev_track_dirty;
+            if !prev_track_dirty {
+                self.clear_dirty();
+            }
+        }
+    }
+
+    fn finalize_live_view_state(&mut self) {
+        let (total_complete, _, view_start, view_end, _) = self.visible_virtual_bounds();
+        if self.scroll_offset == 0 {
+            self.sync_live_cursor_from_view(total_complete, view_start, view_end);
+        }
+    }
+
+    fn render_viewport_full(&mut self) {
+        let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
+        let text_h = self.text_area_height();
+        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
+        self.fill_rect(0, 0, text_w, text_h, self.unpack_color(self.bg));
+        self.redraw_visible_rows(0, self.rows);
+        self.finalize_live_view_state();
+        self.draw_scrollbar_inner();
+        self.end_viewport_render(prev_draw_to_back, prev_track_dirty);
+    }
+
+    fn refresh_viewport_decorations(&mut self) {
+        let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
+        self.finalize_live_view_state();
+        self.draw_scrollbar_inner();
+        self.end_viewport_render(prev_draw_to_back, prev_track_dirty);
+    }
+
+    fn set_scroll_offset_and_render(&mut self, new_offset: usize) {
+        let old_offset = self.scroll_offset;
+        self.scroll_offset = new_offset;
+        if !self.redraw_from_scrollback_incremental(old_offset) {
+            self.redraw_from_scrollback();
+        }
+    }
+
+    fn move_text_view_pixels_up(&mut self, pixels: usize) {
+        if pixels == 0 {
+            return;
+        }
+        let text_h = self.text_area_height();
+        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
+        if pixels >= text_h {
+            self.fill_rect(0, 0, text_w, text_h, self.unpack_color(self.bg));
+            return;
+        }
+        let move_rows = text_h - pixels;
+        if self.draw_to_back_buffer() {
+            if let Some(buf) = self.back_buffer.as_mut() {
+                let row_width = self.fb_width;
+                buf.copy_within(pixels * row_width..text_h * row_width, 0);
+                self.mark_dirty_rect(0, 0, self.fb_width, text_h);
+            }
+        } else {
+            unsafe {
+                core::ptr::copy(
+                    self.fb_addr.add(pixels * self.pitch),
+                    self.fb_addr,
+                    move_rows * self.pitch,
+                );
+            }
+        }
+        self.fill_rect(0, move_rows, text_w, pixels, self.unpack_color(self.bg));
+    }
+
+    fn move_text_view_pixels_down(&mut self, pixels: usize) {
+        if pixels == 0 {
+            return;
+        }
+        let text_h = self.text_area_height();
+        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
+        if pixels >= text_h {
+            self.fill_rect(0, 0, text_w, text_h, self.unpack_color(self.bg));
+            return;
+        }
+        let move_rows = text_h - pixels;
+        if self.draw_to_back_buffer() {
+            if let Some(buf) = self.back_buffer.as_mut() {
+                let row_width = self.fb_width;
+                buf.copy_within(0..move_rows * row_width, pixels * row_width);
+                self.mark_dirty_rect(0, 0, self.fb_width, text_h);
+            }
+        } else {
+            unsafe {
+                core::ptr::copy(
+                    self.fb_addr,
+                    self.fb_addr.add(pixels * self.pitch),
+                    move_rows * self.pitch,
+                );
+            }
+        }
+        self.fill_rect(0, 0, text_w, pixels, self.unpack_color(self.bg));
     }
 
     /// Performs the layout text lines operation.
@@ -2068,13 +2709,7 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
-        let y_start = row * self.font_info.glyph_h;
-        let y_end = y_start + self.font_info.glyph_h;
-        for y in y_start..y_end {
-            for x in 0..self.fb_width {
-                self.put_pixel_raw(x, y, self.bg);
-            }
-        }
+        self.clear_text_line_pixels(row);
     }
 
     /// Performs the scroll operation.
@@ -2088,27 +2723,7 @@ impl VgaWriter {
             self.clear();
             return;
         }
-
-        let move_rows = text_h - dy;
-        if self.draw_to_back_buffer() {
-            if let Some(buf) = self.back_buffer.as_mut() {
-                let src_start = dy * self.fb_width;
-                let src_end = text_h * self.fb_width;
-                buf.copy_within(src_start..src_end, 0);
-                self.mark_dirty_rect(0, 0, self.fb_width, text_h);
-            }
-        } else {
-            let bytes_per_row = self.pitch;
-            unsafe {
-                core::ptr::copy(
-                    self.fb_addr.add(dy * bytes_per_row),
-                    self.fb_addr,
-                    move_rows * bytes_per_row,
-                );
-            }
-        }
-
-        self.fill_rect(0, move_rows, self.fb_width, dy, self.unpack_color(self.bg));
+        self.move_text_view_pixels_up(dy);
         self.row = self.rows - 1;
     }
 
@@ -2154,12 +2769,12 @@ impl VgaWriter {
 
         if self.row >= self.rows {
             self.scroll();
-            self.clear_row(self.row);
         }
     }
 
     /// Writes bytes.
     fn write_bytes(&mut self, s: &str) {
+        let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
         // Skip basic ANSI escape sequences to avoid rendering control garbage.
         let mut chars = s.chars();
         while let Some(ch) = chars.next() {
@@ -2178,6 +2793,7 @@ impl VgaWriter {
         }
         // Refresh scrollbar after each batch of output.
         self.draw_scrollbar_inner();
+        self.end_viewport_render(prev_draw_to_back, prev_track_dirty);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -2193,7 +2809,7 @@ impl VgaWriter {
         match c {
             '\n' => {
                 let row = core::mem::take(&mut self.sb_cur_row);
-                self.sb_rows.push_back(row);
+                self.sb_push_row(row);
                 self.sb_trim();
             }
             '\r' => {
@@ -2207,7 +2823,7 @@ impl VgaWriter {
                 }
                 if self.sb_cur_row.len() >= cols {
                     let row = core::mem::take(&mut self.sb_cur_row);
-                    self.sb_rows.push_back(row);
+                    self.sb_push_row(row);
                     self.sb_trim();
                 }
             }
@@ -2219,7 +2835,7 @@ impl VgaWriter {
                 self.sb_cur_row.push(SbCell { ch, fg, bg });
                 if self.sb_cur_row.len() >= cols {
                     let row = core::mem::take(&mut self.sb_cur_row);
-                    self.sb_rows.push_back(row);
+                    self.sb_push_row(row);
                     self.sb_trim();
                 }
             }
@@ -2229,10 +2845,20 @@ impl VgaWriter {
     /// Keep the scrollback buffer within MAX_SCROLLBACK + rows.
     #[inline]
     fn sb_trim(&mut self) {
-        let cap = MAX_SCROLLBACK + self.rows + 1;
-        while self.sb_rows.len() > cap {
-            self.sb_rows.pop_front();
+        let cap = self.sb_capacity();
+        if self.sb_rows.len() <= cap {
+            return;
         }
+        let keep = cap.min(self.sb_rows.len());
+        let start = self.sb_rows.len().saturating_sub(keep);
+        let mut compacted = Vec::with_capacity(keep);
+        for idx in start..self.sb_rows.len() {
+            if let Some(row) = self.sb_row_at(idx).cloned() {
+                compacted.push(row);
+            }
+        }
+        self.sb_rows = compacted;
+        self.sb_row_head = 0;
     }
 
     /// Draw (or refresh) the scrollbar strip on the right edge of the text area.
@@ -2290,126 +2916,34 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
-        let text_h = self.text_area_height();
-        let total_complete = self.sb_rows.len();
-        let has_partial = !self.sb_cur_row.is_empty();
-        let total_virtual = total_complete + if has_partial { 1 } else { 0 };
-        let view_end = total_virtual.saturating_sub(self.scroll_offset);
-        let view_start = view_end.saturating_sub(self.rows);
+        self.render_viewport_full();
+    }
 
-        if self.back_buffer.is_none() {
-            let total = self.fb_width.saturating_mul(self.fb_height);
-            if total > 0 {
-                self.back_buffer = Some(alloc::vec![0u32; total]);
-            }
+    fn redraw_from_scrollback_incremental(&mut self, old_offset: usize) -> bool {
+        if !self.enabled || self.rows == 0 {
+            return false;
+        }
+        let diff = old_offset.abs_diff(self.scroll_offset);
+        if diff == 0 || diff >= self.rows {
+            return false;
+        }
+        let pixel_delta = diff.saturating_mul(self.font_info.glyph_h);
+        if pixel_delta == 0 {
+            return false;
         }
 
-        let prev_draw_to_back = self.draw_to_back;
-        let prev_track_dirty = self.track_dirty;
-        let using_back = self.back_buffer.is_some();
-        if using_back {
-            self.draw_to_back = true;
-            self.track_dirty = true;
-            self.clear_dirty();
-        }
-
-        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
-        let bg = self.bg;
-        if self.draw_to_back_buffer() {
-            let fb_width = self.fb_width;
-            if let Some(buf) = self.back_buffer.as_mut() {
-                for y in 0..text_h {
-                    let row = y * fb_width;
-                    buf[row..row + text_w].fill(bg);
-                }
-            }
-            self.mark_dirty_rect(0, 0, text_w, text_h);
+        if self.scroll_offset > old_offset {
+            self.move_text_view_pixels_down(pixel_delta);
+            self.redraw_visible_rows(0, diff);
         } else {
-            for y in 0..text_h {
-                for x in 0..text_w {
-                    self.put_pixel_raw(x, y, bg);
-                }
-            }
+            self.move_text_view_pixels_up(pixel_delta);
+            self.redraw_visible_rows(self.rows.saturating_sub(diff), diff);
         }
 
-        let glyph_h = self.font_info.glyph_h;
-        let glyph_w = self.font_info.glyph_w;
-        let max_col = self.cols;
-        let (sel_active, sel_sr, sel_sc, sel_er, sel_ec) = if self.sel_active {
-            let (sr, sc, er, ec) = self.sel_normalized();
-            (true, sr, sc, er, ec)
-        } else {
-            (false, 0, 0, 0, 0)
-        };
-        let sel_bg = self.pack_color(RgbColor::new(0x26, 0x5F, 0xCC));
-        let sel_fg = self.pack_color(RgbColor::WHITE);
-        let display_len = view_end - view_start;
-        for vis_row in 0..display_len {
-            let virt_row = view_start + vis_row;
-            // Get a raw pointer to the row slice to avoid borrow conflicts with draw calls.
-            // SAFETY: sb_rows and sb_cur_row are not modified during this loop; pointer
-            // remains valid for the duration of the iteration.
-            let (row_ptr, row_len) = if virt_row < total_complete {
-                let row = &self.sb_rows[virt_row];
-                (row.as_ptr(), row.len())
-            } else if has_partial && virt_row == total_complete {
-                (self.sb_cur_row.as_ptr(), self.sb_cur_row.len())
-            } else {
-                (core::ptr::null(), 0)
-            };
-            let py = vis_row * glyph_h;
-            let cell_count = row_len.min(max_col);
-            for col in 0..cell_count {
-                let px = col * glyph_w;
-                // SAFETY: col < cell_count <= row_len, row_ptr is valid for row_len elements.
-                let cell = unsafe { &*row_ptr.add(col) };
-                let (draw_fg, draw_bg) = if sel_active {
-                    let in_sel = if virt_row < sel_sr || virt_row > sel_er {
-                        false
-                    } else if sel_sr == sel_er {
-                        col >= sel_sc && col < sel_ec
-                    } else if virt_row == sel_sr {
-                        col >= sel_sc
-                    } else if virt_row == sel_er {
-                        col < sel_ec
-                    } else {
-                        true
-                    };
-                    if in_sel {
-                        (sel_fg, sel_bg)
-                    } else {
-                        (cell.fg, cell.bg)
-                    }
-                } else {
-                    (cell.fg, cell.bg)
-                };
-                self.draw_glyph_at_pixel(px, py, cell.ch, draw_fg, draw_bg);
-            }
-        }
-
-        if self.scroll_offset == 0 {
-            self.row = if display_len > 0 { display_len - 1 } else { 0 };
-            let last_virt = view_start + display_len.saturating_sub(1);
-            let last_len = if last_virt < total_complete {
-                self.sb_rows[last_virt].len()
-            } else if has_partial && last_virt == total_complete {
-                self.sb_cur_row.len()
-            } else {
-                0
-            };
-            self.col = last_len.min(self.cols);
-        }
-
+        self.finalize_live_view_state();
         self.draw_scrollbar_inner();
-
-        if using_back {
-            self.present();
-            self.draw_to_back = prev_draw_to_back;
-            self.track_dirty = prev_track_dirty;
-            if !prev_track_dirty {
-                self.clear_dirty();
-            }
-        }
+        self.request_present();
+        true
     }
 
     /// Scroll the view up (backward in history) by `lines` lines.
@@ -2419,8 +2953,7 @@ impl VgaWriter {
         }
         let total = self.sb_rows.len() + 1;
         let max_off = total.saturating_sub(self.rows);
-        self.scroll_offset = (self.scroll_offset + lines).min(max_off);
-        self.redraw_from_scrollback();
+        self.set_scroll_offset_and_render((self.scroll_offset + lines).min(max_off));
     }
 
     /// Scroll the view down (forward, toward live) by `lines` lines.
@@ -2428,8 +2961,7 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
-        self.redraw_from_scrollback();
+        self.set_scroll_offset_and_render(self.scroll_offset.saturating_sub(lines));
     }
 
     /// Immediately return to the live (bottom) view.
@@ -2437,8 +2969,7 @@ impl VgaWriter {
         if self.scroll_offset == 0 {
             return;
         }
-        self.scroll_offset = 0;
-        self.redraw_from_scrollback();
+        self.set_scroll_offset_and_render(0);
     }
 
     /// Handle a click at pixel `(px_x, px_y)` — if it falls in the scrollbar,
@@ -2463,8 +2994,7 @@ impl VgaWriter {
         // py = 0 → top = oldest = max_offset; py = text_h - 1 → bottom = 0
         let py = px_y.min(text_h - 1);
         let offset = max_off * (text_h - 1 - py) / (text_h - 1);
-        self.scroll_offset = offset.min(max_off);
-        self.redraw_from_scrollback();
+        self.set_scroll_offset_and_render(offset.min(max_off));
     }
 
     /// Drag the scrollbar thumb to vertical pixel `px_y`.
@@ -2488,8 +3018,7 @@ impl VgaWriter {
         // py = 0 -> top = oldest = max_offset; py = text_h - 1 -> bottom = 0
         let py = px_y.min(text_h - 1);
         let offset = max_off * (text_h - 1 - py) / (text_h - 1);
-        self.scroll_offset = offset.min(max_off);
-        self.redraw_from_scrollback();
+        self.set_scroll_offset_and_render(offset.min(max_off));
     }
 
     /// Returns `true` if the pixel coordinates fall within the scrollbar strip.
@@ -2544,6 +3073,26 @@ pub fn with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
     }
     let mut writer = VGA_WRITER.lock();
     Some(f(&mut writer))
+}
+
+/// Writes raw console text to the framebuffer console in a single writer batch.
+pub fn write_text(text: &str) {
+    if !is_available() {
+        crate::arch::x86_64::serial::_print(format_args!("{}", text));
+        return;
+    }
+    let mut writer = VGA_WRITER.lock();
+    writer.write_bytes(text);
+}
+
+/// Writes one console character to the framebuffer console.
+pub fn write_char(ch: char) {
+    if !is_available() {
+        crate::arch::x86_64::serial::_print(format_args!("{}", ch));
+        return;
+    }
+    let mut buf = [0u8; 4];
+    write_text(ch.encode_utf8(&mut buf));
 }
 
 /// Performs the status line info operation.
@@ -3102,18 +3651,7 @@ pub fn draw_text_cursor(color: RgbColor) {
         return;
     }
     let mut writer = VGA_WRITER.lock();
-    let (gw, gh) = writer.glyph_size();
-    let x = writer.col * gw;
-    let y = writer.row * gh;
-    let packed = writer.pack_color(color);
-
-    // Draw a block cursor (full glyph width, 2px height at bottom or full height)
-    // Let's go with a full block for better visibility
-    for py in y..(y + gh) {
-        for px in x..(x + gw) {
-            writer.put_pixel_raw(px, py, packed);
-        }
-    }
+    writer.draw_text_cursor_overlay(color);
 }
 
 /// Performs the framebuffer info operation.
@@ -3141,6 +3679,16 @@ pub fn framebuffer_info() -> FramebufferInfo {
         };
     }
     VGA_WRITER.lock().framebuffer_info()
+}
+
+/// Returns lightweight render metrics for profiling.
+pub fn render_stats() -> RenderStats {
+    RenderStats {
+        presented_frames: PRESENTED_FRAMES.load(Ordering::Relaxed),
+        estimated_fps: FPS_ESTIMATE.load(Ordering::Relaxed),
+        present_region_count: VGA_PRESENT_REGION_COUNT.load(Ordering::Relaxed),
+        present_pixel_count: VGA_PRESENT_PIXEL_COUNT.load(Ordering::Relaxed),
+    }
 }
 
 /// Sets text color.

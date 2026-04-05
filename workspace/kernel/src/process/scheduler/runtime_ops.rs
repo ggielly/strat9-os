@@ -425,6 +425,43 @@ pub fn yield_task() {
     restore_flags(saved_flags);
 }
 
+/// Force a context switch away from the current task, unconditionally.
+///
+/// Unlike [`yield_task`], this function **ignores the preemption guard**.
+/// It must only be called from [`super::task_ops::exit_current_task`] after:
+///
+/// 1. The task has been marked [`TaskState::Dead`].
+/// 2. All scheduler locks have been released.
+/// 3. No spinlock-guarded per-CPU data is being accessed by this task.
+///
+/// At that point the preempt_count is irrelevant — the task will never run
+/// again, so bypassing the guard is both safe and necessary to prevent the
+/// dead task from spinning in a `hlt()` loop.
+pub fn yield_dead_task() {
+    let saved_flags = save_flags_and_cli();
+    let cpu_index = current_cpu_index();
+
+    let switch_target = {
+        let mut local = LOCAL_SCHEDULERS[cpu_index].lock();
+        if let Some(ref mut cpu) = *local {
+            super::core_impl::yield_cpu_local(cpu, cpu_index)
+        } else {
+            None
+        }
+    }; // Lock released before the context switch.
+
+    if let Some(ref target) = switch_target {
+        // SAFETY: Pointers are valid (Arc<Task> contexts kept alive by the
+        // scheduler).  Interrupts are disabled via save_flags_and_cli().
+        unsafe {
+            crate::process::task::do_switch_context(target);
+        }
+        finish_switch();
+    }
+
+    restore_flags(saved_flags);
+}
+
 #[inline]
 fn interrupt_frame_fits(task: &Arc<Task>, rsp: u64) -> bool {
     let stack_base = task.kernel_stack.virt_base.as_u64();
@@ -744,6 +781,7 @@ pub fn log_state(label: &str) {
                     .as_ref()
                     .map(|t| t.id.as_u64())
                     .unwrap_or(u64::MAX);
+                let blocked_len = super::BLOCKED_TASKS.lock().len();
                 log::info!(
                     "[sched][state] label={} cpu={} current={} rq_rt={} rq_fair={} rq_idle={} blocked={} need_resched={}",
                     label,
@@ -752,7 +790,7 @@ pub fn log_state(label: &str) {
                     cpu.class_rqs.real_time.len(),
                     cpu.class_rqs.fair.len(),
                     cpu.class_rqs.idle.len(),
-                    sched.blocked_tasks.len(),
+                    blocked_len,
                     cpu.need_resched
                 );
             }
@@ -796,7 +834,7 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
             out.cpu_count = cpu_count;
             out.pick_order = *sched.class_table.pick_order();
             out.steal_order = *sched.class_table.steal_order();
-            out.blocked_tasks = sched.blocked_tasks.len();
+            out.blocked_tasks = super::BLOCKED_TASKS.lock().len();
             for i in 0..cpu_count {
                 let local_guard = LOCAL_SCHEDULERS[i].lock();
                 if let Some(ref cpu) = *local_guard {
