@@ -782,6 +782,7 @@ pub struct VgaWriter {
     sb_rows: Vec<Vec<SbCell>>,
     /// Current (incomplete) row being assembled by write_char.
     sb_cur_row: Vec<SbCell>,
+    sb_row_head: usize,
     /// Lines scrolled back from the bottom (0 = live view).
     scroll_offset: usize,
 
@@ -806,11 +807,42 @@ pub struct VgaWriter {
     sel_end_col: usize,
     present_pending: bool,
     last_present_tick: u64,
+    prepared_row_cells: Vec<(usize, u32, u32)>,
 }
 
 unsafe impl Send for VgaWriter {}
 
 impl VgaWriter {
+    fn sb_capacity(&self) -> usize {
+        MAX_SCROLLBACK + self.rows + 1
+    }
+
+    fn sb_row_at(&self, logical_idx: usize) -> Option<&Vec<SbCell>> {
+        if logical_idx >= self.sb_rows.len() {
+            return None;
+        }
+        let phys = (self.sb_row_head + logical_idx) % self.sb_rows.len();
+        self.sb_rows.get(phys)
+    }
+
+    fn sb_push_row(&mut self, row: Vec<SbCell>) {
+        let cap = self.sb_capacity();
+        if cap == 0 {
+            return;
+        }
+        if self.sb_rows.len() < cap {
+            self.sb_rows.push(row);
+            return;
+        }
+        if self.sb_rows.is_empty() {
+            self.sb_rows.push(row);
+            self.sb_row_head = 0;
+            return;
+        }
+        self.sb_rows[self.sb_row_head] = row;
+        self.sb_row_head = (self.sb_row_head + 1) % self.sb_rows.len();
+    }
+
     fn build_glyph_mask_cache(font: &'static [u8], info: &FontInfo) -> Vec<u8> {
         let glyph_pixels = info.glyph_w.saturating_mul(info.glyph_h);
         let total_pixels = info.glyph_count.saturating_mul(glyph_pixels);
@@ -896,6 +928,7 @@ impl VgaWriter {
             track_dirty: false,
             sb_rows: Vec::new(),
             sb_cur_row: Vec::new(),
+            sb_row_head: 0,
             scroll_offset: 0,
             mc_x: 0,
             mc_y: 0,
@@ -915,6 +948,7 @@ impl VgaWriter {
             sel_end_col: 0,
             present_pending: false,
             last_present_tick: 0,
+            prepared_row_cells: Vec::new(),
         }
     }
 
@@ -969,6 +1003,7 @@ impl VgaWriter {
         self.track_dirty = false;
         self.sb_rows = Vec::new();
         self.sb_cur_row = Vec::new();
+        self.sb_row_head = 0;
         self.scroll_offset = 0;
         self.mc_visible = false;
         self.tc_visible = false;
@@ -980,6 +1015,7 @@ impl VgaWriter {
         self.sel_active = false;
         self.present_pending = false;
         self.last_present_tick = 0;
+        self.prepared_row_cells = Vec::new();
         true
     }
 
@@ -1558,6 +1594,11 @@ impl VgaWriter {
         let packed = self.pack_color(color);
         if self.tc_visible {
             self.text_cursor_erase_hw();
+            self.tc_visible = false;
+        }
+        if packed == self.bg {
+            self.present_if_due(false);
+            return;
         }
         self.tc_col = self.col;
         self.tc_row = self.row;
@@ -1656,7 +1697,7 @@ impl VgaWriter {
         let mut bytes: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         for row in start_row..=end_row {
             let len = if row < self.sb_rows.len() {
-                self.sb_rows[row].len()
+                self.sb_row_at(row).map(|r| r.len()).unwrap_or(0)
             } else if row == self.sb_rows.len() {
                 self.sb_cur_row.len()
             } else {
@@ -1674,7 +1715,10 @@ impl VgaWriter {
             };
             for col in c0..c1 {
                 let ch = if row < self.sb_rows.len() {
-                    self.sb_rows[row][col].ch
+                    self.sb_row_at(row)
+                        .and_then(|r| r.get(col))
+                        .map(|cell| cell.ch)
+                        .unwrap_or(' ')
                 } else {
                     self.sb_cur_row[col].ch
                 };
@@ -2240,7 +2284,7 @@ impl VgaWriter {
         self.row = if display_len > 0 { display_len - 1 } else { 0 };
         let last_virt = view_start + display_len.saturating_sub(1);
         let last_len = if last_virt < total_complete {
-            self.sb_rows[last_virt].len()
+            self.sb_row_at(last_virt).map(|row| row.len()).unwrap_or(0)
         } else if last_virt == total_complete {
             self.sb_cur_row.len()
         } else {
@@ -2284,7 +2328,10 @@ impl VgaWriter {
         let py = vis_row.saturating_mul(glyph_h);
 
         let (row_ptr, row_len) = if virt_row < total_complete {
-            let row = &self.sb_rows[virt_row];
+            let row = match self.sb_row_at(virt_row) {
+                Some(row) => row,
+                None => return,
+            };
             (row.as_ptr(), row.len())
         } else if has_partial && virt_row == total_complete {
             (self.sb_cur_row.as_ptr(), self.sb_cur_row.len())
@@ -2295,17 +2342,67 @@ impl VgaWriter {
         let cell_count = row_len.min(self.cols);
         let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
         let used_width = cell_count.saturating_mul(glyph_w).min(text_w);
-        if used_width > 0 {
-            self.fill_text_span_bg(0, py, used_width, glyph_h, self.bg);
+
+        if self.draw_to_back_buffer() && py + glyph_h <= self.fb_height {
+            let fb_width = self.fb_width;
+            let default_bg = self.bg;
+            let glyph_pixels = glyph_w.saturating_mul(glyph_h);
+            let glyph_cache_ptr = self.glyph_mask_cache.as_ptr();
+            self.prepared_row_cells.clear();
+            if self.prepared_row_cells.capacity() < cell_count {
+                self.prepared_row_cells
+                    .reserve(cell_count - self.prepared_row_cells.capacity());
+            }
+            for col in 0..cell_count {
+                let cell = unsafe { &*row_ptr.add(col) };
+                let glyph_index = self.glyph_index_for_char(cell.ch);
+                let (draw_fg, draw_bg) =
+                    self.selection_colors_for_cell(virt_row, col, cell.fg, cell.bg);
+                self.prepared_row_cells.push((glyph_index, draw_fg, draw_bg));
+            }
+            if let Some(buf) = self.back_buffer.as_mut() {
+                for gy in 0..glyph_h {
+                    let row_start = (py + gy) * fb_width;
+                    buf[row_start..row_start + text_w].fill(default_bg);
+                }
+
+                for (col, (glyph_index, draw_fg, draw_bg)) in
+                    self.prepared_row_cells.iter().copied().enumerate()
+                {
+                    let px = col.saturating_mul(glyph_w);
+                    if draw_bg != default_bg {
+                        for gy in 0..glyph_h {
+                            let row_start = (py + gy) * fb_width + px;
+                            buf[row_start..row_start + glyph_w].fill(draw_bg);
+                        }
+                    }
+
+                    let glyph_base = glyph_index.saturating_mul(glyph_pixels);
+                    for gy in 0..glyph_h {
+                        let row_start = (py + gy) * fb_width + px;
+                        for gx in 0..glyph_w {
+                            let idx = glyph_base + gy * glyph_w + gx;
+                            let bit = unsafe { *glyph_cache_ptr.add(idx) };
+                            if bit != 0 {
+                                buf[row_start + gx] = draw_fg;
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.mark_dirty_rect(0, py, text_w, glyph_h);
+            return;
         }
-        if text_w > used_width {
-            self.fill_text_span_bg(used_width, py, text_w - used_width, glyph_h, self.bg);
-        }
+
         for col in 0..cell_count {
             let px = col.saturating_mul(glyph_w);
             let cell = unsafe { &*row_ptr.add(col) };
             let (draw_fg, draw_bg) = self.selection_colors_for_cell(virt_row, col, cell.fg, cell.bg);
             self.draw_glyph_at_pixel(px, py, cell.ch, draw_fg, draw_bg);
+        }
+        if text_w > used_width {
+            self.fill_text_span_bg(used_width, py, text_w - used_width, glyph_h, self.bg);
         }
     }
 
@@ -2346,7 +2443,9 @@ impl VgaWriter {
     fn end_viewport_render(&mut self, prev_draw_to_back: bool, prev_track_dirty: bool) {
         if self.back_buffer.is_some() {
             self.request_present();
-            self.present_if_due(true);
+            let now = crate::process::scheduler::ticks();
+            let force_present = self.last_present_tick == 0 || now == 0;
+            self.present_if_due(force_present);
             self.draw_to_back = prev_draw_to_back;
             self.track_dirty = prev_track_dirty;
             if !prev_track_dirty {
@@ -2610,14 +2709,7 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
-        let y_start = row * self.font_info.glyph_h;
-        let y_end = y_start + self.font_info.glyph_h;
-        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
-        for y in y_start..y_end {
-            for x in 0..text_w {
-                self.put_pixel_raw(x, y, self.bg);
-            }
-        }
+        self.clear_text_line_pixels(row);
     }
 
     /// Performs the scroll operation.
@@ -2677,7 +2769,6 @@ impl VgaWriter {
 
         if self.row >= self.rows {
             self.scroll();
-            self.clear_row(self.row);
         }
     }
 
@@ -2718,7 +2809,7 @@ impl VgaWriter {
         match c {
             '\n' => {
                 let row = core::mem::take(&mut self.sb_cur_row);
-                self.sb_rows.push(row);
+                self.sb_push_row(row);
                 self.sb_trim();
             }
             '\r' => {
@@ -2732,7 +2823,7 @@ impl VgaWriter {
                 }
                 if self.sb_cur_row.len() >= cols {
                     let row = core::mem::take(&mut self.sb_cur_row);
-                    self.sb_rows.push(row);
+                    self.sb_push_row(row);
                     self.sb_trim();
                 }
             }
@@ -2744,7 +2835,7 @@ impl VgaWriter {
                 self.sb_cur_row.push(SbCell { ch, fg, bg });
                 if self.sb_cur_row.len() >= cols {
                     let row = core::mem::take(&mut self.sb_cur_row);
-                    self.sb_rows.push(row);
+                    self.sb_push_row(row);
                     self.sb_trim();
                 }
             }
@@ -2754,10 +2845,20 @@ impl VgaWriter {
     /// Keep the scrollback buffer within MAX_SCROLLBACK + rows.
     #[inline]
     fn sb_trim(&mut self) {
-        let cap = MAX_SCROLLBACK + self.rows + 1;
-        while self.sb_rows.len() > cap {
-            self.sb_rows.remove(0);
+        let cap = self.sb_capacity();
+        if self.sb_rows.len() <= cap {
+            return;
         }
+        let keep = cap.min(self.sb_rows.len());
+        let start = self.sb_rows.len().saturating_sub(keep);
+        let mut compacted = Vec::with_capacity(keep);
+        for idx in start..self.sb_rows.len() {
+            if let Some(row) = self.sb_row_at(idx).cloned() {
+                compacted.push(row);
+            }
+        }
+        self.sb_rows = compacted;
+        self.sb_row_head = 0;
     }
 
     /// Draw (or refresh) the scrollbar strip on the right edge of the text area.
@@ -2972,6 +3073,26 @@ pub fn with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
     }
     let mut writer = VGA_WRITER.lock();
     Some(f(&mut writer))
+}
+
+/// Writes raw console text to the framebuffer console in a single writer batch.
+pub fn write_text(text: &str) {
+    if !is_available() {
+        crate::arch::x86_64::serial::_print(format_args!("{}", text));
+        return;
+    }
+    let mut writer = VGA_WRITER.lock();
+    writer.write_bytes(text);
+}
+
+/// Writes one console character to the framebuffer console.
+pub fn write_char(ch: char) {
+    if !is_available() {
+        crate::arch::x86_64::serial::_print(format_args!("{}", ch));
+        return;
+    }
+    let mut buf = [0u8; 4];
+    write_text(ch.encode_utf8(&mut buf));
 }
 
 /// Performs the status line info operation.

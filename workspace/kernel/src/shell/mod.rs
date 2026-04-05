@@ -13,7 +13,7 @@ pub mod parser;
 pub mod scripting;
 
 use commands::CommandRegistry;
-use output::{print_char, print_prompt};
+use output::{print_char, print_prompt, print_text};
 use parser::{parse_pipeline, Redirect};
 
 use crate::{shell_print, shell_println, sync::FixedQueue, vfs};
@@ -97,42 +97,61 @@ fn char_count(input: &[u8]) -> usize {
 /// Performs the print bytes operation.
 fn print_bytes(input: &[u8]) {
     if let Ok(s) = core::str::from_utf8(input) {
-        for ch in s.chars() {
-            print_char(ch);
-        }
+        print_text(s);
     } else {
+        let mut tmp = String::with_capacity(input.len());
         for &b in input {
-            print_char(if b.is_ascii() { b as char } else { '?' });
+            tmp.push(if b.is_ascii() { b as char } else { '?' });
         }
+        print_text(&tmp);
     }
 }
 
 /// Performs the move cursor left chars operation.
 fn move_cursor_left_chars(n: usize) {
-    for _ in 0..n {
-        print_char('\x08');
+    if n == 0 {
+        return;
     }
+    let mut tmp = String::with_capacity(n);
+    for _ in 0..n {
+        tmp.push('\x08');
+    }
+    print_text(&tmp);
 }
 
 /// Performs the clear visible line operation.
 fn clear_visible_line(line: &[u8]) {
     let n = char_count(line);
-    move_cursor_left_chars(n);
-    for _ in 0..n {
-        print_char(' ');
+    if n == 0 {
+        return;
     }
-    move_cursor_left_chars(n);
+    let mut tmp = String::with_capacity(n.saturating_mul(3));
+    for _ in 0..n {
+        tmp.push('\x08');
+    }
+    for _ in 0..n {
+        tmp.push(' ');
+    }
+    for _ in 0..n {
+        tmp.push('\x08');
+    }
+    print_text(&tmp);
 }
 
 /// Redraw the current shell input line after the prompt
 fn redraw_line(input: &[u8], cursor_pos: usize) {
-    print_bytes(input);
+    let mut tmp = String::new();
+    if let Ok(s) = core::str::from_utf8(input) {
+        tmp.push_str(s);
+    } else {
+        tmp.reserve(input.len());
+        for &b in input {
+            tmp.push(if b.is_ascii() { b as char } else { '?' });
+        }
+    }
+    tmp.push(' ');
+    tmp.push('\x08');
 
-    // Print a trailing space to clear any leftover char from a longer previous line
-    print_char(' ');
-    print_char('\x08');
-
-    // Move visual cursor back to its logical position
     let back_moves = if cursor_pos <= input.len() {
         if let (Ok(full), Ok(prefix)) = (
             core::str::from_utf8(input),
@@ -145,22 +164,47 @@ fn redraw_line(input: &[u8], cursor_pos: usize) {
     } else {
         0
     };
+    tmp.reserve(back_moves);
     for _ in 0..back_moves {
-        print_char('\x08');
+        tmp.push('\x08');
     }
+    print_text(&tmp);
 }
 
 /// Performs the redraw full line operation.
 fn redraw_full_line(input: &[u8], cursor_pos: usize) {
-    clear_visible_line(input);
-    print_bytes(input);
-    if cursor_pos <= input.len() {
+    let n = char_count(input);
+    let back_moves = if cursor_pos <= input.len() {
         if let Ok(sfx) = core::str::from_utf8(&input[cursor_pos..]) {
-            move_cursor_left_chars(sfx.chars().count());
+            sfx.chars().count()
         } else {
-            move_cursor_left_chars(input.len().saturating_sub(cursor_pos));
+            input.len().saturating_sub(cursor_pos)
+        }
+    } else {
+        0
+    };
+
+    let mut tmp = String::with_capacity(n.saturating_mul(2).saturating_add(input.len()).saturating_add(back_moves));
+    for _ in 0..n {
+        tmp.push('\x08');
+    }
+    for _ in 0..n {
+        tmp.push(' ');
+    }
+    for _ in 0..n {
+        tmp.push('\x08');
+    }
+    if let Ok(s) = core::str::from_utf8(input) {
+        tmp.push_str(s);
+    } else {
+        for &b in input {
+            tmp.push(if b.is_ascii() { b as char } else { '?' });
         }
     }
+    for _ in 0..back_moves {
+        tmp.push('\x08');
+    }
+    print_text(&tmp);
 }
 
 /// Performs the insert bytes at cursor operation.
