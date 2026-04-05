@@ -516,6 +516,14 @@ pub struct FramebufferInfo {
     pub ui_scale: UiScale,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RenderStats {
+    pub presented_frames: u64,
+    pub estimated_fps: u64,
+    pub present_region_count: u64,
+    pub present_pixel_count: u64,
+}
+
 impl PixelFormat {
     /// Performs the pack rgb operation.
     fn pack_rgb(&self, r: u8, g: u8, b: u8) -> u32 {
@@ -1579,7 +1587,7 @@ impl VgaWriter {
             self.sel_end_row = row;
             self.sel_end_col = col;
             self.sel_active = true;
-            self.redraw_from_scrollback();
+            self.render_viewport_full();
         }
     }
 
@@ -1594,7 +1602,7 @@ impl VgaWriter {
             }
             self.sel_end_row = row;
             self.sel_end_col = col;
-            self.redraw_from_scrollback();
+            self.render_viewport_full();
         }
     }
 
@@ -1647,7 +1655,7 @@ impl VgaWriter {
     pub fn clear_selection(&mut self) {
         if self.sel_active {
             self.sel_active = false;
-            self.redraw_from_scrollback();
+            self.render_viewport_full();
         }
     }
 
@@ -2239,6 +2247,72 @@ impl VgaWriter {
         }
     }
 
+    fn ensure_back_buffer_for_viewport(&mut self) {
+        if self.back_buffer.is_none() {
+            let total = self.fb_width.saturating_mul(self.fb_height);
+            if total > 0 {
+                self.back_buffer = Some(alloc::vec![0u32; total]);
+            }
+        }
+    }
+
+    fn begin_viewport_render(&mut self) -> (bool, bool) {
+        self.ensure_back_buffer_for_viewport();
+        let prev_draw_to_back = self.draw_to_back;
+        let prev_track_dirty = self.track_dirty;
+        if self.back_buffer.is_some() {
+            self.draw_to_back = true;
+            self.track_dirty = true;
+            self.clear_dirty();
+        }
+        (prev_draw_to_back, prev_track_dirty)
+    }
+
+    fn end_viewport_render(&mut self, prev_draw_to_back: bool, prev_track_dirty: bool) {
+        if self.back_buffer.is_some() {
+            self.request_present();
+            self.present_if_due(true);
+            self.draw_to_back = prev_draw_to_back;
+            self.track_dirty = prev_track_dirty;
+            if !prev_track_dirty {
+                self.clear_dirty();
+            }
+        }
+    }
+
+    fn finalize_live_view_state(&mut self) {
+        let (total_complete, _, view_start, view_end, _) = self.visible_virtual_bounds();
+        if self.scroll_offset == 0 {
+            self.sync_live_cursor_from_view(total_complete, view_start, view_end);
+        }
+    }
+
+    fn render_viewport_full(&mut self) {
+        let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
+        let text_h = self.text_area_height();
+        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
+        self.fill_rect(0, 0, text_w, text_h, self.unpack_color(self.bg));
+        self.redraw_visible_rows(0, self.rows);
+        self.finalize_live_view_state();
+        self.draw_scrollbar_inner();
+        self.end_viewport_render(prev_draw_to_back, prev_track_dirty);
+    }
+
+    fn refresh_viewport_decorations(&mut self) {
+        let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
+        self.finalize_live_view_state();
+        self.draw_scrollbar_inner();
+        self.end_viewport_render(prev_draw_to_back, prev_track_dirty);
+    }
+
+    fn set_scroll_offset_and_render(&mut self, new_offset: usize) {
+        let old_offset = self.scroll_offset;
+        self.scroll_offset = new_offset;
+        if !self.redraw_from_scrollback_incremental(old_offset) {
+            self.redraw_from_scrollback();
+        }
+    }
+
     fn move_text_view_pixels_up(&mut self, pixels: usize) {
         if pixels == 0 {
             return;
@@ -2534,6 +2608,7 @@ impl VgaWriter {
 
     /// Writes bytes.
     fn write_bytes(&mut self, s: &str) {
+        let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
         // Skip basic ANSI escape sequences to avoid rendering control garbage.
         let mut chars = s.chars();
         while let Some(ch) = chars.next() {
@@ -2552,6 +2627,7 @@ impl VgaWriter {
         }
         // Refresh scrollbar after each batch of output.
         self.draw_scrollbar_inner();
+        self.end_viewport_render(prev_draw_to_back, prev_track_dirty);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -2664,42 +2740,7 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
-        if self.back_buffer.is_none() {
-            let total = self.fb_width.saturating_mul(self.fb_height);
-            if total > 0 {
-                self.back_buffer = Some(alloc::vec![0u32; total]);
-            }
-        }
-
-        let prev_draw_to_back = self.draw_to_back;
-        let prev_track_dirty = self.track_dirty;
-        let using_back = self.back_buffer.is_some();
-        if using_back {
-            self.draw_to_back = true;
-            self.track_dirty = true;
-            self.clear_dirty();
-        }
-
-        let text_h = self.text_area_height();
-        let text_w = self.fb_width.saturating_sub(SCROLLBAR_W);
-        self.fill_rect(0, 0, text_w, text_h, self.unpack_color(self.bg));
-        self.redraw_visible_rows(0, self.rows);
-
-        let (total_complete, _, view_start, view_end, _) = self.visible_virtual_bounds();
-        if self.scroll_offset == 0 {
-            self.sync_live_cursor_from_view(total_complete, view_start, view_end);
-        }
-
-        self.draw_scrollbar_inner();
-
-        if using_back {
-            self.request_present();
-            self.draw_to_back = prev_draw_to_back;
-            self.track_dirty = prev_track_dirty;
-            if !prev_track_dirty {
-                self.clear_dirty();
-            }
-        }
+        self.render_viewport_full();
     }
 
     fn redraw_from_scrollback_incremental(&mut self, old_offset: usize) -> bool {
@@ -2723,10 +2764,7 @@ impl VgaWriter {
             self.redraw_visible_rows(self.rows.saturating_sub(diff), diff);
         }
 
-        let (total_complete, _, view_start, view_end, _) = self.visible_virtual_bounds();
-        if self.scroll_offset == 0 {
-            self.sync_live_cursor_from_view(total_complete, view_start, view_end);
-        }
+        self.finalize_live_view_state();
         self.draw_scrollbar_inner();
         self.request_present();
         true
@@ -2739,11 +2777,7 @@ impl VgaWriter {
         }
         let total = self.sb_rows.len() + 1;
         let max_off = total.saturating_sub(self.rows);
-        let old_offset = self.scroll_offset;
-        self.scroll_offset = (self.scroll_offset + lines).min(max_off);
-        if !self.redraw_from_scrollback_incremental(old_offset) {
-            self.redraw_from_scrollback();
-        }
+        self.set_scroll_offset_and_render((self.scroll_offset + lines).min(max_off));
     }
 
     /// Scroll the view down (forward, toward live) by `lines` lines.
@@ -2751,11 +2785,7 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
-        let old_offset = self.scroll_offset;
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
-        if !self.redraw_from_scrollback_incremental(old_offset) {
-            self.redraw_from_scrollback();
-        }
+        self.set_scroll_offset_and_render(self.scroll_offset.saturating_sub(lines));
     }
 
     /// Immediately return to the live (bottom) view.
@@ -2763,11 +2793,7 @@ impl VgaWriter {
         if self.scroll_offset == 0 {
             return;
         }
-        let old_offset = self.scroll_offset;
-        self.scroll_offset = 0;
-        if !self.redraw_from_scrollback_incremental(old_offset) {
-            self.redraw_from_scrollback();
-        }
+        self.set_scroll_offset_and_render(0);
     }
 
     /// Handle a click at pixel `(px_x, px_y)` — if it falls in the scrollbar,
@@ -2792,11 +2818,7 @@ impl VgaWriter {
         // py = 0 → top = oldest = max_offset; py = text_h - 1 → bottom = 0
         let py = px_y.min(text_h - 1);
         let offset = max_off * (text_h - 1 - py) / (text_h - 1);
-        let old_offset = self.scroll_offset;
-        self.scroll_offset = offset.min(max_off);
-        if !self.redraw_from_scrollback_incremental(old_offset) {
-            self.redraw_from_scrollback();
-        }
+        self.set_scroll_offset_and_render(offset.min(max_off));
     }
 
     /// Drag the scrollbar thumb to vertical pixel `px_y`.
@@ -2820,11 +2842,7 @@ impl VgaWriter {
         // py = 0 -> top = oldest = max_offset; py = text_h - 1 -> bottom = 0
         let py = px_y.min(text_h - 1);
         let offset = max_off * (text_h - 1 - py) / (text_h - 1);
-        let old_offset = self.scroll_offset;
-        self.scroll_offset = offset.min(max_off);
-        if !self.redraw_from_scrollback_incremental(old_offset) {
-            self.redraw_from_scrollback();
-        }
+        self.set_scroll_offset_and_render(offset.min(max_off));
     }
 
     /// Returns `true` if the pixel coordinates fall within the scrollbar strip.
@@ -3465,6 +3483,16 @@ pub fn framebuffer_info() -> FramebufferInfo {
         };
     }
     VGA_WRITER.lock().framebuffer_info()
+}
+
+/// Returns lightweight render metrics for profiling.
+pub fn render_stats() -> RenderStats {
+    RenderStats {
+        presented_frames: PRESENTED_FRAMES.load(Ordering::Relaxed),
+        estimated_fps: FPS_ESTIMATE.load(Ordering::Relaxed),
+        present_region_count: VGA_PRESENT_REGION_COUNT.load(Ordering::Relaxed),
+        present_pixel_count: VGA_PRESENT_PIXEL_COUNT.load(Ordering::Relaxed),
+    }
 }
 
 /// Sets text color.

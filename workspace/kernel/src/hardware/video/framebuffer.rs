@@ -73,6 +73,13 @@ pub struct FramebufferInfo {
     pub source: FramebufferSource,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct FramebufferRenderStats {
+    pub present_pending: bool,
+    pub dirty_region_count: usize,
+    pub last_present_tick: u64,
+}
+
 unsafe impl Send for FramebufferInfo {}
 unsafe impl Sync for FramebufferInfo {}
 
@@ -420,6 +427,14 @@ impl Framebuffer {
             .as_ref()
             .map(|fb| fb.info.source)
             .unwrap_or(FramebufferSource::None)
+    }
+
+    pub fn render_stats() -> Option<FramebufferRenderStats> {
+        FRAMEBUFFER.lock().as_ref().map(|fb| FramebufferRenderStats {
+            present_pending: fb.present_pending,
+            dirty_region_count: fb.dirty.len,
+            last_present_tick: fb.last_present_tick,
+        })
     }
 
     /// Set a pixel at (x, y) with RGB color

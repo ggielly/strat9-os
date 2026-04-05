@@ -9,6 +9,8 @@ use nic_queues::{RxDescriptor, RxRing, TxRing};
 pub const NUM_RX: usize = 128; // Optimisé pour plus de throughput
 pub const NUM_TX: usize = 128; // Optimisé pour plus de throughput
 pub const RX_BUF_SIZE: usize = 4096; // Buffer size optimisé (MTU + overhead)
+const RESET_SPINS: u64 = 10_000_000;
+const EEPROM_READ_SPINS: u32 = 1_000_000;
 
 pub const E1000_DEVICE_IDS: &[u16] = &[0x100E, 0x100F, 0x10D3, 0x153A, 0x1539];
 pub const INTEL_VENDOR: u16 = 0x8086;
@@ -56,7 +58,7 @@ impl E1000Nic {
             // Reset
             let c = rd(mmio_base, regs::CTRL);
             wr(mmio_base, regs::CTRL, c | ctrl::RST);
-            for _ in 0..10_000_000u64 {
+            for _ in 0..RESET_SPINS {
                 core::hint::spin_loop();
             }
 
@@ -64,7 +66,7 @@ impl E1000Nic {
             wr(mmio_base, regs::IMC, 0xFFFF_FFFF);
             let _ = rd(mmio_base, regs::ICR);
 
-            let mac = Self::read_mac(mmio_base);
+            let mac = Self::read_mac(mmio_base)?;
 
             // RX ring
             let rx_ring_region = alloc
@@ -284,48 +286,52 @@ impl E1000Nic {
     /// # Safety
     ///
     /// The caller must ensure that `base` is a valid mapped MMIO region.
-    unsafe fn read_mac(base: u64) -> [u8; 6] {
+    unsafe fn read_mac(base: u64) -> Result<[u8; 6], NetError> {
         // Try RAL/RAH registers first
         let ral = rd(base, regs::RAL0);
         let rah = rd(base, regs::RAH0);
 
         // Check if MAC address is valid (not all zeros)
         if ral != 0 || rah != 0 {
-            return [
+            return Ok([
                 (ral) as u8,
                 (ral >> 8) as u8,
                 (ral >> 16) as u8,
                 (ral >> 24) as u8,
                 (rah) as u8,
                 (rah >> 8) as u8,
-            ];
+            ]);
         }
 
         // Fallback to EEPROM read
         let mut mac = [0u8; 6];
         for i in 0u32..3 {
-            let w = Self::eeprom_read(base, i as u8);
+            let w = Self::eeprom_read(base, i as u8)?;
             mac[(i * 2) as usize] = w as u8;
             mac[(i * 2 + 1) as usize] = (w >> 8) as u8;
         }
-        mac
+        if mac == [0; 6] || mac == [0xFF; 6] {
+            return Err(NetError::NotReady);
+        }
+        Ok(mac)
     }
 
     /// # Safety
     ///
     /// The caller must ensure that `base` is a valid mapped MMIO region.
-    unsafe fn eeprom_read(base: u64, addr: u8) -> u16 {
+    unsafe fn eeprom_read(base: u64, addr: u8) -> Result<u16, NetError> {
         wr(
             base,
             regs::EERD,
             eerd::START | ((addr as u32) << eerd::ADDR_SHIFT),
         );
-        loop {
+        for _ in 0..EEPROM_READ_SPINS {
             let v = rd(base, regs::EERD);
             if v & eerd::DONE != 0 {
-                return ((v >> eerd::DATA_SHIFT) & 0xFFFF) as u16;
+                return Ok(((v >> eerd::DATA_SHIFT) & 0xFFFF) as u16);
             }
             core::hint::spin_loop();
         }
+        Err(NetError::NotReady)
     }
 }
