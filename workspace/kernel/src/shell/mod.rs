@@ -267,13 +267,16 @@ pub extern "C" fn shell_main() -> ! {
     let mut scrollbar_dragging = false;
     let mut last_scrollbar_drag_tick = 0u64;
     let mut pending_scrollbar_drag_y: Option<usize> = None;
+    let mut pending_selection_pos: Option<(usize, usize)> = None;
+    let mut pending_mouse_cursor: Option<(i32, i32)> = None;
+    let mut pending_scroll_delta: i32 = 0;
     let mut mouse_x: i32 = 0;
     let mut mouse_y: i32 = 0;
 
     // Display welcome message using ASCII for robust terminal rendering.
     shell_println!("");
     shell_println!("+--------------------------------------------------------------+");
-    shell_println!("|         Strat9-OS chevron shell v0.1.0 (Bedrock)             |");
+    shell_println!("|         Strat9-OS chevron shell v0.1.0                       |");
     shell_println!("|         Type 'help' for available commands                   |");
     shell_println!("+--------------------------------------------------------------+");
     shell_println!("");
@@ -286,6 +289,8 @@ pub extern "C" fn shell_main() -> ! {
     // Cap per-loop mouse work to avoid starving timer ticks when dragging.
     const MAX_MOUSE_EVENTS_PER_TURN: usize = 16;
     const SCROLLBAR_DRAG_MIN_TICKS: u64 = 1;
+    const MOUSE_RENDER_MIN_TICKS: u64 = 1;
+    let mut last_mouse_render_tick = 0u64;
 
     loop {
         // Handle cursor blinking (graphics only)
@@ -572,20 +577,21 @@ pub extern "C" fn shell_main() -> ! {
                     crate::process::scheduler::yield_task();
                 }
 
-                if had_events || left_held {
+                let has_pending_visual = pending_scroll_delta != 0
+                    || pending_scrollbar_drag_y.is_some()
+                    || pending_selection_pos.is_some()
+                    || pending_mouse_cursor.is_some();
+
+                if had_events || left_held || has_pending_visual {
                     let (new_mx, new_my) = crate::arch::x86_64::mouse::mouse_pos();
                     let moved = new_mx != mouse_x || new_my != mouse_y;
                     mouse_x = new_mx;
                     mouse_y = new_my;
+                    if had_events {
+                        pending_scroll_delta += scroll_delta;
+                    }
 
                     if crate::arch::x86_64::vga::is_available() {
-                        // Inverted wheel: wheel up (dz>0) → scroll down (history forward)
-                        if scroll_delta > 0 {
-                            crate::arch::x86_64::vga::scroll_view_down((scroll_delta as usize) * 3);
-                        } else if scroll_delta < 0 {
-                            crate::arch::x86_64::vga::scroll_view_up((-scroll_delta as usize) * 3);
-                        }
-
                         if left_pressed {
                             let (mx, my) = (new_mx as usize, new_my as usize);
                             if crate::arch::x86_64::vga::scrollbar_hit_test(mx, my) {
@@ -593,30 +599,23 @@ pub extern "C" fn shell_main() -> ! {
                                 crate::arch::x86_64::vga::clear_selection();
                                 selecting = false;
                                 scrollbar_dragging = true;
+                                pending_scrollbar_drag_y = None;
                             } else {
                                 crate::arch::x86_64::vga::start_selection(mx, my);
                                 selecting = true;
                                 scrollbar_dragging = false;
+                                pending_selection_pos = None;
                             }
+                            last_mouse_render_tick = ticks;
                         } else if left_held && scrollbar_dragging && moved {
                             pending_scrollbar_drag_y = Some(new_my as usize);
-                            if ticks.saturating_sub(last_scrollbar_drag_tick)
-                                >= SCROLLBAR_DRAG_MIN_TICKS
-                            {
-                                if let Some(py) = pending_scrollbar_drag_y.take() {
-                                    crate::arch::x86_64::vga::scrollbar_drag_to(py);
-                                    last_scrollbar_drag_tick = ticks;
-                                }
-                            }
                         } else if left_held && selecting && moved {
-                            crate::arch::x86_64::vga::update_selection(
-                                new_mx as usize,
-                                new_my as usize,
-                            );
+                            pending_selection_pos = Some((new_mx as usize, new_my as usize));
                         } else if left_released {
                             if selecting {
                                 crate::arch::x86_64::vga::end_selection();
                                 selecting = false;
+                                pending_selection_pos = None;
                             }
                             if scrollbar_dragging {
                                 if let Some(py) = pending_scrollbar_drag_y.take() {
@@ -624,10 +623,63 @@ pub extern "C" fn shell_main() -> ! {
                                 }
                             }
                             scrollbar_dragging = false;
+                            last_mouse_render_tick = ticks;
                         }
 
                         if moved {
-                            crate::arch::x86_64::vga::update_mouse_cursor(new_mx, new_my);
+                            pending_mouse_cursor = Some((new_mx, new_my));
+                        }
+
+                        let render_due =
+                            ticks.saturating_sub(last_mouse_render_tick) >= MOUSE_RENDER_MIN_TICKS;
+                        let drag_due = ticks.saturating_sub(last_scrollbar_drag_tick)
+                            >= SCROLLBAR_DRAG_MIN_TICKS;
+                        let has_pending_visual = pending_scroll_delta != 0
+                            || pending_scrollbar_drag_y.is_some()
+                            || pending_selection_pos.is_some()
+                            || pending_mouse_cursor.is_some();
+                        if has_pending_visual && (render_due || left_pressed || left_released) {
+                            let mut rendered = false;
+
+                            // Inverted wheel: wheel up (dz>0) -> scroll down (history forward)
+                            if pending_scroll_delta > 0 {
+                                crate::arch::x86_64::vga::scroll_view_down(
+                                    (pending_scroll_delta as usize) * 3,
+                                );
+                                pending_scroll_delta = 0;
+                                rendered = true;
+                            } else if pending_scroll_delta < 0 {
+                                crate::arch::x86_64::vga::scroll_view_up(
+                                    ((-pending_scroll_delta) as usize) * 3,
+                                );
+                                pending_scroll_delta = 0;
+                                rendered = true;
+                            }
+
+                            if drag_due {
+                                if selecting {
+                                    if let Some((sx, sy)) = pending_selection_pos.take() {
+                                        crate::arch::x86_64::vga::update_selection(sx, sy);
+                                        rendered = true;
+                                    }
+                                }
+                                if scrollbar_dragging {
+                                    if let Some(py) = pending_scrollbar_drag_y.take() {
+                                        crate::arch::x86_64::vga::scrollbar_drag_to(py);
+                                        last_scrollbar_drag_tick = ticks;
+                                        rendered = true;
+                                    }
+                                }
+                            }
+
+                            if let Some((cx, cy)) = pending_mouse_cursor.take() {
+                                crate::arch::x86_64::vga::update_mouse_cursor(cx, cy);
+                                rendered = true;
+                            }
+
+                            if rendered {
+                                last_mouse_render_tick = ticks;
+                            }
                         }
                     }
                 }

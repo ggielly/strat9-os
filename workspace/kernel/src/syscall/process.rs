@@ -144,6 +144,7 @@ fn build_user_thread_task(
         trampoline_arg0: core::sync::atomic::AtomicU64::new(0),
         ticks: core::sync::atomic::AtomicU64::new(0),
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
+        home_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
         vruntime: core::sync::atomic::AtomicU64::new(parent.vruntime()),
         fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
         fair_on_rq: core::sync::atomic::AtomicBool::new(false),

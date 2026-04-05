@@ -37,10 +37,9 @@ use crate::{
 use alloc::{boxed::Box, sync::Arc};
 use core::{
     mem::offset_of,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 use x86_64::structures::paging::mapper::TranslateResult;
-
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
     pub child_pid: Pid,
@@ -270,6 +269,7 @@ fn build_child_task(
         trampoline_arg0: AtomicU64::new(0),
         ticks: AtomicU64::new(0),
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
+        home_cpu: AtomicUsize::new(usize::MAX),
         vruntime: AtomicU64::new(parent.vruntime()),
         fair_rq_generation: AtomicU64::new(0),
         fair_on_rq: AtomicBool::new(false),

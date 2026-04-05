@@ -124,7 +124,7 @@ pub fn timer_tick() {
 ///
 /// # Lock discipline
 ///
-/// The GLOBAL_SCHED_STATE lock is held **only** during the scan + re-enqueue phase.
+/// The `BLOCKED_TASKS` lock is held **only** during the scan + re-enqueue phase.
 /// The lock is explicitly dropped before sending IPIs (which may acquire
 /// per-CPU data) and before any `Arc<Task>` drop (which reaches
 /// `KernelStack::drop → free_frames → buddy_alloc.lock()`).
@@ -145,58 +145,67 @@ fn check_wake_deadlines(current_time_ns: u64) {
     let mut drop_count = 0usize;
 
     {
-        // --- begin critical section (GLOBAL_SCHED_STATE lock held) ---
-        let mut scheduler = match GLOBAL_SCHED_STATE.try_lock_no_irqsave() {
+        // --- begin critical section (BLOCKED_TASKS lock held) ---
+        let mut blocked = match super::BLOCKED_TASKS.try_lock_no_irqsave() {
             Some(guard) => guard,
             None => return,
         };
 
-        if let Some(ref mut sched) = *scheduler {
-            let mut to_wake = [TaskId::from_u64(0); BATCH];
-            let mut count = 0usize;
-            for (id, task) in sched.blocked_tasks.iter() {
-                let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
-                if deadline != 0 && current_time_ns >= deadline {
-                    if count < BATCH {
-                        to_wake[count] = *id;
-                        count += 1;
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            for id in to_wake.iter().copied().take(count) {
-                if let Some(blocked_task) = sched.blocked_tasks.remove(&id) {
-                    blocked_task.wake_deadline_ns.store(0, Ordering::Relaxed);
-                    blocked_task.set_state(TaskState::Ready);
-                    let cpu = sched.task_cpu.get(&id).copied().unwrap_or(0);
-                    let class = sched.class_table.class_for_task(&blocked_task);
-                    if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu].lock() {
-                        // `enqueue` moves the Arc into the run-queue, so no
-                        // drop occurs here; the Arc is alive in class_rqs.
-                        local_cpu.class_rqs.enqueue(class, blocked_task);
-                        local_cpu.need_resched = true;
-                        if cpu != my_cpu && cpu_is_valid(cpu) {
-                            ipi_targets[cpu] = true;
-                        }
-                    } else {
-                        // No valid CPU slot: stash for drop outside the lock.
-                        // This is the only path where an Arc<Task> can be the
-                        // last reference and trigger KernelStack::drop.
-                        if drop_count < BATCH {
-                            deferred_drops[drop_count] = Some(blocked_task);
-                            drop_count += 1;
-                        }
-                        // If deferred_drops is full the task Arc is dropped here,
-                        // still under the lock — but that case means we already
-                        // have 128 orphaned tasks with no valid CPU, which is a
-                        // bug elsewhere; emit a trace and accept the latency hit.
-                    }
+        let mut to_wake = [TaskId::from_u64(0); BATCH];
+        let mut count = 0usize;
+        for (id, task) in blocked.iter() {
+            let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
+            if deadline != 0 && current_time_ns >= deadline {
+                if count < BATCH {
+                    to_wake[count] = *id;
+                    count += 1;
+                } else {
+                    break;
                 }
             }
         }
-        // `scheduler` guard drops here — GLOBAL_SCHED_STATE lock released BEFORE any
+
+        for id in to_wake.iter().copied().take(count) {
+            if let Some(blocked_task) = blocked.remove(&id) {
+                blocked_task.wake_deadline_ns.store(0, Ordering::Relaxed);
+                blocked_task.set_state(TaskState::Ready);
+                let home = blocked_task.home_cpu.load(Ordering::Relaxed);
+                let cpu = if home != usize::MAX { home } else { 0 };
+                let class = {
+                    use crate::process::sched::SchedClassId;
+                    match blocked_task.sched_policy() {
+                        crate::process::sched::SchedPolicy::RealTimeRR { .. }
+                        | crate::process::sched::SchedPolicy::RealTimeFifo { .. } => {
+                            SchedClassId::RealTime
+                        }
+                        crate::process::sched::SchedPolicy::Fair(_) => SchedClassId::Fair,
+                        crate::process::sched::SchedPolicy::Idle => SchedClassId::Idle,
+                    }
+                };
+                if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu].lock() {
+                    // `enqueue` moves the Arc into the run-queue, so no
+                    // drop occurs here; the Arc is alive in class_rqs.
+                    local_cpu.class_rqs.enqueue(class, blocked_task);
+                    local_cpu.need_resched = true;
+                    if cpu != my_cpu && cpu_is_valid(cpu) {
+                        ipi_targets[cpu] = true;
+                    }
+                } else {
+                    // No valid CPU slot: stash for drop outside the lock.
+                    // This is the only path where an Arc<Task> can be the
+                    // last reference and trigger KernelStack::drop.
+                    if drop_count < BATCH {
+                        deferred_drops[drop_count] = Some(blocked_task);
+                        drop_count += 1;
+                    }
+                    // If deferred_drops is full the task Arc is dropped here,
+                    // still under the lock — but that case means we already
+                    // have 128 orphaned tasks with no valid CPU, which is a
+                    // bug elsewhere; emit a trace and accept the latency hit.
+                }
+            }
+        }
+        // `blocked` guard drops here — BLOCKED_TASKS lock released BEFORE any
         // Arc<Task> drop and BEFORE send_resched_ipi_to_cpu.
         // --- end critical section ---
     }

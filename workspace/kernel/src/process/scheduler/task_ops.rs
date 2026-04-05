@@ -647,6 +647,13 @@ pub fn try_wait_child(parent: TaskId, target: Option<TaskId>) -> WaitChildResult
 /// in the `blocked_tasks` map. It will not be re-scheduled until
 /// `wake_task(id)` is called.
 ///
+/// ## Lock design
+///
+/// This function acquires **only** the `BLOCKED_TASKS` lock + the current
+/// CPU's `LOCAL_SCHEDULERS[cpu]` lock. It does **not** touch
+/// `GLOBAL_SCHED_STATE`, avoiding contention with cold-path operations
+/// (fork, exit, kill).
+///
 /// ## Lost-wakeup prevention
 ///
 /// Before actually blocking, this function checks the task's `wake_pending`
@@ -661,27 +668,25 @@ pub fn block_current_task() {
     let cpu_index = current_cpu_index();
 
     let switch_target = {
-        // Hold GLOBAL and LOCAL together through the state transition and task
-        // selection so a concurrent wake cannot observe the task as blocked,
-        // requeue it, and race with us tearing down current_task.
-        let mut scheduler = GLOBAL_SCHED_STATE.lock();
+        // Hold BLOCKED_TASKS and LOCAL together through the state transition
+        // and task selection so a concurrent wake cannot observe the task as
+        // blocked, requeue it, and race with us tearing down current_task.
+        let mut blocked = super::BLOCKED_TASKS.lock();
         let mut local = LOCAL_SCHEDULERS[cpu_index].lock();
-        let out = if let Some(ref mut sched) = *scheduler {
-            if let Some(ref mut cpu) = *local {
-                if let Some(ref current) = cpu.current_task {
-                    if current
-                        .wake_pending
-                        .swap(false, core::sync::atomic::Ordering::AcqRel)
-                    {
-                        // Pending wakeup consumed - do not block.
-                        None
-                    } else {
-                        current.set_state(TaskState::Blocked);
-                        sched.blocked_tasks.insert(current.id, current.clone());
-                        super::core_impl::yield_cpu_local(cpu, cpu_index)
-                    }
-                } else {
+        let out = if let Some(ref mut cpu) = *local {
+            if let Some(ref current) = cpu.current_task {
+                if current
+                    .wake_pending
+                    .swap(false, core::sync::atomic::Ordering::AcqRel)
+                {
+                    // Pending wakeup consumed - do not block.
                     None
+                } else {
+                    current.set_state(TaskState::Blocked);
+                    // Record home CPU so wake_task can route without GLOBAL.
+                    current.home_cpu.store(cpu_index, core::sync::atomic::Ordering::Relaxed);
+                    blocked.insert(current.id, current.clone());
+                    super::core_impl::yield_cpu_local(cpu, cpu_index)
                 }
             } else {
                 None
@@ -690,9 +695,9 @@ pub fn block_current_task() {
             None
         };
         drop(local);
-        drop(scheduler);
+        drop(blocked);
         out
-    }; // Lock released
+    }; // Locks released
 
     if let Some(ref target) = switch_target {
         unsafe {
@@ -709,6 +714,13 @@ pub fn block_current_task() {
 /// Moves the task from `blocked_tasks` to the ready queue and sets its
 /// state to Ready. Returns `true` if the task was found and woken.
 ///
+/// ## Lock design
+///
+/// The primary path (task found in `BLOCKED_TASKS`) acquires **only** the
+/// `BLOCKED_TASKS` lock + the target CPU's `LOCAL_SCHEDULERS[cpu]` lock.
+/// It does **not** touch `GLOBAL_SCHED_STATE`, avoiding contention with
+/// cold-path operations (fork, exit, kill).
+///
 /// ## Lost-wakeup prevention
 ///
 /// If the task is not yet in `blocked_tasks` (it is still transitioning
@@ -717,14 +729,66 @@ pub fn block_current_task() {
 /// the pending wakeup and return immediately without actually blocking.
 pub fn wake_task(id: TaskId) -> bool {
     let saved_flags = save_flags_and_cli();
-    let (woken, ipi_cpu) = {
+
+    // --- Primary path: task is in BLOCKED_TASKS ---
+    // Acquire only BLOCKED_TASKS + LOCAL[target_cpu]. No GLOBAL_SCHED_STATE.
+    let mut task_to_enqueue: Option<Arc<Task>> = None;
+    let mut ipi_cpu: Option<usize> = None;
+    let mut woken = false;
+
+    {
+        let mut blocked = super::BLOCKED_TASKS.lock();
+        if let Some(task) = blocked.remove(&id) {
+            task.set_state(TaskState::Ready);
+            let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
+            let cpu_index = if home != usize::MAX { home } else { 0 };
+
+            // Compute the scheduling class for this task (done without GLOBAL).
+            let class = {
+                use crate::process::sched::SchedClassId;
+                match task.sched_policy() {
+                    crate::process::sched::SchedPolicy::RealTimeRR { .. }
+                    | crate::process::sched::SchedPolicy::RealTimeFifo { .. } => {
+                        SchedClassId::RealTime
+                    }
+                    crate::process::sched::SchedPolicy::Fair(_) => SchedClassId::Fair,
+                    crate::process::sched::SchedPolicy::Idle => SchedClassId::Idle,
+                }
+            };
+
+            if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
+                local_cpu.class_rqs.enqueue(class, task.clone());
+                local_cpu.need_resched = true;
+            }
+
+            ipi_cpu = if cpu_index != current_cpu_index() {
+                Some(cpu_index)
+            } else {
+                None
+            };
+            woken = true;
+            task_to_enqueue = None; // task is enqueued, no deferred drop needed
+        }
+    } // BLOCKED_TASKS lock released
+
+    if woken {
+        if let Some(ci) = ipi_cpu {
+            send_resched_ipi_to_cpu(ci);
+        }
+        restore_flags(saved_flags);
+        return true;
+    }
+
+    // --- Fallback path: task not yet in BLOCKED_TASKS ---
+    // Set wake_pending so block_current_task skips blocking.
+    {
         let mut scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref mut sched) = *scheduler {
-            sched.wake_task_locked(id)
-        } else {
-            (false, None)
+            let (fallback_woken, _) = sched.wake_task_locked(id);
+            woken = fallback_woken;
         }
-    };
+    }
+
     if let Some(ci) = ipi_cpu {
         send_resched_ipi_to_cpu(ci);
     }
@@ -767,69 +831,66 @@ pub fn suspend_task(id: TaskId) -> bool {
     let mut suspended = false;
     let mut ipi_to_cpu: Option<usize> = None;
 
-    {
-        let mut scheduler = GLOBAL_SCHED_STATE.lock();
-        if let Some(ref mut sched) = *scheduler {
-            let my_cpu = current_cpu_index();
-            let n = active_cpu_count();
+    let my_cpu = current_cpu_index();
+    let n = active_cpu_count();
 
-            // Check if the task is the current task on any CPU.
-            for ci in 0..n {
-                let task_id_on_cpu = LOCAL_SCHEDULERS[ci]
-                    .lock()
-                    .as_ref()
-                    .and_then(|cpu| cpu.current_task.as_ref().map(|t| (t.id, t.clone())));
-                if let Some((tid, current)) = task_id_on_cpu {
-                    if tid == id {
-                        current.set_state(TaskState::Blocked);
-                        sched.blocked_tasks.insert(current.id, current.clone());
-                        suspended = true;
-                        if ci == my_cpu {
-                            // Re-acquire LOCAL to yield.  The gap between the
-                            // probe above and this lock is safe because IRQs
-                            // are disabled (save_flags_and_cli), so no timer
-                            // tick can preempt us or mutate current_task.
-                            let mut local = LOCAL_SCHEDULERS[ci].lock();
-                            if let Some(ref mut cpu) = *local {
-                                switch_target = super::core_impl::yield_cpu_local(cpu, ci);
-                            }
-                        } else {
-                            // Cross-CPU: IPI will make the remote CPU preempt.
-                            ipi_to_cpu = Some(ci);
-                        }
-                        break;
-                    }
-                }
-            }
-
-            // Remove from ready queues (task was not running anywhere).
-            if !suspended {
-                for ci in 0..n {
-                    let removed = {
-                        let mut local = LOCAL_SCHEDULERS[ci].lock();
-                        if let Some(ref mut cpu) = *local {
-                            cpu.class_rqs.remove(id)
-                        } else {
-                            false
-                        }
-                    };
-                    if removed {
-                        if let Some(task) = sched.all_tasks.get(&id) {
-                            task.set_state(TaskState::Blocked);
-                            sched.blocked_tasks.insert(task.id, task.clone());
-                        }
-                        suspended = true;
-                        break;
-                    }
-                }
-            }
-
-            // Already blocked.
-            if !suspended && sched.blocked_tasks.contains_key(&id) {
+    // Check if the task is the current task on any CPU.
+    for ci in 0..n {
+        let task_id_on_cpu = LOCAL_SCHEDULERS[ci]
+            .lock()
+            .as_ref()
+            .and_then(|cpu| cpu.current_task.as_ref().map(|t| (t.id, t.clone())));
+        if let Some((tid, current)) = task_id_on_cpu {
+            if tid == id {
+                current.set_state(TaskState::Blocked);
+                current.home_cpu.store(ci, core::sync::atomic::Ordering::Relaxed);
+                super::BLOCKED_TASKS.lock().insert(current.id, current.clone());
                 suspended = true;
+                if ci == my_cpu {
+                    // Re-acquire LOCAL to yield.  The gap between the
+                    // probe above and this lock is safe because IRQs
+                    // are disabled (save_flags_and_cli), so no timer
+                    // tick can preempt us or mutate current_task.
+                    let mut local = LOCAL_SCHEDULERS[ci].lock();
+                    if let Some(ref mut cpu) = *local {
+                        switch_target = super::core_impl::yield_cpu_local(cpu, ci);
+                    }
+                } else {
+                    // Cross-CPU: IPI will make the remote CPU preempt.
+                    ipi_to_cpu = Some(ci);
+                }
+                break;
             }
         }
-    } // scheduler lock released before IPI and context switch
+    }
+
+    // Remove from ready queues (task was not running anywhere).
+    if !suspended {
+        for ci in 0..n {
+            let removed = {
+                let mut local = LOCAL_SCHEDULERS[ci].lock();
+                if let Some(ref mut cpu) = *local {
+                    cpu.class_rqs.remove(id)
+                } else {
+                    false
+                }
+            };
+            if removed {
+                if let Some(task) = get_task_by_id(id) {
+                    task.set_state(TaskState::Blocked);
+                    task.home_cpu.store(ci, core::sync::atomic::Ordering::Relaxed);
+                    super::BLOCKED_TASKS.lock().insert(task.id, task.clone());
+                }
+                suspended = true;
+                break;
+            }
+        }
+    }
+
+    // Already blocked.
+    if !suspended && super::BLOCKED_TASKS.lock().contains_key(&id) {
+        suspended = true;
+    }
 
     if let Some(ref target) = switch_target {
         unsafe {
@@ -852,34 +913,45 @@ pub fn suspend_task(id: TaskId) -> bool {
 pub fn resume_task(id: TaskId) -> bool {
     let saved_flags = save_flags_and_cli();
     let mut ipi_to_cpu: Option<usize> = None;
-    let resumed = {
-        let mut scheduler = GLOBAL_SCHED_STATE.lock();
-        if let Some(ref mut sched) = *scheduler {
-            if let Some(task) = sched.blocked_tasks.remove(&id) {
-                let _ = sched.clear_task_wake_deadline_locked(id);
-                task.set_state(TaskState::Ready);
-                let cpu_index = sched.task_cpu.get(&id).copied().unwrap_or(0);
-                let class = sched.class_table.class_for_task(&task);
-                if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
-                    local_cpu.class_rqs.enqueue(class, task);
-                    local_cpu.need_resched = true;
+
+    let mut task_to_enqueue: Option<Arc<Task>> = None;
+    {
+        let mut blocked = super::BLOCKED_TASKS.lock();
+        if let Some(task) = blocked.remove(&id) {
+            task.set_state(TaskState::Ready);
+            let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
+            let cpu_index = if home != usize::MAX { home } else { 0 };
+
+            let class = {
+                use crate::process::sched::SchedClassId;
+                match task.sched_policy() {
+                    crate::process::sched::SchedPolicy::RealTimeRR { .. }
+                    | crate::process::sched::SchedPolicy::RealTimeFifo { .. } => {
+                        SchedClassId::RealTime
+                    }
+                    crate::process::sched::SchedPolicy::Fair(_) => SchedClassId::Fair,
+                    crate::process::sched::SchedPolicy::Idle => SchedClassId::Idle,
                 }
-                if cpu_index != current_cpu_index() {
-                    ipi_to_cpu = Some(cpu_index);
-                }
-                true
-            } else {
-                false
+            };
+
+            if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
+                local_cpu.class_rqs.enqueue(class, task.clone());
+                local_cpu.need_resched = true;
             }
-        } else {
-            false
+
+            if cpu_index != current_cpu_index() {
+                ipi_to_cpu = Some(cpu_index);
+            }
+            drop(blocked);
+            task_to_enqueue = Some(task);
         }
-    };
+    }
+
     if let Some(ci) = ipi_to_cpu {
         send_resched_ipi_to_cpu(ci);
     }
     restore_flags(saved_flags);
-    resumed
+    task_to_enqueue.is_some()
 }
 
 /// Kill a task by ID (best-effort).
@@ -1001,7 +1073,7 @@ pub fn kill_task(id: TaskId) -> bool {
 
             // Remove from blocked map.
             if !killed {
-                if let Some(task) = sched.blocked_tasks.remove(&id) {
+                if let Some(task) = super::BLOCKED_TASKS.lock().remove(&id) {
                     let task_pid = task.pid;
                     let _ = sched.clear_task_wake_deadline_locked(id);
                     task.set_state(TaskState::Dead);

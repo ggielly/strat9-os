@@ -781,6 +781,7 @@ pub fn log_state(label: &str) {
                     .as_ref()
                     .map(|t| t.id.as_u64())
                     .unwrap_or(u64::MAX);
+                let blocked_len = super::BLOCKED_TASKS.lock().len();
                 log::info!(
                     "[sched][state] label={} cpu={} current={} rq_rt={} rq_fair={} rq_idle={} blocked={} need_resched={}",
                     label,
@@ -789,7 +790,7 @@ pub fn log_state(label: &str) {
                     cpu.class_rqs.real_time.len(),
                     cpu.class_rqs.fair.len(),
                     cpu.class_rqs.idle.len(),
-                    sched.blocked_tasks.len(),
+                    blocked_len,
                     cpu.need_resched
                 );
             }
@@ -833,7 +834,7 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
             out.cpu_count = cpu_count;
             out.pick_order = *sched.class_table.pick_order();
             out.steal_order = *sched.class_table.steal_order();
-            out.blocked_tasks = sched.blocked_tasks.len();
+            out.blocked_tasks = super::BLOCKED_TASKS.lock().len();
             for i in 0..cpu_count {
                 let local_guard = LOCAL_SCHEDULERS[i].lock();
                 if let Some(ref cpu) = *local_guard {

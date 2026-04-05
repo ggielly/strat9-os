@@ -4,7 +4,7 @@
 
 use crate::memory::AddressSpace;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use intrusive_collections::LinkedListLink;
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -284,6 +284,10 @@ pub struct Task {
     pub ticks: AtomicU64,
     /// Scheduling policy (Fair, RealTime, Idle)
     pub sched_policy: SyncUnsafeCell<crate::process::sched::SchedPolicy>,
+    /// Home CPU index for this task. Set when the task is first scheduled
+    /// or explicitly assigned. Used by `wake_task()` to route to the correct
+    /// per-CPU runqueue without acquiring `GLOBAL_SCHED_STATE`.
+    pub home_cpu: AtomicUsize,
     /// Virtual runtime for CFS
     pub vruntime: AtomicU64,
     /// Monotonic token identifying the currently valid FAIR runqueue entry.
@@ -889,6 +893,7 @@ impl Task {
             trampoline_arg0: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
+            home_cpu: AtomicUsize::new(usize::MAX),
             vruntime: AtomicU64::new(0),
             fair_rq_generation: AtomicU64::new(0),
             fair_on_rq: AtomicBool::new(false),
@@ -958,6 +963,7 @@ impl Task {
             trampoline_arg0: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
+            home_cpu: AtomicUsize::new(usize::MAX),
             vruntime: AtomicU64::new(0),
             fair_rq_generation: AtomicU64::new(0),
             fair_on_rq: AtomicBool::new(false),

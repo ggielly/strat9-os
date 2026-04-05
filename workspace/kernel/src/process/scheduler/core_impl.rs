@@ -33,7 +33,6 @@ impl GlobalSchedState {
     pub fn new() -> Self {
         crate::serial_println!("[trace][sched] GlobalSchedState::new enter");
         GlobalSchedState {
-            blocked_tasks: BTreeMap::new(),
             all_tasks: BTreeMap::new(),
             all_tasks_scan: Vec::new(),
             task_cpu: BTreeMap::new(),
@@ -184,6 +183,7 @@ impl GlobalSchedState {
             task_id.as_u64()
         );
         self.task_cpu.insert(task_id, cpu_index);
+        task.home_cpu.store(cpu_index, core::sync::atomic::Ordering::Relaxed);
         crate::serial_println!(
             "[trace][sched] add_task_on_cpu task_cpu inserted tid={}",
             task_id.as_u64()
@@ -344,25 +344,15 @@ impl GlobalSchedState {
     ///
     /// Returns `(was_woken, ipi_cpu)`. The caller must send a resched IPI to
     /// `ipi_cpu` after releasing the scheduler lock.
+    ///
+    /// NOTE: `blocked_tasks` lives in the separate `BLOCKED_TASKS` lock.
+    /// This method now only handles the fallback path (task not yet blocked,
+    /// set `wake_pending`). The primary wake path is in `wake_task()`.
     pub fn wake_task_locked(&mut self, id: TaskId) -> (bool, Option<usize>) {
         self.clear_task_wake_deadline_locked(id);
-        if let Some(task) = self.blocked_tasks.remove(&id) {
-            task.set_state(TaskState::Ready);
-            let cpu_index = self.task_cpu.get(&id).copied().unwrap_or(0);
-            {
-                let class = self.class_table.class_for_task(&task);
-                if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
-                    local_cpu.class_rqs.enqueue(class, task);
-                    local_cpu.need_resched = true;
-                }
-            }
-            let ipi = if cpu_index != current_cpu_index() {
-                Some(cpu_index)
-            } else {
-                None
-            };
-            (true, ipi)
-        } else if let Some(task) = self.all_tasks.get(&id) {
+        // Fallback: task is not yet in BLOCKED_TASKS (still transitioning to
+        // Blocked). Set wake_pending so block_current_task will skip blocking.
+        if let Some(task) = self.all_tasks.get(&id) {
             task.wake_pending
                 .store(true, core::sync::atomic::Ordering::Release);
             (true, None)
@@ -578,6 +568,7 @@ pub(super) fn steal_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Opti
             }
             if let Some(task) = sib.class_rqs.steal_candidate(&sib.class_table) {
                 sched.task_cpu.insert(task.id, cpu_index);
+                task.home_cpu.store(cpu_index, core::sync::atomic::Ordering::Relaxed);
                 if cpu_is_valid(cpu_index) {
                     CPU_STEAL_IN_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
                 }

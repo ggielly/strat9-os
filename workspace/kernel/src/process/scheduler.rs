@@ -529,15 +529,24 @@ pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
     crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { SpinLock::new(None) }; crate::arch::x86_64::percpu::MAX_CPUS];
 
-/// Global task registry — cold path: fork, exit, wake, block.
+/// Blocked tasks registry — hot path: block/wake.
+///
+/// This lock is **independent** of `GLOBAL_SCHED_STATE`. The block and wake
+/// paths acquire only this lock + the target CPU's `LOCAL_SCHEDULERS[cpu]`
+/// lock, avoiding contention with cold-path operations (fork, exit, kill).
+///
+/// Lock order: BLOCKED_TASKS before LOCAL (never the reverse).
+pub(crate) static BLOCKED_TASKS: SpinLock<BTreeMap<TaskId, Arc<Task>>> =
+    SpinLock::new(BTreeMap::new());
+
+/// Global task registry — cold path: fork, exit, identity lookups.
 ///
 /// Lock order: acquire GLOBAL_SCHED_STATE before LOCAL when both are needed.
 /// Per-CPU runqueues and current-task tracking live in `LOCAL_SCHEDULERS`.
+/// Blocked tasks are tracked in `BLOCKED_TASKS` (separate lock).
 /// This struct holds only data that is accessed by cold paths (fork, exit,
-/// wake, block) and is protected by the `GLOBAL_SCHED_STATE` lock.
+/// identity lookups) and is protected by the `GLOBAL_SCHED_STATE` lock.
 pub struct GlobalSchedState {
-    /// Tasks blocked waiting for an event (keyed by TaskId for O(log n) wake)
-    blocked_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// All tasks in the system (for lookup by TaskId)
     pub(crate) all_tasks: BTreeMap<TaskId, Arc<Task>>,
     /// Flat task snapshot used by IRQ-safe scans such as `tick_all_timers`.

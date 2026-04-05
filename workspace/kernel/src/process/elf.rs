@@ -1681,6 +1681,7 @@ pub fn load_elf_task_with_caps(
         sched_policy: crate::process::task::SyncUnsafeCell::new(Task::default_sched_policy(
             TaskPriority::Normal,
         )),
+        home_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
         vruntime: core::sync::atomic::AtomicU64::new(0),
         fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
         fair_on_rq: core::sync::atomic::AtomicBool::new(false),
