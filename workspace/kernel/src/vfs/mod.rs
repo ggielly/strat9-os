@@ -58,6 +58,9 @@ pub use scheme_router::{
 
 use crate::memory::{UserSliceRead, UserSliceWrite};
 
+// Re-export AT_FDCWD from the ABI so VFS callers can use it.
+pub use crate::syscall::numbers::AT_FDCWD;
+
 // ============================================================================
 // High-level VFS API
 // ============================================================================
@@ -88,6 +91,59 @@ pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
     let fd = unsafe { (&mut *task.process.fd_table.get()).insert(open_file) };
 
     Ok(fd)
+}
+
+/// Open a file relative to a directory FD.
+///
+/// - If `dir_fd == AT_FDCWD`, resolve against the process CWD (equivalent to `open()`).
+/// - Otherwise, resolve against the path of the given directory FD.
+///
+/// This is the foundation for capability-based path resolution: the directory
+/// FD acts as the root of the namespace for this operation, naturally
+/// preventing `../` escapes beyond the FD's subtree.
+pub fn open_at(dir_fd: u64, path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
+    if dir_fd == AT_FDCWD as u64 {
+        // Fall back to process CWD — original open() behavior.
+        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+        let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+        let abs = resolve_path(path, &cwd);
+        crate::silo::enforce_path_for_current_task(&abs, flags.contains(OpenFlags::READ) || flags.contains(OpenFlags::DIRECTORY), flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE), false)?;
+        open(&abs, flags)
+    } else {
+        // Resolve relative to the directory FD.
+        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+        let fd_table = unsafe { &*task.process.fd_table.get() };
+        let dir_file = fd_table.get(dir_fd as u32)?;
+        if !dir_file.flags().contains(FileFlags::DIRECTORY) {
+            return Err(SyscallError::NotADirectory);
+        }
+        let dir_path = dir_file.path();
+        let abs = resolve_path(path, dir_path);
+        crate::silo::enforce_path_for_current_task(&abs, flags.contains(OpenFlags::READ) || flags.contains(OpenFlags::DIRECTORY), flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE), false)?;
+        open(&abs, flags)
+    }
+}
+
+/// Stat a file relative to a directory FD.
+///
+/// Same resolution semantics as `open_at`.
+pub fn fstat_at(dir_fd: u64, path: &str) -> Result<FileStat, SyscallError> {
+    if dir_fd == AT_FDCWD as u64 {
+        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+        let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+        let abs = resolve_path(path, &cwd);
+        stat_path(&abs)
+    } else {
+        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+        let fd_table = unsafe { &*task.process.fd_table.get() };
+        let dir_file = fd_table.get(dir_fd as u32)?;
+        if !dir_file.flags().contains(FileFlags::DIRECTORY) {
+            return Err(SyscallError::NotADirectory);
+        }
+        let dir_path = dir_file.path();
+        let abs = resolve_path(path, dir_path);
+        stat_path(&abs)
+    }
 }
 
 /// Create a directory.
@@ -385,6 +441,31 @@ pub fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, Syscall
 
     let fd = open(&path, open_flags)?;
     Ok(fd as u64)
+}
+
+/// SYS_OPENAT (462): Open a file relative to a directory FD.
+pub fn sys_openat(dir_fd: u64, path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, SyscallError> {
+    const MAX_PATH_LEN: usize = 4096;
+    if path_len == 0 || path_len as usize > MAX_PATH_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let raw = read_user_path(path_ptr, path_len)?;
+    let open_flags = OpenFlags::from_bits_truncate(flags as u32);
+    let fd = open_at(dir_fd, &raw, open_flags)?;
+    Ok(fd as u64)
+}
+
+/// SYS_FSTATAT (463): Stat a file relative to a directory FD.
+pub fn sys_fstatat(dir_fd: u64, path_ptr: u64, path_len: u64, _flags: u64) -> Result<u64, SyscallError> {
+    const MAX_PATH_LEN: usize = 4096;
+    if path_len == 0 || path_len as usize > MAX_PATH_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let raw = read_user_path(path_ptr, path_len)?;
+    let st = fstat_at(dir_fd, &raw)?;
+    // TODO: copy stat struct to userspace — for now return error as placeholder
+    let _ = st;
+    Err(SyscallError::NotImplemented)
 }
 
 /// Syscall handler for reading from a file.

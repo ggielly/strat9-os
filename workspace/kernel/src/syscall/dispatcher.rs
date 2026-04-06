@@ -300,6 +300,10 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_POLL => super::poll::sys_poll(arg1, arg2, arg3),
         SYS_PPOLL => super::poll::sys_poll(arg1, arg2, 0),
 
+        // *at() syscalls — FD-relative path resolution ======================
+        SYS_OPENAT => crate::vfs::sys_openat(arg1, arg2, arg3, arg4),
+        SYS_FSTATAT => crate::vfs::sys_fstatat(arg1, arg2, arg3, arg4),
+
         // Network syscalls (500-599) ========================================
         SYS_NET_RECV => sys_net_recv(arg1, arg2),
         SYS_NET_SEND => sys_net_send(arg1, arg2),

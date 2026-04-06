@@ -146,6 +146,22 @@ pub const SYS_PWRITE: usize = 457;
 pub const SYS_POLL: usize = 460;
 pub const SYS_PPOLL: usize = 461;
 
+// Block 462-469: *at() syscalls (FD-relative path resolution)
+/// Base directory for *at() syscalls: use the process CWD.
+pub const AT_FDCWD: i64 = -100;
+/// Open a file relative to a directory FD.
+pub const SYS_OPENAT: usize = 462;
+/// Get file stat relative to a directory FD.
+pub const SYS_FSTATAT: usize = 463;
+/// Unlink a file relative to a directory FD.
+pub const SYS_UNLINKAT: usize = 464;
+/// Rename a file relative to directory FDs.
+pub const SYS_RENAMEAT: usize = 465;
+/// Create a directory relative to a directory FD.
+pub const SYS_MKDIRAT: usize = 466;
+/// Read a symlink relative to a directory FD.
+pub const SYS_READLINKAT: usize = 467;
+
 // Block 500-599: time / alarms
 pub const SYS_CLOCK_GETTIME: usize = 500;
 pub const SYS_NANOSLEEP: usize = 501;
