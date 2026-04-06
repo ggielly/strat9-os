@@ -249,6 +249,13 @@ fn build_child_task(
             cwd: crate::process::task::SyncUnsafeCell::new(
                 unsafe { &*parent.process.cwd.get() }.clone(),
             ),
+            // POSIX: cwd_fd IS inherited (capability to the CWD directory).
+            cwd_fd: core::sync::atomic::AtomicU64::new(
+                parent
+                    .process
+                    .cwd_fd
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            ),
             umask: core::sync::atomic::AtomicU32::new(
                 parent
                     .process
