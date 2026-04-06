@@ -285,24 +285,16 @@ unsafe impl GlobalAlloc for LockedHeap {
             }
             slab.with_mut_and_token(|s, token| s.alloc_block(ci, token))
         } else {
-            // --- buddy path (large allocation) ---
-            let pages_needed = (effective + 4095) / 4096;
-            let max_pages = 1usize << MAX_ORDER;
-            if pages_needed > max_pages {
-                return ptr::null_mut();
-            }
-            let order = pages_needed.next_power_of_two().trailing_zeros() as u8;
+            // --- vmalloc path (large allocation) ---
+            // Large heap allocations use the VM-backed arena: virtually contiguous
+            // but physically fragmented. No requirement for physically contiguous
+            // buddy blocks : fixes the fragmentation-induced panic issue (#48).
             if boot_reg {
-                crate::serial_println!(
-                    "[trace][heap] alloc buddy order={} pages_needed={}",
-                    order,
-                    pages_needed
-                );
+                crate::serial_println!("[trace][heap] alloc vmalloc size={}", effective);
             }
 
-            crate::sync::with_irqs_disabled(|token| match memory::allocate_frames(token, order) {
-                Ok(frame) => super::phys_to_virt(frame.start_address.as_u64()) as *mut u8,
-                Err(_) => ptr::null_mut(),
+            crate::sync::with_irqs_disabled(|token| {
+                crate::memory::vmalloc::vmalloc(effective, token).unwrap_or(ptr::null_mut())
             })
         };
 
@@ -336,22 +328,18 @@ unsafe impl GlobalAlloc for LockedHeap {
             let mut slab = SLAB_ALLOC.lock();
             slab.dealloc_block(ptr, ci);
         } else {
-            // --- buddy path: return page(s) to buddy ---
-            let pages_needed = (effective + 4095) / 4096;
-            let max_pages = 1usize << MAX_ORDER;
-            if pages_needed > max_pages {
-                return;
-            }
-            let order = pages_needed.next_power_of_two().trailing_zeros() as u8;
-
-            let hhdm = super::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
-            let phys_addr = (ptr as u64).wrapping_sub(hhdm);
-
-            if let Ok(frame) = PhysFrame::from_start_address(PhysAddr::new(phys_addr)) {
+            // --- vmalloc path: free via the vmalloc arena ---
+            // Check if the pointer is in the vmalloc arena range.
+            let addr = ptr as u64;
+            if addr >= crate::memory::vmalloc::VMALLOC_VIRT_START
+                && addr < crate::memory::vmalloc::VMALLOC_VIRT_END
+            {
                 crate::sync::with_irqs_disabled(|token| {
-                    memory::free_frames(token, frame, order);
+                    crate::memory::vmalloc::vfree(ptr, token);
                 });
             }
+            // else: pointer is outside vmalloc range — likely a stale or corrupt
+            // pointer. Silently ignore (same as the old buddy path behavior).
         }
     }
 }

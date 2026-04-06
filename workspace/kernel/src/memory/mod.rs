@@ -13,6 +13,7 @@ pub mod ownership;
 pub mod paging;
 pub mod region_cap;
 pub mod userslice;
+pub mod vmalloc;
 pub mod zone;
 
 use crate::{
