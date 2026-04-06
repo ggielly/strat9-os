@@ -566,6 +566,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     memory::boot_alloc::init_boot_allocator(&mmap_work[..mmap_work_len]);
     serial_println!("[init] Boot allocator ready.");
 
+    // Validate that all protected module ranges are consistent with the memory map
+    // before the buddy allocator starts managing these pages.
+    memory::boot_alloc::validate_protected_ranges(&mmap_work[..mmap_work_len]);
+
     let total_ram = mmap_work[..mmap_work_len]
         .iter()
         .filter(|region| {
