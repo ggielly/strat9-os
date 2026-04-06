@@ -63,6 +63,7 @@ impl CommandRegistry {
 
         // Memory
         registry.register("mem", mem::cmd_mem);
+        registry.register("heap", sys::cmd_heap);
 
         // Hardware / IPC / Diagnostics
         registry.register("lspci", hw::cmd_lspci);

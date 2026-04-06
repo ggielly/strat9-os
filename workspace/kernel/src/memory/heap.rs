@@ -359,45 +359,149 @@ fn alloc_error_handler(layout: Layout) -> ! {
     };
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
     let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+    let tid = crate::process::current_task_id()
+        .map(|t| t.as_u64())
+        .unwrap_or(0);
+    let task_name = crate::process::current_task_clone()
+        .map(|t| t.name)
+        .unwrap_or("<none>");
+
     if let Some(guard) = crate::memory::buddy::get_allocator().try_lock() {
         if let Some(alloc) = guard.as_ref() {
             let (total_pages, allocated_pages) = alloc.page_totals();
+            let free_pages = total_pages.saturating_sub(allocated_pages);
+            let fail_counts = crate::memory::buddy::buddy_alloc_fail_counts_snapshot();
+
             crate::serial_println!(
-                "[heap][oom] cpu={} irq={} size={} align={} effective={} pages={} order={} total_pages={} allocated_pages={} free_pages={}",
+                "[heap][oom] cpu={} irq={} tid={} task={} size={} align={} effective={}",
                 cpu,
                 irq_enabled,
+                tid,
+                task_name,
                 layout.size(),
                 layout.align(),
-                effective,
+                effective
+            );
+            crate::serial_println!(
+                "[heap][oom] pages={} order={} total={} alloc={} free={}",
                 pages_needed,
                 order,
                 total_pages,
                 allocated_pages,
-                total_pages.saturating_sub(allocated_pages)
+                free_pages
             );
+            // Dump buddy failure counts by order : high-order failures indicate
+            // fragmentation, not genuine memory pressure.
+            let mut fail_line = alloc::string::String::from("[heap][oom] buddy_fail_by_order:");
+            for (i, &count) in fail_counts.iter().enumerate() {
+                use core::fmt::Write;
+                let _ = write!(fail_line, " o{}={} ", i, count);
+            }
+            crate::serial_println!("{}", fail_line);
+
+            // Heuristic: if we have plenty of free pages but failed at a high
+            // order, this is fragmentation, not OOM.
+            if free_pages > (total_pages / 4) && order >= 8 {
+                crate::serial_println!(
+                    "[heap][oom] DIAGNOSIS: fragmentation-induced high-order alloc failure \
+                     ({} free pages but no order-{} block)",
+                    free_pages,
+                    order
+                );
+            }
         } else {
             crate::serial_println!(
-                "[heap][oom] cpu={} irq={} size={} align={} effective={} pages={} order={} allocator=uninitialized",
+                "[heap][oom] cpu={} irq={} tid={} task={} size={} order={} allocator=uninitialized",
                 cpu,
                 irq_enabled,
+                tid,
+                task_name,
                 layout.size(),
-                layout.align(),
-                effective,
-                pages_needed,
                 order
             );
         }
     } else {
         crate::serial_println!(
-            "[heap][oom] cpu={} irq={} size={} align={} effective={} pages={} order={} allocator=locked",
+            "[heap][oom] cpu={} irq={} tid={} task={} size={} order={} allocator=locked",
             cpu,
             irq_enabled,
+            tid,
+            task_name,
             layout.size(),
-            layout.align(),
-            effective,
-            pages_needed,
             order
         );
     }
     panic!("allocation error: {:?}", layout)
+}
+
+/// Dump heap and buddy allocator diagnostics to the serial console.
+///
+/// Safe to call from the shell or debug tooling. Prints:
+/// - Total/allocated/free pages
+/// - Per-order buddy free list head counts
+/// - Buddy allocation failure counts by order (fragmentation indicator)
+/// - Slab free list head pointers
+pub fn dump_diagnostics() {
+    crate::serial_println!("[heap][diag] === Heap Diagnostics ===");
+
+    // Buddy allocator stats
+    if let Some(guard) = crate::memory::buddy::get_allocator().try_lock() {
+        if let Some(alloc) = guard.as_ref() {
+            let (total_pages, allocated_pages) = alloc.page_totals();
+            crate::serial_println!(
+                "[heap][diag] buddy: total={} pages, allocated={} pages, free={} pages",
+                total_pages,
+                allocated_pages,
+                total_pages.saturating_sub(allocated_pages)
+            );
+
+            // Per-zone free list heads
+            for zi in 0..crate::memory::zone::ZoneType::COUNT {
+                let zone = alloc.get_zone(zi);
+                let zone_name = match zi {
+                    x if x == crate::memory::zone::ZoneType::DMA as usize => "DMA",
+                    x if x == crate::memory::zone::ZoneType::Normal as usize => "Normal",
+                    _ => "HighMem",
+                };
+                let mut line = alloc::string::String::from("[heap][diag] ");
+                use core::fmt::Write;
+                let _ = write!(line, "zone={} free_heads:", zone_name);
+                for order in 0..=crate::memory::zone::MAX_ORDER {
+                    let count = zone.free_list_count(order as u8);
+                    if count > 0 {
+                        let _ = write!(line, " o{}={} ", order, count);
+                    }
+                }
+                crate::serial_println!("{}", line);
+            }
+        }
+    } else {
+        crate::serial_println!("[heap][diag] buddy: allocator locked (retry later)");
+    }
+
+    // Buddy failure counts
+    let fail_counts = crate::memory::buddy::buddy_alloc_fail_counts_snapshot();
+    let mut has_fails = false;
+    for (i, &count) in fail_counts.iter().enumerate() {
+        if count > 0 {
+            has_fails = true;
+        }
+        crate::serial_println!("[heap][diag] buddy_fail[{}]: {}", i, count);
+    }
+    if has_fails {
+        crate::serial_println!(
+            "[heap][diag] => non-zero buddy_fail counts indicate fragmentation pressure"
+        );
+    }
+
+    // Slab stats
+    if let Some(_guard) = SLAB_ALLOC.try_lock() {
+        crate::serial_println!(
+            "[heap][diag] slab: lock acquired (diagnostic info not yet tracked per-class)"
+        );
+    } else {
+        crate::serial_println!("[heap][diag] slab: locked (retry later)");
+    }
+
+    crate::serial_println!("[heap][diag] === End Diagnostics ===");
 }

@@ -154,6 +154,26 @@ impl Zone {
     pub fn available_pages(&self) -> usize {
         self.page_count.saturating_sub(self.allocated)
     }
+
+    /// Count the number of free blocks at a given order.
+    ///
+    /// Walks the intrusive free list. Safe because we only read the next
+    /// pointer from the frame metadata (which is safe when the block is free).
+    pub fn free_list_count(&self, order: u8) -> usize {
+        let mut count = 0usize;
+        let mut phys = self.free_lists[order as usize];
+        while phys != 0 {
+            count += 1;
+            // Read next pointer from the frame metadata.
+            let meta = crate::memory::frame::get_meta(PhysAddr::new(phys));
+            phys = if meta.next() == crate::memory::frame::FRAME_META_LINK_NONE {
+                0
+            } else {
+                meta.next()
+            };
+        }
+        count
+    }
 }
 
 // SAFETY: access is protected by the allocator lock.
