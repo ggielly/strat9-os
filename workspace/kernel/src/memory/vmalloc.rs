@@ -36,7 +36,7 @@
 use crate::{
     memory::{
         frame::PhysFrame,
-        paging::{map_page, unmap_page},
+        paging::{map_page_kernel, unmap_page_kernel},
         phys_to_virt,
     },
     serial_println,
@@ -55,8 +55,9 @@ use x86_64::{
 /// Placed at 0xffffc000_0000_0000 — well above the HHDM direct map.
 pub const VMALLOC_VIRT_START: u64 = 0xffff_c000_0000_0000;
 
-/// Total size of the vmalloc arena: 256 MiB.
-pub const VMALLOC_SIZE: usize = 256 * 1024 * 1024;
+/// Total size of the vmalloc arena: 1 GiB.
+/// Increased from the initial 256 MiB to accommodate heavy workloads.
+pub const VMALLOC_SIZE: usize = 1024 * 1024 * 1024;
 
 /// End virtual address of the vmalloc arena.
 pub const VMALLOC_VIRT_END: u64 = VMALLOC_VIRT_START + VMALLOC_SIZE as u64;
@@ -64,8 +65,9 @@ pub const VMALLOC_VIRT_END: u64 = VMALLOC_VIRT_START + VMALLOC_SIZE as u64;
 /// Number of pages in the arena.
 const VMALLOC_PAGES: usize = VMALLOC_SIZE / 4096;
 
-/// Maximum single allocation size: 64 MiB (limited by bitmap allocator).
-const VMALLOC_MAX_ALLOC: usize = 64 * 1024 * 1024;
+/// Maximum single allocation size: 256 MiB.
+/// Increased from 64 MiB to accommodate large buffers without fragmentation.
+const VMALLOC_MAX_ALLOC: usize = 256 * 1024 * 1024;
 
 // ─── Bitmap-based virtual range allocator ────────────────────────────────────
 
@@ -187,7 +189,8 @@ struct Vmalloc {
     bitmap: VmallocBitmap,
     /// Active allocations. Fixed-size array to avoid heap allocation during
     /// init (which would recursively call vmalloc and deadlock).
-    allocations: [Option<VmallocAlloc>; 128],
+    /// Increased from 128 to 512 to accommodate heavy workloads.
+    allocations: [Option<VmallocAlloc>; 512],
     /// Number of valid entries in `allocations`.
     alloc_count: usize,
     /// Total allocation failures.
@@ -299,12 +302,12 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
         let page_virt = virt_base + (i as u64 * 4096);
         let page = Page::containing_address(VirtAddr::new(page_virt));
         let x86_frame = X86PhysFrame::containing_address(frame.start_address);
-        if map_page(page, x86_frame, page_flags).is_err() {
+        if map_page_kernel(page, x86_frame, page_flags).is_err() {
             // Rollback mappings and physical pages.
             for j in 0..i {
                 let pv = virt_base + (j as u64 * 4096);
                 let pg = Page::containing_address(VirtAddr::new(pv));
-                let _ = unmap_page(pg);
+                let _ = unmap_page_kernel(pg);
             }
             for frame in &frames {
                 crate::memory::free_frame(token, *frame);
@@ -329,7 +332,7 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
         for i in 0..pages {
             let pv = virt_base + (i as u64 * 4096);
             let pg = Page::containing_address(VirtAddr::new(pv));
-            let _ = unmap_page(pg);
+            let _ = unmap_page_kernel(pg);
             crate::memory::free_frame(token, frames[i]);
         }
         vm.fail_count += 1;
@@ -351,61 +354,83 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
 ///
 /// Unmaps each page from the kernel page tables and returns physical pages
 /// to the buddy allocator.
+///
+/// ## Deadlock prevention
+///
+/// The `frames` Vec is extracted from the allocation record inside a scope
+/// that holds VMALLOC.lock(), then dropped AFTER that scope exits. This
+/// prevents recursive deadlock: if the Vec's internal capacity was itself
+/// allocated via vmalloc, dropping it under the lock would call vfree()
+/// again → recursive lock → deadlock.
 pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) {
     if ptr.is_null() {
         return;
     }
 
-    let mut guard = VMALLOC.lock();
-    let vm = guard.as_mut().unwrap();
-
     let addr = ptr as u64;
     if addr < VMALLOC_VIRT_START || addr >= VMALLOC_VIRT_END {
-        serial_println!("[vmalloc] vfree: pointer 0x{:x} outside arena", addr);
+        // Not a vmalloc pointer — could be from some other allocator.
         return;
     }
 
     let page_idx = ((addr - VMALLOC_VIRT_START) / 4096) as usize;
 
-    // Find the allocation record.
-    let mut found_idx: Option<usize> = None;
-    for i in 0..vm.alloc_count {
-        if let Some(ref a) = vm.allocations[i] {
-            let a_start = (a.virt_start - VMALLOC_VIRT_START) / 4096;
-            let a_end = a_start + (a.page_count as u64);
-            let pi = page_idx as u64;
-            if (pi >= a_start) && (pi < a_end) {
-                found_idx = Some(i);
-                break;
+    // Extract allocation data inside the lock scope.
+    // The frames Vec is moved out so it can be dropped outside the lock.
+    let (frames, page_count) = {
+        let mut guard = VMALLOC.lock();
+        let vm = guard.as_mut().unwrap();
+
+        // Find the allocation record.
+        let mut found_idx: Option<usize> = None;
+        for i in 0..vm.alloc_count {
+            if let Some(ref a) = vm.allocations[i] {
+                let a_start = (a.virt_start - VMALLOC_VIRT_START) / 4096;
+                let a_end = a_start + (a.page_count as u64);
+                let pi = page_idx as u64;
+                if (pi >= a_start) && (pi < a_end) {
+                    found_idx = Some(i);
+                    break;
+                }
             }
         }
-    }
 
-    let Some(pos) = found_idx else {
-        serial_println!("[vmalloc] vfree: no allocation record for 0x{:x}", addr);
-        return;
-    };
+        let Some(pos) = found_idx else {
+            serial_println!("[vmalloc] vfree: no allocation record for 0x{:x}", addr);
+            return;
+        };
 
-    let alloc = vm.allocations[pos].take().unwrap();
+        // Move the Vec and metadata out of the record.
+        let alloc = vm.allocations[pos].take().unwrap();
+        let frames = alloc.frames;
+        let page_count = alloc.page_count;
+        let virt_start = alloc.virt_start;
+
+        // Swap the last entry into the freed slot to keep the array compact.
+        let last = vm.alloc_count - 1;
+        if pos != last {
+            vm.allocations[pos] = vm.allocations[last].take();
+        }
+        vm.alloc_count -= 1;
+
+        // Mark the virtual range as free — still under the lock.
+        let start_idx = ((virt_start - VMALLOC_VIRT_START) / 4096) as usize;
+        vm.bitmap.free_range(start_idx, page_count);
+        vm.search_hint = vm.search_hint.min(start_idx);
+
+        (frames, page_count)
+    }; // VMALLOC lock released here — frames Vec is now outside the lock
 
     // Unmap and free each physical page.
-    for (i, frame) in alloc.frames.iter().enumerate() {
-        let page_virt = alloc.virt_start + (i as u64 * 4096);
-        let page = Page::containing_address(VirtAddr::new(page_virt));
-        let _ = unmap_page(page);
-        crate::memory::free_frame(token, *frame);
+    for i in 0..page_count {
+        let page_start = (addr & !(4095u64)) + (i as u64 * 4096);
+        let page = Page::containing_address(VirtAddr::new(page_start));
+        let _ = unmap_page_kernel(page);
+        if i < frames.len() {
+            crate::memory::free_frame(token, frames[i]);
+        }
     }
-
-    // Mark the virtual range as free.
-    let start_idx = (alloc.virt_start - VMALLOC_VIRT_START) / 4096;
-    vm.bitmap.free_range(start_idx as usize, alloc.page_count);
-    vm.search_hint = vm.search_hint.min(start_idx as usize);
-    // Swap the last entry into the freed slot to keep the array compact.
-    let last = vm.alloc_count - 1;
-    if pos != last {
-        vm.allocations[pos] = vm.allocations[last].take();
-    }
-    vm.alloc_count -= 1;
+    // frames Vec is dropped here — outside the lock, no recursive deadlock
 }
 
 /// Dump vmalloc diagnostics to the serial console.
