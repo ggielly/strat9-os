@@ -325,8 +325,10 @@ const fn align_down(value: u64, align: u64) -> u64 {
 /// Performs three checks:
 /// 1. **Non-zero count**: at least one module must be registered.
 /// 2. **No overlaps**: protected ranges must not overlap with each other.
-/// 3. **Within memory regions**: each protected range must fall within a valid
-///    `Free` or `Reclaim` memory region from the boot memory map.
+/// 3. **Accounted in memory map**: each protected range must fall within a
+///    memory region from the boot memory map (typically `Reserved` after
+///   `reserve_modules` has carved them out of `Free`/`Reclaim` regions,
+///    or still within `Free`/`Reclaim` if the module was not loaded).
 ///
 /// Panics on any failure — the kernel cannot safely proceed if module ranges
 /// are corrupted or inconsistent with the memory map.
@@ -354,12 +356,12 @@ pub fn validate_protected_ranges(regions: &[MemoryRegion]) {
         active[active_len] = (start, end);
         active_len += 1;
 
-        // Check 3: range must be within a valid memory region.
+        // Check 3: range must fall within a known memory region.
+        // After `reserve_modules` carves out module pages, they land in
+        // `Reserved` regions — so we must accept ALL region kinds, not just
+        // Free/Reclaim.
         let mut found_region = false;
         for region in regions {
-            if !matches!(region.kind, MemoryKind::Free | MemoryKind::Reclaim) {
-                continue;
-            }
             let rstart = region.base;
             let rend = region.base.saturating_add(region.size);
             if start >= rstart && end <= rend {
@@ -370,7 +372,7 @@ pub fn validate_protected_ranges(regions: &[MemoryRegion]) {
         if !found_region {
             crate::serial_println!(
                 "[PANIC] Protected module range #{} (0x{:x}..0x{:x}) \
-                 is not within any Free/Reclaim memory region!",
+                 is not within any known memory region!",
                 i, start, end
             );
             panic!("Protected module range validation failed: range outside memory map");
