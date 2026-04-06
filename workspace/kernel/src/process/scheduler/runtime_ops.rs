@@ -380,7 +380,35 @@ pub fn finish_interrupt_switch() {
         }
         core::hint::spin_loop();
     }
+
+    // Drop the old task Arc outside the lock so that KernelStack::drop
+    // (buddy allocator) does not run while any scheduler lock is held.
     let _ = task_to_drop;
+
+    // Deliver pending signals to the resumed task if it is about to return
+    // to Ring 3 via iretq.  The SyscallFrame lives on this task's kernel
+    // stack at interrupt_rsp(); any modifications we make here are picked
+    // up directly by the naked assembly stub's `pop`/`iretq` sequence.
+    //
+    // SAFETY: interrupt_rsp() is the address of the SyscallFrame written by
+    // maybe_preempt_from_interrupt when saving the outgoing task's context.
+    // We are now running on that task's kernel stack (the assembly stub
+    // already did `mov rsp, next_rsp`), so the frame at interrupt_rsp() is
+    // valid and above (lower in virtual address space than) our current RSP.
+    if let Some(task) = current_task_clone_try() {
+        if !task.is_kernel()
+            && task.resume_kind() == crate::process::task::ResumeKind::IretFrame
+        {
+            let frame_rsp = task.interrupt_rsp();
+            if frame_rsp != 0 {
+                let frame =
+                    unsafe { &mut *(frame_rsp as *mut crate::syscall::SyscallFrame) };
+                if frame.iret_cs & 3 == 3 {
+                    crate::process::signal::deliver_pending_signal(frame);
+                }
+            }
+        }
+    }
 }
 
 /// Yield the current task to allow other tasks to run (cooperative).
@@ -679,6 +707,16 @@ pub fn maybe_preempt_from_interrupt(
 
     if decision.is_some() && cpu_is_valid(cpu_index) {
         CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Deliver pending signals when the LOCAL lock is released and we are
+    // about to return to Ring 3 without performing a context switch.
+    // (The switch case is handled in finish_interrupt_switch on the new
+    // task's stack, where the new task's iretq frame is accessible.)
+    if let Some(ref d) = decision {
+        if d.next_rsp == 0 && current_frame.iret_cs & 3 == 3 {
+            crate::process::signal::deliver_pending_signal(current_frame);
+        }
     }
 
     decision

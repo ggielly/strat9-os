@@ -689,8 +689,24 @@ fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
     // has completed and the task is running on its own stack.
     crate::arch::x86_64::sti();
 
-    // User tasks still transition to Ring 3 via iretq later and will restore
-    // their own RFLAGS there.
+    // Deliver any pending signals to Ring 3 tasks before their first
+    // kernel→user transition.  The seeded interrupt frame at
+    // task.interrupt_rsp() is the iretq target; modifying it here
+    // transparently redirects the task into its signal handler.
+    //
+    // SAFETY: interrupt_rsp() was written by seed_interrupt_frame() and
+    // lives on this task's kernel stack.  We are executing on that stack
+    // now; the frame is at a higher address than our current RSP.
+    if is_user_entry {
+        if let Some(task) = crate::process::scheduler::current_task_clone_try() {
+            let frame_rsp = task.interrupt_rsp();
+            if frame_rsp != 0 {
+                let frame =
+                    unsafe { &mut *(frame_rsp as *mut crate::syscall::SyscallFrame) };
+                crate::process::signal::deliver_pending_signal(frame);
+            }
+        }
+    }
 
     let entry_fn: extern "C" fn(u64) -> ! = unsafe { core::mem::transmute(entry as usize) };
     entry_fn(arg0)
