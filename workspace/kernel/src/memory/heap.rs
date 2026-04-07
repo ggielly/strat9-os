@@ -34,6 +34,22 @@ const NUM_SLABS: usize = SLAB_SIZES.len();
 /// Allocations with effective size above this threshold bypass the slab.
 const MAX_SLAB_SIZE: usize = 2048;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KernelHeapBackend {
+    Slab,
+    Vmalloc,
+}
+
+#[inline]
+pub fn classify_kernel_heap_backend(layout: Layout) -> KernelHeapBackend {
+    let effective = layout.size().max(layout.align());
+    if effective <= MAX_SLAB_SIZE {
+        KernelHeapBackend::Slab
+    } else {
+        KernelHeapBackend::Vmalloc
+    }
+}
+
 // =============================================================================
 // CRITICAL: Slab corruption detection
 //
@@ -347,6 +363,24 @@ unsafe impl GlobalAlloc for LockedHeap {
 
 #[global_allocator]
 static HEAP_ALLOCATOR: LockedHeap = LockedHeap;
+
+/// Compatibility facade over the current global kernel heap policy.
+///
+/// Callers that need an explicit heap allocation entry point, rather than
+/// relying on `Box`/`Vec`/`GlobalAlloc`, should use this helper. The selected
+/// backend remains the current heap policy:
+/// - small allocations -> slab
+/// - large allocations -> vmalloc
+#[inline]
+pub unsafe fn alloc_kernel_heap(layout: Layout) -> *mut u8 {
+    HEAP_ALLOCATOR.alloc(layout)
+}
+
+/// Free memory previously returned by [`alloc_kernel_heap`].
+#[inline]
+pub unsafe fn dealloc_kernel_heap(ptr: *mut u8, layout: Layout) {
+    HEAP_ALLOCATOR.dealloc(ptr, layout);
+}
 
 fn log_common_oom_header(layout: Layout, effective: usize) {
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();

@@ -25,7 +25,7 @@ impl DmaAllocator for KernelDma {
         let pages = (size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
         let frame =
-            crate::sync::with_irqs_disabled(|token| crate::memory::allocate_frames(token, order))
+            crate::sync::with_irqs_disabled(|token| crate::memory::allocate_phys_contiguous(token, order))
                 .map_err(|_| nic_buffers::DmaAllocError)?;
         let phys = frame.start_address.as_u64();
         let virt = memory::phys_to_virt(phys) as *mut u8;
@@ -43,7 +43,7 @@ impl DmaAllocator for KernelDma {
         let frame =
             crate::memory::PhysFrame::containing_address(x86_64::PhysAddr::new(region.phys));
         crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_frames(token, frame, order);
+            crate::memory::free_phys_contiguous(token, frame, order);
         });
     }
 }

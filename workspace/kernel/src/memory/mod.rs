@@ -19,6 +19,7 @@ pub mod zone;
 use crate::{
     boot::entry::MemoryRegion, capability::CapId, process::get_task_by_pid, sync::IrqDisabledToken,
 };
+use core::alloc::Layout;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Once;
 
@@ -74,6 +75,7 @@ pub use block::{
 pub use block_meta::{get_block_meta, resolve_handle};
 pub use buddy::get_allocator;
 pub use frame::{AllocError, FrameAllocOptions, FrameAllocator, FramePurpose, PhysFrame};
+pub use heap::KernelHeapBackend;
 pub use mapping_index::{MappingIndex, MappingRef};
 pub use ownership::{BlockState, OwnerEntry, OwnerError, OwnershipTable, RemoveRefResult};
 pub use region_cap::{
@@ -210,12 +212,33 @@ pub fn allocate_frames(token: &IrqDisabledToken, order: u8) -> Result<PhysFrame,
     buddy::alloc(token, order)
 }
 
+/// Allocate a physically contiguous block of `2^order` pages.
+///
+/// This API is the explicit contiguous-physical allocator for DMA rings,
+/// MMIO-adjacent buffers, large hardware descriptors, and similar cases.
+/// Prefer this name over `allocate_frames()` at call sites where physical
+/// contiguity is the actual requirement.
+#[inline]
+pub fn allocate_phys_contiguous(
+    token: &IrqDisabledToken,
+    order: u8,
+) -> Result<PhysFrame, AllocError> {
+    allocate_frames(token, order)
+}
+
 /// Free `2^order` contiguous physical frames.
 ///
 /// Requires an `IrqDisabledToken` proving that IRQs are disabled on the calling CPU.
 #[inline]
 pub fn free_frames(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
     buddy::free(token, frame, order);
+}
+
+/// Free a physically contiguous block previously returned by
+/// [`allocate_phys_contiguous`].
+#[inline]
+pub fn free_phys_contiguous(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
+    free_frames(token, frame, order);
 }
 
 /// Allocate a single **zeroed** physical frame with `KernelData` purpose.
@@ -242,6 +265,53 @@ pub fn allocate_frame(token: &IrqDisabledToken) -> Result<PhysFrame, AllocError>
 #[inline]
 pub fn free_frame(token: &IrqDisabledToken, frame: PhysFrame) {
     free_frames(token, frame, 0);
+}
+
+/// Return the currently selected backend for a kernel heap allocation request.
+///
+/// This makes the current heap routing policy explicit at call sites and in
+/// diagnostics, instead of hiding it behind `GlobalAlloc`.
+#[inline]
+pub fn kernel_heap_backend_for(layout: Layout) -> KernelHeapBackend {
+    heap::classify_kernel_heap_backend(layout)
+}
+
+/// Explicit compatibility entry point for kernel heap allocation.
+///
+/// Today this still uses the existing global heap policy:
+/// - small allocations -> slab
+/// - large allocations -> vmalloc
+///
+/// The goal is to provide a named API that can be migrated gradually, instead
+/// of leaving backend selection implicit everywhere through `GlobalAlloc`.
+#[inline]
+pub unsafe fn alloc_kernel_heap(layout: Layout) -> *mut u8 {
+    heap::alloc_kernel_heap(layout)
+}
+
+/// Free memory previously returned by [`alloc_kernel_heap`].
+#[inline]
+pub unsafe fn dealloc_kernel_heap(ptr: *mut u8, layout: Layout) {
+    heap::dealloc_kernel_heap(ptr, layout);
+}
+
+/// Allocate virtually contiguous kernel memory backed by fragmented physical
+/// pages.
+///
+/// This is the explicit large-allocation API for kernel callers that require a
+/// large contiguous virtual range but do not require physical contiguity.
+#[inline]
+pub fn allocate_kernel_virtual(
+    size: usize,
+    token: &IrqDisabledToken,
+) -> Result<*mut u8, vmalloc::VmallocError> {
+    vmalloc::vmalloc(size, token)
+}
+
+/// Free memory previously returned by [`allocate_kernel_virtual`].
+#[inline]
+pub fn free_kernel_virtual(ptr: *mut u8, token: &IrqDisabledToken) {
+    vmalloc::vfree(ptr, token);
 }
 
 /// Allocate a zeroed 4 KiB frame suitable for DMA operations.
