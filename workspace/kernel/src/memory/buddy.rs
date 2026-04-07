@@ -318,6 +318,8 @@ impl BuddyAllocator {
 
             return PhysFrame::from_start_address(PhysAddr::new(frame_phys)).ok();
         }
+        // Exhausted all orders : record the failure for diagnostics.
+        crate::memory::buddy::record_buddy_alloc_fail(order);
         None
     }
 
@@ -708,6 +710,41 @@ impl BuddyAllocator {
 }
 
 static BUDDY_ALLOCATOR: SpinLock<Option<BuddyAllocator>> = SpinLock::new(None);
+
+/// Per-order allocation failure counters.
+///
+/// `BUDDY_ALLOC_FAIL_COUNTS[order]` counts how many times a request for
+/// `order` failed to find a free block at `order` or any higher order.
+/// These are incremented in `alloc_from_zone` when the loop exhausts all
+/// orders without finding a free block.
+///
+/// Read via `buddy_alloc_fail_counts_snapshot()` for diagnostics.
+static BUDDY_ALLOC_FAIL_COUNTS: [core::sync::atomic::AtomicUsize;
+    crate::memory::zone::MAX_ORDER + 1] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::memory::zone::MAX_ORDER + 1];
+
+/// Records a buddy allocation failure for the given order.
+///
+/// Called from `alloc_from_zone` when no free block is available at any
+/// order >= `order`. Increments the per-order counter for diagnostics.
+pub(crate) fn record_buddy_alloc_fail(order: u8) {
+    let idx = order as usize;
+    if idx <= crate::memory::zone::MAX_ORDER {
+        BUDDY_ALLOC_FAIL_COUNTS[idx].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Returns the buddy allocation failure counts by order.
+///
+/// Use this for diagnostics — e.g., to determine whether a heap panic is
+/// caused by genuine memory pressure or by high-order fragmentation.
+pub fn buddy_alloc_fail_counts_snapshot() -> [usize; crate::memory::zone::MAX_ORDER + 1] {
+    let mut out = [0usize; crate::memory::zone::MAX_ORDER + 1];
+    for (i, counter) in BUDDY_ALLOC_FAIL_COUNTS.iter().enumerate() {
+        out[i] = counter.load(core::sync::atomic::Ordering::Relaxed);
+    }
+    out
+}
 
 /// Returns the global buddy lock address for deadlock tracing.
 pub fn debug_buddy_lock_addr() -> usize {
@@ -1180,6 +1217,11 @@ impl BuddyAllocator {
         let cached_pages = LOCAL_CACHED_FRAMES.load(AtomicOrdering::Relaxed);
         allocated_pages = allocated_pages.saturating_sub(cached_pages);
         (total_pages, allocated_pages)
+    }
+
+    /// Get a reference to a zone by index.
+    pub fn get_zone(&self, idx: usize) -> &Zone {
+        &self.zones[idx]
     }
 
     /// Snapshot zones without heap allocation.

@@ -2,6 +2,7 @@
 mod clear;
 mod cpuinfo;
 mod health;
+mod heap;
 mod reboot;
 mod scheduler;
 mod shutdown;
@@ -24,6 +25,7 @@ mod wasm_run;
 pub use clear::cmd_clear;
 pub use cpuinfo::cmd_cpuinfo;
 pub use health::cmd_health;
+pub use heap::cmd_heap;
 pub use reboot::cmd_reboot;
 pub use scheduler::cmd_scheduler;
 pub use shutdown::cmd_shutdown;
