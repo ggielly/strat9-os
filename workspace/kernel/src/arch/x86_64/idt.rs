@@ -344,7 +344,17 @@ extern "C" fn lapic_timer_inner(
     }
     crate::process::scheduler::timer_tick();
     super::apic::eoi();
-    let _ = frame;
+
+    // Deliver pending POSIX signals before returning to Ring 3 via iretq.
+    // This is the critical path that closes issue #47: previously, signals
+    // were only delivered after syscalls, so a Ring 3 task that never made
+    // syscalls would starve its pending signals indefinitely. The timer IRQ
+    // fires regularly, making it the right place to check for pending signals
+    // on the interrupt return path — exactly like Linux's signal delivery on
+    // interrupt return (see Linux `do_notify_resume()`).
+    if from_ring3 {
+        crate::process::signal::deliver_pending_signal(frame);
+    }
 
     // Temporarily keep timer IRQs side-effect free with respect to stack
     // switching. The raw `iretq`-based resume path is not yet correct for all
