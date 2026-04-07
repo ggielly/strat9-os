@@ -419,6 +419,11 @@ enum SignalDeliveryMode {
     InterruptReturn,
 }
 
+/// Count of signals deferred on the interrupt-return path because their
+/// default action (Term/Core/Stop) or missing restorer requires a task-switch
+/// or kill, which is not safe from timer-IRQ context.  Exposed for diagnostics.
+pub static SIGNAL_IRQ_DEFERRED_COUNT: AtomicU64 = AtomicU64::new(0);
+
 fn deliver_pending_signal_inner(
     frame: &mut crate::syscall::SyscallFrame,
     mode: SignalDeliveryMode,
@@ -432,6 +437,10 @@ fn deliver_pending_signal_inner(
         return false;
     }
 
+    // A task runs on exactly one CPU at a time, so no concurrent delivery to
+    // the same `pending_signals` is possible.  peek_one_unblocked + a separate
+    // try_consume is therefore race-free: nobody else can consume the signal
+    // between the peek and the consume while we are executing.
     let signal = match task.pending_signals.peek_one_unblocked(&task.blocked_signals) {
         Some(s) => s,
         None => return false,
@@ -443,25 +452,40 @@ fn deliver_pending_signal_inner(
     };
 
     if action.is_ignore() {
-        let _ = task.pending_signals.try_consume(signal);
+        debug_assert!(
+            task.pending_signals.try_consume(signal),
+            "signal vanished between peek and consume (ignore path)"
+        );
         return true;
     }
 
     if action.is_default() {
         match signal.default_action() {
             DefaultAction::Ign | DefaultAction::Cont => {
-                let _ = task.pending_signals.try_consume(signal);
+                debug_assert!(
+                    task.pending_signals.try_consume(signal),
+                    "signal vanished between peek and consume (ign/cont path)"
+                );
                 return true;
             }
             DefaultAction::Stop => {
                 if mode == SignalDeliveryMode::InterruptReturn {
+                    // Stop requires task suspension — not safe from IRQ context.
+                    // Leave the signal pending; the syscall-return path will deliver it.
+                    SIGNAL_IRQ_DEFERRED_COUNT.fetch_add(1, Ordering::Relaxed);
                     return false;
                 }
-                let _ = task.pending_signals.try_consume(signal);
+                debug_assert!(
+                    task.pending_signals.try_consume(signal),
+                    "signal vanished between peek and consume (stop path)"
+                );
                 return true;
             }
             DefaultAction::Term | DefaultAction::Core => {
                 if mode == SignalDeliveryMode::InterruptReturn {
+                    // kill_task requires a scheduler operation — not safe from IRQ context.
+                    // Leave the signal pending; the syscall-return path will deliver it.
+                    SIGNAL_IRQ_DEFERRED_COUNT.fetch_add(1, Ordering::Relaxed);
                     return false;
                 }
                 if !task.pending_signals.try_consume(signal) {
@@ -485,6 +509,8 @@ fn deliver_pending_signal_inner(
 
     if restorer == 0 {
         if mode == SignalDeliveryMode::InterruptReturn {
+            // Cannot safely kill from IRQ context; leave signal pending.
+            SIGNAL_IRQ_DEFERRED_COUNT.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         if !task.pending_signals.try_consume(signal) {
@@ -579,8 +605,15 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
     deliver_pending_signal_inner(frame, SignalDeliveryMode::Normal)
 }
 
-/// Deliver pending signals on the IRQ-return path without triggering unsafe
-/// kill/switch side effects from timer interrupt context.
+/// Deliver a pending signal on the IRQ-return path to Ring 3.
+///
+/// Only one signal is delivered per call (the lowest-numbered unblocked one).
+/// Signals whose default action is Term, Core, or Stop, and signals without a
+/// restorer, are **deferred** — they remain pending and are delivered on the
+/// next syscall-return path, which is safe to kill or suspend the task.
+/// The deferral count is tracked in [`SIGNAL_IRQ_DEFERRED_COUNT`].
+///
+/// This mirrors Linux's `do_notify_resume()` called from `ret_from_intr`.
 pub fn deliver_pending_signal_on_interrupt_return(
     frame: &mut crate::syscall::SyscallFrame,
 ) -> bool {
