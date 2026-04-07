@@ -44,6 +44,7 @@ use crate::{
     sync::{IrqDisabledToken, SpinLock},
 };
 use core::mem::size_of;
+use core::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use x86_64::{
     structures::paging::{Page, PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB},
     VirtAddr,
@@ -93,7 +94,7 @@ impl FrameList {
         } else {
             pages_needed.next_power_of_two().trailing_zeros() as u8
         };
-        let storage_frame = crate::memory::allocate_frames(token, order).ok()?;
+        let storage_frame = crate::memory::buddy::alloc(token, order).ok()?;
         let ptr = phys_to_virt(storage_frame.start_address.as_u64()) as *mut PhysFrame;
         Some(Self {
             ptr,
@@ -114,7 +115,7 @@ impl FrameList {
     }
 
     fn free_storage(self, token: &IrqDisabledToken) {
-        crate::memory::free_frames(token, self.storage_frame, self.storage_order);
+        crate::memory::buddy::free(token, self.storage_frame, self.storage_order);
     }
 }
 
@@ -333,6 +334,11 @@ impl Vmalloc {
 
 static VMALLOC: SpinLock<Vmalloc> = SpinLock::new(Vmalloc::new());
 
+/// Counts ZeroSize and SizeExceedsPolicy rejections.
+/// These are caller-error pre-validation checks that do not need the VMALLOC
+/// lock — tracked separately to avoid locking the allocator for a pure policy check.
+pub static VMALLOC_POLICY_REJECT_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// Ensure the vmalloc kernel subtree exists in the canonical kernel page table.
 ///
 /// The map/unmap bootstrap intentionally leaves the intermediate page-table
@@ -421,22 +427,22 @@ pub fn last_failure_snapshot() -> Option<VmallocFailureSnapshot> {
 ///
 /// Returns a typed error so heap diagnostics can report the actual backend
 /// failure instead of assuming buddy fragmentation.
-pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, VmallocError> {
+///
+/// Prefer [`crate::memory::allocate_kernel_virtual`] over calling this directly.
+pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, VmallocError> {
     if size == 0 {
-        let mut guard = VMALLOC.lock();
-        return Err(record_failure(&mut guard, size, 0, VmallocError::ZeroSize));
+        // Pure caller-error: no allocator state involved. Use the lock-free
+        // policy counter instead of acquiring VMALLOC just for bookkeeping.
+        VMALLOC_POLICY_REJECT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+        return Err(VmallocError::ZeroSize);
     }
     if size > VMALLOC_MAX_ALLOC {
-        let mut guard = VMALLOC.lock();
-        return Err(record_failure(
-            &mut guard,
-            size,
-            size.saturating_add(4095) / 4096,
-            VmallocError::SizeExceedsPolicy {
-                requested: size,
-                max_allowed: VMALLOC_MAX_ALLOC,
-            },
-        ));
+        // Same: policy limit exceeded — no allocator state to record.
+        VMALLOC_POLICY_REJECT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+        return Err(VmallocError::SizeExceedsPolicy {
+            requested: size,
+            max_allowed: VMALLOC_MAX_ALLOC,
+        });
     }
 
     // Ensure initialized (lazy init on first use).
@@ -555,6 +561,9 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, Vmalloc
         frames,
     });
     vm.alloc_count += 1;
+    // Reset last_failure on success so diagnostics reflect the most recent attempt.
+    // Note: this clears any prior failure snapshot — call last_failure_snapshot()
+    // before the next allocation if you need to preserve a failure for later inspection.
     vm.last_failure = None;
 
     Ok(virt_base as *mut u8)

@@ -343,6 +343,26 @@ unsafe impl GlobalAlloc for LockedHeap {
                         );
                     }
                 }
+                // Catch layout mismatches where a vmalloc pointer is freed with
+                // a small layout (classify_kernel_heap_backend routes to Slab).
+                // This means the caller passed a different layout to dealloc than
+                // was used for alloc — a GlobalAlloc contract violation.
+                #[cfg(debug_assertions)]
+                {
+                    let addr = ptr as u64;
+                    if addr >= crate::memory::vmalloc::VMALLOC_VIRT_START
+                        && addr < crate::memory::vmalloc::VMALLOC_VIRT_END
+                    {
+                        crate::serial_println!(
+                            "[heap][bug] slab dealloc: ptr {:#x} is in vmalloc range — layout mismatch",
+                            addr
+                        );
+                        debug_assert!(
+                            false,
+                            "slab dealloc with vmalloc pointer — alloc/dealloc layout mismatch"
+                        );
+                    }
+                }
                 let mut slab = SLAB_ALLOC.lock();
                 slab.dealloc_block(ptr, ci);
             }
@@ -355,9 +375,24 @@ unsafe impl GlobalAlloc for LockedHeap {
                     crate::sync::with_irqs_disabled(|token| {
                         crate::memory::free_kernel_virtual(ptr, token);
                     });
+                } else {
+                    // Pointer is outside the vmalloc arena with a large-allocation
+                    // layout. This is a leak — warn loudly in debug builds.
+                    #[cfg(debug_assertions)]
+                    {
+                        crate::serial_println!(
+                            "[heap][bug] vmalloc dealloc: ptr {:#x} outside vmalloc arena \
+                             [{:#x}..{:#x}] — memory leaked",
+                            addr,
+                            crate::memory::vmalloc::VMALLOC_VIRT_START,
+                            crate::memory::vmalloc::VMALLOC_VIRT_END,
+                        );
+                        debug_assert!(
+                            false,
+                            "vmalloc dealloc with out-of-range pointer — memory leaked"
+                        );
+                    }
                 }
-                // else: pointer is outside vmalloc range — likely a stale or corrupt
-                // pointer. Silently ignore (same as the old buddy path behavior).
             }
         }
     }
