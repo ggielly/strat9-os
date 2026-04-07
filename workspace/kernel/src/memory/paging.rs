@@ -1,7 +1,7 @@
 //! Virtual Memory Management (Paging) for Strat9-OS
 //!
 //! Uses the `x86_64` crate's `OffsetPageTable` which is designed for the HHDM
-//! (Higher Half Direct Map) pattern — exactly what Limine provides.
+//! (Higher Half Direct Map) pattern : exactly what Limine provides.
 //!
 //! Provides map/unmap/translate operations on the active page table.
 
@@ -14,7 +14,10 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 
-use crate::memory::frame::{FrameAllocOptions, FramePurpose};
+use crate::{
+    memory::frame::{FrameAllocOptions, FramePurpose},
+    sync::SpinLock,
+};
 
 /// Wrapper around the buddy allocator implementing the x86_64 crate's `FrameAllocator` trait.
 ///
@@ -78,6 +81,13 @@ static mut PAGING_READY: bool = false;
 
 /// Physical address of the kernel's level-4 page table (set at init, never changes).
 static mut KERNEL_CR3: PhysAddr = PhysAddr::new_truncate(0);
+
+/// Serializes mutations of the canonical kernel page tables.
+///
+/// The active-CR3 mapping helpers are still caller-synchronized by their own
+/// higher-level address-space locks, but kernel-global mappings such as vmalloc
+/// must not race while allocating or wiring intermediate page-table levels.
+static KERNEL_PT_LOCK: SpinLock<()> = SpinLock::new(());
 
 /// Returns whether initialized.
 pub fn is_initialized() -> bool {
@@ -185,6 +195,7 @@ pub fn map_page_kernel(
     if !is_initialized() {
         return Err("Paging not initialized");
     }
+    let _guard = KERNEL_PT_LOCK.lock();
     // SAFETY: KERNEL_CR3 is set once during init and never changes.
     let kernel_cr3 = unsafe { *(&raw const KERNEL_CR3) };
     let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
@@ -228,6 +239,7 @@ pub fn unmap_page_kernel(page: Page<Size4KiB>) -> Result<X86PhysFrame<Size4KiB>,
     if !is_initialized() {
         return Err("Paging not initialized");
     }
+    let _guard = KERNEL_PT_LOCK.lock();
     // SAFETY: KERNEL_CR3 is set once during init and never changes.
     let kernel_cr3 = unsafe { *(&raw const KERNEL_CR3) };
     let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());

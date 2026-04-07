@@ -25,7 +25,7 @@
 //! ## Deallocation
 //!
 //! 1. Unmap each page from the kernel page tables.
-//! 2. Flush stale TLB entries across CPUs.
+//! 2. Flush stale TLB entries across CPUs for the unmapped range.
 //! 3. Return the virtual range to the extent allocator.
 //! 4. Free each physical page back to the frame allocator.
 //!
@@ -47,7 +47,7 @@
 //! allocation to prevent deadlock with the buddy allocator.
 
 use crate::{
-    arch::x86_64::tlb::shootdown_all,
+    arch::x86_64::tlb::shootdown_range,
     memory::{
         frame::PhysFrame,
         paging::{map_page_kernel, unmap_page_kernel},
@@ -643,7 +643,11 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) {
                 let _ = unmap_page_kernel(page);
             }
 
-            shootdown_all();
+            let range_start = VirtAddr::new(virt_start);
+            let range_end = VirtAddr::new(virt_start + (page_count as u64 * 4096));
+            // Invalidate the unmapped vmalloc range on all CPUs before the
+            // frames can be returned to the allocator and later reused.
+            shootdown_range(range_start, range_end);
 
             vm.alloc_count = vm.alloc_count.saturating_sub(1);
             vm.allocated_pages = vm.allocated_pages.saturating_sub(page_count);
