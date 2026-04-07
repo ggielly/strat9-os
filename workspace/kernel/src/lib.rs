@@ -588,6 +588,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     serial_println!("[init] Buddy allocator ready.");
 
+    // Initialize the vmalloc arena (VM-backed large heap allocations)
+    memory::vmalloc::init();
+    serial_println!("[init] Vmalloc arena ready.");
+
     debug_assert!(
         !arch::x86_64::interrupts_enabled(),
         "interrupts must be disabled after buddy allocator init"

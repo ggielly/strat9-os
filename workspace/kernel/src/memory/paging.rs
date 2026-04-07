@@ -169,7 +169,41 @@ pub fn map_page(
     Ok(())
 }
 
-/// Unmap a virtual page, returning the physical frame it was mapped to.
+/// Map a page into the kernel's canonical page tables (not the active CR3).
+///
+/// This ensures that the mapping is visible from all address spaces, because
+/// every user address space clones the kernel half (PML4[256..512]) from the
+/// kernel's L4 table at creation time.
+///
+/// Used by vmalloc so that heap allocations are kernel-global.
+/// Intermediate page tables are allocated from the buddy allocator as needed.
+pub fn map_page_kernel(
+    page: Page<Size4KiB>,
+    frame: X86PhysFrame<Size4KiB>,
+    flags: PageTableFlags,
+) -> Result<(), &'static str> {
+    if !is_initialized() {
+        return Err("Paging not initialized");
+    }
+    // SAFETY: KERNEL_CR3 is set once during init and never changes.
+    let kernel_cr3 = unsafe { *(&raw const KERNEL_CR3) };
+    let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
+    let level_4_virt = phys_offset + kernel_cr3.as_u64();
+    // SAFETY: level_4_virt points to the kernel's L4 table via HHDM.
+    let mapper = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
+    let mut mapper = unsafe { OffsetPageTable::new(mapper, phys_offset) };
+    let mut allocator = BuddyFrameAllocator;
+
+    unsafe {
+        mapper
+            .map_to(page, frame, flags, &mut allocator)
+            .map_err(|_| "Failed to map page (kernel)")?
+            .flush();
+    }
+    Ok(())
+}
+
+/// Unmap a page from the active CR3, returning the physical frame.
 pub fn unmap_page(page: Page<Size4KiB>) -> Result<X86PhysFrame<Size4KiB>, &'static str> {
     if !is_initialized() {
         return Err("Paging not initialized");
@@ -181,6 +215,27 @@ pub fn unmap_page(page: Page<Size4KiB>) -> Result<X86PhysFrame<Size4KiB>, &'stat
     let mapper = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
     let mut mapper = unsafe { OffsetPageTable::new(mapper, phys_offset) };
     let (frame, flush) = mapper.unmap(page).map_err(|_| "Failed to unmap page")?;
+    flush.flush();
+    Ok(frame)
+}
+
+/// Unmap a page from the kernel's canonical page tables.
+///
+/// This is the counterpart to `map_page_kernel`. It removes the mapping from
+/// the kernel's L4 table so that the page is no longer visible in any address
+/// space.
+pub fn unmap_page_kernel(page: Page<Size4KiB>) -> Result<X86PhysFrame<Size4KiB>, &'static str> {
+    if !is_initialized() {
+        return Err("Paging not initialized");
+    }
+    // SAFETY: KERNEL_CR3 is set once during init and never changes.
+    let kernel_cr3 = unsafe { *(&raw const KERNEL_CR3) };
+    let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
+    let level_4_virt = phys_offset + kernel_cr3.as_u64();
+    // SAFETY: level_4_virt points to the kernel's L4 table via HHDM.
+    let mapper = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
+    let mut mapper = unsafe { OffsetPageTable::new(mapper, phys_offset) };
+    let (frame, flush) = mapper.unmap(page).map_err(|_| "Failed to unmap page (kernel)")?;
     flush.flush();
     Ok(frame)
 }
