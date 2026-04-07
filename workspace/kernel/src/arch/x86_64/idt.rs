@@ -344,7 +344,15 @@ extern "C" fn lapic_timer_inner(
     }
     crate::process::scheduler::timer_tick();
     super::apic::eoi();
-    let _ = frame;
+
+    // Deliver pending POSIX signals before returning to Ring 3 via iretq.
+    // On this IRQ-return path we only perform deliveries that are safe from
+    // timer interrupt context; fatal/default actions remain deferred to the
+    // normal syscall-side delivery path, which may kill/switch the current
+    // task and is not yet validated on the raw timer-iret path.
+    if from_ring3 {
+        crate::process::signal::deliver_pending_signal_on_interrupt_return(frame);
+    }
 
     // Temporarily keep timer IRQs side-effect free with respect to stack
     // switching. The raw `iretq`-based resume path is not yet correct for all

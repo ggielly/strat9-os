@@ -1670,6 +1670,7 @@ pub fn load_elf_task_with_caps(
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: super::signal::SignalSet::new(),
         blocked_signals: super::signal::SignalSet::new(),
+        irq_signal_delivery_blocked: core::sync::atomic::AtomicBool::new(false),
         signal_stack: SyncUnsafeCell::new(None),
         itimers: super::timer::ITimers::new(),
         wake_pending: core::sync::atomic::AtomicBool::new(false),
