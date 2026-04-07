@@ -246,6 +246,39 @@ impl SignalSet {
             }
         }
     }
+
+    /// Peek the next pending unblocked signal without consuming it.
+    pub fn peek_one_unblocked(&self, blocked: &SignalSet) -> Option<Signal> {
+        let pending = self.mask.load(Ordering::Acquire);
+        let blocked_mask = blocked.mask.load(Ordering::Acquire);
+        let unblocked = pending & !blocked_mask;
+        if unblocked == 0 {
+            return None;
+        }
+        let signal_num = unblocked.trailing_zeros() + 1;
+        Signal::from_u32(signal_num)
+    }
+
+    /// Try to consume a specific pending signal.
+    pub fn try_consume(&self, signal: Signal) -> bool {
+        let bit = signal.bit();
+        loop {
+            let pending = self.mask.load(Ordering::Acquire);
+            if (pending & bit) == 0 {
+                return false;
+            }
+            let new_pending = pending & !bit;
+            match self.mask.compare_exchange_weak(
+                pending,
+                new_pending,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue,
+            }
+        }
+    }
 }
 
 /// Signal action flags
@@ -380,8 +413,21 @@ pub struct SignalFrame {
     pub magic: u64,
 }
 
-/// Performs the deliver pending signal operation.
-pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SignalDeliveryMode {
+    Normal,
+    InterruptReturn,
+}
+
+/// Count of signals deferred on the interrupt-return path because their
+/// default action (Term/Core/Stop) or missing restorer requires a task-switch
+/// or kill, which is not safe from timer-IRQ context.  Exposed for diagnostics.
+pub static SIGNAL_IRQ_DEFERRED_COUNT: AtomicU64 = AtomicU64::new(0);
+
+fn deliver_pending_signal_inner(
+    frame: &mut crate::syscall::SyscallFrame,
+    mode: SignalDeliveryMode,
+) -> bool {
     let task = match crate::process::current_task_clone() {
         Some(t) => t,
         None => return false,
@@ -391,10 +437,22 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
         return false;
     }
 
-    let signal = match task
-        .pending_signals
-        .consume_one_unblocked(&task.blocked_signals)
+    if mode == SignalDeliveryMode::InterruptReturn
+        && task.irq_signal_delivery_blocked.load(Ordering::Acquire)
     {
+        return false;
+    }
+
+    if mode == SignalDeliveryMode::Normal {
+        task.irq_signal_delivery_blocked
+            .store(false, Ordering::Release);
+    }
+
+    // A task runs on exactly one CPU at a time, so there is no concurrent
+    // signal-consumption path executing on behalf of the same task. Signal
+    // senders may still add new bits concurrently, so try_consume remains the
+    // authority for actually claiming the signal selected by the peek.
+    let signal = match task.pending_signals.peek_one_unblocked(&task.blocked_signals) {
         Some(s) => s,
         None => return false,
     };
@@ -405,17 +463,49 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
     };
 
     if action.is_ignore() {
+        debug_assert!(
+            task.pending_signals.try_consume(signal),
+            "signal vanished between peek and consume (ignore path)"
+        );
         return true;
     }
 
     if action.is_default() {
         match signal.default_action() {
-            DefaultAction::Ign => return true,
-            DefaultAction::Cont => return true,
+            DefaultAction::Ign | DefaultAction::Cont => {
+                debug_assert!(
+                    task.pending_signals.try_consume(signal),
+                    "signal vanished between peek and consume (ign/cont path)"
+                );
+                return true;
+            }
             DefaultAction::Stop => {
+                if mode == SignalDeliveryMode::InterruptReturn {
+                    // Stop requires task suspension — not safe from IRQ context.
+                    // Leave the signal pending; the syscall-return path will deliver it.
+                    task.irq_signal_delivery_blocked
+                        .store(true, Ordering::Release);
+                    SIGNAL_IRQ_DEFERRED_COUNT.fetch_add(1, Ordering::Relaxed);
+                    return false;
+                }
+                debug_assert!(
+                    task.pending_signals.try_consume(signal),
+                    "signal vanished between peek and consume (stop path)"
+                );
                 return true;
             }
             DefaultAction::Term | DefaultAction::Core => {
+                if mode == SignalDeliveryMode::InterruptReturn {
+                    // kill_task requires a scheduler operation — not safe from IRQ context.
+                    // Leave the signal pending; the syscall-return path will deliver it.
+                    task.irq_signal_delivery_blocked
+                        .store(true, Ordering::Release);
+                    SIGNAL_IRQ_DEFERRED_COUNT.fetch_add(1, Ordering::Relaxed);
+                    return false;
+                }
+                if !task.pending_signals.try_consume(signal) {
+                    return false;
+                }
                 log::info!(
                     "[signal] killing pid {} on SIG{}",
                     task.pid,
@@ -433,9 +523,23 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
     let flags = action.flags;
 
     if restorer == 0 {
+        if mode == SignalDeliveryMode::InterruptReturn {
+            // Cannot safely kill from IRQ context; leave signal pending.
+            task.irq_signal_delivery_blocked
+                .store(true, Ordering::Release);
+            SIGNAL_IRQ_DEFERRED_COUNT.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if !task.pending_signals.try_consume(signal) {
+            return false;
+        }
         log::warn!("[signal] no restorer for SIG{}, killing", signal.as_u32());
         crate::process::kill_task(task.id);
         return true;
+    }
+
+    if !task.pending_signals.try_consume(signal) {
+        return false;
     }
 
     let user_rsp = frame.iret_rsp;
@@ -479,6 +583,12 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
             slice.copy_from(bytes);
         }
         Err(_) => {
+            if mode == SignalDeliveryMode::InterruptReturn {
+                task.irq_signal_delivery_blocked
+                    .store(true, Ordering::Release);
+                task.pending_signals.add(signal);
+                return false;
+            }
             log::warn!("[signal] fault writing signal frame, killing");
             crate::process::kill_task(task.id);
             return true;
@@ -507,6 +617,26 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
     frame.rdx = 0;
 
     true
+}
+
+/// Performs the deliver pending signal operation.
+pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool {
+    deliver_pending_signal_inner(frame, SignalDeliveryMode::Normal)
+}
+
+/// Deliver a pending signal on the IRQ-return path to Ring 3.
+///
+/// Only one signal is delivered per call (the lowest-numbered unblocked one).
+/// Signals whose default action is Term, Core, or Stop, and signals without a
+/// restorer, are **deferred** — they remain pending and are delivered on the
+/// next syscall-return path, which is safe to kill or suspend the task.
+/// The deferral count is tracked in [`SIGNAL_IRQ_DEFERRED_COUNT`].
+///
+/// This mirrors Linux's `do_notify_resume()` called from `ret_from_intr`.
+pub fn deliver_pending_signal_on_interrupt_return(
+    frame: &mut crate::syscall::SyscallFrame,
+) -> bool {
+    deliver_pending_signal_inner(frame, SignalDeliveryMode::InterruptReturn)
 }
 
 /// Signal alternate stack
