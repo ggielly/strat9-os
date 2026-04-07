@@ -267,6 +267,7 @@ fn build_child_task(
         pending_signals: SignalSet::new(),
         // POSIX: signal mask IS inherited.
         blocked_signals: parent_blocked,
+        irq_signal_delivery_blocked: AtomicBool::new(false),
         signal_stack: SyncUnsafeCell::new(parent_sigstack),
         itimers: crate::process::timer::ITimers::new(),
         wake_pending: AtomicBool::new(false),

@@ -1,4 +1,4 @@
-// Heap allocator: slab sub-allocator + buddy fallback for large objects.
+// Heap allocator: slab sub-allocator + VM-backed large-allocation path.
 //
 // Small allocations (effective size ≤ 2048 B) come from per-size-class slab
 // free lists.  Each slab class draws whole pages from the buddy allocator and
@@ -6,8 +6,9 @@
 // list, so the buddy's page counter stabilises after warm-up instead of
 // growing on every tiny allocation.
 //
-// Large allocations (> 2048 B) go directly to the buddy allocator, exactly
-// as before.
+// Large allocations (> 2048 B) go through the kernel vmalloc backend:
+// virtually contiguous, physically fragmented, and independent from
+// high-order physically contiguous buddy blocks.
 //
 // Lock ordering: SLAB_ALLOC (outer) may call the frame-allocation helpers.
 // Those helpers can hit a CPU-local cache (no global buddy lock) or fall back
@@ -347,6 +348,58 @@ unsafe impl GlobalAlloc for LockedHeap {
 #[global_allocator]
 static HEAP_ALLOCATOR: LockedHeap = LockedHeap;
 
+fn log_common_oom_header(layout: Layout, effective: usize) {
+    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+    let tid = crate::process::current_task_id()
+        .map(|t| t.as_u64())
+        .unwrap_or(0);
+    let task_name = crate::process::current_task_clone()
+        .map(|t| t.name)
+        .unwrap_or("<none>");
+
+    crate::serial_println!(
+        "[heap][oom] cpu={} irq={} tid={} task={} size={} align={} effective={}",
+        cpu,
+        irq_enabled,
+        tid,
+        task_name,
+        layout.size(),
+        layout.align(),
+        effective
+    );
+}
+
+fn log_buddy_snapshot() -> Option<(usize, usize, usize)> {
+    if let Some(guard) = crate::memory::buddy::get_allocator().try_lock() {
+        if let Some(alloc) = guard.as_ref() {
+            let (total_pages, allocated_pages) = alloc.page_totals();
+            let free_pages = total_pages.saturating_sub(allocated_pages);
+            let fail_counts = crate::memory::buddy::buddy_alloc_fail_counts_snapshot();
+
+            crate::serial_println!(
+                "[heap][oom] buddy: total={} alloc={} free={}",
+                total_pages,
+                allocated_pages,
+                free_pages
+            );
+
+            let mut fail_line = alloc::string::String::from("[heap][oom] buddy_fail_by_order:");
+            for (i, &count) in fail_counts.iter().enumerate() {
+                use core::fmt::Write;
+                let _ = write!(fail_line, " o{}={} ", i, count);
+            }
+            crate::serial_println!("{}", fail_line);
+            return Some((total_pages, allocated_pages, free_pages));
+        }
+        crate::serial_println!("[heap][oom] buddy: allocator uninitialized");
+        return None;
+    }
+
+    crate::serial_println!("[heap][oom] buddy: allocator locked");
+    None
+}
+
 /// Allocates error handler.
 #[alloc_error_handler]
 fn alloc_error_handler(layout: Layout) -> ! {
@@ -357,79 +410,96 @@ fn alloc_error_handler(layout: Layout) -> ! {
     } else {
         pages_needed.next_power_of_two().trailing_zeros() as u8
     };
-    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-    let irq_enabled = crate::arch::x86_64::interrupts_enabled();
-    let tid = crate::process::current_task_id()
-        .map(|t| t.as_u64())
-        .unwrap_or(0);
-    let task_name = crate::process::current_task_clone()
-        .map(|t| t.name)
-        .unwrap_or("<none>");
+    log_common_oom_header(layout, effective);
 
-    if let Some(guard) = crate::memory::buddy::get_allocator().try_lock() {
-        if let Some(alloc) = guard.as_ref() {
-            let (total_pages, allocated_pages) = alloc.page_totals();
-            let free_pages = total_pages.saturating_sub(allocated_pages);
-            let fail_counts = crate::memory::buddy::buddy_alloc_fail_counts_snapshot();
-
+    if effective <= MAX_SLAB_SIZE {
+        crate::serial_println!(
+            "[heap][oom] backend=slab effective={} class_max={} refill_order=0",
+            effective,
+            MAX_SLAB_SIZE
+        );
+        if let Some((total_pages, _, free_pages)) = log_buddy_snapshot() {
             crate::serial_println!(
-                "[heap][oom] cpu={} irq={} tid={} task={} size={} align={} effective={}",
-                cpu,
-                irq_enabled,
-                tid,
-                task_name,
-                layout.size(),
-                layout.align(),
-                effective
-            );
-            crate::serial_println!(
-                "[heap][oom] pages={} order={} total={} alloc={} free={}",
+                "[heap][oom] slab-refill pages={} buddy_order={}",
                 pages_needed,
-                order,
-                total_pages,
-                allocated_pages,
-                free_pages
+                order
             );
-            // Dump buddy failure counts by order : high-order failures indicate
-            // fragmentation, not genuine memory pressure.
-            let mut fail_line = alloc::string::String::from("[heap][oom] buddy_fail_by_order:");
-            for (i, &count) in fail_counts.iter().enumerate() {
-                use core::fmt::Write;
-                let _ = write!(fail_line, " o{}={} ", i, count);
-            }
-            crate::serial_println!("{}", fail_line);
-
-            // Heuristic: if we have plenty of free pages but failed at a high
-            // order, this is fragmentation, not OOM.
             if free_pages > (total_pages / 4) && order >= 8 {
                 crate::serial_println!(
-                    "[heap][oom] DIAGNOSIS: fragmentation-induced high-order alloc failure \
+                    "[heap][oom] diagnosis=fragmentation-induced high-order buddy failure \
                      ({} free pages but no order-{} block)",
                     free_pages,
                     order
                 );
             }
-        } else {
-            crate::serial_println!(
-                "[heap][oom] cpu={} irq={} tid={} task={} size={} order={} allocator=uninitialized",
-                cpu,
-                irq_enabled,
-                tid,
-                task_name,
-                layout.size(),
-                order
-            );
         }
     } else {
         crate::serial_println!(
-            "[heap][oom] cpu={} irq={} tid={} task={} size={} order={} allocator=locked",
-            cpu,
-            irq_enabled,
-            tid,
-            task_name,
-            layout.size(),
+            "[heap][oom] backend=vmalloc request_pages={} legacy_buddy_order_hint={}",
+            pages_needed,
             order
         );
+        match crate::memory::vmalloc::last_failure_snapshot() {
+            Some(snapshot) => {
+                crate::serial_println!(
+                    "[heap][oom] vmalloc_last_failure size={} pages={} error={:?}",
+                    snapshot.size,
+                    snapshot.pages,
+                    snapshot.error
+                );
+                match snapshot.error {
+                    crate::memory::vmalloc::VmallocError::SizeExceedsPolicy {
+                        requested,
+                        max_allowed,
+                    } => {
+                        crate::serial_println!(
+                            "[heap][oom] diagnosis=vmalloc policy limit exceeded requested={} max_allowed={}",
+                            requested,
+                            max_allowed
+                        );
+                    }
+                    crate::memory::vmalloc::VmallocError::VirtualRangeExhausted => {
+                        crate::serial_println!(
+                            "[heap][oom] diagnosis=kernel virtual allocation arena exhausted or fragmented"
+                        );
+                    }
+                    crate::memory::vmalloc::VmallocError::PhysicalMemoryExhausted => {
+                        crate::serial_println!(
+                            "[heap][oom] diagnosis=vmalloc could not acquire enough physical pages"
+                        );
+                    }
+                    crate::memory::vmalloc::VmallocError::MetadataAllocationFailed => {
+                        crate::serial_println!(
+                            "[heap][oom] diagnosis=vmalloc metadata allocation failed"
+                        );
+                    }
+                    crate::memory::vmalloc::VmallocError::KernelMapFailed => {
+                        crate::serial_println!(
+                            "[heap][oom] diagnosis=kernel page-table mapping failed during vmalloc"
+                        );
+                    }
+                    crate::memory::vmalloc::VmallocError::AllocationRecordsExhausted {
+                        max_records,
+                    } => {
+                        crate::serial_println!(
+                            "[heap][oom] diagnosis=vmalloc allocation-record table exhausted max_records={}",
+                            max_records
+                        );
+                    }
+                    crate::memory::vmalloc::VmallocError::ZeroSize => {
+                        crate::serial_println!(
+                            "[heap][oom] diagnosis=zero-sized vmalloc request"
+                        );
+                    }
+                }
+            }
+            None => {
+                crate::serial_println!(
+                    "[heap][oom] vmalloc_last_failure unavailable"
+                );
+            }
+        }
+        let _ = log_buddy_snapshot();
     }
     panic!("allocation error: {:?}", layout)
 }
@@ -502,6 +572,8 @@ pub fn dump_diagnostics() {
     } else {
         crate::serial_println!("[heap][diag] slab: locked (retry later)");
     }
+
+    crate::memory::vmalloc::dump_diagnostics();
 
     crate::serial_println!("[heap][diag] === End Diagnostics ===");
 }

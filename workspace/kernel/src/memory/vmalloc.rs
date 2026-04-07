@@ -65,8 +65,10 @@ pub const VMALLOC_VIRT_END: u64 = VMALLOC_VIRT_START + VMALLOC_SIZE as u64;
 /// Number of pages in the arena.
 const VMALLOC_PAGES: usize = VMALLOC_SIZE / 4096;
 
-/// Maximum single allocation size: 256 MiB.
-/// Increased from 64 MiB to accommodate large buffers without fragmentation.
+/// Soft policy limit for a single vmalloc allocation.
+///
+/// This is intentionally surfaced as an explicit policy failure in diagnostics,
+/// rather than being conflated with buddy fragmentation or true OOM.
 const VMALLOC_MAX_ALLOC: usize = 256 * 1024 * 1024;
 
 /// Maximum number of concurrent vmalloc allocations tracked in the
@@ -124,6 +126,29 @@ impl FrameList {
 // and all frames stored within are valid physical addresses that travel
 // with the struct.
 unsafe impl Send for FrameList {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmallocError {
+    ZeroSize,
+    SizeExceedsPolicy {
+        requested: usize,
+        max_allowed: usize,
+    },
+    MetadataAllocationFailed,
+    PhysicalMemoryExhausted,
+    VirtualRangeExhausted,
+    KernelMapFailed,
+    AllocationRecordsExhausted {
+        max_records: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmallocFailureSnapshot {
+    pub size: usize,
+    pub pages: usize,
+    pub error: VmallocError,
+}
 
 // ─── Bitmap-based virtual range allocator ────────────────────────────────────
 
@@ -285,6 +310,8 @@ struct Vmalloc {
     alloc_count: usize,
     /// Total allocation failures.
     fail_count: usize,
+    /// Last typed failure for backend-aware heap diagnostics.
+    last_failure: Option<VmallocFailureSnapshot>,
     /// Hint for the next allocation search.
     search_hint: usize,
 }
@@ -298,6 +325,7 @@ impl Vmalloc {
             allocations: [const { None }; VMALLOC_ALLOC_SLOTS],
             alloc_count: 0,
             fail_count: 0,
+            last_failure: None,
             search_hint: 0,
         }
     }
@@ -367,6 +395,22 @@ pub fn init() {
     crate::sync::with_irqs_disabled(|token| ensure_kernel_subtree_ready(token));
 }
 
+fn record_failure(
+    vm: &mut Vmalloc,
+    size: usize,
+    pages: usize,
+    error: VmallocError,
+) -> VmallocError {
+    vm.fail_count = vm.fail_count.saturating_add(1);
+    vm.last_failure = Some(VmallocFailureSnapshot { size, pages, error });
+    error
+}
+
+pub fn last_failure_snapshot() -> Option<VmallocFailureSnapshot> {
+    let guard = VMALLOC.lock();
+    guard.last_failure
+}
+
 /// Allocate `size` bytes of virtually contiguous memory.
 ///
 /// The memory is backed by individually allocated physical pages — no
@@ -375,12 +419,24 @@ pub fn init() {
 ///
 /// **Must be called with IRQs disabled** (the `token` parameter proves it).
 ///
-/// Returns `None` if:
-/// - No contiguous virtual address range is available
-/// - Buddy allocator cannot provide enough physical pages
-pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
-    if size == 0 || size > VMALLOC_MAX_ALLOC {
-        return None;
+/// Returns a typed error so heap diagnostics can report the actual backend
+/// failure instead of assuming buddy fragmentation.
+pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, VmallocError> {
+    if size == 0 {
+        let mut guard = VMALLOC.lock();
+        return Err(record_failure(&mut guard, size, 0, VmallocError::ZeroSize));
+    }
+    if size > VMALLOC_MAX_ALLOC {
+        let mut guard = VMALLOC.lock();
+        return Err(record_failure(
+            &mut guard,
+            size,
+            size.saturating_add(4095) / 4096,
+            VmallocError::SizeExceedsPolicy {
+                requested: size,
+                max_allowed: VMALLOC_MAX_ALLOC,
+            },
+        ));
     }
 
     // Ensure initialized (lazy init on first use).
@@ -393,7 +449,18 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
 
     // Phase 1: allocate backing-frame metadata from raw buddy pages, not the
     // heap, so vmalloc metadata never recurses back into vmalloc.
-    let mut frames = FrameList::new(pages, token)?;
+    let mut frames = match FrameList::new(pages, token) {
+        Some(frames) => frames,
+        None => {
+            let mut guard = VMALLOC.lock();
+            return Err(record_failure(
+                &mut guard,
+                size,
+                pages,
+                VmallocError::MetadataAllocationFailed,
+            ));
+        }
+    };
     for i in 0..pages {
         match crate::memory::allocate_frame(token) {
             Ok(frame) => {
@@ -405,7 +472,13 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
                     crate::memory::free_frame(token, frames.get(j));
                 }
                 frames.free_storage(token);
-                return None;
+                let mut guard = VMALLOC.lock();
+                return Err(record_failure(
+                    &mut guard,
+                    size,
+                    pages,
+                    VmallocError::PhysicalMemoryExhausted,
+                ));
             }
         }
     }
@@ -420,8 +493,12 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
             crate::memory::free_frame(token, frames.get(i));
         }
         frames.free_storage(token);
-        vm.fail_count += 1;
-        return None;
+        return Err(record_failure(
+            vm,
+            size,
+            pages,
+            VmallocError::VirtualRangeExhausted,
+        ));
     };
 
     let virt_base = VMALLOC_VIRT_START + (page_idx as u64 * 4096);
@@ -443,8 +520,7 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
                 crate::memory::free_frame(token, frames.get(j));
             }
             frames.free_storage(token);
-            vm.fail_count += 1;
-            return None;
+            return Err(record_failure(vm, size, pages, VmallocError::KernelMapFailed));
         }
     }
 
@@ -463,8 +539,15 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
             crate::memory::free_frame(token, frames.get(i));
         }
         frames.free_storage(token);
-        vm.fail_count += 1;
-        return None;
+        vm.bitmap.free_range(page_idx, pages);
+        return Err(record_failure(
+            vm,
+            size,
+            pages,
+            VmallocError::AllocationRecordsExhausted {
+                max_records: VMALLOC_ALLOC_SLOTS,
+            },
+        ));
     }
     vm.allocations[vm.alloc_count] = Some(VmallocAlloc {
         virt_start: virt_base,
@@ -472,8 +555,9 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
         frames,
     });
     vm.alloc_count += 1;
+    vm.last_failure = None;
 
-    Some(virt_base as *mut u8)
+    Ok(virt_base as *mut u8)
 }
 
 /// Free a vmalloc'd allocation.
@@ -582,4 +666,12 @@ pub fn dump_diagnostics() {
         VMALLOC_PAGES - alloc_pages,
         vm.fail_count
     );
+    if let Some(last) = vm.last_failure {
+        serial_println!(
+            "[vmalloc][diag] last_failure: size={} pages={} error={:?}",
+            last.size,
+            last.pages,
+            last.error
+        );
+    }
 }

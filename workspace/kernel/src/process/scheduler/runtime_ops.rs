@@ -244,12 +244,6 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
                 .load(core::sync::atomic::Ordering::Relaxed),
         );
     }
-    // Should never reach here
-    crate::serial_force_println!(
-        "[PANIC] restore_first_task returned! cpu={} tid={}",
-        cpu_index,
-        first_task.id.as_u64()
-    );
 }
 
 /// Called immediately after a context switch completes (in the new task's context).
