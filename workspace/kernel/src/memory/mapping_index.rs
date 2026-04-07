@@ -6,10 +6,7 @@ use smallvec::SmallVec;
 use x86_64::VirtAddr;
 
 use crate::{
-    capability::CapId,
-    memory::address_space::VmaPageSize,
-    process::task::Pid,
-    sync::SpinLock,
+    capability::CapId, memory::address_space::VmaPageSize, process::task::Pid, sync::SpinLock,
 };
 
 /// Reference to a concrete mapping in an address space.

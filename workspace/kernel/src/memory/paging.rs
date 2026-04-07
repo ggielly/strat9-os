@@ -235,7 +235,9 @@ pub fn unmap_page_kernel(page: Page<Size4KiB>) -> Result<X86PhysFrame<Size4KiB>,
     // SAFETY: level_4_virt points to the kernel's L4 table via HHDM.
     let mapper = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
     let mut mapper = unsafe { OffsetPageTable::new(mapper, phys_offset) };
-    let (frame, flush) = mapper.unmap(page).map_err(|_| "Failed to unmap page (kernel)")?;
+    let (frame, flush) = mapper
+        .unmap(page)
+        .map_err(|_| "Failed to unmap page (kernel)")?;
     flush.flush();
     Ok(frame)
 }

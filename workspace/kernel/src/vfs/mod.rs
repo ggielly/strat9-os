@@ -107,7 +107,12 @@ pub fn open_at(dir_fd: u64, path: &str, flags: OpenFlags) -> Result<u32, Syscall
         let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
         let cwd = unsafe { (&*task.process.cwd.get()).clone() };
         let abs = resolve_path(path, &cwd);
-        crate::silo::enforce_path_for_current_task(&abs, flags.contains(OpenFlags::READ) || flags.contains(OpenFlags::DIRECTORY), flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE), false)?;
+        crate::silo::enforce_path_for_current_task(
+            &abs,
+            flags.contains(OpenFlags::READ) || flags.contains(OpenFlags::DIRECTORY),
+            flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE),
+            false,
+        )?;
         open(&abs, flags)
     } else {
         // Resolve relative to the directory FD.
@@ -119,7 +124,12 @@ pub fn open_at(dir_fd: u64, path: &str, flags: OpenFlags) -> Result<u32, Syscall
         }
         let dir_path = dir_file.path();
         let abs = resolve_path(path, dir_path);
-        crate::silo::enforce_path_for_current_task(&abs, flags.contains(OpenFlags::READ) || flags.contains(OpenFlags::DIRECTORY), flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE), false)?;
+        crate::silo::enforce_path_for_current_task(
+            &abs,
+            flags.contains(OpenFlags::READ) || flags.contains(OpenFlags::DIRECTORY),
+            flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE),
+            false,
+        )?;
         open(&abs, flags)
     }
 }
@@ -444,7 +454,12 @@ pub fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, Syscall
 }
 
 /// SYS_OPENAT (462): Open a file relative to a directory FD.
-pub fn sys_openat(dir_fd: u64, path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, SyscallError> {
+pub fn sys_openat(
+    dir_fd: u64,
+    path_ptr: u64,
+    path_len: u64,
+    flags: u64,
+) -> Result<u64, SyscallError> {
     const MAX_PATH_LEN: usize = 4096;
     if path_len == 0 || path_len as usize > MAX_PATH_LEN {
         return Err(SyscallError::InvalidArgument);
@@ -456,7 +471,12 @@ pub fn sys_openat(dir_fd: u64, path_ptr: u64, path_len: u64, flags: u64) -> Resu
 }
 
 /// SYS_FSTATAT (463): Stat a file relative to a directory FD.
-pub fn sys_fstatat(dir_fd: u64, path_ptr: u64, path_len: u64, _flags: u64) -> Result<u64, SyscallError> {
+pub fn sys_fstatat(
+    dir_fd: u64,
+    path_ptr: u64,
+    path_len: u64,
+    _flags: u64,
+) -> Result<u64, SyscallError> {
     const MAX_PATH_LEN: usize = 4096;
     if path_len == 0 || path_len as usize > MAX_PATH_LEN {
         return Err(SyscallError::InvalidArgument);

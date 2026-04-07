@@ -45,8 +45,8 @@ use crate::{
 };
 use core::mem::size_of;
 use x86_64::{
+    structures::paging::{Page, PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB},
     VirtAddr,
-    structures::paging::{Page, PageTableFlags, Size4KiB, PhysFrame as X86PhysFrame},
 };
 
 // ─── Arena constants ─────────────────────────────────────────────────────────
@@ -388,7 +388,8 @@ pub fn vmalloc(size: usize, token: &IrqDisabledToken) -> Option<*mut u8> {
     ensure_kernel_subtree_ready(token);
 
     let pages = (size + 4095) / 4096;
-    let page_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+    let page_flags =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
     // Phase 1: allocate backing-frame metadata from raw buddy pages, not the
     // heap, so vmalloc metadata never recurses back into vmalloc.

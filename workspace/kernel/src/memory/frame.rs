@@ -243,13 +243,14 @@ impl FrameAllocOptions {
         // Failure means the frame's refcount was not REFCOUNT_UNUSED — either
         // the frame is still live (double-alloc) or the buddy free list is
         // corrupt (double-free).  Both are kernel bugs; panic immediately.
-        meta.cas_refcount(REFCOUNT_UNUSED, 1).unwrap_or_else(|actual| {
-            panic!(
-                "buddy corruption: frame {:#x} refcount is {:#x} (expected REFCOUNT_UNUSED); \
+        meta.cas_refcount(REFCOUNT_UNUSED, 1)
+            .unwrap_or_else(|actual| {
+                panic!(
+                    "buddy corruption: frame {:#x} refcount is {:#x} (expected REFCOUNT_UNUSED); \
                  double-free or free-list corruption",
-                phys, actual,
-            )
-        });
+                    phys, actual,
+                )
+            });
 
         Ok(frame)
     }
@@ -374,12 +375,8 @@ impl FrameMeta {
 
     #[inline]
     pub fn cas_refcount(&self, expect: u32, new: u32) -> Result<u32, u32> {
-        self.refcount.compare_exchange(
-            expect,
-            new,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
+        self.refcount
+            .compare_exchange(expect, new, Ordering::AcqRel, Ordering::Acquire)
     }
 
     #[inline]

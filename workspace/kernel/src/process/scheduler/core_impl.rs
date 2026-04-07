@@ -168,7 +168,8 @@ impl GlobalSchedState {
             task_id.as_u64()
         );
         self.task_cpu.insert(task_id, cpu_index);
-        task.home_cpu.store(cpu_index, core::sync::atomic::Ordering::Relaxed);
+        task.home_cpu
+            .store(cpu_index, core::sync::atomic::Ordering::Relaxed);
         crate::serial_println!(
             "[trace][sched] add_task_on_cpu task_cpu inserted tid={}",
             task_id.as_u64()
@@ -577,7 +578,8 @@ pub(super) fn steal_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Opti
             }
             if let Some(task) = sib.class_rqs.steal_candidate(&sib.class_table) {
                 sched.task_cpu.insert(task.id, cpu_index);
-                task.home_cpu.store(cpu_index, core::sync::atomic::Ordering::Relaxed);
+                task.home_cpu
+                    .store(cpu_index, core::sync::atomic::Ordering::Relaxed);
                 if cpu_is_valid(cpu_index) {
                     CPU_STEAL_IN_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
                 }

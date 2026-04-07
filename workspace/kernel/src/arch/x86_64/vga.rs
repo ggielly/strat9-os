@@ -872,7 +872,10 @@ impl VgaWriter {
     }
 
     fn glyph_mask_slice(&self, glyph_index: usize) -> Option<&[u8]> {
-        let glyph_pixels = self.font_info.glyph_w.saturating_mul(self.font_info.glyph_h);
+        let glyph_pixels = self
+            .font_info
+            .glyph_w
+            .saturating_mul(self.font_info.glyph_h);
         if glyph_pixels == 0 {
             return None;
         }
@@ -1240,8 +1243,14 @@ impl VgaWriter {
             let cur = self.dirty_regions.rects[0];
             let x0 = core::cmp::min(cur.x, merged.x);
             let y0 = core::cmp::min(cur.y, merged.y);
-            let x1 = core::cmp::max(cur.x.saturating_add(cur.w), merged.x.saturating_add(merged.w));
-            let y1 = core::cmp::max(cur.y.saturating_add(cur.h), merged.y.saturating_add(merged.h));
+            let x1 = core::cmp::max(
+                cur.x.saturating_add(cur.w),
+                merged.x.saturating_add(merged.w),
+            );
+            let y1 = core::cmp::max(
+                cur.y.saturating_add(cur.h),
+                merged.y.saturating_add(merged.h),
+            );
             self.dirty_regions.rects[0] = ClipRect {
                 x: x0,
                 y: y0,
@@ -2237,7 +2246,14 @@ impl VgaWriter {
         self.draw_glyph_index_at_pixel(pixel_x, pixel_y, glyph_index, fg, bg);
     }
 
-    fn fill_text_span_bg(&mut self, pixel_x: usize, pixel_y: usize, width: usize, height: usize, bg: u32) {
+    fn fill_text_span_bg(
+        &mut self,
+        pixel_x: usize,
+        pixel_y: usize,
+        width: usize,
+        height: usize,
+        bg: u32,
+    ) {
         if self.draw_to_back_buffer()
             && pixel_x + width <= self.fb_width
             && pixel_y + height <= self.fb_height
@@ -2271,7 +2287,13 @@ impl VgaWriter {
         let total_virtual = total_complete + if has_partial { 1 } else { 0 };
         let view_end = total_virtual.saturating_sub(self.scroll_offset);
         let view_start = view_end.saturating_sub(self.rows);
-        (total_complete, total_virtual, view_start, view_end, has_partial)
+        (
+            total_complete,
+            total_virtual,
+            view_start,
+            view_end,
+            has_partial,
+        )
     }
 
     fn sync_live_cursor_from_view(
@@ -2293,7 +2315,13 @@ impl VgaWriter {
         self.col = last_len.min(self.cols);
     }
 
-    fn selection_colors_for_cell(&self, virt_row: usize, col: usize, fg: u32, bg: u32) -> (u32, u32) {
+    fn selection_colors_for_cell(
+        &self,
+        virt_row: usize,
+        col: usize,
+        fg: u32,
+        bg: u32,
+    ) -> (u32, u32) {
         if !self.sel_active {
             return (fg, bg);
         }
@@ -2310,7 +2338,10 @@ impl VgaWriter {
             true
         };
         if in_sel {
-            (self.pack_color(RgbColor::WHITE), self.pack_color(RgbColor::new(0x26, 0x5F, 0xCC)))
+            (
+                self.pack_color(RgbColor::WHITE),
+                self.pack_color(RgbColor::new(0x26, 0x5F, 0xCC)),
+            )
         } else {
             (fg, bg)
         }
@@ -2358,7 +2389,8 @@ impl VgaWriter {
                 let glyph_index = self.glyph_index_for_char(cell.ch);
                 let (draw_fg, draw_bg) =
                     self.selection_colors_for_cell(virt_row, col, cell.fg, cell.bg);
-                self.prepared_row_cells.push((glyph_index, draw_fg, draw_bg));
+                self.prepared_row_cells
+                    .push((glyph_index, draw_fg, draw_bg));
             }
             if let Some(buf) = self.back_buffer.as_mut() {
                 for gy in 0..glyph_h {
@@ -2398,7 +2430,8 @@ impl VgaWriter {
         for col in 0..cell_count {
             let px = col.saturating_mul(glyph_w);
             let cell = unsafe { &*row_ptr.add(col) };
-            let (draw_fg, draw_bg) = self.selection_colors_for_cell(virt_row, col, cell.fg, cell.bg);
+            let (draw_fg, draw_bg) =
+                self.selection_colors_for_cell(virt_row, col, cell.fg, cell.bg);
             self.draw_glyph_at_pixel(px, py, cell.ch, draw_fg, draw_bg);
         }
         if text_w > used_width {

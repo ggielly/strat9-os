@@ -192,10 +192,8 @@ impl DirtyRectSet {
                 idx += 1;
                 continue;
             }
-            let overlaps = next.x0 <= cur.x1
-                && next.x1 >= cur.x0
-                && next.y0 <= cur.y1
-                && next.y1 >= cur.y0;
+            let overlaps =
+                next.x0 <= cur.x1 && next.x1 >= cur.x0 && next.y0 <= cur.y1 && next.y1 >= cur.y0;
             if overlaps {
                 next.include(
                     cur.x0,
@@ -430,11 +428,14 @@ impl Framebuffer {
     }
 
     pub fn render_stats() -> Option<FramebufferRenderStats> {
-        FRAMEBUFFER.lock().as_ref().map(|fb| FramebufferRenderStats {
-            present_pending: fb.present_pending,
-            dirty_region_count: fb.dirty.len,
-            last_present_tick: fb.last_present_tick,
-        })
+        FRAMEBUFFER
+            .lock()
+            .as_ref()
+            .map(|fb| FramebufferRenderStats {
+                present_pending: fb.present_pending,
+                dirty_region_count: fb.dirty.len,
+                last_present_tick: fb.last_present_tick,
+            })
     }
 
     /// Set a pixel at (x, y) with RGB color

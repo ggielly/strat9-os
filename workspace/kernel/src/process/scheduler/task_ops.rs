@@ -484,12 +484,20 @@ pub fn set_process_group(
 
         // Step 2: Mutate identity maps under SCHED_IDENTITY lock.
         let old_pgid = target_task.pgid.load(Ordering::Relaxed);
-        target_task.pgid.store(new_pgid.unwrap_or(target_task.pid), Ordering::Relaxed);
+        target_task
+            .pgid
+            .store(new_pgid.unwrap_or(target_task.pid), Ordering::Relaxed);
         {
             let mut identity = SCHED_IDENTITY.lock();
             GlobalSchedState::member_remove(&mut identity.pgid_members, old_pgid, target_id);
-            GlobalSchedState::member_add(&mut identity.pgid_members, new_pgid.unwrap_or(target_task.pid), target_id);
-            identity.pid_to_pgid.insert(target_task.pid, new_pgid.unwrap_or(target_task.pid));
+            GlobalSchedState::member_add(
+                &mut identity.pgid_members,
+                new_pgid.unwrap_or(target_task.pid),
+                target_id,
+            );
+            identity
+                .pid_to_pgid
+                .insert(target_task.pid, new_pgid.unwrap_or(target_task.pid));
         }
         Ok(new_pgid.unwrap_or(target_task.pid))
     })();
@@ -667,7 +675,9 @@ pub fn block_current_task() {
                 } else {
                     current.set_state(TaskState::Blocked);
                     // Record home CPU so wake_task can route without GLOBAL.
-                    current.home_cpu.store(cpu_index, core::sync::atomic::Ordering::Relaxed);
+                    current
+                        .home_cpu
+                        .store(cpu_index, core::sync::atomic::Ordering::Relaxed);
                     blocked.insert(current.id, current.clone());
                     super::core_impl::yield_cpu_local(cpu, cpu_index)
                 }
@@ -826,8 +836,12 @@ pub fn suspend_task(id: TaskId) -> bool {
         if let Some((tid, current)) = task_id_on_cpu {
             if tid == id {
                 current.set_state(TaskState::Blocked);
-                current.home_cpu.store(ci, core::sync::atomic::Ordering::Relaxed);
-                super::BLOCKED_TASKS.lock().insert(current.id, current.clone());
+                current
+                    .home_cpu
+                    .store(ci, core::sync::atomic::Ordering::Relaxed);
+                super::BLOCKED_TASKS
+                    .lock()
+                    .insert(current.id, current.clone());
                 suspended = true;
                 if ci == my_cpu {
                     // Re-acquire LOCAL to yield.  The gap between the
@@ -861,7 +875,8 @@ pub fn suspend_task(id: TaskId) -> bool {
             if removed {
                 if let Some(task) = get_task_by_id(id) {
                     task.set_state(TaskState::Blocked);
-                    task.home_cpu.store(ci, core::sync::atomic::Ordering::Relaxed);
+                    task.home_cpu
+                        .store(ci, core::sync::atomic::Ordering::Relaxed);
                     super::BLOCKED_TASKS.lock().insert(task.id, task.clone());
                 }
                 suspended = true;

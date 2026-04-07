@@ -184,7 +184,11 @@ fn redraw_full_line(input: &[u8], cursor_pos: usize) {
         0
     };
 
-    let mut tmp = String::with_capacity(n.saturating_mul(2).saturating_add(input.len()).saturating_add(back_moves));
+    let mut tmp = String::with_capacity(
+        n.saturating_mul(2)
+            .saturating_add(input.len())
+            .saturating_add(back_moves),
+    );
     for _ in 0..n {
         tmp.push('\x08');
     }
