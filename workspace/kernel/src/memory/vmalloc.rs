@@ -62,7 +62,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
 use x86_64::{
-    structures::paging::{Page, PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB},
+    structures::paging::{Page, PageTableFlags, PhysFrame as X86PhysFrame},
     VirtAddr,
 };
 
@@ -159,11 +159,16 @@ pub struct VmallocFailureSnapshot {
 ///
 /// `frames == None` means the node describes a free extent.
 /// `frames == Some(_)` means the node describes an active allocation.
+///
+/// `attr` is only meaningful when `frames.is_some()`; it is zero-initialized
+/// for free-extent nodes.
 struct VmallocNode {
     start_page: usize,
     page_count: usize,
     next: *mut VmallocNode,
     frames: Option<FrameList>,
+    /// Attribution captured at allocation time. Used by leak diagnostics.
+    attr: VmallocAttr,
 }
 
 // SAFETY: access to nodes is serialized by `VMALLOC`; the struct only contains
@@ -236,6 +241,7 @@ impl Vmalloc {
                     page_count: 0,
                     next: self.node_pool_free,
                     frames: None,
+                    attr: VmallocAttr::default(),
                 },
             );
             self.node_pool_free = node;
@@ -257,6 +263,7 @@ impl Vmalloc {
         (*node).start_page = 0;
         (*node).page_count = 0;
         (*node).frames = None;
+        (*node).attr = VmallocAttr::default();
         Ok(node)
     }
 
@@ -442,12 +449,88 @@ static VMALLOC: SpinLock<Vmalloc> = SpinLock::new(Vmalloc::new());
 /// Counts ZeroSize / policy-limit rejections.
 pub static VMALLOC_POLICY_REJECT_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Ensure the vmalloc kernel subtree exists in the canonical kernel page table.
+/// Monotonic sequence number — incremented once per successful `vmalloc` call.
 ///
-/// The map/unmap bootstrap intentionally leaves the intermediate page-table
-/// nodes allocated even though the leaf mapping is removed immediately.
-/// `unmap_page_kernel()` removes only the leaf PTE; it does not reclaim empty
-/// upper-level tables. That is exactly what we want here.
+/// Provides a stable ordering for leak analysis: lower `alloc_seq` means an
+/// earlier allocation, so the oldest live allocations are easy to spot.
+pub static VMALLOC_ALLOC_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// High-watermark of simultaneously allocated pages (updated on every alloc).
+pub static VMALLOC_PEAK_PAGES: AtomicU64 = AtomicU64::new(0);
+
+/// Attribution snapshot captured at vmalloc time.
+///
+/// Stored inside each live allocation node so that `dump_live_allocations()`
+/// can attribute each mapping to a task and silo without external state.
+///
+/// Designed for post-mortem leak analysis:
+/// - `alloc_seq` gives ordering (smallest = oldest live alloc).
+/// - `pid`/`tid`/`silo_id` identify the requesting workload.
+/// - `size` is the **requested** byte count, not the page-rounded value.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VmallocAttr {
+    /// PID of the requesting task (`0` = kernel or pre-scheduler context).
+    pub pid: u32,
+    /// TID of the requesting task.
+    pub tid: u32,
+    /// Silo that owns the task (`0` = kernel / silo lookup failed / not in silo).
+    pub silo_id: u32,
+    /// Requested allocation size in bytes (before page-rounding).
+    pub size: usize,
+    /// Monotonic per-boot sequence number (see [`VMALLOC_ALLOC_SEQ`]).
+    pub alloc_seq: u64,
+}
+
+/// Capture attribution for the calling task, without holding VMALLOC.
+///
+/// Must be called **before** acquiring the VMALLOC lock to maintain
+/// the VMALLOC → SILO_MANAGER lock ordering and to avoid deadlocking
+/// if vmalloc is called from within silo or scheduler code.
+///
+/// Uses `current_task_clone_try()` (non-blocking) so that vmalloc called
+/// from within a scheduler path cannot deadlock on the per-CPU scheduler lock.
+fn capture_attr(size: usize) -> VmallocAttr {
+    let alloc_seq = VMALLOC_ALLOC_SEQ.fetch_add(1, AtomicOrdering::Relaxed);
+
+    let (pid, tid, silo_id) =
+        match crate::process::current_task_clone_try() {
+            Some(task) => {
+                let pid = task.pid;
+                let tid = task.tid;
+                // Non-blocking: if SILO_MANAGER is held by an outer frame on this
+                // CPU, we just record silo_id=0 rather than risk a deadlock.
+                let silo_id = crate::silo::try_silo_id_for_task(task.id).unwrap_or(0);
+                (pid, tid, silo_id)
+            }
+            // No scheduler running yet, or per-CPU lock is contended.
+            None => (0, 0, 0),
+        };
+
+    VmallocAttr { pid, tid, silo_id, size, alloc_seq }
+}
+
+/// Pre-allocate the intermediate page-table nodes (PML4 → PDPT → PD) for the
+/// vmalloc virtual address range in the **canonical kernel page table**.
+///
+/// ## Why this is necessary
+///
+/// Every new user address space clones `PML4[256..512]` from the kernel L4 at
+/// creation time.  If the PDPT/PD nodes for the vmalloc arena do not exist at
+/// that point, the new address space inherits `PML4[256] = 0` (not present).
+/// Any subsequent kernel access to a vmalloc address in that process's context
+/// will fault, because its page-table walk stops at the missing PML4 entry.
+///
+/// By touching (map + immediately unmap) a page inside the arena during
+/// `init()`, we force the page-table allocator to create and wire all
+/// intermediate nodes.  `unmap_page_kernel()` removes only the leaf PTE; it
+/// does **not** reclaim intermediate tables — that is exactly what we need.
+///
+/// ## Caller contract
+///
+/// **Called only from `init()`**, which runs before any user address space is
+/// created.  Do **not** call this from `vmalloc()`: the check (`subtree_ready`)
+/// would always succeed after boot and would add a gratuitous VMALLOC lock
+/// acquire on every allocation hot path.
 fn ensure_kernel_subtree_ready(token: &IrqDisabledToken) {
     let mut guard = VMALLOC.lock();
     if guard.subtree_ready {
@@ -521,8 +604,12 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
         });
     }
 
+    // Capture attribution before acquiring VMALLOC to respect lock ordering
+    // (VMALLOC → SILO_MANAGER) and to avoid a re-entrancy deadlock if this
+    // vmalloc call originates from within scheduler or silo code.
+    let attr = capture_attr(size);
+
     ensure_init();
-    ensure_kernel_subtree_ready(token);
 
     let pages = (size + 4095) / 4096;
     let page_flags =
@@ -600,10 +687,26 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
         }
 
         (*alloc_node).frames = Some(frames);
+        (*alloc_node).attr = attr;
         vm.insert_alloc_node(alloc_node);
         vm.alloc_count = vm.alloc_count.saturating_add(1);
         vm.allocated_pages = vm.allocated_pages.saturating_add(pages);
         vm.last_failure = None;
+
+        // Update peak-pages high watermark (lock-free, best-effort).
+        let current_pages = vm.allocated_pages as u64;
+        let mut peak = VMALLOC_PEAK_PAGES.load(AtomicOrdering::Relaxed);
+        while current_pages > peak {
+            match VMALLOC_PEAK_PAGES.compare_exchange_weak(
+                peak,
+                current_pages,
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(p) => peak = p,
+            }
+        }
 
         Ok(virt_base as *mut u8)
     }
@@ -677,6 +780,60 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) {
     frames.free_storage(token);
 }
 
+/// Dump all live large allocations with attribution to the serial console.
+///
+/// Output format (one line per allocation, sorted by `start_page`):
+/// ```text
+/// [vmalloc][live] seq=N pid=P tid=T silo=S size=B pages=N vaddr=0x...
+/// ```
+///
+/// A `silo=0` entry means the allocation was made by kernel code with no
+/// associated silo, or that the silo lookup failed (SILO_MANAGER contended).
+///
+/// This is the primary tool for leak investigation: run it periodically under
+/// a long-lived workload, diff the outputs, and identify growing sequences.
+pub fn dump_live_allocations() {
+    let guard = VMALLOC.lock();
+    let vm = &*guard;
+    if !vm.initialized {
+        serial_println!("[vmalloc][live] not initialized");
+        return;
+    }
+
+    let mut count = 0usize;
+    let mut total_pages = 0usize;
+
+    // SAFETY: all nodes are valid while VMALLOC is held; `alloc_head` is a
+    // sorted intrusive list of active allocation nodes.
+    let mut cur = vm.alloc_head;
+    while !cur.is_null() {
+        let node = unsafe { &*cur };
+        let virt_start = VMALLOC_VIRT_START + (node.start_page as u64 * 4096);
+        serial_println!(
+            "[vmalloc][live] seq={} pid={} tid={} silo={} size={} pages={} vaddr=0x{:x}",
+            node.attr.alloc_seq,
+            node.attr.pid,
+            node.attr.tid,
+            node.attr.silo_id,
+            node.attr.size,
+            node.page_count,
+            virt_start,
+        );
+        count = count.saturating_add(1);
+        total_pages = total_pages.saturating_add(node.page_count);
+        cur = node.next;
+    }
+
+    let peak = VMALLOC_PEAK_PAGES.load(AtomicOrdering::Relaxed);
+    serial_println!(
+        "[vmalloc][live] total: {} allocs, {} pages ({} KiB), peak_pages={}",
+        count,
+        total_pages,
+        total_pages.saturating_mul(4),
+        peak,
+    );
+}
+
 /// Dump vmalloc diagnostics to the serial console.
 pub fn dump_diagnostics() {
     let guard = VMALLOC.lock();
@@ -687,6 +844,8 @@ pub fn dump_diagnostics() {
     }
 
     let policy_rejects = VMALLOC_POLICY_REJECT_COUNT.load(AtomicOrdering::Relaxed);
+    let peak_pages = VMALLOC_PEAK_PAGES.load(AtomicOrdering::Relaxed);
+    let total_seq = VMALLOC_ALLOC_SEQ.load(AtomicOrdering::Relaxed);
     let (free_extents, largest_free, node_pool_free) = unsafe {
         (
             vm.free_extent_count(),
@@ -695,12 +854,15 @@ pub fn dump_diagnostics() {
         )
     };
     serial_println!(
-        "[vmalloc][diag] arena=0x{:x}..0x{:x} allocs={} alloc_pages={} free_pages={} fails={} policy_rejects={}",
+        "[vmalloc][diag] arena=0x{:x}..0x{:x} allocs={} alloc_pages={} free_pages={} \
+         peak_pages={} total_seq={} fails={} policy_rejects={}",
         VMALLOC_VIRT_START,
         VMALLOC_VIRT_END,
         vm.alloc_count,
         vm.allocated_pages,
         VMALLOC_PAGES.saturating_sub(vm.allocated_pages),
+        peak_pages,
+        total_seq,
         vm.fail_count,
         policy_rejects
     );
@@ -718,5 +880,10 @@ pub fn dump_diagnostics() {
             last.pages,
             last.error
         );
+    }
+    // Print live allocations when any are present — useful for routine health checks.
+    if vm.alloc_count > 0 {
+        drop(guard); // release VMALLOC before re-acquiring inside dump_live_allocations
+        dump_live_allocations();
     }
 }

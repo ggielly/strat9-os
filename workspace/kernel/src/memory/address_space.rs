@@ -620,13 +620,21 @@ impl AddressSpace {
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                crate::memory::free_phys_contiguous(token, frame, order);
+                                if order == 0 {
+                                    crate::memory::free_frame(token, frame);
+                                } else {
+                                    crate::memory::free_phys_contiguous(token, frame, order);
+                                }
                             });
                             return Ok(());
                         }
                         Err(_) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                crate::memory::free_phys_contiguous(token, frame, order);
+                                if order == 0 {
+                                    crate::memory::free_frame(token, frame);
+                                } else {
+                                    crate::memory::free_phys_contiguous(token, frame, order);
+                                }
                             });
                             return Err("Failed to map demand page (4K)");
                         }
@@ -646,13 +654,21 @@ impl AddressSpace {
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                crate::memory::free_phys_contiguous(token, frame, order);
+                                if order == 0 {
+                                    crate::memory::free_frame(token, frame);
+                                } else {
+                                    crate::memory::free_phys_contiguous(token, frame, order);
+                                }
                             });
                             return Ok(());
                         }
                         Err(_) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                crate::memory::free_phys_contiguous(token, frame, order);
+                                if order == 0 {
+                                    crate::memory::free_frame(token, frame);
+                                } else {
+                                    crate::memory::free_phys_contiguous(token, frame, order);
+                                }
                             });
                             return Err("Failed to map demand page (2M)");
                         }
