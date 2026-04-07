@@ -855,7 +855,7 @@ impl Virtqueue {
             let resp_frame = allocate_dma_frame().ok_or("Failed to allocate response buffer")?;
 
             let payload_frame = crate::sync::with_irqs_disabled(|token| {
-                memory::allocate_frames(token, VIRTQ_PAYLOAD_ORDER)
+                memory::allocate_phys_contiguous(token, VIRTQ_PAYLOAD_ORDER)
             })
             .map_err(|_| "Failed to allocate payload buffer")?;
 

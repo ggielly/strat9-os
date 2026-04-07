@@ -254,7 +254,9 @@ impl VirtioBlockDevice {
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
             let buf_frame =
-                crate::sync::with_irqs_disabled(|token| memory::allocate_frames(token, buf_order))
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::allocate_phys_contiguous(token, buf_order)
+                })
                     .map_err(|_| {
                         crate::sync::with_irqs_disabled(|token| {
                             memory::free_frame(token, metadata_frame);
@@ -295,7 +297,7 @@ impl VirtioBlockDevice {
                 crate::sync::with_irqs_disabled(|token| {
                     memory::free_frame(token, metadata_frame);
                     if let Some((f, o)) = data_frame_info {
-                        memory::free_frames(token, f, o);
+                        memory::free_phys_contiguous(token, f, o);
                     }
                 });
                 return Err(BlockError::IoError);
@@ -357,7 +359,7 @@ impl VirtioBlockDevice {
                 crate::sync::with_irqs_disabled(|token| {
                     memory::free_frame(token, metadata_frame);
                     if let Some((f, o)) = data_frame_info {
-                        memory::free_frames(token, f, o);
+                        memory::free_phys_contiguous(token, f, o);
                     }
                 });
                 return Err(BlockError::IoError);
@@ -386,7 +388,7 @@ impl VirtioBlockDevice {
 
                 // Free DMA buffer
                 crate::sync::with_irqs_disabled(|token| {
-                    memory::free_frames(token, buf_frame, buf_order);
+                    memory::free_phys_contiguous(token, buf_frame, buf_order);
                 });
             }
         }

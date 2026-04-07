@@ -268,51 +268,52 @@ unsafe impl GlobalAlloc for LockedHeap {
             );
         }
 
-        let result = if effective <= MAX_SLAB_SIZE {
-            // --- slab path ---
-            let ci = SlabState::class_index(effective);
-            // Race/corruption diagnostic: log alloc when IRQs disabled (rate-limited).
-            let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-            let irq_enabled = crate::arch::x86_64::interrupts_enabled();
-            if !irq_enabled {
-                use core::sync::atomic::{AtomicUsize, Ordering};
-                static HEAP_A_COUNT: AtomicUsize = AtomicUsize::new(0);
-                let n = HEAP_A_COUNT.fetch_add(1, Ordering::Relaxed);
-                if n % 100 == 0 {
-                    crate::e9_println!(
-                        "HEAP-A cpu={} irq=0 size={} ci={} n={}",
-                        cpu,
-                        effective,
+        let result = match classify_kernel_heap_backend(layout) {
+            KernelHeapBackend::Slab => {
+                // --- slab path ---
+                let ci = SlabState::class_index(effective);
+                // Race/corruption diagnostic: log alloc when IRQs disabled (rate-limited).
+                let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+                let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+                if !irq_enabled {
+                    use core::sync::atomic::{AtomicUsize, Ordering};
+                    static HEAP_A_COUNT: AtomicUsize = AtomicUsize::new(0);
+                    let n = HEAP_A_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if n % 100 == 0 {
+                        crate::e9_println!(
+                            "HEAP-A cpu={} irq=0 size={} ci={} n={}",
+                            cpu,
+                            effective,
+                            ci,
+                            n
+                        );
+                    }
+                }
+                if boot_reg {
+                    crate::serial_println!(
+                        "[trace][heap] alloc slab ci={} slab_size={} lock={:#x}",
                         ci,
-                        n
+                        SLAB_SIZES[ci],
+                        &SLAB_ALLOC as *const _ as usize
                     );
                 }
+                let mut slab = SLAB_ALLOC.lock();
+                if boot_reg {
+                    crate::serial_println!("[trace][heap] alloc slab lock acquired");
+                }
+                slab.with_mut_and_token(|s, token| s.alloc_block(ci, token))
             }
-            if boot_reg {
-                crate::serial_println!(
-                    "[trace][heap] alloc slab ci={} slab_size={} lock={:#x}",
-                    ci,
-                    SLAB_SIZES[ci],
-                    &SLAB_ALLOC as *const _ as usize
-                );
-            }
-            let mut slab = SLAB_ALLOC.lock();
-            if boot_reg {
-                crate::serial_println!("[trace][heap] alloc slab lock acquired");
-            }
-            slab.with_mut_and_token(|s, token| s.alloc_block(ci, token))
-        } else {
-            // --- vmalloc path (large allocation) ---
-            // Large heap allocations use the VM-backed arena: virtually contiguous
-            // but physically fragmented. No requirement for physically contiguous
-            // buddy blocks : fixes the fragmentation-induced panic issue (#48).
-            if boot_reg {
-                crate::serial_println!("[trace][heap] alloc vmalloc size={}", effective);
-            }
+            KernelHeapBackend::Vmalloc => {
+                // --- vmalloc path (large allocation) ---
+                if boot_reg {
+                    crate::serial_println!("[trace][heap] alloc vmalloc size={}", effective);
+                }
 
-            crate::sync::with_irqs_disabled(|token| {
-                crate::memory::vmalloc::vmalloc(effective, token).unwrap_or(ptr::null_mut())
-            })
+                crate::sync::with_irqs_disabled(|token| {
+                    crate::memory::allocate_kernel_virtual(effective, token)
+                        .unwrap_or(ptr::null_mut())
+                })
+            }
         };
 
         result
@@ -322,41 +323,42 @@ unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let effective = layout.size().max(layout.align());
 
-        if effective <= MAX_SLAB_SIZE {
-            // --- slab path: return block to free list ---
-            let ci = SlabState::class_index(effective);
-            // Race/corruption diagnostic: log dealloc when IRQs disabled (rate-limited).
-            let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-            let irq_enabled = crate::arch::x86_64::interrupts_enabled();
-            if !irq_enabled {
-                use core::sync::atomic::{AtomicUsize, Ordering};
-                static HEAP_D_COUNT: AtomicUsize = AtomicUsize::new(0);
-                let n = HEAP_D_COUNT.fetch_add(1, Ordering::Relaxed);
-                if n % 100 == 0 {
-                    crate::e9_println!(
-                        "HEAP-D cpu={} irq=0 size={} ci={} n={}",
-                        cpu,
-                        effective,
-                        ci,
-                        n
-                    );
+        match classify_kernel_heap_backend(layout) {
+            KernelHeapBackend::Slab => {
+                // --- slab path: return block to free list ---
+                let ci = SlabState::class_index(effective);
+                let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+                let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+                if !irq_enabled {
+                    use core::sync::atomic::{AtomicUsize, Ordering};
+                    static HEAP_D_COUNT: AtomicUsize = AtomicUsize::new(0);
+                    let n = HEAP_D_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if n % 100 == 0 {
+                        crate::e9_println!(
+                            "HEAP-D cpu={} irq=0 size={} ci={} n={}",
+                            cpu,
+                            effective,
+                            ci,
+                            n
+                        );
+                    }
                 }
+                let mut slab = SLAB_ALLOC.lock();
+                slab.dealloc_block(ptr, ci);
             }
-            let mut slab = SLAB_ALLOC.lock();
-            slab.dealloc_block(ptr, ci);
-        } else {
-            // --- vmalloc path: free via the vmalloc arena ---
-            // Check if the pointer is in the vmalloc arena range.
-            let addr = ptr as u64;
-            if addr >= crate::memory::vmalloc::VMALLOC_VIRT_START
-                && addr < crate::memory::vmalloc::VMALLOC_VIRT_END
-            {
-                crate::sync::with_irqs_disabled(|token| {
-                    crate::memory::vmalloc::vfree(ptr, token);
-                });
+            KernelHeapBackend::Vmalloc => {
+                // --- vmalloc path: free via the vmalloc arena ---
+                let addr = ptr as u64;
+                if addr >= crate::memory::vmalloc::VMALLOC_VIRT_START
+                    && addr < crate::memory::vmalloc::VMALLOC_VIRT_END
+                {
+                    crate::sync::with_irqs_disabled(|token| {
+                        crate::memory::free_kernel_virtual(ptr, token);
+                    });
+                }
+                // else: pointer is outside vmalloc range — likely a stale or corrupt
+                // pointer. Silently ignore (same as the old buddy path behavior).
             }
-            // else: pointer is outside vmalloc range — likely a stale or corrupt
-            // pointer. Silently ignore (same as the old buddy path behavior).
         }
     }
 }

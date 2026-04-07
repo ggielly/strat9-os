@@ -179,7 +179,7 @@ impl VirtioNetDevice {
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
             let buf_frame = match crate::sync::with_irqs_disabled(|token| {
-                memory::allocate_frames(token, buf_order)
+                memory::allocate_phys_contiguous(token, buf_order)
             }) {
                 Ok(frame) => frame,
                 Err(_) => break, // No more memory available
@@ -198,7 +198,7 @@ impl VirtioNetDevice {
                 Ok(_) => {
                     if rx_frames.push_back((buf_frame, buf_order)).is_err() {
                         crate::sync::with_irqs_disabled(|token| {
-                            memory::free_frames(token, buf_frame, buf_order);
+                            memory::free_phys_contiguous(token, buf_frame, buf_order);
                         });
                         break;
                     }
@@ -207,7 +207,7 @@ impl VirtioNetDevice {
                 Err(_) => {
                     // Queue full, free the buffer
                     crate::sync::with_irqs_disabled(|token| {
-                        memory::free_frames(token, buf_frame, buf_order);
+                        memory::free_phys_contiguous(token, buf_frame, buf_order);
                     });
                     break;
                 }
@@ -274,7 +274,7 @@ impl NetworkDevice for VirtioNetDevice {
         if buf.len() < packet_len {
             // Buffer too small, packet lost
             crate::sync::with_irqs_disabled(|token| {
-                memory::free_frames(token, frame, order);
+                memory::free_phys_contiguous(token, frame, order);
             });
             drop(rx_queue);
             // We still need to refill.
@@ -291,7 +291,7 @@ impl NetworkDevice for VirtioNetDevice {
 
         // Free the frame
         crate::sync::with_irqs_disabled(|token| {
-            memory::free_frames(token, frame, order);
+            memory::free_phys_contiguous(token, frame, order);
         });
         drop(rx_queue);
 
@@ -313,7 +313,7 @@ impl NetworkDevice for VirtioNetDevice {
         let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
         let buf_frame =
-            crate::sync::with_irqs_disabled(|token| memory::allocate_frames(token, buf_order))
+            crate::sync::with_irqs_disabled(|token| memory::allocate_phys_contiguous(token, buf_order))
                 .map_err(|_| NetError::NotReady)?;
 
         let buf_addr = buf_frame.start_address.as_u64();
@@ -335,7 +335,7 @@ impl NetworkDevice for VirtioNetDevice {
             .map_err(|_| {
                 // Free buffer if failed
                 crate::sync::with_irqs_disabled(|token| {
-                    memory::free_frames(token, buf_frame, buf_order);
+                    memory::free_phys_contiguous(token, buf_frame, buf_order);
                 });
                 NetError::TxQueueFull
             })?;
@@ -362,7 +362,7 @@ impl NetworkDevice for VirtioNetDevice {
 
         // Free TX buffer
         crate::sync::with_irqs_disabled(|token| {
-            memory::free_frames(token, buf_frame, buf_order);
+            memory::free_phys_contiguous(token, buf_frame, buf_order);
         });
 
         Ok(())

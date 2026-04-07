@@ -446,7 +446,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
         if order == 0 {
             crate::memory::allocate_frame(token)
         } else {
-            crate::memory::allocate_frames(token, order)
+            crate::memory::allocate_phys_contiguous(token, order)
         }
     })
     .map_err(|_| "OOM during COW copy")?;
@@ -533,7 +533,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             },
         }
         crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_frames(token, new_frame, order);
+            crate::memory::free_phys_contiguous(token, new_frame, order);
         });
         return Err(remap_res.err().unwrap_or("Failed to map new COW frame"));
     }
@@ -585,7 +585,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             }
         }
         crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_frames(token, new_frame, order);
+            crate::memory::free_phys_contiguous(token, new_frame, order);
         });
         return Err("Failed to track new COW mapping");
     }
