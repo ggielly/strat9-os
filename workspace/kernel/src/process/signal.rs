@@ -246,6 +246,39 @@ impl SignalSet {
             }
         }
     }
+
+    /// Peek the next pending unblocked signal without consuming it.
+    pub fn peek_one_unblocked(&self, blocked: &SignalSet) -> Option<Signal> {
+        let pending = self.mask.load(Ordering::Acquire);
+        let blocked_mask = blocked.mask.load(Ordering::Acquire);
+        let unblocked = pending & !blocked_mask;
+        if unblocked == 0 {
+            return None;
+        }
+        let signal_num = unblocked.trailing_zeros() + 1;
+        Signal::from_u32(signal_num)
+    }
+
+    /// Try to consume a specific pending signal.
+    pub fn try_consume(&self, signal: Signal) -> bool {
+        let bit = signal.bit();
+        loop {
+            let pending = self.mask.load(Ordering::Acquire);
+            if (pending & bit) == 0 {
+                return false;
+            }
+            let new_pending = pending & !bit;
+            match self.mask.compare_exchange_weak(
+                pending,
+                new_pending,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue,
+            }
+        }
+    }
 }
 
 /// Signal action flags
@@ -380,8 +413,16 @@ pub struct SignalFrame {
     pub magic: u64,
 }
 
-/// Performs the deliver pending signal operation.
-pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SignalDeliveryMode {
+    Normal,
+    InterruptReturn,
+}
+
+fn deliver_pending_signal_inner(
+    frame: &mut crate::syscall::SyscallFrame,
+    mode: SignalDeliveryMode,
+) -> bool {
     let task = match crate::process::current_task_clone() {
         Some(t) => t,
         None => return false,
@@ -391,10 +432,7 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
         return false;
     }
 
-    let signal = match task
-        .pending_signals
-        .consume_one_unblocked(&task.blocked_signals)
-    {
+    let signal = match task.pending_signals.peek_one_unblocked(&task.blocked_signals) {
         Some(s) => s,
         None => return false,
     };
@@ -405,17 +443,30 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
     };
 
     if action.is_ignore() {
+        let _ = task.pending_signals.try_consume(signal);
         return true;
     }
 
     if action.is_default() {
         match signal.default_action() {
-            DefaultAction::Ign => return true,
-            DefaultAction::Cont => return true,
+            DefaultAction::Ign | DefaultAction::Cont => {
+                let _ = task.pending_signals.try_consume(signal);
+                return true;
+            }
             DefaultAction::Stop => {
+                if mode == SignalDeliveryMode::InterruptReturn {
+                    return false;
+                }
+                let _ = task.pending_signals.try_consume(signal);
                 return true;
             }
             DefaultAction::Term | DefaultAction::Core => {
+                if mode == SignalDeliveryMode::InterruptReturn {
+                    return false;
+                }
+                if !task.pending_signals.try_consume(signal) {
+                    return false;
+                }
                 log::info!(
                     "[signal] killing pid {} on SIG{}",
                     task.pid,
@@ -433,9 +484,19 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
     let flags = action.flags;
 
     if restorer == 0 {
+        if mode == SignalDeliveryMode::InterruptReturn {
+            return false;
+        }
+        if !task.pending_signals.try_consume(signal) {
+            return false;
+        }
         log::warn!("[signal] no restorer for SIG{}, killing", signal.as_u32());
         crate::process::kill_task(task.id);
         return true;
+    }
+
+    if !task.pending_signals.try_consume(signal) {
+        return false;
     }
 
     let user_rsp = frame.iret_rsp;
@@ -479,6 +540,10 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
             slice.copy_from(bytes);
         }
         Err(_) => {
+            if mode == SignalDeliveryMode::InterruptReturn {
+                task.pending_signals.add(signal);
+                return false;
+            }
             log::warn!("[signal] fault writing signal frame, killing");
             crate::process::kill_task(task.id);
             return true;
@@ -507,6 +572,19 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
     frame.rdx = 0;
 
     true
+}
+
+/// Performs the deliver pending signal operation.
+pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool {
+    deliver_pending_signal_inner(frame, SignalDeliveryMode::Normal)
+}
+
+/// Deliver pending signals on the IRQ-return path without triggering unsafe
+/// kill/switch side effects from timer interrupt context.
+pub fn deliver_pending_signal_on_interrupt_return(
+    frame: &mut crate::syscall::SyscallFrame,
+) -> bool {
+    deliver_pending_signal_inner(frame, SignalDeliveryMode::InterruptReturn)
 }
 
 /// Signal alternate stack
