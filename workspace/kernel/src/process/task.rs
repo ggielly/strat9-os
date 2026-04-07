@@ -258,6 +258,9 @@ pub struct Task {
     pub pending_signals: super::signal::SignalSet,
     /// Blocked signals mask for this task
     pub blocked_signals: super::signal::SignalSet,
+    /// Suppress repeated IRQ-return delivery attempts until a normal delivery
+    /// path runs again.
+    pub irq_signal_delivery_blocked: AtomicBool,
     /// Signal actions (handlers) for this task
     /// Signal alternate stack for this task
     pub signal_stack: SyncUnsafeCell<Option<super::signal::SigStack>>,
@@ -884,6 +887,7 @@ impl Task {
             process,
             pending_signals: super::signal::SignalSet::new(),
             blocked_signals: super::signal::SignalSet::new(),
+            irq_signal_delivery_blocked: AtomicBool::new(false),
             signal_stack: SyncUnsafeCell::new(None),
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),
@@ -954,6 +958,7 @@ impl Task {
             process: Arc::new(crate::process::process::Process::new(pid, address_space)),
             pending_signals: super::signal::SignalSet::new(),
             blocked_signals: super::signal::SignalSet::new(),
+            irq_signal_delivery_blocked: AtomicBool::new(false),
             signal_stack: SyncUnsafeCell::new(None),
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),

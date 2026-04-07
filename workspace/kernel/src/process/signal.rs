@@ -437,10 +437,21 @@ fn deliver_pending_signal_inner(
         return false;
     }
 
-    // A task runs on exactly one CPU at a time, so no concurrent delivery to
-    // the same `pending_signals` is possible.  peek_one_unblocked + a separate
-    // try_consume is therefore race-free: nobody else can consume the signal
-    // between the peek and the consume while we are executing.
+    if mode == SignalDeliveryMode::InterruptReturn
+        && task.irq_signal_delivery_blocked.load(Ordering::Acquire)
+    {
+        return false;
+    }
+
+    if mode == SignalDeliveryMode::Normal {
+        task.irq_signal_delivery_blocked
+            .store(false, Ordering::Release);
+    }
+
+    // A task runs on exactly one CPU at a time, so there is no concurrent
+    // signal-consumption path executing on behalf of the same task. Signal
+    // senders may still add new bits concurrently, so try_consume remains the
+    // authority for actually claiming the signal selected by the peek.
     let signal = match task.pending_signals.peek_one_unblocked(&task.blocked_signals) {
         Some(s) => s,
         None => return false,
@@ -472,6 +483,8 @@ fn deliver_pending_signal_inner(
                 if mode == SignalDeliveryMode::InterruptReturn {
                     // Stop requires task suspension — not safe from IRQ context.
                     // Leave the signal pending; the syscall-return path will deliver it.
+                    task.irq_signal_delivery_blocked
+                        .store(true, Ordering::Release);
                     SIGNAL_IRQ_DEFERRED_COUNT.fetch_add(1, Ordering::Relaxed);
                     return false;
                 }
@@ -485,6 +498,8 @@ fn deliver_pending_signal_inner(
                 if mode == SignalDeliveryMode::InterruptReturn {
                     // kill_task requires a scheduler operation — not safe from IRQ context.
                     // Leave the signal pending; the syscall-return path will deliver it.
+                    task.irq_signal_delivery_blocked
+                        .store(true, Ordering::Release);
                     SIGNAL_IRQ_DEFERRED_COUNT.fetch_add(1, Ordering::Relaxed);
                     return false;
                 }
@@ -510,6 +525,8 @@ fn deliver_pending_signal_inner(
     if restorer == 0 {
         if mode == SignalDeliveryMode::InterruptReturn {
             // Cannot safely kill from IRQ context; leave signal pending.
+            task.irq_signal_delivery_blocked
+                .store(true, Ordering::Release);
             SIGNAL_IRQ_DEFERRED_COUNT.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -567,6 +584,8 @@ fn deliver_pending_signal_inner(
         }
         Err(_) => {
             if mode == SignalDeliveryMode::InterruptReturn {
+                task.irq_signal_delivery_blocked
+                    .store(true, Ordering::Release);
                 task.pending_signals.add(signal);
                 return false;
             }
