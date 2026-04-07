@@ -146,9 +146,6 @@ pub enum VmallocError {
     PhysicalMemoryExhausted,
     VirtualRangeExhausted,
     KernelMapFailed,
-    AllocationRecordsExhausted {
-        max_records: usize,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,6 +174,10 @@ unsafe impl Send for VmallocNode {}
 struct Vmalloc {
     initialized: bool,
     subtree_ready: bool,
+    /// True once the initial single-spanning free extent has been inserted.
+    /// Replaces the ambiguous `!free_head.is_null() || !alloc_head.is_null()`
+    /// guard that read as a free-space check rather than an init-state check.
+    arena_initialized: bool,
     free_head: *mut VmallocNode,
     alloc_head: *mut VmallocNode,
     node_pool_free: *mut VmallocNode,
@@ -197,6 +198,7 @@ impl Vmalloc {
         Self {
             initialized: false,
             subtree_ready: false,
+            arena_initialized: false,
             free_head: ptr::null_mut(),
             alloc_head: ptr::null_mut(),
             node_pool_free: ptr::null_mut(),
@@ -218,11 +220,12 @@ impl Vmalloc {
         let frame = crate::memory::buddy::alloc(token, 0)
             .map_err(|_| self.record_failure(0, 0, VmallocError::MetadataAllocationFailed))?;
         let base = phys_to_virt(frame.start_address.as_u64()) as *mut VmallocNode;
+        // Compile-time guarantee that at least one node fits in a page.
+        const _: () = assert!(
+            core::mem::size_of::<VmallocNode>() < 4096,
+            "VmallocNode exceeds one page — refill_node_pool logic must be revised"
+        );
         let nodes_per_page = 4096 / size_of::<VmallocNode>();
-        if nodes_per_page == 0 {
-            crate::memory::buddy::free(token, frame, 0);
-            return Err(self.record_failure(0, 0, VmallocError::MetadataAllocationFailed));
-        }
 
         for i in 0..nodes_per_page {
             let node = base.add(i);
@@ -266,16 +269,16 @@ impl Vmalloc {
     }
 
     unsafe fn ensure_arena_ready(&mut self, token: &IrqDisabledToken) -> Result<(), VmallocError> {
-        if !self.free_head.is_null() || !self.alloc_head.is_null() {
+        if self.arena_initialized {
             return Ok(());
         }
-
         let node = self.alloc_node(token)?;
         (*node).start_page = 0;
         (*node).page_count = VMALLOC_PAGES;
         (*node).next = ptr::null_mut();
         (*node).frames = None;
         self.free_head = node;
+        self.arena_initialized = true;
         Ok(())
     }
 
@@ -505,21 +508,17 @@ pub fn last_failure_snapshot() -> Option<VmallocFailureSnapshot> {
 /// directly.
 pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, VmallocError> {
     if size == 0 {
+        // Pure policy reject — no allocation attempted, no per-call context
+        // worth recording. VMALLOC_POLICY_REJECT_COUNT captures the count.
         VMALLOC_POLICY_REJECT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-        let mut guard = VMALLOC.lock();
-        return Err(guard.record_failure(size, 0, VmallocError::ZeroSize));
+        return Err(VmallocError::ZeroSize);
     }
     if size > VMALLOC_MAX_ALLOC {
         VMALLOC_POLICY_REJECT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-        let mut guard = VMALLOC.lock();
-        return Err(guard.record_failure(
-            size,
-            size.saturating_add(4095) / 4096,
-            VmallocError::SizeExceedsPolicy {
-                requested: size,
-                max_allowed: VMALLOC_MAX_ALLOC,
-            },
-        ));
+        return Err(VmallocError::SizeExceedsPolicy {
+            requested: size,
+            max_allowed: VMALLOC_MAX_ALLOC,
+        });
     }
 
     ensure_init();
@@ -611,6 +610,17 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
 }
 
 /// Free a vmalloc allocation.
+///
+/// Structured as three phases to avoid a spinlock-under-IPI deadlock:
+///
+/// 1. **Under VMALLOC lock** : unmap pages (acquires/releases KERNEL_PT_LOCK per
+///    page), collect the frame list, update allocator bookkeeping, return the
+///    virtual extent to the free list.
+/// 2. **Lock released** : TLB shootdown. Remote CPUs servicing the IPI must
+///    acknowledge before returning. If VMALLOC were still held here, any
+///    remote CPU blocked on VMALLOC could not reach the acknowledgement path,
+///    causing a deadlock. Releasing first eliminates the hazard.
+/// 3. **No lock** : free physical frames back to the buddy allocator.
 pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) {
     if ptr.is_null() {
         return;
@@ -621,7 +631,8 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) {
         return;
     }
 
-    let frames = {
+    // Phase 1 — unmap and collect under VMALLOC lock.
+    let (frames, range_start, range_end) = {
         let mut guard = VMALLOC.lock();
         let vm = &mut *guard;
         let start_page = ((addr - VMALLOC_VIRT_START) / 4096) as usize;
@@ -640,22 +651,26 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) {
             for i in 0..page_count {
                 let page_start = virt_start + (i as u64 * 4096);
                 let page = Page::containing_address(VirtAddr::new(page_start));
+                // unmap_page_kernel acquires/releases KERNEL_PT_LOCK internally.
+                // Lock order: VMALLOC → KERNEL_PT_LOCK — consistent with vmalloc().
                 let _ = unmap_page_kernel(page);
             }
 
             let range_start = VirtAddr::new(virt_start);
             let range_end = VirtAddr::new(virt_start + (page_count as u64 * 4096));
-            // Invalidate the unmapped vmalloc range on all CPUs before the
-            // frames can be returned to the allocator and later reused.
-            shootdown_range(range_start, range_end);
 
             vm.alloc_count = vm.alloc_count.saturating_sub(1);
             vm.allocated_pages = vm.allocated_pages.saturating_sub(page_count);
             vm.insert_free_node_merge(node);
-            frames
+            (frames, range_start, range_end)
         }
-    };
+    }; // Phase 1 end — VMALLOC lock released here.
 
+    // Phase 2 — TLB shootdown with no lock held.
+    // All remote CPUs can freely enter vmalloc/vfree while processing the IPI.
+    shootdown_range(range_start, range_end);
+
+    // Phase 3 — return physical frames to the buddy allocator.
     for i in 0..frames.len {
         crate::memory::free_frame(token, frames.get(i));
     }

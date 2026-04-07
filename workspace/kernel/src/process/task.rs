@@ -729,7 +729,7 @@ impl KernelStack {
         );
         let frame =
             crate::sync::with_irqs_disabled(|token| {
-                crate::memory::allocate_phys_contiguous(token, order)
+                crate::memory::allocate_kernel_stack_frames(token, order)
             })
                 .map_err(|_| "Failed to allocate kernel stack")?;
         crate::serial_println!(
@@ -794,7 +794,7 @@ impl Drop for KernelStack {
         };
 
         crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_phys_contiguous(token, frame, order);
+            crate::memory::free_kernel_stack_frames(token, frame, order);
         });
     }
 }

@@ -3,7 +3,7 @@
 //! When a page table entry is modified on one CPU, all other CPUs that might
 //! have cached that entry in their TLB must be notified to invalidate it.
 //!
-//! This implementation uses a per-CPU mailbox system inspired by Asterinas:
+//! This implementation uses a per-CPU mailbox system inspired by Asterinas :
 //! 1. Each CPU has its own queue of pending TLB operations.
 //! 2. The initiator pushes an operation into each target's queue.
 //! 3. The initiator sends a TLB shootdown IPI to all targets.
@@ -108,6 +108,31 @@ pub fn shootdown_page(vaddr: VirtAddr) {
     unsafe { invlpg(vaddr) };
 
     dispatch_op(op);
+}
+
+/// Invalidate a single page on the current CPU only.
+#[inline]
+pub fn local_page(vaddr: VirtAddr) {
+    unsafe { invlpg(vaddr) };
+}
+
+/// Invalidate a range on the current CPU only.
+pub fn local_range(start: VirtAddr, end: VirtAddr) {
+    if end.as_u64() <= start.as_u64() {
+        unsafe { flush_tlb_all() };
+        return;
+    }
+
+    let page_count = (end.as_u64() - start.as_u64()) / 4096;
+    if page_count > 64 {
+        unsafe { flush_tlb_all() };
+        return;
+    }
+
+    for i in 0..page_count {
+        let addr = start + (i * 4096);
+        unsafe { invlpg(addr) };
+    }
 }
 
 /// Invalidate a range of pages on all CPUs.

@@ -248,6 +248,25 @@ pub fn free_phys_contiguous(token: &IrqDisabledToken, frame: PhysFrame, order: u
     buddy::free(token, frame, order);
 }
 
+/// Allocate physically contiguous pages for a kernel stack.
+///
+/// Kernel stacks need a contiguous physical backing in the current design
+/// because they are carved as a single block and directly accessed through the
+/// HHDM. This is distinct from DMA intent, so keep a dedicated API.
+#[inline]
+pub fn allocate_kernel_stack_frames(
+    token: &IrqDisabledToken,
+    order: u8,
+) -> Result<PhysFrame, AllocError> {
+    allocate_phys_contiguous(token, order)
+}
+
+/// Free pages previously returned by [`allocate_kernel_stack_frames`].
+#[inline]
+pub fn free_kernel_stack_frames(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
+    free_phys_contiguous(token, frame, order);
+}
+
 /// Allocate a single **zeroed** physical frame with `KernelData` purpose.
 ///
 /// This is the standard allocation path for all kernel-internal frames.  It

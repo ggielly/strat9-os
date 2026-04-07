@@ -10,7 +10,7 @@
 //! Source : https://wiki.osdev.org/Memory_Management
 //!
 //!
-//! x86_64 virtual address space layout:
+//! x86_64 virtual address space layout :
 //!   - PML4[0..256]   => user space (per-process, zeroed for new AS)
 //!   - PML4[256..512] => kernel space (shared, cloned from kernel L4)
 //!
@@ -1974,10 +1974,26 @@ impl AddressSpace {
             Ok(())
         })();
 
+        let tlb_flush_range = if tlb_flush_needed && !processed_pages.is_empty() {
+            let mut range_start = u64::MAX;
+            let mut range_end = 0u64;
+            for (vaddr, _, page_size) in &processed_pages {
+                range_start = range_start.min(*vaddr);
+                range_end = range_end.max(vaddr.saturating_add(page_size.bytes()));
+            }
+            if range_start < range_end {
+                Some((range_start, range_end))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         if let Err(e) = res {
             log::error!("clone_cow error: {}. Rolling back...", e);
             let mut parent_mapper = unsafe { self.mapper() };
-            for (vaddr, original_flags, page_size) in processed_pages.into_iter().rev() {
+            for &(vaddr, original_flags, page_size) in processed_pages.iter().rev() {
                 if original_flags.contains(PageTableFlags::WRITABLE) {
                     unsafe {
                         match page_size {
@@ -2000,14 +2016,20 @@ impl AddressSpace {
                     let _ = self.update_effective_mapping_flags(vaddr, original_flags);
                 }
             }
-            if tlb_flush_needed {
-                crate::arch::x86_64::tlb::shootdown_all();
+            if let Some((range_start, range_end)) = tlb_flush_range {
+                crate::arch::x86_64::tlb::shootdown_range(
+                    VirtAddr::new(range_start),
+                    VirtAddr::new(range_end),
+                );
             }
             return Err(e);
         }
 
-        if tlb_flush_needed {
-            crate::arch::x86_64::tlb::shootdown_all();
+        if let Some((range_start, range_end)) = tlb_flush_range {
+            crate::arch::x86_64::tlb::shootdown_range(
+                VirtAddr::new(range_start),
+                VirtAddr::new(range_end),
+            );
         }
         Ok(child)
     }

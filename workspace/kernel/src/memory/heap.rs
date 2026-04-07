@@ -1,6 +1,6 @@
 // Heap allocator: slab sub-allocator + VM-backed large-allocation path.
 //
-// Small allocations (effective size ≤ 2048 B) come from per-size-class slab
+// Small allocations (effective size =< 2048 B) come from per-size-class slab
 // free lists.  Each slab class draws whole pages from the buddy allocator and
 // carves them into fixed-size blocks.  Freed blocks return to the slab free
 // list, so the buddy's page counter stabilises after warm-up instead of
@@ -10,19 +10,16 @@
 // virtually contiguous, physically fragmented, and independent from
 // high-order physically contiguous buddy blocks.
 //
-// Lock ordering: SLAB_ALLOC (outer) may call the frame-allocation helpers.
+// Lock ordering : SLAB_ALLOC (outer) may call the frame-allocation helpers.
 // Those helpers can hit a CPU-local cache (no global buddy lock) or fall back
 // to the global buddy lock as needed.
 
-use crate::{
-    memory::{self, frame::PhysFrame, zone::MAX_ORDER},
-    sync::SpinLock,
-};
+use crate::{memory, sync::SpinLock};
 use core::{
     alloc::{GlobalAlloc, Layout},
     ptr,
 };
-use x86_64::PhysAddr;
+//use x86_64::PhysAddr;
 
 // ---------------------------------------------------------------------------
 // Slab size classes
@@ -549,25 +546,13 @@ fn alloc_error_handler(layout: Layout) -> ! {
                             "[heap][oom] diagnosis=kernel page-table mapping failed during vmalloc"
                         );
                     }
-                    crate::memory::vmalloc::VmallocError::AllocationRecordsExhausted {
-                        max_records,
-                    } => {
-                        crate::serial_println!(
-                            "[heap][oom] diagnosis=vmalloc allocation-record table exhausted max_records={}",
-                            max_records
-                        );
-                    }
                     crate::memory::vmalloc::VmallocError::ZeroSize => {
-                        crate::serial_println!(
-                            "[heap][oom] diagnosis=zero-sized vmalloc request"
-                        );
+                        crate::serial_println!("[heap][oom] diagnosis=zero-sized vmalloc request");
                     }
                 }
             }
             None => {
-                crate::serial_println!(
-                    "[heap][oom] vmalloc_last_failure unavailable"
-                );
+                crate::serial_println!("[heap][oom] vmalloc_last_failure unavailable");
             }
         }
         let _ = log_buddy_snapshot();
