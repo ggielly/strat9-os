@@ -25,20 +25,38 @@ use core::{
 // Slab size classes
 // ---------------------------------------------------------------------------
 
-/// Power-of-two block sizes handled by the slab allocator.
-const SLAB_SIZES: [usize; 9] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
+/// Slab block sizes chosen to bound internal fragmentation to ~25% worst-case
+/// (average ~12%) instead of 50% with pure power-of-two classes.
+///
+/// The progression follows a roughly 1.25× step above 64 bytes.  Below 64
+/// bytes the absolute waste of a 2× jump is small enough (max 32 bytes) to
+/// keep power-of-two boundaries, avoiding an explosion of size classes.
+///
+/// | Class range | Step  | Max waste |
+/// |-------------|-------|-----------|
+/// |  8 –  64 B  | 2× / 1.5× | ≤ 32 B  |
+/// | 64 – 256 B  | ~1.25×    | ≤ 64 B  |
+/// |256 – 2048 B | 1.25×     | ≤ 512 B |
+///
+/// Example improvement:
+///   - 700 B request: old → 1024 (324 B wasted, 32%), new → 768 (68 B, 9%)
+///   - 100 B request: old → 128  (28 B wasted, 22%),  new → 112 (12 B, 11%)
+const SLAB_SIZES: [usize; 26] = [
+    8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768,
+    896, 1024, 1280, 1536, 1792, 2048,
+];
 const NUM_SLABS: usize = SLAB_SIZES.len();
 /// Allocations with effective size above this threshold bypass the slab.
 const MAX_SLAB_SIZE: usize = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum KernelHeapBackend {
+pub(crate) enum KernelHeapBackend {
     Slab,
     Vmalloc,
 }
 
 #[inline]
-pub fn classify_kernel_heap_backend(layout: Layout) -> KernelHeapBackend {
+pub(crate) fn classify_kernel_heap_backend(layout: Layout) -> KernelHeapBackend {
     let effective = layout.size().max(layout.align());
     if effective <= MAX_SLAB_SIZE {
         KernelHeapBackend::Slab

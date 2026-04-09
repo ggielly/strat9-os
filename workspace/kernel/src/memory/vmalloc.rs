@@ -81,6 +81,15 @@ pub const VMALLOC_VIRT_END: u64 = VMALLOC_VIRT_START + VMALLOC_SIZE as u64;
 /// Number of pages in the arena.
 const VMALLOC_PAGES: usize = VMALLOC_SIZE / 4096;
 
+/// First allocatable page index inside the arena.
+///
+/// Page 0 (`VMALLOC_VIRT_START`) is permanently mapped by the bootstrap frame
+/// allocated in `ensure_kernel_subtree_ready()`.  Keeping that mapping alive
+/// anchors the intermediate page-table nodes (PDPT → PD → PT) so they are
+/// inherited by every address space cloned after `init()` runs.
+/// The free-extent list therefore starts at page 1.
+const ARENA_START_PAGE: usize = 1;
+
 /// Maximum single allocation size.
 ///
 /// The backend is now bounded by the actual vmalloc arena size rather than an
@@ -183,6 +192,13 @@ struct Vmalloc {
     /// Replaces the ambiguous `!free_head.is_null() || !alloc_head.is_null()`
     /// guard that read as a free-space check rather than an init-state check.
     arena_initialized: bool,
+    /// Bootstrap frame permanently mapped at `VMALLOC_VIRT_START` (arena page 0).
+    ///
+    /// Keeping this mapping live anchors the intermediate page-table nodes
+    /// (PDPT → PD → PT) so they are present in the canonical kernel L4 table
+    /// and inherited by every address space created after `init()`.  The frame
+    /// must never be freed while the kernel is running.
+    bootstrap_frame: Option<PhysFrame>,
     free_head: *mut VmallocNode,
     alloc_head: *mut VmallocNode,
     node_pool_free: *mut VmallocNode,
@@ -204,6 +220,7 @@ impl Vmalloc {
             initialized: false,
             subtree_ready: false,
             arena_initialized: false,
+            bootstrap_frame: None,
             free_head: ptr::null_mut(),
             alloc_head: ptr::null_mut(),
             node_pool_free: ptr::null_mut(),
@@ -268,7 +285,18 @@ impl Vmalloc {
     }
 
     unsafe fn release_node(&mut self, node: *mut VmallocNode) {
-        (*node).frames = None;
+        // Releasing a node that still holds a FrameList would silently drop the
+        // physical frames without freeing them — an unrecoverable leak / potential
+        // double-free if the frames are later re-allocated.  Free nodes must
+        // always have `frames == None` before being returned to the pool.
+        debug_assert!(
+            (*node).frames.is_none(),
+            "release_node: node at {:p} still has live frames (start_page={}) — \
+             caller must take() frames before releasing",
+            node,
+            (*node).start_page,
+        );
+        (*node).frames = None; // belt-and-suspenders in release builds
         (*node).start_page = 0;
         (*node).page_count = 0;
         (*node).next = self.node_pool_free;
@@ -280,8 +308,11 @@ impl Vmalloc {
             return Ok(());
         }
         let node = self.alloc_node(token)?;
-        (*node).start_page = 0;
-        (*node).page_count = VMALLOC_PAGES;
+        // Page 0 (VMALLOC_VIRT_START) is reserved for the bootstrap mapping
+        // established by `ensure_kernel_subtree_ready()`. The allocatable arena
+        // begins at ARENA_START_PAGE to avoid colliding with that frame.
+        (*node).start_page = ARENA_START_PAGE;
+        (*node).page_count = VMALLOC_PAGES - ARENA_START_PAGE;
         (*node).next = ptr::null_mut();
         (*node).frames = None;
         self.free_head = node;
@@ -547,13 +578,26 @@ fn ensure_kernel_subtree_ready(token: &IrqDisabledToken) {
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
     if map_page_kernel(page, x86_frame, flags).is_ok() {
-        let _ = unmap_page_kernel(page);
+        // Keep the frame permanently mapped at VMALLOC_VIRT_START (arena page 0).
+        //
+        // We deliberately do NOT unmap here.  The goal is to keep the intermediate
+        // page-table nodes (PDPT → PD → PT) alive in the canonical kernel L4 so
+        // that every address space cloned after this point inherits them.
+        //
+        // Previously the code did map + immediate unmap, relying on the fact that
+        // `unmap_page_kernel` only removes the leaf PTE and never reclaims empty
+        // intermediate tables.  That invariant is not guaranteed to hold forever;
+        // anchoring through a live mapping makes the intent explicit and robust.
+        //
+        // The vmalloc arena consequently starts at ARENA_START_PAGE (page 1) to
+        // avoid handing out the bootstrap virtual address to callers.
+        guard.bootstrap_frame = Some(frame);
         guard.subtree_ready = true;
     } else {
+        // Mapping failed — free the frame; the arena will be unusable.
+        crate::memory::free_frame(token, frame);
         serial_println!("[vmalloc] bootstrap: failed to map bootstrap page");
     }
-
-    crate::memory::free_frame(token, frame);
 }
 
 fn ensure_init() {
@@ -615,6 +659,17 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
     let page_flags =
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
+    // Two-phase lock pattern:
+    //
+    // Phase A (no VMALLOC lock): allocate all physical frames from the buddy.
+    // Phase B (VMALLOC lock held): reserve a virtual range and map the frames.
+    //
+    // Keeping Phase A outside the lock allows the buddy to run concurrently with
+    // other vmalloc/vfree calls.  The trade-off is that another thread may exhaust
+    // the virtual arena between A and B, in which case the frames are rolled back
+    // and `VirtualRangeExhausted` is returned.  This is acceptable: physical frames
+    // are cheap to allocate and free compared to holding a global spinlock across
+    // potentially dozens of buddy allocations.
     let mut frames = match FrameList::new(pages, token) {
         Some(frames) => frames,
         None => {
@@ -860,7 +915,7 @@ pub fn dump_diagnostics() {
         VMALLOC_VIRT_END,
         vm.alloc_count,
         vm.allocated_pages,
-        VMALLOC_PAGES.saturating_sub(vm.allocated_pages),
+        (VMALLOC_PAGES - ARENA_START_PAGE).saturating_sub(vm.allocated_pages),
         peak_pages,
         total_seq,
         vm.fail_count,

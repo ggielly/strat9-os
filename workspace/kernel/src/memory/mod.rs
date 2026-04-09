@@ -74,7 +74,6 @@ pub use block::{
 pub use block_meta::{get_block_meta, resolve_handle};
 pub use buddy::get_allocator;
 pub use frame::{AllocError, FrameAllocOptions, FrameAllocator, FramePurpose, PhysFrame};
-pub use heap::KernelHeapBackend;
 pub use mapping_index::{MappingIndex, MappingRef};
 pub use ownership::{BlockState, OwnerEntry, OwnerError, OwnershipTable, RemoveRefResult};
 pub use region_cap::{
