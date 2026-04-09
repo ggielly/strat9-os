@@ -13,7 +13,7 @@
 
 use crate::{
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
-    memory::{allocate_dma_frame, paging, phys_to_virt},
+    memory::{allocate_zeroed_frame, paging, phys_to_virt},
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::{
@@ -404,7 +404,7 @@ impl XhciController {
 
     /// Initializes rings.
     unsafe fn init_rings(&mut self) -> Result<(), &'static str> {
-        let cmd_frame = allocate_dma_frame().ok_or("Failed to allocate cmd ring")?;
+        let cmd_frame = allocate_zeroed_frame().ok_or("Failed to allocate cmd ring")?;
         self.cmd_ring_phys = cmd_frame.start_address.as_u64();
         self.cmd_ring = phys_to_virt(self.cmd_ring_phys) as *mut Trb;
         core::ptr::write_bytes(self.cmd_ring as *mut u8, 0, 4096);
@@ -414,12 +414,12 @@ impl XhciController {
         );
         self.write_crcr(self.cmd_ring_phys | 1);
 
-        let event_frame = allocate_dma_frame().ok_or("Failed to allocate event ring")?;
+        let event_frame = allocate_zeroed_frame().ok_or("Failed to allocate event ring")?;
         self.event_ring_phys = event_frame.start_address.as_u64();
         self.event_ring = phys_to_virt(self.event_ring_phys) as *mut Trb;
         core::ptr::write_bytes(self.event_ring as *mut u8, 0, 4096);
 
-        let dev_frame = allocate_dma_frame().ok_or("Failed to allocate DCBAA")?;
+        let dev_frame = allocate_zeroed_frame().ok_or("Failed to allocate DCBAA")?;
         self.device_ctx_phys = dev_frame.start_address.as_u64();
         self.device_ctx = phys_to_virt(self.device_ctx_phys) as *mut u8;
         core::ptr::write_bytes(self.device_ctx, 0, 4096);
@@ -430,7 +430,7 @@ impl XhciController {
 
     /// Initializes interrupter.
     unsafe fn init_interrupter(&mut self) -> Result<(), &'static str> {
-        let erst_frame = allocate_dma_frame().ok_or("Failed to allocate ERST")?;
+        let erst_frame = allocate_zeroed_frame().ok_or("Failed to allocate ERST")?;
         let erst_phys = erst_frame.start_address.as_u64();
         let erst_virt = phys_to_virt(erst_phys) as *mut u64;
         core::ptr::write_bytes(erst_virt as *mut u8, 0, 4096);
@@ -454,12 +454,12 @@ impl XhciController {
 
     /// Initializes control transfer ring.
     unsafe fn init_ctrl_ring(&mut self) -> Result<(), &'static str> {
-        let buf_frame = allocate_dma_frame().ok_or("Failed to allocate ctrl buf")?;
+        let buf_frame = allocate_zeroed_frame().ok_or("Failed to allocate ctrl buf")?;
         self.ctrl_transfer_buf_phys = buf_frame.start_address.as_u64();
         self.ctrl_transfer_buf = phys_to_virt(self.ctrl_transfer_buf_phys) as *mut u8;
         core::ptr::write_bytes(self.ctrl_transfer_buf, 0, 4096);
 
-        let ring_frame = allocate_dma_frame().ok_or("Failed to allocate ctrl ring")?;
+        let ring_frame = allocate_zeroed_frame().ok_or("Failed to allocate ctrl ring")?;
         self.ctrl_ring_phys = ring_frame.start_address.as_u64();
         self.ctrl_ring = phys_to_virt(self.ctrl_ring_phys) as *mut Trb;
         core::ptr::write_bytes(self.ctrl_ring as *mut u8, 0, 4096);

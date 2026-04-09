@@ -18,8 +18,9 @@ use crate::{memory, sync::SpinLock};
 use core::{
     alloc::{GlobalAlloc, Layout},
     ptr,
+    sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
-//use x86_64::PhysAddr;
+use x86_64::PhysAddr;
 
 // ---------------------------------------------------------------------------
 // Slab size classes
@@ -32,18 +33,18 @@ use core::{
 /// bytes the absolute waste of a 2× jump is small enough (max 32 bytes) to
 /// keep power-of-two boundaries, avoiding an explosion of size classes.
 ///
-/// | Class range | Step  | Max waste |
-/// |-------------|-------|-----------|
-/// |  8 –  64 B  | 2× / 1.5× | ≤ 32 B  |
-/// | 64 – 256 B  | ~1.25×    | ≤ 64 B  |
-/// |256 – 2048 B | 1.25×     | ≤ 512 B |
+/// | Class range | Step      | Max waste |
+/// |-------------|-----------|-----------|
+/// |  8 –  64 B  | 2× / 1.5× | ≤ 32 B    |
+/// | 64 – 256 B  | ~1.25×    | ≤ 64 B    |
+/// |256 – 2048 B | 1.25×     | ≤ 512 B   |
 ///
-/// Example improvement:
-///   - 700 B request: old → 1024 (324 B wasted, 32%), new → 768 (68 B, 9%)
-///   - 100 B request: old → 128  (28 B wasted, 22%),  new → 112 (12 B, 11%)
+/// Example improvement :
+///   - 700 B request: old -> 1024 (324 B wasted, 32%), new -> 768 (68 B, 9%)
+///   - 100 B request: old -> 128  (28 B wasted, 22%),  new -> 112 (12 B, 11%)
 const SLAB_SIZES: [usize; 26] = [
-    8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768,
-    896, 1024, 1280, 1536, 1792, 2048,
+    8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896,
+    1024, 1280, 1536, 1792, 2048,
 ];
 const NUM_SLABS: usize = SLAB_SIZES.len();
 /// Allocations with effective size above this threshold bypass the slab.
@@ -66,7 +67,7 @@ pub(crate) fn classify_kernel_heap_backend(layout: Layout) -> KernelHeapBackend 
 }
 
 // =============================================================================
-// CRITICAL: Slab corruption detection
+// CRITICAL: slab corruption detection
 //
 // Set HEAP_POISON_ENABLED to true during debugging of heap-corruption crashes.
 // When enabled:
@@ -90,14 +91,64 @@ const POISON_BYTE: u8 = 0xDE;
 const SLAB_CANARY: u32 = 0xDEAD_BEEF;
 
 // ---------------------------------------------------------------------------
+// Slab page header : embedded at byte 0 of every buddy page used by a class.
+// Blocks start at offset SLAB_HEADER_SIZE within the page.
+// ---------------------------------------------------------------------------
+
+/// Header at the base of each 4 KiB page dedicated to a slab class.
+///
+/// Page layout:
+/// ```text
+/// [0 .. SLAB_HEADER_SIZE)   SlabPageHeader  (24 bytes)
+/// [SLAB_HEADER_SIZE .. 4096) slab blocks, each SLAB_SIZES[ci] bytes
+/// ```
+///
+/// A page lives in `partial_pages[ci]` while `0 < free_count < total_blocks`.
+/// It is removed when all blocks are allocated (`free_count == 0`), and is
+/// reclaimed to the buddy allocator when it becomes fully empty again
+/// (`free_count == total_blocks`).
+#[repr(C)]
+struct SlabPageHeader {
+    /// Next page in the partial list for this class (null = end of list).
+    next_partial: *mut SlabPageHeader,
+    /// Head of the intra-page free-block chain (null = page is full).
+    free_head: *mut u8,
+    /// Free blocks currently in this page.
+    free_count: u32,
+    /// Total blocks this page can hold (constant per class after refill).
+    total_blocks: u32,
+}
+
+// SAFETY: only accessed under SLAB_ALLOC spinlock.
+unsafe impl Send for SlabPageHeader {}
+unsafe impl Sync for SlabPageHeader {}
+
+/// Byte offset at which slab blocks begin within each slab page.
+const SLAB_HEADER_SIZE: usize = core::mem::size_of::<SlabPageHeader>();
+
+// Compile-time invariants.
+const _: () = assert!(
+    SLAB_HEADER_SIZE == 24,
+    "SlabPageHeader size changed : update docs"
+);
+const _: () = assert!(
+    (4096 - SLAB_HEADER_SIZE) / SLAB_SIZES[NUM_SLABS - 1] >= 1,
+    "SlabPageHeader too large: largest slab class gets 0 blocks per page"
+);
+
+// ---------------------------------------------------------------------------
 // SlabState
 // ---------------------------------------------------------------------------
 
-/// Per-size-class free lists.  Each element is the head of an intrusive
-/// singly-linked list stored *in* the free blocks themselves.
+/// Per-size-class partial-page lists.
+///
+/// `partial_pages[ci]` is the head of a singly-linked list of `SlabPageHeader`
+/// nodes for class `ci`.  A page enters the list on `refill` and on the first
+/// `dealloc` after going full.  It leaves the list when all its blocks are
+/// allocated (it silently becomes "full") or when it becomes completely empty
+/// (it is then returned to the buddy allocator).
 struct SlabState {
-    /// `free_lists[i]` is the head of the free list for `SLAB_SIZES[i]`.
-    free_lists: [*mut u8; NUM_SLABS],
+    partial_pages: [*mut SlabPageHeader; NUM_SLABS],
 }
 
 // SAFETY: protected exclusively through `SLAB_ALLOC: SpinLock<SlabState>`.
@@ -105,15 +156,13 @@ unsafe impl Send for SlabState {}
 unsafe impl Sync for SlabState {}
 
 impl SlabState {
-    /// Creates a new instance.
     const fn new() -> Self {
         SlabState {
-            free_lists: [ptr::null_mut(); NUM_SLABS],
+            partial_pages: [ptr::null_mut(); NUM_SLABS],
         }
     }
 
-    /// Return the slab class index for `effective` bytes (already rounded up
-    /// via `max(size, align)`).  Panics if called with `effective > MAX_SLAB_SIZE`.
+    /// Return the slab class index for `effective` bytes.
     #[inline]
     fn class_index(effective: usize) -> usize {
         for (i, &s) in SLAB_SIZES.iter().enumerate() {
@@ -124,34 +173,39 @@ impl SlabState {
         unreachable!("class_index called with effective > MAX_SLAB_SIZE")
     }
 
-    /// Carve one buddy page into blocks of size `SLAB_SIZES[ci]` and prepend
-    /// them all to the free list for that class.
-    ///
-    /// Requests one order-0 frame through the memory frame helpers.
-    /// Requires `token` from the SpinLockGuard that holds the slab lock.
+    /// Allocate one buddy page, write a `SlabPageHeader` at its base, carve
+    /// the remaining space into blocks, and prepend the page to `partial_pages[ci]`.
     unsafe fn refill(&mut self, ci: usize, token: &crate::sync::IrqDisabledToken) {
         let slab_size = SLAB_SIZES[ci];
+        let num_blocks = (4096 - SLAB_HEADER_SIZE) / slab_size;
+        debug_assert!(
+            num_blocks >= 1,
+            "refill: slab_size {} yields 0 blocks",
+            slab_size
+        );
 
-        // Allocate one page (order-0) from the buddy allocator.
-        // IRQs are disabled via the SpinLock guardian; token proves it.
         let frame = match memory::allocate_frame(token) {
             Ok(f) => f,
-            Err(_) => return, // OOM — caller will return null
+            Err(_) => return, // OOM : alloc_block will see null partial and return null
         };
+        SLAB_PAGES_ALLOCATED.fetch_add(1, AtomicOrdering::Relaxed);
 
         let page_virt = super::phys_to_virt(frame.start_address.as_u64()) as *mut u8;
-        let num_blocks = 4096 / slab_size;
 
-        // Link all blocks into the free list (highest address first so the
-        // first block handed out is at the lowest address — irrelevant for
-        // correctness but tidy).
-        let mut head = self.free_lists[ci];
+        // Initialise page header at byte 0.
+        let header = page_virt as *mut SlabPageHeader;
+        (*header).next_partial = ptr::null_mut();
+        (*header).free_head = ptr::null_mut();
+        (*header).free_count = 0;
+        (*header).total_blocks = num_blocks as u32;
+
+        // Carve blocks starting at SLAB_HEADER_SIZE, highest index first so
+        // the lowest-address block ends up at the head (cosmetic only).
+        let blocks_start = page_virt.add(SLAB_HEADER_SIZE);
         for i in (0..num_blocks).rev() {
-            let block = page_virt.add(i * slab_size);
-            // Store the next-free pointer in the first word of the free block.
-            *(block as *mut *mut u8) = head;
+            let block = blocks_start.add(i * slab_size);
+            *(block as *mut *mut u8) = (*header).free_head;
             if HEAP_POISON_ENABLED {
-                // Poison bytes [8..slab_size-4] and place canary at the tail.
                 let end = slab_size.saturating_sub(4);
                 for off in 8..end {
                     *block.add(off) = POISON_BYTE;
@@ -161,80 +215,98 @@ impl SlabState {
                     *cp = SLAB_CANARY;
                 }
             }
-            head = block;
+            (*header).free_head = block;
+            (*header).free_count += 1;
         }
-        self.free_lists[ci] = head;
+
+        // Prepend to partial list.
+        (*header).next_partial = self.partial_pages[ci];
+        self.partial_pages[ci] = header;
     }
 
-    /// Pop a block from the free list for class `ci`, refilling from a buddy
-    /// page if the list is empty.  Returns null on OOM.
+    /// Pop one block from the first partial page for class `ci`.
+    /// Calls `refill` when the partial list is empty.  Returns null on OOM.
     unsafe fn alloc_block(&mut self, ci: usize, token: &crate::sync::IrqDisabledToken) -> *mut u8 {
-        if self.free_lists[ci].is_null() {
+        if self.partial_pages[ci].is_null() {
             self.refill(ci, token);
         }
-        let head = self.free_lists[ci];
-        if head.is_null() {
+        let header = self.partial_pages[ci];
+        if header.is_null() {
             return ptr::null_mut();
         }
-        // Read the next pointer stored at the start of the block.
-        let next = *(head as *const *mut u8);
-        self.free_lists[ci] = next;
+
+        let block = (*header).free_head;
+        debug_assert!(
+            !block.is_null(),
+            "alloc_block: partial page has null free_head"
+        );
+
+        (*header).free_head = *(block as *const *mut u8);
+        (*header).free_count -= 1;
+
+        // Remove page from partial list when it is now full (free_count == 0).
+        if (*header).free_count == 0 {
+            self.partial_pages[ci] = (*header).next_partial;
+            (*header).next_partial = ptr::null_mut();
+        }
 
         if HEAP_POISON_ENABLED {
             let slab_size = SLAB_SIZES[ci];
-            // Bytes [8..slab_size-4] should still hold POISON_BYTE.
-            // Bytes [0..8] held the free-list pointer, exempt from check.
             let end = slab_size.saturating_sub(4);
             let mut bad_off: Option<usize> = None;
             for off in 8..end {
-                if *head.add(off) != POISON_BYTE {
+                if *block.add(off) != POISON_BYTE {
                     bad_off = Some(off);
                     break;
                 }
             }
             if let Some(off) = bad_off {
-                let b0 = *head.add(off);
+                let b0 = *block.add(off);
                 let b1 = if off + 1 < slab_size {
-                    *head.add(off + 1)
+                    *block.add(off + 1)
                 } else {
                     0
                 };
                 let b2 = if off + 2 < slab_size {
-                    *head.add(off + 2)
+                    *block.add(off + 2)
                 } else {
                     0
                 };
                 let b3 = if off + 3 < slab_size {
-                    *head.add(off + 3)
+                    *block.add(off + 3)
                 } else {
                     0
                 };
                 crate::serial_println!(
                     "\x1b[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}]\x1b[0m",
-                    slab_size, head as u64, off, b0, b1, b2, b3
+                    slab_size, block as u64, off, b0, b1, b2, b3
                 );
             }
-            // Verify the canary at the tail of the block.
             if slab_size >= 12 {
-                let canary = *(head.add(slab_size - 4) as *const u32);
+                let canary = *(block.add(slab_size - 4) as *const u32);
                 if canary != SLAB_CANARY {
                     crate::serial_println!(
                         "\x1b[1;31m[HEAP] CANARY OVERFLOW: slab[{}] block={:#x} expected={:#x} got={:#x}\x1b[0m",
-                        slab_size, head as u64, SLAB_CANARY, canary
+                        slab_size, block as u64, SLAB_CANARY, canary
                     );
                 }
             }
         }
 
-        head
+        block
     }
 
-    /// Push a block back onto the free list for class `ci`.
-    unsafe fn dealloc_block(&mut self, ptr: *mut u8, ci: usize) {
+    /// Return `ptr` to its slab page and reclaim the page to the buddy
+    /// allocator if it becomes fully empty.
+    unsafe fn dealloc_block(
+        &mut self,
+        ptr: *mut u8,
+        ci: usize,
+        token: &crate::sync::IrqDisabledToken,
+    ) {
+        let slab_size = SLAB_SIZES[ci];
+
         if HEAP_POISON_ENABLED {
-            let slab_size = SLAB_SIZES[ci];
-            // Canary at tail, then poison the body (skip the first 8 bytes
-            // which will be overwritten by the free-list pointer below).
             if slab_size >= 12 {
                 let cp = ptr.add(slab_size - 4) as *mut u32;
                 *cp = SLAB_CANARY;
@@ -244,13 +316,69 @@ impl SlabState {
                 *ptr.add(off) = POISON_BYTE;
             }
         }
-        // Overwrite the first word of the freed block with the current head.
-        *(ptr as *mut *mut u8) = self.free_lists[ci];
-        self.free_lists[ci] = ptr;
+
+        // Locate the page header: round ptr down to 4 KiB boundary.
+        let page_base = (ptr as usize) & !0xFFF;
+        let header = page_base as *mut SlabPageHeader;
+
+        let was_full = (*header).free_count == 0;
+
+        // Push block onto the page's intra-page free list.
+        *(ptr as *mut *mut u8) = (*header).free_head;
+        (*header).free_head = ptr;
+        (*header).free_count += 1;
+
+        if was_full {
+            // Page went full -> partial: re-insert at list head.
+            (*header).next_partial = self.partial_pages[ci];
+            self.partial_pages[ci] = header;
+        }
+
+        // Reclaim fully-empty pages to the buddy allocator.
+        if (*header).free_count == (*header).total_blocks {
+            self.remove_from_partial(header, ci);
+            let phys = super::virt_to_phys(page_base as u64);
+            // Zero the header before freeing to catch accidental reuse.
+            core::ptr::write_bytes(header as *mut u8, 0, SLAB_HEADER_SIZE);
+            let frame = memory::frame::PhysFrame {
+                start_address: PhysAddr::new(phys),
+            };
+            memory::free_frame(token, frame);
+            SLAB_PAGES_RECLAIMED.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    /// Unlink `page` from `partial_pages[ci]`.  O(n) in partial-list length.
+    unsafe fn remove_from_partial(&mut self, page: *mut SlabPageHeader, ci: usize) {
+        if self.partial_pages[ci] == page {
+            self.partial_pages[ci] = (*page).next_partial;
+            (*page).next_partial = ptr::null_mut();
+            return;
+        }
+        let mut cur = self.partial_pages[ci];
+        while !cur.is_null() {
+            let next = (*cur).next_partial;
+            if next == page {
+                (*cur).next_partial = (*page).next_partial;
+                (*page).next_partial = ptr::null_mut();
+                return;
+            }
+            cur = next;
+        }
+        debug_assert!(
+            false,
+            "remove_from_partial: page {:p} not found in class {} list",
+            page, ci
+        );
     }
 }
 
 static SLAB_ALLOC: SpinLock<SlabState> = SpinLock::new(SlabState::new());
+
+/// Total buddy pages ever handed to the slab allocator.
+static SLAB_PAGES_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+/// Total buddy pages ever returned from the slab allocator (fully-empty reclaim).
+static SLAB_PAGES_RECLAIMED: AtomicUsize = AtomicUsize::new(0);
 
 /// Returns the slab lock address for deadlock tracing.
 pub fn debug_slab_lock_addr() -> usize {
@@ -361,7 +489,7 @@ unsafe impl GlobalAlloc for LockedHeap {
                 // Catch layout mismatches where a vmalloc pointer is freed with
                 // a small layout (classify_kernel_heap_backend routes to Slab).
                 // This means the caller passed a different layout to dealloc than
-                // was used for alloc — a GlobalAlloc contract violation.
+                // was used for alloc : a GlobalAlloc contract violation.
                 #[cfg(debug_assertions)]
                 {
                     let addr = ptr as u64;
@@ -369,20 +497,20 @@ unsafe impl GlobalAlloc for LockedHeap {
                         && addr < crate::memory::vmalloc::VMALLOC_VIRT_END
                     {
                         crate::serial_println!(
-                            "[heap][bug] slab dealloc: ptr {:#x} is in vmalloc range — layout mismatch",
+                            "[heap][bug] slab dealloc: ptr {:#x} is in vmalloc range : layout mismatch",
                             addr
                         );
                         debug_assert!(
                             false,
-                            "slab dealloc with vmalloc pointer — alloc/dealloc layout mismatch"
+                            "slab dealloc with vmalloc pointer : alloc/dealloc layout mismatch"
                         );
                     }
                 }
                 let mut slab = SLAB_ALLOC.lock();
-                slab.dealloc_block(ptr, ci);
+                slab.with_mut_and_token(|s, token| s.dealloc_block(ptr, ci, token));
             }
             KernelHeapBackend::Vmalloc => {
-                // --- vmalloc path: free via the vmalloc arena ---
+                // vmalloc path: free via the vmalloc arena
                 let addr = ptr as u64;
                 if addr >= crate::memory::vmalloc::VMALLOC_VIRT_START
                     && addr < crate::memory::vmalloc::VMALLOC_VIRT_END
@@ -392,19 +520,19 @@ unsafe impl GlobalAlloc for LockedHeap {
                     });
                 } else {
                     // Pointer is outside the vmalloc arena with a large-allocation
-                    // layout. This is a leak — warn loudly in debug builds.
+                    // layout. This is a leak : warn loudly in debug builds.
                     #[cfg(debug_assertions)]
                     {
                         crate::serial_println!(
                             "[heap][bug] vmalloc dealloc: ptr {:#x} outside vmalloc arena \
-                             [{:#x}..{:#x}] — memory leaked",
+                             [{:#x}..{:#x}] : memory leaked",
                             addr,
                             crate::memory::vmalloc::VMALLOC_VIRT_START,
                             crate::memory::vmalloc::VMALLOC_VIRT_END,
                         );
                         debug_assert!(
                             false,
-                            "vmalloc dealloc with out-of-range pointer — memory leaked"
+                            "vmalloc dealloc with out-of-range pointer : memory leaked"
                         );
                     }
                 }
@@ -639,12 +767,50 @@ pub fn dump_diagnostics() {
     }
 
     // Slab stats
-    if let Some(_guard) = SLAB_ALLOC.try_lock() {
+    {
+        let alloc = SLAB_PAGES_ALLOCATED.load(AtomicOrdering::Relaxed);
+        let reclaim = SLAB_PAGES_RECLAIMED.load(AtomicOrdering::Relaxed);
         crate::serial_println!(
-            "[heap][diag] slab: lock acquired (diagnostic info not yet tracked per-class)"
+            "[heap][diag] slab: pages_allocated={} pages_reclaimed={} pages_live={}",
+            alloc,
+            reclaim,
+            alloc.saturating_sub(reclaim)
         );
+    }
+    if let Some(mut guard) = SLAB_ALLOC.try_lock() {
+        // SAFETY: we hold the slab lock; raw pointer traversal is safe.
+        guard.with_mut_and_token(|s, _| unsafe {
+            for ci in 0..NUM_SLABS {
+                let mut head = s.partial_pages[ci];
+                if head.is_null() {
+                    continue;
+                }
+                let mut page_count = 0usize;
+                let mut free_blocks = 0u32;
+                while !head.is_null() {
+                    page_count += 1;
+                    free_blocks = free_blocks.saturating_add((*head).free_count);
+                    head = (*head).next_partial;
+                }
+                crate::serial_println!(
+                    "[heap][diag] slab[{}]: partial_pages={} free_blocks={}",
+                    SLAB_SIZES[ci],
+                    page_count,
+                    free_blocks
+                );
+            }
+        });
     } else {
         crate::serial_println!("[heap][diag] slab: locked (retry later)");
+    }
+
+    // Contiguous-physical allocation telemetry
+    {
+        let d = crate::memory::phys_contiguous_diag();
+        crate::serial_println!(
+            "[heap][diag] phys_contiguous: pages_allocated={} pages_freed={} pages_live={} alloc_failures={}",
+            d.pages_allocated, d.pages_freed, d.pages_live, d.alloc_fail_count
+        );
     }
 
     crate::memory::vmalloc::dump_diagnostics();

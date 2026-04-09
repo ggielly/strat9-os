@@ -6,7 +6,7 @@ use crate::{
         nic::NetworkDevice,
         pci_client::{self as pci, Bar, ProbeCriteria},
     },
-    memory::{allocate_dma_frame, phys_to_virt},
+    memory::{allocate_zeroed_frame, phys_to_virt},
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -164,7 +164,7 @@ impl PcnetDevice {
         let mut rx_buffers = [core::ptr::null_mut(); RX_BUFFERS_COUNT];
         let mut rx_phys = [0u64; RX_BUFFERS_COUNT];
         for i in 0..RX_BUFFERS_COUNT {
-            let frame = allocate_dma_frame().ok_or("Failed to allocate RX buffer")?;
+            let frame = allocate_zeroed_frame().ok_or("Failed to allocate RX buffer")?;
             rx_phys[i] = frame.start_address.as_u64();
             rx_buffers[i] = phys_to_virt(rx_phys[i]) as *mut u8;
         }
@@ -172,19 +172,19 @@ impl PcnetDevice {
         let mut tx_buffers = [core::ptr::null_mut(); TX_BUFFERS_COUNT];
         let mut tx_phys = [0u64; TX_BUFFERS_COUNT];
         for i in 0..TX_BUFFERS_COUNT {
-            let frame = allocate_dma_frame().ok_or("Failed to allocate TX buffer")?;
+            let frame = allocate_zeroed_frame().ok_or("Failed to allocate TX buffer")?;
             tx_phys[i] = frame.start_address.as_u64();
             tx_buffers[i] = phys_to_virt(tx_phys[i]) as *mut u8;
         }
 
-        let rx_des_frame = allocate_dma_frame().ok_or("Failed to allocate RX descriptors")?;
+        let rx_des_frame = allocate_zeroed_frame().ok_or("Failed to allocate RX descriptors")?;
         let rx_des_phys = rx_des_frame.start_address.as_u64();
         let rx_des = phys_to_virt(rx_des_phys) as *mut u8;
         unsafe {
             core::ptr::write_bytes(rx_des, 0, RX_BUFFERS_COUNT * DESC_LEN);
         }
 
-        let tx_des_frame = allocate_dma_frame().ok_or("Failed to allocate TX descriptors")?;
+        let tx_des_frame = allocate_zeroed_frame().ok_or("Failed to allocate TX descriptors")?;
         let tx_des_phys = tx_des_frame.start_address.as_u64();
         let tx_des = phys_to_virt(tx_des_phys) as *mut u8;
         unsafe {
@@ -234,7 +234,7 @@ impl PcnetDevice {
             self.init_tx_descriptor(i);
         }
 
-        let init_struct_frame = allocate_dma_frame().unwrap();
+        let init_struct_frame = allocate_zeroed_frame().unwrap();
         let init_phys = init_struct_frame.start_address.as_u64();
         let init_virt = phys_to_virt(init_phys) as *mut u8;
         unsafe {

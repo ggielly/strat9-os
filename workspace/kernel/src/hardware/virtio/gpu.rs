@@ -3,7 +3,7 @@
 
 use crate::{
     arch::x86_64::pci::{self, Bar, ProbeCriteria},
-    memory::{self, allocate_dma_frame, phys_to_virt, PhysFrame},
+    memory::{self, allocate_zeroed_frame, phys_to_virt, PhysFrame},
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -329,7 +329,7 @@ impl VirtioGpu {
         let mut segments = Vec::with_capacity(page_count);
 
         for _ in 0..page_count {
-            let frame = allocate_dma_frame().ok_or("Failed to allocate framebuffer page")?;
+            let frame = allocate_zeroed_frame().ok_or("Failed to allocate framebuffer page")?;
             let phys = frame.start_address.as_u64();
             pages.push(frame);
             entries.push(MemEntry {
@@ -848,11 +848,11 @@ impl Virtqueue {
             let queue_size = core::cmp::min(max_size, VIRTIO_RING_SIZE) as u16;
             ((device.mmio + 0x16) as *mut u16).write_volatile(queue_size);
 
-            let desc_frame = allocate_dma_frame().ok_or("Failed to allocate desc")?;
-            let avail_frame = allocate_dma_frame().ok_or("Failed to allocate avail")?;
-            let used_frame = allocate_dma_frame().ok_or("Failed to allocate used")?;
-            let cmd_frame = allocate_dma_frame().ok_or("Failed to allocate command buffer")?;
-            let resp_frame = allocate_dma_frame().ok_or("Failed to allocate response buffer")?;
+            let desc_frame = allocate_zeroed_frame().ok_or("Failed to allocate desc")?;
+            let avail_frame = allocate_zeroed_frame().ok_or("Failed to allocate avail")?;
+            let used_frame = allocate_zeroed_frame().ok_or("Failed to allocate used")?;
+            let cmd_frame = allocate_zeroed_frame().ok_or("Failed to allocate command buffer")?;
+            let resp_frame = allocate_zeroed_frame().ok_or("Failed to allocate response buffer")?;
 
             let payload_frame = crate::sync::with_irqs_disabled(|token| {
                 memory::allocate_phys_contiguous(token, VIRTQ_PAYLOAD_ORDER)

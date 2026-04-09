@@ -19,7 +19,7 @@ pub mod zone;
 use crate::{
     boot::entry::MemoryRegion, capability::CapId, process::get_task_by_pid, sync::IrqDisabledToken,
 };
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Once;
 
 /// Higher Half Direct Map offset.
@@ -214,17 +214,42 @@ pub fn allocate_frames(token: &IrqDisabledToken, order: u8) -> Result<PhysFrame,
     buddy::alloc(token, order)
 }
 
+/// Total pages handed out by [`allocate_phys_contiguous`] (in units of 4 KiB pages, summed across orders).
+///
+/// Incremented on every successful contiguous alloc; never decremented.
+/// Paired with [`CONTIGUOUS_FREE_PAGES`] to derive the live count.
+static CONTIGUOUS_ALLOC_PAGES: AtomicUsize = AtomicUsize::new(0);
+/// Total pages returned via [`free_phys_contiguous`].
+static CONTIGUOUS_FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
+/// Total failed contiguous allocation attempts (fragmentation indicator).
+static CONTIGUOUS_ALLOC_FAIL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Allocate a physically contiguous block of `2^order` pages.
 ///
-/// This is the explicit contiguous-physical allocator for DMA rings,
-/// MMIO-adjacent buffers, large hardware descriptors, and similar cases
-/// where physical contiguity is the actual requirement.
+/// **Intended for hardware/DMA use only** — DMA rings, MMIO-adjacent buffers,
+/// large hardware descriptor tables, and other cases where physical contiguity
+/// is the *actual requirement*.
+///
+/// DO NOT USE for general heap allocations — use [`allocate_kernel_virtual`]
+/// for large kernel buffers or [`allocate_frame`] for single kernel-data frames.
+///
+/// Telemetry: increments [`CONTIGUOUS_ALLOC_PAGES`] on success,
+/// [`CONTIGUOUS_ALLOC_FAIL_COUNT`] on failure.
 #[inline]
-pub fn allocate_phys_contiguous(
+pub(crate) fn allocate_phys_contiguous(
     token: &IrqDisabledToken,
     order: u8,
 ) -> Result<PhysFrame, AllocError> {
-    buddy::alloc(token, order)
+    match buddy::alloc(token, order) {
+        Ok(frame) => {
+            CONTIGUOUS_ALLOC_PAGES.fetch_add(1usize << order, Ordering::Relaxed);
+            Ok(frame)
+        }
+        Err(e) => {
+            CONTIGUOUS_ALLOC_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+            Err(e)
+        }
+    }
 }
 
 /// Free `2^order` contiguous physical frames.
@@ -242,9 +267,32 @@ pub fn free_frames(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
 
 /// Free a physically contiguous block previously returned by
 /// [`allocate_phys_contiguous`].
+///
+/// DO NOT USE to free frames from [`allocate_frame`] — use [`free_frame`] instead.
 #[inline]
-pub fn free_phys_contiguous(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
+pub(crate) fn free_phys_contiguous(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
+    CONTIGUOUS_FREE_PAGES.fetch_add(1usize << order, Ordering::Relaxed);
     buddy::free(token, frame, order);
+}
+
+/// Snapshot of contiguous-physical-allocation telemetry.
+pub struct PhysContiguousDiag {
+    pub pages_allocated: usize,
+    pub pages_freed: usize,
+    pub pages_live: usize,
+    pub alloc_fail_count: usize,
+}
+
+/// Read current contiguous-allocation telemetry without locking.
+pub fn phys_contiguous_diag() -> PhysContiguousDiag {
+    let alloc = CONTIGUOUS_ALLOC_PAGES.load(Ordering::Relaxed);
+    let freed = CONTIGUOUS_FREE_PAGES.load(Ordering::Relaxed);
+    PhysContiguousDiag {
+        pages_allocated: alloc,
+        pages_freed: freed,
+        pages_live: alloc.saturating_sub(freed),
+        alloc_fail_count: CONTIGUOUS_ALLOC_FAIL_COUNT.load(Ordering::Relaxed),
+    }
 }
 
 /// Allocate physically contiguous pages for a kernel stack.
@@ -311,14 +359,18 @@ pub fn free_kernel_virtual(ptr: *mut u8, token: &IrqDisabledToken) {
     vmalloc::vfree(ptr, token);
 }
 
-/// Allocate a zeroed 4 KiB frame suitable for DMA operations.
+/// Allocate a single zeroed 4 KiB frame.
 ///
 /// Disables IRQs internally.  The frame is zeroed before being returned
-/// (guaranteed by `FrameAllocOptions::new()` — zeroed = true by default).
-pub fn allocate_dma_frame() -> Option<PhysFrame> {
+/// (`FrameAllocOptions::new()` defaults to zeroed = true).
+///
+/// This is a convenience wrapper for hardware drivers that need a single
+/// device-accessible page.  It carries no DMA-zone or address-range
+/// guarantee — the frame may come from any zone.  For strict DMA
+/// requirements (e.g. <16 MiB for ISA DMA), allocate from the DMA zone
+/// directly via `FrameAllocOptions`.
+pub fn allocate_zeroed_frame() -> Option<PhysFrame> {
     with_irqs_disabled(|token| {
-        // `FrameAllocOptions::new()` defaults to zeroed = true; no manual
-        // `write_bytes` call is needed here any more.
         FrameAllocOptions::new()
             .purpose(FramePurpose::KernelData)
             .allocate(token)

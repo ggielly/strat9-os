@@ -6,7 +6,7 @@ use crate::{
         nic::NetworkDevice,
         pci_client::{self as pci, Bar, ProbeCriteria},
     },
-    memory::{allocate_dma_frame, phys_to_virt},
+    memory::{allocate_zeroed_frame, phys_to_virt},
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -129,7 +129,7 @@ impl Rtl8139Device {
         let mac = ports.mac();
         let name = format!("rtl8139_{:02x}{:02x}{:02x}", mac[3], mac[4], mac[5]);
 
-        let rx_frame = allocate_dma_frame().ok_or("Failed to allocate RX buffer")?;
+        let rx_frame = allocate_zeroed_frame().ok_or("Failed to allocate RX buffer")?;
         let rx_phys = rx_frame.start_address.as_u64();
         let rx_buffer = phys_to_virt(rx_phys) as *mut u8;
         core::ptr::write_bytes(rx_buffer, 0, RX_BUFFER_SIZE + RX_BUFFER_PAD + MTU);
@@ -137,7 +137,7 @@ impl Rtl8139Device {
         let mut tx_buffers = [core::ptr::null_mut(); TX_BUFFERS_COUNT];
         let mut tx_phys = [0u64; TX_BUFFERS_COUNT];
         for i in 0..TX_BUFFERS_COUNT {
-            let frame = allocate_dma_frame().ok_or("Failed to allocate TX buffer")?;
+            let frame = allocate_zeroed_frame().ok_or("Failed to allocate TX buffer")?;
             tx_phys[i] = frame.start_address.as_u64();
             tx_buffers[i] = phys_to_virt(tx_phys[i]) as *mut u8;
             core::ptr::write_bytes(tx_buffers[i], 0, TX_BUFFER_SIZE);

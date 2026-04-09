@@ -11,7 +11,7 @@
 
 use crate::{
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
-    memory::{allocate_dma_frame, phys_to_virt},
+    memory::{allocate_zeroed_frame, phys_to_virt},
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -175,13 +175,13 @@ impl EhciController {
     /// Initializes schedules.
     unsafe fn init_schedules(&mut self) -> Result<(), &'static str> {
         // Allocate periodic list (4KB aligned, 1024 entries)
-        let periodic_frame = allocate_dma_frame().ok_or("Failed to allocate periodic list")?;
+        let periodic_frame = allocate_zeroed_frame().ok_or("Failed to allocate periodic list")?;
         self.periodic_list_phys = periodic_frame.start_address.as_u64();
         self.periodic_list = phys_to_virt(self.periodic_list_phys) as *mut u32;
         core::ptr::write_bytes(self.periodic_list as *mut u8, 0, 4096);
 
         // Allocate async list (32-byte aligned)
-        let async_frame = allocate_dma_frame().ok_or("Failed to allocate async list")?;
+        let async_frame = allocate_zeroed_frame().ok_or("Failed to allocate async list")?;
         self.async_list_phys = async_frame.start_address.as_u64();
         self.async_list = phys_to_virt(self.async_list_phys) as *mut u32;
         core::ptr::write_bytes(self.async_list as *mut u8, 0, 4096);
