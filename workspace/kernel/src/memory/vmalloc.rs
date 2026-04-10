@@ -63,11 +63,11 @@ use core::{
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
 use x86_64::{
-    VirtAddr,
     structures::paging::{Page, PageTableFlags, PhysFrame as X86PhysFrame},
+    VirtAddr,
 };
 
-//  Arena constants =====================================================
+// Arena constants =====================================================
 
 /// Base virtual address of the vmalloc arena.
 /// Placed at 0xffffc000_0000_0000 — well above the HHDM direct map.

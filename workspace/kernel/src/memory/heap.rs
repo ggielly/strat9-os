@@ -520,10 +520,6 @@ fn record_heap_failure(
     error
 }
 
-fn clear_heap_failure() {
-    *LAST_HEAP_FAILURE.lock() = None;
-}
-
 pub fn last_heap_failure_snapshot() -> Option<KernelHeapFailureSnapshot> {
     *LAST_HEAP_FAILURE.lock()
 }
@@ -537,7 +533,9 @@ pub fn last_heap_failure_snapshot() -> Option<KernelHeapFailureSnapshot> {
 pub unsafe fn try_alloc_kernel_heap(layout: Layout) -> Result<*mut u8, KernelHeapAllocError> {
     // Effective size must satisfy both the size and alignment requirements.
     let effective = layout.size().max(layout.align());
-    if layout.align() == 0 || !layout.align().is_power_of_two() {
+    // `Layout` constructors guarantee a non-zero alignment; keep the power-of-two
+    // check as a defensive guard for any malformed caller input.
+    if !layout.align().is_power_of_two() {
         return Err(record_heap_failure(
             layout,
             effective,
@@ -621,7 +619,6 @@ pub unsafe fn try_alloc_kernel_heap(layout: Layout) -> Result<*mut u8, KernelHea
         }
     };
 
-    clear_heap_failure();
     Ok(result)
 }
 
@@ -746,8 +743,8 @@ fn alloc_error_handler(layout: Layout) -> ! {
             );
             if free_pages > (total_pages / 4) {
                 crate::serial_println!(
-                    "[heap][oom] diagnosis=slab refill failed despite remaining free pages \
-                     ({} free pages): fragmented physical memory or allocator pressure",
+                    "[heap][oom] diagnosis=slab order-0 refill failed despite remaining free pages \
+                     ({} free pages): allocator pressure, zone exhaustion, or transient allocator state",
                     free_pages,
                 );
             }
