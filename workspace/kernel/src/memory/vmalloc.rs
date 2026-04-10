@@ -580,6 +580,24 @@ pub struct VmallocLiveAllocationSnapshot {
     pub caller_column: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmallocDiagSnapshot {
+    pub arena_start: u64,
+    pub arena_end: u64,
+    pub alloc_count: usize,
+    pub allocated_pages: usize,
+    pub free_pages: usize,
+    pub peak_pages: u64,
+    pub total_seq: u64,
+    pub fail_count: usize,
+    pub policy_rejects: u64,
+    pub free_extent_count: usize,
+    pub largest_free_pages: usize,
+    pub metadata_pages: usize,
+    pub node_pool_free: usize,
+    pub last_failure: Option<VmallocFailureSnapshot>,
+}
+
 /// Pre-allocate the intermediate page-table nodes (PML4 → PDPT → PD) for the
 /// vmalloc virtual address range in the **canonical kernel page table**.
 ///
@@ -667,6 +685,39 @@ pub fn init() {
 pub fn last_failure_snapshot() -> Option<VmallocFailureSnapshot> {
     let guard = VMALLOC.lock();
     guard.last_failure
+}
+
+pub fn diag_snapshot() -> Option<VmallocDiagSnapshot> {
+    let guard = VMALLOC.lock();
+    let vm = &*guard;
+    if !vm.initialized {
+        return None;
+    }
+
+    let (free_extents, largest_free, node_pool_free) = unsafe {
+        (
+            vm.free_extent_count(),
+            vm.largest_free_extent_pages(),
+            vm.node_pool_free_count(),
+        )
+    };
+
+    Some(VmallocDiagSnapshot {
+        arena_start: VMALLOC_VIRT_START,
+        arena_end: VMALLOC_VIRT_END,
+        alloc_count: vm.alloc_count,
+        allocated_pages: vm.allocated_pages,
+        free_pages: (VMALLOC_PAGES - ARENA_START_PAGE).saturating_sub(vm.allocated_pages),
+        peak_pages: VMALLOC_PEAK_PAGES.load(AtomicOrdering::Relaxed),
+        total_seq: VMALLOC_ALLOC_SEQ.load(AtomicOrdering::Relaxed),
+        fail_count: vm.fail_count,
+        policy_rejects: VMALLOC_POLICY_REJECT_COUNT.load(AtomicOrdering::Relaxed),
+        free_extent_count: free_extents,
+        largest_free_pages: largest_free,
+        metadata_pages: vm.metadata_pages,
+        node_pool_free,
+        last_failure: vm.last_failure,
+    })
 }
 
 /// Allocate `size` bytes of virtually contiguous kernel memory.

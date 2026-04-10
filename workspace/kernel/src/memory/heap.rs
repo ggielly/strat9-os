@@ -69,6 +69,13 @@ pub struct KernelHeapFailureSnapshot {
     pub error: KernelHeapAllocError,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SlabDiagSnapshot {
+    pub pages_allocated: usize,
+    pub pages_reclaimed: usize,
+    pub pages_live: usize,
+}
+
 #[inline]
 pub(crate) fn classify_kernel_heap_backend(layout: Layout) -> KernelHeapBackend {
     let effective = layout.size().max(layout.align());
@@ -522,6 +529,16 @@ fn record_heap_failure(
 
 pub fn last_heap_failure_snapshot() -> Option<KernelHeapFailureSnapshot> {
     *LAST_HEAP_FAILURE.lock()
+}
+
+pub fn slab_diag_snapshot() -> SlabDiagSnapshot {
+    let allocated = SLAB_PAGES_ALLOCATED.load(AtomicOrdering::Relaxed);
+    let reclaimed = SLAB_PAGES_RECLAIMED.load(AtomicOrdering::Relaxed);
+    SlabDiagSnapshot {
+        pages_allocated: allocated,
+        pages_reclaimed: reclaimed,
+        pages_live: allocated.saturating_sub(reclaimed),
+    }
 }
 
 /// Fallible heap entry point with explicit backend-aware errors.
