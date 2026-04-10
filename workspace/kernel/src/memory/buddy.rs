@@ -293,7 +293,10 @@ impl BuddyAllocator {
             if Self::protected_overlap_end(frame_phys, block_end).is_some() {
                 // Inconsistency: a free block overlaps with protected kernel memory.
                 // This means seed_range_as_free() was incorrect.
-                panic!("Buddy allocator inconsistency: free block 0x{:x} order {} overlaps protected memory", frame_phys, cur_order);
+                panic!(
+                    "Buddy allocator inconsistency: free block 0x{:x} order {} overlaps protected memory",
+                    frame_phys, cur_order
+                );
             }
 
             // One block of this order transitions free -> allocated.

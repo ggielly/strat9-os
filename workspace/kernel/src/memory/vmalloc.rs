@@ -58,12 +58,13 @@ use crate::{
 };
 use core::{
     mem::size_of,
+    panic::Location,
     ptr,
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
 use x86_64::{
-    structures::paging::{Page, PageTableFlags, PhysFrame as X86PhysFrame},
     VirtAddr,
+    structures::paging::{Page, PageTableFlags, PhysFrame as X86PhysFrame},
 };
 
 //  Arena constants =====================================================
@@ -500,6 +501,8 @@ pub static VMALLOC_PEAK_PAGES: AtomicU64 = AtomicU64::new(0);
 /// - `size` is the **requested** byte count, not the page-rounded value.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VmallocAttr {
+    /// Scheduler task id (`0` = kernel or pre-scheduler context).
+    pub task_id: u64,
     /// PID of the requesting task (`0` = kernel or pre-scheduler context).
     pub pid: u32,
     /// TID of the requesting task.
@@ -510,6 +513,12 @@ pub struct VmallocAttr {
     pub size: usize,
     /// Monotonic per-boot sequence number (see [`VMALLOC_ALLOC_SEQ`]).
     pub alloc_seq: u64,
+    /// Best-effort callsite file of the allocator request.
+    pub caller_file: &'static str,
+    /// Best-effort callsite line of the allocator request.
+    pub caller_line: u32,
+    /// Best-effort callsite column of the allocator request.
+    pub caller_column: u32,
 }
 
 /// Capture attribution for the calling task, without holding VMALLOC.
@@ -520,24 +529,55 @@ pub struct VmallocAttr {
 ///
 /// Uses `current_task_clone_try()` (non-blocking) so that vmalloc called
 /// from within a scheduler path cannot deadlock on the per-CPU scheduler lock.
-fn capture_attr(size: usize) -> VmallocAttr {
+fn capture_attr(size: usize, caller: &'static Location<'static>) -> VmallocAttr {
     let alloc_seq = VMALLOC_ALLOC_SEQ.fetch_add(1, AtomicOrdering::Relaxed);
 
-    let (pid, tid, silo_id) =
-        match crate::process::current_task_clone_try() {
-            Some(task) => {
-                let pid = task.pid;
-                let tid = task.tid;
-                // Non-blocking: if SILO_MANAGER is held by an outer frame on this
-                // CPU, we just record silo_id=0 rather than risk a deadlock.
-                let silo_id = crate::silo::try_silo_id_for_task(task.id).unwrap_or(0);
-                (pid, tid, silo_id)
-            }
-            // No scheduler running yet, or per-CPU lock is contended.
-            None => (0, 0, 0),
-        };
+    let (task_id, pid, tid, silo_id) = match crate::process::current_task_clone_try() {
+        Some(task) => {
+            let task_id = task.id.as_u64();
+            let pid = task.pid;
+            let tid = task.tid;
+            // Non-blocking: if SILO_MANAGER is held by an outer frame on this
+            // CPU, we just record silo_id=0 rather than risk a deadlock.
+            let silo_id = crate::silo::try_silo_id_for_task(task.id).unwrap_or(0);
+            (task_id, pid, tid, silo_id)
+        }
+        // No scheduler running yet, or per-CPU lock is contended.
+        None => (0, 0, 0, 0),
+    };
 
-    VmallocAttr { pid, tid, silo_id, size, alloc_seq }
+    VmallocAttr {
+        task_id,
+        pid,
+        tid,
+        silo_id,
+        size,
+        alloc_seq,
+        caller_file: caller.file(),
+        caller_line: caller.line(),
+        caller_column: caller.column(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmallocAllocBackend {
+    KernelVirtual,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmallocLiveAllocationSnapshot {
+    pub seq: u64,
+    pub task_id: u64,
+    pub pid: u32,
+    pub tid: u32,
+    pub silo_id: u32,
+    pub size: usize,
+    pub pages: usize,
+    pub vaddr: u64,
+    pub backend: VmallocAllocBackend,
+    pub caller_file: &'static str,
+    pub caller_line: u32,
+    pub caller_column: u32,
 }
 
 /// Pre-allocate the intermediate page-table nodes (PML4 → PDPT → PD) for the
@@ -633,6 +673,7 @@ pub fn last_failure_snapshot() -> Option<VmallocFailureSnapshot> {
 ///
 /// Prefer [`crate::memory::allocate_kernel_virtual`] over calling this
 /// directly.
+#[track_caller]
 pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, VmallocError> {
     if size == 0 {
         // Pure policy reject — no allocation attempted, no per-call context
@@ -651,7 +692,7 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
     // Capture attribution before acquiring VMALLOC to respect lock ordering
     // (VMALLOC → SILO_MANAGER) and to avoid a re-entrancy deadlock if this
     // vmalloc call originates from within scheduler or silo code.
-    let attr = capture_attr(size);
+    let attr = capture_attr(size, Location::caller());
 
     ensure_init();
 
@@ -848,45 +889,103 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) {
 /// This is the primary tool for leak investigation: run it periodically under
 /// a long-lived workload, diff the outputs, and identify growing sequences.
 pub fn dump_live_allocations() {
-    let guard = VMALLOC.lock();
-    let vm = &*guard;
-    if !vm.initialized {
-        serial_println!("[vmalloc][live] not initialized");
-        return;
+    const MAX_SNAPSHOT: usize = 256;
+    let mut snapshot = [VmallocLiveAllocationSnapshot {
+        seq: 0,
+        task_id: 0,
+        pid: 0,
+        tid: 0,
+        silo_id: 0,
+        size: 0,
+        pages: 0,
+        vaddr: 0,
+        backend: VmallocAllocBackend::KernelVirtual,
+        caller_file: "",
+        caller_line: 0,
+        caller_column: 0,
+    }; MAX_SNAPSHOT];
+    let count = live_allocations_snapshot(&mut snapshot);
+    if count == 0 {
+        let guard = VMALLOC.lock();
+        if !guard.initialized {
+            serial_println!("[vmalloc][live] not initialized");
+            return;
+        }
     }
 
-    let mut count = 0usize;
     let mut total_pages = 0usize;
-
-    // SAFETY: all nodes are valid while VMALLOC is held; `alloc_head` is a
-    // sorted intrusive list of active allocation nodes.
-    let mut cur = vm.alloc_head;
-    while !cur.is_null() {
-        let node = unsafe { &*cur };
-        let virt_start = VMALLOC_VIRT_START + (node.start_page as u64 * 4096);
+    for entry in snapshot.iter().take(count) {
         serial_println!(
-            "[vmalloc][live] seq={} pid={} tid={} silo={} size={} pages={} vaddr=0x{:x}",
-            node.attr.alloc_seq,
-            node.attr.pid,
-            node.attr.tid,
-            node.attr.silo_id,
-            node.attr.size,
-            node.page_count,
-            virt_start,
+            "[vmalloc][live] seq={} backend={:?} task={} pid={} tid={} silo={} size={} pages={} vaddr=0x{:x} caller={}:{}:{}",
+            entry.seq,
+            entry.backend,
+            entry.task_id,
+            entry.pid,
+            entry.tid,
+            entry.silo_id,
+            entry.size,
+            entry.pages,
+            entry.vaddr,
+            entry.caller_file,
+            entry.caller_line,
+            entry.caller_column,
         );
-        count = count.saturating_add(1);
-        total_pages = total_pages.saturating_add(node.page_count);
-        cur = node.next;
+        total_pages = total_pages.saturating_add(entry.pages);
     }
 
     let peak = VMALLOC_PEAK_PAGES.load(AtomicOrdering::Relaxed);
+    let guard = VMALLOC.lock();
+    let live_count = guard.alloc_count;
+    let live_pages = guard.allocated_pages;
     serial_println!(
         "[vmalloc][live] total: {} allocs, {} pages ({} KiB), peak_pages={}",
-        count,
-        total_pages,
-        total_pages.saturating_mul(4),
+        live_count,
+        live_pages,
+        live_pages.saturating_mul(4),
         peak,
     );
+    if live_count > count {
+        serial_println!(
+            "[vmalloc][live] snapshot truncated: {} additional allocations not shown",
+            live_count - count,
+        );
+    }
+}
+
+/// Copy live vmalloc allocations into `out`, in allocation-address order.
+///
+/// Returns the number of entries written. If `out` is too small, the snapshot is
+/// truncated; callers can compare the returned length with allocator totals to
+/// detect truncation.
+pub fn live_allocations_snapshot(out: &mut [VmallocLiveAllocationSnapshot]) -> usize {
+    let guard = VMALLOC.lock();
+    let vm = &*guard;
+    if !vm.initialized {
+        return 0;
+    }
+
+    let mut count = 0usize;
+    let mut cur = vm.alloc_head;
+    while !cur.is_null() && count < out.len() {
+        let node = unsafe { &*cur };
+        out[count] = VmallocLiveAllocationSnapshot {
+            seq: node.attr.alloc_seq,
+            task_id: node.attr.task_id,
+            pid: node.attr.pid,
+            tid: node.attr.tid,
+            silo_id: node.attr.silo_id,
+            size: node.attr.size,
+            pages: node.page_count,
+            vaddr: VMALLOC_VIRT_START + (node.start_page as u64 * 4096),
+            backend: VmallocAllocBackend::KernelVirtual,
+            caller_file: node.attr.caller_file,
+            caller_line: node.attr.caller_line,
+            caller_column: node.attr.caller_column,
+        };
+        count += 1;
+        cur = node.next;
+    }
+    count
 }
 
 /// Dump vmalloc diagnostics to the serial console.

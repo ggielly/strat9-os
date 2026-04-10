@@ -35,13 +35,10 @@ use x86_64::PhysAddr;
 ///
 /// | Class range | Step      | Max waste |
 /// |-------------|-----------|-----------|
-/// |  8 –  64 B  | 2× / 1.5× | ≤ 32 B    |
-/// | 64 – 256 B  | ~1.25×    | ≤ 64 B    |
-/// |256 – 2048 B | 1.25×     | ≤ 512 B   |
-///
-/// Example improvement :
-///   - 700 B request: old -> 1024 (324 B wasted, 32%), new -> 768 (68 B, 9%)
-///   - 100 B request: old -> 128  (28 B wasted, 22%),  new -> 112 (12 B, 11%)
+/// | 8 to  64 B  | x2 / 1,5× | ≤ 32 B    |
+/// |64 to 256 B  | ~ x1,25×  | ≤ 64 B    |
+/// |256 to 2048 B| x1,25     | ≤ 512 B   |
+
 const SLAB_SIZES: [usize; 26] = [
     8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896,
     1024, 1280, 1536, 1792, 2048,
@@ -51,9 +48,25 @@ const NUM_SLABS: usize = SLAB_SIZES.len();
 const MAX_SLAB_SIZE: usize = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum KernelHeapBackend {
+pub enum KernelHeapBackend {
     Slab,
     Vmalloc,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KernelHeapAllocError {
+    InvalidLayout,
+    SlabRefillFailed { effective: usize, class_size: usize },
+    Vmalloc(memory::vmalloc::VmallocError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KernelHeapFailureSnapshot {
+    pub backend: KernelHeapBackend,
+    pub requested_size: usize,
+    pub align: usize,
+    pub effective_size: usize,
+    pub error: KernelHeapAllocError,
 }
 
 #[inline]
@@ -279,7 +292,13 @@ impl SlabState {
                 };
                 crate::serial_println!(
                     "\x1b[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}]\x1b[0m",
-                    slab_size, block as u64, off, b0, b1, b2, b3
+                    slab_size,
+                    block as u64,
+                    off,
+                    b0,
+                    b1,
+                    b2,
+                    b3
                 );
             }
             if slab_size >= 12 {
@@ -287,7 +306,10 @@ impl SlabState {
                 if canary != SLAB_CANARY {
                     crate::serial_println!(
                         "\x1b[1;31m[HEAP] CANARY OVERFLOW: slab[{}] block={:#x} expected={:#x} got={:#x}\x1b[0m",
-                        slab_size, block as u64, SLAB_CANARY, canary
+                        slab_size,
+                        block as u64,
+                        SLAB_CANARY,
+                        canary
                     );
                 }
             }
@@ -374,6 +396,7 @@ impl SlabState {
 }
 
 static SLAB_ALLOC: SpinLock<SlabState> = SpinLock::new(SlabState::new());
+static LAST_HEAP_FAILURE: SpinLock<Option<KernelHeapFailureSnapshot>> = SpinLock::new(None);
 
 /// Total buddy pages ever handed to the slab allocator.
 static SLAB_PAGES_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
@@ -399,67 +422,7 @@ pub struct LockedHeap;
 unsafe impl GlobalAlloc for LockedHeap {
     /// Performs the alloc operation.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // Effective size must satisfy both the size and alignment requirements.
-        let effective = layout.size().max(layout.align());
-        let boot_reg = crate::silo::debug_boot_reg_active();
-        if boot_reg {
-            crate::serial_println!(
-                "[trace][heap] alloc enter effective={} size={} align={}",
-                effective,
-                layout.size(),
-                layout.align()
-            );
-        }
-
-        let result = match classify_kernel_heap_backend(layout) {
-            KernelHeapBackend::Slab => {
-                // --- slab path ---
-                let ci = SlabState::class_index(effective);
-                // Race/corruption diagnostic: log alloc when IRQs disabled (rate-limited).
-                let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-                let irq_enabled = crate::arch::x86_64::interrupts_enabled();
-                if !irq_enabled {
-                    use core::sync::atomic::{AtomicUsize, Ordering};
-                    static HEAP_A_COUNT: AtomicUsize = AtomicUsize::new(0);
-                    let n = HEAP_A_COUNT.fetch_add(1, Ordering::Relaxed);
-                    if n % 100 == 0 {
-                        crate::e9_println!(
-                            "HEAP-A cpu={} irq=0 size={} ci={} n={}",
-                            cpu,
-                            effective,
-                            ci,
-                            n
-                        );
-                    }
-                }
-                if boot_reg {
-                    crate::serial_println!(
-                        "[trace][heap] alloc slab ci={} slab_size={} lock={:#x}",
-                        ci,
-                        SLAB_SIZES[ci],
-                        &SLAB_ALLOC as *const _ as usize
-                    );
-                }
-                let mut slab = SLAB_ALLOC.lock();
-                if boot_reg {
-                    crate::serial_println!("[trace][heap] alloc slab lock acquired");
-                }
-                slab.with_mut_and_token(|s, token| s.alloc_block(ci, token))
-            }
-            KernelHeapBackend::Vmalloc => {
-                // --- vmalloc path (large allocation) ---
-                if boot_reg {
-                    crate::serial_println!("[trace][heap] alloc vmalloc size={}", effective);
-                }
-
-                crate::sync::with_irqs_disabled(|token| {
-                    crate::memory::allocate_kernel_virtual(effective, token)
-                        .unwrap_or(ptr::null_mut())
-                })
-            }
-        };
-
-        result
+        try_alloc_kernel_heap(layout).unwrap_or(ptr::null_mut())
     }
 
     /// Performs the dealloc operation.
@@ -541,6 +504,127 @@ unsafe impl GlobalAlloc for LockedHeap {
     }
 }
 
+fn record_heap_failure(
+    layout: Layout,
+    effective: usize,
+    backend: KernelHeapBackend,
+    error: KernelHeapAllocError,
+) -> KernelHeapAllocError {
+    *LAST_HEAP_FAILURE.lock() = Some(KernelHeapFailureSnapshot {
+        backend,
+        requested_size: layout.size(),
+        align: layout.align(),
+        effective_size: effective,
+        error,
+    });
+    error
+}
+
+fn clear_heap_failure() {
+    *LAST_HEAP_FAILURE.lock() = None;
+}
+
+pub fn last_heap_failure_snapshot() -> Option<KernelHeapFailureSnapshot> {
+    *LAST_HEAP_FAILURE.lock()
+}
+
+/// Fallible heap entry point with explicit backend-aware errors.
+///
+/// Kernel code that can recover from allocation failure should prefer this API
+/// over `Box`/`Vec`/`GlobalAlloc`, which eventually route to
+/// [`alloc_error_handler`] and remain fatal by language contract.
+#[inline]
+pub unsafe fn try_alloc_kernel_heap(layout: Layout) -> Result<*mut u8, KernelHeapAllocError> {
+    // Effective size must satisfy both the size and alignment requirements.
+    let effective = layout.size().max(layout.align());
+    if layout.align() == 0 || !layout.align().is_power_of_two() {
+        return Err(record_heap_failure(
+            layout,
+            effective,
+            classify_kernel_heap_backend(layout),
+            KernelHeapAllocError::InvalidLayout,
+        ));
+    }
+    let boot_reg = crate::silo::debug_boot_reg_active();
+    if boot_reg {
+        crate::serial_println!(
+            "[trace][heap] alloc enter effective={} size={} align={}",
+            effective,
+            layout.size(),
+            layout.align()
+        );
+    }
+
+    let result = match classify_kernel_heap_backend(layout) {
+        KernelHeapBackend::Slab => {
+            // --- slab path ---
+            let ci = SlabState::class_index(effective);
+            // Race/corruption diagnostic: log alloc when IRQs disabled (rate-limited).
+            let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+            if !irq_enabled {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static HEAP_A_COUNT: AtomicUsize = AtomicUsize::new(0);
+                let n = HEAP_A_COUNT.fetch_add(1, Ordering::Relaxed);
+                if n % 100 == 0 {
+                    crate::e9_println!(
+                        "HEAP-A cpu={} irq=0 size={} ci={} n={}",
+                        cpu,
+                        effective,
+                        ci,
+                        n
+                    );
+                }
+            }
+            if boot_reg {
+                crate::serial_println!(
+                    "[trace][heap] alloc slab ci={} slab_size={} lock={:#x}",
+                    ci,
+                    SLAB_SIZES[ci],
+                    &SLAB_ALLOC as *const _ as usize
+                );
+            }
+            let mut slab = SLAB_ALLOC.lock();
+            if boot_reg {
+                crate::serial_println!("[trace][heap] alloc slab lock acquired");
+            }
+            let ptr = slab.with_mut_and_token(|s, token| s.alloc_block(ci, token));
+            if ptr.is_null() {
+                return Err(record_heap_failure(
+                    layout,
+                    effective,
+                    KernelHeapBackend::Slab,
+                    KernelHeapAllocError::SlabRefillFailed {
+                        effective,
+                        class_size: SLAB_SIZES[ci],
+                    },
+                ));
+            }
+            ptr
+        }
+        KernelHeapBackend::Vmalloc => {
+            // --- vmalloc path (large allocation) ---
+            if boot_reg {
+                crate::serial_println!("[trace][heap] alloc vmalloc size={}", effective);
+            }
+
+            crate::sync::with_irqs_disabled(|token| {
+                crate::memory::allocate_kernel_virtual(effective, token).map_err(|error| {
+                    record_heap_failure(
+                        layout,
+                        effective,
+                        KernelHeapBackend::Vmalloc,
+                        KernelHeapAllocError::Vmalloc(error),
+                    )
+                })
+            })?
+        }
+    };
+
+    clear_heap_failure();
+    Ok(result)
+}
+
 #[global_allocator]
 static HEAP_ALLOCATOR: LockedHeap = LockedHeap;
 
@@ -553,7 +637,7 @@ static HEAP_ALLOCATOR: LockedHeap = LockedHeap;
 /// - large allocations -> vmalloc
 #[inline]
 pub unsafe fn alloc_kernel_heap(layout: Layout) -> *mut u8 {
-    HEAP_ALLOCATOR.alloc(layout)
+    try_alloc_kernel_heap(layout).unwrap_or(ptr::null_mut())
 }
 
 /// Free memory previously returned by [`alloc_kernel_heap`].
@@ -614,6 +698,27 @@ fn log_buddy_snapshot() -> Option<(usize, usize, usize)> {
     None
 }
 
+fn log_heap_failure_policy(layout: Layout) {
+    match last_heap_failure_snapshot() {
+        Some(snapshot) => {
+            crate::serial_println!(
+                "[heap][oom] last_failure backend={:?} requested={} align={} effective={} error={:?}",
+                snapshot.backend,
+                snapshot.requested_size,
+                snapshot.align,
+                snapshot.effective_size,
+                snapshot.error
+            );
+            if snapshot.requested_size != layout.size() || snapshot.align != layout.align() {
+                crate::serial_println!(
+                    "[heap][oom] note=last_heap_failure does not exactly match current layout; using best-effort context"
+                );
+            }
+        }
+        None => crate::serial_println!("[heap][oom] last_heap_failure unavailable"),
+    }
+}
+
 /// Allocates error handler.
 #[alloc_error_handler]
 fn alloc_error_handler(layout: Layout) -> ! {
@@ -632,18 +737,18 @@ fn alloc_error_handler(layout: Layout) -> ! {
             effective,
             MAX_SLAB_SIZE
         );
+        log_heap_failure_policy(layout);
         if let Some((total_pages, _, free_pages)) = log_buddy_snapshot() {
             crate::serial_println!(
                 "[heap][oom] slab-refill pages={} buddy_order={}",
                 pages_needed,
                 order
             );
-            if free_pages > (total_pages / 4) && order >= 8 {
+            if free_pages > (total_pages / 4) {
                 crate::serial_println!(
-                    "[heap][oom] diagnosis=fragmentation-induced high-order buddy failure \
-                     ({} free pages but no order-{} block)",
+                    "[heap][oom] diagnosis=slab refill failed despite remaining free pages \
+                     ({} free pages): fragmented physical memory or allocator pressure",
                     free_pages,
-                    order
                 );
             }
         }
@@ -653,6 +758,7 @@ fn alloc_error_handler(layout: Layout) -> ! {
             pages_needed,
             order
         );
+        log_heap_failure_policy(layout);
         match crate::memory::vmalloc::last_failure_snapshot() {
             Some(snapshot) => {
                 crate::serial_println!(
@@ -703,7 +809,10 @@ fn alloc_error_handler(layout: Layout) -> ! {
         }
         let _ = log_buddy_snapshot();
     }
-    panic!("allocation error: {:?}", layout)
+    crate::serial_println!(
+        "[heap][oom] policy=fatal_global_alloc_path use try_alloc_kernel_heap()/allocate_kernel_virtual() on recoverable paths"
+    );
+    panic!("fatal kernel heap allocation failure: {:?}", layout)
 }
 
 /// Dump heap and buddy allocator diagnostics to the serial console.
@@ -809,7 +918,21 @@ pub fn dump_diagnostics() {
         let d = crate::memory::phys_contiguous_diag();
         crate::serial_println!(
             "[heap][diag] phys_contiguous: pages_allocated={} pages_freed={} pages_live={} alloc_failures={}",
-            d.pages_allocated, d.pages_freed, d.pages_live, d.alloc_fail_count
+            d.pages_allocated,
+            d.pages_freed,
+            d.pages_live,
+            d.alloc_fail_count
+        );
+    }
+
+    if let Some(snapshot) = last_heap_failure_snapshot() {
+        crate::serial_println!(
+            "[heap][diag] last_heap_failure: backend={:?} requested={} align={} effective={} error={:?}",
+            snapshot.backend,
+            snapshot.requested_size,
+            snapshot.align,
+            snapshot.effective_size,
+            snapshot.error
         );
     }
 

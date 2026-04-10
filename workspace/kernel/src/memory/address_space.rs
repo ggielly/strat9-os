@@ -10,7 +10,7 @@
 //! Source : https://wiki.osdev.org/Memory_Management
 //!
 //!
-//! x86_64 virtual address space layout :
+//! x86_64 virtual address space layout:
 //!   - PML4[0..256]   => user space (per-process, zeroed for new AS)
 //!   - PML4[256..512] => kernel space (shared, cloned from kernel L4)
 //!
@@ -620,21 +620,13 @@ impl AddressSpace {
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                if order == 0 {
-                                    crate::memory::free_frame(token, frame);
-                                } else {
-                                    crate::memory::free_phys_contiguous(token, frame, order);
-                                }
+                                crate::memory::free_phys_contiguous(token, frame, order);
                             });
                             return Ok(());
                         }
                         Err(_) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                if order == 0 {
-                                    crate::memory::free_frame(token, frame);
-                                } else {
-                                    crate::memory::free_phys_contiguous(token, frame, order);
-                                }
+                                crate::memory::free_phys_contiguous(token, frame, order);
                             });
                             return Err("Failed to map demand page (4K)");
                         }
@@ -654,21 +646,13 @@ impl AddressSpace {
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                if order == 0 {
-                                    crate::memory::free_frame(token, frame);
-                                } else {
-                                    crate::memory::free_phys_contiguous(token, frame, order);
-                                }
+                                crate::memory::free_phys_contiguous(token, frame, order);
                             });
                             return Ok(());
                         }
                         Err(_) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                if order == 0 {
-                                    crate::memory::free_frame(token, frame);
-                                } else {
-                                    crate::memory::free_phys_contiguous(token, frame, order);
-                                }
+                                crate::memory::free_phys_contiguous(token, frame, order);
                             });
                             return Err("Failed to map demand page (2M)");
                         }

@@ -2,7 +2,7 @@
 
 use alloc::collections::BTreeMap;
 
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 
 use crate::{capability::CapId, sync::SpinLock};
 

@@ -66,7 +66,7 @@ static MEMORY_REGION_REGISTRY: Once<MemoryRegionRegistry> = Once::new();
 // Re-exports
 pub use crate::sync::with_irqs_disabled;
 pub use address_space::{
-    kernel_address_space, AddressSpace, EffectiveMapping, VmaFlags, VmaPageSize, VmaType,
+    AddressSpace, EffectiveMapping, VmaFlags, VmaPageSize, VmaType, kernel_address_space,
 };
 pub use block::{
     BlockHandle, BuddyReserved, Exclusive, MappedExclusive, MappedShared, PhysBlock, Released,
@@ -346,6 +346,7 @@ pub fn free_frame(token: &IrqDisabledToken, frame: PhysFrame) {
 /// This is the explicit large-allocation API for kernel callers that require a
 /// large contiguous virtual range but do not require physical contiguity.
 #[inline]
+#[track_caller]
 pub fn allocate_kernel_virtual(
     size: usize,
     token: &IrqDisabledToken,

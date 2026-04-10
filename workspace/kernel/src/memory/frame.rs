@@ -7,9 +7,9 @@ use core::{
 };
 use x86_64::PhysAddr;
 
-// ──────────────────────────────────────────────────────────────────────────────
+// ==============================================================================
 // FrameAllocOptions  (Asterinas OSTD pattern)
-// ──────────────────────────────────────────────────────────────────────────────
+// ==============================================================================
 //
 // DESIGN NOTES — why this wrapper exists:
 //
@@ -39,10 +39,10 @@ use x86_64::PhysAddr;
 //
 //    `buddy.rs` maintains the invariant: free-list frame ⟹ refcount == REFCOUNT_UNUSED.
 //    `mark_block_free()` stamps REFCOUNT_UNUSED; `mark_block_allocated()` leaves it
-//    untouched.  `FrameAllocOptions::allocate()` performs CAS(REFCOUNT_UNUSED → 1)
+//    untouched.  `FrameAllocOptions::allocate()` performs CAS(REFCOUNT_UNUSED -> 1)
 //    as a fail-fast corruption check before publishing the frame as live:
 //
-//       buddy alloc ──▶ optional zero ──▶ set flags ──▶ CAS(UNUSED → 1) ──▶ live
+//       buddy alloc ──▶ optional zero ──▶ set flags ──▶ CAS(UNUSED -> 1) ──▶ live
 
 /// Sentinel refcount for a frame that is in the buddy free list.
 ///
@@ -50,7 +50,7 @@ use x86_64::PhysAddr;
 ///
 /// `buddy.rs` stamps this value in `mark_block_free()` and leaves it intact in
 /// `mark_block_allocated()`.  `FrameAllocOptions::allocate()` performs
-/// `CAS(REFCOUNT_UNUSED → 1)` to atomically claim the frame and detect any
+/// `CAS(REFCOUNT_UNUSED -> 1)` to atomically claim the frame and detect any
 /// double-free / free-list corruption.
 pub const REFCOUNT_UNUSED: u32 = u32::MAX;
 
@@ -179,7 +179,7 @@ impl FrameAllocOptions {
     ///    load of the refcount observes the fully-initialised metadata and
     ///    (if zeroed) zeroed content.
     ///
-    /// # Sentinel handoff: `CAS(REFCOUNT_UNUSED → 1)`
+    /// # Sentinel handoff: `CAS(REFCOUNT_UNUSED -> 1)`
     ///
     /// `buddy.rs` maintains the invariant that every frame on the free list has
     /// `refcount == REFCOUNT_UNUSED`.  `mark_block_allocated()` leaves this
@@ -234,7 +234,7 @@ impl FrameAllocOptions {
 
         // Step 4 — claim the frame and publish it as live.
         //
-        // CAS(REFCOUNT_UNUSED → 1): atomically transitions the frame from the
+        // CAS(REFCOUNT_UNUSED -> 1): atomically transitions the frame from the
         // buddy free-list sentinel to a live, exclusively-owned frame.  The
         // `AcqRel` success ordering ensures steps 2 and 3 happen-before any
         // `Acquire` load of this refcount by another CPU, and also observes

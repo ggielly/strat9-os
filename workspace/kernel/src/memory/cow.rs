@@ -20,9 +20,9 @@
 
 use crate::{
     memory::{
-        frame::{frame_flags, get_meta, PhysFrame},
-        ownership_table, release_owned_block, resolve_handle, BlockHandle, OwnerError,
-        RemoveRefResult,
+        BlockHandle, OwnerError, RemoveRefResult,
+        frame::{PhysFrame, frame_flags, get_meta},
+        ownership_table, release_owned_block, resolve_handle,
     },
     sync::SpinLock,
 };
