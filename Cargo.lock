@@ -348,6 +348,7 @@ name = "e1000"
 version = "0.1.0"
 dependencies = [
  "intel-ethernet",
+ "log",
  "net-core",
  "nic-buffers",
  "nic-queues",

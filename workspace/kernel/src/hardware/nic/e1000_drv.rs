@@ -175,9 +175,13 @@ pub fn init() {
                 mmio_phys,
                 mmio_virt
             );
+            log::debug!("E1000: entering e1000::E1000Nic::init (reset, MAC, rings)…");
             match E1000Nic::init(mmio_virt, &KernelDma) {
                 Ok(nic) => {
-                    log::info!("E1000: core init ok on attempt {}", attempt + 1);
+                    log::info!(
+                        "E1000: core init ok on attempt {} (see trace=e1000::* for reset/EEPROM detail)",
+                        attempt + 1
+                    );
                     init_ok = Some(nic);
                     break;
                 }
