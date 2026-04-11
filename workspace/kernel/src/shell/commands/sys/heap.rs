@@ -289,20 +289,18 @@ fn cmd_heap_stress(rounds_arg: Option<&String>) -> Result<(), ShellError> {
             shell_println!("--- round {}/{} ---", round + 1, rounds);
         }
 
-        let mut run = |name: &str, result: StressOutcome| {
-            match result {
-                StressOutcome::Pass => {
-                    shell_println!("  {:<36} PASS", name);
-                    total_pass += 1;
-                }
-                StressOutcome::Fail(msg) => {
-                    shell_println!("  {:<36} FAIL  {}", name, msg);
-                    total_fail += 1;
-                }
-                StressOutcome::Skip(msg) => {
-                    shell_println!("  {:<36} SKIP  {}", name, msg);
-                    total_skip += 1;
-                }
+        let mut run = |name: &str, result: StressOutcome| match result {
+            StressOutcome::Pass => {
+                shell_println!("  {:<36} PASS", name);
+                total_pass += 1;
+            }
+            StressOutcome::Fail(msg) => {
+                shell_println!("  {:<36} FAIL  {}", name, msg);
+                total_fail += 1;
+            }
+            StressOutcome::Skip(msg) => {
+                shell_println!("  {:<36} SKIP  {}", name, msg);
+                total_skip += 1;
             }
         };
 
@@ -765,7 +763,9 @@ fn stress_telemetry() -> StressOutcome {
     // Phys-contiguous: freed must not exceed allocated.
     let phys = crate::memory::phys_contiguous_diag();
     if phys.pages_freed > phys.pages_allocated {
-        return StressOutcome::Fail("phys_contiguous: pages_freed > pages_allocated (counter corruption)");
+        return StressOutcome::Fail(
+            "phys_contiguous: pages_freed > pages_allocated (counter corruption)",
+        );
     }
 
     // vmalloc: allocated_pages must fit in the arena; peak must be a watermark.
@@ -777,10 +777,14 @@ fn stress_telemetry() -> StressOutcome {
         }
         if vm.allocated_pages.saturating_add(vm.free_pages) > arena_pages.saturating_add(1) {
             // ±1 for the ARENA_START_PAGE reservation
-            return StressOutcome::Fail("vmalloc: allocated + free > arena capacity (accounting error)");
+            return StressOutcome::Fail(
+                "vmalloc: allocated + free > arena capacity (accounting error)",
+            );
         }
         if (vm.peak_pages as usize) < vm.allocated_pages {
-            return StressOutcome::Fail("vmalloc: peak_pages < allocated_pages (watermark regression)");
+            return StressOutcome::Fail(
+                "vmalloc: peak_pages < allocated_pages (watermark regression)",
+            );
         }
     }
 

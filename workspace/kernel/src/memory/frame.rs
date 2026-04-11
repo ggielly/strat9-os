@@ -1,4 +1,29 @@
-// Physical frame allocator abstraction
+//! Physical frame allocator abstraction.
+//!
+//! ## MetaSlot (per-frame metadata, issue #38)
+//!
+//! Each 4 KiB physical frame has a **dedicated 64-byte [`MetaSlot`]**
+//! in a separate contiguous array (initialized by [`init_metadata_array`]). Buddy
+//! free-list [`FreeListLink`] nodes, reference counts, purpose flags,
+//! [`meta_guard`] bits, a per-allocation **generation** counter, and an optional
+//! [`FrameMetaVtable`] live here — **not** in the mapped page bytes, so mappings
+//! see a pristine payload.
+//!
+//! ## Revue / invariants (issue #38)
+//!
+//! - **Pas de métadonnées dans la charge utile** : les liens buddy sont dans
+//!   [`FreeListLink`], jamais écrits comme « faux pointeurs » dans les 4 KiB mappés.
+//! - **`generation`** : incrémentée uniquement par [`MetaSlot::note_new_allocation_epoch`]
+//!   après un `CAS` réussi dans [`FrameAllocOptions::allocate`]. Ne pas utiliser
+//!   [`MetaSlot::set_generation`] sauf bootstrap/tests — sinon les schémas « généalogiques »
+//!   deviennent incohérents.
+//! - **`meta_guard::POISONED` vs `frame_flags::POISONED`** : deux espaces (bits dédiés
+//!   `guard` vs flags logiques). Pour marquer une frame corrompue, préférer
+//!   [`MetaSlot::mark_poisoned`] qui pose les deux.
+//! - **`vtable_ref`** : tout pointeur non nul doit désigner une [`FrameMetaVtable`] `'static`
+//!   valide ; sinon UB. Les bits sont posés par le noyau uniquement.
+//! - **Cache order-0** : `buddy::alloc(0)` peut servir depuis le cache local ; le chemin
+//!   [`FrameAllocOptions::allocate`] applique quand même le CAS + epoch sur la même frame.
 
 use crate::{memory::boot_alloc::BootAllocator, sync::IrqDisabledToken};
 use core::{
@@ -252,6 +277,9 @@ impl FrameAllocOptions {
                 )
             });
 
+        // New live epoch: default vtable, clear guard bits, bump generation (issue #38).
+        meta.note_new_allocation_epoch();
+
         Ok(frame)
     }
 }
@@ -261,7 +289,19 @@ pub const FRAME_META_ALIGN: usize = 64;
 pub const FRAME_META_SIZE: usize = 64;
 pub const FRAME_META_LINK_NONE: u64 = u64::MAX;
 
-/// Persistent flags stored in [`FrameMeta`].
+/// Guard bits stored in [`MetaSlot::guard`] (issue #38 — extensible without touching page bytes).
+///
+/// Distinct from [`frame_flags::POISONED`] (logical frame state in `flags`).
+pub mod meta_guard {
+    /// No guard condition asserted.
+    pub const NONE: u32 = 0;
+    /// Frame must not be exposed as a userspace mapping (kernel / debug).
+    pub const KERNEL_ONLY: u32 = 1 << 0;
+    /// Slot marked poisoned after detected corruption (never recycle blindly).
+    pub const POISONED: u32 = 1 << 31;
+}
+
+/// Persistent flags stored in [`MetaSlot`] / [`FrameMeta`].
 pub mod frame_flags {
     /// La frame est allouée.
     pub const ALLOCATED: u32 = 1 << 8;
@@ -281,56 +321,193 @@ pub mod frame_flags {
     pub const ANONYMOUS: u32 = 1 << 2;
 }
 
-/// Bytes used by the named fields of [`FrameMeta`] before the padding.
-const FRAME_META_FIELDS_SIZE: usize = 8 + 8 + 4 + 1 + 3 + 4; // next+prev+flags+order+_reserved0+refcount
-
-/// Intriside metadata for a physical frame.
-/// - 64 bytes (one cache line) for efficient atomic access and to avoid false sharing.
-
-#[repr(C, align(64))]
-pub struct FrameMeta {
+/// Buddy free-list link storage (intrusive list nodes live in [`MetaSlot`], not in frame bytes).
+#[repr(C)]
+pub struct FreeListLink {
     pub(crate) next: AtomicU64,
     pub(crate) prev: AtomicU64,
-    pub(crate) flags: AtomicU32,
-    pub(crate) order: AtomicU8,
-    _reserved0: [u8; 3],
-    pub(crate) refcount: AtomicU32,
-    _cacheline_pad: [u8; FRAME_META_SIZE - FRAME_META_FIELDS_SIZE],
 }
 
-impl FrameMeta {
-    /// Create emplty metadata ready to be initialized by the boot allocator.
+impl FreeListLink {
     pub const fn new() -> Self {
         Self {
             next: AtomicU64::new(FRAME_META_LINK_NONE),
             prev: AtomicU64::new(FRAME_META_LINK_NONE),
+        }
+    }
+}
+
+/// Custom vtable for frame-type-specific behavior (DMA teardown, device hooks, …).
+///
+/// Store a pointer as `u64` in [`MetaSlot::vtable`]; `0` selects [`DEFAULT_FRAME_META_VTABLE`].
+#[repr(C)]
+pub struct FrameMetaVtable {
+    /// Reserved slots for future hooks (`on_last_ref`, device unmap, …).
+    pub reserved: [u64; 8],
+}
+
+/// Default vtable used when [`MetaSlot::vtable`] is `0`.
+pub static DEFAULT_FRAME_META_VTABLE: FrameMetaVtable = FrameMetaVtable { reserved: [0; 8] };
+
+/// 64-byte cache-line metadata for one physical frame (issue #38).
+///
+/// Layout: free-list links + flags + refcount + optional vtable + generation + reserved tail
+/// for future guard bits / generational references without touching the page payload.
+///
+/// Use plain `#[repr(C)]` (not `align(64)` on the struct): `align(64)` would pad the **type
+/// size** to a multiple of 64 and can inflate `size_of` to 128. The metadata **array** is
+/// still allocated with [`FRAME_META_ALIGN`] so each slot stays cache-line aligned.
+///
+/// Field order matters: `vtable` immediately follows `free_link` so `AtomicU64` stays
+/// 8-byte aligned without hidden padding after `refcount` (which would inflate the struct
+/// to 72 bytes).
+#[repr(C)]
+pub struct MetaSlot {
+    pub free_link: FreeListLink,
+    /// `*const FrameMetaVtable` as bits; `0` means [`DEFAULT_FRAME_META_VTABLE`].
+    pub vtable: AtomicU64,
+    pub flags: AtomicU32,
+    pub order: AtomicU8,
+    _reserved0: [u8; 3],
+    pub refcount: AtomicU32,
+    /// Bumps each time the frame is successfully claimed from the buddy free list
+    /// (see [`MetaSlot::note_new_allocation_epoch`]).
+    pub generation: AtomicU32,
+    /// Kernel-owned guard bits ([`meta_guard`]); independent of `frame_flags`.
+    pub guard: AtomicU32,
+    _reserved_future: [u8; 20],
+}
+
+/// Backwards-compatible name for [`MetaSlot`].
+pub type FrameMeta = MetaSlot;
+
+impl MetaSlot {
+    /// Empty metadata for boot-time array initialization.
+    pub const fn new() -> Self {
+        Self {
+            free_link: FreeListLink::new(),
+            vtable: AtomicU64::new(0),
             flags: AtomicU32::new(0),
             order: AtomicU8::new(0),
-            ///
             _reserved0: [0; 3],
             refcount: AtomicU32::new(0),
-            _cacheline_pad: [0; FRAME_META_SIZE - FRAME_META_FIELDS_SIZE],
+            generation: AtomicU32::new(0),
+            guard: AtomicU32::new(0),
+            _reserved_future: [0; 20],
         }
+    }
+
+    /// Reset vtable/guard when returning a frame to the buddy free list (`buddy::set_block_meta`).
+    #[inline]
+    pub fn reset_with_free_list_meta(&self) {
+        self.set_vtable_bits(0);
+        self.guard.store(meta_guard::NONE, Ordering::Release);
+    }
+
+    /// After a successful `CAS(REFCOUNT_UNUSED → 1)` in [`FrameAllocOptions::allocate`],
+    /// start a new metadata epoch: default vtable, clear guards, bump generation.
+    #[inline]
+    pub fn note_new_allocation_epoch(&self) {
+        self.set_vtable_bits(0);
+        self.guard.store(meta_guard::NONE, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn get_guard(&self) -> u32 {
+        self.guard.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_guard(&self, bits: u32) {
+        self.guard.store(bits, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn fetch_or_guard(&self, bits: u32) -> u32 {
+        self.guard.fetch_or(bits, Ordering::AcqRel)
+    }
+
+    /// Returns `true` if [`meta_guard::POISONED`] is set.
+    #[inline]
+    pub fn is_guard_poisoned(&self) -> bool {
+        self.get_guard() & meta_guard::POISONED != 0
+    }
+
+    /// Marks both [`meta_guard::POISONED`] and [`frame_flags::POISONED`] (corruption / audit path).
+    #[inline]
+    pub fn mark_poisoned(&self) {
+        self.fetch_or_guard(meta_guard::POISONED);
+        self.set_flags(self.get_flags() | frame_flags::POISONED);
+    }
+
+    /// `(generation, guard_bits, vtable_bits)` for serial / shell diagnostics.
+    #[inline]
+    pub fn debug_snapshot(&self) -> (u32, u32, u64) {
+        (self.generation(), self.get_guard(), self.vtable_bits())
+    }
+
+    /// Raw vtable pointer bits (`0` = default).
+    #[inline]
+    pub fn vtable_bits(&self) -> u64 {
+        self.vtable.load(Ordering::Acquire)
+    }
+
+    /// Install a custom vtable pointer (must point to a `'static` [`FrameMetaVtable`]).
+    #[inline]
+    pub fn set_vtable_bits(&self, bits: u64) {
+        self.vtable.store(bits, Ordering::Release);
+    }
+
+    /// Resolved vtable reference (`0` bits map to [`DEFAULT_FRAME_META_VTABLE`]).
+    ///
+    /// # Safety contract
+    ///
+    /// Non-zero pointers must reference valid, `'static` vtables for the frame's lifetime.
+    pub fn vtable_ref(&self) -> &'static FrameMetaVtable {
+        let bits = self.vtable_bits();
+        let ptr = if bits == 0 {
+            &DEFAULT_FRAME_META_VTABLE as *const FrameMetaVtable
+        } else {
+            bits as *const FrameMetaVtable
+        };
+        // SAFETY: `0` maps to the static default; non-zero values are only written by
+        // kernel code that registers static vtables.
+        unsafe { &*ptr }
+    }
+
+    #[inline]
+    pub fn generation(&self) -> u32 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Overwrites the generation counter — **only** for boot-time init or tests.
+    ///
+    /// Normal allocations bump generation via [`MetaSlot::note_new_allocation_epoch`].
+    /// Arbitrary values break « generational » use-after-free checks.
+    #[inline]
+    pub fn set_generation(&self, g: u32) {
+        self.generation.store(g, Ordering::Release);
     }
 
     #[inline]
     pub fn next(&self) -> u64 {
-        self.next.load(Ordering::Acquire)
+        self.free_link.next.load(Ordering::Acquire)
     }
 
     #[inline]
     pub fn set_next(&self, next: u64) {
-        self.next.store(next, Ordering::Release);
+        self.free_link.next.store(next, Ordering::Release);
     }
 
     #[inline]
     pub fn prev(&self) -> u64 {
-        self.prev.load(Ordering::Acquire)
+        self.free_link.prev.load(Ordering::Acquire)
     }
 
     #[inline]
     pub fn set_prev(&self, prev: u64) {
-        self.prev.store(prev, Ordering::Release);
+        self.free_link.prev.store(prev, Ordering::Release);
     }
 
     #[inline]
@@ -396,8 +573,10 @@ impl FrameMeta {
 }
 
 const _: () = {
-    assert!(mem::align_of::<FrameMeta>() == FRAME_META_ALIGN);
-    assert!(mem::size_of::<FrameMeta>() == FRAME_META_SIZE);
+    assert!(mem::size_of::<MetaSlot>() == FRAME_META_SIZE);
+    // Stride is `FRAME_META_SIZE`; the backing array is allocated with `FRAME_META_ALIGN`
+    // so each index maps to a cache-line-aligned slot even if `align_of::<MetaSlot>()` is 8.
+    assert!(mem::align_of::<MetaSlot>() <= FRAME_META_SIZE);
 };
 
 /// The metadata array size for `ram_size` bytes, rounded up to the nearest page since each frame
@@ -424,13 +603,13 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
 
     let bytes = metadata_size_for(total_ram) as usize;
     let phys = boot_alloc.alloc(bytes, FRAME_META_ALIGN);
-    let virt = crate::memory::phys_to_virt(phys.as_u64()) as *mut FrameMeta;
+    let virt = crate::memory::phys_to_virt(phys.as_u64()) as *mut MetaSlot;
 
     for idx in 0..frame_count as usize {
         // SAFETY: le bloc a été réservé par le boot allocator avec un alignement
-        // compatible `FrameMeta` et une taille suffisante pour tout le tableau.
+        // compatible `MetaSlot` et une taille suffisante pour tout le tableau.
         unsafe {
-            ptr::write(virt.add(idx), FrameMeta::new());
+            ptr::write(virt.add(idx), MetaSlot::new());
         }
     }
 
@@ -438,8 +617,20 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     METADATA_BASE_VIRT.store(virt as u64, Ordering::Release);
 }
 
-/// Get the metadata for a given physical frame.
-pub fn get_meta(phys: PhysAddr) -> &'static FrameMeta {
+/// Get the [`MetaSlot`] for a given physical frame (same as [`get_meta_slot`]).
+#[inline]
+pub fn get_meta(phys: PhysAddr) -> &'static MetaSlot {
+    get_meta_slot(phys)
+}
+
+/// `(generation, guard_bits, vtable_bits)` for debugging (e.g. `serial_println!`).
+#[inline]
+pub fn frame_meta_debug_snapshot(phys: PhysAddr) -> (u32, u32, u64) {
+    get_meta_slot(phys).debug_snapshot()
+}
+
+/// Preferred name matching the frame metadata design (issue #38).
+pub fn get_meta_slot(phys: PhysAddr) -> &'static MetaSlot {
     let base = METADATA_BASE_VIRT.load(Ordering::Acquire);
     let frame_count = METADATA_FRAME_COUNT.load(Ordering::Acquire);
     assert!(base != 0, "frame metadata array is not initialized");
@@ -450,7 +641,7 @@ pub fn get_meta(phys: PhysAddr) -> &'static FrameMeta {
     let byte_offset = pfn as usize * FRAME_META_SIZE;
     // SAFETY: le tableau global couvre au moins `frame_count` entrées et reste
     // vivant pendant toute la durée du noyau.
-    unsafe { &*((base as usize + byte_offset) as *const FrameMeta) }
+    unsafe { &*((base as usize + byte_offset) as *const MetaSlot) }
 }
 
 /// Physical frame (4KB aligned physical memory)

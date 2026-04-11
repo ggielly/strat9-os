@@ -8,8 +8,8 @@ use x86_64::PhysAddr;
 
 use crate::memory::{block::BlockHandle, frame, ownership_table};
 
-/// Current metadata backing a block head.
-pub type BlockMeta = frame::FrameMeta;
+/// Current metadata backing a block head (see [`frame::MetaSlot`] / issue #38).
+pub type BlockMeta = frame::MetaSlot;
 
 /// Sentinel refcount for an unused block.
 pub const REFCOUNT_UNUSED: u32 = frame::REFCOUNT_UNUSED;

@@ -350,9 +350,7 @@ impl CapabilityManager {
 
     fn increment_resource_refcount_key(&self, key: &ResourceKey) {
         let mut refcounts = self.resource_refcounts.lock();
-        let entry = refcounts
-            .entry(*key)
-            .or_insert_with(|| AtomicUsize::new(0));
+        let entry = refcounts.entry(*key).or_insert_with(|| AtomicUsize::new(0));
         entry.fetch_add(1, Ordering::Relaxed);
     }
 

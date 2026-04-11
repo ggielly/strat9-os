@@ -23,8 +23,8 @@
 use crate::syscall::error::SyscallError;
 use alloc::vec::Vec;
 use x86_64::{
-    VirtAddr,
     structures::paging::{PageTableFlags, Translate},
+    VirtAddr,
 };
 
 /// End of user-accessible virtual address space.

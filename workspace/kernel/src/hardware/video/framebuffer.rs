@@ -348,9 +348,10 @@ impl Framebuffer {
         }
         let db_pages = (db_size + 4095) / 4096;
         let db_order = db_pages.next_power_of_two().trailing_zeros() as u8;
-        let db_frame =
-            crate::sync::with_irqs_disabled(|token| memory::allocate_phys_contiguous(token, db_order))
-                .map_err(|_| "Failed to allocate double buffer")?;
+        let db_frame = crate::sync::with_irqs_disabled(|token| {
+            memory::allocate_phys_contiguous(token, db_order)
+        })
+        .map_err(|_| "Failed to allocate double buffer")?;
         let db_virt = phys_to_virt(db_frame.start_address.as_u64()) as *mut u8;
         unsafe {
             // SAFETY: `db_virt` is a freshly allocated contiguous buffer of at

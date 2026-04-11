@@ -3,15 +3,14 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 
 use crate::{capability::CapId, sync::SpinLock};
 
 use super::{
-    BlockHandle, OwnerError,
     address_space::{AddressSpace, VmaFlags, VmaPageSize, VmaType},
     cow, ownership_table, release_owned_block, revoke_mapping_cap_id,
-    try_register_mapping_identity, unregister_mapping_identity,
+    try_register_mapping_identity, unregister_mapping_identity, BlockHandle, OwnerError,
 };
 
 /// Public metadata about an exported memory region.

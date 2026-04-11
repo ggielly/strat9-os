@@ -66,14 +66,18 @@ static MEMORY_REGION_REGISTRY: Once<MemoryRegionRegistry> = Once::new();
 // Re-exports
 pub use crate::sync::with_irqs_disabled;
 pub use address_space::{
-    AddressSpace, EffectiveMapping, VmaFlags, VmaPageSize, VmaType, kernel_address_space,
+    kernel_address_space, AddressSpace, EffectiveMapping, VmaFlags, VmaPageSize, VmaType,
 };
 pub use block::{
     BlockHandle, BuddyReserved, Exclusive, MappedExclusive, MappedShared, PhysBlock, Released,
 };
 pub use block_meta::{get_block_meta, resolve_handle};
 pub use buddy::get_allocator;
-pub use frame::{AllocError, FrameAllocOptions, FrameAllocator, FramePurpose, PhysFrame};
+pub use frame::{
+    frame_meta_debug_snapshot, get_meta, get_meta_slot, meta_guard, AllocError, FrameAllocOptions,
+    FrameAllocator, FrameMeta, FrameMetaVtable, FramePurpose, FreeListLink, MetaSlot, PhysFrame,
+    DEFAULT_FRAME_META_VTABLE,
+};
 pub use mapping_index::{MappingIndex, MappingRef};
 pub use ownership::{BlockState, OwnerEntry, OwnerError, OwnershipTable, RemoveRefResult};
 pub use region_cap::{

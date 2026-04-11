@@ -229,7 +229,11 @@ impl SchedClassRq for FairClassRq {
         } else {
             // `by_id` and `entities` are kept in sync on every mutation path;
             // reaching here indicates a bug in this module.
-            debug_assert!(false, "FairClassRq: by_id/entities out of sync for task {:?}", task_id);
+            debug_assert!(
+                false,
+                "FairClassRq: by_id/entities out of sync for task {:?}",
+                task_id
+            );
             false
         }
     }

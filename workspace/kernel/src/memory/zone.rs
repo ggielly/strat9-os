@@ -157,8 +157,8 @@ impl Zone {
 
     /// Count the number of free blocks at a given order.
     ///
-    /// Walks the intrusive free list. Safe because we only read the next
-    /// pointer from the frame metadata (which is safe when the block is free).
+    /// Walks the buddy free list. Safe because we only read the next link from
+    /// the per-frame [`crate::memory::frame::MetaSlot`] (not from mapped page bytes).
     pub fn free_list_count(&self, order: u8) -> usize {
         let mut count = 0usize;
         let mut phys = self.free_lists[order as usize];

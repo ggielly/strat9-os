@@ -57,8 +57,13 @@ pub enum KernelHeapBackend {
 pub enum KernelHeapAllocError {
     InvalidLayout,
     /// [`GlobalAlloc`] large path uses vmalloc, which only guarantees 4 KiB alignment.
-    AlignmentExceedsKernelPage { align: usize },
-    SlabRefillFailed { effective: usize, class_size: usize },
+    AlignmentExceedsKernelPage {
+        align: usize,
+    },
+    SlabRefillFailed {
+        effective: usize,
+        class_size: usize,
+    },
     Vmalloc(memory::vmalloc::VmallocError),
 }
 

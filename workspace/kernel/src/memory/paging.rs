@@ -6,12 +6,12 @@
 //! Provides map/unmap/translate operations on the active page table.
 
 use x86_64::{
-    PhysAddr, VirtAddr,
     registers::control::Cr3,
     structures::paging::{
         FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
         PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB, Translate,
     },
+    PhysAddr, VirtAddr,
 };
 
 use crate::{
@@ -38,14 +38,16 @@ use crate::{
 ///  .purpose(FramePurpose::PageTable)` which:
 ///
 ///  1. Calls the buddy allocator for a raw order-0 frame.
-///  2. CAS-claims the frame via `FrameMeta::refcount` (UNUSED → 0 → 1).
+///  2. CAS-claims the frame via the [`MetaSlot`](crate::memory::MetaSlot) refcount field
+///     (`REFCOUNT_UNUSED` → `1`).
 ///  3. Zeros the 4 KiB with a single `ptr::write_bytes` through the HHDM.
-///  4. Sets `FrameMeta::flags` to `KERNEL | ALLOCATED` with `Release` ordering.
+///  4. Sets purpose flags on the [`MetaSlot`](crate::memory::MetaSlot) with `Release` ordering.
 ///  5. Stores `refcount = 1` with `Release` ordering so any future reader
 ///     that loads the refcount with `Acquire` observes a fully-initialised frame.
 ///
-/// This pattern is lifted directly from Asterinas OSTD
-/// `FrameAllocOptions::alloc_frame_with` + `MetaSlot::get_from_unused`.
+/// This matches the Asterinas OSTD pattern (`FrameAllocOptions` + per-frame
+/// [`MetaSlot`](crate::memory::MetaSlot) with refcount CAS). Metadata lives in
+/// dedicated slots (not in mapped page bytes); see [`get_meta_slot`](crate::memory::get_meta_slot).
 pub struct BuddyFrameAllocator;
 
 // SAFETY: `BuddyFrameAllocator::allocate_frame` returns 4KiB-aligned,
