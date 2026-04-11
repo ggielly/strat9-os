@@ -2,7 +2,7 @@
 //!
 //! Provides virtually contiguous allocations backed by individually allocated
 //! physical pages. Unlike the buddy allocator, `vmalloc` does **not** require
-//! physically contiguous memory : it maps each page individually into a
+//! physically contiguous memory — it maps each page individually into a
 //! dedicated kernel virtual memory arena.
 //!
 //! ## Arena layout
@@ -481,10 +481,11 @@ static VMALLOC: SpinLock<Vmalloc> = SpinLock::new(Vmalloc::new());
 /// Counts ZeroSize / policy-limit rejections.
 pub static VMALLOC_POLICY_REJECT_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Monotonic sequence number — incremented once per successful `vmalloc` call.
+/// Monotonic count of **successful** `vmalloc` calls this boot (next seq = current value).
 ///
-/// Provides a stable ordering for leak analysis: lower `alloc_seq` means an
-/// earlier allocation, so the oldest live allocations are easy to spot.
+/// Incremented only after mapping succeeds so failed attempts do not consume
+/// sequence numbers.  Live nodes store the assigned value in [`VmallocAttr::alloc_seq`].
+/// Lower `alloc_seq` still means an earlier successful allocation among live mappings.
 pub static VMALLOC_ALLOC_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// High-watermark of simultaneously allocated pages (updated on every alloc).
@@ -530,8 +531,6 @@ pub struct VmallocAttr {
 /// Uses `current_task_clone_try()` (non-blocking) so that vmalloc called
 /// from within a scheduler path cannot deadlock on the per-CPU scheduler lock.
 fn capture_attr(size: usize, caller: &'static Location<'static>) -> VmallocAttr {
-    let alloc_seq = VMALLOC_ALLOC_SEQ.fetch_add(1, AtomicOrdering::Relaxed);
-
     let (task_id, pid, tid, silo_id) = match crate::process::current_task_clone_try() {
         Some(task) => {
             let task_id = task.id.as_u64();
@@ -552,7 +551,7 @@ fn capture_attr(size: usize, caller: &'static Location<'static>) -> VmallocAttr 
         tid,
         silo_id,
         size,
-        alloc_seq,
+        alloc_seq: 0,
         caller_file: caller.file(),
         caller_line: caller.line(),
         caller_column: caller.column(),
@@ -588,6 +587,7 @@ pub struct VmallocDiagSnapshot {
     pub allocated_pages: usize,
     pub free_pages: usize,
     pub peak_pages: u64,
+    /// Cumulative successful `vmalloc` calls this boot (matches [`VMALLOC_ALLOC_SEQ`]).
     pub total_seq: u64,
     pub fail_count: usize,
     pub policy_rejects: u64,
@@ -609,10 +609,11 @@ pub struct VmallocDiagSnapshot {
 /// Any subsequent kernel access to a vmalloc address in that process's context
 /// will fault, because its page-table walk stops at the missing PML4 entry.
 ///
-/// By touching (map + immediately unmap) a page inside the arena during
-/// `init()`, we force the page-table allocator to create and wire all
-/// intermediate nodes.  `unmap_page_kernel()` removes only the leaf PTE; it
-/// does **not** reclaim intermediate tables — that is exactly what we need.
+/// By mapping a page at [`VMALLOC_VIRT_START`] during `init()` and **keeping**
+/// that mapping (see `bootstrap_frame`), we force the page-table allocator to
+/// create and wire all intermediate nodes.  The leaf mapping anchors the
+/// subtree; the allocatable arena begins at page 1 so callers never receive the
+/// bootstrap virtual address.
 ///
 /// ## Caller contract
 ///
@@ -678,7 +679,12 @@ pub fn init() {
     crate::sync::with_irqs_disabled(|token| {
         ensure_kernel_subtree_ready(token);
         let mut guard = VMALLOC.lock();
-        let _ = unsafe { guard.ensure_arena_ready(token) };
+        if let Err(e) = unsafe { guard.ensure_arena_ready(token) } {
+            serial_println!(
+                "[vmalloc] init: ensure_arena_ready failed ({:?}) — vmalloc will retry on first use",
+                e
+            );
+        }
     });
 }
 
@@ -746,7 +752,7 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
     // Capture attribution before acquiring VMALLOC to respect lock ordering
     // (VMALLOC → SILO_MANAGER) and to avoid a re-entrancy deadlock if this
     // vmalloc call originates from within scheduler or silo code.
-    let attr = capture_attr(size, Location::caller());
+    let mut attr = capture_attr(size, Location::caller());
 
     ensure_init();
 
@@ -837,6 +843,7 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
         }
 
         (*alloc_node).frames = Some(frames);
+        attr.alloc_seq = VMALLOC_ALLOC_SEQ.fetch_add(1, AtomicOrdering::Relaxed);
         (*alloc_node).attr = attr;
         vm.insert_alloc_node(alloc_node);
         vm.alloc_count = vm.alloc_count.saturating_add(1);
@@ -874,14 +881,18 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
 ///    remote CPU blocked on VMALLOC could not reach the acknowledgement path,
 ///    causing a deadlock. Releasing first eliminates the hazard.
 /// 3. **No lock** : free physical frames back to the buddy allocator.
-pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) {
+///
+/// Returns `true` if a region was released (`free(NULL)` counts as success).
+/// Returns `false` if the pointer was non-null but did not denote a live
+/// vmalloc mapping in the arena (nothing freed — caller may be leaking).
+pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
     if ptr.is_null() {
-        return;
+        return true;
     }
 
     let addr = ptr as u64;
     if addr < VMALLOC_VIRT_START || addr >= VMALLOC_VIRT_END {
-        return;
+        return false;
     }
 
     // Phase 1 — unmap and collect under VMALLOC lock.
@@ -894,7 +905,7 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) {
             let node = vm.take_alloc_node(start_page);
             if node.is_null() {
                 serial_println!("[vmalloc] vfree: no allocation record for 0x{:x}", addr);
-                return;
+                return false;
             }
 
             let page_count = (*node).page_count;
@@ -928,6 +939,7 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) {
         crate::memory::free_frame(token, frames.get(i));
     }
     frames.free_storage(token);
+    true
 }
 
 /// Dump all live large allocations with attribution to the serial console.

@@ -1,3 +1,9 @@
+//! Allocator inspection and stress tests for the kernel shell.
+//!
+//! Commands such as `heap live` print task ids, addresses, and source locations
+//! from vmalloc attribution — useful for debugging but **sensitive** if the
+//! serial console is exposed; restrict shell access accordingly.
+
 use crate::{
     alloc::string::String,
     shell::{output::format_bytes, ShellError},
@@ -252,6 +258,9 @@ fn cmd_heap_fail() -> Result<(), ShellError> {
 ///   slab_reclaim[S]    : fill/drain slab classes without leaking.
 ///   slab_frag[256]     : verify a page becomes partial after partial free.
 ///   vmalloc_cycle      : alloc/free vmalloc ranges and verify live tracking.
+///   vmalloc_frag       : random-size allocs freed in random order; checks that
+///                        virtual fragmentation is observable and all pages are
+///                        returned after drain.
 ///   telemetry          : sanity-check counters are self-consistent.
 ///   userspace_workload : launch `/initfs/test_mem_stressed` in a silo and
 ///                        observe its lifecycle for a bounded period.
@@ -303,6 +312,7 @@ fn cmd_heap_stress(rounds_arg: Option<&String>) -> Result<(), ShellError> {
         run("slab_reclaim[8 ci=0 p=1]", stress_slab_reclaim(0, 1));
         run("slab_frag[256 ci=13]", stress_slab_frag(13));
         run("vmalloc_cycle", stress_vmalloc_cycle());
+        run("vmalloc_frag", stress_vmalloc_frag());
         run("telemetry_consistency", stress_telemetry());
         run("userspace_workload", stress_userspace_workload());
     }

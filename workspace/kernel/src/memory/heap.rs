@@ -1,6 +1,6 @@
 // Heap allocator: slab sub-allocator + VM-backed large-allocation path.
 //
-// Small allocations (effective size =< 2048 B) come from per-size-class slab
+// Small allocations (effective size <= 2048 B) come from per-size-class slab
 // free lists.  Each slab class draws whole pages from the buddy allocator and
 // carves them into fixed-size blocks.  Freed blocks return to the slab free
 // list, so the buddy's page counter stabilises after warm-up instead of
@@ -10,7 +10,7 @@
 // virtually contiguous, physically fragmented, and independent from
 // high-order physically contiguous buddy blocks.
 //
-// Lock ordering : SLAB_ALLOC (outer) may call the frame-allocation helpers.
+// Lock ordering — SLAB_ALLOC (outer) may call the frame-allocation helpers.
 // Those helpers can hit a CPU-local cache (no global buddy lock) or fall back
 // to the global buddy lock as needed.
 
@@ -36,8 +36,8 @@ use x86_64::PhysAddr;
 /// | Class range | Step      | Max waste |
 /// |-------------|-----------|-----------|
 /// | 8 to  64 B  | x2 / 1,5× | ≤ 32 B    |
-/// |64 to 256 B  | ~ x1,25×  | ≤ 64 B    |
-/// |256 to 2048 B| x1,25     | ≤ 512 B   |
+/// |64 to 256 B  | ~1.25×    | ≤ 64 B    |
+/// |256 to 2048 B| 1.25×     | ≤ 512 B   |
 
 const SLAB_SIZES: [usize; 26] = [
     8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896,
@@ -56,6 +56,8 @@ pub enum KernelHeapBackend {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KernelHeapAllocError {
     InvalidLayout,
+    /// [`GlobalAlloc`] large path uses vmalloc, which only guarantees 4 KiB alignment.
+    AlignmentExceedsKernelPage { align: usize },
     SlabRefillFailed { effective: usize, class_size: usize },
     Vmalloc(memory::vmalloc::VmallocError),
 }
@@ -111,7 +113,7 @@ const POISON_BYTE: u8 = 0xDE;
 const SLAB_CANARY: u32 = 0xDEAD_BEEF;
 
 // ---------------------------------------------------------------------------
-// Slab page header : embedded at byte 0 of every buddy page used by a class.
+// Slab page header — embedded at byte 0 of every buddy page used by a class.
 // Blocks start at offset SLAB_HEADER_SIZE within the page.
 // ---------------------------------------------------------------------------
 
@@ -149,7 +151,7 @@ const SLAB_HEADER_SIZE: usize = core::mem::size_of::<SlabPageHeader>();
 // Compile-time invariants.
 const _: () = assert!(
     SLAB_HEADER_SIZE == 24,
-    "SlabPageHeader size changed : update docs"
+    "SlabPageHeader size changed — update docs"
 );
 const _: () = assert!(
     (4096 - SLAB_HEADER_SIZE) / SLAB_SIZES[NUM_SLABS - 1] >= 1,
@@ -442,6 +444,7 @@ unsafe impl GlobalAlloc for LockedHeap {
                 let ci = SlabState::class_index(effective);
                 let cpu = crate::arch::x86_64::percpu::current_cpu_index();
                 let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+                #[cfg(debug_assertions)]
                 if !irq_enabled {
                     use core::sync::atomic::{AtomicUsize, Ordering};
                     static HEAP_D_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -485,26 +488,29 @@ unsafe impl GlobalAlloc for LockedHeap {
                 if addr >= crate::memory::vmalloc::VMALLOC_VIRT_START
                     && addr < crate::memory::vmalloc::VMALLOC_VIRT_END
                 {
-                    crate::sync::with_irqs_disabled(|token| {
-                        crate::memory::free_kernel_virtual(ptr, token);
+                    let ok = crate::sync::with_irqs_disabled(|token| {
+                        crate::memory::free_kernel_virtual(ptr, token)
                     });
-                } else {
-                    // Pointer is outside the vmalloc arena with a large-allocation
-                    // layout. This is a leak : warn loudly in debug builds.
-                    #[cfg(debug_assertions)]
-                    {
+                    if !ok {
                         crate::serial_println!(
-                            "[heap][bug] vmalloc dealloc: ptr {:#x} outside vmalloc arena \
-                             [{:#x}..{:#x}] : memory leaked",
-                            addr,
-                            crate::memory::vmalloc::VMALLOC_VIRT_START,
-                            crate::memory::vmalloc::VMALLOC_VIRT_END,
-                        );
-                        debug_assert!(
-                            false,
-                            "vmalloc dealloc with out-of-range pointer : memory leaked"
+                            "[heap][leak] vmalloc free: no live mapping at {:#x} (wrong base or double-free?)",
+                            addr
                         );
                     }
+                } else {
+                    // Pointer is outside the vmalloc arena with a large-allocation
+                    // layout — nothing is freed (GlobalAlloc contract violation).
+                    crate::serial_println!(
+                        "[heap][leak] vmalloc dealloc: ptr {:#x} outside vmalloc arena [{:#x}..{:#x}]",
+                        addr,
+                        crate::memory::vmalloc::VMALLOC_VIRT_START,
+                        crate::memory::vmalloc::VMALLOC_VIRT_END,
+                    );
+                    #[cfg(debug_assertions)]
+                    debug_assert!(
+                        false,
+                        "vmalloc dealloc with out-of-range pointer : memory leaked"
+                    );
                 }
             }
         }
@@ -598,6 +604,17 @@ pub unsafe fn try_alloc_kernel_heap(layout: Layout) -> Result<*mut u8, KernelHea
             KernelHeapAllocError::InvalidLayout,
         ));
     }
+    // Large heap path uses vmalloc, which only aligns to 4 KiB pages.
+    if effective > MAX_SLAB_SIZE && layout.align() > 4096 {
+        return Err(record_heap_failure(
+            layout,
+            effective,
+            KernelHeapBackend::Vmalloc,
+            KernelHeapAllocError::AlignmentExceedsKernelPage {
+                align: layout.align(),
+            },
+        ));
+    }
     let boot_reg = crate::silo::debug_boot_reg_active();
     if boot_reg {
         crate::serial_println!(
@@ -615,6 +632,7 @@ pub unsafe fn try_alloc_kernel_heap(layout: Layout) -> Result<*mut u8, KernelHea
             // Race/corruption diagnostic: log alloc when IRQs disabled (rate-limited).
             let cpu = crate::arch::x86_64::percpu::current_cpu_index();
             let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+            #[cfg(debug_assertions)]
             if !irq_enabled {
                 use core::sync::atomic::{AtomicUsize, Ordering};
                 static HEAP_A_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -811,6 +829,14 @@ fn alloc_error_handler(layout: Layout) -> ! {
             order
         );
         log_heap_failure_policy(layout);
+        if let Some(snap) = last_heap_failure_snapshot() {
+            if let KernelHeapAllocError::AlignmentExceedsKernelPage { align } = snap.error {
+                crate::serial_println!(
+                    "[heap][oom] diagnosis=layout alignment {} B exceeds 4 KiB page alignment guaranteed by vmalloc heap path",
+                    align
+                );
+            }
+        }
         match crate::memory::vmalloc::last_failure_snapshot() {
             Some(snapshot) => {
                 crate::serial_println!(

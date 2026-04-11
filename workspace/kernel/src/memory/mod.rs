@@ -226,15 +226,19 @@ static CONTIGUOUS_ALLOC_FAIL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Allocate a physically contiguous block of `2^order` pages.
 ///
-/// **Intended for hardware/DMA use only** — DMA rings, MMIO-adjacent buffers,
-/// large hardware descriptor tables, and other cases where physical contiguity
-/// is the *actual requirement*.
+/// Use when **physical contiguity** is required: DMA rings, MMIO-adjacent
+/// buffers, hardware tables, copy-on-write multi-page copies, kernel stacks
+/// ([`allocate_kernel_stack_frames`]), etc.
 ///
-/// DO NOT USE for general heap allocations — use [`allocate_kernel_virtual`]
-/// for large kernel buffers or [`allocate_frame`] for single kernel-data frames.
+/// Do not use for general large kernel buffers — prefer [`allocate_kernel_virtual`]
+/// (virtually contiguous, physically fragmented) or [`allocate_frame`] for single pages.
 ///
-/// Telemetry: increments [`CONTIGUOUS_ALLOC_PAGES`] on success,
-/// [`CONTIGUOUS_ALLOC_FAIL_COUNT`] on failure.
+/// **Telemetry:** increments [`CONTIGUOUS_ALLOC_PAGES`] on success and
+/// [`CONTIGUOUS_ALLOC_FAIL_COUNT`] on failure; [`CONTIGUOUS_FREE_PAGES`] on
+/// [`free_phys_contiguous`]. Those counters include **every** use of this
+/// allocate/free pair (DMA buffers, kernel stacks, COW multi-page blocks,
+/// etc.) — not only hardware DMA. Treat [`phys_contiguous_diag`] as overall
+/// buddy multi-page contiguous traffic.
 #[inline]
 pub(crate) fn allocate_phys_contiguous(
     token: &IrqDisabledToken,
@@ -276,6 +280,9 @@ pub(crate) fn free_phys_contiguous(token: &IrqDisabledToken, frame: PhysFrame, o
 }
 
 /// Snapshot of contiguous-physical-allocation telemetry.
+///
+/// Covers all [`allocate_phys_contiguous`] / [`free_phys_contiguous`] usage
+/// (DMA-style buffers, kernel stacks, COW multi-page blocks, etc.).
 pub struct PhysContiguousDiag {
     pub pages_allocated: usize,
     pub pages_freed: usize,
@@ -284,6 +291,9 @@ pub struct PhysContiguousDiag {
 }
 
 /// Read current contiguous-allocation telemetry without locking.
+///
+/// Counters are not limited to device DMA; any code path using
+/// [`allocate_phys_contiguous`] contributes (see module docs on that function).
 pub fn phys_contiguous_diag() -> PhysContiguousDiag {
     let alloc = CONTIGUOUS_ALLOC_PAGES.load(Ordering::Relaxed);
     let freed = CONTIGUOUS_FREE_PAGES.load(Ordering::Relaxed);
@@ -344,7 +354,11 @@ pub fn free_frame(token: &IrqDisabledToken, frame: PhysFrame) {
 /// pages.
 ///
 /// This is the explicit large-allocation API for kernel callers that require a
-/// large contiguous virtual range but do not require physical contiguity.
+/// large virtually contiguous range but not physical contiguity.
+///
+/// Returned pointers are aligned to a **4 KiB** page boundary. For alignment
+/// stricter than one page, do not route through [`GlobalAlloc`] / large
+/// [`Layout`] on this heap — use a dedicated aligned mapping or slab path.
 #[inline]
 #[track_caller]
 pub fn allocate_kernel_virtual(
@@ -355,9 +369,12 @@ pub fn allocate_kernel_virtual(
 }
 
 /// Free memory previously returned by [`allocate_kernel_virtual`].
+///
+/// Returns `true` if a mapping was released. `false` means nothing was freed
+/// (e.g. pointer not in the vmalloc arena or not a live allocation start).
 #[inline]
-pub fn free_kernel_virtual(ptr: *mut u8, token: &IrqDisabledToken) {
-    vmalloc::vfree(ptr, token);
+pub fn free_kernel_virtual(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
+    vmalloc::vfree(ptr, token)
 }
 
 /// Allocate a single zeroed 4 KiB frame.
