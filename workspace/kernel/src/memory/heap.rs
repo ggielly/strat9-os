@@ -541,6 +541,25 @@ pub fn slab_diag_snapshot() -> SlabDiagSnapshot {
     }
 }
 
+/// Number of slab size classes.
+pub const SLAB_NUM_CLASSES: usize = NUM_SLABS;
+
+/// Block size in bytes for slab class `ci`.
+///
+/// Panics in debug if `ci >= SLAB_NUM_CLASSES`.
+#[inline]
+pub fn slab_class_size(ci: usize) -> usize {
+    SLAB_SIZES[ci]
+}
+
+/// Number of blocks that fit in one buddy page for slab class `ci`.
+///
+/// Accounts for the `SlabPageHeader` at the base of each page.
+#[inline]
+pub fn slab_blocks_per_page(ci: usize) -> usize {
+    (4096 - SLAB_HEADER_SIZE) / SLAB_SIZES[ci]
+}
+
 /// Fallible heap entry point with explicit backend-aware errors.
 ///
 /// Kernel code that can recover from allocation failure should prefer this API

@@ -4,20 +4,25 @@ use crate::{
     shell_println,
 };
 
-const HEAP_USAGE: &str = "Usage: heap [summary|vmalloc|live [limit]|fail|diag]";
+const HEAP_USAGE: &str = "Usage: heap [summary|vmalloc|live [limit]|fail|diag|stress [rounds]]";
 const MAX_LIVE_LIMIT: usize = 4096;
 
-/// `heap` — allocator telemetry and diagnostics.
+/// Maximum number of pointers held on the stack during a slab stress test.
+/// Sized to cover the densest class (8 B, 509 blocks/page) over 1 page.
+const STRESS_MAX_BLOCKS: usize = 512;
+
+/// `heap` : allocator telemetry and diagnostics.
 pub fn cmd_heap(args: &[String]) -> Result<(), ShellError> {
     match args.first().map(|s| s.as_str()) {
         None | Some("summary") => cmd_heap_summary(),
         Some("vmalloc") => cmd_heap_vmalloc(),
-        Some("live") => cmd_heap_live(args.get(1))?,
+        Some("live") => cmd_heap_live(args.get(1)),
         Some("fail") => cmd_heap_fail(),
         Some("diag") => {
             crate::memory::heap::dump_diagnostics();
             Ok(())
         }
+        Some("stress") => cmd_heap_stress(args.get(1)),
         Some(_) => {
             shell_println!("{}", HEAP_USAGE);
             Err(ShellError::InvalidArguments)
@@ -97,11 +102,7 @@ fn cmd_heap_vmalloc() -> Result<(), ShellError> {
     };
 
     shell_println!("Vmalloc:");
-    shell_println!(
-        "  Arena: 0x{:x}..0x{:x}",
-        diag.arena_start,
-        diag.arena_end
-    );
+    shell_println!("  Arena: 0x{:x}..0x{:x}", diag.arena_start, diag.arena_end);
     shell_println!(
         "  Usage: allocs={} alloc_pages={} free_pages={} peak_pages={}",
         diag.alloc_count,
@@ -227,6 +228,382 @@ fn cmd_heap_fail() -> Result<(), ShellError> {
             last.error
         ),
         None => shell_println!("Last vmalloc failure: none"),
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Stress tests
+// =============================================================================
+
+/// `heap stress [rounds]` : exercise the slab and vmalloc allocators,
+/// validate partial-page reclaim, fragmentation handling, and telemetry
+/// consistency.  All tests run in kernel context from the shell task.
+///
+/// Each round runs 7 sub-tests:
+///   slab_reclaim[S]  : fill N complete slab pages for class S, free all,
+///                      verify the pages are reclaimed to the buddy.
+///   slab_frag[256]   : allocate one page, free in non-LIFO order, verify
+///                      the page is not reclaimed mid-way and is reclaimed
+///                      only when fully empty.
+///   vmalloc_cycle    : alloc/free several vmalloc regions, check telemetry.
+///   telemetry        : sanity-check all counters are self-consistent.
+fn cmd_heap_stress(rounds_arg: Option<&String>) -> Result<(), ShellError> {
+    let rounds = match rounds_arg {
+        None => 1,
+        Some(r) => r
+            .parse::<usize>()
+            .map_err(|_| ShellError::InvalidArguments)?
+            .max(1)
+            .min(32),
+    };
+
+    shell_println!("heap stress: {} round(s)", rounds);
+
+    let mut total_pass = 0usize;
+    let mut total_fail = 0usize;
+
+    for round in 0..rounds {
+        if rounds > 1 {
+            shell_println!("--- round {}/{} ---", round + 1, rounds);
+        }
+
+        // Helper: run a sub-test and print PASS/FAIL.
+        // Returns true on pass.
+        let mut run = |name: &str, result: Result<(), &'static str>| -> bool {
+            match result {
+                Ok(()) => {
+                    shell_println!("  {:<36} PASS", name);
+                    true
+                }
+                Err(msg) => {
+                    shell_println!("  {:<36} FAIL  {}", name, msg);
+                    false
+                }
+            }
+        };
+
+        // slab_reclaim: largest class (1 block/page → easy reclaim signal)
+        let ok = run("slab_reclaim[2048 ci=25 p=4]", stress_slab_reclaim(25, 4));
+        if ok {
+            total_pass += 1;
+        } else {
+            total_fail += 1;
+        }
+
+        let ok = run("slab_reclaim[512 ci=17 p=3]", stress_slab_reclaim(17, 3));
+        if ok {
+            total_pass += 1;
+        } else {
+            total_fail += 1;
+        }
+
+        let ok = run("slab_reclaim[64 ci=5 p=2]", stress_slab_reclaim(5, 2));
+        if ok {
+            total_pass += 1;
+        } else {
+            total_fail += 1;
+        }
+
+        let ok = run("slab_reclaim[8 ci=0 p=1]", stress_slab_reclaim(0, 1));
+        if ok {
+            total_pass += 1;
+        } else {
+            total_fail += 1;
+        }
+
+        let ok = run("slab_frag[256 ci=13]", stress_slab_frag(13));
+        if ok {
+            total_pass += 1;
+        } else {
+            total_fail += 1;
+        }
+
+        let ok = run("vmalloc_cycle", stress_vmalloc_cycle());
+        if ok {
+            total_pass += 1;
+        } else {
+            total_fail += 1;
+        }
+
+        let ok = run("telemetry_consistency", stress_telemetry());
+        if ok {
+            total_pass += 1;
+        } else {
+            total_fail += 1;
+        }
+    }
+
+    shell_println!("heap stress: {} passed, {} failed", total_pass, total_fail);
+    if total_fail == 0 {
+        Ok(())
+    } else {
+        Err(ShellError::ExecutionFailed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sub-test: slab_reclaim
+//
+// Allocate `pages` worth of complete slab pages for class `ci`, then free
+// all blocks and verify the pages are returned to the buddy allocator.
+//
+// Pointer storage lives on the stack (STRESS_MAX_BLOCKS × 8 bytes ≈ 4 KiB).
+// No heap allocation is used for bookkeeping, so the snapshot deltas are clean.
+// ---------------------------------------------------------------------------
+fn stress_slab_reclaim(ci: usize, pages: usize) -> Result<(), &'static str> {
+    use alloc::alloc::{alloc, dealloc, Layout};
+
+    let class_size = crate::memory::heap::slab_class_size(ci);
+    let blocks_per_page = crate::memory::heap::slab_blocks_per_page(ci);
+    let total = pages * blocks_per_page;
+
+    if total > STRESS_MAX_BLOCKS {
+        return Err("test config: total_blocks > STRESS_MAX_BLOCKS, reduce pages");
+    }
+
+    let layout =
+        Layout::from_size_align(class_size, 8).map_err(|_| "Layout::from_size_align failed")?;
+
+    // Stack storage : no heap interaction for bookkeeping.
+    let mut ptrs = [core::ptr::null_mut::<u8>(); STRESS_MAX_BLOCKS];
+    let mut count = 0usize;
+
+    let before = crate::memory::heap::slab_diag_snapshot();
+
+    // Fill `pages` complete slab pages.
+    for i in 0..total {
+        // SAFETY: layout is valid; LockedHeap is the global allocator.
+        let ptr = unsafe { alloc(layout) };
+        if ptr.is_null() {
+            // OOM: clean up and fail.
+            for j in 0..count {
+                unsafe { dealloc(ptrs[j], layout) };
+            }
+            return Err("OOM during slab reclaim fill phase");
+        }
+        ptrs[i] = ptr;
+        count += 1;
+    }
+
+    let mid = crate::memory::heap::slab_diag_snapshot();
+
+    // Free all blocks : should trigger full-page reclaim.
+    for i in 0..count {
+        // SAFETY: ptr was returned by alloc with the same layout.
+        unsafe { dealloc(ptrs[i], layout) };
+        ptrs[i] = core::ptr::null_mut();
+    }
+
+    let after = crate::memory::heap::slab_diag_snapshot();
+
+    // Verify: the slab allocated at least `pages` new pages during the fill.
+    let pages_added = mid.pages_allocated.saturating_sub(before.pages_allocated);
+    if pages_added < pages {
+        return Err("slab allocated fewer pages than expected during fill");
+    }
+
+    // Verify: reclamation happened : pages_live must return to baseline (±1
+    // for any transient races between the two atomic reads in the snapshot).
+    if after.pages_live > before.pages_live.saturating_add(1) {
+        return Err("slab pages not fully reclaimed after freeing all blocks");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sub-test: slab_frag
+//
+// Allocate one complete slab page for class `ci`, then free blocks in a
+// non-LIFO order (even indices first, then odd).  Verify that:
+//   1. No page is reclaimed after the first (partial) free.
+//   2. The page IS reclaimed after all blocks are freed.
+// ---------------------------------------------------------------------------
+fn stress_slab_frag(ci: usize) -> Result<(), &'static str> {
+    use alloc::alloc::{alloc, dealloc, Layout};
+
+    let class_size = crate::memory::heap::slab_class_size(ci);
+    let bpp = crate::memory::heap::slab_blocks_per_page(ci);
+
+    if bpp < 2 {
+        return Err("class has < 2 blocks/page, frag test not meaningful");
+    }
+    if bpp > STRESS_MAX_BLOCKS {
+        return Err("blocks_per_page > STRESS_MAX_BLOCKS");
+    }
+
+    let layout =
+        Layout::from_size_align(class_size, 8).map_err(|_| "Layout::from_size_align failed")?;
+
+    let mut ptrs = [core::ptr::null_mut::<u8>(); STRESS_MAX_BLOCKS];
+
+    let before = crate::memory::heap::slab_diag_snapshot();
+
+    // Allocate exactly one page worth of blocks.
+    for i in 0..bpp {
+        let ptr = unsafe { alloc(layout) };
+        if ptr.is_null() {
+            for j in 0..i {
+                unsafe { dealloc(ptrs[j], layout) };
+            }
+            return Err("OOM during slab frag alloc phase");
+        }
+        ptrs[i] = ptr;
+    }
+
+    let after_alloc = crate::memory::heap::slab_diag_snapshot();
+
+    // Free even-indexed blocks : page goes partial but NOT fully empty.
+    for i in (0..bpp).step_by(2) {
+        unsafe { dealloc(ptrs[i], layout) };
+        ptrs[i] = core::ptr::null_mut();
+    }
+
+    let after_partial = crate::memory::heap::slab_diag_snapshot();
+
+    // Check: the page must NOT have been reclaimed yet.
+    let reclaimed_so_far = after_partial
+        .pages_reclaimed
+        .saturating_sub(before.pages_reclaimed);
+    if reclaimed_so_far > 0 {
+        // Clean up remaining blocks before returning.
+        for i in (1..bpp).step_by(2) {
+            if !ptrs[i].is_null() {
+                unsafe { dealloc(ptrs[i], layout) };
+            }
+        }
+        return Err("page reclaimed prematurely (after partial free : still has live blocks)");
+    }
+
+    // Free odd-indexed blocks : page becomes fully empty and should be reclaimed.
+    for i in (1..bpp).step_by(2) {
+        if !ptrs[i].is_null() {
+            unsafe { dealloc(ptrs[i], layout) };
+            ptrs[i] = core::ptr::null_mut();
+        }
+    }
+
+    let after_full = crate::memory::heap::slab_diag_snapshot();
+
+    // Verify page was allocated during the fill phase.
+    let pages_added = after_alloc
+        .pages_allocated
+        .saturating_sub(before.pages_allocated);
+    if pages_added == 0 {
+        return Err("no slab page was allocated during frag test fill");
+    }
+
+    // Verify the page was reclaimed after all blocks were freed.
+    let reclaimed_total = after_full
+        .pages_reclaimed
+        .saturating_sub(before.pages_reclaimed);
+    if reclaimed_total == 0 {
+        return Err("slab page not reclaimed after all blocks freed (fragmentation regression)");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sub-test: vmalloc_cycle
+//
+// Allocate and free several vmalloc regions of increasing size.  Verify that
+// alloc_count increases during the fill and that allocated_pages returns to
+// the baseline after all frees.
+// ---------------------------------------------------------------------------
+fn stress_vmalloc_cycle() -> Result<(), &'static str> {
+    // Sizes chosen to cover 1, 4, 16, and 64 pages.
+    const SIZES: [usize; 4] = [4096, 16384, 65536, 262144];
+    let mut vptrs = [core::ptr::null_mut::<u8>(); 4];
+
+    let before = crate::memory::vmalloc::diag_snapshot().ok_or("vmalloc not initialised")?;
+
+    // Allocate all regions.
+    for (i, &size) in SIZES.iter().enumerate() {
+        let ptr = crate::sync::with_irqs_disabled(|token| {
+            crate::memory::allocate_kernel_virtual(size, token).ok()
+        });
+        match ptr {
+            Some(p) if !p.is_null() => vptrs[i] = p,
+            _ => {
+                // OOM or arena exhausted: free what we have.
+                for j in 0..i {
+                    if !vptrs[j].is_null() {
+                        crate::sync::with_irqs_disabled(|token| {
+                            crate::memory::free_kernel_virtual(vptrs[j], token);
+                        });
+                    }
+                }
+                return Err("vmalloc returned null during cycle alloc phase");
+            }
+        }
+    }
+
+    let mid =
+        crate::memory::vmalloc::diag_snapshot().ok_or("vmalloc snapshot failed after alloc")?;
+
+    // Free all regions.
+    for ptr in vptrs.iter_mut() {
+        if !ptr.is_null() {
+            crate::sync::with_irqs_disabled(|token| {
+                crate::memory::free_kernel_virtual(*ptr, token);
+            });
+            *ptr = core::ptr::null_mut();
+        }
+    }
+
+    let after =
+        crate::memory::vmalloc::diag_snapshot().ok_or("vmalloc snapshot failed after free")?;
+
+    // Verify alloc_count grew by the expected number of allocations.
+    let added = mid.alloc_count.saturating_sub(before.alloc_count);
+    if added < SIZES.len() {
+        return Err("vmalloc alloc_count did not increase by expected amount");
+    }
+
+    // Verify pages were freed: allocated_pages must return to baseline (±1).
+    if after.allocated_pages > before.allocated_pages.saturating_add(1) {
+        return Err("vmalloc allocated_pages did not return to baseline after free");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sub-test: telemetry_consistency
+//
+// Sanity-check that all allocator counters are internally consistent.
+// Does not allocate anything : pure read of existing state.
+// ---------------------------------------------------------------------------
+fn stress_telemetry() -> Result<(), &'static str> {
+    // Slab: reclaimed must not exceed allocated.
+    let slab = crate::memory::heap::slab_diag_snapshot();
+    if slab.pages_reclaimed > slab.pages_allocated {
+        return Err("slab: pages_reclaimed > pages_allocated (counter corruption)");
+    }
+
+    // Phys-contiguous: freed must not exceed allocated.
+    let phys = crate::memory::phys_contiguous_diag();
+    if phys.pages_freed > phys.pages_allocated {
+        return Err("phys_contiguous: pages_freed > pages_allocated (counter corruption)");
+    }
+
+    // vmalloc: allocated_pages must fit in the arena; peak must be a watermark.
+    if let Some(vm) = crate::memory::vmalloc::diag_snapshot() {
+        let arena_pages = (vm.arena_end.saturating_sub(vm.arena_start)) as usize / 4096;
+
+        if vm.allocated_pages > arena_pages {
+            return Err("vmalloc: allocated_pages > arena capacity (impossible)");
+        }
+        if vm.allocated_pages.saturating_add(vm.free_pages) > arena_pages.saturating_add(1) {
+            // ±1 for the ARENA_START_PAGE reservation
+            return Err("vmalloc: allocated + free > arena capacity (accounting error)");
+        }
+        if (vm.peak_pages as usize) < vm.allocated_pages {
+            return Err("vmalloc: peak_pages < allocated_pages (watermark regression)");
+        }
     }
 
     Ok(())

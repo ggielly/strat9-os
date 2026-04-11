@@ -252,32 +252,36 @@ impl SchedClassRq for FairClassRq {
         }
     }
 
-    /// Performs the remove operation.
+    /// Remove a task from the runqueue by task id.
+    ///
+    /// Uses **lazy deletion**: the heap entry is NOT physically removed — it is
+    /// invalidated in-place via `fair_invalidate_rq_entry()` and will be
+    /// silently skipped or pruned by `prune_stale_head()` the next time the
+    /// heap is touched.  This keeps `remove()`:
+    ///   - **allocation-free** (no Vec drain / BinaryHeap reconstruction), and
+    ///   - **O(n)** in heap size — acceptable under the per-CPU scheduler lock
+    ///     since task counts are small and reconstruction would cost the same.
+    ///
+    /// The scan is a single pass: we find the live entry, call
+    /// `fair_invalidate_rq_entry()` (atomic CAS) in-place without cloning the
+    /// Arc, and read `weight` directly.
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool {
-        let found = self
-            .entities
-            .iter()
-            .any(|Reverse(item)| item.task.id == task_id && item.is_live());
-        if !found {
-            return false;
-        }
-
-        let Some((task, weight)) = self.entities.iter().find_map(|Reverse(item)| {
-            if item.task.id == task_id && item.is_live() {
-                Some((item.task.clone(), item.weight))
+        // Single O(n) scan — no Arc::clone, no allocation.
+        let weight = self.entities.iter().find_map(|Reverse(item)| {
+            if item.task.id == task_id && item.is_live() && item.task.fair_invalidate_rq_entry() {
+                Some(item.weight)
             } else {
                 None
             }
-        }) else {
-            return false;
-        };
+        });
 
-        if !task.fair_invalidate_rq_entry() {
-            return false;
+        match weight {
+            Some(w) => {
+                self.total_weight = self.total_weight.saturating_sub(w);
+                self.runnable_count = self.runnable_count.saturating_sub(1);
+                true
+            }
+            None => false,
         }
-
-        self.total_weight = self.total_weight.saturating_sub(weight);
-        self.runnable_count = self.runnable_count.saturating_sub(1);
-        true
     }
 }
