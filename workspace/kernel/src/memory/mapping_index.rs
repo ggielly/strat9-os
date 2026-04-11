@@ -21,8 +21,16 @@ pub struct MappingRef {
 }
 
 /// Reverse index from capability ID to live mappings.
+///
+/// The inline capacity of 4 covers the common case (a memory region mapped
+/// in the kernel + up to 3 user address spaces) without heap allocation.
+/// If a capability ever acquires more than 4 mappings, `SmallVec` spills to
+/// the heap while the `SpinLock` is held.  This is not an IRQ path and the
+/// heap lock order (mapping_index → heap) does not conflict with any other
+/// known lock order, so the spill is not a correctness issue — only a minor
+/// latency concern noted in ticket #49.
 pub struct MappingIndex {
-    index: SpinLock<BTreeMap<CapId, SmallVec<[MappingRef; 2]>>>,
+    index: SpinLock<BTreeMap<CapId, SmallVec<[MappingRef; 4]>>>,
 }
 
 impl MappingIndex {
@@ -57,12 +65,12 @@ impl MappingIndex {
     }
 
     /// Returns a snapshot of the mappings for the given capability.
-    pub fn lookup(&self, cap_id: CapId) -> SmallVec<[MappingRef; 2]> {
+    pub fn lookup(&self, cap_id: CapId) -> SmallVec<[MappingRef; 4]> {
         self.index.lock().get(&cap_id).cloned().unwrap_or_default()
     }
 
     /// Removes and returns every mapping associated with the given capability.
-    pub fn remove_all(&self, cap_id: CapId) -> SmallVec<[MappingRef; 2]> {
+    pub fn remove_all(&self, cap_id: CapId) -> SmallVec<[MappingRef; 4]> {
         self.index.lock().remove(&cap_id).unwrap_or_default()
     }
 }

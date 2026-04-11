@@ -108,6 +108,22 @@ impl FutexBucket {
         Ok(queue)
     }
 
+    /// Removes the slot for `addr`/`queue` if the queue is still empty.
+    ///
+    /// # Lock ordering
+    ///
+    /// This method is called while the **bucket lock** is held.  It
+    /// re-acquires `queue.waiters` internally to re-verify emptiness.
+    /// Therefore the lock order on this path is:
+    ///
+    ///   `bucket_lock` → `queue.waiters`
+    ///
+    /// **Invariant:** no code path may hold `queue.waiters` while trying to
+    /// acquire any `bucket_lock`.  Violating this would cause an ABBA
+    /// deadlock with the ordering established here.  All callers of
+    /// `queue.waiters.lock()` in the syscall handlers release the bucket
+    /// lock before acquiring waiters (bucket is released inside `get_queue`/
+    /// `lookup_queue` before the returned Arc is used).
     fn remove_if_empty(&mut self, addr: u64, queue: &Arc<FutexQueue>) {
         for slot in &mut self.entries {
             let should_remove = match slot {
@@ -295,14 +311,32 @@ fn do_requeue(
     Ok(woke + requeued)
 }
 
-/// Attempts to gc queue.
+/// Removes the queue entry for `addr` from its bucket if the queue is empty.
+///
+/// Two-phase to avoid holding `bucket_lock` while checking emptiness (which
+/// would require acquiring `waiters` under `bucket`, violating the intended
+/// ordering of acquiring bucket before waiters):
+///
+///   Phase 1 — check under `waiters`: fast exit if non-empty.
+///   Phase 2 — remove under `bucket_lock`: `remove_if_empty` re-verifies
+///              emptiness while already holding the bucket lock.  A new
+///              waiter that enqueued between the two phases will be visible
+///              in that re-check and will block the removal.
+///
+/// TOCTOU note: a task may enqueue between phase 1 and phase 2.  This is
+/// safe: `remove_if_empty` re-checks `is_empty()` under the bucket lock,
+/// so a queue with live waiters is never removed.
 fn try_gc_queue(addr: u64, queue: &Arc<FutexQueue>) {
-    let waiters = queue.waiters.lock();
-    if waiters.is_empty() {
-        drop(waiters);
-        let mut bucket = futex_bucket(addr).lock();
-        bucket.remove_if_empty(addr, queue);
+    // Phase 1: early exit if still has waiters.
+    {
+        let waiters = queue.waiters.lock();
+        if !waiters.is_empty() {
+            return;
+        }
     }
+    // Phase 2: remove under bucket lock, with re-verification inside.
+    let mut bucket = futex_bucket(addr).lock();
+    bucket.remove_if_empty(addr, queue);
 }
 
 struct FutexWakeOpEncode {
@@ -486,12 +520,23 @@ pub fn sys_futex_cmp_requeue(
         return Ok(0);
     };
 
+    // Preliminary val check before allocating a bucket slot for addr2.
+    // This avoids consuming a slot on the common EAGAIN path (e.g. lock
+    // already taken by another thread).  The authoritative check is
+    // re-done under the waiter locks below to close the race window.
+    let cur_prelim = read_u32(_addr1)?;
+    if cur_prelim != _expected_val {
+        return Err(SyscallError::Again);
+    }
+
     let queue2 = get_queue(_addr2)?;
     let mut woke = 0u64;
     let mut requeued = 0u64;
 
     {
         let (mut w1, mut w2) = lock_two_queues(_addr1, &queue1, _addr2, &queue2);
+        // Authoritative check: re-read under both waiter locks so no waker
+        // can race between the val read and the requeue.
         let cur = read_u32(_addr1)?;
         if cur != _expected_val {
             return Err(SyscallError::Again);
