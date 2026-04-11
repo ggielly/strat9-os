@@ -72,11 +72,12 @@ pub use block::{
     BlockHandle, BuddyReserved, Exclusive, MappedExclusive, MappedShared, PhysBlock, Released,
 };
 pub use block_meta::{get_block_meta, resolve_handle};
-pub use buddy::get_allocator;
+pub use buddy::{get_allocator, poison_quarantine_pages_snapshot};
 pub use frame::{
-    frame_meta_debug_snapshot, get_meta, get_meta_slot, meta_guard, AllocError, FrameAllocOptions,
-    FrameAllocator, FrameMeta, FrameMetaVtable, FramePurpose, FreeListLink, MetaSlot, PhysFrame,
-    DEFAULT_FRAME_META_VTABLE,
+    block_phys_has_poison_guard, frame_meta_debug_snapshot, get_meta, get_meta_slot,
+    invoke_vtable_on_last_ref, invoke_vtable_on_unmap, meta_generation_matches, meta_guard,
+    AllocError, FrameAllocOptions, FrameAllocator, FrameMeta, FrameMetaVtable, FramePurpose,
+    FreeListLink, MetaSlot, PhysFrame, DEFAULT_FRAME_META_VTABLE, META_SLOT_REFCOUNT_BYTE_OFFSET,
 };
 pub use mapping_index::{MappingIndex, MappingRef};
 pub use ownership::{BlockState, OwnerEntry, OwnerError, OwnershipTable, RemoveRefResult};
@@ -127,15 +128,24 @@ pub fn try_register_mapping_identity(handle: BlockHandle, cap_id: CapId) -> Resu
 }
 
 /// Releases a block back to the buddy allocator.
+///
+/// Invokes optional per-page [`FrameMetaVtable::on_unmap`] hooks, then returns the block to buddy.
+/// Poisoned frames ([`meta_guard::POISONED`]) are quarantined and not recycled ([`poison_quarantine_pages_snapshot`]).
 pub fn release_owned_block(block: PhysBlock<Released>) {
     let handle = block.into_handle();
     with_irqs_disabled(|token| {
+        let frame_phys = handle.base.as_u64();
+        let order = handle.order;
+        for i in 0..(1u64 << order) {
+            let p = x86_64::PhysAddr::new(frame_phys + i * frame::PAGE_SIZE);
+            frame::invoke_vtable_on_unmap(p);
+        }
         buddy::free(
             token,
             PhysFrame {
                 start_address: handle.base,
             },
-            handle.order,
+            order,
         );
     });
 }

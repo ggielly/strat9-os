@@ -1,6 +1,7 @@
 //! System management commands
 mod clear;
 mod cpuinfo;
+mod frame_meta;
 mod health;
 mod heap;
 mod reboot;
@@ -24,6 +25,7 @@ mod version;
 mod wasm_run;
 pub use clear::cmd_clear;
 pub use cpuinfo::cmd_cpuinfo;
+pub use frame_meta::cmd_frame_meta;
 pub use health::cmd_health;
 pub use heap::cmd_heap;
 pub use reboot::cmd_reboot;

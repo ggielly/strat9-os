@@ -20,14 +20,16 @@
 //! - **`meta_guard::POISONED` vs `frame_flags::POISONED`** : deux espaces (bits dédiés
 //!   `guard` vs flags logiques). Pour marquer une frame corrompue, préférer
 //!   [`MetaSlot::mark_poisoned`] qui pose les deux.
-//! - **`vtable_ref`** : tout pointeur non nul doit désigner une [`FrameMetaVtable`] `'static`
-//!   valide ; sinon UB. Les bits sont posés par le noyau uniquement.
+//! - **`vtable_ref` / `try_vtable_ref`** : bits `0` → défaut ; bits non alignés ou invalides
+//!   → défaut (pas d’UB). Les pointeurs alignés doivent désigner une [`FrameMetaVtable`] `'static`
+//!   valide lorsqu’ils sont enregistrés par le noyau.
 //! - **Cache order-0** : `buddy::alloc(0)` peut servir depuis le cache local ; le chemin
 //!   [`FrameAllocOptions::allocate`] applique quand même le CAS + epoch sur la même frame.
 
 use crate::{memory::boot_alloc::BootAllocator, sync::IrqDisabledToken};
 use core::{
-    mem, ptr,
+    mem::{self, offset_of},
+    ptr,
     sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering},
 };
 use x86_64::PhysAddr;
@@ -322,6 +324,12 @@ pub mod frame_flags {
 }
 
 /// Buddy free-list link storage (intrusive list nodes live in [`MetaSlot`], not in frame bytes).
+///
+/// `AtomicU64` matches the rest of the metadata slot’s atomic story and keeps the public
+/// [`MetaSlot`] API safe if list helpers are ever used without the buddy spinlock. Today
+/// `buddy.rs` mutates these fields only while holding the global buddy lock, so plain
+/// `Cell<u64>` would suffice for ordering; that would be a micro-optimization if profiling shows
+/// hot contention here.
 #[repr(C)]
 pub struct FreeListLink {
     pub(crate) next: AtomicU64,
@@ -342,12 +350,33 @@ impl FreeListLink {
 /// Store a pointer as `u64` in [`MetaSlot::vtable`]; `0` selects [`DEFAULT_FRAME_META_VTABLE`].
 #[repr(C)]
 pub struct FrameMetaVtable {
-    /// Reserved slots for future hooks (`on_last_ref`, device unmap, …).
-    pub reserved: [u64; 8],
+    /// Called when the last shared reference to the frame is dropped (`refcount` → 0 path).
+    ///
+    /// # Constraints
+    /// Invoked with IRQs **disabled** and without the buddy zone lock held.
+    /// MUST be: allocation-free, lock-free, and infallible.
+    pub on_last_ref: Option<fn(PhysAddr)>,
+    /// Called once per 4 KiB page when a mapping block is released to the allocator (unmap path).
+    ///
+    /// # Constraints
+    /// Invoked with IRQs **disabled** and the buddy zone lock held on the caller's CPU.
+    /// MUST be:
+    ///   - allocation-free (no heap, no buddy);
+    ///   - lock-free (no spinlocks that might be held by the interrupted CPU);
+    ///   - infallible (no panic, no unwrap).
+    pub on_unmap: Option<fn(PhysAddr)>,
+    /// Reserved for future hooks (keeps struct at 64 bytes for [`FRAME_META_SIZE`]).
+    pub reserved: [u64; 6],
 }
 
 /// Default vtable used when [`MetaSlot::vtable`] is `0`.
-pub static DEFAULT_FRAME_META_VTABLE: FrameMetaVtable = FrameMetaVtable { reserved: [0; 8] };
+pub static DEFAULT_FRAME_META_VTABLE: FrameMetaVtable = FrameMetaVtable {
+    on_last_ref: None,
+    on_unmap: None,
+    reserved: [0; 6],
+};
+
+const _: () = assert!(mem::size_of::<FrameMetaVtable>() == FRAME_META_SIZE);
 
 /// 64-byte cache-line metadata for one physical frame (issue #38).
 ///
@@ -368,6 +397,8 @@ pub struct MetaSlot {
     pub vtable: AtomicU64,
     pub flags: AtomicU32,
     pub order: AtomicU8,
+    /// Padding so `refcount` stays 4-byte aligned; if `order` widens or new fields are added,
+    /// re-check [`META_SLOT_REFCOUNT_BYTE_OFFSET`] / [`MetaSlot::REFCOUNT_BYTE_OFFSET`].
     _reserved0: [u8; 3],
     pub refcount: AtomicU32,
     /// Bumps each time the frame is successfully claimed from the buddy free list
@@ -375,8 +406,15 @@ pub struct MetaSlot {
     pub generation: AtomicU32,
     /// Kernel-owned guard bits ([`meta_guard`]); independent of `frame_flags`.
     pub guard: AtomicU32,
-    _reserved_future: [u8; 20],
+    /// Low 16 bits: owner CPU id hint (issue #38); upper bits reserved / NUMA placeholder.
+    pub meta_aux: AtomicU32,
+    pub _reserved_tail: [u8; 16],
 }
+
+/// Byte offset of [`MetaSlot::refcount`] from the start of each metadata slot (layout contract).
+///
+/// Re-exported as [`crate::memory::META_SLOT_REFCOUNT_BYTE_OFFSET`]. Equals [`MetaSlot::REFCOUNT_BYTE_OFFSET`].
+pub const META_SLOT_REFCOUNT_BYTE_OFFSET: usize = offset_of!(MetaSlot, refcount);
 
 /// Backwards-compatible name for [`MetaSlot`].
 pub type FrameMeta = MetaSlot;
@@ -393,24 +431,47 @@ impl MetaSlot {
             refcount: AtomicU32::new(0),
             generation: AtomicU32::new(0),
             guard: AtomicU32::new(0),
-            _reserved_future: [0; 20],
+            meta_aux: AtomicU32::new(0),
+            _reserved_tail: [0; 16],
         }
     }
 
     /// Reset vtable/guard when returning a frame to the buddy free list (`buddy::set_block_meta`).
+    ///
+    /// Preserves [`meta_guard::POISONED`] so poisoned frames are not silently « healed » on free.
     #[inline]
     pub fn reset_with_free_list_meta(&self) {
         self.set_vtable_bits(0);
-        self.guard.store(meta_guard::NONE, Ordering::Release);
+        let poison = self.get_guard() & meta_guard::POISONED;
+        self.guard.store(poison, Ordering::Release);
     }
+
+    #[inline]
+    pub fn meta_aux_load(&self) -> u32 {
+        self.meta_aux.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn meta_aux_store(&self, v: u32) {
+        // CPU-id hint — no happens-before relationship needed; Relaxed is sufficient.
+        self.meta_aux.store(v, Ordering::Relaxed);
+    }
+
+    /// Byte offset of `refcount` from the start of [`MetaSlot`] (same as [`META_SLOT_REFCOUNT_BYTE_OFFSET`]).
+    pub const REFCOUNT_BYTE_OFFSET: usize = META_SLOT_REFCOUNT_BYTE_OFFSET;
 
     /// After a successful `CAS(REFCOUNT_UNUSED → 1)` in [`FrameAllocOptions::allocate`],
     /// start a new metadata epoch: default vtable, clear guards, bump generation.
+    ///
+    /// The generation bump uses [`Ordering::Release`] so another CPU that later
+    /// [`Acquire`]-loads [`Self::generation`] or pairs with the refcount hand-off sees this
+    /// epoch for genealogical use-after-free checks. [`Ordering::Relaxed`] would be enough only
+    /// if all such checks ran on the allocating CPU with no cross-CPU visibility requirement.
     #[inline]
     pub fn note_new_allocation_epoch(&self) {
         self.set_vtable_bits(0);
         self.guard.store(meta_guard::NONE, Ordering::Release);
-        self.generation.fetch_add(1, Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     #[inline]
@@ -461,21 +522,38 @@ impl MetaSlot {
 
     /// Resolved vtable reference (`0` bits map to [`DEFAULT_FRAME_META_VTABLE`]).
     ///
-    /// # Safety contract
-    ///
-    /// Non-zero pointers must reference valid, `'static` vtables for the frame's lifetime.
+    /// Misaligned or otherwise invalid non-zero pointer bits fall back to the default vtable
+    /// (same as [`Self::try_vtable_ref`] returning `None`).
     pub fn vtable_ref(&self) -> &'static FrameMetaVtable {
-        let bits = self.vtable_bits();
-        let ptr = if bits == 0 {
-            &DEFAULT_FRAME_META_VTABLE as *const FrameMetaVtable
-        } else {
-            bits as *const FrameMetaVtable
-        };
-        // SAFETY: `0` maps to the static default; non-zero values are only written by
-        // kernel code that registers static vtables.
-        unsafe { &*ptr }
+        self.try_vtable_ref().unwrap_or(&DEFAULT_FRAME_META_VTABLE)
     }
 
+    /// Like [`Self::vtable_ref`], but returns `None` if non-zero vtable bits are not aligned
+    /// to a [`FrameMetaVtable`] pointer (8-byte aligned).
+    pub fn try_vtable_ref(&self) -> Option<&'static FrameMetaVtable> {
+        let bits = self.vtable_bits();
+        if bits == 0 {
+            return Some(&DEFAULT_FRAME_META_VTABLE);
+        }
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            bits & 7,
+            0,
+            "MetaSlot::vtable_bits must be 8-byte aligned (got {bits:#x})"
+        );
+        if bits & 7 != 0 {
+            return None;
+        }
+        let ptr = bits as *const FrameMetaVtable;
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: aligned, non-null; must point to a `'static` vtable when registered by the kernel.
+        unsafe { Some(&*ptr) }
+    }
+
+    /// Loads the allocation generation with [`Ordering::Acquire`], pairing with the
+    /// [`Ordering::Release`] bump in [`Self::note_new_allocation_epoch`] for cross-CPU checks.
     #[inline]
     pub fn generation(&self) -> u32 {
         self.generation.load(Ordering::Acquire)
@@ -577,6 +655,9 @@ const _: () = {
     // Stride is `FRAME_META_SIZE`; the backing array is allocated with `FRAME_META_ALIGN`
     // so each index maps to a cache-line-aligned slot even if `align_of::<MetaSlot>()` is 8.
     assert!(mem::align_of::<MetaSlot>() <= FRAME_META_SIZE);
+    // `_reserved0` exists only to pad `order`+tail to 4 bytes before `refcount`; changing field
+    // sizes or order requires updating `META_SLOT_REFCOUNT_BYTE_OFFSET` and this assert.
+    assert!(META_SLOT_REFCOUNT_BYTE_OFFSET == 32);
 };
 
 /// The metadata array size for `ram_size` bytes, rounded up to the nearest page since each frame
@@ -602,7 +683,14 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     }
 
     let bytes = metadata_size_for(total_ram) as usize;
-    let phys = boot_alloc.alloc(bytes, FRAME_META_ALIGN);
+    let phys = boot_alloc
+        .try_alloc(bytes, FRAME_META_ALIGN)
+        .unwrap_or_else(|| {
+            panic!(
+                "frame metadata: boot allocator could not reserve {} bytes (align {}) for {} frames — out of early boot memory",
+                bytes, FRAME_META_ALIGN, frame_count
+            )
+        });
     let virt = crate::memory::phys_to_virt(phys.as_u64()) as *mut MetaSlot;
 
     for idx in 0..frame_count as usize {
@@ -627,6 +715,53 @@ pub fn get_meta(phys: PhysAddr) -> &'static MetaSlot {
 #[inline]
 pub fn frame_meta_debug_snapshot(phys: PhysAddr) -> (u32, u32, u64) {
     get_meta_slot(phys).debug_snapshot()
+}
+
+/// Returns `true` if [`MetaSlot::generation`] matches `expected` for `phys` (epoch check for use-after-free guards).
+#[inline]
+pub fn meta_generation_matches(phys: PhysAddr, expected: u32) -> bool {
+    get_meta_slot(phys).generation() == expected
+}
+
+/// Returns `true` if any page in `[phys, phys + 2^order * PAGE_SIZE)` has [`MetaSlot::is_guard_poisoned`].
+///
+/// Returns `false` when the metadata array is not yet initialized (early-boot
+/// guard: called from `free_list_push` / `alloc_from_zone` during buddy setup
+/// before `init_metadata_array` has run).
+pub fn block_phys_has_poison_guard(frame_phys: u64, order: u8) -> bool {
+    if METADATA_BASE_VIRT.load(Ordering::Acquire) == 0 {
+        return false; // metadata not yet initialized — no poison possible
+    }
+    let n = 1u64 << order;
+    for i in 0..n {
+        let p = PhysAddr::new(frame_phys + i * PAGE_SIZE);
+        if get_meta_slot(p).is_guard_poisoned() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Invokes `on_unmap` from the frame vtable, if any (issue #38 — unmap / release path).
+pub fn invoke_vtable_on_unmap(phys: PhysAddr) {
+    let m = get_meta_slot(phys);
+    let Some(vt) = m.try_vtable_ref() else {
+        return;
+    };
+    if let Some(f) = vt.on_unmap {
+        f(phys);
+    }
+}
+
+/// Invokes `on_last_ref` from the frame vtable, if any (last refcount drop).
+pub fn invoke_vtable_on_last_ref(phys: PhysAddr) {
+    let m = get_meta_slot(phys);
+    let Some(vt) = m.try_vtable_ref() else {
+        return;
+    };
+    if let Some(f) = vt.on_last_ref {
+        f(phys);
+    }
 }
 
 /// Preferred name matching the frame metadata design (issue #38).
