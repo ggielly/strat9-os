@@ -289,28 +289,38 @@ pub fn get_task_by_pid(pid: Pid) -> Option<Arc<Task>> {
 /// Unlike the global pid index, this remains valid after the child has called
 /// exit and before it is reaped, because the task object stays in `all_tasks`
 /// until waitpid consumes the zombie.
+///
+/// Lock order: `GLOBAL_SCHED_STATE` before `SCHED_IDENTITY` (see module docs).
 pub fn get_child_task_id_by_pid(parent: TaskId, pid: Pid) -> Option<TaskId> {
-    let children = SCHED_IDENTITY
-        .lock()
-        .children_of
-        .get(&parent)
-        .cloned()
-        .unwrap_or_default();
-    if children.is_empty() {
-        return None;
-    }
-    let scheduler = GLOBAL_SCHED_STATE.lock();
-    if let Some(ref sched) = *scheduler {
-        children.iter().copied().find(|child_id| {
-            sched
-                .all_tasks
-                .get(child_id)
-                .map(|task| task.pid == pid)
-                .unwrap_or(false)
-        })
-    } else {
-        None
-    }
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        if let Some(ref sched) = *scheduler {
+            let children = {
+                let identity = SCHED_IDENTITY.lock();
+                identity
+                    .children_of
+                    .get(&parent)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            if children.is_empty() {
+                None
+            } else {
+                children.iter().copied().find(|child_id| {
+                    sched
+                        .all_tasks
+                        .get(child_id)
+                        .map(|task| task.pid == pid)
+                        .unwrap_or(false)
+                })
+            }
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
 }
 
 /// Resolve a POSIX tid to the corresponding internal task id.
@@ -328,28 +338,38 @@ pub fn get_task_id_by_tid(tid: Tid) -> Option<TaskId> {
 /// This remains valid for dead-but-not-yet-reaped threads because it scans the
 /// caller's child set and the retained task object instead of relying on the
 /// global tid index removed during exit.
+///
+/// Lock order: `GLOBAL_SCHED_STATE` before `SCHED_IDENTITY` (see module docs).
 pub fn get_child_task_id_by_tid(parent: TaskId, tid: Tid) -> Option<TaskId> {
-    let children = SCHED_IDENTITY
-        .lock()
-        .children_of
-        .get(&parent)
-        .cloned()
-        .unwrap_or_default();
-    if children.is_empty() {
-        return None;
-    }
-    let scheduler = GLOBAL_SCHED_STATE.lock();
-    if let Some(ref sched) = *scheduler {
-        children.iter().copied().find(|child_id| {
-            sched
-                .all_tasks
-                .get(child_id)
-                .map(|task| task.tid == tid)
-                .unwrap_or(false)
-        })
-    } else {
-        None
-    }
+    let saved_flags = save_flags_and_cli();
+    let out = {
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        if let Some(ref sched) = *scheduler {
+            let children = {
+                let identity = SCHED_IDENTITY.lock();
+                identity
+                    .children_of
+                    .get(&parent)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            if children.is_empty() {
+                None
+            } else {
+                children.iter().copied().find(|child_id| {
+                    sched
+                        .all_tasks
+                        .get(child_id)
+                        .map(|task| task.tid == tid)
+                        .unwrap_or(false)
+                })
+            }
+        } else {
+            None
+        }
+    };
+    restore_flags(saved_flags);
+    out
 }
 
 /// Resolve a PID to the current process group id.

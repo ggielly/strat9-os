@@ -250,37 +250,41 @@ else
     echo "  [WARN] exec-test helper binary not found at $EXEC_TEST_HELPER_ELF"
 fi
 
-if [ "$INCLUDE_TESTS" = "1" ]; then
-    if [ -f "$INIT_TEST_ELF" ]; then
-        cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
-        echo "  [OK] Copied init-test binary: /initfs/test_pid"
-    else
-        echo "  ERROR: init-test binary not found at $INIT_TEST_ELF"
-        echo "  Build it first (e.g. cargo make strate-silo-test or strate-silo-test-release)"
+# Core syscall/mem test ELFs: copy whenever built (limine-image already depends on
+# strate-silo-test / strate-mem-test). The kernel always requests these via Limine
+# internal modules — if they are missing from the ISO, /initfs/* open() fails with
+# BadHandle. STRAT9_INCLUDE_TESTS=1 only tightens diagnostics for strict test ISOs.
+if [ -f "$INIT_TEST_ELF" ]; then
+    cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
+    echo "  [OK] Copied init-test binary: /initfs/test_pid"
+else
+    echo "  [WARN] test_pid binary not found at $INIT_TEST_ELF"
+    if [ "$INCLUDE_TESTS" = "1" ]; then
+        echo "  ERROR: init-test binary required when STRAT9_INCLUDE_TESTS=1"
+        echo "  Build it first (e.g. cargo make strate-silo-test)"
         exit 1
     fi
+fi
 
-    if [ -f "$SYSCALL_TEST_ELF" ]; then
-        cp "$SYSCALL_TEST_ELF" "$ISO_ROOT/initfs/test_syscalls"
-        echo "  [OK] Copied syscall-test binary: /initfs/test_syscalls"
-    else
-        echo "  [WARN] syscall-test binary not found at $SYSCALL_TEST_ELF"
-    fi
+if [ -f "$SYSCALL_TEST_ELF" ]; then
+    cp "$SYSCALL_TEST_ELF" "$ISO_ROOT/initfs/test_syscalls"
+    echo "  [OK] Copied syscall-test binary: /initfs/test_syscalls"
+else
+    echo "  [WARN] syscall-test binary not found at $SYSCALL_TEST_ELF"
+fi
 
-    if [ -f "$MEM_TEST_ELF" ]; then
-        cp "$MEM_TEST_ELF" "$ISO_ROOT/initfs/test_mem"
-        echo "  [OK] Copied mem-test binary: /initfs/test_mem"
-    else
-        echo "  [WARN] mem-test binary not found at $MEM_TEST_ELF"
-    fi
+if [ -f "$MEM_TEST_ELF" ]; then
+    cp "$MEM_TEST_ELF" "$ISO_ROOT/initfs/test_mem"
+    echo "  [OK] Copied mem-test binary: /initfs/test_mem"
+else
+    echo "  [WARN] mem-test binary not found at $MEM_TEST_ELF"
+fi
 
-    if [ -f "$MEM_STRESSED_ELF" ]; then
-        cp "$MEM_STRESSED_ELF" "$ISO_ROOT/initfs/test_mem_stressed"
-        echo "  [OK] Copied mem-stressed binary: /initfs/test_mem_stressed"
-    else
-        echo "  [WARN] mem-stressed binary not found at $MEM_STRESSED_ELF"
-    fi
-
+if [ -f "$MEM_STRESSED_ELF" ]; then
+    cp "$MEM_STRESSED_ELF" "$ISO_ROOT/initfs/test_mem_stressed"
+    echo "  [OK] Copied mem-stressed binary: /initfs/test_mem_stressed"
+else
+    echo "  [WARN] mem-stressed binary not found at $MEM_STRESSED_ELF"
 fi
 
 if [ -f "$INIT_ELF" ]; then
