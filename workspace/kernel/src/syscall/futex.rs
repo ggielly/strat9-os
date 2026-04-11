@@ -9,9 +9,28 @@ use crate::{
     sync::{FixedQueue, SpinLock, SpinLockGuard},
 };
 
-const FUTEX_QUEUE_BUCKETS: usize = 64;
-const FUTEX_BUCKET_CAPACITY: usize = 16;
+/// Number of independent hash buckets.  Must be a power of two.
+///
+/// 256 buckets × 32 slots = 8 192 distinct futex addresses system-wide.
+/// Increasing this reduces hot-bucket probability at the cost of 256 ×
+/// sizeof(SpinLock<FutexBucket>) of static memory (~16 KiB on x86-64).
+const FUTEX_QUEUE_BUCKETS: usize = 256;
+
+/// Max distinct futex addresses per bucket.
+///
+/// With the Fibonacci hash below, collisions are rare; 32 slots handle
+/// workloads with hundreds of concurrent futex addresses without spilling.
+const FUTEX_BUCKET_CAPACITY: usize = 32;
+
+/// Max concurrent waiters on a single futex address.
 const FUTEX_WAITERS_CAPACITY: usize = 256;
+
+// Fibonacci hashing requires FUTEX_QUEUE_BUCKETS to be a power of two so
+// the bit-shift index calculation is correct.
+const _: () = assert!(
+    FUTEX_QUEUE_BUCKETS.is_power_of_two(),
+    "FUTEX_QUEUE_BUCKETS must be a power of two"
+);
 
 struct FutexQueue {
     waiters: SpinLock<FixedQueue<crate::process::TaskId, FUTEX_WAITERS_CAPACITY>>,
@@ -115,7 +134,13 @@ static FUTEX_QUEUES: [SpinLock<FutexBucket>; FUTEX_QUEUE_BUCKETS] =
 
 #[inline]
 fn futex_bucket_index(addr: u64) -> usize {
-    ((addr >> 2) as usize) & (FUTEX_QUEUE_BUCKETS - 1)
+    // Fibonacci hashing: multiply by the 64-bit golden-ratio constant then
+    // take the top byte.  This spreads all address bits across the index,
+    // avoiding the hot-bucket problem of the old `(addr >> 2) & 63` which
+    // only used 6 bits and caused all page-offset-0 addresses to collide.
+    // FUTEX_QUEUE_BUCKETS must remain a power of two for the mask to work.
+    let h = addr.wrapping_mul(0x9e37_79b9_7f4a_7c15_u64);
+    (h >> (64 - FUTEX_QUEUE_BUCKETS.trailing_zeros())) as usize
 }
 
 #[inline]

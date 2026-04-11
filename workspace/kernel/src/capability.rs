@@ -10,7 +10,7 @@ use crate::{
     vfs,
 };
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Unique identifier for a capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
