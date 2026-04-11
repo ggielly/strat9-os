@@ -1105,6 +1105,8 @@ fn alloc_order0_cached() -> Result<PhysFrame, AllocError> {
 }
 
 fn free_order0_cached(frame: PhysFrame) {
+    // NOTE: O(2^order) MetaSlot scan — acceptable here because order is always 0
+    // (single-page check) on this hot path.
     if crate::memory::frame::block_phys_has_poison_guard(frame.start_address.as_u64(), 0) {
         let mut global = OnDemandGlobalLock::new();
         global.free(frame, 0);
@@ -1228,6 +1230,9 @@ impl FrameAllocator for BuddyAllocator {
         let frame_phys = frame.start_address.as_u64();
         let zi = Self::zone_index_for_addr(frame_phys);
         let zone = &mut self.zones[zi];
+        // NOTE: O(2^order) MetaSlot scan. Acceptable for large-order frees
+        // (kernel stacks, vmalloc) which are rare; order-0 path is handled
+        // separately in free_order0_cached with a single-page check.
         if crate::memory::frame::block_phys_has_poison_guard(frame_phys, order) {
             Self::quarantine_poisoned_block_in_zone(zone, frame, order, token);
         } else {

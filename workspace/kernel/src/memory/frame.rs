@@ -545,9 +545,7 @@ impl MetaSlot {
             return None;
         }
         let ptr = bits as *const FrameMetaVtable;
-        if ptr.is_null() {
-            return None;
-        }
+        debug_assert!(!ptr.is_null(), "vtable bits non-zero but produced null pointer");
         // SAFETY: aligned, non-null; must point to a `'static` vtable when registered by the kernel.
         unsafe { Some(&*ptr) }
     }
