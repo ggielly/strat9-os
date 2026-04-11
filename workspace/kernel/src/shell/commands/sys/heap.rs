@@ -342,6 +342,9 @@ fn stress_slab_reclaim(ci: usize, pages: usize) -> StressOutcome {
         Ok(layout) => layout,
         Err(_) => return StressOutcome::Fail("Layout::from_size_align failed"),
     };
+
+    let before = crate::memory::heap::slab_diag_snapshot();
+
     let mut ptrs = [core::ptr::null_mut::<u8>(); STRESS_MAX_BLOCKS];
     let mut count = 0usize;
 
@@ -368,6 +371,23 @@ fn stress_slab_reclaim(ci: usize, pages: usize) -> StressOutcome {
         ptrs[i] = core::ptr::null_mut();
     }
 
+    let after = crate::memory::heap::slab_diag_snapshot();
+
+    // Check 1: pages_live must return to (at most) baseline + 1.
+    // Tolerates ±1 for atomic snapshot races between the two load() calls.
+    if after.pages_live > before.pages_live.saturating_add(1) {
+        return StressOutcome::Fail("slab pages not fully reclaimed after freeing all blocks");
+    }
+
+    // Check 2: pages_reclaimed must have grown by at least `pages`.
+    // Catches bugs where pages are silently lost (neither live nor reclaimed):
+    // pages_live alone cannot distinguish between correct reclaim and a leak
+    // that happens to match the baseline by coincidence.
+    if after.pages_reclaimed < before.pages_reclaimed.saturating_add(pages) {
+        return StressOutcome::Fail("slab pages_reclaimed did not increase by expected count");
+    }
+
+    // Sanity: allocator must still be functional after a full fill/drain cycle.
     let ptr = unsafe { alloc(layout) };
     if ptr.is_null() {
         return StressOutcome::Fail("slab unusable after fill/drain cycle");
