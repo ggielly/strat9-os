@@ -25,7 +25,7 @@ enum StressOutcome {
     Skip(&'static str),
 }
 
-/// `heap` : allocator telemetry and diagnostics.
+/// `heap` — allocator telemetry and diagnostics.
 pub fn cmd_heap(args: &[String]) -> Result<(), ShellError> {
     match args.first().map(|s| s.as_str()) {
         None | Some("summary") => cmd_heap_summary(),
@@ -251,18 +251,18 @@ fn cmd_heap_fail() -> Result<(), ShellError> {
 // Stress tests
 // =============================================================================
 
-/// `heap stress [rounds]` : exercise allocator smoke paths and one bounded
+/// `heap stress [rounds]` — exercise allocator smoke paths and one bounded
 /// userspace workload path.
 ///
 /// Each round runs:
-///   slab_reclaim[S]    : fill/drain slab classes without leaking.
-///   slab_frag[256]     : verify a page becomes partial after partial free.
-///   vmalloc_cycle      : alloc/free vmalloc ranges and verify live tracking.
-///   vmalloc_frag       : random-size allocs freed in random order; checks that
+///   slab_reclaim[S]    — fill/drain slab classes without leaking.
+///   slab_frag[256]     — verify a page becomes partial after partial free.
+///   vmalloc_cycle      — alloc/free vmalloc ranges and verify live tracking.
+///   vmalloc_frag       — random-size allocs freed in random order; checks that
 ///                        virtual fragmentation is observable and all pages are
 ///                        returned after drain.
-///   telemetry          : sanity-check counters are self-consistent.
-///   userspace_workload : launch `/initfs/test_mem_stressed` in a silo and
+///   telemetry          — sanity-check counters are self-consistent.
+///   userspace_workload — launch `/initfs/test_mem_stressed` in a silo and
 ///                        observe its lifecycle for a bounded period.
 fn cmd_heap_stress(rounds_arg: Option<&String>) -> Result<(), ShellError> {
     let rounds = match rounds_arg {
@@ -594,10 +594,166 @@ fn stress_vmalloc_cycle() -> StressOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// Sub-test: vmalloc_frag
+//
+// Stress the vmalloc extent allocator with random-size allocations freed in
+// a random order to verify:
+//
+//  1. Virtual fragmentation is observable: after freeing half the regions in
+//     shuffled order while the other half remain live, free_extent_count must
+//     exceed the pre-test baseline (the arena was a single large free extent).
+//  2. No silent leaks: after a full drain, free_pages returns to baseline.
+//  3. Coherence: largest_free_pages ≤ free_pages.
+//
+// Uses an Xorshift64 PRNG seeded from the tick counter — no heap allocation
+// for PRNG state (stack-only bookkeeping, sizes and order vary across runs).
+//
+// Note B (ticket #49): SMP contention is not exercised here.
+// That requires a dedicated benchmark harness, not a shell sub-test.
+// ---------------------------------------------------------------------------
+const VMALLOC_FRAG_COUNT: usize = 32;
+
+fn stress_vmalloc_frag() -> StressOutcome {
+    #[inline(always)]
+    fn xorshift64(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    let before = match crate::memory::vmalloc::diag_snapshot() {
+        Some(s) => s,
+        None => return StressOutcome::Skip("vmalloc not initialised"),
+    };
+
+    // Non-zero seed so sizes and shuffle order vary across runs.
+    let mut rng: u64 = crate::process::scheduler::ticks() | 1;
+
+    let mut ptrs = [core::ptr::null_mut::<u8>(); VMALLOC_FRAG_COUNT];
+    let mut sizes = [0usize; VMALLOC_FRAG_COUNT];
+    let mut allocated = 0usize;
+
+    // Phase 1: allocate VMALLOC_FRAG_COUNT regions of random sizes (1-16 pages).
+    for i in 0..VMALLOC_FRAG_COUNT {
+        if crate::shell::is_interrupted() {
+            for j in 0..allocated {
+                if !ptrs[j].is_null() {
+                    crate::sync::with_irqs_disabled(|token| {
+                        crate::memory::free_kernel_virtual(ptrs[j], token);
+                    });
+                }
+            }
+            return StressOutcome::Skip("interrupted");
+        }
+        let pages = (xorshift64(&mut rng) as usize % 16) + 1; // 1..=16 pages
+        let size = pages * 4096;
+        let ptr = crate::sync::with_irqs_disabled(|token| {
+            crate::memory::allocate_kernel_virtual(size, token).ok()
+        });
+        match ptr {
+            Some(p) if !p.is_null() => {
+                ptrs[i] = p;
+                sizes[i] = size;
+                allocated += 1;
+            }
+            _ => break, // arena exhausted — test with however many we got
+        }
+    }
+
+    if allocated < 8 {
+        for j in 0..allocated {
+            if !ptrs[j].is_null() {
+                crate::sync::with_irqs_disabled(|token| {
+                    crate::memory::free_kernel_virtual(ptrs[j], token);
+                });
+            }
+        }
+        return StressOutcome::Skip("vmalloc arena too small for frag test (< 8 regions)");
+    }
+
+    // Phase 2: Fisher-Yates shuffle of indices [0..allocated].
+    let mut order = [0usize; VMALLOC_FRAG_COUNT];
+    for i in 0..allocated {
+        order[i] = i;
+    }
+    for i in (1..allocated).rev() {
+        let j = (xorshift64(&mut rng) as usize) % (i + 1);
+        order.swap(i, j);
+    }
+
+    // Phase 3: free the first half of the shuffled order.
+    // The remaining half stays live, creating non-contiguous holes in the arena.
+    let half = allocated / 2;
+    for &idx in &order[..half] {
+        if !ptrs[idx].is_null() {
+            crate::sync::with_irqs_disabled(|token| {
+                crate::memory::free_kernel_virtual(ptrs[idx], token);
+            });
+            ptrs[idx] = core::ptr::null_mut();
+        }
+    }
+
+    // Phase 4: verify fragmentation is visible.
+    // With `half` regions freed in random order and `allocated - half` still
+    // live, the free space is split into non-contiguous holes →
+    // free_extent_count must exceed the pre-test baseline.
+    let mid = match crate::memory::vmalloc::diag_snapshot() {
+        Some(s) => s,
+        None => {
+            for &idx in &order[half..allocated] {
+                if !ptrs[idx].is_null() {
+                    crate::sync::with_irqs_disabled(|token| {
+                        crate::memory::free_kernel_virtual(ptrs[idx], token);
+                    });
+                }
+            }
+            return StressOutcome::Skip("VMALLOC lock busy during mid-frag snapshot");
+        }
+    };
+    // Capture result before freeing remaining regions so cleanup always runs.
+    let frag_ok = mid.free_extent_count > before.free_extent_count;
+
+    // Phase 5: free the second half of the shuffled order.
+    for &idx in &order[half..allocated] {
+        if !ptrs[idx].is_null() {
+            crate::sync::with_irqs_disabled(|token| {
+                crate::memory::free_kernel_virtual(ptrs[idx], token);
+            });
+            ptrs[idx] = core::ptr::null_mut();
+        }
+    }
+
+    // Phase 6: final coherence checks.
+    let after = match crate::memory::vmalloc::diag_snapshot() {
+        Some(s) => s,
+        None => return StressOutcome::Skip("VMALLOC lock busy during final frag snapshot"),
+    };
+
+    // All allocated pages must be returned (±1 for snapshot race).
+    let total_pages: usize = sizes.iter().take(allocated).map(|&s| s / 4096).sum();
+    let expected_free = before.free_pages.saturating_add(total_pages);
+    if after.free_pages.saturating_add(1) < expected_free {
+        return StressOutcome::Fail("vmalloc_frag: pages not fully returned after drain");
+    }
+
+    // Coherence: largest free extent must fit within total free pages.
+    if after.largest_free_pages > after.free_pages.saturating_add(1) {
+        return StressOutcome::Fail("vmalloc_frag: largest_free_pages > free_pages (incoherent)");
+    }
+
+    if !frag_ok {
+        return StressOutcome::Fail("vmalloc_frag: fragmentation not visible after half-drain");
+    }
+
+    StressOutcome::Pass
+}
+
+// ---------------------------------------------------------------------------
 // Sub-test: telemetry_consistency
 //
 // Sanity-check that all allocator counters are internally consistent.
-// Does not allocate anything : pure read of existing state.
+// Does not allocate anything — pure read of existing state.
 // ---------------------------------------------------------------------------
 fn stress_telemetry() -> StressOutcome {
     // Slab: reclaimed must not exceed allocated.

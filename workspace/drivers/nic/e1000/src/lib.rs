@@ -9,8 +9,11 @@ use nic_queues::{RxDescriptor, RxRing, TxRing};
 pub const NUM_RX: usize = 128; // Optimisé pour plus de throughput
 pub const NUM_TX: usize = 128; // Optimisé pour plus de throughput
 pub const RX_BUF_SIZE: usize = 4096; // Buffer size optimisé (MTU + overhead)
-const RESET_SPINS: u64 = 10_000_000;
-const EEPROM_READ_SPINS: u32 = 1_000_000;
+
+/// Poll `CTRL.RST` until hardware clears it (reset complete). Bounded to avoid hangs.
+const RESET_MAX_POLLS: u32 = 200_000;
+/// Max polls per EEPROM read (EERD.DONE). Much smaller than blind 1M spins.
+const EEPROM_MAX_POLLS: u32 = 50_000;
 
 pub const E1000_DEVICE_IDS: &[u16] = &[0x100E, 0x100F, 0x10D3, 0x153A, 0x1539];
 pub const INTEL_VENDOR: u16 = 0x8086;
@@ -55,11 +58,30 @@ impl E1000Nic {
         // SAFETY: We have exclusive access to the MMIO region during initialization.
         // All DMA allocations are fresh and properly zeroed.
         unsafe {
-            // Reset
+            // Reset: set CTRL.RST; hardware clears RST when reset completes (SDM).
             let c = rd(mmio_base, regs::CTRL);
+            log::trace!("e1000: assert CTRL.RST (ctrl={:#x})", c);
             wr(mmio_base, regs::CTRL, c | ctrl::RST);
-            for _ in 0..RESET_SPINS {
+            let mut reset_done = false;
+            for poll in 0..RESET_MAX_POLLS {
+                let ctrl = rd(mmio_base, regs::CTRL);
+                if ctrl & ctrl::RST == 0 {
+                    log::trace!(
+                        "e1000: reset complete after {} polls (ctrl={:#x})",
+                        poll + 1,
+                        ctrl
+                    );
+                    reset_done = true;
+                    break;
+                }
                 core::hint::spin_loop();
+            }
+            if !reset_done {
+                log::warn!(
+                    "e1000: reset timeout after {} CTRL polls (RST never cleared)",
+                    RESET_MAX_POLLS
+                );
+                return Err(NetError::NotReady);
             }
 
             // Disable interrupts during setup

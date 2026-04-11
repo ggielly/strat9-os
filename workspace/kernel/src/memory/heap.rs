@@ -208,7 +208,7 @@ impl SlabState {
 
         let frame = match memory::allocate_frame(token) {
             Ok(f) => f,
-            Err(_) => return, // OOM : alloc_block will see null partial and return null
+            Err(_) => return, // OOM — alloc_block will see null partial and return null
         };
         SLAB_PAGES_ALLOCATED.fetch_add(1, AtomicOrdering::Relaxed);
 
@@ -462,7 +462,7 @@ unsafe impl GlobalAlloc for LockedHeap {
                 // Catch layout mismatches where a vmalloc pointer is freed with
                 // a small layout (classify_kernel_heap_backend routes to Slab).
                 // This means the caller passed a different layout to dealloc than
-                // was used for alloc : a GlobalAlloc contract violation.
+                // was used for alloc — a GlobalAlloc contract violation.
                 #[cfg(debug_assertions)]
                 {
                     let addr = ptr as u64;
@@ -470,12 +470,12 @@ unsafe impl GlobalAlloc for LockedHeap {
                         && addr < crate::memory::vmalloc::VMALLOC_VIRT_END
                     {
                         crate::serial_println!(
-                            "[heap][bug] slab dealloc: ptr {:#x} is in vmalloc range : layout mismatch",
+                            "[heap][bug] slab dealloc: ptr {:#x} is in vmalloc range — layout mismatch",
                             addr
                         );
                         debug_assert!(
                             false,
-                            "slab dealloc with vmalloc pointer : alloc/dealloc layout mismatch"
+                            "slab dealloc with vmalloc pointer — alloc/dealloc layout mismatch"
                         );
                     }
                 }
@@ -509,7 +509,7 @@ unsafe impl GlobalAlloc for LockedHeap {
                     #[cfg(debug_assertions)]
                     debug_assert!(
                         false,
-                        "vmalloc dealloc with out-of-range pointer : memory leaked"
+                        "vmalloc dealloc with out-of-range pointer — memory leaked"
                     );
                 }
             }

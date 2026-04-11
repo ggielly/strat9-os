@@ -267,15 +267,15 @@ pub extern "C" fn tlb_shootdown_ipi_handler() {
 
     // 1. Take all pending ops from our mailbox.
     let mut local_ops = [TlbOp::NONE; 16];
-    let mut count = 0;
-    {
+    let count = {
         let mut queue = TLB_QUEUES[cpu_idx].lock();
-        count = queue.count;
-        for i in 0..count {
+        let c = queue.count;
+        for i in 0..c {
             local_ops[i] = queue.ops[i];
         }
         queue.clear();
-    }
+        c
+    };
 
     // 2. Perform the operations.
     for i in 0..count {
