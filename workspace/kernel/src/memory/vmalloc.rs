@@ -1042,6 +1042,39 @@ pub fn live_allocations_snapshot(out: &mut [VmallocLiveAllocationSnapshot]) -> u
     count
 }
 
+/// Returns whether `ptr` is currently the base address of a live vmalloc
+/// allocation.
+///
+/// Returns `None` if the VMALLOC lock is contended. Intended for shell/debug
+/// validation, not for allocator hot paths.
+pub fn is_live_allocation(ptr: *mut u8) -> Option<bool> {
+    let addr = ptr as u64;
+    if addr < VMALLOC_VIRT_START || addr >= VMALLOC_VIRT_END {
+        return Some(false);
+    }
+
+    let guard = VMALLOC.try_lock()?;
+    let vm = &*guard;
+    if !vm.initialized {
+        return Some(false);
+    }
+
+    let start_page = ((addr - VMALLOC_VIRT_START) / 4096) as usize;
+    let mut cur = vm.alloc_head;
+    while !cur.is_null() {
+        let node = unsafe { &*cur };
+        if node.start_page == start_page {
+            return Some(true);
+        }
+        if node.start_page > start_page {
+            break;
+        }
+        cur = node.next;
+    }
+
+    Some(false)
+}
+
 /// Dump vmalloc diagnostics to the serial console.
 pub fn dump_diagnostics() {
     let guard = VMALLOC.lock();

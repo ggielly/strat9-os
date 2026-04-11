@@ -2,11 +2,9 @@
 
 use super::{CurrentRuntime, SchedClassRq};
 use crate::process::task::Task;
-use alloc::{collections::BinaryHeap, sync::Arc};
-use core::cmp::{self, Reverse};
+use alloc::{collections::BTreeMap, sync::Arc};
 
 const WEIGHT_0: u64 = 1024;
-const FAIR_PREALLOC_SLOTS: usize = 64;
 
 /// Base time slice per task in ticks for the CFS fair scheduler.
 ///
@@ -51,68 +49,39 @@ pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {
     NICE_TO_WEIGHT[(nice.value().get() + 20) as usize]
 }
 
-struct FairQueueItem {
-    task: Arc<Task>,
-    vruntime: u64,
-    weight: u64,
-    generation: u64,
-}
-
-impl FairQueueItem {
-    /// Performs the key operation.
-    fn key(&self) -> u64 {
-        self.vruntime
-    }
-
-    /// Returns whether this heap node still represents the live FAIR entry.
-    fn is_live(&self) -> bool {
-        self.task.fair_is_on_rq() && self.task.fair_generation() == self.generation
-    }
-}
-
-impl core::fmt::Debug for FairQueueItem {
-    /// Performs the fmt operation.
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "id={} vruntime={} gen={}",
-            self.task.id.as_u64(),
-            self.vruntime,
-            self.generation
-        )
-    }
-}
-
-impl PartialEq for FairQueueItem {
-    /// Performs the eq operation.
-    fn eq(&self, other: &Self) -> bool {
-        self.key().eq(&other.key())
-            && self.task.id == other.task.id
-            && self.weight == other.weight
-            && self.generation == other.generation
-    }
-}
-impl Eq for FairQueueItem {}
-
-impl PartialOrd for FairQueueItem {
-    /// Performs the partial cmp operation.
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for FairQueueItem {
-    /// Performs the cmp operation.
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.key()
-            .cmp(&other.key())
-            .then_with(|| self.task.id.as_u64().cmp(&other.task.id.as_u64()))
-            .then_with(|| self.generation.cmp(&other.generation))
-    }
-}
-
+/// Per-CPU run queue for the Completely Fair Scheduler.
+///
+/// Uses two `BTreeMap`s for O(log n) operations without allocation on the
+/// fast paths (`pick_next`, `remove`):
+///
+/// - `entities`: primary map keyed by `(vruntime, task_id)` — the minimum
+///   entry is always the next task to schedule.
+/// - `by_id`: reverse index mapping `task_id → primary key` — enables O(log n)
+///   removal by task ID in `remove()` without scanning `entities`.
+///
+/// This replaces the previous `BinaryHeap`-based design which used *lazy
+/// deletion* (O(n) `remove()` scan, phantom entries, generation counters).
+/// The `BTreeMap` approach gives:
+///
+/// | Operation   | Complexity | Allocates?                              |
+/// |-------------|------------|-----------------------------------------|
+/// | `enqueue`   | O(log n)   | yes — 2 BTreeMap nodes (wakeup path)    |
+/// | `pick_next` | O(log n)   | no  — removes 2 nodes                   |
+/// | `remove`    | O(log n)   | no  — removes 2 nodes                   |
+///
+/// No phantom entries means no generation counter, no `prune_stale_head()`,
+/// and no per-entry liveness checks.  The BTreeMap pair is the authoritative
+/// record of which tasks are currently on the run queue.
 pub struct FairClassRq {
-    entities: BinaryHeap<Reverse<FairQueueItem>>,
+    /// Primary index: `(vruntime, task_id)` → `(Arc<Task>, weight)`.
+    /// Ordered so `pop_first()` yields the task with the smallest vruntime.
+    /// `task_id` is part of the key to ensure uniqueness when two tasks share
+    /// the same vruntime.
+    entities: BTreeMap<(u64, u64), (Arc<Task>, u64)>,
+    /// Reverse index: `task_id` → primary key.
+    /// Allows `remove(task_id)` to locate and delete the `entities` entry in
+    /// O(log n) without scanning the primary map.
+    by_id: BTreeMap<u64, (u64, u64)>,
     min_vruntime: u64,
     total_weight: u64,
     runnable_count: usize,
@@ -121,110 +90,100 @@ pub struct FairClassRq {
 impl FairClassRq {
     /// Creates a new instance.
     pub fn new() -> Self {
-        let mut entities = BinaryHeap::new();
-        // Keep the timer/preemption fast path allocation-free: once tasks are
-        // in circulation, requeueing a preempted FAIR task must not grow the
-        // heap from IRQ context.
-        entities.reserve(FAIR_PREALLOC_SLOTS);
         Self {
-            entities,
+            entities: BTreeMap::new(),
+            by_id: BTreeMap::new(),
             min_vruntime: 0,
             total_weight: 0,
             runnable_count: 0,
         }
     }
 
-    /// Drop stale heap nodes from the top until the minimum is live.
-    fn prune_stale_head(&mut self) {
-        while let Some(Reverse(item)) = self.entities.peek() {
-            if item.is_live() {
-                break;
-            }
-            let _ = self.entities.pop();
-        }
-    }
-
-    /// Performs the period operation.
+    /// Total scheduling period in ticks.
+    ///
+    /// `BASE_SLICE_TICKS * (nr_runnable + 1)` — each runnable task gets at
+    /// least one full `BASE_SLICE_TICKS` per round.  `+1` accounts for the
+    /// currently-running task that is not counted in `runnable_count`.
     fn period(&self) -> u64 {
-        // Total scheduling period (ticks) = BASE_SLICE_TICKS * nr_runnable.
-        // Ensures each runnable task gets at least BASE_SLICE_TICKS per round.
-        // Minimum = BASE_SLICE_TICKS to avoid division-by-zero in time_slice().
         let count = (self.runnable_count + 1) as u64;
         (BASE_SLICE_TICKS * count).max(BASE_SLICE_TICKS)
     }
 
-    /// Performs the vtime slice operation.
+    /// Virtual-time slice: the vruntime budget for the current task.
     fn vtime_slice(&self) -> u64 {
         self.period() / (self.runnable_count + 1) as u64
     }
 
-    /// Performs the time slice operation.
+    /// Wall-clock time slice scaled by `cur_weight` relative to total weight.
     fn time_slice(&self, cur_weight: u64) -> u64 {
-        if self.total_weight + cur_weight == 0 {
+        let denom = self.total_weight + cur_weight;
+        if denom == 0 {
             return self.period();
         }
-        self.period() * cur_weight / (self.total_weight + cur_weight)
+        self.period() * cur_weight / denom
     }
 }
 
 impl SchedClassRq for FairClassRq {
-    /// Performs the enqueue operation.
+    /// Enqueues a task onto the run queue.
+    ///
+    /// Clamps `vruntime` to `min_vruntime` so waking tasks do not receive an
+    /// unfair head start over tasks that have been waiting.  O(log n);
+    /// allocates two BTreeMap nodes.
     fn enqueue(&mut self, task: Arc<Task>) {
         if let super::SchedPolicy::Fair(nice) = task.sched_policy() {
+            let task_id = task.id.as_u64();
+
+            // Guard against double-enqueue: `by_id` is the authoritative
+            // membership record.  This should not occur in normal operation.
+            if self.by_id.contains_key(&task_id) {
+                return;
+            }
+
             let weight = nice_to_weight(nice);
             let mut vruntime = task.vruntime();
-            // Start at min_vruntime if hasn't run yet or blocked heavily
             if vruntime < self.min_vruntime {
                 vruntime = self.min_vruntime;
             }
             task.set_vruntime(vruntime);
-            let (generation, was_queued) = task.fair_prepare_enqueue();
-            if !was_queued {
-                self.total_weight += weight;
-                self.runnable_count += 1;
-            }
-            self.entities.push(Reverse(FairQueueItem {
-                task,
-                vruntime,
-                weight,
-                generation,
-            }));
+            // Keep the task-side `fair_on_rq` flag consistent with external
+            // observers.  The generation return value is unused in this design.
+            task.fair_prepare_enqueue();
+
+            let key = (vruntime, task_id);
+            self.entities.insert(key, (task, weight));
+            self.by_id.insert(task_id, key);
+            self.total_weight += weight;
+            self.runnable_count += 1;
         }
     }
 
-    /// Performs the len operation.
+    /// Returns the number of tasks currently on the run queue.
     fn len(&self) -> usize {
         self.runnable_count
     }
 
-    /// Performs the pick next operation.
+    /// Picks the next task to run: the one with the smallest vruntime.
+    ///
+    /// O(log n), allocation-free.
     fn pick_next(&mut self) -> Option<Arc<Task>> {
-        self.prune_stale_head();
-
-        while let Some(Reverse(item)) = self.entities.pop() {
-            if !item.is_live() {
-                continue;
-            }
-
-            let task = item.task;
-            let was_queued = task.fair_mark_dequeued();
-            if !was_queued {
-                continue;
-            }
-            self.total_weight = self.total_weight.saturating_sub(item.weight);
-            self.runnable_count = self.runnable_count.saturating_sub(1);
-            return Some(task);
-        }
-
-        None
+        let ((_, task_id), (task, weight)) = self.entities.pop_first()?;
+        self.by_id.remove(&task_id);
+        task.fair_mark_dequeued();
+        self.total_weight = self.total_weight.saturating_sub(weight);
+        self.runnable_count = self.runnable_count.saturating_sub(1);
+        Some(task)
     }
 
-    /// Updates current.
+    /// Updates the vruntime of the currently-running task and decides whether
+    /// it should be preempted.
+    ///
+    /// Returns `true` if the task has exhausted its time slice or its vruntime
+    /// has overtaken the leftmost task's vruntime by more than `vtime_slice`.
     fn update_current(&mut self, rt: &CurrentRuntime, task: &Task, is_yield: bool) -> bool {
         if is_yield {
             return true;
         }
-        self.prune_stale_head();
         if let super::SchedPolicy::Fair(nice) = task.sched_policy() {
             let weight = nice_to_weight(nice);
             let delta_vruntime = if weight == 0 {
@@ -235,13 +194,15 @@ impl SchedClassRq for FairClassRq {
             let vruntime = task.vruntime() + delta_vruntime;
             task.set_vruntime(vruntime);
 
-            let leftmost = self.entities.peek();
-            self.min_vruntime = match leftmost {
-                Some(Reverse(leftmost)) => vruntime.min(leftmost.key()),
+            // The leftmost entry is O(log n) to peek on a BTreeMap.
+            let leftmost_vruntime = self.entities.keys().next().map(|&(v, _)| v);
+            self.min_vruntime = match leftmost_vruntime {
+                Some(lv) => vruntime.min(lv),
                 None => vruntime,
             };
 
-            if leftmost.is_none() {
+            // No other runnable task — keep running.
+            if leftmost_vruntime.is_none() {
                 return false;
             }
 
@@ -252,36 +213,24 @@ impl SchedClassRq for FairClassRq {
         }
     }
 
-    /// Remove a task from the runqueue by task id.
+    /// Removes the task identified by `task_id` from the run queue.
     ///
-    /// Uses **lazy deletion**: the heap entry is NOT physically removed — it is
-    /// invalidated in-place via `fair_invalidate_rq_entry()` and will be
-    /// silently skipped or pruned by `prune_stale_head()` the next time the
-    /// heap is touched.  This keeps `remove()`:
-    ///   - **allocation-free** (no Vec drain / BinaryHeap reconstruction), and
-    ///   - **O(n)** in heap size — acceptable under the per-CPU scheduler lock
-    ///     since task counts are small and reconstruction would cost the same.
-    ///
-    /// The scan is a single pass: we find the live entry, call
-    /// `fair_invalidate_rq_entry()` (atomic CAS) in-place without cloning the
-    /// Arc, and read `weight` directly.
+    /// Uses the `by_id` reverse index for O(log n) lookup, then removes both
+    /// entries.  Allocation-free.  Returns `true` if the task was present.
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool {
-        // Single O(n) scan — no Arc::clone, no allocation.
-        let weight = self.entities.iter().find_map(|Reverse(item)| {
-            if item.task.id == task_id && item.is_live() && item.task.fair_invalidate_rq_entry() {
-                Some(item.weight)
-            } else {
-                None
-            }
-        });
-
-        match weight {
-            Some(w) => {
-                self.total_weight = self.total_weight.saturating_sub(w);
-                self.runnable_count = self.runnable_count.saturating_sub(1);
-                true
-            }
-            None => false,
+        let Some(key) = self.by_id.remove(&task_id.as_u64()) else {
+            return false;
+        };
+        if let Some((task, weight)) = self.entities.remove(&key) {
+            task.fair_invalidate_rq_entry();
+            self.total_weight = self.total_weight.saturating_sub(weight);
+            self.runnable_count = self.runnable_count.saturating_sub(1);
+            true
+        } else {
+            // `by_id` and `entities` are kept in sync on every mutation path;
+            // reaching here indicates a bug in this module.
+            debug_assert!(false, "FairClassRq: by_id/entities out of sync for task {:?}", task_id);
+            false
         }
     }
 }

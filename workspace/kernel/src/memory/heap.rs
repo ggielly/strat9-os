@@ -560,6 +560,25 @@ pub fn slab_blocks_per_page(ci: usize) -> usize {
     (4096 - SLAB_HEADER_SIZE) / SLAB_SIZES[ci]
 }
 
+/// Returns whether the slab page at `page_base` is currently present in the
+/// partial-page list for class `ci`.
+///
+/// Returns `None` if the slab allocator lock is contended. Intended for
+/// shell/debug validation, not for allocator hot paths.
+pub fn slab_page_in_partial_list(ci: usize, page_base: u64) -> Option<bool> {
+    let mut guard = SLAB_ALLOC.try_lock()?;
+    Some(guard.with_mut_and_token(|s, _| unsafe {
+        let mut cur = s.partial_pages[ci];
+        while !cur.is_null() {
+            if cur as u64 == page_base {
+                return true;
+            }
+            cur = (*cur).next_partial;
+        }
+        false
+    }))
+}
+
 /// Fallible heap entry point with explicit backend-aware errors.
 ///
 /// Kernel code that can recover from allocation failure should prefer this API

@@ -10,6 +10,14 @@ const MAX_LIVE_LIMIT: usize = 4096;
 /// Maximum number of pointers held on the stack during a slab stress test.
 /// Sized to cover the densest class (8 B, 509 blocks/page) over 1 page.
 const STRESS_MAX_BLOCKS: usize = 512;
+const STRESS_WORKLOAD_OBSERVE_TICKS: u64 = 100;
+const STRESS_WORKLOAD_EXIT_TIMEOUT_TICKS: u64 = 1_000;
+
+enum StressOutcome {
+    Pass,
+    Fail(&'static str),
+    Skip(&'static str),
+}
 
 /// `heap` : allocator telemetry and diagnostics.
 pub fn cmd_heap(args: &[String]) -> Result<(), ShellError> {
