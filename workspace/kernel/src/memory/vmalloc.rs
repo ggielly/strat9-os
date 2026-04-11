@@ -694,6 +694,9 @@ pub fn diag_snapshot() -> Option<VmallocDiagSnapshot> {
         return None;
     }
 
+    // NOTE: holds VMALLOC for O(free_extents) traversal of the internal free
+    // lists. This is acceptable for shell/debug telemetry, but should not be
+    // used on allocator hot paths.
     let (free_extents, largest_free, node_pool_free) = unsafe {
         (
             vm.free_extent_count(),

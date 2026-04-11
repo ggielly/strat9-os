@@ -5,6 +5,7 @@ use crate::{
 };
 
 const HEAP_USAGE: &str = "Usage: heap [summary|vmalloc|live [limit]|fail|diag]";
+const MAX_LIVE_LIMIT: usize = 4096;
 
 /// `heap` — allocator telemetry and diagnostics.
 pub fn cmd_heap(args: &[String]) -> Result<(), ShellError> {
@@ -26,7 +27,10 @@ pub fn cmd_heap(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_heap_summary() -> Result<(), ShellError> {
     let (total_pages, allocated_pages) = {
-        let guard = crate::memory::buddy::get_allocator().lock();
+        let Some(guard) = crate::memory::buddy::get_allocator().try_lock() else {
+            shell_println!("heap: buddy allocator busy, retry");
+            return Ok(());
+        };
         let Some(alloc) = guard.as_ref() else {
             shell_println!("heap: allocator not initialized");
             return Ok(());
@@ -133,7 +137,10 @@ fn cmd_heap_vmalloc() -> Result<(), ShellError> {
 fn cmd_heap_live(limit_arg: Option<&String>) -> Result<(), ShellError> {
     let limit = match limit_arg {
         None => 32usize,
-        Some(raw) => raw.parse::<usize>().map_err(|_| ShellError::InvalidArguments)?,
+        Some(raw) => raw
+            .parse::<usize>()
+            .map_err(|_| ShellError::InvalidArguments)?
+            .min(MAX_LIVE_LIMIT),
     };
     if limit == 0 {
         shell_println!("{}", HEAP_USAGE);
@@ -164,6 +171,9 @@ fn cmd_heap_live(limit_arg: Option<&String>) -> Result<(), ShellError> {
         return Ok(());
     };
     let count = crate::memory::vmalloc::live_allocations_snapshot(&mut rows[..]);
+    // Non-atomic diagnostic read: alloc_count and live rows are obtained under
+    // separate VMALLOC acquisitions, so they may reflect slightly different
+    // moments in time under concurrent allocation traffic.
     let total_live = diag.alloc_count;
 
     if count == 0 {
@@ -188,8 +198,9 @@ fn cmd_heap_live(limit_arg: Option<&String>) -> Result<(), ShellError> {
             entry.caller_column
         );
     }
-    if total_live > count {
-        shell_println!("  ... {} more allocation(s) not shown", total_live - count);
+    let hidden = total_live.saturating_sub(count);
+    if hidden != 0 {
+        shell_println!("  ... {} more allocation(s) not shown", hidden);
     }
 
     Ok(())
