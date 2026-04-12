@@ -102,7 +102,7 @@ script = [
         git pull origin strat9-os
     else
         rm -rf "$relibc_dir"
-        git clone https://git.strat9-os.org/strat9-os/relibc.git "$relibc_dir"
+        git clone https://github.com/ggielly/relibc "$relibc_dir"
         cd "$relibc_dir"
         git checkout strat9-os
         git submodule update --init --recursive
@@ -1012,8 +1012,6 @@ dependencies = [
     "kernel",
     "strate-ext4",
     "strate-fs-ramfs",
-    "strate-silo-test",
-    "strate-mem-test",
     "strate-init",
     "strate-console-admin",
     "strate-net",
@@ -1072,8 +1070,6 @@ dependencies = [
     "kernel-dev-opt",
     "strate-ext4-dev-opt",
     "strate-fs-ramfs-dev-opt",
-    "strate-silo-test-dev-opt",
-    "strate-mem-test-dev-opt",
     "strate-init-dev-opt",
     "strate-console-admin-dev-opt",
     "strate-net-dev-opt",
@@ -1102,8 +1098,6 @@ dependencies = [
     "kernel-release",
     "strate-ext4-release",
     "strate-fs-ramfs-release",
-    "strate-silo-test-release",
-    "strate-mem-test-release",
     "strate-init-release",
     "strate-console-admin-release",
     "strate-net-release",
@@ -1318,60 +1312,14 @@ args = [
     "-no-shutdown",
     "-serial",
     "mon:stdio",
-    "-object",
-    "rng-random,filename=/dev/urandom,id=rng0",
-    "-device",
-    "virtio-rng-pci,rng=rng0",
     "-D",
     "build/qemu.log",
     "-d",
     "guest_errors",
 ]
 
-
-[tasks.run-gui-smp-release-console]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs (release profile) - CONSOLE"
-dependencies = ["limine-image-release"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "max",
-    "-smp",
-    "2",
-    "-m",
-    "512M",
-    "-display",
-    "gtk,grab-on-hover=off,zoom-to-fit=on",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "file:build/com1.log",
-    "-netdev",
-    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1,hostfwd=tcp::8080-:8080",
-    "-device",
-    "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-chardev",
-    "file,id=debug_log,path=build/e9_debug.log",
-    "-device",
-    "isa-debugcon,iobase=0xe9,chardev=debug_log",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "int,cpu_reset,guest_errors",
-]
-
-#####################################################################################################################################################################################
-##############################################################################################################################################################
 [tasks.run-gui-smp-release]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs (release)"
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs (release profile)"
 dependencies = ["limine-image-release"]
 command = "${QEMU}"
 args = [
@@ -1384,11 +1332,11 @@ args = [
     "-machine",
     "q35",
     "-cpu",
-    "max",
+    "qemu64",
     "-smp",
     "2",
     "-m",
-    "512M",
+    "256M",
     "-display",
     "gtk,grab-on-hover=off,zoom-to-fit=on",
     "-no-reboot",
@@ -1396,17 +1344,13 @@ args = [
     "-serial",
     "mon:stdio",
     "-netdev",
-    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1,hostfwd=tcp::8080-:8080",
+    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1",
     "-device",
     "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-chardev",
-    "file,id=debug_log,path=build/e9_debug.log",
-    "-device",
-    "isa-debugcon,iobase=0xe9,chardev=debug_log",
     "-D",
     "build/qemu.log",
     "-d",
-    "int,cpu_reset,guest_errors",
+    "guest_errors",
 ]
 
 [tasks.run-gui-smp-dev-opt]
@@ -1480,7 +1424,7 @@ args = [
     "-machine",
     "q35",
     "-cpu",
-    "max",
+    "qemu64",
     "-m",
     "256M",
     "-nographic",
@@ -1492,33 +1436,23 @@ args = [
     "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1,hostfwd=tcp::8080-:8080",
     "-device",
     "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-chardev",
-    "stdio,id=con0",
-    "-device",
-    "isa-debugcon,iobase=0xe9,chardev=con0",
     "-D",
-    "-d",
-    "int,cpu_reset",
     "build/qemu.log",
 ]
 
 [tasks.net-setup-routed]
 description = "Setup routed TAP network on host (requires sudo): DHCP + NAT forwarding"
 script_runner = "@shell"
-script = [
-    '''
+script = ['''
 sudo bash tools/scripts/net/setup-tap-routed.sh "${STRAT9_UPLINK_IFACE}" "${STRAT9_TAP_IFACE}"
-''',
-]
+''']
 
 [tasks.net-teardown-routed]
 description = "Teardown routed TAP network on host (requires sudo)"
 script_runner = "@shell"
-script = [
-    '''
+script = ['''
 sudo bash tools/scripts/net/teardown-tap-routed.sh "${STRAT9_TAP_IFACE}" "${STRAT9_UPLINK_IFACE}"
-''',
-]
+''']
 
 [tasks.run-net-tap]
 description = "Load QEMU in text mode using TAP passthrough (requires net-setup-routed)"
@@ -1606,8 +1540,6 @@ args = [
     "q35",
     "-cpu",
     "qemu64",
-    "-smp",
-    "2",
     "-m",
     "256M",
     "-no-reboot",
@@ -1635,8 +1567,6 @@ args = [
     "q35",
     "-cpu",
     "qemu64",
-    "-smp",
-    "2",
     "-m",
     "256M",
     "-nographic",
@@ -1874,3 +1804,127 @@ dependencies = ["build-all"]
 
 [tasks.all]
 alias = "default"
+
+# =============================================================================
+# Windows-native Tasks (PowerShell-based build, no bash/WSL required for compile)
+# =============================================================================
+
+[tasks.build-windows]
+description = "Build strat9-os using native Windows PowerShell script"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile ${STRAT9_PROFILE}
+    """,
+]
+
+[tasks.build-windows-test]
+description = "Build strat9-os with test binaries (Windows)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile ${STRAT9_PROFILE} -Tests
+    """,
+]
+
+[tasks.run-wingui]
+description = "Build and run QEMU with GUI (Windows native build)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile ${STRAT9_PROFILE} -Run
+    """,
+]
+
+[tasks.run-wingui-smp]
+description = "Build and run QEMU with GUI + SMP 2 CPUs (Windows native build)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile ${STRAT9_PROFILE} -Run
+    """,
+]
+
+[tasks.run-wingui-release]
+description = "Build and run QEMU with GUI (release profile, Windows)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile release -Run
+    """,
+]
+
+[tasks.run-wingui-smp-release]
+description = "Build and run QEMU with GUI + SMP 2 CPUs (release profile, Windows)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile release -Run
+    """,
+]
+
+[tasks.run-wingui-dev-opt]
+description = "Build and run QEMU with GUI (dev-opt profile, Windows)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile dev-opt -Run
+    """,
+]
+
+[tasks.run-wingui-smp-dev-opt]
+description = "Build and run QEMU with GUI + SMP 2 CPUs (dev-opt profile, Windows)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile dev-opt -Run
+    """,
+]
+
+[tasks.run-wingui-test]
+description = "Build and run QEMU with test ISO (Windows)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile debug -Tests -Run
+    """,
+]
+
+[tasks.run-wingui-test-release]
+description = "Build and run QEMU with test ISO (release, Windows)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile release -Tests -Run
+    """,
+]
+
+[tasks.build-iso-windows]
+description = "Build ISO only (no QEMU run, Windows native)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile ${STRAT9_PROFILE}
+    """,
+]
+
+[tasks.build-iso-windows-release]
+description = "Build ISO only (release profile, Windows)"
+condition = { platforms = ["windows"] }
+script_runner = "@duckscript"
+script = [
+    """
+    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile release
+    """,
+]
