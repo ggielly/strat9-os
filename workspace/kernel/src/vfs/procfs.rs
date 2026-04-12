@@ -94,7 +94,10 @@ impl ProcScheme {
         match subpath {
             "" | "/" => Ok(ProcEntry::Directory),
             "status" => Ok(ProcEntry::File(self.get_process_status(task))),
-            "cmdline" => Ok(ProcEntry::File(format!("{}\n", task.name))),
+            "cmdline" => Ok(ProcEntry::File(format!(
+                "{}\n",
+                crate::arch::x86_64::serial::get_cmdline()
+            ))),
             _ => Err(SyscallError::NotFound),
         }
     }

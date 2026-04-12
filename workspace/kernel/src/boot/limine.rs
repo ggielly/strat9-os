@@ -27,6 +27,11 @@ static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
 #[link_section = ".requests"]
 static EXECUTABLE_ADDRESS: ExecutableAddressRequest = ExecutableAddressRequest::new();
 
+/// Request the kernel command line
+#[used]
+#[link_section = ".requests"]
+static EXEC_CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+
 /// Request the kernel file
 #[used]
 #[link_section = ".requests"]
@@ -483,6 +488,14 @@ pub unsafe extern "C" fn kmain() -> ! {
     // Verify the Limine base revision is supported
     assert!(BASE_REVISION.is_supported());
 
+    // === VERY EARLY SERIAL OUTPUT: confirms kernel entry before any init ===
+    {
+        // SAFETY: Direct UART write at earliest possible point. Raw port I/O before any setup.
+        let mut early_port = unsafe { uart_16550::SerialPort::new(0x3F8) };
+        early_port.init();
+        let _ = core::fmt::Write::write_str(&mut early_port, "[kmain] *** Strat9-OS kernel entry ***\r\n");
+    }
+
     // Get framebuffer info (graphics mode provided by Limine)
     let (
         fb_addr,
@@ -895,6 +908,21 @@ pub unsafe extern "C" fn kmain() -> ! {
         }
     }
 
+    // Extract kernel command line from Limine
+    let (cmdline_ptr, cmdline_len) = if let Some(cmdline_resp) = EXEC_CMDLINE.get_response() {
+        let cstr = cmdline_resp.cmdline();
+        let bytes = cstr.to_bytes_with_nul();
+        let ptr = bytes.as_ptr() as u64;
+        let len = bytes.len() as u64;
+        if let Ok(s) = cstr.to_str() {
+            crate::serial_println!("[limine] cmdline: '{}'", s);
+        }
+        (ptr, len)
+    } else {
+        crate::serial_println!("[limine] no cmdline provided");
+        (0, 0)
+    };
+
     let args = super::entry::KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
@@ -927,8 +955,10 @@ pub unsafe extern "C" fn kmain() -> ! {
         framebuffer_green_mask_shift: fb_green_mask_shift,
         framebuffer_blue_mask_size: fb_blue_mask_size,
         framebuffer_blue_mask_shift: fb_blue_mask_shift,
-        _padding1: 0,
+        _padding1: [0; 4],
         hhdm_offset,
+        cmdline_ptr,
+        cmdline_len,
     };
 
     // Call kernel main

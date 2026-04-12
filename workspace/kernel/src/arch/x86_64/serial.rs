@@ -1,12 +1,19 @@
 use core::{
     fmt,
-    sync::atomic::{AtomicBool, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 use spin::Mutex;
 use uart_16550::SerialPort;
 
 /// Global serial port instance
 static SERIAL1: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(0x3F8) });
+
+/// Fixed-size buffer for kernel cmdline (up to 2KB).
+/// SAFETY: Written once during early boot (single-threaded, IRQs disabled),
+/// then read-only. Safe for concurrent reads after initialization.
+static CMDLINE_BUF: [u8; 2048] = [0; 2048];
+static CMDLINE_LEN: AtomicUsize = AtomicUsize::new(0);
+static CMDLINE_READY: AtomicBool = AtomicBool::new(false);
 
 /// Flag indicating if the kernel is in a panic state.
 /// When true, serial output bypasses all locks to ensure messages are displayed.
@@ -228,6 +235,84 @@ impl<W: fmt::Write> fmt::Write for BootPrefixWriter<'_, W> {
 /// Initialize the serial port
 pub fn init() {
     SERIAL1.lock().init();
+}
+
+/// Parse kernel cmdline from Limine boot arguments.
+///
+/// `ptr` is a pointer to a null-terminated C string provided by the bootloader.
+/// `len` is the length of the cmdline string (including the null terminator).
+///
+/// This function:
+/// - Stores the cmdline globally for `/proc/cmdline` access.
+/// - Detects `console=ttyS0,baud` parameters and logs the configuration.
+pub unsafe fn parse_cmdline(ptr: u64, len: u64) {
+    if ptr == 0 || len == 0 {
+        return;
+    }
+
+    // Convert C string to Rust &str and copy into static buffer.
+    let cstr = core::ffi::CStr::from_ptr(ptr as *const core::ffi::c_char);
+    let cmdline = cstr.to_str().unwrap_or("");
+
+    let copy_len = cmdline.len().min(2047);
+    // SAFETY: Single-threaded early boot, IRQs disabled. No concurrent access.
+    let buf_ptr = CMDLINE_BUF.as_ptr() as *mut u8;
+    core::ptr::copy_nonoverlapping(cmdline.as_ptr(), buf_ptr, copy_len);
+    CMDLINE_LEN.store(copy_len, Ordering::Release);
+    CMDLINE_READY.store(true, Ordering::Release);
+
+    // Parse console parameters.
+    let cmdline_str =
+        core::str::from_utf8_unchecked(core::slice::from_raw_parts(buf_ptr, copy_len));
+
+    let mut has_serial_console = false;
+    let mut baud: Option<u32> = None;
+
+    let mut pos = 0;
+    while pos < cmdline_str.len() {
+        while pos < cmdline_str.len() && cmdline_str.as_bytes()[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= cmdline_str.len() {
+            break;
+        }
+        let start = pos;
+        while pos < cmdline_str.len() && !cmdline_str.as_bytes()[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        let token = &cmdline_str[start..pos];
+
+        if let Some(value) = token.strip_prefix("console=") {
+            if value.starts_with("ttyS0") {
+                has_serial_console = true;
+                if let Some((_, baud_str)) = value.split_once(',') {
+                    if let Ok(b) = baud_str.parse::<u32>() {
+                        baud = Some(b);
+                    }
+                }
+            }
+        }
+    }
+
+    if has_serial_console {
+        if let Some(b) = baud {
+            crate::serial_force_println!("[cmdline] console=ttyS0,{}", b);
+        } else {
+            crate::serial_force_println!("[cmdline] console=ttyS0 (115200 baud)");
+        }
+    } else {
+        crate::serial_force_println!("[cmdline] no serial console detected");
+    }
+}
+
+/// Returns the stored kernel cmdline for `/proc/cmdline`.
+pub fn get_cmdline() -> &'static str {
+    if !CMDLINE_READY.load(Ordering::Acquire) {
+        return "";
+    }
+    let len = CMDLINE_LEN.load(Ordering::Acquire);
+    // SAFETY: CMDLINE_READY guarantees CMDLINE_BUF has been written.
+    unsafe { core::str::from_utf8_unchecked(&CMDLINE_BUF[..len]) }
 }
 
 /// Print to serial port

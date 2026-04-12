@@ -460,6 +460,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
     }
 
+    // Parse kernel cmdline from Limine (early, for serial console config).
+    if args.cmdline_ptr != 0 && args.cmdline_len != 0 {
+        // SAFETY: cmdline_ptr is a valid null-terminated C string from Limine bootloader.
+        unsafe { arch::x86_64::serial::parse_cmdline(args.cmdline_ptr, args.cmdline_len) };
+    } else {
+        serial_println!("[init] No kernel cmdline provided");
+    }
+
     // Le's go !
     //
     // =============================================
