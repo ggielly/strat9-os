@@ -3,6 +3,12 @@ stages:
   - release
 
 variables:
+  # GIT_STRATEGY: clone avoids fetching refs/pipelines/N (a GitLab-specific ref
+  # created per pipeline by Gitaly). When Gitaly is under memory pressure it can
+  # fail to create that ref (SIGKILL), causing every subsequent `fetch` strategy
+  # job to fail with "couldn't find remote ref refs/pipelines/N".
+  # clone does a fresh git clone each run and never looks up that ref.
+  GIT_STRATEGY: clone
   GIT_DEPTH: "0"
   TZ: "Europe/Paris"
 
