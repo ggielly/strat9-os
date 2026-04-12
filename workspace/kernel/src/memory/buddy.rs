@@ -1121,23 +1121,29 @@ fn free_order0_cached(frame: PhysFrame) {
 
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
     let mut spill = [0u64; LOCAL_CACHE_FLUSH_BATCH];
-    BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0);
 
     let spill_len = {
         let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
         if cache.push(frame).is_ok() {
+            // Mark free only on the success path: the incoming frame transitions
+            // from "caller-allocated" to "cache sentinel" (REFCOUNT_UNUSED).
+            BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0);
             local_cached_inc_phys(frame.start_address.as_u64());
             return;
         }
 
+        // Cache full: pop existing frames to spill to buddy, then retry the push.
         let mut spill_len = cache.pop_many(&mut spill);
         for phys in spill.iter().take(spill_len).copied() {
             local_cached_dec_phys(phys);
         }
 
         if cache.push(frame).is_ok() {
+            BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0);
             local_cached_inc_phys(frame.start_address.as_u64());
         } else {
+            // Still full after spilling — the incoming frame joins the spill batch.
+            // It will be marked free by free_phys_batch → free_to_zone.
             spill[spill_len] = frame.start_address.as_u64();
             spill_len += 1;
         }

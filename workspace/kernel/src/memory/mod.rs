@@ -130,7 +130,13 @@ pub fn try_register_mapping_identity(handle: BlockHandle, cap_id: CapId) -> Resu
 /// Releases a block back to the buddy allocator.
 ///
 /// Invokes optional per-page [`FrameMetaVtable::on_unmap`] hooks, then returns the block to buddy.
-/// Poisoned frames ([`meta_guard::POISONED`]) are quarantined and not recycled ([`poison_quarantine_pages_snapshot`]).
+/// Poisoned frames ([`meta_guard::POISONED`]) are quarantined and not recycled
+/// ([`poison_quarantine_pages_snapshot`]).
+///
+/// # Hook ordering guarantee
+/// `on_unmap` is called **before** the buddy allocator decides to recycle or quarantine.
+/// Hooks that rely on the frame being recyclable may run pointlessly on poisoned blocks —
+/// they must therefore be idempotent and side-effect-safe.
 pub fn release_owned_block(block: PhysBlock<Released>) {
     let handle = block.into_handle();
     with_irqs_disabled(|token| {

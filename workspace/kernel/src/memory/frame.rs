@@ -358,6 +358,11 @@ pub struct FrameMetaVtable {
     pub on_last_ref: Option<fn(PhysAddr)>,
     /// Called once per 4 KiB page when a mapping block is released to the allocator (unmap path).
     ///
+    /// # When it runs
+    /// Invoked by [`release_owned_block`] **before** the buddy allocator decides whether
+    /// to recycle or quarantine the block.  It therefore runs even for poisoned frames
+    /// that will be quarantined and never reused.
+    ///
     /// # Constraints
     /// Invoked with IRQs **disabled** and the buddy zone lock held on the caller's CPU.
     /// MUST be:
