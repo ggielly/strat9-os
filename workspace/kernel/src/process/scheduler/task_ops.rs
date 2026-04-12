@@ -49,7 +49,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 let current_id = current.id;
                 let current_pid = current.pid;
                 let parent = {
-                    let identity = SCHED_IDENTITY.lock();
+                    let identity = SCHED_IDENTITY.read();
                     identity.parent_of.get(&current_id).copied()
                 };
                 let _ = sched.clear_task_wake_deadline_locked(current_id);
@@ -62,7 +62,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 // lookups while the task is dying.
                 sched.task_cpu.remove(&current_id);
                 {
-                    let mut identity = SCHED_IDENTITY.lock();
+                    let mut identity = SCHED_IDENTITY.write();
                     GlobalSchedState::unregister_identity_locked(
                         &mut identity,
                         current_id,
@@ -73,7 +73,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 }
 
                 ipi_to_cpu = {
-                    let mut identity = SCHED_IDENTITY.lock();
+                    let mut identity = SCHED_IDENTITY.write();
                     reparent_children(sched, &mut identity, current_id)
                 };
 
@@ -275,7 +275,7 @@ pub fn current_task_clone_spin_debug(trace_label: &str) -> Option<Arc<Task>> {
 
 /// Resolve a POSIX pid to internal TaskId.
 pub fn get_task_id_by_pid(pid: Pid) -> Option<TaskId> {
-    SCHED_IDENTITY.lock().pid_to_task.get(&pid).copied()
+    SCHED_IDENTITY.read().pid_to_task.get(&pid).copied()
 }
 
 /// Resolve a POSIX pid to the corresponding task.
@@ -297,7 +297,7 @@ pub fn get_child_task_id_by_pid(parent: TaskId, pid: Pid) -> Option<TaskId> {
         let scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref sched) = *scheduler {
             let children = {
-                let identity = SCHED_IDENTITY.lock();
+                let identity = SCHED_IDENTITY.read();
                 identity
                     .children_of
                     .get(&parent)
@@ -325,7 +325,7 @@ pub fn get_child_task_id_by_pid(parent: TaskId, pid: Pid) -> Option<TaskId> {
 
 /// Resolve a POSIX tid to the corresponding internal task id.
 pub fn get_task_id_by_tid(tid: Tid) -> Option<TaskId> {
-    let identity = SCHED_IDENTITY.lock();
+    let identity = SCHED_IDENTITY.read();
     identity
         .tid_to_task
         .get(&tid)
@@ -346,7 +346,7 @@ pub fn get_child_task_id_by_tid(parent: TaskId, tid: Tid) -> Option<TaskId> {
         let scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref sched) = *scheduler {
             let children = {
-                let identity = SCHED_IDENTITY.lock();
+                let identity = SCHED_IDENTITY.read();
                 identity
                     .children_of
                     .get(&parent)
@@ -374,19 +374,19 @@ pub fn get_child_task_id_by_tid(parent: TaskId, tid: Tid) -> Option<TaskId> {
 
 /// Resolve a PID to the current process group id.
 pub fn get_pgid_by_pid(pid: Pid) -> Option<Pid> {
-    SCHED_IDENTITY.lock().pid_to_pgid.get(&pid).copied()
+    SCHED_IDENTITY.read().pid_to_pgid.get(&pid).copied()
 }
 
 /// Resolve a PID to the current session id.
 pub fn get_sid_by_pid(pid: Pid) -> Option<Pid> {
-    SCHED_IDENTITY.lock().pid_to_sid.get(&pid).copied()
+    SCHED_IDENTITY.read().pid_to_sid.get(&pid).copied()
 }
 
 /// Collect task IDs that currently belong to process group `pgid`.
 pub fn get_task_ids_in_pgid(pgid: Pid) -> alloc::vec::Vec<TaskId> {
     use alloc::vec::Vec;
     SCHED_IDENTITY
-        .lock()
+        .read()
         .pgid_members
         .get(&pgid)
         .cloned()
@@ -439,7 +439,7 @@ pub fn set_process_group(
             let target_id = match target_pid {
                 None => requester,
                 Some(pid) => SCHED_IDENTITY
-                    .lock()
+                    .read()
                     .pid_to_task
                     .get(&pid)
                     .copied()
@@ -448,7 +448,7 @@ pub fn set_process_group(
 
             if target_id != requester {
                 let is_child = SCHED_IDENTITY
-                    .lock()
+                    .read()
                     .children_of
                     .get(&requester)
                     .map(|children| children.iter().any(|child| *child == target_id))
@@ -477,7 +477,7 @@ pub fn set_process_group(
             let desired_pgid = new_pgid.unwrap_or(target_pid_value);
             let group_leader_sid = if desired_pgid != target_pid_value {
                 let group_leader_tid = SCHED_IDENTITY
-                    .lock()
+                    .read()
                     .pid_to_task
                     .get(&desired_pgid)
                     .copied()
@@ -508,7 +508,7 @@ pub fn set_process_group(
             .pgid
             .store(new_pgid.unwrap_or(target_task.pid), Ordering::Relaxed);
         {
-            let mut identity = SCHED_IDENTITY.lock();
+            let mut identity = SCHED_IDENTITY.write();
             GlobalSchedState::member_remove(&mut identity.pgid_members, old_pgid, target_id);
             GlobalSchedState::member_add(
                 &mut identity.pgid_members,
@@ -551,7 +551,7 @@ pub fn create_session(requester: TaskId) -> Result<Pid, crate::syscall::error::S
         requester_task.sid.store(pid, Ordering::Relaxed);
         requester_task.pgid.store(pid, Ordering::Relaxed);
         {
-            let mut identity = SCHED_IDENTITY.lock();
+            let mut identity = SCHED_IDENTITY.write();
             GlobalSchedState::member_remove(&mut identity.sid_members, old_sid, requester);
             GlobalSchedState::member_remove(&mut identity.pgid_members, old_pgid, requester);
             GlobalSchedState::member_add(&mut identity.sid_members, pid, requester);
@@ -625,7 +625,7 @@ pub fn set_task_sched_policy(id: TaskId, policy: crate::process::sched::SchedPol
 
 /// Get parent task ID for a child task.
 pub fn get_parent_id(child: TaskId) -> Option<TaskId> {
-    SCHED_IDENTITY.lock().parent_of.get(&child).copied()
+    SCHED_IDENTITY.read().parent_of.get(&child).copied()
 }
 
 /// Get parent process ID for a child task.
@@ -1036,7 +1036,7 @@ pub fn kill_task(id: TaskId) -> bool {
                 // the cleanup when it moves the task to task_to_drop.
                 sched.task_cpu.remove(&id);
                 {
-                    let mut identity = SCHED_IDENTITY.lock();
+                    let mut identity = SCHED_IDENTITY.write();
                     GlobalSchedState::unregister_identity_locked(
                         &mut identity,
                         id,
@@ -1086,7 +1086,7 @@ pub fn kill_task(id: TaskId) -> bool {
                         cleanup_task_resources(&task);
                         sched.task_cpu.remove(&id);
                         {
-                            let mut identity = SCHED_IDENTITY.lock();
+                            let mut identity = SCHED_IDENTITY.write();
                             GlobalSchedState::unregister_identity_locked(
                                 &mut identity,
                                 id,
@@ -1115,7 +1115,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     let _ = sched.remove_all_task_locked(id);
                     sched.task_cpu.remove(&id);
                     {
-                        let mut identity = SCHED_IDENTITY.lock();
+                        let mut identity = SCHED_IDENTITY.write();
                         GlobalSchedState::unregister_identity_locked(
                             &mut identity,
                             id,
@@ -1164,11 +1164,11 @@ fn finalize_forced_death(
     task_pid: Pid,
 ) -> (Option<TaskId>, Option<usize>) {
     let ipi_reparent = {
-        let mut identity = SCHED_IDENTITY.lock();
+        let mut identity = SCHED_IDENTITY.write();
         reparent_children(sched, &mut identity, task_id)
     };
     let parent = {
-        let mut identity = SCHED_IDENTITY.lock();
+        let mut identity = SCHED_IDENTITY.write();
         identity.parent_of.remove(&task_id)
     };
     if let Some(parent_id) = parent {

@@ -131,7 +131,7 @@ impl GlobalSchedState {
         let cpu_index = self.select_cpu_for_task();
         let ipi = self.add_task_on_cpu(task, cpu_index);
         {
-            let mut identity = SCHED_IDENTITY.lock();
+            let mut identity = SCHED_IDENTITY.write();
             identity.parent_of.insert(child, parent);
             identity.children_of.entry(parent).or_default().push(child);
         }
@@ -175,7 +175,7 @@ impl GlobalSchedState {
             task_id.as_u64()
         );
         {
-            let mut identity = SCHED_IDENTITY.lock();
+            let mut identity = SCHED_IDENTITY.write();
             identity.pid_to_task.insert(task.pid, task_id);
             crate::serial_println!(
                 "[trace][sched] add_task_on_cpu pid map inserted tid={}",
@@ -362,7 +362,7 @@ impl GlobalSchedState {
     ) -> WaitChildResult {
         // First, check children under SCHED_IDENTITY lock.
         let target_is_child = {
-            let identity = SCHED_IDENTITY.lock();
+            let identity = SCHED_IDENTITY.read();
             let Some(children_view) = identity.children_of.get(&parent) else {
                 return WaitChildResult::NoChildren;
             };
@@ -385,7 +385,7 @@ impl GlobalSchedState {
 
         // Find the zombie child — re-check children under SCHED_IDENTITY.
         let zombie = {
-            let identity = SCHED_IDENTITY.lock();
+            let identity = SCHED_IDENTITY.read();
             let children = match identity.children_of.get(&parent) {
                 Some(c) => c.clone(),
                 None => return WaitChildResult::NoChildren,
@@ -407,12 +407,12 @@ impl GlobalSchedState {
             let child_tid = reaped_task.as_ref().map(|t| t.tid);
             if child_pid != 0 {
                 if let Some(tid) = child_tid {
-                    let mut identity = SCHED_IDENTITY.lock();
+                    let mut identity = SCHED_IDENTITY.write();
                     Self::unregister_identity_locked(&mut identity, child, child_pid, tid);
                 }
             }
             {
-                let mut identity = SCHED_IDENTITY.lock();
+                let mut identity = SCHED_IDENTITY.write();
                 if let Some(children) = identity.children_of.get_mut(&parent) {
                     children.retain(|&id| id != child);
                     if children.is_empty() {
