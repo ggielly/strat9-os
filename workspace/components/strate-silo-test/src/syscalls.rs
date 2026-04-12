@@ -182,12 +182,21 @@ fn check_expect_err(
 fn test_process_and_ids(ctx: &mut Ctx) {
     section("Process IDs / Session / Group / Credentials");
 
-    let _pid = check_ok(ctx, "getpid()", call::getpid()).unwrap_or(0);
+    let pid = check_ok(ctx, "getpid()", call::getpid()).unwrap_or(0);
     let _ = check_ok(ctx, "getppid()", call::getppid());
     let _ = check_ok(ctx, "gettid()", call::gettid());
-    let _ = check_ok(ctx, "getpgid(0)", call::getpgid(0));
-    let _ = check_ok(ctx, "getsid(0)", call::getsid(0));
-    let _ = check_ok(ctx, "setpgid(0,0)", call::setpgid(0, 0));
+    let _pgid = check_ok(ctx, "getpgid(0)", call::getpgid(0)).unwrap_or(0);
+    let sid = check_ok(ctx, "getsid(0)", call::getsid(0)).unwrap_or(0);
+    if sid == pid {
+        check_expect_err(
+            ctx,
+            "setpgid(0,0) while session leader -> EPERM",
+            call::setpgid(0, 0),
+            Error::PermissionDenied,
+        );
+    } else {
+        let _ = check_ok(ctx, "setpgid(0,0)", call::setpgid(0, 0));
+    }
     check_expect_one_of(
         ctx,
         "setsid()",
@@ -281,8 +290,14 @@ fn test_fs(ctx: &mut Ctx) {
 
     const DIR: &str = "/tmp/iso_syscalls_suite";
     const FILE: &str = "/tmp/iso_syscalls_suite/data.txt";
+    const FILE_RENAMED: &str = "/tmp/iso_syscalls_suite/data_renamed.txt";
+    const FILE_LINK: &str = "/tmp/iso_syscalls_suite/data_link.txt";
+    const FILE_SYMLINK: &str = "/tmp/iso_syscalls_suite/data_symlink.txt";
 
     let _ = unsafe { syscall2(SYS_UNLINK, FILE.as_ptr() as usize, FILE.len()) };
+    let _ = unsafe { syscall2(SYS_UNLINK, FILE_RENAMED.as_ptr() as usize, FILE_RENAMED.len()) };
+    let _ = unsafe { syscall2(SYS_UNLINK, FILE_LINK.as_ptr() as usize, FILE_LINK.len()) };
+    let _ = unsafe { syscall2(SYS_UNLINK, FILE_SYMLINK.as_ptr() as usize, FILE_SYMLINK.len()) };
     let _ = unsafe { syscall2(SYS_RMDIR, DIR.as_ptr() as usize, DIR.len()) };
 
     let _ = check_ok(ctx, "SYS_MKDIR /tmp/iso_syscalls_suite", unsafe {
@@ -324,18 +339,12 @@ fn test_fs(ctx: &mut Ctx) {
                 &mut st as *mut data::FileStat as usize,
             )
         });
-        check_expect_err(
-            ctx,
-            "SYS_FCHMOD expected ENOSYS",
-            unsafe { syscall2(SYS_FCHMOD, file_fd, 0o644) },
-            Error::NotImplemented,
-        );
-        check_expect_err(
-            ctx,
-            "SYS_FTRUNCATE expected ENOSYS",
-            unsafe { syscall2(SYS_FTRUNCATE, file_fd, 4) },
-            Error::NotImplemented,
-        );
+        let _ = check_ok(ctx, "SYS_FCHMOD file_fd 0644", unsafe {
+            syscall2(SYS_FCHMOD, file_fd, 0o644)
+        });
+        let _ = check_ok(ctx, "SYS_FTRUNCATE file_fd -> 4", unsafe {
+            syscall2(SYS_FTRUNCATE, file_fd, 4)
+        });
     }
 
     let dir_fd = check_ok(ctx, "SYS_OPEN dir O_DIRECTORY", unsafe {
@@ -364,68 +373,50 @@ fn test_fs(ctx: &mut Ctx) {
     let _ = check_ok(ctx, "SYS_UMASK set 022", unsafe {
         syscall1(SYS_UMASK, 0o022)
     });
-    check_expect_err(
-        ctx,
-        "SYS_CHMOD expected ENOSYS",
-        unsafe { syscall3(SYS_CHMOD, FILE.as_ptr() as usize, FILE.len(), 0o644) },
-        Error::NotImplemented,
-    );
-    check_expect_err(
-        ctx,
-        "SYS_RENAME expected ENOSYS",
-        unsafe {
-            syscall4(
-                SYS_RENAME,
-                FILE.as_ptr() as usize,
-                FILE.len(),
-                DIR.as_ptr() as usize,
-                DIR.len(),
-            )
-        },
-        Error::NotImplemented,
-    );
-    check_expect_err(
-        ctx,
-        "SYS_LINK expected ENOSYS",
-        unsafe {
-            syscall4(
-                SYS_LINK,
-                FILE.as_ptr() as usize,
-                FILE.len(),
-                DIR.as_ptr() as usize,
-                DIR.len(),
-            )
-        },
-        Error::NotImplemented,
-    );
-    check_expect_err(
-        ctx,
-        "SYS_SYMLINK expected ENOSYS",
-        unsafe {
-            syscall4(
-                SYS_SYMLINK,
-                FILE.as_ptr() as usize,
-                FILE.len(),
-                DIR.as_ptr() as usize,
-                DIR.len(),
-            )
-        },
-        Error::NotImplemented,
-    );
+    let _ = check_ok(ctx, "SYS_CHMOD file 0644", unsafe {
+        syscall3(SYS_CHMOD, FILE.as_ptr() as usize, FILE.len(), 0o644)
+    });
+    let _ = check_ok(ctx, "SYS_RENAME file -> data_renamed.txt", unsafe {
+        syscall4(
+            SYS_RENAME,
+            FILE.as_ptr() as usize,
+            FILE.len(),
+            FILE_RENAMED.as_ptr() as usize,
+            FILE_RENAMED.len(),
+        )
+    });
+    let _ = check_ok(ctx, "SYS_LINK renamed -> hardlink", unsafe {
+        syscall4(
+            SYS_LINK,
+            FILE_RENAMED.as_ptr() as usize,
+            FILE_RENAMED.len(),
+            FILE_LINK.as_ptr() as usize,
+            FILE_LINK.len(),
+        )
+    });
+    let _ = check_ok(ctx, "SYS_SYMLINK renamed -> symlink", unsafe {
+        syscall4(
+            SYS_SYMLINK,
+            FILE_RENAMED.as_ptr() as usize,
+            FILE_RENAMED.len(),
+            FILE_SYMLINK.as_ptr() as usize,
+            FILE_SYMLINK.len(),
+        )
+    });
     let mut rl = [0u8; 64];
     check_expect_err(
         ctx,
-        "SYS_READLINK expected ENOSYS",
+        "SYS_READLINK regular file -> EINVAL",
         unsafe {
             syscall4(
                 SYS_READLINK,
-                FILE.as_ptr() as usize,
-                FILE.len(),
+                FILE_RENAMED.as_ptr() as usize,
+                FILE_RENAMED.len(),
                 rl.as_mut_ptr() as usize,
                 rl.len(),
             )
         },
-        Error::NotImplemented,
+        Error::InvalidArgument,
     );
 
     if file_fd != usize::MAX {
@@ -438,8 +429,18 @@ fn test_fs(ctx: &mut Ctx) {
             syscall1(number::SYS_CLOSE, dir_fd)
         });
     }
-    let _ = check_ok(ctx, "SYS_UNLINK file", unsafe {
-        syscall2(SYS_UNLINK, FILE.as_ptr() as usize, FILE.len())
+    let _ = check_ok(ctx, "SYS_UNLINK hardlink", unsafe {
+        syscall2(SYS_UNLINK, FILE_LINK.as_ptr() as usize, FILE_LINK.len())
+    });
+    let _ = check_ok(ctx, "SYS_UNLINK symlink", unsafe {
+        syscall2(SYS_UNLINK, FILE_SYMLINK.as_ptr() as usize, FILE_SYMLINK.len())
+    });
+    let _ = check_ok(ctx, "SYS_UNLINK renamed file", unsafe {
+        syscall2(
+            SYS_UNLINK,
+            FILE_RENAMED.as_ptr() as usize,
+            FILE_RENAMED.len(),
+        )
     });
     let _ = check_ok(ctx, "SYS_RMDIR dir", unsafe {
         syscall2(SYS_RMDIR, DIR.as_ptr() as usize, DIR.len())

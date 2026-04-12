@@ -35,8 +35,12 @@ pub struct KernelArgs {
     pub framebuffer_green_mask_shift: u8,
     pub framebuffer_blue_mask_size: u8,
     pub framebuffer_blue_mask_shift: u8,
-    pub _padding1: u32,
+    pub _padding1: [u8; 4], // Align hhdm_offset to 8-byte boundary
     pub hhdm_offset: u64,
+    /// Pointer to the kernel command line string (null-terminated C string).
+    pub cmdline_ptr: u64,
+    /// Length of the kernel command line string (including null terminator).
+    pub cmdline_len: u64,
 }
 
 /// Memory region descriptor for the bootloader memory map.
@@ -64,7 +68,7 @@ impl MemoryKind {
 }
 
 // ABI size assertions for bootloader structures
-static_assertions::assert_eq_size!(KernelArgs, [u8; 144]);
+static_assertions::assert_eq_size!(KernelArgs, [u8; 160]);
 static_assertions::const_assert_eq!(core::mem::align_of::<KernelArgs>(), 8);
 static_assertions::assert_eq_size!(MemoryRegion, [u8; 24]);
 static_assertions::const_assert_eq!(core::mem::align_of::<MemoryRegion>(), 8);
