@@ -643,7 +643,10 @@ pub fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
             framebuffer_green_mask_shift: 0,
             framebuffer_blue_mask_size: 0,
             framebuffer_blue_mask_shift: 0,
+            _padding1: [0; 4],
             hhdm_offset: 0,
+            cmdline_ptr: 0,
+            cmdline_len: 0,
         },
     )
 }

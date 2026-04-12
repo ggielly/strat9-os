@@ -189,22 +189,27 @@ impl SlabState {
         }
     }
 
-    /// Return the slab class index for `effective` bytes.
+    /// Return the slab class index for `layout`.
+    ///
+    /// The chosen class must be large enough for the payload and guarantee the
+    /// requested alignment for every block carved from that class.
     #[inline]
-    fn class_index(effective: usize) -> usize {
+    fn class_index_for_layout(layout: Layout) -> usize {
         for (i, &s) in SLAB_SIZES.iter().enumerate() {
-            if effective <= s {
+            if layout.size() <= s && layout.align() <= slab_class_alignment(i) {
                 return i;
             }
         }
-        unreachable!("class_index called with effective > MAX_SLAB_SIZE")
+        unreachable!("class_index_for_layout called for unsupported slab layout")
     }
 
     /// Allocate one buddy page, write a `SlabPageHeader` at its base, carve
     /// the remaining space into blocks, and prepend the page to `partial_pages[ci]`.
     unsafe fn refill(&mut self, ci: usize, token: &crate::sync::IrqDisabledToken) {
         let slab_size = SLAB_SIZES[ci];
-        let num_blocks = (4096 - SLAB_HEADER_SIZE) / slab_size;
+        let slab_align = slab_class_alignment(ci);
+        let blocks_offset = (SLAB_HEADER_SIZE + slab_align - 1) & !(slab_align - 1);
+        let num_blocks = (4096 - blocks_offset) / slab_size;
         debug_assert!(
             num_blocks >= 1,
             "refill: slab_size {} yields 0 blocks",
@@ -226,11 +231,17 @@ impl SlabState {
         (*header).free_count = 0;
         (*header).total_blocks = num_blocks as u32;
 
-        // Carve blocks starting at SLAB_HEADER_SIZE, highest index first so
+        // Carve blocks starting at an alignment-respecting offset, highest index first so
         // the lowest-address block ends up at the head (cosmetic only).
-        let blocks_start = page_virt.add(SLAB_HEADER_SIZE);
+        let blocks_start = page_virt.add(blocks_offset);
         for i in (0..num_blocks).rev() {
             let block = blocks_start.add(i * slab_size);
+            debug_assert_eq!(
+                (block as usize) & (slab_align - 1),
+                0,
+                "slab block alignment invariant broken for class {}",
+                slab_size
+            );
             *(block as *mut *mut u8) = (*header).free_head;
             if HEAP_POISON_ENABLED {
                 let end = slab_size.saturating_sub(4);
@@ -446,7 +457,7 @@ unsafe impl GlobalAlloc for LockedHeap {
         match classify_kernel_heap_backend(layout) {
             KernelHeapBackend::Slab => {
                 // --- slab path: return block to free list ---
-                let ci = SlabState::class_index(effective);
+                let ci = SlabState::class_index_for_layout(layout);
                 let cpu = crate::arch::x86_64::percpu::current_cpu_index();
                 let irq_enabled = crate::arch::x86_64::interrupts_enabled();
                 #[cfg(debug_assertions)]
@@ -563,12 +574,22 @@ pub fn slab_class_size(ci: usize) -> usize {
     SLAB_SIZES[ci]
 }
 
+/// Guaranteed alignment in bytes for slab class `ci`.
+///
+/// This is the largest power-of-two divisor of the class size.
+#[inline]
+pub fn slab_class_alignment(ci: usize) -> usize {
+    1usize << SLAB_SIZES[ci].trailing_zeros()
+}
+
 /// Number of blocks that fit in one buddy page for slab class `ci`.
 ///
 /// Accounts for the `SlabPageHeader` at the base of each page.
 #[inline]
 pub fn slab_blocks_per_page(ci: usize) -> usize {
-    (4096 - SLAB_HEADER_SIZE) / SLAB_SIZES[ci]
+    let align = slab_class_alignment(ci);
+    let blocks_offset = (SLAB_HEADER_SIZE + align - 1) & !(align - 1);
+    (4096 - blocks_offset) / SLAB_SIZES[ci]
 }
 
 /// Returns whether the slab page at `page_base` is currently present in the
@@ -633,7 +654,7 @@ pub unsafe fn try_alloc_kernel_heap(layout: Layout) -> Result<*mut u8, KernelHea
     let result = match classify_kernel_heap_backend(layout) {
         KernelHeapBackend::Slab => {
             // --- slab path ---
-            let ci = SlabState::class_index(effective);
+            let ci = SlabState::class_index_for_layout(layout);
             // Race/corruption diagnostic: log alloc when IRQs disabled (rate-limited).
             let cpu = crate::arch::x86_64::percpu::current_cpu_index();
             let irq_enabled = crate::arch::x86_64::interrupts_enabled();

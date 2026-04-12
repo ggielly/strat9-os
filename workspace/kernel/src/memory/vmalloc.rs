@@ -386,11 +386,12 @@ impl Vmalloc {
         }
     }
 
-    unsafe fn take_alloc_node(&mut self, start_page: usize) -> *mut VmallocNode {
+    unsafe fn take_alloc_node_by_addr(&mut self, addr: u64) -> *mut VmallocNode {
         let mut prev: *mut VmallocNode = ptr::null_mut();
         let mut cur = self.alloc_head;
         while !cur.is_null() {
-            if (*cur).start_page == start_page {
+            let cur_addr = VMALLOC_VIRT_START + ((*cur).start_page as u64 * 4096);
+            if cur_addr == addr {
                 let next = (*cur).next;
                 if prev.is_null() {
                     self.alloc_head = next;
@@ -400,7 +401,7 @@ impl Vmalloc {
                 (*cur).next = ptr::null_mut();
                 return cur;
             }
-            if (*cur).start_page > start_page {
+            if cur_addr > addr {
                 break;
             }
             prev = cur;
@@ -899,10 +900,9 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
     let (frames, range_start, range_end) = {
         let mut guard = VMALLOC.lock();
         let vm = &mut *guard;
-        let start_page = ((addr - VMALLOC_VIRT_START) / 4096) as usize;
 
         unsafe {
-            let node = vm.take_alloc_node(start_page);
+            let node = vm.take_alloc_node_by_addr(addr);
             if node.is_null() {
                 serial_println!("[vmalloc] vfree: no allocation record for 0x{:x}", addr);
                 return false;

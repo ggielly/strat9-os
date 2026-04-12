@@ -1351,6 +1351,7 @@ impl AddressSpace {
         let end = addr
             .checked_add(len)
             .ok_or("protect_range: address overflow")?;
+        let mut cursor = addr;
 
         {
             let regions = self.regions.lock();
@@ -1374,14 +1375,14 @@ impl AddressSpace {
         }
 
         let mut touched = false;
-        loop {
+        while cursor < end {
             let region_info = {
                 let regions = self.regions.lock();
                 regions
                     .iter()
                     .find(|(&vma_start, vma)| {
                         let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
-                        vma_start < end && vma_end > addr
+                        vma_start < end && vma_end > cursor
                     })
                     .map(|(&k, v)| (k, v.clone()))
             };
@@ -1392,7 +1393,7 @@ impl AddressSpace {
             touched = true;
 
             let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
-            let range_start = core::cmp::max(vma_start, addr);
+            let range_start = core::cmp::max(vma_start, cursor);
             let range_end = core::cmp::min(vma_end, end);
             let page_bytes = vma.page_size.bytes();
             let new_pt_flags = flags.to_page_flags();
@@ -1479,6 +1480,8 @@ impl AddressSpace {
                     );
                 }
             }
+
+            cursor = range_end;
         }
 
         if !touched {

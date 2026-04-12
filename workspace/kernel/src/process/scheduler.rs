@@ -84,6 +84,7 @@ use crate::{
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use spin::RwLock as SpinRwLock;
 
 /// Per-CPU scheduler tick counters used for CPU usage estimation.
 ///
@@ -548,9 +549,15 @@ pub(crate) static BLOCKED_TASKS: SpinLock<BTreeMap<TaskId, Arc<Task>>> =
 /// Separate from `GLOBAL_SCHED_STATE` so that identity lookups (getpid, getpgid,
 /// setpgid, etc.) never contend with fork/exit/zombie management.
 ///
+/// Upgraded to an `RwLock` so that concurrent readers (`getpid`, `gettid`,
+/// `getppid`, `getpgid`, `getsid`, `get_task_by_pid`) do not serialize on
+/// each other.  Only writers (`fork`, `exit`, `setpgid`, `setsid`, `kill`)
+/// acquire the exclusive write lock.
+///
 /// Lock order: SCHED_IDENTITY before LOCAL (never the reverse).
 /// SCHED_IDENTITY and BLOCKED_TASKS are independent — never hold both.
-pub(crate) static SCHED_IDENTITY: SpinLock<SchedIdentity> = SpinLock::new(SchedIdentity::new());
+pub(crate) static SCHED_IDENTITY: SpinRwLock<SchedIdentity> =
+    SpinRwLock::new(SchedIdentity::new());
 
 /// Identity maps for the scheduler: PID/TID routing, process groups,
 /// session membership, and parent/child relationships.
