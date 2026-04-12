@@ -352,6 +352,12 @@ impl FreeListLink {
 pub struct FrameMetaVtable {
     /// Called when the last shared reference to the frame is dropped (`refcount` → 0 path).
     ///
+    /// # When it runs
+    /// Invoked by [`release_owned_block`] **once** for the head frame of a block,
+    /// immediately after the last ownership reference is dropped and before any
+    /// per-page `on_unmap` hooks.  It does **not** run for individual page unmappings
+    /// that leave the block pinned (e.g. one task unmapping while another still holds a pin).
+    ///
     /// # Constraints
     /// Invoked with IRQs **disabled** and without the buddy zone lock held.
     /// MUST be: allocation-free, lock-free, and infallible.
@@ -549,8 +555,8 @@ impl MetaSlot {
         if bits & 7 != 0 {
             return None;
         }
+        // `bits` is non-zero (checked above) and 8-byte aligned, so the pointer is non-null.
         let ptr = bits as *const FrameMetaVtable;
-        debug_assert!(!ptr.is_null(), "vtable bits non-zero but produced null pointer");
         // SAFETY: aligned, non-null; must point to a `'static` vtable when registered by the kernel.
         unsafe { Some(&*ptr) }
     }

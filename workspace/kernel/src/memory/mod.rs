@@ -72,7 +72,7 @@ pub use block::{
     BlockHandle, BuddyReserved, Exclusive, MappedExclusive, MappedShared, PhysBlock, Released,
 };
 pub use block_meta::{get_block_meta, resolve_handle};
-pub use buddy::{get_allocator, poison_quarantine_pages_snapshot};
+pub use buddy::{buddy_alloc_fail_counts_snapshot, get_allocator, poison_quarantine_pages_snapshot};
 pub use frame::{
     block_phys_has_poison_guard, frame_meta_debug_snapshot, get_meta, get_meta_slot,
     invoke_vtable_on_last_ref, invoke_vtable_on_unmap, meta_generation_matches, meta_guard,
@@ -129,19 +129,28 @@ pub fn try_register_mapping_identity(handle: BlockHandle, cap_id: CapId) -> Resu
 
 /// Releases a block back to the buddy allocator.
 ///
-/// Invokes optional per-page [`FrameMetaVtable::on_unmap`] hooks, then returns the block to buddy.
-/// Poisoned frames ([`meta_guard::POISONED`]) are quarantined and not recycled
-/// ([`poison_quarantine_pages_snapshot`]).
+/// Lifecycle order:
+/// 1. Invoke per-block [`FrameMetaVtable::on_last_ref`] (once, for the head frame) —
+///    signals that the last shared ownership reference has been dropped.
+/// 2. Invoke per-page [`FrameMetaVtable::on_unmap`] hooks (once per constituent 4 KiB page)
+///    — signals that mappings are being torn down.
+/// 3. Return the block to buddy.  Poisoned frames ([`meta_guard::POISONED`]) are quarantined
+///    and not recycled ([`poison_quarantine_pages_snapshot`]).
 ///
 /// # Hook ordering guarantee
-/// `on_unmap` is called **before** the buddy allocator decides to recycle or quarantine.
-/// Hooks that rely on the frame being recyclable may run pointlessly on poisoned blocks —
-/// they must therefore be idempotent and side-effect-safe.
+/// `on_last_ref` and `on_unmap` are called **before** the buddy allocator decides to recycle
+/// or quarantine.  Hooks that rely on the frame being recyclable may run pointlessly on
+/// poisoned blocks — they must therefore be idempotent and side-effect-safe.
 pub fn release_owned_block(block: PhysBlock<Released>) {
     let handle = block.into_handle();
     with_irqs_disabled(|token| {
         let frame_phys = handle.base.as_u64();
         let order = handle.order;
+
+        // 1. on_last_ref — once per block (head frame only).
+        frame::invoke_vtable_on_last_ref(x86_64::PhysAddr::new(frame_phys));
+
+        // 2. on_unmap — once per constituent page.
         for i in 0..(1u64 << order) {
             let p = x86_64::PhysAddr::new(frame_phys + i * frame::PAGE_SIZE);
             frame::invoke_vtable_on_unmap(p);
