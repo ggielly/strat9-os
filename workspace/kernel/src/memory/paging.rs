@@ -1,7 +1,7 @@
 //! Virtual Memory Management (Paging) for Strat9-OS
 //!
 //! Uses the `x86_64` crate's `OffsetPageTable` which is designed for the HHDM
-//! (Higher Half Direct Map) pattern — exactly what Limine provides.
+//! (Higher Half Direct Map) pattern : exactly what Limine provides.
 //!
 //! Provides map/unmap/translate operations on the active page table.
 
@@ -14,7 +14,10 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 
-use crate::memory::frame::{FrameAllocOptions, FramePurpose};
+use crate::{
+    memory::frame::{FrameAllocOptions, FramePurpose},
+    sync::SpinLock,
+};
 
 /// Wrapper around the buddy allocator implementing the x86_64 crate's `FrameAllocator` trait.
 ///
@@ -35,14 +38,16 @@ use crate::memory::frame::{FrameAllocOptions, FramePurpose};
 ///  .purpose(FramePurpose::PageTable)` which:
 ///
 ///  1. Calls the buddy allocator for a raw order-0 frame.
-///  2. CAS-claims the frame via `FrameMeta::refcount` (UNUSED → 0 → 1).
+///  2. CAS-claims the frame via the [`MetaSlot`](crate::memory::MetaSlot) refcount field
+///     (`REFCOUNT_UNUSED` → `1`).
 ///  3. Zeros the 4 KiB with a single `ptr::write_bytes` through the HHDM.
-///  4. Sets `FrameMeta::flags` to `KERNEL | ALLOCATED` with `Release` ordering.
+///  4. Sets purpose flags on the [`MetaSlot`](crate::memory::MetaSlot) with `Release` ordering.
 ///  5. Stores `refcount = 1` with `Release` ordering so any future reader
 ///     that loads the refcount with `Acquire` observes a fully-initialised frame.
 ///
-/// This pattern is lifted directly from Asterinas OSTD
-/// `FrameAllocOptions::alloc_frame_with` + `MetaSlot::get_from_unused`.
+/// This matches the Asterinas OSTD pattern (`FrameAllocOptions` + per-frame
+/// [`MetaSlot`](crate::memory::MetaSlot) with refcount CAS). Metadata lives in
+/// dedicated slots (not in mapped page bytes); see [`get_meta_slot`](crate::memory::get_meta_slot).
 pub struct BuddyFrameAllocator;
 
 // SAFETY: `BuddyFrameAllocator::allocate_frame` returns 4KiB-aligned,
@@ -78,6 +83,13 @@ static mut PAGING_READY: bool = false;
 
 /// Physical address of the kernel's level-4 page table (set at init, never changes).
 static mut KERNEL_CR3: PhysAddr = PhysAddr::new_truncate(0);
+
+/// Serializes mutations of the canonical kernel page tables.
+///
+/// The active-CR3 mapping helpers are still caller-synchronized by their own
+/// higher-level address-space locks, but kernel-global mappings such as vmalloc
+/// must not race while allocating or wiring intermediate page-table levels.
+static KERNEL_PT_LOCK: SpinLock<()> = SpinLock::new(());
 
 /// Returns whether initialized.
 pub fn is_initialized() -> bool {
@@ -185,6 +197,7 @@ pub fn map_page_kernel(
     if !is_initialized() {
         return Err("Paging not initialized");
     }
+    let _guard = KERNEL_PT_LOCK.lock();
     // SAFETY: KERNEL_CR3 is set once during init and never changes.
     let kernel_cr3 = unsafe { *(&raw const KERNEL_CR3) };
     let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
@@ -228,6 +241,7 @@ pub fn unmap_page_kernel(page: Page<Size4KiB>) -> Result<X86PhysFrame<Size4KiB>,
     if !is_initialized() {
         return Err("Paging not initialized");
     }
+    let _guard = KERNEL_PT_LOCK.lock();
     // SAFETY: KERNEL_CR3 is set once during init and never changes.
     let kernel_cr3 = unsafe { *(&raw const KERNEL_CR3) };
     let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());

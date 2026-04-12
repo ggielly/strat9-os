@@ -3,7 +3,7 @@
 //! When a page table entry is modified on one CPU, all other CPUs that might
 //! have cached that entry in their TLB must be notified to invalidate it.
 //!
-//! This implementation uses a per-CPU mailbox system inspired by Asterinas:
+//! This implementation uses a per-CPU mailbox system inspired by Asterinas :
 //! 1. Each CPU has its own queue of pending TLB operations.
 //! 2. The initiator pushes an operation into each target's queue.
 //! 3. The initiator sends a TLB shootdown IPI to all targets.
@@ -80,6 +80,21 @@ impl TlbQueue {
     }
 }
 
+/// Page-count threshold above which a ranged shootdown falls back to a full
+/// CR3 reload (`shootdown_all`) rather than issuing one `invlpg` per page.
+///
+/// Rationale: on x86, a CR3 write flushes all non-global TLB entries in a
+/// single pipeline stage. Individual `invlpg` instructions have a per-entry
+/// cost that grows linearly with the number of pages. Empirically, the
+/// crossover point is around 32–64 pages (µarch-dependent); 64 is a
+/// conservative upper bound that keeps the fast path below ~256 ns on modern
+/// hardware while avoiding spurious full flushes on small vmalloc frees.
+///
+/// The same constant governs both the sender side (`shootdown_range`,
+/// `local_range`) and the receiver side (IPI handler's `Range` arm) so the
+/// two never disagree on what "small range" means.
+pub const TLB_RANGE_THRESHOLD_PAGES: usize = 64;
+
 /// Global array of per-CPU TLB queues.
 static TLB_QUEUES: [SpinLock<TlbQueue>; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { SpinLock::new(TlbQueue::new()) }; crate::arch::x86_64::percpu::MAX_CPUS];
@@ -110,7 +125,37 @@ pub fn shootdown_page(vaddr: VirtAddr) {
     dispatch_op(op);
 }
 
+/// Invalidate a single page on the current CPU only.
+#[inline]
+pub fn local_page(vaddr: VirtAddr) {
+    unsafe { invlpg(vaddr) };
+}
+
+/// Invalidate a range on the current CPU only.
+pub fn local_range(start: VirtAddr, end: VirtAddr) {
+    if end.as_u64() <= start.as_u64() {
+        unsafe { flush_tlb_all() };
+        return;
+    }
+
+    let page_count = (end.as_u64() - start.as_u64()) / 4096;
+    if page_count > TLB_RANGE_THRESHOLD_PAGES as u64 {
+        unsafe { flush_tlb_all() };
+        return;
+    }
+
+    for i in 0..page_count {
+        let addr = start + (i * 4096);
+        unsafe { invlpg(addr) };
+    }
+}
+
 /// Invalidate a range of pages on all CPUs.
+///
+/// Falls back to [`shootdown_all`] when the range exceeds
+/// [`TLB_RANGE_THRESHOLD_PAGES`] pages, because a full CR3 reload is cheaper
+/// than that many `invlpg` instructions on both the initiating and receiving
+/// CPUs.
 pub fn shootdown_range(start: VirtAddr, end: VirtAddr) {
     // Guard: end must be strictly after start; silently promote to full flush
     // if the range is invalid rather than underflowing in u64 arithmetic.
@@ -125,7 +170,7 @@ pub fn shootdown_range(start: VirtAddr, end: VirtAddr) {
     }
 
     let page_count = (end.as_u64() - start.as_u64()) / 4096;
-    if page_count > 64 {
+    if page_count > TLB_RANGE_THRESHOLD_PAGES as u64 {
         shootdown_all();
         return;
     }
@@ -222,15 +267,15 @@ pub extern "C" fn tlb_shootdown_ipi_handler() {
 
     // 1. Take all pending ops from our mailbox.
     let mut local_ops = [TlbOp::NONE; 16];
-    let mut count = 0;
-    {
+    let count = {
         let mut queue = TLB_QUEUES[cpu_idx].lock();
-        count = queue.count;
-        for i in 0..count {
+        let c = queue.count;
+        for i in 0..c {
             local_ops[i] = queue.ops[i];
         }
         queue.clear();
-    }
+        c
+    };
 
     // 2. Perform the operations.
     for i in 0..count {
@@ -244,11 +289,18 @@ pub extern "C" fn tlb_shootdown_ipi_handler() {
                 let start = op.vaddr_start;
                 let end = op.vaddr_end;
                 // Guard: corrupt TlbOp must not underflow in release build.
+                // Also cap to TLB_RANGE_THRESHOLD_PAGES for defense-in-depth:
+                // the sender already guarantees this, but a stale or malformed
+                // op must not spend thousands of invlpg cycles on the receiver.
                 if end > start {
                     let page_count = (end - start) / 4096;
-                    for j in 0..page_count {
-                        let addr = VirtAddr::new(start + j * 4096);
-                        unsafe { invlpg(addr) };
+                    if page_count > TLB_RANGE_THRESHOLD_PAGES as u64 {
+                        unsafe { flush_tlb_all() };
+                    } else {
+                        for j in 0..page_count {
+                            let addr = VirtAddr::new(start + j * 4096);
+                            unsafe { invlpg(addr) };
+                        }
                     }
                 } else {
                     unsafe { flush_tlb_all() };

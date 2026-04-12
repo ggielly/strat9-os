@@ -11,7 +11,7 @@
 
 use crate::{
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
-    memory::{allocate_dma_frame, phys_to_virt},
+    memory::{allocate_zeroed_frame, phys_to_virt},
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -179,7 +179,7 @@ impl UhciController {
     /// Initializes frame list.
     unsafe fn init_frame_list(&mut self) -> Result<(), &'static str> {
         // Allocate frame list (4KB aligned, 1024 entries for 1ms frames)
-        let frame = allocate_dma_frame().ok_or("Failed to allocate frame list")?;
+        let frame = allocate_zeroed_frame().ok_or("Failed to allocate frame list")?;
         self.frame_list_phys = frame.start_address.as_u64();
         self.frame_list = phys_to_virt(self.frame_list_phys) as *mut u32;
         core::ptr::write_bytes(self.frame_list as *mut u8, 0, 4096);

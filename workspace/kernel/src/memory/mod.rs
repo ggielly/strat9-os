@@ -19,7 +19,7 @@ pub mod zone;
 use crate::{
     boot::entry::MemoryRegion, capability::CapId, process::get_task_by_pid, sync::IrqDisabledToken,
 };
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Once;
 
 /// Higher Half Direct Map offset.
@@ -72,8 +72,13 @@ pub use block::{
     BlockHandle, BuddyReserved, Exclusive, MappedExclusive, MappedShared, PhysBlock, Released,
 };
 pub use block_meta::{get_block_meta, resolve_handle};
-pub use buddy::get_allocator;
-pub use frame::{AllocError, FrameAllocOptions, FrameAllocator, FramePurpose, PhysFrame};
+pub use buddy::{buddy_alloc_fail_counts_snapshot, get_allocator, poison_quarantine_pages_snapshot};
+pub use frame::{
+    block_phys_has_poison_guard, frame_meta_debug_snapshot, get_meta, get_meta_slot,
+    invoke_vtable_on_last_ref, invoke_vtable_on_unmap, meta_generation_matches, meta_guard,
+    AllocError, FrameAllocOptions, FrameAllocator, FrameMeta, FrameMetaVtable, FramePurpose,
+    FreeListLink, MetaSlot, PhysFrame, DEFAULT_FRAME_META_VTABLE, META_SLOT_REFCOUNT_BYTE_OFFSET,
+};
 pub use mapping_index::{MappingIndex, MappingRef};
 pub use ownership::{BlockState, OwnerEntry, OwnerError, OwnershipTable, RemoveRefResult};
 pub use region_cap::{
@@ -123,15 +128,39 @@ pub fn try_register_mapping_identity(handle: BlockHandle, cap_id: CapId) -> Resu
 }
 
 /// Releases a block back to the buddy allocator.
+///
+/// Lifecycle order:
+/// 1. Invoke per-block [`FrameMetaVtable::on_last_ref`] (once, for the head frame) —
+///    signals that the last shared ownership reference has been dropped.
+/// 2. Invoke per-page [`FrameMetaVtable::on_unmap`] hooks (once per constituent 4 KiB page)
+///    — signals that mappings are being torn down.
+/// 3. Return the block to buddy.  Poisoned frames ([`meta_guard::POISONED`]) are quarantined
+///    and not recycled ([`poison_quarantine_pages_snapshot`]).
+///
+/// # Hook ordering guarantee
+/// `on_last_ref` and `on_unmap` are called **before** the buddy allocator decides to recycle
+/// or quarantine.  Hooks that rely on the frame being recyclable may run pointlessly on
+/// poisoned blocks — they must therefore be idempotent and side-effect-safe.
 pub fn release_owned_block(block: PhysBlock<Released>) {
     let handle = block.into_handle();
     with_irqs_disabled(|token| {
-        free_frames(
+        let frame_phys = handle.base.as_u64();
+        let order = handle.order;
+
+        // 1. on_last_ref — once per block (head frame only).
+        frame::invoke_vtable_on_last_ref(x86_64::PhysAddr::new(frame_phys));
+
+        // 2. on_unmap — once per constituent page.
+        for i in 0..(1u64 << order) {
+            let p = x86_64::PhysAddr::new(frame_phys + i * frame::PAGE_SIZE);
+            frame::invoke_vtable_on_unmap(p);
+        }
+        buddy::free(
             token,
             PhysFrame {
                 start_address: handle.base,
             },
-            handle.order,
+            order,
         );
     });
 }
@@ -201,21 +230,127 @@ pub fn revoke_mapping_cap_id(cap_id: CapId) -> usize {
 
 /// Allocate `2^order` contiguous physical frames (raw, no zeroing).
 ///
-/// Prefer `FrameAllocOptions::new().allocate(token)` for order-0 allocations
-/// where zeroing or metadata stamping is needed (page tables, anonymous pages).
-/// This raw path is kept for multi-page / DMA bulk allocations where the caller
-/// manages zeroing explicitly.
+/// **Deprecated** — use [`allocate_phys_contiguous`] for DMA / hardware-ring
+/// allocations where physical contiguity is the explicit requirement, or
+/// [`allocate_frame`] for single kernel-data frames.  This name remains for
+/// internal callers that pre-date the explicit-intent API.
+#[deprecated(
+    note = "use allocate_phys_contiguous() for DMA/contiguous allocations, \
+            or allocate_frame() for single kernel-data frames"
+)]
 #[inline]
 pub fn allocate_frames(token: &IrqDisabledToken, order: u8) -> Result<PhysFrame, AllocError> {
     buddy::alloc(token, order)
 }
 
+/// Total pages handed out by [`allocate_phys_contiguous`] (in units of 4 KiB pages, summed across orders).
+///
+/// Incremented on every successful contiguous alloc; never decremented.
+/// Paired with [`CONTIGUOUS_FREE_PAGES`] to derive the live count.
+static CONTIGUOUS_ALLOC_PAGES: AtomicUsize = AtomicUsize::new(0);
+/// Total pages returned via [`free_phys_contiguous`].
+static CONTIGUOUS_FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
+/// Total failed contiguous allocation attempts (fragmentation indicator).
+static CONTIGUOUS_ALLOC_FAIL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Allocate a physically contiguous block of `2^order` pages.
+///
+/// Use when **physical contiguity** is required: DMA rings, MMIO-adjacent
+/// buffers, hardware tables, copy-on-write multi-page copies, kernel stacks
+/// ([`allocate_kernel_stack_frames`]), etc.
+///
+/// Do not use for general large kernel buffers — prefer [`allocate_kernel_virtual`]
+/// (virtually contiguous, physically fragmented) or [`allocate_frame`] for single pages.
+///
+/// **Telemetry:** increments [`CONTIGUOUS_ALLOC_PAGES`] on success and
+/// [`CONTIGUOUS_ALLOC_FAIL_COUNT`] on failure; [`CONTIGUOUS_FREE_PAGES`] on
+/// [`free_phys_contiguous`]. Those counters include **every** use of this
+/// allocate/free pair (DMA buffers, kernel stacks, COW multi-page blocks,
+/// etc.) — not only hardware DMA. Treat [`phys_contiguous_diag`] as overall
+/// buddy multi-page contiguous traffic.
+#[inline]
+pub(crate) fn allocate_phys_contiguous(
+    token: &IrqDisabledToken,
+    order: u8,
+) -> Result<PhysFrame, AllocError> {
+    match buddy::alloc(token, order) {
+        Ok(frame) => {
+            CONTIGUOUS_ALLOC_PAGES.fetch_add(1usize << order, Ordering::Relaxed);
+            Ok(frame)
+        }
+        Err(e) => {
+            CONTIGUOUS_ALLOC_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+            Err(e)
+        }
+    }
+}
+
 /// Free `2^order` contiguous physical frames.
 ///
-/// Requires an `IrqDisabledToken` proving that IRQs are disabled on the calling CPU.
+/// **Deprecated** — use [`free_phys_contiguous`] for blocks returned by
+/// [`allocate_phys_contiguous`], or [`free_frame`] for single frames.
+#[deprecated(
+    note = "use free_phys_contiguous() for blocks from allocate_phys_contiguous, \
+            or free_frame() for single frames"
+)]
 #[inline]
 pub fn free_frames(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
     buddy::free(token, frame, order);
+}
+
+/// Free a physically contiguous block previously returned by
+/// [`allocate_phys_contiguous`].
+///
+/// DO NOT USE to free frames from [`allocate_frame`] — use [`free_frame`] instead.
+#[inline]
+pub(crate) fn free_phys_contiguous(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
+    CONTIGUOUS_FREE_PAGES.fetch_add(1usize << order, Ordering::Relaxed);
+    buddy::free(token, frame, order);
+}
+
+/// Snapshot of contiguous-physical-allocation telemetry.
+///
+/// Covers all [`allocate_phys_contiguous`] / [`free_phys_contiguous`] usage
+/// (DMA-style buffers, kernel stacks, COW multi-page blocks, etc.).
+pub struct PhysContiguousDiag {
+    pub pages_allocated: usize,
+    pub pages_freed: usize,
+    pub pages_live: usize,
+    pub alloc_fail_count: usize,
+}
+
+/// Read current contiguous-allocation telemetry without locking.
+///
+/// Counters are not limited to device DMA; any code path using
+/// [`allocate_phys_contiguous`] contributes (see module docs on that function).
+pub fn phys_contiguous_diag() -> PhysContiguousDiag {
+    let alloc = CONTIGUOUS_ALLOC_PAGES.load(Ordering::Relaxed);
+    let freed = CONTIGUOUS_FREE_PAGES.load(Ordering::Relaxed);
+    PhysContiguousDiag {
+        pages_allocated: alloc,
+        pages_freed: freed,
+        pages_live: alloc.saturating_sub(freed),
+        alloc_fail_count: CONTIGUOUS_ALLOC_FAIL_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+/// Allocate physically contiguous pages for a kernel stack.
+///
+/// Kernel stacks need a contiguous physical backing in the current design
+/// because they are carved as a single block and directly accessed through the
+/// HHDM. This is distinct from DMA intent, so keep a dedicated API.
+#[inline]
+pub fn allocate_kernel_stack_frames(
+    token: &IrqDisabledToken,
+    order: u8,
+) -> Result<PhysFrame, AllocError> {
+    allocate_phys_contiguous(token, order)
+}
+
+/// Free pages previously returned by [`allocate_kernel_stack_frames`].
+#[inline]
+pub fn free_kernel_stack_frames(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
+    free_phys_contiguous(token, frame, order);
 }
 
 /// Allocate a single **zeroed** physical frame with `KernelData` purpose.
@@ -241,17 +376,48 @@ pub fn allocate_frame(token: &IrqDisabledToken) -> Result<PhysFrame, AllocError>
 /// For standard single-frame deallocation, prefer `release_owned_block()` which also handles ownership table updates and safety checks.
 #[inline]
 pub fn free_frame(token: &IrqDisabledToken, frame: PhysFrame) {
-    free_frames(token, frame, 0);
+    buddy::free(token, frame, 0);
 }
 
-/// Allocate a zeroed 4 KiB frame suitable for DMA operations.
+/// Allocate virtually contiguous kernel memory backed by fragmented physical
+/// pages.
+///
+/// This is the explicit large-allocation API for kernel callers that require a
+/// large virtually contiguous range but not physical contiguity.
+///
+/// Returned pointers are aligned to a **4 KiB** page boundary. For alignment
+/// stricter than one page, do not route through [`GlobalAlloc`] / large
+/// [`Layout`] on this heap — use a dedicated aligned mapping or slab path.
+#[inline]
+#[track_caller]
+pub fn allocate_kernel_virtual(
+    size: usize,
+    token: &IrqDisabledToken,
+) -> Result<*mut u8, vmalloc::VmallocError> {
+    vmalloc::vmalloc(size, token)
+}
+
+/// Free memory previously returned by [`allocate_kernel_virtual`].
+///
+/// Returns `true` if a mapping was released. `false` means nothing was freed
+/// (e.g. pointer not in the vmalloc arena or not a live allocation start).
+#[inline]
+pub fn free_kernel_virtual(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
+    vmalloc::vfree(ptr, token)
+}
+
+/// Allocate a single zeroed 4 KiB frame.
 ///
 /// Disables IRQs internally.  The frame is zeroed before being returned
-/// (guaranteed by `FrameAllocOptions::new()` — zeroed = true by default).
-pub fn allocate_dma_frame() -> Option<PhysFrame> {
+/// (`FrameAllocOptions::new()` defaults to zeroed = true).
+///
+/// This is a convenience wrapper for hardware drivers that need a single
+/// device-accessible page.  It carries no DMA-zone or address-range
+/// guarantee — the frame may come from any zone.  For strict DMA
+/// requirements (e.g. <16 MiB for ISA DMA), allocate from the DMA zone
+/// directly via `FrameAllocOptions`.
+pub fn allocate_zeroed_frame() -> Option<PhysFrame> {
     with_irqs_disabled(|token| {
-        // `FrameAllocOptions::new()` defaults to zeroed = true; no manual
-        // `write_bytes` call is needed here any more.
         FrameAllocOptions::new()
             .purpose(FramePurpose::KernelData)
             .allocate(token)

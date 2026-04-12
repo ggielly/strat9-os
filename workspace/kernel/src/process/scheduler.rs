@@ -325,6 +325,10 @@ pub(crate) fn take_force_resched_hint(cpu: usize) -> bool {
 ///
 /// Lock order: acquire `GLOBAL_SCHED_STATE` before `LOCAL_SCHEDULERS[n]`
 /// when both are needed. Never hold a LOCAL lock and then block-acquire GLOBAL.
+///
+/// When both `GLOBAL_SCHED_STATE` and `SCHED_IDENTITY` are needed, always take
+/// `GLOBAL_SCHED_STATE` first, then `SCHED_IDENTITY`. Paths that reversed this
+/// order deadlocked with `kill_task` / `try_reap_child_locked` during shutdown.
 pub(crate) static GLOBAL_SCHED_STATE: SpinLock<Option<GlobalSchedState>> = SpinLock::new(None);
 
 /// Returns the scheduler lock address for deadlock tracing.

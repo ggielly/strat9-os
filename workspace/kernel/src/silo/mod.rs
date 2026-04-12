@@ -1341,6 +1341,16 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
 /// - current usage bytes
 /// - configured minimum bytes
 /// - configured maximum bytes (0 = unlimited)
+/// Best-effort, non-blocking silo lookup for allocator-internal accounting.
+///
+/// Uses `try_lock` so that callers running under IRQs-disabled conditions
+/// (e.g. inside vmalloc) do not deadlock when SILO_MANAGER is already held
+/// by an outer call on the same CPU.  Returns `None` if the lock is contended
+/// or if the task is not registered in any silo.
+pub fn try_silo_id_for_task(task_id: TaskId) -> Option<u32> {
+    SILO_MANAGER.try_lock()?.silo_for_task(task_id)
+}
+
 pub fn silo_info_for_task(task_id: TaskId) -> Option<(u32, Option<String>, u64, u64, u64)> {
     let mgr = SILO_MANAGER.lock();
     let silo_id = mgr.silo_for_task(task_id)?;

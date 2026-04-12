@@ -7,6 +7,9 @@
 use crate::sync::SpinLock;
 use alloc::vec::Vec;
 
+// SpinLock over Option<Vec<u8>>: shell-only path, never called from IRQ context
+// or the allocator hot path.  Heap growth under this lock is acceptable.
+// Tracked as low-priority debt in ticket #49.
 static CAPTURE_BUF: SpinLock<Option<Vec<u8>>> = SpinLock::new(None);
 static PIPE_INPUT: SpinLock<Option<Vec<u8>>> = SpinLock::new(None);
 

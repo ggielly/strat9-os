@@ -288,12 +288,20 @@ impl BuddyAllocator {
             let Some(frame_phys) = Self::free_list_pop(zone, cur_order) else {
                 continue;
             };
+            debug_assert!(
+                !crate::memory::frame::block_phys_has_poison_guard(frame_phys, cur_order),
+                "buddy: poisoned block on free list (order {})",
+                cur_order
+            );
             let block_size = PAGE_SIZE << cur_order;
             let block_end = frame_phys.saturating_add(block_size);
             if Self::protected_overlap_end(frame_phys, block_end).is_some() {
                 // Inconsistency: a free block overlaps with protected kernel memory.
                 // This means seed_range_as_free() was incorrect.
-                panic!("Buddy allocator inconsistency: free block 0x{:x} order {} overlaps protected memory", frame_phys, cur_order);
+                panic!(
+                    "Buddy allocator inconsistency: free block 0x{:x} order {} overlaps protected memory",
+                    frame_phys, cur_order
+                );
             }
 
             // One block of this order transitions free -> allocated.
@@ -350,6 +358,37 @@ impl BuddyAllocator {
         Self::mark_block_free(frame_phys, order);
         Self::insert_free_block(zone, frame_phys, order);
         zone.allocated = zone.allocated.saturating_sub(1usize << order);
+    }
+
+    /// Drops allocator accounting for a poisoned block without returning it to the free list.
+    ///
+    /// The block is **not** placed on any free list and its debug-bitmap entries
+    /// remain marked as "allocated" — because they genuinely are: the pages are
+    /// quarantined and inaccessible.  Clearing them would defeat the double-free
+    /// detector for any later attempt to free the same block.
+    fn quarantine_poisoned_block_in_zone(
+        zone: &mut Zone,
+        frame: PhysFrame,
+        order: u8,
+        _token: &IrqDisabledToken,
+    ) {
+        let frame_phys = frame.start_address.as_u64();
+        let block_size = PAGE_SIZE << order;
+        let block_end = frame_phys.saturating_add(block_size);
+
+        debug_assert!(order <= MAX_ORDER as u8);
+        debug_assert!(frame.start_address.is_aligned(PAGE_SIZE << order));
+        debug_assert!(zone.contains_address(frame.start_address));
+
+        if Self::protected_overlap_end(frame_phys, block_end).is_some() {
+            return;
+        }
+
+        // Intentionally NO mark_allocated(false) here — pages stay "allocated"
+        // in the debug bitmap because they are quarantined, not freed.
+
+        zone.allocated = zone.allocated.saturating_sub(1usize << order);
+        POISON_QUARANTINE_PAGES.fetch_add(1usize << order, AtomicOrdering::Relaxed);
     }
 
     /// Linux-style parity-map coalescing insertion.
@@ -453,6 +492,10 @@ impl BuddyAllocator {
 
     /// Releases list push.
     fn free_list_push(zone: &mut Zone, phys: u64, order: u8) {
+        debug_assert!(
+            !crate::memory::frame::block_phys_has_poison_guard(phys, order),
+            "buddy: refusing to push poisoned block to free list"
+        );
         let head = zone.free_lists[order as usize];
         Self::write_free_prev(phys, 0);
         Self::write_free_next(phys, head);
@@ -695,6 +738,11 @@ impl BuddyAllocator {
         );
     }
 
+    /// Stamp every 4 KiB [`MetaSlot`] in the buddy block (flags, order, free-list links, refcount).
+    ///
+    /// [`MetaSlot::reset_with_free_list_meta`] runs on **each** page, including non-head pages
+    /// of a multi-page block: the whole block returns to the buddy as one unit, so vtable and
+    /// guard bits are cleared (except poison preserved per-slot) on every constituent frame.
     fn set_block_meta(frame_phys: u64, order: u8, flags: u32, refcount: u32) {
         let page_count = 1usize << order;
         for page_idx in 0..page_count {
@@ -705,6 +753,7 @@ impl BuddyAllocator {
             meta.set_next(FRAME_META_LINK_NONE);
             meta.set_prev(FRAME_META_LINK_NONE);
             meta.set_refcount(refcount);
+            meta.reset_with_free_list_meta();
         }
     }
 }
@@ -744,6 +793,14 @@ pub fn buddy_alloc_fail_counts_snapshot() -> [usize; crate::memory::zone::MAX_OR
         out[i] = counter.load(core::sync::atomic::Ordering::Relaxed);
     }
     out
+}
+
+/// Pages permanently withheld from the buddy free lists due to [`meta_guard::POISONED`].
+static POISON_QUARANTINE_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Snapshot of pages quarantined (not recycled) because frame metadata reported poison.
+pub fn poison_quarantine_pages_snapshot() -> usize {
+    POISON_QUARANTINE_PAGES.load(AtomicOrdering::Relaxed)
 }
 
 /// Returns the global buddy lock address for deadlock tracing.
@@ -1048,6 +1105,14 @@ fn alloc_order0_cached() -> Result<PhysFrame, AllocError> {
 }
 
 fn free_order0_cached(frame: PhysFrame) {
+    // NOTE: O(2^order) MetaSlot scan — acceptable here because order is always 0
+    // (single-page check) on this hot path.
+    if crate::memory::frame::block_phys_has_poison_guard(frame.start_address.as_u64(), 0) {
+        let mut global = OnDemandGlobalLock::new();
+        global.free(frame, 0);
+        return;
+    }
+
     if !is_cacheable_phys(frame.start_address.as_u64()) {
         let mut global = OnDemandGlobalLock::new();
         global.free(frame, 0);
@@ -1056,23 +1121,29 @@ fn free_order0_cached(frame: PhysFrame) {
 
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
     let mut spill = [0u64; LOCAL_CACHE_FLUSH_BATCH];
-    BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0);
 
     let spill_len = {
         let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
         if cache.push(frame).is_ok() {
+            // Mark free only on the success path: the incoming frame transitions
+            // from "caller-allocated" to "cache sentinel" (REFCOUNT_UNUSED).
+            BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0);
             local_cached_inc_phys(frame.start_address.as_u64());
             return;
         }
 
+        // Cache full: pop existing frames to spill to buddy, then retry the push.
         let mut spill_len = cache.pop_many(&mut spill);
         for phys in spill.iter().take(spill_len).copied() {
             local_cached_dec_phys(phys);
         }
 
         if cache.push(frame).is_ok() {
+            BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0);
             local_cached_inc_phys(frame.start_address.as_u64());
         } else {
+            // Still full after spilling — the incoming frame joins the spill batch.
+            // It will be marked free by free_phys_batch → free_to_zone.
             spill[spill_len] = frame.start_address.as_u64();
             spill_len += 1;
         }
@@ -1165,7 +1236,14 @@ impl FrameAllocator for BuddyAllocator {
         let frame_phys = frame.start_address.as_u64();
         let zi = Self::zone_index_for_addr(frame_phys);
         let zone = &mut self.zones[zi];
-        Self::free_to_zone(zone, frame, order, token);
+        // NOTE: O(2^order) MetaSlot scan. Acceptable for large-order frees
+        // (kernel stacks, vmalloc) which are rare; order-0 path is handled
+        // separately in free_order0_cached with a single-page check.
+        if crate::memory::frame::block_phys_has_poison_guard(frame_phys, order) {
+            Self::quarantine_poisoned_block_in_zone(zone, frame, order, token);
+        } else {
+            Self::free_to_zone(zone, frame, order, token);
+        }
 
         ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
     }

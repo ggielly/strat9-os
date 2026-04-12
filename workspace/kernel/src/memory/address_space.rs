@@ -586,7 +586,7 @@ impl AddressSpace {
             if order == 0 {
                 crate::memory::allocate_frame(token)
             } else {
-                let f = crate::memory::allocate_frames(token, order)?;
+                let f = crate::memory::allocate_phys_contiguous(token, order)?;
                 // SAFETY: phys_to_virt gives a valid HHDM pointer for this
                 // frame; we have exclusive ownership from the buddy allocator.
                 unsafe {
@@ -620,13 +620,13 @@ impl AddressSpace {
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                crate::memory::free_frames(token, frame, order);
+                                crate::memory::free_phys_contiguous(token, frame, order);
                             });
                             return Ok(());
                         }
                         Err(_) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                crate::memory::free_frames(token, frame, order);
+                                crate::memory::free_phys_contiguous(token, frame, order);
                             });
                             return Err("Failed to map demand page (4K)");
                         }
@@ -646,13 +646,13 @@ impl AddressSpace {
                         }
                         Err(MapToError::PageAlreadyMapped(_)) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                crate::memory::free_frames(token, frame, order);
+                                crate::memory::free_phys_contiguous(token, frame, order);
                             });
                             return Ok(());
                         }
                         Err(_) => {
                             crate::sync::with_irqs_disabled(|token| {
-                                crate::memory::free_frames(token, frame, order);
+                                crate::memory::free_phys_contiguous(token, frame, order);
                             });
                             return Err("Failed to map demand page (2M)");
                         }
@@ -691,7 +691,7 @@ impl AddressSpace {
                 }
             }
             crate::sync::with_irqs_disabled(|token| {
-                crate::memory::free_frames(token, frame, order);
+                crate::memory::free_phys_contiguous(token, frame, order);
             });
             return Err("Failed to track demand page mapping");
         }
@@ -778,7 +778,7 @@ impl AddressSpace {
                 if order == 0 {
                     crate::memory::allocate_frame(token)
                 } else {
-                    let f = crate::memory::allocate_frames(token, order)?;
+                    let f = crate::memory::allocate_phys_contiguous(token, order)?;
                     unsafe {
                         let virt = crate::memory::phys_to_virt(f.start_address.as_u64());
                         core::ptr::write_bytes(virt as *mut u8, 0, page_bytes as usize);
@@ -833,7 +833,7 @@ impl AddressSpace {
                 );
                 // Free frame for this page that failed to map.
                 crate::sync::with_irqs_disabled(|token| {
-                    crate::memory::free_frames(token, frame, order);
+                    crate::memory::free_phys_contiguous(token, frame, order);
                 });
 
                 // Roll back already mapped pages to keep state consistent.
@@ -901,7 +901,7 @@ impl AddressSpace {
                     }
                 }
                 crate::sync::with_irqs_disabled(|token| {
-                    crate::memory::free_frames(token, frame, order);
+                    crate::memory::free_phys_contiguous(token, frame, order);
                 });
                 for j in (0..mapped_pages).rev() {
                     let rb_addr = start + (j as u64) * page_bytes;
@@ -1974,10 +1974,26 @@ impl AddressSpace {
             Ok(())
         })();
 
+        let tlb_flush_range = if tlb_flush_needed && !processed_pages.is_empty() {
+            let mut range_start = u64::MAX;
+            let mut range_end = 0u64;
+            for (vaddr, _, page_size) in &processed_pages {
+                range_start = range_start.min(*vaddr);
+                range_end = range_end.max(vaddr.saturating_add(page_size.bytes()));
+            }
+            if range_start < range_end {
+                Some((range_start, range_end))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         if let Err(e) = res {
             log::error!("clone_cow error: {}. Rolling back...", e);
             let mut parent_mapper = unsafe { self.mapper() };
-            for (vaddr, original_flags, page_size) in processed_pages.into_iter().rev() {
+            for &(vaddr, original_flags, page_size) in processed_pages.iter().rev() {
                 if original_flags.contains(PageTableFlags::WRITABLE) {
                     unsafe {
                         match page_size {
@@ -2000,14 +2016,20 @@ impl AddressSpace {
                     let _ = self.update_effective_mapping_flags(vaddr, original_flags);
                 }
             }
-            if tlb_flush_needed {
-                crate::arch::x86_64::tlb::shootdown_all();
+            if let Some((range_start, range_end)) = tlb_flush_range {
+                crate::arch::x86_64::tlb::shootdown_range(
+                    VirtAddr::new(range_start),
+                    VirtAddr::new(range_end),
+                );
             }
             return Err(e);
         }
 
-        if tlb_flush_needed {
-            crate::arch::x86_64::tlb::shootdown_all();
+        if let Some((range_start, range_end)) = tlb_flush_range {
+            crate::arch::x86_64::tlb::shootdown_range(
+                VirtAddr::new(range_start),
+                VirtAddr::new(range_end),
+            );
         }
         Ok(child)
     }

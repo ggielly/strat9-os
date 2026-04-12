@@ -290,8 +290,9 @@ impl Bounce {
     fn alloc(bytes: usize) -> Result<Self, AhciError> {
         let pages = (bytes + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let frame = crate::sync::with_irqs_disabled(|token| memory::allocate_frames(token, order))
-            .map_err(|_| AhciError::Alloc)?;
+        let frame =
+            crate::sync::with_irqs_disabled(|token| memory::allocate_phys_contiguous(token, order))
+                .map_err(|_| AhciError::Alloc)?;
         let phys = frame.start_address.as_u64();
         Ok(Self {
             frame,
@@ -304,7 +305,7 @@ impl Bounce {
     /// Performs the free operation.
     fn free(self) {
         crate::sync::with_irqs_disabled(|token| {
-            memory::free_frames(token, self.frame, self.order);
+            memory::free_phys_contiguous(token, self.frame, self.order);
         });
     }
 }

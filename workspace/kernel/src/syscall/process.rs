@@ -135,6 +135,7 @@ fn build_user_thread_task(
         process: parent.process.clone(),
         pending_signals: crate::process::signal::SignalSet::new(),
         blocked_signals: parent.blocked_signals.clone(),
+        irq_signal_delivery_blocked: core::sync::atomic::AtomicBool::new(false),
         signal_stack: SyncUnsafeCell::new(None),
         itimers: crate::process::timer::ITimers::new(),
         wake_pending: core::sync::atomic::AtomicBool::new(false),

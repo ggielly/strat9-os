@@ -3,7 +3,7 @@
 
 use crate::{
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
-    memory::{allocate_dma_frame, phys_to_virt},
+    memory::{allocate_zeroed_frame, phys_to_virt},
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::{
@@ -245,7 +245,7 @@ impl NvmeController {
 
     /// Performs the identify operation.
     fn identify(&self, cns: u8, nsid: u32) -> Result<*mut u8, NvmeError> {
-        let frame = allocate_dma_frame().ok_or(NvmeError::IoError)?;
+        let frame = allocate_zeroed_frame().ok_or(NvmeError::IoError)?;
         let phys = frame.start_address.as_u64();
         let virt = phys_to_virt(phys) as *mut u8;
         unsafe {
@@ -393,7 +393,7 @@ impl<T: QueueType> Queue<T> {
         let doorbell =
             unsafe { &*((registers_base + doorbell_offset) as *const VolatileCell<u32>) };
 
-        let frame = allocate_dma_frame().expect("NVMe: failed to allocate queue frame");
+        let frame = allocate_zeroed_frame().expect("NVMe: failed to allocate queue frame");
         let phys_addr = frame.start_address.as_u64();
         let virt_addr = phys_to_virt(phys_addr);
 

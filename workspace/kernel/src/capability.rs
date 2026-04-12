@@ -10,11 +10,15 @@ use crate::{
     vfs,
 };
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Unique identifier for a capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CapId(u64);
+
+/// Key for per-resource refcounting: (resource_type, resource_ptr)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct ResourceKey(ResourceType, usize);
 
 impl CapId {
     /// Generate a new unique capability ID
@@ -35,7 +39,7 @@ impl CapId {
 }
 
 /// Types of kernel resources that can be accessed via capabilities
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResourceType {
     MemoryRegion,
     IoPortRange,
@@ -274,6 +278,8 @@ impl CapabilityTable {
 pub struct CapabilityManager {
     /// All capabilities in the system
     all_capabilities: SpinLock<BTreeMap<CapId, Capability>>,
+    /// Per-resource refcounts for O(1) capability counting (no full-table scan)
+    resource_refcounts: SpinLock<BTreeMap<ResourceKey, AtomicUsize>>,
 }
 
 impl CapabilityManager {
@@ -281,6 +287,7 @@ impl CapabilityManager {
     pub fn new() -> Self {
         CapabilityManager {
             all_capabilities: SpinLock::new(BTreeMap::new()),
+            resource_refcounts: SpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -299,33 +306,67 @@ impl CapabilityManager {
         };
 
         self.all_capabilities.lock().insert(cap.id, cap.clone());
+        self.increment_resource_refcount(resource_type, resource);
         cap
     }
 
     /// Register an already-created capability in the global table.
     pub fn register_capability(&self, cap: Capability) {
+        let key = ResourceKey(cap.resource_type, cap.resource);
         self.all_capabilities.lock().insert(cap.id, cap);
+        self.increment_resource_refcount_key(&key);
     }
 
     /// Revoke a capability (removes it from the global table)
     pub fn revoke_capability(&self, id: CapId) -> Option<Capability> {
-        self.all_capabilities.lock().remove(&id)
+        let removed = {
+            let mut caps = self.all_capabilities.lock();
+            caps.remove(&id)
+        };
+        if let Some(ref cap) = removed {
+            let key = ResourceKey(cap.resource_type, cap.resource);
+            self.decrement_resource_refcount(&key);
+        }
+        removed
     }
 
     /// Count remaining capabilities that still reference the same resource.
-    // TODO(migration): Replace this full-table scan with per-resource refcounts
-    // maintained transactionally on insert/remove/revoke_all. The current
-    // approach is correct for the hardened migration, but every close of a
-    // multi-handle IPC resource still walks the entire global capability map
-    // under one lock. When the system grows more handles, this becomes both a
-    // teardown hotspot and a place where future rollback bugs could desync the
-    // observed last-handle state from the real one.
+    /// O(1) lookup via per-resource refcount — no full-table scan.
     pub fn resource_capability_count(&self, resource_type: ResourceType, resource: usize) -> usize {
-        self.all_capabilities
+        let key = ResourceKey(resource_type, resource);
+        self.resource_refcounts
             .lock()
-            .values()
-            .filter(|cap| cap.resource_type == resource_type && cap.resource == resource)
-            .count()
+            .get(&key)
+            .map(|rc| rc.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    // -- Internal refcount helpers --
+
+    fn increment_resource_refcount(&self, resource_type: ResourceType, resource: usize) {
+        let key = ResourceKey(resource_type, resource);
+        self.increment_resource_refcount_key(&key);
+    }
+
+    fn increment_resource_refcount_key(&self, key: &ResourceKey) {
+        let mut refcounts = self.resource_refcounts.lock();
+        let entry = refcounts.entry(*key).or_insert_with(|| AtomicUsize::new(0));
+        entry.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_resource_refcount(&self, key: &ResourceKey) {
+        let mut refcounts = self.resource_refcounts.lock();
+        // Check and remove under the same lock acquisition to avoid the TOCTOU
+        // window where another thread could increment the refcount between the
+        // `drop` and the second `lock().remove()`.
+        let should_remove = if let Some(rc) = refcounts.get(key) {
+            rc.fetch_sub(1, Ordering::Relaxed) == 1
+        } else {
+            false
+        };
+        if should_remove {
+            refcounts.remove(key);
+        }
     }
 }
 

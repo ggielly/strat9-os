@@ -9,8 +9,11 @@ use nic_queues::{RxDescriptor, RxRing, TxRing};
 pub const NUM_RX: usize = 128; // Optimisé pour plus de throughput
 pub const NUM_TX: usize = 128; // Optimisé pour plus de throughput
 pub const RX_BUF_SIZE: usize = 4096; // Buffer size optimisé (MTU + overhead)
-const RESET_SPINS: u64 = 10_000_000;
-const EEPROM_READ_SPINS: u32 = 1_000_000;
+
+/// Poll `CTRL.RST` until hardware clears it (reset complete). Bounded to avoid hangs.
+const RESET_MAX_POLLS: u32 = 200_000;
+/// Max polls per EEPROM read (EERD.DONE). Much smaller than blind 1M spins.
+const EEPROM_MAX_POLLS: u32 = 50_000;
 
 pub const E1000_DEVICE_IDS: &[u16] = &[0x100E, 0x100F, 0x10D3, 0x153A, 0x1539];
 pub const INTEL_VENDOR: u16 = 0x8086;
@@ -55,18 +58,47 @@ impl E1000Nic {
         // SAFETY: We have exclusive access to the MMIO region during initialization.
         // All DMA allocations are fresh and properly zeroed.
         unsafe {
-            // Reset
+            // Reset: set CTRL.RST; hardware clears RST when reset completes (SDM).
             let c = rd(mmio_base, regs::CTRL);
+            log::trace!("e1000: assert CTRL.RST (ctrl={:#x})", c);
             wr(mmio_base, regs::CTRL, c | ctrl::RST);
-            for _ in 0..RESET_SPINS {
+            let mut reset_done = false;
+            for poll in 0..RESET_MAX_POLLS {
+                let ctrl = rd(mmio_base, regs::CTRL);
+                if ctrl & ctrl::RST == 0 {
+                    log::trace!(
+                        "e1000: reset complete after {} polls (ctrl={:#x})",
+                        poll + 1,
+                        ctrl
+                    );
+                    reset_done = true;
+                    break;
+                }
                 core::hint::spin_loop();
+            }
+            if !reset_done {
+                log::warn!(
+                    "e1000: reset timeout after {} CTRL polls (RST never cleared)",
+                    RESET_MAX_POLLS
+                );
+                return Err(NetError::NotReady);
             }
 
             // Disable interrupts during setup
             wr(mmio_base, regs::IMC, 0xFFFF_FFFF);
             let _ = rd(mmio_base, regs::ICR);
 
+            log::trace!("e1000: read MAC");
             let mac = Self::read_mac(mmio_base)?;
+            log::trace!(
+                "e1000: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0],
+                mac[1],
+                mac[2],
+                mac[3],
+                mac[4],
+                mac[5]
+            );
 
             // RX ring
             let rx_ring_region = alloc
@@ -290,6 +322,7 @@ impl E1000Nic {
         // Try RAL/RAH registers first
         let ral = rd(base, regs::RAL0);
         let rah = rd(base, regs::RAH0);
+        log::trace!("e1000: RAL0={:#x} RAH0={:#x}", ral, rah);
 
         // Check if MAC address is valid (not all zeros)
         if ral != 0 || rah != 0 {
@@ -304,6 +337,7 @@ impl E1000Nic {
         }
 
         // Fallback to EEPROM read
+        log::trace!("e1000: RAL/RAH empty — reading MAC words from EEPROM");
         let mut mac = [0u8; 6];
         for i in 0u32..3 {
             let w = Self::eeprom_read(base, i as u8)?;
@@ -320,18 +354,31 @@ impl E1000Nic {
     ///
     /// The caller must ensure that `base` is a valid mapped MMIO region.
     unsafe fn eeprom_read(base: u64, addr: u8) -> Result<u16, NetError> {
+        log::trace!("e1000: EEPROM read addr={}", addr);
         wr(
             base,
             regs::EERD,
             eerd::START | ((addr as u32) << eerd::ADDR_SHIFT),
         );
-        for _ in 0..EEPROM_READ_SPINS {
+        for poll in 0..EEPROM_MAX_POLLS {
             let v = rd(base, regs::EERD);
             if v & eerd::DONE != 0 {
-                return Ok(((v >> eerd::DATA_SHIFT) & 0xFFFF) as u16);
+                let data = ((v >> eerd::DATA_SHIFT) & 0xFFFF) as u16;
+                log::trace!(
+                    "e1000: EEPROM addr={} ok after {} polls data={:#x}",
+                    addr,
+                    poll + 1,
+                    data
+                );
+                return Ok(data);
             }
             core::hint::spin_loop();
         }
+        log::warn!(
+            "e1000: EEPROM addr={} timeout after {} EERD polls",
+            addr,
+            EEPROM_MAX_POLLS
+        );
         Err(NetError::NotReady)
     }
 }

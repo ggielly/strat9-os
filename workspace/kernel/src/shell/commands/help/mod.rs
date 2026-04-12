@@ -60,6 +60,8 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("-- Memory --");
     shell_println!("  mem               - Display memory status");
     shell_println!("  mem zones         - Display detailed zone information");
+    shell_println!("  mem diag          - Diagnostics: poison quarantine, slab health, alloc failures");
+    shell_println!("  frame-meta <phys> - Print MetaSlot snapshot for a physical frame");
 
     shell_println!("");
     shell_println!("-- Hardware / IPC --");

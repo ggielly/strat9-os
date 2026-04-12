@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+log = { workspace = true }
 net-core = { path = "../net-core" }
 nic-buffers = { path = "../nic-buffers" }
 nic-queues = { path = "../nic-queues" }

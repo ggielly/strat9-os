@@ -63,6 +63,7 @@ impl CommandRegistry {
 
         // Memory
         registry.register("mem", mem::cmd_mem);
+        registry.register("frame-meta", sys::cmd_frame_meta);
         registry.register("heap", sys::cmd_heap);
 
         // Hardware / IPC / Diagnostics

@@ -3,7 +3,7 @@
 
 use crate::{
     arch::x86_64::pci::{self, Bar, ProbeCriteria},
-    memory::{allocate_dma_frame, phys_to_virt},
+    memory::{allocate_zeroed_frame, phys_to_virt},
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -222,9 +222,9 @@ impl Virtqueue {
             }
             ((device.mmio + 0x16) as *mut u16).write_volatile(VIRTIO_RING_SIZE as u16);
 
-            let desc_frame = allocate_dma_frame().ok_or("Failed to allocate desc")?;
-            let avail_frame = allocate_dma_frame().ok_or("Failed to allocate avail")?;
-            let used_frame = allocate_dma_frame().ok_or("Failed to allocate used")?;
+            let desc_frame = allocate_zeroed_frame().ok_or("Failed to allocate desc")?;
+            let avail_frame = allocate_zeroed_frame().ok_or("Failed to allocate avail")?;
+            let used_frame = allocate_zeroed_frame().ok_or("Failed to allocate used")?;
 
             let desc_phys = desc_frame.start_address.as_u64();
             let avail_phys = avail_frame.start_address.as_u64();
@@ -245,7 +245,7 @@ impl Virtqueue {
             ((device.mmio + 0x10) as *mut u32).write_volatile((desc_phys & 0xFFFFFFFF) as u32);
             ((device.mmio + 0x1A) as *mut u16).write_volatile(0xFFFF);
 
-            let buffer_frame = allocate_dma_frame().ok_or("Failed to allocate buffer")?;
+            let buffer_frame = allocate_zeroed_frame().ok_or("Failed to allocate buffer")?;
             let buffer_phys = buffer_frame.start_address.as_u64();
             let buffer_virt = phys_to_virt(buffer_phys) as *mut u8;
             core::ptr::write_bytes(buffer_virt, 0, 4096);

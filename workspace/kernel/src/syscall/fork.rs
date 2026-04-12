@@ -50,9 +50,7 @@ pub struct ForkResult {
 fn local_invlpg(vaddr: u64) {
     // Local TLB invalidation is sufficient here: this kernel currently runs
     // one task per user address space (no shared user CR3 across CPUs).
-    unsafe {
-        core::arch::asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
-    }
+    crate::arch::x86_64::tlb::local_page(x86_64::VirtAddr::new(vaddr));
 }
 
 #[repr(C)]
@@ -267,6 +265,7 @@ fn build_child_task(
         pending_signals: SignalSet::new(),
         // POSIX: signal mask IS inherited.
         blocked_signals: parent_blocked,
+        irq_signal_delivery_blocked: AtomicBool::new(false),
         signal_stack: SyncUnsafeCell::new(parent_sigstack),
         itimers: crate::process::timer::ITimers::new(),
         wake_pending: AtomicBool::new(false),
@@ -445,7 +444,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
         if order == 0 {
             crate::memory::allocate_frame(token)
         } else {
-            crate::memory::allocate_frames(token, order)
+            crate::memory::allocate_phys_contiguous(token, order)
         }
     })
     .map_err(|_| "OOM during COW copy")?;
@@ -532,7 +531,11 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             },
         }
         crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_frames(token, new_frame, order);
+            if order == 0 {
+                crate::memory::free_frame(token, new_frame);
+            } else {
+                crate::memory::free_phys_contiguous(token, new_frame, order);
+            }
         });
         return Err(remap_res.err().unwrap_or("Failed to map new COW frame"));
     }
@@ -584,7 +587,11 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             }
         }
         crate::sync::with_irqs_disabled(|token| {
-            crate::memory::free_frames(token, new_frame, order);
+            if order == 0 {
+                crate::memory::free_frame(token, new_frame);
+            } else {
+                crate::memory::free_phys_contiguous(token, new_frame, order);
+            }
         });
         return Err("Failed to track new COW mapping");
     }

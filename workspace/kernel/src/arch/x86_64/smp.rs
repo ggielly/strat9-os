@@ -301,9 +301,10 @@ pub fn init() -> Result<usize, &'static str> {
         let stack_size = crate::process::task::Task::DEFAULT_STACK_SIZE;
         let pages = (stack_size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let frame =
-            crate::sync::with_irqs_disabled(|token| crate::memory::allocate_frames(token, order))
-                .map_err(|_| "SMP: failed to allocate AP stack from buddy")?;
+        let frame = crate::sync::with_irqs_disabled(|token| {
+            crate::memory::allocate_phys_contiguous(token, order)
+        })
+        .map_err(|_| "SMP: failed to allocate AP stack from buddy")?;
         let stack_phys = frame.start_address.as_u64();
         let stack_virt = crate::memory::phys_to_virt(stack_phys);
 

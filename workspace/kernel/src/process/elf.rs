@@ -469,13 +469,7 @@ fn apply_segment_permissions(
     let (current_cr3, _) = Cr3::read();
     if current_cr3.start_address() == user_as.cr3() {
         let end = page_start + (page_count as u64) * 4096;
-        let mut v = page_start;
-        while v < end {
-            unsafe {
-                core::arch::asm!("invlpg [{}]", in(reg) v, options(nostack, preserves_flags));
-            }
-            v += 4096;
-        }
+        crate::arch::x86_64::tlb::local_range(VirtAddr::new(page_start), VirtAddr::new(end));
     }
 
     Ok(())

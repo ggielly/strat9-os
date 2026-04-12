@@ -452,7 +452,10 @@ fn deliver_pending_signal_inner(
     // signal-consumption path executing on behalf of the same task. Signal
     // senders may still add new bits concurrently, so try_consume remains the
     // authority for actually claiming the signal selected by the peek.
-    let signal = match task.pending_signals.peek_one_unblocked(&task.blocked_signals) {
+    let signal = match task
+        .pending_signals
+        .peek_one_unblocked(&task.blocked_signals)
+    {
         Some(s) => s,
         None => return false,
     };

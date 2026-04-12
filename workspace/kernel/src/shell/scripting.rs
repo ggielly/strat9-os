@@ -14,6 +14,9 @@ use alloc::{
     vec::Vec,
 };
 
+// SpinLock over BTreeMap<String, String>: administrative scripting surface,
+// not on any system hot path.  String allocation under this lock is acceptable.
+// Tracked as low-priority debt in ticket #49.
 static SHELL_VARS: SpinLock<BTreeMap<String, String>> = SpinLock::new(BTreeMap::new());
 static LAST_EXIT: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
