@@ -177,6 +177,20 @@ fn reserve_range_in_map(
     }
 }
 
+#[inline]
+fn count_free_like_regions(map: &[boot::entry::MemoryRegion], len: usize) -> usize {
+    map[..len]
+        .iter()
+        .filter(|region| {
+            matches!(
+                region.kind,
+                boot::entry::MemoryKind::Free | boot::entry::MemoryKind::Reclaim
+            )
+        })
+        .count()
+}
+
+
 /// Performs the region kind for addr operation.
 #[cfg(feature = "selftest")]
 fn region_kind_for_addr(
@@ -535,6 +549,51 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         ),
     ];
 
+    let mut protected_ranges = [None; memory::boot_alloc::MAX_PROTECTED_RANGES];
+    for (idx, (_name, module)) in reserve_modules.iter().enumerate() {
+        if idx >= protected_ranges.len() {
+            break;
+        }
+        protected_ranges[idx] = *module;
+    }
+    memory::boot_alloc::set_protected_ranges(&protected_ranges);
+
+    // Initialize the boot allocator before manually carving the working memory
+    // map. The allocator excludes the configured protected ranges itself, so
+    // it can still see the large original free extents that VMware exposes
+    // before module reservations fragment them.
+    memory::boot_alloc::init_boot_allocator(&mmap_work[..mmap_work_len]);
+    serial_println!("[init] Boot allocator ready.");
+
+    let total_ram = mmap_work[..mmap_work_len]
+        .iter()
+        .filter(|region| {
+            matches!(
+                region.kind,
+                boot::entry::MemoryKind::Free | boot::entry::MemoryKind::Reclaim
+            )
+        })
+        .map(|region| region.base.saturating_add(region.size))
+        .max()
+        .unwrap_or(0);
+    let free_like_regions = count_free_like_regions(&mmap_work, mmap_work_len);
+    let metadata_bytes = memory::frame::metadata_size_for(total_ram) as usize;
+    let boot_stats = memory::boot_alloc::boot_allocator_stats();
+    serial_println!(
+        "[init] Frame metadata plan: total_ram={:#x} free_regions={} bytes={} boot_free={} largest_boot_region={}",
+        total_ram,
+        free_like_regions,
+        metadata_bytes,
+        boot_stats.total_free_bytes as usize,
+        boot_stats.largest_region_bytes as usize,
+    );
+
+    {
+        let mut boot_alloc = memory::boot_alloc::get_boot_allocator().lock();
+        memory::frame::init_metadata_array(total_ram, &mut *boot_alloc);
+    }
+    serial_println!("[init] Frame metadata ready.");
+
     for (_name, module) in reserve_modules {
         let Some((base, size)) = module else {
             continue;
@@ -545,11 +604,21 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let phys = virt_or_phys_to_phys(base, hhdm);
         let reserve_start = align_down(phys, PAGE_SIZE);
         let reserve_end = align_up(phys.saturating_add(size), PAGE_SIZE);
+        let before_regions = count_free_like_regions(&mmap_work, mmap_work_len);
         reserve_range_in_map(
             &mut mmap_work,
             &mut mmap_work_len,
             reserve_start,
             reserve_end,
+        );
+        let after_regions = count_free_like_regions(&mmap_work, mmap_work_len);
+        serial_println!(
+            "[init] reserve_range_in_map: {} phys=0x{:x}..0x{:x} free_regions {} -> {}",
+            _name,
+            reserve_start,
+            reserve_end,
+            before_regions,
+            after_regions
         );
         #[cfg(feature = "selftest")]
         {
@@ -568,29 +637,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             );
         }
     }
-
-    // Here we are
-    // We have the memory map from the bootloader, with all modules reserved.
-    memory::boot_alloc::init_boot_allocator(&mmap_work[..mmap_work_len]);
-    serial_println!("[init] Boot allocator ready.");
-
-    let total_ram = mmap_work[..mmap_work_len]
-        .iter()
-        .filter(|region| {
-            matches!(
-                region.kind,
-                boot::entry::MemoryKind::Free | boot::entry::MemoryKind::Reclaim
-            )
-        })
-        .map(|region| region.base.saturating_add(region.size))
-        .max()
-        .unwrap_or(0);
-
-    {
-        let mut boot_alloc = memory::boot_alloc::get_boot_allocator().lock();
-        memory::frame::init_metadata_array(total_ram, &mut *boot_alloc);
-    }
-    serial_println!("[init] Frame metadata ready.");
 
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
 
@@ -1042,9 +1088,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                             if dev.link_up() { "up" } else { "down" },
                         );
                         vga_println!("[OK] Network {} ({}) loaded", name, dev.name());
-                    }
-                }
-            }
+        }
+    }
+}
+
         }
 
         serial_println!("[init] Storage verification skipped (boot path)");

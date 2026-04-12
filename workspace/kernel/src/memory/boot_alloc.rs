@@ -3,13 +3,14 @@
 use crate::{
     boot::entry::{MemoryKind, MemoryRegion},
     memory::phys_to_virt,
+    serial_println,
     sync::SpinLock,
 };
 use x86_64::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
-pub const MAX_BOOT_ALLOC_REGIONS: usize = 128;
-pub const MAX_PROTECTED_RANGES: usize = 17;
+pub const MAX_BOOT_ALLOC_REGIONS: usize = 512;
+pub const MAX_PROTECTED_RANGES: usize = 32;
 
 #[derive(Clone, Copy)]
 struct BootRegion {
@@ -31,6 +32,13 @@ impl BootRegion {
 pub struct BootAllocator {
     regions: [BootRegion; MAX_BOOT_ALLOC_REGIONS],
     len: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BootAllocStats {
+    pub region_count: usize,
+    pub total_free_bytes: u64,
+    pub largest_region_bytes: u64,
 }
 
 impl BootAllocator {
@@ -58,7 +66,9 @@ impl BootAllocator {
             self.push_region(BootRegion { start, end });
         }
 
-        for (base, size) in protected_module_ranges().into_iter().flatten() {
+        self.normalize_regions();
+
+        for (base, size) in protected_ranges_snapshot().into_iter().flatten() {
             if size == 0 {
                 continue;
             }
@@ -67,6 +77,8 @@ impl BootAllocator {
                 align_up(base.saturating_add(size), PAGE_SIZE),
             );
         }
+
+        self.normalize_regions();
     }
 
     pub fn alloc(&mut self, size: usize, align: usize) -> PhysAddr {
@@ -102,6 +114,15 @@ impl BootAllocator {
             return Some(PhysAddr::new(alloc_start));
         }
 
+        let stats = self.stats();
+        serial_println!(
+            "[boot_alloc] try_alloc failed: requested={} aligned={} largest_region={} regions={} total_free={}",
+            size as usize,
+            align as usize,
+            stats.largest_region_bytes as usize,
+            stats.region_count,
+            stats.total_free_bytes as usize
+        );
         None
     }
 
@@ -170,6 +191,8 @@ impl BootAllocator {
             }
             idx += 2;
         }
+
+        self.normalize_regions();
     }
 
     fn consume_region(&mut self, idx: usize, alloc_start: u64, alloc_end: u64) {
@@ -198,6 +221,8 @@ impl BootAllocator {
         if self.len < self.regions.len() {
             self.insert_region(idx + 1, right);
         }
+
+        self.normalize_regions();
     }
 
     fn insert_region(&mut self, idx: usize, region: BootRegion) {
@@ -224,9 +249,67 @@ impl BootAllocator {
             self.regions[self.len] = BootRegion::empty();
         }
     }
+
+    fn normalize_regions(&mut self) {
+        if self.len <= 1 {
+            return;
+        }
+
+        for i in 1..self.len {
+            let cur = self.regions[i];
+            let mut j = i;
+            while j > 0 && self.regions[j - 1].start > cur.start {
+                self.regions[j] = self.regions[j - 1];
+                j -= 1;
+            }
+            self.regions[j] = cur;
+        }
+
+        let mut write = 0usize;
+        for read in 0..self.len {
+            let cur = self.regions[read];
+            if cur.is_empty() {
+                continue;
+            }
+            if write == 0 {
+                self.regions[write] = cur;
+                write += 1;
+                continue;
+            }
+            let prev = self.regions[write - 1];
+            if cur.start <= prev.end {
+                self.regions[write - 1].end = prev.end.max(cur.end);
+            } else {
+                self.regions[write] = cur;
+                write += 1;
+            }
+        }
+
+        for slot in write..self.regions.len() {
+            self.regions[slot] = BootRegion::empty();
+        }
+        self.len = write;
+    }
+
+    pub fn stats(&self) -> BootAllocStats {
+        let mut total = 0u64;
+        let mut largest = 0u64;
+        for region in self.regions.iter().take(self.len) {
+            let size = region.end.saturating_sub(region.start);
+            total = total.saturating_add(size);
+            largest = largest.max(size);
+        }
+        BootAllocStats {
+            region_count: self.len,
+            total_free_bytes: total,
+            largest_region_bytes: largest,
+        }
+    }
 }
 
 static BOOT_ALLOCATOR: SpinLock<BootAllocator> = SpinLock::new(BootAllocator::new());
+static PROTECTED_RANGES: SpinLock<[Option<(u64, u64)>; MAX_PROTECTED_RANGES]> =
+    SpinLock::new([None; MAX_PROTECTED_RANGES]);
 
 pub fn init_boot_allocator(regions: &[MemoryRegion]) {
     BOOT_ALLOCATOR.lock().init(regions);
@@ -234,6 +317,10 @@ pub fn init_boot_allocator(regions: &[MemoryRegion]) {
 
 pub fn get_boot_allocator() -> &'static SpinLock<BootAllocator> {
     &BOOT_ALLOCATOR
+}
+
+pub fn boot_allocator_stats() -> BootAllocStats {
+    BOOT_ALLOCATOR.lock().stats()
 }
 
 pub fn alloc_bytes(size: usize, align: usize) -> Option<PhysAddr> {
@@ -260,26 +347,20 @@ pub fn alloc_stack(size: usize) -> Option<u64> {
     Some(phys_to_virt(phys.as_u64()).saturating_add(span))
 }
 
-pub(crate) fn protected_module_ranges() -> [Option<(u64, u64)>; MAX_PROTECTED_RANGES] {
-    [
-        crate::boot::limine::fs_ext4_module(),
-        crate::boot::limine::strate_fs_ramfs_module(),
-        crate::boot::limine::init_module(),
-        crate::boot::limine::console_admin_module(),
-        crate::boot::limine::strate_net_module(),
-        crate::boot::limine::strate_bus_module(),
-        crate::boot::limine::dhcp_client_module(),
-        crate::boot::limine::ping_module(),
-        crate::boot::limine::telnetd_module(),
-        crate::boot::limine::udp_tool_module(),
-        crate::boot::limine::strate_wasm_module(),
-        crate::boot::limine::strate_webrtc_module(),
-        crate::boot::limine::hello_wasm_module(),
-        crate::boot::limine::wasm_test_toml_module(),
-        crate::boot::limine::test_syscalls_module(),
-        crate::boot::limine::test_mem_module(),
-        crate::boot::limine::test_mem_stressed_module(),
-    ]
+pub fn set_protected_ranges(ranges: &[Option<(u64, u64)>]) {
+    let mut protected = PROTECTED_RANGES.lock();
+    *protected = [None; MAX_PROTECTED_RANGES];
+    for (dst, src) in protected.iter_mut().zip(ranges.iter().copied()) {
+        *dst = src;
+    }
+}
+
+pub fn reset_protected_ranges() {
+    *PROTECTED_RANGES.lock() = [None; MAX_PROTECTED_RANGES];
+}
+
+pub(crate) fn protected_ranges_snapshot() -> [Option<(u64, u64)>; MAX_PROTECTED_RANGES] {
+    *PROTECTED_RANGES.lock()
 }
 
 #[inline]

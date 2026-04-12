@@ -221,6 +221,9 @@ impl BuddyAllocator {
     }
 
     /// Performs the setup zone bitmaps operation.
+    /// `pool_start` and `pool_end` are the physical address range of the reserved bitmap pool for this zone.
+    /// This initializes the `buddy_bitmaps` (and `alloc_bitmap` in debug) to point into the pool, and leaves any unused portion of the pool (if the zone is small) as all-zero.
+    /// The caller is responsible for zeroing the pool pages before this step, so this does not write to the bitmaps itself.
     fn setup_zone_bitmaps(&mut self, zone_idx: usize, pool_start: u64, pool_end: u64) {
         let zone = &mut self.zones[zone_idx];
         let mut cursor = pool_start;
@@ -392,6 +395,9 @@ impl BuddyAllocator {
     }
 
     /// Linux-style parity-map coalescing insertion.
+    /// Returns after inserting the (potentially coalesced) block into the appropriate free list, without recursing further.
+    /// If the buddy bit is already set or we reach MAX_ORDER, the block is inserted as-is.
+    /// Otherwise, the buddy block is removed from its free list and coalesced with the current block, and the process repeats at the next order.
     fn insert_free_block(zone: &mut Zone, frame_phys: u64, initial_order: u8) {
         let mut current = frame_phys;
         let mut order = initial_order;
@@ -666,7 +672,7 @@ impl BuddyAllocator {
 
     /// Performs the protected module ranges operation.
     fn protected_module_ranges() -> [Option<(u64, u64)>; boot_alloc::MAX_PROTECTED_RANGES] {
-        boot_alloc::protected_module_ranges()
+        boot_alloc::protected_ranges_snapshot()
     }
 
     /// Performs the pairs for order operation.
