@@ -19,7 +19,10 @@ use crate::{
             frame_flags, get_meta, AllocError, FrameAllocator, PhysFrame, FRAME_META_LINK_NONE,
         },
         hhdm_offset, phys_to_virt,
-        zone::{BuddyBitmap, Migratetype, Zone, ZoneSegment, ZoneType, MAX_ORDER},
+        zone::{
+            BuddyBitmap, Migratetype, Zone, ZoneSegment, ZoneType, MAX_ORDER, PAGEBLOCK_ORDER,
+            PAGEBLOCK_PAGES,
+        },
     },
     serial_println,
     sync::{IrqDisabledToken, SpinLock, SpinLockGuard},
@@ -410,6 +413,8 @@ impl BuddyAllocator {
                     page_count: ((end - start) / PAGE_SIZE) as usize,
                     free_lists: [[0; MAX_ORDER + 1]; Migratetype::COUNT],
                     buddy_bitmaps: [BuddyBitmap::empty(); MAX_ORDER + 1],
+                    pageblock_tags: ptr::null_mut(),
+                    pageblock_count: 0,
                     #[cfg(debug_assertions)]
                     alloc_bitmap: BuddyBitmap::empty(),
                 };
@@ -438,6 +443,7 @@ impl BuddyAllocator {
             }
 
             let zone = &mut self.zones[zi];
+            let default_pageblock_migratetype = Self::default_pageblock_migratetype(zone.zone_type);
             let mut cursor = pool_start;
             let segment_count = zone.segment_count;
             for segment in zone.segments_mut().iter_mut().take(segment_count) {
@@ -472,6 +478,24 @@ impl BuddyAllocator {
                         };
                         cursor += num_bytes;
                     }
+                }
+
+                let pageblock_count = segment.page_count.div_ceil(PAGEBLOCK_PAGES);
+                segment.pageblock_count = pageblock_count;
+                if pageblock_count == 0 {
+                    segment.pageblock_tags = ptr::null_mut();
+                } else {
+                    let num_bytes = pageblock_count as u64;
+                    debug_assert!(cursor + num_bytes <= pool_end);
+                    segment.pageblock_tags = phys_to_virt(cursor) as *mut u8;
+                    unsafe {
+                        ptr::write_bytes(
+                            segment.pageblock_tags,
+                            default_pageblock_migratetype as u8,
+                            pageblock_count,
+                        );
+                    }
+                    cursor += num_bytes;
                 }
             }
 
@@ -557,7 +581,9 @@ impl BuddyAllocator {
                     continue;
                 }
 
-                Self::insert_free_block(segment, addr, order, Migratetype::Unmovable);
+                let migratetype =
+                    Self::pageblock_migratetype(segment, addr, Self::default_pageblock_migratetype(zone_type));
+                Self::insert_free_block(segment, addr, order, migratetype);
                 addr = block_end;
                 continue 'seed;
             }
@@ -622,11 +648,20 @@ impl BuddyAllocator {
                 let mut split_order = cur_order;
                 while split_order > order {
                     split_order -= 1;
+                    Self::retag_pageblock_range(
+                        segment,
+                        frame_phys,
+                        split_order,
+                        requested_migratetype,
+                    );
                     let buddy_phys = frame_phys + ((1u64 << split_order) * PAGE_SIZE);
-                    Self::mark_block_free(buddy_phys, split_order, donor_migratetype);
-                    Self::free_list_push(segment, buddy_phys, split_order, donor_migratetype);
+                    let buddy_migratetype =
+                        Self::pageblock_migratetype(segment, buddy_phys, donor_migratetype);
+                    Self::mark_block_free(buddy_phys, split_order, buddy_migratetype);
+                    Self::free_list_push(segment, buddy_phys, split_order, buddy_migratetype);
                     let _ = Self::toggle_pair(segment, frame_phys, split_order);
                 }
+                Self::retag_pageblock_range(segment, frame_phys, order, requested_migratetype);
                 Self::mark_block_allocated(frame_phys, order, requested_migratetype);
 
                 #[cfg(debug_assertions)]
@@ -689,10 +724,14 @@ impl BuddyAllocator {
             Self::mark_allocated(segment, frame_phys, order, false);
         }
 
-        Self::mark_block_free(frame_phys, order, migratetype);
         {
             let segment = &mut zone.segments_mut()[segment_idx];
-            Self::insert_free_block(segment, frame_phys, order, migratetype);
+            if order as usize >= PAGEBLOCK_ORDER {
+                Self::retag_pageblock_range(segment, frame_phys, order, migratetype);
+            }
+            let free_migratetype = Self::pageblock_migratetype(segment, frame_phys, migratetype);
+            Self::mark_block_free(frame_phys, order, free_migratetype);
+            Self::insert_free_block(segment, frame_phys, order, free_migratetype);
         }
         zone.allocated = zone.allocated.saturating_sub(1usize << order);
     }
@@ -1051,6 +1090,7 @@ impl BuddyAllocator {
         {
             bytes += Self::bits_to_bytes(span_pages);
         }
+        bytes += Self::pageblock_tag_bytes_for_span(span_pages);
         bytes
     }
 
@@ -1065,7 +1105,19 @@ impl BuddyAllocator {
         {
             bits = bits.saturating_add(page_count);
         }
-        Self::bits_to_bytes(bits)
+        Self::bits_to_bytes(bits).saturating_add(Self::pageblock_tag_bytes_upper_bound_for_pages(page_count))
+    }
+
+    /// Exact byte count required for pageblock migratetype tags over one contiguous span.
+    #[inline]
+    fn pageblock_tag_bytes_for_span(span_pages: usize) -> usize {
+        span_pages.div_ceil(PAGEBLOCK_PAGES)
+    }
+
+    /// Safe upper bound for pageblock-tag storage across any segmentation of `page_count` pages.
+    #[inline]
+    fn pageblock_tag_bytes_upper_bound_for_pages(page_count: usize) -> usize {
+        page_count
     }
 
     /// Performs the align up operation.
@@ -1080,6 +1132,86 @@ impl BuddyAllocator {
     fn align_down(value: u64, align: u64) -> u64 {
         debug_assert!(align.is_power_of_two());
         value & !(align - 1)
+    }
+
+    /// Default pageblock migratetype assigned at bootstrap for one zone.
+    #[inline]
+    fn default_pageblock_migratetype(zone_type: ZoneType) -> Migratetype {
+        match zone_type {
+            ZoneType::HighMem => Migratetype::Movable,
+            ZoneType::DMA | ZoneType::Normal => Migratetype::Unmovable,
+        }
+    }
+
+    /// Returns the pageblock index covering `phys` inside `segment`.
+    #[inline]
+    fn pageblock_index(segment: &ZoneSegment, phys: u64) -> usize {
+        Self::page_index(segment, phys) / PAGEBLOCK_PAGES
+    }
+
+    /// Decode one pageblock tag byte into a migratetype.
+    #[inline]
+    fn decode_pageblock_tag(tag: u8) -> Migratetype {
+        match tag {
+            x if x == Migratetype::Movable as u8 => Migratetype::Movable,
+            _ => Migratetype::Unmovable,
+        }
+    }
+
+    /// Returns the current pageblock migratetype for a block start.
+    #[inline]
+    fn pageblock_migratetype(
+        segment: &ZoneSegment,
+        phys: u64,
+        fallback: Migratetype,
+    ) -> Migratetype {
+        if segment.pageblock_count == 0 || segment.pageblock_tags.is_null() {
+            return fallback;
+        }
+        let idx = Self::pageblock_index(segment, phys);
+        debug_assert!(idx < segment.pageblock_count);
+        unsafe { Self::decode_pageblock_tag(*segment.pageblock_tags.add(idx)) }
+    }
+
+    /// Retag every pageblock overlapped by the buddy block `[phys, phys + 2^order * PAGE_SIZE)`.
+    fn retag_pageblock_range(
+        segment: &mut ZoneSegment,
+        phys: u64,
+        order: u8,
+        migratetype: Migratetype,
+    ) {
+        if segment.pageblock_count == 0 || segment.pageblock_tags.is_null() {
+            return;
+        }
+
+        let start_page = Self::page_index(segment, phys);
+        let end_page_exclusive = start_page.saturating_add(1usize << order);
+        let start_idx = start_page / PAGEBLOCK_PAGES;
+        let end_idx = end_page_exclusive.saturating_sub(1) / PAGEBLOCK_PAGES;
+        debug_assert!(end_idx < segment.pageblock_count);
+
+        for idx in start_idx..=end_idx {
+            unsafe {
+                *segment.pageblock_tags.add(idx) = migratetype as u8;
+            }
+        }
+    }
+
+    /// Count pageblocks by migratetype for one zone.
+    fn zone_pageblock_counts(zone: &Zone) -> [usize; Migratetype::COUNT] {
+        let mut counts = [0usize; Migratetype::COUNT];
+        for segment in zone.segments().iter().take(zone.segment_count) {
+            if segment.pageblock_count == 0 || segment.pageblock_tags.is_null() {
+                continue;
+            }
+            for idx in 0..segment.pageblock_count {
+                let migratetype = unsafe {
+                    Self::decode_pageblock_tag(*segment.pageblock_tags.add(idx))
+                };
+                counts[migratetype.index()] = counts[migratetype.index()].saturating_add(1);
+            }
+        }
+        counts
     }
 
     fn zone_effective_free_pages(zone: &Zone, zone_idx: usize) -> usize {
@@ -1905,6 +2037,12 @@ pub struct ZoneStats {
     pub segment_count: usize,
     /// Reserved segment-table capacity.
     pub segment_capacity: usize,
+    /// Total number of pageblocks tracked across all segments.
+    pub pageblock_count: usize,
+    /// Pageblocks currently tagged unmovable.
+    pub unmovable_pageblocks: usize,
+    /// Pageblocks currently tagged movable.
+    pub movable_pageblocks: usize,
     /// Minimum watermark.
     pub watermark_min: usize,
     /// Low watermark.
@@ -1936,6 +2074,9 @@ impl ZoneStats {
             unmovable_free_pages: 0,
             segment_count: 0,
             segment_capacity: 0,
+            pageblock_count: 0,
+            unmovable_pageblocks: 0,
+            movable_pageblocks: 0,
             watermark_min: 0,
             watermark_low: 0,
             watermark_high: 0,
@@ -2009,6 +2150,7 @@ impl BuddyAllocator {
             let cached_unmovable = local_cached_zone_migratetype_count(i, Migratetype::Unmovable);
             let cached_movable = local_cached_zone_migratetype_count(i, Migratetype::Movable);
             let cached = cached_unmovable.saturating_add(cached_movable);
+            let pageblocks = Self::zone_pageblock_counts(zone);
             let mut free_by_type = zone.free_pages_by_migratetype();
             free_by_type[Migratetype::Unmovable.index()] =
                 free_by_type[Migratetype::Unmovable.index()].saturating_add(cached_unmovable);
@@ -2030,6 +2172,10 @@ impl BuddyAllocator {
                 unmovable_free_pages: free_by_type[Migratetype::Unmovable.index()],
                 segment_count: zone.segment_count,
                 segment_capacity: zone.segment_capacity,
+                pageblock_count: pageblocks[Migratetype::Unmovable.index()]
+                    .saturating_add(pageblocks[Migratetype::Movable.index()]),
+                unmovable_pageblocks: pageblocks[Migratetype::Unmovable.index()],
+                movable_pageblocks: pageblocks[Migratetype::Movable.index()],
                 watermark_min: zone.watermark_min,
                 watermark_low: zone.watermark_low,
                 watermark_high: zone.watermark_high,

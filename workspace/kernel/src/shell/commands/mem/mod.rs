@@ -181,6 +181,13 @@ fn cmd_mem_zones() -> Result<(), ShellError> {
             info.segment_capacity
         );
         shell_println!(
+            "    Pageblocks: {} (u/m = {} / {}, order={})",
+            info.pageblock_count,
+            info.unmovable_pageblocks,
+            info.movable_pageblocks
+            ,crate::memory::zone::PAGEBLOCK_ORDER
+        );
+        shell_println!(
             "    Free(u/m): {} {} / {} {}",
             unmovable_val,
             unmovable_unit,
@@ -263,7 +270,7 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
                 }
                 match info.largest_free_order {
                     Some(order) => shell_println!(
-                        "  {:?}: state={:?} free={} used={} cached={} avail={} segments={}/{} u/m={}/{} cu/cm={}/{} watermarks={}/{}/{} reserve={} largest=o{}",
+                        "  {:?}: state={:?} free={} used={} cached={} avail={} segments={}/{} pageblocks=u{}/m{} u/m={}/{} cu/cm={}/{} watermarks={}/{}/{} reserve={} largest=o{}",
                         info.zone_type,
                         info.pressure(),
                         info.free_pages,
@@ -272,6 +279,8 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
                         info.available_after_reserve_pages(),
                         info.segment_count,
                         info.segment_capacity,
+                        info.unmovable_pageblocks,
+                        info.movable_pageblocks,
                         info.unmovable_free_pages,
                         info.movable_free_pages,
                         info.cached_unmovable_pages,
@@ -283,7 +292,7 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
                         order
                     ),
                     None => shell_println!(
-                        "  {:?}: state={:?} free={} used={} cached={} avail={} segments={}/{} u/m={}/{} cu/cm={}/{} watermarks={}/{}/{} reserve={} largest=none",
+                        "  {:?}: state={:?} free={} used={} cached={} avail={} segments={}/{} pageblocks=u{}/m{} u/m={}/{} cu/cm={}/{} watermarks={}/{}/{} reserve={} largest=none",
                         info.zone_type,
                         info.pressure(),
                         info.free_pages,
@@ -292,6 +301,8 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
                         info.available_after_reserve_pages(),
                         info.segment_count,
                         info.segment_capacity,
+                        info.unmovable_pageblocks,
+                        info.movable_pageblocks,
                         info.unmovable_free_pages,
                         info.movable_free_pages,
                         info.cached_unmovable_pages,

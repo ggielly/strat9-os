@@ -945,7 +945,7 @@ pub fn dump_diagnostics() {
 
             for info in zones.iter().take(zone_count) {
                 crate::serial_println!(
-                    "[heap][diag] zone={:?} state={:?} managed={} present={} reserved={} free={} cached={} cu/cm={}/{} avail={} segments={}/{} u_free={} m_free={} watermarks={}/{}/{} reserve={} largest_order={:?}",
+                    "[heap][diag] zone={:?} state={:?} managed={} present={} reserved={} free={} cached={} cu/cm={}/{} avail={} segments={}/{} pageblocks=u{}/m{} u_free={} m_free={} watermarks={}/{}/{} reserve={} largest_order={:?}",
                     info.zone_type,
                     info.pressure(),
                     info.managed_pages,
@@ -958,6 +958,8 @@ pub fn dump_diagnostics() {
                     info.available_after_reserve_pages(),
                     info.segment_count,
                     info.segment_capacity,
+                    info.unmovable_pageblocks,
+                    info.movable_pageblocks,
                     info.unmovable_free_pages,
                     info.movable_free_pages,
                     info.watermark_min,

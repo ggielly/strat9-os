@@ -23,6 +23,16 @@ impl ZoneType {
 /// Maximum buddy order (0-11 for 4KB to 8MB blocks)
 pub const MAX_ORDER: usize = 11;
 
+/// Pageblock order used by the compaction-friendly migratetype grouping.
+///
+/// Order 9 corresponds to 2 MiB pageblocks, which is a pragmatic starting
+/// point on x86_64 because it matches the huge-page granularity commonly used
+/// by mature kernels for anti-fragmentation grouping.
+pub const PAGEBLOCK_ORDER: usize = 9;
+
+/// Number of 4 KiB pages inside one pageblock.
+pub const PAGEBLOCK_PAGES: usize = 1 << PAGEBLOCK_ORDER;
+
 /// Minimal free-block classes used by the buddy allocator.
 ///
 /// This is intentionally smaller than Linux's full migratetype/pageblock
@@ -149,6 +159,12 @@ pub struct ZoneSegment {
     /// Per-order parity bitmaps scoped to this segment only.
     pub buddy_bitmaps: [BuddyBitmap; MAX_ORDER + 1],
 
+    /// Per-pageblock migratetype tags used to keep movable and unmovable frees grouped.
+    pub pageblock_tags: *mut u8,
+
+    /// Number of pageblocks described by `pageblock_tags`.
+    pub pageblock_count: usize,
+
     /// Optional debug bitmap: 1 bit per page = allocated.
     #[cfg(debug_assertions)]
     pub alloc_bitmap: BuddyBitmap,
@@ -162,6 +178,8 @@ impl ZoneSegment {
             page_count: 0,
             free_lists: [[0; MAX_ORDER + 1]; Migratetype::COUNT],
             buddy_bitmaps: [BuddyBitmap::empty(); MAX_ORDER + 1],
+            pageblock_tags: core::ptr::null_mut(),
+            pageblock_count: 0,
             #[cfg(debug_assertions)]
             alloc_bitmap: BuddyBitmap::empty(),
         }
