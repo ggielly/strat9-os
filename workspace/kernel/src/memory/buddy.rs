@@ -318,19 +318,21 @@ impl BuddyAllocator {
             let mut order = max_possible_order;
             while order > 0 {
                 let block_size = PAGE_SIZE << order;
-                if addr.is_aligned(block_size) {
+                if addr & (block_size - 1) == 0 {
                     break;
                 }
                 order -= 1;
             }
 
-            let block_pages = 1usize << order;
-            let block_size = PAGE_SIZE << order;
+            let mut block_pages = 1usize << order;
+            let mut block_size = PAGE_SIZE << order;
 
             // Double-check we don't exceed the range
             if addr + block_size > end {
                 // Should not happen if alignment logic is correct, but safety fallback
                 order = 0;
+                block_pages = 1;
+                block_size = PAGE_SIZE;
             }
 
             Self::insert_free_block(zone, addr, order);
@@ -389,29 +391,6 @@ impl BuddyAllocator {
         }
 
         debug_assert!(cursor <= pool_end);
-    }
-
-    /// Performs the seed range as free operation.
-    fn seed_range_as_free(&mut self, zone_idx: usize, start: u64, end: u64) {
-        if start >= end {
-            return;
-        }
-        let zone = &mut self.zones[zone_idx];
-        let mut addr = start;
-        while addr < end {
-            if Self::is_protected_module_page(addr) {
-                buddy_dbg!(
-                    "  Zone {:?}: skip protected page 0x{:x}",
-                    zone.zone_type,
-                    addr
-                );
-                addr += PAGE_SIZE;
-                continue;
-            }
-            Self::insert_free_block(zone, addr, 0);
-            zone.page_count += 1;
-            addr += PAGE_SIZE;
-        }
     }
 
     /// Allocates from zone.
