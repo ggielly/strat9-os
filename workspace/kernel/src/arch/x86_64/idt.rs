@@ -1372,10 +1372,8 @@ fn dump_page_fault_full(
                 free,
                 free * 4 / 1024
             );
-            let mut zones = [
-                crate::memory::buddy::ZoneStats::empty();
-                crate::memory::zone::ZoneType::COUNT
-            ];
+            let mut zones =
+                [crate::memory::buddy::ZoneStats::empty(); crate::memory::zone::ZoneType::COUNT];
             let n = alloc.zone_snapshot(&mut zones);
             for i in 0..n {
                 let zone = zones[i];

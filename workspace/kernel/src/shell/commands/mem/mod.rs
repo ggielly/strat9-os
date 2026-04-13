@@ -101,7 +101,10 @@ fn cmd_mem_summary() -> Result<(), ShellError> {
         cached_unit,
         cached_pages
     );
-    shell_println!("  Pressure:  {} zone(s) below high watermark", pressured_zones);
+    shell_println!(
+        "  Pressure:  {} zone(s) below high watermark",
+        pressured_zones
+    );
     shell_println!("");
 
     Ok(())
@@ -168,6 +171,11 @@ fn cmd_mem_zones() -> Result<(), ShellError> {
         shell_println!("    Used:      {} pages", info.allocated_pages);
         shell_println!("    Cached:    {} pages", info.cached_pages);
         shell_println!(
+            "    Cached(u/m): {} / {} pages",
+            info.cached_unmovable_pages,
+            info.cached_movable_pages
+        );
+        shell_println!(
             "    Segments:  {}/{}",
             info.segment_count,
             info.segment_capacity
@@ -228,10 +236,7 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
             if count > 0 {
                 let size = 4096usize << order;
                 let (v, u) = format_bytes(size);
-                shell_println!(
-                    "  order {:>2} ({} {}): {} failures",
-                    order, v, u, count
-                );
+                shell_println!("  order {:>2} ({} {}): {} failures", order, v, u, count);
             }
         }
         shell_println!("");
@@ -244,13 +249,21 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
     {
         let allocator_guard = crate::memory::buddy::get_allocator().lock();
         if let Some(ref allocator) = *allocator_guard {
-            let mut zones = [crate::memory::buddy::ZoneStats::empty(); crate::memory::zone::ZoneType::COUNT];
+            let mut zones =
+                [crate::memory::buddy::ZoneStats::empty(); crate::memory::zone::ZoneType::COUNT];
             let zone_count = allocator.zone_snapshot(&mut zones);
             shell_println!("Buddy zones:");
-            for info in zones.iter().take(zone_count) {
+            for (zone_idx, info) in zones.iter().take(zone_count).enumerate() {
+                let zone = allocator.get_zone(zone_idx);
+                let mut frag = String::new();
+                for order in 1..=crate::memory::zone::MAX_ORDER {
+                    use core::fmt::Write;
+                    let score = zone.fragmentation_score(order as u8, info.cached_pages);
+                    let _ = write!(frag, "o{}={}% ", order, score);
+                }
                 match info.largest_free_order {
                     Some(order) => shell_println!(
-                        "  {:?}: state={:?} free={} used={} cached={} avail={} segments={}/{} u/m={}/{} watermarks={}/{}/{} reserve={} largest=o{}",
+                        "  {:?}: state={:?} free={} used={} cached={} avail={} segments={}/{} u/m={}/{} cu/cm={}/{} watermarks={}/{}/{} reserve={} largest=o{}",
                         info.zone_type,
                         info.pressure(),
                         info.free_pages,
@@ -261,6 +274,8 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
                         info.segment_capacity,
                         info.unmovable_free_pages,
                         info.movable_free_pages,
+                        info.cached_unmovable_pages,
+                        info.cached_movable_pages,
                         info.watermark_min,
                         info.watermark_low,
                         info.watermark_high,
@@ -268,7 +283,7 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
                         order
                     ),
                     None => shell_println!(
-                        "  {:?}: state={:?} free={} used={} cached={} avail={} segments={}/{} u/m={}/{} watermarks={}/{}/{} reserve={} largest=none",
+                        "  {:?}: state={:?} free={} used={} cached={} avail={} segments={}/{} u/m={}/{} cu/cm={}/{} watermarks={}/{}/{} reserve={} largest=none",
                         info.zone_type,
                         info.pressure(),
                         info.free_pages,
@@ -279,12 +294,15 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
                         info.segment_capacity,
                         info.unmovable_free_pages,
                         info.movable_free_pages,
+                        info.cached_unmovable_pages,
+                        info.cached_movable_pages,
                         info.watermark_min,
                         info.watermark_low,
                         info.watermark_high,
                         info.lowmem_reserve_pages
                     ),
                 }
+                shell_println!("    frag/order: {}", frag);
             }
             shell_println!("");
         }
@@ -296,9 +314,24 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
     let (sr_v, sr_u) = format_bytes(slab.pages_reclaimed.saturating_mul(4096));
     let (sl_v, sl_u) = format_bytes(slab.pages_live.saturating_mul(4096));
     shell_println!("Slab allocator:");
-    shell_println!("  Pages allocated:  {} ({} {})", slab.pages_allocated, sa_v, sa_u);
-    shell_println!("  Pages reclaimed:  {} ({} {})", slab.pages_reclaimed, sr_v, sr_u);
-    shell_println!("  Pages live:       {} ({} {})", slab.pages_live, sl_v, sl_u);
+    shell_println!(
+        "  Pages allocated:  {} ({} {})",
+        slab.pages_allocated,
+        sa_v,
+        sa_u
+    );
+    shell_println!(
+        "  Pages reclaimed:  {} ({} {})",
+        slab.pages_reclaimed,
+        sr_v,
+        sr_u
+    );
+    shell_println!(
+        "  Pages live:       {} ({} {})",
+        slab.pages_live,
+        sl_v,
+        sl_u
+    );
     shell_println!("");
 
     // ── Last heap failure ──────────────────────────────────────────────
@@ -323,7 +356,10 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
         let waste = block.saturating_sub(1); // worst-case internal waste
         shell_println!(
             "  class {:>2}: block={:>5}B  blocks/page={:>3}  max_waste={:>4}B",
-            ci, block, blocks, waste
+            ci,
+            block,
+            blocks,
+            waste
         );
     }
 

@@ -359,6 +359,40 @@ impl Zone {
         totals
     }
 
+    /// Returns the number of free pages currently available in blocks of at least `order`.
+    ///
+    /// This is the relevant numerator for fragmentation analysis of an
+    /// allocation request at `order`: pages on smaller free lists exist, but
+    /// cannot satisfy that request without prior coalescing.
+    pub fn free_pages_at_or_above_order(&self, order: u8) -> usize {
+        let mut pages = 0usize;
+        for current_order in order as usize..=MAX_ORDER {
+            pages = pages.saturating_add(self.free_list_count(current_order as u8) << current_order);
+        }
+        pages
+    }
+
+    /// Returns a simple fragmentation score for `order`, expressed as a percentage.
+    ///
+    /// `0` means all currently free pages are still usable for an allocation of
+    /// that order. `100` means all free pages are trapped in blocks smaller than
+    /// the requested order. `cached_order0_pages` accounts for pages parked in
+    /// per-CPU caches, which behave like order-0 fragments until drained.
+    pub fn fragmentation_score(&self, order: u8, cached_order0_pages: usize) -> usize {
+        if order == 0 {
+            return 0;
+        }
+
+        let total_free = self.available_pages().saturating_add(cached_order0_pages);
+        if total_free == 0 {
+            return 0;
+        }
+
+        let usable = self.free_pages_at_or_above_order(order);
+        let fragmented = total_free.saturating_sub(usable);
+        fragmented.saturating_mul(100) / total_free
+    }
+
     /// Returns the largest order that currently has at least one free block.
     pub fn largest_free_order(&self) -> Option<u8> {
         for order in (0..=MAX_ORDER).rev() {

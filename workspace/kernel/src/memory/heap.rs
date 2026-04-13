@@ -945,13 +945,17 @@ pub fn dump_diagnostics() {
 
             for info in zones.iter().take(zone_count) {
                 crate::serial_println!(
-                    "[heap][diag] zone={:?} managed={} present={} reserved={} free={} cached={} segments={}/{} u_free={} m_free={} watermarks={}/{}/{} reserve={} largest_order={:?}",
+                    "[heap][diag] zone={:?} state={:?} managed={} present={} reserved={} free={} cached={} cu/cm={}/{} avail={} segments={}/{} u_free={} m_free={} watermarks={}/{}/{} reserve={} largest_order={:?}",
                     info.zone_type,
+                    info.pressure(),
                     info.managed_pages,
                     info.present_pages,
                     info.reserved_pages,
                     info.free_pages,
                     info.cached_pages,
+                    info.cached_unmovable_pages,
+                    info.cached_movable_pages,
+                    info.available_after_reserve_pages(),
                     info.segment_count,
                     info.segment_capacity,
                     info.unmovable_free_pages,
@@ -967,6 +971,7 @@ pub fn dump_diagnostics() {
             // Per-zone free list heads by migratetype.
             for zi in 0..zone_count {
                 let zone = alloc.get_zone(zi);
+                let info = zones[zi];
                 let mut line = alloc::string::String::from("[heap][diag] ");
                 use core::fmt::Write;
                 let _ = write!(line, "zone={:?} free_heads:", zone.zone_type);
@@ -984,6 +989,14 @@ pub fn dump_diagnostics() {
                     }
                 }
                 crate::serial_println!("{}", line);
+
+                let mut frag = alloc::string::String::from("[heap][diag] ");
+                let _ = write!(frag, "zone={:?} frag:", zone.zone_type);
+                for order in 1..=crate::memory::zone::MAX_ORDER {
+                    let score = zone.fragmentation_score(order as u8, info.cached_pages);
+                    let _ = write!(frag, " o{}={}%", order, score);
+                }
+                crate::serial_println!("{}", frag);
             }
         }
     } else {

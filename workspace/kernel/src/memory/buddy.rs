@@ -37,6 +37,9 @@ const LOCAL_CACHE_CAPACITY: usize = 256;
 const LOCAL_CACHE_REFILL_ORDER: u8 = 4;
 const LOCAL_CACHE_REFILL_FRAMES: usize = 1 << (LOCAL_CACHE_REFILL_ORDER as usize);
 const LOCAL_CACHE_FLUSH_BATCH: usize = 64;
+const LOCAL_CACHE_SLOTS: usize =
+    Migratetype::COUNT * crate::arch::x86_64::percpu::MAX_CPUS;
+const LOCAL_CACHED_ZONE_MIGRATETYPE_SLOTS: usize = Migratetype::COUNT * ZoneType::COUNT;
 const UNMOVABLE_ZONE_ORDER: [usize; ZoneType::COUNT] = [
     ZoneType::Normal as usize,
     ZoneType::HighMem as usize,
@@ -1398,11 +1401,13 @@ impl LocalFrameCache {
     }
 }
 
-static LOCAL_FRAME_CACHES: [SpinLock<LocalFrameCache>; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { SpinLock::new(LocalFrameCache::new()) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static LOCAL_FRAME_CACHES: [SpinLock<LocalFrameCache>; LOCAL_CACHE_SLOTS] =
+    [const { SpinLock::new(LocalFrameCache::new()) }; LOCAL_CACHE_SLOTS];
 static LOCAL_CACHED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static LOCAL_CACHED_ZONE_FRAMES: [AtomicUsize; ZoneType::COUNT] =
     [const { AtomicUsize::new(0) }; ZoneType::COUNT];
+static LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES: [AtomicUsize; LOCAL_CACHED_ZONE_MIGRATETYPE_SLOTS] =
+    [const { AtomicUsize::new(0) }; LOCAL_CACHED_ZONE_MIGRATETYPE_SLOTS];
 
 type GlobalGuard = SpinLockGuard<'static, Option<BuddyAllocator>>;
 
@@ -1425,10 +1430,6 @@ impl OnDemandGlobalLock {
     ) -> Option<R> {
         let guard = self.guard.get_or_insert_with(|| BUDDY_ALLOCATOR.lock());
         guard.with_mut_and_token(|slot, token| slot.as_mut().map(|allocator| f(allocator, token)))
-    }
-
-    fn alloc(&mut self, order: u8) -> Result<PhysFrame, AllocError> {
-        self.alloc_with_migratetype(order, Migratetype::Unmovable)
     }
 
     fn alloc_with_migratetype(
@@ -1476,23 +1477,57 @@ fn zone_index_for_phys(phys: u64) -> usize {
 }
 
 #[inline]
-fn is_cacheable_phys(phys: u64) -> bool {
-    zone_index_for_phys(phys) == ZoneType::Normal as usize
+fn local_cache_slot(cpu_idx: usize, migratetype: Migratetype) -> usize {
+    migratetype.index() * crate::arch::x86_64::percpu::MAX_CPUS + cpu_idx
 }
 
 #[inline]
-fn local_cached_inc_phys(phys: u64) {
+fn local_cached_zone_migratetype_slot(zone_idx: usize, migratetype: Migratetype) -> usize {
+    migratetype.index() * ZoneType::COUNT + zone_idx
+}
+
+#[inline]
+fn is_cacheable_phys_for(phys: u64, migratetype: Migratetype) -> bool {
+    match migratetype {
+        Migratetype::Unmovable => zone_index_for_phys(phys) == ZoneType::Normal as usize,
+        Migratetype::Movable => zone_index_for_phys(phys) != ZoneType::DMA as usize,
+    }
+}
+
+#[inline]
+fn local_cached_zone_migratetype_count(zone_idx: usize, migratetype: Migratetype) -> usize {
+    LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES[local_cached_zone_migratetype_slot(
+        zone_idx,
+        migratetype,
+    )]
+    .load(AtomicOrdering::Relaxed)
+}
+
+#[inline]
+fn local_cached_inc_phys(phys: u64, migratetype: Migratetype) {
+    let zone_idx = zone_index_for_phys(phys);
     LOCAL_CACHED_FRAMES.fetch_add(1, AtomicOrdering::Relaxed);
-    LOCAL_CACHED_ZONE_FRAMES[zone_index_for_phys(phys)].fetch_add(1, AtomicOrdering::Relaxed);
+    LOCAL_CACHED_ZONE_FRAMES[zone_idx].fetch_add(1, AtomicOrdering::Relaxed);
+    LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES[local_cached_zone_migratetype_slot(
+        zone_idx,
+        migratetype,
+    )]
+    .fetch_add(1, AtomicOrdering::Relaxed);
 }
 
 #[inline]
-fn local_cached_dec_phys(phys: u64) {
+fn local_cached_dec_phys(phys: u64, migratetype: Migratetype) {
     let prev_total = LOCAL_CACHED_FRAMES.fetch_sub(1, AtomicOrdering::Relaxed);
     debug_assert!(prev_total > 0);
     let zone = zone_index_for_phys(phys);
     let prev_zone = LOCAL_CACHED_ZONE_FRAMES[zone].fetch_sub(1, AtomicOrdering::Relaxed);
     debug_assert!(prev_zone > 0);
+    let prev_zone_type = LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES[local_cached_zone_migratetype_slot(
+        zone,
+        migratetype,
+    )]
+    .fetch_sub(1, AtomicOrdering::Relaxed);
+    debug_assert!(prev_zone_type > 0);
 }
 
 fn drain_local_caches_to_global(max_pages: usize, global: &mut OnDemandGlobalLock) -> usize {
@@ -1502,31 +1537,33 @@ fn drain_local_caches_to_global(max_pages: usize, global: &mut OnDemandGlobalLoc
 
     let mut drained = 0usize;
     let mut batch = [0u64; LOCAL_CACHE_FLUSH_BATCH];
-    for cpu in 0..crate::arch::x86_64::percpu::MAX_CPUS {
-        if drained >= max_pages {
-            break;
-        }
-        let target = core::cmp::min(batch.len(), max_pages.saturating_sub(drained));
-        if target == 0 {
-            break;
-        }
+    for migratetype in Migratetype::ALL {
+        for cpu in 0..crate::arch::x86_64::percpu::MAX_CPUS {
+            if drained >= max_pages {
+                break;
+            }
+            let target = core::cmp::min(batch.len(), max_pages.saturating_sub(drained));
+            if target == 0 {
+                break;
+            }
 
-        let popped = {
-            let mut cache = LOCAL_FRAME_CACHES[cpu].lock();
-            cache.pop_many(&mut batch[..target])
-        };
-        if popped == 0 {
-            continue;
-        }
+            let popped = {
+                let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu, migratetype)].lock();
+                cache.pop_many(&mut batch[..target])
+            };
+            if popped == 0 {
+                continue;
+            }
 
-        for phys in batch.iter().take(popped).copied() {
-            local_cached_dec_phys(phys);
-        }
-        global.free_phys_batch(&batch, popped);
+            for phys in batch.iter().take(popped).copied() {
+                local_cached_dec_phys(phys, migratetype);
+            }
+            global.free_phys_batch(&batch, popped);
 
-        // Keep lock acquisition on-demand during cross-CPU draining.
-        global.unlock();
-        drained += popped;
+            // Keep lock acquisition on-demand during cross-CPU draining.
+            global.unlock();
+            drained += popped;
+        }
     }
 
     drained
@@ -1539,6 +1576,9 @@ pub fn init_buddy_allocator(memory_regions: &[MemoryRegion]) {
     }
     LOCAL_CACHED_FRAMES.store(0, AtomicOrdering::Relaxed);
     for zone_cached in &LOCAL_CACHED_ZONE_FRAMES {
+        zone_cached.store(0, AtomicOrdering::Relaxed);
+    }
+    for zone_cached in &LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES {
         zone_cached.store(0, AtomicOrdering::Relaxed);
     }
 
@@ -1563,11 +1603,12 @@ pub fn get_allocator() -> &'static SpinLock<Option<BuddyAllocator>> {
 fn refill_local_cache(
     cpu_idx: usize,
     global: &mut OnDemandGlobalLock,
+    migratetype: Migratetype,
 ) -> Result<PhysFrame, AllocError> {
     // Critical path: refill in batches from the global allocator to amortize lock contention.
-    let (base, order) = match global.alloc(LOCAL_CACHE_REFILL_ORDER) {
+    let (base, order) = match global.alloc_with_migratetype(LOCAL_CACHE_REFILL_ORDER, migratetype) {
         Ok(frame) => (frame, LOCAL_CACHE_REFILL_ORDER),
-        Err(AllocError::OutOfMemory) => (global.alloc(0)?, 0),
+        Err(AllocError::OutOfMemory) => (global.alloc_with_migratetype(0, migratetype)?, 0),
         Err(e) => return Err(e),
     };
     global.unlock();
@@ -1578,13 +1619,13 @@ fn refill_local_cache(
     let mut ret = None;
 
     {
-        let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
+        let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu_idx, migratetype)].lock();
         for idx in 0..frame_count {
             let phys = base.start_address.as_u64() + (idx as u64) * PAGE_SIZE;
             let frame = PhysFrame {
                 start_address: PhysAddr::new(phys),
             };
-            if !is_cacheable_phys(phys) {
+            if !is_cacheable_phys_for(phys, migratetype) {
                 overflow[overflow_len] = phys;
                 overflow_len += 1;
                 continue;
@@ -1593,15 +1634,15 @@ fn refill_local_cache(
                 // Re-publish the returned page as an allocated order-0 block.
                 // The refcount must stay REFCOUNT_UNUSED so FrameAllocOptions
                 // can still claim it via CAS(UNUSED -> 1).
-                BuddyAllocator::mark_block_allocated(phys, 0, Migratetype::Unmovable);
+                BuddyAllocator::mark_block_allocated(phys, 0, migratetype);
                 ret = Some(frame);
                 continue;
             }
             // Pages parked in the local cache are logically free and must
             // therefore carry the free-list sentinel invariant.
-            BuddyAllocator::mark_block_free(phys, 0, Migratetype::Unmovable);
+            BuddyAllocator::mark_block_free(phys, 0, migratetype);
             if cache.push(frame).is_ok() {
-                local_cached_inc_phys(phys);
+                local_cached_inc_phys(phys, migratetype);
             } else {
                 overflow[overflow_len] = phys;
                 overflow_len += 1;
@@ -1616,59 +1657,59 @@ fn refill_local_cache(
     ret.ok_or(AllocError::OutOfMemory)
 }
 
-fn steal_from_other_caches(cpu_idx: usize) -> Option<PhysFrame> {
+fn steal_from_other_caches(cpu_idx: usize, migratetype: Migratetype) -> Option<PhysFrame> {
     let cpu_count = crate::arch::x86_64::percpu::cpu_count()
         .max(1)
         .min(crate::arch::x86_64::percpu::MAX_CPUS);
 
     for step in 1..cpu_count {
         let peer = (cpu_idx + step) % cpu_count;
-        let mut cache = LOCAL_FRAME_CACHES[peer].lock();
+        let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(peer, migratetype)].lock();
         if let Some(frame) = cache.pop() {
             BuddyAllocator::mark_block_allocated(
                 frame.start_address.as_u64(),
                 0,
-                Migratetype::Unmovable,
+                migratetype,
             );
-            local_cached_dec_phys(frame.start_address.as_u64());
+            local_cached_dec_phys(frame.start_address.as_u64(), migratetype);
             return Some(frame);
         }
     }
     None
 }
 
-fn alloc_order0_cached() -> Result<PhysFrame, AllocError> {
+fn alloc_order0_cached(migratetype: Migratetype) -> Result<PhysFrame, AllocError> {
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
 
     {
-        let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
+        let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu_idx, migratetype)].lock();
         if let Some(frame) = cache.pop() {
             BuddyAllocator::mark_block_allocated(
                 frame.start_address.as_u64(),
                 0,
-                Migratetype::Unmovable,
+                migratetype,
             );
-            local_cached_dec_phys(frame.start_address.as_u64());
+            local_cached_dec_phys(frame.start_address.as_u64(), migratetype);
             return Ok(frame);
         }
     }
 
     let mut global = OnDemandGlobalLock::new();
 
-    if let Ok(frame) = refill_local_cache(cpu_idx, &mut global) {
+    if let Ok(frame) = refill_local_cache(cpu_idx, &mut global, migratetype) {
         return Ok(frame);
     }
     // Critical lock-order rule: never hold global while probing local caches.
     global.unlock();
 
-    if let Some(frame) = steal_from_other_caches(cpu_idx) {
+    if let Some(frame) = steal_from_other_caches(cpu_idx, migratetype) {
         return Ok(frame);
     }
 
-    global.alloc(0)
+    global.alloc_with_migratetype(0, migratetype)
 }
 
-fn free_order0_cached(frame: PhysFrame) {
+fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
     // NOTE: O(2^order) MetaSlot scan — acceptable here because order is always 0
     // (single-page check) on this hot path.
     if crate::memory::frame::block_phys_has_poison_guard(frame.start_address.as_u64(), 0) {
@@ -1677,7 +1718,7 @@ fn free_order0_cached(frame: PhysFrame) {
         return;
     }
 
-    if !is_cacheable_phys(frame.start_address.as_u64()) {
+    if !is_cacheable_phys_for(frame.start_address.as_u64(), migratetype) {
         let mut global = OnDemandGlobalLock::new();
         global.free(frame, 0);
         return;
@@ -1687,32 +1728,32 @@ fn free_order0_cached(frame: PhysFrame) {
     let mut spill = [0u64; LOCAL_CACHE_FLUSH_BATCH];
 
     let spill_len = {
-        let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
+        let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu_idx, migratetype)].lock();
         if cache.push(frame).is_ok() {
             // Mark free only on the success path: the incoming frame transitions
             // from "caller-allocated" to "cache sentinel" (REFCOUNT_UNUSED).
             BuddyAllocator::mark_block_free(
                 frame.start_address.as_u64(),
                 0,
-                Migratetype::Unmovable,
+                migratetype,
             );
-            local_cached_inc_phys(frame.start_address.as_u64());
+            local_cached_inc_phys(frame.start_address.as_u64(), migratetype);
             return;
         }
 
         // Cache full: pop existing frames to spill to buddy, then retry the push.
         let mut spill_len = cache.pop_many(&mut spill);
         for phys in spill.iter().take(spill_len).copied() {
-            local_cached_dec_phys(phys);
+            local_cached_dec_phys(phys, migratetype);
         }
 
         if cache.push(frame).is_ok() {
             BuddyAllocator::mark_block_free(
                 frame.start_address.as_u64(),
                 0,
-                Migratetype::Unmovable,
+                migratetype,
             );
-            local_cached_inc_phys(frame.start_address.as_u64());
+            local_cached_inc_phys(frame.start_address.as_u64(), migratetype);
         } else {
             // Still full after spilling — the incoming frame joins the spill batch.
             // It will be marked free by free_phys_batch → free_to_zone.
@@ -1738,9 +1779,8 @@ pub fn alloc(_token: &IrqDisabledToken, order: u8) -> Result<PhysFrame, AllocErr
 
 /// Allocate frames with an explicit migratetype preference.
 ///
-/// Order-0 unmovable allocations still use the per-CPU cache fast path.
-/// Movable allocations bypass that cache today so low-memory hot pages are not
-/// silently recycled into the movable class through the cache layer.
+/// Order-0 allocations use a per-CPU cache partitioned by migratetype so the
+/// fast path preserves the caller's mobility class.
 pub fn alloc_migratetype(
     _token: &IrqDisabledToken,
     order: u8,
@@ -1754,8 +1794,8 @@ pub fn alloc_migratetype(
             &BUDDY_ALLOCATOR as *const _ as usize
         );
     }
-    if order == 0 && migratetype == Migratetype::Unmovable {
-        alloc_order0_cached()
+    if order == 0 {
+        alloc_order0_cached(migratetype)
     } else {
         let mut global = OnDemandGlobalLock::new();
         match global.alloc_with_migratetype(order, migratetype) {
@@ -1774,10 +1814,9 @@ pub fn alloc_migratetype(
 ///
 /// `_token` is a compile-time proof that interrupts are disabled on the calling CPU.
 pub fn free(_token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
-    if order == 0
-        && BuddyAllocator::block_migratetype(frame.start_address.as_u64()) == Migratetype::Unmovable
-    {
-        free_order0_cached(frame);
+    let migratetype = BuddyAllocator::block_migratetype(frame.start_address.as_u64());
+    if order == 0 {
+        free_order0_cached(frame, migratetype);
     } else {
         let mut global = OnDemandGlobalLock::new();
         global.free(frame, order);
@@ -1877,6 +1916,10 @@ pub struct ZoneStats {
     pub allocated_pages: usize,
     /// Order-0 pages currently parked in per-CPU caches.
     pub cached_pages: usize,
+    /// Cached pages parked in unmovable per-CPU caches.
+    pub cached_unmovable_pages: usize,
+    /// Cached pages parked in movable per-CPU caches.
+    pub cached_movable_pages: usize,
     /// Effective free pages, including cached pages.
     pub free_pages: usize,
     /// Free pages tracked in movable free lists.
@@ -1911,6 +1954,8 @@ impl ZoneStats {
             reserved_pages: 0,
             allocated_pages: 0,
             cached_pages: 0,
+            cached_unmovable_pages: 0,
+            cached_movable_pages: 0,
             free_pages: 0,
             movable_free_pages: 0,
             unmovable_free_pages: 0,
@@ -1946,7 +1991,9 @@ impl ZoneStats {
     pub fn pressure(&self) -> ZonePressure {
         let reserve_floor = self.reserve_floor_pages();
         let low_floor = self.watermark_low.saturating_add(self.lowmem_reserve_pages);
-        let high_floor = self.watermark_high.saturating_add(self.lowmem_reserve_pages);
+        let high_floor = self
+            .watermark_high
+            .saturating_add(self.lowmem_reserve_pages);
 
         if self.free_pages <= reserve_floor {
             ZonePressure::Min
@@ -1984,10 +2031,15 @@ impl BuddyAllocator {
     pub fn zone_snapshot(&self, out: &mut [ZoneStats]) -> usize {
         let n = core::cmp::min(out.len(), self.zones.len());
         for (i, zone) in self.zones.iter().take(n).enumerate() {
-            let cached = LOCAL_CACHED_ZONE_FRAMES[i].load(AtomicOrdering::Relaxed);
+            let cached_unmovable =
+                local_cached_zone_migratetype_count(i, Migratetype::Unmovable);
+            let cached_movable = local_cached_zone_migratetype_count(i, Migratetype::Movable);
+            let cached = cached_unmovable.saturating_add(cached_movable);
             let mut free_by_type = zone.free_pages_by_migratetype();
             free_by_type[Migratetype::Unmovable.index()] =
-                free_by_type[Migratetype::Unmovable.index()].saturating_add(cached);
+                free_by_type[Migratetype::Unmovable.index()].saturating_add(cached_unmovable);
+            free_by_type[Migratetype::Movable.index()] =
+                free_by_type[Migratetype::Movable.index()].saturating_add(cached_movable);
             out[i] = ZoneStats {
                 zone_type: zone.zone_type,
                 base: zone.base.as_u64(),
@@ -1997,6 +2049,8 @@ impl BuddyAllocator {
                 reserved_pages: zone.reserved_pages,
                 allocated_pages: zone.allocated.saturating_sub(cached),
                 cached_pages: cached,
+                cached_unmovable_pages: cached_unmovable,
+                cached_movable_pages: cached_movable,
                 free_pages: Self::zone_effective_free_pages(zone, i),
                 movable_free_pages: free_by_type[Migratetype::Movable.index()],
                 unmovable_free_pages: free_by_type[Migratetype::Unmovable.index()],
