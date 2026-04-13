@@ -37,8 +37,7 @@ const LOCAL_CACHE_CAPACITY: usize = 256;
 const LOCAL_CACHE_REFILL_ORDER: u8 = 4;
 const LOCAL_CACHE_REFILL_FRAMES: usize = 1 << (LOCAL_CACHE_REFILL_ORDER as usize);
 const LOCAL_CACHE_FLUSH_BATCH: usize = 64;
-const LOCAL_CACHE_SLOTS: usize =
-    Migratetype::COUNT * crate::arch::x86_64::percpu::MAX_CPUS;
+const LOCAL_CACHE_SLOTS: usize = Migratetype::COUNT * crate::arch::x86_64::percpu::MAX_CPUS;
 const LOCAL_CACHED_ZONE_MIGRATETYPE_SLOTS: usize = Migratetype::COUNT * ZoneType::COUNT;
 const UNMOVABLE_ZONE_ORDER: [usize; ZoneType::COUNT] = [
     ZoneType::Normal as usize,
@@ -1496,11 +1495,8 @@ fn is_cacheable_phys_for(phys: u64, migratetype: Migratetype) -> bool {
 
 #[inline]
 fn local_cached_zone_migratetype_count(zone_idx: usize, migratetype: Migratetype) -> usize {
-    LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES[local_cached_zone_migratetype_slot(
-        zone_idx,
-        migratetype,
-    )]
-    .load(AtomicOrdering::Relaxed)
+    LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES[local_cached_zone_migratetype_slot(zone_idx, migratetype)]
+        .load(AtomicOrdering::Relaxed)
 }
 
 #[inline]
@@ -1508,11 +1504,8 @@ fn local_cached_inc_phys(phys: u64, migratetype: Migratetype) {
     let zone_idx = zone_index_for_phys(phys);
     LOCAL_CACHED_FRAMES.fetch_add(1, AtomicOrdering::Relaxed);
     LOCAL_CACHED_ZONE_FRAMES[zone_idx].fetch_add(1, AtomicOrdering::Relaxed);
-    LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES[local_cached_zone_migratetype_slot(
-        zone_idx,
-        migratetype,
-    )]
-    .fetch_add(1, AtomicOrdering::Relaxed);
+    LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES[local_cached_zone_migratetype_slot(zone_idx, migratetype)]
+        .fetch_add(1, AtomicOrdering::Relaxed);
 }
 
 #[inline]
@@ -1522,10 +1515,8 @@ fn local_cached_dec_phys(phys: u64, migratetype: Migratetype) {
     let zone = zone_index_for_phys(phys);
     let prev_zone = LOCAL_CACHED_ZONE_FRAMES[zone].fetch_sub(1, AtomicOrdering::Relaxed);
     debug_assert!(prev_zone > 0);
-    let prev_zone_type = LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES[local_cached_zone_migratetype_slot(
-        zone,
-        migratetype,
-    )]
+    let prev_zone_type = LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES
+        [local_cached_zone_migratetype_slot(zone, migratetype)]
     .fetch_sub(1, AtomicOrdering::Relaxed);
     debug_assert!(prev_zone_type > 0);
 }
@@ -1666,11 +1657,7 @@ fn steal_from_other_caches(cpu_idx: usize, migratetype: Migratetype) -> Option<P
         let peer = (cpu_idx + step) % cpu_count;
         let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(peer, migratetype)].lock();
         if let Some(frame) = cache.pop() {
-            BuddyAllocator::mark_block_allocated(
-                frame.start_address.as_u64(),
-                0,
-                migratetype,
-            );
+            BuddyAllocator::mark_block_allocated(frame.start_address.as_u64(), 0, migratetype);
             local_cached_dec_phys(frame.start_address.as_u64(), migratetype);
             return Some(frame);
         }
@@ -1684,11 +1671,7 @@ fn alloc_order0_cached(migratetype: Migratetype) -> Result<PhysFrame, AllocError
     {
         let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu_idx, migratetype)].lock();
         if let Some(frame) = cache.pop() {
-            BuddyAllocator::mark_block_allocated(
-                frame.start_address.as_u64(),
-                0,
-                migratetype,
-            );
+            BuddyAllocator::mark_block_allocated(frame.start_address.as_u64(), 0, migratetype);
             local_cached_dec_phys(frame.start_address.as_u64(), migratetype);
             return Ok(frame);
         }
@@ -1732,11 +1715,7 @@ fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
         if cache.push(frame).is_ok() {
             // Mark free only on the success path: the incoming frame transitions
             // from "caller-allocated" to "cache sentinel" (REFCOUNT_UNUSED).
-            BuddyAllocator::mark_block_free(
-                frame.start_address.as_u64(),
-                0,
-                migratetype,
-            );
+            BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0, migratetype);
             local_cached_inc_phys(frame.start_address.as_u64(), migratetype);
             return;
         }
@@ -1748,11 +1727,7 @@ fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
         }
 
         if cache.push(frame).is_ok() {
-            BuddyAllocator::mark_block_free(
-                frame.start_address.as_u64(),
-                0,
-                migratetype,
-            );
+            BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0, migratetype);
             local_cached_inc_phys(frame.start_address.as_u64(), migratetype);
         } else {
             // Still full after spilling — the incoming frame joins the spill batch.
@@ -2031,8 +2006,7 @@ impl BuddyAllocator {
     pub fn zone_snapshot(&self, out: &mut [ZoneStats]) -> usize {
         let n = core::cmp::min(out.len(), self.zones.len());
         for (i, zone) in self.zones.iter().take(n).enumerate() {
-            let cached_unmovable =
-                local_cached_zone_migratetype_count(i, Migratetype::Unmovable);
+            let cached_unmovable = local_cached_zone_migratetype_count(i, Migratetype::Unmovable);
             let cached_movable = local_cached_zone_migratetype_count(i, Migratetype::Movable);
             let cached = cached_unmovable.saturating_add(cached_movable);
             let mut free_by_type = zone.free_pages_by_migratetype();

@@ -367,7 +367,8 @@ impl Zone {
     pub fn free_pages_at_or_above_order(&self, order: u8) -> usize {
         let mut pages = 0usize;
         for current_order in order as usize..=MAX_ORDER {
-            pages = pages.saturating_add(self.free_list_count(current_order as u8) << current_order);
+            pages =
+                pages.saturating_add(self.free_list_count(current_order as u8) << current_order);
         }
         pages
     }
