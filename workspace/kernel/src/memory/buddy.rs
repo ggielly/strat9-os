@@ -42,6 +42,8 @@ const LOCAL_CACHE_REFILL_FRAMES: usize = 1 << (LOCAL_CACHE_REFILL_ORDER as usize
 const LOCAL_CACHE_FLUSH_BATCH: usize = 64;
 const LOCAL_CACHE_SLOTS: usize = Migratetype::COUNT * crate::arch::x86_64::percpu::MAX_CPUS;
 const LOCAL_CACHED_ZONE_MIGRATETYPE_SLOTS: usize = Migratetype::COUNT * ZoneType::COUNT;
+const COMPACTION_FRAGMENTATION_THRESHOLD: usize = 35;
+const COMPACTION_SNAPSHOT_NONE: usize = usize::MAX;
 const UNMOVABLE_ZONE_ORDER: [usize; ZoneType::COUNT] = [
     ZoneType::Normal as usize,
     ZoneType::HighMem as usize,
@@ -69,6 +71,22 @@ pub struct BuddyAllocator {
     zones: [Zone; ZoneType::COUNT],
     /// Per-zone bitmap pool reserved from free memory: [start, end).
     bitmap_pool: [(u64, u64); ZoneType::COUNT],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CompactionCandidate {
+    zone_idx: usize,
+    zone_type: ZoneType,
+    order: u8,
+    migratetype: Migratetype,
+    pressure: ZonePressure,
+    fragmentation_score: usize,
+    requested_pages: usize,
+    available_pages: usize,
+    usable_pages: usize,
+    cached_pages: usize,
+    pageblock_count: usize,
+    matching_pageblocks: usize,
 }
 
 impl BuddyAllocator {
@@ -1324,6 +1342,116 @@ impl BuddyAllocator {
         }
     }
 
+    #[inline]
+    fn zone_pressure_for_free_pages(zone: &Zone, free_pages: usize) -> ZonePressure {
+        let reserve_floor = zone.watermark_min.saturating_add(zone.lowmem_reserve_pages);
+        let low_floor = zone.watermark_low.saturating_add(zone.lowmem_reserve_pages);
+        let high_floor = zone
+            .watermark_high
+            .saturating_add(zone.lowmem_reserve_pages);
+
+        if free_pages <= reserve_floor {
+            ZonePressure::Min
+        } else if free_pages <= low_floor {
+            ZonePressure::Low
+        } else if free_pages <= high_floor {
+            ZonePressure::High
+        } else {
+            ZonePressure::Healthy
+        }
+    }
+
+    fn compaction_candidate(
+        &self,
+        order: u8,
+        migratetype: Migratetype,
+        zone_order: &[usize],
+    ) -> Option<CompactionCandidate> {
+        if order == 0 {
+            return None;
+        }
+
+        let requested_pages = 1usize << order;
+        let mut best: Option<CompactionCandidate> = None;
+
+        for &zone_idx in zone_order {
+            let zone = &self.zones[zone_idx];
+            if zone.page_count == 0 {
+                continue;
+            }
+
+            let cached_pages = LOCAL_CACHED_ZONE_FRAMES[zone_idx].load(AtomicOrdering::Relaxed);
+            if cached_pages == 0 {
+                continue;
+            }
+
+            let effective_free = Self::zone_effective_free_pages(zone, zone_idx);
+            let available_pages = effective_free
+                .saturating_sub(zone.watermark_min.saturating_add(zone.lowmem_reserve_pages));
+            if available_pages < requested_pages {
+                continue;
+            }
+
+            let usable_pages = zone.free_pages_at_or_above_order(order);
+            if usable_pages >= requested_pages {
+                continue;
+            }
+
+            let fragmentation_score = zone.fragmentation_score(order, cached_pages);
+            if fragmentation_score < COMPACTION_FRAGMENTATION_THRESHOLD {
+                continue;
+            }
+
+            let pageblocks = Self::zone_pageblock_counts(zone);
+            let candidate = CompactionCandidate {
+                zone_idx,
+                zone_type: zone.zone_type,
+                order,
+                migratetype,
+                pressure: Self::zone_pressure_for_free_pages(zone, effective_free),
+                fragmentation_score,
+                requested_pages,
+                available_pages,
+                usable_pages,
+                cached_pages,
+                pageblock_count: pageblocks[Migratetype::Unmovable.index()]
+                    .saturating_add(pageblocks[Migratetype::Movable.index()]),
+                matching_pageblocks: pageblocks[migratetype.index()],
+            };
+
+            let replace = match best {
+                None => true,
+                Some(current) => {
+                    candidate.fragmentation_score > current.fragmentation_score
+                        || (candidate.fragmentation_score == current.fragmentation_score
+                            && candidate.cached_pages > current.cached_pages)
+                        || (candidate.fragmentation_score == current.fragmentation_score
+                            && candidate.cached_pages == current.cached_pages
+                            && candidate.matching_pageblocks > current.matching_pageblocks)
+                }
+            };
+
+            if replace {
+                best = Some(candidate);
+            }
+        }
+
+        best
+    }
+
+    #[inline]
+    fn compaction_drain_budget(candidate: CompactionCandidate) -> usize {
+        let pageblock_goal = if candidate.matching_pageblocks != 0 {
+            PAGEBLOCK_PAGES
+        } else {
+            candidate.requested_pages
+        };
+        let target_pages = core::cmp::max(candidate.requested_pages, pageblock_goal)
+            .saturating_mul(2)
+            .max(LOCAL_CACHE_FLUSH_BATCH);
+        core::cmp::min(target_pages, candidate.cached_pages)
+    }
+
     /// Allocate while the caller already owns the global allocator lock.
     fn alloc_locked_with_migratetype(
         &mut self,
@@ -1449,6 +1577,21 @@ static BUDDY_ALLOC_FAIL_COUNTS: [core::sync::atomic::AtomicUsize;
     crate::memory::zone::MAX_ORDER + 1] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; crate::memory::zone::MAX_ORDER + 1];
 
+static COMPACTION_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+static COMPACTION_SUCCESSES: AtomicUsize = AtomicUsize::new(0);
+static COMPACTION_LAST_ORDER: AtomicUsize = AtomicUsize::new(COMPACTION_SNAPSHOT_NONE);
+static COMPACTION_LAST_MIGRATETYPE: AtomicUsize = AtomicUsize::new(COMPACTION_SNAPSHOT_NONE);
+static COMPACTION_LAST_ZONE: AtomicUsize = AtomicUsize::new(COMPACTION_SNAPSHOT_NONE);
+static COMPACTION_LAST_PRESSURE: AtomicUsize = AtomicUsize::new(ZonePressure::SNAPSHOT_COUNT);
+static COMPACTION_LAST_FRAGMENTATION: AtomicUsize = AtomicUsize::new(0);
+static COMPACTION_LAST_REQUESTED_PAGES: AtomicUsize = AtomicUsize::new(0);
+static COMPACTION_LAST_AVAILABLE_PAGES: AtomicUsize = AtomicUsize::new(0);
+static COMPACTION_LAST_USABLE_PAGES: AtomicUsize = AtomicUsize::new(0);
+static COMPACTION_LAST_CACHED_PAGES: AtomicUsize = AtomicUsize::new(0);
+static COMPACTION_LAST_DRAINED_PAGES: AtomicUsize = AtomicUsize::new(0);
+static COMPACTION_LAST_PAGEBLOCK_COUNT: AtomicUsize = AtomicUsize::new(0);
+static COMPACTION_LAST_MATCHING_PAGEBLOCKS: AtomicUsize = AtomicUsize::new(0);
+
 /// Records a buddy allocation failure for the given order.
 ///
 /// Called from `alloc_from_zone` when no free block is available at any
@@ -1470,6 +1613,73 @@ pub fn buddy_alloc_fail_counts_snapshot() -> [usize; crate::memory::zone::MAX_OR
         out[i] = counter.load(core::sync::atomic::Ordering::Relaxed);
     }
     out
+}
+
+fn snapshot_zone_type(value: usize) -> Option<ZoneType> {
+    match value {
+        x if x == ZoneType::DMA as usize => Some(ZoneType::DMA),
+        x if x == ZoneType::Normal as usize => Some(ZoneType::Normal),
+        x if x == ZoneType::HighMem as usize => Some(ZoneType::HighMem),
+        _ => None,
+    }
+}
+
+fn snapshot_migratetype(value: usize) -> Option<Migratetype> {
+    match value {
+        x if x == Migratetype::Unmovable as usize => Some(Migratetype::Unmovable),
+        x if x == Migratetype::Movable as usize => Some(Migratetype::Movable),
+        _ => None,
+    }
+}
+
+fn record_compaction_attempt(candidate: CompactionCandidate, drained_pages: usize, success: bool) {
+    COMPACTION_ATTEMPTS.fetch_add(1, AtomicOrdering::Relaxed);
+    if success {
+        COMPACTION_SUCCESSES.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    COMPACTION_LAST_ORDER.store(candidate.order as usize, AtomicOrdering::Relaxed);
+    COMPACTION_LAST_MIGRATETYPE.store(candidate.migratetype as usize, AtomicOrdering::Relaxed);
+    COMPACTION_LAST_ZONE.store(candidate.zone_type as usize, AtomicOrdering::Relaxed);
+    COMPACTION_LAST_PRESSURE.store(candidate.pressure.as_snapshot(), AtomicOrdering::Relaxed);
+    COMPACTION_LAST_FRAGMENTATION.store(candidate.fragmentation_score, AtomicOrdering::Relaxed);
+    COMPACTION_LAST_REQUESTED_PAGES.store(candidate.requested_pages, AtomicOrdering::Relaxed);
+    COMPACTION_LAST_AVAILABLE_PAGES.store(candidate.available_pages, AtomicOrdering::Relaxed);
+    COMPACTION_LAST_USABLE_PAGES.store(candidate.usable_pages, AtomicOrdering::Relaxed);
+    COMPACTION_LAST_CACHED_PAGES.store(candidate.cached_pages, AtomicOrdering::Relaxed);
+    COMPACTION_LAST_DRAINED_PAGES.store(drained_pages, AtomicOrdering::Relaxed);
+    COMPACTION_LAST_PAGEBLOCK_COUNT.store(candidate.pageblock_count, AtomicOrdering::Relaxed);
+    COMPACTION_LAST_MATCHING_PAGEBLOCKS
+        .store(candidate.matching_pageblocks, AtomicOrdering::Relaxed);
+}
+
+/// Snapshot compaction-assist telemetry without locking the allocator.
+pub fn compaction_stats_snapshot() -> CompactionStats {
+    let last_order = COMPACTION_LAST_ORDER.load(AtomicOrdering::Relaxed);
+    let last_migratetype = COMPACTION_LAST_MIGRATETYPE.load(AtomicOrdering::Relaxed);
+    let last_zone = COMPACTION_LAST_ZONE.load(AtomicOrdering::Relaxed);
+    let last_pressure = COMPACTION_LAST_PRESSURE.load(AtomicOrdering::Relaxed);
+
+    CompactionStats {
+        attempts: COMPACTION_ATTEMPTS.load(AtomicOrdering::Relaxed),
+        successes: COMPACTION_SUCCESSES.load(AtomicOrdering::Relaxed),
+        last_order: if last_order == COMPACTION_SNAPSHOT_NONE {
+            None
+        } else {
+            Some(last_order as u8)
+        },
+        last_migratetype: snapshot_migratetype(last_migratetype),
+        last_zone: snapshot_zone_type(last_zone),
+        last_pressure: ZonePressure::from_snapshot(last_pressure),
+        last_fragmentation_score: COMPACTION_LAST_FRAGMENTATION.load(AtomicOrdering::Relaxed),
+        last_requested_pages: COMPACTION_LAST_REQUESTED_PAGES.load(AtomicOrdering::Relaxed),
+        last_available_pages: COMPACTION_LAST_AVAILABLE_PAGES.load(AtomicOrdering::Relaxed),
+        last_usable_pages: COMPACTION_LAST_USABLE_PAGES.load(AtomicOrdering::Relaxed),
+        last_cached_pages: COMPACTION_LAST_CACHED_PAGES.load(AtomicOrdering::Relaxed),
+        last_drained_pages: COMPACTION_LAST_DRAINED_PAGES.load(AtomicOrdering::Relaxed),
+        last_pageblock_count: COMPACTION_LAST_PAGEBLOCK_COUNT.load(AtomicOrdering::Relaxed),
+        last_matching_pageblocks: COMPACTION_LAST_MATCHING_PAGEBLOCKS.load(AtomicOrdering::Relaxed),
+    }
 }
 
 /// Pages permanently withheld from the buddy free lists due to [`meta_guard::POISONED`].
@@ -1532,6 +1742,26 @@ impl LocalFrameCache {
             *slot = self.frames[self.len];
         }
         count
+    }
+
+    fn pop_many_for_zone(&mut self, out: &mut [u64], zone_idx: usize) -> usize {
+        let mut written = 0usize;
+        let mut idx = 0usize;
+
+        while idx < self.len && written < out.len() {
+            let phys = self.frames[idx];
+            if zone_index_for_phys(phys) != zone_idx {
+                idx += 1;
+                continue;
+            }
+
+            self.len -= 1;
+            out[written] = phys;
+            written += 1;
+            self.frames[idx] = self.frames[self.len];
+        }
+
+        written
     }
 }
 
@@ -1690,6 +1920,57 @@ fn drain_local_caches_to_global(max_pages: usize, global: &mut OnDemandGlobalLoc
             global.unlock();
             drained += popped;
         }
+    }
+
+    drained
+}
+
+fn drain_local_caches_for_zone(
+    max_pages: usize,
+    zone_idx: usize,
+    primary_migratetype: Migratetype,
+    global: &mut OnDemandGlobalLock,
+) -> usize {
+    if max_pages == 0 {
+        return 0;
+    }
+
+    let mut drained = 0usize;
+    let mut batch = [0u64; LOCAL_CACHE_FLUSH_BATCH];
+
+    for migratetype in primary_migratetype.fallback_order() {
+        for cpu in 0..crate::arch::x86_64::percpu::MAX_CPUS {
+            if drained >= max_pages {
+                return drained;
+            }
+
+            let target = core::cmp::min(batch.len(), max_pages.saturating_sub(drained));
+            if target == 0 {
+                break;
+            }
+
+            let popped = {
+                let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu, migratetype)].lock();
+                cache.pop_many_for_zone(&mut batch[..target], zone_idx)
+            };
+            if popped == 0 {
+                continue;
+            }
+
+            for phys in batch.iter().take(popped).copied() {
+                local_cached_dec_phys(phys, migratetype);
+            }
+            global.free_phys_batch(&batch, popped);
+            global.unlock();
+            drained += popped;
+        }
+    }
+
+    if drained < max_pages {
+        drained = drained.saturating_add(drain_local_caches_to_global(
+            max_pages.saturating_sub(drained),
+            global,
+        ));
     }
 
     drained
@@ -1911,7 +2192,34 @@ pub fn alloc_migratetype(
         match global.alloc_with_migratetype(order, migratetype) {
             Ok(frame) => Ok(frame),
             Err(AllocError::OutOfMemory) => {
-                global.unlock();
+                let candidate = global
+                    .with_allocator(|allocator, _token| {
+                        allocator.compaction_candidate(
+                            order,
+                            migratetype,
+                            BuddyAllocator::preferred_zone_order(migratetype),
+                        )
+                    })
+                    .flatten();
+
+                if let Some(candidate) = candidate {
+                    let budget = BuddyAllocator::compaction_drain_budget(candidate);
+                    global.unlock();
+                    let drained = drain_local_caches_for_zone(
+                        budget,
+                        candidate.zone_idx,
+                        migratetype,
+                        &mut global,
+                    );
+                    let retry = global.alloc_with_migratetype(order, migratetype);
+                    record_compaction_attempt(candidate, drained, retry.is_ok());
+                    if retry.is_ok() || drained != 0 {
+                        return retry;
+                    }
+                } else {
+                    global.unlock();
+                }
+
                 let _ = drain_local_caches_to_global(usize::MAX, &mut global);
                 global.alloc_with_migratetype(order, migratetype)
             }
@@ -2002,6 +2310,31 @@ pub enum ZonePressure {
     Low,
     /// Free pages reached the minimum watermark plus reserve floor.
     Min,
+}
+
+impl ZonePressure {
+    const SNAPSHOT_COUNT: usize = 4;
+
+    #[inline]
+    const fn as_snapshot(self) -> usize {
+        match self {
+            Self::Healthy => 0,
+            Self::High => 1,
+            Self::Low => 2,
+            Self::Min => 3,
+        }
+    }
+
+    #[inline]
+    const fn from_snapshot(value: usize) -> Option<Self> {
+        match value {
+            0 => Some(Self::Healthy),
+            1 => Some(Self::High),
+            2 => Some(Self::Low),
+            3 => Some(Self::Min),
+            _ => None,
+        }
+    }
 }
 
 /// Snapshot statistics for a single memory zone.
@@ -2122,6 +2455,64 @@ impl ZoneStats {
             ZonePressure::High
         } else {
             ZonePressure::Healthy
+        }
+    }
+}
+
+/// Snapshot of the last fragmentation-driven compaction assist attempt.
+///
+/// The fields are intentionally plain data so crash dumps and shell commands
+/// can read them without locking or heap allocation.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactionStats {
+    /// Number of targeted compaction assists attempted after an allocation miss.
+    pub attempts: usize,
+    /// Number of attempts that yielded a successful retry.
+    pub successes: usize,
+    /// Last requested buddy order that triggered a targeted drain.
+    pub last_order: Option<u8>,
+    /// Mobility class of the last assisted allocation.
+    pub last_migratetype: Option<Migratetype>,
+    /// Zone selected as the preferred compaction target.
+    pub last_zone: Option<ZoneType>,
+    /// Pressure state observed on that zone before draining caches.
+    pub last_pressure: Option<ZonePressure>,
+    /// Fragmentation score that justified the assist path.
+    pub last_fragmentation_score: usize,
+    /// Pages requested by the original allocation.
+    pub last_requested_pages: usize,
+    /// Effective free pages left above reserves in the chosen zone.
+    pub last_available_pages: usize,
+    /// Free pages already available at or above the requested order.
+    pub last_usable_pages: usize,
+    /// Order-0 pages parked in local caches for the chosen zone.
+    pub last_cached_pages: usize,
+    /// Pages actually drained from local caches during the last attempt.
+    pub last_drained_pages: usize,
+    /// Total pageblocks tracked in the selected zone.
+    pub last_pageblock_count: usize,
+    /// Pageblocks already tagged with the requested migratetype.
+    pub last_matching_pageblocks: usize,
+}
+
+impl CompactionStats {
+    /// Empty snapshot used before any assisted drain happened.
+    pub const fn empty() -> Self {
+        Self {
+            attempts: 0,
+            successes: 0,
+            last_order: None,
+            last_migratetype: None,
+            last_zone: None,
+            last_pressure: None,
+            last_fragmentation_score: 0,
+            last_requested_pages: 0,
+            last_available_pages: 0,
+            last_usable_pages: 0,
+            last_cached_pages: 0,
+            last_drained_pages: 0,
+            last_pageblock_count: 0,
+            last_matching_pageblocks: 0,
         }
     }
 }

@@ -1377,8 +1377,9 @@ fn dump_page_fault_full(
             let n = alloc.zone_snapshot(&mut zones);
             for i in 0..n {
                 let zone = zones[i];
+                let zone_ref = alloc.get_zone(i);
                 crate::serial_println!(
-                    "    Zone {} ({}): base={:#x} pages={} alloc={} free={} state={:?} seg={}/{} reserve={} largest={:?}",
+                    "    Zone {} ({}): base={:#x} managed={} present={} spanned={} reserved={} alloc={} free={} state={:?} seg={}/{} largest={:?}",
                     i,
                     match zone.zone_type {
                         crate::memory::zone::ZoneType::DMA => "DMA",
@@ -1387,13 +1388,39 @@ fn dump_page_fault_full(
                     },
                     zone.base,
                     zone.managed_pages,
+                    zone.present_pages,
+                    zone.spanned_pages,
+                    zone.reserved_pages,
                     zone.allocated_pages,
                     zone.free_pages,
                     zone.pressure(),
                     zone.segment_count,
                     zone.segment_capacity,
-                    zone.reserve_floor_pages(),
                     zone.largest_free_order
+                );
+                crate::serial_println!(
+                    "      reserve={} avail={} holes={} cached[u/m]={}/{} free[u/m]={}/{} pageblocks[u/m]={}/{} total={} order={}",
+                    zone.reserve_floor_pages(),
+                    zone.available_after_reserve_pages(),
+                    zone.hole_pages(),
+                    zone.cached_unmovable_pages,
+                    zone.cached_movable_pages,
+                    zone.unmovable_free_pages,
+                    zone.movable_free_pages,
+                    zone.unmovable_pageblocks,
+                    zone.movable_pageblocks,
+                    zone.pageblock_count,
+                    crate::memory::zone::PAGEBLOCK_ORDER
+                );
+                crate::serial_println!(
+                    "      frag/order: o1={}%% o4={}%% o{}={}%%",
+                    zone_ref.fragmentation_score(1, zone.cached_pages),
+                    zone_ref.fragmentation_score(4, zone.cached_pages),
+                    crate::memory::zone::PAGEBLOCK_ORDER,
+                    zone_ref.fragmentation_score(
+                        crate::memory::zone::PAGEBLOCK_ORDER as u8,
+                        zone.cached_pages,
+                    )
                 );
             }
         } else {
@@ -1401,6 +1428,48 @@ fn dump_page_fault_full(
         }
     } else {
         crate::serial_println!("  (allocator lock contended — skipping)");
+    }
+
+    let quarantine = crate::memory::buddy::poison_quarantine_pages_snapshot();
+    let fail_counts = crate::memory::buddy::buddy_alloc_fail_counts_snapshot();
+    let compaction = crate::memory::buddy::compaction_stats_snapshot();
+    crate::serial_println!("  Poison quarantine : {} pages", quarantine);
+
+    let mut printed_fail = false;
+    for (order, count) in fail_counts.iter().enumerate() {
+        if *count == 0 {
+            continue;
+        }
+        printed_fail = true;
+        crate::serial_println!("  Buddy alloc fail  : order={} count={}", order, count);
+    }
+    if !printed_fail {
+        crate::serial_println!("  Buddy alloc fail  : none");
+    }
+
+    if compaction.attempts == 0 {
+        crate::serial_println!("  Compaction assist : none");
+    } else {
+        crate::serial_println!(
+            "  Compaction assist : attempts={} success={} last_order={:?} migratetype={:?} zone={:?} pressure={:?}",
+            compaction.attempts,
+            compaction.successes,
+            compaction.last_order,
+            compaction.last_migratetype,
+            compaction.last_zone,
+            compaction.last_pressure
+        );
+        crate::serial_println!(
+            "                      frag={}%% req={} avail={} usable={} cached={} drained={} pageblocks={}/{}",
+            compaction.last_fragmentation_score,
+            compaction.last_requested_pages,
+            compaction.last_available_pages,
+            compaction.last_usable_pages,
+            compaction.last_cached_pages,
+            compaction.last_drained_pages,
+            compaction.last_matching_pageblocks,
+            compaction.last_pageblock_count
+        );
     }
 
     // --- Code bytes at RIP ---
