@@ -1380,7 +1380,7 @@ fn dump_page_fault_full(
             for i in 0..n {
                 let zone = zones[i];
                 crate::serial_println!(
-                    "    Zone {} ({}): base={:#x} pages={} alloc={} free={}",
+                    "    Zone {} ({}): base={:#x} pages={} alloc={} free={} state={:?} seg={}/{} reserve={} largest={:?}",
                     i,
                     match zone.zone_type {
                         crate::memory::zone::ZoneType::DMA => "DMA",
@@ -1390,7 +1390,12 @@ fn dump_page_fault_full(
                     zone.base,
                     zone.managed_pages,
                     zone.allocated_pages,
-                    zone.free_pages
+                    zone.free_pages,
+                    zone.pressure(),
+                    zone.segment_count,
+                    zone.segment_capacity,
+                    zone.reserve_floor_pages(),
+                    zone.largest_free_order
                 );
             }
         } else {

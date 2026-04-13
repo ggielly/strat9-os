@@ -23,10 +23,35 @@ pub fn cmd_mem(args: &[String]) -> Result<(), ShellError> {
 
 /// Summary view (default for `mem` with no subcommand).
 fn cmd_mem_summary() -> Result<(), ShellError> {
-    let (total_pages, allocated_pages) = {
+    let (total_pages, allocated_pages, reserved_pages, cached_pages, pressured_zones) = {
         let allocator_guard = crate::memory::buddy::get_allocator().lock();
         if let Some(ref allocator) = *allocator_guard {
-            allocator.page_totals()
+            let (total_pages, allocated_pages) = allocator.page_totals();
+            let mut zones =
+                [crate::memory::buddy::ZoneStats::empty(); crate::memory::zone::ZoneType::COUNT];
+            let zone_count = allocator.zone_snapshot(&mut zones);
+            let reserved_pages = zones
+                .iter()
+                .take(zone_count)
+                .map(|zone| zone.reserved_pages)
+                .sum::<usize>();
+            let cached_pages = zones
+                .iter()
+                .take(zone_count)
+                .map(|zone| zone.cached_pages)
+                .sum::<usize>();
+            let pressured_zones = zones
+                .iter()
+                .take(zone_count)
+                .filter(|zone| zone.pressure() != crate::memory::buddy::ZonePressure::Healthy)
+                .count();
+            (
+                total_pages,
+                allocated_pages,
+                reserved_pages,
+                cached_pages,
+                pressured_zones,
+            )
         } else {
             shell_println!("  Memory allocator not initialized");
             return Ok(());
@@ -36,10 +61,14 @@ fn cmd_mem_summary() -> Result<(), ShellError> {
     let total_bytes = total_pages * 4096;
     let used_bytes = allocated_pages * 4096;
     let free_bytes = total_bytes - used_bytes;
+    let reserved_bytes = reserved_pages * 4096;
+    let cached_bytes = cached_pages * 4096;
 
     let (total_val, total_unit) = format_bytes(total_bytes);
     let (used_val, used_unit) = format_bytes(used_bytes);
     let (free_val, free_unit) = format_bytes(free_bytes);
+    let (reserved_val, reserved_unit) = format_bytes(reserved_bytes);
+    let (cached_val, cached_unit) = format_bytes(cached_bytes);
 
     shell_println!("Memory status:");
     shell_println!(
@@ -60,6 +89,19 @@ fn cmd_mem_summary() -> Result<(), ShellError> {
         free_unit,
         total_pages - allocated_pages
     );
+    shell_println!(
+        "  Reserved:  {} {} ({} pages)",
+        reserved_val,
+        reserved_unit,
+        reserved_pages
+    );
+    shell_println!(
+        "  Cached:    {} {} ({} pages)",
+        cached_val,
+        cached_unit,
+        cached_pages
+    );
+    shell_println!("  Pressure:  {} zone(s) below high watermark", pressured_zones);
     shell_println!("");
 
     Ok(())
@@ -156,6 +198,12 @@ fn cmd_mem_zones() -> Result<(), ShellError> {
             info.watermark_high,
             info.lowmem_reserve_pages
         );
+        shell_println!(
+            "    State:     {:?} (avail_after_reserve={} pages, holes={} pages)",
+            info.pressure(),
+            info.available_after_reserve_pages(),
+            info.hole_pages()
+        );
         shell_println!("");
     }
 
@@ -202,11 +250,13 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
             for info in zones.iter().take(zone_count) {
                 match info.largest_free_order {
                     Some(order) => shell_println!(
-                        "  {:?}: free={} used={} cached={} segments={}/{} u/m={}/{} watermarks={}/{}/{} reserve={} largest=o{}",
+                        "  {:?}: state={:?} free={} used={} cached={} avail={} segments={}/{} u/m={}/{} watermarks={}/{}/{} reserve={} largest=o{}",
                         info.zone_type,
+                        info.pressure(),
                         info.free_pages,
                         info.allocated_pages,
                         info.cached_pages,
+                        info.available_after_reserve_pages(),
                         info.segment_count,
                         info.segment_capacity,
                         info.unmovable_free_pages,
@@ -218,11 +268,13 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
                         order
                     ),
                     None => shell_println!(
-                        "  {:?}: free={} used={} cached={} segments={}/{} u/m={}/{} watermarks={}/{}/{} reserve={} largest=none",
+                        "  {:?}: state={:?} free={} used={} cached={} avail={} segments={}/{} u/m={}/{} watermarks={}/{}/{} reserve={} largest=none",
                         info.zone_type,
+                        info.pressure(),
                         info.free_pages,
                         info.allocated_pages,
                         info.cached_pages,
+                        info.available_after_reserve_pages(),
                         info.segment_count,
                         info.segment_capacity,
                         info.unmovable_free_pages,

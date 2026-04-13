@@ -24,8 +24,10 @@ use crate::{
     serial_println,
     sync::{IrqDisabledToken, SpinLock, SpinLockGuard},
 };
-use core::{mem, ptr};
-use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use core::{
+    mem, ptr,
+    sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+};
 use x86_64::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
@@ -35,9 +37,14 @@ const LOCAL_CACHE_CAPACITY: usize = 256;
 const LOCAL_CACHE_REFILL_ORDER: u8 = 4;
 const LOCAL_CACHE_REFILL_FRAMES: usize = 1 << (LOCAL_CACHE_REFILL_ORDER as usize);
 const LOCAL_CACHE_FLUSH_BATCH: usize = 64;
-const DEFAULT_ZONE_ORDER: [usize; ZoneType::COUNT] = [
+const UNMOVABLE_ZONE_ORDER: [usize; ZoneType::COUNT] = [
     ZoneType::Normal as usize,
     ZoneType::HighMem as usize,
+    ZoneType::DMA as usize,
+];
+const MOVABLE_ZONE_ORDER: [usize; ZoneType::COUNT] = [
+    ZoneType::HighMem as usize,
+    ZoneType::Normal as usize,
     ZoneType::DMA as usize,
 ];
 
@@ -201,8 +208,8 @@ impl BuddyAllocator {
         for region in memory_regions {
             for zi in 0..ZoneType::COUNT {
                 if let Some((start, end)) = Self::zone_intersection_aligned(region, zi) {
-                    present_pages[zi] = present_pages[zi]
-                        .saturating_add(((end - start) / PAGE_SIZE) as usize);
+                    present_pages[zi] =
+                        present_pages[zi].saturating_add(((end - start) / PAGE_SIZE) as usize);
                     if start < min_base[zi] {
                         min_base[zi] = start;
                     }
@@ -257,14 +264,15 @@ impl BuddyAllocator {
             }
 
             let bytes = segment_count.saturating_mul(mem::size_of::<ZoneSegment>());
-            let storage_phys = boot_alloc::alloc_bytes_accessible(bytes, mem::align_of::<ZoneSegment>())
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Buddy allocator: unable to reserve {} bytes for {:?} segment table",
-                        bytes, zone.zone_type
-                    )
-                })
-                .as_u64();
+            let storage_phys =
+                boot_alloc::alloc_bytes_accessible(bytes, mem::align_of::<ZoneSegment>())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Buddy allocator: unable to reserve {} bytes for {:?} segment table",
+                            bytes, zone.zone_type
+                        )
+                    })
+                    .as_u64();
             unsafe {
                 ptr::write_bytes(phys_to_virt(storage_phys) as *mut u8, 0, bytes);
             }
@@ -328,8 +336,14 @@ impl BuddyAllocator {
             zone.watermark_min = Self::watermark_target_pages(zone.page_count, 256, 16, 2048);
 
             let delta = Self::watermark_target_pages(zone.page_count, 512, 16, 2048);
-            zone.watermark_low = zone.watermark_min.saturating_add(delta).min(zone.page_count);
-            zone.watermark_high = zone.watermark_low.saturating_add(delta).min(zone.page_count);
+            zone.watermark_low = zone
+                .watermark_min
+                .saturating_add(delta)
+                .min(zone.page_count);
+            zone.watermark_high = zone
+                .watermark_low
+                .saturating_add(delta)
+                .min(zone.page_count);
         }
     }
 
@@ -841,12 +855,7 @@ impl BuddyAllocator {
     }
 
     /// Releases list push.
-    fn free_list_push(
-        segment: &mut ZoneSegment,
-        phys: u64,
-        order: u8,
-        migratetype: Migratetype,
-    ) {
+    fn free_list_push(segment: &mut ZoneSegment, phys: u64, order: u8, migratetype: Migratetype) {
         debug_assert!(
             !crate::memory::frame::block_phys_has_poison_guard(phys, order),
             "buddy: refusing to push poisoned block to free list"
@@ -861,7 +870,11 @@ impl BuddyAllocator {
     }
 
     /// Releases list pop.
-    fn free_list_pop(segment: &mut ZoneSegment, order: u8, migratetype: Migratetype) -> Option<u64> {
+    fn free_list_pop(
+        segment: &mut ZoneSegment,
+        order: u8,
+        migratetype: Migratetype,
+    ) -> Option<u64> {
         let head = segment.free_lists[migratetype.index()][order as usize];
         if head == 0 {
             return None;
@@ -1068,9 +1081,8 @@ impl BuddyAllocator {
     }
 
     fn zone_effective_free_pages(zone: &Zone, zone_idx: usize) -> usize {
-        zone.available_pages().saturating_add(
-            LOCAL_CACHED_ZONE_FRAMES[zone_idx].load(AtomicOrdering::Relaxed),
-        )
+        zone.available_pages()
+            .saturating_add(LOCAL_CACHED_ZONE_FRAMES[zone_idx].load(AtomicOrdering::Relaxed))
     }
 
     /// Returns whether the zone should be considered for the current request.
@@ -1089,11 +1101,8 @@ impl BuddyAllocator {
         }
 
         let requested_pages = 1usize << order;
-        let floor = zone
-            .watermark_min
-            .saturating_add(zone.lowmem_reserve_pages);
-        Self::zone_effective_free_pages(zone, zone_idx)
-            >= requested_pages.saturating_add(floor)
+        let floor = zone.watermark_min.saturating_add(zone.lowmem_reserve_pages);
+        Self::zone_effective_free_pages(zone, zone_idx) >= requested_pages.saturating_add(floor)
     }
 
     /// Returns whether a buddy block is free and coalescible with `migratetype`.
@@ -1164,6 +1173,20 @@ impl BuddyAllocator {
         None
     }
 
+    /// Returns the preferred zone scan order for one migratetype.
+    ///
+    /// Unmovable allocations still prefer `Normal` first because the current
+    /// kernel hot-touches those pages directly. Movable allocations instead
+    /// prefer `HighMem` first to preserve scarce low memory for pinned kernel
+    /// structures and emergency paths.
+    #[inline]
+    fn preferred_zone_order(migratetype: Migratetype) -> &'static [usize; ZoneType::COUNT] {
+        match migratetype {
+            Migratetype::Unmovable => &UNMOVABLE_ZONE_ORDER,
+            Migratetype::Movable => &MOVABLE_ZONE_ORDER,
+        }
+    }
+
     /// Allocate while the caller already owns the global allocator lock.
     fn alloc_locked_with_migratetype(
         &mut self,
@@ -1181,7 +1204,12 @@ impl BuddyAllocator {
         }
 
         let result = self
-            .alloc_in_zone_order(order, migratetype, &DEFAULT_ZONE_ORDER, token)
+            .alloc_in_zone_order(
+                order,
+                migratetype,
+                Self::preferred_zone_order(migratetype),
+                token,
+            )
             .ok_or_else(|| {
                 crate::memory::buddy::record_buddy_alloc_fail(order);
                 AllocError::OutOfMemory
@@ -1411,7 +1439,7 @@ impl OnDemandGlobalLock {
         self.with_allocator(|allocator, token| {
             allocator.alloc_locked_with_migratetype(order, migratetype, token)
         })
-            .unwrap_or(Err(AllocError::OutOfMemory))
+        .unwrap_or(Err(AllocError::OutOfMemory))
     }
 
     fn free(&mut self, frame: PhysFrame, order: u8) {
@@ -1709,6 +1737,10 @@ pub fn alloc(_token: &IrqDisabledToken, order: u8) -> Result<PhysFrame, AllocErr
 }
 
 /// Allocate frames with an explicit migratetype preference.
+///
+/// Order-0 unmovable allocations still use the per-CPU cache fast path.
+/// Movable allocations bypass that cache today so low-memory hot pages are not
+/// silently recycled into the movable class through the cache layer.
 pub fn alloc_migratetype(
     _token: &IrqDisabledToken,
     order: u8,
@@ -1742,7 +1774,9 @@ pub fn alloc_migratetype(
 ///
 /// `_token` is a compile-time proof that interrupts are disabled on the calling CPU.
 pub fn free(_token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
-    if order == 0 && BuddyAllocator::block_migratetype(frame.start_address.as_u64()) == Migratetype::Unmovable {
+    if order == 0
+        && BuddyAllocator::block_migratetype(frame.start_address.as_u64()) == Migratetype::Unmovable
+    {
         free_order0_cached(frame);
     } else {
         let mut global = OnDemandGlobalLock::new();
@@ -1789,28 +1823,79 @@ impl BuddyAllocator {
     ) -> Result<PhysFrame, AllocError> {
         self.alloc_zone_locked(order, zone, Migratetype::Unmovable, token)
     }
+
+    /// Allocate explicitly from one zone with a migratetype hint.
+    ///
+    /// This keeps the target zone fixed but still selects the preferred
+    /// free-list class and fallback donor order from `migratetype`.
+    pub fn alloc_zone_migratetype(
+        &mut self,
+        order: u8,
+        zone: ZoneType,
+        migratetype: Migratetype,
+        token: &IrqDisabledToken,
+    ) -> Result<PhysFrame, AllocError> {
+        self.alloc_zone_locked(order, zone, migratetype, token)
+    }
 }
 
-/// Statistics for a single memory zone
+/// Derived pressure state for a zone snapshot.
+///
+/// Thresholds are evaluated against the zone's effective free pages, including
+/// pages parked in order-0 per-CPU caches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZonePressure {
+    /// Free pages are above the high watermark.
+    Healthy,
+    /// Free pages dropped below the high watermark.
+    High,
+    /// Free pages dropped below the low watermark.
+    Low,
+    /// Free pages reached the minimum watermark plus reserve floor.
+    Min,
+}
+
+/// Snapshot statistics for a single memory zone.
+///
+/// The struct is plain data on purpose so low-level diagnostics and crash paths
+/// can snapshot it onto the stack without heap allocation.
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneStats {
+    /// Zone classification.
     pub zone_type: ZoneType,
+    /// Lowest physical address covered by the zone span.
     pub base: u64,
+    /// Pages currently managed by buddy in this zone.
     pub managed_pages: usize,
+    /// Pages reported as usable by the firmware map before reservations.
     pub present_pages: usize,
+    /// Outer span in pages, including holes.
     pub spanned_pages: usize,
+    /// Pages removed from management during bootstrap.
     pub reserved_pages: usize,
+    /// Pages allocated to live callers.
     pub allocated_pages: usize,
+    /// Order-0 pages currently parked in per-CPU caches.
     pub cached_pages: usize,
+    /// Effective free pages, including cached pages.
     pub free_pages: usize,
+    /// Free pages tracked in movable free lists.
     pub movable_free_pages: usize,
+    /// Free pages tracked in unmovable free lists.
     pub unmovable_free_pages: usize,
+    /// Number of populated contiguous segments.
     pub segment_count: usize,
+    /// Reserved segment-table capacity.
     pub segment_capacity: usize,
+    /// Minimum watermark.
     pub watermark_min: usize,
+    /// Low watermark.
     pub watermark_low: usize,
+    /// High watermark.
     pub watermark_high: usize,
+    /// Low-memory reserve kept for lower-priority paths.
     pub lowmem_reserve_pages: usize,
+    /// Largest currently available free order.
     pub largest_free_order: Option<u8>,
 }
 
@@ -1836,6 +1921,41 @@ impl ZoneStats {
             watermark_high: 0,
             lowmem_reserve_pages: 0,
             largest_free_order: None,
+        }
+    }
+
+    /// Returns the number of hole pages inside the zone span.
+    #[inline]
+    pub fn hole_pages(&self) -> usize {
+        self.spanned_pages.saturating_sub(self.managed_pages)
+    }
+
+    /// Returns the effective reserve floor enforced by policy.
+    #[inline]
+    pub fn reserve_floor_pages(&self) -> usize {
+        self.watermark_min.saturating_add(self.lowmem_reserve_pages)
+    }
+
+    /// Returns the free pages remaining after the reserve floor is discounted.
+    #[inline]
+    pub fn available_after_reserve_pages(&self) -> usize {
+        self.free_pages.saturating_sub(self.reserve_floor_pages())
+    }
+
+    /// Returns the derived pressure state from the current zone watermarks.
+    pub fn pressure(&self) -> ZonePressure {
+        let reserve_floor = self.reserve_floor_pages();
+        let low_floor = self.watermark_low.saturating_add(self.lowmem_reserve_pages);
+        let high_floor = self.watermark_high.saturating_add(self.lowmem_reserve_pages);
+
+        if self.free_pages <= reserve_floor {
+            ZonePressure::Min
+        } else if self.free_pages <= low_floor {
+            ZonePressure::Low
+        } else if self.free_pages <= high_floor {
+            ZonePressure::High
+        } else {
+            ZonePressure::Healthy
         }
     }
 }
@@ -1866,9 +1986,8 @@ impl BuddyAllocator {
         for (i, zone) in self.zones.iter().take(n).enumerate() {
             let cached = LOCAL_CACHED_ZONE_FRAMES[i].load(AtomicOrdering::Relaxed);
             let mut free_by_type = zone.free_pages_by_migratetype();
-            free_by_type[Migratetype::Unmovable.index()] = free_by_type
-                [Migratetype::Unmovable.index()]
-                .saturating_add(cached);
+            free_by_type[Migratetype::Unmovable.index()] =
+                free_by_type[Migratetype::Unmovable.index()].saturating_add(cached);
             out[i] = ZoneStats {
                 zone_type: zone.zone_type,
                 base: zone.base.as_u64(),
