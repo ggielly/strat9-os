@@ -28,6 +28,7 @@ use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use x86_64::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
+const PAGE_SHIFT: u8 = 12; // log2(4096)
 const DMA_MAX: u64 = 16 * 1024 * 1024;
 const NORMAL_MAX: u64 = 896 * 1024 * 1024;
 const LOCAL_CACHE_CAPACITY: usize = 256;
@@ -78,6 +79,26 @@ impl BuddyAllocator {
             "Buddy allocator: initializing with {} memory regions",
             memory_regions.len()
         );
+
+        // Dump memory regions for diagnostic (compare QEMU vs VMware maps)
+        for (i, region) in memory_regions.iter().enumerate() {
+            let kind_str = match region.kind {
+                crate::boot::entry::MemoryKind::Free => "FREE",
+                crate::boot::entry::MemoryKind::Reclaim => "RECLAIM",
+                crate::boot::entry::MemoryKind::Reserved => "RESERVED",
+                crate::boot::entry::MemoryKind::Null => "NULL",
+                _ => "UNKNOWN",
+            };
+            serial_println!(
+                "  [buddy] MMAP[{:2}]: phys={:#018x}..{:#018x} size={:#x} ({})",
+                i,
+                region.base,
+                region.base.saturating_add(region.size),
+                region.size,
+                kind_str
+            );
+        }
+
         for (_protected_base, _protected_size) in
             Self::protected_module_ranges().into_iter().flatten()
         {
@@ -90,6 +111,17 @@ impl BuddyAllocator {
 
         // Pass 1: compute per-zone address span (base + span_pages)
         self.pass_count(memory_regions);
+
+        // Diagnostic: log span info for each zone (helps diagnose VMware memory map issues)
+        for zone in &self.zones {
+            serial_println!(
+                "  [buddy] Zone {:?}: base={:#x} span={} pages ({} MB span)",
+                zone.zone_type,
+                zone.base.as_u64(),
+                zone.span_pages,
+                (zone.span_pages * 4096) / (1024 * 1024)
+            );
+        }
 
         // Pass 2: reserve bitmap storage via the boot allocator.
         self.pass_boot_alloc_and_setup_bitmaps();
@@ -109,13 +141,28 @@ impl BuddyAllocator {
         boot_alloc::seal();
 
         for zone in &self.zones {
+            let hole_pages = zone.span_pages.saturating_sub(zone.page_count);
+            let efficiency = if zone.span_pages > 0 {
+                (zone.page_count * 100) / zone.span_pages
+            } else {
+                0
+            };
             serial_println!(
-                "  Zone {:?}: managed={} pages span={} pages ({} MB managed)",
+                "  [buddy] Zone {:?}: managed={} span={} holes={} ({}% utilized, {} MB managed)",
                 zone.zone_type,
                 zone.page_count,
                 zone.span_pages,
+                hole_pages,
+                efficiency,
                 (zone.page_count * 4096) / (1024 * 1024)
             );
+            if zone.span_pages > 0 && efficiency < 70 {
+                serial_println!(
+                    "  [buddy] WARNING: Zone {:?} has large holes ({}% wasted). This may indicate VMware memory fragmentation.",
+                    zone.zone_type,
+                    100 - efficiency
+                );
+            }
         }
     }
 
@@ -199,6 +246,17 @@ impl BuddyAllocator {
     }
 
     /// Performs the pass populate operation.
+    ///
+    /// # Strategy (VMware-safe)
+    ///
+    /// The buddy bitmaps are already zeroed by `pass_boot_alloc_and_setup_bitmaps`,
+    /// meaning **all pages in the span are implicitly allocated**.
+    /// We only seed the FREE/RECLAIM regions, and the holes (MMIO, ACPI NVS, reserved)
+    /// remain allocated : preventing any coalescing across VMware's fragmented memory map.
+    ///
+    /// The seeding is **greedy**: instead of inserting page-by-page (order 0), we calculate
+    /// the largest power-of-2 block that fits at each address, reducing O(N) iterations
+    /// to O(N / 2^order) : critical for VMware's 59+ fragmented regions.
     fn pass_populate(&mut self, memory_regions: &[MemoryRegion]) {
         for region in memory_regions {
             for zi in 0..ZoneType::COUNT {
@@ -207,6 +265,77 @@ impl BuddyAllocator {
                 };
                 self.seed_range_as_free(zi, start, end);
             }
+        }
+    }
+
+    /// Seeds a contiguous physical range `[start, end)` as free using **greedy block insertion**.
+    ///
+    /// Instead of inserting page-by-page at order 0 (which causes O(N) coalescing storms on
+    /// VMware's fragmented memory maps), this function calculates the largest power-of-2 block
+    /// that fits at each address and inserts it directly.
+    ///
+    /// # Algorithm
+    /// For each position `addr` in the range:
+    /// 1. Compute remaining bytes: `remaining = end - addr`
+    /// 2. Find max order: `min(ilog2(remaining / PAGE_SIZE), MAX_ORDER)`
+    /// 3. Reduce order until `addr` is aligned to `PAGE_SIZE << order`
+    /// 4. Insert the block via `insert_free_block(zone, addr, order)`
+    /// 5. Advance `addr += PAGE_SIZE << order`
+    ///
+    /// # Safety: holes are implicitly protected
+    /// Since buddy bitmaps start zeroed (all pages allocated), pages NOT seeded here
+    /// (MMIO gaps, ACPI NVS, reserved regions) remain marked as allocated. The buddy
+    /// coalescing logic (`toggle_pair`) will never merge blocks across these holes because
+    /// their buddy bits stay at 0, blocking coalescing at hole boundaries.
+    fn seed_range_as_free(&mut self, zone_idx: usize, start: u64, end: u64) {
+        if start >= end {
+            return;
+        }
+        let zone = &mut self.zones[zone_idx];
+        let mut addr = start;
+
+        while addr < end {
+            // Skip protected module pages
+            if Self::is_protected_module_page(addr) {
+                buddy_dbg!(
+                    "  Zone {:?}: skip protected page 0x{:x}",
+                    zone.zone_type,
+                    addr
+                );
+                addr += PAGE_SIZE;
+                continue;
+            }
+
+            // Greedy: find the largest block that fits
+            let remaining = end - addr;
+            let max_possible_order = if remaining >= PAGE_SIZE {
+                ((remaining / PAGE_SIZE).ilog2() as u8).min(MAX_ORDER as u8)
+            } else {
+                0
+            };
+
+            // Reduce order until address is aligned to block size
+            let mut order = max_possible_order;
+            while order > 0 {
+                let block_size = PAGE_SIZE << order;
+                if addr.is_aligned(block_size) {
+                    break;
+                }
+                order -= 1;
+            }
+
+            let block_pages = 1usize << order;
+            let block_size = PAGE_SIZE << order;
+
+            // Double-check we don't exceed the range
+            if addr + block_size > end {
+                // Should not happen if alignment logic is correct, but safety fallback
+                order = 0;
+            }
+
+            Self::insert_free_block(zone, addr, order);
+            zone.page_count += block_pages;
+            addr += block_size;
         }
     }
 

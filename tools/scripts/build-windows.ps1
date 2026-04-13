@@ -202,27 +202,28 @@ Step "4. Creating ISO"
 
 $IsoFile = Join-Path $BuildDir "strat9-os.iso"
 
-# Use WSL xorriso (reliable), fallback to bundled Windows binary
+# Try native Windows xorriso first, then WSL fallback
 $UseXorrisoWsl = $false
 $WslDistro = "Debian"
+$XorrisoNative = Get-Command xorriso -ErrorAction SilentlyContinue
+
+# Check tools/ directory for bundled Windows xorriso
 $XorrisoBundled = Join-Path $RootDir "tools\xorriso-win32.2026-02-25\xorriso.exe"
-
-# Prefer WSL - it handles path conversion correctly
-try {
-    $WslCheck = & wsl -d $WslDistro -- which xorriso 2>$null
-    if ($LASTEXITCODE -eq 0 -and $WslCheck -match "xorriso") {
-        $UseXorrisoWsl = $true
-        Write-Host "  xorriso found via WSL ($WslDistro)" -ForegroundColor Green
-    }
-} catch {}
-
-# Fallback to bundled Windows binary (may have path issues with Cygwin builds)
-if (-not $UseXorrisoWsl -and (Test-Path $XorrisoBundled)) {
-    Write-Host "  xorriso found (bundled Windows binary)" -ForegroundColor Yellow
-    Write-Host "  Note: WSL xorriso is preferred for reliable path handling" -ForegroundColor Yellow
+if (Test-Path $XorrisoBundled) {
+    Write-Host "  xorriso found (bundled Windows binary)" -ForegroundColor Green
+} elseif ($XorrisoNative) {
+    Write-Host "  xorriso found natively (PATH)" -ForegroundColor Green
+} else {
+    try {
+        $WslCheck = & wsl -d $WslDistro -- which xorriso 2>$null
+        if ($LASTEXITCODE -eq 0 -and $WslCheck -match "xorriso") {
+            $UseXorrisoWsl = $true
+            Write-Host "  xorriso found via WSL ($WslDistro)" -ForegroundColor Green
+        }
+    } catch {}
 }
 
-if ($UseXorrisoWsl -or (Test-Path $XorrisoBundled)) {
+if ($XorrisoBundled -or $XorrisoNative -or $UseXorrisoWsl) {
     Write-Host "  Creating ISO with xorriso..."
 
     $XorrisoArgs = @(
@@ -243,11 +244,9 @@ if ($UseXorrisoWsl -or (Test-Path $XorrisoBundled)) {
         $XorrisoArgs += @($IsoRootWsl, "-o", $IsoFileWsl)
         & wsl -d $WslDistro -- xorriso @XorrisoArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
     } else {
-        # Bundled Windows binary - use forward slashes
-        $IsoRootPosix = $IsoRoot.Replace('\', '/')
-        $IsoFilePosix = $IsoFile.Replace('\', '/')
-        $XorrisoArgs += @($IsoRootPosix, "-o", $IsoFilePosix)
-        & $XorrisoBundled @XorrisoArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $XorrisoCmd = if ($XorrisoBundled) { $XorrisoBundled } else { "xorriso" }
+        $XorrisoArgs += @($IsoRoot, "-o", $IsoFile)
+        & $XorrisoCmd @XorrisoArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
     }
 
     if ((Test-Path $IsoFile) -and ((Get-Item $IsoFile).Length -gt 1MB)) {
@@ -258,8 +257,16 @@ if ($UseXorrisoWsl -or (Test-Path $XorrisoBundled)) {
         exit 1
     }
 } else {
-    Write-Host "  ERROR: No xorriso found." -ForegroundColor Red
-    Write-Host "  Place xorriso.exe in tools\xorriso-win32*/" -ForegroundColor Yellow
+    # Fallback: try to download pre-built mkisofs or use PowerShell ISO creation
+    # For Limine, we need proper El Torito boot records
+    Write-Host "  Neither xorriso nor oscdimg found." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Install one of:" -ForegroundColor Yellow
+    Write-Host "    - xorriso:  wsl sudo apt install xorriso" -ForegroundColor Yellow
+    Write-Host "    - Windows ADK: https://learn.microsoft.com/en-us/windows-hardware/get-started/adk-install" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Quick fix - install xorriso via WSL:" -ForegroundColor Cyan
+    Write-Host "    wsl sudo apt install -y xorriso" -ForegroundColor Cyan
     exit 1
 }
 
