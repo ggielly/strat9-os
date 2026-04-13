@@ -139,7 +139,9 @@ impl FramePurpose {
             // Page-table frames are always kernel-owned.
             Self::PageTable => frame_flags::KERNEL | frame_flags::ALLOCATED,
             Self::KernelData => frame_flags::KERNEL | frame_flags::ALLOCATED,
-            Self::UserData => frame_flags::USER | frame_flags::ALLOCATED,
+            Self::UserData => {
+                frame_flags::USER | frame_flags::ALLOCATED | frame_flags::MOVABLE
+            }
             Self::Custom(f) => f | frame_flags::ALLOCATED,
         }
     }
@@ -218,8 +220,14 @@ impl FrameAllocOptions {
     /// refcount of `1` (set by the first allocation) and panic immediately rather
     /// than silently aliasing memory.
     pub fn allocate(self, token: &IrqDisabledToken) -> Result<PhysFrame, AllocError> {
+        let migratetype = if self.purpose_flags & frame_flags::MOVABLE != 0 {
+            crate::memory::zone::Migratetype::Movable
+        } else {
+            crate::memory::zone::Migratetype::Unmovable
+        };
+
         // Step 1 — exclusive frame from the buddy allocator.
-        let frame = crate::memory::buddy::alloc(token, 0)?;
+        let frame = crate::memory::buddy::alloc_migratetype(token, 0, migratetype)?;
         let phys = frame.start_address.as_u64();
 
         // SAFETY: `get_meta` panics only if `phys` is out-of-bounds, which
@@ -315,6 +323,8 @@ pub mod frame_flags {
     pub const USER: u32 = 1 << 11;
     /// La frame est empoisonnée et ne doit plus être recyclée telle quelle.
     pub const POISONED: u32 = 1 << 12;
+    /// La frame appartient à une classe de pages movable.
+    pub const MOVABLE: u32 = 1 << 13;
     /// Frame éligible au copy-on-write.
     pub const COW: u32 = 1 << 0;
     /// Frame partagée de type DLL, jamais COW.

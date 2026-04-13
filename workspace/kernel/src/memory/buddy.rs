@@ -19,11 +19,12 @@ use crate::{
             frame_flags, get_meta, AllocError, FrameAllocator, PhysFrame, FRAME_META_LINK_NONE,
         },
         hhdm_offset, phys_to_virt,
-        zone::{BuddyBitmap, Zone, ZoneSegment, ZoneType, MAX_ORDER, MAX_ZONE_SEGMENTS},
+        zone::{BuddyBitmap, Migratetype, Zone, ZoneSegment, ZoneType, MAX_ORDER},
     },
     serial_println,
     sync::{IrqDisabledToken, SpinLock, SpinLockGuard},
 };
+use core::{mem, ptr};
 use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use x86_64::PhysAddr;
 
@@ -34,6 +35,11 @@ const LOCAL_CACHE_CAPACITY: usize = 256;
 const LOCAL_CACHE_REFILL_ORDER: u8 = 4;
 const LOCAL_CACHE_REFILL_FRAMES: usize = 1 << (LOCAL_CACHE_REFILL_ORDER as usize);
 const LOCAL_CACHE_FLUSH_BATCH: usize = 64;
+const DEFAULT_ZONE_ORDER: [usize; ZoneType::COUNT] = [
+    ZoneType::Normal as usize,
+    ZoneType::HighMem as usize,
+    ZoneType::DMA as usize,
+];
 
 #[cfg(feature = "selftest")]
 macro_rules! buddy_dbg {
@@ -132,7 +138,8 @@ impl BuddyAllocator {
         let candidate_len = boot_alloc::snapshot_free_regions(&mut candidates);
         self.pass_reserve_bitmap_pools(&candidates[..candidate_len]);
 
-        // Pass 3: build the final segmented buddy layout from the boot
+        // Pass 3: reserve exact segment storage from the remaining accessible
+        // boot memory and then build the final segmented buddy layout from the boot
         // allocator's remaining free ranges after bitmap reservations.
         let mut remaining = [MemoryRegion {
             base: 0,
@@ -140,7 +147,9 @@ impl BuddyAllocator {
             kind: MemoryKind::Reserved,
         }; boot_alloc::MAX_BOOT_ALLOC_REGIONS];
         let remaining_len = boot_alloc::snapshot_free_regions(&mut remaining);
+        self.pass_reserve_segment_storage(&remaining[..remaining_len]);
         self.pass_build_segments(&remaining[..remaining_len]);
+        self.pass_finalize_zone_accounting();
         self.pass_setup_segment_bitmaps();
         self.pass_populate();
 
@@ -157,12 +166,19 @@ impl BuddyAllocator {
                 0
             };
             serial_println!(
-                "  [buddy] Zone {:?}: segments={} managed={} span={} holes={} ({}% utilized, {} MB managed)",
+                "  [buddy] Zone {:?}: segments={}/{} managed={} present={} reserved={} span={} holes={} min/low/high={}/{}/{} reserve={} ({}% utilized, {} MB managed)",
                 zone.zone_type,
                 zone.segment_count,
+                zone.segment_capacity,
                 zone.page_count,
+                zone.present_pages,
+                zone.reserved_pages,
                 zone.span_pages,
                 hole_pages,
+                zone.watermark_min,
+                zone.watermark_low,
+                zone.watermark_high,
+                zone.lowmem_reserve_pages,
                 efficiency,
                 (zone.page_count * 4096) / (1024 * 1024)
             );
@@ -180,10 +196,13 @@ impl BuddyAllocator {
     fn pass_count(&mut self, memory_regions: &[MemoryRegion]) {
         let mut min_base = [u64::MAX; ZoneType::COUNT];
         let mut max_end = [0u64; ZoneType::COUNT];
+        let mut present_pages = [0usize; ZoneType::COUNT];
 
         for region in memory_regions {
             for zi in 0..ZoneType::COUNT {
                 if let Some((start, end)) = Self::zone_intersection_aligned(region, zi) {
+                    present_pages[zi] = present_pages[zi]
+                        .saturating_add(((end - start) / PAGE_SIZE) as usize);
                     if start < min_base[zi] {
                         min_base[zi] = start;
                     }
@@ -198,10 +217,15 @@ impl BuddyAllocator {
             let zone = &mut self.zones[zi];
             zone.base = PhysAddr::new(0);
             zone.page_count = 0;
+            zone.present_pages = present_pages[zi];
             zone.span_pages = 0;
             zone.allocated = 0;
-            zone.segment_count = 0;
-            zone.segments = [ZoneSegment::empty(); MAX_ZONE_SEGMENTS];
+            zone.reserved_pages = 0;
+            zone.lowmem_reserve_pages = 0;
+            zone.watermark_min = 0;
+            zone.watermark_low = 0;
+            zone.watermark_high = 0;
+            zone.clear_segments();
 
             if min_base[zi] == u64::MAX || max_end[zi] <= min_base[zi] {
                 continue;
@@ -209,6 +233,44 @@ impl BuddyAllocator {
 
             zone.base = PhysAddr::new(min_base[zi]);
             zone.span_pages = ((max_end[zi] - min_base[zi]) / PAGE_SIZE) as usize;
+        }
+    }
+
+    /// Reserve per-zone segment tables sized to the actual fragmented layout.
+    fn pass_reserve_segment_storage(&mut self, memory_regions: &[MemoryRegion]) {
+        let mut segment_counts = [0usize; ZoneType::COUNT];
+
+        for region in memory_regions {
+            for (zi, count) in segment_counts.iter_mut().enumerate() {
+                if Self::zone_intersection_aligned(region, zi).is_some() {
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+
+        for (zi, &segment_count) in segment_counts.iter().enumerate() {
+            let zone = &mut self.zones[zi];
+            zone.clear_segments();
+
+            if segment_count == 0 {
+                continue;
+            }
+
+            let bytes = segment_count.saturating_mul(mem::size_of::<ZoneSegment>());
+            let storage_phys = boot_alloc::alloc_bytes_accessible(bytes, mem::align_of::<ZoneSegment>())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Buddy allocator: unable to reserve {} bytes for {:?} segment table",
+                        bytes, zone.zone_type
+                    )
+                })
+                .as_u64();
+            unsafe {
+                ptr::write_bytes(phys_to_virt(storage_phys) as *mut u8, 0, bytes);
+            }
+
+            zone.segment_capacity = segment_count;
+            zone.segments = phys_to_virt(storage_phys) as *mut ZoneSegment;
         }
     }
 
@@ -257,6 +319,57 @@ impl BuddyAllocator {
         }
     }
 
+    /// Finalise zone accounting once the managed segment set is known.
+    fn pass_finalize_zone_accounting(&mut self) {
+        for zone in &mut self.zones {
+            zone.reserved_pages = zone.present_pages.saturating_sub(zone.page_count);
+            zone.lowmem_reserve_pages =
+                Self::lowmem_reserve_target_pages(zone.zone_type, zone.page_count);
+            zone.watermark_min = Self::watermark_target_pages(zone.page_count, 256, 16, 2048);
+
+            let delta = Self::watermark_target_pages(zone.page_count, 512, 16, 2048);
+            zone.watermark_low = zone.watermark_min.saturating_add(delta).min(zone.page_count);
+            zone.watermark_high = zone.watermark_low.saturating_add(delta).min(zone.page_count);
+        }
+    }
+
+    /// Compute a bounded watermark target for a zone.
+    fn watermark_target_pages(
+        managed_pages: usize,
+        divisor: usize,
+        floor: usize,
+        cap: usize,
+    ) -> usize {
+        Self::bounded_zone_target(managed_pages, divisor, floor, cap, 8)
+    }
+
+    /// Compute a bounded low-memory reserve target.
+    fn lowmem_reserve_target_pages(zone_type: ZoneType, managed_pages: usize) -> usize {
+        match zone_type {
+            ZoneType::DMA => Self::bounded_zone_target(managed_pages, 8, 16, 512, 4),
+            ZoneType::Normal => Self::bounded_zone_target(managed_pages, 64, 64, 2048, 8),
+            ZoneType::HighMem => 0,
+        }
+    }
+
+    /// Bound a policy target to something meaningful for the current zone size.
+    fn bounded_zone_target(
+        managed_pages: usize,
+        divisor: usize,
+        floor: usize,
+        cap: usize,
+        max_fraction_divisor: usize,
+    ) -> usize {
+        if managed_pages == 0 {
+            return 0;
+        }
+
+        let scaled = core::cmp::max(managed_pages / divisor, floor);
+        let capped = core::cmp::min(scaled, cap);
+        let max_for_zone = core::cmp::max(1, managed_pages / max_fraction_divisor);
+        core::cmp::min(capped, max_for_zone)
+    }
+
     /// Build the final segmented physical layout from remaining boot allocator ranges.
     fn pass_build_segments(&mut self, memory_regions: &[MemoryRegion]) {
         for region in memory_regions {
@@ -265,25 +378,26 @@ impl BuddyAllocator {
                     continue;
                 };
                 let zone = &mut self.zones[zi];
-                if zone.segment_count >= MAX_ZONE_SEGMENTS {
+                if zone.segment_count >= zone.segment_capacity {
                     panic!(
-                        "Buddy allocator: zone {:?} exceeded MAX_ZONE_SEGMENTS={} while processing phys=0x{:x}..0x{:x}",
+                        "Buddy allocator: zone {:?} exceeded reserved segment capacity={} while processing phys=0x{:x}..0x{:x}",
                         zone.zone_type,
-                        MAX_ZONE_SEGMENTS,
+                        zone.segment_capacity,
                         start,
                         end,
                     );
                 }
 
-                zone.segments[zone.segment_count] = ZoneSegment {
+                let slot = zone.segment_count;
+                zone.segments_mut()[slot] = ZoneSegment {
                     base: PhysAddr::new(start),
                     page_count: ((end - start) / PAGE_SIZE) as usize,
-                    free_lists: [0; MAX_ORDER + 1],
+                    free_lists: [[0; MAX_ORDER + 1]; Migratetype::COUNT],
                     buddy_bitmaps: [BuddyBitmap::empty(); MAX_ORDER + 1],
                     #[cfg(debug_assertions)]
                     alloc_bitmap: BuddyBitmap::empty(),
                 };
-                zone.segment_count += 1;
+                zone.segment_count = slot + 1;
                 zone.page_count = zone
                     .page_count
                     .saturating_add(((end - start) / PAGE_SIZE) as usize);
@@ -309,8 +423,8 @@ impl BuddyAllocator {
 
             let zone = &mut self.zones[zi];
             let mut cursor = pool_start;
-            for si in 0..zone.segment_count {
-                let segment = &mut zone.segments[si];
+            let segment_count = zone.segment_count;
+            for segment in zone.segments_mut().iter_mut().take(segment_count) {
                 let _exact_bitmap_bytes = Self::bitmap_bytes_for_span(segment.page_count);
                 for order in 0..=MAX_ORDER {
                     let num_bits = Self::pairs_for_order(segment.page_count, order as u8);
@@ -356,10 +470,11 @@ impl BuddyAllocator {
             let segment_count = self.zones[zi].segment_count;
             for si in 0..segment_count {
                 let (start, end) = {
-                    let segment = &self.zones[zi].segments[si];
+                    let segments = self.zones[zi].segments();
+                    let segment = &segments[si];
                     (segment.base.as_u64(), segment.end_address())
                 };
-                let segment = &mut self.zones[zi].segments[si];
+                let segment = &mut self.zones[zi].segments_mut()[si];
                 Self::seed_range_as_free(zone_type, segment, start, end);
             }
         }
@@ -417,11 +532,7 @@ impl BuddyAllocator {
                 if Self::protected_overlap_end(addr, block_end).is_some() {
                     if order == 0 {
                         if let Some(skip_to) = Self::protected_overlap_end(addr, block_end) {
-                            buddy_dbg!(
-                                "  Zone {:?}: skip protected page 0x{:x}",
-                                zone_type,
-                                addr
-                            );
+                            buddy_dbg!("  Zone {:?}: skip protected page 0x{:x}", zone_type, addr);
                             addr = core::cmp::min(skip_to, end);
                             continue 'seed;
                         }
@@ -430,7 +541,7 @@ impl BuddyAllocator {
                     continue;
                 }
 
-                Self::insert_free_block(segment, addr, order);
+                Self::insert_free_block(segment, addr, order, Migratetype::Unmovable);
                 addr = block_end;
                 continue 'seed;
             }
@@ -438,11 +549,22 @@ impl BuddyAllocator {
     }
 
     /// Allocates from zone.
-    fn alloc_from_zone(zone: &mut Zone, order: u8, token: &IrqDisabledToken) -> Option<PhysFrame> {
+    fn alloc_from_zone(
+        zone: &mut Zone,
+        zone_idx: usize,
+        order: u8,
+        migratetype: Migratetype,
+        honor_watermarks: bool,
+        token: &IrqDisabledToken,
+    ) -> Option<PhysFrame> {
+        if !Self::zone_allows_allocation(zone, zone_idx, order, honor_watermarks) {
+            return None;
+        }
+
         for si in 0..zone.segment_count {
             let frame_phys = {
-                let segment = &mut zone.segments[si];
-                Self::alloc_from_segment(segment, order, token)
+                let segment = &mut zone.segments_mut()[si];
+                Self::alloc_from_segment(segment, order, migratetype, token)
             };
             if let Some(frame_phys) = frame_phys {
                 zone.allocated += 1usize << order;
@@ -456,55 +578,55 @@ impl BuddyAllocator {
     fn alloc_from_segment(
         segment: &mut ZoneSegment,
         order: u8,
+        requested_migratetype: Migratetype,
         _token: &IrqDisabledToken,
     ) -> Option<u64> {
         for cur_order in order..=MAX_ORDER as u8 {
-            let Some(frame_phys) = Self::free_list_pop(segment, cur_order) else {
-                continue;
-            };
-            debug_assert!(
-                !crate::memory::frame::block_phys_has_poison_guard(frame_phys, cur_order),
-                "buddy: poisoned block on free list (order {})",
-                cur_order
-            );
-            let block_size = PAGE_SIZE << cur_order;
-            let block_end = frame_phys.saturating_add(block_size);
-            if Self::protected_overlap_end(frame_phys, block_end).is_some() {
-                // Inconsistency: a free block overlaps with protected kernel memory.
-                // This means seed_range_as_free() was incorrect.
-                panic!(
-                    "Buddy allocator inconsistency: free block 0x{:x} order {} overlaps protected memory",
-                    frame_phys, cur_order
+            for donor_migratetype in requested_migratetype.fallback_order() {
+                let Some(frame_phys) = Self::free_list_pop(segment, cur_order, donor_migratetype)
+                else {
+                    continue;
+                };
+                debug_assert!(
+                    !crate::memory::frame::block_phys_has_poison_guard(frame_phys, cur_order),
+                    "buddy: poisoned block on free list (order {})",
+                    cur_order
                 );
+                let block_size = PAGE_SIZE << cur_order;
+                let block_end = frame_phys.saturating_add(block_size);
+                if Self::protected_overlap_end(frame_phys, block_end).is_some() {
+                    panic!(
+                        "Buddy allocator inconsistency: free block 0x{:x} order {} overlaps protected memory",
+                        frame_phys, cur_order
+                    );
+                }
+
+                let _ = Self::toggle_pair(segment, frame_phys, cur_order);
+
+                let mut split_order = cur_order;
+                while split_order > order {
+                    split_order -= 1;
+                    let buddy_phys = frame_phys + ((1u64 << split_order) * PAGE_SIZE);
+                    Self::mark_block_free(buddy_phys, split_order, donor_migratetype);
+                    Self::free_list_push(segment, buddy_phys, split_order, donor_migratetype);
+                    let _ = Self::toggle_pair(segment, frame_phys, split_order);
+                }
+                Self::mark_block_allocated(frame_phys, order, requested_migratetype);
+
+                #[cfg(debug_assertions)]
+                Self::mark_allocated(segment, frame_phys, order, true);
+
+                return Some(frame_phys);
             }
-
-            // One block of this order transitions free -> allocated.
-            let _ = Self::toggle_pair(segment, frame_phys, cur_order);
-
-            // Split down to requested order.
-            let mut split_order = cur_order;
-            while split_order > order {
-                split_order -= 1;
-                let buddy_phys = frame_phys + ((1u64 << split_order) * PAGE_SIZE);
-                Self::mark_block_free(buddy_phys, split_order);
-                Self::free_list_push(segment, buddy_phys, split_order);
-                // Pair at split_order becomes (allocated, free).
-                let _ = Self::toggle_pair(segment, frame_phys, split_order);
-            }
-            Self::mark_block_allocated(frame_phys, order);
-
-            #[cfg(debug_assertions)]
-            Self::mark_allocated(segment, frame_phys, order, true);
-
-            return Some(frame_phys);
         }
         None
     }
 
     #[inline]
     fn find_segment_index(zone: &Zone, phys: u64, order: u8) -> Option<usize> {
-        zone.segments[..zone.segment_count]
+        zone.segments()
             .iter()
+            .take(zone.segment_count)
             .position(|segment| Self::segment_contains_block(segment, phys, order))
     }
 
@@ -522,12 +644,11 @@ impl BuddyAllocator {
         let frame_phys = frame.start_address.as_u64();
         let block_size = PAGE_SIZE << order;
         let block_end = frame_phys.saturating_add(block_size);
+        let migratetype = Self::block_migratetype(frame_phys);
         let Some(segment_idx) = Self::find_segment_index(zone, frame_phys, order) else {
             panic!(
                 "buddy free: frame 0x{:x} order {} does not belong to any segment in zone {:?}",
-                frame_phys,
-                order,
-                zone.zone_type,
+                frame_phys, order, zone.zone_type,
             );
         };
 
@@ -548,14 +669,14 @@ impl BuddyAllocator {
 
         #[cfg(debug_assertions)]
         {
-            let segment = &mut zone.segments[segment_idx];
+            let segment = &mut zone.segments_mut()[segment_idx];
             Self::mark_allocated(segment, frame_phys, order, false);
         }
 
-        Self::mark_block_free(frame_phys, order);
+        Self::mark_block_free(frame_phys, order, migratetype);
         {
-            let segment = &mut zone.segments[segment_idx];
-            Self::insert_free_block(segment, frame_phys, order);
+            let segment = &mut zone.segments_mut()[segment_idx];
+            Self::insert_free_block(segment, frame_phys, order, migratetype);
         }
         zone.allocated = zone.allocated.saturating_sub(1usize << order);
     }
@@ -587,7 +708,11 @@ impl BuddyAllocator {
         debug_assert!(order <= MAX_ORDER as u8);
         debug_assert!(frame.start_address.is_aligned(PAGE_SIZE << order));
         debug_assert!(zone.contains_address(frame.start_address));
-        debug_assert!(Self::segment_contains_block(&zone.segments[segment_idx], frame_phys, order));
+        debug_assert!(Self::segment_contains_block(
+            &zone.segments()[segment_idx],
+            frame_phys,
+            order
+        ));
 
         if Self::protected_overlap_end(frame_phys, block_end).is_some() {
             return;
@@ -604,30 +729,40 @@ impl BuddyAllocator {
     /// Returns after inserting the (potentially coalesced) block into the appropriate free list, without recursing further.
     /// If the buddy bit is already set or we reach MAX_ORDER, the block is inserted as-is.
     /// Otherwise, the buddy block is removed from its free list and coalesced with the current block, and the process repeats at the next order.
-    fn insert_free_block(segment: &mut ZoneSegment, frame_phys: u64, initial_order: u8) {
+    fn insert_free_block(
+        segment: &mut ZoneSegment,
+        frame_phys: u64,
+        initial_order: u8,
+        migratetype: Migratetype,
+    ) {
         let mut current = frame_phys;
         let mut order = initial_order;
 
         loop {
             let bit_is_set = Self::toggle_pair(segment, current, order);
             if bit_is_set || order == MAX_ORDER as u8 {
-                Self::mark_block_free(current, order);
-                Self::free_list_push(segment, current, order);
+                Self::mark_block_free(current, order, migratetype);
+                Self::free_list_push(segment, current, order, migratetype);
                 break;
             }
 
             let Some(buddy) = Self::buddy_phys(segment, current, order) else {
-                Self::mark_block_free(current, order);
-                Self::free_list_push(segment, current, order);
+                Self::mark_block_free(current, order, migratetype);
+                Self::free_list_push(segment, current, order, migratetype);
                 break;
             };
 
-            let removed = Self::free_list_remove(segment, buddy, order);
+            if !Self::can_merge_with_buddy(buddy, order, migratetype) {
+                Self::mark_block_free(current, order, migratetype);
+                Self::free_list_push(segment, current, order, migratetype);
+                break;
+            }
+
+            let removed = Self::free_list_remove(segment, buddy, order, migratetype);
             if !removed {
-                // Inconsistency fallback: keep allocator consistent.
                 debug_assert!(false, "buddy bitmap/list inconsistency while freeing");
-                Self::mark_block_free(current, order);
-                Self::free_list_push(segment, current, order);
+                Self::mark_block_free(current, order, migratetype);
+                Self::free_list_push(segment, current, order, migratetype);
                 break;
             }
 
@@ -693,7 +828,10 @@ impl BuddyAllocator {
             let bit = start + i;
             debug_assert!(bit < segment.alloc_bitmap.num_bits);
             if allocated {
-                debug_assert!(!segment.alloc_bitmap.test(bit), "double allocation detected");
+                debug_assert!(
+                    !segment.alloc_bitmap.test(bit),
+                    "double allocation detected"
+                );
                 segment.alloc_bitmap.set(bit);
             } else {
                 debug_assert!(segment.alloc_bitmap.test(bit), "double free detected");
@@ -703,28 +841,33 @@ impl BuddyAllocator {
     }
 
     /// Releases list push.
-    fn free_list_push(segment: &mut ZoneSegment, phys: u64, order: u8) {
+    fn free_list_push(
+        segment: &mut ZoneSegment,
+        phys: u64,
+        order: u8,
+        migratetype: Migratetype,
+    ) {
         debug_assert!(
             !crate::memory::frame::block_phys_has_poison_guard(phys, order),
             "buddy: refusing to push poisoned block to free list"
         );
-        let head = segment.free_lists[order as usize];
+        let head = segment.free_lists[migratetype.index()][order as usize];
         Self::write_free_prev(phys, 0);
         Self::write_free_next(phys, head);
         if head != 0 {
             Self::write_free_prev(head, phys);
         }
-        segment.free_lists[order as usize] = phys;
+        segment.free_lists[migratetype.index()][order as usize] = phys;
     }
 
     /// Releases list pop.
-    fn free_list_pop(segment: &mut ZoneSegment, order: u8) -> Option<u64> {
-        let head = segment.free_lists[order as usize];
+    fn free_list_pop(segment: &mut ZoneSegment, order: u8, migratetype: Migratetype) -> Option<u64> {
+        let head = segment.free_lists[migratetype.index()][order as usize];
         if head == 0 {
             return None;
         }
         let next = Self::read_free_next(head);
-        segment.free_lists[order as usize] = next;
+        segment.free_lists[migratetype.index()][order as usize] = next;
         if next != 0 {
             Self::write_free_prev(next, 0);
         }
@@ -734,15 +877,20 @@ impl BuddyAllocator {
     }
 
     /// Releases list remove.
-    fn free_list_remove(segment: &mut ZoneSegment, phys: u64, order: u8) -> bool {
+    fn free_list_remove(
+        segment: &mut ZoneSegment,
+        phys: u64,
+        order: u8,
+        migratetype: Migratetype,
+    ) -> bool {
         let prev = Self::read_free_prev(phys);
         let next = Self::read_free_next(phys);
 
         if prev == 0 {
-            if segment.free_lists[order as usize] != phys {
+            if segment.free_lists[migratetype.index()][order as usize] != phys {
                 return false;
             }
-            segment.free_lists[order as usize] = next;
+            segment.free_lists[migratetype.index()][order as usize] = next;
         } else {
             Self::write_free_next(prev, next);
         }
@@ -919,7 +1067,161 @@ impl BuddyAllocator {
         value & !(align - 1)
     }
 
-    fn mark_block_allocated(frame_phys: u64, order: u8) {
+    fn zone_effective_free_pages(zone: &Zone, zone_idx: usize) -> usize {
+        zone.available_pages().saturating_add(
+            LOCAL_CACHED_ZONE_FRAMES[zone_idx].load(AtomicOrdering::Relaxed),
+        )
+    }
+
+    /// Returns whether the zone should be considered for the current request.
+    fn zone_allows_allocation(
+        zone: &Zone,
+        zone_idx: usize,
+        order: u8,
+        honor_watermarks: bool,
+    ) -> bool {
+        if zone.page_count == 0 {
+            return false;
+        }
+
+        if !honor_watermarks {
+            return true;
+        }
+
+        let requested_pages = 1usize << order;
+        let floor = zone
+            .watermark_min
+            .saturating_add(zone.lowmem_reserve_pages);
+        Self::zone_effective_free_pages(zone, zone_idx)
+            >= requested_pages.saturating_add(floor)
+    }
+
+    /// Returns whether a buddy block is free and coalescible with `migratetype`.
+    fn can_merge_with_buddy(phys: u64, order: u8, migratetype: Migratetype) -> bool {
+        let meta = get_meta(PhysAddr::new(phys));
+        let flags = meta.get_flags();
+        flags & frame_flags::FREE != 0
+            && meta.get_order() == order
+            && Self::migratetype_from_flags(flags) == migratetype
+            && !crate::memory::frame::block_phys_has_poison_guard(phys, order)
+    }
+
+    /// Decode the block migratetype stored in frame metadata flags.
+    fn block_migratetype(frame_phys: u64) -> Migratetype {
+        Self::migratetype_from_flags(get_meta(PhysAddr::new(frame_phys)).get_flags())
+    }
+
+    /// Decode a migratetype from frame flags.
+    #[inline]
+    fn migratetype_from_flags(flags: u32) -> Migratetype {
+        if flags & frame_flags::MOVABLE != 0 {
+            Migratetype::Movable
+        } else {
+            Migratetype::Unmovable
+        }
+    }
+
+    /// Encode the metadata flags for a free block of the given migratetype.
+    #[inline]
+    fn free_flags_for(migratetype: Migratetype) -> u32 {
+        match migratetype {
+            Migratetype::Unmovable => frame_flags::FREE,
+            Migratetype::Movable => frame_flags::FREE | frame_flags::MOVABLE,
+        }
+    }
+
+    /// Encode the metadata flags for an allocated block of the given migratetype.
+    #[inline]
+    fn allocated_flags_for(migratetype: Migratetype) -> u32 {
+        match migratetype {
+            Migratetype::Unmovable => frame_flags::ALLOCATED,
+            Migratetype::Movable => frame_flags::ALLOCATED | frame_flags::MOVABLE,
+        }
+    }
+
+    /// Try to allocate from the supplied zone order, first honoring reserves and then bypassing them.
+    fn alloc_in_zone_order(
+        &mut self,
+        order: u8,
+        migratetype: Migratetype,
+        zone_order: &[usize],
+        token: &IrqDisabledToken,
+    ) -> Option<PhysFrame> {
+        for honor_watermarks in [true, false] {
+            for &zi in zone_order {
+                if let Some(frame) = Self::alloc_from_zone(
+                    &mut self.zones[zi],
+                    zi,
+                    order,
+                    migratetype,
+                    honor_watermarks,
+                    token,
+                ) {
+                    return Some(frame);
+                }
+            }
+        }
+        None
+    }
+
+    /// Allocate while the caller already owns the global allocator lock.
+    fn alloc_locked_with_migratetype(
+        &mut self,
+        order: u8,
+        migratetype: Migratetype,
+        token: &IrqDisabledToken,
+    ) -> Result<PhysFrame, AllocError> {
+        if order > MAX_ORDER as u8 {
+            return Err(AllocError::InvalidOrder);
+        }
+
+        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
+            panic!("Recursive allocation detected on CPU {}!", cpu_idx);
+        }
+
+        let result = self
+            .alloc_in_zone_order(order, migratetype, &DEFAULT_ZONE_ORDER, token)
+            .ok_or_else(|| {
+                crate::memory::buddy::record_buddy_alloc_fail(order);
+                AllocError::OutOfMemory
+            });
+
+        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
+        result
+    }
+
+    /// Allocate from one explicit zone while the caller already owns the global allocator lock.
+    fn alloc_zone_locked(
+        &mut self,
+        order: u8,
+        zone: ZoneType,
+        migratetype: Migratetype,
+        token: &IrqDisabledToken,
+    ) -> Result<PhysFrame, AllocError> {
+        if order > MAX_ORDER as u8 {
+            return Err(AllocError::InvalidOrder);
+        }
+
+        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
+            panic!("Recursive allocation detected on CPU {}!", cpu_idx);
+        }
+
+        let zone_idx = zone as usize;
+        let zone_order = [zone_idx];
+        let result = self
+            .alloc_in_zone_order(order, migratetype, &zone_order, token)
+            .ok_or_else(|| {
+                crate::memory::buddy::record_buddy_alloc_fail(order);
+                AllocError::OutOfMemory
+            });
+
+        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
+        result
+    }
+
+    fn mark_block_allocated(frame_phys: u64, order: u8, migratetype: Migratetype) {
         let page_count = 1usize << order;
         for page_idx in 0..page_count {
             let phys = frame_phys + page_idx as u64 * PAGE_SIZE;
@@ -932,18 +1234,18 @@ impl BuddyAllocator {
                 "buddy: mark_block_allocated on frame {:#x} with unexpected refcount (corruption?)",
                 phys,
             );
-            meta.set_flags(frame_flags::ALLOCATED);
+            meta.set_flags(Self::allocated_flags_for(migratetype));
             meta.set_order(order);
             // Leave refcount as REFCOUNT_UNUSED; FrameAllocOptions::allocate()
             // will perform CAS(REFCOUNT_UNUSED → 1) as the fail-fast handoff.
         }
     }
 
-    fn mark_block_free(frame_phys: u64, order: u8) {
+    fn mark_block_free(frame_phys: u64, order: u8, migratetype: Migratetype) {
         Self::set_block_meta(
             frame_phys,
             order,
-            frame_flags::FREE,
+            Self::free_flags_for(migratetype),
             crate::memory::frame::REFCOUNT_UNUSED,
         );
     }
@@ -1098,7 +1400,17 @@ impl OnDemandGlobalLock {
     }
 
     fn alloc(&mut self, order: u8) -> Result<PhysFrame, AllocError> {
-        self.with_allocator(|allocator, token| allocator.alloc(order, token))
+        self.alloc_with_migratetype(order, Migratetype::Unmovable)
+    }
+
+    fn alloc_with_migratetype(
+        &mut self,
+        order: u8,
+        migratetype: Migratetype,
+    ) -> Result<PhysFrame, AllocError> {
+        self.with_allocator(|allocator, token| {
+            allocator.alloc_locked_with_migratetype(order, migratetype, token)
+        })
             .unwrap_or(Err(AllocError::OutOfMemory))
     }
 
@@ -1253,13 +1565,13 @@ fn refill_local_cache(
                 // Re-publish the returned page as an allocated order-0 block.
                 // The refcount must stay REFCOUNT_UNUSED so FrameAllocOptions
                 // can still claim it via CAS(UNUSED -> 1).
-                BuddyAllocator::mark_block_allocated(phys, 0);
+                BuddyAllocator::mark_block_allocated(phys, 0, Migratetype::Unmovable);
                 ret = Some(frame);
                 continue;
             }
             // Pages parked in the local cache are logically free and must
             // therefore carry the free-list sentinel invariant.
-            BuddyAllocator::mark_block_free(phys, 0);
+            BuddyAllocator::mark_block_free(phys, 0, Migratetype::Unmovable);
             if cache.push(frame).is_ok() {
                 local_cached_inc_phys(phys);
             } else {
@@ -1285,7 +1597,11 @@ fn steal_from_other_caches(cpu_idx: usize) -> Option<PhysFrame> {
         let peer = (cpu_idx + step) % cpu_count;
         let mut cache = LOCAL_FRAME_CACHES[peer].lock();
         if let Some(frame) = cache.pop() {
-            BuddyAllocator::mark_block_allocated(frame.start_address.as_u64(), 0);
+            BuddyAllocator::mark_block_allocated(
+                frame.start_address.as_u64(),
+                0,
+                Migratetype::Unmovable,
+            );
             local_cached_dec_phys(frame.start_address.as_u64());
             return Some(frame);
         }
@@ -1299,7 +1615,11 @@ fn alloc_order0_cached() -> Result<PhysFrame, AllocError> {
     {
         let mut cache = LOCAL_FRAME_CACHES[cpu_idx].lock();
         if let Some(frame) = cache.pop() {
-            BuddyAllocator::mark_block_allocated(frame.start_address.as_u64(), 0);
+            BuddyAllocator::mark_block_allocated(
+                frame.start_address.as_u64(),
+                0,
+                Migratetype::Unmovable,
+            );
             local_cached_dec_phys(frame.start_address.as_u64());
             return Ok(frame);
         }
@@ -1343,7 +1663,11 @@ fn free_order0_cached(frame: PhysFrame) {
         if cache.push(frame).is_ok() {
             // Mark free only on the success path: the incoming frame transitions
             // from "caller-allocated" to "cache sentinel" (REFCOUNT_UNUSED).
-            BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0);
+            BuddyAllocator::mark_block_free(
+                frame.start_address.as_u64(),
+                0,
+                Migratetype::Unmovable,
+            );
             local_cached_inc_phys(frame.start_address.as_u64());
             return;
         }
@@ -1355,7 +1679,11 @@ fn free_order0_cached(frame: PhysFrame) {
         }
 
         if cache.push(frame).is_ok() {
-            BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0);
+            BuddyAllocator::mark_block_free(
+                frame.start_address.as_u64(),
+                0,
+                Migratetype::Unmovable,
+            );
             local_cached_inc_phys(frame.start_address.as_u64());
         } else {
             // Still full after spilling — the incoming frame joins the spill batch.
@@ -1377,24 +1705,33 @@ fn free_order0_cached(frame: PhysFrame) {
 /// `_token` is a compile-time proof that interrupts are disabled on the calling CPU,
 /// preventing re-entrant allocation through an interrupt handler on the same lock.
 pub fn alloc(_token: &IrqDisabledToken, order: u8) -> Result<PhysFrame, AllocError> {
+    alloc_migratetype(_token, order, Migratetype::Unmovable)
+}
+
+/// Allocate frames with an explicit migratetype preference.
+pub fn alloc_migratetype(
+    _token: &IrqDisabledToken,
+    order: u8,
+    migratetype: Migratetype,
+) -> Result<PhysFrame, AllocError> {
     if crate::silo::debug_boot_reg_active() {
         crate::serial_println!(
-            "[trace][buddy] alloc enter order={} buddy_lock={:#x}",
+            "[trace][buddy] alloc enter order={} migratetype={:?} buddy_lock={:#x}",
             order,
+            migratetype,
             &BUDDY_ALLOCATOR as *const _ as usize
         );
     }
-    if order == 0 {
+    if order == 0 && migratetype == Migratetype::Unmovable {
         alloc_order0_cached()
     } else {
         let mut global = OnDemandGlobalLock::new();
-        match global.alloc(order) {
+        match global.alloc_with_migratetype(order, migratetype) {
             Ok(frame) => Ok(frame),
             Err(AllocError::OutOfMemory) => {
-                // Critical lock-order rule: release global before draining local caches.
                 global.unlock();
                 let _ = drain_local_caches_to_global(usize::MAX, &mut global);
-                global.alloc(order)
+                global.alloc_with_migratetype(order, migratetype)
             }
             Err(e) => Err(e),
         }
@@ -1405,7 +1742,7 @@ pub fn alloc(_token: &IrqDisabledToken, order: u8) -> Result<PhysFrame, AllocErr
 ///
 /// `_token` is a compile-time proof that interrupts are disabled on the calling CPU.
 pub fn free(_token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
-    if order == 0 {
+    if order == 0 && BuddyAllocator::block_migratetype(frame.start_address.as_u64()) == Migratetype::Unmovable {
         free_order0_cached(frame);
     } else {
         let mut global = OnDemandGlobalLock::new();
@@ -1416,31 +1753,7 @@ pub fn free(_token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
 impl FrameAllocator for BuddyAllocator {
     /// Performs the alloc operation.
     fn alloc(&mut self, order: u8, token: &IrqDisabledToken) -> Result<PhysFrame, AllocError> {
-        if order > MAX_ORDER as u8 {
-            return Err(AllocError::InvalidOrder);
-        }
-
-        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
-        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
-            panic!("Recursive allocation detected on CPU {}!", cpu_idx);
-        }
-
-        let result = (|| {
-            for zi in [
-                ZoneType::Normal as usize,
-                ZoneType::HighMem as usize,
-                ZoneType::DMA as usize,
-            ] {
-                if let Some(frame) = Self::alloc_from_zone(&mut self.zones[zi], order, token) {
-                    return Ok(frame);
-                }
-            }
-            crate::memory::buddy::record_buddy_alloc_fail(order);
-            Err(AllocError::OutOfMemory)
-        })();
-
-        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
-        result
+        self.alloc_locked_with_migratetype(order, Migratetype::Unmovable, token)
     }
 
     /// Performs the free operation.
@@ -1474,23 +1787,7 @@ impl BuddyAllocator {
         zone: ZoneType,
         token: &IrqDisabledToken,
     ) -> Result<PhysFrame, AllocError> {
-        if order > MAX_ORDER as u8 {
-            return Err(AllocError::InvalidOrder);
-        }
-
-        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
-        if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
-            panic!("Recursive allocation detected on CPU {}!", cpu_idx);
-        }
-
-        let result = Self::alloc_from_zone(&mut self.zones[zone as usize], order, token)
-            .ok_or_else(|| {
-                crate::memory::buddy::record_buddy_alloc_fail(order);
-                AllocError::OutOfMemory
-            });
-
-        ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
-        result
+        self.alloc_zone_locked(order, zone, Migratetype::Unmovable, token)
     }
 }
 
@@ -1499,8 +1796,48 @@ impl BuddyAllocator {
 pub struct ZoneStats {
     pub zone_type: ZoneType,
     pub base: u64,
-    pub page_count: usize,
-    pub allocated: usize,
+    pub managed_pages: usize,
+    pub present_pages: usize,
+    pub spanned_pages: usize,
+    pub reserved_pages: usize,
+    pub allocated_pages: usize,
+    pub cached_pages: usize,
+    pub free_pages: usize,
+    pub movable_free_pages: usize,
+    pub unmovable_free_pages: usize,
+    pub segment_count: usize,
+    pub segment_capacity: usize,
+    pub watermark_min: usize,
+    pub watermark_low: usize,
+    pub watermark_high: usize,
+    pub lowmem_reserve_pages: usize,
+    pub largest_free_order: Option<u8>,
+}
+
+impl ZoneStats {
+    /// Empty snapshot entry for stack-allocated arrays.
+    pub const fn empty() -> Self {
+        Self {
+            zone_type: ZoneType::DMA,
+            base: 0,
+            managed_pages: 0,
+            present_pages: 0,
+            spanned_pages: 0,
+            reserved_pages: 0,
+            allocated_pages: 0,
+            cached_pages: 0,
+            free_pages: 0,
+            movable_free_pages: 0,
+            unmovable_free_pages: 0,
+            segment_count: 0,
+            segment_capacity: 0,
+            watermark_min: 0,
+            watermark_low: 0,
+            watermark_high: 0,
+            lowmem_reserve_pages: 0,
+            largest_free_order: None,
+        }
+    }
 }
 
 impl BuddyAllocator {
@@ -1524,16 +1861,34 @@ impl BuddyAllocator {
 
     /// Snapshot zones without heap allocation.
     /// Returns the number of entries written to `out`.
-    pub fn zone_snapshot(&self, out: &mut [(u8, u64, usize, usize)]) -> usize {
+    pub fn zone_snapshot(&self, out: &mut [ZoneStats]) -> usize {
         let n = core::cmp::min(out.len(), self.zones.len());
         for (i, zone) in self.zones.iter().take(n).enumerate() {
             let cached = LOCAL_CACHED_ZONE_FRAMES[i].load(AtomicOrdering::Relaxed);
-            out[i] = (
-                zone.zone_type as u8,
-                zone.base.as_u64(),
-                zone.page_count,
-                zone.allocated.saturating_sub(cached),
-            );
+            let mut free_by_type = zone.free_pages_by_migratetype();
+            free_by_type[Migratetype::Unmovable.index()] = free_by_type
+                [Migratetype::Unmovable.index()]
+                .saturating_add(cached);
+            out[i] = ZoneStats {
+                zone_type: zone.zone_type,
+                base: zone.base.as_u64(),
+                managed_pages: zone.page_count,
+                present_pages: zone.present_pages,
+                spanned_pages: zone.span_pages,
+                reserved_pages: zone.reserved_pages,
+                allocated_pages: zone.allocated.saturating_sub(cached),
+                cached_pages: cached,
+                free_pages: Self::zone_effective_free_pages(zone, i),
+                movable_free_pages: free_by_type[Migratetype::Movable.index()],
+                unmovable_free_pages: free_by_type[Migratetype::Unmovable.index()],
+                segment_count: zone.segment_count,
+                segment_capacity: zone.segment_capacity,
+                watermark_min: zone.watermark_min,
+                watermark_low: zone.watermark_low,
+                watermark_high: zone.watermark_high,
+                lowmem_reserve_pages: zone.lowmem_reserve_pages,
+                largest_free_order: zone.largest_free_order(),
+            };
         }
         n
     }

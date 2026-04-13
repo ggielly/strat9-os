@@ -1,5 +1,6 @@
 // Memory zone management for buddy allocator
 
+use core::{ptr, slice};
 use x86_64::PhysAddr;
 
 /// Memory zone types
@@ -22,12 +23,43 @@ impl ZoneType {
 /// Maximum buddy order (0-11 for 4KB to 8MB blocks)
 pub const MAX_ORDER: usize = 11;
 
-/// Maximum number of discontiguous physical segments tracked per zone.
+/// Minimal free-block classes used by the buddy allocator.
 ///
-/// VMware and some firmware expose fragmented RAM maps with many holes. A
-/// single zone therefore contains multiple independently managed buddy segments
-/// instead of one monolithic min/max span.
-pub const MAX_ZONE_SEGMENTS: usize = 64;
+/// This is intentionally smaller than Linux's full migratetype/pageblock
+/// matrix. The current design separates long-lived kernel pages from more
+/// reclaimable or relocatable user pages without introducing full migration
+/// machinery yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Migratetype {
+    /// Default class for kernel data, page tables and other pinned pages.
+    Unmovable = 0,
+    /// Preferred class for user-space data and frames that can later be moved.
+    Movable = 1,
+}
+
+impl Migratetype {
+    /// Number of migratetypes tracked by the allocator.
+    pub const COUNT: usize = 2;
+
+    /// Stable iteration order used by diagnostics.
+    pub const ALL: [Self; Self::COUNT] = [Self::Unmovable, Self::Movable];
+
+    /// Returns the free-list index for this migratetype.
+    #[inline]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Returns the donor probing order for an allocation request.
+    #[inline]
+    pub const fn fallback_order(self) -> [Self; Self::COUNT] {
+        match self {
+            Self::Unmovable => [Self::Unmovable, Self::Movable],
+            Self::Movable => [Self::Movable, Self::Unmovable],
+        }
+    }
+}
 
 /// Bitmap used by buddy coalescing logic.
 ///
@@ -111,8 +143,8 @@ pub struct ZoneSegment {
     /// Number of pages managed by this segment.
     pub page_count: usize,
 
-    /// Free lists for each order within this segment.
-    pub free_lists: [u64; MAX_ORDER + 1],
+    /// Free lists for each order within this segment, split by migratetype.
+    pub free_lists: [[u64; MAX_ORDER + 1]; Migratetype::COUNT],
 
     /// Per-order parity bitmaps scoped to this segment only.
     pub buddy_bitmaps: [BuddyBitmap; MAX_ORDER + 1],
@@ -128,7 +160,7 @@ impl ZoneSegment {
         Self {
             base: PhysAddr::new(0),
             page_count: 0,
-            free_lists: [0; MAX_ORDER + 1],
+            free_lists: [[0; MAX_ORDER + 1]; Migratetype::COUNT],
             buddy_bitmaps: [BuddyBitmap::empty(); MAX_ORDER + 1],
             #[cfg(debug_assertions)]
             alloc_bitmap: BuddyBitmap::empty(),
@@ -161,8 +193,16 @@ impl ZoneSegment {
 
     /// Count the number of free blocks at a given order.
     pub fn free_list_count(&self, order: u8) -> usize {
+        Migratetype::ALL
+            .into_iter()
+            .map(|migratetype| self.free_list_count_for(order, migratetype))
+            .sum()
+    }
+
+    /// Count the number of free blocks at a given order and migratetype.
+    pub fn free_list_count_for(&self, order: u8, migratetype: Migratetype) -> usize {
         let mut count = 0usize;
-        let mut phys = self.free_lists[order as usize];
+        let mut phys = self.free_lists[migratetype.index()][order as usize];
         while phys != 0 {
             count += 1;
             let meta = crate::memory::frame::get_meta(PhysAddr::new(phys));
@@ -187,6 +227,9 @@ pub struct Zone {
     /// Total number of managed pages in this zone.
     pub page_count: usize,
 
+    /// Pages reported as usable RAM by the boot memory map for this zone.
+    pub present_pages: usize,
+
     /// Total address span covered by this zone metadata, in pages.
     ///
     /// Unlike `page_count`, this includes holes and is kept for diagnostics.
@@ -195,11 +238,29 @@ pub struct Zone {
     /// Number of allocated pages
     pub allocated: usize,
 
+    /// Pages removed from management during boot reservations.
+    pub reserved_pages: usize,
+
+    /// Hard reserve kept available for lower zones or emergency paths.
+    pub lowmem_reserve_pages: usize,
+
+    /// Watermark below which this zone should be avoided when possible.
+    pub watermark_min: usize,
+
+    /// Advisory low watermark for diagnostics and future reclaim hooks.
+    pub watermark_low: usize,
+
+    /// Advisory high watermark for diagnostics and future reclaim hooks.
+    pub watermark_high: usize,
+
     /// Number of populated contiguous segments in this zone.
     pub segment_count: usize,
 
+    /// Total number of segment slots reserved for this zone.
+    pub segment_capacity: usize,
+
     /// Independently managed contiguous segments inside this zone.
-    pub segments: [ZoneSegment; MAX_ZONE_SEGMENTS],
+    pub segments: *mut ZoneSegment,
 }
 
 impl Zone {
@@ -209,17 +270,53 @@ impl Zone {
             zone_type,
             base: PhysAddr::new(0),
             page_count: 0,
+            present_pages: 0,
             span_pages: 0,
             allocated: 0,
+            reserved_pages: 0,
+            lowmem_reserve_pages: 0,
+            watermark_min: 0,
+            watermark_low: 0,
+            watermark_high: 0,
             segment_count: 0,
-            segments: [ZoneSegment::empty(); MAX_ZONE_SEGMENTS],
+            segment_capacity: 0,
+            segments: ptr::null_mut(),
         }
+    }
+
+    /// Returns the reserved segment storage as a slice.
+    #[inline]
+    pub fn segments(&self) -> &[ZoneSegment] {
+        if self.segment_capacity == 0 || self.segments.is_null() {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(self.segments, self.segment_capacity) }
+        }
+    }
+
+    /// Returns the reserved segment storage as a mutable slice.
+    #[inline]
+    pub fn segments_mut(&mut self) -> &mut [ZoneSegment] {
+        if self.segment_capacity == 0 || self.segments.is_null() {
+            &mut []
+        } else {
+            unsafe { slice::from_raw_parts_mut(self.segments, self.segment_capacity) }
+        }
+    }
+
+    /// Reset the zone's segment storage metadata.
+    #[inline]
+    pub fn clear_segments(&mut self) {
+        self.segment_count = 0;
+        self.segment_capacity = 0;
+        self.segments = ptr::null_mut();
     }
 
     /// Check if an address is within this zone
     pub fn contains_address(&self, addr: PhysAddr) -> bool {
-        self.segments[..self.segment_count]
+        self.segments()
             .iter()
+            .take(self.segment_count)
             .any(|segment| segment.contains_address(addr))
     }
 
@@ -233,12 +330,47 @@ impl Zone {
     /// Walks the buddy free list. Safe because we only read the next link from
     /// the per-frame [`crate::memory::frame::MetaSlot`] (not from mapped page bytes).
     pub fn free_list_count(&self, order: u8) -> usize {
-        self.segments[..self.segment_count]
+        self.segments()
             .iter()
+            .take(self.segment_count)
             .map(|segment| segment.free_list_count(order))
             .sum()
+    }
+
+    /// Count the number of free blocks at a given order for one migratetype.
+    pub fn free_list_count_for(&self, order: u8, migratetype: Migratetype) -> usize {
+        self.segments()
+            .iter()
+            .take(self.segment_count)
+            .map(|segment| segment.free_list_count_for(order, migratetype))
+            .sum()
+    }
+
+    /// Returns the total free pages by migratetype across all orders.
+    pub fn free_pages_by_migratetype(&self) -> [usize; Migratetype::COUNT] {
+        let mut totals = [0usize; Migratetype::COUNT];
+        for migratetype in Migratetype::ALL {
+            let idx = migratetype.index();
+            for order in 0..=MAX_ORDER {
+                let blocks = self.free_list_count_for(order as u8, migratetype);
+                totals[idx] = totals[idx].saturating_add(blocks << order);
+            }
+        }
+        totals
+    }
+
+    /// Returns the largest order that currently has at least one free block.
+    pub fn largest_free_order(&self) -> Option<u8> {
+        for order in (0..=MAX_ORDER).rev() {
+            if self.free_list_count(order as u8) > 0 {
+                return Some(order as u8);
+            }
+        }
+        None
     }
 }
 
 // SAFETY: access is protected by the allocator lock.
 unsafe impl Send for BuddyBitmap {}
+// SAFETY: raw segment storage is owned and mutated only under the allocator lock.
+unsafe impl Send for Zone {}

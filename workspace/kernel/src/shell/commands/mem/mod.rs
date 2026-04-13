@@ -67,8 +67,8 @@ fn cmd_mem_summary() -> Result<(), ShellError> {
 
 /// Display detailed memory zone information
 fn cmd_mem_zones() -> Result<(), ShellError> {
-    const MAX_ZONES: usize = 4;
-    let mut zones_info = [(0u8, 0u64, 0usize, 0usize); MAX_ZONES];
+    const MAX_ZONES: usize = crate::memory::zone::ZoneType::COUNT;
+    let mut zones_info = [crate::memory::buddy::ZoneStats::empty(); MAX_ZONES];
     let zone_count;
 
     {
@@ -82,43 +82,84 @@ fn cmd_mem_zones() -> Result<(), ShellError> {
     }
 
     shell_println!("Memory zones:");
-    for i in 0..zone_count {
-        let (zone_type, base, page_count, allocated) = zones_info[i];
-        let total_bytes = page_count * 4096;
-        let free_bytes = (page_count - allocated) * 4096;
+    for info in zones_info.iter().take(zone_count) {
+        let managed_bytes = info.managed_pages * 4096;
+        let present_bytes = info.present_pages * 4096;
+        let reserved_bytes = info.reserved_pages * 4096;
+        let free_bytes = info.free_pages * 4096;
+        let movable_bytes = info.movable_free_pages * 4096;
+        let unmovable_bytes = info.unmovable_free_pages * 4096;
 
-        let (total_val, total_unit) = format_bytes(total_bytes);
+        let (managed_val, managed_unit) = format_bytes(managed_bytes);
+        let (present_val, present_unit) = format_bytes(present_bytes);
+        let (reserved_val, reserved_unit) = format_bytes(reserved_bytes);
         let (free_val, free_unit) = format_bytes(free_bytes);
+        let (movable_val, movable_unit) = format_bytes(movable_bytes);
+        let (unmovable_val, unmovable_unit) = format_bytes(unmovable_bytes);
 
-        shell_println!("  Zone {:?}:", zone_type_from_u8(zone_type));
-        shell_println!("    Base:      0x{:016x}", base);
+        shell_println!("  Zone {:?}:", info.zone_type);
+        shell_println!("    Base:      0x{:016x}", info.base);
         shell_println!(
-            "    Total:     {} {} ({} pages)",
-            total_val,
-            total_unit,
-            page_count
+            "    Managed:   {} {} ({} pages)",
+            managed_val,
+            managed_unit,
+            info.managed_pages
+        );
+        shell_println!(
+            "    Present:   {} {} ({} pages)",
+            present_val,
+            present_unit,
+            info.present_pages
+        );
+        shell_println!(
+            "    Reserved:  {} {} ({} pages)",
+            reserved_val,
+            reserved_unit,
+            info.reserved_pages
         );
         shell_println!(
             "    Free:      {} {} ({} pages)",
             free_val,
             free_unit,
-            page_count - allocated
+            info.free_pages
         );
-        shell_println!("    Used:      {} pages", allocated);
+        shell_println!("    Used:      {} pages", info.allocated_pages);
+        shell_println!("    Cached:    {} pages", info.cached_pages);
+        shell_println!(
+            "    Segments:  {}/{}",
+            info.segment_count,
+            info.segment_capacity
+        );
+        shell_println!(
+            "    Free(u/m): {} {} / {} {}",
+            unmovable_val,
+            unmovable_unit,
+            movable_val,
+            movable_unit
+        );
+        if let Some(order) = info.largest_free_order {
+            let largest_bytes = 4096usize << order;
+            let (largest_val, largest_unit) = format_bytes(largest_bytes);
+            shell_println!(
+                "    Largest:   order {} ({} {})",
+                order,
+                largest_val,
+                largest_unit
+            );
+        } else {
+            shell_println!("    Largest:   none");
+        }
+        shell_println!(
+            "    Policy:    min={} low={} high={} reserve={}",
+            info.watermark_min,
+            info.watermark_low,
+            info.watermark_high,
+            info.lowmem_reserve_pages
+        );
         shell_println!("");
     }
 
     Ok(())
-}
-
-/// Performs the zone type from u8 operation.
-fn zone_type_from_u8(val: u8) -> crate::memory::zone::ZoneType {
-    match val {
-        0 => crate::memory::zone::ZoneType::DMA,
-        1 => crate::memory::zone::ZoneType::Normal,
-        2 => crate::memory::zone::ZoneType::HighMem,
-        _ => crate::memory::zone::ZoneType::DMA,
-    }
 }
 
 /// Diagnostic view — poison quarantine, slab health, buddy alloc failures.
@@ -149,6 +190,52 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
     } else {
         shell_println!("Buddy allocation failures: none");
         shell_println!("");
+    }
+
+    // ── Buddy zone policy / fragmentation view ────────────────────────
+    {
+        let allocator_guard = crate::memory::buddy::get_allocator().lock();
+        if let Some(ref allocator) = *allocator_guard {
+            let mut zones = [crate::memory::buddy::ZoneStats::empty(); crate::memory::zone::ZoneType::COUNT];
+            let zone_count = allocator.zone_snapshot(&mut zones);
+            shell_println!("Buddy zones:");
+            for info in zones.iter().take(zone_count) {
+                match info.largest_free_order {
+                    Some(order) => shell_println!(
+                        "  {:?}: free={} used={} cached={} segments={}/{} u/m={}/{} watermarks={}/{}/{} reserve={} largest=o{}",
+                        info.zone_type,
+                        info.free_pages,
+                        info.allocated_pages,
+                        info.cached_pages,
+                        info.segment_count,
+                        info.segment_capacity,
+                        info.unmovable_free_pages,
+                        info.movable_free_pages,
+                        info.watermark_min,
+                        info.watermark_low,
+                        info.watermark_high,
+                        info.lowmem_reserve_pages,
+                        order
+                    ),
+                    None => shell_println!(
+                        "  {:?}: free={} used={} cached={} segments={}/{} u/m={}/{} watermarks={}/{}/{} reserve={} largest=none",
+                        info.zone_type,
+                        info.free_pages,
+                        info.allocated_pages,
+                        info.cached_pages,
+                        info.segment_count,
+                        info.segment_capacity,
+                        info.unmovable_free_pages,
+                        info.movable_free_pages,
+                        info.watermark_min,
+                        info.watermark_low,
+                        info.watermark_high,
+                        info.lowmem_reserve_pages
+                    ),
+                }
+            }
+            shell_println!("");
+        }
     }
 
     // ── Slab allocator ─────────────────────────────────────────────────

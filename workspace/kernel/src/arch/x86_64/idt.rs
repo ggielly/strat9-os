@@ -1372,23 +1372,25 @@ fn dump_page_fault_full(
                 free,
                 free * 4 / 1024
             );
-            let mut zones = [(0u8, 0u64, 0usize, 0usize); 4];
+            let mut zones = [
+                crate::memory::buddy::ZoneStats::empty();
+                crate::memory::zone::ZoneType::COUNT
+            ];
             let n = alloc.zone_snapshot(&mut zones);
             for i in 0..n {
-                let (zt, base, pages, ap) = zones[i];
+                let zone = zones[i];
                 crate::serial_println!(
                     "    Zone {} ({}): base={:#x} pages={} alloc={} free={}",
                     i,
-                    match zt {
-                        0 => "DMA",
-                        1 => "Normal",
-                        2 => "High",
-                        _ => "?",
+                    match zone.zone_type {
+                        crate::memory::zone::ZoneType::DMA => "DMA",
+                        crate::memory::zone::ZoneType::Normal => "Normal",
+                        crate::memory::zone::ZoneType::HighMem => "High",
                     },
-                    base,
-                    pages,
-                    ap,
-                    pages.saturating_sub(ap)
+                    zone.base,
+                    zone.managed_pages,
+                    zone.allocated_pages,
+                    zone.free_pages
                 );
             }
         } else {

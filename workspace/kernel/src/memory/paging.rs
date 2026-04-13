@@ -328,10 +328,7 @@ pub fn is_hhdm_range_mapped_now(phys_base: u64, size: u64) -> bool {
     }
 
     let start = phys_base & !0xFFF;
-    let end = phys_base
-        .saturating_add(size)
-        .saturating_add(0xFFF)
-        & !0xFFF;
+    let end = phys_base.saturating_add(size).saturating_add(0xFFF) & !0xFFF;
 
     let mut phys = start;
     while phys < end {
