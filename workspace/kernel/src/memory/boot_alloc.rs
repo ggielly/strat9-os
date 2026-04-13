@@ -126,6 +126,46 @@ impl BootAllocator {
         None
     }
 
+    pub fn try_alloc_accessible(&mut self, size: usize, align: usize) -> Option<PhysAddr> {
+        if size == 0 {
+            return Some(PhysAddr::new(0));
+        }
+
+        let align = normalize_align(align) as u64;
+        let size = align_up(size as u64, PAGE_SIZE);
+
+        for idx in 0..self.len {
+            let region = self.regions[idx];
+            if region.is_empty() {
+                continue;
+            }
+
+            let alloc_start = align_up(region.start, align);
+            let alloc_end = alloc_start.checked_add(size)?;
+            if alloc_end > region.end {
+                continue;
+            }
+
+            if !crate::memory::paging::is_hhdm_range_mapped_now(alloc_start, size) {
+                continue;
+            }
+
+            self.consume_region(idx, alloc_start, alloc_end);
+            return Some(PhysAddr::new(alloc_start));
+        }
+
+        let stats = self.stats();
+        serial_println!(
+            "[boot_alloc] try_alloc_accessible failed: requested={} aligned={} largest_region={} regions={} total_free={}",
+            size as usize,
+            align as usize,
+            stats.largest_region_bytes as usize,
+            stats.region_count,
+            stats.total_free_bytes as usize
+        );
+        None
+    }
+
     pub fn snapshot_free_regions(&self, out: &mut [MemoryRegion]) -> usize {
         let count = core::cmp::min(self.len, out.len());
         for (dst, region) in out.iter_mut().zip(self.regions.iter()).take(count) {
@@ -325,6 +365,10 @@ pub fn boot_allocator_stats() -> BootAllocStats {
 
 pub fn alloc_bytes(size: usize, align: usize) -> Option<PhysAddr> {
     BOOT_ALLOCATOR.lock().try_alloc(size, align)
+}
+
+pub fn alloc_bytes_accessible(size: usize, align: usize) -> Option<PhysAddr> {
+    BOOT_ALLOCATOR.lock().try_alloc_accessible(size, align)
 }
 
 pub fn snapshot_free_regions(out: &mut [MemoryRegion]) -> usize {

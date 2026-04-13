@@ -19,7 +19,7 @@ use crate::{
             frame_flags, get_meta, AllocError, FrameAllocator, PhysFrame, FRAME_META_LINK_NONE,
         },
         hhdm_offset, phys_to_virt,
-        zone::{BuddyBitmap, Zone, ZoneType, MAX_ORDER},
+        zone::{BuddyBitmap, Zone, ZoneSegment, ZoneType, MAX_ORDER, MAX_ZONE_SEGMENTS},
     },
     serial_println,
     sync::{IrqDisabledToken, SpinLock, SpinLockGuard},
@@ -28,7 +28,6 @@ use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use x86_64::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
-const PAGE_SHIFT: u8 = 12; // log2(4096)
 const DMA_MAX: u64 = 16 * 1024 * 1024;
 const NORMAL_MAX: u64 = 896 * 1024 * 1024;
 const LOCAL_CACHE_CAPACITY: usize = 256;
@@ -123,17 +122,27 @@ impl BuddyAllocator {
             );
         }
 
-        // Pass 2: reserve bitmap storage via the boot allocator.
-        self.pass_boot_alloc_and_setup_bitmaps();
+        // Pass 2: reserve per-zone bitmap pools using an upper bound derived
+        // from the boot allocator's current free extents.
+        let mut candidates = [MemoryRegion {
+            base: 0,
+            size: 0,
+            kind: MemoryKind::Reserved,
+        }; boot_alloc::MAX_BOOT_ALLOC_REGIONS];
+        let candidate_len = boot_alloc::snapshot_free_regions(&mut candidates);
+        self.pass_reserve_bitmap_pools(&candidates[..candidate_len]);
 
-        // Pass 3: populate free lists from the boot allocator's remaining ranges.
+        // Pass 3: build the final segmented buddy layout from the boot
+        // allocator's remaining free ranges after bitmap reservations.
         let mut remaining = [MemoryRegion {
             base: 0,
             size: 0,
             kind: MemoryKind::Reserved,
         }; boot_alloc::MAX_BOOT_ALLOC_REGIONS];
         let remaining_len = boot_alloc::snapshot_free_regions(&mut remaining);
-        self.pass_populate(&remaining[..remaining_len]);
+        self.pass_build_segments(&remaining[..remaining_len]);
+        self.pass_setup_segment_bitmaps();
+        self.pass_populate();
 
         // Seal the boot allocator: all its remaining free regions are now managed
         // by buddy.  Any later boot_alloc::alloc_stack() call would otherwise
@@ -148,8 +157,9 @@ impl BuddyAllocator {
                 0
             };
             serial_println!(
-                "  [buddy] Zone {:?}: managed={} span={} holes={} ({}% utilized, {} MB managed)",
+                "  [buddy] Zone {:?}: segments={} managed={} span={} holes={} ({}% utilized, {} MB managed)",
                 zone.zone_type,
+                zone.segment_count,
                 zone.page_count,
                 zone.span_pages,
                 hole_pages,
@@ -186,13 +196,14 @@ impl BuddyAllocator {
 
         for zi in 0..ZoneType::COUNT {
             let zone = &mut self.zones[zi];
+            zone.base = PhysAddr::new(0);
             zone.page_count = 0;
+            zone.span_pages = 0;
             zone.allocated = 0;
-            zone.free_lists = [0; MAX_ORDER + 1];
+            zone.segment_count = 0;
+            zone.segments = [ZoneSegment::empty(); MAX_ZONE_SEGMENTS];
 
             if min_base[zi] == u64::MAX || max_end[zi] <= min_base[zi] {
-                zone.base = PhysAddr::new(0);
-                zone.span_pages = 0;
                 continue;
             }
 
@@ -201,20 +212,23 @@ impl BuddyAllocator {
         }
     }
 
-    /// Performs the pass steal and setup bitmaps operation.
-    fn pass_boot_alloc_and_setup_bitmaps(&mut self) {
+    /// Reserve per-zone bitmap pools using a segmentation-safe upper bound.
+    fn pass_reserve_bitmap_pools(&mut self, memory_regions: &[MemoryRegion]) {
         for zi in 0..ZoneType::COUNT {
-            let zone_span = self.zones[zi].span_pages;
-            let needed_bytes = Self::bitmap_bytes_for_span(zone_span);
+            let managed_pages = memory_regions
+                .iter()
+                .filter_map(|region| Self::zone_intersection_aligned(region, zi))
+                .map(|(start, end)| ((end - start) / PAGE_SIZE) as usize)
+                .sum::<usize>();
+            let needed_bytes = Self::bitmap_bytes_upper_bound_for_pages(managed_pages);
             let reserved_bytes = Self::align_up(needed_bytes as u64, PAGE_SIZE);
 
             if reserved_bytes == 0 {
                 self.bitmap_pool[zi] = (0, 0);
-                self.clear_zone_bitmaps(zi);
                 continue;
             }
 
-            let pool_start = boot_alloc::alloc_bytes(needed_bytes, PAGE_SIZE as usize)
+            let pool_start = boot_alloc::alloc_bytes_accessible(needed_bytes, PAGE_SIZE as usize)
                 .unwrap_or_else(|| {
                     panic!(
                         "Buddy allocator: unable to reserve {} bytes for zone {:?} bitmaps",
@@ -240,82 +254,149 @@ impl BuddyAllocator {
                     (pool_end - pool_start) as usize,
                 );
             }
-
-            self.setup_zone_bitmaps(zi, pool_start, pool_end);
         }
     }
 
-    /// Performs the pass populate operation.
-    ///
-    /// # Strategy (VMware-safe)
-    ///
-    /// The buddy bitmaps are already zeroed by `pass_boot_alloc_and_setup_bitmaps`,
-    /// meaning **all pages in the span are implicitly allocated**.
-    /// We only seed the FREE/RECLAIM regions, and the holes (MMIO, ACPI NVS, reserved)
-    /// remain allocated : preventing any coalescing across VMware's fragmented memory map.
-    ///
-    /// The seeding is **greedy**: instead of inserting page-by-page (order 0), we calculate
-    /// the largest power-of-2 block that fits at each address, reducing O(N) iterations
-    /// to O(N / 2^order) : critical for VMware's 59+ fragmented regions.
-    fn pass_populate(&mut self, memory_regions: &[MemoryRegion]) {
+    /// Build the final segmented physical layout from remaining boot allocator ranges.
+    fn pass_build_segments(&mut self, memory_regions: &[MemoryRegion]) {
         for region in memory_regions {
             for zi in 0..ZoneType::COUNT {
                 let Some((start, end)) = Self::zone_intersection_aligned(region, zi) else {
                     continue;
                 };
-                self.seed_range_as_free(zi, start, end);
+                let zone = &mut self.zones[zi];
+                if zone.segment_count >= MAX_ZONE_SEGMENTS {
+                    panic!(
+                        "Buddy allocator: zone {:?} exceeded MAX_ZONE_SEGMENTS={} while processing phys=0x{:x}..0x{:x}",
+                        zone.zone_type,
+                        MAX_ZONE_SEGMENTS,
+                        start,
+                        end,
+                    );
+                }
+
+                zone.segments[zone.segment_count] = ZoneSegment {
+                    base: PhysAddr::new(start),
+                    page_count: ((end - start) / PAGE_SIZE) as usize,
+                    free_lists: [0; MAX_ORDER + 1],
+                    buddy_bitmaps: [BuddyBitmap::empty(); MAX_ORDER + 1],
+                    #[cfg(debug_assertions)]
+                    alloc_bitmap: BuddyBitmap::empty(),
+                };
+                zone.segment_count += 1;
+                zone.page_count = zone
+                    .page_count
+                    .saturating_add(((end - start) / PAGE_SIZE) as usize);
+
+                buddy_dbg!(
+                    "  Zone {:?}: segment phys=0x{:x}..0x{:x} pages={}",
+                    zone.zone_type,
+                    start,
+                    end,
+                    ((end - start) / PAGE_SIZE) as usize,
+                );
             }
         }
     }
 
-    /// Seeds a contiguous physical range `[start, end)` as free using **greedy block insertion**.
-    ///
-    /// Instead of inserting page-by-page at order 0 (which causes O(N) coalescing storms on
-    /// VMware's fragmented memory maps), this function calculates the largest power-of-2 block
-    /// that fits at each address and inserts it directly.
-    ///
-    /// # Algorithm
-    /// For each position `addr` in the range:
-    /// 1. Compute remaining bytes: `remaining = end - addr`
-    /// 2. Find max order: `min(ilog2(remaining / PAGE_SIZE), MAX_ORDER)`
-    /// 3. Reduce order until `addr` is aligned to `PAGE_SIZE << order`
-    /// 4. Insert the block via `insert_free_block(zone, addr, order)`
-    /// 5. Advance `addr += PAGE_SIZE << order`
-    ///
-    /// # Safety: holes are implicitly protected
-    /// Since buddy bitmaps start zeroed (all pages allocated), pages NOT seeded here
-    /// (MMIO gaps, ACPI NVS, reserved regions) remain marked as allocated. The buddy
-    /// coalescing logic (`toggle_pair`) will never merge blocks across these holes because
-    /// their buddy bits stay at 0, blocking coalescing at hole boundaries.
-    fn seed_range_as_free(&mut self, zone_idx: usize, start: u64, end: u64) {
-        if start >= end {
-            return;
-        }
-        let zone = &mut self.zones[zone_idx];
-        let mut addr = start;
-
-        while addr < end {
-            // Skip protected module pages
-            if Self::is_protected_module_page(addr) {
-                buddy_dbg!(
-                    "  Zone {:?}: skip protected page 0x{:x}",
-                    zone.zone_type,
-                    addr
-                );
-                addr += PAGE_SIZE;
+    /// Assign bitmap slices to each populated segment.
+    fn pass_setup_segment_bitmaps(&mut self) {
+        for zi in 0..ZoneType::COUNT {
+            let (pool_start, pool_end) = self.bitmap_pool[zi];
+            if pool_start == 0 || pool_end <= pool_start {
                 continue;
             }
 
-            // Greedy: find the largest block that fits
-            let remaining = end - addr;
-            let max_possible_order = if remaining >= PAGE_SIZE {
-                ((remaining / PAGE_SIZE).ilog2() as u8).min(MAX_ORDER as u8)
-            } else {
-                0
-            };
+            let zone = &mut self.zones[zi];
+            let mut cursor = pool_start;
+            for si in 0..zone.segment_count {
+                let segment = &mut zone.segments[si];
+                let _exact_bitmap_bytes = Self::bitmap_bytes_for_span(segment.page_count);
+                for order in 0..=MAX_ORDER {
+                    let num_bits = Self::pairs_for_order(segment.page_count, order as u8);
+                    let num_bytes = Self::bits_to_bytes(num_bits) as u64;
+                    if num_bits == 0 {
+                        segment.buddy_bitmaps[order] = BuddyBitmap::empty();
+                        continue;
+                    }
 
-            // Reduce order until address is aligned to block size
-            let mut order = max_possible_order;
+                    debug_assert!(cursor + num_bytes <= pool_end);
+                    segment.buddy_bitmaps[order] = BuddyBitmap {
+                        data: phys_to_virt(cursor) as *mut u8,
+                        num_bits,
+                    };
+                    cursor += num_bytes;
+                }
+
+                #[cfg(debug_assertions)]
+                {
+                    let num_bits = segment.page_count;
+                    let num_bytes = Self::bits_to_bytes(num_bits) as u64;
+                    if num_bits == 0 {
+                        segment.alloc_bitmap = BuddyBitmap::empty();
+                    } else {
+                        debug_assert!(cursor + num_bytes <= pool_end);
+                        segment.alloc_bitmap = BuddyBitmap {
+                            data: phys_to_virt(cursor) as *mut u8,
+                            num_bits,
+                        };
+                        cursor += num_bytes;
+                    }
+                }
+            }
+
+            debug_assert!(cursor <= pool_end);
+        }
+    }
+
+    /// Seed each contiguous segment with greedy block insertion.
+    fn pass_populate(&mut self) {
+        for zi in 0..ZoneType::COUNT {
+            let zone_type = self.zones[zi].zone_type;
+            let segment_count = self.zones[zi].segment_count;
+            for si in 0..segment_count {
+                let (start, end) = {
+                    let segment = &self.zones[zi].segments[si];
+                    (segment.base.as_u64(), segment.end_address())
+                };
+                let segment = &mut self.zones[zi].segments[si];
+                Self::seed_range_as_free(zone_type, segment, start, end);
+            }
+        }
+    }
+
+    /// Seeds a contiguous physical range `[start, end)` as free using greedy block insertion.
+    ///
+    /// Unlike the previous min/max span design, `segment` is guaranteed to be a
+    /// genuinely contiguous free extent. Greedy seeding therefore improves boot
+    /// time without ever making holes visible to the buddy topology.
+    fn seed_range_as_free(zone_type: ZoneType, segment: &mut ZoneSegment, start: u64, end: u64) {
+        let _ = zone_type;
+        if start >= end {
+            return;
+        }
+        let mut addr = start;
+
+        'seed: while addr < end {
+            if !segment.contains_address(PhysAddr::new(addr)) {
+                break;
+            }
+
+            if let Some(protected_end) = Self::protected_overlap_end(addr, addr + PAGE_SIZE) {
+                buddy_dbg!(
+                    "  Zone {:?}: skip protected range 0x{:x}..0x{:x}",
+                    zone_type,
+                    addr,
+                    protected_end
+                );
+                addr = core::cmp::min(protected_end, end);
+                continue;
+            }
+
+            let remaining_pages = ((end - addr) / PAGE_SIZE) as usize;
+            debug_assert!(remaining_pages != 0);
+            let mut order = ((remaining_pages.ilog2()) as u8).min(MAX_ORDER as u8);
+
             while order > 0 {
                 let block_size = PAGE_SIZE << order;
                 if addr & (block_size - 1) == 0 {
@@ -324,79 +405,61 @@ impl BuddyAllocator {
                 order -= 1;
             }
 
-            let mut block_pages = 1usize << order;
-            let mut block_size = PAGE_SIZE << order;
+            loop {
+                let block_size = PAGE_SIZE << order;
+                let block_end = addr.saturating_add(block_size);
+                if block_end > end {
+                    debug_assert!(order != 0);
+                    order -= 1;
+                    continue;
+                }
 
-            // Double-check we don't exceed the range
-            if addr + block_size > end {
-                // Should not happen if alignment logic is correct, but safety fallback
-                order = 0;
-                block_pages = 1;
-                block_size = PAGE_SIZE;
-            }
+                if Self::protected_overlap_end(addr, block_end).is_some() {
+                    if order == 0 {
+                        if let Some(skip_to) = Self::protected_overlap_end(addr, block_end) {
+                            buddy_dbg!(
+                                "  Zone {:?}: skip protected page 0x{:x}",
+                                zone_type,
+                                addr
+                            );
+                            addr = core::cmp::min(skip_to, end);
+                            continue 'seed;
+                        }
+                    }
+                    order -= 1;
+                    continue;
+                }
 
-            Self::insert_free_block(zone, addr, order);
-            zone.page_count += block_pages;
-            addr += block_size;
-        }
-    }
-
-    /// Performs the clear zone bitmaps operation.
-    fn clear_zone_bitmaps(&mut self, zone_idx: usize) {
-        let zone = &mut self.zones[zone_idx];
-        zone.buddy_bitmaps = [BuddyBitmap::empty(); MAX_ORDER + 1];
-        #[cfg(debug_assertions)]
-        {
-            zone.alloc_bitmap = BuddyBitmap::empty();
-        }
-    }
-
-    /// Performs the setup zone bitmaps operation.
-    /// `pool_start` and `pool_end` are the physical address range of the reserved bitmap pool for this zone.
-    /// This initializes the `buddy_bitmaps` (and `alloc_bitmap` in debug) to point into the pool, and leaves any unused portion of the pool (if the zone is small) as all-zero.
-    /// The caller is responsible for zeroing the pool pages before this step, so this does not write to the bitmaps itself.
-    fn setup_zone_bitmaps(&mut self, zone_idx: usize, pool_start: u64, pool_end: u64) {
-        let zone = &mut self.zones[zone_idx];
-        let mut cursor = pool_start;
-
-        for order in 0..=MAX_ORDER {
-            let num_bits = Self::pairs_for_order(zone.span_pages, order as u8);
-            let num_bytes = Self::bits_to_bytes(num_bits) as u64;
-            if num_bits == 0 {
-                zone.buddy_bitmaps[order] = BuddyBitmap::empty();
-                continue;
-            }
-            debug_assert!(cursor + num_bytes <= pool_end);
-            zone.buddy_bitmaps[order] = BuddyBitmap {
-                data: phys_to_virt(cursor) as *mut u8,
-                num_bits,
-            };
-            cursor += num_bytes;
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            let num_bits = zone.span_pages;
-            let num_bytes = Self::bits_to_bytes(num_bits) as u64;
-            if num_bits == 0 {
-                zone.alloc_bitmap = BuddyBitmap::empty();
-            } else {
-                debug_assert!(cursor + num_bytes <= pool_end);
-                zone.alloc_bitmap = BuddyBitmap {
-                    data: phys_to_virt(cursor) as *mut u8,
-                    num_bits,
-                };
-                cursor += num_bytes;
+                Self::insert_free_block(segment, addr, order);
+                addr = block_end;
+                continue 'seed;
             }
         }
-
-        debug_assert!(cursor <= pool_end);
     }
 
     /// Allocates from zone.
-    fn alloc_from_zone(zone: &mut Zone, order: u8, _token: &IrqDisabledToken) -> Option<PhysFrame> {
+    fn alloc_from_zone(zone: &mut Zone, order: u8, token: &IrqDisabledToken) -> Option<PhysFrame> {
+        for si in 0..zone.segment_count {
+            let frame_phys = {
+                let segment = &mut zone.segments[si];
+                Self::alloc_from_segment(segment, order, token)
+            };
+            if let Some(frame_phys) = frame_phys {
+                zone.allocated += 1usize << order;
+                return PhysFrame::from_start_address(PhysAddr::new(frame_phys)).ok();
+            }
+        }
+        None
+    }
+
+    /// Allocate from one contiguous segment.
+    fn alloc_from_segment(
+        segment: &mut ZoneSegment,
+        order: u8,
+        _token: &IrqDisabledToken,
+    ) -> Option<u64> {
         for cur_order in order..=MAX_ORDER as u8 {
-            let Some(frame_phys) = Self::free_list_pop(zone, cur_order) else {
+            let Some(frame_phys) = Self::free_list_pop(segment, cur_order) else {
                 continue;
             };
             debug_assert!(
@@ -416,7 +479,7 @@ impl BuddyAllocator {
             }
 
             // One block of this order transitions free -> allocated.
-            let _ = Self::toggle_pair(zone, frame_phys, cur_order);
+            let _ = Self::toggle_pair(segment, frame_phys, cur_order);
 
             // Split down to requested order.
             let mut split_order = cur_order;
@@ -424,22 +487,34 @@ impl BuddyAllocator {
                 split_order -= 1;
                 let buddy_phys = frame_phys + ((1u64 << split_order) * PAGE_SIZE);
                 Self::mark_block_free(buddy_phys, split_order);
-                Self::free_list_push(zone, buddy_phys, split_order);
+                Self::free_list_push(segment, buddy_phys, split_order);
                 // Pair at split_order becomes (allocated, free).
-                let _ = Self::toggle_pair(zone, frame_phys, split_order);
+                let _ = Self::toggle_pair(segment, frame_phys, split_order);
             }
-
-            zone.allocated += 1usize << order;
             Self::mark_block_allocated(frame_phys, order);
 
             #[cfg(debug_assertions)]
-            Self::mark_allocated(zone, frame_phys, order, true);
+            Self::mark_allocated(segment, frame_phys, order, true);
 
-            return PhysFrame::from_start_address(PhysAddr::new(frame_phys)).ok();
+            return Some(frame_phys);
         }
-        // Exhausted all orders : record the failure for diagnostics.
-        crate::memory::buddy::record_buddy_alloc_fail(order);
         None
+    }
+
+    #[inline]
+    fn find_segment_index(zone: &Zone, phys: u64, order: u8) -> Option<usize> {
+        zone.segments[..zone.segment_count]
+            .iter()
+            .position(|segment| Self::segment_contains_block(segment, phys, order))
+    }
+
+    #[inline]
+    fn segment_contains_block(segment: &ZoneSegment, phys: u64, order: u8) -> bool {
+        if !segment.contains_address(PhysAddr::new(phys)) {
+            return false;
+        }
+        let block_end = phys.saturating_add(PAGE_SIZE << order);
+        block_end <= segment.end_address()
     }
 
     /// Releases to zone.
@@ -447,6 +522,14 @@ impl BuddyAllocator {
         let frame_phys = frame.start_address.as_u64();
         let block_size = PAGE_SIZE << order;
         let block_end = frame_phys.saturating_add(block_size);
+        let Some(segment_idx) = Self::find_segment_index(zone, frame_phys, order) else {
+            panic!(
+                "buddy free: frame 0x{:x} order {} does not belong to any segment in zone {:?}",
+                frame_phys,
+                order,
+                zone.zone_type,
+            );
+        };
 
         debug_assert!(order <= MAX_ORDER as u8);
         debug_assert!(frame.start_address.is_aligned(PAGE_SIZE << order));
@@ -464,10 +547,16 @@ impl BuddyAllocator {
         }
 
         #[cfg(debug_assertions)]
-        Self::mark_allocated(zone, frame_phys, order, false);
+        {
+            let segment = &mut zone.segments[segment_idx];
+            Self::mark_allocated(segment, frame_phys, order, false);
+        }
 
         Self::mark_block_free(frame_phys, order);
-        Self::insert_free_block(zone, frame_phys, order);
+        {
+            let segment = &mut zone.segments[segment_idx];
+            Self::insert_free_block(segment, frame_phys, order);
+        }
         zone.allocated = zone.allocated.saturating_sub(1usize << order);
     }
 
@@ -486,10 +575,19 @@ impl BuddyAllocator {
         let frame_phys = frame.start_address.as_u64();
         let block_size = PAGE_SIZE << order;
         let block_end = frame_phys.saturating_add(block_size);
+        let Some(segment_idx) = Self::find_segment_index(zone, frame_phys, order) else {
+            panic!(
+                "buddy quarantine: frame 0x{:x} order {} does not belong to any segment in zone {:?}",
+                frame_phys,
+                order,
+                zone.zone_type,
+            );
+        };
 
         debug_assert!(order <= MAX_ORDER as u8);
         debug_assert!(frame.start_address.is_aligned(PAGE_SIZE << order));
         debug_assert!(zone.contains_address(frame.start_address));
+        debug_assert!(Self::segment_contains_block(&zone.segments[segment_idx], frame_phys, order));
 
         if Self::protected_overlap_end(frame_phys, block_end).is_some() {
             return;
@@ -506,30 +604,30 @@ impl BuddyAllocator {
     /// Returns after inserting the (potentially coalesced) block into the appropriate free list, without recursing further.
     /// If the buddy bit is already set or we reach MAX_ORDER, the block is inserted as-is.
     /// Otherwise, the buddy block is removed from its free list and coalesced with the current block, and the process repeats at the next order.
-    fn insert_free_block(zone: &mut Zone, frame_phys: u64, initial_order: u8) {
+    fn insert_free_block(segment: &mut ZoneSegment, frame_phys: u64, initial_order: u8) {
         let mut current = frame_phys;
         let mut order = initial_order;
 
         loop {
-            let bit_is_set = Self::toggle_pair(zone, current, order);
+            let bit_is_set = Self::toggle_pair(segment, current, order);
             if bit_is_set || order == MAX_ORDER as u8 {
                 Self::mark_block_free(current, order);
-                Self::free_list_push(zone, current, order);
+                Self::free_list_push(segment, current, order);
                 break;
             }
 
-            let Some(buddy) = Self::buddy_phys(zone, current, order) else {
+            let Some(buddy) = Self::buddy_phys(segment, current, order) else {
                 Self::mark_block_free(current, order);
-                Self::free_list_push(zone, current, order);
+                Self::free_list_push(segment, current, order);
                 break;
             };
 
-            let removed = Self::free_list_remove(zone, buddy, order);
+            let removed = Self::free_list_remove(segment, buddy, order);
             if !removed {
                 // Inconsistency fallback: keep allocator consistent.
                 debug_assert!(false, "buddy bitmap/list inconsistency while freeing");
                 Self::mark_block_free(current, order);
-                Self::free_list_push(zone, current, order);
+                Self::free_list_push(segment, current, order);
                 break;
             }
 
@@ -540,9 +638,9 @@ impl BuddyAllocator {
 
     /// Performs the page index operation.
     #[inline]
-    fn page_index(zone: &Zone, phys: u64) -> usize {
-        debug_assert!(zone.span_pages > 0);
-        let base = zone.base.as_u64();
+    fn page_index(segment: &ZoneSegment, phys: u64) -> usize {
+        debug_assert!(segment.page_count > 0);
+        let base = segment.base.as_u64();
         debug_assert!(phys >= base);
         debug_assert!((phys - base).is_multiple_of(PAGE_SIZE));
         ((phys - base) / PAGE_SIZE) as usize
@@ -550,26 +648,26 @@ impl BuddyAllocator {
 
     /// Performs the pair index operation.
     #[inline]
-    fn pair_index(zone: &Zone, phys: u64, order: u8) -> usize {
-        Self::page_index(zone, phys) >> (order as usize + 1)
+    fn pair_index(segment: &ZoneSegment, phys: u64, order: u8) -> usize {
+        Self::page_index(segment, phys) >> (order as usize + 1)
     }
 
     /// Performs the toggle pair operation.
     #[inline]
-    fn toggle_pair(zone: &mut Zone, phys: u64, order: u8) -> bool {
-        let bitmap = zone.buddy_bitmaps[order as usize];
+    fn toggle_pair(segment: &mut ZoneSegment, phys: u64, order: u8) -> bool {
+        let bitmap = segment.buddy_bitmaps[order as usize];
         if bitmap.is_empty() {
             return true;
         }
-        let idx = Self::pair_index(zone, phys, order);
+        let idx = Self::pair_index(segment, phys, order);
         debug_assert!(idx < bitmap.num_bits);
         bitmap.toggle(idx)
     }
 
     /// Performs the buddy phys operation.
     #[inline]
-    fn buddy_phys(zone: &Zone, phys: u64, order: u8) -> Option<u64> {
-        let base = zone.base.as_u64();
+    fn buddy_phys(segment: &ZoneSegment, phys: u64, order: u8) -> Option<u64> {
+        let base = segment.base.as_u64();
         if phys < base {
             return None;
         }
@@ -577,7 +675,7 @@ impl BuddyAllocator {
         let block_size = PAGE_SIZE << order;
         let buddy_offset = offset ^ block_size;
         let buddy_page = (buddy_offset / PAGE_SIZE) as usize;
-        if buddy_page >= zone.span_pages {
+        if buddy_page >= segment.page_count {
             return None;
         }
         Some(base + buddy_offset)
@@ -585,48 +683,48 @@ impl BuddyAllocator {
 
     /// Performs the mark allocated operation.
     #[cfg(debug_assertions)]
-    fn mark_allocated(zone: &mut Zone, frame_phys: u64, order: u8, allocated: bool) {
-        if zone.alloc_bitmap.is_empty() {
+    fn mark_allocated(segment: &mut ZoneSegment, frame_phys: u64, order: u8, allocated: bool) {
+        if segment.alloc_bitmap.is_empty() {
             return;
         }
-        let start = Self::page_index(zone, frame_phys);
+        let start = Self::page_index(segment, frame_phys);
         let count = 1usize << order;
         for i in 0..count {
             let bit = start + i;
-            debug_assert!(bit < zone.alloc_bitmap.num_bits);
+            debug_assert!(bit < segment.alloc_bitmap.num_bits);
             if allocated {
-                debug_assert!(!zone.alloc_bitmap.test(bit), "double allocation detected");
-                zone.alloc_bitmap.set(bit);
+                debug_assert!(!segment.alloc_bitmap.test(bit), "double allocation detected");
+                segment.alloc_bitmap.set(bit);
             } else {
-                debug_assert!(zone.alloc_bitmap.test(bit), "double free detected");
-                zone.alloc_bitmap.clear(bit);
+                debug_assert!(segment.alloc_bitmap.test(bit), "double free detected");
+                segment.alloc_bitmap.clear(bit);
             }
         }
     }
 
     /// Releases list push.
-    fn free_list_push(zone: &mut Zone, phys: u64, order: u8) {
+    fn free_list_push(segment: &mut ZoneSegment, phys: u64, order: u8) {
         debug_assert!(
             !crate::memory::frame::block_phys_has_poison_guard(phys, order),
             "buddy: refusing to push poisoned block to free list"
         );
-        let head = zone.free_lists[order as usize];
+        let head = segment.free_lists[order as usize];
         Self::write_free_prev(phys, 0);
         Self::write_free_next(phys, head);
         if head != 0 {
             Self::write_free_prev(head, phys);
         }
-        zone.free_lists[order as usize] = phys;
+        segment.free_lists[order as usize] = phys;
     }
 
     /// Releases list pop.
-    fn free_list_pop(zone: &mut Zone, order: u8) -> Option<u64> {
-        let head = zone.free_lists[order as usize];
+    fn free_list_pop(segment: &mut ZoneSegment, order: u8) -> Option<u64> {
+        let head = segment.free_lists[order as usize];
         if head == 0 {
             return None;
         }
         let next = Self::read_free_next(head);
-        zone.free_lists[order as usize] = next;
+        segment.free_lists[order as usize] = next;
         if next != 0 {
             Self::write_free_prev(next, 0);
         }
@@ -636,15 +734,15 @@ impl BuddyAllocator {
     }
 
     /// Releases list remove.
-    fn free_list_remove(zone: &mut Zone, phys: u64, order: u8) -> bool {
+    fn free_list_remove(segment: &mut ZoneSegment, phys: u64, order: u8) -> bool {
         let prev = Self::read_free_prev(phys);
         let next = Self::read_free_next(phys);
 
         if prev == 0 {
-            if zone.free_lists[order as usize] != phys {
+            if segment.free_lists[order as usize] != phys {
                 return false;
             }
-            zone.free_lists[order as usize] = next;
+            segment.free_lists[order as usize] = next;
         } else {
             Self::write_free_next(prev, next);
         }
@@ -762,22 +860,6 @@ impl BuddyAllocator {
         None
     }
 
-    /// Returns whether protected module page.
-    fn is_protected_module_page(phys: u64) -> bool {
-        let page = Self::align_down(phys, PAGE_SIZE);
-        for (base, size) in Self::protected_module_ranges().into_iter().flatten() {
-            if size == 0 {
-                continue;
-            }
-            let pstart = Self::align_down(base, PAGE_SIZE);
-            let pend = Self::align_up(base.saturating_add(size), PAGE_SIZE);
-            if page >= pstart && page < pend {
-                return true;
-            }
-        }
-        false
-    }
-
     /// Performs the protected module ranges operation.
     fn protected_module_ranges() -> [Option<(u64, u64)>; boot_alloc::MAX_PROTECTED_RANGES] {
         boot_alloc::protected_ranges_snapshot()
@@ -807,6 +889,20 @@ impl BuddyAllocator {
             bytes += Self::bits_to_bytes(span_pages);
         }
         bytes
+    }
+
+    /// Upper bound for bitmap storage over any segmentation of `page_count` pages.
+    ///
+    /// For one page, every order contributes at most one parity bit. Summing that
+    /// pessimistic bound across all pages yields a simple safe allocation bound,
+    /// even if bitmap-pool reservations split ranges further.
+    fn bitmap_bytes_upper_bound_for_pages(page_count: usize) -> usize {
+        let mut bits = page_count.saturating_mul(MAX_ORDER + 1);
+        #[cfg(debug_assertions)]
+        {
+            bits = bits.saturating_add(page_count);
+        }
+        Self::bits_to_bytes(bits)
     }
 
     /// Performs the align up operation.
@@ -1106,9 +1202,15 @@ pub fn init_buddy_allocator(memory_regions: &[MemoryRegion]) {
         zone_cached.store(0, AtomicOrdering::Relaxed);
     }
 
-    let mut allocator = BuddyAllocator::new();
-    allocator.init(memory_regions);
-    *BUDDY_ALLOCATOR.lock() = Some(allocator);
+    {
+        let mut guard = BUDDY_ALLOCATOR.lock();
+        *guard = Some(BuddyAllocator::new());
+        guard.with_mut_and_token(|slot, _token| {
+            if let Some(allocator) = slot.as_mut() {
+                allocator.init(memory_regions);
+            }
+        });
+    }
     // Race/corruption diagnostic: register buddy lock for E9 LOCK-A/LOCK-R traces.
     crate::sync::debug_set_trace_buddy_addr(debug_buddy_lock_addr());
 }
@@ -1333,6 +1435,7 @@ impl FrameAllocator for BuddyAllocator {
                     return Ok(frame);
                 }
             }
+            crate::memory::buddy::record_buddy_alloc_fail(order);
             Err(AllocError::OutOfMemory)
         })();
 
@@ -1381,7 +1484,10 @@ impl BuddyAllocator {
         }
 
         let result = Self::alloc_from_zone(&mut self.zones[zone as usize], order, token)
-            .ok_or(AllocError::OutOfMemory);
+            .ok_or_else(|| {
+                crate::memory::buddy::record_buddy_alloc_fail(order);
+                AllocError::OutOfMemory
+            });
 
         ALLOC_IN_PROGRESS[cpu_idx].store(false, core::sync::atomic::Ordering::Release);
         result

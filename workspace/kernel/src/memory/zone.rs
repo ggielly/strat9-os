@@ -22,6 +22,13 @@ impl ZoneType {
 /// Maximum buddy order (0-11 for 4KB to 8MB blocks)
 pub const MAX_ORDER: usize = 11;
 
+/// Maximum number of discontiguous physical segments tracked per zone.
+///
+/// VMware and some firmware expose fragmented RAM maps with many holes. A
+/// single zone therefore contains multiple independently managed buddy segments
+/// instead of one monolithic min/max span.
+pub const MAX_ZONE_SEGMENTS: usize = 64;
+
 /// Bitmap used by buddy coalescing logic.
 ///
 /// The storage is provided externally (stolen from early boot free pages)
@@ -95,6 +102,80 @@ impl BuddyBitmap {
     }
 }
 
+/// One contiguous buddy-managed extent inside a zone.
+#[derive(Clone, Copy)]
+pub struct ZoneSegment {
+    /// Base physical address of this contiguous segment.
+    pub base: PhysAddr,
+
+    /// Number of pages managed by this segment.
+    pub page_count: usize,
+
+    /// Free lists for each order within this segment.
+    pub free_lists: [u64; MAX_ORDER + 1],
+
+    /// Per-order parity bitmaps scoped to this segment only.
+    pub buddy_bitmaps: [BuddyBitmap; MAX_ORDER + 1],
+
+    /// Optional debug bitmap: 1 bit per page = allocated.
+    #[cfg(debug_assertions)]
+    pub alloc_bitmap: BuddyBitmap,
+}
+
+impl ZoneSegment {
+    /// Empty segment for const initialization.
+    pub const fn empty() -> Self {
+        Self {
+            base: PhysAddr::new(0),
+            page_count: 0,
+            free_lists: [0; MAX_ORDER + 1],
+            buddy_bitmaps: [BuddyBitmap::empty(); MAX_ORDER + 1],
+            #[cfg(debug_assertions)]
+            alloc_bitmap: BuddyBitmap::empty(),
+        }
+    }
+
+    /// Returns whether this segment is populated.
+    #[inline]
+    pub fn is_populated(&self) -> bool {
+        self.page_count != 0
+    }
+
+    /// Returns whether an address falls within the segment.
+    #[inline]
+    pub fn contains_address(&self, addr: PhysAddr) -> bool {
+        if !self.is_populated() {
+            return false;
+        }
+        let start = self.base.as_u64();
+        let end = start + (self.page_count as u64 * 4096);
+        let value = addr.as_u64();
+        value >= start && value < end
+    }
+
+    /// Returns the exclusive end address of the segment.
+    #[inline]
+    pub fn end_address(&self) -> u64 {
+        self.base.as_u64() + (self.page_count as u64 * 4096)
+    }
+
+    /// Count the number of free blocks at a given order.
+    pub fn free_list_count(&self, order: u8) -> usize {
+        let mut count = 0usize;
+        let mut phys = self.free_lists[order as usize];
+        while phys != 0 {
+            count += 1;
+            let meta = crate::memory::frame::get_meta(PhysAddr::new(phys));
+            phys = if meta.next() == crate::memory::frame::FRAME_META_LINK_NONE {
+                0
+            } else {
+                meta.next()
+            };
+        }
+        count
+    }
+}
+
 /// Memory zone with buddy allocator free lists
 pub struct Zone {
     /// Zone type
@@ -108,22 +189,17 @@ pub struct Zone {
 
     /// Total address span covered by this zone metadata, in pages.
     ///
-    /// Unlike `page_count`, this includes holes and is used to size bitmaps.
+    /// Unlike `page_count`, this includes holes and is kept for diagnostics.
     pub span_pages: usize,
 
     /// Number of allocated pages
     pub allocated: usize,
 
-    /// Free lists for each order (0-11), intrusive list head as physical addr.
-    /// 0 means empty.
-    pub free_lists: [u64; MAX_ORDER + 1],
+    /// Number of populated contiguous segments in this zone.
+    pub segment_count: usize,
 
-    /// Per-order buddy pair bitmaps (Linux-style parity map).
-    pub buddy_bitmaps: [BuddyBitmap; MAX_ORDER + 1],
-
-    /// Optional debug bitmap: 1 bit per page = allocated.
-    #[cfg(debug_assertions)]
-    pub alloc_bitmap: BuddyBitmap,
+    /// Independently managed contiguous segments inside this zone.
+    pub segments: [ZoneSegment; MAX_ZONE_SEGMENTS],
 }
 
 impl Zone {
@@ -135,19 +211,16 @@ impl Zone {
             page_count: 0,
             span_pages: 0,
             allocated: 0,
-            free_lists: [0; MAX_ORDER + 1],
-            buddy_bitmaps: [BuddyBitmap::empty(); MAX_ORDER + 1],
-            #[cfg(debug_assertions)]
-            alloc_bitmap: BuddyBitmap::empty(),
+            segment_count: 0,
+            segments: [ZoneSegment::empty(); MAX_ZONE_SEGMENTS],
         }
     }
 
     /// Check if an address is within this zone
     pub fn contains_address(&self, addr: PhysAddr) -> bool {
-        let zone_start = self.base.as_u64();
-        let zone_end = zone_start + (self.span_pages as u64 * 4096);
-        let addr_val = addr.as_u64();
-        addr_val >= zone_start && addr_val < zone_end
+        self.segments[..self.segment_count]
+            .iter()
+            .any(|segment| segment.contains_address(addr))
     }
 
     /// Get number of available (free) pages
@@ -160,19 +233,10 @@ impl Zone {
     /// Walks the buddy free list. Safe because we only read the next link from
     /// the per-frame [`crate::memory::frame::MetaSlot`] (not from mapped page bytes).
     pub fn free_list_count(&self, order: u8) -> usize {
-        let mut count = 0usize;
-        let mut phys = self.free_lists[order as usize];
-        while phys != 0 {
-            count += 1;
-            // Read next pointer from the frame metadata.
-            let meta = crate::memory::frame::get_meta(PhysAddr::new(phys));
-            phys = if meta.next() == crate::memory::frame::FRAME_META_LINK_NONE {
-                0
-            } else {
-                meta.next()
-            };
-        }
-        count
+        self.segments[..self.segment_count]
+            .iter()
+            .map(|segment| segment.free_list_count(order))
+            .sum()
     }
 }
 

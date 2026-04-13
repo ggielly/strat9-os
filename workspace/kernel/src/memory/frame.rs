@@ -693,7 +693,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
 
     let bytes = metadata_size_for(total_ram) as usize;
     let phys = boot_alloc
-        .try_alloc(bytes, FRAME_META_ALIGN)
+        .try_alloc_accessible(bytes, FRAME_META_ALIGN)
         .unwrap_or_else(|| {
             panic!(
                 "frame metadata: boot allocator could not reserve {} bytes (align {}) for {} frames — out of early boot memory",
