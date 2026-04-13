@@ -581,8 +581,11 @@ impl BuddyAllocator {
                     continue;
                 }
 
-                let migratetype =
-                    Self::pageblock_migratetype(segment, addr, Self::default_pageblock_migratetype(zone_type));
+                let migratetype = Self::pageblock_migratetype(
+                    segment,
+                    addr,
+                    Self::default_pageblock_migratetype(zone_type),
+                );
                 Self::insert_free_block(segment, addr, order, migratetype);
                 addr = block_end;
                 continue 'seed;
@@ -1105,7 +1108,8 @@ impl BuddyAllocator {
         {
             bits = bits.saturating_add(page_count);
         }
-        Self::bits_to_bytes(bits).saturating_add(Self::pageblock_tag_bytes_upper_bound_for_pages(page_count))
+        Self::bits_to_bytes(bits)
+            .saturating_add(Self::pageblock_tag_bytes_upper_bound_for_pages(page_count))
     }
 
     /// Exact byte count required for pageblock migratetype tags over one contiguous span.
@@ -1205,9 +1209,8 @@ impl BuddyAllocator {
                 continue;
             }
             for idx in 0..segment.pageblock_count {
-                let migratetype = unsafe {
-                    Self::decode_pageblock_tag(*segment.pageblock_tags.add(idx))
-                };
+                let migratetype =
+                    unsafe { Self::decode_pageblock_tag(*segment.pageblock_tags.add(idx)) };
                 counts[migratetype.index()] = counts[migratetype.index()].saturating_add(1);
             }
         }
