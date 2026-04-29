@@ -1,0 +1,501 @@
+#!/bin/bash
+
+# Script to create bootable disk image with Limine
+
+set -e
+
+BUILD_DIR="build"
+LIMINE_DIR="$BUILD_DIR/limine"
+ISO_ROOT="$BUILD_DIR/iso_root"
+IMAGE_BASENAME="${STRAT9_IMAGE_BASENAME:-strat9-os}"
+PROFILE="${STRAT9_PROFILE:-debug}"
+INCLUDE_TESTS="${STRAT9_INCLUDE_TESTS:-0}"
+IMAGE_FILE="$BUILD_DIR/${IMAGE_BASENAME}.img"
+ISO_FILE="$BUILD_DIR/${IMAGE_BASENAME}.iso"
+KERNEL_ELF="target/x86_64-unknown-none/${PROFILE}/kernel"
+FS_EXT4_ELF="target/x86_64-unknown-none/${PROFILE}/fs-ext4-strate"
+FS_RAM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-fs-ramfs"
+INIT_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_pid"
+SYSCALL_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_syscalls"
+MEM_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem"
+MEM_STRESSED_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_stressed"
+MEM_REGION_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_region"
+MEM_REGION_PROC_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_mem_region_proc"
+EXEC_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_exec"
+EXEC_TEST_HELPER_ELF="target/x86_64-unknown-none/${PROFILE}/test_exec_helper"
+INIT_ELF="target/x86_64-unknown-none/${PROFILE}/strate-init"
+CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
+NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
+BUS_ELF="target/x86_64-unknown-none/${PROFILE}/strate-bus"
+STRATE_WASM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-wasm"
+STRATE_WEBRTC_ELF="target/x86_64-unknown-none/${PROFILE}/strate-webrtc"
+DHCP_CLIENT_ELF="target/x86_64-unknown-none/${PROFILE}/dhcp-client"
+PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
+TELNETD_ELF="target/x86_64-unknown-none/${PROFILE}/telnetd"
+UDP_TOOL_ELF="target/x86_64-unknown-none/${PROFILE}/udp-tool"
+STRATE_SSHD_ELF="target/x86_64-unknown-none/${PROFILE}/strate-sshd"
+WEB_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/web-admin"
+HELLO_WASM_FILE="workspace/assets/wasm/hello.wasm"
+WASM_TEST_TOML_FILE="workspace/assets/wasm/wasm-test.toml"
+SILO_TOML_FILE="workspace/assets/boot/silo.toml"
+
+echo ""
+echo "=== Creating Limine bootable image ==="
+echo "Profile: ${PROFILE}"
+echo ""
+
+# Check if Limine is setup
+if [ ! -f "$LIMINE_DIR/limine-bios.sys" ]; then
+    echo "ERROR: Limine not found. Run 'cargo make setup-limine' first"
+    exit 1
+fi
+
+# Check if kernel exists
+if [ ! -f "$KERNEL_ELF" ]; then
+    echo "ERROR: Kernel not found at $KERNEL_ELF"
+    echo "  Build the kernel first with 'cargo make kernel'"
+    exit 1
+fi
+
+kernel_size=$(stat -c%s "$KERNEL_ELF")
+echo "  Components:"
+echo "    Kernel ELF : $kernel_size bytes"
+if [ -f "$FS_EXT4_ELF" ]; then
+    ext4_size=$(stat -c%s "$FS_EXT4_ELF")
+    echo "    fs-ext4    : $ext4_size bytes"
+else
+    echo "    fs-ext4    : (missing)"
+fi
+if [ -f "$FS_RAM_ELF" ]; then
+    ram_size=$(stat -c%s "$FS_RAM_ELF")
+    echo "    strate-fs-ramfs : $ram_size bytes"
+else
+    echo "    strate-fs-ramfs : (missing)"
+fi
+if [ "$INCLUDE_TESTS" = "1" ]; then
+    if [ -f "$INIT_TEST_ELF" ]; then
+        init_size=$(stat -c%s "$INIT_TEST_ELF")
+        echo "    init-test   : $init_size bytes"
+    else
+        echo "    init-test   : (missing)"
+    fi
+    if [ -f "$SYSCALL_TEST_ELF" ]; then
+        syscall_test_size=$(stat -c%s "$SYSCALL_TEST_ELF")
+        echo "    syscall-test: $syscall_test_size bytes"
+    else
+        echo "    syscall-test: (missing)"
+    fi
+    if [ -f "$MEM_TEST_ELF" ]; then
+        mem_test_size=$(stat -c%s "$MEM_TEST_ELF")
+        echo "    mem-test    : $mem_test_size bytes"
+    else
+        echo "    mem-test    : (missing)"
+    fi
+    if [ -f "$MEM_STRESSED_ELF" ]; then
+        mem_stressed_size=$(stat -c%s "$MEM_STRESSED_ELF")
+        echo "    mem-stressed: $mem_stressed_size bytes"
+    else
+        echo "    mem-stressed: (missing)"
+    fi
+    if [ -f "$MEM_REGION_TEST_ELF" ]; then
+        mem_region_test_size=$(stat -c%s "$MEM_REGION_TEST_ELF")
+        echo "    mem-region  : $mem_region_test_size bytes"
+    else
+        echo "    mem-region  : (missing)"
+    fi
+    if [ -f "$EXEC_TEST_ELF" ]; then
+        exec_test_size=$(stat -c%s "$EXEC_TEST_ELF")
+        echo "    exec-test   : $exec_test_size bytes"
+    else
+        echo "    exec-test   : (missing)"
+    fi
+fi
+if [ -f "$INIT_ELF" ]; then
+    init_real_size=$(stat -c%s "$INIT_ELF")
+    echo "    init        : $init_real_size bytes"
+else
+    echo "    init        : (missing)"
+fi
+if [ -f "$CONSOLE_ADMIN_ELF" ]; then
+    ca_size=$(stat -c%s "$CONSOLE_ADMIN_ELF")
+    echo "    console-admin: $ca_size bytes"
+else
+    echo "    console-admin: (missing)"
+fi
+if [ -f "$NET_ELF" ]; then
+    net_size=$(stat -c%s "$NET_ELF")
+    echo "    strate-net   : $net_size bytes"
+else
+    echo "    strate-net   : (missing)"
+fi
+if [ -f "$BUS_ELF" ]; then
+    bus_size=$(stat -c%s "$BUS_ELF")
+    echo "    strate-bus   : $bus_size bytes"
+else
+    echo "    strate-bus   : (missing)"
+fi
+if [ -f "$STRATE_WASM_ELF" ]; then
+    wasm_size=$(stat -c%s "$STRATE_WASM_ELF")
+    echo "    strate-wasm  : $wasm_size bytes"
+else
+    echo "    strate-wasm  : (missing)"
+fi
+if [ -f "$STRATE_WEBRTC_ELF" ]; then
+    webrtc_size=$(stat -c%s "$STRATE_WEBRTC_ELF")
+    echo "    strate-webrtc: $webrtc_size bytes"
+else
+    echo "    strate-webrtc: (missing)"
+fi
+if [ -f "$DHCP_CLIENT_ELF" ]; then
+    dhcp_client_size=$(stat -c%s "$DHCP_CLIENT_ELF")
+    echo "    dhcp-client  : $dhcp_client_size bytes"
+else
+    echo "    dhcp-client  : (missing)"
+fi
+if [ -f "$PING_ELF" ]; then
+    ping_size=$(stat -c%s "$PING_ELF")
+    echo "    ping         : $ping_size bytes"
+else
+    echo "    ping         : (missing)"
+fi
+if [ -f "$TELNETD_ELF" ]; then
+    telnetd_size=$(stat -c%s "$TELNETD_ELF")
+    echo "    telnetd      : $telnetd_size bytes"
+else
+    echo "    telnetd      : (missing)"
+fi
+if [ -f "$UDP_TOOL_ELF" ]; then
+    udp_tool_size=$(stat -c%s "$UDP_TOOL_ELF")
+    echo "    udp-tool     : $udp_tool_size bytes"
+else
+    echo "    udp-tool     : (missing)"
+fi
+if [ -f "$STRATE_SSHD_ELF" ]; then
+    sshd_size=$(stat -c%s "$STRATE_SSHD_ELF")
+    echo "    strate-sshd  : $sshd_size bytes"
+else
+    echo "    strate-sshd  : (missing)"
+fi
+if [ -f "$WEB_ADMIN_ELF" ]; then
+    wa_size=$(stat -c%s "$WEB_ADMIN_ELF")
+    echo "    web-admin    : $wa_size bytes"
+else
+    echo "    web-admin    : (missing)"
+fi
+echo ""
+
+# Create ISO root structure
+rm -rf "$ISO_ROOT"
+mkdir -p "$ISO_ROOT/boot/limine"
+mkdir -p "$ISO_ROOT/initfs"
+mkdir -p "$ISO_ROOT/initfs/bin"
+
+# Copy kernel
+cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel.elf"
+echo "  [OK] Copied kernel"
+
+# Copy Limine files
+# Re-ensure destination exists in case an external step altered build/ tree.
+mkdir -p "$ISO_ROOT/boot/limine"
+cp "$LIMINE_DIR/limine-bios.sys" "$ISO_ROOT/boot/limine/"
+cp "$LIMINE_DIR/limine-bios-cd.bin" "$ISO_ROOT/boot/limine/"
+cp "$LIMINE_DIR/limine-uefi-cd.bin" "$ISO_ROOT/boot/limine/"
+echo "  [OK] Copied Limine bootloader"
+
+# Copy config (v8.x uses limine.conf)
+cp "limine.conf" "$ISO_ROOT/boot/limine/"
+echo "  [OK] Copied configuration"
+
+# Copy userspace modules (initfs)
+if [ -f "$FS_EXT4_ELF" ]; then
+    cp "$FS_EXT4_ELF" "$ISO_ROOT/initfs/fs-ext4"
+    cp "$FS_EXT4_ELF" "$ISO_ROOT/initfs/fs-ext4-strate"
+    echo "  [OK] Copied fs-ext4 (aliases: fs-ext4 + fs-ext4-strate)"
+else
+    echo "  [WARN] fs-ext4 strate not found at $FS_EXT4_ELF"
+fi
+
+if [ -f "$FS_RAM_ELF" ]; then
+    cp "$FS_RAM_ELF" "$ISO_ROOT/initfs/strate-fs-ramfs"
+    echo "  [OK] Copied strate-fs-ramfs"
+else
+    echo "  [WARN] strate-fs-ramfs not found at $FS_RAM_ELF"
+fi
+
+if [ -f "$MEM_REGION_TEST_ELF" ]; then
+    cp "$MEM_REGION_TEST_ELF" "$ISO_ROOT/initfs/test_mem_region"
+    echo "  [OK] Copied mem-region binary: /initfs/test_mem_region"
+else
+    echo "  [WARN] mem-region binary not found at $MEM_REGION_TEST_ELF"
+fi
+
+if [ -f "$MEM_REGION_PROC_TEST_ELF" ]; then
+    cp "$MEM_REGION_PROC_TEST_ELF" "$ISO_ROOT/initfs/test_mem_region_proc"
+    echo "  [OK] Copied mem-region-proc binary: /initfs/test_mem_region_proc"
+else
+    echo "  [WARN] mem-region-proc binary not found at $MEM_REGION_PROC_TEST_ELF"
+fi
+
+if [ -f "$EXEC_TEST_ELF" ]; then
+    cp "$EXEC_TEST_ELF" "$ISO_ROOT/initfs/test_exec"
+    echo "  [OK] Copied exec-test binary: /initfs/test_exec"
+else
+    echo "  [WARN] exec-test binary not found at $EXEC_TEST_ELF"
+fi
+
+if [ -f "$EXEC_TEST_HELPER_ELF" ]; then
+    cp "$EXEC_TEST_HELPER_ELF" "$ISO_ROOT/initfs/test_exec_helper"
+    echo "  [OK] Copied exec-test helper binary: /initfs/test_exec_helper"
+else
+    echo "  [WARN] exec-test helper binary not found at $EXEC_TEST_HELPER_ELF"
+fi
+
+# Core syscall/mem test ELFs: copy whenever built (limine-image already depends on
+# strate-silo-test / strate-mem-test). The kernel always requests these via Limine
+# internal modules — if they are missing from the ISO, /initfs/* open() fails with
+# BadHandle. STRAT9_INCLUDE_TESTS=1 only tightens diagnostics for strict test ISOs.
+if [ -f "$INIT_TEST_ELF" ]; then
+    cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
+    echo "  [OK] Copied init-test binary: /initfs/test_pid"
+else
+    echo "  [WARN] test_pid binary not found at $INIT_TEST_ELF"
+    if [ "$INCLUDE_TESTS" = "1" ]; then
+        echo "  ERROR: init-test binary required when STRAT9_INCLUDE_TESTS=1"
+        echo "  Build it first (e.g. cargo make strate-silo-test)"
+        exit 1
+    fi
+fi
+
+if [ -f "$SYSCALL_TEST_ELF" ]; then
+    cp "$SYSCALL_TEST_ELF" "$ISO_ROOT/initfs/test_syscalls"
+    echo "  [OK] Copied syscall-test binary: /initfs/test_syscalls"
+else
+    echo "  [WARN] syscall-test binary not found at $SYSCALL_TEST_ELF"
+fi
+
+if [ -f "$MEM_TEST_ELF" ]; then
+    cp "$MEM_TEST_ELF" "$ISO_ROOT/initfs/test_mem"
+    echo "  [OK] Copied mem-test binary: /initfs/test_mem"
+else
+    echo "  [WARN] mem-test binary not found at $MEM_TEST_ELF"
+fi
+
+if [ -f "$MEM_STRESSED_ELF" ]; then
+    cp "$MEM_STRESSED_ELF" "$ISO_ROOT/initfs/test_mem_stressed"
+    echo "  [OK] Copied mem-stressed binary: /initfs/test_mem_stressed"
+else
+    echo "  [WARN] mem-stressed binary not found at $MEM_STRESSED_ELF"
+fi
+
+if [ -f "$INIT_ELF" ]; then
+    cp "$INIT_ELF" "$ISO_ROOT/initfs/init"
+    echo "  [OK] Copied init binary: /initfs/init"
+else
+    echo "  [WARN] init binary not found at $INIT_ELF"
+fi
+
+if [ -f "$CONSOLE_ADMIN_ELF" ]; then
+    cp "$CONSOLE_ADMIN_ELF" "$ISO_ROOT/initfs/console-admin"
+    echo "  [OK] Copied console-admin binary: /initfs/console-admin"
+else
+    echo "  [WARN] console-admin binary not found at $CONSOLE_ADMIN_ELF"
+fi
+
+if [ -f "$NET_ELF" ]; then
+    cp "$NET_ELF" "$ISO_ROOT/initfs/strate-net"
+    echo "  [OK] Copied strate-net: /initfs/strate-net"
+else
+    echo "  [WARN] strate-net binary not found at $NET_ELF"
+fi
+
+if [ -f "$BUS_ELF" ]; then
+    cp "$BUS_ELF" "$ISO_ROOT/initfs/strate-bus"
+    echo "  [OK] Copied strate-bus: /initfs/strate-bus"
+else
+    echo "  [WARN] strate-bus binary not found at $BUS_ELF"
+fi
+
+if [ -f "$STRATE_WASM_ELF" ]; then
+    cp "$STRATE_WASM_ELF" "$ISO_ROOT/initfs/strate-wasm"
+    echo "  [OK] Copied strate-wasm: /initfs/strate-wasm"
+else
+    echo "  [WARN] strate-wasm binary not found at $STRATE_WASM_ELF"
+fi
+
+if [ -f "$STRATE_WEBRTC_ELF" ]; then
+    cp "$STRATE_WEBRTC_ELF" "$ISO_ROOT/initfs/strate-webrtc"
+    echo "  [OK] Copied strate-webrtc: /initfs/strate-webrtc"
+else
+    echo "  [WARN] strate-webrtc binary not found at $STRATE_WEBRTC_ELF"
+fi
+
+if [ -f "$DHCP_CLIENT_ELF" ]; then
+    cp "$DHCP_CLIENT_ELF" "$ISO_ROOT/initfs/bin/dhcp-client"
+    echo "  [OK] Copied dhcp-client: /initfs/bin/dhcp-client"
+else
+    echo "  [WARN] dhcp-client binary not found at $DHCP_CLIENT_ELF"
+fi
+
+if [ -f "$PING_ELF" ]; then
+    cp "$PING_ELF" "$ISO_ROOT/initfs/bin/ping"
+    echo "  [OK] Copied ping: /initfs/bin/ping"
+else
+    echo "  [WARN] ping binary not found at $PING_ELF"
+fi
+
+if [ -f "$TELNETD_ELF" ]; then
+    cp "$TELNETD_ELF" "$ISO_ROOT/initfs/bin/telnetd"
+    echo "  [OK] Copied telnetd: /initfs/bin/telnetd"
+else
+    echo "  [WARN] telnetd binary not found at $TELNETD_ELF"
+fi
+
+if [ -f "$UDP_TOOL_ELF" ]; then
+    cp "$UDP_TOOL_ELF" "$ISO_ROOT/initfs/bin/udp-tool"
+    echo "  [OK] Copied udp-tool: /initfs/bin/udp-tool"
+else
+    echo "  [WARN] udp-tool binary not found at $UDP_TOOL_ELF"
+fi
+
+if [ -f "$STRATE_SSHD_ELF" ]; then
+    cp "$STRATE_SSHD_ELF" "$ISO_ROOT/initfs/bin/sshd"
+    echo "  [OK] Copied strate-sshd: /initfs/bin/sshd"
+else
+    echo "  [WARN] strate-sshd binary not found at $STRATE_SSHD_ELF"
+fi
+
+if [ -f "$WEB_ADMIN_ELF" ]; then
+    cp "$WEB_ADMIN_ELF" "$ISO_ROOT/initfs/bin/web-admin"
+    echo "  [OK] Copied web-admin: /initfs/bin/web-admin"
+else
+    echo "  [WARN] web-admin binary not found at $WEB_ADMIN_ELF"
+fi
+
+if [ -f "$HELLO_WASM_FILE" ]; then
+    cp "$HELLO_WASM_FILE" "$ISO_ROOT/initfs/bin/hello.wasm"
+    echo "  [OK] Copied hello.wasm: /initfs/bin/hello.wasm"
+else
+    echo "  [WARN] hello.wasm not found at $HELLO_WASM_FILE"
+fi
+
+if [ -f "$WASM_TEST_TOML_FILE" ]; then
+    cp "$WASM_TEST_TOML_FILE" "$ISO_ROOT/initfs/wasm-test.toml"
+    echo "  [OK] Copied wasm-test config: /initfs/wasm-test.toml"
+else
+    echo "  [WARN] wasm-test config not found at $WASM_TEST_TOML_FILE"
+fi
+
+if [ -f "$SILO_TOML_FILE" ]; then
+    cp "$SILO_TOML_FILE" "$ISO_ROOT/initfs/silo.toml"
+    echo "  [OK] Copied boot config: /initfs/silo.toml"
+else
+    echo "  [WARN] boot config not found at $SILO_TOML_FILE"
+fi
+
+# Create ISO using xorriso
+if command -v xorriso >/dev/null 2>&1; then
+    echo "  Creating ISO with xorriso..."
+    
+    xorriso -as mkisofs \
+        -b boot/limine/limine-bios-cd.bin \
+        -no-emul-boot \
+        -boot-load-size 4 \
+        -boot-info-table \
+        --efi-boot boot/limine/limine-uefi-cd.bin \
+        -efi-boot-part \
+        --efi-boot-image \
+        --protective-msdos-label \
+        "$ISO_ROOT" \
+        -o "$ISO_FILE"
+    
+    # Check if the ISO was created successfully
+    if [ -f "$ISO_FILE" ]; then
+        iso_size=$(stat -c%s "$ISO_FILE")
+        iso_size_mb=$((iso_size / 1024 / 1024))
+        if [ $iso_size -gt 1048576 ]; then  # Check if ISO has reasonable size (>1MB)
+            echo "  [OK] ISO created ($iso_size_mb MB)"
+            
+            # Install Limine to ISO (only run executable if it is native executable for this host)
+            if [ -f "$LIMINE_DIR/limine" ] || [ -f "$LIMINE_DIR/limine.exe" ]; then
+                # Prefer native 'limine' binary when present
+                if [ -f "$LIMINE_DIR/limine" ]; then
+                    limine_cmd="$LIMINE_DIR/limine"
+                    if "$limine_cmd" bios-install "$ISO_FILE"; then
+                        echo "  [OK] Limine installed to ISO"
+                    else
+                        echo "  [INFO] Limine install failed (limine returned non-zero), but ISO is bootable"
+                    fi
+                fi
+
+                # If only limine.exe is present, check its file type before trying to execute it
+                if [ -f "$LIMINE_DIR/limine.exe" ] && [ ! -f "$LIMINE_DIR/limine" ]; then
+                    file_out=$(file -b "$LIMINE_DIR/limine.exe" 2>/dev/null || true)
+                    # Only attempt to run it if 'ELF' (native Linux binary) is reported
+                    if echo "$file_out" | grep -qi 'ELF'; then
+                        if "$LIMINE_DIR/limine.exe" bios-install "$ISO_FILE"; then
+                            echo "  [OK] Limine installed to ISO (limine.exe executed)"
+                        else
+                            echo "  [INFO] Limine install failed (limine.exe), but ISO is bootable"
+                        fi
+                    else
+                        echo "  [INFO] Found limine.exe (not an ELF/native binary: $file_out) — skipping execution on this host. ISO is still bootable."
+                    fi
+                fi
+            fi
+            
+            # Also create a raw disk image for QEMU
+            image_size=$((64 * 1024 * 1024))  # 64 MB
+            dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=64 >/dev/null 2>&1
+            
+            echo "  [OK] Created raw disk image"
+        else
+            echo "  ERROR: xorriso created empty or tiny ISO"
+            exit 1
+        fi
+    else
+        echo "  ERROR: xorriso failed to create ISO"
+        exit 1
+    fi
+else
+    echo "  WARNING: xorriso not found, creating simple flat image"
+    
+    # Fallback: create a simple flat image
+    image_size=$((64 * 1024 * 1024))  # 64 MB
+    dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=64 >/dev/null 2>&1
+    
+    echo "  [OK] Created disk image"
+    echo ""
+    echo "  NOTE: For full UEFI/BIOS support, install xorriso"
+fi
+
+# Kernel size summary
+echo "============================================"
+echo "  Kernel Size Summary"
+echo "============================================"
+echo ""
+
+if [ -f "$KERNEL_ELF" ]; then
+    kernel_size=$(stat -c%s "$KERNEL_ELF")
+    kernel_size_kb=$((kernel_size / 1024))
+    echo "  Kernel ELF: $kernel_size bytes ($kernel_size_kb KB)"
+    
+    # Show section breakdown if size command is available
+    if command -v size >/dev/null 2>&1; then
+        echo ""
+        echo "  Section breakdown:"
+        size "$KERNEL_ELF" | tail -n 1 | awk '{printf "    .text: %s bytes\n    .data: %s bytes\n    .bss:  %s bytes\n", $2, $3, $4}'
+    fi
+fi
+
+echo ""
+echo "============================================"
+echo "  Bootable image created!"
+echo "============================================"
+echo ""
+echo "  ISO file  : $ISO_FILE"
+echo "  Disk image: $IMAGE_FILE"
+echo ""
+echo "--------------------------------------------"
+echo "  Launch with: cargo make run"
+echo "============================================"
+echo ""
