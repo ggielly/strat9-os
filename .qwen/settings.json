@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(vmware *)",
+      "Bash(git clone *)",
+      "Bash(git checkout *)",
+      "Bash(make)",
+      "Bash(sudo *)",
+      "Bash(tar *)",
+      "WebFetch(forum.osdev.org)"
+    ]
+  },
+  "$version": 3
+}

@@ -41,7 +41,8 @@ function CargoBuild([string]$Cwd, [string[]]$ExtraArgs = @()) {
     try {
         & cargo $Args 2>&1 | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed in $Cwd" }
-    } finally {
+    }
+    finally {
         Pop-Location
     }
 }
@@ -60,11 +61,13 @@ if (-not (Test-Path "$LimineDir\limine-bios.sys")) {
         --branch=v8.x-binary --depth=1 $LimineDir 2>&1 | Out-Null
     if (Test-Path "$LimineDir\limine-bios.sys") {
         Write-Host "  Limine cloned successfully" -ForegroundColor Green
-    } else {
+    }
+    else {
         Write-Host "  ERROR: Limine clone failed" -ForegroundColor Red
         exit 1
     }
-} else {
+}
+else {
     Write-Host "  Limine already present" -ForegroundColor Yellow
 }
 
@@ -78,26 +81,26 @@ CargoBuild (Join-Path $RootDir "workspace\kernel")
 # 3. Build userland components
 # =========================================================================
 $Components = @(
-    @{ Name = "strate-ext4";           Cwd = "workspace\components\strate-fs-ext4" }
-    @{ Name = "strate-fs-ramfs";       Cwd = "workspace\components\strate-fs-ramfs" }
-    @{ Name = "strate-init";           Cwd = "workspace\components\strate-init" }
-    @{ Name = "strate-console-admin";  Cwd = "workspace\components\strate-console-admin" }
-    @{ Name = "strate-net";            Cwd = "workspace\components\strate-net" }
-    @{ Name = "strate-bus";            Cwd = "workspace\components\strate-bus" }
-    @{ Name = "strate-wasm";           Cwd = "workspace\components\strate-wasm" }
-    @{ Name = "strate-webrtc";         Cwd = "workspace\components\strate-webrtc" }
-    @{ Name = "dhcp-client";           Cwd = "workspace\components\netutils\dhcp-client" }
-    @{ Name = "ping";                  Cwd = "workspace\components\netutils\ping" }
-    @{ Name = "telnetd";               Cwd = "workspace\components\netutils\telnetd" }
-    @{ Name = "udp-tool";              Cwd = "workspace\components\netutils\udp-tool" }
-    @{ Name = "strate-sshd";           Cwd = "workspace\components\strate-sshd" }
-    @{ Name = "strate-web-admin";      Cwd = "workspace\components\strate-web-admin" }
+    @{ Name = "strate-ext4"; Cwd = "workspace\components\strate-fs-ext4" }
+    @{ Name = "strate-fs-ramfs"; Cwd = "workspace\components\strate-fs-ramfs" }
+    @{ Name = "strate-init"; Cwd = "workspace\components\strate-init" }
+    @{ Name = "strate-console-admin"; Cwd = "workspace\components\strate-console-admin" }
+    @{ Name = "strate-net"; Cwd = "workspace\components\strate-net" }
+    @{ Name = "strate-bus"; Cwd = "workspace\components\strate-bus" }
+    @{ Name = "strate-wasm"; Cwd = "workspace\components\strate-wasm" }
+    @{ Name = "strate-webrtc"; Cwd = "workspace\components\strate-webrtc" }
+    @{ Name = "dhcp-client"; Cwd = "workspace\components\netutils\dhcp-client" }
+    @{ Name = "ping"; Cwd = "workspace\components\netutils\ping" }
+    @{ Name = "telnetd"; Cwd = "workspace\components\netutils\telnetd" }
+    @{ Name = "udp-tool"; Cwd = "workspace\components\netutils\udp-tool" }
+    @{ Name = "strate-sshd"; Cwd = "workspace\components\strate-sshd" }
+    @{ Name = "strate-web-admin"; Cwd = "workspace\components\strate-web-admin" }
 )
 
 if ($Tests) {
     $Components += @(
-        @{ Name = "strate-silo-test";   Cwd = "workspace\components\strate-silo-test" }
-        @{ Name = "strate-mem-test";    Cwd = "workspace\components\strate-mem-test" }
+        @{ Name = "strate-silo-test"; Cwd = "workspace\components\strate-silo-test" }
+        @{ Name = "strate-mem-test"; Cwd = "workspace\components\strate-mem-test" }
     )
 }
 
@@ -107,7 +110,8 @@ foreach ($Comp in $Components) {
     try {
         CargoBuild (Join-Path $RootDir $Comp.Cwd)
         Write-Host " OK" -ForegroundColor Green
-    } catch {
+    }
+    catch {
         Write-Host " FAILED (skipping)" -ForegroundColor Red
         $Skipped += $Comp.Name
     }
@@ -131,7 +135,8 @@ function Copy-Optional([string]$Src, [string]$Dst, [string]$Label) {
     if (Test-Path $Src) {
         Copy-Item $Src $Dst -Force
         Write-Host "  [OK] $Label" -ForegroundColor Green
-    } else {
+    }
+    else {
         Write-Host "  [SKIP] $Label (not found)" -ForegroundColor Yellow
     }
 }
@@ -158,28 +163,28 @@ Copy-Optional $ConfSrc $ConfDst "Limine config"
 
 # Module paths
 $Modules = @(
-    @{ Src = "target\$Target\$ProfileDir\fs-ext4-strate";            Dst = "initfs/fs-ext4" }
-    @{ Src = "target\$Target\$ProfileDir\fs-ext4-strate";            Dst = "initfs/fs-ext4-strate" }
-    @{ Src = "target\$Target\$ProfileDir\strate-fs-ramfs";           Dst = "initfs/strate-fs-ramfs" }
-    @{ Src = "target\$Target\$ProfileDir\strate-init";               Dst = "initfs/init" }
-    @{ Src = "target\$Target\$ProfileDir\console-admin";             Dst = "initfs/console-admin" }
-    @{ Src = "target\$Target\$ProfileDir\strate-net-silo";           Dst = "initfs/strate-net" }
-    @{ Src = "target\$Target\$ProfileDir\strate-bus";                Dst = "initfs/strate-bus" }
-    @{ Src = "target\$Target\$ProfileDir\strate-wasm";               Dst = "initfs/strate-wasm" }
-    @{ Src = "target\$Target\$ProfileDir\strate-webrtc";             Dst = "initfs/strate-webrtc" }
-    @{ Src = "target\$Target\$ProfileDir\dhcp-client";               Dst = "initfs/bin/dhcp-client" }
-    @{ Src = "target\$Target\$ProfileDir\ping";                      Dst = "initfs/bin/ping" }
-    @{ Src = "target\$Target\$ProfileDir\telnetd";                   Dst = "initfs/bin/telnetd" }
-    @{ Src = "target\$Target\$ProfileDir\udp-tool";                  Dst = "initfs/bin/udp-tool" }
-    @{ Src = "target\$Target\$ProfileDir\strate-sshd";               Dst = "initfs/bin/sshd" }
-    @{ Src = "target\$Target\$ProfileDir\web-admin";                 Dst = "initfs/bin/web-admin" }
+    @{ Src = "target\$Target\$ProfileDir\fs-ext4-strate"; Dst = "initfs/fs-ext4" }
+    @{ Src = "target\$Target\$ProfileDir\fs-ext4-strate"; Dst = "initfs/fs-ext4-strate" }
+    @{ Src = "target\$Target\$ProfileDir\strate-fs-ramfs"; Dst = "initfs/strate-fs-ramfs" }
+    @{ Src = "target\$Target\$ProfileDir\strate-init"; Dst = "initfs/init" }
+    @{ Src = "target\$Target\$ProfileDir\console-admin"; Dst = "initfs/console-admin" }
+    @{ Src = "target\$Target\$ProfileDir\strate-net-silo"; Dst = "initfs/strate-net" }
+    @{ Src = "target\$Target\$ProfileDir\strate-bus"; Dst = "initfs/strate-bus" }
+    @{ Src = "target\$Target\$ProfileDir\strate-wasm"; Dst = "initfs/strate-wasm" }
+    @{ Src = "target\$Target\$ProfileDir\strate-webrtc"; Dst = "initfs/strate-webrtc" }
+    @{ Src = "target\$Target\$ProfileDir\dhcp-client"; Dst = "initfs/bin/dhcp-client" }
+    @{ Src = "target\$Target\$ProfileDir\ping"; Dst = "initfs/bin/ping" }
+    @{ Src = "target\$Target\$ProfileDir\telnetd"; Dst = "initfs/bin/telnetd" }
+    @{ Src = "target\$Target\$ProfileDir\udp-tool"; Dst = "initfs/bin/udp-tool" }
+    @{ Src = "target\$Target\$ProfileDir\strate-sshd"; Dst = "initfs/bin/sshd" }
+    @{ Src = "target\$Target\$ProfileDir\web-admin"; Dst = "initfs/bin/web-admin" }
 )
 
 if ($Tests) {
     $Modules += @(
-        @{ Src = "target\$Target\$ProfileDir\test_pid";       Dst = "initfs/test_pid" }
-        @{ Src = "target\$Target\$ProfileDir\test_syscalls";  Dst = "initfs/test_syscalls" }
-        @{ Src = "target\$Target\$ProfileDir\test_mem";       Dst = "initfs/test_mem" }
+        @{ Src = "target\$Target\$ProfileDir\test_pid"; Dst = "initfs/test_pid" }
+        @{ Src = "target\$Target\$ProfileDir\test_syscalls"; Dst = "initfs/test_syscalls" }
+        @{ Src = "target\$Target\$ProfileDir\test_mem"; Dst = "initfs/test_mem" }
         @{ Src = "target\$Target\$ProfileDir\test_mem_stressed"; Dst = "initfs/test_mem_stressed" }
     )
 }
@@ -202,27 +207,32 @@ Step "4. Creating ISO"
 
 $IsoFile = Join-Path $BuildDir "strat9-os.iso"
 
-# Use WSL xorriso (reliable), fallback to bundled Windows binary
+# Try native Windows xorriso first, then WSL fallback
 $UseXorrisoWsl = $false
 $WslDistro = "Debian"
+$XorrisoNative = Get-Command xorriso -ErrorAction SilentlyContinue
+
+# Check tools/ directory for bundled Windows xorriso
 $XorrisoBundled = Join-Path $RootDir "tools\xorriso-win32.2026-02-25\xorriso.exe"
-
-# Prefer WSL - it handles path conversion correctly
-try {
-    $WslCheck = & wsl -d $WslDistro -- which xorriso 2>$null
-    if ($LASTEXITCODE -eq 0 -and $WslCheck -match "xorriso") {
-        $UseXorrisoWsl = $true
-        Write-Host "  xorriso found via WSL ($WslDistro)" -ForegroundColor Green
+$HasBundledXorriso = Test-Path $XorrisoBundled
+if ($HasBundledXorriso) {
+    Write-Host "  xorriso found (bundled Windows binary)" -ForegroundColor Green
+}
+elseif ($XorrisoNative) {
+    Write-Host "  xorriso found natively (PATH)" -ForegroundColor Green
+}
+else {
+    try {
+        $WslCheck = & wsl -d $WslDistro -- which xorriso 2>$null
+        if ($LASTEXITCODE -eq 0 -and $WslCheck -match "xorriso") {
+            $UseXorrisoWsl = $true
+            Write-Host "  xorriso found via WSL ($WslDistro)" -ForegroundColor Green
+        }
     }
-} catch {}
-
-# Fallback to bundled Windows binary (may have path issues with Cygwin builds)
-if (-not $UseXorrisoWsl -and (Test-Path $XorrisoBundled)) {
-    Write-Host "  xorriso found (bundled Windows binary)" -ForegroundColor Yellow
-    Write-Host "  Note: WSL xorriso is preferred for reliable path handling" -ForegroundColor Yellow
+    catch {}
 }
 
-if ($UseXorrisoWsl -or (Test-Path $XorrisoBundled)) {
+if ($HasBundledXorriso -or $XorrisoNative -or $UseXorrisoWsl) {
     Write-Host "  Creating ISO with xorriso..."
 
     $XorrisoArgs = @(
@@ -242,24 +252,41 @@ if ($UseXorrisoWsl -or (Test-Path $XorrisoBundled)) {
         $IsoFileWsl = $IsoFile.Replace('\', '/').Replace('C:', '/mnt/c')
         $XorrisoArgs += @($IsoRootWsl, "-o", $IsoFileWsl)
         & wsl -d $WslDistro -- xorriso @XorrisoArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
-    } else {
-        # Bundled Windows binary - use forward slashes
-        $IsoRootPosix = $IsoRoot.Replace('\', '/')
-        $IsoFilePosix = $IsoFile.Replace('\', '/')
-        $XorrisoArgs += @($IsoRootPosix, "-o", $IsoFilePosix)
-        & $XorrisoBundled @XorrisoArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
+    }
+    else {
+        $XorrisoCmd = if ($HasBundledXorriso) { $XorrisoBundled } else { "xorriso" }
+        Push-Location $BuildDir
+        try {
+            # The bundled Windows xorriso is MSYS-based and misparses absolute drive paths.
+            # Run from build/ and pass relative paths so the source tree is resolved correctly.
+            $XorrisoArgs += @("iso_root", "-o", "strat9-os.iso")
+            & $XorrisoCmd @XorrisoArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
+        }
+        finally {
+            Pop-Location
+        }
     }
 
     if ((Test-Path $IsoFile) -and ((Get-Item $IsoFile).Length -gt 1MB)) {
         $SizeMB = [math]::Round((Get-Item $IsoFile).Length / 1MB, 1)
         Write-Host "  [OK] ISO created ($SizeMB MB)" -ForegroundColor Green
-    } else {
+    }
+    else {
         Write-Host "  [ERROR] ISO is empty or too small" -ForegroundColor Red
         exit 1
     }
-} else {
-    Write-Host "  ERROR: No xorriso found." -ForegroundColor Red
-    Write-Host "  Place xorriso.exe in tools\xorriso-win32*/" -ForegroundColor Yellow
+}
+else {
+    # Fallback: try to download pre-built mkisofs or use PowerShell ISO creation
+    # For Limine, we need proper El Torito boot records
+    Write-Host "  Neither xorriso nor oscdimg found." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Install one of:" -ForegroundColor Yellow
+    Write-Host "    - xorriso:  wsl sudo apt install xorriso" -ForegroundColor Yellow
+    Write-Host "    - Windows ADK: https://learn.microsoft.com/en-us/windows-hardware/get-started/adk-install" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Quick fix - install xorriso via WSL:" -ForegroundColor Cyan
+    Write-Host "    wsl sudo apt install -y xorriso" -ForegroundColor Cyan
     exit 1
 }
 
@@ -276,13 +303,16 @@ if (Test-Path $LimineExe) {
     if ($FileType -match "ELF") {
         Write-Host "  limine.exe is an ELF binary, running via WSL..."
         & wsl -d $WslDistro -- $LimineExe bios-install $IsoFile 2>&1 | ForEach-Object { Write-Host "    $_" }
-    } elseif ($FileType -match "PE.*Windows") {
+    }
+    elseif ($FileType -match "PE.*Windows") {
         Write-Host "  limine.exe is a Windows PE, executing directly..."
         & $LimineExe bios-install $IsoFile 2>&1 | ForEach-Object { Write-Host "    $_" }
     }
-} elseif (Test-Path $LimineLinux) {
+}
+elseif (Test-Path $LimineLinux) {
     & wsl -d $WslDistro -- $LimineLinux bios-install $IsoFile 2>&1 | ForEach-Object { Write-Host "    $_" }
-} else {
+}
+else {
     Write-Host "  [WARN] limine host utility not found, ISO still bootable" -ForegroundColor Yellow
 }
 
