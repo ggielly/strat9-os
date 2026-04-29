@@ -727,15 +727,17 @@ fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
         let rsp = &dummy as *const u64 as u64;
         crate::serial_println!("[PCI] Scanning PCI bus, rsp={:#x}", rsp);
         let devices: Vec<PciDevice> = PciScanner::new().collect();
-        crate::serial_println!(
-            "[PCI] PCI scan complete, found {} devices",
-            devices.len()
-        );
+        crate::serial_println!("[PCI] PCI scan complete, found {} devices", devices.len());
         for dev in &devices {
             crate::serial_println!(
                 "[PCI]   {:02x}:{:02x}.{:x} vendor={:04x} device={:04x} class={:02x}:{:02x}",
-                dev.address.bus, dev.address.device, dev.address.function,
-                dev.vendor_id, dev.device_id, dev.class_code, dev.subclass
+                dev.address.bus,
+                dev.address.device,
+                dev.address.function,
+                dev.vendor_id,
+                dev.device_id,
+                dev.class_code,
+                dev.subclass
             );
         }
         *cache = Some(devices);

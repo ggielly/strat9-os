@@ -556,8 +556,7 @@ pub(crate) static BLOCKED_TASKS: SpinLock<BTreeMap<TaskId, Arc<Task>>> =
 ///
 /// Lock order: SCHED_IDENTITY before LOCAL (never the reverse).
 /// SCHED_IDENTITY and BLOCKED_TASKS are independent — never hold both.
-pub(crate) static SCHED_IDENTITY: SpinRwLock<SchedIdentity> =
-    SpinRwLock::new(SchedIdentity::new());
+pub(crate) static SCHED_IDENTITY: SpinRwLock<SchedIdentity> = SpinRwLock::new(SchedIdentity::new());
 
 /// Identity maps for the scheduler: PID/TID routing, process groups,
 /// session membership, and parent/child relationships.

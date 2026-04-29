@@ -104,8 +104,13 @@ pub fn init() {
     let mut found_intel_nic = false;
     let mut warned_modern_intel = false;
     for pci_dev in candidates.into_iter() {
-        serial_println!("[E1000] Checking device {:04x}:{:04x} class={:02x} subclass={:02x}",
-            pci_dev.vendor_id, pci_dev.device_id, pci_dev.class_code, pci_dev.subclass);
+        serial_println!(
+            "[E1000] Checking device {:04x}:{:04x} class={:02x} subclass={:02x}",
+            pci_dev.vendor_id,
+            pci_dev.device_id,
+            pci_dev.class_code,
+            pci_dev.subclass
+        );
         // Accept standard Ethernet class and vendor-specific network subclass.
         if pci_dev.subclass != pci::net_subclass::ETHERNET
             && pci_dev.subclass != pci::net_subclass::OTHER
@@ -207,8 +212,15 @@ pub fn init() {
 
         if let Some(nic) = init_ok {
             let mac = nic.mac_address();
-            serial_println!("[E1000] Device initialized: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            serial_println!(
+                "[E1000] Device initialized: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0],
+                mac[1],
+                mac[2],
+                mac[3],
+                mac[4],
+                mac[5]
+            );
             let dev = Arc::new(KernelE1000 {
                 mac,
                 inner: SpinLock::new(nic),

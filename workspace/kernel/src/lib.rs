@@ -190,7 +190,6 @@ fn count_free_like_regions(map: &[boot::entry::MemoryRegion], len: usize) -> usi
         .count()
 }
 
-
 /// Performs the region kind for addr operation.
 #[cfg(feature = "selftest")]
 fn region_kind_for_addr(
@@ -1088,10 +1087,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                             if dev.link_up() { "up" } else { "down" },
                         );
                         vga_println!("[OK] Network {} ({}) loaded", name, dev.name());
-        }
-    }
-}
-
+                    }
+                }
+            }
         }
 
         serial_println!("[init] Storage verification skipped (boot path)");

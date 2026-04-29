@@ -933,6 +933,9 @@ pub fn dump_diagnostics() {
     if let Some(guard) = crate::memory::buddy::get_allocator().try_lock() {
         if let Some(alloc) = guard.as_ref() {
             let (total_pages, allocated_pages) = alloc.page_totals();
+            let mut zones =
+                [crate::memory::buddy::ZoneStats::empty(); crate::memory::zone::ZoneType::COUNT];
+            let zone_count = alloc.zone_snapshot(&mut zones);
             crate::serial_println!(
                 "[heap][diag] buddy: total={} pages, allocated={} pages, free={} pages",
                 total_pages,
@@ -940,24 +943,62 @@ pub fn dump_diagnostics() {
                 total_pages.saturating_sub(allocated_pages)
             );
 
-            // Per-zone free list heads
-            for zi in 0..crate::memory::zone::ZoneType::COUNT {
+            for info in zones.iter().take(zone_count) {
+                crate::serial_println!(
+                    "[heap][diag] zone={:?} state={:?} managed={} present={} reserved={} free={} cached={} cu/cm={}/{} avail={} segments={}/{} pageblocks=u{}/m{} u_free={} m_free={} watermarks={}/{}/{} reserve={} largest_order={:?}",
+                    info.zone_type,
+                    info.pressure(),
+                    info.managed_pages,
+                    info.present_pages,
+                    info.reserved_pages,
+                    info.free_pages,
+                    info.cached_pages,
+                    info.cached_unmovable_pages,
+                    info.cached_movable_pages,
+                    info.available_after_reserve_pages(),
+                    info.segment_count,
+                    info.segment_capacity,
+                    info.unmovable_pageblocks,
+                    info.movable_pageblocks,
+                    info.unmovable_free_pages,
+                    info.movable_free_pages,
+                    info.watermark_min,
+                    info.watermark_low,
+                    info.watermark_high,
+                    info.lowmem_reserve_pages,
+                    info.largest_free_order
+                );
+            }
+
+            // Per-zone free list heads by migratetype.
+            for zi in 0..zone_count {
                 let zone = alloc.get_zone(zi);
-                let zone_name = match zi {
-                    x if x == crate::memory::zone::ZoneType::DMA as usize => "DMA",
-                    x if x == crate::memory::zone::ZoneType::Normal as usize => "Normal",
-                    _ => "HighMem",
-                };
+                let info = zones[zi];
                 let mut line = alloc::string::String::from("[heap][diag] ");
                 use core::fmt::Write;
-                let _ = write!(line, "zone={} free_heads:", zone_name);
+                let _ = write!(line, "zone={:?} free_heads:", zone.zone_type);
                 for order in 0..=crate::memory::zone::MAX_ORDER {
-                    let count = zone.free_list_count(order as u8);
-                    if count > 0 {
-                        let _ = write!(line, " o{}={} ", order, count);
+                    let unmovable = zone.free_list_count_for(
+                        order as u8,
+                        crate::memory::zone::Migratetype::Unmovable,
+                    );
+                    let movable = zone.free_list_count_for(
+                        order as u8,
+                        crate::memory::zone::Migratetype::Movable,
+                    );
+                    if unmovable > 0 || movable > 0 {
+                        let _ = write!(line, " o{}=u{}/m{} ", order, unmovable, movable);
                     }
                 }
                 crate::serial_println!("{}", line);
+
+                let mut frag = alloc::string::String::from("[heap][diag] ");
+                let _ = write!(frag, "zone={:?} frag:", zone.zone_type);
+                for order in 1..=crate::memory::zone::MAX_ORDER {
+                    let score = zone.fragmentation_score(order as u8, info.cached_pages);
+                    let _ = write!(frag, " o{}={}%", order, score);
+                }
+                crate::serial_println!("{}", frag);
             }
         }
     } else {

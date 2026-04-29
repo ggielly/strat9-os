@@ -295,9 +295,21 @@ fn test_fs(ctx: &mut Ctx) {
     const FILE_SYMLINK: &str = "/tmp/iso_syscalls_suite/data_symlink.txt";
 
     let _ = unsafe { syscall2(SYS_UNLINK, FILE.as_ptr() as usize, FILE.len()) };
-    let _ = unsafe { syscall2(SYS_UNLINK, FILE_RENAMED.as_ptr() as usize, FILE_RENAMED.len()) };
+    let _ = unsafe {
+        syscall2(
+            SYS_UNLINK,
+            FILE_RENAMED.as_ptr() as usize,
+            FILE_RENAMED.len(),
+        )
+    };
     let _ = unsafe { syscall2(SYS_UNLINK, FILE_LINK.as_ptr() as usize, FILE_LINK.len()) };
-    let _ = unsafe { syscall2(SYS_UNLINK, FILE_SYMLINK.as_ptr() as usize, FILE_SYMLINK.len()) };
+    let _ = unsafe {
+        syscall2(
+            SYS_UNLINK,
+            FILE_SYMLINK.as_ptr() as usize,
+            FILE_SYMLINK.len(),
+        )
+    };
     let _ = unsafe { syscall2(SYS_RMDIR, DIR.as_ptr() as usize, DIR.len()) };
 
     let _ = check_ok(ctx, "SYS_MKDIR /tmp/iso_syscalls_suite", unsafe {
@@ -433,7 +445,11 @@ fn test_fs(ctx: &mut Ctx) {
         syscall2(SYS_UNLINK, FILE_LINK.as_ptr() as usize, FILE_LINK.len())
     });
     let _ = check_ok(ctx, "SYS_UNLINK symlink", unsafe {
-        syscall2(SYS_UNLINK, FILE_SYMLINK.as_ptr() as usize, FILE_SYMLINK.len())
+        syscall2(
+            SYS_UNLINK,
+            FILE_SYMLINK.as_ptr() as usize,
+            FILE_SYMLINK.len(),
+        )
     });
     let _ = check_ok(ctx, "SYS_UNLINK renamed file", unsafe {
         syscall2(

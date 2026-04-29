@@ -272,6 +272,78 @@ pub fn translate(addr: VirtAddr) -> Option<PhysAddr> {
     mapper.translate_addr(addr)
 }
 
+fn translate_via_active_page_tables(addr: VirtAddr) -> Option<PhysAddr> {
+    let hhdm = crate::memory::hhdm_offset();
+    let (level_4_frame, _) = Cr3::read();
+
+    unsafe {
+        let l4_ptr = (level_4_frame.start_address().as_u64() + hhdm) as *const u64;
+        let l4e = *l4_ptr.add(((addr.as_u64() >> 39) & 0x1FF) as usize);
+        if l4e & 1 == 0 {
+            return None;
+        }
+
+        let l3_ptr = ((l4e & 0x000F_FFFF_FFFF_F000) + hhdm) as *const u64;
+        let l3e = *l3_ptr.add(((addr.as_u64() >> 30) & 0x1FF) as usize);
+        if l3e & 1 == 0 {
+            return None;
+        }
+        if l3e & 0x80 != 0 {
+            return Some(PhysAddr::new(
+                (l3e & 0x000F_FFFF_C000_0000) + (addr.as_u64() & 0x3FFF_FFFF),
+            ));
+        }
+
+        let l2_ptr = ((l3e & 0x000F_FFFF_FFFF_F000) + hhdm) as *const u64;
+        let l2e = *l2_ptr.add(((addr.as_u64() >> 21) & 0x1FF) as usize);
+        if l2e & 1 == 0 {
+            return None;
+        }
+        if l2e & 0x80 != 0 {
+            return Some(PhysAddr::new(
+                (l2e & 0x000F_FFFF_FFE0_0000) + (addr.as_u64() & 0x1F_FFFF),
+            ));
+        }
+
+        let l1_ptr = ((l2e & 0x000F_FFFF_FFFF_F000) + hhdm) as *const u64;
+        let l1e = *l1_ptr.add(((addr.as_u64() >> 12) & 0x1FF) as usize);
+        if l1e & 1 == 0 {
+            return None;
+        }
+
+        Some(PhysAddr::new(
+            (l1e & 0x000F_FFFF_FFFF_F000) + (addr.as_u64() & 0xFFF),
+        ))
+    }
+}
+
+/// Returns whether the current page tables map the HHDM view of the whole range.
+///
+/// This helper is safe before `paging::init()` and is intended for early boot
+/// allocators that must only touch memory already reachable through the current
+/// firmware-provided direct map.
+pub fn is_hhdm_range_mapped_now(phys_base: u64, size: u64) -> bool {
+    if size == 0 {
+        return true;
+    }
+
+    let start = phys_base & !0xFFF;
+    let end = phys_base.saturating_add(size).saturating_add(0xFFF) & !0xFFF;
+
+    let mut phys = start;
+    while phys < end {
+        let virt = VirtAddr::new(crate::memory::phys_to_virt(phys));
+        let Some(mapped) = translate_via_active_page_tables(virt) else {
+            return false;
+        };
+        if mapped.as_u64() != phys {
+            return false;
+        }
+        phys = phys.saturating_add(4096);
+    }
+    true
+}
+
 /// Read the current CR3 value (physical address of the active level-4 page table).
 pub fn active_page_table() -> PhysAddr {
     let (frame, _) = Cr3::read();

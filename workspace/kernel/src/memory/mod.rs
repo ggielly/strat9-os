@@ -72,7 +72,9 @@ pub use block::{
     BlockHandle, BuddyReserved, Exclusive, MappedExclusive, MappedShared, PhysBlock, Released,
 };
 pub use block_meta::{get_block_meta, resolve_handle};
-pub use buddy::{buddy_alloc_fail_counts_snapshot, get_allocator, poison_quarantine_pages_snapshot};
+pub use buddy::{
+    buddy_alloc_fail_counts_snapshot, get_allocator, poison_quarantine_pages_snapshot,
+};
 pub use frame::{
     block_phys_has_poison_guard, frame_meta_debug_snapshot, get_meta, get_meta_slot,
     invoke_vtable_on_last_ref, invoke_vtable_on_unmap, meta_generation_matches, meta_guard,
@@ -364,7 +366,28 @@ pub fn free_kernel_stack_frames(token: &IrqDisabledToken, frame: PhysFrame, orde
 /// For user-space frames use `FrameAllocOptions::new().purpose(FramePurpose::UserData)`.
 #[inline]
 pub fn allocate_frame(token: &IrqDisabledToken) -> Result<PhysFrame, AllocError> {
-    FrameAllocOptions::new().allocate(token)
+    allocate_frame_for_purpose(token, FramePurpose::KernelData)
+}
+
+/// Allocate a single zeroed 4 KiB frame for an explicit purpose.
+///
+/// This wrapper keeps the default zeroing policy while allowing callers to
+/// select the ownership class that drives buddy migratetype selection.
+#[inline]
+pub fn allocate_frame_for_purpose(
+    token: &IrqDisabledToken,
+    purpose: FramePurpose,
+) -> Result<PhysFrame, AllocError> {
+    FrameAllocOptions::new().purpose(purpose).allocate(token)
+}
+
+/// Allocate a single zeroed 4 KiB frame intended for user-space memory.
+///
+/// The frame is tagged movable, which biases the buddy allocator toward the
+/// zone order intended to preserve scarce low memory for pinned kernel pages.
+#[inline]
+pub fn allocate_user_frame(token: &IrqDisabledToken) -> Result<PhysFrame, AllocError> {
+    allocate_frame_for_purpose(token, FramePurpose::UserData)
 }
 
 /// Free a single physical frame.

@@ -32,6 +32,7 @@ impl BootRegion {
 pub struct BootAllocator {
     regions: [BootRegion; MAX_BOOT_ALLOC_REGIONS],
     len: usize,
+    accessible_limit: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -39,6 +40,7 @@ pub struct BootAllocStats {
     pub region_count: usize,
     pub total_free_bytes: u64,
     pub largest_region_bytes: u64,
+    pub accessible_limit: u64,
 }
 
 impl BootAllocator {
@@ -46,6 +48,7 @@ impl BootAllocator {
         Self {
             regions: [BootRegion::empty(); MAX_BOOT_ALLOC_REGIONS],
             len: 0,
+            accessible_limit: 0,
         }
     }
 
@@ -79,6 +82,7 @@ impl BootAllocator {
         }
 
         self.normalize_regions();
+        self.rebuild_accessible_limit();
     }
 
     pub fn alloc(&mut self, size: usize, align: usize) -> PhysAddr {
@@ -126,6 +130,51 @@ impl BootAllocator {
         None
     }
 
+    pub fn try_alloc_accessible(&mut self, size: usize, align: usize) -> Option<PhysAddr> {
+        if size == 0 {
+            return Some(PhysAddr::new(0));
+        }
+
+        let align = normalize_align(align) as u64;
+        let size = align_up(size as u64, PAGE_SIZE);
+
+        for idx in 0..self.len {
+            let region = self.regions[idx];
+            if region.is_empty() {
+                continue;
+            }
+
+            let alloc_start = align_up(region.start, align);
+            let alloc_end = alloc_start.checked_add(size)?;
+            if alloc_end > region.end {
+                continue;
+            }
+
+            if self.accessible_limit != 0 && alloc_end > self.accessible_limit {
+                continue;
+            }
+
+            if !crate::memory::paging::is_hhdm_range_mapped_now(alloc_start, size) {
+                continue;
+            }
+
+            self.consume_region(idx, alloc_start, alloc_end);
+            return Some(PhysAddr::new(alloc_start));
+        }
+
+        let stats = self.stats();
+        serial_println!(
+            "[boot_alloc] try_alloc_accessible failed: requested={} aligned={} largest_region={} regions={} total_free={} accessible_limit={:#x}",
+            size as usize,
+            align as usize,
+            stats.largest_region_bytes as usize,
+            stats.region_count,
+            stats.total_free_bytes as usize
+            ,stats.accessible_limit
+        );
+        None
+    }
+
     pub fn snapshot_free_regions(&self, out: &mut [MemoryRegion]) -> usize {
         let count = core::cmp::min(self.len, out.len());
         for (dst, region) in out.iter_mut().zip(self.regions.iter()).take(count) {
@@ -141,6 +190,7 @@ impl BootAllocator {
     fn reset(&mut self) {
         self.regions = [BootRegion::empty(); MAX_BOOT_ALLOC_REGIONS];
         self.len = 0;
+        self.accessible_limit = 0;
     }
 
     fn push_region(&mut self, region: BootRegion) {
@@ -200,16 +250,19 @@ impl BootAllocator {
 
         if alloc_start <= region.start && alloc_end >= region.end {
             self.remove_region(idx);
+            self.rebuild_accessible_limit();
             return;
         }
 
         if alloc_start <= region.start {
             self.regions[idx].start = alloc_end;
+            self.rebuild_accessible_limit();
             return;
         }
 
         if alloc_end >= region.end {
             self.regions[idx].end = alloc_start;
+            self.rebuild_accessible_limit();
             return;
         }
 
@@ -223,6 +276,7 @@ impl BootAllocator {
         }
 
         self.normalize_regions();
+        self.rebuild_accessible_limit();
     }
 
     fn insert_region(&mut self, idx: usize, region: BootRegion) {
@@ -252,6 +306,7 @@ impl BootAllocator {
 
     fn normalize_regions(&mut self) {
         if self.len <= 1 {
+            self.rebuild_accessible_limit();
             return;
         }
 
@@ -289,6 +344,42 @@ impl BootAllocator {
             self.regions[slot] = BootRegion::empty();
         }
         self.len = write;
+        self.rebuild_accessible_limit();
+    }
+
+    /// Recompute the highest currently reachable physical byte for HHDM-backed boot allocations.
+    fn rebuild_accessible_limit(&mut self) {
+        let mut limit = 0u64;
+        for region in self.regions.iter().take(self.len).copied() {
+            limit = limit.max(self.accessible_prefix_end(region));
+        }
+        self.accessible_limit = limit;
+    }
+
+    /// Return the end of the longest mapped prefix of `region` visible through the current HHDM.
+    fn accessible_prefix_end(&self, region: BootRegion) -> u64 {
+        if region.is_empty() {
+            return 0;
+        }
+
+        let total_pages = ((region.end - region.start) / PAGE_SIZE) as usize;
+        if total_pages == 0 {
+            return 0;
+        }
+
+        let mut low = 0usize;
+        let mut high = total_pages;
+        while low < high {
+            let mid = (low + high).div_ceil(2);
+            let size = mid as u64 * PAGE_SIZE;
+            if crate::memory::paging::is_hhdm_range_mapped_now(region.start, size) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        region.start + low as u64 * PAGE_SIZE
     }
 
     pub fn stats(&self) -> BootAllocStats {
@@ -303,6 +394,7 @@ impl BootAllocator {
             region_count: self.len,
             total_free_bytes: total,
             largest_region_bytes: largest,
+            accessible_limit: self.accessible_limit,
         }
     }
 }
@@ -325,6 +417,10 @@ pub fn boot_allocator_stats() -> BootAllocStats {
 
 pub fn alloc_bytes(size: usize, align: usize) -> Option<PhysAddr> {
     BOOT_ALLOCATOR.lock().try_alloc(size, align)
+}
+
+pub fn alloc_bytes_accessible(size: usize, align: usize) -> Option<PhysAddr> {
+    BOOT_ALLOCATOR.lock().try_alloc_accessible(size, align)
 }
 
 pub fn snapshot_free_regions(out: &mut [MemoryRegion]) -> usize {

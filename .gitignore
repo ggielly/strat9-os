@@ -15,7 +15,7 @@ build/
 
 CLAUDE.md
 .cursor
-
+.qwen
 
 #Ignore vscode AI rules
 .github\instructions\codacy.instructions.md

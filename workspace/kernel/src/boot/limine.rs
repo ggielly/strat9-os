@@ -493,7 +493,10 @@ pub unsafe extern "C" fn kmain() -> ! {
         // SAFETY: Direct UART write at earliest possible point. Raw port I/O before any setup.
         let mut early_port = unsafe { uart_16550::SerialPort::new(0x3F8) };
         early_port.init();
-        let _ = core::fmt::Write::write_str(&mut early_port, "[kmain] *** Strat9-OS kernel entry ***\r\n");
+        let _ = core::fmt::Write::write_str(
+            &mut early_port,
+            "[kmain] *** Strat9-OS kernel entry ***\r\n",
+        );
     }
 
     // Get framebuffer info (graphics mode provided by Limine)
