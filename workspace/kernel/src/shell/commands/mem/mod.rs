@@ -139,10 +139,7 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
             if count > 0 {
                 let size = 4096usize << order;
                 let (v, u) = format_bytes(size);
-                shell_println!(
-                    "  order {:>2} ({} {}): {} failures",
-                    order, v, u, count
-                );
+                shell_println!("  order {:>2} ({} {}): {} failures", order, v, u, count);
             }
         }
         shell_println!("");
@@ -157,9 +154,24 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
     let (sr_v, sr_u) = format_bytes(slab.pages_reclaimed.saturating_mul(4096));
     let (sl_v, sl_u) = format_bytes(slab.pages_live.saturating_mul(4096));
     shell_println!("Slab allocator:");
-    shell_println!("  Pages allocated:  {} ({} {})", slab.pages_allocated, sa_v, sa_u);
-    shell_println!("  Pages reclaimed:  {} ({} {})", slab.pages_reclaimed, sr_v, sr_u);
-    shell_println!("  Pages live:       {} ({} {})", slab.pages_live, sl_v, sl_u);
+    shell_println!(
+        "  Pages allocated:  {} ({} {})",
+        slab.pages_allocated,
+        sa_v,
+        sa_u
+    );
+    shell_println!(
+        "  Pages reclaimed:  {} ({} {})",
+        slab.pages_reclaimed,
+        sr_v,
+        sr_u
+    );
+    shell_println!(
+        "  Pages live:       {} ({} {})",
+        slab.pages_live,
+        sl_v,
+        sl_u
+    );
     shell_println!("");
 
     // ── Last heap failure ──────────────────────────────────────────────
@@ -184,7 +196,10 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
         let waste = block.saturating_sub(1); // worst-case internal waste
         shell_println!(
             "  class {:>2}: block={:>5}B  blocks/page={:>3}  max_waste={:>4}B",
-            ci, block, blocks, waste
+            ci,
+            block,
+            blocks,
+            waste
         );
     }
 

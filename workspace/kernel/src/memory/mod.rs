@@ -72,7 +72,9 @@ pub use block::{
     BlockHandle, BuddyReserved, Exclusive, MappedExclusive, MappedShared, PhysBlock, Released,
 };
 pub use block_meta::{get_block_meta, resolve_handle};
-pub use buddy::{buddy_alloc_fail_counts_snapshot, get_allocator, poison_quarantine_pages_snapshot};
+pub use buddy::{
+    buddy_alloc_fail_counts_snapshot, get_allocator, poison_quarantine_pages_snapshot,
+};
 pub use frame::{
     block_phys_has_poison_guard, frame_meta_debug_snapshot, get_meta, get_meta_slot,
     invoke_vtable_on_last_ref, invoke_vtable_on_unmap, meta_generation_matches, meta_guard,
