@@ -81,6 +81,16 @@ binary = "/initfs/console-admin"
 type = "elf"
 
 [[silos]]
+name = "bus"
+family = "DRV"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-bus"
+binary = "/initfs/strate-bus"
+type = "elf"
+
+[[silos]]
 name = "network"
 family = "NET"
 mode = "076"
@@ -118,6 +128,21 @@ sid = 42
 [[silos.strates]]
 name = "sshd"
 binary = "/initfs/bin/sshd"
+type = "elf"
+
+[[silos]]
+name = "web-admin"
+family = "NET"
+mode = "076"
+sid = 42
+graphics_enabled = true
+graphics_mode = "webrtc-native"
+graphics_max_sessions = 1
+graphics_session_ttl_sec = 1800
+graphics_turn_policy = "auto"
+[[silos.strates]]
+name = "web-admin"
+binary = "/initfs/bin/web-admin"
 type = "elf"
 
 [[silos]]
@@ -349,6 +374,66 @@ fn load_managed_silos_with_source() -> (Vec<ManagedSiloDef>, &'static str) {
             "embedded-default",
         ),
     }
+}
+
+fn family_uses_system_sid(family: &str) -> bool {
+    matches!(family, "SYS" | "DRV" | "NET" | "FS")
+}
+
+fn compute_managed_runtime_sids(managed: &[ManagedSiloDef]) -> Vec<(String, u32)> {
+    let mut ordered = managed.to_vec();
+    ordered.sort_by_key(|s| if s.name == "bus" { 0u8 } else { 1u8 });
+
+    let mut next_sys_sid = 100u32;
+    let mut next_usr_sid = 1000u32;
+    let mut mappings = Vec::new();
+
+    for silo in ordered {
+        let sid = if silo.sid == 42 {
+            if family_uses_system_sid(&silo.family) {
+                let id = next_sys_sid;
+                next_sys_sid += 1;
+                id
+            } else {
+                let id = next_usr_sid;
+                next_usr_sid += 1;
+                id
+            }
+        } else {
+            silo.sid
+        };
+        mappings.push((silo.name, sid));
+    }
+
+    mappings
+}
+
+fn managed_name_for_runtime_sid(
+    managed_runtime_sids: &[(String, u32)],
+    sid: u32,
+) -> Option<String> {
+    managed_runtime_sids
+        .iter()
+        .find(|(_, mapped_sid)| *mapped_sid == sid)
+        .map(|(name, _)| name.clone())
+}
+
+fn normalize_silo_selector(selector: &str, managed_runtime_sids: &[(String, u32)]) -> String {
+    if selector.parse::<u32>().is_ok() {
+        return String::from(selector);
+    }
+
+    managed_runtime_sids
+        .iter()
+        .find(|(name, _)| name == selector)
+        .map(|(_, sid)| alloc::format!("{}", sid))
+        .unwrap_or_else(|| String::from(selector))
+}
+
+fn normalize_current_silo_selector(selector: &str) -> String {
+    let (managed, _) = load_managed_silos_with_source();
+    let managed_runtime_sids = compute_managed_runtime_sids(&managed);
+    normalize_silo_selector(selector, &managed_runtime_sids)
 }
 
 /// Performs the push unique operation.
@@ -1256,6 +1341,7 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
     }
 
     let (managed, managed_source) = load_managed_silos_with_source();
+    let managed_runtime_sids = compute_managed_runtime_sids(&managed);
     let mut silos = silo::list_silos_snapshot();
     silos.sort_by_key(|s| s.id);
 
@@ -1270,7 +1356,11 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
             }
         }
         config_rows.push(ConfigListRow {
-            sid: m.sid,
+            sid: managed_runtime_sids
+                .iter()
+                .find(|(name, _)| *name == m.name)
+                .map(|(_, sid)| *sid)
+                .unwrap_or(m.sid),
             name: m.name.clone(),
             family: m.family.clone(),
             mode: m.mode.clone(),
@@ -1279,10 +1369,15 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
     }
 
     for s in silos.iter() {
+        let display_name = managed_name_for_runtime_sid(&managed_runtime_sids, s.id)
+            .unwrap_or_else(|| s.name.clone());
         let label = s.strate_label.clone().unwrap_or_else(|| String::from("-"));
         let mut strates = Vec::new();
         for m in &managed {
-            if m.name == s.name || m.sid == s.id {
+            if managed_runtime_sids
+                .iter()
+                .any(|(name, sid)| *sid == s.id && *name == m.name)
+            {
                 for st in &m.strates {
                     if !st.name.is_empty() {
                         push_unique(&mut strates, &st.name);
@@ -1303,7 +1398,7 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
         };
         rows.push(SiloListRow {
             sid: s.id,
-            name: s.name.clone(),
+            name: display_name,
             state: alloc::format!("{:?}", s.state),
             tasks: s.task_count,
             memory: mem_cell,
@@ -1786,11 +1881,11 @@ fn cmd_strate_config(args: &[String]) -> Result<(), ShellError> {
 /// Performs the cmd strate start operation.
 fn cmd_strate_start(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 2 {
-        shell_println!("Usage: strate start <id|label>");
+        shell_println!("Usage: strate start <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
-    match silo::kernel_start_silo(selector) {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    match silo::kernel_start_silo(selector.as_str()) {
         Ok(sid) => {
             shell_println!("strate start: ok (sid={})", sid);
             print_strate_state_for_sid(sid);
@@ -1806,15 +1901,15 @@ fn cmd_strate_start(args: &[String]) -> Result<(), ShellError> {
 /// Performs the cmd strate lifecycle operation.
 fn cmd_strate_lifecycle(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 2 {
-        shell_println!("Usage: strate start|stop|kill|destroy <id|label>");
+        shell_println!("Usage: strate start|stop|kill|destroy <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
+    let selector = normalize_current_silo_selector(args[1].as_str());
     let action = args[0].as_str();
     let result = match action {
-        "stop" => silo::kernel_stop_silo(selector, false),
-        "kill" => silo::kernel_stop_silo(selector, true),
-        "destroy" => silo::kernel_destroy_silo(selector),
+        "stop" => silo::kernel_stop_silo(selector.as_str(), false),
+        "kill" => silo::kernel_stop_silo(selector.as_str(), true),
+        "destroy" => silo::kernel_destroy_silo(selector.as_str()),
         _ => unreachable!(),
     };
     match result {
@@ -1835,12 +1930,12 @@ fn cmd_strate_lifecycle(args: &[String]) -> Result<(), ShellError> {
 /// Performs the cmd strate rename operation.
 fn cmd_strate_rename(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 3 {
-        shell_println!("Usage: strate rename <id|label> <new_label>");
+        shell_println!("Usage: strate rename <id|label|name> <new_label>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
+    let selector = normalize_current_silo_selector(args[1].as_str());
     let new_label = args[2].as_str();
-    match silo::kernel_rename_silo_label(selector, new_label) {
+    match silo::kernel_rename_silo_label(selector.as_str(), new_label) {
         Ok(sid) => {
             shell_println!("strate rename: ok (sid={}, new_label={})", sid, new_label);
             Ok(())
@@ -1895,11 +1990,11 @@ pub(super) fn cmd_strate_impl(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo info <id|label>");
+        shell_println!("Usage: silo info <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
-    let detail = silo::silo_detail_snapshot(selector).map_err(|e| {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    let detail = silo::silo_detail_snapshot(selector.as_str()).map_err(|e| {
         shell_println!("silo info: {:?}", e);
         ShellError::ExecutionFailed
     })?;
@@ -1984,10 +2079,11 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_suspend(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo suspend <id|label>");
+        shell_println!("Usage: silo suspend <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    match silo::kernel_suspend_silo(args[1].as_str()) {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    match silo::kernel_suspend_silo(selector.as_str()) {
         Ok(sid) => {
             shell_println!("silo suspend: ok (sid={})", sid);
             Ok(())
@@ -2001,10 +2097,11 @@ fn cmd_silo_suspend(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_resume(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo resume <id|label>");
+        shell_println!("Usage: silo resume <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    match silo::kernel_resume_silo(args[1].as_str()) {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    match silo::kernel_resume_silo(selector.as_str()) {
         Ok(sid) => {
             shell_println!("silo resume: ok (sid={})", sid);
             Ok(())
@@ -2029,7 +2126,8 @@ fn event_kind_str(kind: silo::SiloEventKind) -> &'static str {
 
 fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
     let events = if args.len() >= 2 {
-        silo::list_events_for_silo(args[1].as_str()).map_err(|e| {
+        let selector = normalize_current_silo_selector(args[1].as_str());
+        silo::list_events_for_silo(selector.as_str()).map_err(|e| {
             shell_println!("silo events: {:?}", e);
             ShellError::ExecutionFailed
         })?
@@ -2066,14 +2164,15 @@ fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_pledge(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 3 {
-        shell_println!("Usage: silo pledge <id|label> <octal_mode>");
+        shell_println!("Usage: silo pledge <id|label|name> <octal_mode>");
         return Err(ShellError::InvalidArguments);
     }
     let mode_val = u16::from_str_radix(args[2].as_str(), 8).map_err(|_| {
         shell_println!("silo pledge: invalid octal mode '{}'", args[2]);
         ShellError::InvalidArguments
     })?;
-    match silo::kernel_pledge_silo(args[1].as_str(), mode_val) {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    match silo::kernel_pledge_silo(selector.as_str(), mode_val) {
         Ok((old, new)) => {
             shell_println!("silo pledge: {:03o} -> {:03o}", old, new);
             Ok(())
@@ -2087,13 +2186,13 @@ fn cmd_silo_pledge(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_unveil(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 4 {
-        shell_println!("Usage: silo unveil <id|label> <path> <rwx>");
+        shell_println!("Usage: silo unveil <id|label|name> <path> <rwx>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
+    let selector = normalize_current_silo_selector(args[1].as_str());
     let path = args[2].as_str();
     let rights = args[3].as_str();
-    match silo::kernel_unveil_silo(selector, path, rights) {
+    match silo::kernel_unveil_silo(selector.as_str(), path, rights) {
         Ok(sid) => {
             shell_println!(
                 "silo unveil: ok (sid={}, path={}, rights={})",
@@ -2112,10 +2211,11 @@ fn cmd_silo_unveil(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_sandbox(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo sandbox <id|label>");
+        shell_println!("Usage: silo sandbox <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    match silo::kernel_sandbox_silo(args[1].as_str()) {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    match silo::kernel_sandbox_silo(selector.as_str()) {
         Ok(sid) => {
             shell_println!("silo sandbox: ok (sid={})", sid);
             Ok(())
@@ -2181,10 +2281,11 @@ fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_logs(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo logs <id|label>");
+        shell_println!("Usage: silo logs <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    let events = silo::list_events_for_silo(args[1].as_str()).map_err(|e| {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    let events = silo::list_events_for_silo(selector.as_str()).map_err(|e| {
         shell_println!("silo logs: {:?}", e);
         ShellError::ExecutionFailed
     })?;

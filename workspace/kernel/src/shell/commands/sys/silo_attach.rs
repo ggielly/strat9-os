@@ -2,18 +2,18 @@ use super::*;
 
 /// Attach to a silo's debug output stream.
 ///
-/// Usage: `silo attach <id|label>`
+/// Usage: `silo attach <id|label|name>`
 ///
 /// Displays output from `sys_debug_log` calls made by tasks in the silo.
 /// Press Ctrl+C or 'q' to detach.
 pub(super) fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo attach <id|label>");
+        shell_println!("Usage: silo attach <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
+    let selector = normalize_current_silo_selector(args[1].as_str());
 
-    let sid = match silo::silo_detail_snapshot(selector) {
+    let sid = match silo::silo_detail_snapshot(selector.as_str()) {
         Ok(detail) => {
             shell_println!(
                 "Attached to silo {} ({}). Press Ctrl+C or 'q' to detach.",

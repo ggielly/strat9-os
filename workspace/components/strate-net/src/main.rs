@@ -100,6 +100,7 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 const NANOS_PER_MICRO: u64 = 1_000;
 static RX_ERR_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
 static TX_ERR_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
+const NET_SEND_RETRY_LIMIT: usize = 64;
 
 /// Implements log errno.
 fn log_errno(prefix: &str, err: strate_net::syscalls::Error) {
@@ -207,7 +208,29 @@ impl phy::TxToken for Strat9TxToken {
         }
         let mut buf = [0u8; MAX_FRAME_SIZE];
         let ret = f(&mut buf[..len]);
-        if let Err(e) = net_send(&buf[..len]) {
+        let mut last_err = None;
+        for attempt in 0..NET_SEND_RETRY_LIMIT {
+            match net_send(&buf[..len]) {
+                Ok(_) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e @ (Error::Again | Error::QueueFull)) => {
+                    last_err = Some(e);
+                    let _ = proc_yield();
+                }
+                Err(e @ Error::IoError) if attempt + 1 < NET_SEND_RETRY_LIMIT => {
+                    last_err = Some(e);
+                    sleep_micros(500);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        if let Some(e) = last_err {
             if TX_ERR_LOG_BUDGET.load(Ordering::Relaxed) > 0 {
                 TX_ERR_LOG_BUDGET.fetch_sub(1, Ordering::Relaxed);
                 log_errno("[strate-net] net_send errno=", e);
@@ -1883,6 +1906,27 @@ fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
 
+fn wait_for_kernel_mac(max_attempts: usize) -> Option<[u8; 6]> {
+    let mut mac = [0u8; 6];
+
+    for attempt in 0..max_attempts {
+        if net_info(0, &mut mac).is_ok() {
+            if attempt != 0 {
+                log("[strate-net] Kernel NIC became available\n");
+            }
+            return Some(mac);
+        }
+
+        if attempt == 0 {
+            log("[strate-net] Waiting for kernel NIC registration...\n");
+        }
+
+        let _ = proc_yield();
+    }
+
+    None
+}
+
 #[unsafe(no_mangle)]
 /// Implements start.
 pub extern "C" fn _start() -> ! {
@@ -1907,13 +1951,16 @@ pub extern "C" fn _start() -> ! {
 
     log("[strate-net] Bound to /net\n");
 
-    let mut mac = [0u8; 6];
-    if net_info(0, &mut mac).is_err() {
-        log("[strate-net] No NIC found, using fallback MAC\n");
-        mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
-    } else {
-        log("[strate-net] MAC acquired from kernel\n");
-    }
+    let mac = match wait_for_kernel_mac(2048) {
+        Some(mac) => {
+            log("[strate-net] MAC acquired from kernel\n");
+            mac
+        }
+        None => {
+            log("[strate-net] No NIC found after waiting, using fallback MAC\n");
+            [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]
+        }
+    };
 
     let mut strate = NetworkStrate::new(mac);
     strate.serve(port);

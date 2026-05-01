@@ -685,6 +685,14 @@ fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
             is_user_entry,
             entry
         );
+        if is_user_entry {
+            crate::serial_println!(
+                "[trace][task] post_switch_enter cpu={} tid={} entry={:#x}",
+                cpu,
+                task.id.as_u64(),
+                entry
+            );
+        }
     }
 
     // First-launch tasks arrive here via the legacy `ret` bootstrap path, which

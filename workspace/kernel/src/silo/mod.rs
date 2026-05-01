@@ -1584,7 +1584,7 @@ pub fn kernel_start_silo(selector: &str) -> Result<u32, SyscallError> {
         let mgr = SILO_MANAGER.lock();
         resolve_selector_to_silo_id(selector, &mgr)?
     };
-    start_silo_by_id(silo_id)?;
+    let _ = start_silo_by_id(silo_id)?;
     Ok(silo_id)
 }
 
@@ -2102,7 +2102,7 @@ pub fn sys_silo_attach_module(handle: u64, module_handle: u64) -> Result<u64, Sy
 }
 
 /// Starts silo by id.
-fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
+fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
     let (
         module_id,
         granted_caps,
@@ -2236,6 +2236,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         }
     };
     let task_id = task.id;
+    let task_pid = task.pid;
 
     // Give the silo an EOF stdin so that any read(0, …) returns 0 immediately
     // instead of EBADF (which can cause busy-loops) or blocking on the
@@ -2269,7 +2270,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
     });
     drop(mgr);
     crate::process::add_task(task);
-    Ok(())
+    Ok(task_pid as u64)
 }
 
 /// Performs the sys silo start operation.
@@ -2283,8 +2284,7 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
         revoke: false,
     };
     let silo_id = resolve_silo_handle(handle, required)?;
-    start_silo_by_id(silo_id)?;
-    Ok(0)
+    start_silo_by_id(silo_id)
 }
 
 /// Best-effort cleanup hook called by the scheduler when a task terminates.
