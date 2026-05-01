@@ -100,6 +100,7 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 const NANOS_PER_MICRO: u64 = 1_000;
 static RX_ERR_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
 static TX_ERR_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
+static TX_SUCCESS_COUNT: AtomicUsize = AtomicUsize::new(0);
 const NET_SEND_RETRY_LIMIT: usize = 64;
 
 /// Implements log errno.
@@ -212,6 +213,7 @@ impl phy::TxToken for Strat9TxToken {
         for attempt in 0..NET_SEND_RETRY_LIMIT {
             match net_send(&buf[..len]) {
                 Ok(_) => {
+                    TX_SUCCESS_COUNT.fetch_add(1, Ordering::Relaxed);
                     last_err = None;
                     break;
                 }
@@ -553,6 +555,25 @@ impl NetworkStrate {
         }
     }
 
+    fn clear_ipv4_runtime_config(&mut self) {
+        self.ip_config = None;
+        self.interface.update_ip_addrs(|addrs| addrs.clear());
+        let _ = self.interface.routes_mut().remove_default_ipv4_route();
+        self.refresh_dns_servers();
+    }
+
+    fn reset_dhcp_socket(&mut self) {
+        self.sockets
+            .get_mut::<dhcpv4::Socket>(self.dhcp_handle)
+            .reset();
+    }
+
+    fn enable_dhcp(&mut self) {
+        self.dhcp_enabled = true;
+        self.clear_ipv4_runtime_config();
+        self.reset_dhcp_socket();
+    }
+
     /// Returns true if a local UDP port is already in use by an opened UDP handle.
     fn udp_port_in_use(&self, port: u16) -> bool {
         self.udp_bound.values().any(|s| s.local_port == port)
@@ -669,11 +690,7 @@ impl NetworkStrate {
             }
             Some(dhcpv4::Event::Deconfigured) => {
                 log("[strate-net] DHCP: deconfigured (lease expired?)\n");
-                self.ip_config = None;
-                // Clear interface addresses
-                self.interface.update_ip_addrs(|addrs| addrs.clear());
-                let _ = self.interface.routes_mut().remove_default_ipv4_route();
-                self.refresh_dns_servers();
+                self.clear_ipv4_runtime_config();
             }
             None => {}
         }
@@ -1708,7 +1725,7 @@ impl NetworkStrate {
         }
 
         if path == "dhcp/enable" {
-            self.dhcp_enabled = true;
+            self.enable_dhcp();
             let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
             return reply_write(msg.sender, data_len);
         }
