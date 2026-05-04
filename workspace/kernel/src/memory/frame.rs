@@ -6,7 +6,7 @@
 //! in a separate contiguous array (initialized by [`init_metadata_array`]). Buddy
 //! free-list [`FreeListLink`] nodes, reference counts, purpose flags,
 //! [`meta_guard`] bits, a per-allocation **generation** counter, and an optional
-//! [`FrameMetaVtable`] live here — **not** in the mapped page bytes, so mappings
+//! [`FrameMetaVtable`] live here : **not** in the mapped page bytes, so mappings
 //! see a pristine payload.
 //!
 //! ## Revue / invariants (issue #38)
@@ -15,7 +15,7 @@
 //!   [`FreeListLink`], jamais écrits comme « faux pointeurs » dans les 4 KiB mappés.
 //! - **`generation`** : incrémentée uniquement par [`MetaSlot::note_new_allocation_epoch`]
 //!   après un `CAS` réussi dans [`FrameAllocOptions::allocate`]. Ne pas utiliser
-//!   [`MetaSlot::set_generation`] sauf bootstrap/tests — sinon les schémas « généalogiques »
+//!   [`MetaSlot::set_generation`] sauf bootstrap/tests : sinon les schémas « généalogiques »
 //!   deviennent incohérents.
 //! - **`meta_guard::POISONED` vs `frame_flags::POISONED`** : deux espaces (bits dédiés
 //!   `guard` vs flags logiques). Pour marquer une frame corrompue, préférer
@@ -38,7 +38,7 @@ use x86_64::PhysAddr;
 // FrameAllocOptions  (Asterinas OSTD pattern)
 // ==============================================================================
 //
-// DESIGN NOTES — why this wrapper exists:
+// DESIGN NOTES : why this wrapper exists:
 //
 //  * In Asterinas OSTD, `FrameAllocOptions::new()` defaults to `zeroed: true`.
 //    This means callers can never accidentally hand out a frame that still holds
@@ -53,7 +53,7 @@ use x86_64::PhysAddr;
 //    slab allocator (POISON_BYTE = 0xDE) or by whatever previously lived in
 //    that memory.  The CPU page-table walker reads all 512 entries of every
 //    intermediate node it traverses.  A random non-zero entry is decoded as a
-//    valid PTE pointing to an arbitrary physical address — which explains why
+//    valid PTE pointing to an arbitrary physical address : which explains why
 //    RIP (the first fetch address the CPU tries after entering Ring 3) changes
 //    on every boot.
 //
@@ -122,7 +122,7 @@ pub struct FrameAllocOptions {
 pub enum FramePurpose {
     /// Frame will hold a kernel page-table node (PML4/PDPT/PD/PT).
     ///
-    /// These frames MUST be zeroed — unzeroed page-table nodes are the primary
+    /// These frames MUST be zeroed : unzeroed page-table nodes are the primary
     /// source of non-deterministic RIP at Ring 3 transition.
     PageTable,
     /// Frame belongs to kernel address-space (e.g. heap, stack, metadata).
@@ -139,9 +139,7 @@ impl FramePurpose {
             // Page-table frames are always kernel-owned.
             Self::PageTable => frame_flags::KERNEL | frame_flags::ALLOCATED,
             Self::KernelData => frame_flags::KERNEL | frame_flags::ALLOCATED,
-            Self::UserData => {
-                frame_flags::USER | frame_flags::ALLOCATED | frame_flags::MOVABLE
-            }
+            Self::UserData => frame_flags::USER | frame_flags::ALLOCATED | frame_flags::MOVABLE,
             Self::Custom(f) => f | frame_flags::ALLOCATED,
         }
     }
@@ -188,7 +186,7 @@ impl FrameAllocOptions {
     /// `PageTable` purpose forces zeroing even if `.zeroed(false)` was called.
     pub fn purpose(mut self, p: FramePurpose) -> Self {
         self.purpose_flags = p.to_flags();
-        // Page-table nodes must always be zeroed — override any caller setting.
+        // Page-table nodes must always be zeroed : override any caller setting.
         if p.requires_zero() {
             self.zeroed = true;
         }
@@ -226,7 +224,7 @@ impl FrameAllocOptions {
             crate::memory::zone::Migratetype::Unmovable
         };
 
-        // Step 1 — exclusive frame from the buddy allocator.
+        // Step 1 : exclusive frame from the buddy allocator.
         let frame = crate::memory::buddy::alloc_migratetype(token, 0, migratetype)?;
         let phys = frame.start_address.as_u64();
 
@@ -235,7 +233,7 @@ impl FrameAllocOptions {
         // beyond the metadata array).  That is a kernel bug, not UB here.
         let meta = get_meta(frame.start_address);
 
-        // Step 2 — zero the frame content if required.
+        // Step 2 : zero the frame content if required.
         //
         // The zeroing MUST happen before the `Release` store of `refcount = 1`
         // (step 4) so that any thread performing an `Acquire` load of the
@@ -260,14 +258,14 @@ impl FrameAllocOptions {
             }
         }
 
-        // Step 3 — stamp purpose flags with `Release` ordering.
+        // Step 3 : stamp purpose flags with `Release` ordering.
         //
         // Any reader that subsequently loads `refcount` with `Acquire` (step 4)
         // is guaranteed to observe these flags as well.
         meta.flags.store(self.purpose_flags, Ordering::Release);
         meta.set_order(0);
 
-        // Step 4 — claim the frame and publish it as live.
+        // Step 4 : claim the frame and publish it as live.
         //
         // CAS(REFCOUNT_UNUSED -> 1): atomically transitions the frame from the
         // buddy free-list sentinel to a live, exclusively-owned frame.  The
@@ -275,7 +273,7 @@ impl FrameAllocOptions {
         // `Acquire` load of this refcount by another CPU, and also observes
         // the buddy's `Release` store of REFCOUNT_UNUSED.
         //
-        // Failure means the frame's refcount was not REFCOUNT_UNUSED — either
+        // Failure means the frame's refcount was not REFCOUNT_UNUSED : either
         // the frame is still live (double-alloc) or the buddy free list is
         // corrupt (double-free).  Both are kernel bugs; panic immediately.
         meta.cas_refcount(REFCOUNT_UNUSED, 1)
@@ -299,7 +297,7 @@ pub const FRAME_META_ALIGN: usize = 64;
 pub const FRAME_META_SIZE: usize = 64;
 pub const FRAME_META_LINK_NONE: u64 = u64::MAX;
 
-/// Guard bits stored in [`MetaSlot::guard`] (issue #38 — extensible without touching page bytes).
+/// Guard bits stored in [`MetaSlot::guard`] (issue #38 : extensible without touching page bytes).
 ///
 /// Distinct from [`frame_flags::POISONED`] (logical frame state in `flags`).
 pub mod meta_guard {
@@ -474,7 +472,7 @@ impl MetaSlot {
 
     #[inline]
     pub fn meta_aux_store(&self, v: u32) {
-        // CPU-id hint — no happens-before relationship needed; Relaxed is sufficient.
+        // CPU-id hint : no happens-before relationship needed; Relaxed is sufficient.
         self.meta_aux.store(v, Ordering::Relaxed);
     }
 
@@ -578,7 +576,7 @@ impl MetaSlot {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// Overwrites the generation counter — **only** for boot-time init or tests.
+    /// Overwrites the generation counter : **only** for boot-time init or tests.
     ///
     /// Normal allocations bump generation via [`MetaSlot::note_new_allocation_epoch`].
     /// Arbitrary values break « generational » use-after-free checks.
@@ -706,7 +704,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
         .try_alloc_accessible(bytes, FRAME_META_ALIGN)
         .unwrap_or_else(|| {
             panic!(
-                "frame metadata: boot allocator could not reserve {} bytes (align {}) for {} frames — out of early boot memory",
+                "frame metadata: boot allocator could not reserve {} bytes (align {}) for {} frames : out of early boot memory",
                 bytes, FRAME_META_ALIGN, frame_count
             )
         });
@@ -749,7 +747,7 @@ pub fn meta_generation_matches(phys: PhysAddr, expected: u32) -> bool {
 /// before `init_metadata_array` has run).
 pub fn block_phys_has_poison_guard(frame_phys: u64, order: u8) -> bool {
     if METADATA_BASE_VIRT.load(Ordering::Acquire) == 0 {
-        return false; // metadata not yet initialized — no poison possible
+        return false; // metadata not yet initialized : no poison possible
     }
     let n = 1u64 << order;
     for i in 0..n {
@@ -761,7 +759,7 @@ pub fn block_phys_has_poison_guard(frame_phys: u64, order: u8) -> bool {
     false
 }
 
-/// Invokes `on_unmap` from the frame vtable, if any (issue #38 — unmap / release path).
+/// Invokes `on_unmap` from the frame vtable, if any (issue #38 : unmap / release path).
 pub fn invoke_vtable_on_unmap(phys: PhysAddr) {
     let m = get_meta_slot(phys);
     let Some(vt) = m.try_vtable_ref() else {

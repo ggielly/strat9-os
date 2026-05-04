@@ -1901,7 +1901,7 @@ impl NetworkStrate {
                 let _ = call::ipc_reply(&reply);
             }
 
-            // 4. Brief sleep when idle — capped to stay responsive to IPC
+            // 4. Brief sleep when idle : capped to stay responsive to IPC
             if !got_ipc && poll_result == smoltcp::iface::PollResult::None {
                 const MAX_SLEEP_US: u64 = 10_000; // 10 ms
                 if let Some(delay) = self.interface.poll_delay(now, &self.sockets) {

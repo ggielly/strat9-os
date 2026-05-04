@@ -16,7 +16,7 @@ pub const KERNEL_RSP_OFFSET: usize = 16;
 /// Minimal per-CPU block accessed from assembly via GS base.
 ///
 /// **Layout invariant** (`#[repr(C)]`):
-/// - `cpu_index` at offset  0 (8 bytes) — read by assembly as `gs:[0]`
+/// - `cpu_index` at offset  0 (8 bytes) : read by assembly as `gs:[0]`
 /// - `user_rsp`  at offset  8 (8 bytes)
 /// - `kernel_rsp` at offset 16 (8 bytes)
 ///
@@ -31,7 +31,7 @@ pub struct PerCpuArch {
     /// proper `UnsafeCell` interior mutability so reads through `&PerCpuArch`
     /// are not UB even though the field was written after the struct was placed
     /// in a `static`.
-    pub cpu_index: AtomicU64, // offset 0 — read by assembly: `mov rax, gs:[0]`
+    pub cpu_index: AtomicU64, // offset 0 : read by assembly: `mov rax, gs:[0]`
     pub user_rsp: AtomicU64,   // offset 8
     pub kernel_rsp: AtomicU64, // offset 16
 }
@@ -103,7 +103,7 @@ pub fn init_boot_cpu(apic_id: u32) -> usize {
     cpu.present.store(true, Ordering::Release);
     cpu.online.store(true, Ordering::Release);
     cpu.apic_id.store(apic_id, Ordering::Release);
-    // AtomicU64::store through shared ref — no unsafe needed, UnsafeCell provides
+    // AtomicU64::store through shared ref : no unsafe needed, UnsafeCell provides
     // interior mutability so this write is well-defined.
     cpu.arch.cpu_index.store(0, Ordering::Release);
     cpu.tlb_ready.store(false, Ordering::Release);
@@ -227,7 +227,7 @@ pub fn get_cpu_count() -> usize {
 /// this CPU.  If called before GS is initialised (early boot), `current_cpu_index`
 /// returns 0, which is always the BSP slot.  On the BSP itself that is correct;
 /// on an AP before its GS base is set the call is a no-op because the AP's
-/// scheduler is not yet running — incrementing slot 0 would be wrong, so we
+/// scheduler is not yet running : incrementing slot 0 would be wrong, so we
 /// verify the GS index matches the slot we are about to touch.
 #[inline]
 pub fn preempt_disable() {
@@ -235,7 +235,7 @@ pub fn preempt_disable() {
     // SAFETY: idx is clamped to [0, MAX_CPUS-1] by current_cpu_index().
     // Additional guard: if GS is not yet set on this CPU, cpu_index will be
     // the BSP's slot (0).  Skip if the slot's stored cpu_index disagrees with
-    // idx — that means GS isn't set here yet.
+    // idx : that means GS isn't set here yet.
     if PERCPU[idx].arch.cpu_index.load(Ordering::Relaxed) as usize == idx {
         PERCPU[idx].preempt_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -256,7 +256,7 @@ pub fn preempt_enable() {
         if prev > 0 {
             PERCPU[idx].preempt_count.fetch_sub(1, Ordering::Relaxed);
         } else {
-            // Mismatched preempt_enable — log and leave count at 0.
+            // Mismatched preempt_enable : log and leave count at 0.
             log::warn!("preempt_enable: underflow on CPU {} (mismatched call)", idx);
         }
     }
@@ -284,7 +284,7 @@ pub fn apic_id_by_cpu_index(index: usize) -> Option<u32> {
 /// Resolve current CPU index via a GS-relative load from offset 0.
 ///
 /// **Hot path** (after `init_gs_base` has run on the BSP): a single
-/// non-serialising `mov rax, gs:[0]` — no MSR, no pipeline stall.
+/// non-serialising `mov rax, gs:[0]` : no MSR, no pipeline stall.
 ///
 /// **Slow/early-boot path** (before `init_gs_base` is called the first time):
 /// reads `IA32_GS_BASE` via `rdmsr` as a null-guard; if the GS base is 0
@@ -300,12 +300,12 @@ pub fn apic_id_by_cpu_index(index: usize) -> Option<u32> {
 #[inline]
 pub fn current_cpu_index() -> usize {
     // SAFETY:
-    // Hot path — `gs:[0]` reads `PerCpuArch::cpu_index` (AtomicU64, repr(C),
+    // Hot path : `gs:[0]` reads `PerCpuArch::cpu_index` (AtomicU64, repr(C),
     // offset 0).  Valid because `BSP_GS_INITIALIZED` is only set after the BSP's
     // GS base has been written, and APs always write their GS base before
     // executing any code that calls this function.
     //
-    // Slow path — `rdmsr` is a privileged Ring-0 instruction, always valid here.
+    // Slow path : `rdmsr` is a privileged Ring-0 instruction, always valid here.
     // The derference of `gs_base` is guarded by the != 0 check.
     unsafe {
         if BSP_GS_INITIALIZED.load(Ordering::Acquire) {
@@ -319,7 +319,7 @@ pub fn current_cpu_index() -> usize {
             return (idx as usize).min(MAX_CPUS - 1);
         }
 
-        // Slow path: early boot — GS not yet set on any CPU.
+        // Slow path: early boot : GS not yet set on any CPU.
         // `rdmsr` reads IA32_GS_BASE (0xC000_0101) as a null-guard.
         let lo: u32;
         let hi: u32;
@@ -332,7 +332,7 @@ pub fn current_cpu_index() -> usize {
         );
         let gs_base = (lo as u64) | ((hi as u64) << 32);
         if gs_base == 0 {
-            return 0; // GS not yet initialised — early boot, return BSP slot.
+            return 0; // GS not yet initialised : early boot, return BSP slot.
         }
 
         // GS is set but BSP_GS_INITIALIZED wasn't yet visible (narrow race

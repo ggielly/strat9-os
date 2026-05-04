@@ -112,7 +112,7 @@ fn validate_components_toml(path: &std::path::Path) {
 
     if warnings == 0 {
         println!(
-            "cargo:warning=Components.toml: OK — {} component(s) validated",
+            "cargo:warning=Components.toml: OK : {} component(s) validated",
             graph.len()
         );
     }

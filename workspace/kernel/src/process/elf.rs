@@ -1201,12 +1201,12 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         );
         if lvt & (1 << 16) != 0 {
             crate::e9_println!(
-                "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) — no ticks will fire!"
+                "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) : no ticks will fire!"
             );
         }
         if init_cnt == 0 {
             crate::e9_println!(
-                "[trace][elf] WARNING: LAPIC timer init_count=0 — timer not started!"
+                "[trace][elf] WARNING: LAPIC timer init_count=0 : timer not started!"
             );
         }
     }
@@ -1253,7 +1253,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     //   '1' (0x31): start of the asm block, input registers in place
     //   '2' (0x32): iretq frame fully on stack (5 words)
     //   '3' (0x33): RDI loaded with arg0, just before SWAPGS
-    //   '4' (0x34): SWAPGS done — if CPU crashes on iretq the last char is '4'
+    //   '4' (0x34): SWAPGS done : if CPU crashes on iretq the last char is '4'
     //
     // If output stops at:
     //   '1' → RSP/alignment problem before any pushes
@@ -1646,7 +1646,7 @@ pub fn load_elf_task_with_caps(
         interp_base,
     )?;
 
-    // Step 5: Create kernel task — trampoline params are stored inside the task
+    // Step 5: Create kernel task : trampoline params are stored inside the task
     // itself so that concurrent SMP execution of multiple trampolines is safe.
     crate::e9_println!(
         "[trace][elf] load_elf_task kstack_begin size={}",

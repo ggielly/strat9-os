@@ -322,7 +322,7 @@ pub(crate) fn take_force_resched_hint(cpu: usize) -> bool {
     }
 }
 
-/// Global scheduler state — cold path: fork, exit, wake, block.
+/// Global scheduler state : cold path: fork, exit, wake, block.
 ///
 /// Lock order: acquire `GLOBAL_SCHED_STATE` before `LOCAL_SCHEDULERS[n]`
 /// when both are needed. Never hold a LOCAL lock and then block-acquire GLOBAL.
@@ -525,7 +525,7 @@ struct SchedulerCpu {
     class_table: crate::process::sched::SchedClassTable,
 }
 
-/// Per-CPU local scheduler locks — hot path: timer tick, preemption, yield.
+/// Per-CPU local scheduler locks : hot path: timer tick, preemption, yield.
 ///
 /// Lock order: LOCAL before nothing; never hold two LOCAL locks simultaneously
 /// (use `try_lock` when touching a sibling CPU).
@@ -534,7 +534,7 @@ pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
     crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { SpinLock::new(None) }; crate::arch::x86_64::percpu::MAX_CPUS];
 
-/// Blocked tasks registry — hot path: block/wake.
+/// Blocked tasks registry : hot path: block/wake.
 ///
 /// This lock is **independent** of `GLOBAL_SCHED_STATE`. The block and wake
 /// paths acquire only this lock + the target CPU's `LOCAL_SCHEDULERS[cpu]`
@@ -544,7 +544,7 @@ pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
 pub(crate) static BLOCKED_TASKS: SpinLock<BTreeMap<TaskId, Arc<Task>>> =
     SpinLock::new(BTreeMap::new());
 
-/// Identity maps — cold path: PID/TID lookups, process groups, sessions, parent/child.
+/// Identity maps : cold path: PID/TID lookups, process groups, sessions, parent/child.
 ///
 /// Separate from `GLOBAL_SCHED_STATE` so that identity lookups (getpid, getpgid,
 /// setpgid, etc.) never contend with fork/exit/zombie management.
@@ -555,7 +555,7 @@ pub(crate) static BLOCKED_TASKS: SpinLock<BTreeMap<TaskId, Arc<Task>>> =
 /// acquire the exclusive write lock.
 ///
 /// Lock order: SCHED_IDENTITY before LOCAL (never the reverse).
-/// SCHED_IDENTITY and BLOCKED_TASKS are independent — never hold both.
+/// SCHED_IDENTITY and BLOCKED_TASKS are independent : never hold both.
 pub(crate) static SCHED_IDENTITY: SpinRwLock<SchedIdentity> = SpinRwLock::new(SchedIdentity::new());
 
 /// Identity maps for the scheduler: PID/TID routing, process groups,
@@ -599,7 +599,7 @@ impl SchedIdentity {
     }
 }
 
-/// Global task registry — cold path: fork, exit, all_tasks scan.
+/// Global task registry : cold path: fork, exit, all_tasks scan.
 ///
 /// Lock order: acquire GLOBAL_SCHED_STATE before LOCAL when both are needed.
 /// Per-CPU runqueues and current-task tracking live in `LOCAL_SCHEDULERS`.

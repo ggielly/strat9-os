@@ -34,7 +34,7 @@ static RSDP_VADDR: AtomicU64 = AtomicU64::new(0);
 /// RSDP revision (0 = ACPI 1.0, 2+ = ACPI 2.0+)
 static RSDP_REVISION: AtomicU64 = AtomicU64::new(0);
 
-/// RSDP (Root System Descriptor Pointer) — ACPI 1.0
+/// RSDP (Root System Descriptor Pointer) : ACPI 1.0
 #[repr(C, packed)]
 struct Rsdp {
     signature: [u8; 8],
@@ -44,7 +44,7 @@ struct Rsdp {
     rsdt_address: u32,
 }
 
-/// RSDP extended — ACPI 2.0+
+/// RSDP extended : ACPI 2.0+
 #[repr(C, packed)]
 struct Rsdp2 {
     base: Rsdp,

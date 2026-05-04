@@ -347,7 +347,7 @@ pub fn xsave_size_for_xcr0(xcr0: u64) -> usize {
 }
 
 /// Return the host's default XCR0 mask (all supported features).
-/// Safe to call before `init()` — returns `XCR0_X87 | XCR0_SSE` if not yet initialized.
+/// Safe to call before `init()` : returns `XCR0_X87 | XCR0_SSE` if not yet initialized.
 pub fn host_default_xcr0() -> u64 {
     if INITIALIZED.load(Ordering::Acquire) {
         HOST_CPU.lock().as_ref().map_or(XCR0_X87 | XCR0_SSE, |h| {

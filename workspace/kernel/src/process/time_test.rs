@@ -79,7 +79,7 @@ fn run_time_suite() -> bool {
     }
     if ns > expected + 10_000_000 {
         crate::serial_println!(
-            "[time-test][STEP] note: ns > expected+10M — tick advanced between calls"
+            "[time-test][STEP] note: ns > expected+10M : tick advanced between calls"
         );
     }
     record("current_time_ns formula", s, &mut passed, &mut total);

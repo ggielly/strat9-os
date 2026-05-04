@@ -11,7 +11,7 @@
 //! ```text
 //! User syscall (open "/net/tcp/0")
 //!      ↓
-//! VFS::open() — path resolution
+//! VFS::open() : path resolution
 //!      ↓
 //! MountTable::resolve() → ("/net" → IpcScheme, "tcp/0")
 //!      ↓
@@ -103,7 +103,7 @@ pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
 /// preventing `../` escapes beyond the FD's subtree.
 pub fn open_at(dir_fd: u64, path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
     if dir_fd == AT_FDCWD as u64 {
-        // Fall back to process CWD — original open() behavior.
+        // Fall back to process CWD : original open() behavior.
         let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
         let cwd = unsafe { (&*task.process.cwd.get()).clone() };
         let abs = resolve_path(path, &cwd);
@@ -483,7 +483,7 @@ pub fn sys_fstatat(
     }
     let raw = read_user_path(path_ptr, path_len)?;
     let st = fstat_at(dir_fd, &raw)?;
-    // TODO: copy stat struct to userspace — for now return error as placeholder
+    // TODO: copy stat struct to userspace : for now return error as placeholder
     let _ = st;
     Err(SyscallError::NotImplemented)
 }
@@ -801,7 +801,7 @@ pub fn sys_getcwd(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     Ok(needed as u64) // Like Linux: returns byte count written (including NUL)
 }
 
-/// SYS_IOCTL (443): I/O control — stub.
+/// SYS_IOCTL (443): I/O control : stub.
 ///
 /// Returns ENOTTY for all file descriptors that are not character devices.
 /// Terminal / PTY support will be added when a TTY driver is implemented.
@@ -1128,7 +1128,7 @@ pub fn init() {
     let pci_count = Box::leak(pci_count_str.into_bytes().into_boxed_slice());
     kernel_scheme.register("pci/count", pci_count.as_ptr(), pci_count.len());
 
-    // /sys/cpu/* — CPU information scheme (Plan9-style)
+    // /sys/cpu/* : CPU information scheme (Plan9-style)
     {
         let host = crate::arch::x86_64::cpuid::host();
         // VFS initializes before SMP/percpu registration is complete.
@@ -1211,7 +1211,7 @@ pub fn init() {
         log::info!("[VFS] Mounted /ipc (kernel ipc control scheme)");
     }
 
-    // Mount /dev — raw block-device scheme backed by AHCI.
+    // Mount /dev : raw block-device scheme backed by AHCI.
     // The scheme is registered regardless of whether a disk is present:
     // device files appear dynamically when the hardware is available.
     let dev_scheme = Arc::new(BlkDevScheme::new());
@@ -1221,7 +1221,7 @@ pub fn init() {
         log::info!("[VFS] Mounted /dev (block-device scheme)");
     }
 
-    // Console scheme (/dev/console) — backs stdin/stdout/stderr for ELF processes
+    // Console scheme (/dev/console) : backs stdin/stdout/stderr for ELF processes
     let console = console_scheme::init_console_scheme();
     if let Err(e) = mount::mount("/dev/console", console) {
         log::error!("[VFS] Failed to mount /dev/console: {:?}", e);
@@ -1229,7 +1229,7 @@ pub fn init() {
         log::info!("[VFS] Mounted /dev/console (serial + keyboard)");
     }
 
-    // PTY scheme (/dev/pts) — pseudo-terminals for interactive programs
+    // PTY scheme (/dev/pts) : pseudo-terminals for interactive programs
     pty_scheme::init_pty_scheme();
     log::info!("[VFS] Mounted /dev/pts (PTY scheme)");
 

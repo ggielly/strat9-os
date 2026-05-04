@@ -1,4 +1,4 @@
-//! Boot timestamp — TSC-based elapsed time from kernel entry.
+//! Boot timestamp : TSC-based elapsed time from kernel entry.
 //!
 //! Captures `rdtsc()` at the very start of `kernel_main` and exposes
 //! `elapsed_ms()` / `elapsed_us()` for boot milestone logging.
@@ -22,8 +22,8 @@ pub fn init() {
 
 /// Refine TSC frequency after timer calibration.
 ///
-/// `known_interval_ns` — duration of the reference interval in nanoseconds.
-/// `tsc_delta`          — TSC ticks measured over that interval.
+/// `known_interval_ns` : duration of the reference interval in nanoseconds.
+/// `tsc_delta`          : TSC ticks measured over that interval.
 ///
 /// Example: if the APIC timer calibration measured 10 ms (10_000_000 ns)
 /// and `tsc_delta` = 20_000_000 cycles  →  TSC runs at 2 GHz.

@@ -87,7 +87,7 @@ impl WaitQueue {
                 .expect("WaitQueue waiter queue overflow");
         }
 
-        // Block — returns when wake_task(id) is called (or immediately if
+        // Block : returns when wake_task(id) is called (or immediately if
         // wake_pending was already set by a racing wake_one()).
         block_current_task();
     }
@@ -115,10 +115,10 @@ impl WaitQueue {
         loop {
             // Hold the waiters lock while evaluating the condition so that a
             // concurrent wake_one() either:
-            //   (a) finds us in the waiter list and calls wake_task() — which
+            //   (a) finds us in the waiter list and calls wake_task() : which
             //       sets wake_pending if we haven't blocked yet, or unblocks us
             //       if we already have, or
-            //   (b) runs before we push ourselves — in which case it won't pop
+            //   (b) runs before we push ourselves : in which case it won't pop
             //       us, but the condition will be true on the next evaluation.
             {
                 let mut waiters = self.waiters.lock();
@@ -139,7 +139,7 @@ impl WaitQueue {
             // block_current_task() returns immediately.
             block_current_task();
 
-            // Woken — re-evaluate the condition at the top of the loop.
+            // Woken : re-evaluate the condition at the top of the loop.
         }
     }
 

@@ -10,7 +10,7 @@
 // virtually contiguous, physically fragmented, and independent from
 // high-order physically contiguous buddy blocks.
 //
-// Lock ordering — SLAB_ALLOC (outer) may call the frame-allocation helpers.
+// Lock ordering : SLAB_ALLOC (outer) may call the frame-allocation helpers.
 // Those helpers can hit a CPU-local cache (no global buddy lock) or fall back
 // to the global buddy lock as needed.
 
@@ -118,7 +118,7 @@ const POISON_BYTE: u8 = 0xDE;
 const SLAB_CANARY: u32 = 0xDEAD_BEEF;
 
 // ---------------------------------------------------------------------------
-// Slab page header — embedded at byte 0 of every buddy page used by a class.
+// Slab page header : embedded at byte 0 of every buddy page used by a class.
 // Blocks start at offset SLAB_HEADER_SIZE within the page.
 // ---------------------------------------------------------------------------
 
@@ -156,7 +156,7 @@ const SLAB_HEADER_SIZE: usize = core::mem::size_of::<SlabPageHeader>();
 // Compile-time invariants.
 const _: () = assert!(
     SLAB_HEADER_SIZE == 24,
-    "SlabPageHeader size changed — update docs"
+    "SlabPageHeader size changed : update docs"
 );
 const _: () = assert!(
     (4096 - SLAB_HEADER_SIZE) / SLAB_SIZES[NUM_SLABS - 1] >= 1,
@@ -218,7 +218,7 @@ impl SlabState {
 
         let frame = match memory::allocate_frame(token) {
             Ok(f) => f,
-            Err(_) => return, // OOM — alloc_block will see null partial and return null
+            Err(_) => return, // OOM : alloc_block will see null partial and return null
         };
         SLAB_PAGES_ALLOCATED.fetch_add(1, AtomicOrdering::Relaxed);
 
@@ -478,7 +478,7 @@ unsafe impl GlobalAlloc for LockedHeap {
                 // Catch layout mismatches where a vmalloc pointer is freed with
                 // a small layout (classify_kernel_heap_backend routes to Slab).
                 // This means the caller passed a different layout to dealloc than
-                // was used for alloc — a GlobalAlloc contract violation.
+                // was used for alloc : a GlobalAlloc contract violation.
                 #[cfg(debug_assertions)]
                 {
                     let addr = ptr as u64;
@@ -486,12 +486,12 @@ unsafe impl GlobalAlloc for LockedHeap {
                         && addr < crate::memory::vmalloc::VMALLOC_VIRT_END
                     {
                         crate::serial_println!(
-                            "[heap][bug] slab dealloc: ptr {:#x} is in vmalloc range — layout mismatch",
+                            "[heap][bug] slab dealloc: ptr {:#x} is in vmalloc range : layout mismatch",
                             addr
                         );
                         debug_assert!(
                             false,
-                            "slab dealloc with vmalloc pointer — alloc/dealloc layout mismatch"
+                            "slab dealloc with vmalloc pointer : alloc/dealloc layout mismatch"
                         );
                     }
                 }
@@ -515,7 +515,7 @@ unsafe impl GlobalAlloc for LockedHeap {
                     }
                 } else {
                     // Pointer is outside the vmalloc arena with a large-allocation
-                    // layout — nothing is freed (GlobalAlloc contract violation).
+                    // layout : nothing is freed (GlobalAlloc contract violation).
                     crate::serial_println!(
                         "[heap][leak] vmalloc dealloc: ptr {:#x} outside vmalloc arena [{:#x}..{:#x}]",
                         addr,
@@ -525,7 +525,7 @@ unsafe impl GlobalAlloc for LockedHeap {
                     #[cfg(debug_assertions)]
                     debug_assert!(
                         false,
-                        "vmalloc dealloc with out-of-range pointer — memory leaked"
+                        "vmalloc dealloc with out-of-range pointer : memory leaked"
                     );
                 }
             }

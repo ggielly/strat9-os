@@ -2387,7 +2387,7 @@ pub(super) fn cmd_wasm_run_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-/// `health` — system health diagnostic (boot graph, strates, IPC, VFS mounts).
+/// `health` : system health diagnostic (boot graph, strates, IPC, VFS mounts).
 pub(super) fn cmd_health_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("=== Strat9 Health Report ===\n");
 

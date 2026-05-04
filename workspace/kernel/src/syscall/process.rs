@@ -410,7 +410,7 @@ pub fn sys_exit_group(exit_code: u64) -> Result<u64, SyscallError> {
         }
     }
 
-    // Diverges — never returns.
+    // Diverges : never returns.
     crate::process::scheduler::exit_current_task(exit_code as i32)
 }
 
@@ -437,7 +437,7 @@ pub fn sys_arch_prctl(code: u64, addr: u64) -> Result<u64, SyscallError> {
         ARCH_SET_FS => {
             // Store in task struct (so it survives context switches).
             task.user_fs_base.store(addr, Ordering::Relaxed);
-            // Write to MSR immediately — we are the current task.
+            // Write to MSR immediately : we are the current task.
             unsafe { wrmsr(MSR_FS_BASE, addr) };
             Ok(0)
         }

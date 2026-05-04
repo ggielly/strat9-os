@@ -1,10 +1,10 @@
-//! Block-device scheme — exposes raw disk devices under `/dev`.
+//! Block-device scheme : exposes raw disk devices under `/dev`.
 //!
 //! ## Namespace layout
 //!
 //! ```text
-//! /dev/          — directory listing (this scheme root)
-//! /dev/sda       — first SATA disk (AHCI port 0), raw byte-addressable
+//! /dev/          : directory listing (this scheme root)
+//! /dev/sda       : first SATA disk (AHCI port 0), raw byte-addressable
 //! ```
 //!
 //! ## I/O model

@@ -638,13 +638,13 @@ pub fn sys_mem_region_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallErro
 ///
 /// | `addr`          | Behaviour                                              |
 /// |-----------------|--------------------------------------------------------|
-/// | `0`             | Query — return current break unchanged.                |
+/// | `0`             | Query : return current break unchanged.                |
 /// | `> current_brk` | Extend heap; new pages are zero-filled RW anonymous.   |
 /// | `< current_brk` | Shrink heap; backing pages are freed.                  |
-/// | `< BRK_BASE`    | Invalid — return current break unchanged (Linux compat).|
+/// | `< BRK_BASE`    | Invalid : return current break unchanged (Linux compat).|
 ///
 /// On any error (OOM, out-of-range) the **unchanged** break is returned rather
-/// than a negative code — this is the Linux `brk(2)` contract.
+/// than a negative code : this is the Linux `brk(2)` contract.
 pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
 
@@ -675,7 +675,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     // ── Compute page-aligned extents ──────────────────────────────────────
     // The heap occupies [BRK_BASE, page_align_up(current_brk)).
     // Any bytes in the last partial page are already backed but not accounted
-    // for in the page-end calculation — they stay mapped on shrink.
+    // for in the page-end calculation : they stay mapped on shrink.
     let old_page_end = page_align_up(current_brk);
     let new_page_end = page_align_up(addr);
 
@@ -700,7 +700,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             )
             .is_err()
         {
-            // OOM — return the unchanged break (Linux behaviour).
+            // OOM : return the unchanged break (Linux behaviour).
             return Ok(current_brk);
         }
         log::trace!(

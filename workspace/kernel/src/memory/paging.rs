@@ -31,7 +31,7 @@ use crate::{
 /// If a newly allocated page-table frame contains stale bytes (left behind by
 /// the slab allocator or a previous allocation), any non-zero entry is decoded
 /// as a valid PTE pointing to an arbitrary physical address.  The first fetch
-/// from such an address becomes the new RIP after the Ring 3 transition —
+/// from such an address becomes the new RIP after the Ring 3 transition :
 /// explaining why RIP is non-deterministic across boots.
 ///
 /// `BuddyFrameAllocator` enforces zeroing via `FrameAllocOptions::new()
@@ -352,7 +352,7 @@ pub fn active_page_table() -> PhysAddr {
 
 /// Return the physical address of the kernel's level-4 page table.
 ///
-/// This is the CR3 value captured at init time — used by `AddressSpace::new_user()`
+/// This is the CR3 value captured at init time : used by `AddressSpace::new_user()`
 /// to clone kernel mappings (PML4 entries 256..512) into new address spaces.
 pub fn kernel_l4_phys() -> PhysAddr {
     // SAFETY: Written once during single-threaded init, read-only after that.

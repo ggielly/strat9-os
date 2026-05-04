@@ -268,7 +268,7 @@ pub struct Task {
     pub itimers: super::timer::ITimers,
     /// Pending wakeup flag: set by `wake_task()` when the task is not yet
     /// in `blocked_tasks` (it is still transitioning to Blocked state).
-    /// Checked by `block_current_task()` — if set, the task skips blocking
+    /// Checked by `block_current_task()` : if set, the task skips blocking
     /// and continues execution, preventing a lost-wakeup race.
     pub wake_pending: AtomicBool,
     /// Sleep deadline in nanoseconds (monotonic). If non-zero, the task
@@ -1067,7 +1067,7 @@ impl Task {
         // never read the uninitialized data itself, so this is sound.
         let task_box: alloc::boxed::Box<core::mem::MaybeUninit<Task>> =
             alloc::boxed::Box::new_uninit();
-        // Cast to *const Task — we never read Task data, only compute field addresses.
+        // Cast to *const Task : we never read Task data, only compute field addresses.
         let task_ptr = task_box.as_ptr() as *const Task;
         let base = task_ptr as u64;
         // SAFETY: We only take addresses via addr_of!, no uninitialized reads.

@@ -1,4 +1,4 @@
-//! In-kernel RAM filesystem — mounts on `/` to provide a writable root.
+//! In-kernel RAM filesystem : mounts on `/` to provide a writable root.
 //!
 //! ## Design
 //!
@@ -290,7 +290,7 @@ impl Scheme for RamfsScheme {
             let now = RamState::now_ns();
 
             if let Some(ino) = st.lookup(path) {
-                // Entry already exists — succeed (POSIX O_CREAT without O_EXCL).
+                // Entry already exists : succeed (POSIX O_CREAT without O_EXCL).
                 let inode = st.inodes.get_mut(&ino).unwrap();
                 if inode.is_dir() {
                     inode.atime_ns = now;
@@ -423,7 +423,7 @@ impl Scheme for RamfsScheme {
 
     /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
-        Ok(()) // stateless — nothing to clean up
+        Ok(()) // stateless : nothing to clean up
     }
 
     // ── size ─────────────────────────────────────────────────────────────────

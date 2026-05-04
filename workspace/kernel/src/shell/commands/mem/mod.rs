@@ -184,8 +184,8 @@ fn cmd_mem_zones() -> Result<(), ShellError> {
             "    Pageblocks: {} (u/m = {} / {}, order={})",
             info.pageblock_count,
             info.unmovable_pageblocks,
-            info.movable_pageblocks
-            ,crate::memory::zone::PAGEBLOCK_ORDER
+            info.movable_pageblocks,
+            crate::memory::zone::PAGEBLOCK_ORDER
         );
         shell_println!(
             "    Free(u/m): {} {} / {} {}",
@@ -225,7 +225,7 @@ fn cmd_mem_zones() -> Result<(), ShellError> {
     Ok(())
 }
 
-/// Diagnostic view — poison quarantine, slab health, buddy alloc failures.
+/// Diagnostic view : poison quarantine, slab health, buddy alloc failures.
 fn cmd_mem_diag() -> Result<(), ShellError> {
     // ── Poison quarantine ──────────────────────────────────────────────
     let quarantine = crate::memory::poison_quarantine_pages_snapshot();

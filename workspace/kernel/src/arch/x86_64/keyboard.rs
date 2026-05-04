@@ -12,8 +12,8 @@ const KEYBOARD_BUFFER_SIZE: usize = 256;
 // ─── Interrupt-safe ring buffer ───────────────────────────────────────────────
 //
 // The previous design used three separate `Mutex` fields (buffer, head, tail).
-// `push()` — called from the keyboard ISR — acquired them in order
-// tail → buffer → head.  `pop()` — called from task context — acquired them in
+// `push()` : called from the keyboard ISR : acquired them in order
+// tail → buffer → head.  `pop()` : called from task context : acquired them in
 // order head → tail → buffer.
 //
 // This created a classic spinlock + interrupt deadlock:
@@ -57,7 +57,7 @@ impl KeyboardBuffer {
         let tail = g.tail;
         g.buf[tail] = ch;
         g.tail = (tail + 1) % KEYBOARD_BUFFER_SIZE;
-        // Buffer full — drop oldest character silently.
+        // Buffer full : drop oldest character silently.
         if g.head == g.tail {
             g.head = (g.head + 1) % KEYBOARD_BUFFER_SIZE;
         }
@@ -81,7 +81,7 @@ impl KeyboardBuffer {
         result
     }
 
-    /// Called from task context — same interrupt-disable discipline as `pop`.
+    /// Called from task context : same interrupt-disable discipline as `pop`.
     pub fn has_data(&self) -> bool {
         let saved = super::save_flags_and_cli();
         let result = {

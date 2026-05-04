@@ -56,7 +56,7 @@ extern "C" fn ipc_sender_main() -> ! {
     TEST_PORT_ID.store(port_id.as_u64(), Ordering::Release);
 
     // Yield a couple of times to give the receiver a chance to call recv() first
-    // (this tests the blocking path — receiver blocks, then we wake it)
+    // (this tests the blocking path : receiver blocks, then we wake it)
     crate::process::yield_task();
     crate::process::yield_task();
 
@@ -125,7 +125,7 @@ extern "C" fn ipc_receiver_main() -> ! {
 //   - wait_until round-trip through the scheduler
 
 /// Endpoint slots: each task takes its endpoint out (Option::take) once.
-/// SpinLock<Option<T>>: Sync when T: Send — no private-field access needed.
+/// SpinLock<Option<T>>: Sync when T: Send : no private-field access needed.
 static CHAN_TX1: SpinLock<Option<channel::Sender<u64>>> = SpinLock::new(None);
 static CHAN_TX2: SpinLock<Option<channel::Sender<u64>>> = SpinLock::new(None);
 static CHAN_RX: SpinLock<Option<channel::Receiver<u64>>> = SpinLock::new(None);

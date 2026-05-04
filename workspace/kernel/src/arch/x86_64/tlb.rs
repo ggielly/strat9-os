@@ -218,7 +218,7 @@ fn dispatch_op(op: TlbOp) {
 
     // `queued` tracks only the APIC IDs that were successfully pushed to a
     // mailbox queue.  We must not send an IPI to, or wait for an ACK from,
-    // an AP whose queue was skipped — doing so would either waste cycles or
+    // an AP whose queue was skipped : doing so would either waste cycles or
     // spin-wait forever on an ACK that was never cleared.
     let mut queued = [0u32; crate::arch::x86_64::percpu::MAX_CPUS];
     let mut queued_count = 0usize;
@@ -364,7 +364,7 @@ fn wait_for_acks(targets: &[u32]) {
     const MAX_WAIT_CYCLES: usize = 10_000_000;
     for &apic_id in targets {
         // Use if-let: if the APIC ID is gone (AP offline after we sent the IPI)
-        // there is nothing to wait for — skip rather than panic in kernel context.
+        // there is nothing to wait for : skip rather than panic in kernel context.
         let cpu_idx = match crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id) {
             Some(idx) => idx,
             None => {

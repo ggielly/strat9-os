@@ -27,7 +27,7 @@ pub struct MappingRef {
 /// If a capability ever acquires more than 4 mappings, `SmallVec` spills to
 /// the heap while the `SpinLock` is held.  This is not an IRQ path and the
 /// heap lock order (mapping_index → heap) does not conflict with any other
-/// known lock order, so the spill is not a correctness issue — only a minor
+/// known lock order, so the spill is not a correctness issue : only a minor
 /// latency concern noted in ticket #49.
 pub struct MappingIndex {
     index: SpinLock<BTreeMap<CapId, SmallVec<[MappingRef; 4]>>>,

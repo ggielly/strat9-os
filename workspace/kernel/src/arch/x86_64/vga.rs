@@ -3005,7 +3005,7 @@ impl VgaWriter {
         self.set_scroll_offset_and_render(0);
     }
 
-    /// Handle a click at pixel `(px_x, px_y)` — if it falls in the scrollbar,
+    /// Handle a click at pixel `(px_x, px_y)` : if it falls in the scrollbar,
     /// jump the view to the corresponding scroll position.
     pub fn scrollbar_click(&mut self, px_x: usize, px_y: usize) {
         if !self.enabled {

@@ -331,7 +331,7 @@ impl CapabilityManager {
     }
 
     /// Count remaining capabilities that still reference the same resource.
-    /// O(1) lookup via per-resource refcount — no full-table scan.
+    /// O(1) lookup via per-resource refcount : no full-table scan.
     pub fn resource_capability_count(&self, resource_type: ResourceType, resource: usize) -> usize {
         let key = ResourceKey(resource_type, resource);
         self.resource_refcounts

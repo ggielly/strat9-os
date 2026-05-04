@@ -384,7 +384,7 @@ pub extern "C" fn smp_main() -> ! {
         None => {
             // If we fall back to 0, this AP would share the BSP's
             // CPU index and double-increment TICK_COUNT 2× timer speed.
-            log::error!("SMP AP: APIC id {} not registered — halting core", apic_id);
+            log::error!("SMP AP: APIC id {} not registered : halting core", apic_id);
             loop {
                 core::hint::spin_loop();
             }

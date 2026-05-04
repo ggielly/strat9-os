@@ -37,9 +37,9 @@ pub use component_macro::{init_component, parse_components_toml};
 
 /// Initialization stages for components.
 ///
-/// - `Bootstrap` — Early kernel initialization, before SMP.
-/// - `Kthread`   — After SMP enabled, in kernel-thread context.
-/// - `Process`   — After first user process created.
+/// - `Bootstrap` : Early kernel initialization, before SMP.
+/// - `Kthread`   : After SMP enabled, in kernel-thread context.
+/// - `Process`   : After first user process created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum InitStage {
@@ -83,13 +83,13 @@ impl core::fmt::Display for ComponentInitError {
 /// `init_all()` can iterate entries with `ptr::add(1)`.
 #[repr(C)]
 pub struct ComponentEntry {
-    /// Function name as written in source — used for dependency resolution.
+    /// Function name as written in source : used for dependency resolution.
     pub name: &'static str,
     /// Lifecycle stage this component belongs to.
     pub stage: InitStage,
     /// The registered initializer.
     pub init_fn: fn() -> Result<(), ComponentInitError>,
-    /// `"file!():fn_name"` — for log messages only.
+    /// `"file!():fn_name"` : for log messages only.
     pub path: &'static str,
     /// Lower value = earlier init within the same topological level.
     pub priority: u32,
@@ -184,7 +184,7 @@ extern "C" {
 /// 4. Execute each initializer in the computed order.
 ///
 /// Cross-stage dependencies (names not found in the current stage) are warned
-/// about and skipped — they are assumed to have already run in a prior stage.
+/// about and skipped : they are assumed to have already run in a prior stage.
 ///
 /// Detected cycles are logged as errors; cyclic components are appended in
 /// priority order after the acyclic ones (best-effort fallback).
@@ -234,7 +234,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
                 adj[dep_idx].push(i);
                 in_degree[i] += 1;
             } else {
-                // Not in this stage — assumed handled in a prior stage.
+                // Not in this stage : assumed handled in a prior stage.
                 log::warn!(
                     "[component] '{}': dep '{}' not in {:?} stage (cross-stage, skipped)",
                     entry.name,
@@ -275,7 +275,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
     // ── 4. Cycle detection fallback ──────────────────────────────────────────
     if ordered.len() != n {
         log::error!(
-            "[component] Dependency cycle in {:?} stage — cyclic components will run last",
+            "[component] Dependency cycle in {:?} stage : cyclic components will run last",
             stage
         );
         let mut remaining: Vec<usize> = (0..n).filter(|i| !ordered.contains(i)).collect();
@@ -285,7 +285,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
 
     // ── 5. Execute ───────────────────────────────────────────────────────────
     log::info!(
-        "[component] {:?} stage — {} component(s) to initialize",
+        "[component] {:?} stage : {} component(s) to initialize",
         stage,
         ordered.len()
     );

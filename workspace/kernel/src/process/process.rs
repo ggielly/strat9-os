@@ -36,7 +36,7 @@ pub struct Process {
     pub cwd: SyncUnsafeCell<String>,
     /// File descriptor pointing to the current working directory.
     /// Used by `*at()` syscalls as the resolution root.
-    /// `usize::MAX` means "not yet set — fall back to root `/`".
+    /// `usize::MAX` means "not yet set : fall back to root `/`".
     pub cwd_fd: AtomicU64,
     /// File creation mask (inherited by children, NOT reset by exec).
     pub umask: AtomicU32,

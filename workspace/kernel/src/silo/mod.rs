@@ -2663,7 +2663,7 @@ pub fn sys_silo_suspend(handle: u64) -> Result<u64, SyscallError> {
 
     // Lock is released before suspend_task (which takes the scheduler lock)
     // to avoid lock-ordering deadlock. Tasks added between the two locks
-    // won't be suspended — acceptable best-effort trade-off.
+    // won't be suspended : acceptable best-effort trade-off.
     let tasks = {
         let mut mgr = SILO_MANAGER.lock();
         let silo = mgr.get_mut(silo_id)?;
@@ -2734,7 +2734,7 @@ pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
 }
 
 // ============================================================================
-// Kernel-side CLI helpers (no capability gate — shell runs in Ring 0)
+// Kernel-side CLI helpers (no capability gate : shell runs in Ring 0)
 // ============================================================================
 
 pub fn kernel_suspend_silo(selector: &str) -> Result<u32, SyscallError> {

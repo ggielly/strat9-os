@@ -300,7 +300,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_POLL => super::poll::sys_poll(arg1, arg2, arg3),
         SYS_PPOLL => super::poll::sys_poll(arg1, arg2, 0),
 
-        // *at() syscalls — FD-relative path resolution ======================
+        // *at() syscalls : FD-relative path resolution ======================
         SYS_OPENAT => crate::vfs::sys_openat(arg1, arg2, arg3, arg4),
         SYS_FSTATAT => crate::vfs::sys_fstatat(arg1, arg2, arg3, arg4),
 
@@ -378,7 +378,7 @@ fn sys_null() -> Result<u64, SyscallError> {
     Ok(0x57A79)
 }
 
-/// SYS_HANDLE_CLOSE (2): Close a handle. Stub — always succeeds.
+/// SYS_HANDLE_CLOSE (2): Close a handle. Stub : always succeeds.
 fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(_handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;

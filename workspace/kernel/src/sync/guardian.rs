@@ -1,4 +1,4 @@
-//! Lock guardian trait — determines the guard behaviour of [`SpinLock`].
+//! Lock guardian trait : determines the guard behaviour of [`SpinLock`].
 //!
 //! Two built-in implementations are provided:
 //!

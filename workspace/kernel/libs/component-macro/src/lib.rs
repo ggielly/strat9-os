@@ -180,7 +180,7 @@ pub fn init_component(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let stage = Ident::new(&component_args.stage, Span::call_site());
     let priority = component_args.priority;
-    let depends_on = &component_args.depends_on; // Vec<String> — quoted as &[str_lit, ...]
+    let depends_on = &component_args.depends_on; // Vec<String> : quoted as &[str_lit, ...]
 
     // Static name: guaranteed unique within a crate via function name.
     let static_name = quote::format_ident!("__COMPONENT_ENTRY_{}", function_name);

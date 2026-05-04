@@ -1,4 +1,4 @@
-//! ABI layout self-tests — struct sizes, alignments, field offsets, constants.
+//! ABI layout self-tests : struct sizes, alignments, field offsets, constants.
 //!
 //! Validates that the kernel's view of ABI structures matches the published
 //! contract in `strat9_abi`. Runs under `feature = "selftest"` only.

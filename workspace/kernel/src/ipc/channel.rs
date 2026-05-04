@@ -2,7 +2,7 @@
 //!
 //! ## Two levels of abstraction
 //!
-//! ### 1. Typed MPMC channel — kernel-internal
+//! ### 1. Typed MPMC channel : kernel-internal
 //!
 //! [`channel`]`<T>(capacity)` returns a `(`[`Sender`]`<T>, `[`Receiver`]`<T>)` pair.
 //! Both endpoints are cloneable (Multi-Producer / Multi-Consumer).
@@ -15,7 +15,7 @@
 //! let rx2 = rx.clone();           // second consumer
 //! ```
 //!
-//! ### 2. Symmetric channel — userspace IPC (silo-to-silo)
+//! ### 2. Symmetric channel : userspace IPC (silo-to-silo)
 //!
 //! [`SyncChan`] is a symmetric [`IpcMessage`] channel: any holder can send
 //! *or* receive.  It is stored by [`ChanId`] in a global registry and
@@ -24,7 +24,7 @@
 //!
 //! ## Blocking guarantee
 //!
-//! Both levels use [`WaitQueue::wait_until`] — the condition closure is
+//! Both levels use [`WaitQueue::wait_until`] : the condition closure is
 //! evaluated atomically under the waiter lock, eliminating the classic
 //! lost-wakeup race without a polling loop.
 //!
@@ -55,7 +55,7 @@ pub enum ChannelError {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Typed MPMC channel — kernel-internal
+// Typed MPMC channel : kernel-internal
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Shared inner state for the typed MPMC channel.
@@ -123,7 +123,7 @@ impl<T: Send> Drop for Sender<T> {
     /// Performs the drop operation.
     fn drop(&mut self) {
         if self.inner.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // Last sender gone — mark and wake blocked receivers.
+            // Last sender gone : mark and wake blocked receivers.
             self.inner
                 .status
                 .store(STATUS_SENDER_GONE, Ordering::Release);
@@ -159,7 +159,7 @@ impl<T: Send> Sender<T> {
                 }
             }
             // `buf` (queue lock) is released here, before returning from the
-            // closure — never held while wake_one() is called below.
+            // closure : never held while wake_one() is called below.
         });
 
         // Wake exactly one receiver AFTER releasing the waiters lock.
@@ -236,7 +236,7 @@ impl<T: Send> Drop for Receiver<T> {
     /// Performs the drop operation.
     fn drop(&mut self) {
         if self.inner.receiver_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // Last receiver gone — mark and wake blocked senders.
+            // Last receiver gone : mark and wake blocked senders.
             self.inner
                 .status
                 .store(STATUS_RECEIVER_GONE, Ordering::Release);
@@ -329,7 +329,7 @@ pub fn channel<T: Send>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     )
 }
 
-// Symmetric channel (SyncChan) — userspace / silo-to-silo IPC
+// Symmetric channel (SyncChan) : userspace / silo-to-silo IPC
 /// A symmetric bounded channel over [`IpcMessage`], used by the global
 /// channel registry for silo-to-silo syscall-level IPC.
 ///
@@ -480,7 +480,7 @@ impl SyncChan {
     }
 }
 
-// Global channel registry — userspace syscall surface
+// Global channel registry : userspace syscall surface
 /// Unique identifier for a [`SyncChan`] in the global registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChanId(pub u64);

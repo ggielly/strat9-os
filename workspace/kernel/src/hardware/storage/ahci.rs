@@ -1,4 +1,4 @@
-//! AHCI (Advanced Host Controller Interface) driver — AHCI spec 1.3.1
+//! AHCI (Advanced Host Controller Interface) driver : AHCI spec 1.3.1
 //!
 //! PCI: class=0x01 (Mass Storage), subclass=0x06 (SATA), prog_if=0x01
 //! MMIO base: BAR5 (ABAR)
@@ -17,10 +17,10 @@
 //!
 //! Per-port statics (indexed by `port_num 0..32`) are used so the IRQ handler
 //! can signal completion without acquiring any slow lock:
-//!   - `PORT_VIRT[n]`       — MMIO virtual address of port n registers
-//!   - `PORT_SLOT0_DONE[n]` — set by IRQ handler when slot-0 completes
-//!   - `PORT_SLOT0_ERROR[n]`— set by IRQ handler when a task-file error fires
-//!   - `PORT_WQ[n]`         — WaitQueue; issuing task blocks here
+//!   - `PORT_VIRT[n]`       : MMIO virtual address of port n registers
+//!   - `PORT_SLOT0_DONE[n]` : set by IRQ handler when slot-0 completes
+//!   - `PORT_SLOT0_ERROR[n]`: set by IRQ handler when a task-file error fires
+//!   - `PORT_WQ[n]`         : WaitQueue; issuing task blocks here
 
 use crate::{
     hardware::pci_client::{self as pci, ProbeCriteria},
@@ -50,7 +50,7 @@ const PORT_CLBU: u64 = 0x04;
 const PORT_FB: u64 = 0x08;
 const PORT_FBU: u64 = 0x0C;
 const PORT_IS: u64 = 0x10;
-const PORT_IE: u64 = 0x14; // PxIE — port interrupt enable
+const PORT_IE: u64 = 0x14; // PxIE : port interrupt enable
 const PORT_CMD: u64 = 0x18;
 const PORT_TFD: u64 = 0x20;
 const PORT_SIG: u64 = 0x24;
@@ -166,31 +166,31 @@ unsafe impl Sync for AhciController {}
 // These statics are accessed from the IRQ handler without locks.
 // Indexed by port_num (0..32).
 
-/// AHCI ABAR virtual address — written once during init, read by IRQ handler.
+/// AHCI ABAR virtual address : written once during init, read by IRQ handler.
 static AHCI_ABAR_VIRT: AtomicU64 = AtomicU64::new(0);
 
 /// PCI interrupt line used by this controller.
 pub static AHCI_IRQ_LINE: AtomicU8 = AtomicU8::new(0xFF);
 
-/// Per-port MMIO virtual addresses — written once during init.
+/// Per-port MMIO virtual addresses : written once during init.
 static PORT_VIRT: [AtomicU64; 32] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
     [INIT; 32]
 };
 
-/// Per-port slot-0 completion flags — set by IRQ handler, cleared by consumer.
+/// Per-port slot-0 completion flags : set by IRQ handler, cleared by consumer.
 static PORT_SLOT0_DONE: [AtomicBool; 32] = {
     const INIT: AtomicBool = AtomicBool::new(false);
     [INIT; 32]
 };
 
-/// Per-port slot-0 error flags — set by IRQ handler on task-file error.
+/// Per-port slot-0 error flags : set by IRQ handler on task-file error.
 static PORT_SLOT0_ERROR: [AtomicBool; 32] = {
     const INIT: AtomicBool = AtomicBool::new(false);
     [INIT; 32]
 };
 
-/// Per-port wait queues — tasks block here while waiting for IRQ completion.
+/// Per-port wait queues : tasks block here while waiting for IRQ completion.
 static PORT_WQ: [WaitQueue; 32] = {
     const INIT: WaitQueue = WaitQueue::new();
     [INIT; 32]
@@ -313,7 +313,7 @@ impl Bounce {
 // ─── Command submission ───────────────────────────────────────────────────────
 //
 // Two completion strategies:
-//   1. Task context (current_task_id() is Some): IRQ + WaitQueue — the issuing
+//   1. Task context (current_task_id() is Some): IRQ + WaitQueue : the issuing
 //      task is blocked by the scheduler until the IRQ fires and wakes it.
 //   2. Boot context (no task yet): legacy busy-poll with timeout.
 
@@ -520,7 +520,7 @@ pub fn handle_interrupt() {
             }
         } else {
             PORT_SLOT0_ERROR[port_num as usize].store(false, Ordering::Release);
-            // SAFETY: W1C — write back PxIS to clear all set bits
+            // SAFETY: W1C : write back PxIS to clear all set bits
             unsafe { wr32(pvirt, PORT_IS, pxis) };
         }
 
@@ -617,7 +617,7 @@ impl AhciController {
             let ssts = rd32(pvirt, PORT_SSTS);
             let det = ssts & SSTS_DET_MASK;
             if det != SSTS_DET_COMM {
-                log::debug!("AHCI: port {} DET={} — no device, skipping", port_num, det);
+                log::debug!("AHCI: port {} DET={} : no device, skipping", port_num, det);
                 continue;
             }
 
@@ -625,7 +625,7 @@ impl AhciController {
             let sig = rd32(pvirt, PORT_SIG);
             if sig != SIG_SATA {
                 log::debug!(
-                    "AHCI: port {} sig={:#010x} — not plain SATA, skipping",
+                    "AHCI: port {} sig={:#010x} : not plain SATA, skipping",
                     port_num,
                     sig
                 );
@@ -671,7 +671,7 @@ impl AhciController {
                     let w3 = u16::from_le_bytes([id_buf[206], id_buf[207]]) as u64;
                     port.sector_count = w0 | (w1 << 16) | (w2 << 32) | (w3 << 48);
                     log::info!(
-                        "AHCI: port {} SATA — {} sectors ({} MiB)",
+                        "AHCI: port {} SATA : {} sectors ({} MiB)",
                         port_num,
                         port.sector_count,
                         (port.sector_count * SECTOR_SIZE as u64) / (1024 * 1024)
@@ -695,7 +695,7 @@ impl AhciController {
         AHCI_IRQ_LINE.store(irq_line, Ordering::Relaxed);
 
         // Enable global HBA interrupts (GHC.IE)
-        // SAFETY: MMIO write — all port interrupts already enabled above
+        // SAFETY: MMIO write : all port interrupts already enabled above
         let ghc = rd32(abar_virt, HBA_GHC);
         wr32(abar_virt, HBA_GHC, ghc | GHC_IE);
 

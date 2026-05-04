@@ -7,7 +7,7 @@
 //! - **Naive byte-by-byte** as baseline
 //!
 //! The `xfs_crc32c` function automatically selects the best available method
-//! at compile time. Fully `no_std` compatible — no external crate dependency.
+//! at compile time. Fully `no_std` compatible : no external crate dependency.
 
 /// CRC32C polynomial (Castagnoli) - reversed representation.
 const CRC32C_POLY: u32 = 0x82F63B78;

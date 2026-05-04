@@ -233,7 +233,7 @@ impl VirtioBlockDevice {
         // Build descriptor chain (DMA → physical addresses)
         let mut buffers = Vec::with_capacity(3);
 
-        // 1. Header (Device Readable) — physical addr for DMA
+        // 1. Header (Device Readable) : physical addr for DMA
         buffers.push((
             metadata_phys,
             mem::size_of::<BlockRequestHeader>() as u32,
@@ -283,7 +283,7 @@ impl VirtioBlockDevice {
             buffers.push((buf_phys, buf_size as u32, device_writable));
         }
 
-        // 3. Status (Device Writable) — physical addr for DMA
+        // 3. Status (Device Writable) : physical addr for DMA
         buffers.push((metadata_phys + status_offset, 1, true));
 
         // Submit request

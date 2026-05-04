@@ -199,13 +199,13 @@ fn check_wake_deadlines(current_time_ns: u64) {
                         drop_count += 1;
                     }
                     // If deferred_drops is full the task Arc is dropped here,
-                    // still under the lock — but that case means we already
+                    // still under the lock : but that case means we already
                     // have 128 orphaned tasks with no valid CPU, which is a
                     // bug elsewhere; emit a trace and accept the latency hit.
                 }
             }
         }
-        // `blocked` guard drops here — BLOCKED_TASKS lock released BEFORE any
+        // `blocked` guard drops here : BLOCKED_TASKS lock released BEFORE any
         // Arc<Task> drop and BEFORE send_resched_ipi_to_cpu.
         // --- end critical section ---
     }
