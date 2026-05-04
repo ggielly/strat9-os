@@ -219,7 +219,7 @@ impl phy::TxToken for Strat9TxToken {
                 }
                 Err(e @ (Error::Again | Error::QueueFull)) => {
                     last_err = Some(e);
-                    let _ = proc_yield();
+                    sleep_micros(1000);
                 }
                 Err(e @ Error::IoError) if attempt + 1 < NET_SEND_RETRY_LIMIT => {
                     last_err = Some(e);
@@ -1873,6 +1873,7 @@ impl NetworkStrate {
     /// Implements serve.
     fn serve(&mut self, port: u64) -> ! {
         log("[strate-net] Starting DHCP...\n");
+        self.enable_dhcp();
 
         loop {
             // 1. Drive the smoltcp stack (transmits queued packets, processes received ones)
@@ -1927,7 +1928,7 @@ fn wait_for_kernel_mac(max_attempts: usize) -> Option<[u8; 6]> {
     let mut mac = [0u8; 6];
 
     for attempt in 0..max_attempts {
-        if net_info(0, &mut mac).is_ok() {
+        if net_info(0, &mut mac).is_ok() && mac != [0; 6] {
             if attempt != 0 {
                 log("[strate-net] Kernel NIC became available\n");
             }
@@ -1938,7 +1939,7 @@ fn wait_for_kernel_mac(max_attempts: usize) -> Option<[u8; 6]> {
             log("[strate-net] Waiting for kernel NIC registration...\n");
         }
 
-        let _ = proc_yield();
+        sleep_micros(1000);
     }
 
     None
