@@ -1992,7 +1992,7 @@ fn sys_pci_cfg_write(
     Ok(0)
 }
 
-// ── Typed MPMC sync-channel syscall handlers (IPC-02) ================================================================================─
+//  Typed MPMC sync-channel syscall handlers (IPC-02) ================================================================================
 
 /// SYS_CHAN_CREATE (220): create a bounded sync-channel.
 ///

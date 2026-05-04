@@ -76,7 +76,7 @@ impl Guardian for IrqDisabled {
     }
 }
 
-// ========== PreemptDisabled ==========──
+// ========== PreemptDisabled ==========
 
 /// Guardian that only disables preemption, leaving IRQs untouched.
 ///

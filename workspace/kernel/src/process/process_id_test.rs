@@ -39,7 +39,7 @@ fn run_process_id_suite() -> bool {
     let mut passed = 0usize;
     let mut total = 0usize;
 
-    // ── 1. getpid returns non-zero ============================================================================================================================================
+    //  1. getpid returns non-zero ============================================================================================================================================
     log_section("1. GETPID");
     let mut s = true;
     match proc_sys::sys_getpid() {
@@ -57,7 +57,7 @@ fn run_process_id_suite() -> bool {
     }
     record("getpid returns non-zero", s, &mut passed, &mut total);
 
-    // ── 2. gettid returns non-zero ============================================================================================================================================
+    //  2. gettid returns non-zero ============================================================================================================================================
     log_section("2. GETTID");
     let mut s = true;
     match proc_sys::sys_gettid() {
@@ -75,7 +75,7 @@ fn run_process_id_suite() -> bool {
     }
     record("gettid returns non-zero", s, &mut passed, &mut total);
 
-    // ── 3. getpid == gettid for main thread ==============================================================================================================
+    //  3. getpid == gettid for main thread ==============================================================================================================
     log_section("3. PID == TID (MAIN THREAD)");
     let mut s = true;
     let pid = proc_sys::sys_getpid().unwrap_or(0);
@@ -91,7 +91,7 @@ fn run_process_id_suite() -> bool {
     }
     record("pid and tid are non-zero", s, &mut passed, &mut total);
 
-    // ── 4. getppid returns a valid pid ========================================================================================================================──
+    //  4. getppid returns a valid pid ========================================================================================================================
     log_section("4. GETPPID");
     let mut s = true;
     match proc_sys::sys_getppid() {
@@ -105,7 +105,7 @@ fn run_process_id_suite() -> bool {
     }
     record("getppid returns value", s, &mut passed, &mut total);
 
-    // ── 5. getpid via scheduler matches syscall ==========================================================================================──
+    //  5. getpid via scheduler matches syscall ==========================================================================================
     log_section("5. GETPID CONSISTENCY");
     let mut s = true;
     let sched_pid = current_pid().unwrap_or(0) as u64;
@@ -121,7 +121,7 @@ fn run_process_id_suite() -> bool {
     }
     record("getpid scheduler vs syscall", s, &mut passed, &mut total);
 
-    // ── 6. getuid / geteuid return 0 (root default) ================================================================================
+    //  6. getuid / geteuid return 0 (root default) ================================================================================
     log_section("6. GETUID / GETEUID");
     let mut s = true;
     match proc_sys::sys_getuid() {
@@ -149,7 +149,7 @@ fn run_process_id_suite() -> bool {
     }
     record("getuid / geteuid", s, &mut passed, &mut total);
 
-    // ── 7. getgid / getegid return 0 (root default) ================================================================================
+    //  7. getgid / getegid return 0 (root default) ================================================================================
     log_section("7. GETGID / GETEGID");
     let mut s = true;
     match proc_sys::sys_getgid() {
@@ -172,7 +172,7 @@ fn run_process_id_suite() -> bool {
     }
     record("getgid / getegid", s, &mut passed, &mut total);
 
-    // ── 8. setuid + getuid round-trip ==================================================================================================================================
+    //  8. setuid + getuid round-trip ==================================================================================================================================
     log_section("8. SETUID + GETUID ROUND-TRIP");
     let mut s = true;
     let orig_uid = proc_sys::sys_getuid().unwrap_or(0);
@@ -193,7 +193,7 @@ fn run_process_id_suite() -> bool {
     }
     record("setuid + getuid round-trip", s, &mut passed, &mut total);
 
-    // ── 9. setgid + getgid round-trip ==================================================================================================================================
+    //  9. setgid + getgid round-trip ==================================================================================================================================
     log_section("9. SETGID + GETGID ROUND-TRIP");
     let mut s = true;
     let orig_gid = proc_sys::sys_getgid().unwrap_or(0);
@@ -214,7 +214,7 @@ fn run_process_id_suite() -> bool {
     }
     record("setgid + getgid round-trip", s, &mut passed, &mut total);
 
-    // ── 10. getpgid(0) returns current pgid ==============================================================================================================
+    //  10. getpgid(0) returns current pgid ==============================================================================================================
     log_section("10. GETPGID(0)");
     let mut s = true;
     match proc_sys::sys_getpgid(0) {
@@ -228,7 +228,7 @@ fn run_process_id_suite() -> bool {
     }
     record("getpgid(0)", s, &mut passed, &mut total);
 
-    // ── 11. getpgrp == getpgid(0) ============================================================================================================================================─
+    //  11. getpgrp == getpgid(0) ============================================================================================================================================
     log_section("11. GETPGRP == GETPGID(0)");
     let mut s = true;
     let pgid_0 = proc_sys::sys_getpgid(0).unwrap_or(u64::MAX);
@@ -244,7 +244,7 @@ fn run_process_id_suite() -> bool {
     }
     record("getpgrp == getpgid(0)", s, &mut passed, &mut total);
 
-    // ── 12. getsid(0) ==========
+    //  12. getsid(0) ==========
     log_section("12. GETSID(0)");
     let mut s = true;
     match proc_sys::sys_getsid(0) {
@@ -258,7 +258,7 @@ fn run_process_id_suite() -> bool {
     }
     record("getsid(0)", s, &mut passed, &mut total);
 
-    // ── 13. setsid ====================
+    //  13. setsid ====================
     log_section("13. SETSID");
     let mut s = true;
     match proc_sys::sys_setsid() {
@@ -279,7 +279,7 @@ fn run_process_id_suite() -> bool {
     }
     record("setsid", s, &mut passed, &mut total);
 
-    // ── 14. setpgid(0, 0) sets pgid to own pid ==========================================================================================──
+    //  14. setpgid(0, 0) sets pgid to own pid ==========================================================================================
     log_section("14. SETPGID(0, 0)");
     let mut s = true;
     match proc_sys::sys_setpgid(0, 0) {
@@ -305,7 +305,7 @@ fn run_process_id_suite() -> bool {
     }
     record("setpgid(0,0) sets pgid=pid", s, &mut passed, &mut total);
 
-    // ── 15. current_task_clone returns Some ==============================================================================================================
+    //  15. current_task_clone returns Some ==============================================================================================================
     log_section("15. CURRENT_TASK_CLONE");
     let mut s = true;
     match current_task_clone() {
@@ -328,7 +328,7 @@ fn run_process_id_suite() -> bool {
     }
     record("current_task_clone is Some", s, &mut passed, &mut total);
 
-    // ── 16. current_task_id returns Some ========================================================================================================================
+    //  16. current_task_id returns Some ========================================================================================================================
     log_section("16. CURRENT_TASK_ID");
     let mut s = true;
     match current_task_id() {
@@ -342,7 +342,7 @@ fn run_process_id_suite() -> bool {
     }
     record("current_task_id is Some", s, &mut passed, &mut total);
 
-    // ── Summary ==============================
+    //  Summary ==============================
     log_section("PROCESS ID TEST SUMMARY");
     let ok = passed == total;
     crate::serial_println!(

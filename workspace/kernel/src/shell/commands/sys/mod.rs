@@ -1425,7 +1425,7 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
         "Label",
         "Strates"
     );
-    shell_println!("====================================================================================================================================================================================──");
+    shell_println!("====================================================================================================================================================================================");
     for r in rows {
         shell_println!(
             "{:<6} {:<12} {:<10} {:<7} {:<18} {:<6o} {:<12} {}",
@@ -1533,14 +1533,14 @@ fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
 
     shell_println!("Runtime:");
     shell_println!("{:<20} {:<24} {}", "Strate", "BelongsTo", "Status");
-    shell_println!("====================──");
+    shell_println!("====================");
     for r in runtime_rows {
         shell_println!("{:<20} {:<24} {}", r.strate, r.belongs_to, r.status);
     }
     shell_println!("");
     shell_println!("Config ({}):", managed_source);
     shell_println!("{:<20} {}", "Strate", "BelongsTo");
-    shell_println!("====================──");
+    shell_println!("====================");
     for r in config_rows {
         shell_println!("{:<20} {}", r.strate, r.belongs_to);
     }
@@ -2148,7 +2148,7 @@ fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
         "Data1",
         "Tick"
     );
-    shell_println!("==========─");
+    shell_println!("==========");
     for ev in &events {
         shell_println!(
             "{:<8} {:<10} {:#010x}   {:#010x}   {}",

@@ -90,12 +90,12 @@ fn run_errno_suite() -> bool {
     let mut passed = 0usize;
     let mut total = 0usize;
 
-    // ── 1. close invalid fd → BadHandle ========================================================================================================================─
+    //  1. close invalid fd → BadHandle ========================================================================================================================
     log_section("1. CLOSE INVALID FD");
     let s = expect_err("close(9999)", vfs::close(9999), SyscallError::BadHandle);
     record("close(9999) → EBADF", s, &mut passed, &mut total);
 
-    // ── 2. read invalid fd → BadHandle ========================================================================================================================──
+    //  2. read invalid fd → BadHandle ========================================================================================================================
     log_section("2. READ INVALID FD");
     let mut buf = [0u8; 8];
     let s = expect_err(
@@ -105,7 +105,7 @@ fn run_errno_suite() -> bool {
     );
     record("read(9999) → EBADF", s, &mut passed, &mut total);
 
-    // ── 3. write invalid fd → BadHandle ========================================================================================================================─
+    //  3. write invalid fd → BadHandle ========================================================================================================================
     log_section("3. WRITE INVALID FD");
     let s = expect_err(
         "write(9999)",
@@ -114,12 +114,12 @@ fn run_errno_suite() -> bool {
     );
     record("write(9999) → EBADF", s, &mut passed, &mut total);
 
-    // ── 4. fstat invalid fd → BadHandle ========================================================================================================================─
+    //  4. fstat invalid fd → BadHandle ========================================================================================================================
     log_section("4. FSTAT INVALID FD");
     let s = expect_err("fstat(9999)", vfs::fstat(9999), SyscallError::BadHandle);
     record("fstat(9999) → EBADF", s, &mut passed, &mut total);
 
-    // ── 5. lseek invalid fd → BadHandle ========================================================================================================================─
+    //  5. lseek invalid fd → BadHandle ========================================================================================================================
     log_section("5. LSEEK INVALID FD");
     let s = expect_err(
         "lseek(9999)",
@@ -128,12 +128,12 @@ fn run_errno_suite() -> bool {
     );
     record("lseek(9999) → EBADF", s, &mut passed, &mut total);
 
-    // ── 6. dup invalid fd → BadHandle ==================================================================================================================================
+    //  6. dup invalid fd → BadHandle ==================================================================================================================================
     log_section("6. DUP INVALID FD");
     let s = expect_err("dup(9999)", vfs::dup(9999), SyscallError::BadHandle);
     record("dup(9999) → EBADF", s, &mut passed, &mut total);
 
-    // ── 7. dup2 invalid fd → BadHandle ========================================================================================================================──
+    //  7. dup2 invalid fd → BadHandle ========================================================================================================================
     log_section("7. DUP2 INVALID FD");
     let s = expect_err(
         "dup2(9999, 10)",
@@ -142,7 +142,7 @@ fn run_errno_suite() -> bool {
     );
     record("dup2(9999, 10) → EBADF", s, &mut passed, &mut total);
 
-    // ── 8. double close → BadHandle ==================================================================================================================================──
+    //  8. double close → BadHandle ==================================================================================================================================
     log_section("8. DOUBLE CLOSE");
     let mut s = true;
     let f = format!("{}/dbl_close.txt", base);
@@ -164,7 +164,7 @@ fn run_errno_suite() -> bool {
     let _ = vfs::unlink(&f);
     record("double close → EBADF", s, &mut passed, &mut total);
 
-    // ── 9. open non-existent → NotFound ========================================================================================================================─
+    //  9. open non-existent → NotFound ========================================================================================================================
     log_section("9. OPEN NON-EXISTENT");
     let s = expect_err(
         "open(/tmp/does_not_exist_xyz)",
@@ -173,7 +173,7 @@ fn run_errno_suite() -> bool {
     );
     record("open non-existent → ENOENT", s, &mut passed, &mut total);
 
-    // ── 10. unlink non-existent → NotFound ==============================================================================================================─
+    //  10. unlink non-existent → NotFound ==============================================================================================================
     log_section("10. UNLINK NON-EXISTENT");
     let s = expect_err(
         "unlink(non_existent)",
@@ -182,7 +182,7 @@ fn run_errno_suite() -> bool {
     );
     record("unlink non-existent → ENOENT", s, &mut passed, &mut total);
 
-    // ── 11. mkdir existing → AlreadyExists ==============================================================================================================─
+    //  11. mkdir existing → AlreadyExists ==============================================================================================================
     log_section("11. MKDIR EXISTING");
     let existing = format!("{}/existing_dir", base);
     let _ = vfs::mkdir(&existing, 0o755);
@@ -194,7 +194,7 @@ fn run_errno_suite() -> bool {
     let _ = vfs::unlink(&existing);
     record("mkdir existing → EEXIST", s, &mut passed, &mut total);
 
-    // ── 12. create_file existing → AlreadyExists ==========================================================================================─
+    //  12. create_file existing → AlreadyExists ==========================================================================================
     log_section("12. CREATE_FILE EXISTING");
     let exist_f = format!("{}/exists.txt", base);
     let _ = vfs::create_file(&exist_f, 0o644);
@@ -206,7 +206,7 @@ fn run_errno_suite() -> bool {
     let _ = vfs::unlink(&exist_f);
     record("create_file existing → EEXIST", s, &mut passed, &mut total);
 
-    // ── 13. rename non-existent source → NotFound ==========================================================================================
+    //  13. rename non-existent source → NotFound ==========================================================================================
     log_section("13. RENAME NON-EXISTENT SRC");
     let s = expect_err(
         "rename(nonexistent, dst)",
@@ -218,7 +218,7 @@ fn run_errno_suite() -> bool {
     );
     record("rename non-existent → ENOENT", s, &mut passed, &mut total);
 
-    // ── 14. link non-existent source → NotFound ==========================================================================================──
+    //  14. link non-existent source → NotFound ==========================================================================================
     log_section("14. LINK NON-EXISTENT SRC");
     let s = expect_err(
         "link(nonexistent, dst)",
@@ -230,7 +230,7 @@ fn run_errno_suite() -> bool {
     );
     record("link non-existent → ENOENT", s, &mut passed, &mut total);
 
-    // ── 15. chmod non-existent → error ========================================================================================================================──
+    //  15. chmod non-existent → error ========================================================================================================================
     log_section("15. CHMOD NON-EXISTENT");
     let s = expect_any_err(
         "chmod(nonexistent)",
@@ -238,7 +238,7 @@ fn run_errno_suite() -> bool {
     );
     record("chmod non-existent → error", s, &mut passed, &mut total);
 
-    // ── 16. readlink on regular file → error ====================================================================================================──
+    //  16. readlink on regular file → error ====================================================================================================
     log_section("16. READLINK ON REGULAR FILE");
     let f_not_sym = format!("{}/not_a_symlink.txt", base);
     let _ = vfs::create_file(&f_not_sym, 0o644);
@@ -251,7 +251,7 @@ fn run_errno_suite() -> bool {
         &mut total,
     );
 
-    // ── 17. truncate non-existent → error ==============================================================================================================──
+    //  17. truncate non-existent → error ==============================================================================================================
     log_section("17. TRUNCATE NON-EXISTENT");
     let s = expect_any_err(
         "truncate(nonexistent, 0)",
@@ -259,7 +259,7 @@ fn run_errno_suite() -> bool {
     );
     record("truncate non-existent → error", s, &mut passed, &mut total);
 
-    // ── 18. fchmod invalid fd → BadHandle ==============================================================================================================──
+    //  18. fchmod invalid fd → BadHandle ==============================================================================================================
     log_section("18. FCHMOD INVALID FD");
     let s = expect_err(
         "fchmod(9999)",
@@ -268,7 +268,7 @@ fn run_errno_suite() -> bool {
     );
     record("fchmod(9999) → EBADF", s, &mut passed, &mut total);
 
-    // ── 19. ftruncate invalid fd → BadHandle ====================================================================================================──
+    //  19. ftruncate invalid fd → BadHandle ====================================================================================================
     log_section("19. FTRUNCATE INVALID FD");
     let s = expect_err(
         "ftruncate(9999)",
@@ -277,7 +277,7 @@ fn run_errno_suite() -> bool {
     );
     record("ftruncate(9999) → EBADF", s, &mut passed, &mut total);
 
-    // ── 20. SyscallError::to_raw encodes correctly ================================================================================──
+    //  20. SyscallError::to_raw encodes correctly ================================================================================
     log_section("20. SYSCALL ERROR ENCODING");
     let mut s = true;
     let cases: &[(SyscallError, i64)] = &[
@@ -319,7 +319,7 @@ fn run_errno_suite() -> bool {
     }
     record("SyscallError::to_raw encoding", s, &mut passed, &mut total);
 
-    // ── 21. SyscallError::from_code round-trip ====================================================================================================
+    //  21. SyscallError::from_code round-trip ====================================================================================================
     log_section("21. SYSCALL ERROR FROM_CODE");
     let mut s = true;
     for &(err, expected_raw) in cases {
@@ -346,7 +346,7 @@ fn run_errno_suite() -> bool {
         &mut total,
     );
 
-    // ── 22. SyscallError::name returns correct strings ======================================================================─
+    //  22. SyscallError::name returns correct strings ======================================================================
     log_section("22. SYSCALL ERROR NAMES");
     let mut s = true;
     let name_cases: &[(SyscallError, &str)] = &[
@@ -380,7 +380,7 @@ fn run_errno_suite() -> bool {
     }
     record("SyscallError::name()", s, &mut passed, &mut total);
 
-    // ── 23. is_retryable ==========================================================================================================================================================================─
+    //  23. is_retryable ==========================================================================================================================================================================
     log_section("23. IS_RETRYABLE");
     let mut s = true;
     if !SyscallError::Interrupted.is_retryable() {
@@ -403,7 +403,7 @@ fn run_errno_suite() -> bool {
     }
     record("is_retryable", s, &mut passed, &mut total);
 
-    // ── 24. symlink to non-existent target ==============================================================================================================─
+    //  24. symlink to non-existent target ==============================================================================================================
     log_section("24. SYMLINK DANGLING");
     let sym_dangle = format!("{}/dangling_sym", base);
     let mut s = true;
@@ -436,11 +436,11 @@ fn run_errno_suite() -> bool {
     }
     record("symlink to dangling target", s, &mut passed, &mut total);
 
-    // ── Cleanup ==============================
+    //  Cleanup ==============================
     crate::serial_println!("[errno-test][CLEANUP] best-effort cleanup");
     let _ = vfs::unlink(&base);
 
-    // ── Summary ==============================
+    //  Summary ==============================
     log_section("ERRNO TEST SUMMARY");
     let ok = passed == total;
     crate::serial_println!(

@@ -1244,7 +1244,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // before `iretq`, with `CS=0x8` and `GS=user`, and the first `gs:[..]`
     // access in the handler faults in the swapgs->iretq window.
     //
-    // ── E9-hack probes ==========================================================================================================================================================================─
+    //  E9-hack probes ==========================================================================================================================================================================
     // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port
     // (visible with `-debugcon stdio` or `-debugcon file:e9.log`).
     // The push/pop rax around each probe protects registers allocated by the
@@ -1268,7 +1268,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             // interrupts enabled.
             "cli",
 
-            // ── Probe 1 : entrée dans le bloc asm ================================================================================─
+            //  Probe 1 : entrée dans le bloc asm ================================================================================
             // Les registres d'entrée sont déjà alloués par le compilateur ;
             // push/pop rax les laisse intacts.
             "push rax",
@@ -1276,7 +1276,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "out 0xe9, al",
             "pop rax",
 
-            // ── Construction de la frame iretq ==========================================================================================─
+            //  Construction de la frame iretq ==========================================================================================
             // Ordre requis par IRETQ (dépilé dans l'ordre inverse) :
             //   [RSP+32] SS
             //   [RSP+24] user RSP
@@ -1289,27 +1289,27 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "push {cs}",
             "push {rip}",
 
-            // ── Probe 2 : frame iretq complète ==========================================================================================─
+            //  Probe 2 : frame iretq complète ==========================================================================================
             "push rax",
             "mov al, 0x32",     // '2'
             "out 0xe9, al",
             "pop rax",
 
-            // ── Chargement de arg0 dans RDI ====================================================================================================─
+            //  Chargement de arg0 dans RDI ====================================================================================================
             "mov rdi, {arg0}",
 
-            // ── Probe 3 : RDI chargé, juste avant SWAPGS ==================================================──
+            //  Probe 3 : RDI chargé, juste avant SWAPGS ==================================================
             "push rax",
             "mov al, 0x33",     // '3'
             "out 0xe9, al",
             "pop rax",
 
-            // ── SWAPGS : GS.base kernel ↔ GS.base user ============================================================─
+            //  SWAPGS : GS.base kernel ↔ GS.base user ============================================================
             // Après cette instruction, GS pointe vers le bloc per-thread user.
             // Le push/pop ci-dessous ne touche pas GS, il est sûr.
             "swapgs",
 
-            // ── Probe 4 : SWAPGS réussi, IRETQ imminent ============================================================
+            //  Probe 4 : SWAPGS réussi, IRETQ imminent ============================================================
             // Si le double-fault survient sur iretq, '4' sera le DERNIER
             // caractère visible dans la console E9.
             "push rax",
@@ -1317,7 +1317,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "out 0xe9, al",
             "pop rax",
 
-            // ── IRETQ : point de non-retour ====================================================================================================─
+            //  IRETQ : point de non-retour ====================================================================================================
             "iretq",
 
             ss      = in(reg) user_ss,

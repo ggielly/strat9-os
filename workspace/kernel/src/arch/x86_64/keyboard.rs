@@ -9,7 +9,7 @@ use spin::Mutex;
 /// Keyboard input buffer size
 const KEYBOARD_BUFFER_SIZE: usize = 256;
 
-// ========== Interrupt-safe ring buffer ======================================================================================================================================================──
+// ========== Interrupt-safe ring buffer ======================================================================================================================================================
 //
 // The previous design used three separate `Mutex` fields (buffer, head, tail).
 // `push()` : called from the keyboard ISR : acquired them in order

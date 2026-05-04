@@ -8,7 +8,7 @@ use super::io::{inb, outb};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use spin::Mutex;
 
-// PS/2 controller ports ==========================================================================================================================================================================──
+// PS/2 controller ports ==========================================================================================================================================================================
 const PS2_DATA: u16 = 0x60;
 const PS2_CMD: u16 = 0x64;
 
@@ -52,7 +52,7 @@ static EVENT_BUF: Mutex<EventBuffer> = Mutex::new(EventBuffer {
     tail: 0,
 });
 
-//  Absolute cursor position (accumulated) ==============================================================================================================──
+//  Absolute cursor position (accumulated) ==============================================================================================================
 static MOUSE_ABS_X: AtomicI32 = AtomicI32::new(0);
 static MOUSE_ABS_Y: AtomicI32 = AtomicI32::new(0);
 // Cached screen bounds to avoid locking VGA from IRQ context.
@@ -83,7 +83,7 @@ pub struct MouseEvent {
     pub middle: bool,
 }
 
-// ── PS/2 helpers ==============================─
+//  PS/2 helpers ==============================
 
 /// Spin until the PS/2 input buffer is empty (safe to write).
 #[inline]

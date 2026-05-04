@@ -711,7 +711,7 @@ const SCROLLBAR_W: usize = 12;
 const MAX_SCROLLBACK: usize = 500;
 const MAX_DIRTY_RECTS: usize = 8;
 
-// Mouse cursor (X arrow, 12×16) ==================================================================================================================================──
+// Mouse cursor (X arrow, 12×16) ==================================================================================================================================
 const CURSOR_W: usize = 12;
 const CURSOR_H: usize = 16;
 const TEXT_CURSOR_MAX_DIM: usize = 32;
@@ -737,7 +737,7 @@ const CURSOR_PIXELS: [u8; CURSOR_W * CURSOR_H] = [
     0,0,0,0,0,0,0,0,0,0,0,0,
 ];
 
-// Selection clipboard ==========================================================================================================================================================================─
+// Selection clipboard ==========================================================================================================================================================================
 const CLIPBOARD_CAP: usize = 8192;
 static CLIPBOARD: spin::Mutex<([u8; CLIPBOARD_CAP], usize)> =
     spin::Mutex::new(([0u8; CLIPBOARD_CAP], 0));
@@ -777,7 +777,7 @@ pub struct VgaWriter {
     dirty_regions: DirtyRegionSet,
     track_dirty: bool,
 
-    // Scrollback buffer ==========================================================================================================================================================================─
+    // Scrollback buffer ==========================================================================================================================================================================
     /// Completed screen rows kept for history scrolling.
     sb_rows: Vec<Vec<SbCell>>,
     /// Current (incomplete) row being assembled by write_char.
@@ -4433,7 +4433,7 @@ pub fn draw_strata_stack(origin_x: usize, origin_y: usize, layer_w: usize, layer
         .lock()
         .draw_strata_stack(origin_x, origin_y, layer_w, layer_h);
 }
-// ── Scrollback / scrollbar public API ==================================================================================================================================─
+//  Scrollback / scrollbar public API ==================================================================================================================================
 
 /// Scroll the console view up (backward in history) by `lines` lines.
 pub fn scroll_view_up(lines: usize) {

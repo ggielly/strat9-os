@@ -37,7 +37,7 @@ pub use touch::cmd_touch;
 pub use umount::cmd_umount;
 pub use write::cmd_write;
 
-// ========== Shell CWD ==============================──
+// ========== Shell CWD ==============================
 
 /// Current working directory for the chevron shell.
 ///
@@ -179,7 +179,7 @@ pub(super) fn cmd_ls_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ========== cat ==================================================──
+// ========== cat ==================================================
 
 /// Display file contents.
 /// Display file contents or piped input.
@@ -228,7 +228,7 @@ pub(super) fn cmd_cat_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ========== scheme ========================================──
+// ========== scheme ========================================
 
 /// List registered schemes.
 pub(super) fn cmd_scheme_impl(args: &[String]) -> Result<(), ShellError> {
@@ -402,7 +402,7 @@ pub(super) fn cmd_stat_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ========== cp ==================================================──
+// ========== cp ==================================================
 
 pub(super) fn cmd_cp_impl(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
@@ -442,7 +442,7 @@ pub(super) fn cmd_cp_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ========== mv ==================================================──
+// ========== mv ==================================================
 
 pub(super) fn cmd_mv_impl(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
@@ -474,12 +474,12 @@ pub(super) fn cmd_mv_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ========== df ==================================================──
+// ========== df ==================================================
 
 pub(super) fn cmd_df_impl(_args: &[String]) -> Result<(), ShellError> {
     let mounts = vfs::list_mounts();
     shell_println!("{:<20} {}", "Mount", "Status");
-    shell_println!("==================================================================================================================================─");
+    shell_println!("==================================================================================================================================");
     for m in &mounts {
         let status = if vfs::open(m, OpenFlags::READ | OpenFlags::DIRECTORY)
             .map(|fd| {

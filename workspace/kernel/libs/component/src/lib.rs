@@ -71,7 +71,7 @@ impl core::fmt::Display for ComponentInitError {
     }
 }
 
-// ========== ComponentEntry ====================─
+// ========== ComponentEntry ====================
 
 /// Entry placed in `.component_entries` by `#[init_component]`.
 ///
@@ -118,7 +118,7 @@ impl ComponentEntry {
     }
 }
 
-// ========== ComponentInfo ====================──
+// ========== ComponentInfo ====================
 
 /// Human-readable component metadata (not stored in the linker section).
 #[derive(Debug)]
@@ -190,7 +190,7 @@ extern "C" {
 /// priority order after the acyclic ones (best-effort fallback).
 #[allow(unsafe_code)]
 pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
-    // ── 1. Collect entries for this stage ========================================================================================================================
+    //  1. Collect entries for this stage ========================================================================================================================
     let mut components: Vec<&'static ComponentEntry> = Vec::new();
 
     // SAFETY: linker guarantees the section boundaries are valid and all
@@ -213,7 +213,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
         return Ok(());
     }
 
-    // ── 2. Build dependency graph ============================================================================================================================================──
+    //  2. Build dependency graph ============================================================================================================================================
     let n = components.len();
 
     // name → index in `components`
@@ -245,7 +245,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
         }
     }
 
-    // ── 3. Kahn's topological sort with priority tiebreaker ============================================================
+    //  3. Kahn's topological sort with priority tiebreaker ============================================================
     // `ready` is sorted ascending by priority so `remove(0)` always gives the
     // component with the smallest priority number (= earliest boot precedence).
     let mut ready: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
@@ -272,7 +272,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
         }
     }
 
-    // ── 4. Cycle detection fallback ============================================================================================================================================
+    //  4. Cycle detection fallback ============================================================================================================================================
     if ordered.len() != n {
         log::error!(
             "[component] Dependency cycle in {:?} stage : cyclic components will run last",
@@ -283,7 +283,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
         ordered.extend(remaining);
     }
 
-    // ── 5. Execute ====================─
+    //  5. Execute ====================
     log::info!(
         "[component] {:?} stage : {} component(s) to initialize",
         stage,
@@ -320,7 +320,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
     Ok(())
 }
 
-// ========== list_components ==========──
+// ========== list_components ==========
 
 /// Return all registered components sorted by stage then priority (for debug).
 #[allow(unsafe_code)]
@@ -349,7 +349,7 @@ pub fn list_components() -> Vec<&'static ComponentEntry> {
     components
 }
 
-// ========== parse_metadata! ==========──
+// ========== parse_metadata! ==========
 
 /// Parse `Components.toml` at compile time and return the dependency metadata.
 ///

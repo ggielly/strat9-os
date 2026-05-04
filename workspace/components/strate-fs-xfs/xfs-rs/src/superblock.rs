@@ -20,7 +20,7 @@ pub struct Superblock {
     /// Block size in bytes (e.g., 4096).
     pub block_size: u32,
 
-    // ========== Block Counts (offset 0x008-0x01F) ==========================================================================================─
+    // ========== Block Counts (offset 0x008-0x01F) ==========================================================================================
     /// Total data blocks in filesystem.
     pub total_blocks: u64,
     /// Total realtime blocks.
@@ -32,7 +32,7 @@ pub struct Superblock {
     /// Filesystem UUID.
     pub uuid: [u8; 16],
 
-    // ========== Log and Root (offset 0x030-0x04F) ==========================================================================================─
+    // ========== Log and Root (offset 0x030-0x04F) ==========================================================================================
     /// First block of internal log (0 if external).
     pub log_start: u64,
     /// Root directory inode number.
@@ -42,7 +42,7 @@ pub struct Superblock {
     /// Realtime summary inode.
     pub realtime_summary_inode: u64,
 
-    // ========== Sizes (offset 0x050-0x06B) ==============================================================================================================──
+    // ========== Sizes (offset 0x050-0x06B) ==============================================================================================================
     /// Realtime extent size in blocks.
     pub realtime_extent_size: u32,
     /// AG size in blocks.
@@ -64,7 +64,7 @@ pub struct Superblock {
     /// Filesystem name (12 bytes, may not be null-terminated).
     pub name: [u8; 12],
 
-    // ========== Log2 Values (offset 0x078-0x07F) ==========================================================================================──
+    // ========== Log2 Values (offset 0x078-0x07F) ==========================================================================================
     /// log2(block_size).
     pub block_log: u8,
     /// log2(sector_size).
@@ -82,7 +82,7 @@ pub struct Superblock {
     /// Maximum percentage of inodes.
     pub inode_max_percent: u8,
 
-    // ========== Inode/Block Stats (offset 0x080-0x09F) ======================================================================──
+    // ========== Inode/Block Stats (offset 0x080-0x09F) ======================================================================
     /// Allocated inode count.
     pub inode_count: u64,
     /// Free inode count.
@@ -92,7 +92,7 @@ pub struct Superblock {
     /// Free realtime extent count.
     pub free_realtime_extents: u64,
 
-    // ========== V5 Fields (offset 0x0D0-0x107) ====================================================================================================─
+    // ========== V5 Fields (offset 0x0D0-0x107) ====================================================================================================
     /// Compatible features.
     pub features_compat: u32,
     /// Read-only compatible features.

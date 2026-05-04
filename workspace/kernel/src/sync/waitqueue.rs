@@ -46,7 +46,7 @@ use crate::{
 
 const WAITQUEUE_CAPACITY: usize = 256;
 
-// ── WaitQueue ========================================
+//  WaitQueue ========================================
 
 /// A FIFO queue of tasks waiting for an event.
 ///
@@ -188,7 +188,7 @@ impl WaitQueue {
     }
 }
 
-// ── WaitCondition ====================──
+//  WaitCondition ====================
 
 /// A named condition variable backed by a [`WaitQueue`].
 ///

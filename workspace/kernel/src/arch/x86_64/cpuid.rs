@@ -13,7 +13,7 @@ bitflags! {
     /// CPU feature flags detected via CPUID.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct CpuFeatures: u64 {
-        // ── Leaf 0x01 ECX ──
+        //  Leaf 0x01 ECX 
         const SSE3      = 1 << 0;
         const SSSE3     = 1 << 1;
         const FMA       = 1 << 2;
@@ -26,25 +26,25 @@ bitflags! {
         const F16C      = 1 << 9;
         const VMX       = 1 << 10;
         const X2APIC    = 1 << 11;
-        // ── Leaf 0x01 EDX ──
+        //  Leaf 0x01 EDX 
         const FPU       = 1 << 16;
         const TSC       = 1 << 17;
         const APIC      = 1 << 18;
         const SSE       = 1 << 19;
         const SSE2      = 1 << 20;
         const FXSR      = 1 << 21;
-        // ── Leaf 0x07 EBX ──
+        //  Leaf 0x07 EBX 
         const AVX2      = 1 << 32;
         const AVX512F   = 1 << 33;
         const AVX512BW  = 1 << 34;
         const AVX512VL  = 1 << 35;
         const SHA       = 1 << 36;
-        // ── Leaf 0x80000001 EDX ──
+        //  Leaf 0x80000001 EDX 
         const NX        = 1 << 48;
         const PAGES_1G  = 1 << 49;
         const RDTSCP    = 1 << 50;
         const LONG_MODE = 1 << 51;
-        // ── Leaf 0x80000001 ECX ──
+        //  Leaf 0x80000001 ECX 
         const SVM       = 1 << 56;
     }
 }
@@ -140,7 +140,7 @@ pub fn host_uses_xsave() -> bool {
 fn detect() -> CpuInfo {
     let cpuid = super::cpuid;
 
-    // ── Vendor (leaf 0) ──
+    //  Vendor (leaf 0) 
     let (max_leaf, ebx0, ecx0, edx0) = cpuid(0, 0);
     let vendor = match (ebx0, edx0, ecx0) {
         (0x756E_6547, 0x4965_6E69, 0x6C65_746E) => CpuVendor::Intel,
@@ -150,7 +150,7 @@ fn detect() -> CpuInfo {
 
     let mut features = CpuFeatures::empty();
 
-    // ── Leaf 0x01: main feature bits ──
+    //  Leaf 0x01: main feature bits 
     let (eax1, _ebx1, ecx1, edx1) = if max_leaf >= 1 {
         cpuid(1, 0)
     } else {
@@ -228,7 +228,7 @@ fn detect() -> CpuInfo {
         features |= CpuFeatures::SSE2;
     }
 
-    // ── Leaf 0x07: extended features ──
+    //  Leaf 0x07: extended features 
     if max_leaf >= 7 {
         let (_eax7, ebx7, _ecx7, _edx7) = cpuid(7, 0);
         if ebx7 & (1 << 5) != 0 {
@@ -248,7 +248,7 @@ fn detect() -> CpuInfo {
         }
     }
 
-    // ── Leaf 0x0D: XSAVE geometry ──
+    //  Leaf 0x0D: XSAVE geometry 
     let (mut max_xcr0, mut xsave_size) = (XCR0_X87 | XCR0_SSE, 512usize);
     if features.contains(CpuFeatures::XSAVE) && max_leaf >= 0x0D {
         let (eax_d, ebx_d, _ecx_d, edx_d) = cpuid(0x0D, 0);
@@ -256,7 +256,7 @@ fn detect() -> CpuInfo {
         xsave_size = ebx_d as usize;
     }
 
-    // ── Leaf 0x80000001: extended features (AMD-V, NX, 1G pages) ──
+    //  Leaf 0x80000001: extended features (AMD-V, NX, 1G pages) 
     let (max_ext, _, _, _) = cpuid(0x8000_0000, 0);
     if max_ext >= 0x8000_0001 {
         let (_eax_e, _ebx_e, ecx_e, edx_e) = cpuid(0x8000_0001, 0);
@@ -277,7 +277,7 @@ fn detect() -> CpuInfo {
         }
     }
 
-    // ── Leaves 0x80000002-0x80000004: brand string ──
+    //  Leaves 0x80000002-0x80000004: brand string 
     let mut model_name = [0u8; 48];
     let mut model_name_len = 0usize;
     if max_ext >= 0x8000_0004 {

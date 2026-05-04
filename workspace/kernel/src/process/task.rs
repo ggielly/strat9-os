@@ -1203,7 +1203,7 @@ pub(super) unsafe fn do_restore_first_task(
     restore_first_task_fxsave(frame_ptr, fpu_ptr);
 }
 
-// ── FXSAVE path (legacy, no XSAVE support) ──
+//  FXSAVE path (legacy, no XSAVE support) 
 
 /// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu
 #[unsafe(naked)]
@@ -1254,7 +1254,7 @@ unsafe extern "C" fn restore_first_task_fxsave(_rsp_ptr: *const u64, _fpu_ptr: *
     );
 }
 
-// ── XSAVE path (with XCR0 switching per-silo) ──
+//  XSAVE path (with XCR0 switching per-silo) 
 
 /// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu, r8=new_xcr0, r9=old_xcr0
 #[unsafe(naked)]

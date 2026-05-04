@@ -117,7 +117,7 @@ fn run_abi_layout_suite() -> bool {
     let mut passed = 0usize;
     let mut total = 0usize;
 
-    // ── 1. Struct sizes ==========================================================================================================================================================================──
+    //  1. Struct sizes ==========================================================================================================================================================================
     log_section("STRUCT SIZES");
 
     let mut s = true;
@@ -136,7 +136,7 @@ fn run_abi_layout_suite() -> bool {
     s &= check_size::<IpcHandshakeReply>("IpcHandshakeReply", 16);
     record("all struct sizes", s, &mut passed, &mut total);
 
-    // ── 2. Struct alignments ================================================================================================================================================================
+    //  2. Struct alignments ================================================================================================================================================================
     log_section("STRUCT ALIGNMENTS");
 
     let mut a = true;
@@ -153,7 +153,7 @@ fn run_abi_layout_suite() -> bool {
     a &= check_align::<PciDeviceInfo>("PciDeviceInfo", 4);
     record("all struct alignments", a, &mut passed, &mut total);
 
-    // ── 3. Field offsets of FileStat ==================================================================================================================================─
+    //  3. Field offsets of FileStat ==================================================================================================================================
     log_section("FILESTAT FIELD OFFSETS");
 
     let base = FileStat::zeroed();
@@ -226,7 +226,7 @@ fn run_abi_layout_suite() -> bool {
     );
     record("FileStat field offsets", fo, &mut passed, &mut total);
 
-    // ── 4. Field offsets of IpcMessage ========================================================================================================================──
+    //  4. Field offsets of IpcMessage ========================================================================================================================
     log_section("IPCMESSAGE FIELD OFFSETS");
 
     let msg = IpcMessage::new(0);
@@ -254,7 +254,7 @@ fn run_abi_layout_suite() -> bool {
     );
     record("IpcMessage field offsets", mo, &mut passed, &mut total);
 
-    // ── 5. Field offsets of IpcHandshake ========================================================================================================================
+    //  5. Field offsets of IpcHandshake ========================================================================================================================
     log_section("IPCHANDSHAKE FIELD OFFSETS");
 
     let hs = IpcHandshake::new();
@@ -297,7 +297,7 @@ fn run_abi_layout_suite() -> bool {
     );
     record("IpcHandshake field offsets", ho, &mut passed, &mut total);
 
-    // ── 6. ABI version constants ============================================================================================================================================──
+    //  6. ABI version constants ============================================================================================================================================
     log_section("ABI VERSION CONSTANTS");
 
     let mut vc = true;
@@ -311,7 +311,7 @@ fn run_abi_layout_suite() -> bool {
     );
     record("ABI version constants", vc, &mut passed, &mut total);
 
-    // ── 7. IPC handshake constants ============================================================================================================================================
+    //  7. IPC handshake constants ============================================================================================================================================
     log_section("IPC HANDSHAKE CONSTANTS");
 
     let mut ic = true;
@@ -330,7 +330,7 @@ fn run_abi_layout_suite() -> bool {
     ic &= check_eq("IPC_HANDSHAKE_REJECTED", IPC_HANDSHAKE_REJECTED as u64, 2);
     record("IPC handshake constants", ic, &mut passed, &mut total);
 
-    // ── 8. IpcHandshake logic ======================================================================================================================================================──
+    //  8. IpcHandshake logic ======================================================================================================================================================
     log_section("IPC HANDSHAKE LOGIC");
 
     let mut hl = true;
@@ -359,7 +359,7 @@ fn run_abi_layout_suite() -> bool {
     hl &= h42.client_abi_minor == ABI_VERSION_MINOR;
     record("IpcHandshake logic", hl, &mut passed, &mut total);
 
-    // ── 9. IpcHandshakeReply logic ============================================================================================================================================
+    //  9. IpcHandshakeReply logic ============================================================================================================================================
     log_section("IPC HANDSHAKE REPLY LOGIC");
 
     let mut rl = true;
@@ -374,7 +374,7 @@ fn run_abi_layout_suite() -> bool {
     rl &= rrej.magic == IPC_HANDSHAKE_MAGIC;
     record("IpcHandshakeReply logic", rl, &mut passed, &mut total);
 
-    // ── 10. TimeSpec helpers ================================================================================================================================================================
+    //  10. TimeSpec helpers ================================================================================================================================================================
     log_section("TIMESPEC HELPERS");
 
     let mut th = true;
@@ -399,7 +399,7 @@ fn run_abi_layout_suite() -> bool {
     }
     record("TimeSpec helpers", th, &mut passed, &mut total);
 
-    // ── 11. FileStat helpers ================================================================================================================================================================
+    //  11. FileStat helpers ================================================================================================================================================================
     log_section("FILESTAT HELPERS");
 
     let mut fh = true;
@@ -421,7 +421,7 @@ fn run_abi_layout_suite() -> bool {
     fh &= !file_st.is_dir();
     record("FileStat helpers", fh, &mut passed, &mut total);
 
-    // ── 12. IpcMessage helpers ======================================================================================================================================================─
+    //  12. IpcMessage helpers ======================================================================================================================================================
     log_section("IPCMESSAGE HELPERS");
 
     let mut mh = true;
@@ -446,7 +446,7 @@ fn run_abi_layout_suite() -> bool {
     }
     record("IpcMessage helpers", mh, &mut passed, &mut total);
 
-    // ── 13. DirentHeader constants ============================================================================================================================================
+    //  13. DirentHeader constants ============================================================================================================================================
     log_section("DIRENTHEADER CONSTANTS");
 
     let mut dh = true;
@@ -467,7 +467,7 @@ fn run_abi_layout_suite() -> bool {
     dh &= h2.entry_size() == 12 + 3 + 1;
     record("DirentHeader constants", dh, &mut passed, &mut total);
 
-    // ── 14. SEEK / DT constants ======================================================================================================================================================
+    //  14. SEEK / DT constants ======================================================================================================================================================
     log_section("POSIX CONSTANTS");
 
     let mut pc = true;
@@ -484,7 +484,7 @@ fn run_abi_layout_suite() -> bool {
     pc &= check_eq("DT_SOCK", DT_SOCK as u64, 12);
     record("POSIX constants", pc, &mut passed, &mut total);
 
-    // ── 15. Syscall number block boundaries ==============================================================================================================
+    //  15. Syscall number block boundaries ==============================================================================================================
     log_section("SYSCALL NUMBER BLOCKS");
 
     use strat9_abi::syscall::*;
@@ -532,7 +532,7 @@ fn run_abi_layout_suite() -> bool {
     sn &= check_eq("SYS_PCI_ENUM", SYS_PCI_ENUM as u64, 240);
     record("syscall number blocks", sn, &mut passed, &mut total);
 
-    // ── 16. Errno values match ABI ============================================================================================================================================
+    //  16. Errno values match ABI ============================================================================================================================================
     log_section("ERRNO VALUES");
 
     use strat9_abi::errno::*;
@@ -555,7 +555,7 @@ fn run_abi_layout_suite() -> bool {
     ev &= check_eq("ENOSPC", ENOSPC as u64, 28);
     record("errno values", ev, &mut passed, &mut total);
 
-    // ── Summary ==============================
+    //  Summary ==============================
     log_section("ABI LAYOUT TEST SUMMARY");
     let ok = passed == total;
     crate::serial_println!(

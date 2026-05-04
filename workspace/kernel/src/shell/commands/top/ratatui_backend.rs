@@ -106,7 +106,7 @@ impl Strat9RatatuiBackend {
         match ch {
             // Box drawing fallback
             '│' | '┃' => '|',
-            '─' | '━' => '-',
+            '' | '━' => '-',
             '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' => '+',
             // Block/shade fallback (used by gauges/progress)
             '█' | '▇' | '▆' | '▅' | '▄' | '▃' | '▂' | '▁' | '░' | '▒' | '▓' => {

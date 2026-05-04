@@ -34,7 +34,7 @@ use crate::{
     },
 };
 
-// ========== File-ID constants ==========─
+// ========== File-ID constants ==========
 
 const FID_ROOT: u64 = 0;
 const FID_SDA: u64 = 1;
@@ -86,7 +86,7 @@ impl BlkDevScheme {
 }
 
 impl Scheme for BlkDevScheme {
-    // ── open ========================================─
+    //  open ========================================
 
     /// Performs the open operation.
     fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
@@ -140,7 +140,7 @@ impl Scheme for BlkDevScheme {
         }
     }
 
-    // ── read ========================================─
+    //  read ========================================
 
     /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
@@ -185,7 +185,7 @@ impl Scheme for BlkDevScheme {
         }
     }
 
-    // ── write ========================================
+    //  write ========================================
 
     /// Performs the write operation.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
@@ -205,14 +205,14 @@ impl Scheme for BlkDevScheme {
         }
     }
 
-    // ── close ========================================
+    //  close ========================================
 
     /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(()) // stateless: nothing to clean up
     }
 
-    // ── size ========================================─
+    //  size ========================================
 
     /// Performs the size operation.
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
@@ -228,7 +228,7 @@ impl Scheme for BlkDevScheme {
         Err(SyscallError::BadHandle)
     }
 
-    // ── stat ========================================─
+    //  stat ========================================
 
     /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
@@ -337,7 +337,7 @@ impl Scheme for BlkDevScheme {
         }
     }
 
-    // ── readdir ==============================─
+    //  readdir ==============================
 
     /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
@@ -383,7 +383,7 @@ impl Scheme for BlkDevScheme {
     }
 }
 
-// ========== Byte-offset <==> sector I/O helpers ==================================================================================================================================─
+// ========== Byte-offset <==> sector I/O helpers ==================================================================================================================================
 
 /// Read `buf.len()` bytes from the block device starting at byte `offset`.
 ///

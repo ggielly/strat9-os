@@ -24,7 +24,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 // ================================================================================
 // Port ping-pong test
-// ================================================================================─
+// ================================================================================
 
 /// Shared port ID between the two test tasks.
 /// 0 = not yet created.
@@ -114,9 +114,9 @@ extern "C" fn ipc_receiver_main() -> ! {
 // The PortId(u64) constructor is pub(crate) via the struct definition,
 // so this test module in the same crate can use it directly.
 
-// ================================================================================─
+// ================================================================================
 // IPC-02: typed MPMC SyncChannel test
-// ================================================================================─
+// ================================================================================
 //
 // Exercises:
 //   - channel() constructor (Sender<u64> + Receiver<u64> cloning → MPMC)
@@ -224,9 +224,9 @@ extern "C" fn chan_consumer_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
-// ================================================================================─
+// ================================================================================
 // IPC-04/05 tests: shared ring + POSIX semaphore
-// ================================================================================─
+// ================================================================================
 
 static SEM_TEST_ID: AtomicU64 = AtomicU64::new(0);
 static SEM_TEST_RESULT: SpinLock<Option<bool>> = SpinLock::new(None);

@@ -43,7 +43,7 @@ use crate::{
     syscall::error::SyscallError,
 };
 
-// ========== Options flags ====================──
+// ========== Options flags ====================
 
 /// Do not block if no child has exited yet.
 pub const WNOHANG: u32 = 1 << 0;
@@ -183,7 +183,7 @@ fn wait_blocking(
     }
 }
 
-// ========== Syscall handlers ==========──
+// ========== Syscall handlers ==========
 
 /// SYS_PROC_WAITPID (310): wait for a child process to exit.
 ///
@@ -226,7 +226,7 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
         return Err(SyscallError::InvalidArgument);
     };
 
-    // ── Non-blocking fast path ============================================================================================================================================──
+    //  Non-blocking fast path ============================================================================================================================================
     if wnohang {
         return match try_wait_child(parent_id, target) {
             WaitChildResult::Reaped { pid, status, .. } => {
@@ -239,7 +239,7 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
         };
     }
 
-    // ── Blocking path ==========================================================================================================================================================================──
+    //  Blocking path ==========================================================================================================================================================================
     let (_child, child_pid, status) = wait_blocking(parent_id, target)?;
     write_wstatus(status_ptr, status)?;
     log::debug!("waitpid: reaped pid={} status={}", child_pid, status);
@@ -285,7 +285,7 @@ pub fn sys_getppid() -> Result<u64, SyscallError> {
     super::process::sys_getppid()
 }
 
-// ========== Internal helpers ==========──
+// ========== Internal helpers ==========
 
 /// Write the Linux-encoded wait status to a nullable userspace pointer.
 fn write_wstatus(status_ptr: u64, exit_code: i32) -> Result<(), SyscallError> {

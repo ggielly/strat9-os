@@ -16,9 +16,9 @@ use core::sync::atomic::Ordering;
 use strat9_abi::data::MemoryRegionInfo as MemoryRegionInfoAbi;
 use x86_64::VirtAddr;
 
-// ================================================================================─
+// ================================================================================
 // Virtual address layout constants
-// ================================================================================─
+// ================================================================================
 
 /// Base virtual address for the heap (`brk`-managed region).
 pub const BRK_BASE: u64 = 0x0000_0000_2000_0000; // 512 MiB
@@ -29,17 +29,17 @@ pub const MMAP_BASE: u64 = 0x0000_0000_6000_0000; // 1.5 GiB
 /// Exclusive upper bound of the canonical user-space address range.
 const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
 
-// ================================================================================─
+// ================================================================================
 // PROT flags (arg3 of mmap)
-// ================================================================================─
+// ================================================================================
 
 const PROT_READ: u32 = 1 << 0;
 const PROT_WRITE: u32 = 1 << 1;
 const PROT_EXEC: u32 = 1 << 2;
 
-// ================================================================================─
+// ================================================================================
 // MAP flags (arg4 of mmap)
-// ================================================================================─
+// ================================================================================
 
 const MAP_SHARED: u32 = 1 << 0;
 const MAP_PRIVATE: u32 = 1 << 1;
@@ -50,9 +50,9 @@ const MAP_FIXED_NOREPLACE: u32 = 1 << 20; // Linux-compatible extension bit.
 
 const MREMAP_MAYMOVE: u64 = 1 << 0;
 
-// ================================================================================─
+// ================================================================================
 // Helpers
-// ================================================================================─
+// ================================================================================
 
 /// Round `addr` up to the nearest 4 KiB page boundary.
 #[inline]
@@ -83,9 +83,9 @@ fn vma_flags_to_prot(flags: VmaFlags) -> u32 {
         | (if flags.executable { PROT_EXEC } else { 0 })
 }
 
-// ================================================================================─
+// ================================================================================
 // sys_mmap
-// ================================================================================─
+// ================================================================================
 
 /// SYS_MMAP (100): map anonymous virtual memory.
 ///
@@ -333,9 +333,9 @@ pub fn sys_mmap(
     Ok(target)
 }
 
-// ================================================================================─
+// ================================================================================
 // sys_munmap
-// ================================================================================─
+// ================================================================================
 
 /// SYS_MUNMAP (101): unmap a virtual memory range.
 ///
@@ -628,9 +628,9 @@ pub fn sys_mem_region_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallErro
     Ok(0)
 }
 
-// ================================================================================─
+// ================================================================================
 // sys_brk
-// ================================================================================─
+// ================================================================================
 
 /// SYS_BRK (102): set or query the program break (top of heap).
 ///
@@ -648,7 +648,7 @@ pub fn sys_mem_region_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallErro
 pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
 
-    // ── Lazy initialisation ======================================================================================================================================================──
+    //  Lazy initialisation ======================================================================================================================================================
     // `task.process.brk == 0` means this task has never called brk.  The heap starts
     // empty at BRK_BASE; no pages are mapped yet.
     let current_brk = {
@@ -661,18 +661,18 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
         }
     };
 
-    // ── Query ==============================
+    //  Query ==============================
     if addr == 0 {
         return Ok(current_brk);
     }
 
-    // ── Range checks ==========================================================================================================================================================================──
+    //  Range checks ==========================================================================================================================================================================
     // Reject attempts to move the break below the heap base or into kernel AS.
     if addr < BRK_BASE || addr >= USER_SPACE_END {
         return Ok(current_brk); // return unchanged (Linux behaviour)
     }
 
-    // ── Compute page-aligned extents ========================================================================================================================──
+    //  Compute page-aligned extents ========================================================================================================================
     // The heap occupies [BRK_BASE, page_align_up(current_brk)).
     // Any bytes in the last partial page are already backed but not accounted
     // for in the page-end calculation : they stay mapped on shrink.
@@ -680,7 +680,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     let new_page_end = page_align_up(addr);
 
     if new_page_end > old_page_end {
-        // ── Grow: map [old_page_end, new_page_end) ================================================================================
+        //  Grow: map [old_page_end, new_page_end) ================================================================================
         let n_pages = ((new_page_end - old_page_end) / 4096) as usize;
         let vma_flags = VmaFlags {
             readable: true,
@@ -710,7 +710,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
             n_pages,
         );
     } else if new_page_end < old_page_end {
-        // ── Shrink: unmap [new_page_end, old_page_end) ============================================================─
+        //  Shrink: unmap [new_page_end, old_page_end) ============================================================
         let len = old_page_end - new_page_end;
         if task
             .process
@@ -730,7 +730,7 @@ pub fn sys_brk(addr: u64) -> Result<u64, SyscallError> {
     // If new_page_end == old_page_end, only the sub-page byte offset changed;
     // no page-table operations are needed.
 
-    // ── Commit the new exact-byte program break ==========================================================================================
+    //  Commit the new exact-byte program break ==========================================================================================
     task.process.brk.store(addr, Ordering::Relaxed);
     Ok(addr)
 }

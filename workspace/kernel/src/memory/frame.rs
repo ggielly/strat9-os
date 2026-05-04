@@ -69,7 +69,7 @@ use x86_64::PhysAddr;
 //    untouched.  `FrameAllocOptions::allocate()` performs CAS(REFCOUNT_UNUSED -> 1)
 //    as a fail-fast corruption check before publishing the frame as live:
 //
-//       buddy alloc ──▶ optional zero ──▶ set flags ──▶ CAS(UNUSED -> 1) ──▶ live
+//       buddy alloc ▶ optional zero ▶ set flags ▶ CAS(UNUSED -> 1) ▶ live
 
 /// Sentinel refcount for a frame that is in the buddy free list.
 ///
