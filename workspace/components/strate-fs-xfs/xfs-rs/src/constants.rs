@@ -71,7 +71,7 @@ pub const XFS_FIBT_MAGIC: u32 = 0x46494254; // "FIBT"
 /// Magic number for v5 free inode B+tree.
 pub const XFS_FIBT_CRC_MAGIC: u32 = 0x46494233; // "FIB3"
 
-// ─── Sizes ────────────────────────────────────────────────────────────────
+// ========== Sizes ========================================
 
 /// Minimum superblock size (v4).
 pub const XFS_SB_SIZE_V4: usize = 208;
@@ -91,12 +91,12 @@ pub const XFS_DIR2_DATA_ENTRY_HDR_SIZE: usize = 8;
 /// Size of an extent record (128 bits = 16 bytes).
 pub const XFS_EXTENT_SIZE: usize = 16;
 
-// ─── Inode Numbers ────────────────────────────────────────────────────────
+// ========== Inode Numbers ==========─
 
 /// Root inode number (default).
 pub const XFS_ROOT_INO: u64 = 128;
 
-// ─── Version Flags ────────────────────────────────────────────────────────
+// ========== Version Flags ==========─
 
 /// Version 4 filesystem.
 pub const XFS_SB_VERSION_4: u16 = 4;
@@ -113,7 +113,7 @@ pub const XFS_SB_VERSION_QUOTABIT: u16 = 0x0040;
 /// Version flag: has extended attributes.
 pub const XFS_SB_VERSION_MOREBITSBIT: u16 = 0x8000;
 
-// ─── Feature Flags (v5) ───────────────────────────────────────────────────
+// ========== Feature Flags (v5) ==========================================================================================================================================================================
 
 /// Feature: File type in directory entries.
 pub const XFS_SB_FEAT_INCOMPAT_FTYPE: u32 = 1 << 0;
@@ -130,7 +130,7 @@ pub const XFS_SB_FEAT_INCOMPAT_BIGTIME: u32 = 1 << 3;
 /// Feature: Large extent counters.
 pub const XFS_SB_FEAT_INCOMPAT_NREXT64: u32 = 1 << 5;
 
-// ─── Inode Format Types ───────────────────────────────────────────────────
+// ========== Inode Format Types ==========================================================================================================================================================================
 
 /// Inode format: device.
 pub const XFS_DINODE_FMT_DEV: u8 = 0;
@@ -147,7 +147,7 @@ pub const XFS_DINODE_FMT_BTREE: u8 = 3;
 /// Inode format: UUID (extended attribute fork).
 pub const XFS_DINODE_FMT_UUID: u8 = 4;
 
-// ─── File Types ───────────────────────────────────────────────────────────
+// ========== File Types ====================─
 
 /// File type: FIFO.
 pub const S_IFIFO: u16 = 0o010000;
@@ -173,12 +173,12 @@ pub const S_IFSOCK: u16 = 0o140000;
 /// File type mask.
 pub const S_IFMT: u16 = 0o170000;
 
-// ─── Extent Flags ─────────────────────────────────────────────────────────
+// ========== Extent Flags ==========──
 
 /// Extent is unwritten (preallocated but not written).
 pub const XFS_EXT_UNWRITTEN: u8 = 1;
 
-// ─── Limits ───────────────────────────────────────────────────────────────
+// ========== Limits ==============================──
 
 /// Maximum name length in a directory entry.
 pub const XFS_NAME_MAX: usize = 255;

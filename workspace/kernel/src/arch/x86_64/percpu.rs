@@ -218,7 +218,7 @@ pub fn get_cpu_count() -> usize {
     cpu_count()
 }
 
-// ─── Preemption helpers ───────────────────────────────────────────────────────
+// ========== Preemption helpers ==========
 
 /// Increment the preemption-disable depth for the current CPU.
 /// When depth > 0, the scheduler will not preempt this CPU.

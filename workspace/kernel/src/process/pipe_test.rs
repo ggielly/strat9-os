@@ -36,7 +36,7 @@ fn run_pipe_suite() -> bool {
     let mut passed = 0usize;
     let mut total = 0usize;
 
-    // ── 1. pipe() returns two distinct fds ──────────────────────────────────
+    // ── 1. pipe() returns two distinct fds ==============================================================================================================─
     log_section("1. PIPE CREATION");
     let mut s = true;
     let (rfd, wfd) = match vfs::pipe() {
@@ -56,7 +56,7 @@ fn run_pipe_suite() -> bool {
     };
     record("pipe() returns distinct fds", s, &mut passed, &mut total);
 
-    // ── 2. write then read exact content ────────────────────────────────────
+    // ── 2. write then read exact content ========================================================================================================================
     log_section("2. WRITE + READ EXACT");
     let mut s = true;
     if rfd != 0 || wfd != 0 || !s {
@@ -99,7 +99,7 @@ fn run_pipe_suite() -> bool {
     let _ = vfs::close(rfd);
     let _ = vfs::close(wfd);
 
-    // ── 3. multiple writes, single read ─────────────────────────────────────
+    // ── 3. multiple writes, single read ========================================================================================================================─
     log_section("3. MULTIPLE WRITES, SINGLE READ");
     let mut s = true;
     match vfs::pipe() {
@@ -152,7 +152,7 @@ fn run_pipe_suite() -> bool {
     }
     record("multiple writes, single read", s, &mut passed, &mut total);
 
-    // ── 4. close write-end, read returns EOF ────────────────────────────────
+    // ── 4. close write-end, read returns EOF ====================================================================================================──
     log_section("4. CLOSE WRITE-END → EOF");
     let mut s = true;
     match vfs::pipe() {
@@ -188,7 +188,7 @@ fn run_pipe_suite() -> bool {
     }
     record("close write-end → EOF", s, &mut passed, &mut total);
 
-    // ── 5. dup on pipe read-end ─────────────────────────────────────────────
+    // ── 5. dup on pipe read-end ======================================================================================================================================================
     log_section("5. DUP PIPE READ-END");
     let mut s = true;
     match vfs::pipe() {
@@ -233,7 +233,7 @@ fn run_pipe_suite() -> bool {
     }
     record("dup pipe read-end", s, &mut passed, &mut total);
 
-    // ── 6. dup on pipe write-end ────────────────────────────────────────────
+    // ── 6. dup on pipe write-end ============================================================================================================================================──
     log_section("6. DUP PIPE WRITE-END");
     let mut s = true;
     match vfs::pipe() {
@@ -276,7 +276,7 @@ fn run_pipe_suite() -> bool {
     }
     record("dup pipe write-end", s, &mut passed, &mut total);
 
-    // ── 7. zero-length write ────────────────────────────────────────────────
+    // ── 7. zero-length write ================================================================================================================================================================
     log_section("7. ZERO-LENGTH WRITE");
     let mut s = true;
     match vfs::pipe() {
@@ -297,7 +297,7 @@ fn run_pipe_suite() -> bool {
     }
     record("zero-length write", s, &mut passed, &mut total);
 
-    // ── 8. write 4000 bytes ─────────────────────────────────────────────────
+    // ── 8. write 4000 bytes ================================================================================================================================================================─
     log_section("8. LARGE WRITE (4000 BYTES)");
     let mut s = true;
     match vfs::pipe() {
@@ -341,7 +341,7 @@ fn run_pipe_suite() -> bool {
     }
     record("large write 4000 bytes", s, &mut passed, &mut total);
 
-    // ── 9. multiple pipes simultaneously ────────────────────────────────────
+    // ── 9. multiple pipes simultaneously ========================================================================================================================
     log_section("9. MULTIPLE PIPES");
     let mut s = true;
     let p1 = vfs::pipe();
@@ -381,7 +381,7 @@ fn run_pipe_suite() -> bool {
     }
     record("multiple pipes simultaneously", s, &mut passed, &mut total);
 
-    // ── 10. fstat on pipe fd ────────────────────────────────────────────────
+    // ── 10. fstat on pipe fd ================================================================================================================================================================
     log_section("10. FSTAT ON PIPE FD");
     let mut s = true;
     match vfs::pipe() {
@@ -411,7 +411,7 @@ fn run_pipe_suite() -> bool {
     }
     record("fstat on pipe fd", s, &mut passed, &mut total);
 
-    // ── Summary ─────────────────────────────────────────────────────────────
+    // ── Summary ==============================
     log_section("PIPE TEST SUMMARY");
     let ok = passed == total;
     crate::serial_println!(

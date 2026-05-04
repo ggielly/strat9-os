@@ -115,7 +115,7 @@ impl SyscallError {
     }
 }
 
-// ── From impls for kernel-internal error types ──────────────────────────────
+// ── From impls for kernel-internal error types ====================================================================================================
 
 impl From<core::str::Utf8Error> for SyscallError {
     /// Performs the from operation.

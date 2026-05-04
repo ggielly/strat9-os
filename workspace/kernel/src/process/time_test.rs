@@ -35,7 +35,7 @@ fn run_time_suite() -> bool {
     let mut passed = 0usize;
     let mut total = 0usize;
 
-    // ── 1. clock_gettime returns non-zero ───────────────────────────────────
+    // ── 1. clock_gettime returns non-zero ==============================================================================================================──
     log_section("1. CLOCK_GETTIME NON-ZERO");
     let mut s = true;
     let mut ts = TimeSpec::from_nanos(0);
@@ -60,7 +60,7 @@ fn run_time_suite() -> bool {
     }
     record("clock_gettime returns non-zero", s, &mut passed, &mut total);
 
-    // ── 2. current_time_ns matches ticks * 10_000_000 ──────────────────────
+    // ── 2. current_time_ns matches ticks * 10_000_000 ======================================================================─
     log_section("2. CURRENT_TIME_NS FORMULA");
     let mut s = true;
     let t = ticks();
@@ -84,7 +84,7 @@ fn run_time_suite() -> bool {
     }
     record("current_time_ns formula", s, &mut passed, &mut total);
 
-    // ── 3. monotonicity: 10 consecutive calls ──────────────────────────────
+    // ── 3. monotonicity: 10 consecutive calls ====================================================================================================
     log_section("3. MONOTONICITY (10 CALLS)");
     let mut s = true;
     let mut prev = current_time_ns();
@@ -99,7 +99,7 @@ fn run_time_suite() -> bool {
     }
     record("monotonicity 10 calls", s, &mut passed, &mut total);
 
-    // ── 4. monotonicity across yields ───────────────────────────────────────
+    // ── 4. monotonicity across yields ==================================================================================================================================
     log_section("4. MONOTONICITY ACROSS YIELDS");
     let mut s = true;
     let before = current_time_ns();
@@ -119,7 +119,7 @@ fn run_time_suite() -> bool {
     }
     record("monotonicity across yields", s, &mut passed, &mut total);
 
-    // ── 5. time advances after yield ────────────────────────────────────────
+    // ── 5. time advances after yield ==================================================================================================================================─
     log_section("5. TIME ADVANCES AFTER YIELD");
     let mut s = true;
     let t0 = current_time_ns();
@@ -143,7 +143,7 @@ fn run_time_suite() -> bool {
     }
     record("time advances after yield", s, &mut passed, &mut total);
 
-    // ── 6. ticks counter consistency ────────────────────────────────────────
+    // ── 6. ticks counter consistency ==================================================================================================================================─
     log_section("6. TICKS COUNTER");
     let mut s = true;
     let t1 = ticks();
@@ -160,7 +160,7 @@ fn run_time_suite() -> bool {
     }
     record("ticks counter monotonic", s, &mut passed, &mut total);
 
-    // ── 7. TimeSpec from_nanos → to_nanos round-trip ────────────────────────
+    // ── 7. TimeSpec from_nanos → to_nanos round-trip ================================================================================
     log_section("7. TIMESPEC ROUND-TRIP");
     use strat9_abi::data::TimeSpec;
     let mut s = true;
@@ -189,7 +189,7 @@ fn run_time_suite() -> bool {
     }
     record("TimeSpec round-trip", s, &mut passed, &mut total);
 
-    // ── 8. clock_gettime syscall matches current_time_ns ────────────────────
+    // ── 8. clock_gettime syscall matches current_time_ns ============================================================──
     log_section("8. SYSCALL vs INTERNAL API");
     let mut s = true;
     let internal = current_time_ns();
@@ -217,7 +217,7 @@ fn run_time_suite() -> bool {
     }
     record("syscall vs internal API", s, &mut passed, &mut total);
 
-    // ── 9. timing a known-length busy wait ──────────────────────────────────
+    // ── 9. timing a known-length busy wait ==============================================================================================================─
     log_section("9. TIMING BUSY WAIT");
     let mut s = true;
     let before = current_time_ns();
@@ -242,7 +242,7 @@ fn run_time_suite() -> bool {
     }
     record("timing busy wait ~1s", s, &mut passed, &mut total);
 
-    // ── Summary ─────────────────────────────────────────────────────────────
+    // ── Summary ==============================
     log_section("TIME TEST SUMMARY");
     let ok = passed == total;
     crate::serial_println!(

@@ -329,7 +329,7 @@ pub fn sys_setsid() -> Result<u64, SyscallError> {
     create_session(caller).map(|sid| sid as u64)
 }
 
-// ─── Credentials ─────────────────────────────────────────────────────────────
+// ========== Credentials ==============================
 
 /// SYS_GETUID (335): Return real user id.
 pub fn sys_getuid() -> Result<u64, SyscallError> {
@@ -389,7 +389,7 @@ pub fn sys_setgid(gid: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-// ─── Thread lifecycle helpers ─────────────────────────────────────────────────
+// ========== Thread lifecycle helpers ================================================================================================================================================================─
 
 /// SYS_SET_TID_ADDRESS (333): Store `tidptr` in the task; return current TID.
 ///
@@ -414,7 +414,7 @@ pub fn sys_exit_group(exit_code: u64) -> Result<u64, SyscallError> {
     crate::process::scheduler::exit_current_task(exit_code as i32)
 }
 
-// ─── Architecture-specific ────────────────────────────────────────────────────
+// ========== Architecture-specific ==========================================================================================================================================================================─
 
 /// x86_64 arch_prctl operation codes (Linux-compatible).
 const ARCH_SET_GS: u64 = 0x1001;
@@ -504,7 +504,7 @@ unsafe fn rdmsr(msr: u32) -> u64 {
     lo as u64 | ((hi as u64) << 32)
 }
 
-// ─── tgkill ───────────────────────────────────────────────────────────────────
+// ========== tgkill ==================================================
 
 /// SYS_TGKILL (352): Send a signal to a specific thread in a thread group.
 ///

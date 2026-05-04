@@ -689,7 +689,7 @@ pub fn sys_dup2(old_fd: u32, new_fd: u32) -> Result<u64, SyscallError> {
     Ok(fd as u64)
 }
 
-// ─── Path helpers ─────────────────────────────────────────────────────────────
+// ========== Path helpers ==============================
 
 /// Read a NUL-terminated or length-bounded path from user space.
 ///
@@ -751,7 +751,7 @@ fn normalize_path(path: &str) -> alloc::string::String {
     out
 }
 
-// ─── New VFS syscall handlers ─────────────────────────────────────────────────
+// ========== New VFS syscall handlers ================================================================================================================================================================─
 
 /// SYS_CHDIR (440): Change current working directory.
 pub fn sys_chdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
@@ -1075,7 +1075,7 @@ fn build_pci_inventory_text() -> String {
 pub fn init() {
     log::info!("[VFS] Initializing virtual file system");
 
-    // ── Root filesystem (RamFS on "/") ────────────────────────────────────
+    // ── Root filesystem (RamFS on "/") ========================================================================================================================
     // Must be mounted before any other scheme so that longest-prefix resolution
     // falls back to "/" for paths not covered by a more specific mount point.
     let rootfs = alloc::sync::Arc::new(RamfsScheme::new());

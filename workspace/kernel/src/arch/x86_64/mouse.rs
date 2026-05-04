@@ -8,7 +8,7 @@ use super::io::{inb, outb};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use spin::Mutex;
 
-// ── PS/2 controller ports ─────────────────────────────────────────────────────
+// PS/2 controller ports ==========================================================================================================================================================================──
 const PS2_DATA: u16 = 0x60;
 const PS2_CMD: u16 = 0x64;
 
@@ -30,7 +30,7 @@ const MOUSE_ACK: u8 = 0xFA;
 const STATUS_OUTPUT_FULL: u8 = 0x01; // data available on port 0x60
 const STATUS_INPUT_FULL: u8 = 0x02; // controller busy, don't write
 
-// ── Event ring buffer ─────────────────────────────────────────────────────────
+//  Event ring buffer ==========
 const EVENT_BUF_SIZE: usize = 64;
 
 struct EventBuffer {
@@ -52,14 +52,14 @@ static EVENT_BUF: Mutex<EventBuffer> = Mutex::new(EventBuffer {
     tail: 0,
 });
 
-// ── Absolute cursor position (accumulated) ───────────────────────────────────
+//  Absolute cursor position (accumulated) ==============================================================================================================──
 static MOUSE_ABS_X: AtomicI32 = AtomicI32::new(0);
 static MOUSE_ABS_Y: AtomicI32 = AtomicI32::new(0);
 // Cached screen bounds to avoid locking VGA from IRQ context.
 static SCREEN_W: AtomicI32 = AtomicI32::new(1280);
 static SCREEN_H: AtomicI32 = AtomicI32::new(800);
 
-// ── Packet state machine ──────────────────────────────────────────────────────
+//  Packet state machine ====================================================================================================================================================================================
 /// Current byte index within the current packet (0, 1, 2, [3])
 static MOUSE_CYCLE: AtomicU8 = AtomicU8::new(0);
 /// Whether IntelliMouse (4-byte) mode is active
@@ -83,7 +83,7 @@ pub struct MouseEvent {
     pub middle: bool,
 }
 
-// ── PS/2 helpers ──────────────────────────────────────────────────────────────
+// ── PS/2 helpers ==============================─
 
 /// Spin until the PS/2 input buffer is empty (safe to write).
 #[inline]
@@ -160,7 +160,7 @@ fn flush_output() {
     }
 }
 
-// ── Initialization ────────────────────────────────────────────────────────────
+// Initialization ====================
 
 /// Initialize the PS/2 mouse.
 ///
@@ -239,7 +239,7 @@ fn try_enable_intellimouse() -> bool {
     id == 0x03
 }
 
-// ── IRQ12 handler ─────────────────────────────────────────────────────────────
+//  IRQ12 handler ==============================
 
 /// Called from the IDT IRQ12 handler (interrupt context, interrupts disabled).
 ///
@@ -354,7 +354,7 @@ fn decode_packet() {
     }
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// Public API ========================================
 
 /// Dequeue the oldest mouse event (non-blocking).
 ///

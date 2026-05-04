@@ -15,7 +15,7 @@
 
 use super::{IrqDisabledToken, PreemptGuard};
 
-// ─── Sealed trait ─────────────────────────────────────────────────────────────
+// ========== Sealed trait ==============================
 
 mod private {
     pub trait Sealed {}
@@ -43,7 +43,7 @@ pub struct GuardianState<Token> {
     pub(crate) restore_flags: bool,
 }
 
-// ─── IrqDisabled ─────────────────────────────────────────────────────────────
+// ========== IrqDisabled ==============================
 
 /// Guardian that saves RFLAGS and disables IRQs before the lock is acquired.
 ///
@@ -76,7 +76,7 @@ impl Guardian for IrqDisabled {
     }
 }
 
-// ─── PreemptDisabled ─────────────────────────────────────────────────────────
+// ========== PreemptDisabled ==========──
 
 /// Guardian that only disables preemption, leaving IRQs untouched.
 ///

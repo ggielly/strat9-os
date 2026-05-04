@@ -81,7 +81,7 @@ impl core::fmt::Write for BufWriter<'_> {
 
 /// Read a scheme file and return how many bytes were read into `buf`.
 fn scheme_read(path: &str, buf: &mut [u8]) -> Result<usize, ()> {
-    let fd = call::openat(0, path, 0x1, 0).map_err(|_| ())?; // O_READ
+    let fd = call::openat(-100_i64 as usize, path, 0x1, 0).map_err(|_| ())?; // O_READ
     let n = call::read(fd as usize, buf).map_err(|_| {
         let _ = call::close(fd as usize);
     })?;

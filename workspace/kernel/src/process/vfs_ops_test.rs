@@ -42,13 +42,13 @@ fn run_vfs_ops_suite() -> bool {
     let mut passed = 0usize;
     let mut total = 0usize;
 
-    // ── Setup: create base directory ────────────────────────────────────────
+    // ── Setup: create base directory ==================================================================================================================================─
     if let Err(e) = vfs::mkdir(&base, 0o755) {
         crate::serial_println!("[vfs-ops-test][SETUP] FAIL: mkdir('{}') => {:?}", base, e);
         return false;
     }
 
-    // ── 1. create_file + open + close ───────────────────────────────────────
+    // ── 1. create_file + open + close ==================================================================================================================================
     log_section("1. CREATE + OPEN + CLOSE");
     let f1 = format!("{}/basic.txt", base);
     let mut s = true;
@@ -73,7 +73,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("create_file + open + close", s, &mut passed, &mut total);
 
-    // ── 2. write + read back ────────────────────────────────────────────────
+    // ── 2. write + read back ================================================================================================================================================================
     log_section("2. WRITE + READ BACK");
     let f2 = format!("{}/rw.txt", base);
     let mut s = true;
@@ -130,7 +130,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("write + read back", s, &mut passed, &mut total);
 
-    // ── 3. lseek SEEK_SET / SEEK_CUR / SEEK_END ────────────────────────────
+    // ── 3. lseek SEEK_SET / SEEK_CUR / SEEK_END ==========================================================================================─
     log_section("3. LSEEK");
     let mut s = true;
     match vfs::open(&f2, vfs::OpenFlags::READ) {
@@ -189,7 +189,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("lseek SEEK_SET/CUR/END", s, &mut passed, &mut total);
 
-    // ── 4. fstat on file ────────────────────────────────────────────────────
+    // ── 4. fstat on file ==========================================================================================================================================================================─
     log_section("4. FSTAT ON FILE");
     let mut s = true;
     match vfs::open(&f2, vfs::OpenFlags::READ) {
@@ -233,7 +233,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("fstat on regular file", s, &mut passed, &mut total);
 
-    // ── 5. fstat on directory ───────────────────────────────────────────────
+    // ── 5. fstat on directory ======================================================================================================================================================──
     log_section("5. FSTAT ON DIRECTORY");
     let mut s = true;
     match vfs::open(&base, vfs::OpenFlags::READ | vfs::OpenFlags::DIRECTORY) {
@@ -265,7 +265,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("fstat on directory", s, &mut passed, &mut total);
 
-    // ── 6. stat_path equivalence ────────────────────────────────────────────
+    // ── 6. stat_path equivalence ============================================================================================================================================──
     log_section("6. STAT_PATH vs FSTAT");
     let mut s = true;
     match vfs::stat_path(&f2) {
@@ -307,7 +307,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("stat_path vs fstat equivalence", s, &mut passed, &mut total);
 
-    // ── 7. mkdir + getdents + rmdir ─────────────────────────────────────────
+    // ── 7. mkdir + getdents + rmdir ==================================================================================================================================──
     log_section("7. MKDIR + GETDENTS + RMDIR");
     let subdir = format!("{}/subdir", base);
     let mut s = true;
@@ -359,7 +359,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("mkdir + getdents + rmdir", s, &mut passed, &mut total);
 
-    // ── 8. mkdir existing → EEXIST ──────────────────────────────────────────
+    // ── 8. mkdir existing → EEXIST ============================================================================================================================================
     log_section("8. MKDIR EXISTING");
     let subdir2 = format!("{}/dup_dir", base);
     let mut s = true;
@@ -379,7 +379,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("mkdir existing returns error", s, &mut passed, &mut total);
 
-    // ── 9. unlink file ──────────────────────────────────────────────────────
+    // ── 9. unlink file ====================================================================================================================================================================================
     log_section("9. UNLINK FILE");
     let f_unl = format!("{}/to_delete.txt", base);
     let mut s = true;
@@ -409,7 +409,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("unlink file", s, &mut passed, &mut total);
 
-    // ── 10. rename file ─────────────────────────────────────────────────────
+    // ── 10. rename file ==========================================================================================================================================================================──
     log_section("10. RENAME FILE");
     let f_ren_a = format!("{}/ren_a.txt", base);
     let f_ren_b = format!("{}/ren_b.txt", base);
@@ -441,7 +441,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_ren_b);
     record("rename file", s, &mut passed, &mut total);
 
-    // ── 11. hard link + nlink ───────────────────────────────────────────────
+    // ── 11. hard link + nlink ======================================================================================================================================================──
     log_section("11. HARD LINK + NLINK");
     let f_link = format!("{}/link_src.txt", base);
     let f_hard = format!("{}/link_dst.txt", base);
@@ -470,7 +470,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_link);
     record("hard link + nlink >= 2", s, &mut passed, &mut total);
 
-    // ── 12. symlink + readlink ──────────────────────────────────────────────
+    // ── 12. symlink + readlink ======================================================================================================================================================─
     log_section("12. SYMLINK + READLINK");
     let f_sym_tgt = format!("{}/sym_target.txt", base);
     let f_sym_lnk = format!("{}/sym_link", base);
@@ -499,7 +499,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_sym_tgt);
     record("symlink + readlink", s, &mut passed, &mut total);
 
-    // ── 13. chmod + verify mode ─────────────────────────────────────────────
+    // ── 13. chmod + verify mode ======================================================================================================================================================
     log_section("13. CHMOD");
     let f_chm = format!("{}/chmod.txt", base);
     let mut s = true;
@@ -527,7 +527,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_chm);
     record("chmod + verify mode", s, &mut passed, &mut total);
 
-    // ── 14. truncate + verify size ──────────────────────────────────────────
+    // ── 14. truncate + verify size ============================================================================================================================================
     log_section("14. TRUNCATE");
     let f_trunc = format!("{}/trunc.txt", base);
     let mut s = true;
@@ -569,7 +569,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_trunc);
     record("truncate + verify size", s, &mut passed, &mut total);
 
-    // ── 15. dup ─────────────────────────────────────────────────────────────
+    // ── 15. dup ==============================
     log_section("15. DUP");
     let f_dup = format!("{}/dup.txt", base);
     let mut s = true;
@@ -633,7 +633,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_dup);
     record("dup + read from dup'd fd", s, &mut passed, &mut total);
 
-    // ── 16. dup2 ────────────────────────────────────────────────────────────
+    // ── 16. dup2 ====================──
     log_section("16. DUP2");
     let f_dup2 = format!("{}/dup2.txt", base);
     let mut s = true;
@@ -693,7 +693,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_dup2);
     record("dup2 to specific fd", s, &mut passed, &mut total);
 
-    // ── 17. pipe basic ──────────────────────────────────────────────────────
+    // ── 17. pipe basic ====================================================================================================================================================================================
     log_section("17. PIPE BASIC");
     let mut s = true;
     match vfs::pipe() {
@@ -743,7 +743,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("pipe create + write + read", s, &mut passed, &mut total);
 
-    // ── 18. write to closed read-end pipe → read returns 0 after close ─────
+    // ── 18. write to closed read-end pipe → read returns 0 after close ==========──
     log_section("18. PIPE WRITE-END CLOSE → EOF");
     let mut s = true;
     match vfs::pipe() {
@@ -784,7 +784,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("pipe write-end close → EOF", s, &mut passed, &mut total);
 
-    // ── 19. read empty file returns 0 ───────────────────────────────────────
+    // ── 19. read empty file returns 0 ==================================================================================================================================
     log_section("19. READ EMPTY FILE");
     let f_empty = format!("{}/empty.txt", base);
     let mut s = true;
@@ -818,7 +818,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_empty);
     record("read empty file returns 0", s, &mut passed, &mut total);
 
-    // ── 20. seek beyond file size + read ────────────────────────────────────
+    // ── 20. seek beyond file size + read ========================================================================================================================
     log_section("20. SEEK BEYOND END");
     let f_seek = format!("{}/seekbeyond.txt", base);
     let mut s = true;
@@ -853,7 +853,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_seek);
     record("seek beyond end + read", s, &mut passed, &mut total);
 
-    // ── 21. multiple writes accumulate ──────────────────────────────────────
+    // ── 21. multiple writes accumulate ========================================================================================================================──
     log_section("21. MULTIPLE WRITES");
     let f_multi = format!("{}/multi.txt", base);
     let mut s = true;
@@ -907,7 +907,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_multi);
     record("multiple writes accumulate", s, &mut passed, &mut total);
 
-    // ── 22. getdents on root / ──────────────────────────────────────────────
+    // ── 22. getdents on root / ======================================================================================================================================================─
     log_section("22. GETDENTS ON ROOT");
     let mut s = true;
     match vfs::open("/", vfs::OpenFlags::READ | vfs::OpenFlags::DIRECTORY) {
@@ -947,7 +947,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("getdents on root /", s, &mut passed, &mut total);
 
-    // ── 23. open /sys/version (kernel pseudo-fs) ────────────────────────────
+    // ── 23. open /sys/version (kernel pseudo-fs) ==========================================================================================─
     log_section("23. OPEN /sys/version");
     let mut s = true;
     match vfs::open("/sys/version", vfs::OpenFlags::READ) {
@@ -976,7 +976,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("open /sys/version", s, &mut passed, &mut total);
 
-    // ── 24. fchmod on open fd ───────────────────────────────────────────────
+    // ── 24. fchmod on open fd ======================================================================================================================================================──
     log_section("24. FCHMOD");
     let f_fchmod = format!("{}/fchmod.txt", base);
     let mut s = true;
@@ -1016,7 +1016,7 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_fchmod);
     record("fchmod on open fd", s, &mut passed, &mut total);
 
-    // ── 25. ftruncate on open fd ────────────────────────────────────────────
+    // ── 25. ftruncate on open fd ============================================================================================================================================──
     log_section("25. FTRUNCATE");
     let f_ft = format!("{}/ftrunc.txt", base);
     let mut s = true;
@@ -1056,13 +1056,13 @@ fn run_vfs_ops_suite() -> bool {
     let _ = vfs::unlink(&f_ft);
     record("ftruncate on open fd", s, &mut passed, &mut total);
 
-    // ── Cleanup ─────────────────────────────────────────────────────────────
+    // ── Cleanup ==============================
     crate::serial_println!("[vfs-ops-test][CLEANUP] best-effort cleanup");
     let _ = vfs::unlink(&f1);
     let _ = vfs::unlink(&f2);
     let _ = vfs::unlink(&base);
 
-    // ── Summary ─────────────────────────────────────────────────────────────
+    // ── Summary ==============================
     log_section("VFS OPS TEST SUMMARY");
     let ok = passed == total;
     crate::serial_println!(

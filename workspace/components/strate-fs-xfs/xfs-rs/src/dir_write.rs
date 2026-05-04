@@ -374,7 +374,7 @@ impl From<u8> for DirFileType {
     }
 }
 
-// ─── Block Directory Operations ───────────────────────────────────────────
+// ========== Block directory operations ============================================================================================================================================─
 
 /// Block directory data entry header.
 #[derive(Debug, Clone)]

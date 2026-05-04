@@ -227,14 +227,14 @@ fn cmd_mem_zones() -> Result<(), ShellError> {
 
 /// Diagnostic view : poison quarantine, slab health, buddy alloc failures.
 fn cmd_mem_diag() -> Result<(), ShellError> {
-    // ── Poison quarantine ──────────────────────────────────────────────
+    // ── Poison quarantine ======================================================================================================================================================─
     let quarantine = crate::memory::poison_quarantine_pages_snapshot();
     let (q_val, q_unit) = format_bytes(quarantine.saturating_mul(4096));
     shell_println!("Poison quarantine:");
     shell_println!("  Quarantined pages: {} ({} {})", quarantine, q_val, q_unit);
     shell_println!("");
 
-    // ── Buddy allocation failures ──────────────────────────────────────
+    // ── Buddy allocation failures ========================================================================================================================──
     let fail_counts = crate::memory::buddy::buddy_alloc_fail_counts_snapshot();
     let any_fail = fail_counts.iter().any(|&c| c > 0);
     if any_fail {
@@ -252,7 +252,7 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
         shell_println!("");
     }
 
-    // ── Buddy zone policy / fragmentation view ────────────────────────
+    // ── Buddy zone policy / fragmentation view ================================================================================
     {
         let allocator_guard = crate::memory::buddy::get_allocator().lock();
         if let Some(ref allocator) = *allocator_guard {
@@ -319,7 +319,7 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
         }
     }
 
-    // ── Slab allocator ─────────────────────────────────────────────────
+    // ── Slab allocator ================================================================================================================================================================─
     let slab = crate::memory::heap::slab_diag_snapshot();
     let (sa_v, sa_u) = format_bytes(slab.pages_allocated.saturating_mul(4096));
     let (sr_v, sr_u) = format_bytes(slab.pages_reclaimed.saturating_mul(4096));
@@ -345,7 +345,7 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
     );
     shell_println!("");
 
-    // ── Last heap failure ──────────────────────────────────────────────
+    // ── Last heap failure ======================================================================================================================================================─
     if let Some(fail) = crate::memory::heap::last_heap_failure_snapshot() {
         shell_println!("Last heap allocation failure:");
         shell_println!("  Backend:  {:?}", fail.backend);
@@ -359,7 +359,7 @@ fn cmd_mem_diag() -> Result<(), ShellError> {
         shell_println!("");
     }
 
-    // ── Slab size classes ──────────────────────────────────────────────
+    // ── Slab size classes ======================================================================================================================================================─
     shell_println!("Slab size classes:");
     for ci in 0..crate::memory::heap::SLAB_NUM_CLASSES {
         let block = crate::memory::heap::slab_class_size(ci);

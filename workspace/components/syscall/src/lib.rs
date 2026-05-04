@@ -492,7 +492,7 @@ pub mod call {
     /// ```
     pub fn open<T: AsRef<str>>(path: T, posix_flags: u32) -> error::Result<usize> {
         let strat9_flags = flag::posix_oflags_to_strat9(posix_flags);
-        openat(0, path, strat9_flags.bits() as usize, 0)
+        openat(-100_i64 as usize, path, strat9_flags.bits() as usize, 0)
     }
 
     /// Open a file at a specific path with filter

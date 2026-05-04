@@ -711,7 +711,7 @@ const SCROLLBAR_W: usize = 12;
 const MAX_SCROLLBACK: usize = 500;
 const MAX_DIRTY_RECTS: usize = 8;
 
-// ── Mouse cursor (X arrow, 12×16) ─────────────────────────────────────────
+// Mouse cursor (X arrow, 12×16) ==================================================================================================================================──
 const CURSOR_W: usize = 12;
 const CURSOR_H: usize = 16;
 const TEXT_CURSOR_MAX_DIM: usize = 32;
@@ -737,7 +737,7 @@ const CURSOR_PIXELS: [u8; CURSOR_W * CURSOR_H] = [
     0,0,0,0,0,0,0,0,0,0,0,0,
 ];
 
-// ── Selection clipboard ────────────────────────────────────────────────────
+// Selection clipboard ==========================================================================================================================================================================─
 const CLIPBOARD_CAP: usize = 8192;
 static CLIPBOARD: spin::Mutex<([u8; CLIPBOARD_CAP], usize)> =
     spin::Mutex::new(([0u8; CLIPBOARD_CAP], 0));
@@ -777,7 +777,7 @@ pub struct VgaWriter {
     dirty_regions: DirtyRegionSet,
     track_dirty: bool,
 
-    // ── Scrollback buffer ────────────────────────────────────────────────────
+    // Scrollback buffer ==========================================================================================================================================================================─
     /// Completed screen rows kept for history scrolling.
     sb_rows: Vec<Vec<SbCell>>,
     /// Current (incomplete) row being assembled by write_char.
@@ -786,7 +786,7 @@ pub struct VgaWriter {
     /// Lines scrolled back from the bottom (0 = live view).
     scroll_offset: usize,
 
-    // ── Mouse cursor ──────────────────────────────────────────────────────────
+    // Mouse cursor ====================
     mc_x: i32,
     mc_y: i32,
     mc_visible: bool,
@@ -799,7 +799,7 @@ pub struct VgaWriter {
     tc_color: u32,
     tc_save: [u32; TEXT_CURSOR_MAX_DIM * TEXT_CURSOR_MAX_DIM],
 
-    // ── Text selection ────────────────────────────────────────────────────────
+    // Text selection ==========
     sel_active: bool,
     sel_start_row: usize,
     sel_start_col: usize,
@@ -1432,7 +1432,7 @@ impl VgaWriter {
         }
     }
 
-    // ── Mouse cursor ──────────────────────────────────────────────────────────
+    // Mouse cursor ====================
 
     /// Performs the mc save hw operation.
     fn mc_save_hw(&mut self) {
@@ -1618,7 +1618,7 @@ impl VgaWriter {
         self.present_if_due(false);
     }
 
-    // ── Text selection ────────────────────────────────────────────────────────
+    //  Text selection ==========
 
     /// Performs the sel normalized operation.
     fn sel_normalized(&self) -> (usize, usize, usize, usize) {
@@ -2767,13 +2767,13 @@ impl VgaWriter {
         }
         let c = normalize_console_char(c);
 
-        // ── Mirror into scrollback (always, even when scrolled back) ──────────────
+        // Mirror into scrollback (always, even when scrolled back) ========================================
         self.sb_mirror_char(c);
         // If the user is viewing history, suppress live rendering.
         if self.scroll_offset > 0 {
             return;
         }
-        // ──────────────────────────────────────────────────────────────
+        // ==============================
 
         match c {
             '\n' => {
@@ -4433,7 +4433,7 @@ pub fn draw_strata_stack(origin_x: usize, origin_y: usize, layer_w: usize, layer
         .lock()
         .draw_strata_stack(origin_x, origin_y, layer_w, layer_h);
 }
-// ── Scrollback / scrollbar public API ────────────────────────────────────────
+// ── Scrollback / scrollbar public API ==================================================================================================================================─
 
 /// Scroll the console view up (backward in history) by `lines` lines.
 pub fn scroll_view_up(lines: usize) {

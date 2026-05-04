@@ -35,7 +35,7 @@ use core::{
 
 pub use super::virtio_block::{BlockDevice, BlockError, SECTOR_SIZE};
 
-// ─── HBA generic registers (at ABAR) ─────────────────────────────────────────
+// ========== HBA generic registers (at ABAR) ==================================================================================================================================──
 const HBA_GHC: u64 = 0x04;
 const HBA_IS: u64 = 0x08;
 const HBA_PI: u64 = 0x0C;
@@ -44,7 +44,7 @@ const GHC_AE: u32 = 1 << 31; // AHCI Enable
 const GHC_IE: u32 = 1 << 1; // Global Interrupt Enable
 const GHC_HR: u32 = 1 << 0; // HBA Reset
 
-// ─── Port register offsets (relative to port base = ABAR + 0x100 + n*0x80) ──
+// ========== Port register offsets (relative to port base = ABAR + 0x100 + n*0x80)
 const PORT_CLB: u64 = 0x00;
 const PORT_CLBU: u64 = 0x04;
 const PORT_FB: u64 = 0x08;
@@ -75,7 +75,7 @@ const SIG_SATA: u32 = 0x0000_0101;
 const PXIE_DHRE: u32 = 1 << 0; // D2H Register FIS Received Enable (normal DMA completion)
 const PXIE_TFEE: u32 = 1 << 30; // Task File Error Enable
 
-// ─── Per-port memory layout offsets ──────────────────────────────────────────
+// ========== Per-port memory layout offsets ========================================================
 const CLB_OFF: u64 = 0x000; // Command List (1024 B)
 const FB_OFF: u64 = 0x400; // FIS buffer   (256 B)
 const CTAB_OFF: u64 = 0x500; // Command Table (128 B header + 16 B PRDT)
@@ -116,7 +116,7 @@ const ATA_WRITE_DMA_EXT: u8 = 0x35;
 // PxIS bit 30 = Task File Error Status
 const PXIS_TFES: u32 = 1 << 30;
 
-// ─── Error type ──────────────────────────────────────────────────────────────
+// ========== Error type ==============================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AhciError {
@@ -140,7 +140,7 @@ pub enum AhciError {
     NoPort,
 }
 
-// ─── Internal port handle ─────────────────────────────────────────────────────
+// ========== Internal port handle ==========================================================================================================================================================================──
 
 struct AhciPort {
     port_num: u8,
@@ -150,7 +150,7 @@ struct AhciPort {
     sector_count: u64,
 }
 
-// ─── Controller ──────────────────────────────────────────────────────────────
+// ========== Controller ==============================
 
 pub struct AhciController {
     #[allow(dead_code)]
@@ -162,7 +162,7 @@ pub struct AhciController {
 unsafe impl Send for AhciController {}
 unsafe impl Sync for AhciController {}
 
-// ─── Per-port IRQ completion state ───────────────────────────────────────────
+// ========== Per-port IRQ completion state ============================================================================================================================================─
 // These statics are accessed from the IRQ handler without locks.
 // Indexed by port_num (0..32).
 
@@ -196,7 +196,7 @@ static PORT_WQ: [WaitQueue; 32] = {
     [INIT; 32]
 };
 
-// ─── MMIO helpers ─────────────────────────────────────────────────────────────
+// ========== MMIO helpers ==============================
 
 /// Performs the rd32 operation.
 #[inline]
@@ -210,7 +210,7 @@ unsafe fn wr32(base: u64, off: u64, val: u32) {
     ptr::write_volatile((base + off) as *mut u32, val);
 }
 
-// ─── Port start/stop ──────────────────────────────────────────────────────────
+// ========== Port start/stop ====================
 
 /// Performs the port stop operation.
 fn port_stop(pvirt: u64) {
@@ -276,7 +276,7 @@ fn port_enable_irq(pvirt: u64) {
     }
 }
 
-// ─── Bounce-buffer management ─────────────────────────────────────────────────
+// ========== Bounce-buffer management ================================================================================================================================================================─
 
 struct Bounce {
     frame: PhysFrame,
@@ -310,7 +310,7 @@ impl Bounce {
     }
 }
 
-// ─── Command submission ───────────────────────────────────────────────────────
+// ========== Command submission ==========
 //
 // Two completion strategies:
 //   1. Task context (current_task_id() is Some): IRQ + WaitQueue : the issuing
@@ -406,7 +406,7 @@ fn submit_cmd(
     // SAFETY: MMIO write to PxCI
     unsafe { wr32(port.port_virt, PORT_CI, 1) };
 
-    // ── Completion strategy ────────────────────────────────────────────────────
+    // Completion strategy ==========================================================================================================================================================================─
     if crate::process::current_task_id().is_some() {
         // Task context: block until the IRQ handler signals DONE.
         // WaitQueue::wait_until() atomically checks the condition under the
@@ -472,7 +472,7 @@ fn submit_cmd(
     Ok(())
 }
 
-// ─── IRQ handler ─────────────────────────────────────────────────────────────
+// ========== IRQ handler ==============================
 
 /// Called from the IDT AHCI IRQ handler.
 ///
@@ -534,7 +534,7 @@ pub fn handle_interrupt() {
     }
 }
 
-// ─── BlockDevice impl for AhciController ─────────────────────────────────────
+// ========== BlockDevice impl for AhciController ========================================================================================================================─
 
 impl AhciController {
     /// Probe and initialise an AHCI controller from the PCI bus.
@@ -750,7 +750,7 @@ impl BlockDevice for AhciController {
     }
 }
 
-// ─── Global singleton + public API ───────────────────────────────────────────
+// ========== Global singleton + public API ============================================================================================================================================─
 
 static AHCI: SpinLock<Option<Box<AhciController>>> = SpinLock::new(None);
 
