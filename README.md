@@ -66,7 +66,7 @@ This project is in active development and not production-ready. The ABI is still
     - RamFS filesystem
     - XFS filesystem (WiP and disabled) 
     - VirtIO block and net drivers (kernel-side)
-    - libc (relibc from the Redox-OS project)
+    - libc (musl : statically linked, Linux ABI compatibility)
     - IPv4 network stack with UDP/TCP/ICMP support, dhcp client, telnet server
     - e1000/e1000e and virtio NIC drivers
     - WASM native execution strate
@@ -74,7 +74,6 @@ This project is in active development and not production-ready. The ABI is still
     - CLI for managing silo and strate : memory management, start, stop, delete...
     - Basic commands : cat, ls, uptime, reboot, shutdown, cd, top
     - VFS with /proc /sys ...
-
 
 ```mermaid
 graph TD
@@ -146,9 +145,10 @@ or
 cargo make
 ```
 
-## Device list where Strat9-OS is booting
+## Device list where Strat9-OS is booting with sucess
 
 - QEMU
+- VMware Workstation
 - Lenovo Thinkpad X13
 
 ## Repository way of life
@@ -161,7 +161,7 @@ cargo make
 
 ### Related specifications
 
-todo...
+TODO...
 
 ## License
 

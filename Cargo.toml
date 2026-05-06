@@ -33,9 +33,9 @@ members = [
     "workspace/components/netutils/ice-candidate",
     "workspace/components/netutils/udp-tool",
     "workspace/components/strate-web-admin",
+    "workspace/components/musl-compat",
 ]
 exclude = [
-    "workspace/components/relibc",        # External dependency, built separately
     "workspace/components/strate-fs-xfs", # Missing fs-abstraction dependency
 ]
 resolver = "2"
@@ -76,12 +76,12 @@ unused_variables = "allow" # TODO review occurrences (too many for now :D)
 #opt-level = "z"   # Optimize for size
 opt-level = 2
 #lto = true        # Link-Time Optimization
-lto=false
+lto = false
 #codegen-units = 1 # Single codegen unit for max LTO
-panic = "abort"   # No unwinding in kernel
+panic = "abort" # No unwinding in kernel
 #strip = true      # Strip debug symbols from release
-strip=false
-debug=2
+strip = false
+debug = 2
 incremental = true # Faster recompilation
 
 [profile.dev]

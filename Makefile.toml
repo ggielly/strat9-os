@@ -23,152 +23,50 @@ command = "bash"
 args = ["tools/scripts/setup-limine.sh"]
 
 
-[tasks.patch-relibc]
-description = "Verify/patch relibc Strat9 integration (source of truth: sdk/relibc)"
-script_runner = "@shell"
-script_extension = "sh"
-script = [
-    '''
-    root_dir="$(pwd)"
-    relibc_dir="$root_dir/sdk/relibc"
-    platform_mod="$relibc_dir/src/platform/mod.rs"
-    target_dir="$relibc_dir/src/platform/strat9"
-
-    if [ ! -d "$relibc_dir" ]; then
-        echo "ERROR: $relibc_dir not found. Run setup-relibc first."
-        exit 1
-    fi
-
-    if [ ! -f "$target_dir/mod.rs" ] || [ ! -f "$target_dir/auxv_defs.rs" ]; then
-        echo "ERROR: Strat9 PAL files must live in $target_dir (mod.rs + auxv_defs.rs)."
-        echo "This repository is configured for Choice 1 (single source in sdk/relibc)."
-        exit 1
-    fi
-
-    # Patch src/platform/mod.rs (idempotent with markers)
-    echo "Patching $platform_mod..."
-
-    # Remove any existing Strat9 blocks (idempotent removal)
-    sed -i '/\/\/ STRAT9-OS-START/,/\/\/ STRAT9-OS-END/d' "$platform_mod"
-
-    # Define the blocks to insert
-    sys_block="// STRAT9-OS-START
-#[cfg(all(not(feature = \"no_std\"), target_os = \"strat9\"))]
-#[path = \"strat9/mod.rs\"]
-pub(crate) mod sys;
-// STRAT9-OS-END
-"
-    auxv_block="// STRAT9-OS-START
-#[cfg(target_os = \"strat9\")]
-pub use self::sys::auxv_defs;
-// STRAT9-OS-END"
-
-    modified=false
-    # Insert sys block after redox sys.
-    if grep -q 'redox/mod.rs.*pub(crate) mod sys' "$platform_mod"; then
-        sed -i "/redox\/mod\.rs.*pub(crate) mod sys/a $sys_block" "$platform_mod"
-        modified=true
-    fi
-
-    # Insert auxv block after redox auxv.
-    if grep -q 'redox_rt::auxv_defs' "$platform_mod"; then
-        sed -i "/redox_rt::auxv_defs/a $auxv_block" "$platform_mod"
-        modified=true
-    fi
-
-    if [ "$modified" = true ]; then
-        echo "Successfully patched $platform_mod with markers."
-    else
-        echo "ERROR: Could not find insertion points in $platform_mod"
-        exit 1
-    fi
-    ''',
-]
-
-[tasks.setup-relibc]
-description = "Clone/update external relibc fork and validate Strat9 PAL (Choice 1)"
-script_runner = "@shell"
-script = [
-    '''
-    root_dir="$(pwd)"
-    relibc_dir="$root_dir/sdk/relibc"
-    platform_mod="$relibc_dir/src/platform/mod.rs"
-    target_dir="$relibc_dir/src/platform/strat9"
-
-    if [ -d "$relibc_dir/.git" ]; then
-        cd "$relibc_dir"
-        git fetch origin
-        git checkout strat9-os
-        git pull origin strat9-os
-    else
-        rm -rf "$relibc_dir"
-        git clone https://github.com/ggielly/relibc "$relibc_dir"
-        cd "$relibc_dir"
-        git checkout strat9-os
-        git submodule update --init --recursive
-    fi
-
-    # Choice 1 is mandatory: Strat9 PAL lives directly in relibc fork.
-    if [ ! -f "$target_dir/mod.rs" ] || [ ! -f "$target_dir/auxv_defs.rs" ]; then
-        echo "ERROR: Missing $target_dir/mod.rs or $target_dir/auxv_defs.rs."
-        echo "Choice 1 is enforced: maintain PAL only inside sdk/relibc."
-        exit 1
-    fi
-
-    # Verify marker blocks are present in relibc platform registry.
-    echo "Verifying $platform_mod has Strat9 markers..."
-    if ! grep -q '// STRAT9-OS-START' "$platform_mod"; then
-        echo "ERROR: Strat9 markers not found in $platform_mod. Please update your fork."
-        exit 1
-    fi
-
-    echo "Successfully verified $platform_mod with Strat9 markers."
-    ''',
-]
-
-# =============================================================================
-# Build tasks - Relibc 
-# =============================================================================
-
-[tasks.check-relibc]
-description = "Check relibc compilation for Strat9 target"
+[tasks.setup-musl]
+description = "Clone/update external musl"
 script_runner = "@shell"
 script = ['''
-echo "Checking relibc for x86_64-unknown-strat9 target..."
-cd sdk/relibc
-cargo check \
-    --target ../../targets/x86_64-unknown-strat9.json \
-    -Z build-std=core,alloc \
-    -Z json-target-spec \
-    --no-default-features
-echo "Relibc check completed."
-''']
+    root_dir="$(pwd)"
+    musl_dir="$root_dir/sdk/musl"
 
-[tasks.build-relibc]
-description = "Build relibc static library for Strat9"
-dependencies = ["setup-relibc"]
+    if [ ! -d "$musl_dir/.git" ]; then
+        rm -rf "$musl_dir"
+        git clone git://git.musl-libc.org/musl "$musl_dir"
+    fi
+    ''']
+
+[tasks.build-musl]
+description = "Build musl static library for Strat9"
+dependencies = ["setup-musl"]
 script_runner = "@shell"
 script = ['''
-echo "Building relibc for x86_64-unknown-strat9 target..."
-cd sdk/relibc
-cargo build \
-    --target ../../targets/x86_64-unknown-strat9.json \
-    --release \
-    -Z build-std=core,alloc \
-    -Z json-target-spec \
-    --no-default-features
+echo "Building musl for x86_64-unknown-strat9 target..."
+cd sdk/musl
+
+# Configure musl for x86_64 (native, no cross-compile prefix)
+if [ ! -f config.mak ]; then
+    ./configure CC=gcc --disable-shared
+fi
+
+# Build musl
+make -j$(nproc)
 
 echo ""
-echo "=== Relibc Build Complete ==="
+echo "=== Musl Build Complete ==="
 echo ""
-librelibc="../../target/x86_64-unknown-strat9/release/librelibc.a"
-if [ -f "$librelibc" ]; then
-    size=$(stat -c%s "$librelibc" 2>/dev/null || stat -f%z "$librelibc")
+libmusl="lib/libc.a"
+if [ -f "$libmusl" ]; then
+    mkdir -p ../../target/x86_64-unknown-strat9/release/
+    cp "$libmusl" ../../target/x86_64-unknown-strat9/release/libc.a
+    # Also provide librelibc.a so we don't break existing link flags immediately
+    cp "$libmusl" ../../target/x86_64-unknown-strat9/release/librelibc.a
+    size=$(stat -c%s "$libmusl" 2>/dev/null || stat -f%z "$libmusl")
     size_kb=$((size / 1024))
-    echo "  librelibc.a: $size bytes ($size_kb KB)"
-    echo "  Location: target/x86_64-unknown-strat9/release/librelibc.a"
+    echo "  libc.a: $size bytes ($size_kb KB)"
 else
-    echo "  Warning: librelibc.a not found"
+    echo "  Warning: libc.a not found"
+    exit 1
 fi
 echo ""
 ''']
@@ -1007,7 +905,7 @@ args = [
 
 description = "Create bootable ISO/IMG with Limine + kernel"
 dependencies = [
-    "build-relibc",
+    "build-musl",
     "setup-limine",
     "kernel",
     "strate-ext4",
@@ -1035,7 +933,7 @@ bash tools/scripts/create-limine-image.sh
 
 description = "Create bootable ISO/IMG with Limine + kernel (self-tests enabled)"
 dependencies = [
-    "build-relibc",
+    "build-musl",
     "setup-limine",
     "kernel-test",
     "strate-ext4",
@@ -1065,7 +963,7 @@ bash tools/scripts/create-limine-image.sh
 
 description = "Create bootable ISO/IMG with Limine + kernel (dev-opt profile)"
 dependencies = [
-    "build-relibc",
+    "build-musl",
     "setup-limine",
     "kernel-dev-opt",
     "strate-ext4-dev-opt",
@@ -1093,7 +991,7 @@ bash tools/scripts/create-limine-image.sh
 
 description = "Create bootable ISO/IMG with Limine + kernel (release profile)"
 dependencies = [
-    "build-relibc",
+    "build-musl",
     "setup-limine",
     "kernel-release",
     "strate-ext4-release",
@@ -1443,16 +1341,20 @@ args = [
 [tasks.net-setup-routed]
 description = "Setup routed TAP network on host (requires sudo): DHCP + NAT forwarding"
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 sudo bash tools/scripts/net/setup-tap-routed.sh "${STRAT9_UPLINK_IFACE}" "${STRAT9_TAP_IFACE}"
-''']
+''',
+]
 
 [tasks.net-teardown-routed]
 description = "Teardown routed TAP network on host (requires sudo)"
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 sudo bash tools/scripts/net/teardown-tap-routed.sh "${STRAT9_TAP_IFACE}" "${STRAT9_UPLINK_IFACE}"
-''']
+''',
+]
 
 [tasks.run-net-tap]
 description = "Load QEMU in text mode using TAP passthrough (requires net-setup-routed)"

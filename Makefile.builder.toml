@@ -32,7 +32,7 @@ required_dirs=(
     "workspace/components/strate-silo-test"
     "workspace/components/syscall"
     "workspace/components/api"
-    "workspace/sdk/relibc"
+    "workspace/sdk/musl"
 )
 
 missing=0
@@ -74,35 +74,45 @@ echo "if missing, rebuild container with: ./builder.sh build-container"
 ''']
 
 # =============================================================================
-# relibc build
+# musl build
 # =============================================================================
 
-[tasks.build-relibc]
-description = "Build relibc static library for strat9"
+[tasks.build-musl]
+description = "Build musl static library for strat9"
 dependencies = ["verify-workspace"]
 script_runner = "@shell"
-script = ['''
-echo "building relibc for ${STRAT9_TARGET}..."
-cd workspace/sdk/relibc
+script = [
+    '''
+echo "building musl for ${STRAT9_TARGET}..."
+cd workspace/sdk/musl
 
-cargo build \
-    --target ../../targets/x86_64-strat9.json \
-    --release \
-    -Z build-std=core,alloc \
-    -Z json-target-spec \
-    --no-default-features
+# Configure musl for x86_64 (native, no cross-compile prefix)
+if [ ! -f config.mak ]; then
+    ./configure CC=gcc --disable-shared
+fi
 
-librelibc="../../target/x86_64-strat9/release/librelibc.a"
-if [ -f "$librelibc" ]; then
-    size=$(stat -c%s "$librelibc" 2>/dev/null || stat -f%z "$librelibc")
+# Build musl
+make -j$(nproc)
+
+libmusl="lib/libc.a"
+if [ -f "$libmusl" ]; then
+    # Copy to target directory so that other builds can find it easily
+    mkdir -p ../../target/${STRAT9_TARGET}/release/
+    cp "$libmusl" ../../target/${STRAT9_TARGET}/release/librelibc.a # keep name to avoid changing all linkers
+    cp "$libmusl" ../../target/${STRAT9_TARGET}/release/libc.a 
+    # TODO : need to change names in all applications
+    # TODO : to remove the relibc naming
+    
+    size=$(stat -c%s "$libmusl" 2>/dev/null || stat -f%z "$libmusl")
     size_kb=$((size / 1024))
     echo ""
-    echo "relibc build complete: $size_kb KB"
+    echo "musl build complete: $size_kb KB"
 else
-    echo "error: librelibc.a not found"
+    echo "error: libc.a not found"
     exit 1
 fi
-''']
+''',
+]
 
 # =============================================================================
 # Component strates build
@@ -160,7 +170,7 @@ dependencies = [
 
 [tasks.build-kernel]
 description = "Build bedrock kernel (release)"
-dependencies = ["verify-workspace", "build-relibc"]
+dependencies = ["verify-workspace", "build-musl"]
 cwd = "workspace/kernel"
 command = "cargo"
 args = ["build", "--release", "--target", "${KERNEL_TARGET}"]
@@ -221,8 +231,8 @@ echo "  copying initfs runtime binaries..."
     cp workspace/target/x86_64-unknown-none/release/console-admin build/iso_root/initfs/console-admin
 [ -f workspace/target/x86_64-unknown-none/release/strate-bus ] && \
     cp workspace/target/x86_64-unknown-none/release/strate-bus build/iso_root/initfs/strate-bus
-[ -f workspace/target/x86_64-unknown-none/release/strate-net-silo ] && \
-    cp workspace/target/x86_64-unknown-none/release/strate-net-silo build/iso_root/initfs/strate-net
+[ -f workspace/target/x86_64-unknown-strat9/release/strate-net-silo ] && \
+    cp workspace/target/x86_64-unknown-strat9/release/strate-net-silo build/iso_root/initfs/strate-net
 [ -f workspace/target/x86_64-unknown-none/release/strate-webrtc ] && \
     cp workspace/target/x86_64-unknown-none/release/strate-webrtc build/iso_root/initfs/strate-webrtc
 [ -f workspace/target/x86_64-unknown-none/release/dhcp-client ] && \
@@ -281,7 +291,7 @@ echo ""
 # =============================================================================
 
 [tasks.build-all]
-description = "Complete build: relibc + strates + kernel + ISO"
+description = "Complete build: musl + strates + kernel + ISO"
 dependencies = ["create-iso"]
 
 # =============================================================================
