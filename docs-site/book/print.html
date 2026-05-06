@@ -217,6 +217,15 @@ python3 -m http.server --directory build/docs-site 8000
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
+<li>2026-05-06 <code>117863e</code> Enhance network and silo management functionality</li>
+<li>2026-04-12 <code>6963e28</code> fix: reduce scheduler contention and harden early boot memory init</li>
+<li>2026-04-12 <code>f3647c1</code> feat(memory): production-grade allocator architecture (#49)</li>
+<li>2026-04-06 <code>a941264</code> feat: capability-based CWD, *at syscalls, and O_RESOLVE_BENEATH sandboxing</li>
+<li>2026-04-06 <code>309a9c1</code> refactor: runtime allocation, scheduler lock decoupling, FixedQueue, and VGA improvements</li>
+<li>2026-03-26 <code>a9a6cd6</code> Implement block-oriented memory management and ownership tracking</li>
+<li>2026-03-23 <code>ec8ee9f</code> refactor(memory): update reference counting logic for COW frames</li>
+<li>2026-03-23 <code>aaa89e0</code> Refactor: Decouple per-CPU scheduler state and logic from the global scheduler instance by moving <code>SchedulerCpu</code> to local CPU storage.</li>
+<li>2026-03-21 <code>c3f93c6</code> feat: Implement TSC-based boot timing and milestones, along with an analysis...</li>
 <li>2026-03-17 <code>eb7818d</code> feat: Implement static module loading from initfs paths and increase module blob size limit.</li>
 <li>2026-03-17 <code>acfdbbd</code> feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.</li>
 <li>2026-03-13 <code>29c6f3d</code> Refactor scheduler task management and introduce interrupt frame handling</li>
@@ -238,15 +247,6 @@ python3 -m http.server --directory build/docs-site 8000
 <li>2026-03-03 <code>c23a68a</code> feat: Ensure Limine bootloader directories exist, use a real time source for <code>setitimer</code>, and add <code>itimerval</code> value validation.</li>
 <li>2026-03-03 <code>ea80816</code> fix: Correct <code>O_NOFOLLOW</code> flag value and add length bounds checks to <code>DirentIter</code> initialization and name length assignment.</li>
 <li>2026-03-03 <code>748f98c</code> feat: Add <code>pread</code> and <code>pwrite</code> syscalls, enhance WASM <code>proc_exit</code> handling, and implement IPC port cleanup on task termination.</li>
-<li>2026-03-03 <code>aa38e26</code> refactor: Change network syscall error for missing device, add user page fault trace budget, and zero demand-paged memory after mapping.</li>
-<li>2026-03-03 <code>326613a</code> feat: Add PCI and handle ABI types, improve user page fault error reporting, ensure identity mapping for demand-paged frames, and update the build target triplet.</li>
-<li>2026-03-03 <code>52f3586</code> Enhance error handling by adding new error variants to the Error enum</li>
-<li>2026-03-03 <code>6cf254d</code> Refactor IPC message handling and update memory management logging</li>
-<li>2026-03-03 <code>50d7f2f</code> Enhance ABI structures and improve syscall error handling</li>
-<li>2026-03-03 <code>607abac</code> Enhance ABI introspection and improve syscall handling</li>
-<li>2026-03-03 <code>deabb18</code> Enhance Strat9 ABI integration and update OpenFlags implementation</li>
-<li>2026-03-03 <code>92ba1c6</code> Add strat9-abi as a workspace dependency and refactor bootloader integration</li>
-<li>2026-03-03 <code>eb5de02</code> Refactor variable names in BuddyAllocator and sys_sigtimedwait for clarity</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
@@ -378,7 +378,7 @@ python3 -m http.server --directory build/docs-site 8000
 <li>builds docs (<code>cargo make docs-site</code>)</li>
 <li>regenerates ABI changelog auto section from git history</li>
 <li>commits/pushes current branch changes</li>
-<li>uploads built website to <code>ggielly.github.io/strat9-os-docs</code></li>
+<li>uploads built website to the remote vhost via SSH</li>
 </ol>
 <p>The docs builder publishes:</p>
 <ol>

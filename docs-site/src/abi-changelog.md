@@ -25,6 +25,15 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-05-06 `117863e` Enhance network and silo management functionality
+- 2026-04-12 `6963e28` fix: reduce scheduler contention and harden early boot memory init
+- 2026-04-12 `f3647c1` feat(memory): production-grade allocator architecture (#49)
+- 2026-04-06 `a941264` feat: capability-based CWD, *at syscalls, and O_RESOLVE_BENEATH sandboxing
+- 2026-04-06 `309a9c1` refactor: runtime allocation, scheduler lock decoupling, FixedQueue, and VGA improvements
+- 2026-03-26 `a9a6cd6` Implement block-oriented memory management and ownership tracking
+- 2026-03-23 `ec8ee9f` refactor(memory): update reference counting logic for COW frames
+- 2026-03-23 `aaa89e0` Refactor: Decouple per-CPU scheduler state and logic from the global scheduler instance by moving `SchedulerCpu` to local CPU storage.
+- 2026-03-21 `c3f93c6` feat: Implement TSC-based boot timing and milestones, along with an analysis...
 - 2026-03-17 `eb7818d` feat: Implement static module loading from initfs paths and increase module blob size limit.
 - 2026-03-17 `acfdbbd` feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.
 - 2026-03-13 `29c6f3d` Refactor scheduler task management and introduce interrupt frame handling
@@ -46,15 +55,6 @@ See:
 - 2026-03-03 `c23a68a` feat: Ensure Limine bootloader directories exist, use a real time source for `setitimer`, and add `itimerval` value validation.
 - 2026-03-03 `ea80816` fix: Correct `O_NOFOLLOW` flag value and add length bounds checks to `DirentIter` initialization and name length assignment.
 - 2026-03-03 `748f98c` feat: Add `pread` and `pwrite` syscalls, enhance WASM `proc_exit` handling, and implement IPC port cleanup on task termination.
-- 2026-03-03 `aa38e26` refactor: Change network syscall error for missing device, add user page fault trace budget, and zero demand-paged memory after mapping.
-- 2026-03-03 `326613a` feat: Add PCI and handle ABI types, improve user page fault error reporting, ensure identity mapping for demand-paged frames, and update the build target triplet.
-- 2026-03-03 `52f3586` Enhance error handling by adding new error variants to the Error enum
-- 2026-03-03 `6cf254d` Refactor IPC message handling and update memory management logging
-- 2026-03-03 `50d7f2f` Enhance ABI structures and improve syscall error handling
-- 2026-03-03 `607abac` Enhance ABI introspection and improve syscall handling
-- 2026-03-03 `deabb18` Enhance Strat9 ABI integration and update OpenFlags implementation
-- 2026-03-03 `92ba1c6` Add strat9-abi as a workspace dependency and refactor bootloader integration
-- 2026-03-03 `eb5de02` Refactor variable names in BuddyAllocator and sys_sigtimedwait for clarity
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

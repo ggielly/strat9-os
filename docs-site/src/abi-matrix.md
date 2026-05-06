@@ -1,6 +1,6 @@
 # ABI Support Matrix
 
-Status of relibc platform APIs on `x86_64-unknown-strat9`.
+Status of musl platform APIs on `x86_64-unknown-strat9`.
 
 Legend: **OK** = implemented, **Stub** = returns ENOSYS, **Partial** = limited.
 
