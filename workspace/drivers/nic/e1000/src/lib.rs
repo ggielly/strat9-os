@@ -337,7 +337,7 @@ impl E1000Nic {
         }
 
         // Fallback to EEPROM read
-        log::trace!("e1000: RAL/RAH empty — reading MAC words from EEPROM");
+        log::trace!("e1000: RAL/RAH empty : reading MAC words from EEPROM");
         let mut mac = [0u8; 6];
         for i in 0u32..3 {
             let w = Self::eeprom_read(base, i as u8)?;

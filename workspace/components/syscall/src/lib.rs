@@ -492,7 +492,7 @@ pub mod call {
     /// ```
     pub fn open<T: AsRef<str>>(path: T, posix_flags: u32) -> error::Result<usize> {
         let strat9_flags = flag::posix_oflags_to_strat9(posix_flags);
-        openat(0, path, strat9_flags.bits() as usize, 0)
+        openat(-100_i64 as usize, path, strat9_flags.bits() as usize, 0)
     }
 
     /// Open a file at a specific path with filter
@@ -664,7 +664,7 @@ pub mod call {
     /// `pid` supports POSIX values (`-1` = any child).
     /// `status` receives encoded wait status (same layout as Linux waitpid).
     ///
-    /// Prefer [`waitpid_blocking`] for blocking waits — it automatically
+    /// Prefer [`waitpid_blocking`] for blocking waits : it automatically
     /// retries on `EINTR`.
     pub fn waitpid(pid: isize, status: Option<&mut i32>, options: usize) -> error::Result<usize> {
         let status_ptr = status.map_or(0usize, |s| s as *mut i32 as usize);
@@ -861,7 +861,7 @@ pub mod call {
     }
 
     // -----------------------------------------------------------------------
-    // IPC — Ports (block 200-211)
+    // IPC : Ports (block 200-211)
     // -----------------------------------------------------------------------
 
     /// Create a new IPC port.
@@ -976,7 +976,7 @@ pub mod call {
     }
 
     // -----------------------------------------------------------------------
-    // IPC — Channels (block 220-224)
+    // IPC : Channels (block 220-224)
     // -----------------------------------------------------------------------
 
     /// Create a typed MPMC sync-channel.

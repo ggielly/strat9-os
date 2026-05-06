@@ -760,7 +760,7 @@ impl BuddyAllocator {
     /// Drops allocator accounting for a poisoned block without returning it to the free list.
     ///
     /// The block is **not** placed on any free list and its debug-bitmap entries
-    /// remain marked as "allocated" — because they genuinely are: the pages are
+    /// remain marked as "allocated" : because they genuinely are: the pages are
     /// quarantined and inaccessible.  Clearing them would defeat the double-free
     /// detector for any later attempt to free the same block.
     fn quarantine_poisoned_block_in_zone(
@@ -794,7 +794,7 @@ impl BuddyAllocator {
             return;
         }
 
-        // Intentionally NO mark_allocated(false) here — pages stay "allocated"
+        // Intentionally NO mark_allocated(false) here : pages stay "allocated"
         // in the debug bitmap because they are quarantined, not freed.
 
         zone.allocated = zone.allocated.saturating_sub(1usize << order);
@@ -1519,7 +1519,7 @@ impl BuddyAllocator {
         for page_idx in 0..page_count {
             let phys = frame_phys + page_idx as u64 * PAGE_SIZE;
             let meta = get_meta(PhysAddr::new(phys));
-            // Sentinel must still be intact at this point — if not, the frame
+            // Sentinel must still be intact at this point : if not, the frame
             // was never on the free list (double-alloc or metadata corruption).
             debug_assert_eq!(
                 meta.get_refcount(),
@@ -1605,7 +1605,7 @@ pub(crate) fn record_buddy_alloc_fail(order: u8) {
 
 /// Returns the buddy allocation failure counts by order.
 ///
-/// Use this for diagnostics — e.g., to determine whether a heap panic is
+/// Use this for diagnostics : e.g., to determine whether a heap panic is
 /// caused by genuine memory pressure or by high-order fragmentation.
 pub fn buddy_alloc_fail_counts_snapshot() -> [usize; crate::memory::zone::MAX_ORDER + 1] {
     let mut out = [0usize; crate::memory::zone::MAX_ORDER + 1];
@@ -2109,7 +2109,7 @@ fn alloc_order0_cached(migratetype: Migratetype) -> Result<PhysFrame, AllocError
 }
 
 fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
-    // NOTE: O(2^order) MetaSlot scan — acceptable here because order is always 0
+    // NOTE: O(2^order) MetaSlot scan : acceptable here because order is always 0
     // (single-page check) on this hot path.
     if crate::memory::frame::block_phys_has_poison_guard(frame.start_address.as_u64(), 0) {
         let mut global = OnDemandGlobalLock::new();
@@ -2146,7 +2146,7 @@ fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
             BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0, migratetype);
             local_cached_inc_phys(frame.start_address.as_u64(), migratetype);
         } else {
-            // Still full after spilling — the incoming frame joins the spill batch.
+            // Still full after spilling : the incoming frame joins the spill batch.
             // It will be marked free by free_phys_batch → free_to_zone.
             spill[spill_len] = frame.start_address.as_u64();
             spill_len += 1;

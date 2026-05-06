@@ -77,7 +77,7 @@ fn test_fault_maps_and_refcount() -> bool {
         return false;
     }
     // After the last unmap the frame is returned to the buddy allocator, which
-    // stamps REFCOUNT_UNUSED (u32::MAX) — the free-list sentinel. Reading 0
+    // stamps REFCOUNT_UNUSED (u32::MAX) : the free-list sentinel. Reading 0
     // here would indicate the old pre-sentinel behaviour.
     crate::memory::cow::frame_get_refcount(frame) == crate::memory::frame::REFCOUNT_UNUSED
 }

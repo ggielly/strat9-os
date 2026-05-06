@@ -30,7 +30,7 @@ use x86_64::{
     structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector},
 };
 
-/// GDT storage — per CPU
+/// GDT storage : per CPU
 static mut GDT: [MaybeUninit<GlobalDescriptorTable>; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { MaybeUninit::uninit() }; crate::arch::x86_64::percpu::MAX_CPUS];
 

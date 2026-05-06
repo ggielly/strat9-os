@@ -181,7 +181,7 @@ fn check_pages_mapped(
 }
 
 // ============================================================================
-// UserSliceRead — validated read-only access to user memory
+// UserSliceRead : validated read-only access to user memory
 // ============================================================================
 
 /// A validated read-only reference to a user-space memory region.
@@ -302,7 +302,7 @@ impl UserSliceRead {
 }
 
 // ============================================================================
-// UserSliceWrite — validated write access to user memory
+// UserSliceWrite : validated write access to user memory
 // ============================================================================
 
 /// A validated writable reference to a user-space memory region.
@@ -372,7 +372,7 @@ impl UserSliceWrite {
 }
 
 // ============================================================================
-// UserSliceReadWrite — validated read+write access to user memory
+// UserSliceReadWrite : validated read+write access to user memory
 // ============================================================================
 
 /// A validated read-write reference to a user-space memory region.

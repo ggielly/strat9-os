@@ -13,7 +13,7 @@ pub fn create_test_tasks() {
         .expect("Failed to create cooperative test task");
     add_task(test_task);
 
-    // Busy-loop test task (never yields — relies on preemption)
+    // Busy-loop test task (never yields : relies on preemption)
     let busy_task = Task::new_kernel_task(busy_task_main, "test-busy", TaskPriority::Normal)
         .expect("Failed to create busy test task");
     add_task(busy_task);

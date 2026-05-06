@@ -484,7 +484,7 @@ fn deliver_pending_signal_inner(
             }
             DefaultAction::Stop => {
                 if mode == SignalDeliveryMode::InterruptReturn {
-                    // Stop requires task suspension — not safe from IRQ context.
+                    // Stop requires task suspension : not safe from IRQ context.
                     // Leave the signal pending; the syscall-return path will deliver it.
                     task.irq_signal_delivery_blocked
                         .store(true, Ordering::Release);
@@ -499,7 +499,7 @@ fn deliver_pending_signal_inner(
             }
             DefaultAction::Term | DefaultAction::Core => {
                 if mode == SignalDeliveryMode::InterruptReturn {
-                    // kill_task requires a scheduler operation — not safe from IRQ context.
+                    // kill_task requires a scheduler operation : not safe from IRQ context.
                     // Leave the signal pending; the syscall-return path will deliver it.
                     task.irq_signal_delivery_blocked
                         .store(true, Ordering::Release);
@@ -631,7 +631,7 @@ pub fn deliver_pending_signal(frame: &mut crate::syscall::SyscallFrame) -> bool 
 ///
 /// Only one signal is delivered per call (the lowest-numbered unblocked one).
 /// Signals whose default action is Term, Core, or Stop, and signals without a
-/// restorer, are **deferred** — they remain pending and are delivered on the
+/// restorer, are **deferred** : they remain pending and are delivered on the
 /// next syscall-return path, which is safe to kill or suspend the task.
 /// The deferral count is tracked in [`SIGNAL_IRQ_DEFERRED_COUNT`].
 ///
@@ -685,7 +685,7 @@ pub fn send_signal(
 
     // If the task is blocked and the signal is not blocked, wake it.
     // Best-effort read: state may change concurrently, but wake_task is
-    // idempotent — a spurious wake is harmless and a missed wake will be
+    // idempotent : a spurious wake is harmless and a missed wake will be
     // caught on the next scheduling point when pending_signals is checked.
     {
         let state = task.get_state();

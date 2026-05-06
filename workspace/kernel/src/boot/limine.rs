@@ -556,7 +556,7 @@ pub unsafe extern "C" fn kmain() -> ! {
         }
     }
 
-    // Get HHDM offset — critical for accessing physical memory
+    // Get HHDM offset : critical for accessing physical memory
     let hhdm_offset = HHDM.get_response().map(|r| r.offset()).unwrap_or(0);
 
     // Build a kernel-local memory map from Limine entries.

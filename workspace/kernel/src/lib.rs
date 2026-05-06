@@ -1255,7 +1255,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::arch::x86_64::keyboard_layout::set_french_layout();
 
     // =============================================
-    // Boot complete — start preemptive multitasking
+    // Boot complete : start preemptive multitasking
     // =============================================
     if apic_active {
         arch::x86_64::smp::open_ap_scheduler_gate();

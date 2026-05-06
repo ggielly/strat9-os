@@ -268,7 +268,7 @@ pub struct Task {
     pub itimers: super::timer::ITimers,
     /// Pending wakeup flag: set by `wake_task()` when the task is not yet
     /// in `blocked_tasks` (it is still transitioning to Blocked state).
-    /// Checked by `block_current_task()` — if set, the task skips blocking
+    /// Checked by `block_current_task()` : if set, the task skips blocking
     /// and continues execution, preventing a lost-wakeup race.
     pub wake_pending: AtomicBool,
     /// Sleep deadline in nanoseconds (monotonic). If non-zero, the task
@@ -685,6 +685,14 @@ fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
             is_user_entry,
             entry
         );
+        if is_user_entry {
+            crate::serial_println!(
+                "[trace][task] post_switch_enter cpu={} tid={} entry={:#x}",
+                cpu,
+                task.id.as_u64(),
+                entry
+            );
+        }
     }
 
     // First-launch tasks arrive here via the legacy `ret` bootstrap path, which
@@ -1059,7 +1067,7 @@ impl Task {
         // never read the uninitialized data itself, so this is sound.
         let task_box: alloc::boxed::Box<core::mem::MaybeUninit<Task>> =
             alloc::boxed::Box::new_uninit();
-        // Cast to *const Task — we never read Task data, only compute field addresses.
+        // Cast to *const Task : we never read Task data, only compute field addresses.
         let task_ptr = task_box.as_ptr() as *const Task;
         let base = task_ptr as u64;
         // SAFETY: We only take addresses via addr_of!, no uninitialized reads.
@@ -1195,7 +1203,7 @@ pub(super) unsafe fn do_restore_first_task(
     restore_first_task_fxsave(frame_ptr, fpu_ptr);
 }
 
-// ── FXSAVE path (legacy, no XSAVE support) ──
+//  FXSAVE path (legacy, no XSAVE support) 
 
 /// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu
 #[unsafe(naked)]
@@ -1246,7 +1254,7 @@ unsafe extern "C" fn restore_first_task_fxsave(_rsp_ptr: *const u64, _fpu_ptr: *
     );
 }
 
-// ── XSAVE path (with XCR0 switching per-silo) ──
+//  XSAVE path (with XCR0 switching per-silo) 
 
 /// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu, r8=new_xcr0, r9=old_xcr0
 #[unsafe(naked)]

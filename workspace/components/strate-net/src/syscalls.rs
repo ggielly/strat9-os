@@ -4,7 +4,7 @@ pub use strat9_syscall::{
     call,
     data::TimeSpec,
     error::{self, Error},
-    number, syscall0, syscall2,
+    number, syscall2,
 };
 
 pub type Result<T> = error::Result<T>;
@@ -26,7 +26,14 @@ pub fn net_info(info_type: u64, buf: &mut [u8]) -> Result<usize> {
 
 /// Implements clock gettime ns.
 pub fn clock_gettime_ns() -> Result<u64> {
-    unsafe { syscall0(number::SYS_CLOCK_GETTIME).map(|v| v as u64) }
+    let mut ts = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    call::clock_gettime(1 /* CLOCK_MONOTONIC */, &mut ts)?;
+    Ok((ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64))
 }
 
 /// Implements nanosleep.

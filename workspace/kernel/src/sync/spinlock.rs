@@ -17,12 +17,12 @@
 //!   (scheduler run-queues, per-CPU frame caches, statistics counters …)
 //!
 //! All call sites that use `SpinLock<T>` without a type argument continue to
-//! compile unchanged — `IrqDisabled` is the default guardian.
+//! compile unchanged : `IrqDisabled` is the default guardian.
 //!
 //! # Debug helpers
 //!
 //! `debug_set_watch_lock_addr` / `debug_clear_watch_lock_addr` emit a serial
-//! trace on every `drop` of a specific lock instance — useful when hunting
+//! trace on every `drop` of a specific lock instance : useful when hunting
 //! deadlocks.
 
 use super::{
