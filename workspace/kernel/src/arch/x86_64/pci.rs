@@ -90,7 +90,7 @@ pub mod storage_subclass {
 
 /// Programming interface codes for mass-storage SATA controllers
 pub mod sata_progif {
-    /// AHCI 1.0 (Advanced Host Controller Interface) — the standard modern mode
+    /// AHCI 1.0 (Advanced Host Controller Interface) : the standard modern mode
     pub const AHCI: u8 = 0x01;
     /// Vendor-specific / legacy IDE emulation
     pub const VENDOR: u8 = 0x00;
@@ -487,7 +487,7 @@ impl Iterator for PciScanner {
                     continue;
                 }
 
-                // Device exists at function 0 — do the full probe.
+                // Device exists at function 0 : do the full probe.
                 let Some(dev) = probe_from_word00(PciAddress::new(bus, self.device, 0), word00)
                 else {
                     self.advance_to_next_device();
@@ -711,13 +711,13 @@ fn probe_from_word00(address: PciAddress, word00: u32) -> Option<PciDevice> {
 ///
 /// The first lookup performs a full bus scan, then all subsequent lookups reuse
 /// this snapshot. Every query function borrows the cache through the lock and
-/// operates on the `&[PciDevice]` directly — no `clone()` of the Vec.
+/// operates on the `&[PciDevice]` directly : no `clone()` of the Vec.
 static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 
 /// Populate the cache if empty, then run `f` on the device slice.
 ///
 /// All query functions route through here so that only a single scan ever
-/// happens, and the lock is held for the duration of the filter — not for
+/// happens, and the lock is held for the duration of the filter : not for
 /// the entire boot.
 fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
     let mut cache = PCI_DEVICE_CACHE.lock();

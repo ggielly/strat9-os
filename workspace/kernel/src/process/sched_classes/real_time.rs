@@ -170,7 +170,7 @@ impl SchedClassRq for RealTimeClassRq {
                 if self.queues[i].is_empty() {
                     self.clear_bit(i as u8);
                 }
-                // task_id is unique — stop scanning once found.
+                // task_id is unique : stop scanning once found.
                 return true;
             }
             bits &= !(1u128 << i);

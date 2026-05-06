@@ -1091,6 +1091,11 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         task.id.as_u64(),
         task.name
     );
+    crate::serial_println!(
+        "[trace][elf] ring3_trampoline enter tid={} name={}",
+        task.id.as_u64(),
+        task.name
+    );
     task.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
 
     let user_rip = task.trampoline_entry.load(Ordering::Acquire);
@@ -1102,6 +1107,12 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_rip,
         user_rsp,
         user_arg0
+    );
+    crate::serial_println!(
+        "[trace][elf] ring3_trampoline args tid={} rip={:#x} rsp={:#x}",
+        task.id.as_u64(),
+        user_rip,
+        user_rsp
     );
 
     // Probe: read GOT entries via HHDM before switching to user AS.
@@ -1148,6 +1159,10 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         "[trace][elf] ring3_trampoline switch_to done tid={}",
         task.id.as_u64()
     );
+    crate::serial_println!(
+        "[trace][elf] ring3_trampoline switch_to done tid={}",
+        task.id.as_u64()
+    );
 
     let user_cs = gdt::user_code_selector().0 as u64;
     let user_ss = gdt::user_data_selector().0 as u64;
@@ -1158,6 +1173,12 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_cs,
         user_ss,
         user_rflags
+    );
+    crate::serial_println!(
+        "[trace][elf] ring3_trampoline iret tid={} rip={:#x} rsp={:#x}",
+        task.id.as_u64(),
+        user_rip,
+        user_rsp
     );
 
     // ----- Pre-iret LAPIC timer diagnostic -----
@@ -1180,12 +1201,12 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         );
         if lvt & (1 << 16) != 0 {
             crate::e9_println!(
-                "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) — no ticks will fire!"
+                "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) : no ticks will fire!"
             );
         }
         if init_cnt == 0 {
             crate::e9_println!(
-                "[trace][elf] WARNING: LAPIC timer init_count=0 — timer not started!"
+                "[trace][elf] WARNING: LAPIC timer init_count=0 : timer not started!"
             );
         }
     }
@@ -1223,7 +1244,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // before `iretq`, with `CS=0x8` and `GS=user`, and the first `gs:[..]`
     // access in the handler faults in the swapgs->iretq window.
     //
-    // ── E9-hack probes ────────────────────────────────────────────────────
+    //  E9-hack probes ==========================================================================================================================================================================
     // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port
     // (visible with `-debugcon stdio` or `-debugcon file:e9.log`).
     // The push/pop rax around each probe protects registers allocated by the
@@ -1232,7 +1253,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     //   '1' (0x31): start of the asm block, input registers in place
     //   '2' (0x32): iretq frame fully on stack (5 words)
     //   '3' (0x33): RDI loaded with arg0, just before SWAPGS
-    //   '4' (0x34): SWAPGS done — if CPU crashes on iretq the last char is '4'
+    //   '4' (0x34): SWAPGS done : if CPU crashes on iretq the last char is '4'
     //
     // If output stops at:
     //   '1' → RSP/alignment problem before any pushes
@@ -1247,7 +1268,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             // interrupts enabled.
             "cli",
 
-            // ── Probe 1 : entrée dans le bloc asm ─────────────────────────
+            //  Probe 1 : entrée dans le bloc asm ================================================================================
             // Les registres d'entrée sont déjà alloués par le compilateur ;
             // push/pop rax les laisse intacts.
             "push rax",
@@ -1255,7 +1276,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "out 0xe9, al",
             "pop rax",
 
-            // ── Construction de la frame iretq ────────────────────────────
+            //  Construction de la frame iretq ==========================================================================================
             // Ordre requis par IRETQ (dépilé dans l'ordre inverse) :
             //   [RSP+32] SS
             //   [RSP+24] user RSP
@@ -1268,27 +1289,27 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "push {cs}",
             "push {rip}",
 
-            // ── Probe 2 : frame iretq complète ────────────────────────────
+            //  Probe 2 : frame iretq complète ==========================================================================================
             "push rax",
             "mov al, 0x32",     // '2'
             "out 0xe9, al",
             "pop rax",
 
-            // ── Chargement de arg0 dans RDI ───────────────────────────────
+            //  Chargement de arg0 dans RDI ====================================================================================================
             "mov rdi, {arg0}",
 
-            // ── Probe 3 : RDI chargé, juste avant SWAPGS ─────────────────
+            //  Probe 3 : RDI chargé, juste avant SWAPGS ==================================================
             "push rax",
             "mov al, 0x33",     // '3'
             "out 0xe9, al",
             "pop rax",
 
-            // ── SWAPGS : GS.base kernel ↔ GS.base user ───────────────────
+            //  SWAPGS : GS.base kernel ↔ GS.base user ============================================================
             // Après cette instruction, GS pointe vers le bloc per-thread user.
             // Le push/pop ci-dessous ne touche pas GS, il est sûr.
             "swapgs",
 
-            // ── Probe 4 : SWAPGS réussi, IRETQ imminent ──────────────────
+            //  Probe 4 : SWAPGS réussi, IRETQ imminent ============================================================
             // Si le double-fault survient sur iretq, '4' sera le DERNIER
             // caractère visible dans la console E9.
             "push rax",
@@ -1296,7 +1317,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "out 0xe9, al",
             "pop rax",
 
-            // ── IRETQ : point de non-retour ───────────────────────────────
+            //  IRETQ : point de non-retour ====================================================================================================
             "iretq",
 
             ss      = in(reg) user_ss,
@@ -1625,7 +1646,7 @@ pub fn load_elf_task_with_caps(
         interp_base,
     )?;
 
-    // Step 5: Create kernel task — trampoline params are stored inside the task
+    // Step 5: Create kernel task : trampoline params are stored inside the task
     // itself so that concurrent SMP execution of multiple trampolines is safe.
     crate::e9_println!(
         "[trace][elf] load_elf_task kstack_begin size={}",

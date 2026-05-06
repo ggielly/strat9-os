@@ -22,9 +22,9 @@ use crate::{
 };
 use core::sync::atomic::{AtomicU64, Ordering};
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ================================================================================
 // Port ping-pong test
-// ─────────────────────────────────────────────────────────────────────────────
+// ================================================================================
 
 /// Shared port ID between the two test tasks.
 /// 0 = not yet created.
@@ -56,7 +56,7 @@ extern "C" fn ipc_sender_main() -> ! {
     TEST_PORT_ID.store(port_id.as_u64(), Ordering::Release);
 
     // Yield a couple of times to give the receiver a chance to call recv() first
-    // (this tests the blocking path — receiver blocks, then we wake it)
+    // (this tests the blocking path : receiver blocks, then we wake it)
     crate::process::yield_task();
     crate::process::yield_task();
 
@@ -114,9 +114,9 @@ extern "C" fn ipc_receiver_main() -> ! {
 // The PortId(u64) constructor is pub(crate) via the struct definition,
 // so this test module in the same crate can use it directly.
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ================================================================================
 // IPC-02: typed MPMC SyncChannel test
-// ─────────────────────────────────────────────────────────────────────────────
+// ================================================================================
 //
 // Exercises:
 //   - channel() constructor (Sender<u64> + Receiver<u64> cloning → MPMC)
@@ -125,7 +125,7 @@ extern "C" fn ipc_receiver_main() -> ! {
 //   - wait_until round-trip through the scheduler
 
 /// Endpoint slots: each task takes its endpoint out (Option::take) once.
-/// SpinLock<Option<T>>: Sync when T: Send — no private-field access needed.
+/// SpinLock<Option<T>>: Sync when T: Send : no private-field access needed.
 static CHAN_TX1: SpinLock<Option<channel::Sender<u64>>> = SpinLock::new(None);
 static CHAN_TX2: SpinLock<Option<channel::Sender<u64>>> = SpinLock::new(None);
 static CHAN_RX: SpinLock<Option<channel::Receiver<u64>>> = SpinLock::new(None);
@@ -224,9 +224,9 @@ extern "C" fn chan_consumer_main() -> ! {
     crate::process::scheduler::exit_current_task(0);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ================================================================================
 // IPC-04/05 tests: shared ring + POSIX semaphore
-// ─────────────────────────────────────────────────────────────────────────────
+// ================================================================================
 
 static SEM_TEST_ID: AtomicU64 = AtomicU64::new(0);
 static SEM_TEST_RESULT: SpinLock<Option<bool>> = SpinLock::new(None);

@@ -165,8 +165,8 @@ fn parse_u16_decimal(s: &[u8]) -> Option<u16> {
 /// Read STUN configuration from /net/stun-config.
 ///
 /// Accepted formats (newline-terminated):
-///   host          — uses DEFAULT_STUN_PORT
-///   host:port     — overrides both host and port
+///   host          : uses DEFAULT_STUN_PORT
+///   host:port     : overrides both host and port
 ///
 /// On any parse or I/O error the defaults are returned unchanged.
 fn read_stun_config<'a>(host_buf: &'a mut [u8; 253], port_out: &mut u16) -> &'a str {

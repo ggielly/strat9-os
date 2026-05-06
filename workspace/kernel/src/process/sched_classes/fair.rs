@@ -54,9 +54,9 @@ pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {
 /// Uses two `BTreeMap`s for O(log n) operations without allocation on the
 /// fast paths (`pick_next`, `remove`):
 ///
-/// - `entities`: primary map keyed by `(vruntime, task_id)` — the minimum
+/// - `entities`: primary map keyed by `(vruntime, task_id)` : the minimum
 ///   entry is always the next task to schedule.
-/// - `by_id`: reverse index mapping `task_id → primary key` — enables O(log n)
+/// - `by_id`: reverse index mapping `task_id → primary key` : enables O(log n)
 ///   removal by task ID in `remove()` without scanning `entities`.
 ///
 /// This replaces the previous `BinaryHeap`-based design which used *lazy
@@ -65,9 +65,9 @@ pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {
 ///
 /// | Operation   | Complexity | Allocates?                              |
 /// |-------------|------------|-----------------------------------------|
-/// | `enqueue`   | O(log n)   | yes — 2 BTreeMap nodes (wakeup path)    |
-/// | `pick_next` | O(log n)   | no  — removes 2 nodes                   |
-/// | `remove`    | O(log n)   | no  — removes 2 nodes                   |
+/// | `enqueue`   | O(log n)   | yes : 2 BTreeMap nodes (wakeup path)    |
+/// | `pick_next` | O(log n)   | no  : removes 2 nodes                   |
+/// | `remove`    | O(log n)   | no  : removes 2 nodes                   |
 ///
 /// No phantom entries means no generation counter, no `prune_stale_head()`,
 /// and no per-entry liveness checks.  The BTreeMap pair is the authoritative
@@ -101,7 +101,7 @@ impl FairClassRq {
 
     /// Total scheduling period in ticks.
     ///
-    /// `BASE_SLICE_TICKS * (nr_runnable + 1)` — each runnable task gets at
+    /// `BASE_SLICE_TICKS * (nr_runnable + 1)` : each runnable task gets at
     /// least one full `BASE_SLICE_TICKS` per round.  `+1` accounts for the
     /// currently-running task that is not counted in `runnable_count`.
     fn period(&self) -> u64 {
@@ -201,7 +201,7 @@ impl SchedClassRq for FairClassRq {
                 None => vruntime,
             };
 
-            // No other runnable task — keep running.
+            // No other runnable task : keep running.
             if leftmost_vruntime.is_none() {
                 return false;
             }

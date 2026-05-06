@@ -279,7 +279,7 @@ fn build_child_task(
         vruntime: AtomicU64::new(parent.vruntime()),
         fair_rq_generation: AtomicU64::new(0),
         fair_on_rq: AtomicBool::new(false),
-        // POSIX: clear_child_tid is NOT inherited — child starts with 0.
+        // POSIX: clear_child_tid is NOT inherited : child starts with 0.
         clear_child_tid: AtomicU64::new(0),
         // POSIX: cwd IS inherited.
         // POSIX: umask IS inherited.
@@ -542,7 +542,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
 
     // The new private frame is the sole owner; set refcount=1 directly.
     // BuddyFrameAllocator returns a raw frame (refcount still REFCOUNT_UNUSED).
-    // frame_inc_ref would wrap REFCOUNT_UNUSED to 0 — use set_refcount instead.
+    // frame_inc_ref would wrap REFCOUNT_UNUSED to 0 : use set_refcount instead.
     crate::memory::cow::handle_init_ref(new_handle);
 
     if address_space

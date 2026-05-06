@@ -193,7 +193,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     // 1. Verification GDT
     // ==================================================================
 
-    // SAFETY: `sgdt` only reads the GDTR register — no side effects.
+    // SAFETY: `sgdt` only reads the GDTR register : no side effects.
     let gdtr = sgdt();
     let gdt_base = gdtr.base.as_u64() as *const u64;
     let gdt_limit = gdtr.limit as usize; // in bytes, inclusive
@@ -303,7 +303,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     }
 
     crate::serial_force_println!(
-        "[validate_ring3] [1/4] GDT OK — \
+        "[validate_ring3] [1/4] GDT OK : \
          CS={:#x} P=1 DPL={} L=1 | SS={:#x} P=1 DPL={}",
         cs,
         cs_dpl,
@@ -332,7 +332,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     }
 
     crate::serial_force_println!(
-        "[validate_ring3] [2/4] Alignement RSP OK — RSP={:#x} ≡ 0 (mod 16)",
+        "[validate_ring3] [2/4] Alignement RSP OK : RSP={:#x} ≡ 0 (mod 16)",
         target_rsp,
     );
 
@@ -348,7 +348,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     match check_user_mapping(target_rip) {
         Ok(()) => {
             crate::serial_force_println!(
-                "[validate_ring3] Pagination RIP OK — {:#x} USER_ACCESSIBLE \
+                "[validate_ring3] Pagination RIP OK : {:#x} USER_ACCESSIBLE \
                  on 4 levels (PML4 -> PDPT -> PD -> PT)",
                 target_rip,
             );
@@ -373,7 +373,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
         match check_user_mapping(probe) {
             Ok(()) => {
                 crate::serial_force_println!(
-                    "[validate_ring3] Pagination RSP OK — page de {:#x} USER_ACCESSIBLE",
+                    "[validate_ring3] Pagination RSP OK : page de {:#x} USER_ACCESSIBLE",
                     probe,
                 );
             }
@@ -388,7 +388,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     }
 
     crate::serial_force_println!(
-        "[validate_ring3] [3/4] Pagination OK — RIP={:#x} RSP={:#x} USER_ACCESSIBLE",
+        "[validate_ring3] [3/4] Pagination OK : RIP={:#x} RSP={:#x} USER_ACCESSIBLE",
         target_rip,
         target_rsp,
     );
@@ -451,7 +451,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     }
 
     crate::serial_force_println!(
-        "[validate_ring3] [4/4] TSS OK — TR={:#x} rsp0={:#x} (kernel space, CPU {})",
+        "[validate_ring3] [4/4] TSS OK : TR={:#x} rsp0={:#x} (kernel space, CPU {})",
         tr_sel,
         rsp0,
         cpu_index,
@@ -464,7 +464,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     );
     if let Some(info) = loaded_tss {
         crate::serial_force_println!(
-            "[validate_ring3] TSS live — TR={:#x} base={:#x} rsp0={:#x}",
+            "[validate_ring3] TSS live : TR={:#x} base={:#x} rsp0={:#x}",
             info.tr_selector,
             info.tss_base,
             info.rsp0,
@@ -477,7 +477,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
         );
         if info.rsp0 != rsp0 {
             crate::serial_force_println!(
-                "[validate_ring3] TSS MISMATCH — software_rsp0={:#x} live_rsp0={:#x} cpu={}",
+                "[validate_ring3] TSS MISMATCH : software_rsp0={:#x} live_rsp0={:#x} cpu={}",
                 rsp0,
                 info.rsp0,
                 cpu_index,

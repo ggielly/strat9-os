@@ -699,7 +699,7 @@ impl AddressSpace {
         // Initialize COW refcount.
         //
         // Order-0 frames come from FrameAllocOptions which stamps refcount=1
-        // via CAS(REFCOUNT_UNUSED → 1) — the frame is already "sole owner".
+        // via CAS(REFCOUNT_UNUSED → 1) : the frame is already "sole owner".
         // Huge pages (order > 0) are raw-allocated with REFCOUNT_UNUSED still
         // in the metadata; initialise explicitly to 1 here.
         //
@@ -1278,7 +1278,7 @@ impl AddressSpace {
         for (&vma_start, vma) in regions.iter() {
             let vma_end = vma_start + vma.page_count as u64 * vma.page_size.bytes();
 
-            // A gap exists before this VMA — candidate fits.
+            // A gap exists before this VMA : candidate fits.
             if candidate.saturating_add(length) <= vma_start {
                 break;
             }
@@ -1660,7 +1660,7 @@ impl AddressSpace {
     pub unsafe fn switch_to(&self) {
         let (current_frame, _) = Cr3::read();
         if current_frame.start_address() == self.cr3_phys {
-            return; // Already active — skip to avoid TLB flush.
+            return; // Already active : skip to avoid TLB flush.
         }
 
         // SAFETY: cr3_phys points to a valid, 4KiB-aligned PML4 table with

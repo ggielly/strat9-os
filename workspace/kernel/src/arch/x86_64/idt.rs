@@ -57,7 +57,7 @@ pub mod irq {
 /// # Safety
 /// Must be constructed **before** any `gs:[…]` access in the handler.
 /// `InterruptStackFrame::code_segment` is a plain memory read from the
-/// interrupt stack — it does not access GS.
+/// interrupt stack : it does not access GS.
 struct SwapGsGuard {
     from_ring3: bool,
 }
@@ -94,10 +94,10 @@ impl Drop for SwapGsGuard {
 /// swapgs.  However, between `swapgs` and `iretq` in
 /// `elf_ring3_trampoline`, CS is still Ring 0 but `IA32_GS_BASE` is
 /// already the user value (0).  If `iretq` itself faults, the exception
-/// handler sees CS=Ring 0 but GS=user — the simple ring check misses
+/// handler sees CS=Ring 0 but GS=user : the simple ring check misses
 /// this.  Reading `IA32_GS_BASE` via `rdmsr` catches both cases.
 ///
-/// Cost: ~20-30 cycles for the `rdmsr` — acceptable in exception paths
+/// Cost: ~20-30 cycles for the `rdmsr` : acceptable in exception paths
 /// (not used for high-frequency IRQ handlers where IF=0 prevents
 /// firing in the swapgs→iretq window).
 #[inline(always)]
@@ -624,7 +624,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 }
 
 extern "x86-interrupt" fn non_maskable_interrupt_handler(stack_frame: InterruptStackFrame) {
-    // NMI can fire at any point — including the swapgs→iretq window.
+    // NMI can fire at any point : including the swapgs→iretq window.
     // Use rdmsr to safely restore kernel GS if needed.
     let _gs = SwapGsGuard::new(needs_swapgs(stack_frame.code_segment.0));
     if crate::boot::panic::panic_in_progress() {
@@ -922,7 +922,7 @@ fn format_pte_flags(entry: u64) -> [u8; 32] {
 ///
 /// # SAFETY
 /// Read-only access to page tables through the HHDM mapping.
-/// All intermediate addresses are derived from table entries — no pointer
+/// All intermediate addresses are derived from table entries : no pointer
 /// originating from user-controlled data is ever dereferenced.
 fn translate_via_raw_pt(vaddr: u64, cr3_phys: u64, hhdm: u64) -> Option<u64> {
     unsafe {
@@ -1312,7 +1312,7 @@ fn dump_page_fault_full(
             // Step 1: Arc<Process> data (Arc::as_ptr is always valid for a live Arc)
             let _proc_ptr: u64 = alloc::sync::Arc::as_ptr(&t.process) as u64;
             // Step 2: address_space field in Process = SyncUnsafeCell whose .get()
-            // returns a raw ptr into the Process data — always valid for a live Process.
+            // returns a raw ptr into the Process data : always valid for a live Process.
             // However, reading the Arc<AddressSpace> *value* from that pointer may
             // fault if the memory is unmapped, so we use translate_via_raw_pt.
             let as_cell_addr: u64 =
@@ -1340,7 +1340,7 @@ fn dump_page_fault_full(
         };
         if task_cr3 == 0 {
             crate::serial_println!(
-                "  Task CR3    : <unreadable — null/unmapped Arc<AddressSpace>>"
+                "  Task CR3    : <unreadable : null/unmapped Arc<AddressSpace>>"
             );
         } else {
             crate::serial_println!(
@@ -1354,7 +1354,7 @@ fn dump_page_fault_full(
             );
         }
     } else {
-        crate::serial_println!("  (no current task — scheduler idle or unavailable)");
+        crate::serial_println!("  (no current task : scheduler idle or unavailable)");
     }
 
     // --- Memory statistics ---
@@ -1427,7 +1427,7 @@ fn dump_page_fault_full(
             crate::serial_println!("  (allocator not initialized)");
         }
     } else {
-        crate::serial_println!("  (allocator lock contended — skipping)");
+        crate::serial_println!("  (allocator lock contended : skipping)");
     }
 
     let quarantine = crate::memory::buddy::poison_quarantine_pages_snapshot();
@@ -1529,7 +1529,7 @@ fn dump_page_fault_full(
             let as_ref = unsafe { &*as_ptr };
             dump_nearby_vma_regions(as_ref, fault_vaddr);
         } else {
-            crate::serial_println!("  (AddressSpace unreadable — skipping VMA dump)");
+            crate::serial_println!("  (AddressSpace unreadable : skipping VMA dump)");
         }
     }
 
@@ -1780,7 +1780,7 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
 
     // serial_force_println holds FORCE_LOCK (IRQ-disabled spinlock) while writing
     // to the UART. At 115200 baud each byte takes ~87 µs; a 60-char message is
-    // ~5 ms of IRQs-off time — long enough to miss ticks and corrupt scheduling.
+    // ~5 ms of IRQs-off time : long enough to miss ticks and corrupt scheduling.
     // Keep serial output out of the hot IRQ path; use e9 port (µs-range) instead.
     unsafe { core::arch::asm!("mov al, '0'; out 0xe9, al", out("al") _) };
     crate::process::scheduler::timer_tick();
@@ -1831,7 +1831,7 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 /// Spurious interrupt handler (APIC vector 0xFF).
 /// Per Intel SDM: do NOT send EOI for spurious interrupts.
 extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {
-    // Intentionally empty — no EOI per Intel SDM
+    // Intentionally empty : no EOI per Intel SDM
 }
 
 /// AHCI storage controller IRQ handler.

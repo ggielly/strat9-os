@@ -4,7 +4,7 @@ use crate::{memory, shell::ShellError, shell_println};
 use alloc::string::String;
 use x86_64::PhysAddr;
 
-/// `frame-meta <phys_hex>` — print generation, guard bits, and vtable bits for one physical frame.
+/// `frame-meta <phys_hex>` : print generation, guard bits, and vtable bits for one physical frame.
 pub fn cmd_frame_meta(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
         shell_println!("Usage: frame-meta <phys_hex>");

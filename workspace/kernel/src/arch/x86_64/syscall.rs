@@ -70,7 +70,7 @@ pub fn init() {
 /// On entry from userspace:
 /// - RCX = user RIP (saved by CPU)
 /// - R11 = user RFLAGS (saved by CPU)
-/// - RSP = user stack pointer (NOT saved by CPU — we must save it)
+/// - RSP = user stack pointer (NOT saved by CPU : we must save it)
 /// - IF = 0 (cleared by FMASK)
 /// - RAX = syscall number
 /// - RDI, RSI, RDX, R10, R8, R9 = arguments 1-6
@@ -115,7 +115,7 @@ unsafe extern "C" fn syscall_entry() {
         "mov rdi, rsp",
         "call {dispatch}",
 
-        // Return value is in RAX — write it into the frame's rax slot
+        // Return value is in RAX : write it into the frame's rax slot
         // SyscallFrame layout: r15 is at RSP+0, ..., rax is at RSP+14*8 = RSP+112
         "mov [rsp + 14*8], rax",
 
@@ -157,7 +157,7 @@ unsafe extern "C" fn syscall_entry() {
         "iretq",
 
         "2:",
-        // SYSRETQ fast path — skip RIP and CS in one step.
+        // SYSRETQ fast path : skip RIP and CS in one step.
         "add rsp, 16",             // Skip RIP + CS
         "pop r11",                 // User RFLAGS into R11
         "pop rsp",                 // User RSP

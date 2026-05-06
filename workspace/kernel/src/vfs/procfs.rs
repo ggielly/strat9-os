@@ -359,7 +359,7 @@ impl Scheme for ProcScheme {
             // Process directory listing (self dir or /proc/<pid>)
             String::from("status\ncmdline\n")
         } else {
-            // File content — distinguish by kind (high 32 bits) for process files,
+            // File content : distinguish by kind (high 32 bits) for process files,
             // or by the literal file_id for well-known fixed files.
             match (kind, file_id) {
                 (0, 10) => self.get_cpuinfo(),

@@ -29,7 +29,7 @@ pub(super) fn create_cpu_scheduler(cpu_idx: usize) -> SchedulerCpu {
 }
 
 impl GlobalSchedState {
-    /// Create a new global scheduler state (no per-CPU runqueues — those live in LOCAL_SCHEDULERS).
+    /// Create a new global scheduler state (no per-CPU runqueues : those live in LOCAL_SCHEDULERS).
     pub fn new() -> Self {
         crate::serial_println!("[trace][sched] GlobalSchedState::new enter");
         GlobalSchedState {
@@ -383,7 +383,7 @@ impl GlobalSchedState {
             return WaitChildResult::NoChildren;
         }
 
-        // Find the zombie child — re-check children under SCHED_IDENTITY.
+        // Find the zombie child : re-check children under SCHED_IDENTITY.
         let zombie = {
             let identity = SCHED_IDENTITY.read();
             let children = match identity.children_of.get(&parent) {
@@ -520,7 +520,7 @@ impl GlobalSchedState {
 // lock.  The one exception is `steal_task_local`, which does a **non-blocking**
 // `GLOBAL_SCHED_STATE.try_lock_no_irqsave()` to update `task_cpu` after a successful
 // steal.  This is an intentional lock-order inversion (LOCAL held, then GLOBAL
-// attempted) that is safe because the try-lock never blocks — if GLOBAL_SCHED_STATE is
+// attempted) that is safe because the try-lock never blocks : if GLOBAL_SCHED_STATE is
 // contended, we simply skip stealing.
 //
 // Lock order for steal: own LOCAL held → try_lock GLOBAL → try_lock sibling
@@ -529,7 +529,7 @@ impl GlobalSchedState {
 /// Steal a task from the busiest sibling CPU using per-CPU LOCAL locks.
 ///
 /// Called with `cpu` borrowed from `LOCAL_SCHEDULERS[cpu_index]` (our own
-/// LOCAL lock already held). Uses `try_lock_no_irqsave` on sibling entries —
+/// LOCAL lock already held). Uses `try_lock_no_irqsave` on sibling entries :
 /// if a sibling or the global scheduler state is contended, we skip stealing
 /// rather than waiting.
 pub(super) fn steal_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Option<Arc<Task>> {
@@ -610,7 +610,7 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
             TaskState::Running => {
                 task.set_state(TaskState::Ready);
                 if !Arc::ptr_eq(&task, &cpu.idle_task) {
-                    // Defer re-queue to finish_switch (not yet safe to enqueue —
+                    // Defer re-queue to finish_switch (not yet safe to enqueue :
                     // another CPU could steal it before our context is saved).
                     cpu.task_to_requeue = Some(task);
                 }
@@ -622,7 +622,7 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
                 cpu.task_to_drop = Some(task);
             }
             TaskState::Blocked | TaskState::Ready => {
-                // Blocked: moved to blocked_tasks by block_current_task — do nothing.
+                // Blocked: moved to blocked_tasks by block_current_task : do nothing.
                 // Ready: shouldn't normally occur for current_task; safe to ignore.
             }
         }
@@ -669,7 +669,7 @@ pub(super) fn yield_cpu_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Optio
         let stk_top = stk_base + next.kernel_stack.size as u64;
         crate::serial_println!(
             "[sched-local] WARN: invalid ctx task='{}' id={} cpu={}: {} \
-             rsp={:#x} stack=[{:#x}..{:#x}] — restoring current",
+             rsp={:#x} stack=[{:#x}..{:#x}] : restoring current",
             next.name,
             next.id.as_u64(),
             cpu_index,

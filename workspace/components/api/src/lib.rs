@@ -14,7 +14,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 // ---------------------------------------------------------------------------
-// Filesystem abstractions — re-exported from strate-fs-abstraction
+// Filesystem abstractions : re-exported from strate-fs-abstraction
 // ---------------------------------------------------------------------------
 
 pub use strate_fs_abstraction::error::{FsError, FsResult};

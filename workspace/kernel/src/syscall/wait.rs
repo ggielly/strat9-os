@@ -30,7 +30,7 @@
 //! macro (`status << 8`), which musl/glibc decode correctly.  A separate
 //! Plan 9-style `Waitmsg` structure (`pid + exit_code + msg[64]`) is written to
 //! an optional second output pointer when the caller provides one (via the
-//! `waitmsg_ptr` variant—`SYS_PROC_WAIT`).
+//! `waitmsg_ptr` variant:`SYS_PROC_WAIT`).
 
 use crate::{
     memory::UserSliceWrite,
@@ -43,21 +43,21 @@ use crate::{
     syscall::error::SyscallError,
 };
 
-// ─── Options flags ────────────────────────────────────────────────────────────
+// ========== Options flags ====================
 
 /// Do not block if no child has exited yet.
 pub const WNOHANG: u32 = 1 << 0;
 
-// ─── Plan 9-style exit message ────────────────────────────────────────────────
+// ========== Plan 9-style exit message ================================================================================================================================================================
 
 /// Plan 9-inspired exit message written to userspace by `SYS_PROC_WAIT`.
 ///
 /// Layout (C-compatible, 80 bytes total):
 /// ```text
-/// pid       u64   — task ID of the exited child
-/// exit_code i32   — numeric exit code (0 = success)
-/// _pad      i32   — padding for alignment
-/// msg       [u8; 64] — null-terminated exit description
+/// pid       u64   : task ID of the exited child
+/// exit_code i32   : numeric exit code (0 = success)
+/// _pad      i32   : padding for alignment
+/// msg       [u8; 64] : null-terminated exit description
 /// ```
 ///
 /// The `msg` field follows Plan 9 convention:
@@ -77,7 +77,7 @@ impl Waitmsg {
     fn new(pid: u64, exit_code: i32) -> Self {
         let mut msg = [0u8; 64];
         if exit_code != 0 {
-            // Write "exit <N>" using a stack buffer — no heap, no format!.
+            // Write "exit <N>" using a stack buffer : no heap, no format!.
             let prefix = b"exit ";
             msg[..prefix.len()].copy_from_slice(prefix);
             write_decimal(exit_code, &mut msg[prefix.len()..]);
@@ -94,7 +94,7 @@ impl Waitmsg {
 
 /// Write the decimal representation of `n` into `buf`, null-terminated.
 ///
-/// Uses digit-reversal on a small stack scratch buffer — no heap allocation.
+/// Uses digit-reversal on a small stack scratch buffer : no heap allocation.
 /// Handles negative values with a leading `-`.  Writes at most `buf.len()-1`
 /// digits and always null-terminates `buf[0]` on empty / overflow.
 fn write_decimal(n: i32, buf: &mut [u8]) {
@@ -123,7 +123,7 @@ fn write_decimal(n: i32, buf: &mut [u8]) {
             v /= 10;
             len += 1;
         }
-        // scratch holds digits in reverse order — fix that in-place
+        // scratch holds digits in reverse order : fix that in-place
         scratch[..len].reverse();
     }
 
@@ -146,7 +146,7 @@ fn write_decimal(n: i32, buf: &mut [u8]) {
     buf[copy_len] = 0;
 }
 
-// ─── Helper ───────────────────────────────────────────────────────────────────
+// ========== Helper ==================================================
 
 /// Encode `exit_code` as a Linux `wstatus` word: `W_EXITCODE(code, 0)`.
 ///
@@ -183,7 +183,7 @@ fn wait_blocking(
     }
 }
 
-// ─── Syscall handlers ─────────────────────────────────────────────────────────
+// ========== Syscall handlers ==========
 
 /// SYS_PROC_WAITPID (310): wait for a child process to exit.
 ///
@@ -191,16 +191,16 @@ fn wait_blocking(
 ///   - `pid`        : child task ID to wait for, or `-1` (any child).
 ///   - `status_ptr` : userspace `*i32` to receive the encoded wait status
 ///                    (`W_EXITCODE`). Pass `0` to discard.
-///   - `options`    : `WNOHANG (1)` — return immediately if no child ready.
+///   - `options`    : `WNOHANG (1)` : return immediately if no child ready.
 ///
 /// Returns:
 ///   - child task ID on success.
 ///   - `0` if `WNOHANG` and no child has exited yet.
 ///
 /// Errors:
-///   - `-ECHILD (-10)` — no matching children.
-///   - `-EINTR  (-4)`  — interrupted by a pending signal.
-///   - `-EINVAL (-22)` — unknown option bits.
+///   - `-ECHILD (-10)` : no matching children.
+///   - `-EINTR  (-4)`  : interrupted by a pending signal.
+///   - `-EINVAL (-22)` : unknown option bits.
 pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, SyscallError> {
     if options & !WNOHANG != 0 {
         return Err(SyscallError::InvalidArgument);
@@ -222,11 +222,11 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
     } else if pid == -1 {
         None // any child
     } else {
-        // pid == 0 or pid < -1: process-group wait — not implemented.
+        // pid == 0 or pid < -1: process-group wait : not implemented.
         return Err(SyscallError::InvalidArgument);
     };
 
-    // ── Non-blocking fast path ────────────────────────────────────────────
+    //  Non-blocking fast path ============================================================================================================================================
     if wnohang {
         return match try_wait_child(parent_id, target) {
             WaitChildResult::Reaped { pid, status, .. } => {
@@ -239,14 +239,14 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
         };
     }
 
-    // ── Blocking path ─────────────────────────────────────────────────────
+    //  Blocking path ==========================================================================================================================================================================
     let (_child, child_pid, status) = wait_blocking(parent_id, target)?;
     write_wstatus(status_ptr, status)?;
     log::debug!("waitpid: reaped pid={} status={}", child_pid, status);
     Ok(child_pid)
 }
 
-/// SYS_PROC_WAIT (311): Plan 9-style wait — any child, writes full Waitmsg.
+/// SYS_PROC_WAIT (311): Plan 9-style wait : any child, writes full Waitmsg.
 ///
 /// Arguments:
 ///   - `waitmsg_ptr`: userspace pointer to a `Waitmsg` struct (80 bytes).
@@ -285,7 +285,7 @@ pub fn sys_getppid() -> Result<u64, SyscallError> {
     super::process::sys_getppid()
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
+// ========== Internal helpers ==========
 
 /// Write the Linux-encoded wait status to a nullable userspace pointer.
 fn write_wstatus(status_ptr: u64, exit_code: i32) -> Result<(), SyscallError> {

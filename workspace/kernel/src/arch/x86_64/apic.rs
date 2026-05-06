@@ -347,7 +347,7 @@ pub fn send_ipi_raw(target_apic_id: u32, icr_low: u32) {
 /// Send a "reschedule now" IPI to the CPU identified by `target_apic_id`.
 ///
 /// Uses Fixed delivery mode (vector `IPI_RESCHED_VECTOR`), physical destination.
-/// This is fire-and-forget — no delivery status wait is needed for reschedule
+/// This is fire-and-forget : no delivery status wait is needed for reschedule
 /// IPIs because a missed IPI only delays preemption by at most one timer tick.
 ///
 /// # Safety

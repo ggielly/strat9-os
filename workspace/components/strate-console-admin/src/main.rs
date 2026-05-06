@@ -529,7 +529,7 @@ pub extern "C" fn _start() -> ! {
     write_str("\n");
     write_str("============================================================\n");
     write_str("[console-admin] strat9-os: silo console admin\n");
-    write_str("[console-admin] Ready (IPC mode — use chevron shell to interact).\n");
+    write_str("[console-admin] Ready (IPC mode : use chevron shell to interact).\n");
     write_str("============================================================\n");
 
     // TODO: replace with IPC event loop once IPC channels are wired up.

@@ -102,7 +102,7 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
         None => return,
     };
 
-    // fd 0 — stdin (read)
+    // fd 0 : stdin (read)
     let r0 = scheme.open("console", OpenFlags::READ).unwrap();
     let stdin = Arc::new(OpenFile::new(
         scheme.clone(),
@@ -114,7 +114,7 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     ));
     fd_table.insert_at(0, stdin);
 
-    // fd 1 — stdout (write)
+    // fd 1 : stdout (write)
     let r1 = scheme.open("console", OpenFlags::WRITE).unwrap();
     let stdout = Arc::new(OpenFile::new(
         scheme.clone(),
@@ -126,7 +126,7 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     ));
     fd_table.insert_at(1, stdout);
 
-    // fd 2 — stderr (write)
+    // fd 2 : stderr (write)
     let r2 = scheme.open("console", OpenFlags::WRITE).unwrap();
     let stderr = Arc::new(OpenFile::new(
         scheme,

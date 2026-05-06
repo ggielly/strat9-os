@@ -155,7 +155,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             if let Some(ref mut cpu) = *local {
                 break super::core_impl::pick_next_task_local(cpu, idx);
             }
-            // LOCAL not ready yet — drop and spin.
+            // LOCAL not ready yet : drop and spin.
             drop(local);
             wait_iters = wait_iters.saturating_add(1);
             if wait_iters == 1 || (wait_iters % 1_000_000 == 0 && wait_iters > 0) {
@@ -258,7 +258,7 @@ pub fn finish_switch() {
     let cpu_index = current_cpu_index();
     let mut task_to_drop = None;
     {
-        // Use LOCAL lock — no spinning on GLOBAL_SCHED_STATE needed.
+        // Use LOCAL lock : no spinning on GLOBAL_SCHED_STATE needed.
         let mut spins = 0usize;
         let mut guard = loop {
             if let Some(g) = LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
@@ -322,7 +322,7 @@ pub fn finish_interrupt_switch() {
     // hang.
     // This is around few seconds on recent CPU.
 
-    // Use LOCAL lock — no spinning on GLOBAL_SCHED_STATE. The LOCAL lock for this CPU
+    // Use LOCAL lock : no spinning on GLOBAL_SCHED_STATE. The LOCAL lock for this CPU
     // is released quickly by maybe_preempt_from_interrupt before we get here.
     const MAX_IFS_SPINS: usize = 50_000_000;
     let mut task_to_drop = None;
@@ -428,7 +428,7 @@ pub fn yield_task() {
 /// 2. All scheduler locks have been released.
 /// 3. No spinlock-guarded per-CPU data is being accessed by this task.
 ///
-/// At that point the preempt_count is irrelevant — the task will never run
+/// At that point the preempt_count is irrelevant : the task will never run
 /// again, so bypassing the guard is both safe and necessary to prevent the
 /// dead task from spinning in a `hlt()` loop.
 pub fn yield_dead_task() {
@@ -488,7 +488,7 @@ pub fn maybe_preempt() {
         return;
     }
 
-    // Use the per-CPU LOCAL lock — never blocked by another CPU's cold-path
+    // Use the per-CPU LOCAL lock : never blocked by another CPU's cold-path
     // operations (fork, exit, wake) that hold GLOBAL_SCHED_STATE.
     let switch_target = {
         let mut guard = match LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
@@ -523,7 +523,7 @@ pub fn maybe_preempt() {
     if let Some(ref target) = switch_target {
         if cpu_is_valid(cpu_index) {
             // One-shot per-CPU: trace the very first real preemption.
-            // NOTE: do NOT acquire GLOBAL_SCHED_STATE here — we are between the lock
+            // NOTE: do NOT acquire GLOBAL_SCHED_STATE here : we are between the lock
             // release (end of the block above) and do_switch_context. A
             // nested try_lock in this window re-enters the guardian (CLI +
             // CAS) on a CPU that is about to switch stacks, producing a
@@ -565,7 +565,7 @@ pub fn maybe_preempt_from_interrupt(
     let mut _task_to_drop: Option<Arc<Task>> = None;
 
     let decision = {
-        // Use per-CPU LOCAL lock — not blocked by cold-path global operations.
+        // Use per-CPU LOCAL lock : not blocked by cold-path global operations.
         let mut guard = match LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
             Some(g) => g,
             None => {

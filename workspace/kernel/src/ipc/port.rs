@@ -1,4 +1,4 @@
-//! IPC Port — a kernel-managed message queue with blocking send/recv.
+//! IPC Port : a kernel-managed message queue with blocking send/recv.
 //!
 //! Each port has a bounded FIFO queue of `IpcMessage`s. Senders block if
 //! the queue is full; receivers block if it's empty. The scheduler's

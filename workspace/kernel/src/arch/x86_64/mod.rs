@@ -37,7 +37,7 @@ pub fn init_cpu_extensions() {
         cr4 |= (1 << 9) | (1 << 10);
 
         if cpuid::host_uses_xsave() {
-            // OSXSAVE (18) — required before xsetbv/xgetbv
+            // OSXSAVE (18) : required before xsetbv/xgetbv
             cr4 |= 1 << 18;
         }
         asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
@@ -210,7 +210,7 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
 /// Read the Time Stamp Counter (TSC).
 ///
 /// Returns the number of CPU cycles since reset. Available from the
-/// very first instruction — use this as the sole timing source during
+/// very first instruction : use this as the sole timing source during
 /// early boot (before APIC/PIT timers are configured).
 #[inline]
 pub fn rdtsc() -> u64 {

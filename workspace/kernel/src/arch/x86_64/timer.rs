@@ -162,7 +162,7 @@ pub fn calibrate_apic_timer() -> u32 {
     log::info!("APIC timer divide set to 16 (0x03)");
 
     // ========================================================================
-    // CRITICAL TIMING SECTION — no log messages between gate-up and poll end
+    // CRITICAL TIMING SECTION : no log messages between gate-up and poll end
     // ========================================================================
     // The PIT channel 2 gate must be LOW while programming the counter.
     // In mode 0, counting starts as soon as the count is loaded AND gate is
@@ -170,10 +170,10 @@ pub fn calibrate_apic_timer() -> u32 {
     // begins before we can start the APIC timer → measurement is wrong.
     //
     // Correct sequence:
-    //   1. Gate LOW  — prevent counting while we program the PIT
+    //   1. Gate LOW  : prevent counting while we program the PIT
     //   2. Program PIT channel 2 (mode 0, one-shot, count = PIT_10MS_COUNT)
     //   3. Set APIC timer initial count to 0xFFFF_FFFF
-    //   4. Gate HIGH — PIT starts counting NOW, APIC is already counting
+    //   4. Gate HIGH : PIT starts counting NOW, APIC is already counting
     //   5. Poll bit 5 of port 0x61 until PIT output goes HIGH (10 ms elapsed)
     //   6. Read APIC timer current count
     // ========================================================================
@@ -208,14 +208,14 @@ pub fn calibrate_apic_timer() -> u32 {
 
     // Step 3: Set APIC timer initial count to maximum
     // SAFETY: APIC is initialized
-    // NOTE: No log::info! between APIC write and PIT gate — the APIC timer
+    // NOTE: No log::info! between APIC write and PIT gate : the APIC timer
     // starts counting immediately, so any delay here inflates the calibrated
     // value and skews the resulting periodic frequency.
     unsafe {
         apic::write_reg(apic::REG_TIMER_INIT, 0xFFFF_FFFF);
     }
 
-    // Step 4: Enable PIT channel 2 gate — starts PIT counting
+    // Step 4: Enable PIT channel 2 gate : starts PIT counting
     // APIC timer is already counting from step 3, so the measurement
     // window begins precisely here.  NO LOG MESSAGES until poll completes.
     let tsc_start = super::rdtsc();
@@ -231,7 +231,7 @@ pub fn calibrate_apic_timer() -> u32 {
         // SAFETY: reading port 0x61 is safe
         let status = unsafe { inb(0x61) };
         if status & 0x20 != 0 {
-            break; // PIT output went high — 10ms elapsed
+            break; // PIT output went high : 10ms elapsed
         }
         iterations += 1;
         if iterations >= MAX_POLL_ITERATIONS {
@@ -250,7 +250,7 @@ pub fn calibrate_apic_timer() -> u32 {
     }
     let tsc_delta = super::rdtsc().wrapping_sub(tsc_start);
 
-    // Step 6: Read APIC timer current count — end of critical section
+    // Step 6: Read APIC timer current count : end of critical section
     // SAFETY: APIC is initialized
     let current = unsafe { apic::read_reg(apic::REG_TIMER_CURRENT) };
     let elapsed = 0xFFFF_FFFFu32.wrapping_sub(current);
@@ -263,7 +263,7 @@ pub fn calibrate_apic_timer() -> u32 {
     }
 
     // ========================================================================
-    // END CRITICAL TIMING SECTION — safe to log again
+    // END CRITICAL TIMING SECTION : safe to log again
     // ========================================================================
     log::info!("PIT poll completed after {} iterations", iterations);
     log::info!("APIC timer current count: 0x{:08X}", current);

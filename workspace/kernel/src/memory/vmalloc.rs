@@ -2,7 +2,7 @@
 //!
 //! Provides virtually contiguous allocations backed by individually allocated
 //! physical pages. Unlike the buddy allocator, `vmalloc` does **not** require
-//! physically contiguous memory — it maps each page individually into a
+//! physically contiguous memory : it maps each page individually into a
 //! dedicated kernel virtual memory arena.
 //!
 //! ## Arena layout
@@ -70,7 +70,7 @@ use x86_64::{
 // Arena constants =====================================================
 
 /// Base virtual address of the vmalloc arena.
-/// Placed at 0xffffc000_0000_0000 — well above the HHDM direct map.
+/// Placed at 0xffffc000_0000_0000 : well above the HHDM direct map.
 pub const VMALLOC_VIRT_START: u64 = 0xffff_c000_0000_0000;
 
 /// Total size of the vmalloc arena: 1 GiB.
@@ -139,7 +139,7 @@ impl FrameList {
 }
 
 // SAFETY: `FrameList` owns a contiguous region of physical memory allocated
-// from the buddy allocator. The raw pointer is never aliased — access is
+// from the buddy allocator. The raw pointer is never aliased : access is
 // exclusively mediated through `get`/`set`. Transferring ownership across
 // threads is safe because the backing storage frame and all frames stored
 // within are plain physical addresses that travel with the struct.
@@ -246,7 +246,7 @@ impl Vmalloc {
         // Compile-time guarantee that at least one node fits in a page.
         const _: () = assert!(
             core::mem::size_of::<VmallocNode>() < 4096,
-            "VmallocNode exceeds one page — refill_node_pool logic must be revised"
+            "VmallocNode exceeds one page : refill_node_pool logic must be revised"
         );
         let nodes_per_page = 4096 / size_of::<VmallocNode>();
 
@@ -287,12 +287,12 @@ impl Vmalloc {
 
     unsafe fn release_node(&mut self, node: *mut VmallocNode) {
         // Releasing a node that still holds a FrameList would silently drop the
-        // physical frames without freeing them — an unrecoverable leak / potential
+        // physical frames without freeing them : an unrecoverable leak / potential
         // double-free if the frames are later re-allocated.  Free nodes must
         // always have `frames == None` before being returned to the pool.
         debug_assert!(
             (*node).frames.is_none(),
-            "release_node: node at {:p} still has live frames (start_page={}) — \
+            "release_node: node at {:p} still has live frames (start_page={}) : \
              caller must take() frames before releasing",
             node,
             (*node).start_page,
@@ -654,7 +654,7 @@ fn ensure_kernel_subtree_ready(token: &IrqDisabledToken) {
         guard.bootstrap_frame = Some(frame);
         guard.subtree_ready = true;
     } else {
-        // Mapping failed — free the frame; the arena will be unusable.
+        // Mapping failed : free the frame; the arena will be unusable.
         crate::memory::free_frame(token, frame);
         serial_println!("[vmalloc] bootstrap: failed to map bootstrap page");
     }
@@ -682,7 +682,7 @@ pub fn init() {
         let mut guard = VMALLOC.lock();
         if let Err(e) = unsafe { guard.ensure_arena_ready(token) } {
             serial_println!(
-                "[vmalloc] init: ensure_arena_ready failed ({:?}) — vmalloc will retry on first use",
+                "[vmalloc] init: ensure_arena_ready failed ({:?}) : vmalloc will retry on first use",
                 e
             );
         }
@@ -737,7 +737,7 @@ pub fn diag_snapshot() -> Option<VmallocDiagSnapshot> {
 #[track_caller]
 pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, VmallocError> {
     if size == 0 {
-        // Pure policy reject — no allocation attempted, no per-call context
+        // Pure policy reject : no allocation attempted, no per-call context
         // worth recording. VMALLOC_POLICY_REJECT_COUNT captures the count.
         VMALLOC_POLICY_REJECT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
         return Err(VmallocError::ZeroSize);
@@ -885,7 +885,7 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
 ///
 /// Returns `true` if a region was released (`free(NULL)` counts as success).
 /// Returns `false` if the pointer was non-null but did not denote a live
-/// vmalloc mapping in the arena (nothing freed — caller may be leaking).
+/// vmalloc mapping in the arena (nothing freed : caller may be leaking).
 pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
     if ptr.is_null() {
         return true;
@@ -896,7 +896,7 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
         return false;
     }
 
-    // Phase 1 — unmap and collect under VMALLOC lock.
+    // Phase 1 : unmap and collect under VMALLOC lock.
     let (frames, range_start, range_end) = {
         let mut guard = VMALLOC.lock();
         let vm = &mut *guard;
@@ -916,7 +916,7 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
                 let page_start = virt_start + (i as u64 * 4096);
                 let page = Page::containing_address(VirtAddr::new(page_start));
                 // unmap_page_kernel acquires/releases KERNEL_PT_LOCK internally.
-                // Lock order: VMALLOC → KERNEL_PT_LOCK — consistent with vmalloc().
+                // Lock order: VMALLOC → KERNEL_PT_LOCK : consistent with vmalloc().
                 let _ = unmap_page_kernel(page);
             }
 
@@ -928,13 +928,13 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
             vm.insert_free_node_merge(node);
             (frames, range_start, range_end)
         }
-    }; // Phase 1 end — VMALLOC lock released here.
+    }; // Phase 1 end : VMALLOC lock released here.
 
-    // Phase 2 — TLB shootdown with no lock held.
+    // Phase 2 : TLB shootdown with no lock held.
     // All remote CPUs can freely enter vmalloc/vfree while processing the IPI.
     shootdown_range(range_start, range_end);
 
-    // Phase 3 — return physical frames to the buddy allocator.
+    // Phase 3 : return physical frames to the buddy allocator.
     for i in 0..frames.len {
         crate::memory::free_frame(token, frames.get(i));
     }
@@ -1134,7 +1134,7 @@ pub fn dump_diagnostics() {
             last.error
         );
     }
-    // Print live allocations when any are present — useful for routine health checks.
+    // Print live allocations when any are present : useful for routine health checks.
     if vm.alloc_count > 0 {
         drop(guard); // release VMALLOC before re-acquiring inside dump_live_allocations
         dump_live_allocations();

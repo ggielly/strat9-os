@@ -1,7 +1,7 @@
 //! Allocator inspection and stress tests for the kernel shell.
 //!
 //! Commands such as `heap live` print task ids, addresses, and source locations
-//! from vmalloc attribution — useful for debugging but **sensitive** if the
+//! from vmalloc attribution : useful for debugging but **sensitive** if the
 //! serial console is exposed; restrict shell access accordingly.
 
 use crate::{
@@ -25,7 +25,7 @@ enum StressOutcome {
     Skip(&'static str),
 }
 
-/// `heap` — allocator telemetry and diagnostics.
+/// `heap` : allocator telemetry and diagnostics.
 pub fn cmd_heap(args: &[String]) -> Result<(), ShellError> {
     match args.first().map(|s| s.as_str()) {
         None | Some("summary") => cmd_heap_summary(),
@@ -251,18 +251,18 @@ fn cmd_heap_fail() -> Result<(), ShellError> {
 // Stress tests
 // =============================================================================
 
-/// `heap stress [rounds]` — exercise allocator smoke paths and one bounded
+/// `heap stress [rounds]` : exercise allocator smoke paths and one bounded
 /// userspace workload path.
 ///
 /// Each round runs:
-///   slab_reclaim[S]    — fill/drain slab classes without leaking.
-///   slab_frag[256]     — verify a page becomes partial after partial free.
-///   vmalloc_cycle      — alloc/free vmalloc ranges and verify live tracking.
-///   vmalloc_frag       — random-size allocs freed in random order; checks that
+///   slab_reclaim[S]    : fill/drain slab classes without leaking.
+///   slab_frag[256]     : verify a page becomes partial after partial free.
+///   vmalloc_cycle      : alloc/free vmalloc ranges and verify live tracking.
+///   vmalloc_frag       : random-size allocs freed in random order; checks that
 ///                        virtual fragmentation is observable and all pages are
 ///                        returned after drain.
-///   telemetry          — sanity-check counters are self-consistent.
-///   userspace_workload — launch `/initfs/test_mem_stressed` in a silo and
+///   telemetry          : sanity-check counters are self-consistent.
+///   userspace_workload : launch `/initfs/test_mem_stressed` in a silo and
 ///                        observe its lifecycle for a bounded period.
 fn cmd_heap_stress(rounds_arg: Option<&String>) -> Result<(), ShellError> {
     let rounds = match rounds_arg {
@@ -603,7 +603,7 @@ fn stress_vmalloc_cycle() -> StressOutcome {
 //  2. No silent leaks: after a full drain, free_pages returns to baseline.
 //  3. Coherence: largest_free_pages ≤ free_pages.
 //
-// Uses an Xorshift64 PRNG seeded from the tick counter — no heap allocation
+// Uses an Xorshift64 PRNG seeded from the tick counter : no heap allocation
 // for PRNG state (stack-only bookkeeping, sizes and order vary across runs).
 //
 // Note B (ticket #49): SMP contention is not exercised here.
@@ -655,7 +655,7 @@ fn stress_vmalloc_frag() -> StressOutcome {
                 sizes[i] = size;
                 allocated += 1;
             }
-            _ => break, // arena exhausted — test with however many we got
+            _ => break, // arena exhausted : test with however many we got
         }
     }
 
@@ -751,7 +751,7 @@ fn stress_vmalloc_frag() -> StressOutcome {
 // Sub-test: telemetry_consistency
 //
 // Sanity-check that all allocator counters are internally consistent.
-// Does not allocate anything — pure read of existing state.
+// Does not allocate anything : pure read of existing state.
 // ---------------------------------------------------------------------------
 fn stress_telemetry() -> StressOutcome {
     // Slab: reclaimed must not exceed allocated.

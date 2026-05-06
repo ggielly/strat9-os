@@ -100,6 +100,8 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 const NANOS_PER_MICRO: u64 = 1_000;
 static RX_ERR_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
 static TX_ERR_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
+static TX_SUCCESS_COUNT: AtomicUsize = AtomicUsize::new(0);
+const NET_SEND_RETRY_LIMIT: usize = 64;
 
 /// Implements log errno.
 fn log_errno(prefix: &str, err: strate_net::syscalls::Error) {
@@ -207,7 +209,30 @@ impl phy::TxToken for Strat9TxToken {
         }
         let mut buf = [0u8; MAX_FRAME_SIZE];
         let ret = f(&mut buf[..len]);
-        if let Err(e) = net_send(&buf[..len]) {
+        let mut last_err = None;
+        for attempt in 0..NET_SEND_RETRY_LIMIT {
+            match net_send(&buf[..len]) {
+                Ok(_) => {
+                    TX_SUCCESS_COUNT.fetch_add(1, Ordering::Relaxed);
+                    last_err = None;
+                    break;
+                }
+                Err(e @ (Error::Again | Error::QueueFull)) => {
+                    last_err = Some(e);
+                    sleep_micros(1000);
+                }
+                Err(e @ Error::IoError) if attempt + 1 < NET_SEND_RETRY_LIMIT => {
+                    last_err = Some(e);
+                    sleep_micros(500);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        if let Some(e) = last_err {
             if TX_ERR_LOG_BUDGET.load(Ordering::Relaxed) > 0 {
                 TX_ERR_LOG_BUDGET.fetch_sub(1, Ordering::Relaxed);
                 log_errno("[strate-net] net_send errno=", e);
@@ -530,6 +555,25 @@ impl NetworkStrate {
         }
     }
 
+    fn clear_ipv4_runtime_config(&mut self) {
+        self.ip_config = None;
+        self.interface.update_ip_addrs(|addrs| addrs.clear());
+        let _ = self.interface.routes_mut().remove_default_ipv4_route();
+        self.refresh_dns_servers();
+    }
+
+    fn reset_dhcp_socket(&mut self) {
+        self.sockets
+            .get_mut::<dhcpv4::Socket>(self.dhcp_handle)
+            .reset();
+    }
+
+    fn enable_dhcp(&mut self) {
+        self.dhcp_enabled = true;
+        self.clear_ipv4_runtime_config();
+        self.reset_dhcp_socket();
+    }
+
     /// Returns true if a local UDP port is already in use by an opened UDP handle.
     fn udp_port_in_use(&self, port: u16) -> bool {
         self.udp_bound.values().any(|s| s.local_port == port)
@@ -646,11 +690,7 @@ impl NetworkStrate {
             }
             Some(dhcpv4::Event::Deconfigured) => {
                 log("[strate-net] DHCP: deconfigured (lease expired?)\n");
-                self.ip_config = None;
-                // Clear interface addresses
-                self.interface.update_ip_addrs(|addrs| addrs.clear());
-                let _ = self.interface.routes_mut().remove_default_ipv4_route();
-                self.refresh_dns_servers();
+                self.clear_ipv4_runtime_config();
             }
             None => {}
         }
@@ -1685,7 +1725,7 @@ impl NetworkStrate {
         }
 
         if path == "dhcp/enable" {
-            self.dhcp_enabled = true;
+            self.enable_dhcp();
             let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
             return reply_write(msg.sender, data_len);
         }
@@ -1833,6 +1873,7 @@ impl NetworkStrate {
     /// Implements serve.
     fn serve(&mut self, port: u64) -> ! {
         log("[strate-net] Starting DHCP...\n");
+        self.enable_dhcp();
 
         loop {
             // 1. Drive the smoltcp stack (transmits queued packets, processes received ones)
@@ -1860,7 +1901,7 @@ impl NetworkStrate {
                 let _ = call::ipc_reply(&reply);
             }
 
-            // 4. Brief sleep when idle — capped to stay responsive to IPC
+            // 4. Brief sleep when idle : capped to stay responsive to IPC
             if !got_ipc && poll_result == smoltcp::iface::PollResult::None {
                 const MAX_SLEEP_US: u64 = 10_000; // 10 ms
                 if let Some(delay) = self.interface.poll_delay(now, &self.sockets) {
@@ -1881,6 +1922,27 @@ impl NetworkStrate {
 /// Implements log.
 fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
+}
+
+fn wait_for_kernel_mac(max_attempts: usize) -> Option<[u8; 6]> {
+    let mut mac = [0u8; 6];
+
+    for attempt in 0..max_attempts {
+        if net_info(0, &mut mac).is_ok() && mac != [0; 6] {
+            if attempt != 0 {
+                log("[strate-net] Kernel NIC became available\n");
+            }
+            return Some(mac);
+        }
+
+        if attempt == 0 {
+            log("[strate-net] Waiting for kernel NIC registration...\n");
+        }
+
+        sleep_micros(1000);
+    }
+
+    None
 }
 
 #[unsafe(no_mangle)]
@@ -1907,13 +1969,16 @@ pub extern "C" fn _start() -> ! {
 
     log("[strate-net] Bound to /net\n");
 
-    let mut mac = [0u8; 6];
-    if net_info(0, &mut mac).is_err() {
-        log("[strate-net] No NIC found, using fallback MAC\n");
-        mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
-    } else {
-        log("[strate-net] MAC acquired from kernel\n");
-    }
+    let mac = match wait_for_kernel_mac(2048) {
+        Some(mac) => {
+            log("[strate-net] MAC acquired from kernel\n");
+            mac
+        }
+        None => {
+            log("[strate-net] No NIC found after waiting, using fallback MAC\n");
+            [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]
+        }
+    };
 
     let mut strate = NetworkStrate::new(mac);
     strate.serve(port);
