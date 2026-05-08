@@ -27,6 +27,7 @@ pub mod boot;
 pub mod capability;
 pub mod components;
 pub mod debug;
+pub mod entropy;
 pub mod hardware;
 pub mod ipc;
 pub mod memory;
@@ -410,6 +411,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     // Initialize FPU/SSE/XSAVE for the BSP
     crate::arch::x86_64::init_cpu_extensions();
+
+    // Seed the kernel entropy pool from RDRAND (if available).
+    crate::entropy::seed_from_rdrand();
 
     // Puts default panic hooks early to ensure
     //we get useful info on any panics during init.

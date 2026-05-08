@@ -78,14 +78,14 @@ fn raw6(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: us
 // === Linux clone flags ================================================
 
 // Clone flag constants matching Linux <linux/sched.h> on x86_64.
-const CLONE_VM: usize           = 0x00000100; // share memory space
-const CLONE_THREAD: usize       = 0x00010000; // same thread group
-const CLONE_SIGHAND: usize      = 0x00000800; // share signal handlers
-const CLONE_SETTLS: usize       = 0x00080000; // set TLS for child
+const CLONE_VM: usize = 0x00000100; // share memory space
+const CLONE_THREAD: usize = 0x00010000; // same thread group
+const CLONE_SIGHAND: usize = 0x00000800; // share signal handlers
+const CLONE_SETTLS: usize = 0x00080000; // set TLS for child
 const CLONE_PARENT_SETTID: usize = 0x00100000; // write child TID to ptid
 const CLONE_CHILD_CLEARTID: usize = 0x00200000; // clear child TID on exit
 const CLONE_CHILD_SETTID: usize = 0x02000000; // write child TID to ctid
-const CLONE_VFORK: usize        = 0x00004000; // vfork: parent blocks until child execs/exits
+const CLONE_VFORK: usize = 0x00004000; // vfork: parent blocks until child execs/exits
 
 // === Linux futex operation constants ==================================
 
@@ -370,11 +370,15 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
                 let child_tid = result as u32;
                 // CLONE_PARENT_SETTID: write child TID to *ptid (a3)
                 if (flags & CLONE_PARENT_SETTID) != 0 && a3u != 0 {
-                    unsafe { *(a3u as *mut u32) = child_tid; }
+                    unsafe {
+                        *(a3u as *mut u32) = child_tid;
+                    }
                 }
                 // CLONE_CHILD_SETTID: write child TID to *ctid (a5)
                 if (flags & CLONE_CHILD_SETTID) != 0 && a5u != 0 {
-                    unsafe { *(a5u as *mut u32) = child_tid; }
+                    unsafe {
+                        *(a5u as *mut u32) = child_tid;
+                    }
                 }
             }
             result
