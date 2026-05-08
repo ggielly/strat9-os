@@ -202,7 +202,9 @@ const LNR_ppoll: i64 = 271;
 const LNR_set_robust_list: i64 = 273;
 const LNR_get_robust_list: i64 = 274;
 const LNR_arch_prctl: i64 = 158;
+const LNR_faccessat: i64 = 269;
 const LNR_getrandom: i64 = 318;
+const LNR_faccessat2: i64 = 439;
 
 // === dispatcher ============================================================
 
@@ -273,6 +275,8 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
         LNR_unlinkat => raw3(SYS_UNLINKAT, a1u, a2u, a3u),
         LNR_renameat => raw4(SYS_RENAMEAT, a1u, a2u, a3u, a4u),
         LNR_readlinkat => raw4(SYS_READLINKAT, a1u, a2u, a3u, a4u),
+        LNR_faccessat => raw5(SYS_FACCESSAT, a1u, a2u, a3u, a4u, 0),
+        LNR_faccessat2 => raw5(SYS_FACCESSAT, a1u, a2u, a3u, a4u, a5u),
 
         // === Directory ops ================================================
         LNR_getcwd => raw2(SYS_GETCWD, a1u, a2u),
@@ -336,14 +340,21 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
         LNR_clone => {
             // Linux clone(flags, stack, ptid, tls, ctid) → Strat9 fork/thread_create
             // musl uses clone for both fork() and pthread_create() on x86_64.
+            //
+            // Linux x86_64 raw clone ABI (via musl __clone wrapper):
+            //   rdi=flags, rsi=stack, rdx=ptid, r10=ctid, r8=tls, r9=func
+            //   Child stack: arg stored at [stack] by musl's __clone asm.
+            //
+            // Strat9 SYS_THREAD_CREATE(entry, stack, arg, flags, tls):
+            //   entry → func (from r9), stack → child stack, arg → read from [stack]
+            //   flags → 0 (Strat9 ignores Linux clone flags), tls → from r8
             let flags = a1u;
             if (flags & CLONE_THREAD) != 0 {
-                // Thread creation: musl stores (func, arg) on the child stack.
-                // Strat9's SYS_THREAD_CREATE expects (entry, stack, arg, flags, tls)
-                // which differs from Linux clone's layout. Thread creation via
-                // clone requires a trampoline to bridge the ABI gap.
-                // For now, return ENOSYS — fork works, threads need the trampoline.
-                -38 // ENOSYS
+                // Read arg from child stack (stored by musl's __clone: mov %rcx,(%rsi))
+                let child_stack = a2u;
+                let arg = unsafe { *(child_stack as *const usize) };
+                // func = a6 (r9 preserved by syscall), tls = a5 (r8)
+                raw5(SYS_THREAD_CREATE, a6u, child_stack, arg, 0, a5u)
             } else {
                 // Fork: clone with no CLONE_THREAD means process creation.
                 // Linux clone(flags, 0, ptid, tls, ctid) → Strat9 fork()

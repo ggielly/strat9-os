@@ -206,7 +206,8 @@ pub fn sys_thread_create(
         || stack_top == 0
         || entry >= USER_TOP_EXCLUSIVE
         || stack_top >= USER_TOP_EXCLUSIVE
-        || (stack_top & 0x7) != 0   // 8-byte alignment (x86_64 entry: 8 mod 16 is valid)
+        || (stack_top & 0x7) != 0
+    // 8-byte alignment (x86_64 entry: 8 mod 16 is valid)
     {
         return Err(SyscallError::InvalidArgument);
     }
