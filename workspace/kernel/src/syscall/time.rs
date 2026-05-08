@@ -1,4 +1,4 @@
-//! Time-related syscalls: clock_gettime, nanosleep
+//! Time-related syscalls: clock_gettime, nanosleep, clock_nanosleep
 
 use core::sync::atomic::Ordering;
 
@@ -13,6 +13,9 @@ pub use strat9_abi::data::TimeSpec;
 /// Clock IDs for clock_gettime (POSIX-compatible subset)
 pub const CLOCK_MONOTONIC: u32 = 1;
 pub const CLOCK_REALTIME: u32 = 0;
+
+/// Flag for clock_nanosleep: request is an absolute time based on the clock.
+const TIMER_ABSTIME: i32 = 1;
 
 /// Get current monotonic time in nanoseconds since boot.
 ///
@@ -129,6 +132,127 @@ pub fn sys_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<u64, SyscallError> {
             if crate::process::has_pending_signals() {
                 task.wake_deadline_ns.store(0, Ordering::Relaxed);
                 if rem_ptr != 0 {
+                    let remaining_ns = deadline - now;
+                    let remaining = TimeSpec::from_nanos(remaining_ns);
+                    let rem_slice =
+                        UserSliceReadWrite::new(rem_ptr, core::mem::size_of::<TimeSpec>() as usize)
+                            .map_err(|_| SyscallError::Fault)?;
+                    rem_slice
+                        .write_val(&remaining)
+                        .map_err(|_| SyscallError::Fault)?;
+                }
+                return Err(SyscallError::Interrupted);
+            }
+        } else {
+            return Err(SyscallError::Fault);
+        }
+    }
+}
+
+/// SYS_CLOCK_NANOSLEEP: Sleep with clock selection and absolute/relative mode.
+///
+/// # Arguments
+/// * `clock_id` - Clock identifier (CLOCK_MONOTONIC or CLOCK_REALTIME)
+/// * `flags` - 0 for relative sleep, TIMER_ABSTIME (1) for absolute wake-up time
+/// * `req_ptr` - Pointer to timespec (absolute time if TIMER_ABSTIME, else duration)
+/// * `rem_ptr` - Optional pointer to timespec for remaining time (relative mode only)
+///
+/// # Returns
+/// * 0 on success
+/// * -EINTR if interrupted by a signal
+/// * -EINVAL if clock_id or timespec is invalid
+/// * -EFAULT if req_ptr is invalid
+///
+/// # POSIX compatibility
+/// POSIX signature: `int clock_nanosleep(clockid_t clock_id, int flags,
+///                                       const struct timespec *request,
+///                                       struct timespec *remain)`
+pub fn sys_clock_nanosleep(
+    clock_id: u32,
+    flags: i32,
+    req_ptr: u64,
+    rem_ptr: u64,
+) -> Result<u64, SyscallError> {
+    // Validate clock_id
+    match clock_id {
+        CLOCK_MONOTONIC | CLOCK_REALTIME => {}
+        _ => return Err(SyscallError::InvalidArgument),
+    }
+
+    // Read the request timespec from userspace
+    let req_slice = UserSliceRead::new(req_ptr, core::mem::size_of::<TimeSpec>() as usize)
+        .map_err(|_| SyscallError::Fault)?;
+
+    let req = req_slice
+        .read_val::<TimeSpec>()
+        .map_err(|_| SyscallError::Fault)?;
+
+    // Validate the timespec fields
+    if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1_000_000_000 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let current_ns = current_time_ns();
+
+    // Compute the wake deadline
+    let wake_deadline_ns = if (flags & TIMER_ABSTIME) != 0 {
+        // Absolute mode: request value IS the deadline
+        let deadline = req.to_nanos();
+        // If the deadline is in the past, return immediately (success per POSIX)
+        if deadline <= current_ns {
+            return Ok(0);
+        }
+        deadline
+    } else {
+        // Relative mode: deadline = now + request duration
+        let sleep_duration_ns = req.to_nanos();
+
+        // Handle zero-duration sleep (just yield)
+        if sleep_duration_ns == 0 {
+            yield_task();
+            return Ok(0);
+        }
+
+        current_ns.saturating_add(sleep_duration_ns)
+    };
+
+    // Get current task ID
+    let task_id = current_task_id().ok_or_else(|| SyscallError::PermissionDenied)?;
+
+    // Set the wake deadline on the task
+    if let Some(task) = crate::process::get_task_by_id(task_id) {
+        task.wake_deadline_ns
+            .store(wake_deadline_ns, Ordering::Relaxed);
+    }
+
+    // Check for pending signals before blocking
+    if let Some(task) = crate::process::get_task_by_id(task_id) {
+        let pending = task.pending_signals.get_mask();
+        let blocked = task.blocked_signals.get_mask();
+        let unblocked_pending = pending & !blocked;
+        if unblocked_pending != 0 {
+            task.wake_deadline_ns.store(0, Ordering::Relaxed);
+            return Err(SyscallError::Interrupted);
+        }
+    }
+
+    loop {
+        block_current_task();
+
+        if let Some(task) = crate::process::get_task_by_id(task_id) {
+            let deadline = task.wake_deadline_ns.load(Ordering::Relaxed);
+            let now = current_time_ns();
+
+            if deadline == 0 || now >= deadline {
+                task.wake_deadline_ns.store(0, Ordering::Relaxed);
+                return Ok(0);
+            }
+
+            if crate::process::has_pending_signals() {
+                task.wake_deadline_ns.store(0, Ordering::Relaxed);
+
+                // Write remaining time only in relative mode
+                if (flags & TIMER_ABSTIME) == 0 && rem_ptr != 0 {
                     let remaining_ns = deadline - now;
                     let remaining = TimeSpec::from_nanos(remaining_ns);
                     let rem_slice =

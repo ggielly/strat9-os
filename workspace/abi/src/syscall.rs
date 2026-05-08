@@ -114,6 +114,7 @@ pub const SYS_STAT: usize = 409;
 pub const SYS_NET_RECV: usize = 410;
 pub const SYS_NET_SEND: usize = 411;
 pub const SYS_NET_INFO: usize = 412;
+pub const SYS_ACCESS: usize = 413;
 
 // Block 420-429: volumes / block devices
 pub const SYS_VOLUME_READ: usize = 420;
@@ -161,13 +162,19 @@ pub const SYS_RENAMEAT: usize = 465;
 pub const SYS_MKDIRAT: usize = 466;
 /// Read a symlink relative to a directory FD.
 pub const SYS_READLINKAT: usize = 467;
+/// Check file access relative to a directory FD.
+pub const SYS_FACCESSAT: usize = 468;
 
 // Block 500-599: time / alarms
 pub const SYS_CLOCK_GETTIME: usize = 500;
 pub const SYS_NANOSLEEP: usize = 501;
+pub const SYS_CLOCK_NANOSLEEP: usize = 502;
 
-// Block 600-699: debug / profiling
+// Block 600-699: debug / profiling / random / robust list
 pub const SYS_DEBUG_LOG: usize = 600;
+pub const SYS_GETRANDOM: usize = 601;
+pub const SYS_SET_ROBUST_LIST: usize = 610;
+pub const SYS_GET_ROBUST_LIST: usize = 611;
 
 // Block 700-799: module management (.cmod)
 pub const SYS_MODULE_LOAD: usize = 700;

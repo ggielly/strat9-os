@@ -33,6 +33,9 @@ pub fn timer_tick() {
         &super::perf_counters::IRQ_TIMER_TSC,
         &super::perf_counters::IRQ_TIMER_COUNT,
     );
+
+    // Feed TSC low bits into the entropy pool (every tick).
+    crate::entropy::add_entropy(2, crate::arch::x86_64::rdtsc());
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
 
     if cpu_is_valid(cpu_idx) {

@@ -1494,7 +1494,7 @@ fn dump_page_fault_full(
 
     // --- VMA regions near fault ---
     if let Some(ref t) = *task {
-        crate::serial_println!("\x1b[1;33m--- VMA Regions Near Fault ---\x1b[0m");
+        crate::serial_println!("\x1b[1;33m--- VMA regions near fault ---\x1b[0m");
         // SAFETY: Use the same safe ptr-chain read strategy as the Task CR3 section above:
         // Arc::as_ptr gives a valid *const AddressSpace if the Arc is alive, but the
         // Arc<AddressSpace> stored inside the SyncUnsafeCell might be corrupted.
@@ -1599,8 +1599,8 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     let cs = stack_frame.code_segment.0;
     let is_user = (cs & 3) == 3;
     // Use rdmsr-based check: catches the swapgs→iretq window where
-    // CS=Ring0 but GS=user (0).  Without this, #GP from a bad iretq
-    // would escalate to double fault → triple fault.
+    // CS=Ring0 but GS=user (0).  
+    // Without this, #GP from a bad iretq would escalate to double fault => triple fault.
     let swapgs_needed = needs_swapgs(cs);
     let _gs = SwapGsGuard::new(swapgs_needed);
     // Detect the swapgs→iretq window case: CS says Ring 0 but GS was user.
@@ -1758,7 +1758,7 @@ extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame)
         crate::serial_force_println!("[heartbeat] PIC timer tick={} preempt_done", ticks);
     }
 }
-
+───────────────────────────────────────────────────────────
 /// Local APIC timer handler (dedicated vector, e.g. 0xD2).
 extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) {
     // Restore kernel GS if the timer fired while Ring 3 was running.
@@ -1817,7 +1817,10 @@ extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
 /// Performs the keyboard handler operation.
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     let raw = unsafe { super::io::inb(0x60) };
-    // Port 0x60 is consumed on read: feed the raw scancode directly.
+
+    // Feed scancode + TSC low bits into the entropy pool.
+    crate::entropy::add_entropy(1, (raw as u64) ^ super::rdtsc());
+
     if let Some(ch) = super::keyboard_layout::handle_scancode_raw(raw) {
         crate::arch::x86_64::keyboard::add_to_buffer(ch);
     }
@@ -1839,6 +1842,9 @@ extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {
 /// Reads `HBA_IS`, processes per-port completions, wakes waiting tasks, then
 /// sends EOI.  Must not call any function that may block or allocate.
 extern "x86-interrupt" fn ahci_handler(_stack_frame: InterruptStackFrame) {
+    // Feed IRQ timing into entropy pool.
+    crate::entropy::add_entropy(3, super::rdtsc());
+
     crate::hardware::storage::ahci::handle_interrupt();
 
     if super::apic::is_initialized() {

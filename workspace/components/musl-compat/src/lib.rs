@@ -75,6 +75,18 @@ fn raw6(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: us
     }
 }
 
+// === Linux clone flags ================================================
+
+// Clone flag constants matching Linux <linux/sched.h> on x86_64.
+const CLONE_VM: usize = 0x00000100; // share memory space
+const CLONE_THREAD: usize = 0x00010000; // same thread group
+const CLONE_SIGHAND: usize = 0x00000800; // share signal handlers
+const CLONE_SETTLS: usize = 0x00080000; // set TLS for child
+const CLONE_PARENT_SETTID: usize = 0x00100000; // write child TID to ptid
+const CLONE_CHILD_CLEARTID: usize = 0x00200000; // clear child TID on exit
+const CLONE_CHILD_SETTID: usize = 0x02000000; // write child TID to ctid
+const CLONE_VFORK: usize = 0x00004000; // vfork: parent blocks until child execs/exits
+
 // === Linux futex operation constants ==================================
 
 const FUTEX_WAIT: usize = 0;
@@ -197,7 +209,9 @@ const LNR_ppoll: i64 = 271;
 const LNR_set_robust_list: i64 = 273;
 const LNR_get_robust_list: i64 = 274;
 const LNR_arch_prctl: i64 = 158;
+const LNR_faccessat: i64 = 269;
 const LNR_getrandom: i64 = 318;
+const LNR_faccessat2: i64 = 439;
 
 // === dispatcher ============================================================
 
@@ -246,7 +260,7 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
         LNR_fstat => raw2(SYS_FSTAT, a1u, a2u),
         LNR_stat => raw2(SYS_STAT, a1u, a2u),
         LNR_lstat => raw2(SYS_STAT, a1u, a2u), // no symlinks in Strat9
-        LNR_access => raw2(SYS_STAT, a1u, a2u), // TODO: proper access() syscall
+        LNR_access => raw3(SYS_ACCESS, a1u, a2u, a3u),
         LNR_pipe => raw1(SYS_PIPE, a1u),
         LNR_dup => raw1(SYS_DUP, a1u),
         LNR_dup2 => raw2(SYS_DUP2, a1u, a2u),
@@ -268,6 +282,8 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
         LNR_unlinkat => raw3(SYS_UNLINKAT, a1u, a2u, a3u),
         LNR_renameat => raw4(SYS_RENAMEAT, a1u, a2u, a3u, a4u),
         LNR_readlinkat => raw4(SYS_READLINKAT, a1u, a2u, a3u, a4u),
+        LNR_faccessat => raw5(SYS_FACCESSAT, a1u, a2u, a3u, a4u, 0),
+        LNR_faccessat2 => raw5(SYS_FACCESSAT, a1u, a2u, a3u, a4u, a5u),
 
         // === Directory ops ================================================
         LNR_getcwd => raw2(SYS_GETCWD, a1u, a2u),
@@ -329,11 +345,43 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
 
         // === Threading =====================================================
         LNR_clone => {
-            // TODO: CLONE_ flags -> SYS_THREAD_CREATE / SYS_PROC_FORK mapping
-            // Linux clone(flags, stack, ptid, tls, ctid) has different
-            // semantics from Strat9 thread_create(entry, stack, arg, flags, tls).
-            // musl uses clone for both fork() and pthread_create().
-            -38 // ENOSYS
+            // Linux clone(flags, stack, ptid, tls, ctid, func) → Strat9 fork/thread_create
+            //
+            // Called via musl __syscallN(SYS_clone, ...). The C ABI order is:
+            //   a1=flags, a2=stack, a3=ptid, a4=tls, a5=ctid, a6=func
+            //
+            // NOTE: pthread_create uses __clone() asm (direct syscall), NOT this path.
+            // This handler covers fork() via _Fork.c's __syscall(SYS_clone, SIGCHLD, 0)
+            // and any direct __syscall(SYS_clone, ...) callers.
+            let flags = a1u;
+            let result = if (flags & CLONE_THREAD) != 0 {
+                // Thread creation: read arg from child stack (stored by musl's __clone)
+                let child_stack = a2u;
+                let arg = unsafe { *(child_stack as *const usize) };
+                // func=a6, stack=a2, arg=[stack], flags=0, tls=a4
+                raw5(SYS_THREAD_CREATE, a6u, child_stack, arg, 0, a4u)
+            } else {
+                // Fork: clone with no CLONE_THREAD means process creation.
+                raw0(SYS_PROC_FORK)
+            };
+
+            // Post-syscall flag handling (runs in parent)
+            if result > 0 {
+                let child_tid = result as u32;
+                // CLONE_PARENT_SETTID: write child TID to *ptid (a3)
+                if (flags & CLONE_PARENT_SETTID) != 0 && a3u != 0 {
+                    unsafe {
+                        *(a3u as *mut u32) = child_tid;
+                    }
+                }
+                // CLONE_CHILD_SETTID: write child TID to *ctid (a5)
+                if (flags & CLONE_CHILD_SETTID) != 0 && a5u != 0 {
+                    unsafe {
+                        *(a5u as *mut u32) = child_tid;
+                    }
+                }
+            }
+            result
         }
         LNR_tkill => raw2(SYS_TGKILL, a1u, a2u),
         LNR_tgkill => raw3(SYS_TGKILL, a1u, a2u, a3u),
@@ -354,10 +402,7 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
             // clock_getres is almost never used; stub with success
             0
         }
-        LNR_clock_nanosleep => {
-            // TODO: implement clock_nanosleep in kernel
-            -38 // ENOSYS
-        }
+        LNR_clock_nanosleep => raw4(SYS_CLOCK_NANOSLEEP, a1u, a2u, a3u, a4u),
         LNR_getitimer => raw2(SYS_GETITIMER, a1u, a2u),
         LNR_setitimer => raw3(SYS_SETITIMER, a1u, a2u, a3u),
 
@@ -377,29 +422,30 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
             }
         }
 
-        // === Networking (stubs — Strat9 uses IPC-based networking) ===
+        // === Networking (Strat9 uses Plan 9-style scheme networking) ===
+        //
+        // When strate-net mounts a Plan 9 /net/tcp scheme, the mapping is:
+        //   LNR_socket   → open("/net/tcp/clone", O_RDWR), read "N", open("/net/tcp/N/data")
+        //   LNR_connect  → write "connect ip!port" to /net/tcp/N/ctl
+        //   LNR_bind     → write "bind ip!port" to /net/tcp/N/ctl
+        //   LNR_listen   → implicit in Plan 9 /net/tcp/N
+        //   LNR_accept   → open("/net/tcp/N/listen") or read from /net/tcp/N/data
+        //   LNR_sendto   → write to /net/tcp/N/data
+        //   LNR_recvfrom → read from /net/tcp/N/data
+        //   LNR_setsockopt / LNR_getsockopt → no-ops or ctl writes
+        //
+        // Until strate-net provides the Plan 9 scheme, return ENOSYS.
+        // The current /dev/net/ scheme provides raw packet I/O only.
         LNR_socket | LNR_connect | LNR_accept | LNR_sendto | LNR_recvfrom | LNR_sendmsg
         | LNR_recvmsg | LNR_shutdown | LNR_bind | LNR_listen | LNR_getsockname
         | LNR_getpeername | LNR_socketpair | LNR_setsockopt | LNR_getsockopt => {
-            // TODO: implement networking via Strat9 IPC net strate
             -38 // ENOSYS
         }
 
         // === Linux-specific thread init (critical for musl) ===
-        LNR_set_tid_address => {
-            // TODO: kernel support for set_tid_address
-            // musl needs this to get a valid tid. Return the current tid.
-            raw1(SYS_GETTID, 0)
-        }
-        LNR_set_robust_list => {
-            // TODO: kernel support for robust futex lists
-            // Returning 0 (success) is safe; musl will work without it.
-            0
-        }
-        LNR_get_robust_list => {
-            // TODO: kernel support
-            -38 // ENOSYS
-        }
+        LNR_set_tid_address => raw1(SYS_SET_TID_ADDRESS, a1u),
+        LNR_set_robust_list => raw2(SYS_SET_ROBUST_LIST, a1u, a2u),
+        LNR_get_robust_list => raw3(SYS_GET_ROBUST_LIST, a1u, a2u, a3u),
         LNR_arch_prctl => {
             match a1u {
                 ARCH_SET_FS => raw2(SYS_ARCH_PRCTL, a1u, a2u),
@@ -409,10 +455,7 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
         }
 
         // === Random ==========================================================
-        LNR_getrandom => {
-            // TODO: kernel support for getrandom
-            -38 // ENOSYS
-        }
+        LNR_getrandom => raw3(SYS_GETRANDOM, a1u, a2u, a3u),
 
         // === Unknown / unimplemented ========================================
         _ => -38, // ENOSYS
