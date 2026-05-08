@@ -23,6 +23,7 @@ pub mod mmap;
 pub mod numbers;
 pub mod poll;
 pub mod process;
+pub mod random;
 pub mod signal;
 pub mod time;
 pub mod wait;

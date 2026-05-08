@@ -273,6 +273,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_LSEEK => sys_lseek(arg1, arg2, arg3),
         SYS_FSTAT => sys_fstat(arg1, arg2),
         SYS_STAT => sys_stat(arg1, arg2, arg3),
+        SYS_ACCESS => crate::vfs::sys_access(arg1, arg2, arg3),
         SYS_GETDENTS => sys_getdents(arg1, arg2, arg3),
         SYS_PIPE => sys_pipe(arg1),
         SYS_DUP => sys_dup(arg1),
@@ -303,6 +304,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         // *at() syscalls : FD-relative path resolution ======================
         SYS_OPENAT => crate::vfs::sys_openat(arg1, arg2, arg3, arg4),
         SYS_FSTATAT => crate::vfs::sys_fstatat(arg1, arg2, arg3, arg4),
+        SYS_FACCESSAT => crate::vfs::sys_faccessat(arg1, arg2, arg3, arg4, frame.r8),
 
         // Network syscalls (500-599) ========================================
         SYS_NET_RECV => sys_net_recv(arg1, arg2),
@@ -315,8 +317,11 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_VOLUME_INFO => sys_volume_info(arg1),
         SYS_CLOCK_GETTIME => super::time::sys_clock_gettime(arg1 as u32, arg2),
         SYS_NANOSLEEP => super::time::sys_nanosleep(arg1, arg2),
-        SYS_CLOCK_NANOSLEEP => super::time::sys_clock_nanosleep(arg1 as u32, arg2 as i32, arg3, arg4),
+        SYS_CLOCK_NANOSLEEP => {
+            super::time::sys_clock_nanosleep(arg1 as u32, arg2 as i32, arg3, arg4)
+        }
         SYS_DEBUG_LOG => sys_debug_log(arg1, arg2),
+        SYS_GETRANDOM => super::random::sys_getrandom(arg1, arg2 as usize, arg3 as u32),
 
         // Silo management (700-799) ========================================
         SYS_SILO_CREATE => silo::sys_silo_create(arg1),

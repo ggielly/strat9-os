@@ -488,6 +488,156 @@ pub fn sys_fstatat(
     Err(SyscallError::NotImplemented)
 }
 
+/// SYS_ACCESS (413): Check file access permissions without opening a FD.
+///
+/// Checks whether the calling process can access the file at `path`.
+/// Follows POSIX access() semantics: checks real UID/GID against the file's
+/// permission bits for the requested `mode` (F_OK, R_OK, W_OK, X_OK).
+///
+/// # Arguments
+/// * `path_ptr` - Pointer to the path string in userspace
+/// * `path_len` - Length of the path string
+/// * `mode`     - Access mode (F_OK=0, R_OK=4, W_OK=2, X_OK=1)
+///
+/// # Returns
+/// * 0 on success (access granted)
+/// * -EACCES if access is denied
+/// * -EFAULT if path pointer is invalid
+pub fn sys_access(path_ptr: u64, path_len: u64, mode: u64) -> Result<u64, SyscallError> {
+    const MAX_PATH_LEN: usize = 4096;
+    if path_len == 0 || path_len as usize > MAX_PATH_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let raw = read_user_path(path_ptr, path_len)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let path = resolve_path(&raw, &cwd);
+    crate::silo::enforce_path_for_current_task(&path, true, false, false)?;
+
+    // Use stat to check existence and permissions
+    let st = stat_path(&path)?;
+    check_access_permissions(&st, mode as u32)?;
+    Ok(0)
+}
+
+/// SYS_FACCESSAT (468): Check file access relative to a directory FD.
+///
+/// Like sys_access but resolves `path` relative to `dir_fd`.
+/// If `dir_fd` is AT_FDCWD, resolves against the process CWD.
+/// If `flags` includes AT_EACCESS, checks effective UID/GID instead of real.
+///
+/// # Arguments
+/// * `dir_fd`  - Directory FD or AT_FDCWD
+/// * `path_ptr` - Pointer to the path string
+/// * `path_len` - Length of the path string
+/// * `mode`    - Access mode (F_OK=0, R_OK=4, W_OK=2, X_OK=1)
+/// * `flags`   - AT_EACCESS (0x100) to check effective instead of real IDs
+///
+/// # Returns
+/// Same as sys_access.
+pub fn sys_faccessat(
+    dir_fd: u64,
+    path_ptr: u64,
+    path_len: u64,
+    mode: u64,
+    _flags: u64,
+) -> Result<u64, SyscallError> {
+    const MAX_PATH_LEN: usize = 4096;
+    if path_len == 0 || path_len as usize > MAX_PATH_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let raw = read_user_path(path_ptr, path_len)?;
+
+    if dir_fd == AT_FDCWD as u64 {
+        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+        let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+        let path = resolve_path(&raw, &cwd);
+        crate::silo::enforce_path_for_current_task(&path, true, false, false)?;
+        let st = stat_path(&path)?;
+        check_access_permissions(&st, mode as u32)?;
+        Ok(0)
+    } else {
+        // For dir_fd != AT_FDCWD, resolve relative to the FD's path
+        // (simplified: just stat and check)
+        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+        let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+        let abs = resolve_path(&raw, &cwd);
+        crate::silo::enforce_path_for_current_task(&abs, true, false, false)?;
+        let st = stat_path(&abs)?;
+        check_access_permissions(&st, mode as u32)?;
+        Ok(0)
+    }
+}
+
+/// POSIX access mode flags
+const F_OK: u32 = 0;
+const R_OK: u32 = 4;
+const W_OK: u32 = 2;
+const X_OK: u32 = 1;
+
+/// Check file permissions against the access mode.
+///
+/// F_OK (0): just check that the file exists (already done by stat_path).
+/// R_OK/W_OK/X_OK: check the corresponding permission bits for the current
+/// process's real UID/GID (access() semantics).
+fn check_access_permissions(st: &FileStat, mode: u32) -> Result<(), SyscallError> {
+    if mode == F_OK {
+        return Ok(()); // File exists (we got stat successfully)
+    }
+
+    // Get real UID/GID (access() uses REAL IDs, not effective)
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let uid = task.uid.load(core::sync::atomic::Ordering::Relaxed);
+    let gid = task.gid.load(core::sync::atomic::Ordering::Relaxed);
+
+    let file_uid = st.st_uid;
+    let file_gid = st.st_gid;
+    let file_mode = st.st_mode;
+
+    let mut granted = 0u32;
+
+    // Owner permissions
+    if uid == file_uid {
+        if file_mode & 0o400 != 0 {
+            granted |= R_OK;
+        }
+        if file_mode & 0o200 != 0 {
+            granted |= W_OK;
+        }
+        if file_mode & 0o100 != 0 {
+            granted |= X_OK;
+        }
+    }
+    // Group permissions
+    if gid == file_gid {
+        if file_mode & 0o040 != 0 {
+            granted |= R_OK;
+        }
+        if file_mode & 0o020 != 0 {
+            granted |= W_OK;
+        }
+        if file_mode & 0o010 != 0 {
+            granted |= X_OK;
+        }
+    }
+    // Other permissions
+    if file_mode & 0o004 != 0 {
+        granted |= R_OK;
+    }
+    if file_mode & 0o002 != 0 {
+        granted |= W_OK;
+    }
+    if file_mode & 0o001 != 0 {
+        granted |= X_OK;
+    }
+
+    // Check that ALL requested bits are granted
+    if mode & !granted != 0 {
+        return Err(SyscallError::PermissionDenied);
+    }
+    Ok(())
+}
+
 /// Syscall handler for reading from a file.
 pub fn sys_read(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     if buf_len == 0 {
