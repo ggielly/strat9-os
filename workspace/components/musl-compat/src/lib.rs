@@ -77,8 +77,15 @@ fn raw6(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: us
 
 // === Linux clone flags ================================================
 
-const _CLONE_VM: usize = 0x100; // share memory space
-const CLONE_THREAD: usize = 0x10000;
+// Clone flag constants matching Linux <linux/sched.h> on x86_64.
+const CLONE_VM: usize           = 0x00000100; // share memory space
+const CLONE_THREAD: usize       = 0x00010000; // same thread group
+const CLONE_SIGHAND: usize      = 0x00000800; // share signal handlers
+const CLONE_SETTLS: usize       = 0x00080000; // set TLS for child
+const CLONE_PARENT_SETTID: usize = 0x00100000; // write child TID to ptid
+const CLONE_CHILD_CLEARTID: usize = 0x00200000; // clear child TID on exit
+const CLONE_CHILD_SETTID: usize = 0x02000000; // write child TID to ctid
+const CLONE_VFORK: usize        = 0x00004000; // vfork: parent blocks until child execs/exits
 
 // === Linux futex operation constants ==================================
 
@@ -338,28 +345,39 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
 
         // === Threading =====================================================
         LNR_clone => {
-            // Linux clone(flags, stack, ptid, tls, ctid) → Strat9 fork/thread_create
-            // musl uses clone for both fork() and pthread_create() on x86_64.
+            // Linux clone(flags, stack, ptid, tls, ctid, func) → Strat9 fork/thread_create
             //
-            // Linux x86_64 raw clone ABI (via musl __clone wrapper):
-            //   rdi=flags, rsi=stack, rdx=ptid, r10=ctid, r8=tls, r9=func
-            //   Child stack: arg stored at [stack] by musl's __clone asm.
+            // Called via musl __syscallN(SYS_clone, ...). The C ABI order is:
+            //   a1=flags, a2=stack, a3=ptid, a4=tls, a5=ctid, a6=func
             //
-            // Strat9 SYS_THREAD_CREATE(entry, stack, arg, flags, tls):
-            //   entry → func (from r9), stack → child stack, arg → read from [stack]
-            //   flags → 0 (Strat9 ignores Linux clone flags), tls → from r8
+            // NOTE: pthread_create uses __clone() asm (direct syscall), NOT this path.
+            // This handler covers fork() via _Fork.c's __syscall(SYS_clone, SIGCHLD, 0)
+            // and any direct __syscall(SYS_clone, ...) callers.
             let flags = a1u;
-            if (flags & CLONE_THREAD) != 0 {
-                // Read arg from child stack (stored by musl's __clone: mov %rcx,(%rsi))
+            let result = if (flags & CLONE_THREAD) != 0 {
+                // Thread creation: read arg from child stack (stored by musl's __clone)
                 let child_stack = a2u;
                 let arg = unsafe { *(child_stack as *const usize) };
-                // func = a6 (r9 preserved by syscall), tls = a5 (r8)
-                raw5(SYS_THREAD_CREATE, a6u, child_stack, arg, 0, a5u)
+                // func=a6, stack=a2, arg=[stack], flags=0, tls=a4
+                raw5(SYS_THREAD_CREATE, a6u, child_stack, arg, 0, a4u)
             } else {
                 // Fork: clone with no CLONE_THREAD means process creation.
-                // Linux clone(flags, 0, ptid, tls, ctid) → Strat9 fork()
                 raw0(SYS_PROC_FORK)
+            };
+
+            // Post-syscall flag handling (runs in parent)
+            if result > 0 {
+                let child_tid = result as u32;
+                // CLONE_PARENT_SETTID: write child TID to *ptid (a3)
+                if (flags & CLONE_PARENT_SETTID) != 0 && a3u != 0 {
+                    unsafe { *(a3u as *mut u32) = child_tid; }
+                }
+                // CLONE_CHILD_SETTID: write child TID to *ctid (a5)
+                if (flags & CLONE_CHILD_SETTID) != 0 && a5u != 0 {
+                    unsafe { *(a5u as *mut u32) = child_tid; }
+                }
             }
+            result
         }
         LNR_tkill => raw2(SYS_TGKILL, a1u, a2u),
         LNR_tgkill => raw3(SYS_TGKILL, a1u, a2u, a3u),
