@@ -355,8 +355,7 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
             0
         }
         LNR_clock_nanosleep => {
-            // TODO: implement clock_nanosleep in kernel
-            -38 // ENOSYS
+            raw4(SYS_CLOCK_NANOSLEEP, a1u, a2u, a3u, a4u)
         }
         LNR_getitimer => raw2(SYS_GETITIMER, a1u, a2u),
         LNR_setitimer => raw3(SYS_SETITIMER, a1u, a2u, a3u),
@@ -387,9 +386,7 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
 
         // === Linux-specific thread init (critical for musl) ===
         LNR_set_tid_address => {
-            // TODO: kernel support for set_tid_address
-            // musl needs this to get a valid tid. Return the current tid.
-            raw1(SYS_GETTID, 0)
+            raw1(SYS_SET_TID_ADDRESS, a1u)
         }
         LNR_set_robust_list => {
             // TODO: kernel support for robust futex lists

@@ -315,6 +315,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_VOLUME_INFO => sys_volume_info(arg1),
         SYS_CLOCK_GETTIME => super::time::sys_clock_gettime(arg1 as u32, arg2),
         SYS_NANOSLEEP => super::time::sys_nanosleep(arg1, arg2),
+        SYS_CLOCK_NANOSLEEP => super::time::sys_clock_nanosleep(arg1 as u32, arg2 as i32, arg3, arg4),
         SYS_DEBUG_LOG => sys_debug_log(arg1, arg2),
 
         // Silo management (700-799) ========================================

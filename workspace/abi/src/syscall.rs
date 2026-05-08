@@ -165,6 +165,7 @@ pub const SYS_READLINKAT: usize = 467;
 // Block 500-599: time / alarms
 pub const SYS_CLOCK_GETTIME: usize = 500;
 pub const SYS_NANOSLEEP: usize = 501;
+pub const SYS_CLOCK_NANOSLEEP: usize = 502;
 
 // Block 600-699: debug / profiling
 pub const SYS_DEBUG_LOG: usize = 600;
