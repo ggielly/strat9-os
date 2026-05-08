@@ -162,6 +162,8 @@ pub fn create_user_test_task() {
         fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
         fair_on_rq: core::sync::atomic::AtomicBool::new(false),
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
+        robust_list_head: core::sync::atomic::AtomicU64::new(0),
+        robust_list_len: core::sync::atomic::AtomicUsize::new(0),
         user_fs_base: core::sync::atomic::AtomicU64::new(0),
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),

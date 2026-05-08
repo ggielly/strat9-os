@@ -170,9 +170,11 @@ pub const SYS_CLOCK_GETTIME: usize = 500;
 pub const SYS_NANOSLEEP: usize = 501;
 pub const SYS_CLOCK_NANOSLEEP: usize = 502;
 
-// Block 600-699: debug / profiling / random
+// Block 600-699: debug / profiling / random / robust list
 pub const SYS_DEBUG_LOG: usize = 600;
 pub const SYS_GETRANDOM: usize = 601;
+pub const SYS_SET_ROBUST_LIST: usize = 610;
+pub const SYS_GET_ROBUST_LIST: usize = 611;
 
 // Block 700-799: module management (.cmod)
 pub const SYS_MODULE_LOAD: usize = 700;

@@ -422,15 +422,8 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
 
         // === Linux-specific thread init (critical for musl) ===
         LNR_set_tid_address => raw1(SYS_SET_TID_ADDRESS, a1u),
-        LNR_set_robust_list => {
-            // TODO: kernel support for robust futex lists
-            // Returning 0 (success) is safe; musl will work without it.
-            0
-        }
-        LNR_get_robust_list => {
-            // TODO: kernel support
-            -38 // ENOSYS
-        }
+        LNR_set_robust_list => raw2(SYS_SET_ROBUST_LIST, a1u, a2u),
+        LNR_get_robust_list => raw3(SYS_GET_ROBUST_LIST, a1u, a2u, a3u),
         LNR_arch_prctl => {
             match a1u {
                 ARCH_SET_FS => raw2(SYS_ARCH_PRCTL, a1u, a2u),

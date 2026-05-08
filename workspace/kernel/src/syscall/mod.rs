@@ -24,6 +24,7 @@ pub mod numbers;
 pub mod poll;
 pub mod process;
 pub mod random;
+pub mod robust_list;
 pub mod signal;
 pub mod time;
 pub mod wait;

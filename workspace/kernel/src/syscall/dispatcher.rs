@@ -322,6 +322,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         }
         SYS_DEBUG_LOG => sys_debug_log(arg1, arg2),
         SYS_GETRANDOM => super::random::sys_getrandom(arg1, arg2 as usize, arg3 as u32),
+        SYS_SET_ROBUST_LIST => super::robust_list::sys_set_robust_list(arg1, arg2 as usize),
+        SYS_GET_ROBUST_LIST => super::robust_list::sys_get_robust_list(arg1 as i64, arg2, arg3),
 
         // Silo management (700-799) ========================================
         SYS_SILO_CREATE => silo::sys_silo_create(arg1),

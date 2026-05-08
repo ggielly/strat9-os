@@ -32,6 +32,11 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 let _ = crate::syscall::futex::sys_futex_wake(tidptr, u32::MAX);
             }
         }
+
+        // -- robust_list (clean up held mutexes) --
+        // Walk the robust list and mark any held futexes as FUTEX_OWNER_DIED,
+        // then wake waiters. Prevents deadlocks when a thread dies holding a mutex.
+        crate::syscall::robust_list::cleanup_robust_list(&task);
     }
 
     let cpu_index = current_cpu_index();

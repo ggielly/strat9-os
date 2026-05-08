@@ -281,6 +281,8 @@ fn build_child_task(
         fair_on_rq: AtomicBool::new(false),
         // POSIX: clear_child_tid is NOT inherited : child starts with 0.
         clear_child_tid: AtomicU64::new(0),
+        robust_list_head: AtomicU64::new(0),
+        robust_list_len: AtomicUsize::new(0),
         // POSIX: cwd IS inherited.
         // POSIX: umask IS inherited.
         // FS.base: child starts with 0 (its own TLS not yet set up).

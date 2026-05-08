@@ -300,6 +300,11 @@ pub struct Task {
     /// TID address for futex-based thread join (set_tid_address).
     /// The kernel writes 0 here when the thread exits, then futex_wake.
     pub clear_child_tid: AtomicU64,
+    /// Robust list head pointer (set by set_robust_list).
+    /// Points to a userspace robust_list_head used for dead-thread mutex cleanup.
+    pub robust_list_head: AtomicU64,
+    /// Length of the robust list head structure (as passed to set_robust_list).
+    pub robust_list_len: AtomicUsize,
     /// Current working directory (POSIX, inherited by children).
     /// File creation mask (inherited by children, NOT reset by exec).
     /// User-space FS.base (TLS on x86_64, set via arch_prctl ARCH_SET_FS).
@@ -911,6 +916,8 @@ impl Task {
             fair_rq_generation: AtomicU64::new(0),
             fair_on_rq: AtomicBool::new(false),
             clear_child_tid: AtomicU64::new(0),
+            robust_list_head: AtomicU64::new(0),
+            robust_list_len: AtomicUsize::new(0),
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
@@ -982,6 +989,8 @@ impl Task {
             fair_rq_generation: AtomicU64::new(0),
             fair_on_rq: AtomicBool::new(false),
             clear_child_tid: AtomicU64::new(0),
+            robust_list_head: AtomicU64::new(0),
+            robust_list_len: AtomicUsize::new(0),
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
