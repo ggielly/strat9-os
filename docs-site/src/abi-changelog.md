@@ -25,12 +25,8 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
-- 2026-05-14 `77540e9` refactor(signal): implement fast signal-pending mechanism for improved syscall efficiency
-- 2026-05-11 `2a12166` refactor(elf): update ELF loading to use capabilities and fix random seed generation
-- 2026-05-11 `3a351bd` refactor(vfs): add path resolution and validation for current task
-- 2026-05-10 `0c603e4` refactor(init): integrate SiloMode into FamilyProfile and update security policy validation
-- 2026-05-10 `c89a14e` refactor(init): clean up SiloConfig usage and improve code organization
-- 2026-05-10 `74cb3a5` refactor(init): move SiloConfig struct to a separate module for better organization and clarity
+- 2026-05-14 `cc4944a` Refactor and clean up code in various modules
+- 2026-05-14 `ecc416d` refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix
 - 2026-05-08 `f070d41` Add kernel entropy pool with interrupt-driven collection
 - 2026-05-08 `9dedb9f` Implement robust list support (set_robust_list/get_robust_list)
 - 2026-05-08 `d2e90a2` Bridge clone() thread creation via SYS_THREAD_CREATE, add faccessat routing
@@ -55,6 +51,10 @@ See:
 - 2026-03-07 `8cd1410` Refactor memory allocation and deallocation in the kernel : per-CPU frame cach and a CPU-local BuddySet avoids the global lock in the common case.
 - 2026-03-04 `04b384e` fix(build): improve stage assembly error handling and warnings
 - 2026-03-03 `2eb44c0` feat(task): replace FpuState with ExtendedState, support xsave/xrstor
+- 2026-03-03 `ae5480a` feat(silo): add silo attach for live debug output monitoring
+- 2026-03-03 `8c0056a` feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.
+- 2026-03-03 `e9cce98` feat: Implement POSIX-compatible `clock_gettime` syscall and add `call::open` with POSIX `O_*` flag conversion.
+- 2026-03-03 `04cbe05` feat: Add comprehensive VFS operation self-tests, refine VFS error handling, and improve IPC port cleanup.
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 
