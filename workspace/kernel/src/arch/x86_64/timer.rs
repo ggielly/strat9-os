@@ -133,8 +133,16 @@ pub fn calibrate_apic_timer() -> u32 {
     };
     let saved_flags = super::save_flags_and_cli();
 
+    // Try CPUID leaf 0x15 for TSC frequency first (Linux primary method).
+    // This avoids relying on PIT channel 2 gate logic which is fragile
+    // on some emulators and hardware.
+    if let Some(tsc_khz) = super::cpuid::tsc_frequency_khz() {
+        log::info!("TSC frequency from CPUID 0x15: {} KHz", tsc_khz);
+        super::boot_timestamp::calibrate_khz(tsc_khz);
+    }
+
     // ========================================================================
-    // DEBUG: Verbose logging for timer calibration
+    // DEBUG: verbose logging for timer calibration
     // ========================================================================
     log::info!("========================================");
     log::info!("APIC TIMER CALIBRATION (verbose debug)");

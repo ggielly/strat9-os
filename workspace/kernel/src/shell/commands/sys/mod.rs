@@ -1047,8 +1047,7 @@ pub(super) fn cmd_test_pid_impl(_args: &[String]) -> Result<(), ShellError> {
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_pid") {
         Ok(task_id) => {
             shell_println!("test_pid started (task id={})", task_id);
             Ok(())
@@ -1084,8 +1083,7 @@ pub(super) fn cmd_test_syscalls_impl(_args: &[String]) -> Result<(), ShellError>
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_syscalls") {
         Ok(task_id) => {
             shell_println!("test_syscalls started (task id={})", task_id);
             Ok(())
@@ -1121,8 +1119,7 @@ pub(super) fn cmd_test_mem_impl(_args: &[String]) -> Result<(), ShellError> {
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_mem") {
         Ok(task_id) => {
             shell_println!("test_mem started (task id={})", task_id);
             Ok(())
@@ -1158,8 +1155,7 @@ pub(super) fn cmd_test_mem_stressed_impl(_args: &[String]) -> Result<(), ShellEr
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_mem_stressed") {
         Ok(task_id) => {
             shell_println!("test_mem_stressed started (task id={})", task_id);
             Ok(())
@@ -1195,8 +1191,7 @@ pub(super) fn cmd_test_mem_region_impl(_args: &[String]) -> Result<(), ShellErro
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_mem_region") {
         Ok(task_id) => {
             shell_println!("test_mem_region started (task id={})", task_id);
             Ok(())
@@ -1232,8 +1227,7 @@ pub(super) fn cmd_test_mem_region_proc_impl(_args: &[String]) -> Result<(), Shel
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_mem_region_proc") {
         Ok(task_id) => {
             shell_println!("test_mem_region_proc started (task id={})", task_id);
             Ok(())
@@ -1277,8 +1271,7 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
 
     if let Some(data) = boot_bytes {
         shell_println!("ELF size: {} bytes", data.len());
-        shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-        return match load_and_run_elf(data, "init") {
+        return match load_and_run_elf(data, "test_exec") {
             Ok(task_id) => {
                 shell_println!("test_exec started (task id={})", task_id);
                 Ok(())
@@ -1314,8 +1307,7 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_exec") {
         Ok(task_id) => {
             shell_println!("test_exec started (task id={})", task_id);
             Ok(())

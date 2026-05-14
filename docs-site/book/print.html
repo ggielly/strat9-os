@@ -217,6 +217,14 @@ python3 -m http.server --directory build/docs-site 8000
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
+<li>2026-05-10 <code>0c603e4</code> refactor(init): integrate SiloMode into FamilyProfile and update security policy validation</li>
+<li>2026-05-10 <code>c89a14e</code> refactor(init): clean up SiloConfig usage and improve code organization</li>
+<li>2026-05-10 <code>74cb3a5</code> refactor(init): move SiloConfig struct to a separate module for better organization and clarity</li>
+<li>2026-05-08 <code>f070d41</code> Add kernel entropy pool with interrupt-driven collection</li>
+<li>2026-05-08 <code>9dedb9f</code> Implement robust list support (set_robust_list/get_robust_list)</li>
+<li>2026-05-08 <code>d2e90a2</code> Bridge clone() thread creation via SYS_THREAD_CREATE, add faccessat routing</li>
+<li>2026-05-08 <code>dabcad2</code> Add sys_access(), sys_faccessat(), and SYS_GETRANDOM() in syscall dispatcher</li>
+<li>2026-05-08 <code>946f200</code> Add missing call for clock_nanosleep and update the calling manager</li>
 <li>2026-05-06 <code>117863e</code> Enhance network and silo management functionality</li>
 <li>2026-04-12 <code>6963e28</code> fix: reduce scheduler contention and harden early boot memory init</li>
 <li>2026-04-12 <code>f3647c1</code> feat(memory): production-grade allocator architecture (#49)</li>
@@ -239,14 +247,6 @@ python3 -m http.server --directory build/docs-site 8000
 <li>2026-03-03 <code>ae5480a</code> feat(silo): add silo attach for live debug output monitoring</li>
 <li>2026-03-03 <code>8c0056a</code> feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.</li>
 <li>2026-03-03 <code>e9cce98</code> feat: Implement POSIX-compatible <code>clock_gettime</code> syscall and add <code>call::open</code> with POSIX <code>O_*</code> flag conversion.</li>
-<li>2026-03-03 <code>04cbe05</code> feat: Add comprehensive VFS operation self-tests, refine VFS error handling, and improve IPC port cleanup.</li>
-<li>2026-03-03 <code>2642cf8</code> docs: Add <code>/// Implements</code> doc comments to various functions across components for improved clarity.</li>
-<li>2026-03-03 <code>ef0f1d7</code> docs: Add documentation comments to ABI and syscall components and enhance error handling in the documentation build script.</li>
-<li>2026-03-03 <code>f314904</code> feat: Expand <code>FileStat</code> with additional POSIX fields and update kernel VFS schemes, and add a <code>nonce</code> to <code>IpcHandshake</code>.</li>
-<li>2026-03-03 <code>769f3eb</code> feat: Update syscall ABI with struct layout adjustments, error encoding clarification, and versioning.</li>
-<li>2026-03-03 <code>c23a68a</code> feat: Ensure Limine bootloader directories exist, use a real time source for <code>setitimer</code>, and add <code>itimerval</code> value validation.</li>
-<li>2026-03-03 <code>ea80816</code> fix: Correct <code>O_NOFOLLOW</code> flag value and add length bounds checks to <code>DirentIter</code> initialization and name length assignment.</li>
-<li>2026-03-03 <code>748f98c</code> feat: Add <code>pread</code> and <code>pwrite</code> syscalls, enhance WASM <code>proc_exit</code> handling, and implement IPC port cleanup on task termination.</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
@@ -271,7 +271,7 @@ python3 -m http.server --directory build/docs-site 8000
   - &lt;what userspace/kernel must update&gt;
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="abi-support-matrix"><a class="header" href="#abi-support-matrix">ABI Support Matrix</a></h1>
-<p>Status of relibc platform APIs on <code>x86_64-unknown-strat9</code>.</p>
+<p>Status of musl platform APIs on <code>x86_64-unknown-strat9</code>.</p>
 <p>Legend: <strong>OK</strong> = implemented, <strong>Stub</strong> = returns ENOSYS, <strong>Partial</strong> = limited.</p>
 <h2 id="posix-file-io"><a class="header" href="#posix-file-io">POSIX File I/O</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>

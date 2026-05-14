@@ -7,7 +7,19 @@
 //!   - ET_EXEC
 //!   - ET_DYN (PIE/static-PIE)
 //!   - ELF64 little-endian x86_64 binaries.
-
+//!
+//!
+//! Does not support (or need future fix) :
+//!   - TT_GNU_IFUNC (R_X86_64_IRELATIVE partial) : we don't support IFUNC resolution in the kernel
+//!     because we need a userland : IRELATIVE is treated as RELATIVE (load_bias + addend).
+//!
+//!   - FIx TODO : allocation heap during ELF loading
+//!     program_headers(elf_data, &header).collect() → Vec<Elf64Phdr>, Vec::new() for interp_phdrs, etc. The kernel uses alloc so it's normal, but allocation errors are not handled (no try_collect, no fallible GlobalAlloc).
+//!
+//!   - Fix TODO : find_free_vma_range : fallback hardcoded 0x1000_0000
+//!     If PIE_BASE_ADDR (0x1_0000_0000) fails, fallback to 0x1000_0000. This value is arbitrary and could overlap existing mappings if many libraries are loaded.
+//!
+//!
 use alloc::{sync::Arc, vec::Vec};
 use x86_64::{
     structures::paging::{Mapper, Page, Size4KiB},
@@ -304,21 +316,42 @@ fn find_relocated_phdr_vaddr(
 /// Reads elf from vfs.
 fn read_elf_from_vfs(path: &str) -> Result<Vec<u8>, &'static str> {
     const MAX_ELF_SIZE: usize = 64 * 1024 * 1024;
-    let fd =
-        crate::vfs::open(path, crate::vfs::OpenFlags::READ).map_err(|_| "PT_INTERP open failed")?;
+    let resolved_path =
+        crate::vfs::resolve_and_check_path_for_current_task(path, true, false, true)
+            .map_err(|_| "PT_INTERP execute denied")?;
+    let fd = crate::vfs::open(&resolved_path, crate::vfs::OpenFlags::READ)
+        .map_err(|_| "PT_INTERP open failed")?;
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
+
+    // Read the first chunk to validate ELF magic before loading the whole file.
+    let n = match crate::vfs::read(fd, &mut buf) {
+        Ok(0) => {
+            let _ = crate::vfs::close(fd);
+            return Err("PT_INTERP file is empty");
+        }
+        Ok(n) => n,
+        Err(_) => {
+            let _ = crate::vfs::close(fd);
+            return Err("PT_INTERP read failed");
+        }
+    };
+    if n < 4 || buf[..4] != [0x7F, b'E', b'L', b'F'] {
+        let _ = crate::vfs::close(fd);
+        return Err("PT_INTERP file is not an ELF");
+    }
+    out.extend_from_slice(&buf[..n]);
+
+    // Continue reading the rest of the file.
     loop {
         let n = match crate::vfs::read(fd, &mut buf) {
+            Ok(0) => break,
             Ok(n) => n,
             Err(_) => {
                 let _ = crate::vfs::close(fd);
                 return Err("PT_INTERP read failed");
             }
         };
-        if n == 0 {
-            break;
-        }
         if out.len().saturating_add(n) > MAX_ELF_SIZE {
             let _ = crate::vfs::close(fd);
             return Err("PT_INTERP file too large");
@@ -326,9 +359,6 @@ fn read_elf_from_vfs(path: &str) -> Result<Vec<u8>, &'static str> {
         out.extend_from_slice(&buf[..n]);
     }
     let _ = crate::vfs::close(fd);
-    if out.is_empty() {
-        return Err("PT_INTERP file is empty");
-    }
     Ok(out)
 }
 
@@ -494,8 +524,17 @@ fn read_user_mapped_bytes(
         let phys = user_as
             .translate(VirtAddr::new(vaddr))
             .ok_or("Failed to translate mapped user bytes")?;
-        let src = crate::memory::phys_to_virt(phys.as_u64()) as *const u8;
+        let paddr = phys.as_u64();
+        if paddr == 0 {
+            return Err("Translated physical address is null");
+        }
+        let src = crate::memory::phys_to_virt(paddr) as *const u8;
+        if src.is_null() {
+            return Err("HHDM-mapped source is null");
+        }
         // SAFETY: src points to mapped physical memory via HHDM.
+        // The address was just validated non-null, and the translate()
+        // call guarantees the virtual address is backed by a valid frame.
         unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(copied), chunk) };
         copied += chunk;
         vaddr = vaddr
@@ -524,8 +563,17 @@ fn write_user_mapped_bytes(
         let phys = user_as
             .translate(VirtAddr::new(vaddr))
             .ok_or("Failed to translate relocation target")?;
-        let dst = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
+        let paddr = phys.as_u64();
+        if paddr == 0 {
+            return Err("Translated physical address is null");
+        }
+        let dst = crate::memory::phys_to_virt(paddr) as *mut u8;
+        if dst.is_null() {
+            return Err("HHDM-mapped destination is null");
+        }
         // SAFETY: destination points to mapped user frame through HHDM.
+        // The address was just validated non-null, and the translate()
+        // call guarantees the virtual address is backed by a valid frame.
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(written), dst, chunk) };
         written += chunk;
         vaddr = vaddr
@@ -648,7 +696,13 @@ fn apply_dynamic_relocations(
         .p_vaddr
         .checked_add(load_bias)
         .ok_or("PT_DYNAMIC relocated address overflow")?;
-    let dyn_count = (dynamic_ph.p_filesz as usize) / core::mem::size_of::<Elf64Dyn>();
+    let dyn_file_size = dynamic_ph.p_filesz as usize;
+    let dyn_count = dyn_file_size / core::mem::size_of::<Elf64Dyn>();
+    // Read the entire .dynamic section at once to avoid O(n) page-table walks.
+    let mut dyn_buf = alloc::vec![0u8; dyn_file_size];
+    read_user_mapped_bytes(user_as, dyn_addr, &mut dyn_buf)?;
+    let dyn_slice: &[Elf64Dyn] =
+        unsafe { core::slice::from_raw_parts(dyn_buf.as_ptr() as *const Elf64Dyn, dyn_count) };
 
     let mut rela_addr: Option<u64> = None;
     let mut rela_size: usize = 0;
@@ -665,13 +719,7 @@ fn apply_dynamic_relocations(
     let mut relr_ent: usize = 0;
 
     for i in 0..dyn_count {
-        let entry_addr = dyn_addr
-            .checked_add((i * core::mem::size_of::<Elf64Dyn>()) as u64)
-            .ok_or("PT_DYNAMIC walk overflow")?;
-        let mut raw = [0u8; core::mem::size_of::<Elf64Dyn>()];
-        read_user_mapped_bytes(user_as, entry_addr, &mut raw)?;
-        // SAFETY: raw has exact size of Elf64Dyn; read_unaligned handles packing.
-        let dyn_entry = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Dyn) };
+        let dyn_entry = &dyn_slice[i];
 
         match dyn_entry.d_tag {
             DT_NULL => break,
@@ -751,28 +799,25 @@ fn apply_dynamic_relocations(
         Ok(unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Sym) })
     };
 
-    let resolve_symbol = |sym_idx: u32| -> Result<u64, &'static str> {
-        if sym_idx == 0 {
-            return Ok(0);
-        }
-        let sym = read_sym_entry(sym_idx)?;
-        if sym.st_shndx == 0 {
-            return Err("Undefined symbol relocation not supported");
-        }
-        sym.st_value
-            .checked_add(load_bias)
-            .ok_or("Symbol value relocation overflow")
-    };
+    let resolve_sym =
+        |sym_idx: u32, with_bias: bool, check_def: bool| -> Result<u64, &'static str> {
+            if sym_idx == 0 {
+                return Ok(0);
+            }
+            let sym = read_sym_entry(sym_idx)?;
+            if check_def && sym.st_shndx == 0 {
+                return Err("Undefined symbol relocation not supported");
+            }
+            if with_bias {
+                sym.st_value
+                    .checked_add(load_bias)
+                    .ok_or("Symbol value relocation overflow")
+            } else {
+                Ok(sym.st_value)
+            }
+        };
 
-    let resolve_symbol_raw = |sym_idx: u32| -> Result<u64, &'static str> {
-        if sym_idx == 0 {
-            return Ok(0);
-        }
-        let sym = read_sym_entry(sym_idx)?;
-        Ok(sym.st_value)
-    };
-
-    let resolve_symbol_size = |sym_idx: u32| -> Result<u64, &'static str> {
+    let resolve_size = |sym_idx: u32| -> Result<u64, &'static str> {
         if sym_idx == 0 {
             return Ok(0);
         }
@@ -821,17 +866,17 @@ fn apply_dynamic_relocations(
                         .ok_or("Relocation value overflow")?
                 }
                 R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_64 => {
-                    let sym_val = resolve_symbol(r_sym)? as i128;
+                    let sym_val = resolve_sym(r_sym, true, true)? as i128;
                     sym_val
                         .checked_add(rela.r_addend as i128)
                         .ok_or("Relocation value overflow")?
                 }
                 R_X86_64_COPY => {
-                    let sym_val = resolve_symbol(r_sym)?;
+                    let sym_val = resolve_sym(r_sym, true, true)?;
                     if sym_val == 0 {
                         continue;
                     }
-                    let sym_sz = resolve_symbol_size(r_sym)?;
+                    let sym_sz = resolve_size(r_sym)?;
                     if sym_sz > 0 && sym_val < USER_ADDR_MAX {
                         let mut tmp = [0u8; 256];
                         let mut off = 0usize;
@@ -851,7 +896,7 @@ fn apply_dynamic_relocations(
                 }
                 R_X86_64_TPOFF64 => {
                     let sym_val = if r_sym != 0 {
-                        resolve_symbol_raw(r_sym)? as i128
+                        resolve_sym(r_sym, false, false)? as i128
                     } else {
                         0i128
                     };
@@ -1025,29 +1070,38 @@ fn load_segment(
     )?;
 
     // Copy file data into the mapped pages.
-    // We translate each page through the user AS to find its physical frame,
-    // then access it via HHDM to write.
+    // Batch-translate all pages at once to avoid page-table walks per-chunk.
     if filesz > 0 {
         let src = &elf_data[offset as usize..file_end];
         let mut copied = 0usize;
 
+        // Collect physical addresses for all pages in the range.
+        let n_vaddrs = ((page_end - page_start) / 4096) as usize;
+        let mut phys_pages = alloc::vec::Vec::with_capacity(n_vaddrs);
+        for i in 0..n_vaddrs {
+            let vaddr = page_start + (i as u64) * 4096;
+            let phys = user_as
+                .translate(VirtAddr::new(vaddr))
+                .ok_or("Failed to translate user page after mapping")?;
+            phys_pages.push(phys);
+        }
+
         while copied < src.len() {
             let dst_vaddr = vaddr + copied as u64;
+            let page_idx = ((dst_vaddr - page_start) / 4096) as usize;
             let page_offset = (dst_vaddr & 0xFFF) as usize;
             let chunk = core::cmp::min(src.len() - copied, 4096 - page_offset);
 
-            // Translate user virtual address → physical → HHDM virtual
-            let phys = user_as
-                .translate(VirtAddr::new(dst_vaddr))
-                .ok_or("Failed to translate user page after mapping")?;
+            let phys = phys_pages[page_idx];
             let hhdm_ptr = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
-
             // SAFETY: hhdm_ptr points to a freshly mapped, zeroed frame via HHDM.
-            // The source slice is validated above.
             unsafe {
-                core::ptr::copy_nonoverlapping(src.as_ptr().add(copied), hhdm_ptr, chunk);
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr().add(copied),
+                    hhdm_ptr.add(page_offset),
+                    chunk,
+                );
             }
-
             copied += chunk;
         }
     }
@@ -1244,23 +1298,8 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // before `iretq`, with `CS=0x8` and `GS=user`, and the first `gs:[..]`
     // access in the handler faults in the swapgs->iretq window.
     //
-    //  E9-hack probes ==========================================================================================================================================================================
+    // E9-hack probes
     // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port
-    // (visible with `-debugcon stdio` or `-debugcon file:e9.log`).
-    // The push/pop rax around each probe protects registers allocated by the
-    // compiler for the `in(reg)` constraints; the net effect on RSP is zero.
-    //
-    //   '1' (0x31): start of the asm block, input registers in place
-    //   '2' (0x32): iretq frame fully on stack (5 words)
-    //   '3' (0x33): RDI loaded with arg0, just before SWAPGS
-    //   '4' (0x34): SWAPGS done : if CPU crashes on iretq the last char is '4'
-    //
-    // If output stops at:
-    //   '1' → RSP/alignment problem before any pushes
-    //   '2' → a push faulted (kernel mapping broken?)
-    //   '3' → bug in arg0 value or in RDI
-    //   '4' → iretq is indeed triple-faulting (GDT/paging/TSS issue)
-    //   nothing → E9 port not enabled in QEMU (add `-debugcon stdio`)
     unsafe {
         core::arch::asm!(
             // Close the IRQ window before touching GS. `iretq` restores IF=1
@@ -1282,7 +1321,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             //   [RSP+24] user RSP
             //   [RSP+16] RFLAGS
             //   [RSP+8]  CS
-            //   [RSP+0]  RIP  ← RSP ici après les 5 push
+            //   [RSP+0]  RIP  <--- RSP ici après les 5 push
             "push {ss}",
             "push {rsp_val}",
             "push {rflags}",
@@ -1304,7 +1343,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "out 0xe9, al",
             "pop rax",
 
-            //  SWAPGS : GS.base kernel ↔ GS.base user ============================================================
+            //  SWAPGS : GS.base kernel <---> GS.base user ============================================================
             // Après cette instruction, GS pointe vers le bloc per-thread user.
             // Le push/pop ci-dessous ne touche pas GS, il est sûr.
             "swapgs",
@@ -1317,7 +1356,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "out 0xe9, al",
             "pop rax",
 
-            //  IRETQ : point de non-retour ====================================================================================================
+            //  IRETQ : point de non-retour ==================================
             "iretq",
 
             ss      = in(reg) user_ss,
@@ -1334,12 +1373,11 @@ extern "C" fn elf_ring3_trampoline() -> ! {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-
 /// Load an ELF64 binary and schedule it as a Ring 3 user task.
 ///
 /// # Arguments
-/// * `elf_data` - Raw ELF file bytes (must remain valid until load completes).
-/// * `name` - Name for the task (debugging purposes).
+/// * `elf_data` : raw ELF file bytes (must remain valid until load completes).
+/// * `name` : name for the task (debugging purposes).
 ///
 /// # Returns
 /// `Ok(())` on success, `Err` with a static error message on failure.
@@ -1392,6 +1430,12 @@ const AT_BASE: u64 = 7;
 const AT_ENTRY: u64 = 9;
 const AT_RANDOM: u64 = 25;
 
+fn generate_aux_random_seed() -> [u8; 16] {
+    let mut seed = [0u8; 16];
+    crate::entropy::fill_random(&mut seed);
+    seed
+}
+
 /// Performs the push auxv operation.
 fn push_auxv(user_as: &AddressSpace, sp: &mut u64, tag: u64, val: u64) -> Result<(), &'static str> {
     *sp -= 8;
@@ -1421,10 +1465,18 @@ fn setup_boot_user_stack(
 
     sp -= 16;
     let random_ptr = sp;
-    write_user_mapped_bytes(user_as, sp, &[0x42u8; 16])?;
+    let random_seed = generate_aux_random_seed();
+    write_user_mapped_bytes(user_as, sp, &random_seed)?;
 
     sp &= !0xF;
+    let auxv_pairs = if interp_base.is_some() { 8u64 } else { 7u64 };
+    let stack_words = 1u64 + 2 + 1 + auxv_pairs * 2;
+    let align_pad = (0u64.wrapping_sub(stack_words * 8)) & 0xF;
+    sp -= align_pad;
 
+    // ---------------------------------------------------------------------------
+    // Public API
+    // ---------------------------------------------------------------------------
     // AT_NULL
     push_auxv(user_as, &mut sp, 0, 0)?;
     push_auxv(user_as, &mut sp, AT_RANDOM, random_ptr)?;
@@ -1449,8 +1501,7 @@ fn setup_boot_user_stack(
     sp -= 8;
     write_user_u64(user_as, sp, 1)?;
 
-    // System V ABI: %rsp % 16 == 0 at process entry
-    sp &= !0xF;
+    debug_assert_eq!(sp & 0xF, 0);
     Ok(sp)
 }
 
@@ -1605,10 +1656,13 @@ pub fn load_elf_task_with_caps(
         )?;
         if tls_filesz > 0 {
             let src_off = tls.p_offset as usize;
-            let src_end = src_off + tls_filesz as usize;
-            if src_end <= elf_data.len() {
-                write_user_mapped_bytes(&user_as, tls_base, &elf_data[src_off..src_end])?;
+            let src_end = src_off
+                .checked_add(tls_filesz as usize)
+                .ok_or("PT_TLS offset+filesz overflows")?;
+            if src_end > elf_data.len() {
+                return Err("PT_TLS file data extends past ELF");
             }
+            write_user_mapped_bytes(&user_as, tls_base, &elf_data[src_off..src_end])?;
         }
         let tp = tls_base + aligned_memsz;
         write_user_u64(&user_as, tp, tp)?;
@@ -1768,15 +1822,6 @@ pub fn load_elf_task_with_caps(
         iret_rsp: boot_sp,
         iret_ss: crate::arch::x86_64::gdt::user_data_selector().0 as u64,
     });
-
-    // Bootstrapping: grant Silo Admin capability to the initial userspace task.
-    if name == "init"
-        || name == "silo-admin"
-        || name.starts_with("strate-admin:")
-        || name.contains("/strate-admin-")
-    {
-        let _ = crate::silo::grant_silo_admin_to_task(&task);
-    }
 
     {
         let arc_data_ptr = alloc::sync::Arc::as_ptr(&task) as usize;

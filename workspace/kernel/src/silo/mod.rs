@@ -4,7 +4,7 @@
 //! to create and manage silos. Policy lives in userspace (silo admin).
 
 use crate::{
-    capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
+    capability::{get_capability_manager, CapId, CapPermissions, Capability, ResourceType},
     hardware::storage::{ahci, virtio_block},
     ipc::port::{self, PortId},
     memory::{UserSliceRead, UserSliceWrite},
@@ -1456,6 +1456,7 @@ pub fn kernel_spawn_strate(
     };
 
     let mut seed_caps = Vec::new();
+    seed_caps.push(create_silo_admin_capability());
     if let Some(path) = dev_path {
         let resource = resolve_volume_resource_from_dev_path(path)?;
         let cap = get_capability_manager().create_capability(
@@ -1762,12 +1763,16 @@ fn resolve_module_handle(handle: u64, required: CapPermissions) -> Result<u64, S
 /// Grant the Silo Admin capability to a task (bootstrapping).
 ///
 /// This should be called only for the initial admin task (e.g. "init").
-pub fn grant_silo_admin_to_task(task: &alloc::sync::Arc<Task>) -> CapId {
-    let cap = get_capability_manager().create_capability(
+pub fn create_silo_admin_capability() -> Capability {
+    get_capability_manager().create_capability(
         ResourceType::Silo,
         SILO_ADMIN_RESOURCE,
         CapPermissions::all(),
-    );
+    )
+}
+
+pub fn grant_silo_admin_to_task(task: &alloc::sync::Arc<Task>) -> CapId {
+    let cap = create_silo_admin_capability();
     // SAFETY: Bootstrapping. Caller must ensure exclusive access.
     unsafe { (&mut *task.process.capabilities.get()).insert(cap) }
 }
@@ -2168,7 +2173,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         }
     };
 
-    let seed_caps = {
+    let mut seed_caps = {
         let task = match current_task_clone() {
             Some(t) => t,
             None => {
@@ -2193,6 +2198,9 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         }
         out
     };
+    if silo_flags & SILO_FLAG_ADMIN != 0 {
+        seed_caps.push(create_silo_admin_capability());
+    }
 
     let display = silo_label.unwrap_or(silo_name);
     let task_name_owned = if silo_flags & SILO_FLAG_ADMIN != 0 {

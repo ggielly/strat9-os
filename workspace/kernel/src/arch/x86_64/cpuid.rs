@@ -348,6 +348,33 @@ pub fn xsave_size_for_xcr0(xcr0: u64) -> usize {
 
 /// Return the host's default XCR0 mask (all supported features).
 /// Safe to call before `init()` : returns `XCR0_X87 | XCR0_SSE` if not yet initialized.
+///
+/// Try to read the TSC frequency from CPUID leaf 0x15 (Time Stamp Counter and
+/// Core Crystal Clock Information).  Returns kHz, or None if not available.
+///
+/// This is the preferred method on Intel/AMD CPUs that support invariant TSC.
+/// Linux uses this as its primary TSC calibration source.
+pub fn tsc_frequency_khz() -> Option<u64> {
+    let max_leaf = super::cpuid(0, 0).0;
+    if max_leaf < 0x15 {
+        //  TSC frequency from CPUID leaf 0x15
+        return None;
+    }
+    let (eax, ebx, ecx, _edx) = super::cpuid(0x15, 0);
+    let core_crystal_hz = ecx as u64;
+
+    // If the core crystal clock is known, compute TSC frequency.
+    if core_crystal_hz != 0 {
+        let denom = eax as u64;
+        let num = ebx as u64;
+        if denom != 0 {
+            // TSC freq = core_crystal_hz * num / denom
+            return Some(core_crystal_hz * num / denom / 1_000);
+        }
+    }
+    None
+}
+
 pub fn host_default_xcr0() -> u64 {
     if INITIALIZED.load(Ordering::Acquire) {
         HOST_CPU.lock().as_ref().map_or(XCR0_X87 | XCR0_SSE, |h| {

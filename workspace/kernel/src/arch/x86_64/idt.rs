@@ -1599,7 +1599,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     let cs = stack_frame.code_segment.0;
     let is_user = (cs & 3) == 3;
     // Use rdmsr-based check: catches the swapgs→iretq window where
-    // CS=Ring0 but GS=user (0).  
+    // CS=Ring0 but GS=user (0).
     // Without this, #GP from a bad iretq would escalate to double fault => triple fault.
     let swapgs_needed = needs_swapgs(cs);
     let _gs = SwapGsGuard::new(swapgs_needed);
@@ -1758,7 +1758,7 @@ extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame)
         crate::serial_force_println!("[heartbeat] PIC timer tick={} preempt_done", ticks);
     }
 }
-───────────────────────────────────────────────────────────
+
 /// Local APIC timer handler (dedicated vector, e.g. 0xD2).
 extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) {
     // Restore kernel GS if the timer fired while Ring 3 was running.

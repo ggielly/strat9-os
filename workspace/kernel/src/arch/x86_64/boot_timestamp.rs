@@ -31,10 +31,15 @@ pub fn calibrate(known_interval_ns: u64, tsc_delta: u64) {
     if known_interval_ns == 0 || tsc_delta == 0 {
         return;
     }
-    // tsc_khz = tsc_delta / (known_interval_ns / 1_000_000)
-    //         = tsc_delta * 1_000_000 / known_interval_ns
     let khz = tsc_delta.saturating_mul(1_000_000) / known_interval_ns;
-    if khz > 0 {
+    calibrate_khz(khz);
+}
+
+/// Set TSC frequency directly (used for CPUID leaf 0x15 calibration).
+pub fn calibrate_khz(khz: u64) {
+    // Sanity check: reject absurdly low frequencies (< 100 MHz).
+    const MIN_SANE_KHZ: u64 = 100_000;
+    if khz >= MIN_SANE_KHZ {
         TSC_KHZ.store(khz, Ordering::Relaxed);
     }
 }

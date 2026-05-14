@@ -1,5 +1,24 @@
 use zerocopy::{FromBytes, IntoBytes};
 
+/// 9-bit octal silo mode (3 control + 3 hardware + 3 registry).
+///
+/// Shared ABI type used by both kernel and userspace init.
+/// The kernel's richer `OctalMode` (with typed bitflag fields)
+/// is built from this via `OctalMode::from_octal(val.0)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes)]
+#[repr(transparent)]
+pub struct SiloMode(pub u16);
+
+impl SiloMode {
+    /// Return true if `self` bits are a subset of `other`'s bits
+    /// (i.e. `self` does not request any permission `other` lacks).
+    pub const fn is_subset_of(&self, other: &SiloMode) -> bool {
+        let (s_c, s_h, s_r) = ((self.0 >> 6) & 0o7, (self.0 >> 3) & 0o7, self.0 & 0o7);
+        let (o_c, o_h, o_r) = ((other.0 >> 6) & 0o7, (other.0 >> 3) & 0o7, other.0 & 0o7);
+        (s_c & !o_c) == 0 && (s_h & !o_h) == 0 && (s_r & !o_r) == 0
+    }
+}
+
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
 #[repr(C)]
 pub struct TimeSpec {
@@ -259,6 +278,64 @@ impl DirentHeader {
     /// Return the total packed entry size (header + name + trailing NUL).
     pub const fn entry_size(&self) -> usize {
         Self::SIZE + self.name_len as usize + 1
+    }
+}
+
+/// Silo configuration block passed from init to `silo_create()`.
+///
+/// Layout must match the kernel's definition (ABI contract).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SiloConfig {
+    pub mem_min: u64,
+    pub mem_max: u64,
+    pub cpu_shares: u32,
+    pub cpu_quota_us: u64,
+    pub cpu_period_us: u64,
+    pub cpu_affinity_mask: u64,
+    pub max_tasks: u32,
+    pub io_bw_read: u64,
+    pub io_bw_write: u64,
+    pub caps_ptr: u64,
+    pub caps_len: u64,
+    pub flags: u64,
+    pub sid: u32,
+    pub mode: u16,
+    pub family: u8,
+    pub cpu_features_required: u64,
+    pub cpu_features_allowed: u64,
+    pub xcr0_mask: u64,
+    pub graphics_max_sessions: u16,
+    pub graphics_session_ttl_sec: u32,
+    pub graphics_reserved: u16,
+}
+
+impl SiloConfig {
+    /// Return a zero-initialized silo configuration.
+    pub const fn zero() -> Self {
+        Self {
+            mem_min: 0,
+            mem_max: 0,
+            cpu_shares: 0,
+            cpu_quota_us: 0,
+            cpu_period_us: 0,
+            cpu_affinity_mask: 0,
+            max_tasks: 0,
+            io_bw_read: 0,
+            io_bw_write: 0,
+            caps_ptr: 0,
+            caps_len: 0,
+            flags: 0,
+            sid: 0,
+            mode: 0,
+            family: 0,
+            cpu_features_required: 0,
+            cpu_features_allowed: u64::MAX,
+            xcr0_mask: 0,
+            graphics_max_sessions: 0,
+            graphics_session_ttl_sec: 0,
+            graphics_reserved: 0,
+        }
     }
 }
 

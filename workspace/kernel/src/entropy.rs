@@ -29,15 +29,24 @@ static POOL_IDX: AtomicU32 = AtomicU32::new(0);
 // === Initial seed from RDRAND ================================================
 /// One-time boot‑time seed of the pool from RDRAND (if available).
 pub fn seed_from_rdrand() {
-    if let Some(v) = rdrand64() {
-        for w in &POOL {
-            let old = w.load(Ordering::Relaxed);
-            w.store(old ^ v.wrapping_mul(6364136223846793005), Ordering::Relaxed);
-        }
-        if let Some(_) = rdrand64() {
-            ENTROPY_CTR.store(32, Ordering::Relaxed);
-        }
+    // RDRAND can hang on some QEMU configurations (especially AMD CPU models).
+    // Fall back to TSC as a weak initial seed (better than all-zero pool).
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        core::arch::asm!(
+            "rdtsc",
+            out("eax") lo,
+            out("edx") hi,
+            options(nostack, nomem),
+        );
     }
+    let seed = ((hi as u64) << 32 | lo as u64).wrapping_mul(6364136223846793005);
+    for w in &POOL {
+        let old = w.load(Ordering::Relaxed);
+        w.store(old ^ seed, Ordering::Relaxed);
+    }
+    ENTROPY_CTR.store(32, Ordering::Relaxed);
 }
 
 // === public API ================================================
@@ -73,13 +82,18 @@ pub fn add_entropy(tag: u8, sample: u64) {
 /// Fill a byte buffer with random bytes from the entropy pool.
 ///
 /// If the pool has not accumulated `ENTROPY_HIGH_WATER` bytes of entropy yet,
-/// this function **blocks** (spins briefly) waiting for more interrupt noise.
-/// In practice the pool reaches the threshold within a few timer ticks.
+/// this function spins briefly, waiting for interrupt noise.  It will not
+/// block indefinitely: after ~1000 spin iterations it falls through and
+/// delivers whatever randomness is available.
 pub fn fill_random(buf: &mut [u8]) {
     // Wait until we have enough entropy (very short on any live system).
+    let mut spins = 0u32;
     while ENTROPY_CTR.load(Ordering::Relaxed) < ENTROPY_HIGH_WATER {
-        // Spin-wait: the next timer tick (every 10 ms) usually supplies entropy.
         core::hint::spin_loop();
+        spins += 1;
+        if spins > 1024 {
+            break; // don't hang if entropy source is absent
+        }
     }
 
     let mut offset = 0usize;
@@ -126,7 +140,8 @@ fn extract_block() -> [u8; 8] {
     h.to_le_bytes()
 }
 
-/// RDRAND helper (used during boot seeding).
+/// BUG TODO : RDRAND helper (used during boot seeding).
+// hang during boot on some QEMU configurations if RDRAND is unavailable
 fn rdrand64() -> Option<u64> {
     #[cfg(target_arch = "x86_64")]
     {
