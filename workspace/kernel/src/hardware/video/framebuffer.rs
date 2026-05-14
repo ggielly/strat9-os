@@ -1,3 +1,4 @@
+// Note : _mm512_stream_si512 (NT store) is not available for x86_64-unknown-none;
 // Framebuffer abstraction layer
 //
 // Provides a unified framebuffer interface that can use:
@@ -14,6 +15,7 @@
 #![allow(dead_code)]
 
 use crate::{
+    framebuffer::FramebufferOps,
     hardware::virtio::gpu,
     memory::{self, phys_to_virt},
 };
@@ -91,6 +93,8 @@ pub struct Framebuffer {
     dirty: DirtyRectSet,
     present_pending: bool,
     last_present_tick: u64,
+    /// SIMD-accelerated pixel ops (fill, blit, blend, convert) dispatched by CPUID
+    ops: FramebufferOps,
 }
 
 unsafe impl Send for Framebuffer {}
@@ -301,6 +305,7 @@ impl Framebuffer {
             dirty: DirtyRectSet::empty(),
             present_pending: false,
             last_present_tick: 0,
+            ops: FramebufferOps::detect(),
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
@@ -365,6 +370,7 @@ impl Framebuffer {
             use_double_buffer: true,
             dirty: DirtyRectSet::empty(),
             present_pending: false,
+            ops: FramebufferOps::detect(),
             last_present_tick: 0,
         };
 
@@ -509,11 +515,22 @@ impl Framebuffer {
             };
 
             let stride = fb.info.stride as usize;
-            for dy in 0..height as usize {
-                let row_ptr =
-                    unsafe { offset.add((y as usize + dy) * stride + x as usize * 4) as *mut u32 };
+            let stride_pixels = fb.info.stride as usize / 4;
+            let width_pixels = width as usize;
+            // Blit groupé : si stride == width (contigu), un seul appel SIMD
+            if stride_pixels == width_pixels {
+                let first = unsafe { offset.add(y as usize * stride + x as usize * 4) as *mut u32 };
                 unsafe {
-                    core::slice::from_raw_parts_mut(row_ptr, width as usize).fill(pixel);
+                    (fb.ops.fill)(first, pixel, width_pixels * height as usize);
+                }
+            } else {
+                for dy in 0..height as usize {
+                    let row_ptr = unsafe {
+                        offset.add((y as usize + dy) * stride + x as usize * 4) as *mut u32
+                    };
+                    unsafe {
+                        (fb.ops.fill)(row_ptr, pixel, width_pixels);
+                    }
                 }
             }
 
@@ -575,26 +592,28 @@ impl Framebuffer {
                 }
                 virtio_present = Some((db as *const u8, fb.info.stride, regions, fb.dirty.len));
             } else {
-                let dst = fb.info.base_virt as *mut u8;
-                let stride = fb.info.stride as usize;
+                let dst = fb.info.base_virt as *mut u32;
+                let src_base = db as *const u32;
+                let stride_pixels = (fb.info.stride / 4) as usize;
                 let mut idx = 0;
                 while idx < fb.dirty.len {
                     let rect = fb.dirty.rects[idx];
-                    let x = rect.x0;
-                    let y = rect.y0;
-                    let width = rect.x1.saturating_sub(rect.x0);
-                    let height = rect.y1.saturating_sub(rect.y0);
-                    let row_bytes = width as usize * 4;
-                    for row in 0..height as usize {
-                        let row_y = y as usize + row;
-                        let src_off = row_y * stride + x as usize * 4;
-                        let dst_off = src_off;
+                    let x = rect.x0 as usize;
+                    let y = rect.y0 as usize;
+                    let width = rect.x1.saturating_sub(rect.x0) as usize;
+                    let height = rect.y1.saturating_sub(rect.y0) as usize;
+                    // Blit groupé : si stride == width, tout est contigu, un seul appel
+                    if stride_pixels == width {
+                        let off = y * stride_pixels + x;
                         unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                db.add(src_off),
-                                dst.add(dst_off),
-                                row_bytes,
-                            );
+                            (fb.ops.blit)(dst.add(off), src_base.add(off), width * height);
+                        }
+                    } else {
+                        for row in 0..height {
+                            let row_off = (y + row) * stride_pixels + x;
+                            unsafe {
+                                (fb.ops.blit)(dst.add(row_off), src_base.add(row_off), width);
+                            }
                         }
                     }
                     idx += 1;
