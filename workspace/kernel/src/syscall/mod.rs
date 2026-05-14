@@ -13,20 +13,28 @@
 //! - 500-599: time/alarms
 //! - 600-699: debug/profiling
 
+pub mod chan;
+pub mod debug;
 pub mod dispatcher;
 pub mod error;
 pub mod exec;
 pub mod fcntl;
 pub mod fork;
 pub mod futex;
+pub mod ipc_port;
+pub mod ipc_ring;
 pub mod mmap;
+pub mod net;
 pub mod numbers;
+pub mod pci;
 pub mod poll;
 pub mod process;
 pub mod random;
 pub mod robust_list;
+pub mod semaphore;
 pub mod signal;
 pub mod time;
+pub mod volume;
 pub mod wait;
 
 pub use dispatcher::dispatch;

@@ -683,6 +683,17 @@ pub fn send_signal(
     let pending = &task.pending_signals;
     pending.add(signal);
 
+    // Fast-path hint: if the signal targets the task currently running on
+    // this CPU, set the per-CPU `signal_pending` flag so the syscall
+    // dispatcher can cheaply detect it via `gs:[...]` without taking the
+    // scheduler lock. Cross-CPU signals are handled on the target's next
+    // syscall (or blocking-syscall explicit check).
+    if let Some(cur_id) = crate::process::current_task_id() {
+        if cur_id == target {
+            crate::arch::x86_64::percpu::set_signal_pending_current();
+        }
+    }
+
     // If the task is blocked and the signal is not blocked, wake it.
     // Best-effort read: state may change concurrently, but wake_task is
     // idempotent : a spurious wake is harmless and a missed wake will be

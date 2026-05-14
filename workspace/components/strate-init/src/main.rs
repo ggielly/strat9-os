@@ -490,13 +490,17 @@ fn ipc_call_status(port: usize, msg: &mut IpcMessage) -> Result<u32, &'static st
     ]))
 }
 
-/// Implements connect wasm service.
+/// Implements connect wasm service with exponential backoff.
 fn connect_wasm_service(path: &str) -> Result<usize, &'static str> {
-    for _ in 0..256 {
+    let mut delay = 1;
+    for _ in 0..12 {
         if let Ok(h) = call::ipc_connect(path.as_bytes()) {
             return Ok(h);
         }
-        let _ = call::sched_yield();
+        for _ in 0..delay {
+            let _ = call::sched_yield();
+        }
+        delay = core::cmp::min(delay * 2, 256);
     }
     Err("ipc_connect timeout")
 }
@@ -957,6 +961,7 @@ fn supervisor_loop() -> ! {
         // the whole system when no child has exited yet.
         match call::waitpid(-1, Some(&mut wstatus), 1) {
             // WNOHANG = 1 : poll without blocking
+
             Ok(pid) if pid > 0 => {
                 let status = wstatus;
                 let mut found = false;

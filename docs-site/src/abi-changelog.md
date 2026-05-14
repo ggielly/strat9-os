@@ -25,6 +25,9 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-05-14 `77540e9` refactor(signal): implement fast signal-pending mechanism for improved syscall efficiency
+- 2026-05-11 `2a12166` refactor(elf): update ELF loading to use capabilities and fix random seed generation
+- 2026-05-11 `3a351bd` refactor(vfs): add path resolution and validation for current task
 - 2026-05-10 `0c603e4` refactor(init): integrate SiloMode into FamilyProfile and update security policy validation
 - 2026-05-10 `c89a14e` refactor(init): clean up SiloConfig usage and improve code organization
 - 2026-05-10 `74cb3a5` refactor(init): move SiloConfig struct to a separate module for better organization and clarity
@@ -52,9 +55,6 @@ See:
 - 2026-03-07 `8cd1410` Refactor memory allocation and deallocation in the kernel : per-CPU frame cach and a CPU-local BuddySet avoids the global lock in the common case.
 - 2026-03-04 `04b384e` fix(build): improve stage assembly error handling and warnings
 - 2026-03-03 `2eb44c0` feat(task): replace FpuState with ExtendedState, support xsave/xrstor
-- 2026-03-03 `ae5480a` feat(silo): add silo attach for live debug output monitoring
-- 2026-03-03 `8c0056a` feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.
-- 2026-03-03 `e9cce98` feat: Implement POSIX-compatible `clock_gettime` syscall and add `call::open` with POSIX `O_*` flag conversion.
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

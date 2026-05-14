@@ -185,6 +185,9 @@
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
+<li>2026-05-14 <code>77540e9</code> refactor(signal): implement fast signal-pending mechanism for improved syscall efficiency</li>
+<li>2026-05-11 <code>2a12166</code> refactor(elf): update ELF loading to use capabilities and fix random seed generation</li>
+<li>2026-05-11 <code>3a351bd</code> refactor(vfs): add path resolution and validation for current task</li>
 <li>2026-05-10 <code>0c603e4</code> refactor(init): integrate SiloMode into FamilyProfile and update security policy validation</li>
 <li>2026-05-10 <code>c89a14e</code> refactor(init): clean up SiloConfig usage and improve code organization</li>
 <li>2026-05-10 <code>74cb3a5</code> refactor(init): move SiloConfig struct to a separate module for better organization and clarity</li>
@@ -212,9 +215,6 @@
 <li>2026-03-07 <code>8cd1410</code> Refactor memory allocation and deallocation in the kernel : per-CPU frame cach and a CPU-local BuddySet avoids the global lock in the common case.</li>
 <li>2026-03-04 <code>04b384e</code> fix(build): improve stage assembly error handling and warnings</li>
 <li>2026-03-03 <code>2eb44c0</code> feat(task): replace FpuState with ExtendedState, support xsave/xrstor</li>
-<li>2026-03-03 <code>ae5480a</code> feat(silo): add silo attach for live debug output monitoring</li>
-<li>2026-03-03 <code>8c0056a</code> feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.</li>
-<li>2026-03-03 <code>e9cce98</code> feat: Implement POSIX-compatible <code>clock_gettime</code> syscall and add <code>call::open</code> with POSIX <code>O_*</code> flag conversion.</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>

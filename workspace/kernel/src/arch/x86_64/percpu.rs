@@ -51,6 +51,16 @@ pub struct PerCpu {
     /// Preemption-disable depth counter.
     /// When > 0, `maybe_preempt()` and `yield_task()` are no-ops on this CPU.
     pub preempt_count: AtomicU32,
+    /// Fast signal-pending hint for the current CPU.
+    ///
+    /// Set by `send_signal` when a signal targets the task currently running
+    /// on this CPU. Checked by the syscall dispatcher to avoid the expensive
+    /// `current_task_clone()` + scheduler lock when no signal is pending.
+    ///
+    /// AtomicU32 (not AtomicBool) for better cache-line performance.
+    ///
+    /// NOTE TODO : the extra bits are reserved for future fast-pending flags.
+    pub signal_pending: AtomicU32,
 }
 
 impl PerCpu {
@@ -68,6 +78,7 @@ impl PerCpu {
             kernel_stack_top: AtomicU64::new(0),
             tlb_ready: AtomicBool::new(false),
             preempt_count: AtomicU32::new(0),
+            signal_pending: AtomicU32::new(0),
         }
     }
 
@@ -379,4 +390,27 @@ pub fn tlb_ready(index: usize) -> bool {
                 && cpu.tlb_ready.load(Ordering::Acquire)
         })
         .unwrap_or(false)
+}
+
+// ========== Fast signal-pending hint ==========
+
+/// Set the `signal_pending` flag for the current CPU.
+///
+/// Called by `send_signal` when a signal targets the task running on this CPU.
+/// The syscall dispatcher checks this flag to avoid the expensive scheduler
+/// lock when no signal is pending.
+#[inline]
+pub fn set_signal_pending_current() {
+    let idx = current_cpu_index();
+    PERCPU[idx].signal_pending.store(1, Ordering::Release);
+}
+
+/// Test and clear the `signal_pending` flag for the current CPU.
+///
+/// Returns `true` if a signal was marked pending since the last check.
+/// This is a one-shot check — the flag is cleared atomically.
+#[inline]
+pub fn test_and_clear_signal_pending_current() -> bool {
+    let idx = current_cpu_index();
+    PERCPU[idx].signal_pending.swap(0, Ordering::AcqRel) != 0
 }
