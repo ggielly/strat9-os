@@ -25,6 +25,14 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-05-10 `0c603e4` refactor(init): integrate SiloMode into FamilyProfile and update security policy validation
+- 2026-05-10 `c89a14e` refactor(init): clean up SiloConfig usage and improve code organization
+- 2026-05-10 `74cb3a5` refactor(init): move SiloConfig struct to a separate module for better organization and clarity
+- 2026-05-08 `f070d41` Add kernel entropy pool with interrupt-driven collection
+- 2026-05-08 `9dedb9f` Implement robust list support (set_robust_list/get_robust_list)
+- 2026-05-08 `d2e90a2` Bridge clone() thread creation via SYS_THREAD_CREATE, add faccessat routing
+- 2026-05-08 `dabcad2` Add sys_access(), sys_faccessat(), and SYS_GETRANDOM() in syscall dispatcher
+- 2026-05-08 `946f200` Add missing call for clock_nanosleep and update the calling manager
 - 2026-05-06 `117863e` Enhance network and silo management functionality
 - 2026-04-12 `6963e28` fix: reduce scheduler contention and harden early boot memory init
 - 2026-04-12 `f3647c1` feat(memory): production-grade allocator architecture (#49)
@@ -47,14 +55,6 @@ See:
 - 2026-03-03 `ae5480a` feat(silo): add silo attach for live debug output monitoring
 - 2026-03-03 `8c0056a` feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.
 - 2026-03-03 `e9cce98` feat: Implement POSIX-compatible `clock_gettime` syscall and add `call::open` with POSIX `O_*` flag conversion.
-- 2026-03-03 `04cbe05` feat: Add comprehensive VFS operation self-tests, refine VFS error handling, and improve IPC port cleanup.
-- 2026-03-03 `2642cf8` docs: Add `/// Implements` doc comments to various functions across components for improved clarity.
-- 2026-03-03 `ef0f1d7` docs: Add documentation comments to ABI and syscall components and enhance error handling in the documentation build script.
-- 2026-03-03 `f314904` feat: Expand `FileStat` with additional POSIX fields and update kernel VFS schemes, and add a `nonce` to `IpcHandshake`.
-- 2026-03-03 `769f3eb` feat: Update syscall ABI with struct layout adjustments, error encoding clarification, and versioning.
-- 2026-03-03 `c23a68a` feat: Ensure Limine bootloader directories exist, use a real time source for `setitimer`, and add `itimerval` value validation.
-- 2026-03-03 `ea80816` fix: Correct `O_NOFOLLOW` flag value and add length bounds checks to `DirentIter` initialization and name length assignment.
-- 2026-03-03 `748f98c` feat: Add `pread` and `pwrite` syscalls, enhance WASM `proc_exit` handling, and implement IPC port cleanup on task termination.
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

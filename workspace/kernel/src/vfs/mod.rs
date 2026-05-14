@@ -93,6 +93,20 @@ pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
     Ok(fd)
 }
 
+/// Resolve `path` against the current task CWD and enforce silo path policy.
+pub fn resolve_and_check_path_for_current_task(
+    path: &str,
+    want_read: bool,
+    want_write: bool,
+    want_execute: bool,
+) -> Result<String, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let abs = resolve_path(path, &cwd);
+    crate::silo::enforce_path_for_current_task(&abs, want_read, want_write, want_execute)?;
+    Ok(abs)
+}
+
 /// Open a file relative to a directory FD.
 ///
 /// - If `dir_fd == AT_FDCWD`, resolve against the process CWD (equivalent to `open()`).

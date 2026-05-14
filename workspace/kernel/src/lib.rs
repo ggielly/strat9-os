@@ -410,14 +410,20 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::arch::x86_64::cpuid::init();
 
     // Initialize FPU/SSE/XSAVE for the BSP
+    crate::e9_println!("B2a pre-cpu-extensions");
     crate::arch::x86_64::init_cpu_extensions();
+    crate::e9_println!("B2b post-cpu-extensions");
 
     // Seed the kernel entropy pool from RDRAND (if available).
+    crate::e9_println!("B2c pre-entropy");
     crate::entropy::seed_from_rdrand();
+    crate::e9_println!("B2d post-entropy");
 
     // Puts default panic hooks early to ensure
     //we get useful info on any panics during init.
+    crate::e9_println!("B2e pre-panic-hooks");
     boot::panic::install_default_panic_hooks();
+    crate::e9_println!("B2f post-panic-hooks");
 
     // Nice logo :D
     serial_println!();
@@ -433,10 +439,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("");
     serial_println!("=======================================================================================================");
     serial_println!("  strat9-OS kernel v0.1.0 (Bedrock)");
-    serial_println!("  Copyright (c) 2025-26 Guillaume Gielly - GPLv3 License");
+    serial_println!("  Copyright (c) 2024-26 Guillaume Gielly - GPLv3 License");
     serial_println!("");
-    //serial_println!("  GNU General Public License as published by the Free Software Foundation, either version 3 of the ");
-    //serial_println!("  License, or (at your option) any later version.");
     serial_println!("  This software is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY, without");
     serial_println!(
         "  even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
@@ -1106,7 +1110,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
         if let Some((base, size)) = crate::boot::limine::init_module() {
             let elf_data = boot_module_slice(base, size);
-            match process::elf::load_and_run_elf(elf_data, "init") {
+            let init_caps = [crate::silo::create_silo_admin_capability()];
+            match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
                     init_loaded = true;
@@ -1120,7 +1125,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
         if !init_loaded && args.initfs_base != 0 && args.initfs_size != 0 {
             let elf_data = boot_module_slice(args.initfs_base, args.initfs_size);
-            match process::elf::load_and_run_elf(elf_data, "init") {
+            let init_caps = [crate::silo::create_silo_admin_capability()];
+            match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
                     serial_println!(

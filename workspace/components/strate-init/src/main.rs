@@ -6,13 +6,17 @@ extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
 use core::{alloc::Layout, panic::PanicInfo};
-use strat9_syscall::{call, data::IpcMessage, number};
+use strat9_syscall::{
+    call,
+    data::{IpcMessage, SiloConfig, SiloMode},
+    number,
+};
+pub mod fmt;
+use fmt::log_u32;
 
 const EAGAIN: usize = 11;
 const MAX_READ_BYTES: usize = 64 * 1024 * 1024;
-const MAX_READ_ITERS: usize = 32768;
 const MAX_READ_EAGAIN: usize = 256;
-const SUPERVISOR_POLL_YIELDS: usize = 512;
 
 // ---------------------------------------------------------------------------
 // GLOBAL ALLOCATOR (BUMP + BRK)
@@ -35,84 +39,70 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 // ---------------------------------------------------------------------------
-// SECURITY POLICY & PROFILES (From silo_security_model.md)
+// SECURITY POLICY & PROFILES (from silo_security_model.md)
 // ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-struct OctalMode(u16);
-
-impl OctalMode {
-    /// Returns whether subset of.
-    fn is_subset_of(&self, other: &OctalMode) -> bool {
-        let (s_c, s_h, s_r) = ((self.0 >> 6) & 0o7, (self.0 >> 3) & 0o7, self.0 & 0o7);
-        let (o_c, o_h, o_r) = ((other.0 >> 6) & 0o7, (other.0 >> 3) & 0o7, other.0 & 0o7);
-        (s_c & !o_c) == 0 && (s_h & !o_h) == 0 && (s_r & !o_r) == 0
-    }
-}
 
 struct FamilyProfile {
     family: &'static str,
-    max_mode: OctalMode,
+    max_mode: SiloMode,
 }
 
-const FAMILY_PROFILES: &[FamilyProfile] = &[
-    FamilyProfile {
-        family: "SYS",
-        max_mode: OctalMode(0o777),
-    },
-    FamilyProfile {
-        family: "DRV",
-        max_mode: OctalMode(0o076),
-    },
-    FamilyProfile {
-        family: "FS",
-        max_mode: OctalMode(0o076),
-    },
-    FamilyProfile {
-        family: "NET",
-        max_mode: OctalMode(0o076),
-    },
-    FamilyProfile {
-        family: "WASM",
-        max_mode: OctalMode(0o006),
-    },
-    FamilyProfile {
-        family: "USR",
-        max_mode: OctalMode(0o004),
-    },
-];
-
-/// Returns family profile.
-fn get_family_profile(name: &str) -> &'static FamilyProfile {
-    for p in FAMILY_PROFILES {
-        if p.family == name {
-            return p;
-        }
+/// Returns family profile — O(1) match (compiler jump table).
+fn get_family_profile(name: &str) -> FamilyProfile {
+    match name {
+        "SYS" => FamilyProfile {
+            family: "SYS",
+            max_mode: SiloMode(0o777),
+        },
+        "DRV" => FamilyProfile {
+            family: "DRV",
+            max_mode: SiloMode(0o076),
+        },
+        "FS" => FamilyProfile {
+            family: "FS",
+            max_mode: SiloMode(0o076),
+        },
+        "NET" => FamilyProfile {
+            family: "NET",
+            max_mode: SiloMode(0o076),
+        },
+        "WASM" => FamilyProfile {
+            family: "WASM",
+            max_mode: SiloMode(0o006),
+        },
+        "USR" | _ => FamilyProfile {
+            family: "USR",
+            max_mode: SiloMode(0o004),
+        },
     }
-    &FAMILY_PROFILES[5] // Default to USR
 }
 
 // ---------------------------------------------------------------------------
 // UTILS
 // ---------------------------------------------------------------------------
 
+/// Formatting helpers (no heap allocation).
+
 /// Implements log.
 fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
 
+/// Log a static prefix followed by a name/suffix without heap allocation.
+
 /// Reads file.
 fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
     let fd = call::openat(0, path, 0x1, 0).map_err(|_| "open failed")?;
     let mut out = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let mut iters = 0usize;
+
+    let mut chunk = [0u8; 8192]; //8k temp buffer, to avoid large stack usage
+    // 64k bug here
+
     let mut eagain = 0usize;
     loop {
-        if out.len() >= MAX_READ_BYTES || iters >= MAX_READ_ITERS {
+        if out.len() >= MAX_READ_BYTES {
             break;
         }
-        iters += 1;
         match call::read(fd as usize, &mut chunk) {
             Ok(0) => break,
             Ok(n) => {
@@ -147,6 +137,7 @@ fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
 // HIERARCHICAL PARSER
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct StrateDef {
     name: String,
     binary: String,
@@ -154,6 +145,7 @@ struct StrateDef {
     target: String,
 }
 
+#[derive(Clone)]
 struct SiloDef {
     name: String,
     sid: u32,
@@ -218,9 +210,6 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
         }
 
         if line == "[[silos.strates]]" {
-            if let Some(ref mut s) = current_silo {
-                push_default_strate(s);
-            }
             section = Section::Strate;
             continue;
         }
@@ -274,9 +263,18 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
 
 /// Implements ensure required silos.
 fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
-    let has_bus = silos.iter().any(|s| s.name == "bus");
-    let has_network = silos.iter().any(|s| s.name == "network");
-    let has_dhcp = silos.iter().any(|s| s.name == "dhcp-client");
+    // Scan once to detect mandatory silos.
+    let mut has_bus = false;
+    let mut has_network = false;
+    let mut has_dhcp = false;
+    for s in &silos {
+        match s.name.as_str() {
+            "bus" => has_bus = true,
+            "network" => has_network = true,
+            "dhcp-client" => has_dhcp = true,
+            _ => {}
+        }
+    }
 
     if !has_bus {
         log("[init] Missing mandatory silo 'bus' in config, adding fallback\n");
@@ -347,6 +345,28 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
     silos
 }
 
+/// Returns the parsed default silo config, parsed once and cached
+fn get_default_silos() -> &'static Vec<SiloDef> {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    static ONCE: AtomicBool = AtomicBool::new(false);
+    static PTR: AtomicUsize = AtomicUsize::new(0);
+
+    // SAFETY: single-threaded at boot; ONCE gates exactly one initialization
+    unsafe {
+        if !ONCE.load(Ordering::Acquire) {
+            let b = alloc::boxed::Box::new(parse_config(DEFAULT_SILO_TOML));
+            let leaked: &'static Vec<SiloDef> = alloc::boxed::Box::leak(b);
+            let ptr = leaked as *const Vec<SiloDef> as usize;
+            PTR.store(ptr, Ordering::Release);
+            ONCE.store(true, Ordering::Release);
+            leaked
+        } else {
+            let ptr = PTR.load(Ordering::Relaxed) as *const Vec<SiloDef>;
+            &*ptr
+        }
+    }
+}
+
 /// Implements load primary silos.
 fn load_primary_silos() -> Vec<SiloDef> {
     log("[init] load_primary_silos: begin\n");
@@ -357,12 +377,11 @@ fn load_primary_silos() -> Vec<SiloDef> {
                 let parsed = parse_config(data_str);
                 if parsed.is_empty() {
                     log("[init] Empty /initfs/silo.toml, using embedded defaults\n");
-                    log("[init] load_primary_silos: parse embedded defaults\n");
-                    let parsed = parse_config(DEFAULT_SILO_TOML);
+                    let defaults = get_default_silos().clone();
                     log("[init] load_primary_silos: parsed embedded defaults count=");
-                    log_u32(parsed.len() as u32);
+                    log_u32(defaults.len() as u32);
                     log("\n");
-                    parsed
+                    defaults
                 } else {
                     log("[init] load_primary_silos: parsed file count=");
                     log_u32(parsed.len() as u32);
@@ -372,22 +391,20 @@ fn load_primary_silos() -> Vec<SiloDef> {
             }
             Err(_) => {
                 log("[init] Invalid UTF-8 in /initfs/silo.toml, using embedded defaults\n");
-                log("[init] load_primary_silos: parse embedded defaults\n");
-                let parsed = parse_config(DEFAULT_SILO_TOML);
+                let defaults = get_default_silos().clone();
                 log("[init] load_primary_silos: parsed embedded defaults count=");
-                log_u32(parsed.len() as u32);
+                log_u32(defaults.len() as u32);
                 log("\n");
-                parsed
+                defaults
             }
         },
         Err(_) => {
             log("[init] Missing /initfs/silo.toml, using embedded defaults\n");
-            log("[init] load_primary_silos: parse embedded defaults\n");
-            let parsed = parse_config(DEFAULT_SILO_TOML);
+            let defaults = get_default_silos().clone();
             log("[init] load_primary_silos: parsed embedded defaults count=");
-            log_u32(parsed.len() as u32);
+            log_u32(defaults.len() as u32);
             log("\n");
-            parsed
+            defaults
         }
     }
 }
@@ -430,60 +447,6 @@ fn merge_wasm_test_overlay(silos: &mut Vec<SiloDef>) {
 // EXECUTION LOGIC
 // ---------------------------------------------------------------------------
 
-#[repr(C)]
-struct SiloConfig {
-    mem_min: u64,
-    mem_max: u64,
-    cpu_shares: u32,
-    cpu_quota_us: u64,
-    cpu_period_us: u64,
-    cpu_affinity_mask: u64,
-    max_tasks: u32,
-    io_bw_read: u64,
-    io_bw_write: u64,
-    caps_ptr: u64,
-    caps_len: u64,
-    flags: u64,
-    sid: u32,
-    mode: u16,
-    family: u8,
-    cpu_features_required: u64,
-    cpu_features_allowed: u64,
-    xcr0_mask: u64,
-    graphics_max_sessions: u16,
-    graphics_session_ttl_sec: u32,
-    graphics_reserved: u16,
-}
-
-impl SiloConfig {
-    /// Creates a new instance.
-    const fn new(sid: u32, mode: u16, family: u8, flags: u64) -> Self {
-        Self {
-            mem_min: 0,
-            mem_max: 0,
-            cpu_shares: 0,
-            cpu_quota_us: 0,
-            cpu_period_us: 0,
-            cpu_affinity_mask: 0,
-            max_tasks: 0,
-            io_bw_read: 0,
-            io_bw_write: 0,
-            caps_ptr: 0,
-            caps_len: 0,
-            flags,
-            sid,
-            mode,
-            family,
-            cpu_features_required: 0,
-            cpu_features_allowed: u64::MAX,
-            xcr0_mask: 0,
-            graphics_max_sessions: 0,
-            graphics_session_ttl_sec: 0,
-            graphics_reserved: 0,
-        }
-    }
-}
-
 const SILO_FLAG_GRAPHICS: u64 = 1 << 1;
 const SILO_FLAG_WEBRTC_NATIVE: u64 = 1 << 2;
 const SILO_FLAG_GRAPHICS_READ_ONLY: u64 = 1 << 3;
@@ -514,23 +477,6 @@ fn parse_mode_octal(s: &str) -> Option<u16> {
 
 fn parse_toml_bool(s: &str) -> bool {
     matches!(s, "true" | "True" | "TRUE" | "1" | "yes" | "on")
-}
-
-/// Implements log u32.
-fn log_u32(mut value: u32) {
-    let mut buf = [0u8; 10];
-    if value == 0 {
-        log("0");
-        return;
-    }
-    let mut i = buf.len();
-    while value > 0 {
-        i -= 1;
-        buf[i] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-    let s = unsafe { core::str::from_utf8_unchecked(&buf[i..]) };
-    log(s);
 }
 
 /// Implements ipc call status.
@@ -582,22 +528,25 @@ fn run_wasm_app(service_path: &str, wasm_path: &str) -> Result<(), u32> {
 }
 
 /// Implements boot silos.
-fn boot_silos(silos: Vec<SiloDef>) {
+fn boot_silos(mut silos: Vec<SiloDef>) {
     let mut next_sys_sid = 100u32;
     let mut next_usr_sid = 1000u32;
-    let mut silos = silos;
 
-    // Blocking launch order requirement:
-    // - "bus" must start first and expose /bus/pci/* before PCI-dependent silos.
-    // - other silos keep their relative order.
-    silos.sort_by_key(|s| if s.name == "bus" { 0u8 } else { 1u8 });
+    // Move "bus" to front (must launch first for PCI discovery),
+    // preserving relative order of all other silos.
+    if let Some(bus_pos) = silos.iter().position(|s| s.name == "bus") {
+        if bus_pos != 0 {
+            let bus_def = silos.remove(bus_pos);
+            silos.insert(0, bus_def);
+        }
+    }
 
     for s_def in silos {
         let requested_mode = parse_mode_octal(&s_def.mode).unwrap_or(0);
         let profile = get_family_profile(&s_def.family);
 
         // Policy Validation
-        if !OctalMode(requested_mode).is_subset_of(&profile.max_mode) {
+        if !SiloMode(requested_mode).is_subset_of(&profile.max_mode) {
             log("[init] SECURITY VIOLATION: silo ");
             log(&s_def.name);
             log(" exceeds family ceiling\n");
@@ -630,11 +579,11 @@ fn boot_silos(silos: Vec<SiloDef>) {
             s_def.sid
         };
 
-        log(&alloc::format!(
-            "[init] Creating Silo: {} (SID={})\n",
-            s_def.name,
-            final_sid
-        ));
+        log("[init] Creating Silo: ");
+        log(&s_def.name);
+        log(" (SID=");
+        log_u32(final_sid);
+        log(")\n");
 
         let mut flags = 0u64;
         let graphics_mode = s_def.graphics_mode.as_str();
@@ -650,7 +599,11 @@ fn boot_silos(silos: Vec<SiloDef>) {
                 flags |= SILO_FLAG_WEBRTC_TURN_FORCE;
             }
         }
-        let mut config = SiloConfig::new(final_sid, requested_mode, family_id, flags);
+        let mut config = SiloConfig::zero();
+        config.sid = final_sid;
+        config.mode = requested_mode;
+        config.family = family_id;
+        config.flags = flags;
         config.graphics_max_sessions = if s_def.graphics_enabled {
             if s_def.graphics_max_sessions == 0 {
                 1
@@ -692,12 +645,13 @@ fn boot_silos(silos: Vec<SiloDef>) {
         for str_def in s_def.strates {
             match str_def.stype.as_str() {
                 "elf" | "wasm-runtime" => {
-                    log(&alloc::format!("[init]   -> Strate: {}\n", str_def.name));
+                    log("[init]   -> Strate: ");
+                    log(&str_def.name);
+                    log("\n");
                     if str_def.binary.starts_with("/initfs/") {
-                        log(&alloc::format!(
-                            "[init]     module path {}\n",
-                            str_def.binary
-                        ));
+                        log("[init]     module path ");
+                        log(&str_def.binary);
+                        log("\n");
                         let mod_h = match unsafe {
                             strat9_syscall::syscall2(
                                 number::SYS_MODULE_LOAD,
@@ -707,23 +661,23 @@ fn boot_silos(silos: Vec<SiloDef>) {
                         } {
                             Ok(h) => h,
                             Err(_) => {
-                                log(&alloc::format!(
-                                    "[init] module_load failed for {}\n",
-                                    str_def.binary
-                                ));
+                                log("[init] module_load failed for ");
+                                log(&str_def.binary);
+                                log("\n");
                                 continue;
                             }
                         };
                         if let Err(e) = call::silo_attach_module(silo_handle, mod_h) {
-                            log(&alloc::format!(
-                                "[init] silo_attach_module failed: {}\n",
-                                e.name()
-                            ));
+                            log("[init] silo_attach_module failed: ");
+                            log(e.name());
+                            log("\n");
                             continue;
                         }
                         match call::silo_start(silo_handle) {
                             Err(e) => {
-                                log(&alloc::format!("[init] silo_start failed: {}\n", e.name()));
+                                log("[init] silo_start failed: ");
+                                log(e.name());
+                                log("\n");
                             }
                             Ok(pid) => {
                                 register_supervised(&str_def.name, pid as u64);
@@ -737,19 +691,18 @@ fn boot_silos(silos: Vec<SiloDef>) {
                     }
                     if let Ok(data) = read_file(&str_def.binary) {
                         if data.len() >= 4 {
-                            log(&alloc::format!(
-                                "[init]     module magic {:02x}{:02x}{:02x}{:02x} size={}\n",
-                                data[0],
-                                data[1],
-                                data[2],
-                                data[3],
-                                data.len()
-                            ));
+                            log("[init]     module magic ");
+                            log_u32(data[0] as u32);
+                            log_u32(data[1] as u32);
+                            log_u32(data[2] as u32);
+                            log_u32(data[3] as u32);
+                            log(" size=");
+                            log_u32(data.len() as u32);
+                            log("\n");
                         } else {
-                            log(&alloc::format!(
-                                "[init]     module too small size={}\n",
-                                data.len()
-                            ));
+                            log("[init]     module too small size=");
+                            log_u32(data.len() as u32);
+                            log("\n");
                         }
                         let mod_h = match unsafe {
                             strat9_syscall::syscall2(
@@ -760,23 +713,23 @@ fn boot_silos(silos: Vec<SiloDef>) {
                         } {
                             Ok(h) => h,
                             Err(_) => {
-                                log(&alloc::format!(
-                                    "[init] module_load failed for {}\n",
-                                    str_def.binary
-                                ));
+                                log("[init] module_load failed for ");
+                                log(&str_def.binary);
+                                log("\n");
                                 continue;
                             }
                         };
                         if let Err(e) = call::silo_attach_module(silo_handle, mod_h) {
-                            log(&alloc::format!(
-                                "[init] silo_attach_module failed: {}\n",
-                                e.name()
-                            ));
+                            log("[init] silo_attach_module failed: ");
+                            log(e.name());
+                            log("\n");
                             continue;
                         }
                         match call::silo_start(silo_handle) {
                             Err(e) => {
-                                log(&alloc::format!("[init] silo_start failed: {}\n", e.name()));
+                                log("[init] silo_start failed: ");
+                                log(e.name());
+                                log("\n");
                             }
                             Ok(pid) => {
                                 register_supervised(&str_def.name, pid as u64);
@@ -787,14 +740,15 @@ fn boot_silos(silos: Vec<SiloDef>) {
                             }
                         }
                     } else {
-                        log(&alloc::format!(
-                            "[init] failed to read binary {}\n",
-                            str_def.binary
-                        ));
+                        log("[init] failed to read binary ");
+                        log(&str_def.binary);
+                        log("\n");
                     }
                 }
                 "wasm-app" => {
-                    log(&alloc::format!("[init]   -> Wasm-App: {}\n", str_def.name));
+                    log("[init]   -> Wasm-App: ");
+                    log(&str_def.name);
+                    log("\n");
                     let mut target_label = String::new();
                     if !str_def.target.is_empty() {
                         let mut found = false;
@@ -816,19 +770,18 @@ fn boot_silos(silos: Vec<SiloDef>) {
                     let service_path = alloc::format!("/srv/strate-wasm/{}", target_label);
                     match run_wasm_app(&service_path, &str_def.binary) {
                         Ok(()) => {
-                            log(&alloc::format!(
-                                "[init]     wasm app started: {}\n",
-                                str_def.binary
-                            ));
+                            log("[init]     wasm app started: ");
+                            log(&str_def.binary);
+                            log("\n");
                         }
                         Err(code) => {
-                            let line = alloc::format!(
-                                "[init]     wasm app failed: status=0x{:08x} (service={}, path={})\n",
-                                code,
-                                service_path,
-                                str_def.binary
-                            );
-                            log(&line);
+                            log("[init]     wasm app failed: status=0x");
+                            log_u32(code);
+                            log(" (service=");
+                            log(&service_path);
+                            log(", path=");
+                            log(&str_def.binary);
+                            log(")\n");
                         }
                     }
                 }
@@ -968,10 +921,16 @@ const SUPERVISED_CAPACITY: usize = 16;
 fn register_supervised(name: &str, pid: u64) {
     unsafe {
         if SUPERVISED_COUNT < SUPERVISED_CAPACITY {
-            let base = core::ptr::addr_of_mut!(SUPERVISED).cast::<Option<SupervisedChild>>();
-            let slot = base.add(SUPERVISED_COUNT);
-            slot.write(Some(SupervisedChild::from_name(name, pid)));
+            let sup = &mut *core::ptr::addr_of_mut!(SUPERVISED);
+            sup[SUPERVISED_COUNT] = Some(SupervisedChild::from_name(name, pid));
             SUPERVISED_COUNT += 1;
+        } else {
+            log("[init] WARN: SUPERVISED_CAPACITY exhausted, strate '");
+            log(name);
+            log("' pid=");
+            #[allow(unused_unsafe)]
+            log_u32(pid as u32);
+            log(" not supervised\n");
         }
     }
 }
@@ -979,13 +938,25 @@ fn register_supervised(name: &str, pid: u64) {
 fn supervisor_loop() -> ! {
     log("[init] Supervisor: entering watch loop\n");
     loop {
-        for _ in 0..SUPERVISOR_POLL_YIELDS {
-            let _ = call::sched_yield();
-        }
+        let _ = call::sched_yield();
 
         let mut wstatus: i32 = 0;
+        // TODO(kernel): replace polling waitpid with blocking variant once the
+        // scheduler deadlock caused by waitpid(-1, ..., 0) is fixed.
+        //
+        // Expected optimal code:
+        //   match call::waitpid(-1, Some(&mut wstatus), 0) {
+        //       Ok(pid) if pid > 0 => { ... }
+        //       _ => {}
+        //   }
+        //
+        // This eliminates the sched_yield() and saves some microseconds per loop iteration :)
+        //
+        //
+        // BUG: workspace/kernel/src/syscall/wait.rs : blocking path hangs
+        // the whole system when no child has exited yet.
         match call::waitpid(-1, Some(&mut wstatus), 1) {
-            // WNOHANG = 1
+            // WNOHANG = 1 : poll without blocking
             Ok(pid) if pid > 0 => {
                 let status = wstatus;
                 let mut found = false;
@@ -1027,7 +998,7 @@ fn supervisor_loop() -> ! {
 #[unsafe(no_mangle)]
 /// Implements start.
 pub unsafe extern "C" fn _start() -> ! {
-    log("[init] Strat9 Hierarchical Boot Starting\n");
+    log("[init] Strat9 hierarchical boot starting\n");
     log("[init] Stage: load primary silos\n");
     let mut silos = load_primary_silos();
     log("[init] Stage: merge wasm overlay\n");
