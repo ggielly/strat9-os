@@ -10,7 +10,10 @@ mod uptime;
 mod watch;
 mod whoami;
 
-use crate::{shell::ShellError, shell_println, vfs};
+use crate::{
+    shell::{is_interrupted, ShellError},
+    shell_println, vfs,
+};
 use alloc::string::String;
 
 pub use audit::cmd_audit;
@@ -227,6 +230,10 @@ pub(super) fn cmd_grep_impl(args: &[String]) -> Result<(), ShellError> {
     let text = core::str::from_utf8(&data).unwrap_or("");
     let mut found = 0u32;
     for line in text.split('\n') {
+        if is_interrupted() {
+            shell_println!("(grep cancelled after {} matches)", found);
+            return Ok(());
+        }
         if line.contains(pattern) {
             shell_println!("{}", line);
             found += 1;

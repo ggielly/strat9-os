@@ -38,11 +38,21 @@ const SHELL_HISTORY_CAPACITY: usize = 50;
 
 /// Global flag set by Ctrl+C. Long-running commands should poll this
 /// via [`is_interrupted`] and abort early when it returns `true`.
+///
+/// # Cooperative cancellation contract
+///
+/// Any command that loops, polls, or performs a multi-step sequence
+/// MUST call [`is_interrupted()`] at least once per iteration and
+/// return promptly when it signals `true`.  This ensures the user
+/// can always break out with Ctrl+C.
+///
+/// Commands that already check keyboard input directly (e.g. `top`,
+/// `silo attach`) are exempt as long as they recognize Ctrl+C (`0x03`).
 pub static SHELL_INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 /// Returns `true` if Ctrl+C was pressed, and clears the flag.
 ///
-/// Commands that loop (e.g. `top`, `watch`) should call this each
+/// Commands that loop (e.g. `watch`, `ping`, `gfx test3d`) should call this each
 /// iteration to support cancellation.
 pub fn is_interrupted() -> bool {
     SHELL_INTERRUPTED.swap(false, Ordering::Relaxed)

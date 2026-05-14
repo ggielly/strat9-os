@@ -2313,6 +2313,10 @@ pub(super) fn cmd_wasm_run_impl(args: &[String]) -> Result<(), ShellError> {
 
     let mut selected_service_path: Option<String> = None;
     for _ in 0..100 {
+        if crate::shell::is_interrupted() {
+            shell_println!("wasm-run: cancelled");
+            return Err(ShellError::ExecutionFailed);
+        }
         if vfs::stat_path(&default_service_path).is_ok() {
             selected_service_path = Some(default_service_path.clone());
             break;
