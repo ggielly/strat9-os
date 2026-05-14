@@ -7,7 +7,7 @@
 use crate::sync::SpinLock;
 use alloc::string::String;
 use bitflags::bitflags;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 bitflags! {
     /// CPU feature flags detected via CPUID.
@@ -98,6 +98,11 @@ impl CpuInfo {
 static HOST_CPU: SpinLock<Option<CpuInfo>> = SpinLock::new(None);
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Lock-free cache of the host's default XCR0 mask, written once during
+/// `init()`.  Used by `normalized_xcr0()` in the context-switch hot path
+/// to avoid acquiring the `HOST_CPU` spinlock with interrupts disabled.
+pub(crate) static HOST_DEFAULT_XCR0_CACHE: AtomicU64 = AtomicU64::new(0);
+
 /// Detect and cache CPU information. Must be called once at BSP boot.
 pub fn init() {
     let info = detect();
@@ -117,6 +122,7 @@ pub fn init() {
     );
     *HOST_CPU.lock() = Some(info);
     INITIALIZED.store(true, Ordering::Release);
+    HOST_DEFAULT_XCR0_CACHE.store(host_default_xcr0(), Ordering::Release);
 }
 
 /// Return a clone of the cached host CPU info. Panics if `init()` not called.
@@ -328,22 +334,36 @@ pub fn xsave_size_for_xcr0(xcr0: u64) -> usize {
     if !host_uses_xsave() {
         return 512;
     }
-    // CPUID leaf 0x0D, sub-leaf 0: ECX gives the size for the *current* XCR0.
-    // Since we may not want to switch XCR0 just to query, use a conservative
-    // computation from the host's max xsave_size clamped down.
     let h = host();
     if xcr0 == h.max_xcr0 {
         return h.xsave_size;
     }
-    // Minimal sizes per component
+
+    // Enumerate each enabled XCR0 component via CPUID leaf 0xD sub-leaves.
+    // Sub-leaf n returns offset (EBX) and size (EAX) for component n.
+    // The total save area is max(offset + size) across all enabled components.
     let mut size = 576usize; // legacy area (512) + xsave header (64)
-    if xcr0 & XCR0_AVX != 0 {
-        size = size.max(832); // +256 for YMM
-    }
-    if xcr0 & (XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM) != 0 {
-        size = size.max(2688); // full AVX-512
+    for comp in 2..63 {
+        if xcr0 & (1u64 << comp) == 0 {
+            continue;
+        }
+        let (eax, ebx, _ecx, _edx) = super::cpuid(0x0D, comp);
+        let comp_size = eax as usize;
+        let comp_offset = ebx as usize;
+        size = size.max(comp_offset + comp_size);
     }
     size.min(h.xsave_size)
+}
+
+/// Return the host's default XCR0 mask from the lock-free cache, falling back
+/// to the locked query before `init()` is complete.
+#[inline]
+pub fn host_default_xcr0_fast() -> u64 {
+    let cached = HOST_DEFAULT_XCR0_CACHE.load(Ordering::Acquire);
+    if cached != 0 {
+        return cached;
+    }
+    host_default_xcr0()
 }
 
 /// Return the host's default XCR0 mask (all supported features).

@@ -11,7 +11,6 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![feature(allocator_api)]
 #![feature(alloc_error_handler)]
 #![feature(negative_impls)]
 
@@ -28,6 +27,7 @@ pub mod capability;
 pub mod components;
 pub mod debug;
 pub mod entropy;
+pub mod framebuffer;
 pub mod hardware;
 pub mod ipc;
 pub mod memory;

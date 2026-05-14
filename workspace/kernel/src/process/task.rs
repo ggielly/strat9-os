@@ -196,10 +196,13 @@ impl ExtendedState {
     }
 
     fn set_defaults(&mut self) {
-        // x87 FCW = 0x037F
+        // Set x87 FCW = 0x037F and MXCSR = 0x1F80 directly in the buffer.
+        // These match the x87/SSE INIT values, so even though the XSAVE
+        // header's XSTATE_BV field (bytes 512-519) remains 0, the first
+        // XRSTOR will restore the same values from INIT defaults.
+        // This is correct and safe by design.
         self.data[0] = 0x7F;
         self.data[1] = 0x03;
-        // MXCSR = 0x1F80
         self.data[24] = 0x80;
         self.data[25] = 0x1F;
     }
@@ -209,6 +212,18 @@ impl ExtendedState {
         let len = other.size.min(self.size);
         self.data[..len].copy_from_slice(&other.data[..len]);
     }
+}
+
+#[inline]
+fn normalized_xcr0(xcr0: u64) -> u64 {
+    if !crate::arch::x86_64::cpuid::host_uses_xsave() {
+        return 0x3;
+    }
+
+    // Use the lock-free cache to avoid acquiring the HOST_CPU spinlock
+    // with interrupts disabled in the context-switch hot path.
+    let host_xcr0 = crate::arch::x86_64::cpuid::host_default_xcr0_fast();
+    (xcr0 & host_xcr0).max(0x3)
 }
 
 /// Represents a single task/thread in the system
@@ -1150,24 +1165,25 @@ impl Task {
 /// # Safety
 /// Caller must ensure all pointers in `target` are valid and interrupts are disabled.
 pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) {
-    // Temporary safety mode: force legacy FXSAVE/FXRSTOR path.
-    // This avoids XSAVE/XRSTOR state-size mismatches that can corrupt task memory.
-    //
-    // TODO : re-enable XSAVE only after the kernel has a proven-stable end-to-end path
-    // for:
-    //     (1) xsave area sizing/allocation,
-    //     (2) XCR0 transitions per task,
-    //     (3) save/restore across scheduler, syscall, and interrupt returns.
-    //
-    // Until then old_xcr0/new_xcr0 stay intentionally unused in this path.
-    let _ = target.old_xcr0;
-    let _ = target.new_xcr0;
-    switch_context_fxsave(
-        target.old_rsp_ptr,
-        target.new_rsp_ptr,
-        target.old_fpu_ptr,
-        target.new_fpu_ptr,
-    );
+    if crate::arch::x86_64::cpuid::host_uses_xsave() {
+        let old_xcr0 = normalized_xcr0(target.old_xcr0);
+        let new_xcr0 = normalized_xcr0(target.new_xcr0);
+        switch_context_xsave(
+            target.old_rsp_ptr,
+            target.new_rsp_ptr,
+            target.old_fpu_ptr,
+            target.new_fpu_ptr,
+            new_xcr0,
+            old_xcr0,
+        );
+    } else {
+        switch_context_fxsave(
+            target.old_rsp_ptr,
+            target.new_rsp_ptr,
+            target.old_fpu_ptr,
+            target.new_fpu_ptr,
+        );
+    }
 }
 
 /// First-task restore dispatcher. Like `do_switch_context` but without
@@ -1208,8 +1224,12 @@ pub(super) unsafe fn do_restore_first_task(
         canary
     );
 
-    let _ = xcr0;
-    restore_first_task_fxsave(frame_ptr, fpu_ptr);
+    if crate::arch::x86_64::cpuid::host_uses_xsave() {
+        restore_first_task_xsave(frame_ptr, fpu_ptr, normalized_xcr0(xcr0));
+    } else {
+        let _ = xcr0;
+        restore_first_task_fxsave(frame_ptr, fpu_ptr);
+    }
 }
 
 //  FXSAVE path (legacy, no XSAVE support)
