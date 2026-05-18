@@ -23,19 +23,21 @@
 //!   - `PORT_WQ[n]`         : WaitQueue; issuing task blocks here
 
 use crate::{
+    dma::DmaBuffer,
     hardware::pci_client::{self as pci, ProbeCriteria},
-    memory::{self, phys_to_virt, PhysFrame},
+    memory,
+    memory::phys_to_virt,
     sync::{SpinLock, WaitQueue},
 };
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     ptr,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
 };
 
 pub use super::virtio_block::{BlockDevice, BlockError, SECTOR_SIZE};
 
-// ========== HBA generic registers (at ABAR) ==================================================================================================================================
+// ========== HBA generic registers (at ABAR) ======================================================
 const HBA_GHC: u64 = 0x04;
 const HBA_IS: u64 = 0x08;
 const HBA_PI: u64 = 0x0C;
@@ -196,6 +198,54 @@ static PORT_WQ: [WaitQueue; 32] = {
     [INIT; 32]
 };
 
+// ========== Per-port async operation metadata  ====================================================================
+//
+// These statics bridge AHCI IRQ completions to the async I/O ring
+// subsystem.  Before issuing a command in async mode, the submit path
+// stores the ring_id / user_data / buffer address in the per-port
+// arrays below.  When the IRQ fires, `handle_interrupt()` reads them
+// back, pushes a CQE into the ring, and drops the DMA buffer.
+//
+// Only slot 0 is used (one in-flight op per port).
+
+/// Ring id to push the completion CQE into (0 = no async pending).
+static PORT_ASYNC_RING_ID: [AtomicU64; 32] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; 32]
+};
+
+/// User-data token echoed in the completion CQE.
+static PORT_ASYNC_USER_DATA: [AtomicU64; 32] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; 32]
+};
+
+/// User virtual address where read data must be copied (0 = write op).
+static PORT_ASYNC_BUF_VADDR: [AtomicU64; 32] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; 32]
+};
+
+/// Number of bytes transferred.
+static PORT_ASYNC_LEN: [AtomicU32; 32] = {
+    const INIT: AtomicU32 = AtomicU32::new(0);
+    [INIT; 32]
+};
+
+/// Raw pointer to a leaked `Box<DmaBuffer>` held until IRQ completion.
+/// 0 means no buffer.  Freed inside `handle_interrupt()` via
+/// `Box::from_raw()`.
+static PORT_ASYNC_DMA_PTR: [AtomicU64; 32] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; 32]
+};
+
+/// Whether an async operation is in-flight on this port's slot 0.
+static PORT_ASYNC_ACTIVE: [AtomicBool; 32] = {
+    const INIT: AtomicBool = AtomicBool::new(false);
+    [INIT; 32]
+};
+
 // ========== MMIO helpers ==============================
 
 /// Performs the rd32 operation.
@@ -276,39 +326,12 @@ fn port_enable_irq(pvirt: u64) {
     }
 }
 
-// ========== Bounce-buffer management ================================================================================================================================================================
-
-struct Bounce {
-    frame: PhysFrame,
-    order: u8,
-    phys: u64,
-    virt: u64,
-}
-
-impl Bounce {
-    /// Performs the alloc operation.
-    fn alloc(bytes: usize) -> Result<Self, AhciError> {
-        let pages = (bytes + 4095) / 4096;
-        let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let frame =
-            crate::sync::with_irqs_disabled(|token| memory::allocate_phys_contiguous(token, order))
-                .map_err(|_| AhciError::Alloc)?;
-        let phys = frame.start_address.as_u64();
-        Ok(Self {
-            frame,
-            order,
-            phys,
-            virt: phys_to_virt(phys),
-        })
-    }
-
-    /// Performs the free operation.
-    fn free(self) {
-        crate::sync::with_irqs_disabled(|token| {
-            memory::free_phys_contiguous(token, self.frame, self.order);
-        });
-    }
-}
+// ========== DMA buffer management ======================================================================
+//
+// Replaced the old `Bounce` hand-rolled struct with the kernel-wide
+// `DmaBuffer` abstraction
+// DmaBuffer pins frames, preventing the buddy allocator from recycling
+// them while a transfer is in flight, and automatically unpins on Drop.
 
 // ========== Command submission ==========
 //
@@ -337,12 +360,12 @@ fn submit_cmd(
         return Err(AhciError::Busy);
     }
 
-    let bounce = Bounce::alloc(nbytes)?;
+    let dma_buf = DmaBuffer::alloc(nbytes).map_err(|_| AhciError::Alloc)?;
 
     if write {
-        // SAFETY: bounce.virt is a valid HHDM address ≥ nbytes; buf.len() ≥ nbytes
+        // SAFETY: dma_buf virtual addr is valid for nbytes; buf.len() >= nbytes
         unsafe {
-            ptr::copy_nonoverlapping(buf.as_ptr(), bounce.virt as *mut u8, nbytes);
+            ptr::copy_nonoverlapping(buf.as_ptr(), dma_buf.virt_addr() as *mut u8, nbytes);
         }
     }
 
@@ -387,9 +410,10 @@ fn submit_cmd(
 
         // PRDT entry 0 (16 bytes)
         let p = t.add(CTAB_PRDT);
-        // DBA: physical address of DMA bounce buffer
-        ptr::write_unaligned(p.add(0) as *mut u32, (bounce.phys & 0xFFFF_FFFF) as u32);
-        ptr::write_unaligned(p.add(4) as *mut u32, (bounce.phys >> 32) as u32);
+        // DBA: physical address of DMA buffer
+        let dma_phys = dma_buf.dma_addr().as_u64();
+        ptr::write_unaligned(p.add(0) as *mut u32, (dma_phys & 0xFFFF_FFFF) as u32);
+        ptr::write_unaligned(p.add(4) as *mut u32, (dma_phys >> 32) as u32);
         ptr::write_unaligned(p.add(8) as *mut u32, 0u32);
         // DBC: byte_count - 1; bit 31 = interrupt on completion
         let dbc = ((nbytes as u32).saturating_sub(1)) | (1 << 31);
@@ -424,7 +448,6 @@ fn submit_cmd(
 
         // Check whether the IRQ reported an error
         if PORT_SLOT0_ERROR[idx].load(Ordering::Acquire) {
-            bounce.free();
             return Err(AhciError::DeviceError);
         }
     } else {
@@ -441,7 +464,6 @@ fn submit_cmd(
                     wr32(port.port_virt, PORT_IS, 0xFFFF_FFFF);
                     wr32(port.port_virt, PORT_SERR, 0xFFFF_FFFF);
                 }
-                bounce.free();
                 return Err(AhciError::DeviceError);
             }
 
@@ -451,7 +473,6 @@ fn submit_cmd(
 
             tries = tries.saturating_sub(1);
             if tries == 0 {
-                bounce.free();
                 return Err(AhciError::Timeout);
             }
             core::hint::spin_loop();
@@ -462,14 +483,183 @@ fn submit_cmd(
     }
 
     if !write {
-        // SAFETY: bounce.virt valid, nbytes ≤ allocated
+        // SAFETY: dma_buf virtual addr valid, nbytes ≤ allocated
         unsafe {
-            ptr::copy_nonoverlapping(bounce.virt as *const u8, buf.as_mut_ptr(), nbytes);
+            ptr::copy_nonoverlapping(dma_buf.virt_addr() as *const u8, buf.as_mut_ptr(), nbytes);
+        }
+    }
+    Ok(())
+}
+
+// ========== Async command submission =======================================
+//
+// Non-blocking variant of `submit_cmd`.  Stores per-port async metadata
+// before issuing the command, so the IRQ handler can push a CQE directly
+// into the caller's async ring without any further kernel involvement.
+
+/// Submit a command asynchronously ; returns immediately without blocking.
+///
+/// The caller **must** have already set `PORT_ASYNC_ACTIVE[idx]` to `true`
+/// and stored the ring / user-data / buffer info in the per-port statics.
+///
+/// On success the operation is in-flight; the IRQ handler will deliver the
+/// CQE.  On failure (device busy, allocation error) the metadata is cleared
+/// and the caller must push an error CQE itself.
+fn submit_async_cmd(
+    port: &AhciPort,
+    lba: u64,
+    count: u16,
+    write: bool,
+    ata_cmd: u8,
+    dma_buf: DmaBuffer,
+) -> Result<(), AhciError> {
+    let nbytes = (count as usize) * SECTOR_SIZE;
+    let idx = port.port_num as usize;
+
+    // SAFETY: MMIO read to check device readiness
+    let tfd = unsafe { rd32(port.port_virt, PORT_TFD) };
+    if tfd & (TFD_BSY | TFD_DRQ) != 0 {
+        return Err(AhciError::Busy);
+    }
+
+    // For writes: copy user data into the DMA buffer before issuing
+    if write {
+        let user_vaddr = PORT_ASYNC_BUF_VADDR[idx].load(Ordering::Acquire);
+        if user_vaddr != 0 {
+            // SAFETY: user buffer vaddr was validated at dispatch time,
+            // nbytes ≤ allocated DMA buffer capacity.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    user_vaddr as *const u8,
+                    dma_buf.virt_addr() as *mut u8,
+                    nbytes,
+                );
+            }
         }
     }
 
-    bounce.free();
+    let ctab_phys = port.mem_phys + CTAB_OFF;
+    let cmdh_virt = port.mem_virt + CLB_OFF;
+    let ctab_virt = port.mem_virt + CTAB_OFF;
+
+    // SAFETY: all addresses point into our pre-allocated per-port frame.
+    unsafe {
+        // --- Command header (slot 0, 32 bytes) ---
+        let h = cmdh_virt as *mut u8;
+        ptr::write_bytes(h, 0, 32);
+
+        let flags: u16 = 5u16 | (if write { 1 << 6 } else { 0 });
+        ptr::write_unaligned(h.add(CMDH_FLAGS) as *mut u16, flags.to_le());
+        ptr::write_unaligned(h.add(CMDH_PRDTL) as *mut u16, 1u16.to_le());
+        ptr::write_unaligned(
+            h.add(CMDH_CTBA) as *mut u32,
+            (ctab_phys & 0xFFFF_FFFF) as u32,
+        );
+        ptr::write_unaligned(h.add(CMDH_CTBAU) as *mut u32, (ctab_phys >> 32) as u32);
+
+        // --- Command table ---
+        let t = ctab_virt as *mut u8;
+        ptr::write_bytes(t, 0, CTAB_PRDT + 16);
+
+        // H2D Register FIS
+        let f = t.add(CTAB_CFIS);
+        *f.add(FIS_TYPE) = FIS_TYPE_H2D;
+        *f.add(FIS_FLAGS) = FIS_C_BIT;
+        *f.add(FIS_CMD) = ata_cmd;
+        *f.add(FIS_LBA0) = (lba & 0xFF) as u8;
+        *f.add(FIS_LBA1) = ((lba >> 8) & 0xFF) as u8;
+        *f.add(FIS_LBA2) = ((lba >> 16) & 0xFF) as u8;
+        *f.add(FIS_DEVICE) = FIS_LBA_MODE;
+        *f.add(FIS_LBA3) = ((lba >> 24) & 0xFF) as u8;
+        *f.add(FIS_LBA4) = ((lba >> 32) & 0xFF) as u8;
+        *f.add(FIS_LBA5) = ((lba >> 40) & 0xFF) as u8;
+        *f.add(FIS_CNT_LO) = (count & 0xFF) as u8;
+        *f.add(FIS_CNT_HI) = (count >> 8) as u8;
+
+        // PRDT entry 0 (16 bytes)
+        let p = t.add(CTAB_PRDT);
+        let dma_phys = dma_buf.dma_addr().as_u64();
+        ptr::write_unaligned(p.add(0) as *mut u32, (dma_phys & 0xFFFF_FFFF) as u32);
+        ptr::write_unaligned(p.add(4) as *mut u32, (dma_phys >> 32) as u32);
+        ptr::write_unaligned(p.add(8) as *mut u32, 0u32);
+        let dbc = ((nbytes as u32).saturating_sub(1)) | (1 << 31);
+        ptr::write_unaligned(p.add(12) as *mut u32, dbc);
+    }
+
+    // Leak the DmaBuffer so it stays alive until the IRQ consumes it.
+    let dma_ptr = Box::into_raw(Box::new(dma_buf));
+    PORT_ASYNC_DMA_PTR[idx].store(dma_ptr as u64, Ordering::Release);
+
+    // Clear stale flags and issue the command
+    PORT_SLOT0_DONE[idx].store(false, Ordering::Release);
+    PORT_SLOT0_ERROR[idx].store(false, Ordering::Release);
+
+    // SAFETY: MMIO write to PxCI issues slot 0
+    unsafe { wr32(port.port_virt, PORT_CI, 1) };
+
     Ok(())
+}
+
+/// Public entry point called from `async_io::dispatch`.
+///
+/// Validates the port index, looks up the AHCI device, allocates a DMA
+/// buffer, stores async metadata, and issues the command.
+///
+/// On success the caller should increment the ring's in-flight counter.
+/// On failure an error CQE is returned so dispatch can push it immediately.
+#[allow(dead_code)]
+pub(crate) fn submit_async_storage_op(
+    port_idx: u8,
+    lba: u64,
+    byte_count: u32,
+    user_buf_vaddr: u64,
+    write: bool,
+    ring_id: u64,
+    user_data: u64,
+) -> Result<(), AhciError> {
+    let controller = get_device().ok_or(AhciError::NoController)?;
+    let port = controller.ports.first().ok_or(AhciError::NoPort)?;
+    // Note: for now we ignore port_idx and always use the first port.
+    // Multi-port dispatch can be added when the controller exposes
+    // a port-by-index accessor.
+    let _ = port_idx;
+
+    if lba >= port.sector_count {
+        return Err(AhciError::InvalidSector);
+    }
+
+    let count = ((byte_count as usize + SECTOR_SIZE - 1) / SECTOR_SIZE) as u16;
+    if count == 0 {
+        return Err(AhciError::BufferTooSmall);
+    }
+    let nbytes = (count as usize) * SECTOR_SIZE;
+
+    let dma_buf = DmaBuffer::alloc(nbytes).map_err(|_| AhciError::Alloc)?;
+
+    let idx = port.port_num as usize;
+    let ata_cmd = if write {
+        ATA_WRITE_DMA_EXT
+    } else {
+        ATA_READ_DMA_EXT
+    };
+
+    // Store async metadata *before* issuing the command.
+    PORT_ASYNC_RING_ID[idx].store(ring_id, Ordering::Release);
+    PORT_ASYNC_USER_DATA[idx].store(user_data, Ordering::Release);
+    PORT_ASYNC_BUF_VADDR[idx].store(if write { 0 } else { user_buf_vaddr }, Ordering::Release);
+    PORT_ASYNC_LEN[idx].store(nbytes as u32, Ordering::Release);
+    PORT_ASYNC_ACTIVE[idx].store(true, Ordering::Release);
+
+    match submit_async_cmd(port, lba, count, write, ata_cmd, dma_buf) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Roll back async metadata on submission failure.
+            PORT_ASYNC_ACTIVE[idx].store(false, Ordering::Release);
+            PORT_ASYNC_RING_ID[idx].store(0, Ordering::Release);
+            PORT_ASYNC_DMA_PTR[idx].store(0, Ordering::Release);
+            Err(e)
+        }
+    }
 }
 
 // ========== IRQ handler ==============================
@@ -528,9 +718,51 @@ pub fn handle_interrupt() {
         // SAFETY: MMIO write to HBA_IS
         unsafe { wr32(abar, HBA_IS, 1 << port_num) };
 
-        // Signal command completion
+        // Signal command completion (always, for sync waiters)
         PORT_SLOT0_DONE[port_num as usize].store(true, Ordering::Release);
-        PORT_WQ[port_num as usize].wake_one();
+
+        // Async path — if an async operation was in-flight on this port,
+        // push a CQE into the registered ring and drop the DMA buffer.
+        let idx = port_num as usize;
+        if PORT_ASYNC_ACTIVE[idx].load(Ordering::Acquire) {
+            let ring_id = PORT_ASYNC_RING_ID[idx].load(Ordering::Acquire);
+            let user_data = PORT_ASYNC_USER_DATA[idx].load(Ordering::Acquire);
+            let buf_vaddr = PORT_ASYNC_BUF_VADDR[idx].load(Ordering::Acquire);
+            let nbytes = PORT_ASYNC_LEN[idx].load(Ordering::Acquire) as usize;
+            let dma_ptr_val = PORT_ASYNC_DMA_PTR[idx].load(Ordering::Acquire);
+
+            // Clear the active flag — this port is now idle.
+            PORT_ASYNC_ACTIVE[idx].store(false, Ordering::Release);
+            PORT_ASYNC_RING_ID[idx].store(0, Ordering::Release);
+            PORT_ASYNC_BUF_VADDR[idx].store(0, Ordering::Release);
+
+            if dma_ptr_val != 0 {
+                // Take ownership of the leaked DmaBuffer back.
+                let dma_buf = unsafe { Box::from_raw(dma_ptr_val as *mut DmaBuffer) };
+
+                // For reads: copy DMA buffer content back to the user buffer.
+                if buf_vaddr != 0 && !PORT_SLOT0_ERROR[idx].load(Ordering::Acquire) {
+                    let src = dma_buf.virt_addr() as *const u8;
+                    let dst = buf_vaddr as *mut u8;
+                    // SAFETY: both pointers valid; nbytes ≤ DMA buffer capacity.
+                    unsafe {
+                        ptr::copy_nonoverlapping(src, dst, nbytes);
+                    }
+                }
+
+                let result = if PORT_SLOT0_ERROR[idx].load(Ordering::Acquire) {
+                    -5i32 // EIO
+                } else {
+                    nbytes as i32
+                };
+
+                // Push CQE into the async ring.
+                crate::async_io::complete::push_completion(ring_id, user_data, result, 0);
+                // DmaBuffer dropped here — frames unpinned, buddy can recycle.
+            }
+        } else {
+            PORT_WQ[idx].wake_one();
+        }
     }
 }
 

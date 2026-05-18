@@ -120,6 +120,20 @@ impl Port {
         result
     }
 
+    /// Try to send a message to this port without blocking.
+    ///
+    /// Returns `Ok(())` if the message was queued,
+    /// or `Err(WouldBlock)` if the queue is full.
+    pub fn try_send(&self, msg: IpcMessage) -> Result<(), IpcError> {
+        match self.queue.push(msg) {
+            Ok(()) => {
+                self.recv_waitq.wake_one();
+                Ok(())
+            }
+            Err(_) => Err(IpcError::PortNotFound), // WouldBlock
+        }
+    }
+
     /// Try to receive a message from this port without blocking.
     ///
     /// Returns `Ok(Some(msg))` if a message was available, `Ok(None)` if empty,
