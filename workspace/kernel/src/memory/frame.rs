@@ -311,24 +311,26 @@ pub mod meta_guard {
 
 /// Persistent flags stored in [`MetaSlot`] / [`FrameMeta`].
 pub mod frame_flags {
-    /// La frame est allouée.
+    /// The frame is allocated
     pub const ALLOCATED: u32 = 1 << 8;
-    /// La frame est libre.
+    /// The frame is free.
     pub const FREE: u32 = 1 << 9;
-    /// La frame est réservée au noyau.
+    /// The frame is reserved for the kernel.
     pub const KERNEL: u32 = 1 << 10;
-    /// La frame appartient à l'espace utilisateur.
+    /// The frame belongs to user space.
     pub const USER: u32 = 1 << 11;
-    /// La frame est empoisonnée et ne doit plus être recyclée telle quelle.
+    /// The frame is poisoned and must not be recycled as-is.
     pub const POISONED: u32 = 1 << 12;
-    /// La frame appartient à une classe de pages movable.
+    /// The frame belongs to a movable page class.
     pub const MOVABLE: u32 = 1 << 13;
-    /// Frame éligible au copy-on-write.
+    /// Frame eligible for copy-on-write.
     pub const COW: u32 = 1 << 0;
-    /// Frame partagée de type DLL, jamais COW.
+    /// Shared frame of type DLL, never COW.
     pub const DLL: u32 = 1 << 1;
-    /// Frame anonyme.
+    /// Anonymous frame.
     pub const ANONYMOUS: u32 = 1 << 2;
+    /// Frame is pinned for DMA transfer : buddy must not recycle.
+    pub const DMA: u32 = 1 << 14;
 }
 
 /// Buddy free-list link storage (intrusive list nodes live in [`MetaSlot`], not in frame bytes).
@@ -628,6 +630,18 @@ impl MetaSlot {
     #[inline]
     pub fn get_flags(&self) -> u32 {
         self.flags.load(Ordering::Acquire)
+    }
+
+    /// Atomic OR: set bits without racing with concurrent readers.
+    #[inline]
+    pub fn or_flags(&self, bits: u32) {
+        self.flags.fetch_or(bits, Ordering::AcqRel);
+    }
+
+    /// Atomic AND: clear bits without racing with concurrent readers.
+    #[inline]
+    pub fn and_flags(&self, bits: u32) {
+        self.flags.fetch_and(bits, Ordering::AcqRel);
     }
 
     #[inline]

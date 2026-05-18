@@ -156,6 +156,70 @@ pub trait Scheme: Send + Sync {
 /// Type-erased Scheme reference.
 pub type DynScheme = Arc<dyn Scheme>;
 
+/// Extension trait adding async operations to [`Scheme`].
+///
+/// Default implementations fall back to the blocking `Scheme` methods,
+/// making it safe to add without breaking existing schemes.
+pub trait AsyncScheme: Scheme {
+    /// Async read : returns immediately and delivers the result via the
+    /// async completion ring identified by `ring_id`.
+    fn async_read(
+        &self,
+        file_id: u64,
+        offset: u64,
+        buf: &mut [u8],
+        ring_id: u64,
+        user_data: u64,
+    ) -> Result<(), ()> {
+        let n = self.read(file_id, offset, buf).map_err(|_| ())?;
+        crate::async_io::complete::push_completion(ring_id, user_data, n as i32, 0);
+        Ok(())
+    }
+
+    /// Async write : returns immediately and delivers the result via the
+    /// async completion ring identified by `ring_id`.
+    fn async_write(
+        &self,
+        file_id: u64,
+        offset: u64,
+        buf: &[u8],
+        ring_id: u64,
+        user_data: u64,
+    ) -> Result<(), ()> {
+        let n = self.write(file_id, offset, buf).map_err(|_| ())?;
+        crate::async_io::complete::push_completion(ring_id, user_data, n as i32, 0);
+        Ok(())
+    }
+
+    /// Async open : returns immediately and delivers the result via the
+    /// async completion ring identified by `ring_id`.
+    fn async_open(
+        &self,
+        path: &str,
+        flags: crate::vfs::OpenFlags,
+        ring_id: u64,
+        user_data: u64,
+    ) -> Result<(), ()> {
+        let result = self.open(path, flags).map_err(|_| ())?;
+        crate::async_io::complete::push_completion(ring_id, user_data, result.file_id as i32, 0);
+        Ok(())
+    }
+
+    /// Async close : returns immediately and delivers the result via the
+    /// async completion ring identified by `ring_id`.
+    fn async_close(&self, file_id: u64, ring_id: u64, user_data: u64) -> Result<(), ()> {
+        let result: i32 = match self.close(file_id) {
+            Ok(()) => 0,
+            Err(_) => -1,
+        };
+        crate::async_io::complete::push_completion(ring_id, user_data, result, 0);
+        Ok(())
+    }
+}
+
+/// Blanket implementation: every Scheme gets AsyncScheme for free.
+impl<T: Scheme + ?Sized> AsyncScheme for T {}
+
 pub const DEV_RAMFS: u64 = 1;
 pub const DEV_SYSFS: u64 = 2;
 pub const DEV_PROCFS: u64 = 3;

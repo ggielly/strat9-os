@@ -18,6 +18,7 @@ use super::{
     numbers::*, pci, process as proc_sys, semaphore as sem_handler, volume, SyscallFrame,
 };
 use crate::{
+    async_io::syscall as async_sys,
     capability::{release_capability, CapId, CapPermissions, ResourceType},
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
@@ -206,6 +207,11 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SEM_POST => sem_handler::sys_sem_post(arg1),
         SYS_SEM_CLOSE => sem_handler::sys_sem_close(arg1),
 
+        // Async I/O syscalls (250-252) ======================================
+        SYS_ASYNC_SETUP => async_sys::sys_async_setup(arg1, arg2),
+        SYS_ASYNC_ENTER => async_sys::sys_async_enter(arg1, arg2, arg3, arg4),
+        SYS_ASYNC_CANCEL => async_sys::sys_async_cancel(arg1, arg2, arg3),
+
         // PCI syscalls ======================================================
         SYS_PCI_ENUM => pci::sys_pci_enum(arg1, arg2, arg3),
         SYS_PCI_CFG_READ => pci::sys_pci_cfg_read(arg1, arg2, arg3),
@@ -323,7 +329,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
     // Fast signal-pending hint: check the per-CPU flag set by `send_signal`
     // when a signal targets the task currently running on this CPU. This
     // avoids the expensive scheduler lock + Arc::clone when no signal is
-    // pending (the common case — 99.99%+ of syscalls).
+    // pending (the common case : +99.99% of syscalls).
     //
     // Cross-CPU signals (rare) are handled on the target's next syscall, or
     // by the explicit `has_pending_signals()` check in blocking syscalls.

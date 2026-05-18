@@ -44,6 +44,11 @@ pub const SYS_SEM_TRYWAIT: usize = 232;
 pub const SYS_SEM_POST: usize = 233;
 pub const SYS_SEM_CLOSE: usize = 234;
 
+// Block 250-252: async I/O
+pub const SYS_ASYNC_SETUP: usize = 250;
+pub const SYS_ASYNC_ENTER: usize = 251;
+pub const SYS_ASYNC_CANCEL: usize = 252;
+
 // Block 240-242: PCI
 pub const SYS_PCI_ENUM: usize = 240;
 pub const SYS_PCI_CFG_READ: usize = 241;

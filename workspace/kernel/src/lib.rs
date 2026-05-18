@@ -27,6 +27,8 @@ pub mod capability;
 pub mod components;
 pub mod debug;
 
+pub mod async_io;
+pub mod dma;
 pub mod entropy;
 pub mod framebuffer;
 pub mod hardware;
