@@ -217,36 +217,36 @@ python3 -m http.server --directory build/docs-site 8000
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
-<li>2026-05-19 <code>93c8927</code> async: implement and optimize async I/O completion handling</li>
-<li>2026-05-18 <code>7c5efb4</code> async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)</li>
-<li>2026-05-14 <code>cc4944a</code> Refactor and clean up code in various modules</li>
-<li>2026-05-14 <code>ecc416d</code> refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix</li>
-<li>2026-05-08 <code>f070d41</code> Add kernel entropy pool with interrupt-driven collection</li>
-<li>2026-05-08 <code>9dedb9f</code> Implement robust list support (set_robust_list/get_robust_list)</li>
-<li>2026-05-08 <code>d2e90a2</code> Bridge clone() thread creation via SYS_THREAD_CREATE, add faccessat routing</li>
-<li>2026-05-08 <code>dabcad2</code> Add sys_access(), sys_faccessat(), and SYS_GETRANDOM() in syscall dispatcher</li>
-<li>2026-05-08 <code>946f200</code> Add missing call for clock_nanosleep and update the calling manager</li>
-<li>2026-05-06 <code>117863e</code> Enhance network and silo management functionality</li>
-<li>2026-04-12 <code>6963e28</code> fix: reduce scheduler contention and harden early boot memory init</li>
-<li>2026-04-12 <code>f3647c1</code> feat(memory): production-grade allocator architecture (#49)</li>
-<li>2026-04-06 <code>a941264</code> feat: capability-based CWD, *at syscalls, and O_RESOLVE_BENEATH sandboxing</li>
-<li>2026-04-06 <code>309a9c1</code> refactor: runtime allocation, scheduler lock decoupling, FixedQueue, and VGA improvements</li>
-<li>2026-03-26 <code>a9a6cd6</code> Implement block-oriented memory management and ownership tracking</li>
-<li>2026-03-23 <code>ec8ee9f</code> refactor(memory): update reference counting logic for COW frames</li>
-<li>2026-03-23 <code>aaa89e0</code> Refactor: Decouple per-CPU scheduler state and logic from the global scheduler instance by moving <code>SchedulerCpu</code> to local CPU storage.</li>
-<li>2026-03-21 <code>c3f93c6</code> feat: Implement TSC-based boot timing and milestones, along with an analysis...</li>
-<li>2026-03-17 <code>eb7818d</code> feat: Implement static module loading from initfs paths and increase module blob size limit.</li>
-<li>2026-03-17 <code>acfdbbd</code> feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.</li>
-<li>2026-03-13 <code>29c6f3d</code> Refactor scheduler task management and introduce interrupt frame handling</li>
-<li>2026-03-11 <code>7e66e69</code> refactor: enhance interrupt handling and logging mechanisms across the kernel</li>
-<li>2026-03-09 <code>ff0a36b</code> Refactor memory management to use IRQ-disabled tokens</li>
-<li>2026-03-07 <code>c3e8969</code> Fix race condition and lock</li>
-<li>2026-03-07 <code>6191656</code> cargo fmt</li>
-<li>2026-03-07 <code>8cd1410</code> Refactor memory allocation and deallocation in the kernel : per-CPU frame cach and a CPU-local BuddySet avoids the global lock in the common case.</li>
-<li>2026-03-04 <code>04b384e</code> fix(build): improve stage assembly error handling and warnings</li>
-<li>2026-03-03 <code>2eb44c0</code> feat(task): replace FpuState with ExtendedState, support xsave/xrstor</li>
-<li>2026-03-03 <code>ae5480a</code> feat(silo): add silo attach for live debug output monitoring</li>
-<li>2026-03-03 <code>8c0056a</code> feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.</li>
+<li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0"><code>93c8927</code></a> async: implement and optimize async I/O completion handling</li>
+<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4</code></a> async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)</li>
+<li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cc4944a2c78236c41fce4b8f1054e119fc2bcd8e"><code>cc4944a</code></a> Refactor and clean up code in various modules</li>
+<li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ecc416df41e29c26f6839ee15cffbc7a7dd41f05"><code>ecc416d</code></a> refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix</li>
+<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f070d41c31fb505fef36603ee7cbc0c6648944b3"><code>f070d41</code></a> Add kernel entropy pool with interrupt-driven collection</li>
+<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9dedb9f19215cd1ad7f4d65d88fe84e4832bfc7c"><code>9dedb9f</code></a> Implement robust list support (set_robust_list/get_robust_list)</li>
+<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d2e90a2ffc1886bc3e72b6d2d10e4dd99c156d5a"><code>d2e90a2</code></a> Bridge clone() thread creation via SYS_THREAD_CREATE, add faccessat routing</li>
+<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dabcad2d5250a317a12ec3b41048a9dfe3d6019c"><code>dabcad2</code></a> Add sys_access(), sys_faccessat(), and SYS_GETRANDOM() in syscall dispatcher</li>
+<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/946f200860b2db8971b15b0829b987cb5282fd78"><code>946f200</code></a> Add missing call for clock_nanosleep and update the calling manager</li>
+<li>2026-05-06 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/117863ea4c6cb1ab65bf240da800c838e4ad8572"><code>117863e</code></a> Enhance network and silo management functionality</li>
+<li>2026-04-12 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6963e28b120c8f86bd08c0c6c6c722058693d945"><code>6963e28</code></a> fix: reduce scheduler contention and harden early boot memory init</li>
+<li>2026-04-12 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f3647c11469c7c728746e3947aecc5d5b067b2fb"><code>f3647c1</code></a> feat(memory): production-grade allocator architecture (#49)</li>
+<li>2026-04-06 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a941264b051e54b64e96a4f72375cd2b6d533b56"><code>a941264</code></a> feat: capability-based CWD, *at syscalls, and O_RESOLVE_BENEATH sandboxing</li>
+<li>2026-04-06 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/309a9c1bb5e9938b0b6b5826d27f8977414ca63e"><code>309a9c1</code></a> refactor: runtime allocation, scheduler lock decoupling, FixedQueue, and VGA improvements</li>
+<li>2026-03-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a9a6cd68b3dbce1e3ecacea313dd598b92312002"><code>a9a6cd6</code></a> Implement block-oriented memory management and ownership tracking</li>
+<li>2026-03-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ec8ee9f88ec5a4cade0c7e5f8433c56605ce888a"><code>ec8ee9f</code></a> refactor(memory): update reference counting logic for COW frames</li>
+<li>2026-03-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aaa89e0ee568eb24908817c20ec50bf4fd3cd282"><code>aaa89e0</code></a> Refactor: Decouple per-CPU scheduler state and logic from the global scheduler instance by moving <code>SchedulerCpu</code> to local CPU storage.</li>
+<li>2026-03-21 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3f93c628fd8be78fd9cc29fbf21692aaacbf494"><code>c3f93c6</code></a> feat: Implement TSC-based boot timing and milestones, along with an analysis...</li>
+<li>2026-03-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/eb7818d13ba67b1b3f718d6161f71eee0d123595"><code>eb7818d</code></a> feat: Implement static module loading from initfs paths and increase module blob size limit.</li>
+<li>2026-03-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acfdbbd126584bcd47355873c93c5584c67877c2"><code>acfdbbd</code></a> feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.</li>
+<li>2026-03-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/29c6f3d75165b41acd72a28d1e1b4e76bd51947c"><code>29c6f3d</code></a> Refactor scheduler task management and introduce interrupt frame handling</li>
+<li>2026-03-11 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7e66e694ffbf939c3651a463736b3bb396ddf24f"><code>7e66e69</code></a> refactor: enhance interrupt handling and logging mechanisms across the kernel</li>
+<li>2026-03-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ff0a36bce4090ee92da37b55fa47996fec5b04b9"><code>ff0a36b</code></a> Refactor memory management to use IRQ-disabled tokens</li>
+<li>2026-03-07 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3e8969978b2472d6cfcd0f870f115fbd1f8ef5a"><code>c3e8969</code></a> Fix race condition and lock</li>
+<li>2026-03-07 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/619165666846d9bc2dd9aaa04e391b5afea2c48b"><code>6191656</code></a> cargo fmt</li>
+<li>2026-03-07 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8cd1410218b1e92b6c02da5be2ecbd2ea975bc02"><code>8cd1410</code></a> Refactor memory allocation and deallocation in the kernel : per-CPU frame cach and a CPU-local BuddySet avoids the global lock in the common case.</li>
+<li>2026-03-04 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/04b384e5690ff97d7de99d0ccaedf188e4442ba4"><code>04b384e</code></a> fix(build): improve stage assembly error handling and warnings</li>
+<li>2026-03-03 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2eb44c056ea5f9f63867e1cd47a3d020a4ffa9a1"><code>2eb44c0</code></a> feat(task): replace FpuState with ExtendedState, support xsave/xrstor</li>
+<li>2026-03-03 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ae5480a0fb745620e6a30939d03de5f0f354821d"><code>ae5480a</code></a> feat(silo): add silo attach for live debug output monitoring</li>
+<li>2026-03-03 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8c0056aeee74504cc0e19aa0051a4cd668a49afd"><code>8c0056a</code></a> feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>

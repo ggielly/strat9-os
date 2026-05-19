@@ -19,7 +19,7 @@ ABI_VERSION="${ABI_MAJOR}.${ABI_MINOR}"
 ABI_COMMITS="$(
   git log \
     --date=short \
-    --pretty='- %ad `%h` %s' \
+    --pretty='- %ad [`%h`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/%H) %s' \
     -- \
     workspace/abi \
     workspace/components/syscall \
@@ -113,6 +113,7 @@ for pkg in "${WORKSPACE_PACKAGES[@]}"; do
       --manifest-path "${ROOT_DIR}/Cargo.toml" \
       -p "${pkg}" \
       --no-deps \
+      --document-private-items \
       > "${DOC_STDOUT}" 2> "${DOC_STDERR}"; then
     echo "     error: rustdoc failed for ${pkg}, continuing"
     sed -n '1,200p' "${DOC_STDERR}" >&2
