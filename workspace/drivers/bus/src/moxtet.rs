@@ -125,6 +125,11 @@ impl BusDriver for Moxtet {
         COMPATIBLE
     }
 
+    /// Requires explicit SPI backend configuration; no auto-detect.
+    fn probe(&self) -> bool {
+        false
+    }
+
     /// Performs the init operation.
     fn init(&mut self, _base: usize) -> Result<(), BusError> {
         self.power_state = PowerState::On;

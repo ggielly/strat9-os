@@ -145,11 +145,15 @@ or
 cargo make
 ```
 
-## Device list where Strat9-OS is booting with sucess
+## Hardware support
+
+See [HARDWARE.md](HARDWARE.md) for a complete list of supported drivers, tested platforms, and future hardware targets.
+
+### Currently booting on
 
 - QEMU
 - VMware Workstation
-- Lenovo Thinkpad X13
+- Lenovo ThinkPad X13
 
 ## Repository way of life
 

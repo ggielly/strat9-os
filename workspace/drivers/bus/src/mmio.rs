@@ -1,33 +1,30 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
 
 pub struct MmioRegion {
-    base: AtomicUsize,
+    base: usize,
     size: usize,
 }
 
 impl MmioRegion {
     /// Creates a new instance.
     pub const fn new() -> Self {
-        Self {
-            base: AtomicUsize::new(0),
-            size: 0,
-        }
+        Self { base: 0, size: 0 }
     }
 
     /// Performs the init operation.
     pub fn init(&mut self, base: usize, size: usize) {
-        self.base.store(base, Ordering::Release);
+        self.base = base;
         self.size = size;
     }
 
     /// Performs the base operation.
     pub fn base(&self) -> usize {
-        self.base.load(Ordering::Acquire)
+        self.base
     }
 
     /// Returns whether valid.
     pub fn is_valid(&self) -> bool {
-        self.base() != 0
+        self.base != 0
     }
 
     /// Performs the checked addr operation.

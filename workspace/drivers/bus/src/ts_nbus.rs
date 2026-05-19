@@ -242,6 +242,11 @@ impl BusDriver for TsNbus {
         COMPATIBLE
     }
 
+    /// Requires explicit GPIO pin configuration; no auto-detect.
+    fn probe(&self) -> bool {
+        false
+    }
+
     /// Performs the init operation.
     fn init(&mut self, _base: usize) -> Result<(), BusError> {
         self.reset_bus();

@@ -6,10 +6,9 @@ extern crate alloc;
 
 use core::{alloc::Layout, panic::PanicInfo};
 use strat9_bus_drivers::{
-    BusDriver,
     probe::{self, ProbeMode},
+    registry,
     scheme::BusSchemeServer,
-    simple_pm_bus::SimplePmBus,
 };
 use strat9_syscall::call;
 
@@ -51,10 +50,10 @@ fn u32_to_ascii(mut n: u32, buf: &mut [u8; 10]) -> &[u8] {
     &buf[pos..10]
 }
 
-/// Implements log probe counts.
+/// Log probe counts
 fn log_probe_counts(passed: u32, failed: u32) {
     let mut line = [0u8; 64];
-    let prefix = b"[strate-bus] MMIO probe: passed=";
+    let prefix = b"[strate-bus] MMIO self-test: passed=";
     let mid = b" failed=";
     let suffix = b"\n";
     let mut off = 0usize;
@@ -171,17 +170,6 @@ fn load_probe_mode() -> ProbeMode {
     parse_probe_mode_from_silo_toml(text).unwrap_or(ProbeMode::Full)
 }
 
-/// Implements startup hardware test.
-fn startup_hardware_test(driver: &mut SimplePmBus) -> bool {
-    if driver.compatible().is_empty() {
-        return false;
-    }
-    if driver.init(0x1000).is_err() {
-        return false;
-    }
-    driver.shutdown().is_ok()
-}
-
 #[unsafe(no_mangle)]
 /// Implements start.
 pub extern "C" fn _start() -> ! {
@@ -238,22 +226,23 @@ pub extern "C" fn _start() -> ! {
             let _ = call::debug_log(b"[strate-bus] Probe mode: full\n");
         }
     }
-    let _ = call::debug_log(b"[strate-bus] MMIO probe starting\n");
-    let probe_result = probe::run_mmio_probe_with_mode(probe_mode);
+    let _ = call::debug_log(b"[strate-bus] MMIO self-test starting\n");
+    let probe_result = probe::run_mmio_self_test_with_mode(probe_mode);
     if probe_result.all_passed() {
-        let _ = call::debug_log(b"[strate-bus] MMIO probe: ALL PASSED\n");
+        let _ = call::debug_log(b"[strate-bus] MMIO self-test: ALL PASSED\n");
     } else {
-        let _ = call::debug_log(b"[strate-bus] MMIO probe: FAILURES DETECTED\n");
+        let _ = call::debug_log(b"[strate-bus] MMIO self-test: FAILURES DETECTED\n");
     }
     log_probe_counts(probe_result.passed, probe_result.failed);
-    let mut driver = SimplePmBus::new();
-    if startup_hardware_test(&mut driver) {
-        let _ = call::debug_log(b"[strate-bus] Startup hardware test: OK\n");
-    } else {
-        let _ = call::debug_log(b"[strate-bus] Startup hardware test: FAILED\n");
+
+    // Init all bus drivers and skipped if the hardware is not present
+    let drivers = registry::init_all();
+    {
+        let msg = alloc::format!("[strate-bus] {} driver(s) registered\n", drivers.len());
+        let _ = call::debug_log(msg.as_bytes());
     }
 
-    let mut server = BusSchemeServer::new(driver, port);
-    server.refresh_pci_cache();
+    let mut server = BusSchemeServer::new(drivers, port);
+    let _ = server.refresh_pci_cache();
     server.serve();
 }

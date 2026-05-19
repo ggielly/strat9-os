@@ -4,6 +4,8 @@
 
 extern crate alloc;
 
+// TODO : split this file into multiple modules like the TOML parser, the silo launcher, the wasm runner, etc.
+
 use alloc::{string::String, vec::Vec};
 use core::{alloc::Layout, panic::PanicInfo};
 use strat9_syscall::{
@@ -38,43 +40,25 @@ fn alloc_error(_layout: Layout) -> ! {
     call::exit(12);
 }
 
-// ---------------------------------------------------------------------------
-// SECURITY POLICY & PROFILES (from silo_security_model.md)
-// ---------------------------------------------------------------------------
+// compile‑time perfect‑hash map (phf)
 
-struct FamilyProfile {
-    family: &'static str,
-    max_mode: SiloMode,
-}
+use phf::phf_map;
 
-/// Returns family profile — O(1) match (compiler jump table).
-fn get_family_profile(name: &str) -> FamilyProfile {
-    match name {
-        "SYS" => FamilyProfile {
-            family: "SYS",
-            max_mode: SiloMode(0o777),
-        },
-        "DRV" => FamilyProfile {
-            family: "DRV",
-            max_mode: SiloMode(0o076),
-        },
-        "FS" => FamilyProfile {
-            family: "FS",
-            max_mode: SiloMode(0o076),
-        },
-        "NET" => FamilyProfile {
-            family: "NET",
-            max_mode: SiloMode(0o076),
-        },
-        "WASM" => FamilyProfile {
-            family: "WASM",
-            max_mode: SiloMode(0o006),
-        },
-        "USR" | _ => FamilyProfile {
-            family: "USR",
-            max_mode: SiloMode(0o004),
-        },
-    }
+static FAMILY_PROFILES: phf::Map<&'static str, SiloMode> = phf_map! {
+    "SYS"  => SiloMode(0o777), // SYS family has no restrictions
+    "DRV"  => SiloMode(0o076), // DRV can do anything except SYS operations
+    "FS"   => SiloMode(0o076), // FS can do anything except SYS operations
+    "NET"  => SiloMode(0o076), // NET can do anything except SYS operations
+    "WASM" => SiloMode(0o006), // WASM can only do NET and FS operations
+};
+
+/// Returns the maximum `SiloMode` ceiling for a given family name.
+/// Unknown families get the least-privileged default (`USR` / 0o004).
+fn get_family_profile(name: &str) -> SiloMode {
+    FAMILY_PROFILES
+        .get(name)
+        .copied()
+        .unwrap_or(SiloMode(0o004))
 }
 
 // ---------------------------------------------------------------------------
@@ -547,10 +531,10 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
 
     for s_def in silos {
         let requested_mode = parse_mode_octal(&s_def.mode).unwrap_or(0);
-        let profile = get_family_profile(&s_def.family);
+        let max_mode = get_family_profile(&s_def.family);
 
         // Policy Validation
-        if !SiloMode(requested_mode).is_subset_of(&profile.max_mode) {
+        if !SiloMode(requested_mode).is_subset_of(&max_mode) {
             log("[init] SECURITY VIOLATION: silo ");
             log(&s_def.name);
             log(" exceeds family ceiling\n");
@@ -961,7 +945,6 @@ fn supervisor_loop() -> ! {
         // the whole system when no child has exited yet.
         match call::waitpid(-1, Some(&mut wstatus), 1) {
             // WNOHANG = 1 : poll without blocking
-
             Ok(pid) if pid > 0 => {
                 let status = wstatus;
                 let mut found = false;

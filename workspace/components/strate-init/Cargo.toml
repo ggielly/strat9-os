@@ -2,11 +2,14 @@
 name = "strate-init"
 version = "0.1.0"
 edition = "2024"
+authors = ["Guillaume Gielly"]
+
 
 [dependencies]
 # Strat9 Kernel integration
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
 alloc-freelist = { path = "../alloc-freelist" }
+phf = { version = "0.13", default-features = false, features = ["macros"] }
 
 [features]
 default = []
