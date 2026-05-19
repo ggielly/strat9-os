@@ -25,6 +25,7 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-05-19 `93c8927` async: implement and optimize async I/O completion handling
 - 2026-05-18 `7c5efb4` async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)
 - 2026-05-14 `cc4944a` Refactor and clean up code in various modules
 - 2026-05-14 `ecc416d` refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix
@@ -54,7 +55,6 @@ See:
 - 2026-03-03 `2eb44c0` feat(task): replace FpuState with ExtendedState, support xsave/xrstor
 - 2026-03-03 `ae5480a` feat(silo): add silo attach for live debug output monitoring
 - 2026-03-03 `8c0056a` feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.
-- 2026-03-03 `e9cce98` feat: Implement POSIX-compatible `clock_gettime` syscall and add `call::open` with POSIX `O_*` flag conversion.
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 
