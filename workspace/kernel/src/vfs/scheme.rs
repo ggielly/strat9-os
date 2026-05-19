@@ -5,6 +5,7 @@
 
 use crate::{
     ipc::{message::IpcMessage, port::PortId},
+    memory::{UserSliceRead, UserSliceWrite},
     sync::SpinLock,
     syscall::error::SyscallError,
 };
@@ -64,6 +65,46 @@ pub trait Scheme: Send + Sync {
 
     /// Write bytes to an open file.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError>;
+
+    /// Submit a read against a userspace buffer for async I/O.
+    ///
+    /// The default implementation performs the read synchronously and copies
+    /// the result back into the validated userspace slice before returning a
+    /// completed result.
+    fn async_read(
+        &self,
+        file_id: u64,
+        offset: u64,
+        user_buf_vaddr: u64,
+        len: usize,
+        _ring_id: u64,
+        _user_data: u64,
+    ) -> Result<AsyncSubmitResult, SyscallError> {
+        let user_buf = UserSliceWrite::new(user_buf_vaddr, len)?;
+        let mut kernel_buf = alloc::vec![0u8; len];
+        let n = self.read(file_id, offset, &mut kernel_buf)?;
+        user_buf.copy_from(&kernel_buf[..n]);
+        Ok(AsyncSubmitResult::Completed(n as i32))
+    }
+
+    /// Submit a write sourced from a userspace buffer for async I/O.
+    ///
+    /// The default implementation validates and copies the user buffer, then
+    /// performs the write synchronously before returning a completed result.
+    fn async_write(
+        &self,
+        file_id: u64,
+        offset: u64,
+        user_buf_vaddr: u64,
+        len: usize,
+        _ring_id: u64,
+        _user_data: u64,
+    ) -> Result<AsyncSubmitResult, SyscallError> {
+        let user_buf = UserSliceRead::new(user_buf_vaddr, len)?;
+        let kernel_buf = user_buf.read_to_vec();
+        let n = self.write(file_id, offset, &kernel_buf)?;
+        Ok(AsyncSubmitResult::Completed(n as i32))
+    }
 
     /// Close an open file.
     fn close(&self, file_id: u64) -> Result<(), SyscallError>;
@@ -156,69 +197,11 @@ pub trait Scheme: Send + Sync {
 /// Type-erased Scheme reference.
 pub type DynScheme = Arc<dyn Scheme>;
 
-/// Extension trait adding async operations to [`Scheme`].
-///
-/// Default implementations fall back to the blocking `Scheme` methods,
-/// making it safe to add without breaking existing schemes.
-pub trait AsyncScheme: Scheme {
-    /// Async read : returns immediately and delivers the result via the
-    /// async completion ring identified by `ring_id`.
-    fn async_read(
-        &self,
-        file_id: u64,
-        offset: u64,
-        buf: &mut [u8],
-        ring_id: u64,
-        user_data: u64,
-    ) -> Result<(), ()> {
-        let n = self.read(file_id, offset, buf).map_err(|_| ())?;
-        crate::async_io::complete::push_completion(ring_id, user_data, n as i32, 0);
-        Ok(())
-    }
-
-    /// Async write : returns immediately and delivers the result via the
-    /// async completion ring identified by `ring_id`.
-    fn async_write(
-        &self,
-        file_id: u64,
-        offset: u64,
-        buf: &[u8],
-        ring_id: u64,
-        user_data: u64,
-    ) -> Result<(), ()> {
-        let n = self.write(file_id, offset, buf).map_err(|_| ())?;
-        crate::async_io::complete::push_completion(ring_id, user_data, n as i32, 0);
-        Ok(())
-    }
-
-    /// Async open : returns immediately and delivers the result via the
-    /// async completion ring identified by `ring_id`.
-    fn async_open(
-        &self,
-        path: &str,
-        flags: crate::vfs::OpenFlags,
-        ring_id: u64,
-        user_data: u64,
-    ) -> Result<(), ()> {
-        let result = self.open(path, flags).map_err(|_| ())?;
-        crate::async_io::complete::push_completion(ring_id, user_data, result.file_id as i32, 0);
-        Ok(())
-    }
-
-    /// Async close : returns immediately and delivers the result via the
-    /// async completion ring identified by `ring_id`.
-    fn async_close(&self, file_id: u64, ring_id: u64, user_data: u64) -> Result<(), ()> {
-        let result: i32 = match self.close(file_id) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        };
-        crate::async_io::complete::push_completion(ring_id, user_data, result, 0);
-        Ok(())
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsyncSubmitResult {
+    Completed(i32),
+    InFlight,
 }
-
-/// Blanket implementation: every Scheme gets AsyncScheme for free.
-impl<T: Scheme + ?Sized> AsyncScheme for T {}
 
 pub const DEV_RAMFS: u64 = 1;
 pub const DEV_SYSFS: u64 = 2;

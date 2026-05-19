@@ -113,6 +113,17 @@ pub struct MemoryRegionInfo {
     pub _reserved: u32,
 }
 
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[repr(C)]
+pub struct AsyncRingLayout {
+    pub sq_base: u64,
+    pub cq_base: u64,
+    pub sq_size: u64,
+    pub cq_size: u64,
+    pub entries: u32,
+    pub _reserved: u32,
+}
+
 pub const PCI_MATCH_VENDOR_ID: u32 = 1 << 0;
 pub const PCI_MATCH_DEVICE_ID: u32 = 1 << 1;
 pub const PCI_MATCH_CLASS_CODE: u32 = 1 << 2;

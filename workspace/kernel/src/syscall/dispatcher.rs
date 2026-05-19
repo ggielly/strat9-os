@@ -207,10 +207,12 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SEM_POST => sem_handler::sys_sem_post(arg1),
         SYS_SEM_CLOSE => sem_handler::sys_sem_close(arg1),
 
-        // Async I/O syscalls (250-252) ======================================
+        // Async I/O syscalls (250-254) ======================================
         SYS_ASYNC_SETUP => async_sys::sys_async_setup(arg1, arg2),
         SYS_ASYNC_ENTER => async_sys::sys_async_enter(arg1, arg2, arg3, arg4),
         SYS_ASYNC_CANCEL => async_sys::sys_async_cancel(arg1, arg2, arg3),
+        SYS_ASYNC_MAP => async_sys::sys_async_map(arg1, arg2),
+        SYS_ASYNC_DESTROY => async_sys::sys_async_destroy(arg1, arg2),
 
         // PCI syscalls ======================================================
         SYS_PCI_ENUM => pci::sys_pci_enum(arg1, arg2, arg3),
