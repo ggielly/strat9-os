@@ -8,6 +8,7 @@ extern crate alloc;
 
 pub mod mmio;
 pub mod probe;
+pub mod registry; // The list of bus drivers is here
 pub mod scheme;
 
 pub mod arm_cci;
@@ -78,6 +79,14 @@ pub trait BusDriver: Send + Sync {
     fn name(&self) -> &str;
     /// Performs the compatible operation.
     fn compatible(&self) -> &[&str];
+    /// Returns `true` if the driver believes the hardware is present.
+    ///
+    /// The default returns `true` (assume present — let `init()` decide).
+    /// Override to `false` for software-backed buses (GPIO, SPI, …) that
+    /// cannot auto-detect their hardware without platform configuration.
+    fn probe(&self) -> bool {
+        true
+    }
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError>;
     /// Performs the shutdown operation.

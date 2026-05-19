@@ -11,6 +11,7 @@ pub mod virtio;
 /// Performs the init operation.
 pub fn init() {
     nic::init();
+    storage::init();
     timer::init();
     usb::init();
     virtio::gpu::init();
