@@ -26,7 +26,7 @@ use crate::{
     dma::DmaBuffer,
     hardware::pci_client::{self as pci, ProbeCriteria},
     memory,
-    memory::phys_to_virt,
+    memory::{phys_to_virt, UserSliceRead, UserSliceWrite},
     sync::{SpinLock, WaitQueue},
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -115,6 +115,8 @@ const ATA_IDENTIFY: u8 = 0xEC;
 const ATA_READ_DMA_EXT: u8 = 0x25;
 const ATA_WRITE_DMA_EXT: u8 = 0x35;
 
+const EFAULT: i32 = -14;
+
 // PxIS bit 30 = Task File Error Status
 const PXIS_TFES: u32 = 1 << 30;
 
@@ -138,6 +140,8 @@ pub enum AhciError {
     InvalidSector,
     #[error("buffer too small (need ≥ SECTOR_SIZE bytes)")]
     BufferTooSmall,
+    #[error("invalid userspace buffer")]
+    InvalidUserBuffer,
     #[error("no usable SATA port found")]
     NoPort,
 }
@@ -232,6 +236,12 @@ static PORT_ASYNC_LEN: [AtomicU32; 32] = {
     [INIT; 32]
 };
 
+/// Whether the in-flight async command is a write operation.
+static PORT_ASYNC_IS_WRITE: [AtomicBool; 32] = {
+    const INIT: AtomicBool = AtomicBool::new(false);
+    [INIT; 32]
+};
+
 /// Raw pointer to a leaked `Box<DmaBuffer>` held until IRQ completion.
 /// 0 means no buffer.  Freed inside `handle_interrupt()` via
 /// `Box::from_raw()`.
@@ -245,6 +255,18 @@ static PORT_ASYNC_ACTIVE: [AtomicBool; 32] = {
     const INIT: AtomicBool = AtomicBool::new(false);
     [INIT; 32]
 };
+
+struct PendingAsyncReadCompletion {
+    ring_id: u64,
+    user_data: u64,
+    user_buf_vaddr: u64,
+    dma_buf: DmaBuffer,
+    len: usize,
+    result: i32,
+}
+
+static PENDING_ASYNC_READ_COMPLETIONS: SpinLock<Vec<PendingAsyncReadCompletion>> =
+    SpinLock::new(Vec::new());
 
 // ========== MMIO helpers ==============================
 
@@ -618,11 +640,7 @@ pub(crate) fn submit_async_storage_op(
     user_data: u64,
 ) -> Result<(), AhciError> {
     let controller = get_device().ok_or(AhciError::NoController)?;
-    let port = controller.ports.first().ok_or(AhciError::NoPort)?;
-    // Note: for now we ignore port_idx and always use the first port.
-    // Multi-port dispatch can be added when the controller exposes
-    // a port-by-index accessor.
-    let _ = port_idx;
+    let port = controller.port_by_num(port_idx).ok_or(AhciError::NoPort)?;
 
     if lba >= port.sector_count {
         return Err(AhciError::InvalidSector);
@@ -633,6 +651,12 @@ pub(crate) fn submit_async_storage_op(
         return Err(AhciError::BufferTooSmall);
     }
     let nbytes = (count as usize) * SECTOR_SIZE;
+
+    if write {
+        UserSliceRead::new(user_buf_vaddr, nbytes).map_err(|_| AhciError::InvalidUserBuffer)?;
+    } else {
+        UserSliceWrite::new(user_buf_vaddr, nbytes).map_err(|_| AhciError::InvalidUserBuffer)?;
+    }
 
     let dma_buf = DmaBuffer::alloc(nbytes).map_err(|_| AhciError::Alloc)?;
 
@@ -646,8 +670,9 @@ pub(crate) fn submit_async_storage_op(
     // Store async metadata *before* issuing the command.
     PORT_ASYNC_RING_ID[idx].store(ring_id, Ordering::Release);
     PORT_ASYNC_USER_DATA[idx].store(user_data, Ordering::Release);
-    PORT_ASYNC_BUF_VADDR[idx].store(if write { 0 } else { user_buf_vaddr }, Ordering::Release);
+    PORT_ASYNC_BUF_VADDR[idx].store(user_buf_vaddr, Ordering::Release);
     PORT_ASYNC_LEN[idx].store(nbytes as u32, Ordering::Release);
+    PORT_ASYNC_IS_WRITE[idx].store(write, Ordering::Release);
     PORT_ASYNC_ACTIVE[idx].store(true, Ordering::Release);
 
     match submit_async_cmd(port, lba, count, write, ata_cmd, dma_buf) {
@@ -656,10 +681,118 @@ pub(crate) fn submit_async_storage_op(
             // Roll back async metadata on submission failure.
             PORT_ASYNC_ACTIVE[idx].store(false, Ordering::Release);
             PORT_ASYNC_RING_ID[idx].store(0, Ordering::Release);
+            PORT_ASYNC_USER_DATA[idx].store(0, Ordering::Release);
+            PORT_ASYNC_BUF_VADDR[idx].store(0, Ordering::Release);
+            PORT_ASYNC_LEN[idx].store(0, Ordering::Release);
+            PORT_ASYNC_IS_WRITE[idx].store(false, Ordering::Release);
             PORT_ASYNC_DMA_PTR[idx].store(0, Ordering::Release);
             Err(e)
         }
     }
+}
+
+pub(crate) fn flush_deferred_async_read_completions(ring_id: u64) -> u32 {
+    let Some(task) = crate::process::current_task_clone() else {
+        return 0;
+    };
+    let Some(ring) = crate::async_io::ring::find_ring(ring_id) else {
+        return discard_deferred_async_read_completions(ring_id);
+    };
+    if ring.owner_pid != task.pid {
+        return 0;
+    }
+    // If the ring was destroyed, discard all deferred reads for it rather
+    // than trying to push completions into a dead ring.
+    if ring.destroyed.load(core::sync::atomic::Ordering::Acquire) != 0 {
+        return discard_deferred_async_read_completions(ring_id);
+    }
+
+    let pending = {
+        let mut guard = PENDING_ASYNC_READ_COMPLETIONS.lock();
+        // Extract only entries for this ring_id; leave others in place
+        // (avoids the allocate + deallocate overhead of take + put-back).
+        let mut pending = Vec::new();
+        let mut i = 0;
+        while i < guard.len() {
+            if guard[i].ring_id == ring_id {
+                // swap_remove is O(1); completion ordering across rings
+                // is not guaranteed to userspace.
+                pending.push(guard.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        pending
+    };
+
+    let mut flushed = 0;
+
+    for mut completion in pending {
+        // All entries in `pending` belong to `ring_id` (extracted by retain above).
+
+        if completion.result >= 0 {
+            completion.result = match UserSliceWrite::new(completion.user_buf_vaddr, completion.len)
+            {
+                Ok(user_buf) => {
+                    /*
+                    Original code before assembly TEST
+                                  let src = unsafe {
+                                            core::slice::from_raw_parts(
+                                                completion.dma_buf.virt_addr() as *const u8,
+                                                completion.len,
+                                            )
+                                        };
+                                        user_buf.copy_from(src);
+
+                    */
+
+                    let src = completion.dma_buf.virt_addr() as *const u8;
+                    let dst = user_buf.as_ptr() as *mut u8;
+                    let n = completion.len;
+
+                    if n >= 128 {
+                        // Fast path for sector-aligned copies : `rep movsb`
+                        // uses a single front-end uop and leverages ERMSB/FSRM hardware on modern x86-64 (Ivy Bridge+ /
+                        // Ice Lake+), outperforming a scalar loop for buffers >= 128 bytes.
+                        unsafe {
+                            core::arch::asm!(
+                                "rep movsb",
+                                inout("rcx") n => _,
+                                inout("rsi") src => _,
+                                inout("rdi") dst => _,
+                                options(nostack),
+                            );
+                        }
+                    } else {
+                        user_buf
+                            .copy_from(unsafe { core::slice::from_raw_parts(src, completion.len) });
+                    }
+                    completion.len as i32
+                }
+                Err(_) => EFAULT,
+            };
+        }
+
+        if crate::async_io::complete::push_completion_for_ring(
+            &ring,
+            completion.user_data,
+            completion.result,
+            0,
+        ) {
+            flushed += 1;
+        } else {
+            // Ring was destroyed between our check and the push : drop silently.
+        }
+    }
+
+    flushed
+}
+
+pub(crate) fn discard_deferred_async_read_completions(ring_id: u64) -> u32 {
+    let mut guard = PENDING_ASYNC_READ_COMPLETIONS.lock();
+    let before = guard.len();
+    guard.retain(|completion| completion.ring_id != ring_id);
+    (before - guard.len()) as u32
 }
 
 // ========== IRQ handler ==============================
@@ -729,26 +862,21 @@ pub fn handle_interrupt() {
             let user_data = PORT_ASYNC_USER_DATA[idx].load(Ordering::Acquire);
             let buf_vaddr = PORT_ASYNC_BUF_VADDR[idx].load(Ordering::Acquire);
             let nbytes = PORT_ASYNC_LEN[idx].load(Ordering::Acquire) as usize;
+            let is_write = PORT_ASYNC_IS_WRITE[idx].load(Ordering::Acquire);
             let dma_ptr_val = PORT_ASYNC_DMA_PTR[idx].load(Ordering::Acquire);
 
             // Clear the active flag — this port is now idle.
             PORT_ASYNC_ACTIVE[idx].store(false, Ordering::Release);
             PORT_ASYNC_RING_ID[idx].store(0, Ordering::Release);
+            PORT_ASYNC_USER_DATA[idx].store(0, Ordering::Release);
             PORT_ASYNC_BUF_VADDR[idx].store(0, Ordering::Release);
+            PORT_ASYNC_LEN[idx].store(0, Ordering::Release);
+            PORT_ASYNC_IS_WRITE[idx].store(false, Ordering::Release);
+            PORT_ASYNC_DMA_PTR[idx].store(0, Ordering::Release);
 
             if dma_ptr_val != 0 {
                 // Take ownership of the leaked DmaBuffer back.
-                let dma_buf = unsafe { Box::from_raw(dma_ptr_val as *mut DmaBuffer) };
-
-                // For reads: copy DMA buffer content back to the user buffer.
-                if buf_vaddr != 0 && !PORT_SLOT0_ERROR[idx].load(Ordering::Acquire) {
-                    let src = dma_buf.virt_addr() as *const u8;
-                    let dst = buf_vaddr as *mut u8;
-                    // SAFETY: both pointers valid; nbytes ≤ DMA buffer capacity.
-                    unsafe {
-                        ptr::copy_nonoverlapping(src, dst, nbytes);
-                    }
-                }
+                let dma_buf = unsafe { *Box::from_raw(dma_ptr_val as *mut DmaBuffer) };
 
                 let result = if PORT_SLOT0_ERROR[idx].load(Ordering::Acquire) {
                     -5i32 // EIO
@@ -756,9 +884,24 @@ pub fn handle_interrupt() {
                     nbytes as i32
                 };
 
-                // Push CQE into the async ring.
-                crate::async_io::complete::push_completion(ring_id, user_data, result, 0);
-                // DmaBuffer dropped here — frames unpinned, buddy can recycle.
+                if is_write || result < 0 {
+                    crate::async_io::complete::push_completion(ring_id, user_data, result, 0);
+                } else {
+                    PENDING_ASYNC_READ_COMPLETIONS
+                        .lock()
+                        .push(PendingAsyncReadCompletion {
+                            ring_id,
+                            user_data,
+                            user_buf_vaddr: buf_vaddr,
+                            dma_buf,
+                            len: nbytes,
+                            result,
+                        });
+
+                    if let Some(ring) = crate::async_io::ring::find_ring(ring_id) {
+                        ring.wq.wake_all();
+                    }
+                }
             }
         } else {
             PORT_WQ[idx].wake_one();
@@ -769,6 +912,10 @@ pub fn handle_interrupt() {
 // ========== BlockDevice impl for AhciController ========================================================================================================================
 
 impl AhciController {
+    fn port_by_num(&self, port_num: u8) -> Option<&AhciPort> {
+        self.ports.iter().find(|port| port.port_num == port_num)
+    }
+
     /// Probe and initialise an AHCI controller from the PCI bus.
     ///
     /// # Safety
@@ -941,9 +1088,42 @@ impl AhciController {
         self.ports.first().map(|p| p.sector_count).unwrap_or(0)
     }
 
+    /// Return the logical port number of the first usable port.
+    pub fn first_port_num(&self) -> Option<u8> {
+        self.ports.first().map(|port| port.port_num)
+    }
+
     /// Performs the first port operation.
     fn first_port(&self) -> Option<&AhciPort> {
         self.ports.first()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AhciController, AhciPort};
+    use alloc::vec;
+
+    fn fake_port(port_num: u8) -> AhciPort {
+        AhciPort {
+            port_num,
+            port_virt: 0,
+            mem_phys: 0,
+            mem_virt: 0,
+            sector_count: 1024,
+        }
+    }
+
+    #[test]
+    fn selects_requested_port_number() {
+        let controller = AhciController {
+            abar_virt: 0,
+            ports: vec![fake_port(2), fake_port(5), fake_port(7)],
+        };
+
+        assert_eq!(controller.port_by_num(5).map(|port| port.port_num), Some(5));
+        assert_eq!(controller.port_by_num(1).map(|port| port.port_num), None);
+        assert_eq!(controller.first_port_num(), Some(2));
     }
 }
 

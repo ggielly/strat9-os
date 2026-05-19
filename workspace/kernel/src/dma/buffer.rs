@@ -85,9 +85,10 @@ impl Drop for DmaBuffer {
 
 // SAFETY: DmaBuffer owns a contiguous physical range; the virtual
 // address is derived via the identity-like HHDM mapping and is valid
-// for the lifetime of the buffer.
+// for the lifetime of the buffer.  Only Send is implemented : the
+// hardware (DMA engine) writes into the buffer without CPU synchronisation,
+// making &DmaBuffer across threads unsafe until an explicit fence.
 unsafe impl Send for DmaBuffer {}
-unsafe impl Sync for DmaBuffer {}
 
 // =============================================================================
 // DmaError

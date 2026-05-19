@@ -27,10 +27,11 @@ use crate::{
         ahci,
         virtio_block::{BlockDevice, BlockError, SECTOR_SIZE},
     },
+    memory::{UserSliceRead, UserSliceWrite},
     syscall::error::SyscallError,
     vfs::scheme::{
-        finalize_pseudo_stat, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
-        DEV_DEVFS, DT_BLK, DT_CHR,
+        finalize_pseudo_stat, AsyncSubmitResult, DirEntry, FileFlags, FileStat, OpenFlags,
+        OpenResult, Scheme, DEV_DEVFS, DT_BLK, DT_CHR,
     },
 };
 
@@ -77,6 +78,18 @@ fn prng_fill(buf: &mut [u8]) {
 
 /// Kernel scheme that serves raw block devices as files under `/dev`.
 pub struct BlkDevScheme;
+
+fn try_direct_async_request(offset: u64, len: usize) -> Option<(u64, u32)> {
+    if len == 0 {
+        return Some((offset / SECTOR_SIZE as u64, 0));
+    }
+    if offset % SECTOR_SIZE as u64 != 0 || len % SECTOR_SIZE != 0 {
+        return None;
+    }
+    let lba = offset / SECTOR_SIZE as u64;
+    let byte_count = u32::try_from(len).ok()?;
+    Some((lba, byte_count))
+}
 
 impl BlkDevScheme {
     /// Creates a new instance.
@@ -210,6 +223,73 @@ impl Scheme for BlkDevScheme {
     /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
         Ok(()) // stateless: nothing to clean up
+    }
+
+    fn async_read(
+        &self,
+        file_id: u64,
+        offset: u64,
+        user_buf_vaddr: u64,
+        len: usize,
+        ring_id: u64,
+        user_data: u64,
+    ) -> Result<AsyncSubmitResult, SyscallError> {
+        if file_id == FID_SDA {
+            let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
+            if let Some((lba, byte_count)) = try_direct_async_request(offset, len) {
+                let port_idx = dev.first_port_num().ok_or(SyscallError::BadHandle)?;
+                ahci::submit_async_storage_op(
+                    port_idx,
+                    lba,
+                    byte_count,
+                    user_buf_vaddr,
+                    false,
+                    ring_id,
+                    user_data,
+                )
+                .map_err(|_| SyscallError::IoError)?;
+                return Ok(AsyncSubmitResult::InFlight);
+            }
+        }
+
+        let user_buf = UserSliceWrite::new(user_buf_vaddr, len)?;
+        let mut kernel_buf = alloc::vec![0u8; len];
+        let n = self.read(file_id, offset, &mut kernel_buf)?;
+        user_buf.copy_from(&kernel_buf[..n]);
+        Ok(AsyncSubmitResult::Completed(n as i32))
+    }
+
+    fn async_write(
+        &self,
+        file_id: u64,
+        offset: u64,
+        user_buf_vaddr: u64,
+        len: usize,
+        ring_id: u64,
+        user_data: u64,
+    ) -> Result<AsyncSubmitResult, SyscallError> {
+        if file_id == FID_SDA {
+            let dev = ahci::get_device().ok_or(SyscallError::BadHandle)?;
+            if let Some((lba, byte_count)) = try_direct_async_request(offset, len) {
+                let port_idx = dev.first_port_num().ok_or(SyscallError::BadHandle)?;
+                ahci::submit_async_storage_op(
+                    port_idx,
+                    lba,
+                    byte_count,
+                    user_buf_vaddr,
+                    true,
+                    ring_id,
+                    user_data,
+                )
+                .map_err(|_| SyscallError::IoError)?;
+                return Ok(AsyncSubmitResult::InFlight);
+            }
+        }
+
+        let user_buf = UserSliceRead::new(user_buf_vaddr, len)?;
+        let kernel_buf = user_buf.read_to_vec();
+        let n = self.write(file_id, offset, &kernel_buf)?;
+        Ok(AsyncSubmitResult::Completed(n as i32))
     }
 
     //  size ========================================
@@ -462,4 +542,17 @@ fn sector_write<D: BlockDevice>(dev: &D, offset: u64, data: &[u8]) -> Result<usi
     }
 
     Ok(data_pos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::try_direct_async_request;
+
+    #[test]
+    fn direct_async_request_requires_sector_alignment() {
+        assert_eq!(try_direct_async_request(0, 512), Some((0, 512)));
+        assert_eq!(try_direct_async_request(512, 1024), Some((1, 1024)));
+        assert_eq!(try_direct_async_request(1, 512), None);
+        assert_eq!(try_direct_async_request(0, 513), None);
+    }
 }

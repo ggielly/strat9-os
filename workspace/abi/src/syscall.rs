@@ -44,15 +44,19 @@ pub const SYS_SEM_TRYWAIT: usize = 232;
 pub const SYS_SEM_POST: usize = 233;
 pub const SYS_SEM_CLOSE: usize = 234;
 
-// Block 250-252: async I/O
-pub const SYS_ASYNC_SETUP: usize = 250;
-pub const SYS_ASYNC_ENTER: usize = 251;
-pub const SYS_ASYNC_CANCEL: usize = 252;
-
 // Block 240-242: PCI
 pub const SYS_PCI_ENUM: usize = 240;
 pub const SYS_PCI_CFG_READ: usize = 241;
 pub const SYS_PCI_CFG_WRITE: usize = 242;
+
+// Block 250-254: async I/O
+pub const SYS_ASYNC_SETUP: usize = 250;
+pub const SYS_ASYNC_ENTER: usize = 251;
+pub const SYS_ASYNC_CANCEL: usize = 252;
+pub const SYS_ASYNC_MAP: usize = 253;
+pub const SYS_ASYNC_DESTROY: usize = 254;
+
+// FREE : 260 to 299
 
 // Block 300-399: process / thread
 pub const SYS_PROC_EXIT: usize = 300;
@@ -76,7 +80,7 @@ pub const SYS_SETPGID: usize = 317;
 pub const SYS_GETPGID: usize = 318;
 pub const SYS_SETSID: usize = 319;
 
-// Block 320-332: signal handling
+// Block 320-353: signal handling
 pub const SYS_KILL: usize = 320;
 pub const SYS_SIGPROCMASK: usize = 321;
 pub const SYS_SIGACTION: usize = 322;

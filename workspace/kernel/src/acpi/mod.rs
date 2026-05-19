@@ -11,6 +11,10 @@
 //! - WAET (VM optimization hints)
 //! - BGRT (boot graphics)
 //! - SLIT (NUMA distances)
+//!
+//! TODO : take a look at the v6 :
+//! https://uefi.org/sites/default/files/resources/ACPI_Spec_6.6.pdf
+//! https://uefi.org/specs/ACPI/6.6/
 
 pub mod bgrt;
 pub mod dmar;

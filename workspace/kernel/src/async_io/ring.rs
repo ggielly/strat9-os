@@ -6,10 +6,14 @@
 //! only the raw SQE/CQE arrays are visible to userspace.
 
 use crate::{
-    memory::{self, phys_to_virt, PhysFrame},
+    memory::{
+        self,
+        address_space::{VmaFlags, VmaPageSize, VmaType},
+        phys_to_virt, PhysFrame,
+    },
     sync::SpinLock,
 };
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::ops::{AsyncCqe, AsyncSqe, DEFAULT_RING_ENTRIES};
@@ -24,10 +28,14 @@ pub struct Ring {
     pub id: u64,
     /// Process that owns this ring (by PID).
     pub owner_pid: u32,
+    /// Stable mapping capability for the SQ pages.
+    pub sq_mapping_cap_id: crate::capability::CapId,
     /// Physical frame backing the SQ page.
     pub sq_frame: PhysFrame,
     /// Kernel virtual address of the SQ metadata header.
     pub sq_virt: u64,
+    /// Stable mapping capability for the CQ pages.
+    pub cq_mapping_cap_id: crate::capability::CapId,
     /// Physical frame backing the CQ page.
     pub cq_frame: PhysFrame,
     /// Kernel virtual address of the CQ metadata header.
@@ -40,6 +48,8 @@ pub struct Ring {
     pub destroyed: AtomicU32,
     /// Lock for pushing completions.
     pub cq_lock: SpinLock<()>,
+    /// Completions retained temporarily when the visible CQ is full.
+    pub completion_backlog: SpinLock<Vec<AsyncCqe>>,
     /// Order used for SQ allocation.
     pub sq_order: u8,
     /// Order used for CQ allocation.
@@ -51,6 +61,10 @@ pub struct Ring {
 impl Ring {
     /// Create a new ring and map it into the calling process's address space.
     pub fn create(pid: u32, entries: u32) -> Result<u64, RingError> {
+        if RING_REGISTRY.lock().len() >= MAX_RINGS {
+            return Err(RingError::TooManyRings);
+        }
+
         let entries = entries.max(2).min(DEFAULT_RING_ENTRIES).next_power_of_two();
 
         let sq_bytes = RING_META_SIZE + (entries as usize * core::mem::size_of::<AsyncSqe>());
@@ -100,25 +114,108 @@ impl Ring {
             (*cq).flags.store(0, Ordering::Release);
         }
 
-        let ring = Ring {
+        let ring = Arc::new(Ring {
             id: next_ring_id(),
             owner_pid: pid,
+            sq_mapping_cap_id: memory::allocate_mapping_cap_id(),
             sq_frame,
             sq_virt,
+            cq_mapping_cap_id: memory::allocate_mapping_cap_id(),
             cq_frame,
             cq_virt,
             entries,
             in_flight: AtomicU32::new(0),
             destroyed: AtomicU32::new(0),
             cq_lock: SpinLock::new(()),
+            completion_backlog: SpinLock::new(Vec::with_capacity(16)),
             sq_order,
             cq_order,
             wq: crate::sync::WaitQueue::new(),
-        };
+        });
 
         let id = ring.id;
-        RING_REGISTRY.lock().push(ring);
+        let mut registry = RING_REGISTRY.lock();
+        if registry.len() >= MAX_RINGS {
+            return Err(RingError::TooManyRings);
+        }
+        registry.push(ring);
         Ok(id)
+    }
+
+    /// Map the SQ and CQ buffers into the provided address space.
+    pub fn map_into_process(
+        &self,
+        addr_space: &crate::memory::AddressSpace,
+    ) -> Result<super::syscall::AsyncRingMapping, &'static str> {
+        let sq_page_count = 1usize << self.sq_order;
+        let cq_page_count = 1usize << self.cq_order;
+        let sq_phys_addrs = self.contiguous_phys_addrs(self.sq_frame, sq_page_count);
+        let cq_phys_addrs = self.contiguous_phys_addrs(self.cq_frame, cq_page_count);
+        let sq_mapping_cap_ids = alloc::vec![self.sq_mapping_cap_id; sq_page_count];
+        let cq_mapping_cap_ids = alloc::vec![self.cq_mapping_cap_id; cq_page_count];
+
+        let sq_base = addr_space
+            .find_free_vma_range(
+                crate::syscall::mmap::MMAP_BASE,
+                sq_page_count,
+                VmaPageSize::Small,
+            )
+            .ok_or("async ring: no free range for SQ")?;
+        addr_space.map_shared_frames_with_cap_ids(
+            sq_base,
+            &sq_phys_addrs,
+            Some(&sq_mapping_cap_ids),
+            VmaFlags {
+                readable: true,
+                writable: true,
+                executable: false,
+                user_accessible: true,
+            },
+            VmaType::Anonymous,
+        )?;
+
+        let cq_base = match addr_space.find_free_vma_range(
+            crate::syscall::mmap::MMAP_BASE,
+            cq_page_count,
+            VmaPageSize::Small,
+        ) {
+            Some(base) => base,
+            None => {
+                let _ = addr_space.unmap_region(sq_base, sq_page_count, VmaPageSize::Small);
+                return Err("async ring: no free range for CQ");
+            }
+        };
+
+        if let Err(err) = addr_space.map_shared_frames_with_cap_ids(
+            cq_base,
+            &cq_phys_addrs,
+            Some(&cq_mapping_cap_ids),
+            VmaFlags {
+                readable: true,
+                writable: true,
+                executable: false,
+                user_accessible: true,
+            },
+            VmaType::Anonymous,
+        ) {
+            let _ = addr_space.unmap_region(sq_base, sq_page_count, VmaPageSize::Small);
+            return Err(err);
+        }
+
+        Ok(super::syscall::AsyncRingMapping {
+            sq_base,
+            cq_base,
+            sq_size: (sq_page_count * 4096) as u64,
+            cq_size: (cq_page_count * 4096) as u64,
+            entries: self.entries,
+        })
+    }
+
+    fn contiguous_phys_addrs(&self, frame: PhysFrame, page_count: usize) -> Vec<u64> {
+        let base = frame.start_address.as_u64();
+        (0..page_count)
+            .map(|index| base + (index as u64) * 4096)
+            .collect()
     }
 
     /// Read the SQ tail (written by userspace, read by kernel).
@@ -179,6 +276,17 @@ impl Ring {
     }
 }
 
+impl Drop for Ring {
+    fn drop(&mut self) {
+        let _ = memory::revoke_mapping_cap_id(self.sq_mapping_cap_id);
+        let _ = memory::revoke_mapping_cap_id(self.cq_mapping_cap_id);
+        crate::sync::with_irqs_disabled(|t| {
+            memory::free_phys_contiguous(t, self.sq_frame, self.sq_order);
+            memory::free_phys_contiguous(t, self.cq_frame, self.cq_order);
+        });
+    }
+}
+
 // =============================================================================
 // RingMeta : header at the start of each ring page
 // =============================================================================
@@ -202,7 +310,7 @@ const RING_META_SIZE: usize = 64; // leave room for future flags
 
 const MAX_RINGS: usize = 128;
 
-static RING_REGISTRY: SpinLock<Vec<Ring>> = SpinLock::new(Vec::new());
+static RING_REGISTRY: SpinLock<Vec<Arc<Ring>>> = SpinLock::new(Vec::new());
 
 static NEXT_RING_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -211,9 +319,9 @@ fn next_ring_id() -> u64 {
 }
 
 /// Find a ring by its opaque id.
-pub fn find_ring(id: u64) -> Option<*const Ring> {
+pub fn find_ring(id: u64) -> Option<Arc<Ring>> {
     let guard = RING_REGISTRY.lock();
-    guard.iter().find(|r| r.id == id).map(|r| r as *const Ring)
+    guard.iter().find(|r| r.id == id).cloned()
 }
 
 /// Remove a ring from the registry and free its pages.
@@ -222,10 +330,8 @@ pub fn destroy_ring(id: u64) -> Result<(), RingError> {
     if let Some(pos) = guard.iter().position(|r| r.id == id) {
         let ring = guard.remove(pos);
         ring.destroy();
-        crate::sync::with_irqs_disabled(|t| {
-            memory::free_phys_contiguous(t, ring.sq_frame, ring.sq_order);
-            memory::free_phys_contiguous(t, ring.cq_frame, ring.cq_order);
-        });
+        ring.wq.wake_all();
+        crate::hardware::storage::ahci::discard_deferred_async_read_completions(id);
         Ok(())
     } else {
         Err(RingError::NotFound)
