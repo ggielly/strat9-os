@@ -1,7 +1,6 @@
 //! Top command with Ratatui no_std backend.
 //!
-//! This command keeps Chevron shell as default UX and only uses Ratatui while `top`
-//! is running.
+//! This command keeps Chevron shell as default UX and only uses Ratatui while `top` is running.
 
 pub(crate) mod ratatui_backend;
 
@@ -183,6 +182,7 @@ fn collect_snapshot() -> TopSnapshot {
         let mut strate_index: Vec<(String, Vec<String>)> = Vec::new();
         let mut silo_snapshots = crate::silo::list_silos_snapshot();
         silo_snapshots.sort_by_key(|s| s.id);
+
         for s in silo_snapshots {
             let label = s.strate_label.unwrap_or_default();
             let strate_name = if !label.is_empty() {
@@ -351,6 +351,7 @@ fn scheduler_runtime_lines(
         s.steal_order[1].as_str()
     );
     let cpu_count = s.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS);
+
     let line3 = if cpu_count == 0 {
         String::from("CPU: n/a")
     } else {
@@ -358,6 +359,7 @@ fn scheduler_runtime_lines(
             "cpu0 cur={} rq={}/{}/{} nr={}",
             s.current_task[0], s.rq_rt[0], s.rq_fair[0], s.rq_idle[0], s.need_resched[0]
         );
+
         if cpu_count == 1 {
             format!("CPU: {}", c0)
         } else {
@@ -474,7 +476,7 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                     ])
                     .split(area);
 
-                let title = Paragraph::new("Strat9 System Monitor (Ratatui no_std)")
+                let title = Paragraph::new("Strat9 system monitor")
                     .style(title_style)
                     .block(Block::default().borders(Borders::BOTTOM).title("Top"));
                 frame.render_widget(title, vertical[0]);

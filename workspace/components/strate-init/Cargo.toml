@@ -2,7 +2,7 @@
 name = "strate-init"
 version = "0.1.0"
 edition = "2024"
-authors = ["Guillaume Gielly"]
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 
 
 [dependencies]

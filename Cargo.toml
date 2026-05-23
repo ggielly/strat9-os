@@ -25,7 +25,6 @@ members = [
     "workspace/components/strate-init",
     "workspace/components/strate-console-admin",
     "workspace/components/ssh-core",
-    "workspace/components/strate-sshd",
     "workspace/components/libssh-strat9",
     "workspace/components/netutils/dhcp-client",
     "workspace/components/netutils/ping",
@@ -50,9 +49,10 @@ repository = "https://git.strat9-os.org/strat9-os/strat9-os.git"
 [workspace.dependencies]
 strat9-abi = { path = "workspace/abi" }
 spin = "0.10.0"
-bitflags = "2.11.0"
+bitflags = "2.11.1"
 log = "0.4"
 zerocopy = { version = "0.8.40", features = ["derive"] }
+endian-num = { version = "0.2", default-features = false }
 
 [workspace.lints.rust]
 dangling_pointers_from_temporaries = "deny"

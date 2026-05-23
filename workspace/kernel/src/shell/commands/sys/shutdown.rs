@@ -30,7 +30,7 @@ pub fn cmd_shutdown(_args: &[String]) -> Result<(), ShellError> {
         crate::process::yield_task();
     }
 
-    shell_println!("[shutdown] Power off...");
+    shell_println!("[shutdown] Powering off...");
     unsafe {
         crate::arch::x86_64::cli();
         // QEMU/Bochs ACPI shutdown

@@ -205,7 +205,7 @@ pub fn init_component(args: TokenStream, input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-// ========== parse_components_toml! ================================================================================================================================================================
+// ========== parse_components_toml ===============================================
 
 /// Emit compile-time dependency metadata parsed from `Components.toml`.
 ///
@@ -268,9 +268,11 @@ pub fn parse_components_toml(_input: TokenStream) -> TokenStream {
     })
 }
 
-// ========== Internal TOML parser ==========================================================================================================================================================================
+// ========== Internal TOML parser ==========================================================
 
 /// Minimal parser for the Components.toml format used by Strat9-OS.
+///
+/// TODO : improve !
 ///
 /// Handles lines of the form (one component per line):
 /// ```toml

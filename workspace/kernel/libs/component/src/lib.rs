@@ -159,7 +159,7 @@ impl PartialOrd for ComponentInfo {
     }
 }
 
-// ========== Linker section symbols ==========================================================================================================================================================================
+// ========== Linker section symbols ========================================
 
 // SAFETY: symbols defined by linker-limine.ld; bracket the `.component_entries`
 // section.  All objects between them are `ComponentEntry` structs placed by the
@@ -190,7 +190,7 @@ extern "C" {
 /// priority order after the acyclic ones (best-effort fallback).
 #[allow(unsafe_code)]
 pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
-    //  1. Collect entries for this stage ========================================================================================================================
+    //  Collect entries for this stage
     let mut components: Vec<&'static ComponentEntry> = Vec::new();
 
     // SAFETY: linker guarantees the section boundaries are valid and all
@@ -213,7 +213,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
         return Ok(());
     }
 
-    //  2. Build dependency graph ============================================================================================================================================
+    //  Build dependency graph ==========================================
     let n = components.len();
 
     // name → index in `components`
@@ -245,9 +245,13 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
         }
     }
 
-    //  3. Kahn's topological sort with priority tiebreaker ============================================================
-    // `ready` is sorted ascending by priority so `remove(0)` always gives the
-    // component with the smallest priority number (= earliest boot precedence).
+    //  =================== Kahn's topological sort with priority tiebreaker ==================
+    //
+    // Kahn’s Algorithm is a Breadth-First Search (BFS) based approach for performing Topological Sorting on a Directed Acyclic Graph (DAG).
+    //
+    // Instead of recursion (like in DFS), Kahn’s Algorithm uses the concept of in-degree and a queue to determine the order of nodes.
+    // `ready` is sorted ascending by priority so `remove(0)` always gives the component with the smallest priority number (= earliest boot precedence).
+    //
     let mut ready: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
     ready.sort_by_key(|&i| components[i].priority);
 
@@ -272,7 +276,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
         }
     }
 
-    //  4. Cycle detection fallback ============================================================================================================================================
+    //  Cycle detection fallback ====================
     if ordered.len() != n {
         log::error!(
             "[component] Dependency cycle in {:?} stage : cyclic components will run last",
@@ -349,7 +353,7 @@ pub fn list_components() -> Vec<&'static ComponentEntry> {
     components
 }
 
-// ========== parse_metadata! ==========
+// ========== parse_metadata ==========
 
 /// Parse `Components.toml` at compile time and return the dependency metadata.
 ///

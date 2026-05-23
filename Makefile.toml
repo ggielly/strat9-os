@@ -377,20 +377,6 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
-[tasks.strate-sshd]
-description = "Build the ssh daemon silo (debug profile)"
-cwd = "workspace/components/strate-sshd"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
 [tasks.strate-web-admin]
 description = "Build the web-admin silo (debug profile)"
 cwd = "workspace/components/strate-web-admin"
@@ -605,21 +591,6 @@ args = [
 [tasks.udp-tool-release]
 description = "Build the UDP scheme utility (release profile)"
 cwd = "workspace/components/netutils/udp-tool"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-sshd-release]
-description = "Build the ssh daemon silo (release profile)"
-cwd = "workspace/components/strate-sshd"
 command = "cargo"
 args = [
     "build",
@@ -869,22 +840,6 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
-[tasks.strate-sshd-dev-opt]
-description = "Build the ssh daemon silo (dev-opt profile)"
-cwd = "workspace/components/strate-sshd"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
 [tasks.strate-web-admin-dev-opt]
 description = "Build the web-admin silo (dev-opt profile)"
 cwd = "workspace/components/strate-web-admin"
@@ -920,7 +875,6 @@ dependencies = [
     "ping",
     "telnetd",
     "udp-tool",
-    "strate-sshd",
     "strate-web-admin",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_INCLUDE_TESTS = "0" }
@@ -950,7 +904,6 @@ dependencies = [
     "ping",
     "telnetd",
     "udp-tool",
-    "strate-sshd",
     "strate-web-admin",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os-test", STRAT9_INCLUDE_TESTS = "1" }
@@ -978,7 +931,6 @@ dependencies = [
     "ping-dev-opt",
     "telnetd-dev-opt",
     "udp-tool-dev-opt",
-    "strate-sshd-dev-opt",
     "strate-web-admin-dev-opt",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "dev-opt", STRAT9_INCLUDE_TESTS = "0" }
@@ -1006,7 +958,6 @@ dependencies = [
     "ping-release",
     "telnetd-release",
     "udp-tool-release",
-    "strate-sshd-release",
     "strate-web-admin-release",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release", STRAT9_INCLUDE_TESTS = "0" }
@@ -1242,7 +1193,7 @@ args = [
     "-serial",
     "mon:stdio",
     "-netdev",
-    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1",
+    "tap,id=net0,ifname=tap0,script=no,downscript=no",
     "-device",
     "e1000,netdev=net0,mac=52:54:00:12:34:56",
     "-D",

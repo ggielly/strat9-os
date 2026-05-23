@@ -102,6 +102,7 @@ const ARCH_GET_FS: usize = 0x1003;
 
 // === Linux syscall numbers used by musl internally ==================================
 // See sdk/musl/arch/x86_64/bits/syscall.h.in for the full list.
+//
 // We define the ones we actually handle; the rest fall through to the
 // default -ENOSYS branch.
 
@@ -425,14 +426,14 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
         // === Networking (Strat9 uses Plan 9-style scheme networking) ===
         //
         // When strate-net mounts a Plan 9 /net/tcp scheme, the mapping is:
-        //   LNR_socket   → open("/net/tcp/clone", O_RDWR), read "N", open("/net/tcp/N/data")
-        //   LNR_connect  → write "connect ip!port" to /net/tcp/N/ctl
-        //   LNR_bind     → write "bind ip!port" to /net/tcp/N/ctl
-        //   LNR_listen   → implicit in Plan 9 /net/tcp/N
-        //   LNR_accept   → open("/net/tcp/N/listen") or read from /net/tcp/N/data
-        //   LNR_sendto   → write to /net/tcp/N/data
-        //   LNR_recvfrom → read from /net/tcp/N/data
-        //   LNR_setsockopt / LNR_getsockopt → no-ops or ctl writes
+        //   LNR_socket   => open("/net/tcp/clone", O_RDWR), read "N", open("/net/tcp/N/data")
+        //   LNR_connect  => write "connect ip!port" to /net/tcp/N/ctl
+        //   LNR_bind     => write "bind ip!port" to /net/tcp/N/ctl
+        //   LNR_listen   => implicit in Plan 9 /net/tcp/N
+        //   LNR_accept   => open("/net/tcp/N/listen") or read from /net/tcp/N/data
+        //   LNR_sendto   => write to /net/tcp/N/data
+        //   LNR_recvfrom => read from /net/tcp/N/data
+        //   LNR_setsockopt / LNR_getsockopt => no-ops or ctl writes
         //
         // Until strate-net provides the Plan 9 scheme, return ENOSYS.
         // The current /dev/net/ scheme provides raw packet I/O only.

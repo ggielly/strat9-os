@@ -7,6 +7,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
+use endian_num::Le;
 use spin::Mutex;
 
 const VIRTIO_RING_SIZE: usize = 4;
@@ -35,31 +36,31 @@ unsafe impl Send for Virtqueue {}
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtqDesc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
+    addr: Le<u64>,
+    len: Le<u32>,
+    flags: Le<u16>,
+    next: Le<u16>,
 }
 
 #[repr(C)]
 struct VirtqAvail {
-    flags: u16,
-    idx: u16,
-    ring: [u16; VIRTIO_RING_SIZE],
+    flags: Le<u16>,
+    idx: Le<u16>,
+    ring: [Le<u16>; VIRTIO_RING_SIZE],
 }
 
 #[repr(C)]
 struct VirtqUsed {
-    flags: u16,
-    idx: u16,
+    flags: Le<u16>,
+    idx: Le<u16>,
     ring: [VirtqUsedElem; VIRTIO_RING_SIZE],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtqUsedElem {
-    id: u32,
-    len: u32,
+    id: Le<u32>,
+    len: Le<u32>,
 }
 
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
@@ -113,15 +114,15 @@ impl VirtioRng {
 
         unsafe {
             let desc = &mut *queue.desc.add(desc_idx as usize);
-            desc.addr = queue.entropy_phys;
-            desc.len = buf.len() as u32;
-            desc.flags = 1;
-            desc.next = 0;
+            desc.addr = Le::<u64>::from_ne(queue.entropy_phys);
+            desc.len = Le::<u32>::from_ne(buf.len() as u32);
+            desc.flags = Le::<u16>::from_ne(1u16);
+            desc.next = Le::<u16>::from_ne(0u16);
 
             let avail = &mut *queue.avail;
-            let idx = avail.idx as usize % VIRTIO_RING_SIZE;
-            avail.ring[idx] = desc_idx;
-            avail.idx = avail.idx.wrapping_add(1);
+            let idx = avail.idx.to_ne() as usize % VIRTIO_RING_SIZE;
+            avail.ring[idx] = Le::<u16>::from_ne(desc_idx);
+            avail.idx = Le::<u16>::from_ne(avail.idx.to_ne().wrapping_add(1));
         }
 
         self.device.notify_queue(0);
@@ -129,19 +130,19 @@ impl VirtioRng {
         loop {
             unsafe {
                 let used = &*queue.used;
-                if queue.last_used_idx != used.idx {
+                if queue.last_used_idx != used.idx.to_ne() {
                     let idx = queue.last_used_idx as usize % VIRTIO_RING_SIZE;
                     let elem = used.ring[idx];
 
-                    if elem.len as usize <= buf.len() {
+                    if elem.len.to_ne() as usize <= buf.len() {
                         core::ptr::copy_nonoverlapping(
                             queue.entropy_virt,
                             buf.as_mut_ptr(),
-                            elem.len as usize,
+                            elem.len.to_ne() as usize,
                         );
                         queue.free.push(desc_idx);
                         queue.last_used_idx = queue.last_used_idx.wrapping_add(1);
-                        return Ok(elem.len as usize);
+                        return Ok(elem.len.to_ne() as usize);
                     }
 
                     queue.free.push(desc_idx);

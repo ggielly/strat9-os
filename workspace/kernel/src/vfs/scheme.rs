@@ -80,6 +80,12 @@ pub trait Scheme: Send + Sync {
         _ring_id: u64,
         _user_data: u64,
     ) -> Result<AsyncSubmitResult, SyscallError> {
+        // Guard against userspace-controlled sizes causing kernel OOM.
+        // Schemes that need larger transfers must override async_read.
+        const MAX_SYNC_FALLBACK_LEN: usize = 4 * 1024 * 1024; // 4 MiB
+        if len > MAX_SYNC_FALLBACK_LEN {
+            return Err(SyscallError::InvalidArgument);
+        }
         let user_buf = UserSliceWrite::new(user_buf_vaddr, len)?;
         let mut kernel_buf = alloc::vec![0u8; len];
         let n = self.read(file_id, offset, &mut kernel_buf)?;
@@ -100,6 +106,11 @@ pub trait Scheme: Send + Sync {
         _ring_id: u64,
         _user_data: u64,
     ) -> Result<AsyncSubmitResult, SyscallError> {
+        // Guard against userspace-controlled sizes causing kernel OOM.
+        const MAX_SYNC_FALLBACK_LEN: usize = 4 * 1024 * 1024; // 4 MiB
+        if len > MAX_SYNC_FALLBACK_LEN {
+            return Err(SyscallError::InvalidArgument);
+        }
         let user_buf = UserSliceRead::new(user_buf_vaddr, len)?;
         let kernel_buf = user_buf.read_to_vec();
         let n = self.write(file_id, offset, &kernel_buf)?;

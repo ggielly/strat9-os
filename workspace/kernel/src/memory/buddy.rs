@@ -36,6 +36,7 @@ use x86_64::PhysAddr;
 const PAGE_SIZE: u64 = 4096;
 const DMA_MAX: u64 = 16 * 1024 * 1024;
 const NORMAL_MAX: u64 = 896 * 1024 * 1024;
+
 const LOCAL_CACHE_CAPACITY: usize = 256;
 const LOCAL_CACHE_REFILL_ORDER: u8 = 4;
 const LOCAL_CACHE_REFILL_FRAMES: usize = 1 << (LOCAL_CACHE_REFILL_ORDER as usize);
@@ -168,16 +169,31 @@ impl BuddyAllocator {
         let candidate_len = boot_alloc::snapshot_free_regions(&mut candidates);
         self.pass_reserve_bitmap_pools(&candidates[..candidate_len]);
 
+        ///////////
         // Pass 3: reserve exact segment storage from the remaining accessible
         // boot memory and then build the final segmented buddy layout from the boot
-        // allocator's remaining free ranges after bitmap reservations.
+        // allocator's remaining free ranges after bitmap and segment-storage
+        // reservations.
+        ///////////
+        // CRITICAL HERE : re-snapshot after pass_reserve_segment_storage
+        // because it consumes pages from the boot allocator.
+        // Using the stale snapshot would cause the buddy to build segments spanning pages that
+        // actually hold the ZoneSegment metadata, leading to silent corruption
+        // when those pages are later allocated and written by a live frame owner.
+        ///////////
         let mut remaining = [MemoryRegion {
             base: 0,
             size: 0,
             kind: MemoryKind::Reserved,
         }; boot_alloc::MAX_BOOT_ALLOC_REGIONS];
+
         let remaining_len = boot_alloc::snapshot_free_regions(&mut remaining);
         self.pass_reserve_segment_storage(&remaining[..remaining_len]);
+
+        // Re-snapshot: segment-storage pages are now consumed from the boot
+        // allocator and must not appear in any buddy segment.
+        let remaining_len = boot_alloc::snapshot_free_regions(&mut remaining);
+
         self.pass_build_segments(&remaining[..remaining_len]);
         self.pass_finalize_zone_accounting();
         self.pass_setup_segment_bitmaps();
@@ -718,6 +734,37 @@ impl BuddyAllocator {
         let block_end = frame_phys.saturating_add(block_size);
         let migratetype = Self::block_migratetype(frame_phys);
         let Some(segment_idx) = Self::find_segment_index(zone, frame_phys, order) else {
+            ////////////// REMOVE HERE DIAGNOSTIC ///////////////////////////////////
+            //
+            // diagnostic: dump zone/segment state to help identify the root cause.
+            //
+            serial_println!(
+                "[buddy] CRITICAL: frame 0x{:x} order {} not found in zone {:?} segments.",
+                frame_phys,
+                order,
+                zone.zone_type,
+            );
+            serial_println!(
+                "  segments={}/{} span_pages={} page_count={} allocated={}",
+                zone.segment_count,
+                zone.segment_capacity,
+                zone.span_pages,
+                zone.page_count,
+                zone.allocated,
+            );
+            for si in 0..zone.segment_count {
+                let seg = &zone.segments()[si];
+                serial_println!(
+                    "    segment[{}]: base=0x{:x} pages={} end=0x{:x}",
+                    si,
+                    seg.base.as_u64(),
+                    seg.page_count,
+                    seg.end_address(),
+                );
+            }
+            //
+            /////////////////// REMOVE HERE /////////////////////////
+
             panic!(
                 "buddy free: frame 0x{:x} order {} does not belong to any segment in zone {:?}",
                 frame_phys, order, zone.zone_type,
@@ -2255,7 +2302,65 @@ impl FrameAllocator for BuddyAllocator {
         }
 
         let frame_phys = frame.start_address.as_u64();
-        let zi = Self::zone_index_for_addr(frame_phys);
+        let mut zi = Self::zone_index_for_addr(frame_phys);
+
+        // Verify the address-selected zone actually contains this frame in its
+        // segment geometry. If not, search all zones to find the correct one.
+        // This handles edge cases where boot-allocator consumption of DMA-region
+        // pages (frame metadata, bitmap pools) leaves physical addresses below
+        // DMA_MAX that are outside any DMA segment.
+        if Self::find_segment_index(&self.zones[zi], frame_phys, order).is_none() {
+            let mut found = false;
+            for candidate_zi in 0..ZoneType::COUNT {
+                if candidate_zi == zi {
+                    continue;
+                }
+                if Self::find_segment_index(&self.zones[candidate_zi], frame_phys, order).is_some()
+                {
+                    serial_println!(
+                        "[buddy] WARN: frame 0x{:x} order {} belongs to zone[{}] {:?}, not zone[{}] {:?}; forwarding.",
+                        frame_phys, order,
+                        candidate_zi, self.zones[candidate_zi].zone_type,
+                        zi, self.zones[zi].zone_type,
+                    );
+                    zi = candidate_zi;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                serial_println!(
+                    "[buddy] free: frame 0x{:x} order {} not in any zone segment; checking all zones...",
+                    frame_phys, order,
+                );
+                for zzi in 0..ZoneType::COUNT {
+                    let z = &self.zones[zzi];
+                    serial_println!(
+                        "  zone[{}] {:?}: segments={} page_count={}",
+                        zzi,
+                        z.zone_type,
+                        z.segment_count,
+                        z.page_count,
+                    );
+                    for si in 0..z.segment_count {
+                        let seg = &z.segments()[si];
+                        serial_println!(
+                            "    segment[{}]: base=0x{:x} pages={} end=0x{:x}",
+                            si,
+                            seg.base.as_u64(),
+                            seg.page_count,
+                            seg.end_address(),
+                        );
+                    }
+                }
+                serial_println!(
+                    "[buddy] CRITICAL: frame 0x{:x} order {} belongs to no zone segment!",
+                    frame_phys,
+                    order,
+                );
+            }
+        }
+
         let zone = &mut self.zones[zi];
         // NOTE: O(2^order) MetaSlot scan. Acceptable for large-order frees
         // (kernel stacks, vmalloc) which are rare; order-0 path is handled
