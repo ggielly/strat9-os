@@ -25,6 +25,7 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-05-23 [`db23b53`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552) Fix major memory leak and remove sshd silo
 - 2026-05-19 [`93c8927`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0) async: implement and optimize async I/O completion handling
 - 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)
 - 2026-05-14 [`cc4944a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cc4944a2c78236c41fce4b8f1054e119fc2bcd8e) Refactor and clean up code in various modules
@@ -54,7 +55,6 @@ See:
 - 2026-03-04 [`04b384e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/04b384e5690ff97d7de99d0ccaedf188e4442ba4) fix(build): improve stage assembly error handling and warnings
 - 2026-03-03 [`2eb44c0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2eb44c056ea5f9f63867e1cd47a3d020a4ffa9a1) feat(task): replace FpuState with ExtendedState, support xsave/xrstor
 - 2026-03-03 [`ae5480a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ae5480a0fb745620e6a30939d03de5f0f354821d) feat(silo): add silo attach for live debug output monitoring
-- 2026-03-03 [`8c0056a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8c0056aeee74504cc0e19aa0051a4cd668a49afd) feat: expand and reorganize shell commands with new utilities for hardware, process, and VFS, and update boot ABI structures.
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 
