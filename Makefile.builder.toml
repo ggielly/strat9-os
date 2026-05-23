@@ -262,7 +262,7 @@ cp limine.conf build/iso_root/boot/limine/
 # Create ISO
 echo "  creating ISO image..."
 xorriso -as mkisofs \
-    -b boot/limine/limine-bios-cd.bin \
+    -b boot/limine/limine-bios-cd.bin \QEMU
     -no-emul-boot \
     -boot-load-size 4 \
     -boot-info-table \
@@ -294,7 +294,7 @@ echo ""
 description = "Complete build: musl + strates + kernel + ISO"
 dependencies = ["create-iso"]
 
-# =============================================================================
+# ========================================QEMU=====================================
 # QEMU execution
 # =============================================================================
 

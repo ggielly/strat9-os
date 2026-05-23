@@ -20,6 +20,7 @@ use crate::{
 };
 use alloc::sync::Arc;
 use core::{mem, ptr};
+use endian_num::Le;
 use net_core::{NetError, NetworkDevice};
 use spin::RwLock as SpinRwLock;
 
@@ -57,16 +58,19 @@ pub mod net_status {
 }
 
 /// VirtIO net header (prepended to every packet)
+///
+/// Fields are little-endian as mandated by the VirtIO spec
+/// https://docs.oasis-open.org/virtio/virtio/v1.4/virtio-v1.4.html#x1-2810006
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VirtioNetHeader {
     pub flags: u8,
     pub gso_type: u8,
-    pub hdr_len: u16,
-    pub gso_size: u16,
-    pub csum_start: u16,
-    pub csum_offset: u16,
-    pub num_buffers: u16,
+    pub hdr_len: Le<u16>,
+    pub gso_size: Le<u16>,
+    pub csum_start: Le<u16>,
+    pub csum_offset: Le<u16>,
+    pub num_buffers: Le<u16>,
 }
 
 /// VirtIO Network Device driver

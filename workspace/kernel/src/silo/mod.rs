@@ -204,6 +204,38 @@ pub fn sys_silo_enter_sandbox() -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// Sets the `strate_label` of a silo identified by handle.
+///
+/// Requires silo-admin capability. The label must be non-empty, at most 31
+/// bytes, and contain ONLY ASCII alphanumeric characters, `-`, `_`, or `.`.
+pub fn sys_silo_rename(handle: u64, label_ptr: u64, label_len: u64) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+    const MAX_LABEL: usize = 31;
+    let len = label_len as usize;
+    if len == 0 || len > MAX_LABEL {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let user_slice = UserSliceRead::new(label_ptr, len)?;
+    let raw = user_slice.read_to_vec();
+    let label = core::str::from_utf8(&raw).map_err(|_| SyscallError::InvalidArgument)?;
+    if !is_valid_label(label) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let silo_id = resolve_silo_handle(handle, CapPermissions::read_write())?;
+    let mut mgr = SILO_MANAGER.lock();
+    // Reject if another silo already owns this label.
+    if mgr
+        .silos
+        .values()
+        .any(|s| s.id.sid != silo_id && s.strate_label.as_deref() == Some(label))
+    {
+        return Err(SyscallError::AlreadyExists);
+    }
+    let silo = mgr.get_mut(silo_id)?;
+    silo.strate_label = Some(String::from(label));
+    Ok(0)
+}
+
 /// Performs the enforce silo may grant operation.
 pub fn enforce_silo_may_grant() -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;

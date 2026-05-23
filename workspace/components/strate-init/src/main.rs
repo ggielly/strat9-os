@@ -4,7 +4,11 @@
 
 extern crate alloc;
 
+//
 // TODO : split this file into multiple modules like the TOML parser, the silo launcher, the wasm runner, etc.
+//
+// TODO : the deafult main silo.toml file is loaded here. We need to have a fixed silo config inside the filesystem
+//
 
 use alloc::{string::String, vec::Vec};
 use core::{alloc::Layout, panic::PanicInfo};
@@ -62,7 +66,7 @@ fn get_family_profile(name: &str) -> SiloMode {
 }
 
 // ---------------------------------------------------------------------------
-// UTILS
+// Utils
 // ---------------------------------------------------------------------------
 
 /// Formatting helpers (no heap allocation).
@@ -129,9 +133,12 @@ struct StrateDef {
     target: String,
 }
 
+// silo definition as parsed from config, before validation and transformation into SiloConfig
+// This is the structure for the TOML config.
 #[derive(Clone)]
 struct SiloDef {
     name: String,
+    label: Option<String>,
     sid: u32,
     family: String,
     mode: String,
@@ -178,6 +185,7 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
             }
             current_silo = Some(SiloDef {
                 name: String::new(),
+                label: None,
                 sid: 42,
                 family: String::from("USR"),
                 mode: String::from("000"),
@@ -206,6 +214,7 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
                 match section {
                     Section::Silo => match key {
                         "name" => s.name = String::from(val),
+                        "label" => s.label = Some(String::from(val)),
                         "sid" => s.sid = val.parse().unwrap_or(42),
                         "family" => s.family = String::from(val),
                         "mode" => s.mode = String::from(val),
@@ -264,6 +273,7 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
         log("[init] Missing mandatory silo 'bus' in config, adding fallback\n");
         silos.push(SiloDef {
             name: String::from("bus"),
+            label: None,
             sid: 42,
             family: String::from("DRV"),
             mode: String::from("076"),
@@ -286,6 +296,7 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
         log("[init] Missing mandatory silo 'network' in config, adding fallback\n");
         silos.push(SiloDef {
             name: String::from("network"),
+            label: None,
             sid: 42,
             family: String::from("NET"),
             mode: String::from("076"),
@@ -308,6 +319,7 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
         log("[init] Missing mandatory silo 'dhcp-client' in config, adding fallback\n");
         silos.push(SiloDef {
             name: String::from("dhcp-client"),
+            label: None,
             sid: 42,
             family: String::from("NET"),
             mode: String::from("076"),
@@ -621,6 +633,14 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
             }
         };
 
+        if let Some(ref lbl) = s_def.label {
+            if let Err(e) = call::silo_rename(silo_handle, lbl.as_ptr() as usize, lbl.len()) {
+                log("[init] silo_rename failed: ");
+                log(e.name());
+                log("\n");
+            }
+        }
+
         if s_def.strates.is_empty() {
             log("[init] No strates declared for silo ");
             log(&s_def.name);
@@ -806,7 +826,28 @@ name = "network"
 family = "NET"
 mode = "076"
 sid = 42
-[[silos.strates]]
+[[silos.strates]][heap][oom] cpu=0 irq=false tid=12 task=silo-105/strate-sshd size=78643200 align=1 effective=78643200
+[heap][oom] backend=vmalloc request_pages=19200 legacy_buddy_order_hint=15
+[heap][oom] last_failure backend=Vmalloc requested=78643200 align=1 effective=78643200 error=Vmalloc(PhysicalMemoryExhausted)
+[heap][oom] vmalloc_last_failure size=78643200 pages=19200 error=PhysicalMemoryExhausted
+[heap][oom] diagnosis=vmalloc could not acquire enough physical pages
+[heap][oom] buddy: total=24420 alloc=12486 free=11934
+[heap][oom] buddy_fail_by_order: o0=2  o1=0  o2=0  o3=0  o4=16  o5=0  o6=0  o7=0  o8=0  o9=0  o10=0  o11=0 
+[heap][oom] policy=fatal_global_alloc_path use try_alloc_kernel_heap()/allocate_kernel_virtual() on recoverable paths
+
+!!! KERNEL PANIC !!!
+=== GURU MEDIATiON :: KERNEL PANiK ===
+not kalm :: panik at workspace/kernel/src/memory/heap.rs:919:5
+Message: fatal kernel heap allocation failure: Layout { size: 78643200, align: 1 (1 << 0) }
+====================
+panic-hook: cpu=0 ticks=171701 cr3=0x5dba000
+panic-hook: current_task id=12 name=silo-105/strate-sshd
+panic-hook: sched cpu=0 current_tid=12 need_resched=true rq(rt/fair/idle)=0/4/1 blocked=2 init=true phase=2
+panic-hook: fb=1024x768 32bpp pitch=4096 text=102x37
+panic-hook: stack rsp=0xffff800005dee960 rbp=0xffff800005deea38
+panic-hook: backtrace (frame-pointer)
+  #00: rip=0xffff800005de03f8 rbp=0xffff800005deea38
+
 name = "strate-net"
 binary = "/initfs/strate-net"
 type = "elf"
@@ -814,7 +855,28 @@ type = "elf"
 [[silos]]
 name = "dhcp-client"
 family = "NET"
-mode = "076"
+mode = "076"[heap][oom] cpu=0 irq=false tid=12 task=silo-105/strate-sshd size=78643200 align=1 effective=78643200
+[heap][oom] backend=vmalloc request_pages=19200 legacy_buddy_order_hint=15
+[heap][oom] last_failure backend=Vmalloc requested=78643200 align=1 effective=78643200 error=Vmalloc(PhysicalMemoryExhausted)
+[heap][oom] vmalloc_last_failure size=78643200 pages=19200 error=PhysicalMemoryExhausted
+[heap][oom] diagnosis=vmalloc could not acquire enough physical pages
+[heap][oom] buddy: total=24420 alloc=12486 free=11934
+[heap][oom] buddy_fail_by_order: o0=2  o1=0  o2=0  o3=0  o4=16  o5=0  o6=0  o7=0  o8=0  o9=0  o10=0  o11=0 
+[heap][oom] policy=fatal_global_alloc_path use try_alloc_kernel_heap()/allocate_kernel_virtual() on recoverable paths
+
+!!! KERNEL PANIC !!!
+=== GURU MEDIATiON :: KERNEL PANiK ===
+not kalm :: panik at workspace/kernel/src/memory/heap.rs:919:5
+Message: fatal kernel heap allocation failure: Layout { size: 78643200, align: 1 (1 << 0) }
+====================
+panic-hook: cpu=0 ticks=171701 cr3=0x5dba000
+panic-hook: current_task id=12 name=silo-105/strate-sshd
+panic-hook: sched cpu=0 current_tid=12 need_resched=true rq(rt/fair/idle)=0/4/1 blocked=2 init=true phase=2
+panic-hook: fb=1024x768 32bpp pitch=4096 text=102x37
+panic-hook: stack rsp=0xffff800005dee960 rbp=0xffff800005deea38
+panic-hook: backtrace (frame-pointer)
+  #00: rip=0xffff800005de03f8 rbp=0xffff800005deea38
+
 sid = 42
 [[silos.strates]]
 name = "dhcp-client"
@@ -827,18 +889,29 @@ family = "NET"
 mode = "076"
 sid = 42
 [[silos.strates]]
-name = "telnetd"
-binary = "/initfs/bin/telnetd"
-type = "elf"
+name = "telnetd"[heap][oom] cpu=0 irq=false tid=12 task=silo-105/strate-sshd size=78643200 align=1 effective=78643200
+[heap][oom] backend=vmalloc request_pages=19200 legacy_buddy_order_hint=15
+[heap][oom] last_failure backend=Vmalloc requested=78643200 align=1 effective=78643200 error=Vmalloc(PhysicalMemoryExhausted)
+[heap][oom] vmalloc_last_failure size=78643200 pages=19200 error=PhysicalMemoryExhausted
+[heap][oom] diagnosis=vmalloc could not acquire enough physical pages
+[heap][oom] buddy: total=24420 alloc=12486 free=11934
+[heap][oom] buddy_fail_by_order: o0=2  o1=0  o2=0  o3=0  o4=16  o5=0  o6=0  o7=0  o8=0  o9=0  o10=0  o11=0 
+[heap][oom] policy=fatal_global_alloc_path use try_alloc_kernel_heap()/allocate_kernel_virtual() on recoverable paths
 
-[[silos]]
-name = "ssh"
-family = "NET"
-mode = "076"
-sid = 42
-[[silos.strates]]
-name = "sshd"
-binary = "/initfs/bin/sshd"
+!!! KERNEL PANIC !!!
+=== GURU MEDIATiON :: KERNEL PANiK ===
+not kalm :: panik at workspace/kernel/src/memory/heap.rs:919:5
+Message: fatal kernel heap allocation failure: Layout { size: 78643200, align: 1 (1 << 0) }
+====================
+panic-hook: cpu=0 ticks=171701 cr3=0x5dba000
+panic-hook: current_task id=12 name=silo-105/strate-sshd
+panic-hook: sched cpu=0 current_tid=12 need_resched=true rq(rt/fair/idle)=0/4/1 blocked=2 init=true phase=2
+panic-hook: fb=1024x768 32bpp pitch=4096 text=102x37
+panic-hook: stack rsp=0xffff800005dee960 rbp=0xffff800005deea38
+panic-hook: backtrace (frame-pointer)
+  #00: rip=0xffff800005de03f8 rbp=0xffff800005deea38
+
+binary = "/initfs/bin/telnetd"
 type = "elf"
 
 [[silos]]
@@ -941,8 +1014,7 @@ fn supervisor_loop() -> ! {
         // This eliminates the sched_yield() and saves some microseconds per loop iteration :)
         //
         //
-        // BUG: workspace/kernel/src/syscall/wait.rs : blocking path hangs
-        // the whole system when no child has exited yet.
+        // BUG: workspace/kernel/src/syscall/wait.rs : blocking path hangs the whole system when no child has exited yet.
         match call::waitpid(-1, Some(&mut wstatus), 1) {
             // WNOHANG = 1 : poll without blocking
             Ok(pid) if pid > 0 => {

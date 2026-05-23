@@ -1,4 +1,4 @@
-//! Strat9-OS syscall dispatcher.
+//! Strat9-OS syscall dispatcher
 //!
 //! Routes syscall numbers to handler functions and converts results to RAX values.
 //! Called from the naked `syscall_entry` assembly with a pointer to `SyscallFrame`.
@@ -10,6 +10,8 @@
 //! Handler implementations live in sibling modules (`net`, `volume`, `ipc_port`,
 //! `ipc_ring`, `semaphore`, `pci`, `chan`, `debug`, etc.). Only the routing
 //! logic and a handful of capability / process / file-io helpers remain here.
+//
+//
 
 use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, SemId};
 
@@ -301,6 +303,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SILO_PLEDGE => silo::sys_silo_pledge(arg1),
         SYS_SILO_UNVEIL => silo::sys_silo_unveil(arg1, arg2, arg3),
         SYS_SILO_ENTER_SANDBOX => silo::sys_silo_enter_sandbox(),
+        SYS_SILO_RENAME => silo::sys_silo_rename(arg1, arg2, arg3),
 
         // Architecture-specific (900-999) =========================================
         SYS_ABI_VERSION => {
@@ -312,6 +315,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             Err(SyscallError::NotImplemented)
         }
     };
+    //=============================================================================================================================
 
     match result {
         Ok(val) => {

@@ -4,7 +4,7 @@
 // Provides a unified framebuffer interface that can use:
 // - Limine framebuffer (bootloader-provided)
 // - VirtIO GPU framebuffer (native driver)
-// - Future: Other GPU drivers (Bochs DRM, etc.)
+// - Future/TODO : other GPU drivers (Bochs DRM, etc.)
 //
 // Features:
 // - Resolution switching

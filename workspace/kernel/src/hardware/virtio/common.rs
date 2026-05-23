@@ -16,6 +16,7 @@ use core::{
     ptr::{read_volatile, write_volatile},
     sync::atomic::{fence, AtomicU16, Ordering},
 };
+use endian_num::Le;
 
 /// VirtIO device features
 pub mod features {
@@ -220,8 +221,8 @@ impl Virtqueue {
         loop {
             // SAFETY: current is a valid descriptor index
             let desc = unsafe { &*self.desc_ptr.add(current as usize) };
-            let has_next = desc.flags & vring_flags::NEXT != 0;
-            let next = desc.next;
+            let has_next = desc.flags.to_ne() & vring_flags::NEXT != 0;
+            let next = desc.next.to_ne();
 
             self.free_descriptors.push(current);
 
@@ -256,14 +257,14 @@ impl Virtqueue {
 
             // SAFETY: current is a valid index regulated by alloc_descriptor
             let desc = unsafe { &mut *self.desc_ptr.add(current as usize) };
-            desc.addr = addr;
-            desc.len = len;
-            desc.flags = if write { vring_flags::WRITE } else { 0 };
+            desc.addr = Le::<u64>::from_ne(addr);
+            desc.len = Le::<u32>::from_ne(len);
+            desc.flags = Le::<u16>::from_ne(if write { vring_flags::WRITE } else { 0 });
 
             if !is_last {
                 let next = self.alloc_descriptor().ok_or("No free descriptors")?;
-                desc.flags |= vring_flags::NEXT;
-                desc.next = next;
+                desc.flags = Le::<u16>::from_ne(desc.flags.to_ne() | vring_flags::NEXT);
+                desc.next = Le::<u16>::from_ne(next);
                 current = next;
             }
         }

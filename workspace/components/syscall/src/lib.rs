@@ -1330,6 +1330,12 @@ pub mod call {
         unsafe { syscall0(number::SYS_SILO_ENTER_SANDBOX) }
     }
 
+    /// Rename a silo by its handle
+    /// Sert a silo label here
+    pub fn silo_rename(silo_id: usize, label_ptr: usize, label_len: usize) -> error::Result<usize> {
+        unsafe { syscall3(number::SYS_SILO_RENAME, silo_id, label_ptr, label_len) }
+    }
+
     // -----------------------------------------------------------------------
     // ABI introspection (block 900)
     // -----------------------------------------------------------------------

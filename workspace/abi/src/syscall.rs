@@ -204,6 +204,7 @@ pub const SYS_SILO_RESUME: usize = 808;
 pub const SYS_SILO_PLEDGE: usize = 809;
 pub const SYS_SILO_UNVEIL: usize = 810;
 pub const SYS_SILO_ENTER_SANDBOX: usize = 811;
+pub const SYS_SILO_RENAME: usize = 812;
 
 // Block 900: ABI introspection
 // Return format for SYS_ABI_VERSION: (major << 16) | minor

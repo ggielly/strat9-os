@@ -3,6 +3,7 @@ name = "strat9-bootloader"
 version = "0.1.0"
 edition = "2021"
 autobins = false
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 
 # BIOS uses lib target
 [lib]

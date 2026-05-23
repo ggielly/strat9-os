@@ -7,6 +7,8 @@
 //! - VirtIO spec: https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html
 //! - RedoxOS drivers: https://gitlab.redox-os.org/redox-os/drivers
 
+use endian_num::Le;
+
 pub mod common;
 pub mod console;
 pub mod gpu;
@@ -58,17 +60,19 @@ pub mod mmio {
 }
 
 /// A VirtIO virtqueue descriptor
+///
+/// All fields are little-endian as mandated by the VirtIO specification.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VirtqDesc {
     /// Physical address of the buffer
-    pub addr: u64,
+    pub addr: Le<u64>,
     /// Length of the buffer
-    pub len: u32,
+    pub len: Le<u32>,
     /// Flags (NEXT, WRITE, INDIRECT)
-    pub flags: u16,
+    pub flags: Le<u16>,
     /// Next descriptor index (if NEXT flag set)
-    pub next: u16,
+    pub next: Le<u16>,
 }
 
 /// Virtqueue descriptor flags

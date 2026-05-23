@@ -7,6 +7,7 @@ use crate::{
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
+use endian_num::Le;
 use spin::{Mutex, Once};
 
 const VIRTIO_RING_SIZE: usize = 64;
@@ -108,31 +109,31 @@ impl DirtyRect {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtqDesc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
+    addr: Le<u64>,
+    len: Le<u32>,
+    flags: Le<u16>,
+    next: Le<u16>,
 }
 
 #[repr(C)]
 struct VirtqAvail {
-    flags: u16,
-    idx: u16,
-    ring: [u16; VIRTIO_RING_SIZE],
+    flags: Le<u16>,
+    idx: Le<u16>,
+    ring: [Le<u16>; VIRTIO_RING_SIZE],
 }
 
 #[repr(C)]
 struct VirtqUsed {
-    flags: u16,
-    idx: u16,
+    flags: Le<u16>,
+    idx: Le<u16>,
     ring: [VirtqUsedElem; VIRTIO_RING_SIZE],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtqUsedElem {
-    id: u32,
-    len: u32,
+    id: Le<u32>,
+    len: Le<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -226,8 +227,8 @@ struct CmdResourceAttachBacking {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct MemEntry {
-    addr: u64,
-    length: u32,
+    addr: Le<u64>,
+    length: Le<u32>,
     _padding: u32,
 }
 
@@ -333,8 +334,8 @@ impl VirtioGpu {
             let phys = frame.start_address.as_u64();
             pages.push(frame);
             entries.push(MemEntry {
-                addr: phys,
-                length: PAGE_SIZE as u32,
+                addr: Le::<u64>::from_ne(phys),
+                length: Le::<u32>::from_ne(PAGE_SIZE as u32),
                 _padding: 0,
             });
             segments.push(FramebufferSegment {
@@ -346,7 +347,7 @@ impl VirtioGpu {
         if let Some(last) = entries.last_mut() {
             let rem = framebuffer_size % PAGE_SIZE;
             if rem != 0 {
-                last.length = rem as u32;
+                last.length = Le::<u32>::from_ne(rem as u32);
             }
         }
         if let Some(last) = segments.last_mut() {
@@ -356,7 +357,7 @@ impl VirtioGpu {
             }
         }
 
-        self.info.framebuffer_phys = entries.first().map(|e| e.addr).unwrap_or(0);
+        self.info.framebuffer_phys = entries.first().map(|e| e.addr.to_ne()).unwrap_or(0);
         self.info.framebuffer_virt = segments
             .first()
             .map(|s| s.virt)
@@ -402,9 +403,18 @@ impl VirtioGpu {
         }
 
         if resp.enabled != 0 {
-            self.info.width = resp.rect.width;
-            self.info.height = resp.rect.height;
-            self.info.stride = resp.rect.width * 4;
+            // Clamp to sane limits to prevent buddy exhaustion if the GPU
+            // returns garbage dimensions.
+            const MAX_WIDTH: u32 = 3840;
+            const MAX_HEIGHT: u32 = 2160;
+            let w = resp.rect.width.min(MAX_WIDTH);
+            let h = resp.rect.height.min(MAX_HEIGHT);
+            if w == 0 || h == 0 {
+                return Err("GET_DISPLAY_INFO: zero dimensions");
+            }
+            self.info.width = w;
+            self.info.height = h;
+            self.info.stride = w * 4;
         }
 
         Ok(())
@@ -610,29 +620,29 @@ impl VirtioGpu {
             }
 
             let head_desc = &mut *ctrl_queue.desc.add(head_idx as usize);
-            head_desc.addr = ctrl_queue.cmd_phys;
-            head_desc.len = cmd_size as u32;
-            head_desc.flags = VIRTQ_DESC_F_NEXT;
-            head_desc.next = middle_idx.unwrap_or(resp_idx);
+            head_desc.addr = Le::<u64>::from_ne(ctrl_queue.cmd_phys);
+            head_desc.len = Le::<u32>::from_ne(cmd_size as u32);
+            head_desc.flags = Le::<u16>::from_ne(VIRTQ_DESC_F_NEXT);
+            head_desc.next = Le::<u16>::from_ne(middle_idx.unwrap_or(resp_idx));
 
             if let Some(mid) = middle_idx {
                 let data_desc = &mut *ctrl_queue.desc.add(mid as usize);
-                data_desc.addr = ctrl_queue.payload_phys;
-                data_desc.len = payload_len as u32;
-                data_desc.flags = VIRTQ_DESC_F_NEXT;
-                data_desc.next = resp_idx;
+                data_desc.addr = Le::<u64>::from_ne(ctrl_queue.payload_phys);
+                data_desc.len = Le::<u32>::from_ne(payload_len as u32);
+                data_desc.flags = Le::<u16>::from_ne(VIRTQ_DESC_F_NEXT);
+                data_desc.next = Le::<u16>::from_ne(resp_idx);
             }
 
             let resp_desc = &mut *ctrl_queue.desc.add(resp_idx as usize);
-            resp_desc.addr = ctrl_queue.resp_phys;
-            resp_desc.len = resp_size as u32;
-            resp_desc.flags = VIRTQ_DESC_F_WRITE;
-            resp_desc.next = 0;
+            resp_desc.addr = Le::<u64>::from_ne(ctrl_queue.resp_phys);
+            resp_desc.len = Le::<u32>::from_ne(resp_size as u32);
+            resp_desc.flags = Le::<u16>::from_ne(VIRTQ_DESC_F_WRITE);
+            resp_desc.next = Le::<u16>::from_ne(0u16);
 
             let avail = &mut *ctrl_queue.avail;
-            let ring_idx = (avail.idx as usize) % (ctrl_queue.queue_size as usize);
-            avail.ring[ring_idx] = head_idx;
-            avail.idx = avail.idx.wrapping_add(1);
+            let ring_idx = (avail.idx.to_ne() as usize) % (ctrl_queue.queue_size as usize);
+            avail.ring[ring_idx] = Le::<u16>::from_ne(head_idx);
+            avail.idx = Le::<u16>::from_ne(avail.idx.to_ne().wrapping_add(1));
         }
 
         unsafe {
@@ -643,12 +653,12 @@ impl VirtioGpu {
         loop {
             unsafe {
                 let used = &*ctrl_queue.used;
-                if ctrl_queue.last_used_idx != used.idx {
+                if ctrl_queue.last_used_idx != used.idx.to_ne() {
                     let idx =
                         (ctrl_queue.last_used_idx as usize) % (ctrl_queue.queue_size as usize);
                     let elem = used.ring[idx];
                     ctrl_queue.last_used_idx = ctrl_queue.last_used_idx.wrapping_add(1);
-                    if elem.id as u16 == head_idx {
+                    if elem.id.to_ne() as u16 == head_idx {
                         break;
                     }
                 }

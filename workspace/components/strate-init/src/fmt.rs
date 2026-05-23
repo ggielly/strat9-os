@@ -5,8 +5,7 @@ use crate::log;
 /// Format a u32 as decimal digits and write it via `log()`.
 ///
 /// Handles up to 10 digits (max 4 294 967 295).  
-/// Zero-padded bytes in the buffer may be read by `from_utf8_unchecked` but are
-/// never written to `log` (the slice is trimmed).
+/// Zero-padded bytes in the buffer may be read by `from_utf8_unchecked` but are never written to `log` (the slice is trimmed).
 pub fn log_u32(mut value: u32) {
     let mut buf = [0u8; 10];
 

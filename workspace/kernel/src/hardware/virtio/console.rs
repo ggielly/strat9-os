@@ -7,6 +7,7 @@ use crate::{
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
+use endian_num::Le;
 use spin::{Mutex, Once};
 
 const VIRTIO_RING_SIZE: usize = 8;
@@ -51,31 +52,31 @@ unsafe impl Send for Virtqueue {}
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtqDesc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
+    addr: Le<u64>,
+    len: Le<u32>,
+    flags: Le<u16>,
+    next: Le<u16>,
 }
 
 #[repr(C)]
 struct VirtqAvail {
-    flags: u16,
-    idx: u16,
-    ring: [u16; VIRTIO_RING_SIZE],
+    flags: Le<u16>,
+    idx: Le<u16>,
+    ring: [Le<u16>; VIRTIO_RING_SIZE],
 }
 
 #[repr(C)]
 struct VirtqUsed {
-    flags: u16,
-    idx: u16,
+    flags: Le<u16>,
+    idx: Le<u16>,
     ring: [VirtqUsedElem; VIRTIO_RING_SIZE],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtqUsedElem {
-    id: u32,
-    len: u32,
+    id: Le<u32>,
+    len: Le<u32>,
 }
 
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
@@ -280,15 +281,15 @@ impl Virtqueue {
 
             let desc = &mut *self.desc.add(desc_idx as usize);
             core::ptr::copy_nonoverlapping(data.as_ptr(), self.buffer_virt, data.len());
-            desc.addr = self.buffer_phys;
-            desc.len = data.len() as u32;
-            desc.flags = 2;
-            desc.next = 0;
+            desc.addr = Le::<u64>::from_ne(self.buffer_phys);
+            desc.len = Le::<u32>::from_ne(data.len() as u32);
+            desc.flags = Le::<u16>::from_ne(2u16);
+            desc.next = Le::<u16>::from_ne(0u16);
 
             let avail = &mut *self.avail;
-            let idx = avail.idx as usize % VIRTIO_RING_SIZE;
-            avail.ring[idx] = desc_idx;
-            avail.idx = avail.idx.wrapping_add(1);
+            let idx = avail.idx.to_ne() as usize % VIRTIO_RING_SIZE;
+            avail.ring[idx] = Le::<u16>::from_ne(desc_idx);
+            avail.idx = Le::<u16>::from_ne(avail.idx.to_ne().wrapping_add(1));
         }
         Ok(())
     }
@@ -296,14 +297,14 @@ impl Virtqueue {
     /// Performs the read operation.
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, &'static str> {
         unsafe {
-            if self.last_used_idx == (*self.used).idx {
+            if self.last_used_idx == (*self.used).idx.to_ne() {
                 return Ok(0);
             }
 
             let idx = self.last_used_idx as usize % VIRTIO_RING_SIZE;
             let elem = (*self.used).ring[idx];
 
-            let len = core::cmp::min(elem.len as usize, buf.len());
+            let len = core::cmp::min(elem.len.to_ne() as usize, buf.len());
             core::ptr::copy_nonoverlapping(self.buffer_virt, buf.as_mut_ptr(), len);
 
             self.last_used_idx = self.last_used_idx.wrapping_add(1);
@@ -313,7 +314,7 @@ impl Virtqueue {
 
     /// Performs the poll used operation.
     fn poll_used(&mut self) -> bool {
-        unsafe { self.last_used_idx != (*self.used).idx }
+        unsafe { self.last_used_idx != (*self.used).idx.to_ne() }
     }
 }
 
