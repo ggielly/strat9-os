@@ -826,28 +826,6 @@ name = "network"
 family = "NET"
 mode = "076"
 sid = 42
-[[silos.strates]][heap][oom] cpu=0 irq=false tid=12 task=silo-105/strate-sshd size=78643200 align=1 effective=78643200
-[heap][oom] backend=vmalloc request_pages=19200 legacy_buddy_order_hint=15
-[heap][oom] last_failure backend=Vmalloc requested=78643200 align=1 effective=78643200 error=Vmalloc(PhysicalMemoryExhausted)
-[heap][oom] vmalloc_last_failure size=78643200 pages=19200 error=PhysicalMemoryExhausted
-[heap][oom] diagnosis=vmalloc could not acquire enough physical pages
-[heap][oom] buddy: total=24420 alloc=12486 free=11934
-[heap][oom] buddy_fail_by_order: o0=2  o1=0  o2=0  o3=0  o4=16  o5=0  o6=0  o7=0  o8=0  o9=0  o10=0  o11=0 
-[heap][oom] policy=fatal_global_alloc_path use try_alloc_kernel_heap()/allocate_kernel_virtual() on recoverable paths
-
-!!! KERNEL PANIC !!!
-=== GURU MEDIATiON :: KERNEL PANiK ===
-not kalm :: panik at workspace/kernel/src/memory/heap.rs:919:5
-Message: fatal kernel heap allocation failure: Layout { size: 78643200, align: 1 (1 << 0) }
-====================
-panic-hook: cpu=0 ticks=171701 cr3=0x5dba000
-panic-hook: current_task id=12 name=silo-105/strate-sshd
-panic-hook: sched cpu=0 current_tid=12 need_resched=true rq(rt/fair/idle)=0/4/1 blocked=2 init=true phase=2
-panic-hook: fb=1024x768 32bpp pitch=4096 text=102x37
-panic-hook: stack rsp=0xffff800005dee960 rbp=0xffff800005deea38
-panic-hook: backtrace (frame-pointer)
-  #00: rip=0xffff800005de03f8 rbp=0xffff800005deea38
-
 name = "strate-net"
 binary = "/initfs/strate-net"
 type = "elf"
@@ -855,29 +833,9 @@ type = "elf"
 [[silos]]
 name = "dhcp-client"
 family = "NET"
-mode = "076"[heap][oom] cpu=0 irq=false tid=12 task=silo-105/strate-sshd size=78643200 align=1 effective=78643200
-[heap][oom] backend=vmalloc request_pages=19200 legacy_buddy_order_hint=15
-[heap][oom] last_failure backend=Vmalloc requested=78643200 align=1 effective=78643200 error=Vmalloc(PhysicalMemoryExhausted)
-[heap][oom] vmalloc_last_failure size=78643200 pages=19200 error=PhysicalMemoryExhausted
-[heap][oom] diagnosis=vmalloc could not acquire enough physical pages
-[heap][oom] buddy: total=24420 alloc=12486 free=11934
-[heap][oom] buddy_fail_by_order: o0=2  o1=0  o2=0  o3=0  o4=16  o5=0  o6=0  o7=0  o8=0  o9=0  o10=0  o11=0 
-[heap][oom] policy=fatal_global_alloc_path use try_alloc_kernel_heap()/allocate_kernel_virtual() on recoverable paths
-
-!!! KERNEL PANIC !!!
-=== GURU MEDIATiON :: KERNEL PANiK ===
-not kalm :: panik at workspace/kernel/src/memory/heap.rs:919:5
-Message: fatal kernel heap allocation failure: Layout { size: 78643200, align: 1 (1 << 0) }
-====================
-panic-hook: cpu=0 ticks=171701 cr3=0x5dba000
-panic-hook: current_task id=12 name=silo-105/strate-sshd
-panic-hook: sched cpu=0 current_tid=12 need_resched=true rq(rt/fair/idle)=0/4/1 blocked=2 init=true phase=2
-panic-hook: fb=1024x768 32bpp pitch=4096 text=102x37
-panic-hook: stack rsp=0xffff800005dee960 rbp=0xffff800005deea38
-panic-hook: backtrace (frame-pointer)
-  #00: rip=0xffff800005de03f8 rbp=0xffff800005deea38
-
+mode = "076"
 sid = 42
+
 [[silos.strates]]
 name = "dhcp-client"
 binary = "/initfs/bin/dhcp-client"
@@ -888,29 +846,9 @@ name = "telnet"
 family = "NET"
 mode = "076"
 sid = 42
+
 [[silos.strates]]
-name = "telnetd"[heap][oom] cpu=0 irq=false tid=12 task=silo-105/strate-sshd size=78643200 align=1 effective=78643200
-[heap][oom] backend=vmalloc request_pages=19200 legacy_buddy_order_hint=15
-[heap][oom] last_failure backend=Vmalloc requested=78643200 align=1 effective=78643200 error=Vmalloc(PhysicalMemoryExhausted)
-[heap][oom] vmalloc_last_failure size=78643200 pages=19200 error=PhysicalMemoryExhausted
-[heap][oom] diagnosis=vmalloc could not acquire enough physical pages
-[heap][oom] buddy: total=24420 alloc=12486 free=11934
-[heap][oom] buddy_fail_by_order: o0=2  o1=0  o2=0  o3=0  o4=16  o5=0  o6=0  o7=0  o8=0  o9=0  o10=0  o11=0 
-[heap][oom] policy=fatal_global_alloc_path use try_alloc_kernel_heap()/allocate_kernel_virtual() on recoverable paths
-
-!!! KERNEL PANIC !!!
-=== GURU MEDIATiON :: KERNEL PANiK ===
-not kalm :: panik at workspace/kernel/src/memory/heap.rs:919:5
-Message: fatal kernel heap allocation failure: Layout { size: 78643200, align: 1 (1 << 0) }
-====================
-panic-hook: cpu=0 ticks=171701 cr3=0x5dba000
-panic-hook: current_task id=12 name=silo-105/strate-sshd
-panic-hook: sched cpu=0 current_tid=12 need_resched=true rq(rt/fair/idle)=0/4/1 blocked=2 init=true phase=2
-panic-hook: fb=1024x768 32bpp pitch=4096 text=102x37
-panic-hook: stack rsp=0xffff800005dee960 rbp=0xffff800005deea38
-panic-hook: backtrace (frame-pointer)
-  #00: rip=0xffff800005de03f8 rbp=0xffff800005deea38
-
+name = "telnetd"
 binary = "/initfs/bin/telnetd"
 type = "elf"
 
@@ -924,6 +862,7 @@ graphics_mode = "webrtc-native"
 graphics_max_sessions = 1
 graphics_session_ttl_sec = 1800
 graphics_turn_policy = "auto"
+
 [[silos.strates]]
 name = "web-admin"
 binary = "/initfs/bin/web-admin"
@@ -934,6 +873,7 @@ name = "graphics-webrtc"
 family = "NET"
 mode = "076"
 sid = 42
+
 [[silos.strates]]
 name = "strate-webrtc"
 binary = "/initfs/strate-webrtc"

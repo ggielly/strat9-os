@@ -70,7 +70,6 @@ This project is in active development and not production-ready. The ABI is still
     - IPv4 network stack with UDP/TCP/ICMP support, dhcp client, telnet server
     - e1000/e1000e and virtio NIC drivers
     - WASM native execution strate
-    - Remote access via SSHd or grapical with VNC
     - CLI for managing silo and strate : memory management, start, stop, delete...
     - Basic commands : cat, ls, uptime, reboot, shutdown, cd, top
     - VFS with /proc /sys ...

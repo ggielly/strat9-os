@@ -33,7 +33,7 @@ DHCP_CLIENT_ELF="target/x86_64-unknown-none/${PROFILE}/dhcp-client"
 PING_ELF="target/x86_64-unknown-none/${PROFILE}/ping"
 TELNETD_ELF="target/x86_64-unknown-none/${PROFILE}/telnetd"
 UDP_TOOL_ELF="target/x86_64-unknown-none/${PROFILE}/udp-tool"
-STRATE_SSHD_ELF="target/x86_64-unknown-none/${PROFILE}/strate-sshd"
+
 WEB_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/web-admin"
 HELLO_WASM_FILE="workspace/assets/wasm/hello.wasm"
 WASM_TEST_TOML_FILE="workspace/assets/wasm/wasm-test.toml"
@@ -170,12 +170,7 @@ if [ -f "$UDP_TOOL_ELF" ]; then
 else
     echo "    udp-tool     : (missing)"
 fi
-if [ -f "$STRATE_SSHD_ELF" ]; then
-    sshd_size=$(stat -c%s "$STRATE_SSHD_ELF")
-    echo "    strate-sshd  : $sshd_size bytes"
-else
-    echo "    strate-sshd  : (missing)"
-fi
+
 if [ -f "$WEB_ADMIN_ELF" ]; then
     wa_size=$(stat -c%s "$WEB_ADMIN_ELF")
     echo "    web-admin    : $wa_size bytes"
@@ -357,12 +352,7 @@ else
     echo "  [WARN] udp-tool binary not found at $UDP_TOOL_ELF"
 fi
 
-if [ -f "$STRATE_SSHD_ELF" ]; then
-    cp "$STRATE_SSHD_ELF" "$ISO_ROOT/initfs/bin/sshd"
-    echo "  [OK] Copied strate-sshd: /initfs/bin/sshd"
-else
-    echo "  [WARN] strate-sshd binary not found at $STRATE_SSHD_ELF"
-fi
+
 
 if [ -f "$WEB_ADMIN_ELF" ]; then
     cp "$WEB_ADMIN_ELF" "$ISO_ROOT/initfs/bin/web-admin"

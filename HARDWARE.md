@@ -127,7 +127,6 @@ All bus drivers are in `workspace/drivers/bus/`. They are probed at silo startup
 | TCP/IP stack (smoltcp) | `components/strate-net/src/` | ✅ Active |
 | DHCP client | `components/netutils/dhcp-client/` | ✅ Active |
 | Telnet server | `components/netutils/telnetd/` | ✅ Active |
-| SSH server | `components/strate-sshd/` | ✅ Active |
 
 ### Shared NIC libraries (linked into kernel)
 

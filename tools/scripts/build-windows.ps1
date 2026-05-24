@@ -93,7 +93,7 @@ $Components = @(
     @{ Name = "ping"; Cwd = "workspace\components\netutils\ping" }
     @{ Name = "telnetd"; Cwd = "workspace\components\netutils\telnetd" }
     @{ Name = "udp-tool"; Cwd = "workspace\components\netutils\udp-tool" }
-    @{ Name = "strate-sshd"; Cwd = "workspace\components\strate-sshd" }
+
     @{ Name = "strate-web-admin"; Cwd = "workspace\components\strate-web-admin" }
 )
 
@@ -176,7 +176,7 @@ $Modules = @(
     @{ Src = "target\$Target\$ProfileDir\ping"; Dst = "initfs/bin/ping" }
     @{ Src = "target\$Target\$ProfileDir\telnetd"; Dst = "initfs/bin/telnetd" }
     @{ Src = "target\$Target\$ProfileDir\udp-tool"; Dst = "initfs/bin/udp-tool" }
-    @{ Src = "target\$Target\$ProfileDir\strate-sshd"; Dst = "initfs/bin/sshd" }
+
     @{ Src = "target\$Target\$ProfileDir\web-admin"; Dst = "initfs/bin/web-admin" }
 )
 

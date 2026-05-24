@@ -50,16 +50,6 @@ name = "telnetd"
 binary = "/initfs/bin/telnetd"
 type = "elf"
 
-[[silos]]
-name = "ssh"
-family = "NET"
-mode = "076"
-sid = 42
-cpu_features = "sse2,aes"
-[[silos.strates]]
-name = "sshd"
-binary = "/initfs/bin/sshd"
-type = "elf"
 
 [[silos]]
 name = "web-admin"
