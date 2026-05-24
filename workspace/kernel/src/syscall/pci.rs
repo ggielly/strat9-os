@@ -67,7 +67,11 @@ fn read_pci_address(addr_ptr: u64) -> Result<pci::PciAddress, SyscallError> {
 }
 
 /// SYS_PCI_ENUM: enumerate PCI devices matching a probe criteria.
-pub fn sys_pci_enum(criteria_ptr: u64, out_ptr: u64, max_entries: u64) -> Result<u64, SyscallError> {
+pub fn sys_pci_enum(
+    criteria_ptr: u64,
+    out_ptr: u64,
+    max_entries: u64,
+) -> Result<u64, SyscallError> {
     if criteria_ptr == 0 || out_ptr == 0 {
         return Err(SyscallError::Fault);
     }

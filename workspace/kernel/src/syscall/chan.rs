@@ -6,8 +6,10 @@
 use super::error::SyscallError;
 use crate::{
     capability::{CapId, CapPermissions, ResourceType},
-    ipc::channel::{self, ChanId},
-    ipc::message::IpcMessage,
+    ipc::{
+        channel::{self, ChanId},
+        message::IpcMessage,
+    },
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
 };
