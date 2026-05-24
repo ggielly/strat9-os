@@ -65,7 +65,7 @@ fn trace_dhcp_frame(tag: &str, frame: &[u8]) {
     );
 }
 
-/// SYS_NET_RECV — Receive a raw Ethernet frame.
+/// SYS_NET_RECV : Receive a raw Ethernet frame.
 pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
     let mut kbuf = vec![0u8; buf_len as usize];
@@ -89,7 +89,7 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     Ok(n as u64)
 }
 
-/// SYS_NET_SEND — Transmit a raw Ethernet frame.
+/// SYS_NET_SEND : Transmit a raw Ethernet frame.
 pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
     let user = UserSliceRead::new(buf_ptr, buf_len as usize)?;
@@ -107,7 +107,7 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     Ok(buf_len)
 }
 
-/// SYS_NET_INFO — Query network interface information.
+/// SYS_NET_INFO : Query network interface information.
 ///
 /// `info_type` 0 returns the MAC address (6 bytes) into `buf_ptr`.
 pub fn sys_net_info(info_type: u64, buf_ptr: u64) -> Result<u64, SyscallError> {

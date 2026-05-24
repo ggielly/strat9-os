@@ -52,7 +52,7 @@ const PCI_PREFIX: &str = "pci";
 // === Handle ================================================================
 
 enum HandleKind {
-    /// Root — listing drivers + pci.
+    /// Root : listing drivers + pci.
     Root,
     /// PCI sub-tree.
     Pci(String),

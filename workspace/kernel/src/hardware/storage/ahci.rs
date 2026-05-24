@@ -146,7 +146,7 @@ pub enum AhciError {
     NoPort,
 }
 
-// ========== Internal port handle ==========================================================================================================================================================================
+// ========== Internal port handle ======================================================================
 
 struct AhciPort {
     port_num: u8,
@@ -168,7 +168,7 @@ pub struct AhciController {
 unsafe impl Send for AhciController {}
 unsafe impl Sync for AhciController {}
 
-// ========== Per-port IRQ completion state ============================================================================================================================================
+// ========== Per-port IRQ completion state ===========================================================
 // These statics are accessed from the IRQ handler without locks.
 // Indexed by port_num (0..32).
 
@@ -452,7 +452,7 @@ fn submit_cmd(
     // SAFETY: MMIO write to PxCI
     unsafe { wr32(port.port_virt, PORT_CI, 1) };
 
-    // Completion strategy ==========================================================================================================================================================================
+    // Completion strategy ================================================
     if crate::process::current_task_id().is_some() {
         // Task context: block until the IRQ handler signals DONE.
         // WaitQueue::wait_until() atomically checks the condition under the
@@ -854,7 +854,7 @@ pub fn handle_interrupt() {
         // Signal command completion (always, for sync waiters)
         PORT_SLOT0_DONE[port_num as usize].store(true, Ordering::Release);
 
-        // Async path — if an async operation was in-flight on this port,
+        // Async path : if an async operation was in-flight on this port,
         // push a CQE into the registered ring and drop the DMA buffer.
         let idx = port_num as usize;
         if PORT_ASYNC_ACTIVE[idx].load(Ordering::Acquire) {
@@ -865,7 +865,7 @@ pub fn handle_interrupt() {
             let is_write = PORT_ASYNC_IS_WRITE[idx].load(Ordering::Acquire);
             let dma_ptr_val = PORT_ASYNC_DMA_PTR[idx].load(Ordering::Acquire);
 
-            // Clear the active flag — this port is now idle.
+            // Clear the active flag : this port is now idle.
             PORT_ASYNC_ACTIVE[idx].store(false, Ordering::Release);
             PORT_ASYNC_RING_ID[idx].store(0, Ordering::Release);
             PORT_ASYNC_USER_DATA[idx].store(0, Ordering::Release);

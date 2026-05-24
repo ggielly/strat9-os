@@ -1,17 +1,17 @@
-//! Asynchronous I/O ABI types — stable across kernel versions.
+//! Asynchronous I/O ABI types : stable across kernel versions.
 //!
 //! Defines the [`AsyncOp`] opcode enum, [`AsyncSqe`] (submission queue entry),
 //! and [`AsyncCqe`] (completion queue event) as `#[repr(C)]` structs.
 
 /// Operation opcode submitted through the async ring.
 ///
-/// **Do not reorder** existing variants — the numeric value is part of the
+/// **Do not reorder** existing variants : the numeric value is part of the
 /// userspace ABI and must remain stable.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum AsyncOp {
-    /// No-op — used for testing and ring probing.
+    /// No-op : used for testing and ring probing.
     Nop = 0,
     /// VFS: read from an open file descriptor.
     Read = 1,
@@ -56,7 +56,7 @@ pub enum AsyncOp {
 }
 
 // =============================================================================
-// SQE — Submission Queue Entry (64 bytes, cache-line aligned)
+// SQE : Submission Queue Entry (64 bytes, cache-line aligned)
 // =============================================================================
 
 /// A single I/O submission, written by userspace into the SQ ring.
@@ -73,13 +73,13 @@ pub struct AsyncSqe {
     pub fd: u32,
     /// File offset (for read/write) or endpoint id (for IPC).
     pub off: u64,
-    /// Buffer virtual address (userspace pointer — validated by kernel).
+    /// Buffer virtual address (userspace pointer : validated by kernel).
     pub addr: u64,
     /// Buffer length in bytes.
     pub len: u32,
     /// Operation-specific flags (e.g. `RW_FSYNC` for write).
     pub op_flags: u32,
-    /// Opaque correlation token — echoed in the CQE on completion.
+    /// Opaque correlation token : echoed in the CQE on completion.
     pub user_data: u64,
     /// Personality / capability context (silo token).
     pub personality: u16,
@@ -87,11 +87,11 @@ pub struct AsyncSqe {
     pub _pad: [u8; 22],
 }
 
-// Compile-time size check — must be exactly 64 bytes.
+// Compile-time size check : must be exactly 64 bytes.
 const _: () = assert!(core::mem::size_of::<AsyncSqe>() == 64);
 
 // =============================================================================
-// CQE — Completion Queue Event (16 bytes)
+// CQE : Completion Queue Event (16 bytes)
 // =============================================================================
 
 /// A single I/O completion, written by the kernel into the CQ ring.
@@ -106,7 +106,7 @@ pub struct AsyncCqe {
     pub flags: u32,
 }
 
-// Compile-time size check — must be exactly 16 bytes.
+// Compile-time size check : must be exactly 16 bytes.
 const _: () = assert!(core::mem::size_of::<AsyncCqe>() == 16);
 
 // =============================================================================

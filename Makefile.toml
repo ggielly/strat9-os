@@ -1137,7 +1137,7 @@ args = [
 ]
 
 [tasks.run-gui-smp]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs"
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk : SMP 2 CPUs"
 dependencies = ["limine-image"]
 command = "${QEMU}"
 args = [
@@ -1168,7 +1168,7 @@ args = [
 ]
 
 [tasks.run-gui-smp-release]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs (release profile)"
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk : SMP 2 CPUs (release profile)"
 dependencies = ["limine-image-release"]
 command = "${QEMU}"
 args = [
@@ -1203,7 +1203,7 @@ args = [
 ]
 
 [tasks.run-gui-smp-dev-opt]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk — SMP 2 CPUs (dev-opt profile)"
+description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk : SMP 2 CPUs (dev-opt profile)"
 dependencies = ["limine-image-dev-opt"]
 command = "${QEMU}"
 args = [

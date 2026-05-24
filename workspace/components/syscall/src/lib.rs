@@ -42,9 +42,9 @@ pub const CLOCK_MONOTONIC: u32 = 1;
 
 // High-level call functions are defined inline below (after syscall0..6).
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Syscall raw invocation functions (x86_64 syscall ABI)
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Instead of a deeply-nested macro (which recent Rust nightlies have trouble
 // parsing), each function is written out explicitly. There are only 7 variants
 // (0..6 arguments) so the duplication is negligible and much more readable.
@@ -763,9 +763,9 @@ pub mod call {
         Err(error::Error::NotSupported)
     }
 
-    // -----------------------------------------------------------------------
+    // ===========================================================================
     // Handle management (block 0-99)
-    // -----------------------------------------------------------------------
+    // ===========================================================================
 
     /// Close a capability handle.
     pub fn handle_close(handle: usize) -> error::Result<usize> {
@@ -803,9 +803,9 @@ pub mod call {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // ===========================================================================
     // Memory management (block 100-199)
-    // -----------------------------------------------------------------------
+    // ===========================================================================
 
     /// Adjust the program break (heap boundary).
     ///
@@ -860,9 +860,9 @@ pub mod call {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // ===========================================================================
     // IPC : Ports (block 200-211)
-    // -----------------------------------------------------------------------
+    // ===========================================================================
 
     /// Create a new IPC port.
     ///
@@ -975,9 +975,9 @@ pub mod call {
         unsafe { syscall2(number::SYS_IPC_RING_MAP, ring_handle, out_ptr) }
     }
 
-    // -----------------------------------------------------------------------
+    // ===========================================================================
     // IPC : Channels (block 220-224)
-    // -----------------------------------------------------------------------
+    // ===========================================================================
 
     /// Create a typed MPMC sync-channel.
     ///
@@ -1078,9 +1078,9 @@ pub mod call {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // ===========================================================================
     // Signals (block 320-332)
-    // -----------------------------------------------------------------------
+    // ===========================================================================
 
     /// Send a signal to a process.
     pub fn kill(pid: isize, signal: u32) -> error::Result<usize> {
@@ -1159,9 +1159,9 @@ pub mod call {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // ========================================================================
     // Network (block 410-412)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Receive a network packet into `buf`.
     ///
@@ -1182,9 +1182,9 @@ pub mod call {
         unsafe { syscall2(number::SYS_NET_INFO, info_type, buf_ptr) }
     }
 
-    // -----------------------------------------------------------------------
+    // ========================================================================
     // Volumes / block devices (block 420-422)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Read sectors from a volume.
     ///
@@ -1216,18 +1216,18 @@ pub mod call {
         unsafe { syscall1(number::SYS_VOLUME_INFO, handle) }
     }
 
-    // -----------------------------------------------------------------------
+    // ========================================================================
     // Debug (block 600)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Write a debug log message to the kernel serial console.
     pub fn debug_log(msg: &[u8]) -> error::Result<usize> {
         unsafe { syscall2(number::SYS_DEBUG_LOG, msg.as_ptr() as usize, msg.len()) }
     }
 
-    // -----------------------------------------------------------------------
+    // ========================================================================
     // Module management (block 700-703)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Load a kernel module by name.
     ///
@@ -1254,9 +1254,9 @@ pub mod call {
         unsafe { syscall2(number::SYS_MODULE_QUERY, module_id, buf_ptr) }
     }
 
-    // -----------------------------------------------------------------------
+    // ========================================================================
     // Silo management (block 800-808)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Create a new silo (isolated execution environment).
     ///
@@ -1336,13 +1336,57 @@ pub mod call {
         unsafe { syscall3(number::SYS_SILO_RENAME, silo_id, label_ptr, label_len) }
     }
 
-    // -----------------------------------------------------------------------
+    // ========================================================================
     // ABI introspection (block 900)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Query the kernel ABI version. Returns (major << 16) | minor.
     pub fn abi_version() -> error::Result<(u16, u16)> {
         let raw = unsafe { syscall0(number::SYS_ABI_VERSION) }?;
         Ok(((raw >> 16) as u16, raw as u16))
+    }
+
+    // ========================================================================
+    // Async I/O ring buffer (block 250-254)
+    // ========================================================================
+
+    /// Create an async I/O ring with `entries` slots (power of 2, min 2, max 256).
+    /// Returns a ring id on success.
+    pub fn async_setup(entries: u32) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_ASYNC_SETUP, entries as usize) }
+    }
+
+    /// Map an async ring's SQ/CQ pages into the process address space.
+    ///
+    /// `ring_id`: id from [`async_setup`].
+    /// `out_ptr`: writes an [`strat9_abi::data::AsyncRingLayout`] here.
+    pub fn async_map(ring_id: usize, out_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_ASYNC_MAP, ring_id, out_ptr) }
+    }
+
+    /// Submit SQEs and/or drain completions.
+    ///
+    /// Submits up to `to_submit` pending SQEs, then waits for at least
+    /// `min_complete` CQEs. Returns the number of completions drained.
+    pub fn async_enter(ring_id: usize, to_submit: u32, min_complete: u32) -> error::Result<usize> {
+        unsafe {
+            syscall4(
+                number::SYS_ASYNC_ENTER,
+                ring_id,
+                to_submit as usize,
+                min_complete as usize,
+                0, // flags
+            )
+        }
+    }
+
+    /// Destroy an async ring and free its pages.
+    pub fn async_destroy(ring_id: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_ASYNC_DESTROY, ring_id) }
+    }
+
+    /// Cancel an in-flight operation by `user_data`.
+    pub fn async_cancel(ring_id: usize, user_data: u64) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_ASYNC_CANCEL, ring_id, user_data as usize) }
     }
 }

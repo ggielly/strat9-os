@@ -67,7 +67,7 @@ fn resolve_volume_device(
     }
 
     let ptr = cap.resource as *const ();
-    // Try Virtio first, then AHCI — compare stored pointer to the global device pointer.
+    // Try Virtio first, then AHCI : compare stored pointer to the global device pointer.
     if let Some(dev) = virtio_block::get_device() {
         if dev as *const _ as *const () == ptr {
             return Ok(VolumeDeviceRef::Virtio(dev));
