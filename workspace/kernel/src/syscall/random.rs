@@ -12,7 +12,7 @@ use crate::{memory::userslice::UserSliceWrite, syscall::error::SyscallError};
 /// # Arguments
 /// * `buf`   - Pointer to the userspace buffer
 /// * `len`   - Number of bytes requested
-/// * `flags` - GRND_NONBLOCK (1) or GRND_RANDOM (2) — currently ignored
+/// * `flags` - GRND_NONBLOCK (1) or GRND_RANDOM (2) : currently ignored
 ///
 /// # Returns
 /// * Number of bytes written on success

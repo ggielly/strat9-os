@@ -197,8 +197,7 @@ pub fn sys_ipc_connect(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError
     let bytes = user.read_to_vec();
     let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
 
-    let (port_raw, _remaining) =
-        crate::namespace::resolve(path).ok_or(SyscallError::NotFound)?;
+    let (port_raw, _remaining) = crate::namespace::resolve(path).ok_or(SyscallError::NotFound)?;
     let port_id = PortId::from_u64(port_raw);
     if port::get_port(port_id).is_none() {
         return Err(SyscallError::BadHandle);
@@ -220,7 +219,7 @@ pub fn sys_ipc_connect(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError
     Ok(cap_id.as_u64())
 }
 
-/// SYS_IPC_CALL: synchronous RPC — send + block until reply arrives.
+/// SYS_IPC_CALL: synchronous RPC : send + block until reply arrives.
 pub fn sys_ipc_call(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     silo::enforce_cap_for_current_task(port_handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;

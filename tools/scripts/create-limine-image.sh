@@ -252,7 +252,7 @@ fi
 
 # Core syscall/mem test ELFs: copy whenever built (limine-image already depends on
 # strate-silo-test / strate-mem-test). The kernel always requests these via Limine
-# internal modules — if they are missing from the ISO, /initfs/* open() fails with
+# internal modules : if they are missing from the ISO, /initfs/* open() fails with
 # BadHandle. STRAT9_INCLUDE_TESTS=1 only tightens diagnostics for strict test ISOs.
 if [ -f "$INIT_TEST_ELF" ]; then
     cp "$INIT_TEST_ELF" "$ISO_ROOT/initfs/test_pid"
@@ -438,7 +438,7 @@ if command -v xorriso >/dev/null 2>&1; then
                             echo "  [INFO] Limine install failed (limine.exe), but ISO is bootable"
                         fi
                     else
-                        echo "  [INFO] Found limine.exe (not an ELF/native binary: $file_out) — skipping execution on this host. ISO is still bootable."
+                        echo "  [INFO] Found limine.exe (not an ELF/native binary: $file_out) : skipping execution on this host. ISO is still bootable."
                     fi
                 fi
             fi

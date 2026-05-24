@@ -8,7 +8,7 @@ Closes #<!-- issue number -->
 
 <!-- Bullet list of the main changes. Focus on the "why", not just the "what". -->
 
-- 
+-
 
 ## Test plan
 
@@ -19,7 +19,7 @@ Closes #<!-- issue number -->
 - [ ] `cargo make kernel-test` / `run-test` passes
 - [ ] Tested in QEMU (`run-gui-smp`)
 - [ ] Stress test run (specify which):
-- [ ] Not testable — reason:
+- [ ] Not testable : reason:
 
 ## Subsystem checklist
 

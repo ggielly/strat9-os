@@ -85,7 +85,7 @@ These drivers live in isolated userspace components (Silos) and access hardware 
 
 ### Bus controllers (ARM SoC / embedded)
 
-All bus drivers are in `workspace/drivers/bus/`. They are probed at silo startup — only those matching the platform hardware will init successfully.
+All bus drivers are in `workspace/drivers/bus/`. They are probed at silo startup : only those matching the platform hardware will init successfully.
 
 | Driver | Compatible strings | File | Lines | Status |
 |---|---|---|---|---|

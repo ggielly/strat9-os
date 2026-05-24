@@ -81,7 +81,7 @@ pub trait BusDriver: Send + Sync {
     fn compatible(&self) -> &[&str];
     /// Returns `true` if the driver believes the hardware is present.
     ///
-    /// The default returns `true` (assume present — let `init()` decide).
+    /// The default returns `true` (assume present : let `init()` decide).
     /// Override to `false` for software-backed buses (GPIO, SPI, …) that
     /// cannot auto-detect their hardware without platform configuration.
     fn probe(&self) -> bool {

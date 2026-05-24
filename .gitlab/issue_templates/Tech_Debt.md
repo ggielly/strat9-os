@@ -7,7 +7,7 @@ labels: refactor
 ## Location
 
 - **File(s):** <!-- e.g. workspace/kernel/src/memory/buddy.rs -->
-- **Function / struct:** 
+- **Function / struct:**
 
 ## Problem
 
@@ -23,14 +23,14 @@ labels: refactor
 
 ## Risk if left unaddressed
 
-- [ ] Correctness — could cause bugs or UB
-- [ ] Performance — measurable overhead on hot path
-- [ ] Maintainability — makes future changes harder
-- [ ] Safety — unsafe invariant not enforced
-- [ ] Low — cosmetic / documentation only
+- [ ] Correctness : could cause bugs or UB
+- [ ] Performance : measurable overhead on hot path
+- [ ] Maintainability : makes future changes harder
+- [ ] Safety : unsafe invariant not enforced
+- [ ] Low : cosmetic / documentation only
 
 ## Priority
 
 - [ ] Must fix before milestone
-- [ ] Medium — fix in a dedicated pass
-- [ ] Low — acceptable as-is for now
+- [ ] Medium : fix in a dedicated pass
+- [ ] Low : acceptable as-is for now

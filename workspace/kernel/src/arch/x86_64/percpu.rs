@@ -408,7 +408,7 @@ pub fn set_signal_pending_current() {
 /// Test and clear the `signal_pending` flag for the current CPU.
 ///
 /// Returns `true` if a signal was marked pending since the last check.
-/// This is a one-shot check — the flag is cleared atomically.
+/// This is a one-shot check : the flag is cleared atomically.
 #[inline]
 pub fn test_and_clear_signal_pending_current() -> bool {
     let idx = current_cpu_index();

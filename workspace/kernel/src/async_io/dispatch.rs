@@ -171,7 +171,43 @@ fn dispatch_one(
             }
         }
 
-        // Storage read : submit async AHCI/NVMe read, CQE arrives via IRQ
+        // IPC call : send message + register async reply via ring CQE.
+        //
+        //   sqe.fd        = port handle (cap id)
+        //   sqe.addr      = pointer to IpcMessage (request in, reply overwrites)
+        //   sqe.user_data = correlation token (echoed in CQE on reply)
+        //
+        op if op == AsyncOp::IpcCall as u8 => {
+            let port_id = crate::ipc::PortId::from_u64(sqe.fd as u64);
+            let Some(port) = crate::ipc::port::get_port(port_id) else {
+                push_completion_for_ring(ring, sqe.user_data, EBADF, 0);
+                return Ok(DispatchOutcome::CompletedInline);
+            };
+
+            // Read the outgoing message from userspace.
+            let user_msg = UserSliceRead::new(sqe.addr, core::mem::size_of::<IpcMessage>())
+                .map_err(|_| EFAULT)?;
+            let mut raw = [0u8; 64];
+            user_msg.copy_to(&mut raw);
+            let mut msg = ipc_message_from_raw(&raw);
+
+            let task = crate::process::current_task_clone().ok_or(EIO)?;
+            msg.sender = task.id.as_u64();
+
+            port.try_send(msg).map_err(|_| ENOMSG)?;
+
+            crate::ipc::reply::register_ring_call(
+                task.id,
+                port.owner,
+                ring_id,
+                sqe.user_data,
+                sqe.addr,
+            );
+
+            Ok(DispatchOutcome::InFlight)
+        }
+
+        // Storage read : submit async AHCI/NVMe read, CQE arrives via the IRQ
         op if op == AsyncOp::StorageRead as u8 => {
             let port_idx = sqe.fd as u8;
             let lba = sqe.off;

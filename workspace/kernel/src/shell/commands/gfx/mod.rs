@@ -276,7 +276,7 @@ pub fn cmd_gfx_test3d() -> Result<(), ShellError> {
         RgbColor::new(0x90, 0x20, 0x30), // dark red
     ];
 
-    shell_println!("gfx-test3d: spinning donut — press Ctrl+C to quit");
+    shell_println!("gfx-test3d: spinning donut : press Ctrl+C to quit");
 
     let mut frame: u64 = 0;
     loop {
