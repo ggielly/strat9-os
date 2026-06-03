@@ -359,12 +359,12 @@ pub extern "C" fn shell_main() -> ! {
             cursor_visible = !cursor_visible;
 
             if crate::arch::x86_64::vga::is_available() {
-                let color = if cursor_visible {
-                    crate::arch::x86_64::vga::RgbColor::new(0x4F, 0xB3, 0xB3) // Cyan
+                if cursor_visible {
+                    let color = crate::arch::x86_64::vga::RgbColor::new(0x4F, 0xB3, 0xB3); // Cyan
+                    crate::arch::x86_64::vga::draw_text_cursor(color);
                 } else {
-                    crate::arch::x86_64::vga::RgbColor::new(0x12, 0x16, 0x1E) // Background
-                };
-                crate::arch::x86_64::vga::draw_text_cursor(color);
+                    crate::arch::x86_64::vga::hide_text_cursor();
+                }
             }
         }
 
@@ -382,9 +382,7 @@ pub extern "C" fn shell_main() -> ! {
 
             // Hide cursor before any action
             if crate::arch::x86_64::vga::is_available() {
-                crate::arch::x86_64::vga::draw_text_cursor(
-                    crate::arch::x86_64::vga::RgbColor::new(0x12, 0x16, 0x1E),
-                );
+                crate::arch::x86_64::vga::hide_text_cursor();
             }
 
             match ch {

@@ -16,8 +16,12 @@ path = "src/main.rs"
 [dependencies]
 smoltcp = { git = "https://github.com/smoltcp-rs/smoltcp.git", default-features = false, features = [
     "alloc",
+    "auto-icmp-echo-reply",
     "medium-ethernet",
     "proto-ipv4",
+    "proto-ipv4-fragmentation", # reassemble/send fragmented IPv4
+    "proto-ipv6",               # IPv6 with NDP/SLAAC
+    "proto-ipv6-fragmentation", # IPv6 fragment reassembly
     "socket-tcp",
     "socket-udp",
     "socket-icmp",
@@ -27,5 +31,6 @@ smoltcp = { git = "https://github.com/smoltcp-rs/smoltcp.git", default-features 
 spin = { workspace = true }
 log = { workspace = true }
 bitflags = { workspace = true }
+strat9-abi = { workspace = true }
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
 alloc-freelist = { path = "../alloc-freelist" }

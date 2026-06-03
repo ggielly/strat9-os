@@ -1306,6 +1306,7 @@ unsafe extern "C" fn switch_context_xsave(
         "jnz 11f",
         "mov r9, 3",
         "11:",
+        "mov r8, r9", // Store normalized old_xcr0 in r8 before it is modified
         "mov eax, r9d",
         "shr r9, 32",
         "mov edx, r9d",
@@ -1324,6 +1325,8 @@ unsafe extern "C" fn switch_context_xsave(
         "pop r12",
         "pop rbp",
         "pop rbx",
+        "cmp r11, r8", // Check if new_xcr0 == old_xcr0
+        "je 20f",      // Skip xsetbv if they are equal
         "push rcx",
         "mov ecx, 0",
         "mov eax, r11d",
@@ -1332,6 +1335,7 @@ unsafe extern "C" fn switch_context_xsave(
         "mov edx, r8d",
         "xsetbv",
         "pop rcx",
+        "20:",
         "mov eax, r11d",
         "mov r8, r11",
         "shr r8, 32",

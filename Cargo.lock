@@ -395,6 +395,7 @@ name = "ice-candidate"
 version = "0.1.0"
 dependencies = [
  "alloc-freelist",
+ "strat9-abi",
  "strat9-syscall",
 ]
 
@@ -748,6 +749,7 @@ name = "ping"
 version = "0.1.0"
 dependencies = [
  "alloc-freelist",
+ "strat9-abi",
  "strat9-syscall",
 ]
 
@@ -1139,6 +1141,7 @@ dependencies = [
  "log",
  "smoltcp",
  "spin 0.10.0",
+ "strat9-abi",
  "strat9-syscall",
 ]
 
@@ -1167,6 +1170,7 @@ name = "strate-webrtc"
 version = "0.1.0"
 dependencies = [
  "alloc-freelist",
+ "strat9-abi",
  "strat9-syscall",
 ]
 
@@ -1289,6 +1293,7 @@ name = "udp-tool"
 version = "0.1.0"
 dependencies = [
  "alloc-freelist",
+ "strat9-abi",
  "strat9-syscall",
 ]
 

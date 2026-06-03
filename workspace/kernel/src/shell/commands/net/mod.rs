@@ -2,7 +2,7 @@
 mod ifconfig;
 mod netcmd;
 mod nslookup;
-mod ping;
+mod ping_userspace;
 mod telnet;
 
 use crate::{
@@ -14,8 +14,58 @@ use alloc::string::String;
 pub use ifconfig::cmd_ifconfig;
 pub use netcmd::cmd_net;
 pub use nslookup::cmd_nslookup;
-pub use ping::cmd_ping;
+pub use ping_userspace::cmd_ping;
+use strat9_abi::net::{is_ipv4_literal_candidate, parse_ipv4_literal};
 pub use telnet::cmd_telnet;
+
+/// Read an ELF binary from a VFS path into a Vec<u8>.
+/// Shared helper used by ping and other commands that spawn userspace binaries.
+pub(super) fn read_elf(path: &str) -> Result<alloc::vec::Vec<u8>, ShellError> {
+    let fd = vfs::open(path, OpenFlags::READ).map_err(|_| {
+        shell_println!("{}: not found", path);
+        ShellError::ExecutionFailed
+    })?;
+    let data = vfs::read_all(fd).map_err(|_| {
+        let _ = vfs::close(fd);
+        shell_println!("{}: read error", path);
+        ShellError::ExecutionFailed
+    })?;
+    let _ = vfs::close(fd);
+    Ok(data)
+}
+
+/// Spawn a userspace ELF binary from `/initfs/bin/<name>` with the given
+/// shell arguments as `argv[1..]`.  Returns immediately after scheduling.
+pub(super) fn spawn_elf_with_args(
+    bin_path: &str,
+    task_name: &'static str,
+    args: &[String],
+) -> Result<(), ShellError> {
+    let data = read_elf(bin_path)?;
+    let arg_strs: alloc::vec::Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    match crate::process::elf::load_and_run_elf_with_args(&data, task_name, &arg_strs) {
+        Ok(task_id) => {
+            shell_println!("{}: started (task={})", task_name, task_id);
+            Ok(())
+        }
+        Err(e) => {
+            shell_println!("{}: failed to launch: {}", task_name, e);
+            Err(ShellError::ExecutionFailed)
+        }
+    }
+}
+
+/// Performs the cmd ping spawn operation (launches /initfs/bin/ping with args).
+pub(super) fn cmd_ping_spawn_impl(args: &[String]) -> Result<(), ShellError> {
+    // Early IPv4 validation — same behaviour as kping
+    if let Some(target) = args.first() {
+        if is_ipv4_literal_candidate(target) && parse_ipv4_literal(target).is_none() {
+            shell_println!("ping: invalid IPv4 address: {}", target);
+            return Ok(());
+        }
+    }
+    spawn_elf_with_args("/initfs/bin/ping", "ping", args)
+}
 
 /// Busy-wait for approximately `ms` milliseconds, yielding to other tasks.
 /// Scheduler ticks are 10ms each.
@@ -28,137 +78,6 @@ pub(super) fn shell_sleep_ms(ms: u64) {
             break;
         }
     }
-}
-
-/// Performs the build ping path operation.
-fn build_ping_path<'a>(buf: &'a mut [u8; 80], target: &str) -> &'a str {
-    let prefix = b"/net/ping/";
-    let tlen = target.len().min(buf.len() - prefix.len());
-    buf[..prefix.len()].copy_from_slice(prefix);
-    buf[prefix.len()..prefix.len() + tlen].copy_from_slice(&target.as_bytes()[..tlen]);
-    let total = prefix.len() + tlen;
-    core::str::from_utf8(&buf[..total]).unwrap_or("/net/ping/0.0.0.0")
-}
-
-/// Performs the cmd ping operation.
-pub(super) fn cmd_ping_impl(args: &[String]) -> Result<(), ShellError> {
-    let target = if args.is_empty() {
-        match vfs::open("/net/gateway", OpenFlags::READ) {
-            Ok(fd) => {
-                let mut buf = [0u8; 64];
-                let n = vfs::read(fd, &mut buf).unwrap_or(0);
-                let _ = vfs::close(fd);
-                let s = core::str::from_utf8(&buf[..n]).unwrap_or("").trim();
-                if s.is_empty() || s.starts_with("0.0.0.0") {
-                    shell_println!("No gateway available. Usage: ping <ip>");
-                    return Ok(());
-                }
-                String::from(s)
-            }
-            Err(_) => {
-                shell_println!("/net not available. Is strate-net running?");
-                return Ok(());
-            }
-        }
-    } else {
-        args[0].clone()
-    };
-
-    let count: u32 = if args.len() > 1 {
-        args[1].parse().unwrap_or(4)
-    } else {
-        4
-    };
-
-    shell_println!("PING {} ({} packets)", target, count);
-
-    let mut path_buf = [0u8; 80];
-    let path = build_ping_path(&mut path_buf, &target);
-
-    let mut sent: u32 = 0;
-    let mut received: u32 = 0;
-
-    for seq in 0..count {
-        if crate::shell::is_interrupted() {
-            shell_println!("^C");
-            break;
-        }
-        match vfs::open(path, OpenFlags::WRITE) {
-            Ok(fd) => {
-                let mut req = [0u8; 4];
-                req[0..2].copy_from_slice(&(seq as u16).to_le_bytes());
-                let _ = vfs::write(fd, &req);
-                let _ = vfs::close(fd);
-                sent += 1;
-            }
-            Err(_) => {
-                shell_println!("  send failed (seq={})", seq);
-                sent += 1;
-                continue;
-            }
-        }
-
-        let mut got_reply = false;
-        for _ in 0..20 {
-            shell_sleep_ms(50);
-
-            match vfs::open(path, OpenFlags::READ) {
-                Ok(fd) => {
-                    let mut reply_buf = [0u8; 10];
-                    match vfs::read(fd, &mut reply_buf) {
-                        Ok(n) if n >= 10 => {
-                            let _ = vfs::close(fd);
-                            let rtt_us = u64::from_le_bytes([
-                                reply_buf[2],
-                                reply_buf[3],
-                                reply_buf[4],
-                                reply_buf[5],
-                                reply_buf[6],
-                                reply_buf[7],
-                                reply_buf[8],
-                                reply_buf[9],
-                            ]);
-                            let rtt_ms = rtt_us / 1000;
-                            let rtt_frac = (rtt_us % 1000) / 100;
-                            shell_println!(
-                                "  Reply from {}: seq={} time={}.{}ms",
-                                target,
-                                seq,
-                                rtt_ms,
-                                rtt_frac
-                            );
-                            received += 1;
-                            got_reply = true;
-                            break;
-                        }
-                        _ => {
-                            let _ = vfs::close(fd);
-                        }
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-
-        if !got_reply {
-            shell_println!("  Request timeout: seq={}", seq);
-        }
-    }
-
-    let loss = if sent > 0 {
-        ((sent - received) * 100) / sent
-    } else {
-        100
-    };
-    shell_println!("--- {} ping statistics ---", target);
-    shell_println!(
-        "{} transmitted, {} received, {}% loss",
-        sent,
-        received,
-        loss
-    );
-
-    Ok(())
 }
 
 /// Performs the cmd ifconfig operation.
@@ -261,7 +180,9 @@ pub(super) fn cmd_ifconfig_impl(args: &[String]) -> Result<(), ShellError> {
     };
 
     let ip = read_file("/net/ip");
+    let ip6 = read_file("/net/ip6");
     let gw = read_file("/net/gateway");
+    let gw6 = read_file("/net/ip6/gateway");
     let route = read_file("/net/route");
     let routes = read_file("/net/routes");
     let dns = read_file("/net/dns");
@@ -269,8 +190,10 @@ pub(super) fn cmd_ifconfig_impl(args: &[String]) -> Result<(), ShellError> {
 
     shell_println!("em0:");
     shell_println!("  inet     {}", ip);
+    shell_println!("  inet6    {}", ip6);
     shell_println!("  dhcp     {}", dhcp);
     shell_println!("  gateway  {}", gw);
+    shell_println!("  gateway6 {}", gw6);
     shell_println!("  route    {}", route);
     shell_println!("  routes   {}", routes);
     shell_println!("  dns      {}", dns);

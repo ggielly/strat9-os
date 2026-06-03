@@ -11,4 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
+strat9-abi = { workspace = true }
 alloc-freelist = { path = "../alloc-freelist" }

@@ -13,4 +13,5 @@ pub mod flag;
 pub mod ipc;
 pub mod ipc_codec;
 pub mod ipc_payload;
+pub mod net;
 pub mod syscall;

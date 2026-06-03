@@ -13,14 +13,14 @@ const KEYBOARD_BUFFER_SIZE: usize = 256;
 //
 // The previous design used three separate `Mutex` fields (buffer, head, tail).
 // `push()` : called from the keyboard ISR : acquired them in order
-// tail → buffer → head.  `pop()` : called from task context : acquired them in
-// order head → tail → buffer.
+// tail => buffer => head.  `pop()` : called from task context : acquired them in
+// order head => tail => buffer.
 //
 // This created a classic spinlock + interrupt deadlock:
 //   1. Task context calls `pop()` → acquires `head` lock.
 //   2. Keyboard IRQ fires before `pop()` releases `head`.
-//   3. ISR calls `push()` → acquires `tail`, then `buffer`, then tries `head`
-//      → spins forever because `head` is still held by the preempted task.
+//   3. ISR calls `push()` => acquires `tail`, then `buffer`, then tries `head`
+//      => spins forever because `head` is still held by the preempted task.
 //
 // Fix: collapse all state into a SINGLE `Mutex` and, in the non-ISR path
 // (`pop` / `has_data`), disable interrupts BEFORE taking the lock.
@@ -100,9 +100,9 @@ impl KeyboardBuffer {
 /// commands can detect cancellation.
 ///
 /// Must NOT call serial_force_println! or any lock that could contend with
-/// the interrupted task (e.g. FORCE_LOCK). Redox/Maestro/Asterinas keep
-/// IRQ handlers minimal; printing here can deadlock if the preempted task
-/// was holding FORCE_LOCK.
+/// the interrupted task (e.g. FORCE_LOCK).
+/// NOTE : Redox/Maestro/Asterinas keep IRQ handlers minimal; printing here can deadlock
+/// if the preempted task was holding FORCE_LOCK.
 pub fn add_to_buffer(ch: u8) {
     if ch == 0x03 {
         crate::shell::SHELL_INTERRUPTED.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -224,6 +224,8 @@ pub struct KeyboardState {
     pub ctrl: bool,
     /// Alt pressed
     pub alt: bool,
+    /// Extended scancode prefix (0xE0) received
+    pub extended_scancode: bool,
 }
 
 impl KeyboardState {
@@ -235,6 +237,7 @@ impl KeyboardState {
             caps_lock: false,
             ctrl: false,
             alt: false,
+            extended_scancode: false,
         }
     }
 
@@ -262,8 +265,8 @@ static SCANCODE_TO_ASCII: [u8; 128] = {
     table[0x09] = b'_'; // 8
     table[0x0A] = b'c'; // 9 (ç -> c)
     table[0x0B] = b'a'; // 0 (à -> a)
-    table[0x0C] = b')'; // -
-    table[0x0D] = b'='; // =
+    table[0x0C] = b')'; // - (minus)
+    table[0x0D] = b'+'; // = -> + (plus, NOT equals)
     table[0x0E] = 0x08; // Backspace
                         // Row 2: Tab, A-Z, [, ], Enter
     table[0x0F] = b'\t';
@@ -302,12 +305,30 @@ static SCANCODE_TO_ASCII: [u8; 128] = {
     table[0x2F] = b'v'; // V
     table[0x30] = b'b'; // B
     table[0x31] = b'n'; // N
-    table[0x32] = b','; // M
-    table[0x33] = b';'; // ,
-    table[0x34] = b'.'; // .
-    table[0x35] = b'/'; // /
-                        // Space
-    table[0x39] = b' ';
+    table[0x32] = b','; // M -> , (comma)
+    table[0x33] = b';'; // , -> ; (semicolon)
+    table[0x34] = b'.'; // . -> . (period)
+    table[0x35] = b'/'; // / -> / (slash)
+    table[0x36] = 0x00; // RShift (handled separately)
+    table[0x37] = b'*'; // * (keypad multiply, on regular keyboard)
+    table[0x38] = 0x00; // Alt (handled separately)
+    table[0x39] = b' '; // Space
+    table[0x3A] = 0x00; // CapsLock (handled separately)
+    table[0x56] = b'<'; // < (the key below LShift)
+                        // Keypad (numpad)
+    table[0x47] = b'7'; // Keypad 7
+    table[0x48] = b'8'; // Keypad 8
+    table[0x49] = b'9'; // Keypad 9
+    table[0x4A] = b'-'; // Keypad -
+    table[0x4B] = b'4'; // Keypad 4
+    table[0x4C] = b'5'; // Keypad 5
+    table[0x4D] = b'6'; // Keypad 6
+    table[0x4E] = b'+'; // Keypad +
+    table[0x4F] = b'1'; // Keypad 1
+    table[0x50] = b'2'; // Keypad 2
+    table[0x51] = b'3'; // Keypad 3
+    table[0x52] = b'0'; // Keypad 0
+    table[0x53] = b'.'; // Keypad .
     table
 };
 
@@ -325,8 +346,8 @@ static SCANCODE_TO_ASCII_SHIFT: [u8; 128] = {
     table[0x09] = b'8'; // _
     table[0x0A] = b'9'; // ç
     table[0x0B] = b'0'; // à
-    table[0x0C] = b')'; // ° -> )
-    table[0x0D] = b'+'; // =
+    table[0x0C] = b')'; // ) (right paren)
+    table[0x0D] = b'+'; // + (plus)
     table[0x0E] = 0x08; // Backspace
     table[0x0F] = b'\t'; // Tab
     table[0x10] = b'A'; // Q
@@ -339,8 +360,8 @@ static SCANCODE_TO_ASCII_SHIFT: [u8; 128] = {
     table[0x17] = b'I'; // I
     table[0x18] = b'O'; // O
     table[0x19] = b'P'; // P
-    table[0x1A] = b'^'; // ¨ -> ^
-    table[0x1B] = b'*'; // $
+    table[0x1A] = b'l'; // ¨ -> l (diaeresis/umlaut placeholder)
+    table[0x1B] = b'*'; // $ -> * (pound sign placeholder)
     table[0x1C] = b'\n'; // Enter
     table[0x1E] = b'Q'; // A
     table[0x1F] = b'S'; // S
@@ -353,19 +374,38 @@ static SCANCODE_TO_ASCII_SHIFT: [u8; 128] = {
     table[0x26] = b'L'; // L
     table[0x27] = b'M'; // ;
     table[0x28] = b'%'; // '
-    table[0x29] = b'm'; // µ -> m
-    table[0x2B] = b'>'; // <
+    table[0x29] = b'u'; // ` -> u (grave accent placeholder)
+    table[0x36] = 0x00; // RShift (handled separately)
+    table[0x37] = b'*'; // * (keypad multiply) unchanged
+    table[0x38] = 0x00; // Alt (handled separately)
+    table[0x2B] = b'>'; // < -> > (greater than, shift of less than)
     table[0x2C] = b'W'; // Z
     table[0x2D] = b'X'; // X
     table[0x2E] = b'C'; // C
     table[0x2F] = b'V'; // V
     table[0x30] = b'B'; // B
     table[0x31] = b'N'; // N
-    table[0x32] = b'?'; // ,
-    table[0x33] = b'.'; // ;
-    table[0x34] = b','; // .
-    table[0x35] = b'/'; // § -> /
+    table[0x32] = b'?'; // , -> ?
+    table[0x33] = b'.'; // ; -> .
+    table[0x34] = b':'; // . -> :
+    table[0x35] = b'/'; // /
     table[0x39] = b' '; // Space
+    table[0x3A] = 0x00; // CapsLock (handled separately)
+                        // Keypad (numpad), same behavior as non-shift
+    table[0x56] = b'>'; // > (greater than, the key below LShift shifted)
+    table[0x47] = b'7'; // Keypad 7
+    table[0x48] = b'8'; // Keypad 8
+    table[0x49] = b'9'; // Keypad 9
+    table[0x4A] = b'-'; // Keypad -
+    table[0x4B] = b'4'; // Keypad 4
+    table[0x4C] = b'5'; // Keypad 5
+    table[0x4D] = b'6'; // Keypad 6
+    table[0x4E] = b'+'; // Keypad +
+    table[0x4F] = b'1'; // Keypad 1
+    table[0x50] = b'2'; // Keypad 2
+    table[0x51] = b'3'; // Keypad 3
+    table[0x52] = b'0'; // Keypad 0
+    table[0x53] = b'.'; // Keypad .
     table
 };
 
@@ -389,6 +429,15 @@ pub fn handle_scancode() -> Option<u8> {
 /// Same as `handle_scancode` but takes a pre-read scancode byte.
 pub fn handle_scancode_raw(scancode: u8) -> Option<u8> {
     let mut kbd = KEYBOARD.lock();
+
+    // Handle extended scancode prefix (0xE0)
+    if scancode == 0xE0 {
+        kbd.extended_scancode = true;
+        return None;
+    }
+
+    let is_extended = kbd.extended_scancode;
+    kbd.extended_scancode = false;
 
     // Key release (bit 7 set)
     if scancode & 0x80 != 0 {
@@ -425,17 +474,26 @@ pub fn handle_scancode_raw(scancode: u8) -> Option<u8> {
             kbd.caps_lock = !kbd.caps_lock;
             return None;
         }
-        // Arrow keys and special keys (Set 1 scancodes)
-        0x48 => return Some(KEY_UP),
-        0x50 => return Some(KEY_DOWN),
-        0x4B => return Some(KEY_LEFT),
-        0x4D => return Some(KEY_RIGHT),
-        0x47 => return Some(KEY_HOME),
-        0x4F => return Some(KEY_END),
         _ => {}
     }
 
-    // Convert scancode to ASCII
+    // Handle extended keys (arrow keys sent as 0xE0 + scancode)
+    if is_extended {
+        match scancode {
+            0x48 => return Some(KEY_UP),
+            0x50 => return Some(KEY_DOWN),
+            0x4B => return Some(KEY_LEFT),
+            0x4D => return Some(KEY_RIGHT),
+            0x47 => return Some(KEY_HOME),
+            0x4F => return Some(KEY_END),
+            0x53 => return Some(b'\x7F'), // Delete key (extended)
+            _ => {}
+        }
+        // For other extended codes, just ignore
+        return None;
+    }
+
+    // Convert regular scancode to ASCII
     if scancode < 128 {
         let shift = kbd.shift_active();
         let ch = if shift {

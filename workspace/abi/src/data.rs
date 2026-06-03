@@ -1,5 +1,16 @@
 use zerocopy::{FromBytes, IntoBytes};
 
+pub const IPC_MESSAGE_SIZE: usize = 256;
+pub const IPC_MESSAGE_ALIGN: usize = 64;
+pub const IPC_MESSAGE_HEADER_SIZE: usize = 16;
+pub const IPC_PAYLOAD_CAPACITY: usize = IPC_MESSAGE_SIZE - IPC_MESSAGE_HEADER_SIZE;
+pub const IPC_FILE_FLAG_DIRECTORY: u32 = 1 << 0;
+pub const IPC_FILE_FLAG_DEVICE: u32 = 1 << 1;
+pub const IPC_FILE_FLAG_PIPE: u32 = 1 << 2;
+pub const IPC_FILE_FLAG_APPEND: u32 = 1 << 3;
+pub const IPC_FILE_FLAG_CHUNK_READ: u32 = 1 << 4;
+pub const IPC_FILE_FLAG_CHUNK_WRITE: u32 = 1 << 5;
+
 /// 9-bit octal silo mode (3 control + 3 hardware + 3 registry).
 ///
 /// Shared ABI type used by both kernel and userspace init.
@@ -222,17 +233,25 @@ pub struct IpcMessage {
     pub sender: u64,
     pub msg_type: u32,
     pub flags: u32,
-    pub payload: [u8; 48],
+    pub payload: [u8; IPC_PAYLOAD_CAPACITY],
 }
 
 impl IpcMessage {
+    pub const WIRE_SIZE: usize = IPC_MESSAGE_SIZE;
+    pub const ALIGN: usize = IPC_MESSAGE_ALIGN;
+    pub const PAYLOAD_CAPACITY: usize = IPC_PAYLOAD_CAPACITY;
+    pub const OPEN_INLINE_CAPACITY: usize = IPC_PAYLOAD_CAPACITY - 6;
+    pub const UNLINK_INLINE_CAPACITY: usize = IPC_PAYLOAD_CAPACITY - 2;
+    pub const READ_INLINE_CAPACITY: usize = IPC_PAYLOAD_CAPACITY - 8;
+    pub const WRITE_INLINE_CAPACITY: usize = IPC_PAYLOAD_CAPACITY - 18;
+
     /// Create an empty IPC message for `msg_type`.
     pub const fn new(msg_type: u32) -> Self {
         IpcMessage {
             sender: 0,
             msg_type,
             flags: 0,
-            payload: [0u8; 48],
+            payload: [0u8; IPC_PAYLOAD_CAPACITY],
         }
     }
 
@@ -362,7 +381,7 @@ assert_abi_struct!(Stat, 120, 8);
 assert_abi_struct!(StatVfs, 88, 8);
 assert_abi_struct!(Map, 32, 8);
 assert_abi_struct!(FileStat, 112, 8);
-assert_abi_struct!(IpcMessage, 64, 64);
+assert_abi_struct!(IpcMessage, IPC_MESSAGE_SIZE, IPC_MESSAGE_ALIGN);
 assert_abi_struct!(TimeSpec, 16, 8);
 assert_abi_struct!(HandleInfo, 16, 8);
 assert_abi_struct!(MemoryRegionInfo, 24, 8);

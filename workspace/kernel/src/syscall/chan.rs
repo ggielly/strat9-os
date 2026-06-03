@@ -14,6 +14,8 @@ use crate::{
     process::current_task_clone,
 };
 
+const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
+
 /// SYS_CHAN_CREATE (220): create a bounded sync-channel.
 pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
     let cap = capacity.clamp(1, 1024) as usize;
@@ -47,12 +49,12 @@ pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
 pub fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
-    let user_slice = UserSliceRead::new(msg_ptr, 64).map_err(SyscallError::from)?;
+    let user_slice = UserSliceRead::new(msg_ptr, MSG_SIZE).map_err(SyscallError::from)?;
     let mut msg = IpcMessage::new(0);
     let n = user_slice.copy_to(unsafe {
-        core::slice::from_raw_parts_mut(&mut msg as *mut IpcMessage as *mut u8, 64)
+        core::slice::from_raw_parts_mut(&mut msg as *mut IpcMessage as *mut u8, MSG_SIZE)
     });
-    if n != 64 {
+    if n != MSG_SIZE {
         return Err(SyscallError::Fault);
     }
 
@@ -91,11 +93,11 @@ pub fn sys_chan_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
     let msg = chan.recv().map_err(SyscallError::from)?;
 
-    let user_slice = UserSliceWrite::new(msg_ptr, 64).map_err(SyscallError::from)?;
+    let user_slice = UserSliceWrite::new(msg_ptr, MSG_SIZE).map_err(SyscallError::from)?;
     let n = user_slice.copy_from(unsafe {
-        core::slice::from_raw_parts(&msg as *const IpcMessage as *const u8, 64)
+        core::slice::from_raw_parts(&msg as *const IpcMessage as *const u8, MSG_SIZE)
     });
-    if n != 64 {
+    if n != MSG_SIZE {
         return Err(SyscallError::Fault);
     }
 
@@ -119,11 +121,11 @@ pub fn sys_chan_try_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
     let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
     match chan.try_recv() {
         Ok(msg) => {
-            let user_slice = UserSliceWrite::new(msg_ptr, 64).map_err(SyscallError::from)?;
+            let user_slice = UserSliceWrite::new(msg_ptr, MSG_SIZE).map_err(SyscallError::from)?;
             let n = user_slice.copy_from(unsafe {
-                core::slice::from_raw_parts(&msg as *const IpcMessage as *const u8, 64)
+                core::slice::from_raw_parts(&msg as *const IpcMessage as *const u8, MSG_SIZE)
             });
-            if n != 64 {
+            if n != MSG_SIZE {
                 return Err(SyscallError::Fault);
             }
             Ok(0)

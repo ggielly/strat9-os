@@ -939,24 +939,9 @@ fn register_supervised(name: &str, pid: u64) {
 fn supervisor_loop() -> ! {
     log("[init] Supervisor: entering watch loop\n");
     loop {
-        let _ = call::sched_yield();
-
         let mut wstatus: i32 = 0;
-        // TODO(kernel): replace polling waitpid with blocking variant once the
-        // scheduler deadlock caused by waitpid(-1, ..., 0) is fixed.
-        //
-        // Expected optimal code:
-        //   match call::waitpid(-1, Some(&mut wstatus), 0) {
-        //       Ok(pid) if pid > 0 => { ... }
-        //       _ => {}
-        //   }
-        //
-        // This eliminates the sched_yield() and saves some microseconds per loop iteration :)
-        //
-        //
-        // BUG: workspace/kernel/src/syscall/wait.rs : blocking path hangs the whole system when no child has exited yet.
-        match call::waitpid(-1, Some(&mut wstatus), 1) {
-            // WNOHANG = 1 : poll without blocking
+        // Optimal blocking waitpid (0 instead of WNOHANG) : blocks without CPU-spinning or sched_yield.
+        match call::waitpid(-1, Some(&mut wstatus), 0) {
             Ok(pid) if pid > 0 => {
                 let status = wstatus;
                 let mut found = false;
@@ -990,7 +975,10 @@ fn supervisor_loop() -> ! {
                     log("\n");
                 }
             }
-            _ => {}
+            _ => {
+                // If waitpid fails or is interrupted, yield briefly to avoid hard lockups but sleep is the default.
+                let _ = call::sched_yield();
+            }
         }
     }
 }

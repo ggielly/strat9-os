@@ -13,6 +13,7 @@
 extern crate alloc;
 
 use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
+use strat9_abi::net::parse_ipv4_literal;
 use strat9_syscall::{call, data::TimeSpec, number};
 
 alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 96 * 1024;);
@@ -98,38 +99,6 @@ fn read_text(path: &str, out: &mut [u8]) -> usize {
     let n = call::read(fd as usize, out).unwrap_or(0);
     let _ = call::close(fd as usize);
     n
-}
-
-fn parse_ipv4_literal(s: &str) -> Option<[u8; 4]> {
-    let mut octets = [0u8; 4];
-    let mut idx = 0usize;
-    let mut val: u16 = 0;
-    let mut has_digit = false;
-
-    for &b in s.as_bytes() {
-        if b == b'.' {
-            if !has_digit || idx >= 3 || val > 255 {
-                return None;
-            }
-            octets[idx] = val as u8;
-            idx += 1;
-            val = 0;
-            has_digit = false;
-            continue;
-        }
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        val = val * 10 + (b - b'0') as u16;
-        has_digit = true;
-    }
-
-    if !has_digit || idx != 3 || val > 255 {
-        return None;
-    }
-
-    octets[3] = val as u8;
-    Some(octets)
 }
 
 fn parse_first_ipv4_line(path: &str, buf: &mut [u8; 128]) -> Option<[u8; 4]> {

@@ -205,9 +205,10 @@ pub fn deliver_reply(target: TaskId, msg: IpcMessage) -> Result<(), ()> {
 
             registry.slots.remove(&target);
 
-            let mut raw = [0u8; 64];
+            let msg_size = core::mem::size_of::<IpcMessage>();
+            let mut raw = [0u8; core::mem::size_of::<IpcMessage>()];
             crate::ipc::message::ipc_message_to_raw(&msg, &mut raw);
-            if let Ok(user) = UserSliceWrite::new(reply_buf, 64) {
+            if let Ok(user) = UserSliceWrite::new(reply_buf, msg_size) {
                 let _ = user.copy_from(&raw);
             }
 

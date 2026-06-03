@@ -52,7 +52,7 @@ fn flush_backlog_locked(ring: &super::ring::Ring) -> u32 {
     flush_count as u32
 }
 
-// ----  ring-id-based public API  --------------------------------------------
+// ====  ring-id-based public API  ===============================================================
 
 /// Push a completion event to the ring identified by `ring_id`.
 ///
