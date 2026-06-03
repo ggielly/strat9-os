@@ -29,7 +29,7 @@ pub fn sys_ipc_create_port(_flags: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
-/// SYS_IPC_SEND: send a 64-byte message to a port.
+/// SYS_IPC_SEND: send one IPC message to a port.
 pub fn sys_ipc_send(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     silo::enforce_cap_for_current_task(port_handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;

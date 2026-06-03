@@ -335,10 +335,51 @@ impl GlobalSchedState {
     /// `ipi_cpu` after releasing the scheduler lock.
     ///
     /// NOTE: `blocked_tasks` lives in the separate `BLOCKED_TASKS` lock.
-    /// This method now only handles the fallback path (task not yet blocked,
-    /// set `wake_pending`). The primary wake path is in `wake_task()`.
+    /// This method handles waking the task directly if it is already in `BLOCKED_TASKS`,
+    /// or setting `wake_pending` as a fallback if the task is still transitioning to Blocked.
     pub fn wake_task_locked(&mut self, id: TaskId) -> (bool, Option<usize>) {
         self.clear_task_wake_deadline_locked(id);
+
+        // Check if the task is already in BLOCKED_TASKS first to wake it directly.
+        let mut woken = false;
+        let mut ipi_cpu = None;
+        {
+            let mut blocked = super::BLOCKED_TASKS.lock();
+            if let Some(task) = blocked.remove(&id) {
+                task.set_state(TaskState::Ready);
+                let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
+                let cpu_index = if home != usize::MAX { home } else { 0 };
+
+                let class = {
+                    use crate::process::sched::SchedClassId;
+                    match task.sched_policy() {
+                        crate::process::sched::SchedPolicy::RealTimeRR { .. }
+                        | crate::process::sched::SchedPolicy::RealTimeFifo { .. } => {
+                            SchedClassId::RealTime
+                        }
+                        crate::process::sched::SchedPolicy::Fair(_) => SchedClassId::Fair,
+                        crate::process::sched::SchedPolicy::Idle => SchedClassId::Idle,
+                    }
+                };
+
+                if let Some(ref mut local_cpu) = *super::LOCAL_SCHEDULERS[cpu_index].lock() {
+                    local_cpu.class_rqs.enqueue(class, task.clone());
+                    local_cpu.need_resched = true;
+                }
+
+                ipi_cpu = if cpu_index != current_cpu_index() {
+                    Some(cpu_index)
+                } else {
+                    None
+                };
+                woken = true;
+            }
+        }
+
+        if woken {
+            return (true, ipi_cpu);
+        }
+
         // Fallback: task is not yet in BLOCKED_TASKS (still transitioning to
         // Blocked). Set wake_pending so block_current_task will skip blocking.
         if let Some(task) = self.all_tasks.get(&id) {

@@ -1969,7 +1969,6 @@ pub(super) fn cmd_strate_impl(args: &[String]) -> Result<(), ShellError> {
 // ============================================================================
 // silo info / suspend / resume / events / pledge / unveil / sandbox / top / logs
 // ============================================================================
-
 fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
         shell_println!("Usage: silo info <id|label|name>");
@@ -2010,7 +2009,7 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     shell_println!("CPU shares: {}", detail.cpu_shares);
     shell_println!("CPU mask:   {:#x}", detail.cpu_affinity_mask);
     shell_println!("CPU req:    {:#x}", detail.cpu_features_required);
-    shell_println!("CPU allow:  {:#x}", detail.cpu_featu#[path = "silo.rs"]res_allowed);
+    shell_println!("CPU allow:  {:#x}", detail.cpu_features_allowed);
     shell_println!("XCR0 mask:  {:#x}", detail.xcr0_mask);
     shell_println!("GFX flags:  {:#x}", detail.graphics_flags);
     shell_println!(
@@ -2041,7 +2040,7 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
             alloc::format!("{}", detail.max_tasks)
         }
     );
-    shell_println!("Caps:       {} granted", detail.gran#[path = "silo.rs"]ted_caps_count);
+    shell_println!("Caps:       {} granted", detail.granted_caps_count);
 
     if !detail.task_ids.is_empty() {
         shell_println!("Task IDs:   {:?}", detail.task_ids);

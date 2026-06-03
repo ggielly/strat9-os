@@ -48,16 +48,18 @@ const OPCODE_READDIR: u32 = 0x08;
 const OPCODE_BOOTSTRAP: u32 = 0x10;
 const REPLY_MSG_TYPE: u32 = 0x80;
 const STATUS_OK: u32 = 0;
-const MAX_OPEN_PATH: usize = 42;
-const MAX_CREATE_PATH: usize = 40;
-const MAX_UNLINK_PATH: usize = 42;
-const MAX_READ_DATA: usize = 40; // payload[8..48]
-const MAX_WRITE_DATA: usize = 30; // payload[18..48]
+const MAX_OPEN_PATH: usize = IpcMessage::OPEN_INLINE_CAPACITY;
+const MAX_CREATE_PATH: usize = IpcMessage::OPEN_INLINE_CAPACITY;
+const MAX_UNLINK_PATH: usize = IpcMessage::UNLINK_INLINE_CAPACITY;
+const MAX_READ_DATA: usize = IpcMessage::READ_INLINE_CAPACITY;
+const MAX_WRITE_DATA: usize = IpcMessage::WRITE_INLINE_CAPACITY;
 const OPEN_CREATE: u32 = 1 << 2;
 const OPEN_TRUNCATE: u32 = 1 << 3;
 const OPEN_DIRECTORY: u32 = 1 << 5;
 
-use strat9_syscall::data::IpcMessage;
+use strat9_syscall::data::{
+    IpcMessage, IPC_FILE_FLAG_CHUNK_READ, IPC_FILE_FLAG_CHUNK_WRITE, IPC_FILE_FLAG_DIRECTORY,
+};
 
 struct StrateRamServer {
     fs: RamFileSystem,
@@ -254,7 +256,11 @@ impl StrateRamServer {
         let mut reply = Self::ok_reply(sender);
         reply.payload[4..12].copy_from_slice(&info.ino.to_le_bytes());
         reply.payload[12..20].copy_from_slice(&info.size.to_le_bytes());
-        let f_flags: u32 = if info.is_dir() { 1 } else { 0 };
+        let f_flags: u32 = if info.is_dir() {
+            IPC_FILE_FLAG_DIRECTORY
+        } else {
+            IPC_FILE_FLAG_CHUNK_READ | IPC_FILE_FLAG_CHUNK_WRITE
+        };
         reply.payload[20..24].copy_from_slice(&f_flags.to_le_bytes());
         reply
     }

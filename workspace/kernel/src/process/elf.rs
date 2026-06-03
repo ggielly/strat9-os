@@ -1385,6 +1385,29 @@ pub fn load_and_run_elf(elf_data: &[u8], name: &'static str) -> Result<TaskId, &
     load_and_run_elf_with_caps(elf_data, name, &[])
 }
 
+/// Load an ELF64 binary with command-line arguments and schedule it as a Ring 3 task.
+///
+/// `extra_args` maps to `argv[1..]`; `argv[0]` is always `name`.
+pub fn load_and_run_elf_with_args(
+    elf_data: &[u8],
+    name: &'static str,
+    extra_args: &[&str],
+) -> Result<TaskId, &'static str> {
+    let task = load_elf_task_inner(elf_data, name, extra_args, &[])?;
+    let task_id = task.id;
+    crate::process::add_task(task);
+    Ok(task_id)
+}
+
+/// Thin public wrapper that keeps the existing API stable.
+pub fn load_elf_task_with_caps(
+    elf_data: &[u8],
+    name: &'static str,
+    seed_caps: &[Capability],
+) -> Result<Arc<Task>, &'static str> {
+    load_elf_task_inner(elf_data, name, &[], seed_caps)
+}
+
 /// Performs the load and run elf with caps operation.
 pub fn load_and_run_elf_with_caps(
     elf_data: &[u8],
@@ -1396,7 +1419,7 @@ pub fn load_and_run_elf_with_caps(
         name,
         elf_data.len()
     );
-    let task = load_elf_task_with_caps(elf_data, name, seed_caps)?;
+    let task = load_elf_task_inner(elf_data, name, &[], seed_caps)?;
     let task_id = task.id;
     let runtime_entry = task
         .trampoline_entry
@@ -1446,9 +1469,21 @@ fn push_auxv(user_as: &AddressSpace, sp: &mut u64, tag: u64, val: u64) -> Result
 }
 
 /// Performs the setup boot user stack operation.
+/// Sets up the initial user-space stack for a freshly loaded ELF task.
+///
+/// Stack layout (low addr at bottom = first word read by `_start`):
+/// ```
+/// [sp+0]             argc
+/// [sp+8]             argv[0] ptr  (program name)
+/// [sp+8*(2..=argc)]  argv[1..] ptrs  (extra_args)
+/// [sp+8*(argc+1)]    NULL  (argv terminator)
+/// [sp+8*(argc+2)]    NULL  (envp terminator)
+/// ...                auxv pairs
+/// ```
 fn setup_boot_user_stack(
     user_as: &AddressSpace,
     name: &str,
+    extra_args: &[&str],
     phdr_vaddr: u64,
     phent: u16,
     phnum: u16,
@@ -1457,11 +1492,22 @@ fn setup_boot_user_stack(
 ) -> Result<u64, &'static str> {
     let mut sp = USER_STACK_TOP;
 
+    // Write argv[0] = program name (null-terminated)
     let name_nul_len = (name.len() + 1) as u64;
     sp -= name_nul_len;
     let argv0_ptr = sp;
     write_user_mapped_bytes(user_as, sp, name.as_bytes())?;
     write_user_mapped_bytes(user_as, sp + name.len() as u64, &[0])?;
+
+    // Write extra arg strings and record their user-space pointers
+    let mut extra_ptrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(extra_args.len());
+    for &arg in extra_args.iter() {
+        let arg_nul_len = (arg.len() + 1) as u64;
+        sp -= arg_nul_len;
+        extra_ptrs.push(sp);
+        write_user_mapped_bytes(user_as, sp, arg.as_bytes())?;
+        write_user_mapped_bytes(user_as, sp + arg.len() as u64, &[0])?;
+    }
 
     sp -= 16;
     let random_ptr = sp;
@@ -1470,15 +1516,13 @@ fn setup_boot_user_stack(
 
     sp &= !0xF;
     let auxv_pairs = if interp_base.is_some() { 8u64 } else { 7u64 };
-    let stack_words = 1u64 + 2 + 1 + auxv_pairs * 2;
+    // argc(1) + argv[0..=N](1+N) + argv_NULL(1) + envp_NULL(1) + auxv(pairs*2)
+    let stack_words = 4u64 + extra_args.len() as u64 + auxv_pairs * 2;
     let align_pad = (0u64.wrapping_sub(stack_words * 8)) & 0xF;
     sp -= align_pad;
 
-    // ---------------------------------------------------------------------------
-    // Public API
-    // ---------------------------------------------------------------------------
-    // AT_NULL
-    push_auxv(user_as, &mut sp, 0, 0)?;
+    // Auxv (written high-to-low since push_auxv decrements sp)
+    push_auxv(user_as, &mut sp, 0, 0)?; // AT_NULL
     push_auxv(user_as, &mut sp, AT_RANDOM, random_ptr)?;
     push_auxv(user_as, &mut sp, AT_ENTRY, program_entry)?;
     if let Some(base) = interp_base {
@@ -1492,23 +1536,35 @@ fn setup_boot_user_stack(
     // envp NULL terminator
     sp -= 8;
     write_user_u64(user_as, sp, 0)?;
-    // argv[0], argv NULL terminator
+
+    // argv NULL terminator
     sp -= 8;
     write_user_u64(user_as, sp, 0)?;
+
+    // Extra argv pointers in reverse (last arg highest in stack, first arg lowest)
+    for &ptr in extra_ptrs.iter().rev() {
+        sp -= 8;
+        write_user_u64(user_as, sp, ptr)?;
+    }
+
+    // argv[0] = program name
     sp -= 8;
     write_user_u64(user_as, sp, argv0_ptr)?;
-    // argc
+
+    // argc = 1 (name) + extra_args
     sp -= 8;
-    write_user_u64(user_as, sp, 1)?;
+    write_user_u64(user_as, sp, 1u64 + extra_args.len() as u64)?;
 
     debug_assert_eq!(sp & 0xF, 0);
     Ok(sp)
 }
 
-/// Performs the load elf task with caps operation.
-pub fn load_elf_task_with_caps(
+/// Internal ELF task builder used by all public loading APIs.
+/// `extra_args` are written to the user stack as argv[1..] after the program name.
+fn load_elf_task_inner(
     elf_data: &[u8],
     name: &'static str,
+    extra_args: &[&str],
     seed_caps: &[Capability],
 ) -> Result<Arc<Task>, &'static str> {
     crate::e9_println!(
@@ -1693,6 +1749,7 @@ pub fn load_elf_task_with_caps(
     let boot_sp = setup_boot_user_stack(
         &user_as,
         name,
+        extra_args,
         phdr_vaddr,
         header.e_phentsize,
         header.e_phnum,

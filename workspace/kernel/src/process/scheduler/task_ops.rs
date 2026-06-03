@@ -429,102 +429,84 @@ pub fn set_process_group(
 
     let saved_flags = save_flags_and_cli();
     let result = (|| -> Result<Pid, SyscallError> {
-        // Step 1: Get task references from GLOBAL_SCHED_STATE.
-        let (requester_task, target_id, target_task, desired_pgid, _group_leader_sid) = {
-            let scheduler = GLOBAL_SCHED_STATE.lock();
-            let sched = scheduler.as_ref().ok_or(SyscallError::Fault)?;
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        let sched = scheduler.as_ref().ok_or(SyscallError::Fault)?;
 
-            let requester_task = sched
-                .all_tasks
+        let requester_task = sched
+            .all_tasks
+            .get(&requester)
+            .cloned()
+            .ok_or(SyscallError::Fault)?;
+        let requester_sid = requester_task.sid.load(Ordering::Relaxed);
+
+        let target_id = match target_pid {
+            None => requester,
+            Some(pid) => SCHED_IDENTITY
+                .read()
+                .pid_to_task
+                .get(&pid)
+                .copied()
+                .ok_or(SyscallError::NotFound)?,
+        };
+
+        if target_id != requester {
+            let is_child = SCHED_IDENTITY
+                .read()
+                .children_of
                 .get(&requester)
-                .cloned()
-                .ok_or(SyscallError::Fault)?;
-            let requester_sid = requester_task.sid.load(Ordering::Relaxed);
-
-            let target_id = match target_pid {
-                None => requester,
-                Some(pid) => SCHED_IDENTITY
-                    .read()
-                    .pid_to_task
-                    .get(&pid)
-                    .copied()
-                    .ok_or(SyscallError::NotFound)?,
-            };
-
-            if target_id != requester {
-                let is_child = SCHED_IDENTITY
-                    .read()
-                    .children_of
-                    .get(&requester)
-                    .map(|children| children.iter().any(|child| *child == target_id))
-                    .unwrap_or(false);
-                if !is_child {
-                    return Err(SyscallError::PermissionDenied);
-                }
+                .map(|children| children.iter().any(|child| *child == target_id))
+                .unwrap_or(false);
+            if !is_child {
+                return Err(SyscallError::PermissionDenied);
             }
+        }
 
-            let target_task = sched
-                .all_tasks
-                .get(&target_id)
-                .cloned()
+        let target_task = sched
+            .all_tasks
+            .get(&target_id)
+            .cloned()
+            .ok_or(SyscallError::NotFound)?;
+        let target_pid_value = target_task.pid;
+        let target_sid = target_task.sid.load(Ordering::Relaxed);
+
+        if target_sid != requester_sid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        if target_pid_value == target_sid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        let desired_pgid = new_pgid.unwrap_or(target_pid_value);
+        if desired_pgid != target_pid_value {
+            let group_leader_tid = SCHED_IDENTITY
+                .read()
+                .pid_to_task
+                .get(&desired_pgid)
+                .copied()
                 .ok_or(SyscallError::NotFound)?;
-            let target_pid_value = target_task.pid;
-            let target_sid = target_task.sid.load(Ordering::Relaxed);
-
-            if target_sid != requester_sid {
+            let group_leader = sched
+                .all_tasks
+                .get(&group_leader_tid)
+                .ok_or(SyscallError::NotFound)?;
+            if group_leader.sid.load(Ordering::Relaxed) != target_sid {
                 return Err(SyscallError::PermissionDenied);
             }
+        }
 
-            if target_pid_value == target_sid {
-                return Err(SyscallError::PermissionDenied);
-            }
-
-            let desired_pgid = new_pgid.unwrap_or(target_pid_value);
-            let group_leader_sid = if desired_pgid != target_pid_value {
-                let group_leader_tid = SCHED_IDENTITY
-                    .read()
-                    .pid_to_task
-                    .get(&desired_pgid)
-                    .copied()
-                    .ok_or(SyscallError::NotFound)?;
-                let group_leader = sched
-                    .all_tasks
-                    .get(&group_leader_tid)
-                    .ok_or(SyscallError::NotFound)?;
-                if group_leader.sid.load(Ordering::Relaxed) != target_sid {
-                    return Err(SyscallError::PermissionDenied);
-                }
-                group_leader.sid.load(Ordering::Relaxed)
-            } else {
-                0
-            };
-            Ok::<_, SyscallError>((
-                requester_task,
-                target_id,
-                target_task,
-                desired_pgid,
-                group_leader_sid,
-            ))
-        }?;
-
-        // Step 2: Mutate identity maps under SCHED_IDENTITY lock.
+        // Mutate identity maps under SCHED_IDENTITY lock while still holding GLOBAL_SCHED_STATE.
         let old_pgid = target_task.pgid.load(Ordering::Relaxed);
-        target_task
-            .pgid
-            .store(new_pgid.unwrap_or(target_task.pid), Ordering::Relaxed);
+        let actual_new_pgid = new_pgid.unwrap_or(target_task.pid);
+        target_task.pgid.store(actual_new_pgid, Ordering::Relaxed);
         {
             let mut identity = SCHED_IDENTITY.write();
             GlobalSchedState::member_remove(&mut identity.pgid_members, old_pgid, target_id);
-            GlobalSchedState::member_add(
-                &mut identity.pgid_members,
-                new_pgid.unwrap_or(target_task.pid),
-                target_id,
-            );
+            GlobalSchedState::member_add(&mut identity.pgid_members, actual_new_pgid, target_id);
             identity
                 .pid_to_pgid
-                .insert(target_task.pid, new_pgid.unwrap_or(target_task.pid));
+                .insert(target_task.pid, actual_new_pgid);
         }
-        Ok(new_pgid.unwrap_or(target_task.pid))
+        Ok(actual_new_pgid)
     })();
     restore_flags(saved_flags);
     result
@@ -536,16 +518,14 @@ pub fn create_session(requester: TaskId) -> Result<Pid, crate::syscall::error::S
 
     let saved_flags = save_flags_and_cli();
     let result = (|| -> Result<Pid, SyscallError> {
-        // Get task reference from GLOBAL_SCHED_STATE.
-        let requester_task = {
-            let scheduler = GLOBAL_SCHED_STATE.lock();
-            let sched = scheduler.as_ref().ok_or(SyscallError::Fault)?;
-            sched
-                .all_tasks
-                .get(&requester)
-                .cloned()
-                .ok_or(SyscallError::Fault)?
-        };
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        let sched = scheduler.as_ref().ok_or(SyscallError::Fault)?;
+        let requester_task = sched
+            .all_tasks
+            .get(&requester)
+            .cloned()
+            .ok_or(SyscallError::Fault)?;
+
         let pid = requester_task.pid;
         if requester_task.pgid.load(Ordering::Relaxed) == pid {
             return Err(SyscallError::PermissionDenied);
@@ -750,7 +730,6 @@ pub fn wake_task(id: TaskId) -> bool {
 
     // --- Primary path: task is in BLOCKED_TASKS ---
     // Acquire only BLOCKED_TASKS + LOCAL[target_cpu]. No GLOBAL_SCHED_STATE.
-    let mut task_to_enqueue: Option<Arc<Task>> = None;
     let mut ipi_cpu: Option<usize> = None;
     let mut woken = false;
 
@@ -785,7 +764,6 @@ pub fn wake_task(id: TaskId) -> bool {
                 None
             };
             woken = true;
-            task_to_enqueue = None; // task is enqueued, no deferred drop needed
         }
     } // BLOCKED_TASKS lock released
 
@@ -797,13 +775,16 @@ pub fn wake_task(id: TaskId) -> bool {
         return true;
     }
 
-    // --- Fallback path: task not yet in BLOCKED_TASKS ---
+    // === Fallback path: task not yet in BLOCKED_TASKS =================================
     // Set wake_pending so block_current_task skips blocking.
     {
         let mut scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref mut sched) = *scheduler {
-            let (fallback_woken, _) = sched.wake_task_locked(id);
+            let (fallback_woken, fallback_ipi) = sched.wake_task_locked(id);
             woken = fallback_woken;
+            if ipi_cpu.is_none() {
+                ipi_cpu = fallback_ipi;
+            }
         }
     }
 

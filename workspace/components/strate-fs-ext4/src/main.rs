@@ -48,8 +48,8 @@ const REPLY_MSG_TYPE: u32 = 0x80;
 const STATUS_OK: u32 = 0;
 const INITIAL_BIND_PATH: &[u8] = b"/srv/strate-fs-ext4/default";
 
-const MAX_OPEN_PATH: usize = 42;
-const MAX_WRITE_DATA: usize = 30;
+const MAX_OPEN_PATH: usize = IpcMessage::OPEN_INLINE_CAPACITY;
+const MAX_WRITE_DATA: usize = IpcMessage::WRITE_INLINE_CAPACITY;
 
 struct BootstrapInfo {
     handle: u64,

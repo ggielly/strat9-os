@@ -1,4 +1,5 @@
 pub use strat9_abi::data::IpcMessage;
+use strat9_abi::data::{IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE};
 
 use zerocopy::FromBytes;
 
@@ -11,18 +12,22 @@ pub struct IpcLabel {
 }
 
 /// Performs the ipc message from raw operation.
-pub fn ipc_message_from_raw(buf: &[u8; 64]) -> IpcMessage {
-    // SAFETY: `buf` has exactly 64 bytes, matching `IpcMessage` size.
+pub fn ipc_message_from_raw(buf: &[u8; IPC_MESSAGE_SIZE]) -> IpcMessage {
+    // SAFETY: `buf` has exactly `IPC_MESSAGE_SIZE` bytes, matching `IpcMessage` size.
     unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const IpcMessage) }
 }
 
 /// Performs the ipc message to raw operation.
-pub fn ipc_message_to_raw(msg: &IpcMessage, out: &mut [u8; 64]) {
-    // SAFETY: `out` has exactly 64 bytes, matching `IpcMessage` size.
+pub fn ipc_message_to_raw(msg: &IpcMessage, out: &mut [u8; IPC_MESSAGE_SIZE]) {
+    // SAFETY: `out` has exactly `IPC_MESSAGE_SIZE` bytes, matching `IpcMessage` size.
     unsafe {
-        core::ptr::copy_nonoverlapping(msg as *const _ as *const u8, out.as_mut_ptr(), 64);
+        core::ptr::copy_nonoverlapping(
+            msg as *const _ as *const u8,
+            out.as_mut_ptr(),
+            IPC_MESSAGE_SIZE,
+        );
     }
 }
 
-static_assertions::assert_eq_size!(IpcMessage, [u8; 64]);
-static_assertions::const_assert_eq!(core::mem::align_of::<IpcMessage>(), 64);
+static_assertions::assert_eq_size!(IpcMessage, [u8; IPC_MESSAGE_SIZE]);
+static_assertions::const_assert_eq!(core::mem::align_of::<IpcMessage>(), IPC_MESSAGE_ALIGN);

@@ -26,7 +26,7 @@ use crate::data::IpcMessage;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Capacity of the `IpcMessage.payload` field.
-pub const PAYLOAD_CAPACITY: usize = 48;
+pub const PAYLOAD_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY;
 
 // ===========================================================================
 // Scalar helpers : bounds-checked get/put for plain integer types

@@ -52,7 +52,7 @@ const RDEV_URANDOM: u64 = (1u64 << 8) | 9;
 const RDEV_SDA: u64 = (8u64 << 8) | 0;
 const RDEV_VDA: u64 = (254u64 << 8) | 0;
 
-// ========== xorshift64 fallback PRNG ================================================================================================================================================================
+// ========== xorshift64 fallback PRNG ====================================
 static PRNG_STATE: AtomicU64 = AtomicU64::new(0xdeadbeef_cafebabe);
 
 /// Performs the prng fill operation.
@@ -473,7 +473,7 @@ impl Scheme for BlkDevScheme {
     }
 }
 
-// ========== Byte-offset <==> sector I/O helpers ==================================================================================================================================
+// ========== Byte-offset <-> sector I/O helpers ======================================================
 
 /// Read `buf.len()` bytes from the block device starting at byte `offset`.
 ///

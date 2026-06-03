@@ -1,4 +1,4 @@
-//! Scheme abstraction - backends for VFS operations.
+//! Scheme abstraction : backends for VFS operations.
 //!
 //! Schemes provide the actual implementation for file operations.
 //! Examples: IPC-based schemes (ext4, network), kernel schemes (devfs, procfs).
@@ -18,6 +18,8 @@ use alloc::{
 
 pub use strat9_abi::data::{
     FileStat, DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK, DT_UNKNOWN,
+    IPC_FILE_FLAG_APPEND, IPC_FILE_FLAG_CHUNK_READ, IPC_FILE_FLAG_CHUNK_WRITE,
+    IPC_FILE_FLAG_DEVICE, IPC_FILE_FLAG_DIRECTORY, IPC_FILE_FLAG_PIPE,
 };
 
 /// A single directory entry returned by readdir.
@@ -43,10 +45,12 @@ bitflags::bitflags! {
     /// Flags describing a file's properties.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct FileFlags: u32 {
-        const DIRECTORY = 1 << 0;
-        const DEVICE    = 1 << 1;
-        const PIPE      = 1 << 2;
-        const APPEND    = 1 << 3;
+        const DIRECTORY   = IPC_FILE_FLAG_DIRECTORY;
+        const DEVICE      = IPC_FILE_FLAG_DEVICE;
+        const PIPE        = IPC_FILE_FLAG_PIPE;
+        const APPEND      = IPC_FILE_FLAG_APPEND;
+        const CHUNK_READ  = IPC_FILE_FLAG_CHUNK_READ;
+        const CHUNK_WRITE = IPC_FILE_FLAG_CHUNK_WRITE;
     }
 }
 
@@ -242,12 +246,32 @@ pub fn finalize_pseudo_stat(mut st: FileStat, st_dev: u64, st_rdev: u64) -> File
 /// IPC-based scheme: forwards operations to a userspace server via IPC.
 pub struct IpcScheme {
     port_id: PortId,
+    open_file_flags: SpinLock<BTreeMap<u64, FileFlags>>,
 }
 
 impl IpcScheme {
     /// Creates a new instance.
     pub fn new(port_id: PortId) -> Self {
-        IpcScheme { port_id }
+        IpcScheme {
+            port_id,
+            open_file_flags: SpinLock::new(BTreeMap::new()),
+        }
+    }
+
+    fn remember_open_flags(&self, file_id: u64, flags: FileFlags) {
+        self.open_file_flags.lock().insert(file_id, flags);
+    }
+
+    fn take_open_flags(&self, file_id: u64) {
+        self.open_file_flags.lock().remove(&file_id);
+    }
+
+    fn open_flags_for(&self, file_id: u64) -> FileFlags {
+        self.open_file_flags
+            .lock()
+            .get(&file_id)
+            .copied()
+            .unwrap_or_else(FileFlags::empty)
     }
 
     /// Build an IPC message for open operation.
@@ -256,7 +280,7 @@ impl IpcScheme {
         let mut msg = IpcMessage::new(OPCODE_OPEN);
 
         // Encode: [flags: u32][path_len: u16][path bytes...]
-        if path.len() > 42 {
+        if path.len() > IpcMessage::OPEN_INLINE_CAPACITY {
             return Err(SyscallError::InvalidArgument); // Path too long for inline
         }
 
@@ -285,8 +309,7 @@ impl IpcScheme {
         msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
         msg.payload[8..16].copy_from_slice(&offset.to_le_bytes());
 
-        // payload[18..48] leaves 30 bytes for data.
-        let packed = core::cmp::min(data.len(), 30);
+        let packed = core::cmp::min(data.len(), IpcMessage::WRITE_INLINE_CAPACITY);
         msg.payload[16..18].copy_from_slice(&(packed as u16).to_le_bytes());
         msg.payload[18..18 + packed].copy_from_slice(&data[..packed]);
         (msg, packed)
@@ -397,59 +420,107 @@ impl Scheme for IpcScheme {
             reply.payload[22],
             reply.payload[23],
         ]);
+        let flags = FileFlags::from_bits_truncate(file_flags);
+        self.remember_open_flags(file_id, flags);
 
         Ok(OpenResult {
             file_id,
             size: if size == u64::MAX { None } else { Some(size) },
-            flags: FileFlags::from_bits_truncate(file_flags),
+            flags,
         })
     }
 
     /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let msg = Self::build_read_msg(file_id, offset, buf.len() as u32);
-        let reply = self.call(msg)?;
+        let flags = self.open_flags_for(file_id);
+        let chunked = flags.contains(FileFlags::CHUNK_READ);
+        let chunk_size = if chunked {
+            IpcMessage::READ_INLINE_CAPACITY
+        } else {
+            buf.len()
+        };
 
-        // Parse reply: [status: u32][bytes_read: u32][data...]
-        Self::parse_status(&reply)?;
+        let mut total = 0usize;
+        let mut current_offset = offset;
+        while total < buf.len() {
+            let request_len = core::cmp::min(buf.len() - total, chunk_size);
+            let msg = Self::build_read_msg(file_id, current_offset, request_len as u32);
+            let reply = self.call(msg)?;
 
-        let bytes_read = u32::from_le_bytes([
-            reply.payload[4],
-            reply.payload[5],
-            reply.payload[6],
-            reply.payload[7],
-        ]) as usize;
+            Self::parse_status(&reply)?;
 
-        let available = core::cmp::min(bytes_read, reply.payload.len() - 8);
-        let to_copy = core::cmp::min(available, buf.len());
-        buf[..to_copy].copy_from_slice(&reply.payload[8..8 + to_copy]);
+            let bytes_read = u32::from_le_bytes([
+                reply.payload[4],
+                reply.payload[5],
+                reply.payload[6],
+                reply.payload[7],
+            ]) as usize;
 
-        Ok(to_copy)
+            let available = core::cmp::min(bytes_read, reply.payload.len() - 8);
+            let to_copy = core::cmp::min(available, request_len);
+            buf[total..total + to_copy].copy_from_slice(&reply.payload[8..8 + to_copy]);
+
+            total += to_copy;
+            current_offset += to_copy as u64;
+
+            if !chunked || to_copy < request_len {
+                break;
+            }
+        }
+
+        Ok(total)
     }
 
     /// Performs the write operation.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
-        let (msg, packed) = Self::build_write_msg(file_id, offset, buf);
-        let reply = self.call(msg)?;
+        let flags = self.open_flags_for(file_id);
+        let chunked = flags.contains(FileFlags::CHUNK_WRITE);
+        // Non-chunked handles (control endpoints, datagrams) must fit in one IPC
+        // message; chunked handles (streams, files) can split across multiple calls.
+        if !chunked && buf.len() > IpcMessage::WRITE_INLINE_CAPACITY {
+            return Err(SyscallError::MessageSize);
+        }
+        let chunk_size = if chunked {
+            IpcMessage::WRITE_INLINE_CAPACITY
+        } else {
+            buf.len()
+        };
 
-        // Parse reply: [status: u32][bytes_written: u32]
-        Self::parse_status(&reply)?;
+        let mut total = 0usize;
+        let mut current_offset = offset;
+        while total < buf.len() {
+            let request_len = core::cmp::min(buf.len() - total, chunk_size);
+            let (msg, packed) =
+                Self::build_write_msg(file_id, current_offset, &buf[total..total + request_len]);
+            let reply = self.call(msg)?;
 
-        let bytes_written = u32::from_le_bytes([
-            reply.payload[4],
-            reply.payload[5],
-            reply.payload[6],
-            reply.payload[7],
-        ]) as usize;
+            Self::parse_status(&reply)?;
 
-        // Never report more bytes than we actually sent.
-        Ok(bytes_written.min(packed))
+            let bytes_written = u32::from_le_bytes([
+                reply.payload[4],
+                reply.payload[5],
+                reply.payload[6],
+                reply.payload[7],
+            ]) as usize;
+
+            let chunk_written = bytes_written.min(packed);
+            total += chunk_written;
+            current_offset += chunk_written as u64;
+
+            if !chunked || chunk_written < packed {
+                break;
+            }
+        }
+
+        Ok(total)
     }
 
     /// Performs the close operation.
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
         let msg = Self::build_close_msg(file_id);
-        let reply = self.call(msg)?;
+        let reply = self.call(msg);
+        self.take_open_flags(file_id);
+        let reply = reply?;
 
         Self::parse_status(&reply)?;
 
@@ -473,7 +544,7 @@ impl Scheme for IpcScheme {
         const OPCODE_UNLINK: u32 = 0x07;
         let mut msg = IpcMessage::new(OPCODE_UNLINK);
 
-        if path.len() > 42 {
+        if path.len() > IpcMessage::UNLINK_INLINE_CAPACITY {
             return Err(SyscallError::InvalidArgument);
         }
 
@@ -560,7 +631,7 @@ impl IpcScheme {
     ) -> Result<OpenResult, SyscallError> {
         let mut msg = IpcMessage::new(opcode);
 
-        if path.len() > 40 {
+        if path.len() > IpcMessage::OPEN_INLINE_CAPACITY {
             return Err(SyscallError::InvalidArgument);
         }
 

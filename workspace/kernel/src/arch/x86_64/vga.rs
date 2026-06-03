@@ -11,16 +11,21 @@ use core::{
 };
 use spin::Mutex;
 
+mod status_line;
+
+use status_line::draw_boot_status_line;
+pub use status_line::{
+    draw_system_status_line, maybe_refresh_system_status_line, set_status_hostname, set_status_ip,
+    status_line_task_main, ui_draw_status_bar,
+};
+
 /// Whether framebuffer console is available.
 static VGA_AVAILABLE: AtomicBool = AtomicBool::new(false);
-static STATUS_LAST_REFRESH_TICK: AtomicU64 = AtomicU64::new(0);
-const STATUS_REFRESH_PERIOD_TICKS: u64 = 100; // 100Hz timer => 1s
-static STATUS_LAST_IP_REFRESH_TICK: AtomicU64 = AtomicU64::new(0);
-const STATUS_IP_REFRESH_PERIOD_TICKS: u64 = 3_000; // 100Hz timer => 30s
 static PRESENTED_FRAMES: AtomicU64 = AtomicU64::new(0);
 static FPS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
 static FPS_LAST_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 static FPS_ESTIMATE: AtomicU64 = AtomicU64::new(0);
+const FPS_REFRESH_PERIOD_TICKS: u64 = 100; // 100Hz timer => 1s
 static VGA_PRESENT_REGION_COUNT: AtomicU64 = AtomicU64::new(0);
 static VGA_PRESENT_PIXEL_COUNT: AtomicU64 = AtomicU64::new(0);
 static DOUBLE_BUFFER_MODE: AtomicBool = AtomicBool::new(false);
@@ -174,14 +179,6 @@ impl UiTheme {
         status_text: RgbColor::new(0xF5, 0xFA, 0xFF),
     };
 }
-
-#[derive(Debug, Clone)]
-struct StatusLineInfo {
-    hostname: String,
-    ip: String,
-}
-
-static STATUS_LINE_INFO: Mutex<Option<StatusLineInfo>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UiRect {
@@ -1618,6 +1615,15 @@ impl VgaWriter {
         self.present_if_due(false);
     }
 
+    /// Performs the hide text cursor operation on the writer.
+    pub fn hide_text_cursor(&mut self) {
+        if self.tc_visible {
+            self.text_cursor_erase_hw();
+            self.tc_visible = false;
+            self.present_if_due(false);
+        }
+    }
+
     //  Text selection ==========
 
     /// Performs the sel normalized operation.
@@ -2829,9 +2835,9 @@ impl VgaWriter {
         self.end_viewport_render(prev_draw_to_back, prev_track_dirty);
     }
 
-    // ═══════════════════════════════════════════════════════════════════
+    // =============================================================
     // Scrollback buffer + scrollbar
-    // ═══════════════════════════════════════════════════════════════════
+    // =============================================================
 
     /// Mirror a normalized character into the scrollback model.
     /// Called by `write_char` before any live rendering.
@@ -2965,6 +2971,8 @@ impl VgaWriter {
             return false;
         }
 
+        let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
+
         if self.scroll_offset > old_offset {
             self.move_text_view_pixels_down(pixel_delta);
             self.redraw_visible_rows(0, diff);
@@ -2975,7 +2983,7 @@ impl VgaWriter {
 
         self.finalize_live_view_state();
         self.draw_scrollbar_inner();
-        self.request_present();
+        self.end_viewport_render(prev_draw_to_back, prev_track_dirty);
         true
     }
 
@@ -3105,7 +3113,68 @@ pub fn with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
         return None;
     }
     let mut writer = VGA_WRITER.lock();
-    Some(f(&mut writer))
+    let mc_was_visible = writer.mc_visible;
+    let tc_was_visible = writer.tc_visible;
+    // Track mouse cursor position to detect if update_mouse_cursor was called inside f
+    let mc_coords_before = (writer.mc_x, writer.mc_y);
+
+    if mc_was_visible {
+        writer.mc_erase_hw();
+    }
+    if tc_was_visible {
+        writer.text_cursor_erase_hw();
+    }
+
+    let res = f(&mut writer);
+
+    // Only redraw mouse cursor if coordinates didn't change (update_mouse_cursor wasn't called)
+    // If update_mouse_cursor was called, it already redrew the cursor
+    let mc_coords_after = (writer.mc_x, writer.mc_y);
+    if writer.mc_visible && mc_coords_before == mc_coords_after {
+        writer.mc_save_hw();
+        writer.mc_draw_hw();
+    }
+    if writer.tc_visible {
+        writer.text_cursor_save_hw();
+        writer.text_cursor_draw_hw();
+    }
+
+    Some(res)
+}
+
+/// Performs the try with writer operation.
+pub fn try_with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
+    if !is_available() {
+        return None;
+    }
+    let mut writer = VGA_WRITER.try_lock()?;
+    let mc_was_visible = writer.mc_visible;
+    let tc_was_visible = writer.tc_visible;
+    // Track mouse cursor position to detect if update_mouse_cursor was called inside f
+    let mc_coords_before = (writer.mc_x, writer.mc_y);
+
+    if mc_was_visible {
+        writer.mc_erase_hw();
+    }
+    if tc_was_visible {
+        writer.text_cursor_erase_hw();
+    }
+
+    let res = f(&mut writer);
+
+    // Only redraw mouse cursor if coordinates didn't change (update_mouse_cursor wasn't called)
+    // If update_mouse_cursor was called, it already redrew the cursor
+    let mc_coords_after = (writer.mc_x, writer.mc_y);
+    if writer.mc_visible && mc_coords_before == mc_coords_after {
+        writer.mc_save_hw();
+        writer.mc_draw_hw();
+    }
+    if writer.tc_visible {
+        writer.text_cursor_save_hw();
+        writer.text_cursor_draw_hw();
+    }
+
+    Some(res)
 }
 
 /// Writes raw console text to the framebuffer console in a single writer batch.
@@ -3114,8 +3183,9 @@ pub fn write_text(text: &str) {
         crate::arch::x86_64::serial::_print(format_args!("{}", text));
         return;
     }
-    let mut writer = VGA_WRITER.lock();
-    writer.write_bytes(text);
+    let _ = with_writer(|w| {
+        w.write_bytes(text);
+    });
 }
 
 /// Writes one console character to the framebuffer console.
@@ -3126,30 +3196,6 @@ pub fn write_char(ch: char) {
     }
     let mut buf = [0u8; 4];
     write_text(ch.encode_utf8(&mut buf));
-}
-
-/// Performs the status line info operation.
-fn status_line_info() -> StatusLineInfo {
-    let mut guard = STATUS_LINE_INFO.lock();
-    if guard.is_none() {
-        *guard = Some(StatusLineInfo {
-            hostname: String::from("strat9"),
-            ip: String::from("n/a"),
-        });
-    }
-    guard.as_ref().cloned().unwrap_or(StatusLineInfo {
-        hostname: String::from("strat9"),
-        ip: String::from("n/a"),
-    })
-}
-
-/// Performs the format uptime from ticks operation.
-fn format_uptime_from_ticks(ticks: u64) -> String {
-    let total_secs = ticks / 100;
-    let h = total_secs / 3600;
-    let m = (total_secs % 3600) / 60;
-    let s = total_secs % 60;
-    format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
 /// Performs the current fps operation.
@@ -3165,7 +3211,7 @@ fn current_fps(tick: u64) -> u64 {
     }
 
     let dt = tick.saturating_sub(last_tick);
-    if dt >= STATUS_REFRESH_PERIOD_TICKS
+    if dt >= FPS_REFRESH_PERIOD_TICKS
         && FPS_LAST_TICK
             .compare_exchange(last_tick, tick, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
@@ -3207,74 +3253,6 @@ pub fn ui_scale_px(base: usize) -> usize {
     let factor = current_ui_scale().factor();
     let denom = UiScale::Normal.factor();
     base.saturating_mul(factor) / denom
-}
-
-/// Performs the format mem usage operation.
-fn format_mem_usage() -> String {
-    let lock = crate::memory::buddy::get_allocator();
-    let Some(guard) = lock.try_lock() else {
-        // Never block the status-line task on allocator contention.
-        return String::from("n/a");
-    };
-    let Some(alloc) = guard.as_ref() else {
-        return String::from("n/a");
-    };
-    let (total_pages, allocated_pages) = alloc.page_totals();
-    let page_size = 4096usize;
-    let total = total_pages.saturating_mul(page_size);
-    let used = allocated_pages.saturating_mul(page_size);
-    let free = total.saturating_sub(used);
-    format!("{}/{}", format_size(free), format_size(total))
-}
-
-/// Performs the format size operation.
-fn format_size(bytes: usize) -> String {
-    const KB: usize = 1024;
-    const MB: usize = 1024 * KB;
-    const GB: usize = 1024 * MB;
-    if bytes >= GB {
-        format!("{}G", bytes / GB)
-    } else if bytes >= MB {
-        format!("{}M", bytes / MB)
-    } else if bytes >= KB {
-        format!("{}K", bytes / KB)
-    } else {
-        format!("{}B", bytes)
-    }
-}
-
-/// Performs the draw status bar inner operation.
-fn draw_status_bar_inner(w: &mut VgaWriter, left: &str, right: &str, theme: UiTheme) {
-    let saved_clip = w.clip;
-    w.reset_clip_rect();
-
-    let (gw, gh) = w.glyph_size();
-    if gh == 0 || gw == 0 {
-        w.clip = saved_clip;
-        return;
-    }
-    let bar_h = gh;
-    let y = w.height().saturating_sub(bar_h);
-    w.fill_rect(0, y, w.width(), bar_h, theme.status_bg);
-
-    let left_opts = TextOptions {
-        fg: theme.status_text,
-        bg: theme.status_bg,
-        align: TextAlign::Left,
-        wrap: false,
-        max_width: Some(w.width().saturating_sub(8)),
-    };
-    w.draw_text(0, y, left, left_opts);
-
-    let right_opts = TextOptions {
-        fg: theme.status_text,
-        bg: theme.status_bg,
-        align: TextAlign::Right,
-        wrap: false,
-        max_width: Some(w.width()),
-    };
-    w.draw_text(0, y, right, right_opts);
-    w.clip = saved_clip;
 }
 
 /// Performs the init operation.
@@ -3389,7 +3367,9 @@ macro_rules! vga_println {
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     if is_available() {
-        VGA_WRITER.lock().write_fmt(args).ok();
+        let _ = with_writer(|w| {
+            w.write_fmt(args).ok();
+        });
         return;
     }
     crate::arch::x86_64::serial::_print(args);
@@ -3685,6 +3665,15 @@ pub fn draw_text_cursor(color: RgbColor) {
     }
     let mut writer = VGA_WRITER.lock();
     writer.draw_text_cursor_overlay(color);
+}
+
+/// Performs the hide text cursor operation.
+pub fn hide_text_cursor() {
+    if !is_available() {
+        return;
+    }
+    let mut writer = VGA_WRITER.lock();
+    writer.hide_text_cursor();
 }
 
 /// Performs the framebuffer info operation.
@@ -4134,296 +4123,6 @@ pub fn ui_draw_table(table: &UiTable) {
     });
 }
 
-/// Performs the ui draw status bar operation.
-pub fn ui_draw_status_bar(left: &str, right: &str, theme: UiTheme) {
-    let _ = with_writer(|w| {
-        draw_status_bar_inner(w, left, right, theme);
-    });
-}
-
-/// Sets status hostname.
-pub fn set_status_hostname(hostname: &str) {
-    let mut guard = STATUS_LINE_INFO.lock();
-    if guard.is_none() {
-        *guard = Some(StatusLineInfo {
-            hostname: String::new(),
-            ip: String::from("n/a"),
-        });
-    }
-    if let Some(info) = guard.as_mut() {
-        info.hostname.clear();
-        info.hostname.push_str(hostname);
-    }
-}
-
-/// Sets status ip.
-pub fn set_status_ip(ip: &str) {
-    let mut guard = STATUS_LINE_INFO.lock();
-    if guard.is_none() {
-        *guard = Some(StatusLineInfo {
-            hostname: String::from("strat9"),
-            ip: String::new(),
-        });
-    }
-    if let Some(info) = guard.as_mut() {
-        info.ip.clear();
-        info.ip.push_str(ip);
-    }
-}
-
-/// Performs the draw system status line operation.
-pub fn draw_system_status_line(theme: UiTheme) {
-    let info = status_line_info();
-    let version = env!("CARGO_PKG_VERSION");
-    let tick = crate::process::scheduler::ticks();
-    let uptime = format_uptime_from_ticks(tick);
-    let mem = format_mem_usage();
-    let fps = current_fps(tick);
-    let left = format!(" {} ", info.hostname);
-    let right = format!(
-        "ip:{}  ver:{}  uptime:{}  ticks:{}  FPS:{}  load:n/a  memfree:{} ",
-        info.ip, version, uptime, tick, fps, mem
-    );
-    ui_draw_status_bar(&left, &right, theme);
-}
-
-/// Performs the draw boot status line operation.
-fn draw_boot_status_line(theme: UiTheme) {
-    let _ = with_writer(|w| {
-        draw_status_bar_inner(
-            w,
-            " strat9 ",
-            "ip:n/a  ver:boot  up:00:00:00  ticks:0  load:n/a  mem:n/a ",
-            theme,
-        );
-    });
-}
-
-/// Performs the refresh status ip from net scheme operation.
-fn refresh_status_ip_from_net_scheme() {
-    let tick = crate::process::scheduler::ticks();
-    let last = STATUS_LAST_IP_REFRESH_TICK.load(Ordering::Relaxed);
-    if tick.saturating_sub(last) < STATUS_IP_REFRESH_PERIOD_TICKS {
-        return;
-    }
-    if STATUS_LAST_IP_REFRESH_TICK
-        .compare_exchange(last, tick, Ordering::Relaxed, Ordering::Relaxed)
-        .is_err()
-    {
-        return;
-    }
-
-    let paths = ["/net/address", "/net/ip"];
-    for path in paths {
-        let fd = match crate::vfs::open(path, crate::vfs::OpenFlags::READ) {
-            Ok(fd) => fd,
-            Err(_) => continue,
-        };
-        let mut buf = [0u8; 64];
-        let read_res = crate::vfs::read(fd, &mut buf);
-        let _ = crate::vfs::close(fd);
-        let n = match read_res {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        if n == 0 {
-            continue;
-        }
-        let Ok(text) = core::str::from_utf8(&buf[..n]) else {
-            continue;
-        };
-        let mut ip = text.trim();
-        if let Some(slash) = ip.find('/') {
-            ip = &ip[..slash];
-        }
-        if ip.is_empty() || ip == "0.0.0.0" || ip == "169.254.0.0" {
-            continue;
-        }
-        set_status_ip(ip);
-        return;
-    }
-
-    set_status_ip("n/a");
-}
-
-/// Stack-only string buffer to avoid heap allocation in the status-line path.
-struct StackStr<const N: usize> {
-    buf: [u8; N],
-    len: usize,
-}
-
-impl<const N: usize> StackStr<N> {
-    /// Creates a new instance.
-    const fn new() -> Self {
-        Self {
-            buf: [0; N],
-            len: 0,
-        }
-    }
-    /// Returns this as str.
-    fn as_str(&self) -> &str {
-        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
-    }
-}
-
-impl<const N: usize> core::fmt::Write for StackStr<N> {
-    /// Writes str.
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let bytes = s.as_bytes();
-        let avail = N - self.len;
-        let n = bytes.len().min(avail);
-        self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
-        self.len += n;
-        Ok(())
-    }
-}
-
-/// Performs the maybe refresh system status line operation.
-pub fn maybe_refresh_system_status_line(theme: UiTheme) {
-    if !is_available() {
-        return;
-    }
-
-    let tick = crate::process::scheduler::ticks();
-    let last = STATUS_LAST_REFRESH_TICK.load(Ordering::Relaxed);
-    if tick.saturating_sub(last) < STATUS_REFRESH_PERIOD_TICKS {
-        return;
-    }
-    if STATUS_LAST_REFRESH_TICK
-        .compare_exchange(last, tick, Ordering::Relaxed, Ordering::Relaxed)
-        .is_err()
-    {
-        return;
-    }
-    refresh_status_ip_from_net_scheme();
-
-    let (hostname, ip) = if let Some(guard) = STATUS_LINE_INFO.try_lock() {
-        if let Some(info) = guard.as_ref() {
-            let mut h = StackStr::<64>::new();
-            let mut i = StackStr::<48>::new();
-            let _ = core::fmt::Write::write_str(&mut h, &info.hostname);
-            let _ = core::fmt::Write::write_str(&mut i, &info.ip);
-            (h, i)
-        } else {
-            let mut h = StackStr::<64>::new();
-            let mut i = StackStr::<48>::new();
-            let _ = core::fmt::Write::write_str(&mut h, "strat9");
-            let _ = core::fmt::Write::write_str(&mut i, "n/a");
-            (h, i)
-        }
-    } else {
-        return;
-    };
-
-    let version = env!("CARGO_PKG_VERSION");
-
-    let total_secs = tick / 100;
-    let h = total_secs / 3600;
-    let m = (total_secs % 3600) / 60;
-    let s = total_secs % 60;
-
-    let mem_str = {
-        use core::fmt::Write;
-        let lock = crate::memory::buddy::get_allocator();
-        if let Some(guard) = lock.try_lock() {
-            if let Some(alloc) = guard.as_ref() {
-                let (tp, ap) = alloc.page_totals();
-                let total = tp.saturating_mul(4096);
-                let used = ap.saturating_mul(4096);
-                let free = total.saturating_sub(used);
-                let mut buf = StackStr::<32>::new();
-                let _ = write!(
-                    buf,
-                    "{}/{}",
-                    format_size_stack(free),
-                    format_size_stack(total)
-                );
-                buf
-            } else {
-                let mut buf = StackStr::<32>::new();
-                let _ = core::fmt::Write::write_str(&mut buf, "n/a");
-                buf
-            }
-        } else {
-            let mut buf = StackStr::<32>::new();
-            let _ = core::fmt::Write::write_str(&mut buf, "n/a");
-            buf
-        }
-    };
-
-    let fps = current_fps(tick);
-
-    use core::fmt::Write;
-    let mut left = StackStr::<80>::new();
-    let _ = write!(left, " {} ", hostname.as_str());
-
-    let mut right = StackStr::<256>::new();
-    let _ = write!(
-        right,
-        "ip:{}  ver:{}  up:{:02}:{:02}:{:02}  ticks:{}  fps:{}  load:n/a  mem:{} ",
-        ip.as_str(),
-        version,
-        h,
-        m,
-        s,
-        tick,
-        fps,
-        mem_str.as_str()
-    );
-
-    if let Some(mut writer) = VGA_WRITER.try_lock() {
-        draw_status_bar_inner(&mut writer, left.as_str(), right.as_str(), theme);
-    }
-}
-
-/// Performs the format size stack operation.
-fn format_size_stack(bytes: usize) -> StackStr<16> {
-    use core::fmt::Write;
-    const KB: usize = 1024;
-    const MB: usize = 1024 * KB;
-    const GB: usize = 1024 * MB;
-    let mut buf = StackStr::<16>::new();
-    if bytes >= GB {
-        let _ = write!(buf, "{}G", bytes / GB);
-    } else if bytes >= MB {
-        let _ = write!(buf, "{}M", bytes / MB);
-    } else if bytes >= KB {
-        let _ = write!(buf, "{}K", bytes / KB);
-    } else {
-        let _ = write!(buf, "{}B", bytes);
-    }
-    buf
-}
-
-impl<const N: usize> core::fmt::Display for StackStr<N> {
-    /// Performs the fmt operation.
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Performs the status line task main operation.
-pub extern "C" fn status_line_task_main() -> ! {
-    let mut last_tick = 0u64;
-    let mut diag_counter = 0u64;
-    loop {
-        let tick = crate::process::scheduler::ticks();
-        if tick != last_tick {
-            last_tick = tick;
-            maybe_refresh_system_status_line(UiTheme::OCEAN_STATUS);
-        }
-        diag_counter += 1;
-        if diag_counter % 5000 == 0 {
-            crate::serial_println!(
-                "[status-line] heartbeat tick={} vga={}",
-                tick,
-                is_available()
-            );
-        }
-        crate::process::yield_task();
-    }
-}
-
 /// Performs the draw strata stack operation.
 pub fn draw_strata_stack(origin_x: usize, origin_y: usize, layer_w: usize, layer_h: usize) {
     if !is_available() {
@@ -4456,9 +4155,9 @@ pub fn scroll_to_live() {
     if !is_available() {
         return;
     }
-    if let Some(mut w) = VGA_WRITER.try_lock() {
+    let _ = try_with_writer(|w| {
         w.scroll_to_live();
-    }
+    });
 }
 
 /// Handle a click at framebuffer pixel `(px_x, px_y)`.
@@ -4467,9 +4166,9 @@ pub fn scrollbar_click(px_x: usize, px_y: usize) {
     if !is_available() {
         return;
     }
-    if let Some(mut w) = VGA_WRITER.try_lock() {
+    let _ = try_with_writer(|w| {
         w.scrollbar_click(px_x, px_y);
-    }
+    });
 }
 
 /// Drag the scrollbar to a given Y pixel coordinate.
@@ -4477,9 +4176,9 @@ pub fn scrollbar_drag_to(px_y: usize) {
     if !is_available() {
         return;
     }
-    if let Some(mut w) = VGA_WRITER.try_lock() {
+    let _ = try_with_writer(|w| {
         w.scrollbar_drag_to(px_y);
-    }
+    });
 }
 
 /// Returns `true` if `(px_x, px_y)` falls within the scrollbar strip.
@@ -4487,11 +4186,7 @@ pub fn scrollbar_hit_test(px_x: usize, px_y: usize) -> bool {
     if !is_available() {
         return false;
     }
-    if let Some(w) = VGA_WRITER.try_lock() {
-        w.scrollbar_hit_test(px_x, px_y)
-    } else {
-        false
-    }
+    try_with_writer(|w| w.scrollbar_hit_test(px_x, px_y)).unwrap_or(false)
 }
 
 /// Updates mouse cursor.
@@ -4499,9 +4194,9 @@ pub fn update_mouse_cursor(x: i32, y: i32) {
     if !is_available() {
         return;
     }
-    if let Some(mut w) = VGA_WRITER.try_lock() {
+    let _ = try_with_writer(|w| {
         w.update_mouse_cursor(x, y);
-    }
+    });
 }
 
 /// Performs the hide mouse cursor operation.
@@ -4509,9 +4204,9 @@ pub fn hide_mouse_cursor() {
     if !is_available() {
         return;
     }
-    if let Some(mut w) = VGA_WRITER.try_lock() {
+    let _ = try_with_writer(|w| {
         w.hide_mouse_cursor();
-    }
+    });
 }
 
 /// Starts selection.
@@ -4519,9 +4214,9 @@ pub fn start_selection(px: usize, py: usize) {
     if !is_available() {
         return;
     }
-    if let Some(mut w) = VGA_WRITER.try_lock() {
+    let _ = try_with_writer(|w| {
         w.start_selection(px, py);
-    }
+    });
 }
 
 /// Updates selection.
@@ -4529,9 +4224,9 @@ pub fn update_selection(px: usize, py: usize) {
     if !is_available() {
         return;
     }
-    if let Some(mut w) = VGA_WRITER.try_lock() {
+    let _ = try_with_writer(|w| {
         w.update_selection(px, py);
-    }
+    });
 }
 
 /// Performs the end selection operation.
@@ -4539,9 +4234,9 @@ pub fn end_selection() {
     if !is_available() {
         return;
     }
-    if let Some(mut w) = VGA_WRITER.try_lock() {
+    let _ = try_with_writer(|w| {
         w.end_selection();
-    }
+    });
 }
 
 /// Performs the clear selection operation.
@@ -4549,9 +4244,9 @@ pub fn clear_selection() {
     if !is_available() {
         return;
     }
-    if let Some(mut w) = VGA_WRITER.try_lock() {
+    let _ = try_with_writer(|w| {
         w.clear_selection();
-    }
+    });
 }
 
 /// Returns clipboard text.

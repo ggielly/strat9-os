@@ -26,6 +26,7 @@ const EFAULT: i32 = -14;
 const EINVAL: i32 = -22;
 const EIO: i32 = -5;
 const ENOMSG: i32 = -42;
+const IPC_MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
 
 /// Process up to `count` pending SQEs from the given ring.
 ///
@@ -131,7 +132,7 @@ fn dispatch_one(
             };
             let user_msg = UserSliceRead::new(sqe.addr, core::mem::size_of::<IpcMessage>())
                 .map_err(|_| EFAULT)?;
-            let mut raw = [0u8; 64];
+            let mut raw = [0u8; IPC_MSG_SIZE];
             user_msg.copy_to(&mut raw);
             let msg = ipc_message_from_raw(&raw);
             let res_code = match port.try_send(msg) {
@@ -154,10 +155,10 @@ fn dispatch_one(
                     let user_msg =
                         UserSliceWrite::new(sqe.addr, core::mem::size_of::<IpcMessage>())
                             .map_err(|_| EFAULT)?;
-                    let mut raw = [0u8; 64];
+                    let mut raw = [0u8; IPC_MSG_SIZE];
                     ipc_message_to_raw(&msg, &mut raw);
                     user_msg.copy_from(&raw);
-                    push_completion_for_ring(ring, sqe.user_data, 64, 0);
+                    push_completion_for_ring(ring, sqe.user_data, IPC_MSG_SIZE as i32, 0);
                     Ok(DispatchOutcome::CompletedInline)
                 }
                 Ok(None) => {
@@ -187,7 +188,7 @@ fn dispatch_one(
             // Read the outgoing message from userspace.
             let user_msg = UserSliceRead::new(sqe.addr, core::mem::size_of::<IpcMessage>())
                 .map_err(|_| EFAULT)?;
-            let mut raw = [0u8; 64];
+            let mut raw = [0u8; IPC_MSG_SIZE];
             user_msg.copy_to(&mut raw);
             let mut msg = ipc_message_from_raw(&raw);
 

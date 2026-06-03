@@ -4,8 +4,12 @@
 
 use super::error::SyscallError;
 use crate::memory::{UserSliceRead, UserSliceWrite};
-use alloc::vec;
 use core::sync::atomic::{AtomicU32, Ordering};
+use smallvec::SmallVec;
+
+/// Most Ethernet frames, including ICMP echo, fit comfortably under 2 KiB.
+/// Keep those on the stack to avoid hot-path heap churn in net send/recv syscalls.
+const NET_INLINE_BUF_CAPACITY: usize = 2048;
 
 /// Budget for logging network send errors to prevent log spam.
 static NET_SEND_ERR_LOG_BUDGET: AtomicU32 = AtomicU32::new(32);
@@ -68,7 +72,9 @@ fn trace_dhcp_frame(tag: &str, frame: &[u8]) {
 /// SYS_NET_RECV : Receive a raw Ethernet frame.
 pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
-    let mut kbuf = vec![0u8; buf_len as usize];
+    let buf_len = buf_len as usize;
+    let mut kbuf = SmallVec::<[u8; NET_INLINE_BUF_CAPACITY]>::new();
+    kbuf.resize(buf_len, 0u8);
 
     let n = match device.receive(&mut kbuf) {
         Ok(n) => n,
@@ -92,8 +98,14 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 /// SYS_NET_SEND : Transmit a raw Ethernet frame.
 pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
-    let user = UserSliceRead::new(buf_ptr, buf_len as usize)?;
-    let kbuf = user.read_to_vec();
+    let buf_len = buf_len as usize;
+    let user = UserSliceRead::new(buf_ptr, buf_len)?;
+    let mut kbuf = SmallVec::<[u8; NET_INLINE_BUF_CAPACITY]>::new();
+    kbuf.resize(buf_len, 0u8);
+    let copied = user.copy_to(&mut kbuf);
+    if copied != buf_len {
+        return Err(SyscallError::Fault);
+    }
     trace_dhcp_frame("tx", &kbuf);
 
     if let Err(e) = device.transmit(&kbuf) {
@@ -104,7 +116,7 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
         return Err(se);
     }
 
-    Ok(buf_len)
+    Ok(buf_len as u64)
 }
 
 /// SYS_NET_INFO : Query network interface information.

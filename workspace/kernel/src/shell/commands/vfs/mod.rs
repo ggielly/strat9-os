@@ -239,7 +239,7 @@ pub(super) fn cmd_scheme_impl(args: &[String]) -> Result<(), ShellError> {
 
     shell_println!("Registered schemes:");
     shell_println!("{:<14} {}", "Name", "Type");
-    shell_println!("========================================================================================================================");
+    shell_println!("======================================================");
     for scheme in vfs::list_schemes() {
         shell_println!("  {:<12} Kernel/IPC", scheme);
     }
@@ -479,7 +479,7 @@ pub(super) fn cmd_mv_impl(args: &[String]) -> Result<(), ShellError> {
 pub(super) fn cmd_df_impl(_args: &[String]) -> Result<(), ShellError> {
     let mounts = vfs::list_mounts();
     shell_println!("{:<20} {}", "Mount", "Status");
-    shell_println!("==================================================================================================================================");
+    shell_println!("=======================================================================================================");
     for m in &mounts {
         let status = if vfs::open(m, OpenFlags::READ | OpenFlags::DIRECTORY)
             .map(|fd| {

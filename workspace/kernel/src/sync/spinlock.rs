@@ -230,7 +230,7 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
     }
 }
 
-// =========================== Debug helpers
+// =========================== Debug helpers ====================================
 
 /// Register a lock address to trace on every drop (serial console output).
 pub fn debug_set_watch_lock_addr(addr: usize) {

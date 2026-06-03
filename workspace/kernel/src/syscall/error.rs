@@ -57,6 +57,8 @@ pub enum SyscallError {
     NotEmpty = -39,
     #[error("Not supported")]
     NotSupported = -52,
+    #[error("Message too long")]
+    MessageSize = -90,
     #[error("No buffer space available")]
     QueueFull = -105,
     #[error("Connection timed out")]
@@ -109,6 +111,7 @@ impl SyscallError {
             SyscallError::NotImplemented => "ENOSYS",
             SyscallError::NotEmpty => "ENOTEMPTY",
             SyscallError::NotSupported => "ENOTSUP",
+            SyscallError::MessageSize => "EMSGSIZE",
             SyscallError::QueueFull => "ENOBUFS",
             SyscallError::TimedOut => "ETIMEDOUT",
         }

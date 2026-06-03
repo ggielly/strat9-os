@@ -1,43 +1,13 @@
 use super::*;
 use alloc::string::String;
+use strat9_abi::net::parse_ipv4_literal;
 
 const NTP_PORT: u16 = 123;
 const NTP_UNIX_EPOCH_DELTA: u64 = 2_208_988_800; // 1900 -> 1970
 
-/// Parses ipv4.
-fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
-    let mut out = [0u8; 4];
-    let mut idx = 0usize;
-    let mut val: u16 = 0;
-    let mut has_digit = false;
-
-    for &b in s.as_bytes() {
-        if b == b'.' {
-            if !has_digit || idx >= 3 || val > 255 {
-                return None;
-            }
-            out[idx] = val as u8;
-            idx += 1;
-            val = 0;
-            has_digit = false;
-            continue;
-        }
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        val = val * 10 + (b - b'0') as u16;
-        has_digit = true;
-    }
-    if !has_digit || idx != 3 || val > 255 {
-        return None;
-    }
-    out[3] = val as u8;
-    Some(out)
-}
-
 /// Resolves ntp server.
 fn resolve_ntp_server(server: &str) -> Result<[u8; 4], ShellError> {
-    if let Some(ip) = parse_ipv4(server) {
+    if let Some(ip) = parse_ipv4_literal(server) {
         return Ok(ip);
     }
 
@@ -51,7 +21,7 @@ fn resolve_ntp_server(server: &str) -> Result<[u8; 4], ShellError> {
     }
     let end = buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
     let s = core::str::from_utf8(&buf[..end]).unwrap_or("").trim();
-    parse_ipv4(s).ok_or(ShellError::ExecutionFailed)
+    parse_ipv4_literal(s).ok_or(ShellError::ExecutionFailed)
 }
 
 /// Formats ipv4.

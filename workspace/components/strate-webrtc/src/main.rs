@@ -15,6 +15,7 @@ use core::{
     panic::PanicInfo,
     sync::atomic::{AtomicU64, Ordering},
 };
+use strat9_abi::net::parse_ipv4_literal;
 use strat9_syscall::{call, data::IpcMessage, CLOCK_MONOTONIC};
 
 alloc_freelist::define_freelist_brk_allocator!(
@@ -293,40 +294,11 @@ fn cleanup_expired(rt: &mut Runtime, now: u64) {
     }
 }
 
-fn parse_ipv4_addr(s: &str) -> Option<[u8; 4]> {
-    let mut out = [0u8; 4];
-    let mut idx = 0usize;
-    let mut val: u16 = 0;
-    let mut has = false;
-    for &b in s.as_bytes() {
-        if b == b'.' {
-            if !has || idx >= 3 || val > 255 {
-                return None;
-            }
-            out[idx] = val as u8;
-            idx += 1;
-            val = 0;
-            has = false;
-            continue;
-        }
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        val = val * 10 + (b - b'0') as u16;
-        has = true;
-    }
-    if !has || idx != 3 || val > 255 {
-        return None;
-    }
-    out[3] = val as u8;
-    Some(out)
-}
-
 fn read_local_ipv4() -> Option<[u8; 4]> {
     let text = read_text_file("/net/address")?;
     let first = text.lines().next()?.trim();
     let ip_only = first.split('/').next().unwrap_or(first).trim();
-    parse_ipv4_addr(ip_only)
+    parse_ipv4_literal(ip_only)
 }
 
 fn parse_endpoint_candidate(raw: &[u8]) -> Option<([u8; 4], u16)> {
@@ -337,7 +309,7 @@ fn parse_endpoint_candidate(raw: &[u8]) -> Option<([u8; 4], u16)> {
         s
     };
     let (ip_s, port_s) = s.rsplit_once(':')?;
-    let ip = parse_ipv4_addr(ip_s.trim())?;
+    let ip = parse_ipv4_literal(ip_s.trim())?;
     let port = port_s.trim().parse::<u16>().ok()?;
     if port == 0 {
         return None;
