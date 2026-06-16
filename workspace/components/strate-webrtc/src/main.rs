@@ -15,7 +15,7 @@ use core::{
     panic::PanicInfo,
     sync::atomic::{AtomicU64, Ordering},
 };
-use strat9_abi::net::parse_ipv4_literal;
+use strat9_abi::ip::parse_ipv4_literal;
 use strat9_syscall::{call, data::IpcMessage, CLOCK_MONOTONIC};
 
 alloc_freelist::define_freelist_brk_allocator!(

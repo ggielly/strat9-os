@@ -545,6 +545,28 @@ pub fn register_ahci_irq(irq: u8) {
     log::info!("AHCI IRQ {} registered on vector {:#x}", irq, vector);
 }
 
+/// Register the NVMe storage controller IRQ handler.
+///
+/// Called after NVMe initialisation once the PCI interrupt line is known.
+pub fn register_nvme_irq(irq: u8) {
+    let vector = if irq < 16 {
+        super::pic::PIC1_OFFSET + irq
+    } else {
+        irq
+    };
+
+    lock_idt_storage();
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[vector]
+            .set_handler_fn(nvme_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        (*idt).load_unsafe();
+    }
+    unlock_idt_storage();
+    log::info!("NVMe IRQ {} registered on vector {:#x}", irq, vector);
+}
+
 /// Register the VirtIO block device IRQ handler
 ///
 /// Called after VirtIO block device initialization to route the device's
@@ -590,6 +612,32 @@ pub fn register_xhci_irq(irq: u8) {
     }
     unlock_idt_storage();
     log::info!("xHCI IRQ {} registered on vector {:#x}", irq, vector);
+}
+
+/// Register the NIC IRQ handler.
+///
+/// Called after a NIC driver successfully initialises and has read its
+/// PCI interrupt line.  The handler reads ICR and sends EOI; actual
+/// receive processing is triggered via the driver's `receive()` method
+/// which the network stack calls when `handle_interrupt()` signals
+/// that packets are available.
+pub fn register_nic_irq(irq: u8) {
+    let vector = if irq < 16 {
+        super::pic::PIC1_OFFSET + irq
+    } else {
+        irq
+    };
+
+    lock_idt_storage();
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[vector]
+            .set_handler_fn(nic_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        (*idt).load_unsafe();
+    }
+    unlock_idt_storage();
+    log::info!("NIC IRQ {} registered on vector {:#x}", irq, vector);
 }
 
 // =============================================
@@ -672,7 +720,18 @@ extern "x86-interrupt" fn page_fault_handler(
             fault_addr,
             error_code.bits()
         );
-        panic!("#PF in swapgs→iretq window");
+
+        // Kill the faulting process instead of panicking the kernel.
+        // The page fault is unrecoverable in this window: we cannot return
+        // to Ring 3 because the IRETQ frame or a user page is invalid.
+        // Keep SwapGsGuard alive until AFTER current_task_clone to avoid
+        // a second #PF from current_cpu_index() reading gs:[0] (kernel GS
+        // is still needed for percpu access during the kill path).
+        if let Some(task) = crate::process::current_task_clone() {
+            crate::process::kill_task(task.id);
+        }
+        drop(_gs);
+        crate::process::scheduler::exit_current_task(-11); // SIGSEGV
     }
 
     // Get the faulting address
@@ -1031,7 +1090,7 @@ fn dump_page_table_walk(vaddr: u64, cr3_phys: u64) {
             core::str::from_utf8(&f).unwrap_or("?").trim()
         );
         if l4e & 1 == 0 {
-            crate::serial_println!("  \x1b[1;31m╰→ STOP: PML4 not present\x1b[0m");
+            crate::serial_println!("  \x1b[1;31m  ==> STOP: PML4 not present !\x1b[0m");
             return;
         }
 
@@ -1046,12 +1105,12 @@ fn dump_page_table_walk(vaddr: u64, cr3_phys: u64) {
             core::str::from_utf8(&f).unwrap_or("?").trim()
         );
         if l3e & 1 == 0 {
-            crate::serial_println!("  \x1b[1;31m╰→ STOP: PDPT not present\x1b[0m");
+            crate::serial_println!("  \x1b[1;31m ==> STOP: PDPT not present !\x1b[0m");
             return;
         }
         if l3e & 0x80 != 0 {
             crate::serial_println!(
-                "  ╰→ 1 GiB huge page → phys {:#x}",
+                "  ==> 1 GiB huge page => phys {:#x}",
                 l3e & 0x000F_FFFF_C000_0000
             );
             return;
@@ -1068,12 +1127,12 @@ fn dump_page_table_walk(vaddr: u64, cr3_phys: u64) {
             core::str::from_utf8(&f).unwrap_or("?").trim()
         );
         if l2e & 1 == 0 {
-            crate::serial_println!("  \x1b[1;31m╰→ STOP: PD not present\x1b[0m");
+            crate::serial_println!("  \x1b[1;31m ==> STOP: PD not present !\x1b[0m");
             return;
         }
         if l2e & 0x80 != 0 {
             crate::serial_println!(
-                "  ╰→ 2 MiB huge page → phys {:#x}",
+                "  ==> 2 MiB huge page => phys {:#x}",
                 l2e & 0x000F_FFFF_FFE0_0000
             );
             return;
@@ -1090,10 +1149,10 @@ fn dump_page_table_walk(vaddr: u64, cr3_phys: u64) {
             core::str::from_utf8(&f).unwrap_or("?").trim()
         );
         if l1e & 1 == 0 {
-            crate::serial_println!("  \x1b[1;31m╰→ STOP: PT not present\x1b[0m");
+            crate::serial_println!("  \x1b[1;31m ==> STOP: PT not present !\x1b[0m");
         } else {
             crate::serial_println!(
-                "  \x1b[1;32m╰→ PAGE PRESENT\x1b[0m → phys {:#x} (check RW/US/NX flags)",
+                "  \x1b[1;32m ==> PAGE PRESENT\x1b[0m => phys {:#x} (check RW/US/NX flags)",
                 l1e & 0x000F_FFFF_FFFF_F000
             );
         }
@@ -1186,14 +1245,16 @@ fn dump_page_fault_full(
     let is_user = (cs & 3) == 3;
 
     crate::serial_println!("\x1b[1;31m");
-    crate::serial_println!("╔══════════════════════════════════════════════════════════════════╗");
-    crate::serial_println!("║                  KERNEL PAGE FAULT EXCEPTION                    ║");
     crate::serial_println!(
-        "╚══════════════════════════════════════════════════════════════════╝\x1b[0m"
+        "****************************************************************************"
+    );
+    crate::serial_println!("*                  KERNEL PAGE FAULT EXCEPTiON                     *");
+    crate::serial_println!(
+        "********************************************************************\x1b[0m"
     );
 
     // --- Error code ---
-    crate::serial_println!("\x1b[1;33m--- Error Code ---\x1b[0m");
+    crate::serial_println!("\x1b[1;33m--- Error code ---\x1b[0m");
     crate::serial_println!("  Raw         : {:#06x}", error_code.bits());
     crate::serial_println!(
         "  Diagnostic  : \x1b[1;31m{}\x1b[0m",
@@ -1209,7 +1270,7 @@ fn dump_page_fault_full(
     );
 
     // --- Faulting context ---
-    crate::serial_println!("\x1b[1;33m--- Faulting Context ---\x1b[0m");
+    crate::serial_println!("\x1b[1;33m--- Faulting context ---\x1b[0m");
     crate::serial_println!("  CR2 (addr)  : \x1b[1;35m{:#018x}\x1b[0m", fault_vaddr);
     crate::serial_println!("  RIP         : \x1b[1;36m{:#018x}\x1b[0m", rip);
     crate::serial_println!("  RSP         : {:#018x}", rsp);
@@ -1255,7 +1316,7 @@ fn dump_page_fault_full(
     );
 
     // --- Control registers ---
-    crate::serial_println!("\x1b[1;33m--- Control Registers ---\x1b[0m");
+    crate::serial_println!("\x1b[1;33m--- Control registers ---\x1b[0m");
     let cr0 = Cr0::read_raw();
     let (cr3_frame, cr3_flags) = Cr3::read();
     let cr3_phys = cr3_frame.start_address().as_u64();
@@ -1277,13 +1338,13 @@ fn dump_page_fault_full(
     );
 
     // --- CPU context ---
-    crate::serial_println!("\x1b[1;33m--- CPU Context ---\x1b[0m");
+    crate::serial_println!("\x1b[1;33m--- CPU context ---\x1b[0m");
     crate::serial_println!("  LAPIC ID    : {}", super::apic::lapic_id());
     crate::serial_println!("  Ticks sched : {}", crate::process::scheduler::ticks());
     crate::serial_println!("  HHDM offset : {:#x}", crate::memory::hhdm_offset());
 
     // --- Task context ---
-    crate::serial_println!("\x1b[1;33m--- Task Context ---\x1b[0m");
+    crate::serial_println!("\x1b[1;33m--- Task context ---\x1b[0m");
     if let Some(ref t) = *task {
         crate::serial_println!(
             "  ID={} PID={} TID={} TGID={} name=\"{}\" prio={:?} ticks={}",
@@ -1358,7 +1419,7 @@ fn dump_page_fault_full(
     }
 
     // --- Memory statistics ---
-    crate::serial_println!("\x1b[1;33m--- Memory Stats ---\x1b[0m");
+    crate::serial_println!("\x1b[1;33m--- Memory stats ---\x1b[0m");
     if let Some(guard) = crate::memory::get_allocator().try_lock() {
         if let Some(ref alloc) = *guard {
             let (total, allocated) = alloc.page_totals();
@@ -1477,12 +1538,12 @@ fn dump_page_fault_full(
     dump_memory_bytes(rip, cr3_phys, 32, "  ");
 
     // --- Stack dump ---
-    crate::serial_println!("\x1b[1;33m--- Stack Dump (RSP={:#x}) ---\x1b[0m", rsp);
+    crate::serial_println!("\x1b[1;33m--- Stack dump (RSP={:#x}) ---\x1b[0m", rsp);
     dump_memory_bytes(rsp, cr3_phys, 128, "  ");
 
     // --- Page table walk ---
     crate::serial_println!(
-        "\x1b[1;33m--- Page Table Walk (CR2={:#x}, CR3={:#x}) ---\x1b[0m",
+        "\x1b[1;33m--- Page table walk (CR2={:#x}, CR3={:#x}) ---\x1b[0m",
         fault_vaddr,
         cr3_phys
     );
@@ -1533,12 +1594,10 @@ fn dump_page_fault_full(
         }
     }
 
+    crate::serial_println!("\x1b[1;31m***********************************************************");
+    crate::serial_println!("*                     END OF PAGE FAULT DuMP                      *");
     crate::serial_println!(
-        "\x1b[1;31m╔══════════════════════════════════════════════════════════════════╗"
-    );
-    crate::serial_println!("║                     END OF PAGE FAULT DUMP                      ║");
-    crate::serial_println!(
-        "╚══════════════════════════════════════════════════════════════════╝\x1b[0m"
+        "*******************************************************************\x1b[0m"
     );
 
     panic!(
@@ -1612,7 +1671,12 @@ extern "x86-interrupt" fn general_protection_fault_handler(
             error_code,
             stack_frame.stack_pointer.as_u64()
         );
-        panic!("#GP in swapgs→iretq window (iretq frame invalid?)");
+        // Keep SwapGsGuard alive through kill path.
+        if let Some(task) = crate::process::current_task_clone() {
+            crate::process::kill_task(task.id);
+        }
+        drop(_gs);
+        crate::process::scheduler::exit_current_task(-11); // SIGSEGV
     }
     if is_user {
         if let Some(tid) = crate::process::current_task_id() {
@@ -1856,6 +1920,23 @@ extern "x86-interrupt" fn ahci_handler(_stack_frame: InterruptStackFrame) {
     }
 }
 
+/// NVMe storage controller IRQ handler.
+///
+/// Processes I/O completion queue entries and wakes waiting tasks.
+extern "x86-interrupt" fn nvme_handler(_stack_frame: InterruptStackFrame) {
+    crate::entropy::add_entropy(3, super::rdtsc());
+
+    crate::hardware::storage::nvme::handle_interrupt();
+
+    if super::apic::is_initialized() {
+        super::apic::eoi();
+    } else {
+        let irq = crate::hardware::storage::nvme::NVME_IRQ_LINE
+            .load(core::sync::atomic::Ordering::Relaxed);
+        pic::end_of_interrupt(irq);
+    }
+}
+
 /// VirtIO Block device IRQ handler
 ///
 /// Handles interrupts from the VirtIO block device.
@@ -1886,6 +1967,28 @@ extern "x86-interrupt" fn xhci_handler(_stack_frame: InterruptStackFrame) {
     } else {
         let irq =
             crate::hardware::usb::xhci::XHCI_IRQ_LINE.load(core::sync::atomic::Ordering::Relaxed);
+        pic::end_of_interrupt(irq);
+    }
+}
+
+/// NIC IRQ handler
+///
+/// Dispatches to the registered NIC device's `handle_interrupt()` which
+/// reads ICR, tracks link state, and reclaims completed TX buffers.
+/// The network stack is expected to call `receive()` in response (or a
+/// future NAPI-style poll can be driven from here).
+extern "x86-interrupt" fn nic_handler(stack_frame: InterruptStackFrame) {
+    // SAFETY: SwapGsGuard restores kernel GS if we interrupted Ring 3.
+    // Without this guard, SpinLock::lock → current_cpu_index() reads gs:[0]
+    // and #PF if GS is still set to the user value (swapgs→iretq window).
+    let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
+
+    crate::hardware::nic::handle_interrupt();
+
+    if super::apic::is_initialized() {
+        super::apic::eoi();
+    } else {
+        let irq = crate::hardware::nic::NIC_IRQ_LINE.load(core::sync::atomic::Ordering::Relaxed);
         pic::end_of_interrupt(irq);
     }
 }

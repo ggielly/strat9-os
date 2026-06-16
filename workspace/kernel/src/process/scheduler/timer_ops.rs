@@ -79,6 +79,10 @@ pub fn timer_tick() {
         let current_time_ns = tick * NS_PER_TICK;
         crate::process::timer::tick_all_timers(current_time_ns);
         check_wake_deadlines(current_time_ns);
+
+        if tick % 200 == 0 {
+            crate::hardware::thermal::poll();
+        }
     }
 
     // Per-task accounting on this CPU : uses LOCAL lock only (no global GLOBAL_SCHED_STATE).

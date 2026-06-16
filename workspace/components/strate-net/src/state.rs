@@ -88,8 +88,8 @@ pub(crate) struct NetworkStrate {
     pub(crate) next_fid: u64,
     pub(crate) ping_ident: u16,
     pub(crate) next_ping_token: u64,
-    pub(crate) pending_ping: Option<PendingPing>,
-    pub(crate) ping_reply: Option<(u16, u64)>,
+    pub(crate) pending_pings: alloc::vec::Vec<PendingPing>,
+    pub(crate) ping_replies: alloc::vec::Vec<(u16, u64)>,
     pub(crate) dhcp_enabled: bool,
 }
 
@@ -143,8 +143,8 @@ impl NetworkStrate {
             next_fid: 1,
             ping_ident: 0x9001,
             next_ping_token: 1,
-            pending_ping: None,
-            ping_reply: None,
+            pending_pings: alloc::vec::Vec::new(),
+            ping_replies: alloc::vec::Vec::new(),
             dhcp_enabled: true,
         }
     }

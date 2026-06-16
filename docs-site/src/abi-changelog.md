@@ -25,10 +25,8 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
-- 2026-05-31 [`c861ec1`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c861ec11a42cabf52fbc243ad668a21d3dc42d59) Ajout d'un code d'erreur pour les messages trop longs et mise à jour de la documentation des schémas VFS
-- 2026-05-31 [`011b54b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/011b54baa028e76048798154ebb5f11fa7f06fef) Ajout de nouveaux drapeaux de fichier IPC et mise à jour des opérations de lecture/écriture pour gérer les chunks
-- 2026-05-31 [`00b07ac`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/00b07ac64bd5e0e02603eb081e3f4bcf5a280d84) Expand IPC inline payload capacity
-- 2026-05-24 [`adc356a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/adc356acade46952c00911d0a9e5de3d88a8348f) Add ICMP response to an external ping  request
+- 2026-06-03 [`8bfea40`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8bfea40d970b272205e1812d6e4df72ec2a85da8) refactor: rename net module to ip and update references
+- 2026-06-03 [`0c40058`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0c40058547bd9b7ef07a837b1153577879510994) Refactor the network stack and add dual-stack userspace tooling
 - 2026-05-24 [`aeade5e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aeade5ef5fcfdddef2caa43da6af361a5102c7cd) Code cleanup
 - 2026-05-24 [`b2bbcc0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8) Improve and fix IPC
 - 2026-05-23 [`db23b53`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552) Fix major memory leak and remove sshd silo
@@ -55,6 +53,8 @@ See:
 - 2026-03-13 [`29c6f3d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/29c6f3d75165b41acd72a28d1e1b4e76bd51947c) Refactor scheduler task management and introduce interrupt frame handling
 - 2026-03-11 [`7e66e69`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7e66e694ffbf939c3651a463736b3bb396ddf24f) refactor: enhance interrupt handling and logging mechanisms across the kernel
 - 2026-03-09 [`ff0a36b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ff0a36bce4090ee92da37b55fa47996fec5b04b9) Refactor memory management to use IRQ-disabled tokens
+- 2026-03-07 [`c3e8969`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3e8969978b2472d6cfcd0f870f115fbd1f8ef5a) Fix race condition and lock
+- 2026-03-07 [`6191656`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/619165666846d9bc2dd9aaa04e391b5afea2c48b) cargo fmt
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

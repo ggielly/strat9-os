@@ -3,6 +3,7 @@
 //! Thin kernel glue that wires external crates (`net-core`, `e1000`, …)
 //! to kernel services (PCI, DMA allocator, VFS schemes).
 
+pub mod common;
 pub mod e1000_drv;
 pub mod e1000e_drv;
 pub mod igc_drv;
@@ -71,6 +72,68 @@ fn next_index_for(prefix: &str) -> usize {
     0
 }
 
+// ---------------------------------------------------------------------------
+// NIC interrupt dispatch (see idt.rs:nic_handler)
+// ---------------------------------------------------------------------------
+
+/// IRQ line of the first registered NIC.  Written once by the NIC driver's
+/// `init()`; read by `nic_handler` in the IDT to send EOI.
+pub static NIC_IRQ_LINE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xFF);
+
+/// Global reference to the first NIC device, used by `nic_handler` to call
+/// `handle_interrupt()`.  Set via `set_nic_device()` after PCI probe.
+///
+/// # TODO (multi-NIC)
+///
+/// This only supports a single NIC.  When multiple NICs are present the
+/// handler should iterate all registered devices or use per-IRQ dispatch.
+static NIC_DEVICE: spin::Mutex<Option<Arc<dyn NetworkDevice>>> = spin::Mutex::new(None);
+
+/// Store a NIC device reference and its IRQ line for the IDT handler.
+///
+/// Called from NIC drivers (`e1000_drv`, `e1000e_drv`, …) after successful
+/// initialisation.
+pub fn set_nic_device(dev: Arc<dyn NetworkDevice>, irq: u8) {
+    NIC_IRQ_LINE.store(irq, core::sync::atomic::Ordering::Relaxed);
+    *NIC_DEVICE.lock() = Some(dev);
+    log::info!("NIC dispatch set for IRQ {}", irq);
+}
+
+// ---------------------------------------------------------------------------
+// strate-net wakeup on NIC IRQ (point 1)
+// ---------------------------------------------------------------------------
+
+/// Cached task ID of the strate-net process, registered from the boot
+/// sequence after strate-net is spawned.  Zero = not yet known; the NIC
+/// handler will skip the wakeup and rely on strate-net's periodic polling.
+///
+/// # TODO
+///
+/// Wire up registration — either via a syscall from strate-net itself or
+/// by scanning `get_all_tasks()` from a safe (non-IRQ) context after init
+/// spawns strate-net.
+static STRATE_NET_TID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Register the strate-net task ID so the NIC IRQ handler can wake it.
+pub fn register_strate_net_tid(tid: u64) {
+    STRATE_NET_TID.store(tid, core::sync::atomic::Ordering::Relaxed);
+    log::info!("NIC: strate-net task {} registered for IRQ wakeup", tid);
+}
+
+/// Called from `idt.rs:nic_handler`.  Dispatches to the registered NIC's
+/// `handle_interrupt()` (reads ICR, coalescing, TX reclaim).
+/// Wakes strate-net (if its TID is known) so it can call `receive()`
+/// without waiting for the next polling timeout.
+pub fn handle_interrupt() {
+    if let Some(ref dev) = *NIC_DEVICE.lock() {
+        dev.handle_interrupt();
+    }
+    let tid_u64 = STRATE_NET_TID.load(core::sync::atomic::Ordering::Relaxed);
+    if tid_u64 != 0 {
+        let _ = crate::process::scheduler::wake_task(crate::process::TaskId(tid_u64));
+    }
+}
+
 /// Performs the register device operation.
 pub fn register_device(device: Arc<dyn NetworkDevice>) -> String {
     let prefix = bsd_prefix(device.name());
@@ -113,6 +176,36 @@ pub fn get_default_device() -> Option<Arc<dyn NetworkDevice>> {
 /// Performs the list interfaces operation.
 pub fn list_interfaces() -> Vec<String> {
     NET_DEVICES.read().iter().map(|e| e.iface.clone()).collect()
+}
+
+/// Call `poll()` on every registered NIC (watchdog + link check).
+/// Safe to call from any non-IRQ context (allocates via get_all_tasks).
+///
+/// # TODO
+///
+/// Hook this into a kernel workqueue or periodic thread instead of
+/// the APIC timer tick — SpinLock::lock reads percpu data (GS:[0])
+/// which is unsafe during the swapgs→iretq window.
+pub fn poll_all() {
+    let guard = NET_DEVICES.read();
+    for entry in guard.iter() {
+        entry.device.poll();
+    }
+}
+
+/// Try to discover strate-net and cache its task ID.
+pub fn try_register_strate_net() {
+    if STRATE_NET_TID.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+        return;
+    }
+    if let Some(tasks) = crate::process::get_all_tasks() {
+        for t in &tasks {
+            if t.name == "strate-net" {
+                register_strate_net_tid(t.id.0);
+                return;
+            }
+        }
+    }
 }
 
 /// Performs the init operation.

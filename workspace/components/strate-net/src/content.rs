@@ -2,6 +2,7 @@ use alloc::{string::String, vec, vec::Vec};
 use core::fmt::Write;
 
 use smoltcp::socket::tcp;
+use strate_net::syscalls::call;
 
 use crate::state::NetworkStrate;
 
@@ -199,12 +200,19 @@ impl NetworkStrate {
                     .map(|addr| alloc::format!("{}\n", addr).into_bytes())
             }
             path if path.starts_with("ping/") || path.starts_with("ping6/") => {
-                if let Some((seq, rtt_us)) = self.ping_reply.take() {
+                if let Some((seq, rtt_us)) = self.ping_replies.first().copied() {
+                    self.ping_replies.remove(0);
+                    let _ = call::debug_log(b"[ping] read returning seq=");
+                    let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
+                    let _ = call::debug_log(b" rtt=");
+                    let _ = call::debug_log(&[(rtt_us / 1000) as u8]);
+                    let _ = call::debug_log(b"ms\n");
                     let mut buf = vec![0u8; 10];
                     buf[0..2].copy_from_slice(&seq.to_le_bytes());
                     buf[2..10].copy_from_slice(&rtt_us.to_le_bytes());
                     Ok(buf)
                 } else {
+                    let _ = call::debug_log(b"[ping] read: no replies waiting\n");
                     Ok(Vec::new())
                 }
             }

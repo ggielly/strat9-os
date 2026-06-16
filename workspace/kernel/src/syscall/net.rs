@@ -88,6 +88,14 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
             return Err(se);
         }
     };
+    crate::serial_println!("[net] recv {} bytes", n);
+    if n > 50 {
+        crate::serial_print!("[net] rx icmp");
+        for i in 34..50 {
+            crate::serial_print!(" {:02x}", kbuf[i]);
+        }
+        crate::serial_println!("");
+    }
     trace_dhcp_frame("rx", &kbuf[..n]);
 
     let user = UserSliceWrite::new(buf_ptr, n)?;
@@ -116,6 +124,7 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
         return Err(se);
     }
 
+    crate::serial_println!("[net] tx ok {} bytes", buf_len);
     Ok(buf_len as u64)
 }
 

@@ -2,11 +2,11 @@
 // Reference: xHCI spec 1.2
 //
 // Features:
-// - xHCI controller initialization
-// - Port management and hot-plug detection
-// - Command and Event rings
-// - Device slot management
-// - Control and Interrupt transfers
+// - xHCI controller initialization with full device enumeration
+// - Port reset, Enable Slot, Address Device, Configure Endpoint
+// - Per-device transfer rings and DCBAA contexts
+// - Control transfers via per-device EP0 transfer rings
+// - Interrupt transfer support for HID polling
 // - HID device support (keyboard/mouse)
 
 #![allow(dead_code)]
@@ -26,6 +26,7 @@ const XHCI_MMIO_SIZE: usize = 0x10000;
 const XHCI_PORT_REG_BASE: usize = 0x400;
 const XHCI_PORT_REG_STRIDE: usize = 0x10;
 const XHCI_RING_TRBS: usize = 64;
+const MAX_ENDPOINTS: usize = 31;
 
 const USBCMD_RUN_STOP: u32 = 1 << 0;
 const USBCMD_HCRST: u32 = 1 << 1;
@@ -61,11 +62,6 @@ const TRB_TYPE_SHIFT: u32 = 10;
 const TRB_IDT: u32 = 1 << 6;
 const TRB_TD_SIZE_SHIFT: u32 = 17;
 const TRB_TD_SIZE_MASK: u32 = 0x1F;
-
-const SLOT_STATE_DISABLED: u32 = 0;
-const SLOT_STATE_ENABLED: u32 = 1;
-const SLOT_STATE_ADDRESSED: u32 = 2;
-const SLOT_STATE_CONFIGURED: u32 = 3;
 
 const EP_TYPE_CONTROL: u32 = 4;
 const EP_TYPE_INTR_IN: u32 = 7;
@@ -140,7 +136,8 @@ impl Trb {
     }
 
     fn normal(addr: u64, len: u32, cycle: bool, ioc: bool) -> Self {
-        let mut d3 = (TRB_TYPE_NORMAL << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
+        let mut d3 =
+            (TRB_TYPE_NORMAL << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
         if ioc {
             d3 |= TRB_IOC;
         }
@@ -244,6 +241,45 @@ struct XhciPort {
     speed: u8,
 }
 
+struct DeviceSlot {
+    slot_id: u8,
+    usb_address: u8,
+    input_ctx: *mut InputContext,
+    input_ctx_phys: u64,
+    ep_transfer_rings: [*mut Trb; MAX_ENDPOINTS],
+    ep_transfer_ring_phys: [u64; MAX_ENDPOINTS],
+    ep_dequeue: [usize; MAX_ENDPOINTS],
+    ep_cycle: [bool; MAX_ENDPOINTS],
+    configured: bool,
+    ep_buf: [*mut u8; MAX_ENDPOINTS],
+    ep_buf_phys: [u64; MAX_ENDPOINTS],
+    ep_buf_len: [usize; MAX_ENDPOINTS],
+    ep_active: [bool; MAX_ENDPOINTS],
+}
+
+unsafe impl Send for DeviceSlot {}
+unsafe impl Sync for DeviceSlot {}
+
+impl DeviceSlot {
+    fn new(slot_id: u8) -> Self {
+        Self {
+            slot_id,
+            usb_address: 0,
+            input_ctx: core::ptr::null_mut(),
+            input_ctx_phys: 0,
+            ep_transfer_rings: [core::ptr::null_mut(); MAX_ENDPOINTS],
+            ep_transfer_ring_phys: [0; MAX_ENDPOINTS],
+            ep_dequeue: [0; MAX_ENDPOINTS],
+            ep_cycle: [true; MAX_ENDPOINTS],
+            configured: false,
+            ep_buf: [core::ptr::null_mut(); MAX_ENDPOINTS],
+            ep_buf_phys: [0; MAX_ENDPOINTS],
+            ep_buf_len: [0; MAX_ENDPOINTS],
+            ep_active: [false; MAX_ENDPOINTS],
+        }
+    }
+}
+
 pub struct XhciController {
     mmio_base: usize,
     cap_regs: *const CapRegisters,
@@ -266,18 +302,13 @@ pub struct XhciController {
     slot_id: AtomicU8,
     ctrl_transfer_buf: *mut u8,
     ctrl_transfer_buf_phys: u64,
-    ctrl_ring: *mut Trb,
-    ctrl_ring_phys: u64,
-    ctrl_ring_deq: usize,
-    ctrl_ring_cycle: bool,
-    enumeration_ready: bool,
+    device_slots: Vec<Option<DeviceSlot>>,
 }
 
 unsafe impl Send for XhciController {}
 unsafe impl Sync for XhciController {}
 
 impl XhciController {
-    /// Creates a new instance.
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let bar = match pci_dev.read_bar(0) {
             Some(Bar::Memory64 { addr, .. }) => addr,
@@ -320,18 +351,13 @@ impl XhciController {
             slot_id: AtomicU8::new(0),
             ctrl_transfer_buf: core::ptr::null_mut(),
             ctrl_transfer_buf_phys: 0,
-            ctrl_ring: core::ptr::null_mut(),
-            ctrl_ring_phys: 0,
-            ctrl_ring_deq: 0,
-            ctrl_ring_cycle: true,
-            enumeration_ready: false,
+            device_slots: Vec::new(),
         };
 
         controller.init()?;
         Ok(controller)
     }
 
-    /// Performs the init operation.
     fn init(&mut self) -> Result<(), &'static str> {
         unsafe {
             for _ in 0..100_000 {
@@ -388,21 +414,17 @@ impl XhciController {
 
             self.init_rings()?;
             self.init_interrupter()?;
-            self.init_ctrl_ring()?;
+            self.init_ctrl_transfer_buf()?;
 
             let max_slots = self.max_device_slots();
             self.write_config(max_slots);
             self.write_usbcmd(self.read_usbcmd() | USBCMD_RUN_STOP | USBCMD_INTE);
 
-            // The command/event path is initialized, but full slot/device
-            // enumeration is not stable yet. Do not issue Enable Slot during
-            // boot: a broken command path must not block the whole kernel.
-            self.enumeration_ready = false;
+            self.enumerate_all_ports();
         }
         Ok(())
     }
 
-    /// Initializes rings.
     unsafe fn init_rings(&mut self) -> Result<(), &'static str> {
         let cmd_frame = allocate_zeroed_frame().ok_or("Failed to allocate cmd ring")?;
         self.cmd_ring_phys = cmd_frame.start_address.as_u64();
@@ -428,7 +450,6 @@ impl XhciController {
         Ok(())
     }
 
-    /// Initializes interrupter.
     unsafe fn init_interrupter(&mut self) -> Result<(), &'static str> {
         let erst_frame = allocate_zeroed_frame().ok_or("Failed to allocate ERST")?;
         let erst_phys = erst_frame.start_address.as_u64();
@@ -452,29 +473,20 @@ impl XhciController {
         Ok(())
     }
 
-    /// Initializes control transfer ring.
-    unsafe fn init_ctrl_ring(&mut self) -> Result<(), &'static str> {
+    unsafe fn init_ctrl_transfer_buf(&mut self) -> Result<(), &'static str> {
         let buf_frame = allocate_zeroed_frame().ok_or("Failed to allocate ctrl buf")?;
         self.ctrl_transfer_buf_phys = buf_frame.start_address.as_u64();
         self.ctrl_transfer_buf = phys_to_virt(self.ctrl_transfer_buf_phys) as *mut u8;
         core::ptr::write_bytes(self.ctrl_transfer_buf, 0, 4096);
-
-        let ring_frame = allocate_zeroed_frame().ok_or("Failed to allocate ctrl ring")?;
-        self.ctrl_ring_phys = ring_frame.start_address.as_u64();
-        self.ctrl_ring = phys_to_virt(self.ctrl_ring_phys) as *mut Trb;
-        core::ptr::write_bytes(self.ctrl_ring as *mut u8, 0, 4096);
-
         Ok(())
     }
 
-    /// Reads portsc.
     unsafe fn read_portsc(&self, port: usize) -> u32 {
         let port_offset = XHCI_PORT_REG_BASE + (port * XHCI_PORT_REG_STRIDE);
         let portsc_ptr = (self.op_regs as *const u8).add(port_offset) as *const u32;
         portsc_ptr.read_volatile()
     }
 
-    /// Writes portsc.
     unsafe fn write_portsc(&self, port: usize, val: u32) {
         let port_offset = XHCI_PORT_REG_BASE + (port * XHCI_PORT_REG_STRIDE);
         let portsc_ptr = (self.op_regs as *const u8).add(port_offset) as *mut u32;
@@ -509,30 +521,10 @@ impl XhciController {
         unsafe { read_volatile(core::ptr::addr_of!((*self.cap_regs).hcsparams1)) & 0xFF }
     }
 
-    /// Enables slot.
-    unsafe fn enable_slot(&mut self) -> Result<(), &'static str> {
-        self.cmd_ring_enqueue(Trb {
-            d0: 0,
-            d1: 0,
-            d2: 0,
-            d3: (TRB_TYPE_ENABLE_SLOT << TRB_TYPE_SHIFT) as u32 | TRB_CYCLE,
-        });
-
-        let event = self.wait_for_event()?;
-        let completion_code = (event.d2 >> 24) & 0xFF;
-        if completion_code != 1 {
-            return Err("Enable slot failed");
-        }
-        let slot_id = ((event.d3 >> 24) & 0xFF) as u8;
-        if slot_id == 0 {
-            return Err("No slot available");
-        }
-        self.slot_id.store(slot_id, Ordering::SeqCst);
-
-        Ok(())
+    fn max_ports_from_hw(&self) -> u32 {
+        unsafe { (read_volatile(core::ptr::addr_of!((*self.cap_regs).hcsparams1)) >> 24) & 0xFF }
     }
 
-    /// Performs the cmd ring enqueue operation.
     unsafe fn cmd_ring_enqueue(&mut self, trb: Trb) {
         let idx = self.cmd_ring_deq;
         let mut trb = trb;
@@ -561,7 +553,6 @@ impl XhciController {
         core::ptr::write_volatile(self.db_regs.add(0), 0);
     }
 
-    /// Performs the wait for event operation.
     unsafe fn wait_for_event(&mut self) -> Result<Trb, &'static str> {
         for _ in 0..1000000 {
             let idx = self.event_ring_deq.load(Ordering::Acquire);
@@ -590,133 +581,404 @@ impl XhciController {
         Err("Event timeout")
     }
 
-    unsafe fn ctrl_ring_enqueue(&mut self, trb: Trb) {
-        let idx = self.ctrl_ring_deq;
-        let mut trb = trb;
-        if self.ctrl_ring_cycle {
-            trb.d3 |= TRB_CYCLE;
-        } else {
-            trb.d3 &= !TRB_CYCLE;
-        }
-        core::ptr::write_volatile(self.ctrl_ring.add(idx), trb);
-        self.ctrl_ring_deq = idx + 1;
-
-        if self.ctrl_ring_deq >= 63 {
-            let link = Trb::link(self.ctrl_ring_phys, true);
-            let mut link_trb = link;
-            if self.ctrl_ring_cycle {
-                link_trb.d3 |= TRB_CYCLE;
-            } else {
-                link_trb.d3 &= !TRB_CYCLE;
-            }
-            core::ptr::write_volatile(self.ctrl_ring.add(63), link_trb);
-            self.ctrl_ring_deq = 0;
-            self.ctrl_ring_cycle = !self.ctrl_ring_cycle;
-        }
-
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        core::ptr::write_volatile(self.db_regs.add(0), 0);
+    unsafe fn ring_doorbell(&self, slot_id: u8, endpoint: u8) {
+        let db_index = (slot_id as usize) * 32 + (endpoint as usize);
+        core::ptr::write_volatile(self.db_regs.add(db_index), 0);
     }
 
-    unsafe fn ctrl_wait_for_event(&mut self) -> Result<Trb, &'static str> {
-        for _ in 0..1000000 {
-            let idx = self.ctrl_ring_deq;
-            let trb = core::ptr::read_volatile(self.ctrl_ring.add(idx));
+    unsafe fn alloc_input_context(&mut self, slot_id: u8) -> Result<(), &'static str> {
+        let frame = allocate_zeroed_frame().ok_or("Failed to allocate input context")?;
+        let phys = frame.start_address.as_u64();
+        let virt = phys_to_virt(phys) as *mut InputContext;
 
-            let expected_c = if self.ctrl_ring_cycle { TRB_CYCLE } else { 0 };
-            if (trb.d3 & TRB_CYCLE) == expected_c {
-                self.ctrl_ring_deq = (idx + 1) % 64;
-                if self.ctrl_ring_deq == 0 {
-                    self.ctrl_ring_cycle = !self.ctrl_ring_cycle;
+        let idx = slot_id as usize;
+        if idx >= self.device_slots.len() {
+            self.device_slots.resize_with(idx + 1, || None);
+        }
+        let dev = self.device_slots[idx].as_mut().unwrap();
+        dev.input_ctx = virt;
+        dev.input_ctx_phys = phys;
+
+        let dcbaa = self.device_ctx as *mut u64;
+        dcbaa.add(idx as usize).write_volatile(phys);
+
+        Ok(())
+    }
+
+    unsafe fn alloc_transfer_ring(
+        &mut self,
+        slot_id: u8,
+        endpoint: u8,
+    ) -> Result<(), &'static str> {
+        let frame = allocate_zeroed_frame().ok_or("Failed to allocate transfer ring")?;
+        let phys = frame.start_address.as_u64();
+        let virt = phys_to_virt(phys) as *mut Trb;
+
+        core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+        core::ptr::write(
+            virt.add(XHCI_RING_TRBS - 1),
+            Trb::link(phys, true),
+        );
+
+        let idx = slot_id as usize;
+        if idx < self.device_slots.len() {
+            if let Some(ref mut dev) = self.device_slots[idx] {
+                let ep = endpoint as usize;
+                if ep < MAX_ENDPOINTS {
+                    dev.ep_transfer_rings[ep] = virt;
+                    dev.ep_transfer_ring_phys[ep] = phys;
+                    dev.ep_dequeue[ep] = 0;
+                    dev.ep_cycle[ep] = true;
                 }
-                return Ok(trb);
+            }
+        }
+        Ok(())
+    }
+
+    unsafe fn write_endpoint_context(
+        &self,
+        slot_id: u8,
+        endpoint: u8,
+        tr_phys: u64,
+        max_packet: u32,
+        ep_type: u32,
+        interval: u32,
+    ) {
+        let dcbaa = self.device_ctx as *mut u64;
+        let ctx_addr = dcbaa.add(slot_id as usize).read_volatile() as *mut u8;
+        if ctx_addr.is_null() {
+            return;
+        }
+
+        let ep_offset = 32 * ((endpoint - 1) as usize) + 32;
+        let ep_ctx = ctx_addr.add(ep_offset) as *mut EndpointContext;
+
+        let d0 = (ep_type & 0x7) << 3 | 0;
+        let d1 = (max_packet & 0x7FF) | (0 << 16);
+        let d2 = (tr_phys & 0xFFFFFFFF) as u32;
+        let d3 = ((tr_phys >> 32) & 0xFFFFFFFF) as u32;
+        let d4 = interval & 0xFF;
+
+        (*ep_ctx).d0 = d0;
+        (*ep_ctx).d1 = d1;
+        (*ep_ctx).d2 = d2;
+        (*ep_ctx).d3 = d3;
+        (*ep_ctx).d4 = d4;
+        (*ep_ctx).d5 = 0;
+        (*ep_ctx).d6 = 0;
+        (*ep_ctx).d7 = 0;
+    }
+
+    unsafe fn reset_port(&self, port: usize) -> bool {
+        let mut portsc = self.read_portsc(port);
+        if portsc & PORTSC_CCS == 0 {
+            return false;
+        }
+
+        portsc = self.read_portsc(port);
+        self.write_portsc(port, portsc | PORTSC_PR);
+
+        for _ in 0..500_000 {
+            portsc = self.read_portsc(port);
+            if portsc & PORTSC_PR == 0 {
+                break;
             }
             core::hint::spin_loop();
         }
-        Err("Control transfer timeout")
+
+        for _ in 0..500_000 {
+            portsc = self.read_portsc(port);
+            if portsc & PORTSC_PED != 0 {
+                return true;
+            }
+            if portsc & PORTSC_CCS == 0 {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+
+        self.read_portsc(port) & PORTSC_PED != 0
     }
 
-    fn ctrl_transfer(
-        &mut self,
-        slot_id: u8,
-        setup_data: &[u8; 8],
-        data_buf: Option<&mut [u8]>,
-        data_len: usize,
-    ) -> Result<usize, &'static str> {
+    fn enable_slot(&mut self) -> Result<u8, &'static str> {
         unsafe {
-            self.ctrl_ring_deq = 0;
-            self.ctrl_ring_cycle = true;
-            core::ptr::write_bytes(self.ctrl_ring as *mut u8, 0, 4096);
+            self.cmd_ring_enqueue(Trb {
+                d0: 0,
+                d1: 0,
+                d2: 0,
+                d3: (TRB_TYPE_ENABLE_SLOT << TRB_TYPE_SHIFT) as u32,
+            });
 
-            let setup_phys = self.ctrl_transfer_buf_phys;
-            let setup_virt = self.ctrl_transfer_buf;
-            core::ptr::copy_nonoverlapping(setup_data.as_ptr(), setup_virt, 8);
-
-            self.ctrl_ring_enqueue(Trb::setup_stage(setup_phys, true));
-
-            let mut transferred = 0;
-            let has_data = data_buf.is_some();
-            let dir_in = if has_data {
-                (setup_data[0] & 0x80) != 0
-            } else {
-                false
-            };
-
-            if let Some(buf) = &data_buf {
-                let data_phys = self.ctrl_transfer_buf_phys + 8;
-                let data_virt = self.ctrl_transfer_buf.add(8);
-
-                if dir_in && data_len > 0 {
-                    core::ptr::write_bytes(data_virt, 0, data_len);
-                } else if !dir_in && data_len > 0 {
-                    core::ptr::copy_nonoverlapping(buf.as_ptr(), data_virt, data_len);
-                }
-
-                self.ctrl_ring_enqueue(Trb::data_stage(
-                    data_phys,
-                    data_len as u32,
-                    dir_in,
-                    true,
-                    false,
-                ));
-
-                self.ctrl_ring_enqueue(Trb::status_stage(true, !dir_in));
-            } else {
-                self.ctrl_ring_enqueue(Trb::status_stage(true, true));
+            let event = self.wait_for_event()?;
+            let completion_code = (event.d2 >> 24) & 0xFF;
+            if completion_code != 1 {
+                log::warn!("[xHCI] Enable Slot failed: completion={}", completion_code);
+                return Err("Enable slot failed");
             }
-
-            for _ in 0..3 {
-                let event = self.ctrl_wait_for_event()?;
-                let trb_type = TRB_GET_TYPE(event.d3);
-                let completion = (event.d2 >> 24) & 0xFF;
-
-                if trb_type == TRB_TYPE_STATUS_STAGE && completion == 1 {
-                    if has_data && data_len > 0 {
-                        if dir_in {
-                            let data_virt = self.ctrl_transfer_buf.add(8);
-                            if let Some(buf) = data_buf {
-                                core::ptr::copy_nonoverlapping(
-                                    data_virt,
-                                    buf.as_mut_ptr(),
-                                    data_len,
-                                );
-                            }
-                        }
-                        transferred = data_len;
-                    }
-                    return Ok(transferred);
-                }
+            let slot_id = ((event.d3 >> 24) & 0xFF) as u8;
+            if slot_id == 0 {
+                return Err("No slot available");
             }
-            Err("Control transfer failed")
+            self.slot_id.store(slot_id, Ordering::SeqCst);
+
+            let idx = slot_id as usize;
+            if idx >= self.device_slots.len() {
+                self.device_slots.resize_with(idx + 1, || None);
+            }
+            self.device_slots[idx] = Some(DeviceSlot::new(slot_id));
+
+            self.alloc_input_context(slot_id)?;
+            self.alloc_transfer_ring(slot_id, 1)?;
+
+            let slot_ctx = &mut (*self.device_slots[idx].as_ref().unwrap().input_ctx).slot;
+            slot_ctx.d0 = (1 << 27) | (slot_id as u32);
+            slot_ctx.d1 = 0;
+            slot_ctx.d2 = 0;
+
+            self.write_endpoint_context(
+                slot_id,
+                1,
+                self.device_slots[idx].as_ref().unwrap().ep_transfer_ring_phys[1],
+                8,
+                EP_TYPE_CONTROL,
+                0,
+            );
+
+            log::info!("[xHCI] Enable Slot: slot_id={}", slot_id);
+            Ok(slot_id)
         }
     }
 
-    /// Performs the port count operation.
+    fn set_address(&mut self, slot_id: u8, address: u8) -> Result<(), &'static str> {
+        unsafe {
+            let idx = slot_id as usize;
+            if idx >= self.device_slots.len() || self.device_slots[idx].is_none() {
+                return Err("Invalid slot for Address Device");
+            }
+
+            let input_ctx_phys = self.device_slots[idx].as_ref().unwrap().input_ctx_phys;
+
+            let slot_ctx = &mut (*self.device_slots[idx].as_ref().unwrap().input_ctx).slot;
+            slot_ctx.d0 = (1 << 27) | (address as u32);
+            slot_ctx.d1 = 0;
+            slot_ctx.d2 = 0;
+
+            self.cmd_ring_enqueue(Trb {
+                d0: (input_ctx_phys & 0xFFFFFFFF) as u32,
+                d1: ((input_ctx_phys >> 32) & 0xFFFFFFFF) as u32,
+                d2: (slot_id as u32) << 24,
+                d3: (TRB_TYPE_ADDRESS_DEVICE << TRB_TYPE_SHIFT) as u32,
+            });
+
+            let event = self.wait_for_event()?;
+            let completion = (event.d2 >> 24) & 0xFF;
+            if completion != 1 {
+                log::warn!(
+                    "[xHCI] Address Device failed: slot={} completion={}",
+                    slot_id,
+                    completion
+                );
+                return Err("Set address failed");
+            }
+
+            self.device_slots[idx].as_mut().unwrap().usb_address = address;
+            log::info!(
+                "[xHCI] Address Device: slot={} addr={}",
+                slot_id,
+                address
+            );
+        }
+        Ok(())
+    }
+
+    pub fn setup_endpoint(
+        &mut self,
+        slot_id: u8,
+        endpoint: u8,
+        max_packet: u32,
+        ep_type: u32,
+        interval: u32,
+        _max_burst: u32,
+    ) -> Result<(), &'static str> {
+        unsafe {
+            let idx = slot_id as usize;
+            if idx >= self.device_slots.len() || self.device_slots[idx].is_none() {
+                return Err("Invalid slot for Setup Endpoint");
+            }
+
+            self.alloc_transfer_ring(slot_id, endpoint)?;
+
+            self.write_endpoint_context(
+                slot_id,
+                endpoint,
+                self.device_slots[idx].as_ref().unwrap().ep_transfer_ring_phys[endpoint as usize],
+                max_packet,
+                ep_type,
+                interval,
+            );
+
+            let input_ctx_phys = self.device_slots[idx].as_ref().unwrap().input_ctx_phys;
+
+            self.cmd_ring_enqueue(Trb {
+                d0: (input_ctx_phys & 0xFFFFFFFF) as u32,
+                d1: ((input_ctx_phys >> 32) & 0xFFFFFFFF) as u32,
+                d2: (slot_id as u32) << 24,
+                d3: (TRB_TYPE_CONFIGURE_ENDPOINT << TRB_TYPE_SHIFT) as u32,
+            });
+
+            let event = self.wait_for_event()?;
+            let completion = (event.d2 >> 24) & 0xFF;
+            if completion != 1 {
+                log::warn!(
+                    "[xHCI] Configure Endpoint failed: slot={} ep={} completion={}",
+                    slot_id,
+                    endpoint,
+                    completion
+                );
+                return Err("Configure endpoint failed");
+            }
+
+            log::info!(
+                "[xHCI] Endpoint configured: slot={} ep={} type={}",
+                slot_id,
+                endpoint,
+                ep_type
+            );
+        }
+        Ok(())
+    }
+
+    fn enumerate_all_ports(&mut self) {
+        let mut usb_address: u8 = 1;
+
+        for port in 0..self.max_ports {
+            let portsc = unsafe { self.read_portsc(port) };
+            let connected = (portsc & PORTSC_CCS) != 0;
+            if !connected {
+                continue;
+            }
+
+            log::info!("[xHCI] Port {} connected, resetting...", port);
+
+            if !unsafe { self.reset_port(port) } {
+                log::warn!("[xHCI] Port {} reset failed", port);
+                continue;
+            }
+
+            let speed = unsafe { ((self.read_portsc(port) >> PORTSC_SPEED_SHIFT) & 0xF) as u8 };
+            log::info!("[xHCI] Port {} speed={}", port, speed);
+
+            match self.enable_slot() {
+                Ok(slot_id) => {
+                    if self.set_address(slot_id, usb_address).is_err() {
+                        log::warn!("[xHCI] Port {} address failed", port);
+                        continue;
+                    }
+                    usb_address += 1;
+
+                    let mut dev_desc = [0u8; 18];
+                    if self.get_device_descriptor(slot_id, &mut dev_desc).is_ok() {
+                        let vid = u16::from_le_bytes([dev_desc[2], dev_desc[3]]);
+                        let pid = u16::from_le_bytes([dev_desc[4], dev_desc[5]]);
+                        let dev_class = dev_desc[4];
+                        let max_packet0 = u16::from_le_bytes([dev_desc[7], dev_desc[8]]);
+                        log::info!(
+                            "[xHCI] Device: VID={:04x} PID={:04x} class={:02x} max_pkt0={}",
+                            vid,
+                            pid,
+                            dev_class,
+                            max_packet0
+                        );
+
+                        if max_packet0 == 64 || max_packet0 == 32 || max_packet0 == 16 || max_packet0 == 8 {
+                            let idx = slot_id as usize;
+                            if idx < self.device_slots.len() {
+                                if let Some(ref mut dev) = self.device_slots[idx] {
+                                    dev.configured = true;
+                                }
+                            }
+                        }
+
+                        crate::hardware::usb::hid::enumerate_device(port, slot_id, &dev_desc);
+                    } else {
+                        log::warn!("[xHCI] Port {} get device descriptor failed", port);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[xHCI] Port {} enable slot failed: {}", port, e);
+                }
+            }
+        }
+    }
+
+    pub fn alloc_interrupt_buffer(
+        &mut self,
+        slot_id: u8,
+        endpoint: u8,
+        len: usize,
+    ) -> Result<(*mut u8, u64), &'static str> {
+        let frame =
+            allocate_zeroed_frame().ok_or("Failed to allocate interrupt buffer")?;
+        let phys = frame.start_address.as_u64();
+        let virt = phys_to_virt(phys) as *mut u8;
+
+        let idx = slot_id as usize;
+        if idx < self.device_slots.len() {
+            if let Some(ref mut dev) = self.device_slots[idx] {
+                let ep = endpoint as usize;
+                if ep < MAX_ENDPOINTS {
+                    dev.ep_buf[ep] = virt;
+                    dev.ep_buf_phys[ep] = phys;
+                    dev.ep_buf_len[ep] = len;
+                }
+            }
+        }
+        Ok((virt, phys))
+    }
+
+    pub fn submit_interrupt_transfer(
+        &mut self,
+        slot_id: u8,
+        endpoint: u8,
+    ) -> Result<(), &'static str> {
+        let idx = slot_id as usize;
+        if idx >= self.device_slots.len() || self.device_slots[idx].is_none() {
+            return Err("Invalid slot for interrupt transfer");
+        }
+
+        let ep = endpoint as usize;
+        if ep >= MAX_ENDPOINTS {
+            return Err("Invalid endpoint");
+        }
+
+        let dev = self.device_slots[idx].as_ref().unwrap();
+        let tr_ring = dev.ep_transfer_rings[ep];
+        let tr_phys = dev.ep_transfer_ring_phys[ep];
+        let buf_phys = dev.ep_buf_phys[ep];
+        let buf_len = dev.ep_buf_len[ep];
+        if tr_ring.is_null() || buf_phys == 0 {
+            return Err("No transfer ring or buffer for endpoint");
+        }
+
+        let deq = dev.ep_dequeue[ep];
+        let cycle = dev.ep_cycle[ep];
+
+        let trb = Trb::normal(buf_phys, buf_len as u32, cycle, true);
+        unsafe {
+            core::ptr::write_volatile(tr_ring.add(deq), trb);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            self.ring_doorbell(slot_id, endpoint);
+        }
+
+        self.device_slots[idx].as_mut().unwrap().ep_active[ep] = true;
+
+        Ok(())
+    }
+
     pub fn port_count(&self) -> usize {
         self.max_ports
     }
 
-    /// Returns whether port connected.
     pub fn is_port_connected(&self, port: usize) -> bool {
         if port >= self.ports.len() {
             return false;
@@ -729,12 +991,8 @@ impl XhciController {
         slot_id: u8,
         buf: &mut [u8; 18],
     ) -> Result<usize, &'static str> {
-        if !self.enumeration_ready {
-            let _ = slot_id;
-            return Err("xHCI enumeration is not ready");
-        }
         let setup = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
-        self.ctrl_transfer(slot_id, &setup, Some(buf), 18)
+        unsafe { self.ctrl_transfer(slot_id, &setup, Some(buf), 18) }
     }
 
     pub fn get_configuration_descriptor(
@@ -744,9 +1002,6 @@ impl XhciController {
         buf: &mut [u8],
         len: usize,
     ) -> Result<usize, &'static str> {
-        if !self.enumeration_ready {
-            return Err("xHCI enumeration is not ready");
-        }
         let setup = [
             0x80,
             0x06,
@@ -757,37 +1012,18 @@ impl XhciController {
             (len & 0xFF) as u8,
             ((len >> 8) & 0xFF) as u8,
         ];
-        self.ctrl_transfer(slot_id, &setup, Some(buf), len)
-    }
-
-    pub fn set_address(&mut self, slot_id: u8, address: u8) -> Result<(), &'static str> {
-        if !self.enumeration_ready {
-            let _ = (slot_id, address);
-            return Err("xHCI enumeration is not ready");
-        }
-        unsafe {
-            self.cmd_ring_enqueue(Trb {
-                d0: 0,
-                d1: 0,
-                d2: (slot_id as u32) << 24,
-                d3: (TRB_TYPE_ADDRESS_DEVICE << TRB_TYPE_SHIFT) as u32 | TRB_CYCLE,
-            });
-            let event = self.wait_for_event()?;
-            let completion = (event.d2 >> 24) & 0xFF;
-            if completion != 1 {
-                return Err("Set address failed");
-            }
-        }
-        Ok(())
+        unsafe { self.ctrl_transfer(slot_id, &setup, Some(buf), len) }
     }
 
     pub fn set_configuration(&mut self, slot_id: u8, config_value: u8) -> Result<(), &'static str> {
-        if !self.enumeration_ready {
-            let _ = (slot_id, config_value);
-            return Err("xHCI enumeration is not ready");
-        }
         let setup = [0x00, 0x09, config_value, 0x00, 0x00, 0x00, 0x00, 0x00];
-        self.ctrl_transfer(slot_id, &setup, None, 0)?;
+        unsafe { self.ctrl_transfer(slot_id, &setup, None, 0)?; }
+        Ok(())
+    }
+
+    pub fn set_protocol(&mut self, slot_id: u8, interface: u8, protocol: u8) -> Result<(), &'static str> {
+        let setup = [0x21, 0x0B, protocol, interface, 0x00, 0x00, 0x00, 0x00];
+        unsafe { self.ctrl_transfer(slot_id, &setup, None, 0)?; }
         Ok(())
     }
 
@@ -797,13 +1033,116 @@ impl XhciController {
         }
         self.ports[port].speed
     }
+
+    unsafe fn ctrl_transfer(
+        &mut self,
+        slot_id: u8,
+        setup_data: &[u8; 8],
+        data_buf: Option<&mut [u8]>,
+        data_len: usize,
+    ) -> Result<usize, &'static str> {
+        let idx = slot_id as usize;
+        if idx >= self.device_slots.len() || self.device_slots[idx].is_none() {
+            return Err("Invalid slot for control transfer");
+        }
+
+        let dev = self.device_slots[idx].as_ref().unwrap();
+        let tr_ring = dev.ep_transfer_rings[1];
+        let tr_phys = dev.ep_transfer_ring_phys[1];
+        if tr_ring.is_null() {
+            return Err("No transfer ring for EP0");
+        }
+
+        let mut deq;
+        let cycle;
+
+        core::ptr::write_bytes(tr_ring as *mut u8, 0, 4096);
+        core::ptr::write(
+            tr_ring.add(XHCI_RING_TRBS - 1),
+            Trb::link(tr_phys, true),
+        );
+        deq = 0;
+        cycle = true;
+
+        let setup_phys = self.ctrl_transfer_buf_phys;
+        let setup_virt = self.ctrl_transfer_buf;
+        core::ptr::copy_nonoverlapping(setup_data.as_ptr(), setup_virt, 8);
+
+        let setup_trb = Trb::setup_stage(setup_phys, cycle);
+        core::ptr::write_volatile(tr_ring.add(deq), setup_trb);
+        deq += 1;
+
+        let has_data = data_buf.is_some();
+        let dir_in = if has_data {
+            (setup_data[0] & 0x80) != 0
+        } else {
+            false
+        };
+
+        if let Some(buf) = &data_buf {
+            let data_phys = self.ctrl_transfer_buf_phys + 8;
+            let data_virt = self.ctrl_transfer_buf.add(8);
+
+            if dir_in && data_len > 0 {
+                core::ptr::write_bytes(data_virt, 0, data_len);
+            } else if !dir_in && data_len > 0 {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), data_virt, data_len);
+            }
+
+            let data_trb = Trb::data_stage(data_phys, data_len as u32, dir_in, cycle, false);
+            core::ptr::write_volatile(tr_ring.add(deq), data_trb);
+            deq += 1;
+
+            let status_trb = Trb::status_stage(cycle, !dir_in);
+            core::ptr::write_volatile(tr_ring.add(deq), status_trb);
+            deq += 1;
+        } else {
+            let status_trb = Trb::status_stage(cycle, true);
+            core::ptr::write_volatile(tr_ring.add(deq), status_trb);
+            deq += 1;
+        }
+
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        self.ring_doorbell(slot_id, 1);
+
+        let mut transferred = 0;
+        for _ in 0..3 {
+            let event = self.wait_for_event()?;
+            let trb_type = TRB_GET_TYPE(event.d3);
+            let completion = (event.d2 >> 24) & 0xFF;
+
+            if completion != 1 {
+                log::warn!(
+                    "[xHCI] ctrl_transfer event error: type={} completion={}",
+                    trb_type,
+                    completion
+                );
+                return Err("Control transfer event error");
+            }
+
+            if trb_type == TRB_TYPE_STATUS_STAGE {
+                if has_data && data_len > 0 && dir_in {
+                    let data_virt = self.ctrl_transfer_buf.add(8);
+                    if let Some(buf) = data_buf {
+                        core::ptr::copy_nonoverlapping(data_virt, buf.as_mut_ptr(), data_len);
+                    }
+                    transferred = data_len;
+                }
+                break;
+            }
+        }
+
+        self.device_slots[idx].as_mut().unwrap().ep_dequeue[1] = deq;
+        self.device_slots[idx].as_mut().unwrap().ep_cycle[1] = cycle;
+
+        Ok(transferred)
+    }
 }
 
 static XHCI_CONTROLLERS: Mutex<Vec<Arc<Mutex<XhciController>>>> = Mutex::new(Vec::new());
 static XHCI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 pub static XHCI_IRQ_LINE: AtomicU8 = AtomicU8::new(0);
 
-/// Performs the init operation.
 pub fn init() {
     log::info!("[xHCI] Scanning for xHCI controllers...");
 
@@ -849,19 +1188,14 @@ pub fn init() {
     );
 }
 
-/// Returns controller.
 pub fn get_controller(index: usize) -> Option<Arc<Mutex<XhciController>>> {
     XHCI_CONTROLLERS.lock().get(index).cloned()
 }
 
-/// Returns whether available.
 pub fn is_available() -> bool {
     XHCI_INITIALIZED.load(Ordering::Relaxed) && !XHCI_CONTROLLERS.lock().is_empty()
 }
 
-/// Handles xHCI interrupts.
-///
-/// Processes event ring entries for completed transfers.
 pub fn handle_interrupt() {
     if let Some(controller_arc) = get_controller(0) {
         let mut controller = controller_arc.lock();
@@ -887,7 +1221,49 @@ pub fn handle_interrupt() {
                         TRB_TYPE_TRANSFER_EVENT => {
                             let slot_id = ((trb.d3 >> 24) & 0xFF) as u8;
                             let ep_id = ((trb.d2 >> 16) & 0x1F) as u8;
-                            crate::hardware::usb::hid::notify_transfer_complete(slot_id, ep_id);
+                            let completion = (trb.d2 >> 24) & 0xFF;
+                            let transferred = (trb.d2 & 0xFFFF) as usize;
+
+                            if completion == 1 && ep_id >= 1 && (ep_id as usize) < MAX_ENDPOINTS {
+                                let idx = slot_id as usize;
+                                if idx < controller.device_slots.len() {
+                                    if let Some(ref mut dev) = controller.device_slots[idx] {
+                                        let ep = ep_id as usize;
+                                        let buf = dev.ep_buf[ep];
+                                        let buf_len = dev.ep_buf_len[ep];
+                                        let actual_len = if transferred < buf_len { transferred } else { buf_len };
+
+                                        if !buf.is_null() && actual_len > 0 {
+                                            crate::hardware::usb::hid::receive_interrupt_report(
+                                                slot_id,
+                                                ep_id,
+                                                buf,
+                                                actual_len,
+                                            );
+                                        }
+
+                                        dev.ep_dequeue[ep] = (dev.ep_dequeue[ep] + 1) % (XHCI_RING_TRBS - 1);
+                                        if dev.ep_dequeue[ep] == 0 {
+                                            dev.ep_cycle[ep] = !dev.ep_cycle[ep];
+                                        }
+                                        dev.ep_active[ep] = false;
+                                    }
+                                }
+                            } else if completion != 1 && completion != 13 {
+                                let idx = slot_id as usize;
+                                if idx < controller.device_slots.len() {
+                                    if let Some(ref mut dev) = controller.device_slots[idx] {
+                                        let ep = ep_id as usize;
+                                        if ep < MAX_ENDPOINTS {
+                                            dev.ep_dequeue[ep] = (dev.ep_dequeue[ep] + 1) % (XHCI_RING_TRBS - 1);
+                                            if dev.ep_dequeue[ep] == 0 {
+                                                dev.ep_cycle[ep] = !dev.ep_cycle[ep];
+                                            }
+                                            dev.ep_active[ep] = false;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -905,6 +1281,31 @@ pub fn handle_interrupt() {
                     ir.erdp = new_erdp | (1 << 3);
 
                     processed += 1;
+                }
+            }
+
+            let db_regs = controller.db_regs;
+            for slot_idx in 0..controller.device_slots.len() {
+                if let Some(ref mut dev) = controller.device_slots[slot_idx] {
+                    for ep in 1..MAX_ENDPOINTS {
+                        if dev.ep_active[ep] || dev.ep_buf[ep].is_null() || dev.ep_transfer_rings[ep].is_null() {
+                            continue;
+                        }
+                        let deq = dev.ep_dequeue[ep];
+                        let cycle = dev.ep_cycle[ep];
+                        let buf_phys = dev.ep_buf_phys[ep];
+                        let buf_len = dev.ep_buf_len[ep];
+                        let tr_ring = dev.ep_transfer_rings[ep];
+                        let slot = dev.slot_id;
+
+                        let trb = Trb::normal(buf_phys, buf_len as u32, cycle, true);
+                        core::ptr::write_volatile(tr_ring.add(deq), trb);
+
+                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                        let db_index = (slot as usize) * 32 + ep;
+                        core::ptr::write_volatile(db_regs.add(db_index), 0);
+                        dev.ep_active[ep] = true;
+                    }
                 }
             }
         }

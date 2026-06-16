@@ -19,4 +19,16 @@ CLAUDE.md
 .github/
 .agents/
 .rtk/
+.claude/
+.gemini/
+graphify-out/
+.cocoindex_code/
+.roo/
+.windsurf/
+.opencode/
+.kilo/
+.mimocode/
 
+opencode.json
+GEMINI.md
+AGENTS.md

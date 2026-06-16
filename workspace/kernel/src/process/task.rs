@@ -29,7 +29,7 @@ fn next_tid() -> Tid {
 
 /// Unique identifier for a task
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TaskId(u64);
+pub struct TaskId(pub u64);
 
 impl TaskId {
     /// Generate a new unique task ID

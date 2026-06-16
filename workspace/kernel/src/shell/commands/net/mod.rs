@@ -15,7 +15,7 @@ pub use ifconfig::cmd_ifconfig;
 pub use netcmd::cmd_net;
 pub use nslookup::cmd_nslookup;
 pub use ping_userspace::cmd_ping;
-use strat9_abi::net::{is_ipv4_literal_candidate, parse_ipv4_literal};
+use strat9_abi::ip::{is_ipv4_literal_candidate, parse_ipv4_literal};
 pub use telnet::cmd_telnet;
 
 /// Read an ELF binary from a VFS path into a Vec<u8>.

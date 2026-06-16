@@ -117,6 +117,14 @@ impl NetworkStrate {
 
         loop {
             let now = now_instant();
+            // Stamp pending pings before both polls so they are never
+            // seen as "timed out" with send_ts_ns == 0.
+            let send_ns = clock_gettime_ns().unwrap_or(0);
+            for ping in self.pending_pings.iter_mut() {
+                if ping.send_ts_ns == 0 {
+                    ping.send_ts_ns = send_ns;
+                }
+            }
             let poll_result = self
                 .interface
                 .poll(now, &mut self.device, &mut self.sockets);
@@ -133,7 +141,6 @@ impl NetworkStrate {
 
             self.process_dhcp();
             self.process_ipv6_slaac();
-            self.process_icmp();
 
             let mut msg = IpcMessage::new(0);
             let mut got_ipc = false;
@@ -154,6 +161,13 @@ impl NetworkStrate {
 
             if got_ipc {
                 let now2 = now_instant();
+                // Stamp pings queued during IPC before the poll that sends them.
+                let send_ns2 = clock_gettime_ns().unwrap_or(0);
+                for ping in self.pending_pings.iter_mut() {
+                    if ping.send_ts_ns == 0 {
+                        ping.send_ts_ns = send_ns2;
+                    }
+                }
                 let _ = self
                     .interface
                     .poll(now2, &mut self.device, &mut self.sockets);

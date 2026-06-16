@@ -15,7 +15,7 @@
 extern crate alloc;
 
 use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
-use strat9_abi::net::{
+use strat9_abi::ip::{
     is_ipv4_literal_candidate, is_ipv6_literal_candidate, parse_ipv4_literal, parse_ipv6_literal,
 };
 use strat9_syscall::{call, data::TimeSpec, number};
@@ -121,24 +121,26 @@ fn sleep_ms(ms: u64) {
     };
 }
 
-/// Read a scheme file, return bytes read.
-fn scheme_read(path: &str, buf: &mut [u8]) -> Result<usize, ()> {
-    let fd = call::openat(0, path, 0x1, 0).map_err(|_| ())?; // O_READ
-    let n = call::read(fd as usize, buf).map_err(|_| {
-        let _ = call::close(fd as usize);
-    })?;
-    let _ = call::close(fd as usize);
-    Ok(n)
+/// Open a scheme file, return fd.
+fn scheme_open(path: &str) -> Result<usize, ()> {
+    call::openat(0, path, 0x3, 0)
+        .map(|fd| fd as usize)
+        .map_err(|_| ())
 }
 
-/// Write to a scheme file, return bytes written.
-fn scheme_write(path: &str, data: &[u8]) -> Result<usize, ()> {
-    let fd = call::openat(0, path, 0x2, 0).map_err(|_| ())?; // O_WRITE
-    let n = call::write(fd as usize, data).map_err(|_| {
-        let _ = call::close(fd as usize);
-    })?;
-    let _ = call::close(fd as usize);
-    Ok(n)
+/// Write to an open scheme fd, return bytes written.
+fn scheme_write_fd(fd: usize, data: &[u8]) -> Result<usize, ()> {
+    call::write(fd, data).map_err(|_| ())
+}
+
+/// Read from an open scheme fd, return bytes read.
+fn scheme_read_fd(fd: usize, buf: &mut [u8]) -> Result<usize, ()> {
+    call::read(fd, buf).map_err(|_| ())
+}
+
+/// Close a scheme fd.
+fn scheme_close(fd: usize) {
+    let _ = call::close(fd);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -225,7 +227,13 @@ fn resolve_target<'a>(
     };
     let path =
         core::str::from_utf8(&path_buf[..path_len]).map_err(|_| ResolveError::ResolveFailed)?;
-    let n = scheme_read(path, resolved_buf).map_err(|_| ResolveError::ResolveFailed)?;
+    let n = scheme_open(path)
+        .and_then(|fd| {
+            let r = scheme_read_fd(fd, resolved_buf);
+            scheme_close(fd);
+            r
+        })
+        .map_err(|_| ResolveError::ResolveFailed)?;
     if n == 0 {
         return Err(ResolveError::ResolveFailed);
     }
@@ -277,7 +285,13 @@ fn read_default_target(family: Option<AddressFamily>, target: &mut [u8; 64]) -> 
     } else {
         "/net/gateway"
     };
-    let n = scheme_read(path, &mut gateway_buf).ok()?;
+    let n = scheme_open(path)
+        .and_then(|fd| {
+            let r = scheme_read_fd(fd, &mut gateway_buf);
+            scheme_close(fd);
+            r
+        })
+        .ok()?;
     if n == 0 {
         return None;
     }
@@ -521,6 +535,17 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
     let path_len = pw.pos;
     let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
 
+    // Open the scheme fd once and reuse for all pings (avoids open/close per packet).
+    let fd = match scheme_open(path) {
+        Ok(fd) => fd,
+        Err(()) => {
+            log("ping: cannot open ");
+            log(path);
+            log("\n");
+            call::exit(1);
+        }
+    };
+
     const PING_TIMEOUT_MS: u64 = 5_000;
     const POLL_INTERVAL_MS: u64 = 100;
 
@@ -548,13 +573,15 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
         let mut wrote = false;
         let write_deadline_ns = clock_ns().saturating_add(PING_TIMEOUT_MS * 1_000_000);
         while clock_ns() < write_deadline_ns {
-            if scheme_write(path, req_bytes).is_ok() {
+            log("[pt] wr ");
+            if scheme_write_fd(fd, req_bytes).is_ok() {
                 wrote = true;
+                log("ok\n");
                 break;
             }
-
-            let mut drain_buf = [0u8; 64];
-            let _ = scheme_read(path, &mut drain_buf);
+            log(".");
+            // NOTE: do NOT read-drain here — with a persistent FD, a drain
+            // would consume replies from previously sent pings, losing them.
             sleep_ms(POLL_INTERVAL_MS);
         }
 
@@ -567,22 +594,26 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
         }
         sent += 1;
 
+        log("[pt] rd ");
         let mut got_reply = false;
         let read_deadline_ns = clock_ns().saturating_add(PING_TIMEOUT_MS * 1_000_000);
         while clock_ns() < read_deadline_ns {
             let mut reply_buf = [0u8; 64];
-            match scheme_read(path, &mut reply_buf) {
+            match scheme_read_fd(fd, &mut reply_buf) {
                 Ok(n) if n >= 10 => {
-                    let recv_ts = clock_ns();
-                    let rtt_ns = recv_ts.saturating_sub(ts);
-                    let rtt_us = rtt_ns / 1000;
+                    log("rep\n");
+                    // Use the RTT computed by strate-net (accurate ICMP-level timing),
+                    // not a local timestamp which would include IPC overhead.
+                    let reply_seq = u16::from_le_bytes([reply_buf[0], reply_buf[1]]);
+                    let rtt_us =
+                        u64::from_le_bytes(reply_buf[2..10].try_into().unwrap_or([0u8; 8]));
                     let rtt_ms = rtt_us / 1000;
                     let rtt_frac = (rtt_us % 1000) / 100;
 
                     log("  Reply from ");
                     log(target.addr);
                     log(": seq=");
-                    log_u32(seq);
+                    log_u32(reply_seq as u32);
                     log(" time=");
                     log_u32(rtt_ms as u32);
                     log(".");
@@ -600,11 +631,19 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
                     got_reply = true;
                     break;
                 }
-                _ => sleep_ms(POLL_INTERVAL_MS),
+                Ok(0) => {
+                    log(".");
+                    sleep_ms(POLL_INTERVAL_MS);
+                }
+                _ => {
+                    log("x");
+                    sleep_ms(POLL_INTERVAL_MS);
+                }
             }
         }
 
         if !got_reply {
+            log("[pt] rto\n");
             log("  Request timeout: seq=");
             log_u32(seq);
             log("\n");
@@ -642,5 +681,6 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
         log(" ms\n");
     }
 
+    scheme_close(fd);
     call::exit(0)
 }

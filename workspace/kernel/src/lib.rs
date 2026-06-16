@@ -1065,6 +1065,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
 
         if let Some(nvme) = hardware::storage::nvme::get_first_controller() {
+            let nvme = nvme.lock();
             if let Some(ns) = nvme.get_namespace(0) {
                 serial_println!(
                     "[INFO] NVMe device found. Namespace {} - {} blocks @ {} bytes ({} MiB)",
@@ -1382,6 +1383,10 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     ioapic::route_legacy_irq(0, lapic_id, 0x20, &madt_info.overrides);
     ioapic::mask_legacy_irq(1, &madt_info.overrides);
     ioapic::mask_legacy_irq(12, &madt_info.overrides);
+
+    // Store overrides so PCI NIC drivers can route their IRQ later.
+    ioapic::store_madt_overrides(&madt_info.overrides);
+
     serial_println!("[init]   6g. IRQ0->vec 0x20 via IOAPIC; IRQ1/IRQ12 via PIC");
 
     // Step 6h: calibrate APIC timer using PIT channel 2

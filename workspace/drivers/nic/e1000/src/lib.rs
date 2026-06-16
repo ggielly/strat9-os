@@ -1,64 +1,93 @@
 #![no_std]
 
 use core::ptr;
-use intel_ethernet::{ctrl, eerd, int_bits, rctl, regs, tctl, LegacyRxDesc, LegacyTxDesc};
+use intel_ethernet::{
+    ctrl, eerd, int_bits, rctl, regs, rx_errors, rx_status, tctl, tx_status, LegacyRxDesc,
+    LegacyTxDesc,
+};
 use net_core::NetError;
 use nic_buffers::{DmaAllocator, DmaRegion};
-use nic_queues::{RxDescriptor, RxRing, TxRing};
+use nic_queues::{RxDescriptor, RxRing, TxDescriptor, TxRing};
 
-pub const NUM_RX: usize = 128; // Optimisé pour plus de throughput
-pub const NUM_TX: usize = 128; // Optimisé pour plus de throughput
-pub const RX_BUF_SIZE: usize = 4096; // Buffer size optimisé (MTU + overhead)
+pub const NUM_RX: usize = 128;
+pub const NUM_TX: usize = 128;
+pub const RX_BUF_SIZE: usize = 4096;
 
-/// Poll `CTRL.RST` until hardware clears it (reset complete). Bounded to avoid hangs.
 const RESET_MAX_POLLS: u32 = 200_000;
-/// Max polls per EEPROM read (EERD.DONE). Much smaller than blind 1M spins.
 const EEPROM_MAX_POLLS: u32 = 50_000;
+
+/// Watchdog timeout in successful TX completions. If no TX completes
+/// within this many transmit attempts the link is considered stalled.
+const WATCHDOG_TX_THRESHOLD: u64 = 10_000;
 
 pub const E1000_DEVICE_IDS: &[u16] = &[0x100E, 0x100F, 0x10D3, 0x153A, 0x1539];
 pub const INTEL_VENDOR: u16 = 0x8086;
 
-/// E1000 NIC structure with DMA-safe rings
+/// Hardware statistics maintained by the driver.
+pub struct E1000Stats {
+    pub rx_ok: u64,
+    pub rx_errors: u64,
+    pub rx_crc_errors: u64,
+    pub rx_length_errors: u64,
+    pub tx_ok: u64,
+    pub tx_errors: u64,
+    pub tx_dropped: u64,
+    pub tx_late_collision: u64,
+    pub tx_underrun: u64,
+    pub watchdog_resets: u64,
+}
+
+impl E1000Stats {
+    const fn new() -> Self {
+        Self {
+            rx_ok: 0,
+            rx_errors: 0,
+            rx_crc_errors: 0,
+            rx_length_errors: 0,
+            tx_ok: 0,
+            tx_errors: 0,
+            tx_dropped: 0,
+            tx_late_collision: 0,
+            tx_underrun: 0,
+            watchdog_resets: 0,
+        }
+    }
+}
+
 pub struct E1000Nic {
     mmio: u64,
     rx: RxRing<LegacyRxDesc>,
     rx_bufs: [DmaRegion; NUM_RX],
+    rx_ring_phys: u64,
     tx: TxRing<LegacyTxDesc>,
-    tx_bufs: [Option<DmaRegion>; NUM_TX],
+    tx_bufs: [DmaRegion; NUM_TX],
+    tx_ring_phys: u64,
     mac: [u8; 6],
     link_up: bool,
+    stats: E1000Stats,
+    tx_since_last_reclaim: u64,
+    /// Last known TDH value for watchdog stall detection.
+    last_tdh: usize,
 }
 
 // SAFETY: E1000Nic owns its MMIO region and DMA buffers. It is safe to send
 // across threads as long as only one thread accesses the hardware at a time.
 unsafe impl Send for E1000Nic {}
 
-// MMIO helpers
-/// # Safety
-///
-/// The caller must ensure that `base + reg` is a valid mapped MMIO region.
 #[inline]
 unsafe fn rd(base: u64, reg: usize) -> u32 {
     ptr::read_volatile((base + reg as u64) as *const u32)
 }
-/// # Safety
-///
-/// The caller must ensure that `base + reg` is a valid mapped MMIO region.
+
 #[inline]
 unsafe fn wr(base: u64, reg: usize, val: u32) {
     ptr::write_volatile((base + reg as u64) as *mut u32, val)
 }
 
 impl E1000Nic {
-    /// Initialise the E1000 hardware.
-    ///
-    /// `mmio_base` is the virtual address of the mapped BAR0 region.
-    /// The caller must ensure the MMIO region (>=128 KiB) is identity-mapped.
     pub fn init(mmio_base: u64, alloc: &dyn DmaAllocator) -> Result<Self, NetError> {
-        // SAFETY: We have exclusive access to the MMIO region during initialization.
-        // All DMA allocations are fresh and properly zeroed.
         unsafe {
-            // Reset: set CTRL.RST; hardware clears RST when reset completes (SDM).
+            // --- Reset ---
             let c = rd(mmio_base, regs::CTRL);
             log::trace!("e1000: assert CTRL.RST (ctrl={:#x})", c);
             wr(mmio_base, regs::CTRL, c | ctrl::RST);
@@ -88,6 +117,7 @@ impl E1000Nic {
             wr(mmio_base, regs::IMC, 0xFFFF_FFFF);
             let _ = rd(mmio_base, regs::ICR);
 
+            // --- MAC address ---
             log::trace!("e1000: read MAC");
             let mac = Self::read_mac(mmio_base)?;
             log::trace!(
@@ -100,7 +130,18 @@ impl E1000Nic {
                 mac[5]
             );
 
-            // RX ring
+            // --- VLAN Ether Type (cosmetic : the 802.1Q network stack does not
+            //     process VLAN tags, so this only makes the hardware parse the
+            //     tag field without any functional effect.)
+            // TODO here ! ---
+            wr(mmio_base, regs::VET, 0x8100);
+            // Zero-out VLAN filter table (accept no VLANs; functional once the
+            // stack gains 802.1Q support).
+            for i in 0..128u32 {
+                wr(mmio_base, regs::VFTA + (i as usize) * 4, 0);
+            }
+
+            // --- RX ring ---
             let rx_ring_region = alloc
                 .alloc_dma(NUM_RX * core::mem::size_of::<LegacyRxDesc>())
                 .map_err(|_| NetError::NotReady)?;
@@ -122,12 +163,11 @@ impl E1000Nic {
             wr(mmio_base, regs::RDH, 0);
             wr(mmio_base, regs::RDT, (NUM_RX - 1) as u32);
 
-            // Set buffer addresses in descriptors
             for (i, buf) in rx_bufs.iter().enumerate().take(NUM_RX) {
                 (*rx_descs.add(i)).addr = buf.phys;
             }
 
-            // TX ring
+            // --- TX ring ---
             let tx_ring_region = alloc
                 .alloc_dma(NUM_TX * core::mem::size_of::<LegacyTxDesc>())
                 .map_err(|_| NetError::NotReady)?;
@@ -140,6 +180,16 @@ impl E1000Nic {
             wr(mmio_base, regs::TDH, 0);
             wr(mmio_base, regs::TDT, 0);
 
+            // Pre-allocate TX buffer pool (avoid per-packet DMA alloc).
+            let mut tx_bufs = [DmaRegion::ZERO; NUM_TX];
+            for tx_buf in tx_bufs.iter_mut().take(NUM_TX) {
+                let buf = alloc
+                    .alloc_dma(net_core::MTU)
+                    .map_err(|_| NetError::NotReady)?;
+                ptr::write_bytes(buf.virt, 0, net_core::MTU);
+                *tx_buf = buf;
+            }
+
             // Enable TX
             wr(
                 mmio_base,
@@ -147,20 +197,47 @@ impl E1000Nic {
                 tctl::EN | tctl::PSP | (0x10 << tctl::CT_SHIFT) | (0x40 << tctl::COLD_SHIFT),
             );
 
-            // Enable RX with 2048 buffer size (default, works with all MTUs)
+            // --- RX control: BSIZE_4096 (BSIZE=00 | BSEX=1) ---
+            // RX_BUF_SIZE is 4096; the hardware must match.
             wr(
                 mmio_base,
                 regs::RCTL,
-                rctl::EN | rctl::BAM | rctl::BSIZE_2048 | rctl::SECRC,
+                rctl::EN | rctl::BAM | rctl::BSIZE_4096 | rctl::SECRC,
             );
 
-            // Link up + interrupts
+            // --- Link up + interrupts ---
             let c = rd(mmio_base, regs::CTRL);
             wr(mmio_base, regs::CTRL, c | ctrl::SLU);
+
+            // --- Interrupt coalescing ---
+            // ITR    = 1950 =>  approx. 2000 irq/s max (1950 × 256 ns ≈ 500 µs between IRQs).
+            // RDTR   = 0 => fire interrupt after first packet (baseline)
+            // RADV   = 128 => absolute timer: force an interrupt after 128 µs even
+            //                if no new packets arrive (keeps latency bounded).
+            // TIDV   = 0 => transmit: fire on first descriptor writeback
+            // TADV   = 64 => absolute timer: flush TX interrupts after 64 µs.
+            //
+            // ITR uses 256 ns units on 8254x; on e1000e/I210 the same register
+            // uses 1024 ns units — the value still provides adequate coalescing.
+            //
+            // 488 × 256 ns ≈ 125 µs => approx 8 000 irq/s max.  Low enough to keep the
+            // CPU from being swamped under heavy load, high enough for interactive
+            // responsiveness (sub-ms ping).
+            wr(mmio_base, regs::ITR, 488);
+            wr(mmio_base, regs::RDTR, 0);
+            wr(mmio_base, regs::RADV, 128);
+            wr(mmio_base, regs::TIDV, 0);
+            wr(mmio_base, regs::TADV, 64);
+
             wr(
                 mmio_base,
                 regs::IMS,
-                int_bits::RXT0 | int_bits::LSC | int_bits::RXDMT0 | int_bits::RXO | int_bits::TXDW,
+                int_bits::RXT0
+                    | int_bits::LSC
+                    | int_bits::RXDMT0
+                    | int_bits::RXO
+                    | int_bits::TXDW
+                    | int_bits::TXQE,
             );
             let status = rd(mmio_base, regs::STATUS);
             let link_up = (status & 0x02) != 0;
@@ -169,27 +246,28 @@ impl E1000Nic {
                 mmio: mmio_base,
                 rx: RxRing::new(rx_descs, NUM_RX),
                 rx_bufs,
+                rx_ring_phys: rx_ring_region.phys,
                 tx: TxRing::new(tx_descs, NUM_TX),
-                tx_bufs: [None; NUM_TX],
+                tx_bufs,
+                tx_ring_phys: tx_ring_region.phys,
                 mac,
                 link_up,
+                stats: E1000Stats::new(),
+                tx_since_last_reclaim: 0,
+                last_tdh: 0,
             })
         }
     }
 
-    /// Performs the mac address operation.
     pub fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
 
-    /// Performs the link up operation.
     pub fn link_up(&self) -> bool {
         self.link_up
     }
 
-    /// Check and update link status
     pub fn check_link(&mut self) -> bool {
-        // SAFETY: MMIO read is safe as long as the device is mapped.
         unsafe {
             let status = rd(self.mmio, regs::STATUS);
             self.link_up = (status & 0x02) != 0;
@@ -197,41 +275,79 @@ impl E1000Nic {
         self.link_up
     }
 
-    /// Performs the receive operation.
-    pub fn receive(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
-        // Check link status first
-        if !self.check_link() {
-            return Err(NetError::LinkDown);
-        }
+    pub fn stats(&self) -> &E1000Stats {
+        &self.stats
+    }
 
-        let (idx, pkt_len) = self.rx.poll().ok_or(NetError::NoPacket)?;
-        let len = pkt_len as usize;
-        if buf.len() < len {
-            return Err(NetError::BufferTooSmall);
-        }
-
-        // SAFETY: The DMA buffer is valid and we have exclusive access during receive.
-        unsafe {
-            ptr::copy_nonoverlapping(self.rx_bufs[idx].virt, buf.as_mut_ptr(), len);
-        }
-
-        // Recycle RX buffer
+    /// Recycle an RX descriptor: clear status, restore buffer address, bump tail.
+    fn recycle_rx_desc(&mut self, idx: usize) {
         self.rx.desc_mut(idx).clear_status();
         self.rx
             .desc_mut(idx)
             .set_buffer_addr(self.rx_bufs[idx].phys);
         let new_tail = self.rx.advance();
-        // SAFETY: Writing to RDT is safe as the device is initialized.
         unsafe {
             wr(self.mmio, regs::RDT, new_tail as u32);
         }
+    }
 
+    pub fn receive(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
+        if !self.check_link() {
+            return Err(NetError::LinkDown);
+        }
+
+        let (idx, pkt_len) = self.rx.poll().ok_or(NetError::NoPacket)?;
+
+        // --- RX error checking ---
+        let err = self.rx.desc(idx).errors;
+        let st = self.rx.desc(idx).status;
+
+        if (err & rx_errors::CE) != 0 {
+            log::warn!("e1000: RX CRC error on descriptor {}", idx);
+            self.recycle_rx_desc(idx);
+            self.stats.rx_crc_errors += 1;
+            self.stats.rx_errors += 1;
+            return Err(NetError::NoPacket);
+        }
+        if (err & rx_errors::SE) != 0 {
+            log::warn!("e1000: RX symbol error on descriptor {}", idx);
+            self.recycle_rx_desc(idx);
+            self.stats.rx_errors += 1;
+            return Err(NetError::NoPacket);
+        }
+        if (err & rx_errors::TCPE) != 0 {
+            log::trace!("e1000: RX TCP/UDP checksum error on descriptor {}", idx);
+        }
+        if (err & rx_errors::IPE) != 0 {
+            log::trace!("e1000: RX IP checksum error on descriptor {}", idx);
+        }
+        if (st & rx_status::EOP) == 0 {
+            log::warn!(
+                "e1000: RX descriptor {} missing EOP — fragment dropped",
+                idx
+            );
+            self.recycle_rx_desc(idx);
+            self.stats.rx_length_errors += 1;
+            self.stats.rx_errors += 1;
+            return Err(NetError::NoPacket);
+        }
+
+        let len = pkt_len as usize;
+        if buf.len() < len {
+            self.recycle_rx_desc(idx);
+            return Err(NetError::BufferTooSmall);
+        }
+
+        unsafe {
+            ptr::copy_nonoverlapping(self.rx_bufs[idx].virt, buf.as_mut_ptr(), len);
+        }
+
+        self.recycle_rx_desc(idx);
+        self.stats.rx_ok += 1;
         Ok(len)
     }
 
-    /// Performs the transmit operation.
-    pub fn transmit(&mut self, buf: &[u8], alloc: &dyn DmaAllocator) -> Result<(), NetError> {
-        // Check link status first
+    pub fn transmit(&mut self, buf: &[u8]) -> Result<(), NetError> {
         if !self.check_link() {
             return Err(NetError::LinkDown);
         }
@@ -242,89 +358,240 @@ impl E1000Nic {
 
         let idx = self.tx.tail();
 
-        // Check if previous TX at this slot is complete (non-blocking)
+        // Reclaim completed TX buffers before checking fullness.
+        self.reclaim_completed_tx_buffers();
+
+        // Check if slot is still busy after reclaim.
         if self.tx.desc(idx).cmd != 0 && !self.tx.is_done(idx) {
+            self.stats.tx_dropped += 1;
             return Err(NetError::TxQueueFull);
         }
 
-        // Free previous buffer if present
-        if let Some(old) = self.tx_bufs[idx].take() {
-            // SAFETY: We own this DMA region and are freeing it after use.
-            unsafe {
-                alloc.free_dma(old);
-            }
-        }
-
-        // Allocate new DMA buffer
-        let region = alloc.alloc_dma(buf.len()).map_err(|_| NetError::NotReady)?;
-        // SAFETY: The DMA region is valid and we have exclusive access.
+        // Copy into the pre-allocated TX buffer pool slot.
         unsafe {
-            ptr::copy_nonoverlapping(buf.as_ptr(), region.virt, buf.len());
+            ptr::copy_nonoverlapping(buf.as_ptr(), self.tx_bufs[idx].virt, buf.len());
         }
 
-        self.tx_bufs[idx] = Some(region);
-        let _submitted = self.tx.submit(region.phys, buf.len() as u16);
-        // SAFETY: Writing to TDT is safe as the device is initialized.
+        let _submitted = self.tx.submit(self.tx_bufs[idx].phys, buf.len() as u16);
         unsafe {
             wr(self.mmio, regs::TDT, self.tx.tail() as u32);
         }
 
-        // Non-blocking: return immediately, caller can poll is_transmit_complete()
-        // For small packets, we can optionally wait (commented out for performance)
-        /*
-        while !self.tx.is_done(submitted) {
-            core::hint::spin_loop();
-        }
-        */
-
+        self.tx_since_last_reclaim += 1;
+        self.stats.tx_ok += 1;
         Ok(())
     }
 
-    /// Check if last transmission is complete (non-blocking)
+    /// Reclaim TX descriptors that the hardware has completed (DD bit set).
+    /// No per-packet DMA free is needed because the buffer pool is
+    /// pre-allocated; we only reset the descriptor for reuse.
+    fn reclaim_completed_tx_buffers(&mut self) {
+        // Scan all slots that might be in-flight.
+        let head = unsafe { rd(self.mmio, regs::TDH) } as usize % NUM_TX;
+        let tail = self.tx.tail();
+
+        let mut idx = head;
+        while idx != tail {
+            if self.tx.is_done(idx) {
+                let st = self.tx.desc(idx).status;
+                if (st & tx_status::LC) != 0 {
+                    log::warn!("e1000: TX late collision at descriptor {}", idx);
+                    self.stats.tx_late_collision += 1;
+                    self.stats.tx_errors += 1;
+                }
+                if (st & tx_status::TU) != 0 {
+                    log::warn!("e1000: TX underrun at descriptor {}", idx);
+                    self.stats.tx_underrun += 1;
+                    self.stats.tx_errors += 1;
+                }
+                // Reset the descriptor for reuse.
+                self.tx.desc_mut(idx).clear();
+            }
+            idx = (idx + 1) % NUM_TX;
+        }
+        self.tx_since_last_reclaim = 0;
+    }
+
+    /// Non-blocking: check if the last submitted TX has completed.
     pub fn is_transmit_complete(&self) -> bool {
         let idx = self.tx.tail();
         self.tx.is_done(idx)
     }
 
-    /// Wait for transmission to complete (blocking)
+    /// Blocking spin until the last TX completes.
     pub fn wait_for_transmit(&self) {
         while !self.is_transmit_complete() {
             core::hint::spin_loop();
         }
     }
 
-    /// Handles interrupt.
-    pub fn handle_interrupt(&self) {
-        // Read and clear interrupt causes
-        // SAFETY: MMIO access is safe during interrupt handling.
+    pub fn tx_is_done(&self, idx: usize) -> bool {
+        self.tx.is_done(idx % NUM_TX)
+    }
+
+    /// Process a hardware interrupt.  Returns the raw ICR value so the
+    /// kernel adapter can decide what to do (e.g. wake a receive task).
+    pub fn handle_interrupt(&mut self) -> u32 {
         let icr = unsafe { rd(self.mmio, regs::ICR) };
 
-        // Handle specific interrupt causes
         if (icr & int_bits::LSC) != 0 {
-            // Link Status Change - update cached state
-            // SAFETY: MMIO read is safe.
-            let _status = unsafe { rd(self.mmio, regs::STATUS) };
+            let status = unsafe { rd(self.mmio, regs::STATUS) };
+            let was_up = self.link_up;
+            self.link_up = (status & 0x02) != 0;
+            if was_up != self.link_up {
+                log::info!("e1000: link {}", if self.link_up { "up" } else { "down" });
+            }
         }
 
         if (icr & (int_bits::RXT0 | int_bits::RXDMT0 | int_bits::RXO)) != 0 {
-            // RX interrupts - packet received, will be handled by poll
+            log::trace!("e1000: RX interrupt (icr={:#x})", icr);
         }
 
         if (icr & int_bits::TXDW) != 0 {
-            // TX descriptor written back - buffers can be freed
+            self.reclaim_completed_tx_buffers();
+            log::trace!("e1000: TX descriptor writeback");
         }
+
+        if (icr & int_bits::TXQE) != 0 {
+            log::trace!("e1000: TX queue empty");
+        }
+
+        if (icr & int_bits::RXO) != 0 {
+            log::warn!("e1000: RX overflow — descriptor ring full");
+        }
+
+        icr
     }
 
-    /// # Safety
+    /// Watchdog check: called periodically (e.g. from timer IRQ) to detect
+    /// and recover from a stalled link.  Returns `true` if a reset was
+    /// performed.
     ///
-    /// The caller must ensure that `base` is a valid mapped MMIO region.
+    /// Stall detection logic:
+    ///   - If `tx_since_last_reclaim` exceeds `WATCHDOG_TX_THRESHOLD` the
+    ///     software has been submitting without any reclaim happening.
+    ///   - If TDH (hardware head) == `last_tdh` → the hardware has not
+    ///     advanced → stall → reset.
+    ///   - If TDH advanced → update `last_tdh` and reset counter (progress).
+    ///   - If TDH == tail (ring empty) → normal idle → reset counter.
+    pub fn watchdog_tick(&mut self, alloc: &dyn DmaAllocator) -> bool {
+        if self.tx_since_last_reclaim < WATCHDOG_TX_THRESHOLD {
+            return false;
+        }
+
+        let tdh = unsafe { rd(self.mmio, regs::TDH) } as usize;
+        let tail = self.tx.tail();
+
+        if tdh != tail {
+            // Descriptors are in-flight — check if head has moved.
+            if tdh == self.last_tdh {
+                log::warn!(
+                    "e1000: watchdog — TX stalled (TDH={} TDT={} last_tdh={}), resetting",
+                    tdh,
+                    tail,
+                    self.last_tdh
+                );
+                self.reinit_hardware(alloc);
+                self.stats.watchdog_resets += 1;
+                return true;
+            }
+            // Head advanced: record new position, reset counter.
+            self.last_tdh = tdh;
+            self.tx_since_last_reclaim = 0;
+        } else {
+            // Ring empty — normal idle.
+            self.tx_since_last_reclaim = 0;
+        }
+        false
+    }
+
+    /// Re-initialise hardware without tearing down the DMA rings.  Used by
+    /// the watchdog to recover from a stuck state.
+    fn reinit_hardware(&mut self, _alloc: &dyn DmaAllocator) {
+        unsafe {
+            // Mask all interrupts while we re-init.
+            wr(self.mmio, regs::IMC, 0xFFFF_FFFF);
+            let _ = rd(self.mmio, regs::ICR);
+
+            // Soft-reset the controller.
+            let c = rd(self.mmio, regs::CTRL);
+            wr(self.mmio, regs::CTRL, c | ctrl::RST);
+            for _ in 0..RESET_MAX_POLLS {
+                if rd(self.mmio, regs::CTRL) & ctrl::RST == 0 {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+
+            // Re-point the rings using the stored physical addresses.
+            wr(self.mmio, regs::RDBAL, self.rx_ring_phys as u32);
+            wr(self.mmio, regs::RDBAH, (self.rx_ring_phys >> 32) as u32);
+            wr(
+                self.mmio,
+                regs::RDLEN,
+                (NUM_RX * core::mem::size_of::<LegacyRxDesc>()) as u32,
+            );
+            wr(self.mmio, regs::RDH, 0);
+            wr(self.mmio, regs::RDT, (NUM_RX - 1) as u32);
+
+            wr(self.mmio, regs::TDBAL, self.tx_ring_phys as u32);
+            wr(self.mmio, regs::TDBAH, (self.tx_ring_phys >> 32) as u32);
+            wr(
+                self.mmio,
+                regs::TDLEN,
+                (NUM_TX * core::mem::size_of::<LegacyTxDesc>()) as u32,
+            );
+            wr(self.mmio, regs::TDH, 0);
+            wr(self.mmio, regs::TDT, 0);
+
+            // Re-enable interrupts.
+            wr(
+                self.mmio,
+                regs::IMS,
+                int_bits::RXT0
+                    | int_bits::LSC
+                    | int_bits::RXDMT0
+                    | int_bits::RXO
+                    | int_bits::TXDW
+                    | int_bits::TXQE,
+            );
+
+            // Force link up.
+            let c = rd(self.mmio, regs::CTRL);
+            wr(self.mmio, regs::CTRL, c | ctrl::SLU);
+
+            // Reconfigure RX: BSIZE_4096.
+            wr(
+                self.mmio,
+                regs::RCTL,
+                rctl::EN | rctl::BAM | rctl::BSIZE_4096 | rctl::SECRC,
+            );
+
+            // Reconfigure TX.
+            wr(
+                self.mmio,
+                regs::TCTL,
+                tctl::EN | tctl::PSP | (0x10 << tctl::CT_SHIFT) | (0x40 << tctl::COLD_SHIFT),
+            );
+
+            // Reconfigure interrupt coalescing.
+            wr(self.mmio, regs::ITR, 488);
+            wr(self.mmio, regs::RDTR, 0);
+            wr(self.mmio, regs::RADV, 128);
+            wr(self.mmio, regs::TIDV, 0);
+            wr(self.mmio, regs::TADV, 64);
+        }
+
+        self.tx_since_last_reclaim = 0;
+        self.last_tdh = 0;
+        self.check_link();
+    }
+
     unsafe fn read_mac(base: u64) -> Result<[u8; 6], NetError> {
-        // Try RAL/RAH registers first
         let ral = rd(base, regs::RAL0);
         let rah = rd(base, regs::RAH0);
         log::trace!("e1000: RAL0={:#x} RAH0={:#x}", ral, rah);
 
-        // Check if MAC address is valid (not all zeros)
         if ral != 0 || rah != 0 {
             return Ok([
                 (ral) as u8,
@@ -336,7 +603,6 @@ impl E1000Nic {
             ]);
         }
 
-        // Fallback to EEPROM read
         log::trace!("e1000: RAL/RAH empty : reading MAC words from EEPROM");
         let mut mac = [0u8; 6];
         for i in 0u32..3 {
@@ -350,9 +616,6 @@ impl E1000Nic {
         Ok(mac)
     }
 
-    /// # Safety
-    ///
-    /// The caller must ensure that `base` is a valid mapped MMIO region.
     unsafe fn eeprom_read(base: u64, addr: u8) -> Result<u16, NetError> {
         log::trace!("e1000: EEPROM read addr={}", addr);
         wr(

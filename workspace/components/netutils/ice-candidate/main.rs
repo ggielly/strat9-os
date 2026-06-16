@@ -6,7 +6,7 @@ extern crate alloc;
 
 use alloc::format;
 use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
-use strat9_abi::net::parse_ipv4_literal;
+use strat9_abi::ip::parse_ipv4_literal;
 use strat9_syscall::{call, data::TimeSpec, number};
 
 /// Default STUN host used when /net/stun-config is absent or unreadable.
