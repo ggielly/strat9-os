@@ -206,6 +206,10 @@ impl SlabState {
     /// Allocate one buddy page, write a `SlabPageHeader` at its base, carve
     /// the remaining space into blocks, and prepend the page to `partial_pages[ci]`.
     unsafe fn refill(&mut self, ci: usize, token: &crate::sync::IrqDisabledToken) {
+        debug_assert!(
+            !crate::arch::x86_64::interrupts_enabled(),
+            "refill: IRQs must be disabled (IrqDisabledToken contract)"
+        );
         let slab_size = SLAB_SIZES[ci];
         let slab_align = slab_class_alignment(ci);
         let blocks_offset = (SLAB_HEADER_SIZE + slab_align - 1) & !(slab_align - 1);
