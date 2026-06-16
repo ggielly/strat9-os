@@ -1815,9 +1815,17 @@ extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame)
         pic::end_of_interrupt(0);
     }
 
-    // Try to preempt the current task (no-op if scheduler lock is held
-    // or no task is running yet)
-    crate::process::scheduler::maybe_preempt();
+    // Mirror the LAPIC timer policy: do not run maybe_preempt() directly
+    // from a Ring-3-origin timer IRQ. The extern "x86-interrupt" frame
+    // must unwind via iretq; switching away from it can corrupt the
+    // interrupt return state. Post a resched hint instead.
+    let cpl = stack_frame.code_segment.0 & 3;
+    if cpl == 3 {
+        let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+        crate::process::scheduler::request_force_resched_hint(cpu);
+    } else {
+        crate::process::scheduler::maybe_preempt();
+    }
     if ticks < 10 {
         crate::serial_force_println!("[heartbeat] PIC timer tick={} preempt_done", ticks);
     }
