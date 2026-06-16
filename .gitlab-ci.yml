@@ -1,80 +1,82 @@
 stages:
-  - build
-  - release
+    - build
+    - release
 
 variables:
-  # GIT_STRATEGY: clone avoids fetching refs/pipelines/N (a GitLab-specific ref
-  # created per pipeline by Gitaly). When Gitaly is under memory pressure it can
-  # fail to create that ref (SIGKILL), causing every subsequent `fetch` strategy
-  # job to fail with "couldn't find remote ref refs/pipelines/N".
-  # clone does a fresh git clone each run and never looks up that ref.
-  GIT_STRATEGY: clone
-  GIT_DEPTH: "0"
-  TZ: "Europe/Paris"
+    # GIT_STRATEGY: clone avoids fetching refs/pipelines/N (a GitLab-specific ref
+    # created per pipeline by Gitaly). When Gitaly is under memory pressure it can
+    # fail to create that ref (SIGKILL), causing every subsequent `fetch` strategy
+    # job to fail with "couldn't find remote ref refs/pipelines/N".
+    # clone does a fresh git clone each run and never looks up that ref.
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "0"
+    TZ: "Europe/Paris"
 
 build-docs:
-  stage: build
-  before_script:
-    - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
-    - rustup component add rust-src llvm-tools-preview
-    - if ! command -v mdbook &> /dev/null; then cargo install mdbook --no-default-features --features search; fi
-  script:
-    - bash tools/scripts/build-docs-site.sh
-  artifacts:
-    paths:
-      - build/docs-site
+    stage: build
+    before_script:
+        - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
+        - rustup component add rust-src llvm-tools-preview
+        - if ! command -v mdbook &> /dev/null; then cargo install mdbook --no-default-features --features search; fi
+    script:
+        - bash tools/scripts/build-docs-site.sh
+    artifacts:
+        paths:
+            - build/docs-site
 
 build-os-release:
-  stage: build
-  before_script:
-    # Sudo is required here ONLY if the runner isn't run as root and the tools aren't already installed:
-    # - sudo apt-get update && sudo apt-get install -y xorriso mtools
-    - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
-    - rustup component add rust-src llvm-tools-preview
-    - rustup target add x86_64-unknown-none
-    - if ! command -v cargo-make &> /dev/null; then cargo install cargo-make; fi
-  script:
-    - cargo make limine-image-release
-  artifacts:
-    paths:
-      - build/strat9-os.iso
-      - build/strat9-os.img
-    expire_in: 12 week
+    stage: build
+    before_script:
+        # Sudo is required here ONLY if the runner isn't run as root and the tools aren't already installed:
+        # - sudo apt-get update && sudo apt-get install -y xorriso mtools
+        - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
+        - rustup component add rust-src llvm-tools-preview
+        - rustup target add x86_64-unknown-none
+        - if ! command -v cargo-make &> /dev/null; then cargo install cargo-make; fi
+    script:
+        - cargo make limine-image-release
+    artifacts:
+        paths:
+            - build/strat9-os.iso
+            - build/strat9-os.img
+        expire_in: 12 week
 
 release-latest:
-  stage: release
-  needs:
-    - job: build-os-release
-      artifacts: true
-  only:
-    - main
-  script:
-    - export COMMIT="${CI_COMMIT_SHORT_SHA}"
-    - export TAG_NAME="build-${COMMIT}"
-    - export ISO_NAME="strat9-os-${COMMIT}.iso"
-    - export IMG_NAME="strat9-os-${COMMIT}.img"
-    - export RELEASE_NAME="Strat9-OS ${COMMIT}"
-    - export DESCRIPTION="Automated build for commit ${CI_COMMIT_SHORT_SHA} (pipeline ${CI_PIPELINE_ID})"
-    - export GITLAB_API="${CI_SERVER_URL}/api/v4"
-    - export TOKEN="${GITLAB_RELEASE_TOKEN}"
-    - test -f build/strat9-os.iso
-    - test -f build/strat9-os.img
-    - cp build/strat9-os.iso "${ISO_NAME}"
-    - cp build/strat9-os.img "${IMG_NAME}"
-    - if [ -z "${TOKEN}" ]; then echo "ERROR - GITLAB_RELEASE_TOKEN is empty"; exit 1; fi
-    - echo "Token length=${#TOKEN}"
-    - echo "==> Creating tag ${TAG_NAME}"
-    - TAG_RESP=$(curl --silent --show-error --request POST --header "PRIVATE-TOKEN:${TOKEN}" --header 'Content-Type:application/json' --data "{\"tag_name\":\"${TAG_NAME}\",\"ref\":\"${CI_COMMIT_SHA}\"}" "${GITLAB_API}/projects/${CI_PROJECT_ID}/repository/tags"); echo "Tag:${TAG_RESP}"
-    - echo "==> Creating release"
-    - REL_RESP=$(curl --silent --show-error --request POST --header "PRIVATE-TOKEN:${TOKEN}" --header 'Content-Type:application/json' --data "{\"name\":\"${RELEASE_NAME}\",\"tag_name\":\"${TAG_NAME}\",\"description\":\"${DESCRIPTION}\"}" "${GITLAB_API}/projects/${CI_PROJECT_ID}/releases"); echo "Release:${REL_RESP}"
-    - echo "==> Uploading ISO"
-    - ISO_UPLOAD=$(curl --silent --show-error --request POST --header "PRIVATE-TOKEN:${TOKEN}" --form "file=@${ISO_NAME}" "${GITLAB_API}/projects/${CI_PROJECT_ID}/uploads"); echo "ISO upload:${ISO_UPLOAD}"
-    - export ISO_URL=$(printf '%s' "${ISO_UPLOAD}" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
-    - echo "==> Uploading IMG"
-    - IMG_UPLOAD=$(curl --silent --show-error --request POST --header "PRIVATE-TOKEN:${TOKEN}" --form "file=@${IMG_NAME}" "${GITLAB_API}/projects/${CI_PROJECT_ID}/uploads"); echo "IMG upload:${IMG_UPLOAD}"
-    - export IMG_URL=$(printf '%s' "${IMG_UPLOAD}" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
-    - echo "==> Attaching ISO asset (url=${CI_SERVER_URL}${ISO_URL})"
-    - curl --silent --show-error --request POST --header "PRIVATE-TOKEN:${TOKEN}" --header 'Content-Type:application/json' --data "{\"name\":\"${ISO_NAME}\",\"url\":\"${CI_SERVER_URL}${ISO_URL}\",\"link_type\":\"other\"}" "${GITLAB_API}/projects/${CI_PROJECT_ID}/releases/${TAG_NAME}/assets/links"
-    - echo "==> Attaching IMG asset (url=${CI_SERVER_URL}${IMG_URL})"
-    - curl --silent --show-error --request POST --header "PRIVATE-TOKEN:${TOKEN}" --header 'Content-Type:application/json' --data "{\"name\":\"${IMG_NAME}\",\"url\":\"${CI_SERVER_URL}${IMG_URL}\",\"link_type\":\"other\"}" "${GITLAB_API}/projects/${CI_PROJECT_ID}/releases/${TAG_NAME}/assets/links"
-    - echo "==> Done"
+    stage: release
+    image: registry.gitlab.com/gitlab-org/release-cli:latest
+    needs:
+        - job: build-os-release
+          artifacts: true
+    rules:
+        - if: $CI_COMMIT_BRANCH == "main"
+    variables:
+        PKG_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/strat9-os/${CI_COMMIT_SHORT_SHA}"
+    script:
+        - |
+            ISO_NAME="strat9-os-${CI_COMMIT_SHORT_SHA}.iso"
+            IMG_NAME="strat9-os-${CI_COMMIT_SHORT_SHA}.img"
+            test -f build/strat9-os.iso
+            test -f build/strat9-os.img
+            echo "==> Uploading ISO to package registry"
+            curl --silent --show-error --fail \
+              --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+              --upload-file build/strat9-os.iso \
+              "${PKG_URL}/${ISO_NAME}"
+            echo "==> Uploading IMG to package registry"
+            curl --silent --show-error --fail \
+              --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+              --upload-file build/strat9-os.img \
+              "${PKG_URL}/${IMG_NAME}"
+            echo "==> Uploads done"
+    release:
+        tag_name: "build-${CI_COMMIT_SHORT_SHA}"
+        name: "Strat9-OS ${CI_COMMIT_SHORT_SHA}"
+        description: "Automated build for commit ${CI_COMMIT_SHORT_SHA} : pipeline #${CI_PIPELINE_ID}"
+        assets:
+            links:
+                - name: "strat9-os-${CI_COMMIT_SHORT_SHA}.iso"
+                  url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/strat9-os/${CI_COMMIT_SHORT_SHA}/strat9-os-${CI_COMMIT_SHORT_SHA}.iso"
+                  link_type: other
+                - name: "strat9-os-${CI_COMMIT_SHORT_SHA}.img"
+                  url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/strat9-os/${CI_COMMIT_SHORT_SHA}/strat9-os-${CI_COMMIT_SHORT_SHA}.img"
+                  link_type: other

@@ -7,6 +7,12 @@ pub fn is_ipv4_literal_candidate(s: &str) -> bool {
 }
 
 /// Returns true when the input looks like an IPv6 literal candidate.
+///
+/// # Limitations
+/// - IPv4-mapped/embedded forms (e.g. `::ffff:192.168.1.1`) are **not** recognised
+///   as candidates — the embedded decimal octets are not valid hex digits.
+/// - Zone IDs (e.g. `fe80::1%eth0`) are **not** recognised — `%` is not in the
+///   allowed character set.
 pub fn is_ipv6_literal_candidate(s: &str) -> bool {
     let bytes = s.as_bytes();
     !bytes.is_empty()
@@ -71,6 +77,14 @@ fn parse_hex_u16(s: &str) -> Option<u16> {
 }
 
 /// Parses an IPv6 literal into network-order octets.
+///
+/// Supports standard colon-hex notation (RFC 4291) with `::` compression.
+///
+/// # Limitations
+/// - IPv4-mapped/embedded forms (e.g. `::ffff:192.168.1.1`) are **not** supported;
+///   only pure colon-hex notation is accepted.
+/// - Zone IDs (e.g. `fe80::1%eth0`) are **not** supported; the zone identifier
+///   must be stripped before calling this function.
 pub fn parse_ipv6_literal(s: &str) -> Option<[u8; 16]> {
     let mut groups = [0u16; 8];
 

@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use strate_net::syscalls::call;
 
 use smoltcp::{
     iface::Route,
@@ -309,12 +310,17 @@ impl NetworkStrate {
             None => return IpcMessage::error_reply(msg.sender, -9),
         };
 
+        let is_ping_path = path.starts_with("ping/") || path.starts_with("ping6/");
+
         let needs_refresh = offset == 0
             || self
                 .open_handles
                 .get(&file_id)
                 .and_then(|handle| handle.cached_content.as_ref())
-                .is_none();
+                .is_none()
+            // Ping paths return dynamic content : one reply per read.
+            // Never serve stale cached data.
+            || is_ping_path;
 
         if needs_refresh {
             match self.generate_content(file_id, &path) {
@@ -336,7 +342,13 @@ impl NetworkStrate {
             None => return IpcMessage::error_reply(msg.sender, -9),
         };
 
-        let start = (offset as usize).min(cached.len());
+        // Ping endpoints behave like a dequeue, not a seekable file. Reads must
+        // ignore the shared file offset because the preceding write advances it.
+        let start = if is_ping_path {
+            0
+        } else {
+            (offset as usize).min(cached.len())
+        };
         reply_read(msg.sender, &cached[start..])
     }
 
@@ -371,9 +383,15 @@ impl NetworkStrate {
                 .get(0..2)
                 .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
                 .unwrap_or(0);
+            let _ = call::debug_log(b"[ping] write ping/ target=");
+            let _ = call::debug_log(&target.octets());
+            let _ = call::debug_log(b" seq=");
+            let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
+            let _ = call::debug_log(b"\n");
             if self.send_ping(target, seq, file_id) {
                 return reply_write(msg.sender, data_len);
             }
+            let _ = call::debug_log(b"[ping] write: send_ping failed\n");
             return IpcMessage::error_reply(msg.sender, -11);
         }
 
@@ -387,9 +405,15 @@ impl NetworkStrate {
                 .get(0..2)
                 .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
                 .unwrap_or(0);
+            let _ = call::debug_log(b"[ping] write ping6/ target=");
+            let _ = call::debug_log(&target.octets());
+            let _ = call::debug_log(b" seq=");
+            let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
+            let _ = call::debug_log(b"\n");
             if self.send_ping6(target, seq, file_id) {
                 return reply_write(msg.sender, data_len);
             }
+            let _ = call::debug_log(b"[ping] write: send_ping6 failed\n");
             return IpcMessage::error_reply(msg.sender, -11);
         }
 

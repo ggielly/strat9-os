@@ -127,8 +127,12 @@ impl Virtqueue {
         let desc_size = queue_size as usize * core::mem::size_of::<VirtqDesc>();
         let avail_size = 6 + queue_size as usize * 2;
         let used_size = 6 + queue_size as usize * core::mem::size_of::<VirtqUsedElem>();
-        let avail_offset = desc_size;
-        let used_offset = Self::align_up(avail_offset + avail_size, 4096);
+        // Legacy virtio layout (Section 2.5.1): the device derives ring offsets
+        // from the descriptor-table PFN using PAGE_ALIGN.  The driver MUST
+        // match that same alignment or device and driver will read/write
+        // different memory locations.
+        let avail_offset = Self::align_up(desc_size, 4096); // PAGE_ALIGN(desc_size)
+        let used_offset = Self::align_up(avail_offset + avail_size, 4096); // PAGE_ALIGN(avail_end)
         let total_size = used_offset + used_size;
 
         // Critical: legacy QUEUE_PFN describes one contiguous vring region.
@@ -198,6 +202,11 @@ impl Virtqueue {
     /// Get the physical address of the used ring
     pub fn used_area(&self) -> u64 {
         self.used_area
+    }
+
+    /// Get the queue size (number of descriptors)
+    pub fn queue_size(&self) -> usize {
+        self.queue_size as usize
     }
 
     /// Get the queue size
@@ -461,9 +470,27 @@ impl VirtioDevice {
         // Select queue
         self.write_reg_u16(14, queue_index); // VIRTIO_PCI_QUEUE_SEL
 
+        // Read max queue size; warn if our size exceeds it
+        let max = self.read_reg_u16(12); // VIRTIO_PCI_QUEUE_NUM
+        if max != 0 && (queue.queue_size() as u16) > max {
+            log::warn!(
+                "virtio: queue {} size {} > device max {}",
+                queue_index,
+                queue.queue_size(),
+                max,
+            );
+        }
+
         // Set queue addresses (page-aligned physical addresses >> 12)
         let desc_pfn = (queue.desc_area() >> 12) as u32;
         self.write_reg_u32(8, desc_pfn); // VIRTIO_PCI_QUEUE_PFN
+
+        log::info!(
+            "virtio: queue {} set up (size={}, pfn={:#x})",
+            queue_index,
+            queue.queue_size(),
+            desc_pfn,
+        );
     }
 
     /// Read the queue size exposed by the selected legacy PCI queue.
@@ -474,6 +501,8 @@ impl VirtioDevice {
 
     /// Notify a queue
     pub fn notify_queue(&self, queue_index: u16) {
-        self.write_reg_u16(16, queue_index); // VIRTIO_PCI_QUEUE_NOTIFY
+        // Write as 32-bit: some QEMU/config combos ignore 16-bit writes
+        // to the QueueNotify register.
+        self.write_reg_u32(16, queue_index as u32); // VIRTIO_PCI_QUEUE_NOTIFY
     }
 }

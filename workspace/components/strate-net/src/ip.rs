@@ -1,5 +1,5 @@
 use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr};
-use strat9_abi::net::{parse_ipv4_literal, parse_ipv6_literal};
+use strat9_abi::ip::{parse_ipv4_literal, parse_ipv6_literal};
 
 pub(crate) struct IpConfig {
     pub(crate) address: Ipv4Cidr,

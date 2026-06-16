@@ -149,7 +149,78 @@ pub mod config {
     pub const INTERRUPT_PIN: u8 = 0x3D;
     pub const MIN_GNT: u8 = 0x3E;
     pub const MAX_LAT: u8 = 0x3F;
+    pub const CAPABILITIES_PTR: u8 = 0x34;
 }
+
+/// PCI capability IDs
+pub mod cap_id {
+    /// MSI capability (PCI 2.2+)
+    pub const MSI: u8 = 0x05;
+    /// MSI-X capability (PCI 3.0+)
+    pub const MSIX: u8 = 0x11;
+}
+
+/// Offsets within an MSI capability block (relative to capability base).
+pub mod msi_cap {
+    /// Capability ID (1 byte) + next ptr (1 byte) = 2 bytes header
+    /// Control register at +2 (16-bit)
+    pub const CONTROL: u8 = 0x02;
+    /// Message Address Register (32-bit) at +4
+    pub const ADDR_LOW: u8 = 0x04;
+    /// Message Upper Address Register (32-bit, 64-bit capable only) at +8
+    pub const ADDR_HIGH: u8 = 0x08;
+    /// Message Data Register (16-bit):
+    ///   - 32-bit capable: at +8
+    ///   - 64-bit capable: at +12
+    pub const DATA: u8 = 0x08;
+}
+
+/// MSI control register bit definitions (16-bit at cap_base + 2).
+pub mod msi_ctrl {
+    /// MSI Enable
+    pub const ENABLE: u16 = 1 << 0;
+    /// Multiple Message Enable (bits 4:6) : number of vectors allocated
+    pub const MME_MASK: u16 = 0b111 << 4;
+    /// Multiple Message Capable (bits 1:3) : number of vectors the device wants
+    pub const MMC_MASK: u16 = 0b111 << 1;
+    /// 64-bit addressing supported
+    pub const ADDR64: u16 = 1 << 7;
+    /// Per-vector masking supported
+    pub const PV_MASK: u16 = 1 << 8;
+}
+
+/// Offsets within an MSI-X capability block (relative to capability base).
+pub mod msix_cap {
+    /// Capability ID (1 byte) + next ptr (1 byte) = 2 bytes header
+    /// Control register at +2 (16-bit)
+    pub const CONTROL: u8 = 0x02;
+    /// Table offset / BAR indicator (32-bit) at +4
+    pub const TABLE: u8 = 0x04;
+    /// Pending Bit Array offset / BAR indicator (32-bit) at +8
+    pub const PBA: u8 = 0x08;
+}
+
+/// MSI-X control register bit definitions (16-bit at cap_base + 2).
+pub mod msix_ctrl {
+    /// MSI-X Enable
+    pub const ENABLE: u16 = 1 << 15;
+    /// Function Mask
+    pub const FUNC_MASK: u16 = 1 << 14;
+    /// Table size (bits 0:10) — number of entries minus 1
+    pub const TABLE_SIZE_MASK: u16 = (1 << 11) - 1;
+}
+
+/// x86 MSI message address (delivers to LAPIC via system bus).
+///
+/// Format:
+///   [31:20] = 0xFEE (fixed)
+///   [19:12] = Destination LAPIC ID
+///   [11:4]  = reserved
+///   [3]     = Redirection Hint (0 = physical destination)
+///   [2]     = Destination Mode (0 = physical)
+///   [1:0]   = 0b00
+pub const MSI_ADDR_BASE: u32 = 0xFEE0_0000;
+pub const MSI_ADDR_DEST_SHIFT: u32 = 12;
 
 /// PCI command register bits
 pub mod command {

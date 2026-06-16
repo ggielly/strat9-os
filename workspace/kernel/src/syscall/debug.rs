@@ -3,7 +3,7 @@
 //! Provides `SYS_DEBUG_LOG` for userspace-to-kernel diagnostic messages.
 
 use super::error::SyscallError;
-use crate::{memory::UserSliceRead, syscall::debug};
+use crate::memory::UserSliceRead;
 /// SYS_DEBUG_LOG (600): write a debug message to serial and silo output.
 ///
 /// arg1 = buffer pointer, arg2 = buffer length.
@@ -26,7 +26,8 @@ pub fn sys_debug_log(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 
     let msg = core::str::from_utf8(&kbuf[..copied]).unwrap_or("<invalid utf8>");
 
-    // Write to E9 (lock-free) to prevent deadlocks
+    // Mirror to serial while debugging userspace/network flows; keep E9 too.
+    crate::serial_println!("[user-debug] {}", msg);
     crate::e9_println!("[user-debug] {}", msg);
 
     // Mirror critical boot/network userspace logs to the serial console so

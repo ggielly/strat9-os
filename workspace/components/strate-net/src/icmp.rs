@@ -4,6 +4,8 @@ use smoltcp::{
 };
 use strate_net::syscalls::clock_gettime_ns;
 
+use strate_net::syscalls::call;
+
 use crate::{
     ip::{icmp_checksum, icmpv6_checksum},
     state::{NetworkStrate, PendingPing, PING_TIMEOUT_NS},
@@ -12,11 +14,10 @@ use crate::{
 impl NetworkStrate {
     pub(crate) fn process_icmp(&mut self) {
         let now_ns = clock_gettime_ns().unwrap_or(0);
-        if let Some(ref ping) = self.pending_ping {
-            if now_ns.saturating_sub(ping.send_ts_ns) >= PING_TIMEOUT_NS {
-                self.pending_ping = None;
-            }
-        }
+
+        // Expire timed-out pending pings.
+        self.pending_pings
+            .retain(|ping| now_ns.saturating_sub(ping.send_ts_ns) < PING_TIMEOUT_NS);
 
         let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
         if !socket.can_recv() {
@@ -27,23 +28,44 @@ impl NetworkStrate {
                 break;
             };
             if data.len() < 16 {
+                let _ = call::debug_log(b"[ping] recv too short\n");
                 continue;
             }
             let is_v6_reply = data[0] == 129;
             if data[0] != 0 && !is_v6_reply {
+                let _ = call::debug_log(b"[ping] recv unexpected type ");
+                let _ = call::debug_log(&[data[0]]);
+                let _ = call::debug_log(b"\n");
                 continue;
             }
             let ident = u16::from_be_bytes([data[4], data[5]]);
             if ident != self.ping_ident {
+                let _ = call::debug_log(b"[ping] recv wrong ident ");
+                let _ = call::debug_log(&[(ident >> 8) as u8, ident as u8]);
+                let _ = call::debug_log(b" != ");
+                let _ = call::debug_log(&[(self.ping_ident >> 8) as u8, self.ping_ident as u8]);
+                let _ = call::debug_log(b"\n");
                 continue;
             }
             let token = u64::from_le_bytes(data[8..16].try_into().unwrap_or([0u8; 8]));
-            if let Some(ref pending) = self.pending_ping {
-                if pending.token == token && pending.is_v6 == is_v6_reply {
-                    let rtt_us = now_ns.saturating_sub(pending.send_ts_ns) / 1000;
-                    self.ping_reply = Some((pending.seq, rtt_us));
-                    self.pending_ping = None;
-                }
+            // Match against all pending pings (supports pipelining).
+            if let Some(idx) = self
+                .pending_pings
+                .iter()
+                .position(|p| p.token == token && p.is_v6 == is_v6_reply)
+            {
+                let pending = self.pending_pings.remove(idx);
+                let rtt_us = now_ns.saturating_sub(pending.send_ts_ns) / 1000;
+                self.ping_replies.push((pending.seq, rtt_us));
+                let _ = call::debug_log(b"[ping] reply seq=");
+                let _ = call::debug_log(&[(pending.seq >> 8) as u8, pending.seq as u8]);
+                let _ = call::debug_log(b" rtt=");
+                let _ = call::debug_log(&[(rtt_us / 1000) as u8]);
+                let _ = call::debug_log(b"ms\n");
+            } else {
+                let _ = call::debug_log(b"[ping] recv: no match for token ");
+                let _ = call::debug_log(&token.to_le_bytes());
+                let _ = call::debug_log(b"\n");
             }
         }
     }
@@ -64,12 +86,8 @@ impl NetworkStrate {
     }
 
     pub(crate) fn send_ping(&mut self, target: Ipv4Address, seq: u16, _file_id: u64) -> bool {
-        if self.pending_ping.is_some() || self.ping_reply.is_some() {
-            return false;
-        }
-
         if self.is_local_ipv4(target) {
-            self.ping_reply = Some((seq, 1));
+            self.ping_replies.push((seq, 1));
             return true;
         }
 
@@ -80,6 +98,7 @@ impl NetworkStrate {
             socket.bind(icmp::Endpoint::Ident(self.ping_ident)).ok();
         }
         if !socket.can_send() {
+            let _ = call::debug_log(b"[ping] send_ping v4: can_send false\n");
             return false;
         }
 
@@ -101,23 +120,25 @@ impl NetworkStrate {
         let checksum = icmp_checksum(buf);
         buf[2..4].copy_from_slice(&checksum.to_be_bytes());
 
+        let _ = call::debug_log(b"[ping] sent seq=");
+        let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
+        let _ = call::debug_log(b" token=");
+        let _ = call::debug_log(&token.to_le_bytes());
+        let _ = call::debug_log(b"\n");
+
         let now_ns = clock_gettime_ns().unwrap_or(0);
-        self.pending_ping = Some(PendingPing {
+        self.pending_pings.push(PendingPing {
             seq,
             token,
-            send_ts_ns: now_ns,
+            send_ts_ns: 0, // stamped by main loop before interface.poll()
             is_v6: false,
         });
         true
     }
 
     pub(crate) fn send_ping6(&mut self, target: Ipv6Address, seq: u16, _file_id: u64) -> bool {
-        if self.pending_ping.is_some() || self.ping_reply.is_some() {
-            return false;
-        }
-
         if self.is_local_ipv6(target) {
-            self.ping_reply = Some((seq, 1));
+            self.ping_replies.push((seq, 1));
             return true;
         }
 
@@ -128,6 +149,7 @@ impl NetworkStrate {
             socket.bind(icmp::Endpoint::Ident(self.ping_ident)).ok();
         }
         if !socket.can_send() {
+            let _ = call::debug_log(b"[ping] send_ping6: can_send false\n");
             return false;
         }
 
@@ -147,6 +169,12 @@ impl NetworkStrate {
             *byte = 0xAA;
         }
 
+        let _ = call::debug_log(b"[ping] sent v6 seq=");
+        let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
+        let _ = call::debug_log(b" token=");
+        let _ = call::debug_log(&token.to_le_bytes());
+        let _ = call::debug_log(b"\n");
+
         let src = if target.is_unicast_link_local() {
             self.link_local_addr
         } else {
@@ -159,10 +187,10 @@ impl NetworkStrate {
         buf[2..4].copy_from_slice(&checksum.to_be_bytes());
 
         let now_ns = clock_gettime_ns().unwrap_or(0);
-        self.pending_ping = Some(PendingPing {
+        self.pending_pings.push(PendingPing {
             seq,
             token,
-            send_ts_ns: now_ns,
+            send_ts_ns: 0, // stamped by main loop before interface.poll()
             is_v6: true,
         });
         true

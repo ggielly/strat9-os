@@ -1,6 +1,6 @@
 use super::*;
 use alloc::string::String;
-use strat9_abi::net::parse_ipv4_literal;
+use strat9_abi::ip::parse_ipv4_literal;
 
 const NTP_PORT: u16 = 123;
 const NTP_UNIX_EPOCH_DELTA: u64 = 2_208_988_800; // 1900 -> 1970

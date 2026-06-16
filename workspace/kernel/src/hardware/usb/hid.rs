@@ -6,6 +6,7 @@
 // - Boot protocol mouse support
 // - Event queue for key presses and mouse movements
 // - PS/2 to USB keycode translation
+// - Interrupt transfer polling via xHCI
 // - Unification with PS/2: events feed into the same keyboard/mouse buffers
 //
 // Inspired by Redox usbhid, Asterinas input subsystem, Maestro device manager.
@@ -20,21 +21,8 @@ use spin::Mutex;
 pub const HID_BOOT_KEYBOARD: u8 = 0x01;
 pub const HID_BOOT_MOUSE: u8 = 0x02;
 
-// USB HID Boot Keyboard Report size (8 bytes)
 const KBD_REPORT_SIZE: usize = 8;
-
-// USB HID Boot Mouse Report size (3 bytes for basic mice)
-const MOUSE_REPORT_SIZE: usize = 3;
-
-// Modifier keys
-const MOD_LCTRL: u8 = 0x01;
-const MOD_LSHIFT: u8 = 0x02;
-const MOD_LALT: u8 = 0x04;
-const MOD_LGUI: u8 = 0x08;
-const MOD_RCTRL: u8 = 0x10;
-const MOD_RSHIFT: u8 = 0x20;
-const MOD_RALT: u8 = 0x40;
-const MOD_RGUI: u8 = 0x80;
+const MOUSE_REPORT_SIZE: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub struct KeyEvent {
@@ -51,28 +39,25 @@ pub struct MouseEvent {
     pub buttons: u8,
 }
 
-// USB to PS/2 scan code translation table (subset)
-// Maps USB HID usage IDs to PS/2 scan codes
 const USB_TO_PS2: [u8; 128] = [
-    0x00, 0x00, 0x00, 0x00, 0x1C, 0x32, 0x21, 0x23, // 00-07
-    0x1D, 0x24, 0x2B, 0x34, 0x33, 0x43, 0x35, 0x0E, // 08-0F
-    0x15, 0x16, 0x17, 0x1C, 0x18, 0x19, 0x14, 0x1A, // 10-17
-    0x1B, 0x1D, 0x1E, 0x21, 0x22, 0x23, 0x24, 0x2B, // 18-1F
-    0x29, 0x2F, 0x2E, 0x30, 0x20, 0x31, 0x32, 0x33, // 20-27
-    0x2C, 0x2D, 0x11, 0x12, 0x13, 0x3F, 0x3E, 0x46, // 28-2F
-    0x45, 0x5D, 0x4C, 0x36, 0x4A, 0x55, 0x37, 0x4E, // 30-37
-    0x57, 0x5E, 0x5C, 0x41, 0x52, 0x4D, 0x4B, 0x5B, // 38-3F
-    0x5A, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, // 40-47
-    0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, // 48-4F
-    0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, // 50-57
-    0x80, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 58-5F
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 60-67
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 68-6F
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 70-77
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 78-7F
+    0x00, 0x00, 0x00, 0x00, 0x1C, 0x32, 0x21, 0x23,
+    0x1D, 0x24, 0x2B, 0x34, 0x33, 0x43, 0x35, 0x0E,
+    0x15, 0x16, 0x17, 0x1C, 0x18, 0x19, 0x14, 0x1A,
+    0x1B, 0x1D, 0x1E, 0x21, 0x22, 0x23, 0x24, 0x2B,
+    0x29, 0x2F, 0x2E, 0x30, 0x20, 0x31, 0x32, 0x33,
+    0x2C, 0x2D, 0x11, 0x12, 0x13, 0x3F, 0x3E, 0x46,
+    0x45, 0x5D, 0x4C, 0x36, 0x4A, 0x55, 0x37, 0x4E,
+    0x57, 0x5E, 0x5C, 0x41, 0x52, 0x4D, 0x4B, 0x5B,
+    0x5A, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F,
+    0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77,
+    0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+    0x80, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// Performs the usb to ps2 operation.
 fn usb_to_ps2(keycode: u8) -> u8 {
     if keycode < USB_TO_PS2.len() as u8 {
         USB_TO_PS2[keycode as usize]
@@ -83,52 +68,49 @@ fn usb_to_ps2(keycode: u8) -> u8 {
 
 pub struct HidKeyboard {
     port: usize,
+    slot_id: u8,
     interface: u8,
     endpoint: u8,
     max_packet: u16,
     interval: u8,
     event_queue: Vec<KeyEvent>,
     last_report: [u8; KBD_REPORT_SIZE],
+    report_buf: *mut u8,
 }
 
 unsafe impl Send for HidKeyboard {}
 unsafe impl Sync for HidKeyboard {}
 
 impl HidKeyboard {
-    /// Creates a new instance.
-    pub fn new(port: usize, interface: u8, endpoint: u8, max_packet: u16, interval: u8) -> Self {
+    pub fn new(
+        port: usize,
+        slot_id: u8,
+        interface: u8,
+        endpoint: u8,
+        max_packet: u16,
+        interval: u8,
+    ) -> Self {
         Self {
             port,
+            slot_id,
             interface,
             endpoint,
             max_packet,
             interval,
             event_queue: Vec::new(),
             last_report: [0; KBD_REPORT_SIZE],
+            report_buf: core::ptr::null_mut(),
         }
     }
 
-    /// Reads event.
     pub fn read_event(&mut self) -> Option<KeyEvent> {
-        if self.event_queue.is_empty() {
-            self.poll();
-        }
         self.event_queue.pop()
     }
 
-    /// Performs the poll operation.
-    pub fn poll(&mut self) {
-        // In a full implementation, this would submit an interrupt transfer
-        // and parse the HID report. For now, we simulate basic functionality.
-        // The actual polling would be done via xHCI interrupt transfers.
-    }
-
-    /// Performs the process report operation.
-    pub fn process_report(&mut self, report: &[u8; KBD_REPORT_SIZE]) {
-        // report[0] = modifiers
-        // report[1] = reserved
-        // report[2..7] = keycodes
-
+    pub fn process_report(&mut self, report: &[u8]) {
+        if report.len() < KBD_REPORT_SIZE {
+            return;
+        }
         let modifiers = report[0];
 
         for i in 2..8 {
@@ -136,8 +118,6 @@ impl HidKeyboard {
             if keycode == 0 {
                 continue;
             }
-
-            // Check if key was pressed (new in this report)
             let was_pressed = self.last_report[2..8].contains(&keycode);
             if !was_pressed {
                 self.event_queue.push(KeyEvent {
@@ -148,7 +128,6 @@ impl HidKeyboard {
             }
         }
 
-        // Check for released keys
         for i in 2..8 {
             let keycode = self.last_report[i];
             if keycode != 0 && !report[2..8].contains(&keycode) {
@@ -160,15 +139,15 @@ impl HidKeyboard {
             }
         }
 
-        self.last_report = *report;
+        for i in 0..8 {
+            self.last_report[i] = report[i];
+        }
     }
 
-    /// Returns whether modifier pressed.
     pub fn is_modifier_pressed(&self, modifier: u8) -> bool {
         self.last_report[0] & modifier != 0
     }
 
-    /// Drain event queue and inject into the unified keyboard buffer.
     pub fn drain_into_unified(&mut self) {
         while let Some(ev) = self.event_queue.pop() {
             keyboard::inject_hid_scancode(ev.keycode, ev.pressed);
@@ -178,46 +157,45 @@ impl HidKeyboard {
 
 pub struct HidMouse {
     port: usize,
+    slot_id: u8,
     interface: u8,
     endpoint: u8,
     max_packet: u16,
     interval: u8,
     event_queue: Vec<MouseEvent>,
     last_buttons: u8,
+    report_buf: *mut u8,
 }
 
 unsafe impl Send for HidMouse {}
 unsafe impl Sync for HidMouse {}
 
 impl HidMouse {
-    /// Creates a new instance.
-    pub fn new(port: usize, interface: u8, endpoint: u8, max_packet: u16, interval: u8) -> Self {
+    pub fn new(
+        port: usize,
+        slot_id: u8,
+        interface: u8,
+        endpoint: u8,
+        max_packet: u16,
+        interval: u8,
+    ) -> Self {
         Self {
             port,
+            slot_id,
             interface,
             endpoint,
             max_packet,
             interval,
             event_queue: Vec::new(),
             last_buttons: 0,
+            report_buf: core::ptr::null_mut(),
         }
     }
 
-    /// Reads event.
     pub fn read_event(&mut self) -> Option<MouseEvent> {
-        if self.event_queue.is_empty() {
-            self.poll();
-        }
         self.event_queue.pop()
     }
 
-    /// Performs the poll operation.
-    pub fn poll(&mut self) {
-        // In a full implementation, this would submit an interrupt transfer
-        // and parse the HID report.
-    }
-
-    /// Performs the process report operation.
     pub fn process_report(&mut self, report: &[u8]) {
         if report.len() < 3 {
             return;
@@ -228,7 +206,6 @@ impl HidMouse {
         let dy = report[2] as i8;
         let dz = if report.len() > 3 { report[3] as i8 } else { 0 };
 
-        // Check for button changes
         for i in 0..5 {
             let mask = 1 << i;
             let was_pressed = self.last_buttons & mask != 0;
@@ -244,7 +221,6 @@ impl HidMouse {
             }
         }
 
-        // Add movement event if there was movement
         if dx != 0 || dy != 0 || dz != 0 {
             self.event_queue.push(MouseEvent {
                 dx,
@@ -257,12 +233,10 @@ impl HidMouse {
         self.last_buttons = buttons;
     }
 
-    /// Returns whether button pressed.
     pub fn is_button_pressed(&self, button: u8) -> bool {
         self.last_buttons & (1 << button) != 0
     }
 
-    /// Drain event queue and inject into the unified mouse buffer.
     pub fn drain_into_unified(&mut self) {
         while let Some(ev) = self.event_queue.pop() {
             let left = ev.buttons & 0x01 != 0;
@@ -277,20 +251,8 @@ static KEYBOARDS: Mutex<Vec<Arc<Mutex<HidKeyboard>>>> = Mutex::new(Vec::new());
 static MICE: Mutex<Vec<Arc<Mutex<HidMouse>>>> = Mutex::new(Vec::new());
 static HID_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// Performs the init operation.
 pub fn init() {
     log::info!("[USB-HID] Initializing HID drivers...");
-
-    if !crate::hardware::usb::xhci::is_available() {
-        log::warn!("[USB-HID] xHCI not available, skipping HID init");
-        return;
-    }
-
-    // xHCI host bring-up is present, but slot/endpoint enumeration is not yet
-    // robust enough to run during kernel boot. Keep HID disabled until the
-    // command path is completed.
-    log::warn!("[USB-HID] xHCI enumeration not enabled yet, skipping HID probe");
-
     HID_INITIALIZED.store(true, Ordering::SeqCst);
     log::info!(
         "[USB-HID] Initialized: {} keyboard(s), {} mouse/mice",
@@ -299,79 +261,193 @@ pub fn init() {
     );
 }
 
-/// Performs the probe hid device operation.
-fn probe_hid_device(port: usize) {
-    if port == 0 {
-        let keyboard = HidKeyboard::new(port, 0, 0x81, 8, 10);
-        KEYBOARDS.lock().push(Arc::new(Mutex::new(keyboard)));
-        log::info!("[USB-HID] Found keyboard on port {}", port);
-    } else if port == 1 {
-        let mouse_dev = HidMouse::new(port, 0, 0x81, 4, 10);
-        MICE.lock().push(Arc::new(Mutex::new(mouse_dev)));
-        log::info!("[USB-HID] Found mouse on port {}", port);
+pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
+    let dev_class = dev_desc[4];
+
+    if dev_class == 0x03 {
+        let protocol = dev_desc[6];
+        log::info!(
+            "[USB-HID] HID device: port={} slot={} class=03 protocol={:02x}",
+            port,
+            slot_id,
+            protocol
+        );
+
+        if let Some(controller_arc) = crate::hardware::usb::xhci::get_controller(0) {
+            let mut controller = controller_arc.lock();
+
+            if protocol == 1 {
+                controller.set_protocol(port as u8, 0, 0).ok();
+            } else if protocol == 2 {
+                controller.set_protocol(port as u8, 0, 1).ok();
+            }
+
+            let mut config_desc = [0u8; 256];
+            if controller
+                .get_configuration_descriptor(slot_id, 0, &mut config_desc, 9)
+                .is_ok()
+            {
+                let total_len = u16::from_le_bytes([config_desc[2], config_desc[3]]) as usize;
+                if total_len > 9 && total_len <= 256 {
+                    controller
+                        .get_configuration_descriptor(slot_id, 0, &mut config_desc, total_len)
+                        .ok();
+                }
+
+                let mut offset = 9;
+                while offset + 9 <= total_len {
+                    let b_length = config_desc[offset];
+                    let b_descriptor_type = config_desc[offset + 1];
+                    if b_length < 9 || offset + b_length as usize > total_len {
+                        break;
+                    }
+                    if b_descriptor_type == 4 {
+                        let b_interface_class = config_desc[offset + 5];
+                        let b_interface_protocol = config_desc[offset + 7];
+
+                        if b_interface_class == 0x03 {
+                            let mut ep_offset = offset + 9;
+                            while ep_offset + 7 <= offset + b_length as usize {
+                                let ep_b_length = config_desc[ep_offset];
+                                let ep_b_descriptor_type = config_desc[ep_offset + 1];
+                                if ep_b_length < 7 || ep_b_descriptor_type != 5 {
+                                    break;
+                                }
+                                let ep_addr = config_desc[ep_offset + 2];
+                                let ep_max_packet = u16::from_le_bytes([
+                                    config_desc[ep_offset + 4],
+                                    config_desc[ep_offset + 5],
+                                ]);
+                                let ep_interval = config_desc[ep_offset + 6];
+
+                                if (ep_addr & 0x80) != 0 {
+                                    let ep_num = ep_addr & 0x0F;
+                                    let ep_type = 7;
+
+                                    controller.setup_endpoint(
+                                        slot_id,
+                                        ep_num,
+                                        ep_max_packet as u32,
+                                        ep_type,
+                                        ep_interval as u32,
+                                        0,
+                                    ).ok();
+
+                                    let buf_size = ep_max_packet as usize;
+                                    if let Ok((_buf_virt, _buf_phys)) =
+                                        controller.alloc_interrupt_buffer(slot_id, ep_num, buf_size)
+                                    {
+                                        if b_interface_protocol == 1 {
+                                            let mut keyboard = HidKeyboard::new(
+                                                port,
+                                                slot_id,
+                                                config_desc[offset + 2],
+                                                ep_addr,
+                                                ep_max_packet,
+                                                ep_interval,
+                                            );
+                                            keyboard.report_buf = _buf_virt;
+                                            log::info!(
+                                                "[USB-HID] Keyboard: port={} slot={} ep={:02x} max_pkt={} interval={}",
+                                                port,
+                                                slot_id,
+                                                ep_addr,
+                                                ep_max_packet,
+                                                ep_interval
+                                            );
+                                            KEYBOARDS.lock().push(Arc::new(Mutex::new(keyboard)));
+
+                                            controller.submit_interrupt_transfer(slot_id, ep_num).ok();
+                                        } else if b_interface_protocol == 2 {
+                                            let mut mouse_dev = HidMouse::new(
+                                                port,
+                                                slot_id,
+                                                config_desc[offset + 2],
+                                                ep_addr,
+                                                ep_max_packet,
+                                                ep_interval,
+                                            );
+                                            mouse_dev.report_buf = _buf_virt;
+                                            log::info!(
+                                                "[USB-HID] Mouse: port={} slot={} ep={:02x} max_pkt={} interval={}",
+                                                port,
+                                                slot_id,
+                                                ep_addr,
+                                                ep_max_packet,
+                                                ep_interval
+                                            );
+                                            MICE.lock().push(Arc::new(Mutex::new(mouse_dev)));
+
+                                            controller.submit_interrupt_transfer(slot_id, ep_num).ok();
+                                        }
+                                    }
+                                }
+                                ep_offset += ep_b_length as usize;
+                            }
+                        }
+                    }
+                    offset += b_length as usize;
+                }
+            }
+
+            controller.set_configuration(slot_id, 1).ok();
+        }
+    } else {
+        log::info!(
+            "[USB-HID] Non-HID device: port={} slot={} class={:02x}",
+            port,
+            slot_id,
+            dev_class
+        );
     }
 }
 
-pub fn enumerate_device(port: usize) {
-    if let Some(controller_arc) = crate::hardware::usb::xhci::get_controller(0) {
-        let mut controller = controller_arc.lock();
-
-        let mut dev_desc = [0u8; 18];
-        if controller.get_device_descriptor(1, &mut dev_desc).is_ok() {
-            log::info!(
-                "[USB-HID] Device: VID={:04x} PID={:04x}",
-                u16::from_le_bytes([dev_desc[2], dev_desc[3]]),
-                u16::from_le_bytes([dev_desc[4], dev_desc[5]])
-            );
-        }
-
-        let mut config_desc = [0u8; 256];
-        if controller
-            .get_configuration_descriptor(1, 0, &mut config_desc, 9)
-            .is_ok()
-        {
-            log::info!(
-                "[USB-HID] Config: total_len={}",
-                u16::from_le_bytes([config_desc[2], config_desc[3]])
-            );
-        }
-
-        controller.set_configuration(1, 1).ok();
+pub fn receive_interrupt_report(slot_id: u8, ep_id: u8, buf: *const u8, len: usize) {
+    if buf.is_null() || len == 0 {
+        return;
     }
 
-    probe_hid_device(port);
+    let report = unsafe { core::slice::from_raw_parts(buf, len) };
+
+    for kbd in KEYBOARDS.lock().iter() {
+        let mut k = kbd.lock();
+        if k.slot_id == slot_id && (k.endpoint & 0x0F) == ep_id {
+            k.process_report(report);
+            k.drain_into_unified();
+            return;
+        }
+    }
+
+    for m in MICE.lock().iter() {
+        let mut dev = m.lock();
+        if dev.slot_id == slot_id && (dev.endpoint & 0x0F) == ep_id {
+            dev.process_report(report);
+            dev.drain_into_unified();
+            return;
+        }
+    }
 }
 
-/// Returns keyboard.
 pub fn get_keyboard(index: usize) -> Option<Arc<Mutex<HidKeyboard>>> {
     KEYBOARDS.lock().get(index).cloned()
 }
 
-/// Returns mouse.
 pub fn get_mouse(index: usize) -> Option<Arc<Mutex<HidMouse>>> {
     MICE.lock().get(index).cloned()
 }
 
-/// Performs the keyboard count operation.
 pub fn keyboard_count() -> usize {
     KEYBOARDS.lock().len()
 }
 
-/// Performs the mouse count operation.
 pub fn mouse_count() -> usize {
     MICE.lock().len()
 }
 
-/// Returns whether available.
 pub fn is_available() -> bool {
     HID_INITIALIZED.load(Ordering::Relaxed)
 }
 
-/// Poll all HID devices and inject events into the unified keyboard/mouse buffers.
-///
-/// Call from the shell loop (task context) to drain USB HID event queues and
-/// feed them into the same buffers used by PS/2. This enables USB keyboards
-/// and mice to work alongside or instead of PS/2.
 pub fn poll_all() {
     for kbd in KEYBOARDS.lock().iter() {
         let mut k = kbd.lock();
@@ -383,9 +459,6 @@ pub fn poll_all() {
     }
 }
 
-/// Called by xHCI IRQ handler when a transfer completes.
-///
-/// Processes the HID report and queues events.
 pub fn notify_transfer_complete(_slot_id: u8, _ep_id: u8) {
     poll_all();
 }

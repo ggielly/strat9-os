@@ -5,6 +5,7 @@
 //! this driver plugs into the unified `/dev/net/` scheme.
 //!
 //! Reference: VirtIO spec v1.2, Section 5.1 (Network Device)
+//! https://docs.oasis-open.org/virtio/virtio/v1.4/cs01/virtio-v1.4-cs01.html#x1-2700001
 
 use crate::{
     arch::x86_64::pci::{self, PciDevice},
@@ -19,13 +20,15 @@ use crate::{
     sync::{FixedQueue, SpinLock},
 };
 use alloc::sync::Arc;
-use core::{mem, ptr};
+use core::{mem, ptr, sync::atomic::Ordering};
 use endian_num::Le;
 use net_core::{NetError, NetworkDevice};
 use spin::RwLock as SpinRwLock;
 
-/// VirtIO net header size
-const NET_HDR_SIZE: usize = mem::size_of::<VirtioNetHeader>();
+/// VirtIO net header size (12 bytes with MRG_RXBUF, 10 bytes without).
+/// Determined at runtime during feature negotiation.
+static NET_HDR_SIZE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(mem::size_of::<VirtioNetHeader>());
 const RX_FRAME_TRACK_CAPACITY: usize = 128;
 
 /// VirtIO net device features
@@ -104,18 +107,36 @@ impl VirtioNetDevice {
         device.add_status(status::DRIVER as u8);
 
         // Read and negotiate features
-        let _device_features = device.read_device_features();
-
-        // Request MAC address feature
-        let guest_features = features::VIRTIO_NET_F_MAC | features::VIRTIO_NET_F_STATUS;
+        let device_features = device.read_device_features();
+        let needed = features::VIRTIO_NET_F_MAC | features::VIRTIO_NET_F_STATUS;
+        // VIRTIO_NET_F_MRG_RXBUF: requested so the device uses the 12-byte
+        // virtio_net_hdr_v1 layout (with num_buffers) that matches our
+        // VirtioNetHeader struct. Without it the legacy 10-byte header would
+        // shift every packet by 2 bytes, corrupting all data.
+        let desired = needed | features::VIRTIO_NET_F_MRG_RXBUF;
+        if device_features & needed != needed {
+            return Err("Device lacks mandatory MAC/STATUS features");
+        }
+        let guest_features = device_features & desired;
         device.write_guest_features(guest_features);
 
         // Features OK
         device.add_status(status::FEATURES_OK as u8);
 
-        // Verify features OK
+        // Double-check that FEATURES_OK stuck
         if device.get_status() & (status::FEATURES_OK as u8) == 0 {
-            return Err("Device doesn't support our feature set");
+            return Err("Device rejected our feature set");
+        }
+
+        // Read back negotiated features to determine actual header size.
+        // With VIRTIO_NET_F_MRG_RXBUF the header is 12 bytes (virtio_net_hdr_v1);
+        // without it the legacy 10-byte header (virtio_net_hdr) is used.
+        let negotiated = device.read_device_features();
+        if negotiated & features::VIRTIO_NET_F_MRG_RXBUF != 0 {
+            NET_HDR_SIZE.store(mem::size_of::<VirtioNetHeader>(), Ordering::Release);
+        } else {
+            // Legacy 10-byte header: num_buffers field is absent.
+            NET_HDR_SIZE.store(10, Ordering::Release);
         }
 
         // Create virtqueues
@@ -178,7 +199,7 @@ impl VirtioNetDevice {
 
         for _ in 0..(target_filled - current_filled) {
             // Allocate buffer for header + MTU
-            let buf_size = NET_HDR_SIZE + net::MTU;
+            let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU;
             let buf_pages = (buf_size + 4095) / 4096;
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
@@ -249,9 +270,16 @@ impl NetworkDevice for VirtioNetDevice {
 
         // Check if there's a used buffer
         if !rx_queue.has_used() {
+            let (dev_idx, drv_idx) = rx_queue.used_indices();
+            log::info!(
+                "[vtnet] rx: no used buf (used.idx={}, last_used={})",
+                dev_idx,
+                drv_idx,
+            );
             return Err(NetError::NoPacket);
         }
 
+        let hdr_size = NET_HDR_SIZE.load(Ordering::Relaxed);
         let (token, len) = rx_queue.get_used().ok_or(NetError::NoPacket)?;
 
         let _desc_index = token as usize;
@@ -266,14 +294,39 @@ impl NetworkDevice for VirtioNetDevice {
         let buf_addr = frame.start_address.as_u64();
         let virt_addr = crate::memory::phys_to_virt(buf_addr);
 
-        // Check if token matches what we expect?
-        // We can't easily without reading the descriptor.
-
         let header_ptr = virt_addr as *const VirtioNetHeader;
-        let data_ptr = (virt_addr + NET_HDR_SIZE as u64) as *const u8;
+        let data_ptr = (virt_addr + hdr_size as u64) as *const u8;
 
-        let _header = unsafe { ptr::read(header_ptr) };
-        let packet_len = (len as usize).saturating_sub(NET_HDR_SIZE);
+        let header = unsafe { ptr::read(header_ptr) };
+        let packet_len = (len as usize).saturating_sub(hdr_size);
+
+        // Dump first 16 bytes of packet payload for diagnostics
+        let mut dump = [0u8; 16];
+        if packet_len >= 16 {
+            unsafe {
+                ptr::copy_nonoverlapping(data_ptr, dump.as_mut_ptr(), 16);
+            }
+        }
+        log::info!(
+            "[vtnet] rx: token={} len={} hdr={} pkt={} flags={} num_buf={}",
+            token,
+            len,
+            hdr_size,
+            packet_len,
+            header.flags,
+            header.num_buffers,
+        );
+        log::info!(
+            "[vtnet] rx: pkt[0..16] = {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} ...",
+            dump[0],
+            dump[1],
+            dump[2],
+            dump[3],
+            dump[4],
+            dump[5],
+            dump[6],
+            dump[7],
+        );
 
         if buf.len() < packet_len {
             // Buffer too small, packet lost
@@ -312,7 +365,7 @@ impl NetworkDevice for VirtioNetDevice {
         }
 
         // Allocate TX buffer (header + data)
-        let buf_size = NET_HDR_SIZE + buf.len();
+        let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + buf.len();
         let buf_pages = (buf_size + 4095) / 4096;
         let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
@@ -325,7 +378,7 @@ impl NetworkDevice for VirtioNetDevice {
         let virt_addr = crate::memory::phys_to_virt(buf_addr);
 
         let header_ptr = virt_addr as *mut VirtioNetHeader;
-        let data_ptr = (virt_addr + NET_HDR_SIZE as u64) as *mut u8;
+        let data_ptr = (virt_addr + NET_HDR_SIZE.load(Ordering::Relaxed) as u64) as *mut u8;
 
         // Write header
         unsafe {
@@ -335,40 +388,28 @@ impl NetworkDevice for VirtioNetDevice {
 
         // Submit to TX queue
         let mut tx_queue = self.tx_queue.lock();
-        let token = tx_queue
+        let _ = tx_queue
             .add_buffer(&[(buf_addr, buf_size as u32, false)]) // Device Readable
             .map_err(|_| {
-                // Free buffer if failed
+                // Free buffer if queue is full
                 crate::sync::with_irqs_disabled(|token| {
                     memory::free_phys_contiguous(token, buf_frame, buf_order);
                 });
                 NetError::TxQueueFull
             })?;
 
+        log::info!("[vtnet] tx: submit {} bytes @ {:#x}", buf_size, buf_addr,);
+
         if tx_queue.should_notify() {
             self.device.notify_queue(1);
         }
         drop(tx_queue);
 
-        // Wait for completion (simple spin for now)
-        loop {
-            let mut tx_queue = self.tx_queue.lock();
-            if tx_queue.has_used() {
-                if let Some((used_token, _)) = tx_queue.get_used() {
-                    // Assuming correct order for now or just waiting for *any* completion which matches ours
-                    if used_token == token {
-                        break;
-                    }
-                }
-            }
-            drop(tx_queue);
-            core::hint::spin_loop();
-        }
-
-        // Free TX buffer
-        crate::sync::with_irqs_disabled(|token| {
-            memory::free_phys_contiguous(token, buf_frame, buf_order);
-        });
+        // Non-blocking: return immediately without waiting for TX completion.
+        // The device will DMA the packet from the buffer and signal completion
+        // via the used ring. The buffer is intentionally leaked for now to keep
+        // the transmit path simple and non-blocking.
+        // TODO: track pending TX buffers and free them after device completion.
 
         Ok(())
     }

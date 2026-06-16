@@ -16,6 +16,11 @@ static IOAPIC_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
 /// GSI base for this I/O APIC
 static IOAPIC_GSI_BASE: AtomicU32 = AtomicU32::new(0);
 
+/// MADT interrupt-source overrides, stored so PCI NIC drivers can route
+/// their IRQ correctly after the APIC init phase.
+static MADT_OVERRIDES: spin::Mutex<[Option<InterruptSourceOverride>; 16]> =
+    spin::Mutex::new([None; 16]);
+
 // I/O APIC register offsets (indirect access)
 const IOREGSEL: u64 = 0x00;
 const IOWIN: u64 = 0x10;
@@ -82,6 +87,16 @@ unsafe fn write_redir(index: u32, value: u64) {
     unsafe {
         ioapic_write(reg_low, value as u32);
         ioapic_write(reg_high, (value >> 32) as u32);
+    }
+}
+
+/// Store the MADT interrupt-source overrides for later use by PCI NIC drivers.
+///
+/// Must be called once after MADT parsing, before any NIC init runs.
+pub fn store_madt_overrides(overrides: &[Option<InterruptSourceOverride>]) {
+    let mut dest = MADT_OVERRIDES.lock();
+    for (i, ovr) in overrides.iter().enumerate().take(16) {
+        dest[i] = ovr.clone();
     }
 }
 
@@ -238,3 +253,19 @@ pub fn unmask_irq(gsi: u32) {
         write_redir(index, entry & !REDIR_MASK);
     }
 }
+
+/// Route a PCI NIC interrupt through the I/O APIC using stored MADT overrides.
+///
+/// `irq` is the PCI interrupt line (from `pci_dev.interrupt_line`).
+/// `vector` is the IDT vector to route to (typically `PIC1_OFFSET + irq` for
+/// legacy IRQs, or `irq` itself for MSI / GSIs ≥ 16).
+///
+/// This should be called from the NIC driver's `init()` after the device is
+/// registered, with interrupts on the device-side already masked via IMC so
+/// no stray IRQ arrives before the handler is live.
+pub fn route_nic_irq(irq: u8, vector: u8) {
+    let lapic_id = super::apic::lapic_id();
+    let overrides = MADT_OVERRIDES.lock();
+    route_legacy_irq(irq, lapic_id, vector, &overrides[..]);
+}
+// MADT_OVERRIDES guard dropped here — overrides no longer needed.
