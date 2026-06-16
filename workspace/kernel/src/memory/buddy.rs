@@ -776,12 +776,18 @@ impl BuddyAllocator {
         debug_assert!(zone.contains_address(frame.start_address));
 
         if Self::protected_overlap_end(frame_phys, block_end).is_some() {
-            buddy_dbg!(
-                "  Zone {:?}: drop free overlap-protected 0x{:x}..0x{:x} order={}",
+            serial_println!(
+                "[buddy] WARNING: free_to_zone: frame 0x{:x} order {} in zone {:?} overlaps protected memory 0x{:x}..0x{:x}",
+                frame_phys,
+                order,
                 zone.zone_type,
                 frame_phys,
                 block_end,
-                order
+            );
+            #[cfg(not(feature = "selftest"))]
+            panic!(
+                "buddy free: frame 0x{:x} order {} overlaps protected memory in zone {:?}",
+                frame_phys, order, zone.zone_type,
             );
             return;
         }
