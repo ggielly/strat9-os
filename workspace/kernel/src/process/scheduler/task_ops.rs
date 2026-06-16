@@ -1167,6 +1167,18 @@ fn finalize_forced_death(
 }
 
 /// Performs the reparent children operation.
+/// Reparent children of a dying task to PID 1 (init), or drop parent links
+/// if PID 1 is not available.
+///
+/// # Orphan policy
+///
+/// - **PID 1 exists:** Orphans are reparented to init, which is responsible
+///   for reaping them. This matches standard Unix semantics.
+/// - **PID 1 does not exist:** Parent links are dropped entirely. Orphans
+///   become parentless — they continue running but cannot be `wait()`-ed on.
+///   This avoids the nondeterministic fallback of adopting an arbitrary task
+///   (which might be short-lived or unsuitable for reaping).
+/// - **PID 1 is the dying task:** Same as above — parent links are dropped.
 fn reparent_children(
     sched: &mut GlobalSchedState,
     identity: &mut SchedIdentity,
@@ -1176,23 +1188,25 @@ fn reparent_children(
         Some(c) => c,
         None => return None,
     };
-    let init_id = identity
-        .pid_to_task
-        .get(&1)
-        .copied()
-        .or_else(|| sched.all_tasks.keys().next().copied());
+
+    // Preferred reaper: PID 1 (standard init process).
+    let init_id = identity.pid_to_task.get(&1).copied();
+
     let Some(init_id) = init_id else {
+        // No PID 1: drop parent links. Orphans become parentless.
         for child in &children {
             identity.parent_of.remove(child);
         }
         return None;
     };
     if init_id == dying {
+        // PID 1 is dying — cannot reparent to self. Drop parent links.
         for child in &children {
             identity.parent_of.remove(child);
         }
         return None;
     }
+
     let mut has_zombie = false;
     let init_children = identity.children_of.entry(init_id).or_default();
     for child in children {
