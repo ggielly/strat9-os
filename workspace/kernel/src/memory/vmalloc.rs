@@ -757,7 +757,7 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
 
     ensure_init();
 
-    let pages = (size + 4095) / 4096;
+    let pages = size.saturating_add(4095) / 4096;
     let page_flags =
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
