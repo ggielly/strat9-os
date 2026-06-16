@@ -176,11 +176,13 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
     let task = LOCAL_SCHEDULERS[cpu_index].lock().as_ref().and_then(|cpu| {
         let arc = cpu.current_task.as_ref()?;
         let strong = Arc::strong_count(arc);
-        // Heuristic only: keep the warning, but do not mutate scheduler state here.
+        // Heuristic only: strong_count can move concurrently, so this is a
+        // diagnostic signal for suspicious scheduler state, not a formal
+        // corruption proof. Keep the warning but do not mutate scheduler state.
         if strong == 0 || strong > (isize::MAX as usize) / 2 {
             let ptr = Arc::as_ptr(arc) as *const u8;
             crate::serial_println!(
-                "[sched] CORRUPT Arc refcount! cpu={} strong={:#x} ptr={:p} caller={}:{}",
+                "[sched] suspicious Arc refcount (heuristic): cpu={} strong={:#x} ptr={:p} caller={}:{}",
                 cpu_index,
                 strong,
                 ptr,
@@ -209,11 +211,13 @@ pub fn current_task_clone_try() -> Option<Arc<Task>> {
             guard.as_ref().and_then(|cpu| {
                 let arc = cpu.current_task.as_ref()?;
                 let strong = Arc::strong_count(arc);
-                // Heuristic only: keep the warning, but do not mutate scheduler state here.
+                // Heuristic only: strong_count can move concurrently, so this is a
+                // diagnostic signal for suspicious scheduler state, not a formal
+                // corruption proof.
                 if strong == 0 || strong > (isize::MAX as usize) / 2 {
                     let ptr = Arc::as_ptr(arc) as *const u8;
                     crate::serial_println!(
-                        "[sched] CORRUPT Arc refcount! cpu={} strong={:#x} ptr={:p} caller={}:{}",
+                        "[sched] suspicious Arc refcount (heuristic): cpu={} strong={:#x} ptr={:p} caller={}:{}",
                         cpu_index,
                         strong,
                         ptr,
