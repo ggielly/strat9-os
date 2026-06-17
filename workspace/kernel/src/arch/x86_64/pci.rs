@@ -783,6 +783,16 @@ fn probe_from_word00(address: PciAddress, word00: u32) -> Option<PciDevice> {
 /// The first lookup performs a full bus scan, then all subsequent lookups reuse
 /// this snapshot. Every query function borrows the cache through the lock and
 /// operates on the `&[PciDevice]` directly : no `clone()` of the Vec.
+///
+/// # Invariant
+///
+/// `PCI_DEVICE_CACHE` is populated once at boot and never invalidated during
+/// normal operation. The `SpinLock<Option<Vec<PciDevice>>>` is held only for
+/// the initial scan (which allocates the Vec) and for subsequent reads. No
+/// code path re-scans the bus or reallocates under the lock. If PCI hotplug
+/// or re-enumeration is added in the future, this must be changed to either :
+///   - a `Mutex` (sleepable) to allow re-scanning, or
+///   - a lock-free double-buffered snapshot model.
 static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 
 /// Populate the cache if empty, then run `f` on the device slice.

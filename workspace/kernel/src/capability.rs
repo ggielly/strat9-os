@@ -278,7 +278,12 @@ impl CapabilityTable {
 pub struct CapabilityManager {
     /// All capabilities in the system
     all_capabilities: SpinLock<BTreeMap<CapId, Capability>>,
-    /// Per-resource refcounts for O(1) capability counting (no full-table scan)
+    /// Per-resource refcounts for O(1) capability counting (no full-table scan).
+    ///
+    /// Each `register_capability` increments the counter; each `revoke_capability`
+    /// decrements it. `resource_capability_count` is O(1) : it reads the atomic
+    /// directly instead of scanning `all_capabilities`.  The lock is only held
+    /// for the brief insert/remove + atomic update, never for a full-map scan.
     resource_refcounts: SpinLock<BTreeMap<ResourceKey, AtomicUsize>>,
 }
 

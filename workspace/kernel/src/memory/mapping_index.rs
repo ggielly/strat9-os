@@ -22,15 +22,18 @@ pub struct MappingRef {
 
 /// Reverse index from capability ID to live mappings.
 ///
-/// The inline capacity of 4 covers the common case (a memory region mapped
-/// in the kernel + up to 3 user address spaces) without heap allocation.
-/// If a capability ever acquires more than 4 mappings, `SmallVec` spills to
+/// The inline capacity of 8 covers the common case (a memory region mapped
+/// in the kernel + up to 7 user address spaces) without heap allocation.
+/// A `debug_assert` in `register` catches spills in test builds so we can
+/// detect if the inline capacity needs to grow further.
+///
+/// If a capability ever acquires more than 8 mappings, `SmallVec` spills to
 /// the heap while the `SpinLock` is held.  This is not an IRQ path and the
-/// heap lock order (mapping_index → heap) does not conflict with any other
+/// heap lock order (mapping_index => heap) does not conflict with any other
 /// known lock order, so the spill is not a correctness issue : only a minor
-/// latency concern noted in ticket #49.
+/// latency concern.
 pub struct MappingIndex {
-    index: SpinLock<BTreeMap<CapId, SmallVec<[MappingRef; 4]>>>,
+    index: SpinLock<BTreeMap<CapId, SmallVec<[MappingRef; 8]>>>,
 }
 
 impl MappingIndex {
@@ -46,7 +49,13 @@ impl MappingIndex {
         let mut index = self.index.lock();
         let mappings = index.entry(cap_id).or_default();
         if !mappings.iter().any(|existing| *existing == mapping) {
+            let was_spilled = mappings.spilled();
             mappings.push(mapping);
+            debug_assert!(
+                !mappings.spilled() || was_spilled,
+                "mapping_index: SmallVec spilled to heap for cap={:?} : consider growing inline capacity",
+                cap_id,
+            );
         }
     }
 
@@ -65,12 +74,12 @@ impl MappingIndex {
     }
 
     /// Returns a snapshot of the mappings for the given capability.
-    pub fn lookup(&self, cap_id: CapId) -> SmallVec<[MappingRef; 4]> {
+    pub fn lookup(&self, cap_id: CapId) -> SmallVec<[MappingRef; 8]> {
         self.index.lock().get(&cap_id).cloned().unwrap_or_default()
     }
 
     /// Removes and returns every mapping associated with the given capability.
-    pub fn remove_all(&self, cap_id: CapId) -> SmallVec<[MappingRef; 4]> {
+    pub fn remove_all(&self, cap_id: CapId) -> SmallVec<[MappingRef; 8]> {
         self.index.lock().remove(&cap_id).unwrap_or_default()
     }
 }
