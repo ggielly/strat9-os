@@ -254,6 +254,15 @@ fn rendezvous_barrier() {
 }
 
 /// Boot Application Processors.
+///
+/// AP kernel stack frames are allocated from the buddy allocator during this
+/// function and intentionally leaked (never freed). The allocation happens
+/// once at boot while only the BSP is online, so there is no lock contention
+/// and no risk of heap exhaustion under concurrent pressure.
+///
+/// If CPU hotplug is added in the future, stack allocation must be moved to
+/// a sleepable context (e.g. `Mutex`-protected) to avoid heap allocation
+/// under any spinlock that could be held during hot-add.
 pub fn init() -> Result<usize, &'static str> {
     if !apic::is_initialized() {
         return Err("APIC not initialized");

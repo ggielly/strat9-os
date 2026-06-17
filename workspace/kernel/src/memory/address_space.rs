@@ -132,6 +132,30 @@ pub struct EffectiveMapping {
 /// Kernel tasks share a single `AddressSpace` (the kernel AS).
 /// User tasks each get their own, with kernel entries (PML4[256..512]) cloned
 /// so that the kernel is always mapped regardless of which AS is active.
+///
+/// # Lock ordering
+///
+/// `regions` and `effective_mappings` are `SpinLock<BTreeMap<...>>`.
+/// Both BTreeMap insert/remove may allocate from the heap allocator.
+/// This is safe because:
+///
+///   1. **No IRQ-reachable path.** These locks are only taken from process
+///      context (syscall handlers, fork, munmap, page-fault). No interrupt
+///      handler or softirq acquires either lock, so IRQ-disabling is not
+///      required and cannot deadlock with the heap allocator.
+///
+///   2. **Heap lock order is consistent.** The implicit heap lock is always
+///      innermost (address_space => heap), never outermost. No other lock is
+///      acquired between the SpinLock hold and the potential heap alloc,
+///      so no ABBA cycle exists.
+///
+///   3. **Bounded contention.** Each lock protects a per-process map; only
+///      one task at a time operates on a given address space, so contention
+///      is low and hold times are short.
+///
+/// If an IRQ or NMI path ever needs to query these maps in the future,
+/// the `SpinLock` must be replaced with a lock-free snapshot or a `Mutex`
+/// (sleepable, IRQ-safe via `spin::Mutex`).
 pub struct AddressSpace {
     /// Physical address of the PML4 table (loaded into CR3).
     cr3_phys: PhysAddr,
