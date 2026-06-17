@@ -25,7 +25,7 @@ use crate::{
         },
     },
     serial_println,
-    sync::{IrqDisabledToken, SpinLock, SpinLockGuard},
+    sync::{guardian::PreemptDisabled, IrqDisabledToken, SpinLock, SpinLockGuard},
 };
 use core::{
     mem, ptr,
@@ -1818,7 +1818,20 @@ impl LocalFrameCache {
     }
 }
 
-static LOCAL_FRAME_CACHES: [SpinLock<LocalFrameCache>; LOCAL_CACHE_SLOTS] =
+/// Per-CPU frame caches protected by a `PreemptDisabled` guardian.
+///
+/// These caches are only accessed from `alloc_order0_cached` / `free_order0_cached`,
+/// which are always called with IRQs already disabled by the caller (via
+/// `IrqDisabledToken`).  Using `PreemptDisabled` instead of the default
+/// `IrqDisabled` avoids redundant RFLAGS save/restore on every lock
+/// acquisition while still preventing preemption-driven data races.
+///
+/// # Safety invariant
+///
+/// If any future code path acquires a `LOCAL_FRAME_CACHES` lock from an
+/// interrupt handler or without IRQs disabled, this must be reverted to
+/// `SpinLock<LocalFrameCache>` (default `IrqDisabled` guardian).
+static LOCAL_FRAME_CACHES: [SpinLock<LocalFrameCache, PreemptDisabled>; LOCAL_CACHE_SLOTS] =
     [const { SpinLock::new(LocalFrameCache::new()) }; LOCAL_CACHE_SLOTS];
 static LOCAL_CACHED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static LOCAL_CACHED_ZONE_FRAMES: [AtomicUsize; ZoneType::COUNT] =
