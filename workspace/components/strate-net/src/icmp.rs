@@ -37,7 +37,7 @@ impl NetworkStrate {
                 let mut buf = [0u8; 128];
                 let n = data.len().min(128);
                 buf[..n].copy_from_slice(&data[..n]);
-                let _ = packets.push((buf, addr));
+                packets.push((buf, addr));
             }
         }
 
