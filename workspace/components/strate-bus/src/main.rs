@@ -29,12 +29,9 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_info: &PanicInfo) -> ! {
-    let _ = call::debug_log(b"[strate-bus] PANIC\n");
-    call::exit(255);
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("strate-bus", info);
 }
-
 /// Implements u32 to ascii.
 fn u32_to_ascii(mut n: u32, buf: &mut [u8; 10]) -> &[u8] {
     if n == 0 {

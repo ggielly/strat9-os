@@ -84,7 +84,7 @@ pub fn wait_for_reply(task_id: TaskId, waiting_on: TaskId) -> IpcMessage {
             },
             waiting_on: Some(waiting_on),
         });
-        slot.waiting_on = Some(waiting_on); // Should never happen — a task cannot be both sync-waiting
+        slot.waiting_on = Some(waiting_on); // Should never happen : a task cannot be both sync-waiting
                                             // and have an async ring pending on the same slot.
         match &slot.target {
             ReplyTarget::Sync { waitq, .. } => waitq.clone(),

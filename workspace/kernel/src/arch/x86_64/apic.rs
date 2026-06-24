@@ -334,10 +334,11 @@ pub fn eoi() {
 /// `icr_low` must contain delivery mode/vector/flags in xAPIC layout.
 pub fn send_ipi_raw(target_apic_id: u32, icr_low: u32) {
     unsafe {
-        write_reg(REG_ESR, 0);
         if APIC_X2_MODE.load(Ordering::Relaxed) {
+            // x2APIC: single MSR write, synchronous (CPU blocks until dispatched).
             super::wrmsr(0x830, ((target_apic_id as u64) << 32) | icr_low as u64);
         } else {
+            // xAPIC: two-step MMIO write (destination high, then command low).
             write_reg(REG_ICR_HIGH, target_apic_id << 24);
             write_reg(REG_ICR_LOW, icr_low);
         }

@@ -19,8 +19,8 @@ const EC_DATA_PORT: u16 = 0x62;
 const EC_SC_PORT: u16 = 0x66;
 
 /// EC status register bits.
-const EC_STATUS_OBF: u8 = 1 << 0; // Output Buffer Full — data available to read
-const EC_STATUS_IBF: u8 = 1 << 1; // Input Buffer Full — controller busy, don't write
+const EC_STATUS_OBF: u8 = 1 << 0; // Output Buffer Full : data available to read
+const EC_STATUS_IBF: u8 = 1 << 1; // Input Buffer Full : controller busy, don't write
 const EC_STATUS_SCI: u8 = 1 << 5; // SCI event pending
 
 /// EC commands.
@@ -132,7 +132,10 @@ pub fn init() {
         let status = inb(EC_SC_PORT);
         if status != 0xFF {
             EC_AVAILABLE.store(true, Ordering::Release);
-            log::info!("[EC] Embedded Controller detected (status=0x{:02x})", status);
+            log::info!(
+                "[EC] Embedded Controller detected (status=0x{:02x})",
+                status
+            );
         } else {
             log::warn!("[EC] No Embedded Controller found (status=0xFF)");
         }

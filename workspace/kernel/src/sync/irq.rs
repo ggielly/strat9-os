@@ -55,7 +55,7 @@ impl IrqDisabledToken {
     /// # Safety
     ///
     /// The caller must guarantee that IRQs are disabled on the current CPU.
-    /// This is a `pub(crate)` escape hatch — prefer `verify()` or
+    /// This is a `pub(crate)` escape hatch : prefer `verify()` or
     /// `with_irqs_disabled()` for all other use cases.
     #[inline]
     pub(crate) unsafe fn token_from_trusted_context() -> Self {

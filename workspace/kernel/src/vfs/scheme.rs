@@ -136,6 +136,14 @@ pub trait Scheme: Send + Sync {
         Err(SyscallError::NotImplemented)
     }
 
+    /// Truncate a file by path (avoids open/close round-trip).
+    ///
+    /// Default implementation returns NotImplemented, causing the caller
+    /// to fall back to open+truncate+close.
+    fn truncate_by_path(&self, _path: &str, _new_size: u64) -> Result<(), SyscallError> {
+        Err(SyscallError::NotImplemented)
+    }
+
     /// Sync file to storage (if applicable).
     fn sync(&self, file_id: u64) -> Result<(), SyscallError> {
         let _ = file_id;
@@ -226,6 +234,7 @@ pub const DEV_CONSOLE: u64 = 5;
 pub const DEV_PIPEFS: u64 = 6;
 pub const DEV_IPCFS: u64 = 7;
 pub const DEV_NETFS: u64 = 8;
+pub const DEV_CHAR_FS: u64 = 9;
 
 /// Finalize pseudo-filesystem stats with a stable device identity and
 /// synthetic timestamps.
@@ -663,21 +672,20 @@ impl IpcScheme {
 }
 
 /// Kernel-backed scheme: serves files from kernel memory (read-only).
+///
+/// SAFETY: All stored pointers are kernel-static (`'static`) and accessed
+/// only through the scheme trait methods which are `&self` (shared reference).
 pub struct KernelScheme {
-    files: SpinLock<BTreeMap<String, KernelFile>>,
+    /// Files indexed by path → (id, base, len).
+    files: SpinLock<BTreeMap<String, (u64, *const u8, usize)>>,
+    /// Reverse lookup: file_id → path name.
     by_id: SpinLock<BTreeMap<u64, String>>,
 }
 
-#[derive(Clone)]
-struct KernelFile {
-    id: u64,
-    base: *const u8,
-    len: usize,
-}
-
-// SAFETY: KernelFile only stores kernel-static pointers
-unsafe impl Send for KernelFile {}
-unsafe impl Sync for KernelFile {}
+// SAFETY: KernelScheme only stores kernel-static pointers that are valid
+// for the entire kernel lifetime. No mutable access through raw pointers.
+unsafe impl Send for KernelScheme {}
+unsafe impl Sync for KernelScheme {}
 
 impl KernelScheme {
     /// Creates a new instance.
@@ -694,22 +702,23 @@ impl KernelScheme {
         let id = NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         self.files
             .lock()
-            .insert(String::from(path), KernelFile { id, base, len });
+            .insert(String::from(path), (id, base, len));
         self.by_id.lock().insert(id, String::from(path));
     }
 
-    /// Returns by id.
-    fn get_by_id(&self, file_id: u64) -> Option<KernelFile> {
+    /// Returns (id, base, len) for a given file_id.
+    fn get_by_id(&self, file_id: u64) -> Option<(u64, *const u8, usize)> {
         let name = self.by_id.lock().get(&file_id)?.clone();
-        self.files.lock().get(&name).cloned()
+        let entry = self.files.lock().get(&name).cloned()?;
+        Some(entry)
     }
 
     /// Returns the bytes of a registered static kernel file.
     pub fn lookup_bytes(&self, path: &str) -> Option<&'static [u8]> {
-        let file = self.files.lock().get(path).cloned()?;
+        let (_, base, len) = self.files.lock().get(path).cloned()?;
         // SAFETY: initfs files are bootloader-provided mappings kept alive for
         // the full kernel lifetime.
-        Some(unsafe { core::slice::from_raw_parts(file.base, file.len) })
+        Some(unsafe { core::slice::from_raw_parts(base, len) })
     }
 }
 
@@ -725,10 +734,10 @@ impl Scheme for KernelScheme {
         }
 
         let files = self.files.lock();
-        let file = files.get(path).ok_or(SyscallError::BadHandle)?;
+        let (id, _, len) = files.get(path).ok_or(SyscallError::BadHandle)?;
         Ok(OpenResult {
-            file_id: file.id,
-            size: Some(file.len as u64),
+            file_id: *id,
+            size: Some(*len as u64),
             flags: FileFlags::empty(),
         })
     }
@@ -755,18 +764,18 @@ impl Scheme for KernelScheme {
             return Ok(to_copy);
         }
 
-        let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
+        let (_, base, len) = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
 
-        if offset >= file.len as u64 {
+        if offset >= len as u64 {
             return Ok(0);
         }
 
-        let remaining = file.len - offset as usize;
+        let remaining = len - offset as usize;
         let to_copy = core::cmp::min(remaining, buf.len());
 
         // SAFETY: file.base is a kernel-static pointer, bounds checked above
         unsafe {
-            let src = file.base.add(offset as usize);
+            let src = base.add(offset as usize);
             core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), to_copy);
         }
 
@@ -785,8 +794,8 @@ impl Scheme for KernelScheme {
 
     /// Performs the size operation.
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
-        let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
-        Ok(file.len as u64)
+        let (_, _, len) = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
+        Ok(len as u64)
     }
 
     /// Performs the stat operation.
@@ -806,15 +815,15 @@ impl Scheme for KernelScheme {
                 0,
             ));
         }
-        let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
+        let (_, _, len) = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
         Ok(finalize_pseudo_stat(
             FileStat {
                 st_ino: file_id,
                 st_mode: 0o100444,
                 st_nlink: 1,
-                st_size: file.len as u64,
+                st_size: len as u64,
                 st_blksize: 512,
-                st_blocks: ((file.len as u64) + 511) / 512,
+                st_blocks: ((len as u64) + 511) / 512,
                 ..FileStat::zeroed()
             },
             DEV_SYSFS,
@@ -829,9 +838,9 @@ impl Scheme for KernelScheme {
         }
         let files = self.files.lock();
         let mut entries = Vec::new();
-        for (name, kf) in files.iter() {
+        for (name, (id, _, _)) in files.iter() {
             entries.push(DirEntry {
-                ino: kf.id,
+                ino: *id,
                 file_type: DT_REG,
                 name: name.clone(),
             });

@@ -1,0 +1,336 @@
+<!DOCTYPE HTML>
+<html lang="en" class="coal sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Boot Sequence - Strat9 OS documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Architecture guide, ABI reference, and syscall documentation for Strat9 OS.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="src/theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "coal";
+            const default_dark_theme = "coal";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('coal')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Strat9 OS documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://git.strat9-os.org/strat9-os/" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/boot-sequence.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="boot-sequence"><a class="header" href="#boot-sequence">Boot Sequence</a></h1>
+<p>Strat9 OS boots on x86_64 via the Limine boot protocol. The boot flow transitions from 16-bit real mode through protected mode to 64-bit long mode before jumping into Rust.</p>
+<hr />
+<h2 id="boot-flow"><a class="header" href="#boot-flow">Boot flow</a></h2>
+<pre><code class="language-mermaid">flowchart TD
+    A[BIOS/UEFI] --&gt; B[MBR / Stage 1]
+    B --&gt; C[Stage 2]
+    C --&gt; D[Limine Protocol]
+    D --&gt; E[kstart - Assembly]
+    E --&gt; F[start - Rust init]
+    F --&gt; G[main.rs - Kernel main]
+
+    style A fill:#333,color:#fff
+    style D fill:#1a6b3a,color:#fff
+    style G fill:#1a6b3a,color:#fff
+</code></pre>
+<hr />
+<h2 id="stage-1--mbr-bootloader-bootloaderasm"><a class="header" href="#stage-1--mbr-bootloader-bootloaderasm">Stage 1 : MBR bootloader (<code>bootloader/asm/</code>)</a></h2>
+<p>The bootloader is written in NASM assembly. Stage 1 fits in exactly 512 bytes (MBR).</p>
+<p><strong>Responsibilities:</strong></p>
+<ol>
+<li>Load Stage 2 from disk (LBA reads via BIOS INT 13h)</li>
+<li>Enable A20 line</li>
+<li>Enter protected mode (32-bit)</li>
+<li>Jump to Stage 2</li>
+</ol>
+<hr />
+<h2 id="stage-2--protected--long-mode"><a class="header" href="#stage-2--protected--long-mode">Stage 2 : Protected → Long mode</a></h2>
+<p><strong>Responsibilities:</strong></p>
+<ol>
+<li>Detect available memory (INT 15h, E820)</li>
+<li>Load the kernel binary from disk</li>
+<li>Set up initial page tables (identity mapping + higher-half)</li>
+<li>Enable PAE, PGE, long mode</li>
+<li>Jump to 64-bit code</li>
+</ol>
+<hr />
+<h2 id="limine-handoff"><a class="header" href="#limine-handoff">Limine handoff</a></h2>
+<p>The kernel is loaded by the Limine bootloader protocol. Limine provides:</p>
+<ul>
+<li>Memory map (E820 equivalent)</li>
+<li>HHDM (Higher Half Direct Map) base address</li>
+<li>PML4 physical address</li>
+<li>RSDP (ACPI tables)</li>
+<li>Framebuffer info</li>
+</ul>
+<p>The <code>KernelArgs</code> struct captures all handoff data:</p>
+<pre><code class="language-text">KernelArgs {
+    hhdm_offset: u64,       // Higher-half direct map base
+    pml4_physical: u64,     // Boot page table
+    acpi_rsdp: Option&lt;NonNull&lt;u8&gt;&gt;,  // ACPI RSDP
+    memory_regions: &amp;[MemoryRegion],  // E820 memory map
+    framebuffer: FramebufferInfo,     // VGA/framebuffer
+}
+</code></pre>
+<hr />
+<h2 id="kernel-entry--kstart-assembly"><a class="header" href="#kernel-entry--kstart-assembly">Kernel entry : <code>kstart</code> (assembly)</a></h2>
+<p>Located in <code>boot/boot64.S</code>:</p>
+<ol>
+<li>Verify BSS is zero, data is non-zero (sanity check)</li>
+<li>Set up kernel stack (128 KiB, from <code>STACK</code> static)</li>
+<li>Jump to <code>start()</code> (Rust)</li>
+</ol>
+<hr />
+<h2 id="kernel-init--start-rust"><a class="header" href="#kernel-init--start-rust">Kernel init : <code>start()</code> (Rust)</a></h2>
+<p>Located in <code>boot/limine.rs</code> → <code>main.rs</code>:</p>
+<pre><code class="language-mermaid">flowchart TD
+    A[serial::init] --&gt; B[gdt::init_bsp]
+    B --&gt; C[idt::init_bsp]
+    C --&gt; D[memory::init]
+    D --&gt; E[paging::init]
+    E --&gt; F[interrupt::syscall::init]
+    F --&gt; G[allocator::init - buddy + slab]
+    G --&gt; H[acpi::init - parse MADT/IOAPIC]
+    H --&gt; I[apic::init - Local APIC]
+    I --&gt; J[smp::init - boot APs]
+    J --&gt; K[timer::init - APIC timer]
+    K --&gt; L[process::init - scheduler]
+    L --&gt; M[shell::init - init process]
+    M --&gt; N[scheduler::run - never returns]
+</code></pre>
+<p><strong>Key init steps:</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Step</th><th>Module</th><th>What happens</th></tr></thead><tbody>
+<tr><td>Serial</td><td><code>serial.rs</code></td><td>Initialize COM1 (0x3F8) at 115200 baud</td></tr>
+<tr><td>GDT</td><td><code>gdt.rs</code></td><td>Set up kernel/user code/data segments</td></tr>
+<tr><td>IDT</td><td><code>idt.rs</code></td><td>Install interrupt handlers (timer, syscall, page fault)</td></tr>
+<tr><td>Memory</td><td><code>memory/</code></td><td>Parse E820, initialize buddy allocator</td></tr>
+<tr><td>Paging</td><td><code>paging.rs</code></td><td>Set up kernel page tables (HHDM + higher-half)</td></tr>
+<tr><td>Syscall</td><td><code>syscall.rs</code></td><td>Install <code>syscall</code>/<code>sysret</code> MSRs</td></tr>
+<tr><td>Heap</td><td><code>heap.rs</code></td><td>Initialize slab allocator on top of buddy</td></tr>
+<tr><td>ACPI</td><td><code>acpi/</code></td><td>Parse MADT (APICs), IOAPIC, interrupt overrides</td></tr>
+<tr><td>APIC</td><td><code>apic.rs</code></td><td>Initialize Local APIC (xAPIC or x2APIC)</td></tr>
+<tr><td>SMP</td><td><code>smp.rs</code></td><td>INIT+SIPI sequence to boot Application Processors</td></tr>
+<tr><td>Timer</td><td><code>timer.rs</code></td><td>Calibrate and start APIC timer (periodic)</td></tr>
+<tr><td>Scheduler</td><td><code>scheduler/</code></td><td>Create per-CPU run queues, spawn idle tasks</td></tr>
+<tr><td>Init</td><td><code>shell/</code></td><td>Spawn the first userspace process (init)</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="smp-boot--application-processors"><a class="header" href="#smp-boot--application-processors">SMP boot : Application Processors</a></h2>
+<pre><code class="language-mermaid">sequenceDiagram
+    participant BSP
+    participant TRAMP as Trampoline (0x8000)
+    participant AP
+
+    BSP-&gt;&gt;TRAMP: Copy trampoline to 0x8000
+    BSP-&gt;&gt;TRAMP: Write CR3 + RSP to data area
+    BSP-&gt;&gt;AP: INIT IPI (0x4500)
+    Note right of AP: 16-bit real mode
+    BSP-&gt;&gt;AP: SIPI (vector=0x8 → 0x8000)
+    TRAMP-&gt;&gt;AP: Enable protected mode
+    TRAMP-&gt;&gt;AP: Enable long mode + paging
+    TRAMP-&gt;&gt;AP: Load kernel stack
+    TRAMP-&gt;&gt;AP: Jump to smp_main (Rust)
+    AP-&gt;&gt;BSP: BOOTED_CORES++
+    BSP-&gt;&gt;BSP: Wait for all APs
+    BSP-&gt;&gt;AP: Open scheduler gate
+    AP-&gt;&gt;AP: Start per-CPU scheduler
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="memory-model.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="ipc-mechanisms.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="memory-model.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="ipc-mechanisms.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="src/theme/mermaid-init.js"></script>
+
+
+    </div>
+    </body>
+</html>

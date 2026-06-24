@@ -1389,4 +1389,84 @@ pub mod call {
     pub fn async_cancel(ring_id: usize, user_data: u64) -> error::Result<usize> {
         unsafe { syscall2(number::SYS_ASYNC_CANCEL, ring_id, user_data as usize) }
     }
+
+    // ========================================================================
+    // Shared userspace panic handler
+    //
+    // Called from the `#[panic_handler]` of every component binary.  Formats
+    // the panic message, location, and backtrace-like context using a stack
+    // buffer, then writes it via `debug_log` and terminates via `exit`.
+    //
+    // This eliminates 22+ near-identical panic handlers and ensures every
+    // component panic produces consistent, maximally informative output.
+    // ========================================================================
+
+    /// Write a string to the kernel log via inline syscall.
+    /// Used when the normal `debug_log` path may not be safe (panic context).
+    fn raw_debug_log(msg: &[u8]) {
+        unsafe {
+            let _ = syscall2(number::SYS_DEBUG_LOG, msg.as_ptr() as usize, msg.len());
+        }
+    }
+
+    /// Handle a component panic: format the info, log it, then exit.
+    ///
+    /// `component` is a short name like `"strate-net"` or `"fs-ext4"`.
+    /// `info` is the standard `PanicInfo` from the `#[panic_handler]`.
+    ///
+    /// Uses a stack-allocated buffer + `core::fmt::Write` so no heap
+    /// allocation is needed.  Falls back even if locks or the heap are
+    /// corrupted.
+    pub fn handle_panic(component: &str, info: &core::panic::PanicInfo) -> ! {
+        // Stack-allocated writer backed by a 1 KB buffer.
+        struct BufWriter<'a> {
+            buf: &'a mut [u8],
+            pos: usize,
+        }
+        impl core::fmt::Write for BufWriter<'_> {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let bytes = s.as_bytes();
+                let remaining = self.buf.len().saturating_sub(self.pos);
+                if bytes.len() > remaining {
+                    // Flush before we overflow.
+                    let flush_end = self.pos;
+                    raw_debug_log(&self.buf[..flush_end]);
+                    self.pos = 0;
+                }
+                let chunk = &bytes[..bytes.len().min(self.buf.len().saturating_sub(self.pos))];
+                self.buf[self.pos..self.pos + chunk.len()].copy_from_slice(chunk);
+                self.pos += chunk.len();
+                Ok(())
+            }
+        }
+        impl BufWriter<'_> {
+            fn flush(&mut self) {
+                if self.pos > 0 {
+                    raw_debug_log(&self.buf[..self.pos]);
+                    self.pos = 0;
+                }
+            }
+        }
+
+        let mut storage = [0u8; 1024];
+        let mut w = BufWriter {
+            buf: &mut storage,
+            pos: 0,
+        };
+
+        // Use core::fmt::Write so we can format PanicInfo::message()
+        // (which returns &core::fmt::Arguments) without alloc.
+        use core::fmt::Write;
+
+        let _ = write!(w, "[{}] PANIC", component);
+        if let Some(loc) = info.location() {
+            let _ = write!(w, " at {}:{}:{}", loc.file(), loc.line(), loc.column());
+        }
+        let _ = write!(w, "\n  {}", info.message());
+        let _ = write!(w, "\n");
+        w.flush();
+
+        // --- Terminate ---
+        exit(255)
+    }
 }

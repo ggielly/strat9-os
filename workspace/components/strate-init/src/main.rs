@@ -1000,8 +1000,6 @@ pub unsafe extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_info: &PanicInfo) -> ! {
-    let _ = call::debug_log(b"[init] PANIC!\n");
-    call::exit(255)
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("init", info)
 }

@@ -1,19 +1,148 @@
 stages:
+    - check
     - build
     - release
 
 variables:
     # GIT_STRATEGY: clone avoids fetching refs/pipelines/N (a GitLab-specific ref
-    # created per pipeline by Gitaly). When Gitaly is under memory pressure it can
+    # created per pipeline by Gitaly. When Gitaly is under memory pressure it can
     # fail to create that ref (SIGKILL), causing every subsequent `fetch` strategy
     # job to fail with "couldn't find remote ref refs/pipelines/N".
     # clone does a fresh git clone each run and never looks up that ref.
     GIT_STRATEGY: clone
     GIT_DEPTH: "0"
     TZ: "Europe/Paris"
+    CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
+    KERNEL_TARGET: "x86_64-unknown-none"
 
+# ---------------------------------------------------------------------------
+# Cache: persist Cargo registry + compiled artifacts across pipelines
+# Key includes CI_COMMIT_REF_SLUG so branches don't pollute each other's cache.
+# ---------------------------------------------------------------------------
+.cargo-cache:
+    cache:
+        key: cargo-${CI_COMMIT_REF_SLUG}
+        paths:
+            - .cargo/registry/index
+            - .cargo/registry/cache
+            - .cargo/git/db
+            - target/
+        policy: pull-push
+
+# ---------------------------------------------------------------------------
+# Check: fmt + clippy + cargo check (fail fast, no full build)
+# ---------------------------------------------------------------------------
+check-fmt:
+    extends: .cargo-cache
+    stage: check
+    timeout: 10 minutes
+    before_script:
+        - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
+    script:
+        - echo "==> Checking formatting"
+        - cargo fmt --all -- --check
+
+check-clippy:
+    extends: .cargo-cache
+    stage: check
+    timeout: 15 minutes
+    before_script:
+        - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
+        - rustup component add rust-src llvm-tools-preview
+    script:
+        - echo "==> Running clippy"
+        - cargo clippy --workspace --target ${KERNEL_TARGET} -- -D warnings
+
+check-build:
+    extends: .cargo-cache
+    stage: check
+    timeout: 15 minutes
+    before_script:
+        - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
+        - rustup component add rust-src llvm-tools-preview
+        - rustup target add x86_64-unknown-none
+    script:
+        - echo "==> Running cargo check"
+        - cargo check --workspace --target ${KERNEL_TARGET}
+
+# ---------------------------------------------------------------------------
+# Check: cargo-audit (vulnerability scan against RustSec advisory DB)
+# ---------------------------------------------------------------------------
+check-audit:
+    extends: .cargo-cache
+    stage: check
+    timeout: 10 minutes
+    allow_failure: true
+    before_script:
+        - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
+        - if ! command -v cargo-audit &> /dev/null; then cargo install cargo-audit; fi
+    script:
+        - |
+            echo "==> Running cargo audit"
+            AUDIT_REPORT="build/cargo-audit-report.md"
+            mkdir -p build
+
+            # Run cargo audit, capture exit code
+            cargo audit 2>&1 | tee build/cargo-audit-raw.txt
+            AUDIT_EXIT=${PIPESTATUS[0]}
+
+            # Generate markdown report
+            echo "# Cargo Audit Report" > "${AUDIT_REPORT}"
+            echo "" >> "${AUDIT_REPORT}"
+            echo "**Date:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> "${AUDIT_REPORT}"
+            echo "**Commit:** ${CI_COMMIT_SHORT_SHA}" >> "${AUDIT_REPORT}"
+            echo "**Pipeline:** #${CI_PIPELINE_ID}" >> "${AUDIT_REPORT}"
+            echo "" >> "${AUDIT_REPORT}"
+
+            if [ ${AUDIT_EXIT} -eq 0 ]; then
+              echo "## Result: PASS" >> "${AUDIT_REPORT}"
+              echo "" >> "${AUDIT_REPORT}"
+              echo "No known vulnerabilities found." >> "${AUDIT_REPORT}"
+              echo "" >> "${AUDIT_REPORT}"
+              echo "✅ All clear." >> "${AUDIT_REPORT}"
+            else
+              echo "## Result: VULNERABILITIES FOUND" >> "${AUDIT_REPORT}"
+              echo "" >> "${AUDIT_REPORT}"
+              echo "Some dependencies have known security advisories." >> "${AUDIT_REPORT}"
+              echo "" >> "${AUDIT_REPORT}"
+              echo "### Raw output" >> "${AUDIT_REPORT}"
+              echo "" >> "${AUDIT_REPORT}"
+              echo '```' >> "${AUDIT_REPORT}"
+              cat build/cargo-audit-raw.txt >> "${AUDIT_REPORT}"
+              echo '```' >> "${AUDIT_REPORT}"
+              echo "" >> "${AUDIT_REPORT}"
+              echo "### Action required" >> "${AUDIT_REPORT}"
+              echo "" >> "${AUDIT_REPORT}"
+              echo "- Review the advisories above" >> "${AUDIT_REPORT}"
+              echo "- Update affected dependencies with \`cargo update <package>\`" >> "${AUDIT_REPORT}"
+              echo "- If no fix exists, check if the vulnerability applies to your usage" >> "${AUDIT_REPORT}"
+              echo "- Re-run this job after fixing: \`retry\`" >> "${AUDIT_REPORT}"
+            fi
+
+            echo "==> Report written to ${AUDIT_REPORT}"
+            cat "${AUDIT_REPORT}"
+
+            # Always produce the artifact, even on failure
+            exit ${AUDIT_EXIT}
+    artifacts:
+        when: always
+        paths:
+            - build/cargo-audit-report.md
+            - build/cargo-audit-raw.txt
+        expire_in: 30 days
+
+# ---------------------------------------------------------------------------
+# Build: documentation (mdBook + rustdoc)
+# ---------------------------------------------------------------------------
 build-docs:
+    extends: .cargo-cache
     stage: build
+    timeout: 15 minutes
+    needs:
+        - job: check-fmt
+          optional: true
+        - job: check-clippy
+          optional: true
     before_script:
         - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
         - rustup component add rust-src llvm-tools-preview
@@ -24,8 +153,16 @@ build-docs:
         paths:
             - build/docs-site
 
+# ---------------------------------------------------------------------------
+# Build: OS image (ISO + raw disk)
+# ---------------------------------------------------------------------------
 build-os-release:
+    extends: .cargo-cache
     stage: build
+    timeout: 30 minutes
+    needs:
+        - job: check-build
+          optional: true
     before_script:
         # Sudo is required here ONLY if the runner isn't run as root and the tools aren't already installed:
         # - sudo apt-get update && sudo apt-get install -y xorriso mtools
@@ -39,11 +176,15 @@ build-os-release:
         paths:
             - build/strat9-os.iso
             - build/strat9-os.img
-        expire_in: 12 week
+        expire_in: 15 days
 
+# ---------------------------------------------------------------------------
+# Release: generate changelog, compress, upload, create GitLab release
+# ---------------------------------------------------------------------------
 release-latest:
     stage: release
     image: registry.gitlab.com/gitlab-org/release-cli:latest
+    timeout: 10 minutes
     needs:
         - job: build-os-release
           artifacts: true
@@ -57,26 +198,74 @@ release-latest:
             IMG_NAME="strat9-os-${CI_COMMIT_SHORT_SHA}.img"
             test -f build/strat9-os.iso
             test -f build/strat9-os.img
+            echo "==> ISO size: $(du -h build/strat9-os.iso | cut -f1)"
+            echo "==> IMG size: $(du -h build/strat9-os.img | cut -f1)"
+
+            # --- SHA256 checksums ---
+            echo "==> Generating checksums"
+            sha256sum build/strat9-os.iso build/strat9-os.img > build/strat9-os-${CI_COMMIT_SHORT_SHA}.sha256
+            cat build/strat9-os-${CI_COMMIT_SHORT_SHA}.sha256
+
+            # --- Compression ---
+            # GitLab generic packages default limit is 100 MB.
+            # Prefer bzip2 (best ratio), fallback to gzip.
+            compress_artifact() {
+              local src="$1" dst_ext="$2"
+              local dst="${src}.${dst_ext}"
+              if command -v bzip2 &>/dev/null && [ "$dst_ext" = "bz2" ]; then
+                echo "==> Compressing with bzip2 -9"
+                bzip2 -9 -k -c "$src" > "$dst"
+              else
+                echo "==> Compressing with gzip -9"
+                gzip -9 -k -c "$src" > "$dst"
+              fi
+              echo "==> Compressed size: $(du -h "$dst" | cut -f1)"
+              echo "$dst"
+            }
+
+            ISO_UPLOAD="build/strat9-os.iso"
+            ISO_UPLOAD_NAME="${ISO_NAME}"
+            if [ "$(stat -c%s build/strat9-os.iso)" -gt 104857600 ]; then
+              ISO_UPLOAD=$(compress_artifact build/strat9-os.iso bz2)
+              ISO_UPLOAD_NAME="${ISO_NAME}.bz2"
+            fi
+
+            IMG_UPLOAD="build/strat9-os.img"
+            IMG_UPLOAD_NAME="${IMG_NAME}"
+            if [ "$(stat -c%s build/strat9-os.img)" -gt 104857600 ]; then
+              IMG_UPLOAD=$(compress_artifact build/strat9-os.img bz2)
+              IMG_UPLOAD_NAME="${IMG_NAME}.bz2"
+            fi
+
+            # --- Upload artifacts ---
             echo "==> Uploading ISO to package registry"
             curl --silent --show-error --fail \
               --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-              --upload-file build/strat9-os.iso \
-              "${PKG_URL}/${ISO_NAME}"
+              --upload-file "${ISO_UPLOAD}" \
+              "${PKG_URL}/${ISO_UPLOAD_NAME}"
             echo "==> Uploading IMG to package registry"
             curl --silent --show-error --fail \
               --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-              --upload-file build/strat9-os.img \
-              "${PKG_URL}/${IMG_NAME}"
+              --upload-file "${IMG_UPLOAD}" \
+              "${PKG_URL}/${IMG_UPLOAD_NAME}"
+            echo "==> Uploading checksums"
+            curl --silent --show-error --fail \
+              --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+              --upload-file "build/strat9-os-${CI_COMMIT_SHORT_SHA}.sha256" \
+              "${PKG_URL}/strat9-os-${CI_COMMIT_SHORT_SHA}.sha256"
             echo "==> Uploads done"
     release:
         tag_name: "build-${CI_COMMIT_SHORT_SHA}"
         name: "Strat9-OS ${CI_COMMIT_SHORT_SHA}"
-        description: "Automated build for commit ${CI_COMMIT_SHORT_SHA} : pipeline #${CI_PIPELINE_ID}"
+        description: "${CI_COMMIT_TITLE}"
         assets:
             links:
-                - name: "strat9-os-${CI_COMMIT_SHORT_SHA}.iso"
-                  url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/strat9-os/${CI_COMMIT_SHORT_SHA}/strat9-os-${CI_COMMIT_SHORT_SHA}.iso"
-                  link_type: other
-                - name: "strat9-os-${CI_COMMIT_SHORT_SHA}.img"
-                  url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/strat9-os/${CI_COMMIT_SHORT_SHA}/strat9-os-${CI_COMMIT_SHORT_SHA}.img"
+                - name: "${ISO_NAME}.bz2"
+                  url: "${PKG_URL}/${ISO_NAME}.bz2"
+                  link_type: package
+                - name: "${IMG_NAME}.bz2"
+                  url: "${PKG_URL}/${IMG_NAME}.bz2"
+                  link_type: package
+                - name: "strat9-os-${CI_COMMIT_SHORT_SHA}.sha256"
+                  url: "${PKG_URL}/strat9-os-${CI_COMMIT_SHORT_SHA}.sha256"
                   link_type: other

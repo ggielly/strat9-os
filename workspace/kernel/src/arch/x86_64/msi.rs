@@ -219,7 +219,7 @@ pub fn probe_and_enable(pci_dev: &PciDevice, prefer_msix: bool) -> (u8, u8) {
         return (irq_line, vector);
     }
 
-    // 3. Fall back to INTx — caller must route via I/O APIC.
+    // 3. Fall back to INTx : caller must route via I/O APIC.
     log::info!(
         "MSI/MSI-X unavailable on {:04x}:{:04x}, falling back to INTx IRQ {}",
         pci_dev.vendor_id,

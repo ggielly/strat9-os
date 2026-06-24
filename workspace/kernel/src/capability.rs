@@ -1,5 +1,8 @@
 //! Capability-based Security System
 //!
+//! See also: [Architecture Overview](https://strat9-os.org/strat9-os-docs/architecture.html)
+//! for the security model and data flow diagrams.
+//!
 //! Implements a capability-based security model for Strat9-OS.
 //! All kernel resources are accessed through unforgeable tokens (capabilities).
 

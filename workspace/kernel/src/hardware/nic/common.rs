@@ -151,7 +151,7 @@ pub fn probe_e1000_pci(device_ids: &[u16]) -> Option<ProbeResult> {
 }
 
 // ---------------------------------------------------------------------------
-// Generic kernel NIC adapter — removes duplication between e1000 and e1000e
+// Generic kernel NIC adapter : removes duplication between e1000 and e1000e
 // kernel drivers (point 4).
 // ---------------------------------------------------------------------------
 

@@ -20,40 +20,8 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
 fn panic(info: &PanicInfo) -> ! {
-    log("[telnetd] PANiK: ");
-    let mut buf = [0u8; 256];
-    let n = {
-        let mut w = BufWriter {
-            buf: &mut buf,
-            pos: 0,
-        };
-        let _ = write!(w, "{}", info.message());
-        w.pos
-    };
-    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-        log(s);
-    }
-    log("\n");
-    call::exit(255)
-}
-
-struct BufWriter<'a> {
-    buf: &'a mut [u8],
-    pos: usize,
-}
-
-impl core::fmt::Write for BufWriter<'_> {
-    /// Writes str.
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let bytes = s.as_bytes();
-        let avail = self.buf.len().saturating_sub(self.pos);
-        let n = bytes.len().min(avail);
-        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
-        self.pos += n;
-        Ok(())
-    }
+    call::handle_panic("telnetd", info)
 }
 
 /// Implements log.
@@ -72,15 +40,23 @@ fn sleep_ms(ms: u64) {
     };
 }
 
-/// Writes all.
+/// Writes all. Returns false on broken pipe or after 500 retries on EAGAIN.
 fn write_all(fd: usize, data: &[u8]) -> bool {
     let mut off = 0usize;
+    let mut retries = 0u32;
     while off < data.len() {
         match call::write(fd, &data[off..]) {
             Ok(0) => return false,
-            Ok(n) => off += n,
+            Ok(n) => {
+                off += n;
+                retries = 0;
+            }
             Err(e) => {
                 if e.to_errno() == 11 {
+                    retries += 1;
+                    if retries > 500 {
+                        return false;
+                    }
                     sleep_ms(10);
                     continue;
                 }
@@ -102,12 +78,20 @@ fn read_text_file(path: &str, out: &mut [u8]) -> usize {
     n
 }
 
-/// Opens listener.
+/// Opens listener. Returns 0 on failure after 100 retries.
 fn open_listener() -> usize {
+    let mut retries = 0u32;
     loop {
         match call::openat(0, "/net/tcp/listen/23", 0x2, 0) {
             Ok(fd) => return fd as usize,
-            Err(_) => sleep_ms(200),
+            Err(_) => {
+                retries += 1;
+                if retries > 100 {
+                    log("[telnetd] FATAL: cannot open listener after 100 retries\n");
+                    return 0;
+                }
+                sleep_ms(200);
+            }
         }
     }
 }
@@ -117,29 +101,34 @@ enum LineAction {
     Disconnect,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum IacState {
+    Normal,
+    SkipOption,
+    SubNeg,
+}
+
 struct TelnetSession {
     connected: bool,
     line: [u8; 256],
     line_len: usize,
-    iac_skip: u8,
+    iac_state: IacState,
 }
 
 impl TelnetSession {
-    /// Creates a new instance.
     const fn new() -> Self {
         Self {
             connected: false,
             line: [0u8; 256],
             line_len: 0,
-            iac_skip: 0,
+            iac_state: IacState::Normal,
         }
     }
 
-    /// Implements reset.
     fn reset(&mut self) {
         self.connected = false;
         self.line_len = 0;
-        self.iac_skip = 0;
+        self.iac_state = IacState::Normal;
     }
 }
 
@@ -171,6 +160,7 @@ fn handle_command(fd: usize, line: &str) -> LineAction {
         let _ = write_all(fd, b"\r\nIP: ");
         if n > 0 {
             let _ = write_all(fd, &buf[..n]);
+            let _ = write_all(fd, b"\r\n");
         } else {
             let _ = write_all(fd, b"n/a\r\n");
         }
@@ -189,13 +179,33 @@ fn handle_command(fd: usize, line: &str) -> LineAction {
         let nr = read_text_file("/net/route", &mut route);
 
         let _ = write_all(fd, b"\r\nIP: ");
-        let _ = write_all(fd, if nip > 0 { &ip[..nip] } else { b"n/a\r\n" });
+        if nip > 0 {
+            let _ = write_all(fd, &ip[..nip]);
+            let _ = write_all(fd, b"\r\n");
+        } else {
+            let _ = write_all(fd, b"n/a\r\n");
+        }
         let _ = write_all(fd, b"GW: ");
-        let _ = write_all(fd, if ngw > 0 { &gw[..ngw] } else { b"n/a\r\n" });
+        if ngw > 0 {
+            let _ = write_all(fd, &gw[..ngw]);
+            let _ = write_all(fd, b"\r\n");
+        } else {
+            let _ = write_all(fd, b"n/a\r\n");
+        }
         let _ = write_all(fd, b"DNS: ");
-        let _ = write_all(fd, if ndns > 0 { &dns[..ndns] } else { b"n/a\r\n" });
+        if ndns > 0 {
+            let _ = write_all(fd, &dns[..ndns]);
+            let _ = write_all(fd, b"\r\n");
+        } else {
+            let _ = write_all(fd, b"n/a\r\n");
+        }
         let _ = write_all(fd, b"ROUTE: ");
-        let _ = write_all(fd, if nr > 0 { &route[..nr] } else { b"n/a\r\n" });
+        if nr > 0 {
+            let _ = write_all(fd, &route[..nr]);
+            let _ = write_all(fd, b"\r\n");
+        } else {
+            let _ = write_all(fd, b"n/a\r\n");
+        }
         send_prompt(fd);
         return LineAction::Continue;
     }
@@ -227,12 +237,22 @@ fn handle_command(fd: usize, line: &str) -> LineAction {
 /// Implements handle bytes.
 fn handle_bytes(fd: usize, session: &mut TelnetSession, bytes: &[u8]) -> LineAction {
     for &b in bytes {
-        if session.iac_skip > 0 {
-            session.iac_skip -= 1;
-            continue;
+        match session.iac_state {
+            IacState::SkipOption => {
+                session.iac_state = IacState::Normal;
+                continue;
+            }
+            IacState::SubNeg => {
+                if b == 240 {
+                    session.iac_state = IacState::Normal;
+                }
+                continue;
+            }
+            IacState::Normal => {}
         }
+
         if b == 255 {
-            session.iac_skip = 2;
+            session.iac_state = IacState::SkipOption;
             continue;
         }
         if b == b'\r' {
@@ -260,44 +280,88 @@ fn handle_bytes(fd: usize, session: &mut TelnetSession, bytes: &[u8]) -> LineAct
 pub extern "C" fn _start() -> ! {
     log("[telnetd] Starting telnet server on /net/tcp/listen/23\n");
     let mut fd = open_listener();
+    if fd == 0 {
+        log("[telnetd] Cannot open listener, exiting\n");
+        call::exit(1);
+    }
     let mut session = TelnetSession::new();
-    let mut buf = [0u8; 128];
+    let mut buf = [0u8; 512];
+    let mut idle_ticks: u64 = 0;
 
     loop {
         match call::read(fd, &mut buf) {
             Ok(0) => {
                 if session.connected {
+                    log("[telnetd] client disconnected\n");
                     let _ = call::close(fd);
                     session.reset();
                     fd = open_listener();
+                    if fd == 0 {
+                        call::exit(1);
+                    }
+                    idle_ticks = 0;
                 } else {
                     sleep_ms(20);
+                    idle_ticks += 1;
+                    if idle_ticks > 750 {
+                        log("[telnetd] idle timeout on listener, reopening\n");
+                        let _ = call::close(fd);
+                        fd = open_listener();
+                        if fd == 0 {
+                            call::exit(1);
+                        }
+                        idle_ticks = 0;
+                    }
                 }
             }
             Ok(n) => {
+                idle_ticks = 0;
                 if !session.connected {
                     session.connected = true;
-                    let _ = write_all(fd, b"\r\nStrat9 Telnet\r\nType 'help' for commands.\r\n");
+                    log("[telnetd] client connected\n");
+                    let _ =
+                        write_all(fd, b"\r\nStrat9 Telnet\r\nType 'help' for commands.\r\n");
                     send_prompt(fd);
                 }
                 if matches!(
                     handle_bytes(fd, &mut session, &buf[..n]),
                     LineAction::Disconnect
                 ) {
+                    log("[telnetd] client quit\n");
                     let _ = call::close(fd);
                     session.reset();
                     fd = open_listener();
+                    if fd == 0 {
+                        call::exit(1);
+                    }
+                    idle_ticks = 0;
                 }
             }
             Err(e) => {
                 if e.to_errno() == 11 {
                     sleep_ms(10);
+                    idle_ticks += 1;
+                    if session.connected && idle_ticks > 1500 {
+                        log("[telnetd] client idle timeout, disconnecting\n");
+                        let _ = call::close(fd);
+                        session.reset();
+                        fd = open_listener();
+                        if fd == 0 {
+                            call::exit(1);
+                        }
+                        idle_ticks = 0;
+                    }
                     continue;
                 }
+                log("[telnetd] read error, reconnecting\n");
                 let _ = call::close(fd);
                 session.reset();
                 sleep_ms(100);
                 fd = open_listener();
+                if fd == 0 {
+                    call::exit(1);
+                }
+                idle_ticks = 0;
             }
         }
     }

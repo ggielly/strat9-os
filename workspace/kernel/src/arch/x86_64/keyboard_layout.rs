@@ -330,7 +330,7 @@ pub fn is_french_layout() -> bool {
     USE_FRENCH_LAYOUT.load(Ordering::Relaxed)
 }
 
-/// Keyboard modifier state — shared across all layouts.
+/// Keyboard modifier state : shared across all layouts.
 pub struct KeyboardState {
     pub left_shift: bool,
     pub right_shift: bool,
@@ -357,7 +357,7 @@ impl KeyboardState {
     }
 }
 
-/// Global keyboard modifier state — single instance shared by all layouts.
+/// Global keyboard modifier state : single instance shared by all layouts.
 pub static KEYBOARD: Mutex<KeyboardState> = Mutex::new(KeyboardState::new());
 
 /// Special key constants (non-ASCII, outside 0-127)
@@ -373,11 +373,7 @@ pub const KEY_END: u8 = 0x85;
 /// Handles modifier tracking, extended scancode prefix (0xE0), caps lock
 /// inversion, and extended key dispatch (arrows, Home, End, Delete).
 /// Called from both PS/2 IRQ and task context (inject_hid_scancode).
-pub fn process_scancode(
-    scancode: u8,
-    normal: &[u8; 128],
-    shift: &[u8; 128],
-) -> Option<u8> {
+pub fn process_scancode(scancode: u8, normal: &[u8; 128], shift: &[u8; 128]) -> Option<u8> {
     let mut kbd = KEYBOARD.lock();
 
     // Extended scancode prefix (0xE0)

@@ -218,7 +218,7 @@ impl E1000Nic {
             // TADV   = 64 => absolute timer: flush TX interrupts after 64 µs.
             //
             // ITR uses 256 ns units on 8254x; on e1000e/I210 the same register
-            // uses 1024 ns units — the value still provides adequate coalescing.
+            // uses 1024 ns units : the value still provides adequate coalescing.
             //
             // 488 × 256 ns ≈ 125 µs => approx 8 000 irq/s max.  Low enough to keep the
             // CPU from being swamped under heavy load, high enough for interactive
@@ -323,7 +323,7 @@ impl E1000Nic {
         }
         if (st & rx_status::EOP) == 0 {
             log::warn!(
-                "e1000: RX descriptor {} missing EOP — fragment dropped",
+                "e1000: RX descriptor {} missing EOP : fragment dropped",
                 idx
             );
             self.recycle_rx_desc(idx);
@@ -457,7 +457,7 @@ impl E1000Nic {
         }
 
         if (icr & int_bits::RXO) != 0 {
-            log::warn!("e1000: RX overflow — descriptor ring full");
+            log::warn!("e1000: RX overflow : descriptor ring full");
         }
 
         icr
@@ -483,10 +483,10 @@ impl E1000Nic {
         let tail = self.tx.tail();
 
         if tdh != tail {
-            // Descriptors are in-flight — check if head has moved.
+            // Descriptors are in-flight : check if head has moved.
             if tdh == self.last_tdh {
                 log::warn!(
-                    "e1000: watchdog — TX stalled (TDH={} TDT={} last_tdh={}), resetting",
+                    "e1000: watchdog : TX stalled (TDH={} TDT={} last_tdh={}), resetting",
                     tdh,
                     tail,
                     self.last_tdh
@@ -499,7 +499,7 @@ impl E1000Nic {
             self.last_tdh = tdh;
             self.tx_since_last_reclaim = 0;
         } else {
-            // Ring empty — normal idle.
+            // Ring empty : normal idle.
             self.tx_since_last_reclaim = 0;
         }
         false

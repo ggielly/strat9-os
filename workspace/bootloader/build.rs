@@ -5,6 +5,18 @@ use std::{env, path::PathBuf, process::Command};
 
 /// Entry point for this component.
 fn main() {
+    // When building for documentation (cargo doc / docs.rs), skip NASM
+    // assembly entirely.  The assembled binaries are not referenced by
+    // the Rust source, so rustdoc can generate API docs without them.
+    // Detection: docs.rs sets DOCS_RS; cargo doc sets CARGO_CFG_DOC.
+    let is_doc_build = env::var("DOCS_RS").is_ok() || env::var("CARGO_CFG_DOC").is_ok();
+    if is_doc_build {
+        // Emit empty env vars so any (future) include_bytes! won't break.
+        println!("cargo:rustc-env=STAGE1_BIN=");
+        println!("cargo:rustc-env=STAGE2_BIN=");
+        return;
+    }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 

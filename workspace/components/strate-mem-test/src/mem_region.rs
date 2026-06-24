@@ -580,10 +580,8 @@ fn run_suite(ctx: &mut Ctx) {
 }
 
 #[panic_handler]
-/// Abort the process on panic.
-fn panic(_info: &PanicInfo) -> ! {
-    log_err("[test_mem_region] PANIC\n");
-    call::exit(250)
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("mem-region", info)
 }
 
 #[no_mangle]

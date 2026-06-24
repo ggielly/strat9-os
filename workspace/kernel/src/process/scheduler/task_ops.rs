@@ -1179,10 +1179,10 @@ fn finalize_forced_death(
 /// - **PID 1 exists:** Orphans are reparented to init, which is responsible
 ///   for reaping them. This matches standard Unix semantics.
 /// - **PID 1 does not exist:** Parent links are dropped entirely. Orphans
-///   become parentless — they continue running but cannot be `wait()`-ed on.
+///   become parentless : they continue running but cannot be `wait()`-ed on.
 ///   This avoids the nondeterministic fallback of adopting an arbitrary task
 ///   (which might be short-lived or unsuitable for reaping).
-/// - **PID 1 is the dying task:** Same as above — parent links are dropped.
+/// - **PID 1 is the dying task:** Same as above : parent links are dropped.
 fn reparent_children(
     sched: &mut GlobalSchedState,
     identity: &mut SchedIdentity,
@@ -1204,7 +1204,7 @@ fn reparent_children(
         return None;
     };
     if init_id == dying {
-        // PID 1 is dying — cannot reparent to self. Drop parent links.
+        // PID 1 is dying : cannot reparent to self. Drop parent links.
         for child in &children {
             identity.parent_of.remove(child);
         }

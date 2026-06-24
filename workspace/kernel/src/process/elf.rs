@@ -10,8 +10,6 @@
 //!
 //!
 //! Does not support (or need future fix) :
-//!   - TT_GNU_IFUNC (R_X86_64_IRELATIVE partial) : we don't support IFUNC resolution in the kernel
-//!     because we need a userland : IRELATIVE is treated as RELATIVE (load_bias + addend).
 //!
 //!   - FIx TODO : allocation heap during ELF loading
 //!     program_headers(elf_data, &header).collect() → Vec<Elf64Phdr>, Vec::new() for interp_phdrs, etc. The kernel uses alloc so it's normal, but allocation errors are not handled (no try_collect, no fallible GlobalAlloc).
@@ -19,6 +17,9 @@
 //!   - Fix TODO : find_free_vma_range : fallback hardcoded 0x1000_0000
 //!     If PIE_BASE_ADDR (0x1_0000_0000) fails, fallback to 0x1000_0000. This value is arbitrary and could overlap existing mappings if many libraries are loaded.
 //!
+//! Security:
+//!   - User stack has a guard page (USER_STACK_BASE - 4096) that is intentionally
+//!     left unmapped.  Stack underflows hit it and page-fault.
 //!
 use alloc::{sync::Arc, vec::Vec};
 use x86_64::{
@@ -86,6 +87,8 @@ pub const USER_STACK_BASE: u64 = 0x0000_7FFF_F000_0000;
 pub const USER_STACK_PAGES: usize = 16;
 /// Top of the user stack (stack grows down).
 pub const USER_STACK_TOP: u64 = USER_STACK_BASE + (USER_STACK_PAGES as u64) * 4096;
+/// Guard page below the user stack : unmapped, catches stack underflows.
+pub const USER_STACK_GUARD: u64 = USER_STACK_BASE - 4096;
 
 /// Result of loading an ELF image into an address space.
 #[derive(Debug, Clone, Copy)]
@@ -595,6 +598,27 @@ fn write_user_u64(user_as: &AddressSpace, vaddr: u64, value: u64) -> Result<(), 
     write_user_mapped_bytes(user_as, vaddr, &value.to_le_bytes())
 }
 
+/// Calls a user-space IFUNC resolver function and returns its result.
+///
+/// The resolver is located at `resolver_vaddr` in the user address space.
+/// All RELATIVE relocations for this binary must have been applied first so
+/// that the resolver's own calls/addresses are correct.
+fn call_ifunc_resolver(user_as: &AddressSpace, resolver_vaddr: u64) -> Result<u64, &'static str> {
+    if resolver_vaddr >= USER_ADDR_MAX {
+        return Err("IFUNC resolver address outside user space");
+    }
+    let phys = user_as
+        .translate(VirtAddr::new(resolver_vaddr))
+        .ok_or("IFUNC resolver page not mapped")?;
+    let hhdm_ptr = crate::memory::phys_to_virt(phys.as_u64());
+    // SAFETY: hhdm_ptr points to a user page containing executable code.
+    // The resolver is a simple function that returns a u64; it must not
+    // access kernel state.  All RELATIVE relocations for this binary have
+    // already been applied, so the resolver's own target addresses are valid.
+    let resolver: extern "C" fn() -> u64 = unsafe { core::mem::transmute(hhdm_ptr as *const ()) };
+    Ok(resolver())
+}
+
 /// Performs the apply relr relocations operation.
 fn apply_relr_relocations(
     user_as: &AddressSpace,
@@ -832,9 +856,15 @@ fn apply_dynamic_relocations(
         if table_size == 0 {
             return Ok(0);
         }
-        let mut count = table_size / rela_ent;
+        // Use the table size as the authoritative entry count.  DT_RELACOUNT is
+        // a *hint* from the linker that may undercount; honouring it with min()
+        // silently drops valid relocations.  We only validate the hint as a
+        // sanity bound (if provided).
+        let count = table_size / rela_ent;
         if let Some(hint) = count_hint {
-            count = core::cmp::min(count, hint);
+            if hint > count {
+                return Err("DT_RELACOUNT exceeds actual RELA table size");
+            }
         }
         let mut applied = 0usize;
         for i in 0..count {
@@ -904,9 +934,20 @@ fn apply_dynamic_relocations(
                         .checked_add(rela.r_addend as i128)
                         .ok_or("TPOFF64 value overflow")?
                 }
-                R_X86_64_IRELATIVE => (load_bias as i128)
-                    .checked_add(rela.r_addend as i128)
-                    .ok_or("IRELATIVE value overflow")?,
+                R_X86_64_IRELATIVE => {
+                    // IRELATIVE: the target is a resolver function that must be
+                    // *called* to obtain the final value.  All RELATIVE
+                    // relocations for this binary have already been applied, so
+                    // the resolver's own addresses are correct.
+                    let resolver_vaddr = (load_bias as i128)
+                        .checked_add(rela.r_addend as i128)
+                        .ok_or("IRELATIVE resolver address overflow")?;
+                    if resolver_vaddr < 0 || resolver_vaddr as u64 >= USER_ADDR_MAX {
+                        return Err("IRELATIVE resolver outside user space");
+                    }
+                    let resolved = call_ifunc_resolver(user_as, resolver_vaddr as u64)?;
+                    resolved as i128
+                }
                 _ => {
                     log::warn!("[elf] Unsupported relocation type {}", r_type);
                     continue;
@@ -1627,27 +1668,6 @@ fn load_elf_task_inner(
         apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
     }
 
-    // Diagnostic: read back key GOT entries after relocation to verify they were applied.
-    for test_offset in [0x12920u64, 0x12928u64, 0x12930u64] {
-        let vaddr = load_bias.wrapping_add(test_offset);
-        if vaddr < USER_ADDR_MAX {
-            if let Some(phys) = user_as.translate(VirtAddr::new(vaddr)) {
-                let ptr = crate::memory::phys_to_virt(phys.as_u64()) as *const u64;
-                // SAFETY: HHDM access to a mapped user page, owned exclusively during ELF loading.
-                let val = unsafe { core::ptr::read_unaligned(ptr) };
-                crate::e9_println!(
-                    "[reloc-check] GOT[{:#x}]=phys={:#x} val={:#x} ({})",
-                    vaddr,
-                    phys.as_u64(),
-                    val,
-                    name
-                );
-            } else {
-                crate::e9_println!("[reloc-check] GOT[{:#x}] = <not mapped> ({})", vaddr, name);
-            }
-        }
-    }
-
     crate::e9_println!(
         "[trace][elf] load_elf_task segments_done count={} has_interp={}",
         load_count,
@@ -1739,11 +1759,15 @@ fn load_elf_task_inner(
         VmaType::Stack,
         VmaPageSize::Small,
     )?;
+    // Guard page: a single unmapped page below the stack.  Any stack
+    // underflow (push past the bottom) hits this and faults.  The page
+    // is intentionally left unmapped : no VMA, no PTE.
     log::debug!(
-        "[elf] User stack: {:#x}..{:#x} ({} pages)",
+        "[elf] User stack: {:#x}..{:#x} ({} pages), guard at {:#x}",
         USER_STACK_BASE,
         USER_STACK_TOP,
         USER_STACK_PAGES,
+        USER_STACK_GUARD,
     );
 
     let boot_sp = setup_boot_user_stack(

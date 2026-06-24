@@ -34,9 +34,8 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    let _ = call::debug_log(b"[strate-webrtc] PANIC\n");
-    call::exit(1);
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("strate-webrtc", info);
 }
 
 const OP_BOOTSTRAP: u32 = 0x10;

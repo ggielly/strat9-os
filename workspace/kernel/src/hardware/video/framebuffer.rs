@@ -15,7 +15,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    framebuffer::FramebufferOps,
+    framebuffer::{CanvasBuffer, DirtyRect, DirtyRectSet, FramebufferOps, MAX_DIRTY_RECTS},
     hardware::virtio::gpu,
     memory::{self, phys_to_virt},
 };
@@ -25,7 +25,6 @@ use spin::Mutex;
 /// Maximum supported resolution
 const MAX_WIDTH: u32 = 3840;
 const MAX_HEIGHT: u32 = 2160;
-const MAX_DIRTY_RECTS: usize = 8;
 const PRESENT_MIN_TICKS: u64 = 1;
 
 /// Framebuffer source
@@ -88,13 +87,12 @@ unsafe impl Sync for FramebufferInfo {}
 /// Main framebuffer structure
 pub struct Framebuffer {
     info: FramebufferInfo,
+    /// Shared double-buffered canvas (dirty tracking, present throttling, SIMD ops)
+    pub canvas: CanvasBuffer,
+    /// Raw double buffer for VirtIO GPU (physically contiguous)
     double_buffer: Option<*mut u8>,
+    /// Whether the raw double buffer should be used
     use_double_buffer: bool,
-    dirty: DirtyRectSet,
-    present_pending: bool,
-    last_present_tick: u64,
-    /// SIMD-accelerated pixel ops (fill, blit, blend, convert) dispatched by CPUID
-    ops: FramebufferOps,
 }
 
 unsafe impl Send for Framebuffer {}
@@ -103,162 +101,36 @@ unsafe impl Sync for Framebuffer {}
 static FRAMEBUFFER: Mutex<Option<Framebuffer>> = Mutex::new(None);
 static FRAMEBUFFER_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone, Copy)]
-struct DirtyRect {
-    valid: bool,
-    x0: u32,
-    y0: u32,
-    x1: u32,
-    y1: u32,
-}
-
-#[derive(Clone, Copy)]
-struct DirtyRectSet {
-    rects: [DirtyRect; MAX_DIRTY_RECTS],
-    len: usize,
-}
-
-impl DirtyRect {
-    /// Performs the empty operation.
-    const fn empty() -> Self {
-        Self {
-            valid: false,
-            x0: 0,
-            y0: 0,
-            x1: 0,
-            y1: 0,
-        }
-    }
-
-    /// Performs the include operation.
-    fn include(&mut self, x: u32, y: u32, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
-        }
-        let x1 = x.saturating_add(width);
-        let y1 = y.saturating_add(height);
-        if !self.valid {
-            self.valid = true;
-            self.x0 = x;
-            self.y0 = y;
-            self.x1 = x1;
-            self.y1 = y1;
-        } else {
-            self.x0 = self.x0.min(x);
-            self.y0 = self.y0.min(y);
-            self.x1 = self.x1.max(x1);
-            self.y1 = self.y1.max(y1);
-        }
-    }
-
-    /// Performs the take operation.
-    fn take(&mut self) -> Option<(u32, u32, u32, u32)> {
-        if !self.valid {
-            return None;
-        }
-        let x = self.x0;
-        let y = self.y0;
-        let width = self.x1.saturating_sub(self.x0);
-        let height = self.y1.saturating_sub(self.y0);
-        *self = Self::empty();
-        Some((x, y, width, height))
-    }
-}
-
-impl DirtyRectSet {
-    const fn empty() -> Self {
-        Self {
-            rects: [DirtyRect::empty(); MAX_DIRTY_RECTS],
-            len: 0,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.len = 0;
-        let mut i = 0;
-        while i < MAX_DIRTY_RECTS {
-            self.rects[i] = DirtyRect::empty();
-            i += 1;
-        }
-    }
-
-    fn include(&mut self, x: u32, y: u32, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
-        }
-        let mut next = DirtyRect::empty();
-        next.include(x, y, width, height);
-
-        let mut idx = 0;
-        while idx < self.len {
-            let cur = self.rects[idx];
-            if !cur.valid {
-                idx += 1;
-                continue;
-            }
-            let overlaps =
-                next.x0 <= cur.x1 && next.x1 >= cur.x0 && next.y0 <= cur.y1 && next.y1 >= cur.y0;
-            if overlaps {
-                next.include(
-                    cur.x0,
-                    cur.y0,
-                    cur.x1.saturating_sub(cur.x0),
-                    cur.y1.saturating_sub(cur.y0),
-                );
-                self.rects[idx] = self.rects[self.len - 1];
-                self.rects[self.len - 1] = DirtyRect::empty();
-                self.len -= 1;
-                idx = 0;
-                continue;
-            }
-            idx += 1;
-        }
-
-        if self.len < MAX_DIRTY_RECTS {
-            self.rects[self.len] = next;
-            self.len += 1;
-            return;
-        }
-
-        self.rects[0].include(
-            next.x0,
-            next.y0,
-            next.x1.saturating_sub(next.x0),
-            next.y1.saturating_sub(next.y0),
-        );
-    }
-}
-
 impl Framebuffer {
     fn request_present(&mut self) {
-        self.present_pending = true;
+        self.canvas.present_pending = true;
     }
 
     fn present_if_due(&mut self, force: bool) {
-        if !self.present_pending {
+        if !self.canvas.present_pending {
             return;
         }
         if self.use_double_buffer {
             return;
         }
         let now = crate::process::scheduler::ticks();
-        if force || now.saturating_sub(self.last_present_tick) >= PRESENT_MIN_TICKS {
-            self.present_pending = false;
-            self.last_present_tick = now;
+        if force || now.saturating_sub(self.canvas.last_present_tick) >= PRESENT_MIN_TICKS {
+            self.canvas.present_pending = false;
+            self.canvas.last_present_tick = now;
         } else {
             return;
         }
 
         if self.info.source != FramebufferSource::VirtioGpu {
-            self.dirty.clear();
+            self.canvas.dirty.clear();
             return;
         }
 
         if let Some(gpu) = gpu::get_gpu() {
             let mut idx = 0;
-            while idx < self.dirty.len {
-                let rect = self.dirty.rects[idx];
-                if rect.valid {
+            while idx < self.canvas.dirty.len {
+                let rect = self.canvas.dirty.rects[idx];
+                if rect.is_valid() {
                     let _ = gpu.present_from_linear(
                         self.info.base_virt as *const u8,
                         self.info.stride,
@@ -271,7 +143,7 @@ impl Framebuffer {
                 idx += 1;
             }
         }
-        self.dirty.clear();
+        self.canvas.dirty.clear();
     }
 
     /// Initialize framebuffer with Limine-provided buffer
@@ -298,14 +170,26 @@ impl Framebuffer {
             source: FramebufferSource::Limine,
         };
 
-        let fb = Framebuffer {
-            info,
-            double_buffer: None,
-            use_double_buffer: false,
+        let canvas = CanvasBuffer {
+            addr: base_virt as *mut u8,
+            width: width as usize,
+            height: height as usize,
+            pitch: stride as usize,
+            bpp: format.bits_per_pixel as u16,
+            back_buffer: None,
+            draw_to_back: false,
             dirty: DirtyRectSet::empty(),
+            track_dirty: false,
             present_pending: false,
             last_present_tick: 0,
             ops: FramebufferOps::detect(),
+        };
+
+        let fb = Framebuffer {
+            info,
+            canvas,
+            double_buffer: None,
+            use_double_buffer: false,
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
@@ -364,14 +248,26 @@ impl Framebuffer {
             core::ptr::write_bytes(db_virt, 0, db_size);
         }
 
+        let canvas = CanvasBuffer {
+            addr: info.base_virt as *mut u8,
+            width: info.width as usize,
+            height: info.height as usize,
+            pitch: info.stride as usize,
+            bpp: 32,
+            back_buffer: None,
+            draw_to_back: false,
+            dirty: DirtyRectSet::empty(),
+            track_dirty: false,
+            present_pending: false,
+            last_present_tick: 0,
+            ops: FramebufferOps::detect(),
+        };
+
         let fb = Framebuffer {
             info,
+            canvas,
             double_buffer: Some(db_virt),
             use_double_buffer: true,
-            dirty: DirtyRectSet::empty(),
-            present_pending: false,
-            ops: FramebufferOps::detect(),
-            last_present_tick: 0,
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
@@ -439,13 +335,16 @@ impl Framebuffer {
             .lock()
             .as_ref()
             .map(|fb| FramebufferRenderStats {
-                present_pending: fb.present_pending,
-                dirty_region_count: fb.dirty.len,
-                last_present_tick: fb.last_present_tick,
+                present_pending: fb.canvas.present_pending,
+                dirty_region_count: fb.canvas.dirty.len,
+                last_present_tick: fb.canvas.last_present_tick,
             })
     }
 
-    /// Set a pixel at (x, y) with RGB color
+    /// Set a pixel at (x, y) with RGB color.
+    ///
+    /// Does NOT present to screen. Call `swap_buffers()` or `present()`
+    /// after a batch of draw operations.
     pub fn set_pixel(x: u32, y: u32, r: u8, g: u8, b: u8) {
         {
             let mut guard = FRAMEBUFFER.lock();
@@ -473,13 +372,15 @@ impl Framebuffer {
                 core::ptr::write(pixel_ptr as *mut u32, pixel);
             }
 
-            fb.dirty.include(x, y, 1, 1);
+            fb.canvas.dirty.include(x, y, 1, 1);
             fb.request_present();
-            fb.present_if_due(false);
         }
     }
 
-    /// Fill rectangle with color
+    /// Fill rectangle with color.
+    ///
+    /// Does NOT present to screen. Call `swap_buffers()` or `present()`
+    /// after a batch of draw operations.
     pub fn fill_rect(x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8) {
         if width == 0 || height == 0 {
             return;
@@ -517,11 +418,10 @@ impl Framebuffer {
             let stride = fb.info.stride as usize;
             let stride_pixels = fb.info.stride as usize / 4;
             let width_pixels = width as usize;
-            // Blit groupé : si stride == width (contigu), un seul appel SIMD
             if stride_pixels == width_pixels {
                 let first = unsafe { offset.add(y as usize * stride + x as usize * 4) as *mut u32 };
                 unsafe {
-                    (fb.ops.fill)(first, pixel, width_pixels * height as usize);
+                    (fb.canvas.ops.fill)(first, pixel, width_pixels * height as usize);
                 }
             } else {
                 for dy in 0..height as usize {
@@ -529,14 +429,13 @@ impl Framebuffer {
                         offset.add((y as usize + dy) * stride + x as usize * 4) as *mut u32
                     };
                     unsafe {
-                        (fb.ops.fill)(row_ptr, pixel, width_pixels);
+                        (fb.canvas.ops.fill)(row_ptr, pixel, width_pixels);
                     }
                 }
             }
 
-            fb.dirty.include(x, y, width, height);
+            fb.canvas.dirty.include(x, y, width, height);
             fb.request_present();
-            fb.present_if_due(false);
         }
     }
 
@@ -573,15 +472,15 @@ impl Framebuffer {
             }
 
             let db = fb.double_buffer.unwrap();
-            if fb.dirty.len == 0 {
+            if fb.canvas.dirty.len == 0 {
                 return;
             }
 
             if fb.info.source == FramebufferSource::VirtioGpu {
                 let mut regions = [(0u32, 0u32, 0u32, 0u32); MAX_DIRTY_RECTS];
                 let mut idx = 0;
-                while idx < fb.dirty.len {
-                    let rect = fb.dirty.rects[idx];
+                while idx < fb.canvas.dirty.len {
+                    let rect = fb.canvas.dirty.rects[idx];
                     regions[idx] = (
                         rect.x0,
                         rect.y0,
@@ -590,14 +489,14 @@ impl Framebuffer {
                     );
                     idx += 1;
                 }
-                virtio_present = Some((db as *const u8, fb.info.stride, regions, fb.dirty.len));
+                virtio_present = Some((db as *const u8, fb.info.stride, regions, fb.canvas.dirty.len));
             } else {
                 let dst = fb.info.base_virt as *mut u32;
                 let src_base = db as *const u32;
                 let stride_pixels = (fb.info.stride / 4) as usize;
                 let mut idx = 0;
-                while idx < fb.dirty.len {
-                    let rect = fb.dirty.rects[idx];
+                while idx < fb.canvas.dirty.len {
+                    let rect = fb.canvas.dirty.rects[idx];
                     let x = rect.x0 as usize;
                     let y = rect.y0 as usize;
                     let width = rect.x1.saturating_sub(rect.x0) as usize;
@@ -606,22 +505,22 @@ impl Framebuffer {
                     if stride_pixels == width {
                         let off = y * stride_pixels + x;
                         unsafe {
-                            (fb.ops.blit)(dst.add(off), src_base.add(off), width * height);
+                            (fb.canvas.ops.blit)(dst.add(off), src_base.add(off), width * height);
                         }
                     } else {
                         for row in 0..height {
                             let row_off = (y + row) * stride_pixels + x;
                             unsafe {
-                                (fb.ops.blit)(dst.add(row_off), src_base.add(row_off), width);
+                                (fb.canvas.ops.blit)(dst.add(row_off), src_base.add(row_off), width);
                             }
                         }
                     }
                     idx += 1;
                 }
             }
-            fb.dirty.clear();
-            fb.present_pending = false;
-            fb.last_present_tick = crate::process::scheduler::ticks();
+            fb.canvas.dirty.clear();
+            fb.canvas.present_pending = false;
+            fb.canvas.last_present_tick = crate::process::scheduler::ticks();
         }
 
         if let Some((src, src_stride, regions, region_count)) = virtio_present {
@@ -645,40 +544,7 @@ impl Framebuffer {
     }
 }
 
-/// RGB color helper
-#[derive(Clone, Copy)]
-pub struct RgbColor {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-impl RgbColor {
-    pub const BLACK: Self = Self { r: 0, g: 0, b: 0 };
-    pub const WHITE: Self = Self {
-        r: 255,
-        g: 255,
-        b: 255,
-    };
-    pub const RED: Self = Self { r: 255, g: 0, b: 0 };
-    pub const GREEN: Self = Self { r: 0, g: 255, b: 0 };
-    pub const BLUE: Self = Self { r: 0, g: 0, b: 255 };
-    pub const CYAN: Self = Self {
-        r: 0,
-        g: 255,
-        b: 255,
-    };
-    pub const MAGENTA: Self = Self {
-        r: 255,
-        g: 0,
-        b: 255,
-    };
-    pub const YELLOW: Self = Self {
-        r: 255,
-        g: 255,
-        b: 0,
-    };
-}
+pub use crate::framebuffer::RgbColor;
 
 /// Initialize framebuffer subsystem
 pub fn init() {
@@ -690,7 +556,6 @@ pub fn init() {
             log::warn!("[FB] VirtIO GPU init failed: {}", e);
         } else {
             log::info!("[FB] Using VirtIO GPU framebuffer");
-            return;
         }
     }
 
@@ -700,5 +565,12 @@ pub fn init() {
         log::info!("[FB] Using Limine framebuffer");
     } else {
         log::warn!("[FB] No framebuffer available");
+    }
+
+    // Register /dev/display/ scheme
+    if Framebuffer::is_available() {
+        if let Err(e) = super::display_scheme::register_display_scheme() {
+            log::warn!("[FB] Failed to register display scheme: {:?}", e);
+        }
     }
 }

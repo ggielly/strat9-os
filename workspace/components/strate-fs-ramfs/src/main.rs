@@ -519,7 +519,6 @@ pub extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_: &PanicInfo) -> ! {
-    exit(255);
+fn panic(info: &PanicInfo) -> ! {
+    strat9_syscall::call::handle_panic("fs-ramfs", info)
 }

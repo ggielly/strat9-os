@@ -932,7 +932,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 [[package]]
 name = "smoltcp"
 version = "0.13.1"
-source = "git+https://github.com/smoltcp-rs/smoltcp.git#8ef276709cd4a0721cd6d98c2ed6d4fede5dd394"
+source = "git+https://github.com/smoltcp-rs/smoltcp.git#d9582fc3cbc66d5b09b9d29649d4cb0d50a75358"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",
@@ -1202,9 +1202,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "2.0.117"
+version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -19,12 +19,14 @@ pub mod percpu;
 pub mod pic;
 pub mod ring3_diag;
 pub mod serial;
+pub mod speaker;
 pub mod smp;
 pub mod syscall;
 pub mod timer;
 pub mod tlb;
 pub mod tss;
 pub mod vga;
+pub mod vgabuf;
 pub mod x2apic;
 
 use core::arch::asm;

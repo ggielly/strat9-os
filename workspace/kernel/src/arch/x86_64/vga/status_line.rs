@@ -182,6 +182,9 @@ fn draw_status_bar_inner(w: &mut VgaWriter, left: &str, right: &str, theme: UiTh
         return;
     }
 
+    // Ensure we draw through the back buffer so present() doesn't overwrite us.
+    let (prev_draw, prev_track) = w.begin_viewport_render();
+
     let bar_h = gh;
     let y = w.height().saturating_sub(bar_h);
     w.fill_rect(0, y, w.width(), bar_h, theme.status_bg);
@@ -225,7 +228,9 @@ fn draw_status_bar_inner(w: &mut VgaWriter, left: &str, right: &str, theme: UiTh
         let right_x = w.width().saturating_sub(right_width);
         w.draw_text(right_x, y, fitted_right.as_str(), right_opts);
     }
+
     w.clip = saved_clip;
+    w.end_viewport_render(prev_draw, prev_track);
 }
 
 /// Performs the ui draw status bar operation.
@@ -452,6 +457,9 @@ pub extern "C" fn status_line_task_main() -> ! {
         if tick != last_tick {
             last_tick = tick;
             maybe_refresh_system_status_line(UiTheme::OCEAN_STATUS);
+            // Flush any pending log lines from the lock-free circular buffer
+            // to the framebuffer.  This runs on every timer tick (~10 ms).
+            crate::arch::x86_64::vgabuf::vgabuf_flush_to_framebuffer();
         }
         diag_counter += 1;
         if diag_counter % 5000 == 0 {

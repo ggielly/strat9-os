@@ -26,6 +26,7 @@ pub mod boot;
 pub mod capability;
 pub mod components;
 pub mod debug;
+pub mod debug_cfg;
 
 pub mod async_io;
 pub mod dma;
@@ -389,6 +390,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     init_logger();
     boot_milestone!("Kernel entry");
+    arch::x86_64::speaker::beep_phase(1);
 
     // =============================================
     // Phase 1c: IDT (Interrupt Descriptor Table)
@@ -660,6 +662,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     );
 
     boot_milestone!("Memory manager ready");
+    arch::x86_64::speaker::beep_phase(2);
     log_boot_module_magics("post-buddy");
 
     // =============================================
@@ -694,6 +697,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
     serial_println!("[init] Paging initialized.");
     boot_milestone!("Paging initialized");
+    arch::x86_64::speaker::beep_phase(3);
 
     // =============================================
     // Phase 3: console output (VGA or serial fallback)
@@ -712,6 +716,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         args.framebuffer_blue_mask_size,
         args.framebuffer_blue_mask_shift,
     );
+    // Flush any log lines buffered before VGA was available.
+    arch::x86_64::vgabuf::vgabuf_flush_to_framebuffer();
     vga_println!("[OK] Paging initialized");
     vga_println!("[OK] Serial port initialized");
     vga_println!("[OK] Memory manager active");
@@ -856,6 +862,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         arch::x86_64::percpu::init_boot_cpu(0);
     }
     boot_milestone!("APIC + SMP ready");
+    arch::x86_64::speaker::beep_phase(4);
 
     arch::x86_64::keyboard::init();
     serial_println!("[init] PS/2 keyboard controller initialized.");
@@ -907,6 +914,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] Scheduler initialized.");
     serial_println!("[trace][bsp] after init_scheduler");
     boot_milestone!("Scheduler + timer ready");
+    arch::x86_64::speaker::beep_phase(5);
     vga_println!("[OK] Multitasking enabled");
 
     // =============================================
@@ -969,24 +977,29 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         hardware::init();
         crate::e9_println!("BH post-hardware");
         boot_milestone!("Hardware drivers ready");
+        arch::x86_64::speaker::beep_phase(15);
+    arch::x86_64::speaker::beep_phase(6);
 
         serial_println!("[init] Initializing timers...");
         vga_println!("[..] Initializing HPET and RTC...");
         hardware::timer::init();
         serial_println!("[init] Timers initialized.");
         vga_println!("[OK] HPET/RTC initialized");
+        arch::x86_64::speaker::beep_phase(16); // Timers
 
         serial_println!("[init] Initializing USB...");
         vga_println!("[..] Looking for USB controllers...");
         hardware::usb::init();
         serial_println!("[init] USB initialized.");
         vga_println!("[OK] USB xHCI/EHCI/UHCI initialized");
+        arch::x86_64::speaker::beep_phase(17); // USB
 
         serial_println!("[init] Initializing VirtIO block...");
         vga_println!("[..] Looking for VirtIO block device...");
         hardware::storage::virtio_block::init();
         serial_println!("[init] VirtIO block initialized.");
         vga_println!("[OK] VirtIO block driver initialized");
+        arch::x86_64::speaker::beep_phase(18); // VirtIO block
 
         serial_println!("[init] Initializing AHCI...");
         vga_println!("[..] Looking for AHCI SATA controller...");
@@ -1005,36 +1018,42 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         hardware::storage::ahci::init();
         serial_println!("[init] AHCI probe done.");
         vga_println!("[OK] AHCI probe done");
+        arch::x86_64::speaker::beep_phase(19); // AHCI
 
         serial_println!("[init] Initializing ATA/IDE...");
         vga_println!("[..] Looking for ATA/IDE devices...");
         hardware::storage::ata_legacy::init();
         serial_println!("[init] ATA/IDE probe done.");
         vga_println!("[OK] ATA/IDE probe done");
+        arch::x86_64::speaker::beep_phase(20); // ATA
 
         serial_println!("[init] Initializing NVMe...");
         vga_println!("[..] Looking for NVMe controllers...");
         hardware::storage::nvme::init();
         serial_println!("[init] NVMe probe done.");
         vga_println!("[OK] NVMe probe done");
+        arch::x86_64::speaker::beep_phase(21); // NVMe
 
         serial_println!("[init] Initializing VirtIO net...");
         vga_println!("[..] Looking for VirtIO net device...");
         hardware::nic::virtio_net::init();
         serial_println!("[init] VirtIO net initialized.");
         vga_println!("[OK] VirtIO net driver initialized");
+        arch::x86_64::speaker::beep_phase(22); // VirtIO net
 
         serial_println!("[init] Initializing VirtIO RNG...");
         vga_println!("[..] Looking for VirtIO RNG device...");
         crate::hardware::virtio::rng::init();
         serial_println!("[init] VirtIO RNG initialized.");
         vga_println!("[OK] VirtIO RNG driver initialized");
+        arch::x86_64::speaker::beep_phase(23); // VirtIO RNG
 
         serial_println!("[init] Initializing VirtIO Console...");
         vga_println!("[..] Looking for VirtIO Console device...");
         crate::hardware::virtio::console::init();
         serial_println!("[init] VirtIO Console initialized.");
         vga_println!("[OK] VirtIO Console driver initialized");
+        arch::x86_64::speaker::beep_phase(24); // VirtIO Console
 
         // VirtIO GPU + framebuffer are initialized in hardware::init()
 
@@ -1256,6 +1275,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             64 * 1024,
         ) {
             process::add_task(status_task);
+            // Switch from live VGA debug output to buffered vgabuf path.
+            // The status_line_task will flush vgabuf to the framebuffer.
+            crate::debug_cfg::set_vga_debug_live(false);
         }
     }
     #[cfg(feature = "selftest")]
@@ -1274,6 +1296,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
     crate::e9_println!("BC pre-schedule");
     boot_milestone!("Boot complete ! Now entering in scheduler");
+    arch::x86_64::speaker::beep_startup();
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
     arch::x86_64::serial::set_boot_log_prefix_enabled(false);

@@ -25,8 +25,78 @@ use spin::Mutex;
 const NVME_PAGE_SIZE: usize = 4096;
 const IO_QUEUE_SIZE: usize = 64;
 const MAX_IO_COMMANDS: usize = IO_QUEUE_SIZE;
+const MAX_PRP_ENTRIES: usize = NVME_PAGE_SIZE / 8; // 512 entries per PRP list page
 
 const ADMIN_CQE_ERROR: u16 = (0x1 << 14) | (0x1 << 10);
+
+// =========================================================================
+// TSC-based timeout helpers
+// =========================================================================
+
+/// Read the TSC (Time Stamp Counter).
+#[inline]
+fn rdtsc() -> u64 {
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// Convert TSC ticks to approximate milliseconds (assumes ~3GHz TSC).
+/// For exact calibration, use the kernel's TSC frequency if available.
+fn tsc_to_ms(ticks: u64) -> u64 {
+    // Rough: 3GHz TSC → 3_000_000 ticks per ms
+    ticks / 3_000_000
+}
+
+/// Get a TSC deadline for `ms` milliseconds from now.
+fn tsc_deadline_ms(ms: u32) -> u64 {
+    rdtsc().wrapping_add((ms as u64) * 3_000_000)
+}
+
+/// Check if a TSC deadline has expired.
+fn tsc_expired(deadline: u64) -> bool {
+    rdtsc() >= deadline
+}
+
+/// Read a 64-bit register from the NVMe controller.
+unsafe fn regs_read64(base: usize, offset: u64) -> u64 {
+    let low = core::ptr::read_volatile((base + offset as usize) as *const u32) as u64;
+    let high = core::ptr::read_volatile((base + offset as usize + 4) as *const u32) as u64;
+    low | (high << 32)
+}
+
+/// Build PRP (Physical Region Page) list for a physically contiguous buffer.
+///
+/// Returns (prp1, prp2):
+/// - If the buffer fits in a single page: prp1 = buf_phys, prp2 = 0
+/// - If the buffer spans multiple pages: prp1 = buf_phys, prp2 = PRP list phys addr
+///
+/// The caller must ensure `buf_phys` is page-aligned and the buffer is physically
+/// contiguous for multi-page transfers.
+unsafe fn build_prp_list(buf_phys: u64, byte_count: usize) -> (u64, u64) {
+    let first_page_remaining = NVME_PAGE_SIZE - (buf_phys as usize % NVME_PAGE_SIZE);
+    if byte_count <= first_page_remaining {
+        return (buf_phys, 0);
+    }
+
+    // Allocate a PRP list page
+    let prp_frame = allocate_zeroed_frame().expect("NVMe: failed to allocate PRP list");
+    let prp_phys = prp_frame.start_address.as_u64();
+    paging::ensure_identity_map_range(prp_phys, NVME_PAGE_SIZE as u64);
+    let prp_virt = phys_to_virt(prp_phys) as *mut u64;
+
+    // First page covers buf_phys..end_of_first_page
+    let mut remaining = byte_count - first_page_remaining;
+    let mut next_phys = (buf_phys & !0xFFF) + NVME_PAGE_SIZE as u64;
+    let mut idx = 0;
+
+    while remaining > 0 && idx < MAX_PRP_ENTRIES {
+        core::ptr::write_volatile(prp_virt.add(idx), next_phys);
+        idx += 1;
+        next_phys += NVME_PAGE_SIZE as u64;
+        remaining = remaining.saturating_sub(NVME_PAGE_SIZE);
+    }
+
+    (buf_phys, prp_phys)
+}
 
 #[repr(transparent)]
 struct VolatileCell<T> {
@@ -132,8 +202,10 @@ struct Registers {
     csts: ControllerStatus,
     _reserved2: VolatileCell<u32>,
     aqa: VolatileCell<u32>,
-    asq: VolatileCell<u64>,
-    acq: VolatileCell<u64>,
+    asq_low: VolatileCell<u32>,
+    asq_high: VolatileCell<u32>,
+    acq_low: VolatileCell<u32>,
+    acq_high: VolatileCell<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -149,6 +221,105 @@ pub struct NvmeNamespace {
     pub nsid: u32,
     pub size: u64,
     pub block_size: u32,
+}
+
+/// LBA Format descriptor (4 bytes each, starting at byte 128 of Identify Namespace).
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LbaFormat {
+    _metadata_size: u16,
+    lbads: u8,
+    _relative_perf: u8,
+}
+
+/// Identify Namespace data (first 384 bytes needed).
+/// Layout per NVMe spec: bytes 0-73 are explicit fields, 74-127 reserved, 128-383 LBAF[0..64].
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct IdentifyNamespaceData {
+    nsze: u64,
+    _ncap: u64,
+    _nuse: u64,
+    _nsfeat: u8,
+    _nlbaf: u8,
+    flbas: u8,
+    _mc: u8,
+    _dpc: u8,
+    _dps: u8,
+    _nmic: u8,
+    _rescap: u8,
+    _fpi: u8,
+    _dlfeat: u8,
+    _nawun: u16,
+    _nawupf: u16,
+    _nacwu: u16,
+    _nabsn: u16,
+    _nabo: u16,
+    _nabspf: u16,
+    _noiob: u16,
+    _nvmcap: [u64; 2],
+    _npwg: u16,
+    _npwa: u16,
+    _npdg: u16,
+    _npda: u16,
+    _nows: u16,
+    _reserved: [u8; 54], // bytes 74-127
+    /// LBA Format Support : 64 entries × 4 bytes at offset 128
+    lbaf: [LbaFormat; 64],
+}
+
+/// Identify Controller data (partial : fields we need).
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct IdentifyControllerData {
+    _vid: u16,
+    _ssvid: u16,
+    _sn: [u8; 20],
+    _mn: [u8; 40],
+    _fr: [u8; 8],
+    _rab: u8,
+    _ieee: [u8; 3],
+    _cmic: u8,
+    mdts: u8,
+    _cntlid: u16,
+    _ver: u32,
+    _rtd3r: u32,
+    _rtd3e: u32,
+    _oaes: u32,
+    _ctratt: u32,
+    _reserved0: [u8; 100],
+    _oacs: u16,
+    _acl: u8,
+    _aerl: u8,
+    _frmw: u8,
+    _lpa: u8,
+    _elpe: u8,
+    _npss: u8,
+    _avscc: u8,
+    _apsta: u8,
+    _wctemp: u16,
+    _cctemp: u16,
+    _reserved1: [u8; 242],
+    sqes: u8,
+    cqes: u8,
+    _maxcmd: u16,
+    nn: u32,
+    _oncs: u16,
+    _fuses: u16,
+    _fna: u8,
+    _vwc: u8,
+    _awun: u16,
+    _awupf: u16,
+    _icsvscc: u8,
+    _nwpc: u8,
+    _acwu: u16,
+    _cdfs: u16,
+    _sgls: u32,
+    _reserved2: [u8; 228],
+    _subnqn: [u8; 256],
+    _reserved3: [u8; 1024],
+    _psd: [[u8; 32]; 32],
+    _vs: [u8; 1024],
 }
 
 struct IoQueuePair {
@@ -239,7 +410,9 @@ impl NvmeController {
             size: IO_QUEUE_SIZE,
         };
 
-        let io_done: Box<[AtomicBool]> = (0..MAX_IO_COMMANDS).map(|_| AtomicBool::new(false)).collect();
+        let io_done: Box<[AtomicBool]> = (0..MAX_IO_COMMANDS)
+            .map(|_| AtomicBool::new(false))
+            .collect();
 
         let mut controller = Self {
             registers,
@@ -275,38 +448,131 @@ impl NvmeController {
         }
         let qsz = ((queue_size as u32).saturating_sub(1)) & 0x0FFF;
 
-        if regs.cc.is_enabled() {
+        log::info!("NVMe init: queue_size={} qsz={}", queue_size, qsz);
+        log::info!(
+            "NVMe init: ASQ phys={:#x} ACQ phys={:#x}",
+            admin_sq_phys,
+            admin_cq_phys
+        );
+
+        // Step 1: Disable controller if it's already enabled
+        let cc_val = regs.cc.value.read();
+        let csts_val = regs.csts.value.read();
+        log::info!("NVMe init: CC={:#010x} CSTS={:#010x}", cc_val, csts_val);
+
+        if cc_val & 1 != 0 {
+            log::info!("NVMe init: controller enabled, disabling...");
+
+            // Some AMD NVMe controllers (e.g. on Lenovo X13) hang if we send
+            // SHN (shutdown notification) before clearing CC.EN.  The safe
+            // approach for re-initialisation is to skip SHN and just write
+            // CC.EN=0 directly.  This matches Linux's nvme_disable_ctrl().
             regs.cc.set_enable(false);
-            let mut disable_timeout = 1_000_000u32;
-            while regs.csts.is_ready() {
+            log::info!("NVMe init: wrote CC.EN=0 (no SHN), waiting for CSTS.RDY...");
+
+            // Wait for CSTS.RDY (bit 0) to clear : up to 5.5 s per NVMe spec.
+            // Use a generous timeout; some AMD controllers are slow to respond.
+            let deadline = tsc_deadline_ms(5500);
+            let mut log_count = 0u32;
+            loop {
+                let csts = regs.csts.value.read();
+                if csts & 1 == 0 {
+                    log::info!("NVMe init: controller disabled, CSTS={:#x}", csts);
+                    break;
+                }
+                if tsc_expired(deadline) {
+                    log::warn!("NVMe init: RDY timeout, CSTS={:#x} : forcing CC=0", csts);
+
+                    // Last resort: write CC=0x00000000
+                    regs.cc.value.write(0x0000_0000);
+                    log::info!("NVMe init: wrote CC=0x00000000 (full reset)");
+                    let force_deadline = tsc_deadline_ms(3000);
+                    while !tsc_expired(force_deadline) {
+                        let c = regs.csts.value.read();
+                        if c & 1 == 0 {
+                            log::info!("NVMe init: forced disable OK, CSTS={:#x}", c);
+                            break;
+                        }
+                        core::hint::spin_loop();
+                    }
+                    break;
+                }
                 core::hint::spin_loop();
-                disable_timeout = disable_timeout.saturating_sub(1);
-                if disable_timeout == 0 {
-                    return Err(NvmeError::Timeout);
+                log_count += 1;
+                if log_count % 2_000_000 == 0 {
+                    log::info!(
+                        "NVMe init: still waiting... CSTS={:#x}",
+                        regs.csts.value.read()
+                    );
                 }
             }
+        } else {
+            log::info!("NVMe init: controller already disabled");
         }
 
-        regs.aqa.write(qsz | (qsz << 16));
-        regs.asq.write(admin_sq_phys);
-        regs.acq.write(admin_cq_phys);
-
-        regs.cc.clear_io_fields();
-        regs.cc.set_css(0);
-        regs.cc.set_iosqes(6);
-        regs.cc.set_iocqes(6);
-        regs.cc.set_enable(true);
-
-        let mut timeout = 1_000_000;
-        while !regs.csts.is_ready() {
+        // Small delay after disable ; some AMD controllers need this before
+        // admin queue registers become writable.
+        let settle = tsc_deadline_ms(2);
+        while !tsc_expired(settle) {
             core::hint::spin_loop();
-            timeout -= 1;
-            if timeout == 0 {
+        }
+
+        // Step 2: Verify CSTS
+        let csts = regs.csts.value.read();
+        log::info!("NVMe init: CSTS={:#x}", csts);
+        if csts & 2 != 0 {
+            log::error!("NVMe init: CSTS.CFS (fatal) set!");
+            return Err(NvmeError::ControllerFatal);
+        }
+
+        // Step 3: Write admin queue registers (32-bit writes, like Redox/MaestroOS)
+        log::info!("NVMe init: writing AQA={:#x}...", qsz | (qsz << 16));
+        regs.aqa.write(qsz | (qsz << 16));
+        log::info!("NVMe init: writing ASQ={:#x}...", admin_sq_phys);
+        regs.asq_low.write(admin_sq_phys as u32);
+        regs.asq_high.write((admin_sq_phys >> 32) as u32);
+        log::info!("NVMe init: writing ACQ={:#x}...", admin_cq_phys);
+        regs.acq_low.write(admin_cq_phys as u32);
+        regs.acq_high.write((admin_cq_phys >> 32) as u32);
+
+        // Step 4: Configure CC
+        log::info!("NVMe init: configuring CC...");
+        regs.cc.clear_io_fields();
+        regs.cc.set_css(0); // NVM Command Set
+        regs.cc.set_iosqes(6); // 2^6 = 64 byte submission queue entries
+        regs.cc.set_iocqes(6); // 2^6 = 64 byte completion queue entries
+        log::info!("NVMe init: CC={:#010x} (configured)", regs.cc.value.read());
+
+        // Step 5: Enable controller
+        log::info!("NVMe init: enabling controller...");
+        regs.cc.set_enable(true);
+        log::info!("NVMe init: CC={:#010x} (EN=1)", regs.cc.value.read());
+
+        // Step 6: Wait for CSTS.RDY (up to 5.5s per NVMe spec)
+        let deadline = tsc_deadline_ms(5500);
+        let mut log_interval = 0u32;
+        loop {
+            let csts = regs.csts.value.read();
+            if csts & 1 != 0 {
+                log::info!("NVMe init: controller ready, CSTS={:#x}", csts);
+                break;
+            }
+            if tsc_expired(deadline) {
+                log::error!("NVMe init: enable timeout! CSTS={:#x}", csts);
                 return Err(NvmeError::Timeout);
+            }
+            core::hint::spin_loop();
+            log_interval += 1;
+            if log_interval % 500_000 == 0 {
+                log::info!("NVMe init: waiting for ready... CSTS={:#x}", csts);
             }
         }
 
-        if regs.csts.is_fatal() {
+        let csts = regs.csts.value.read();
+        log::info!("NVMe init: final CSTS={:#x}", csts);
+
+        if csts & 2 != 0 {
+            log::error!("NVMe init: controller fatal error!");
             return Err(NvmeError::ControllerFatal);
         }
 
@@ -327,6 +593,15 @@ impl NvmeController {
 
         let qsz = ((queue_size as u32).saturating_sub(1)) & 0xFFF;
 
+        log::info!(
+            "NVMe I/O queues: size={} qsz={} SQ={:#x} CQ={:#x}",
+            queue_size,
+            qsz,
+            io_sq_phys,
+            io_cq_phys
+        );
+
+        log::info!("NVMe I/O: sending Set Features (IRQ coalescing)...");
         let set_feature_cmd = Command {
             opcode: 0x09,
             cdw10: 0x07,
@@ -335,9 +610,13 @@ impl NvmeController {
         };
         self.submit_admin_command(set_feature_cmd).ok();
 
+        log::info!("NVMe I/O: creating I/O CQ...");
+        // NVMe spec CDW10: bits 15:0=QID, bits 31:16=QSIZE(0-based)
+        // NVMe spec CDW11: bit 0=PCIE, bit 1=IEN, bits 31:16=IV
         let cq_cmd = Command {
             opcode: 0x05,
-            cdw10: qsz | (0 << 16),
+            cdw10: qsz << 16,   // QID=0 in bits 15:0, QSIZE in bits 31:16
+            cdw11: 0x0000_0003, // PCIE=1, IEN=1
             prp1: io_cq_phys,
             ..Default::default()
         };
@@ -345,6 +624,8 @@ impl NvmeController {
             Ok(c) => {
                 if c.status_code() != 0 {
                     log::warn!("NVMe: Create I/O CQ failed: status={}", c.status_code());
+                } else {
+                    log::info!("NVMe I/O: CQ created OK");
                 }
             }
             Err(e) => {
@@ -353,10 +634,13 @@ impl NvmeController {
             }
         }
 
+        log::info!("NVMe I/O: creating I/O SQ...");
+        // NVMe spec CDW10: bits 15:0=QID, bits 31:16=QSIZE(0-based)
+        // NVMe spec CDW11: bit 0=PCIE, bits 31:16=CQID
         let sq_cmd = Command {
             opcode: 0x01,
-            cdw10: qsz | (1 << 16),
-            cdw11: 0x0000_0001,
+            cdw10: (qsz << 16) | 1, // QID=1 in bits 15:0, QSIZE in bits 31:16
+            cdw11: (1 << 16) | 0x0000_0001, // CQID=1 in bits 31:16, PCIE=1
             prp1: io_sq_phys,
             ..Default::default()
         };
@@ -364,6 +648,8 @@ impl NvmeController {
             Ok(c) => {
                 if c.status_code() != 0 {
                     log::warn!("NVMe: Create I/O SQ failed: status={}", c.status_code());
+                } else {
+                    log::info!("NVMe I/O: SQ created OK");
                 }
             }
             Err(e) => {
@@ -376,7 +662,7 @@ impl NvmeController {
         Ok(())
     }
 
-    fn identify(&self, cns: u8, nsid: u32) -> Result<*mut u8, NvmeError> {
+    fn identify(&self, cns: u8, nsid: u32) -> Result<Vec<u8>, NvmeError> {
         let frame = allocate_zeroed_frame().ok_or(NvmeError::IoError)?;
         let phys = frame.start_address.as_u64();
         paging::ensure_identity_map_range(phys, NVME_PAGE_SIZE as u64);
@@ -397,38 +683,108 @@ impl NvmeController {
         if completion.status_code() != 0 {
             return Err(NvmeError::IoError);
         }
-        Ok(virt)
+
+        // Copy data to owned Vec before the DMA frame is freed.
+        let mut data = Vec::with_capacity(NVME_PAGE_SIZE);
+        unsafe {
+            for i in 0..NVME_PAGE_SIZE {
+                data.push(ptr::read_volatile(virt.add(i)));
+            }
+        }
+        // frame dropped here → physical memory freed
+        Ok(data)
     }
 
     fn identify_namespaces(&mut self) -> Result<(), NvmeError> {
+        // Step 1: Identify Controller : get NN, MDTS, SQES, CQES, and info
         let ctrl_data = self.identify(0x01, 0)?;
-        let nn = unsafe { ptr::read(ctrl_data.add(520) as *const u32) };
+        let ctrl = unsafe { core::ptr::read(ctrl_data.as_ptr() as *const IdentifyControllerData) };
+        let nn = ctrl.nn;
+        let mdts = ctrl.mdts;
+
+        // Validate SQES/CQES (like MaestroOS)
+        let min_sqes = ctrl.sqes & 0xF;
+        let max_sqes = (ctrl.sqes >> 4) & 0xF;
+        let min_cqes = ctrl.cqes & 0xF;
+        let max_cqes = (ctrl.cqes >> 4) & 0xF;
+        let our_sqes = 6u8; // 2^6 = 64 bytes
+        let our_cqes = 4u8; // 2^4 = 16 bytes
+
+        if our_sqes < min_sqes || our_sqes > max_sqes {
+            log::warn!(
+                "NVMe: SQES {} not in range [{}..{}] : controller may reject commands",
+                our_sqes, min_sqes, max_sqes
+            );
+        }
+        if our_cqes < min_cqes || our_cqes > max_cqes {
+            log::warn!(
+                "NVMe: CQES {} not in range [{}..{}] : controller may reject completions",
+                our_cqes, min_cqes, max_cqes
+            );
+        }
+
+        // Validate page size against CAP (like MaestroOS)
+        let cap = unsafe { regs_read64(self.registers, 0x00) };
+        let mpsmin = ((cap >> 48) & 0xF) as u32 + 12; // log2 of min page size
+        let mpsmax = ((cap >> 52) & 0xF) as u32 + 12; // log2 of max page size
+        let our_mps = 12u32; // 4096 bytes
+        if our_mps < mpsmin || our_mps > mpsmax {
+            log::warn!(
+                "NVMe: Page size {} not in range [{}..{}] bytes",
+                1 << our_mps,
+                1 << mpsmin,
+                1 << mpsmax
+            );
+        }
+
+        log::info!(
+            "NVMe: Controller NN={} MDTS={} SQES={:#x} CQES={:#x} MPS=[{}..{}]",
+            nn, mdts, ctrl.sqes, ctrl.cqes,
+            1 << mpsmin, 1 << mpsmax
+        );
+
         if nn == 0 {
             return Err(NvmeError::InvalidNamespace);
         }
 
-        for nsid in 1..=nn {
-            if let Ok(ns_data) = self.identify(0x00, nsid) {
-                unsafe {
-                    let nsze = ptr::read(ns_data.add(16) as *const u64);
-                    let flbas = ptr::read(ns_data.add(26) as *const u8) as usize;
-                    let lbaf_index = flbas & 0xF;
-                    let lbaf_offset = 128 + lbaf_index * 16;
-                    let lbaf_data = ptr::read(ns_data.add(lbaf_offset) as *const u16);
-                    let block_size = (1 << lbaf_data) as u32;
+        // Step 2: Identify Active Namespace ID List (CNS=2)
+        let ns_list = self.identify(0x02, 0)?;
+        let ns_list_words = unsafe {
+            core::slice::from_raw_parts(ns_list.as_ptr() as *const u32, ns_list.len() / 4)
+        };
+        let mut active_nsids: Vec<u32> = Vec::new();
+        for &word in ns_list_words.iter() {
+            if word == 0 {
+                break;
+            }
+            active_nsids.push(word);
+        }
+        log::info!("NVMe: {} active namespace(s)", active_nsids.len());
 
-                    self.namespaces.push(NvmeNamespace {
-                        nsid,
-                        size: nsze,
-                        block_size,
-                    });
-                    log::info!(
-                        "NVMe: Namespace {} - {} blocks @ {} bytes",
-                        nsid,
-                        nsze,
-                        block_size
-                    );
-                }
+        // Step 3: Identify each active namespace
+        for nsid in &active_nsids {
+            if let Ok(ns_data) = self.identify(0x00, *nsid) {
+                let ns =
+                    unsafe { core::ptr::read(ns_data.as_ptr() as *const IdentifyNamespaceData) };
+
+                let flbas = ns.flbas as usize;
+                let lbaf_idx = flbas & 0xF;
+                let lbads = ns.lbaf[lbaf_idx].lbads;
+                let block_size = 1u32 << lbads;
+
+                self.namespaces.push(NvmeNamespace {
+                    nsid: *nsid,
+                    size: ns.nsze,
+                    block_size,
+                });
+                log::info!(
+                    "NVMe: NSID {} - {} blocks @ {} bytes (LBADS={}, FLBAS={:#x})",
+                    nsid,
+                    ns.nsze,
+                    block_size,
+                    lbads,
+                    flbas
+                );
             }
         }
         Ok(())
@@ -441,11 +797,15 @@ impl NvmeController {
         io.command_id = io.command_id.wrapping_add(1);
 
         let slot = cmd_id as usize % io.size;
+
+        let idx = cmd_id as usize % MAX_IO_COMMANDS;
+        self.io_done[idx].store(false, Ordering::SeqCst);
+
         unsafe {
             ptr::write(io.submission.entries.add(slot), *command);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             (*io.submission.doorbell).write(((slot + 1) % io.size) as u32);
         }
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         Ok(cmd_id)
     }
@@ -457,11 +817,15 @@ impl NvmeController {
         block_count: u32,
         buf_phys: u64,
     ) -> Result<(), NvmeError> {
+        let byte_count = block_count as usize * 512;
+        let (prp1, prp2) = unsafe { build_prp_list(buf_phys, byte_count) };
+
         let cmd_id = {
             let mut cmd = Command {
                 opcode: 0x02,
                 nsid,
-                prp1: buf_phys,
+                prp1,
+                prp2,
                 cdw10: (lba & 0xFFFF_FFFF) as u32,
                 cdw11: ((lba >> 32) & 0xFFFF_FFFF) as u32,
                 cdw12: (block_count - 1),
@@ -471,7 +835,6 @@ impl NvmeController {
         };
 
         let idx = cmd_id as usize % MAX_IO_COMMANDS;
-        self.io_done[idx].store(false, Ordering::SeqCst);
 
         self.io_wq.wait_until(|| {
             if self.io_done[idx].load(Ordering::Acquire) {
@@ -491,11 +854,15 @@ impl NvmeController {
         block_count: u32,
         buf_phys: u64,
     ) -> Result<(), NvmeError> {
+        let byte_count = block_count as usize * 512;
+        let (prp1, prp2) = unsafe { build_prp_list(buf_phys, byte_count) };
+
         let cmd_id = {
             let mut cmd = Command {
                 opcode: 0x01,
                 nsid,
-                prp1: buf_phys,
+                prp1,
+                prp2,
                 cdw10: (lba & 0xFFFF_FFFF) as u32,
                 cdw11: ((lba >> 32) & 0xFFFF_FFFF) as u32,
                 cdw12: (block_count - 1),
@@ -505,7 +872,6 @@ impl NvmeController {
         };
 
         let idx = cmd_id as usize % MAX_IO_COMMANDS;
-        self.io_done[idx].store(false, Ordering::SeqCst);
 
         self.io_wq.wait_until(|| {
             if self.io_done[idx].load(Ordering::Acquire) {
@@ -731,13 +1097,12 @@ impl QueuePair {
         }
         self.command_id = self.command_id.wrapping_add(1);
         self.submission.submit_command(cmd, slot);
-        let mut timeout = 5_000_000u32;
+        let deadline = tsc_deadline_ms(5500); // NVMe spec: up to 5.5s for admin commands
         loop {
             if let Some(c) = self.completion.poll_completion() {
                 return Some(c);
             }
-            timeout = timeout.saturating_sub(1);
-            if timeout == 0 {
+            if tsc_expired(deadline) {
                 log::error!("NVMe: admin command timeout");
                 return None;
             }
@@ -791,7 +1156,9 @@ pub fn init() {
                 controller.set_irq_line(irq);
                 NVME_IRQ_LINE.store(irq, Ordering::Relaxed);
                 log::info!("NVMe: {} initialized, IRQ={}", name, irq);
-                NVME_CONTROLLERS.lock().push(Arc::new(Mutex::new(controller)));
+                NVME_CONTROLLERS
+                    .lock()
+                    .push(Arc::new(Mutex::new(controller)));
                 crate::arch::x86_64::idt::register_nvme_irq(irq);
             }
             Err(e) => {
