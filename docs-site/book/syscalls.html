@@ -1,0 +1,540 @@
+<!DOCTYPE HTML>
+<html lang="en" class="coal sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Syscall Reference - Strat9 OS documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Architecture guide, ABI reference, and syscall documentation for Strat9 OS.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="src/theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "coal";
+            const default_dark_theme = "coal";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('coal')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Strat9 OS documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://git.strat9-os.org/strat9-os/" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/syscalls.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="syscall-reference"><a class="header" href="#syscall-reference">Syscall Reference</a></h1>
+<p>Complete reference for all Strat9 OS syscalls. Syscalls are invoked via the <code>syscall</code> instruction (x86_64). Arguments are passed in registers; the return value is in RAX.</p>
+<p><strong>ABI convention:</strong> Success returns a non-negative value. Errors return a negative errno value (two's complement). Userspace checks <code>if result &gt; 0xFFFF_F000</code> to detect errors, then applies <code>!result + 1</code> to get the errno number.</p>
+<hr />
+<h2 id="handle-operations"><a class="header" href="#handle-operations">Handle operations</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>0</td><td><code>SYS_NULL</code></td><td>:</td><td>0</td><td>No-op (used for benchmarking)</td></tr>
+<tr><td>1</td><td><code>SYS_HANDLE_DUPLICATE</code></td><td><code>handle: u64</code></td><td>new handle</td><td>Duplicate a capability handle</td></tr>
+<tr><td>2</td><td><code>SYS_HANDLE_CLOSE</code></td><td><code>handle: u64</code></td><td>0</td><td>Close a capability handle</td></tr>
+<tr><td>3</td><td><code>SYS_HANDLE_WAIT</code></td><td><code>handle: u64, timeout_ns: u64</code></td><td>0</td><td>Wait on a handle (blocks until ready or timeout)</td></tr>
+<tr><td>4</td><td><code>SYS_HANDLE_GRANT</code></td><td><code>handle: u64, target_pid: u64</code></td><td>0</td><td>Grant a capability to another process</td></tr>
+<tr><td>5</td><td><code>SYS_HANDLE_REVOKE</code></td><td><code>handle: u64</code></td><td>0</td><td>Revoke a capability (all holders lose access)</td></tr>
+<tr><td>6</td><td><code>SYS_HANDLE_INFO</code></td><td><code>handle: u64, out_ptr: u64</code></td><td>0</td><td>Query capability info (writes <code>HandleInfo</code> struct)</td></tr>
+</tbody></table>
+</div>
+<p><strong>Errors:</strong> <code>EBADF</code> (invalid handle), <code>EPERM</code> (no grant permission), <code>ESRCH</code> (target process not found)</p>
+<hr />
+<h2 id="memory-management"><a class="header" href="#memory-management">Memory management</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>100</td><td><code>SYS_MMAP</code></td><td><code>addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64</code></td><td>mapped address</td><td>Map a memory region</td></tr>
+<tr><td>101</td><td><code>SYS_MUNMAP</code></td><td><code>addr: u64, len: u64</code></td><td>0</td><td>Unmap a memory region</td></tr>
+<tr><td>102</td><td><code>SYS_BRK</code></td><td><code>addr: u64</code></td><td>new break</td><td>Set/clear the data break</td></tr>
+<tr><td>103</td><td><code>SYS_MREMAP</code></td><td><code>old_addr: u64, old_len: u64, new_len: u64, flags: u64, new_addr: u64</code></td><td>new address</td><td>Remap a memory region</td></tr>
+<tr><td>104</td><td><code>SYS_MPROTECT</code></td><td><code>addr: u64, len: u64, prot: u64</code></td><td>0</td><td>Change memory protection flags</td></tr>
+<tr><td>105</td><td><code>SYS_MEM_REGION_EXPORT</code></td><td><code>addr: u64, len: u64</code></td><td>region handle</td><td>Export a memory region as a shareable handle</td></tr>
+<tr><td>106</td><td><code>SYS_MEM_REGION_MAP</code></td><td><code>region_handle: u64, addr: u64, len: u64</code></td><td>mapped address</td><td>Map an exported memory region</td></tr>
+<tr><td>107</td><td><code>SYS_MEM_REGION_INFO</code></td><td><code>region_handle: u64, out_ptr: u64</code></td><td>0</td><td>Query region metadata</td></tr>
+</tbody></table>
+</div>
+<p><strong>Prot flags:</strong> <code>PROT_READ (1)</code>, <code>PROT_WRITE (2)</code>, <code>PROT_EXEC (4)</code></p>
+<p><strong>Errors:</strong> <code>EINVAL</code> (bad alignment/flags), <code>ENOMEM</code> (out of memory), <code>EACCES</code> (permission denied), <code>EEXIST</code> (region already mapped)</p>
+<hr />
+<h2 id="ipc--ports"><a class="header" href="#ipc--ports">IPC : Ports</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>200</td><td><code>SYS_IPC_CREATE_PORT</code></td><td>:</td><td>port handle</td><td>Create a new IPC port</td></tr>
+<tr><td>201</td><td><code>SYS_IPC_SEND</code></td><td><code>port_handle: u64, msg_ptr: u64, msg_len: u64</code></td><td>0</td><td>Send a message to a port</td></tr>
+<tr><td>202</td><td><code>SYS_IPC_RECV</code></td><td><code>port_handle: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes received</td><td>Receive a message (blocks)</td></tr>
+<tr><td>203</td><td><code>SYS_IPC_CALL</code></td><td><code>port_handle: u64, msg_ptr: u64, msg_len: u64</code></td><td>bytes received</td><td>Synchronous RPC (send + wait for reply)</td></tr>
+<tr><td>204</td><td><code>SYS_IPC_REPLY</code></td><td><code>msg_ptr: u64, msg_len: u64</code></td><td>0</td><td>Reply to the current IPC call</td></tr>
+<tr><td>205</td><td><code>SYS_IPC_BIND_PORT</code></td><td><code>port_handle: u64</code></td><td>0</td><td>Bind a port as a listener</td></tr>
+<tr><td>206</td><td><code>SYS_IPC_UNBIND_PORT</code></td><td><code>port_handle: u64</code></td><td>0</td><td>Unbind a listening port</td></tr>
+<tr><td>207</td><td><code>SYS_IPC_TRY_RECV</code></td><td><code>port_handle: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes received (0 if empty)</td><td>Non-blocking receive</td></tr>
+<tr><td>208</td><td><code>SYS_IPC_CONNECT</code></td><td><code>port_handle: u64</code></td><td>0</td><td>Connect to a bound port</td></tr>
+<tr><td>210</td><td><code>SYS_IPC_RING_CREATE</code></td><td><code>size_log2: u64</code></td><td>ring handle</td><td>Create a shared ring buffer</td></tr>
+<tr><td>211</td><td><code>SYS_IPC_RING_MAP</code></td><td><code>ring_handle: u64, addr: u64</code></td><td>0</td><td>Map a shared ring into address space</td></tr>
+</tbody></table>
+</div>
+<p><strong>Errors:</strong> <code>EBADF</code> (invalid handle), <code>ENOSPC</code> (ring full), <code>EAGAIN</code> (non-blocking, nothing available), <code>ETIMEDOUT</code> (timeout exceeded)</p>
+<hr />
+<h2 id="ipc--channels-typed-mpmc"><a class="header" href="#ipc--channels-typed-mpmc">IPC : Channels (typed MPMC)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>220</td><td><code>SYS_CHAN_CREATE</code></td><td><code>capacity: u64</code></td><td>channel handle</td><td>Create a typed channel</td></tr>
+<tr><td>221</td><td><code>SYS_CHAN_SEND</code></td><td><code>handle: u64, msg_ptr: u64</code></td><td>0</td><td>Send a message (blocks if full)</td></tr>
+<tr><td>222</td><td><code>SYS_CHAN_RECV</code></td><td><code>handle: u64, msg_ptr: u64</code></td><td>0</td><td>Receive a message (blocks if empty)</td></tr>
+<tr><td>223</td><td><code>SYS_CHAN_TRY_RECV</code></td><td><code>handle: u64, msg_ptr: u64</code></td><td>1 if received, 0 if empty</td><td>Non-blocking receive</td></tr>
+<tr><td>224</td><td><code>SYS_CHAN_CLOSE</code></td><td><code>handle: u64</code></td><td>0</td><td>Close channel handle</td></tr>
+</tbody></table>
+</div>
+<p><strong>Errors:</strong> <code>EBADF</code> (invalid handle), <code>EPIPE</code> (all endpoints disconnected), <code>EAGAIN</code> (try_recv on empty channel)</p>
+<hr />
+<h2 id="ipc--semaphores"><a class="header" href="#ipc--semaphores">IPC : Semaphores</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>230</td><td><code>SYS_SEM_CREATE</code></td><td><code>initial_value: u64</code></td><td>semaphore handle</td><td>Create a counting semaphore</td></tr>
+<tr><td>231</td><td><code>SYS_SEM_WAIT</code></td><td><code>handle: u64</code></td><td>0</td><td>Decrement (blocks if zero)</td></tr>
+<tr><td>232</td><td><code>SYS_SEM_TRYWAIT</code></td><td><code>handle: u64</code></td><td>1 if acquired, 0 if would block</td><td>Non-blocking decrement</td></tr>
+<tr><td>233</td><td><code>SYS_SEM_POST</code></td><td><code>handle: u64</code></td><td>0</td><td>Increment (wake a waiter)</td></tr>
+<tr><td>234</td><td><code>SYS_SEM_CLOSE</code></td><td><code>handle: u64</code></td><td>0</td><td>Close semaphore handle</td></tr>
+</tbody></table>
+</div>
+<p><strong>Errors:</strong> <code>EBADF</code> (invalid handle), <code>EAGAIN</code> (try_wait on zero semaphore)</p>
+<hr />
+<h2 id="pci"><a class="header" href="#pci">PCI</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>240</td><td><code>SYS_PCI_ENUM</code></td><td><code>criteria_ptr: u64, out_ptr: u64, max_count: u64</code></td><td>device count</td><td>Enumerate PCI devices matching criteria</td></tr>
+<tr><td>241</td><td><code>SYS_PCI_CFG_READ</code></td><td><code>addr_ptr: u64, offset: u64, width: u64</code></td><td>config value</td><td>Read PCI configuration register</td></tr>
+<tr><td>242</td><td><code>SYS_PCI_CFG_WRITE</code></td><td><code>addr_ptr: u64, offset: u64, width: u64, value: u64</code></td><td>0</td><td>Write PCI configuration register</td></tr>
+</tbody></table>
+</div>
+<p><strong>Errors:</strong> <code>EINVAL</code> (invalid width/offset), <code>EACCES</code> (no PCI capability)</p>
+<hr />
+<h2 id="async-io"><a class="header" href="#async-io">Async I/O</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>250</td><td><code>SYS_ASYNC_SETUP</code></td><td><code>handle: u64, event_mask: u64</code></td><td>async context</td><td>Set up async notification on a handle</td></tr>
+<tr><td>251</td><td><code>SYS_ASYNC_ENTER</code></td><td><code>ctx: u64</code></td><td>0</td><td>Enter async wait (yields until event)</td></tr>
+<tr><td>252</td><td><code>SYS_ASYNC_CANCEL</code></td><td><code>ctx: u64</code></td><td>0</td><td>Cancel pending async wait</td></tr>
+<tr><td>253</td><td><code>SYS_ASYNC_MAP</code></td><td><code>ctx: u64, ring_handle: u64</code></td><td>0</td><td>Map an event ring to the async context</td></tr>
+<tr><td>254</td><td><code>SYS_ASYNC_DESTROY</code></td><td><code>ctx: u64</code></td><td>0</td><td>Destroy async context</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="process-management"><a class="header" href="#process-management">Process management</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>300</td><td><code>SYS_PROC_EXIT</code></td><td><code>exit_code: u64</code></td><td>: (never returns)</td><td>Terminate current process</td></tr>
+<tr><td>301</td><td><code>SYS_PROC_YIELD</code></td><td>:</td><td>0</td><td>Yield CPU to scheduler</td></tr>
+<tr><td>302</td><td><code>SYS_PROC_FORK</code></td><td><code>frame: &amp;SyscallFrame</code></td><td>child PID (parent), 0 (child)</td><td>Fork the current process (COW)</td></tr>
+<tr><td>308</td><td><code>SYS_PROC_GETPID</code></td><td>:</td><td>process ID</td><td>Get current process ID</td></tr>
+<tr><td>309</td><td><code>SYS_PROC_GETPPID</code></td><td>:</td><td>parent PID</td><td>Get parent process ID</td></tr>
+<tr><td>310</td><td><code>SYS_PROC_WAITPID</code></td><td><code>pid: i64, status_ptr: u64, options: u64</code></td><td>child PID</td><td>Wait for a child process</td></tr>
+<tr><td>311</td><td><code>SYS_GETPID</code></td><td>:</td><td>process ID</td><td>Alias for SYS_PROC_GETPID</td></tr>
+<tr><td>312</td><td><code>SYS_GETTID</code></td><td>:</td><td>thread ID</td><td>Get current thread ID</td></tr>
+<tr><td>314</td><td><code>SYS_PROC_WAIT</code></td><td>:</td><td>:</td><td>Wait for any child</td></tr>
+<tr><td>315</td><td><code>SYS_PROC_EXECVE</code></td><td><code>path_ptr: u64, path_len: u64, argv_ptr: u64, envp_ptr: u64</code></td><td>: (replaces image)</td><td>Execute a new program</td></tr>
+<tr><td>341</td><td><code>SYS_THREAD_CREATE</code></td><td><code>entry: u64, stack: u64, arg: u64</code></td><td>thread ID</td><td>Create a new thread</td></tr>
+<tr><td>342</td><td><code>SYS_THREAD_JOIN</code></td><td><code>tid: u64, status_ptr: u64</code></td><td>0</td><td>Wait for thread to exit</td></tr>
+<tr><td>343</td><td><code>SYS_THREAD_EXIT</code></td><td><code>status: u64</code></td><td>: (never returns)</td><td>Terminate current thread</td></tr>
+</tbody></table>
+</div>
+<p><strong>Errors:</strong> <code>ECHILD</code> (no child processes), <code>EAGAIN</code> (thread creation failed), <code>ENOMEM</code> (out of memory)</p>
+<hr />
+<h2 id="futex"><a class="header" href="#futex">Futex</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>303</td><td><code>SYS_FUTEX_WAIT</code></td><td><code>addr: u64, val: u32, timeout_ns: u64</code></td><td>0</td><td>Sleep if <code>*addr == val</code></td></tr>
+<tr><td>304</td><td><code>SYS_FUTEX_WAKE</code></td><td><code>addr: u64, max_wake: u32</code></td><td>woken count</td><td>Wake up to N waiters</td></tr>
+<tr><td>305</td><td><code>SYS_FUTEX_REQUEUE</code></td><td><code>addr: u64, max_wake: u32, addr2: u64, max_requeue: u32</code></td><td>woken count</td><td>Wake + requeue to addr2</td></tr>
+<tr><td>306</td><td><code>SYS_FUTEX_CMP_REQUEUE</code></td><td><code>addr: u64, max_wake: u32, addr2: u64, max_requeue: u32, cmp_val: u32</code></td><td>woken count</td><td>Conditional requeue</td></tr>
+<tr><td>307</td><td><code>SYS_FUTEX_WAKE_OP</code></td><td><code>addr: u64, max_wake: u32, addr2: u64, max_requeue: u32, wake_op: u32</code></td><td>woken count</td><td>Atomic op + wake</td></tr>
+</tbody></table>
+</div>
+<p><strong>Errors:</strong> <code>EAGAIN</code> (value mismatch in WAIT), <code>ETIMEDOUT</code> (timeout expired), <code>EFAULT</code> (invalid address)</p>
+<hr />
+<h2 id="signals"><a class="header" href="#signals">Signals</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>320</td><td><code>SYS_KILL</code></td><td><code>pid: i64, signum: u32</code></td><td>0</td><td>Send signal to a process</td></tr>
+<tr><td>321</td><td><code>SYS_SIGPROCMASK</code></td><td><code>how: i32, set_ptr: u64, oldset_ptr: u64</code></td><td>0</td><td>Get/set signal mask</td></tr>
+<tr><td>322</td><td><code>SYS_SIGACTION</code></td><td><code>signum: u64, act_ptr: u64, oact_ptr: u64</code></td><td>0</td><td>Set signal handler</td></tr>
+<tr><td>323</td><td><code>SYS_SIGALTSTACK</code></td><td><code>ss_ptr: u64, old_ss_ptr: u64</code></td><td>0</td><td>Set alternate signal stack</td></tr>
+<tr><td>324</td><td><code>SYS_SIGPENDING</code></td><td><code>set_ptr: u64</code></td><td>0</td><td>Get pending signals</td></tr>
+<tr><td>325</td><td><code>SYS_SIGSUSPEND</code></td><td><code>mask_ptr: u64</code></td><td>: (restarted on signal)</td><td>Suspend until signal</td></tr>
+<tr><td>326</td><td><code>SYS_SIGTIMEDWAIT</code></td><td><code>set_ptr: u64, info_ptr: u64, timeout_ptr: u64</code></td><td>signal number</td><td>Wait for specific signal</td></tr>
+<tr><td>327</td><td><code>SYS_SIGQUEUE</code></td><td><code>pid: i64, signum: u32, sigval_ptr: u64</code></td><td>0</td><td>Queue a signal with data</td></tr>
+<tr><td>328</td><td><code>SYS_KILLPG</code></td><td><code>pgrp: u64, signum: u32</code></td><td>0</td><td>Send signal to process group</td></tr>
+<tr><td>352</td><td><code>SYS_TGKILL</code></td><td><code>tgid: u64, tid: u64, signum: u32</code></td><td>0</td><td>Send signal to specific thread</td></tr>
+<tr><td>353</td><td><code>SYS_RT_SIGRETURN</code></td><td>:</td><td>:</td><td>Return from signal handler</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="process-groups--sessions"><a class="header" href="#process-groups--sessions">Process groups &amp; sessions</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>316</td><td><code>SYS_FCNTL</code></td><td><code>fd: u64, cmd: u64, arg: u64</code></td><td>depends on cmd</td><td>File control operations</td></tr>
+<tr><td>317</td><td><code>SYS_SETPGID</code></td><td><code>pid: u64, pgid: u64</code></td><td>0</td><td>Set process group ID</td></tr>
+<tr><td>318</td><td><code>SYS_GETPGID</code></td><td><code>pid: u64</code></td><td>pgid</td><td>Get process group ID</td></tr>
+<tr><td>319</td><td><code>SYS_SETSID</code></td><td>:</td><td>session ID</td><td>Create new session</td></tr>
+<tr><td>329</td><td><code>SYS_GETITIMER</code></td><td><code>which: u64, out_ptr: u64</code></td><td>0</td><td>Get interval timer</td></tr>
+<tr><td>330</td><td><code>SYS_SETITIMER</code></td><td><code>which: u64, in_ptr: u64, out_ptr: u64</code></td><td>0</td><td>Set interval timer</td></tr>
+<tr><td>331</td><td><code>SYS_GETPGRP</code></td><td>:</td><td>pgrp</td><td>Get current process group</td></tr>
+<tr><td>332</td><td><code>SYS_GETSID</code></td><td><code>pid: u64</code></td><td>sid</td><td>Get session ID</td></tr>
+<tr><td>333</td><td><code>SYS_SET_TID_ADDRESS</code></td><td><code>tidptr: u64</code></td><td>0</td><td>Set clear-on-exit TID address</td></tr>
+<tr><td>334</td><td><code>SYS_EXIT_GROUP</code></td><td><code>exit_code: u64</code></td><td>: (never returns)</td><td>Exit all threads in process</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="usergroup-ids"><a class="header" href="#usergroup-ids">User/group IDs</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>335</td><td><code>SYS_GETUID</code></td><td>:</td><td>uid</td><td>Get real user ID</td></tr>
+<tr><td>336</td><td><code>SYS_GETEUID</code></td><td>:</td><td>euid</td><td>Get effective user ID</td></tr>
+<tr><td>337</td><td><code>SYS_GETGID</code></td><td>:</td><td>gid</td><td>Get real group ID</td></tr>
+<tr><td>338</td><td><code>SYS_GETEGID</code></td><td>:</td><td>egid</td><td>Get effective group ID</td></tr>
+<tr><td>339</td><td><code>SYS_SETUID</code></td><td><code>uid: u64</code></td><td>0</td><td>Set user ID</td></tr>
+<tr><td>340</td><td><code>SYS_SETGID</code></td><td><code>gid: u64</code></td><td>0</td><td>Set group ID</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="misc-process"><a class="header" href="#misc-process">Misc process</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>344</td><td><code>SYS_UNAME</code></td><td><code>uts_ptr: u64</code></td><td>0</td><td>Get system information (name, release, etc.)</td></tr>
+<tr><td>350</td><td><code>SYS_ARCH_PRCTL</code></td><td><code>code: u64, addr: u64</code></td><td>0</td><td>Architecture-specific process control</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="file-io"><a class="header" href="#file-io">File I/O</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>403</td><td><code>SYS_OPEN</code></td><td><code>path_ptr: u64, path_len: u64, flags: u64</code></td><td>file descriptor</td><td>Open a file</td></tr>
+<tr><td>404</td><td><code>SYS_WRITE</code></td><td><code>fd: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes written</td><td>Write to a file descriptor</td></tr>
+<tr><td>405</td><td><code>SYS_READ</code></td><td><code>fd: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes read</td><td>Read from a file descriptor</td></tr>
+<tr><td>406</td><td><code>SYS_CLOSE</code></td><td><code>fd: u64</code></td><td>0</td><td>Close a file descriptor</td></tr>
+<tr><td>407</td><td><code>SYS_LSEEK</code></td><td><code>fd: u64, offset: u64, whence: u64</code></td><td>new position</td><td>Seek in a file</td></tr>
+<tr><td>408</td><td><code>SYS_FSTAT</code></td><td><code>fd: u64, stat_ptr: u64</code></td><td>0</td><td>Get file status (fstat)</td></tr>
+<tr><td>409</td><td><code>SYS_STAT</code></td><td><code>path_ptr: u64, path_len: u64, stat_ptr: u64</code></td><td>0</td><td>Get file status by path</td></tr>
+<tr><td>413</td><td><code>SYS_ACCESS</code></td><td><code>path_ptr: u64, path_len: u64, mode: u64</code></td><td>0</td><td>Check file accessibility</td></tr>
+<tr><td>430</td><td><code>SYS_GETDENTS</code></td><td><code>fd: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes read</td><td>Read directory entries</td></tr>
+<tr><td>431</td><td><code>SYS_PIPE</code></td><td><code>fds_ptr: u64</code></td><td>0</td><td>Create a pipe pair</td></tr>
+<tr><td>432</td><td><code>SYS_DUP</code></td><td><code>old_fd: u64</code></td><td>new fd</td><td>Duplicate file descriptor</td></tr>
+<tr><td>433</td><td><code>SYS_DUP2</code></td><td><code>old_fd: u64, new_fd: u64</code></td><td>new fd</td><td>Duplicate to specific fd</td></tr>
+<tr><td>456</td><td><code>SYS_PREAD</code></td><td><code>fd: u64, buf_ptr: u64, buf_len: u64, offset: u64</code></td><td>bytes read</td><td>Pread at offset</td></tr>
+<tr><td>457</td><td><code>SYS_PWRITE</code></td><td><code>fd: u64, buf_ptr: u64, buf_len: u64, offset: u64</code></td><td>bytes written</td><td>Pwrite at offset</td></tr>
+</tbody></table>
+</div>
+<p><strong>Open flags:</strong> <code>O_RDONLY (0)</code>, <code>O_WRONLY (1)</code>, <code>O_RDWR (2)</code>, <code>O_CREAT (0x40)</code>, <code>O_TRUNC (0x200)</code>, <code>O_APPEND (0x400)</code>, <code>O_EXCL (0x800)</code></p>
+<p><strong>Errors:</strong> <code>ENOENT</code> (file not found), <code>EACCES</code> (permission denied), <code>EBADF</code> (bad fd), <code>ENOTDIR</code> (not a directory), <code>EISDIR</code> (is a directory), <code>ENOSPC</code> (disk full), <code>EIO</code> (I/O error)</p>
+<hr />
+<h2 id="file-system-operations"><a class="header" href="#file-system-operations">File system operations</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>440</td><td><code>SYS_CHDIR</code></td><td><code>path_ptr: u64, path_len: u64</code></td><td>0</td><td>Change working directory</td></tr>
+<tr><td>441</td><td><code>SYS_FCHDIR</code></td><td><code>fd: u64</code></td><td>0</td><td>Change working directory by fd</td></tr>
+<tr><td>442</td><td><code>SYS_GETCWD</code></td><td><code>buf_ptr: u64, buf_len: u64</code></td><td>bytes written</td><td>Get current working directory</td></tr>
+<tr><td>443</td><td><code>SYS_IOCTL</code></td><td><code>fd: u64, cmd: u64, arg: u64</code></td><td>depends on cmd</td><td>Device I/O control</td></tr>
+<tr><td>444</td><td><code>SYS_UMASK</code></td><td><code>mask: u64</code></td><td>old mask</td><td>Set file mode creation mask</td></tr>
+<tr><td>445</td><td><code>SYS_UNLINK</code></td><td><code>path_ptr: u64, path_len: u64</code></td><td>0</td><td>Delete a file</td></tr>
+<tr><td>446</td><td><code>SYS_RMDIR</code></td><td><code>path_ptr: u64, path_len: u64</code></td><td>0</td><td>Remove a directory</td></tr>
+<tr><td>447</td><td><code>SYS_MKDIR</code></td><td><code>path_ptr: u64, path_len: u64, mode: u64</code></td><td>0</td><td>Create a directory</td></tr>
+<tr><td>448</td><td><code>SYS_RENAME</code></td><td><code>old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64</code></td><td>0</td><td>Rename a file</td></tr>
+<tr><td>449</td><td><code>SYS_LINK</code></td><td><code>old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64</code></td><td>0</td><td>Create a hard link</td></tr>
+<tr><td>450</td><td><code>SYS_SYMLINK</code></td><td><code>target_ptr: u64, target_len: u64, link_ptr: u64, link_len: u64</code></td><td>0</td><td>Create a symbolic link</td></tr>
+<tr><td>451</td><td><code>SYS_READLINK</code></td><td><code>path_ptr: u64, path_len: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes read</td><td>Read symbolic link target</td></tr>
+<tr><td>452</td><td><code>SYS_CHMOD</code></td><td><code>path_ptr: u64, path_len: u64, mode: u64</code></td><td>0</td><td>Change file permissions</td></tr>
+<tr><td>453</td><td><code>SYS_FCHMOD</code></td><td><code>fd: u64, mode: u64</code></td><td>0</td><td>Change file permissions by fd</td></tr>
+<tr><td>454</td><td><code>SYS_TRUNCATE</code></td><td><code>path_ptr: u64, path_len: u64, len: u64</code></td><td>0</td><td>Truncate a file</td></tr>
+<tr><td>455</td><td><code>SYS_FTRUNCATE</code></td><td><code>fd: u64, len: u64</code></td><td>0</td><td>Truncate a file by fd</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="at-variants-relative-to-directory-fd"><a class="header" href="#at-variants-relative-to-directory-fd"><code>*at</code> variants (relative to directory fd)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>462</td><td><code>SYS_OPENAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, flags: u64</code></td><td>file descriptor</td><td>Open relative to dirfd</td></tr>
+<tr><td>463</td><td><code>SYS_FSTATAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, stat_ptr: u64, flags: u64</code></td><td>0</td><td>Stat relative to dirfd</td></tr>
+<tr><td>464</td><td><code>SYS_UNLINKAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, flags: u64</code></td><td>0</td><td>Unlink relative to dirfd</td></tr>
+<tr><td>465</td><td><code>SYS_RENAMEAT</code></td><td><code>olddirfd: u64, old_ptr: u64, old_len: u64, newdirfd: u64, new_ptr: u64, new_len: u64</code></td><td>0</td><td>Rename relative to dirfds</td></tr>
+<tr><td>466</td><td><code>SYS_MKDIRAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, mode: u64</code></td><td>0</td><td>Create directory relative to dirfd</td></tr>
+<tr><td>467</td><td><code>SYS_READLINKAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes read</td><td>Readlink relative to dirfd</td></tr>
+<tr><td>468</td><td><code>SYS_FACCESSAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, mode: u64, flags: u64</code></td><td>0</td><td>Check accessibility relative to dirfd</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="poll--io-multiplexing"><a class="header" href="#poll--io-multiplexing">Poll / I/O multiplexing</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>460</td><td><code>SYS_POLL</code></td><td><code>fds_ptr: u64, nfds: u64, timeout_ms: i64</code></td><td>ready count</td><td>Poll file descriptors</td></tr>
+<tr><td>461</td><td><code>SYS_PPOLL</code></td><td><code>fds_ptr: u64, nfds: u64, timeout_ptr: u64, sigmask_ptr: u64</code></td><td>ready count</td><td>Ppoll with signal mask</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="network"><a class="header" href="#network">Network</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>410</td><td><code>SYS_NET_RECV</code></td><td><code>buf_ptr: u64, buf_len: u64</code></td><td>bytes received</td><td>Receive network packet</td></tr>
+<tr><td>411</td><td><code>SYS_NET_SEND</code></td><td><code>buf_ptr: u64, buf_len: u64</code></td><td>bytes sent</td><td>Send network packet</td></tr>
+<tr><td>412</td><td><code>SYS_NET_INFO</code></td><td><code>info_type: u64, buf_ptr: u64</code></td><td>0</td><td>Query network info (IP, gateway, etc.)</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="volume-block-device"><a class="header" href="#volume-block-device">Volume (block device)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>420</td><td><code>SYS_VOLUME_READ</code></td><td><code>handle: u64, offset: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes read</td><td>Read from volume</td></tr>
+<tr><td>421</td><td><code>SYS_VOLUME_WRITE</code></td><td><code>handle: u64, offset: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes written</td><td>Write to volume</td></tr>
+<tr><td>422</td><td><code>SYS_VOLUME_INFO</code></td><td><code>handle: u64, out_ptr: u64</code></td><td>0</td><td>Query volume info</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="time"><a class="header" href="#time">Time</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>500</td><td><code>SYS_CLOCK_GETTIME</code></td><td><code>clock_id: u64, tp_ptr: u64</code></td><td>0</td><td>Get clock time</td></tr>
+<tr><td>501</td><td><code>SYS_NANOSLEEP</code></td><td><code>req_ptr: u64, rem_ptr: u64</code></td><td>0</td><td>Sleep for a duration</td></tr>
+<tr><td>502</td><td><code>SYS_CLOCK_NANOSLEEP</code></td><td><code>clock_id: u64, flags: u64, req_ptr: u64, rem_ptr: u64</code></td><td>0</td><td>Sleep on a specific clock</td></tr>
+</tbody></table>
+</div>
+<p><strong>Clock IDs:</strong> <code>CLOCK_REALTIME (0)</code>, <code>CLOCK_MONOTONIC (1)</code>, <code>CLOCK_PROCESS_CPUTIME_ID (2)</code>, <code>CLOCK_THREAD_CPUTIME_ID (3)</code></p>
+<hr />
+<h2 id="debug--miscellaneous"><a class="header" href="#debug--miscellaneous">Debug &amp; miscellaneous</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>600</td><td><code>SYS_DEBUG_LOG</code></td><td><code>msg_ptr: u64, msg_len: u64</code></td><td>0</td><td>Write a debug message to kernel log</td></tr>
+<tr><td>601</td><td><code>SYS_GETRANDOM</code></td><td><code>buf: u64, len: usize, flags: u32</code></td><td>bytes written</td><td>Fill buffer with random bytes</td></tr>
+<tr><td>610</td><td><code>SYS_SET_ROBUST_LIST</code></td><td><code>head: u64, len: usize</code></td><td>0</td><td>Set robust futex list head</td></tr>
+<tr><td>611</td><td><code>SYS_GET_ROBUST_LIST</code></td><td><code>pid: i64, head_ptr: u64, len_ptr: u64</code></td><td>0</td><td>Get robust futex list head</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="module-management"><a class="header" href="#module-management">Module management</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>700</td><td><code>SYS_MODULE_LOAD</code></td><td><code>path_ptr: u64, path_len: u64</code></td><td>module ID</td><td>Load a kernel module</td></tr>
+<tr><td>701</td><td><code>SYS_MODULE_UNLOAD</code></td><td><code>module_id: u64</code></td><td>0</td><td>Unload a kernel module</td></tr>
+<tr><td>702</td><td><code>SYS_MODULE_GET_SYMBOL</code></td><td><code>module_id: u64, name_ptr: u64, name_len: u64</code></td><td>symbol address</td><td>Look up a symbol in a loaded module</td></tr>
+<tr><td>703</td><td><code>SYS_MODULE_QUERY</code></td><td><code>out_ptr: u64, max_count: u64</code></td><td>module count</td><td>List loaded modules</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="silo-management"><a class="header" href="#silo-management">Silo management</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>800</td><td><code>SYS_SILO_CREATE</code></td><td>:</td><td>silo ID</td><td>Create a new silo</td></tr>
+<tr><td>801</td><td><code>SYS_SILO_CONFIG</code></td><td><code>silo_id: u64, key_ptr: u64, key_len: u64, val_ptr: u64, val_len: u64</code></td><td>0</td><td>Configure a silo</td></tr>
+<tr><td>802</td><td><code>SYS_SILO_ATTACH_MODULE</code></td><td><code>silo_id: u64, module_id: u64</code></td><td>0</td><td>Attach a module to a silo</td></tr>
+<tr><td>803</td><td><code>SYS_SILO_START</code></td><td><code>silo_id: u64</code></td><td>0</td><td>Start a silo</td></tr>
+<tr><td>804</td><td><code>SYS_SILO_STOP</code></td><td><code>silo_id: u64</code></td><td>0</td><td>Stop a silo</td></tr>
+<tr><td>805</td><td><code>SYS_SILO_KILL</code></td><td><code>silo_id: u64</code></td><td>0</td><td>Kill a silo (force stop)</td></tr>
+<tr><td>806</td><td><code>SYS_SILO_EVENT_NEXT</code></td><td><code>silo_id: u64, out_ptr: u64</code></td><td>0</td><td>Wait for next silo event</td></tr>
+<tr><td>807</td><td><code>SYS_SILO_SUSPEND</code></td><td><code>silo_id: u64</code></td><td>0</td><td>Suspend a silo</td></tr>
+<tr><td>808</td><td><code>SYS_SILO_RESUME</code></td><td><code>silo_id: u64</code></td><td>0</td><td>Resume a silo</td></tr>
+<tr><td>809</td><td><code>SYS_SILO_PLEDGE</code></td><td><code>promises_ptr: u64, promises_len: u64</code></td><td>0</td><td>Restrict syscalls (pledge)</td></tr>
+<tr><td>810</td><td><code>SYS_SILO_UNVEIL</code></td><td><code>path_ptr: u64, path_len: u64, perms_ptr: u64, perms_len: u64</code></td><td>0</td><td>Restrict filesystem access (unveil)</td></tr>
+<tr><td>811</td><td><code>SYS_SILO_ENTER_SANDBOX</code></td><td>:</td><td>0</td><td>Enter sandbox mode (irreversible)</td></tr>
+<tr><td>812</td><td><code>SYS_SILO_RENAME</code></td><td><code>silo_id: u64, name_ptr: u64, name_len: u64</code></td><td>0</td><td>Rename a silo</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="abi-version"><a class="header" href="#abi-version">ABI version</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>900</td><td><code>SYS_ABI_VERSION</code></td><td>:</td><td><code>(major &lt;&lt; 16) | minor</code></td><td>Query ABI version</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="common-errno-values"><a class="header" href="#common-errno-values">Common errno values</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Value</th><th>Name</th><th>Description</th></tr></thead><tbody>
+<tr><td>1</td><td><code>EPERM</code></td><td>Operation not permitted</td></tr>
+<tr><td>2</td><td><code>ENOENT</code></td><td>No such file or directory</td></tr>
+<tr><td>3</td><td><code>ESRCH</code></td><td>No such process</td></tr>
+<tr><td>4</td><td><code>EINTR</code></td><td>Interrupted system call</td></tr>
+<tr><td>5</td><td><code>EIO</code></td><td>Input/output error</td></tr>
+<tr><td>7</td><td><code>E2BIG</code></td><td>Argument list too long</td></tr>
+<tr><td>9</td><td><code>EBADF</code></td><td>Bad file descriptor</td></tr>
+<tr><td>10</td><td><code>ECHILD</code></td><td>No child processes</td></tr>
+<tr><td>11</td><td><code>EAGAIN</code></td><td>Resource temporarily unavailable</td></tr>
+<tr><td>12</td><td><code>ENOMEM</code></td><td>Out of memory</td></tr>
+<tr><td>13</td><td><code>EACCES</code></td><td>Permission denied</td></tr>
+<tr><td>14</td><td><code>EFAULT</code></td><td>Bad address</td></tr>
+<tr><td>17</td><td><code>EEXIST</code></td><td>File exists</td></tr>
+<tr><td>20</td><td><code>ENOTDIR</code></td><td>Not a directory</td></tr>
+<tr><td>21</td><td><code>EISDIR</code></td><td>Is a directory</td></tr>
+<tr><td>22</td><td><code>EINVAL</code></td><td>Invalid argument</td></tr>
+<tr><td>28</td><td><code>ENOSPC</code></td><td>No space left on device</td></tr>
+<tr><td>32</td><td><code>EPIPE</code></td><td>Broken pipe</td></tr>
+<tr><td>38</td><td><code>ENOSYS</code></td><td>Function not implemented</td></tr>
+<tr><td>52</td><td><code>ENOTSUP</code></td><td>Not supported</td></tr>
+<tr><td>98</td><td><code>EADDRINUSE</code></td><td>Address already in use</td></tr>
+<tr><td>110</td><td><code>ETIMEDOUT</code></td><td>Connection timed out</td></tr>
+<tr><td>111</td><td><code>ECONNREFUSED</code></td><td>Connection refused</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="abi-matrix.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="syscall.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="abi-matrix.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="syscall.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="src/theme/mermaid-init.js"></script>
+
+
+    </div>
+    </body>
+</html>

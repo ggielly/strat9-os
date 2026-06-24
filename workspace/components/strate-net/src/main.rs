@@ -36,21 +36,7 @@ fn alloc_error(_layout: Layout) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    let _ = call::debug_log(b"[strate-net] PANIC: ");
-    let msg = info.message();
-    let mut buf = [0u8; 256];
-    use core::fmt::Write;
-    let mut cursor = BufWriter {
-        buf: &mut buf,
-        pos: 0,
-    };
-    let _ = write!(cursor, "{}", msg);
-    let written = cursor.pos;
-    if written > 0 {
-        let _ = call::debug_log(&buf[..written]);
-    }
-    let _ = call::debug_log(b"\n");
-    exit(255);
+    call::handle_panic("strate-net", info)
 }
 
 struct BufWriter<'a> {

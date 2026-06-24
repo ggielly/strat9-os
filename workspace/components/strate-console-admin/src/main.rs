@@ -517,24 +517,22 @@ fn prompt() {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_info: &PanicInfo) -> ! {
-    write_str("[console-admin] PANIC!\n");
-    call::exit(255)
-}
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("console-admin", info);
 
-#[no_mangle]
-/// Implements start.
-pub extern "C" fn _start() -> ! {
-    write_str("\n");
-    write_str("============================================================\n");
-    write_str("[console-admin] strat9-os: silo console admin\n");
-    write_str("[console-admin] Ready (IPC mode : use chevron shell to interact).\n");
-    write_str("============================================================\n");
+    #[no_mangle]
+    /// Implements start.
+    pub extern "C" fn _start() -> ! {
+        write_str("\n");
+        write_str("============================================================\n");
+        write_str("[console-admin] strat9-os: silo console admin\n");
+        write_str("[console-admin] Ready (IPC mode : use chevron shell to interact).\n");
+        write_str("============================================================\n");
 
-    // TODO: replace with IPC event loop once IPC channels are wired up.
-    // For now, idle so we don't steal keyboard input from the chevron shell.
-    loop {
-        let _ = call::sched_yield();
+        // TODO: replace with IPC event loop once IPC channels are wired up.
+        // For now, idle so we don't steal keyboard input from the chevron shell.
+        loop {
+            let _ = call::sched_yield();
+        }
     }
 }

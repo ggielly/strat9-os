@@ -45,16 +45,8 @@ fn alloc_error(layout: Layout) -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
 fn panic(info: &PanicInfo) -> ! {
-    let mut buf = [0u8; 256];
-    let n = {
-        let mut w = BufWriter::new(&mut buf);
-        let _ = write!(w, "[web-admin] PANIC: {}\n", info.message());
-        w.len()
-    };
-    let _ = call::debug_log(&buf[..n]);
-    call::exit(255)
+    call::handle_panic("web-admin", info);
 }
 
 struct BufWriter<'a> {

@@ -1,8 +1,16 @@
 # Summary
 
 - [Home](index.md)
+- [Architecture Overview](architecture.md)
+- [Silo System](silo.md)
+- [Memory Management](memory-model.md)
+- [Boot Sequence](boot-sequence.md)
+- [IPC Mechanisms](ipc-mechanisms.md)
+- [Driver Model](driver-model.md)
 - [ABI Overview](abi.md)
 - [ABI Changelog](abi-changelog.md)
 - [ABI Support Matrix](abi-matrix.md)
+- [Syscall Reference](syscalls.md)
 - [Syscall Layer](syscall.md)
+- [Changelog](changelog.md)
 - [Publishing](publishing.md)

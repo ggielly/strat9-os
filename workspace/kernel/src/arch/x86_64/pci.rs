@@ -206,7 +206,7 @@ pub mod msix_ctrl {
     pub const ENABLE: u16 = 1 << 15;
     /// Function Mask
     pub const FUNC_MASK: u16 = 1 << 14;
-    /// Table size (bits 0:10) — number of entries minus 1
+    /// Table size (bits 0:10) : number of entries minus 1
     pub const TABLE_SIZE_MASK: u16 = (1 << 11) - 1;
 }
 

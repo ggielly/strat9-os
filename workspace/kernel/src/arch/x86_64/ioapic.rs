@@ -268,4 +268,4 @@ pub fn route_nic_irq(irq: u8, vector: u8) {
     let overrides = MADT_OVERRIDES.lock();
     route_legacy_irq(irq, lapic_id, vector, &overrides[..]);
 }
-// MADT_OVERRIDES guard dropped here — overrides no longer needed.
+// MADT_OVERRIDES guard dropped here : overrides no longer needed.

@@ -1,0 +1,408 @@
+<!DOCTYPE HTML>
+<html lang="en" class="coal sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Silo System - Strat9 OS documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Architecture guide, ABI reference, and syscall documentation for Strat9 OS.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="src/theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "coal";
+            const default_dark_theme = "coal";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('coal')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Strat9 OS documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://git.strat9-os.org/strat9-os/" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/silo.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="silo-system"><a class="header" href="#silo-system">Silo System</a></h1>
+<p>Silos are Strat9 OS's primary isolation mechanism. Each silo is a container for processes with bounded resources, restricted capabilities, and filesystem access control. Policy lives in userspace; the kernel enforces mechanisms.</p>
+<hr />
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<pre><code class="language-mermaid">graph TB
+    subgraph "Admin (Silo Admin)"
+        ADMIN[Console Admin / Web Admin]
+    end
+
+    subgraph "Kernel"
+        SM[Silo Manager]
+        CAP[Capability System]
+        MEM[Memory Accounting]
+        EV[Event Queue]
+    end
+
+    subgraph "Silo 1 (System)"
+        T1[Task A]
+        T2[Task B]
+    end
+
+    subgraph "Silo 2 (User)"
+        T3[Task C]
+    end
+
+    ADMIN --&gt;|create/config/start/stop| SM
+    SM --&gt; CAP
+    SM --&gt; MEM
+    SM --&gt; EV
+    T1 --&gt; CAP
+    T2 --&gt; CAP
+    T3 --&gt; CAP
+    T1 -.-&gt; MEM
+    T3 -.-&gt; MEM
+</code></pre>
+<hr />
+<h2 id="silo-identity"><a class="header" href="#silo-identity">Silo identity</a></h2>
+<p>Each silo has a numeric ID (<code>SiloId</code>) and a tier derived from the ID range:</p>
+<div class="table-wrapper"><table><thead><tr><th>ID range</th><th>Tier</th><th>Purpose</th></tr></thead><tbody>
+<tr><td>1–9</td><td><code>Critical</code></td><td>Kernel system services (init, logger)</td></tr>
+<tr><td>10–999</td><td><code>System</code></td><td>Drivers, filesystems, network</td></tr>
+<tr><td>1000+</td><td><code>User</code></td><td>User applications</td></tr>
+</tbody></table>
+</div>
+<p>User-tier silos cannot have hardware or control permissions (enforced at creation).</p>
+<hr />
+<h2 id="silo-lifecycle"><a class="header" href="#silo-lifecycle">Silo lifecycle</a></h2>
+<pre><code class="language-mermaid">stateDiagram-v2
+    [*] --&gt; Created : SYS_SILO_CREATE
+    Created --&gt; Ready : SYS_SILO_CONFIG + SYS_SILO_ATTACH_MODULE
+    Ready --&gt; Running : SYS_SILO_START
+    Running --&gt; Paused : SYS_SILO_SUSPEND
+    Paused --&gt; Running : SYS_SILO_RESUME
+    Running --&gt; Stopping : SYS_SILO_STOP (graceful)
+    Stopping --&gt; Stopped : tasks exit
+    Running --&gt; Stopped : SYS_SILO_KILL (force)
+    Stopped --&gt; [*] : SYS_SILO_DESTROY
+    Running --&gt; Crashed : fault / panic
+    Crashed --&gt; Stopped : cleanup
+</code></pre>
+<p><strong>States:</strong> <code>Created → Loading → Ready → Running → Paused → Stopping → Stopped → Destroyed</code> (also <code>Crashed</code>, <code>Zombie</code>)</p>
+<hr />
+<h2 id="resource-limits"><a class="header" href="#resource-limits">Resource limits</a></h2>
+<p>The <code>SiloConfig</code> struct defines per-silo resource bounds:</p>
+<pre><code class="language-text">SiloConfig {
+    mem_min: u64,           // Minimum guaranteed memory (bytes)
+    mem_max: u64,           // Maximum allowed memory (0 = unlimited)
+    cpu_shares: u32,        // CPU share weight (for proportional scheduling)
+    cpu_quota_us: u64,      // CPU time quota per period (microseconds)
+    cpu_period_us: u64,     // Quota period (microseconds)
+    cpu_affinity_mask: u64, // CPU affinity bitmask
+    max_tasks: u32,         // Maximum concurrent tasks
+    io_bw_read: u64,        // Read bandwidth limit
+    io_bw_write: u64,       // Write bandwidth limit
+    flags: u64,             // Feature flags
+    family: u8,             // Silo family (SYS/DRV/FS/NET/WASM/USR)
+}
+</code></pre>
+<p><strong>Memory accounting:</strong> Every allocation through the kernel heap charges against the silo's <code>mem_usage_bytes</code>. When <code>mem_max</code> is exceeded, <code>charge_current_task_memory()</code> returns <code>OutOfMemory</code>. This is enforced transparently in the buddy allocator and slab paths.</p>
+<hr />
+<h2 id="octal-mode-pledgeunveil"><a class="header" href="#octal-mode-pledgeunveil">Octal mode (pledge/unveil)</a></h2>
+<p>Access control uses an <code>OctalMode</code> with three permission groups, encoded as a 12-bit octal value:</p>
+<div class="table-wrapper"><table><thead><tr><th>Bits</th><th>Group</th><th>Permissions</th></tr></thead><tbody>
+<tr><td>8–10</td><td><strong>Control</strong></td><td><code>LIST</code> (0b100), <code>STOP</code> (0b010), <code>SPAWN</code> (0b001)</td></tr>
+<tr><td>5–7</td><td><strong>Hardware</strong></td><td><code>INTERRUPT</code> (0b100), <code>IO</code> (0b010), <code>DMA</code> (0b001)</td></tr>
+<tr><td>2–4</td><td><strong>Registry</strong></td><td><code>LOOKUP</code> (0b100), <code>BIND</code> (0b010), <code>PROXY</code> (0b001)</td></tr>
+</tbody></table>
+</div>
+<p>Example: <code>0o755</code> = LIST+STOP+SPAWN + INTERRUPT+IO + LOOKUP+BIND</p>
+<h3 id="pledge"><a class="header" href="#pledge">Pledge</a></h3>
+<p><code>SYS_SILO_PLEDGE(mode)</code> restricts the silo's permissions. The new mode must be a <strong>subset</strong> of the current mode : escalation is rejected with <code>PermissionDenied</code>.</p>
+<pre><code class="language-text">silo.mode.pledge(new_mode):
+    if !new_mode.is_subset_of(self.mode):
+        return PermissionDenied  // escalation attempt
+    self.mode = new_mode
+</code></pre>
+<h3 id="unveil"><a class="header" href="#unveil">Unveil</a></h3>
+<p><code>SYS_SILO_UNVEIL(path, rights)</code> restricts filesystem access to specific paths with read/write/execute permissions. Multiple rules can be added; if a path matches no rule, access is denied.</p>
+<p><strong>Rights bits:</strong> <code>read (0x1)</code>, <code>write (0x2)</code>, <code>execute (0x4)</code></p>
+<p><strong>Matching:</strong> A rule <code>/srv/data</code> matches <code>/srv/data/file.txt</code> but not <code>/srv/other</code>. Rule <code>/</code> matches everything.</p>
+<h3 id="enter-sandbox"><a class="header" href="#enter-sandbox">Enter Sandbox</a></h3>
+<p><code>SYS_SILO_ENTER_SANDBOX()</code> is <strong>irreversible</strong> : it clears all registry permissions and prevents further capability grants. Once sandboxed, the silo cannot escape.</p>
+<hr />
+<h2 id="family-types"><a class="header" href="#family-types">Family types</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Family</th><th>Value</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>SYS</code></td><td>0</td><td>System services (init, admin)</td></tr>
+<tr><td><code>DRV</code></td><td>1</td><td>Hardware drivers</td></tr>
+<tr><td><code>FS</code></td><td>2</td><td>Filesystem handlers</td></tr>
+<tr><td><code>NET</code></td><td>3</td><td>Network stack</td></tr>
+<tr><td><code>WASM</code></td><td>4</td><td>WebAssembly runtime</td></tr>
+<tr><td><code>USR</code></td><td>5</td><td>User applications</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="feature-flags"><a class="header" href="#feature-flags">Feature flags</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Value</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>SILO_FLAG_ADMIN</code></td><td><code>1 &lt;&lt; 0</code></td><td>Silo has admin capabilities</td></tr>
+<tr><td><code>SILO_FLAG_GRAPHICS</code></td><td><code>1 &lt;&lt; 1</code></td><td>Graphics session support</td></tr>
+<tr><td><code>SILO_FLAG_WEBRTC_NATIVE</code></td><td><code>1 &lt;&lt; 2</code></td><td>WebRTC native support (requires GRAPHICS)</td></tr>
+<tr><td><code>SILO_FLAG_GRAPHICS_READ_ONLY</code></td><td><code>1 &lt;&lt; 3</code></td><td>Graphics read-only mode</td></tr>
+<tr><td><code>SILO_FLAG_WEBRTC_TURN_FORCE</code></td><td><code>1 &lt;&lt; 4</code></td><td>Force TURN relay for WebRTC</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="module-system-cmod"><a class="header" href="#module-system-cmod">Module system (CMOD)</a></h2>
+<p>Silos can load code modules in the <code>CMOD</code> binary format:</p>
+<pre><code class="language-text">Strat9ModuleHeader {
+    magic: "CMOD",
+    version: 1 or 2,
+    cpu_arch: 0 (x86_64),
+    flags: MODULE_FLAG_SIGNED | MODULE_FLAG_KERNEL,
+    code_offset/size, data_offset/size, bss_size,
+    entry_point,
+    export/import/relocation tables,
+    key_id, signature,
+    cpu_features_required (v2+),
+}
+</code></pre>
+<p><strong>Loading flow:</strong></p>
+<ol>
+<li>Admin calls <code>SYS_MODULE_LOAD</code> with a blob (from file, IPC stream, or initfs path)</li>
+<li>Kernel validates the header (magic, version, alignment, signature)</li>
+<li>Module is registered in the global <code>ModuleRegistry</code></li>
+<li>Admin calls <code>SYS_SILO_ATTACH_MODULE</code> to bind the module to a silo</li>
+<li>Admin calls <code>SYS_SILO_START</code> to launch the silo's entry point</li>
+</ol>
+<hr />
+<h2 id="events"><a class="header" href="#events">Events</a></h2>
+<p>The kernel pushes events to a fixed-capacity ring buffer (256 entries). Userspace polls via <code>SYS_SILO_EVENT_NEXT</code>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Event</th><th>Trigger</th></tr></thead><tbody>
+<tr><td><code>Started</code></td><td>Silo started or config updated</td></tr>
+<tr><td><code>Stopped</code></td><td>Graceful stop</td></tr>
+<tr><td><code>Killed</code></td><td>Force kill</td></tr>
+<tr><td><code>Crashed</code></td><td>Fault/panic (data0 encodes fault reason + subcode)</td></tr>
+<tr><td><code>Paused</code></td><td>Suspended</td></tr>
+<tr><td><code>Resumed</code></td><td>Resumed from pause</td></tr>
+</tbody></table>
+</div>
+<p><strong>Crash encoding:</strong> <code>data0 = fault_reason | (subcode &lt;&lt; 16)</code></p>
+<ul>
+<li><code>PageFault (1)</code>, <code>GeneralProtection (2)</code>, <code>InvalidOpcode (3)</code></li>
+</ul>
+<hr />
+<h2 id="silo-admin"><a class="header" href="#silo-admin">Silo admin</a></h2>
+<p>Admin operations require a <code>ResourceType::Silo</code> capability with <code>grant</code> permission. The <code>SILO_ADMIN_RESOURCE</code> (resource 0) is the special admin handle.</p>
+<p><strong>Bootstrap:</strong> The init process receives a silo-admin capability at boot via <code>create_silo_admin_capability()</code>.</p>
+<p><strong>Admin operations:</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Function</th><th>Description</th></tr></thead><tbody>
+<tr><td>Create</td><td><code>kernel_spawn_strate()</code></td><td>Register module, create silo, spawn task</td></tr>
+<tr><td>Start</td><td><code>kernel_start_silo()</code></td><td>Transitions Ready → Running</td></tr>
+<tr><td>Stop</td><td><code>kernel_stop_silo()</code></td><td>Graceful stop (tasks exit)</td></tr>
+<tr><td>Kill</td><td><code>kernel_stop_silo(force=true)</code></td><td>Force kill all tasks</td></tr>
+<tr><td>Destroy</td><td><code>kernel_destroy_silo()</code></td><td>Remove silo (must be stopped)</td></tr>
+<tr><td>Rename</td><td><code>kernel_rename_silo_label()</code></td><td>Change silo label</td></tr>
+<tr><td>Pledge</td><td><code>sys_silo_pledge()</code></td><td>Restrict permissions</td></tr>
+<tr><td>Unveil</td><td><code>sys_silo_unveil()</code></td><td>Restrict filesystem access</td></tr>
+<tr><td>Sandbox</td><td><code>sys_silo_enter_sandbox()</code></td><td>Lock down (irreversible)</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="path-based-label-assignment"><a class="header" href="#path-based-label-assignment">Path-based label assignment</a></h2>
+<p>When a filesystem path matches <code>/srv/strate-fs-&lt;type&gt;/&lt;label&gt;/</code>, the label is automatically assigned to the silo. This allows convention-based service discovery.</p>
+<hr />
+<h2 id="silo-vs-other-isolation-mechanisms"><a class="header" href="#silo-vs-other-isolation-mechanisms">Silo vs. other isolation mechanisms</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Mechanism</th><th>Scope</th><th>Enforcement</th></tr></thead><tbody>
+<tr><td><strong>Silo</strong></td><td>Process group + resources + capabilities</td><td>Kernel (SiloManager)</td></tr>
+<tr><td><strong>Capability</strong></td><td>Individual resource access</td><td>Kernel (CapabilityManager)</td></tr>
+<tr><td><strong>Pledge</strong></td><td>Syscall permission subset</td><td>Kernel (OctalMode)</td></tr>
+<tr><td><strong>Unveil</strong></td><td>Filesystem path access</td><td>Kernel (UnveilRules)</td></tr>
+<tr><td><strong>Sandbox</strong></td><td>Full lockdown (irreversible)</td><td>Kernel (sandboxed flag)</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="architecture.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="memory-model.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="architecture.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="memory-model.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="src/theme/mermaid-init.js"></script>
+
+
+    </div>
+    </body>
+</html>

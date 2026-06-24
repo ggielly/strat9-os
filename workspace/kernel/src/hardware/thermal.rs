@@ -1,4 +1,4 @@
-//! ACPI thermal management — temperature reading and fan control.
+//! ACPI thermal management : temperature reading and fan control.
 //!
 //! On Lenovo ThinkPads (X13, T14, etc.), the Embedded Controller (EC)
 //! exposes temperature sensors and fan control registers at known offsets.
@@ -19,7 +19,7 @@
 #![allow(dead_code)]
 
 use crate::hardware::ec;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use spin::Mutex;
 
 /// EC register: CPU temperature in degrees Celsius.

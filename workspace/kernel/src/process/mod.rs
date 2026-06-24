@@ -1,5 +1,8 @@
 //! Process and Task Management
 //!
+//! See also: [Architecture Overview](https://strat9-os.org/strat9-os-docs/architecture.html)
+//! for scheduler design and process lifecycle diagrams.
+//!
 //! Implements the core structures for process management in Strat9-OS:
 //! - Task structure with state management
 //! - Process abstraction

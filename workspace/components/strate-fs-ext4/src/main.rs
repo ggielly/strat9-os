@@ -572,8 +572,6 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_info: &PanicInfo) -> ! {
-    debug_log("[fs-ext4] PANIC!\n");
-    exit(255);
+fn panic(info: &PanicInfo) -> ! {
+    strat9_syscall::call::handle_panic("fs-ext4", info)
 }

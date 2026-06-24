@@ -57,7 +57,7 @@ pub(super) fn spawn_elf_with_args(
 
 /// Performs the cmd ping spawn operation (launches /initfs/bin/ping with args).
 pub(super) fn cmd_ping_spawn_impl(args: &[String]) -> Result<(), ShellError> {
-    // Early IPv4 validation — same behaviour as kping
+    // Early IPv4 validation : same behaviour as kping
     if let Some(target) = args.first() {
         if is_ipv4_literal_candidate(target) && parse_ipv4_literal(target).is_none() {
             shell_println!("ping: invalid IPv4 address: {}", target);

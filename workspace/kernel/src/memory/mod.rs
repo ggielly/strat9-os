@@ -1,4 +1,7 @@
 // Memory management module
+//
+// See also: [Memory Management Guide](https://strat9-os.org/strat9-os-docs/memory-model.html)
+// for architecture diagrams (buddy allocator, slab, COW, page tables).
 
 pub mod address_space;
 pub mod block;

@@ -109,7 +109,7 @@ pub fn set_nic_device(dev: Arc<dyn NetworkDevice>, irq: u8) {
 ///
 /// # TODO
 ///
-/// Wire up registration — either via a syscall from strate-net itself or
+/// Wire up registration : either via a syscall from strate-net itself or
 /// by scanning `get_all_tasks()` from a safe (non-IRQ) context after init
 /// spawns strate-net.
 static STRATE_NET_TID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -184,7 +184,7 @@ pub fn list_interfaces() -> Vec<String> {
 /// # TODO
 ///
 /// Hook this into a kernel workqueue or periodic thread instead of
-/// the APIC timer tick — SpinLock::lock reads percpu data (GS:[0])
+/// the APIC timer tick : SpinLock::lock reads percpu data (GS:[0])
 /// which is unsafe during the swapgs→iretq window.
 pub fn poll_all() {
     let guard = NET_DEVICES.read();

@@ -1,5 +1,8 @@
 //! Inter-Process Communication (IPC) subsystem.
 //!
+//! See also: [IPC Mechanisms Guide](https://strat9-os.org/strat9-os-docs/ipc-mechanisms.html)
+//! for architecture diagrams and usage patterns.
+//!
 //! Strat9-OS uses two complementary IPC mechanisms:
 //!
 //! ## 1. IPC Ports (synchronous message-passing, service endpoints)

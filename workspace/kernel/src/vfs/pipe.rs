@@ -87,27 +87,52 @@ impl Pipe {
 
     /// Read from the pipe. Returns 0 on EOF (write end closed + empty).
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let result = self.readers.wait_until(|| {
-            let mut inner = self.inner.lock();
-
-            if inner.available_read() > 0 {
-                let to_read = core::cmp::min(buf.len(), inner.available_read());
-                for i in 0..to_read {
-                    buf[i] = inner.buf[inner.read_pos];
-                    inner.read_pos = (inner.read_pos + 1) % PIPE_BUF_SIZE;
+        loop {
+            // Phase 1: try to consume data without blocking.
+            {
+                let mut inner = self.inner.lock();
+                if inner.available_read() > 0 {
+                    let to_read = core::cmp::min(buf.len(), inner.available_read());
+                    for i in 0..to_read {
+                        buf[i] = inner.buf[inner.read_pos];
+                        inner.read_pos = (inner.read_pos + 1) % PIPE_BUF_SIZE;
+                    }
+                    inner.len -= to_read;
+                    self.writers.wake_one();
+                    return Ok(to_read);
                 }
-                inner.len -= to_read;
-                return Some(Ok(to_read));
+                if inner.write_closed {
+                    return Ok(0); // EOF
+                }
             }
 
-            if inner.write_closed {
-                return Some(Ok(0)); // EOF
-            }
+            // Phase 2: wait for data or close. The wait atomically checks the
+            // condition while the task is registered in the wait queue, so a
+            // concurrent close_write() that sets write_closed + wakes will be
+            // observed.
+            let result = self.readers.wait_until(|| {
+                let inner = self.inner.lock();
+                if inner.available_read() > 0 {
+                    return Some(true);
+                }
+                if inner.write_closed {
+                    return Some(false);
+                }
+                None
+            });
 
-            None // block
-        });
-        self.writers.wake_one();
-        result
+            match result {
+                true => {
+                    // Data available : loop back to Phase 1 to copy it.
+                    continue;
+                }
+                false => {
+                    // EOF : write end closed and buffer drained.
+                    return Ok(0);
+                } // result == None should not happen (wait_until returned None
+                  // for timeout, which we don't use), but handle it safely.
+            }
+        }
     }
 
     /// Write to the pipe. Returns EPIPE if read end is closed.

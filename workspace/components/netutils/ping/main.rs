@@ -37,24 +37,8 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
 fn panic(info: &PanicInfo) -> ! {
-    log("[ping] PANIC: ");
-    let msg = info.message();
-    let mut buf = [0u8; 256];
-    let mut cursor = BufWriter {
-        buf: &mut buf,
-        pos: 0,
-    };
-    let _ = write!(cursor, "{}", msg);
-    let written = cursor.pos;
-    if written > 0 {
-        if let Ok(s) = core::str::from_utf8(&buf[..written]) {
-            log(s);
-        }
-    }
-    log("\n");
-    call::exit(255)
+    call::handle_panic("ping", info)
 }
 
 // ===========================================================================
@@ -580,7 +564,7 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
                 break;
             }
             log(".");
-            // NOTE: do NOT read-drain here — with a persistent FD, a drain
+            // NOTE: do NOT read-drain here : with a persistent FD, a drain
             // would consume replies from previously sent pings, losing them.
             sleep_ms(POLL_INTERVAL_MS);
         }

@@ -56,10 +56,8 @@ fn debug_log(msg: &str) {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_info: &PanicInfo) -> ! {
-    debug_log("[strate-wasm] PANIC!\n");
-    call::exit(1);
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("strate-wasm", info);
 }
 
 /// Implements extract string.

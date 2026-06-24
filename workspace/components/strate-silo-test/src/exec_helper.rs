@@ -106,9 +106,8 @@ fn check_cloexec_closed() -> bool {
 
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    log_err("[test_exec_helper] panic\n");
-    call::exit(210)
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("test-exec-helper", info)
 }
 
 #[no_mangle]

@@ -65,11 +65,15 @@ impl OpenFile {
 
         let mut offset = self.offset.lock();
         if self.open_flags.contains(OpenFlags::APPEND) {
-            if let Ok(sz) = self.scheme.size(self.file_id) {
+            // Atomically seek to end under the offset lock.
+            // Use cached size first; fall back to scheme.size() only if unknown.
+            if let Some(sz) = self.size {
                 *offset = sz;
-            } else if let Some(sz) = self.size {
+            } else if let Ok(sz) = self.scheme.size(self.file_id) {
                 *offset = sz;
             }
+            // If size is unknown and scheme.size() fails, write at current offset
+            // (best-effort append for schemes that don't track size).
         }
 
         let bytes_written = self.scheme.write(self.file_id, *offset, buf)?;

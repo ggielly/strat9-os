@@ -84,7 +84,7 @@ pub fn init() {
                 iface
             );
         } else {
-            // If MSI was enabled, INTx is disabled — skip IOAPIC routing.
+            // If MSI was enabled, INTx is disabled : skip IOAPIC routing.
             // Check whether MSI is active by reading the PCI command register.
             let cmd = probe.pci_dev.read_config_u16(pci::config::COMMAND);
             let msi_active = (cmd & pci::command::INTERRUPT_DISABLE) != 0;

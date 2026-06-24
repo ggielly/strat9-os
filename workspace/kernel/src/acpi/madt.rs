@@ -175,12 +175,23 @@ pub fn parse_madt() -> Option<MadtInfo> {
             0 => {
                 if info.local_apic_count < info.local_apics.len() {
                     let entry = unsafe { &*(offset as *const MadtLocalApic) };
-                    info.local_apics[info.local_apic_count] = Some(LocalApicEntry {
-                        processor: entry.processor,
-                        apic_id: entry.apic_id,
-                        flags: entry.flags,
-                    });
-                    info.local_apic_count += 1;
+                    // MADT flags bit 0: 1 = enabled, 0 = disabled (usable).
+                    // Skip disabled APICs to avoid sending INIT+SIPI to a
+                    // processor that will never respond (hangs on real hardware).
+                    if entry.flags & 1 == 0 {
+                        log::info!(
+                            "MADT: skipping disabled Local APIC id={} processor={}",
+                            entry.apic_id,
+                            entry.processor,
+                        );
+                    } else {
+                        info.local_apics[info.local_apic_count] = Some(LocalApicEntry {
+                            processor: entry.processor,
+                            apic_id: entry.apic_id,
+                            flags: entry.flags,
+                        });
+                        info.local_apic_count += 1;
+                    }
                 }
             }
             1 => {

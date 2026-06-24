@@ -343,6 +343,7 @@ extern "C" fn lapic_timer_inner(
         unsafe { core::arch::asm!("mov al, 0x48; out 0xe9, al", out("al") _) } // 'H'
     }
     crate::process::scheduler::timer_tick();
+    crate::arch::x86_64::speaker::speaker_tick();
     super::apic::eoi();
 
     // Deliver pending POSIX signals before returning to Ring 3 via iretq.

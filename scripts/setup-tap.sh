@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-tap.sh — Configure a TAP interface for QEMU with DHCP, SLAAC and NAT.
+# setup-tap.sh : Configure a TAP interface for QEMU with DHCP, SLAAC and NAT.
 #
 # Usage:
 #   sudo ./setup-tap.sh          # create + configure TAP + DHCP + RA

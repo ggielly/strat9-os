@@ -72,6 +72,58 @@ md_path.write_text(new_text, encoding="utf-8")
 PY
 rm -f /tmp/abi-auto-block.txt
 
+# ---------------------------------------------------------------------------
+# Global changelog (auto-generated from git log)
+# ---------------------------------------------------------------------------
+echo "==> Refreshing global changelog page"
+CHANGELOG_MD="${ROOT_DIR}/docs-site/src/changelog.md"
+TOTAL_COMMITS="$(git rev-list --count HEAD)"
+LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo "")"
+
+GLOBAL_COMMITS="$(
+  git log \
+    --date=short \
+    --pretty='- %ad [`%h`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/%H) %s' \
+    | sed -n '1,50p'
+)"
+
+if [[ -z "${GLOBAL_COMMITS}" ]]; then
+  GLOBAL_COMMITS="- No commits found yet."
+fi
+
+GLOBAL_AUTO_BLOCK="$(cat <<EOF
+## Project stats
+
+- **Total commits:** \`${TOTAL_COMMITS}\`
+- **Latest tag:** \`${LAST_TAG:-none}\`
+- **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
+
+## Recent commits (auto-generated)
+
+${GLOBAL_COMMITS}
+
+EOF
+)"
+
+printf "%s" "${GLOBAL_AUTO_BLOCK}" > /tmp/global-changelog-block.txt
+python3 - "${CHANGELOG_MD}" "/tmp/global-changelog-block.txt" <<'PY'
+import re, sys
+from pathlib import Path
+md_path = Path(sys.argv[1])
+auto_path = Path(sys.argv[2])
+text = md_path.read_text(encoding="utf-8")
+auto = auto_path.read_text(encoding="utf-8").rstrip()
+start = "<!-- AUTO-CHANGELOG:START -->"
+end = "<!-- AUTO-CHANGELOG:END -->"
+pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.S)
+replacement = f"{start}\n\n{auto}\n\n{end}"
+new_text, n = pattern.subn(replacement, text, count=1)
+if n != 1:
+    raise SystemExit(f"Could not replace auto block in {md_path}")
+md_path.write_text(new_text, encoding="utf-8")
+PY
+rm -f /tmp/global-changelog-block.txt
+
 echo "==> Building rustdoc (workspace, resilient mode)"
 METADATA_JSON="$(mktemp)"
 METADATA_ERR="$(mktemp)"
@@ -102,10 +154,6 @@ rm -f "${METADATA_JSON}"
 
 FAILED_PACKAGES=()
 for pkg in "${WORKSPACE_PACKAGES[@]}"; do
-  if [[ "${pkg}" == "strat9-bootloader" ]]; then
-    echo "   - skipping ${pkg} (custom asm build script is not rustdoc-friendly yet)"
-    continue
-  fi
   echo "   - doc ${pkg}"
   DOC_STDOUT="$(mktemp)"
   DOC_STDERR="$(mktemp)"
@@ -134,7 +182,11 @@ echo "==> Building mdBook pages"
 mdbook build "${ROOT_DIR}/docs-site"
 
 echo "==> Assembling website"
-rm -rf "${SITE_DIR}"
+# Remove old site dir (use find+delete for robustness with deep nesting)
+if [[ -d "${SITE_DIR}" ]]; then
+  find "${SITE_DIR}" -type f -exec chmod u+w {} + 2>/dev/null || true
+  rm -rf "${SITE_DIR}"
+fi
 mkdir -p "${SITE_DIR}/api"
 cp -r "${ROOT_DIR}/docs-site/book/." "${SITE_DIR}/"
 cp -r "${RUSTDOC_DIR}/." "${SITE_DIR}/api/"
@@ -197,3 +249,17 @@ echo "  ${SITE_DIR}"
 echo ""
 echo "Open locally with:"
 echo "  python3 -m http.server --directory ${SITE_DIR} 8000"
+
+# ---------------------------------------------------------------------------
+# Dead link check (best-effort, non-fatal)
+# ---------------------------------------------------------------------------
+LINK_CHECKER="${ROOT_DIR}/tools/scripts/check-links.py"
+if [[ -f "${LINK_CHECKER}" ]]; then
+  echo ""
+  echo "==> Checking for broken links..."
+  if python3 "${LINK_CHECKER}" --site-dir "${SITE_DIR}"; then
+    echo "   All links OK"
+  else
+    echo "   Warning: some broken links found (see above)"
+  fi
+fi

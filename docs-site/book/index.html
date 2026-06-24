@@ -1,14 +1,14 @@
 <!DOCTYPE HTML>
-<html lang="en" class="navy sidebar-visible" dir="ltr">
+<html lang="en" class="coal sidebar-visible" dir="ltr">
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Home - Strat9 documentation</title>
+        <title>Home - Strat9 OS documentation</title>
 
 
         <!-- Custom HTML head -->
         
-        <meta name="description" content="Guide and API reference for Strat9 ABI and userspace syscall layer.">
+        <meta name="description" content="Architecture guide, ABI reference, and syscall documentation for Strat9 OS.">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
@@ -29,13 +29,14 @@
         <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
 
         <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="src/theme/custom.css">
 
 
         <!-- Provide site root and default themes to javascript -->
         <script>
             const path_to_root = "";
-            const default_light_theme = "navy";
-            const default_dark_theme = "navy";
+            const default_light_theme = "coal";
+            const default_dark_theme = "coal";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc.js"></script>
@@ -65,7 +66,7 @@
             try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
             if (theme === null || theme === undefined) { theme = default_theme; }
             const html = document.documentElement;
-            html.classList.remove('navy')
+            html.classList.remove('coal')
             html.classList.add(theme);
             html.classList.add("js");
         </script>
@@ -123,7 +124,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">Strat9 documentation</h1>
+                    <h1 class="menu-title">Strat9 OS documentation</h1>
 
                     <div class="right-buttons">
                         <a href="print.html" title="Print this book" aria-label="Print this book">
@@ -161,21 +162,128 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="strat9-docs"><a class="header" href="#strat9-docs">Strat9 Docs</a></h1>
-<p>This website is generated from:</p>
-<ul>
-<li><strong>mdBook pages</strong> for architecture and usage guides</li>
-<li><strong>rustdoc API pages</strong> for ABI and syscall crates</li>
-</ul>
-<h2 id="api-reference"><a class="header" href="#api-reference">API reference</a></h2>
-<ul>
-<li><a href="./api/strat9_abi/index.html">strat9-abi crate</a></li>
-<li><a href="./api/strat9_syscall/index.html">strat9-syscall crate</a></li>
-<li><a href="./api/index.html">Rustdoc index</a></li>
-</ul>
-<h2 id="local-generation"><a class="header" href="#local-generation">Local generation</a></h2>
-<pre><code class="language-bash">bash tools/scripts/build-docs-site.sh
+                        <h1 id="strat9-os"><a class="header" href="#strat9-os">Strat9 OS</a></h1>
+<p>An experimental operating system kernel written in Rust, targeting x86_64 (primary) and aarch64 (secondary).</p>
+<hr />
+<h2 id="quick-start"><a class="header" href="#quick-start">Quick start</a></h2>
+<div class="api-card">
+<p><strong>Building from source</strong></p>
+<pre><code class="language-bash"># Build the full OS image (bootloader + kernel)
+cargo make build-all
+
+# Run in QEMU
+cargo make run-gui
+
+# Run with SMP (multi-core)
+cargo make run-gui-smp
+</code></pre>
+<p><a href="./publishing.html">Build guide</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os">Source repository</a></p>
+</div>
+<hr />
+<h2 id="architecture-guides"><a class="header" href="#architecture-guides">Architecture guides</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Guide</th><th>Description</th></tr></thead><tbody>
+<tr><td><a href="./architecture.html">Architecture Overview</a></td><td>Kernel subsystems, design principles, and data flow diagrams</td></tr>
+<tr><td><a href="./silo.html">Silo System</a></td><td>Process isolation, resource limits, pledge/unveil, module loading</td></tr>
+<tr><td><a href="./memory-model.html">Memory Management</a></td><td>Buddy allocator, slab heap, COW, page tables, vmalloc</td></tr>
+<tr><td><a href="./boot-sequence.html">Boot Sequence</a></td><td>BIOS → bootloader → Limine → kernel init flow</td></tr>
+<tr><td><a href="./ipc-mechanisms.html">IPC Mechanisms</a></td><td>Channels, shared rings, semaphores, futexes</td></tr>
+<tr><td><a href="./driver-model.html">Driver Model</a></td><td>Component trait, PCI, NIC, storage, USB drivers</td></tr>
+<tr><td><a href="./syscalls.html">Syscall Reference</a></td><td>Complete syscall table with parameters and errors</td></tr>
+<tr><td><a href="./abi.html">ABI Overview</a></td><td>Kernel/userspace ABI definitions and versioning</td></tr>
+<tr><td><a href="./abi-changelog.html">ABI Changelog</a></td><td>Recent ABI changes (auto-generated)</td></tr>
+<tr><td><a href="./abi-matrix.html">ABI Support Matrix</a></td><td>Syscall and struct compatibility matrix</td></tr>
+<tr><td><a href="./syscall.html">Syscall Layer</a></td><td>Userspace syscall wrappers and error handling</td></tr>
+<tr><td><a href="./changelog.html">Changelog</a></td><td>Project changelog (auto-generated from git)</td></tr>
+<tr><td><a href="./publishing.html">Publishing</a></td><td>Build, release, and deployment instructions</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="api-reference-by-category"><a class="header" href="#api-reference-by-category">API reference by category</a></h2>
+<h3 id="core"><a class="header" href="#core">Core</a></h3>
+<p>The kernel, ABI definitions, and bootloader : the foundation of the OS.</p>
+<div class="table-wrapper"><table><thead><tr><th>Crate</th><th>Description</th><th>API</th></tr></thead><tbody>
+<tr><td><strong>strat9-kernel</strong></td><td>OS kernel: scheduler, memory management, drivers, IPC</td><td><a href="./api/strat9_kernel/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/kernel">source</a></td></tr>
+<tr><td><strong>strat9-abi</strong></td><td>ABI definitions shared between kernel and userspace (syscalls, data structs, flags, errno)</td><td><a href="./api/strat9_abi/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/abi">source</a></td></tr>
+<tr><td><strong>strat9-bootloader</strong></td><td>BIOS/UEFI bootloader: stage1 MBR, stage2 protected/long mode switch</td><td><a href="./api/bootloader/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/bootloader">source</a></td></tr>
+</tbody></table>
+</div>
+<h3 id="syscall--userspace"><a class="header" href="#syscall--userspace">Syscall &amp; Userspace</a></h3>
+<p>Userspace libraries for interacting with the kernel.</p>
+<div class="table-wrapper"><table><thead><tr><th>Crate</th><th>Description</th><th>API</th></tr></thead><tbody>
+<tr><td><strong>strat9-syscall</strong></td><td>High-level syscall wrappers, error mapping, and constants</td><td><a href="./api/strat9_syscall/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/syscall">source</a></td></tr>
+<tr><td><strong>strate-init</strong></td><td>Init process: system bootstrap and service management</td><td><a href="./api/strate_init/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-init">source</a></td></tr>
+</tbody></table>
+</div>
+<h3 id="component-framework"><a class="header" href="#component-framework">Component Framework</a></h3>
+<p>Trait-based component model for drivers and services.</p>
+<div class="table-wrapper"><table><thead><tr><th>Crate</th><th>Description</th><th>API</th></tr></thead><tbody>
+<tr><td><strong>component</strong></td><td>Component trait and registration framework</td><td><a href="./api/component/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/component">source</a></td></tr>
+<tr><td><strong>component-macro</strong></td><td>Derive macros for component registration</td><td><a href="./api/component_macro/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/component-macro">source</a></td></tr>
+<tr><td><strong>strat9-bus-drivers</strong></td><td>Bus driver infrastructure (PCI, VirtIO)</td><td><a href="./api/strat9_bus_drivers/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/bus-drivers">source</a></td></tr>
+<tr><td><strong>strate-bus</strong></td><td>Bus abstraction layer</td><td><a href="./api/strate_bus/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-bus">source</a></td></tr>
+</tbody></table>
+</div>
+<h3 id="network-drivers"><a class="header" href="#network-drivers">Network Drivers</a></h3>
+<p>Intel Ethernet and NIC queue management.</p>
+<div class="table-wrapper"><table><thead><tr><th>Crate</th><th>Description</th><th>API</th></tr></thead><tbody>
+<tr><td><strong>e1000</strong></td><td>Intel E1000/E1000e network driver</td><td><a href="./api/e1000/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/drivers/net/e1000">source</a></td></tr>
+<tr><td><strong>intel-ethernet</strong></td><td>Intel Ethernet common register definitions</td><td><a href="./api/intel_ethernet/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/drivers/net/intel-ethernet">source</a></td></tr>
+<tr><td><strong>driver-net-proto</strong></td><td>Network protocol driver abstractions</td><td><a href="./api/driver_net_proto/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/drivers/net/proto">source</a></td></tr>
+<tr><td><strong>nic-queues</strong></td><td>NIC TX/RX queue management</td><td><a href="./api/nic_queues/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/drivers/net/nic-queues">source</a></td></tr>
+<tr><td><strong>nic-buffers</strong></td><td>NIC buffer allocation and management</td><td><a href="./api/nic_buffers/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/drivers/net/nic-buffers">source</a></td></tr>
+<tr><td><strong>net-core</strong></td><td>Network core utilities</td><td><a href="./api/net_core/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/drivers/net/core">source</a></td></tr>
+</tbody></table>
+</div>
+<h3 id="filesystem"><a class="header" href="#filesystem">Filesystem</a></h3>
+<p>Filesystem abstraction and implementations.</p>
+<div class="table-wrapper"><table><thead><tr><th>Crate</th><th>Description</th><th>API</th></tr></thead><tbody>
+<tr><td><strong>strate-fs-abstraction</strong></td><td>Filesystem abstraction layer with safe math and Unicode</td><td><a href="./api/strate_fs_abstraction/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-fs-abstraction">source</a></td></tr>
+<tr><td><strong>strate-fs-ext4</strong></td><td>ext4 filesystem implementation</td><td><a href="./api/fs_ext4/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-fs-ext4">source</a></td></tr>
+<tr><td><strong>strate-fs-ramfs</strong></td><td>In-memory RAM filesystem</td><td><a href="./api/strate_fs_ramfs/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-fs-ramfs">source</a></td></tr>
+</tbody></table>
+</div>
+<h3 id="networking"><a class="header" href="#networking">Networking</a></h3>
+<p>Network stack, silo network service, and tools.</p>
+<div class="table-wrapper"><table><thead><tr><th>Crate</th><th>Description</th><th>API</th></tr></thead><tbody>
+<tr><td><strong>strate-net</strong></td><td>Network stack (TCP/UDP/ICMP)</td><td><a href="./api/strate_net/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-net">source</a></td></tr>
+<tr><td><strong>strate-net-silo</strong></td><td>Network silo service (TCP/UDP listener)</td><td><a href="./api/strate_net_silo/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-net">source</a></td></tr>
+<tr><td><strong>dhcp-client</strong></td><td>DHCP client status monitor</td><td><a href="./api/dhcp_client/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/netutils/dhcp-client">source</a></td></tr>
+<tr><td><strong>ping</strong></td><td>ICMP ping utility</td><td><a href="./api/ping/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/netutils/ping">source</a></td></tr>
+<tr><td><strong>udp-tool</strong></td><td>UDP scheme test utility</td><td><a href="./api/udp_tool/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/netutils/udp-tool">source</a></td></tr>
+<tr><td><strong>telnetd</strong></td><td>Telnet server</td><td><a href="./api/telnetd/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/netutils/telnetd">source</a></td></tr>
+<tr><td><strong>ice-candidate</strong></td><td>ICE candidate discovery over scheme UDP</td><td><a href="./api/ice_candidate/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/netutils/ice-candidate">source</a></td></tr>
+</tbody></table>
+</div>
+<h3 id="system-services"><a class="header" href="#system-services">System Services</a></h3>
+<p>Admin interfaces, compatibility layers, and experimental features.</p>
+<div class="table-wrapper"><table><thead><tr><th>Crate</th><th>Description</th><th>API</th></tr></thead><tbody>
+<tr><td><strong>strat9-components-api</strong></td><td>Shared component API types and traits</td><td><a href="./api/strat9_components_api/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/api">source</a></td></tr>
+<tr><td><strong>strate-console-admin</strong></td><td>Interactive console shell with silo management</td><td><a href="./api/console_admin/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-console-admin">source</a></td></tr>
+<tr><td><strong>strate-web-admin</strong></td><td>Web-based admin interface</td><td><a href="./api/web_admin/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-web-admin">source</a></td></tr>
+<tr><td><strong>strate-wasm</strong></td><td>WebAssembly runtime support</td><td><a href="./api/strate_wasm/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-wasm">source</a></td></tr>
+<tr><td><strong>strate-webrtc</strong></td><td>WebRTC support</td><td><a href="./api/strate_webrtc/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-webrtc">source</a></td></tr>
+<tr><td><strong>musl-compat</strong></td><td>musl libc compatibility layer</td><td><a href="./api/musl_compat/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/musl-compat">source</a></td></tr>
+<tr><td><strong>alloc-freelist</strong></td><td>Free-list allocator</td><td><a href="./api/alloc_freelist/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/alloc-freelist">source</a></td></tr>
+</tbody></table>
+</div>
+<h3 id="testing"><a class="header" href="#testing">Testing</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Crate</th><th>Description</th><th>API</th></tr></thead><tbody>
+<tr><td><strong>silo-test</strong></td><td>Silo integration tests</td><td><a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-silo-test">source</a></td></tr>
+<tr><td><strong>mem-test</strong></td><td>Memory subsystem tests</td><td><a href="./api/test_mem/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-mem-test">source</a></td></tr>
+<tr><td><strong>test-syscalls</strong></td><td>Syscall integration tests</td><td><a href="./api/test_syscalls/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-mem-test">source</a></td></tr>
+<tr><td><strong>test-exec</strong></td><td>Exec syscall tests</td><td><a href="./api/test_exec/index.html">docs</a> · <a href="https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/components/strate-mem-test">source</a></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="building-docs-locally"><a class="header" href="#building-docs-locally">Building docs locally</a></h2>
+<pre><code class="language-bash"># Build the full docs site (mdBook + rustdoc)
+bash tools/scripts/build-docs-site.sh
+
+# Serve locally
 python3 -m http.server --directory build/docs-site 8000
+
+# Check for broken links
+python3 tools/scripts/check-links.py --site-dir build/docs-site
 </code></pre>
 
                     </main>
@@ -183,7 +291,7 @@ python3 -m http.server --directory build/docs-site 8000
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
 
-                            <a rel="next prefetch" href="abi.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="architecture.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -194,7 +302,7 @@ python3 -m http.server --directory build/docs-site 8000
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
 
-                    <a rel="next prefetch" href="abi.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="architecture.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>
@@ -218,6 +326,7 @@ python3 -m http.server --directory build/docs-site 8000
         <script src="book.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="src/theme/mermaid-init.js"></script>
 
 
     </div>

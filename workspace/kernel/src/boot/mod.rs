@@ -1,5 +1,8 @@
 //! Boot subsystem
 //!
+//! See also: [Boot Sequence Guide](https://strat9-os.org/strat9-os-docs/boot-sequence.html)
+//! for the full boot flow diagram (BIOS → bootloader → Limine → kernel init).
+//!
 //! Regroups all code involved in the early kernel startup:
 //! - assembly stubs (16-bit → 64-bit transition)
 //! - bootloader handoff structures (KernelArgs)

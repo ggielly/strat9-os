@@ -104,9 +104,14 @@ pub fn clear_screen() {
     }
 }
 
-/// Print the shell prompt.
+/// Print the shell prompt and show the text cursor.
 pub fn print_prompt() {
     shell_print!(">>> ");
+    // Immediately show the cursor so it's always visible after the prompt.
+    if crate::arch::x86_64::vga::is_available() {
+        let color = crate::arch::x86_64::vga::RgbColor::new(0x4F, 0xB3, 0xB3);
+        crate::arch::x86_64::vga::draw_text_cursor(color);
+    }
 }
 
 /// Print raw text without per-character formatting overhead.

@@ -36,36 +36,7 @@ fn alloc_error(_layout: Layout) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    let _ = call::write(1, b"[ice-candidate] PANIC: ");
-    let mut buf = [0u8; 192];
-    let mut w = BufWriter {
-        buf: &mut buf,
-        pos: 0,
-    };
-    let _ = write!(w, "{}", info.message());
-    let len = w.pos;
-    drop(w); // release mutable borrow before reusing `buf`
-    if len > 0 {
-        let _ = call::write(1, &buf[..len]);
-    }
-    let _ = call::write(1, b"\n");
-    call::exit(255)
-}
-
-struct BufWriter<'a> {
-    buf: &'a mut [u8],
-    pos: usize,
-}
-
-impl core::fmt::Write for BufWriter<'_> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let bytes = s.as_bytes();
-        let avail = self.buf.len().saturating_sub(self.pos);
-        let n = bytes.len().min(avail);
-        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
-        self.pos += n;
-        Ok(())
-    }
+    call::handle_panic("ice-candidate", info)
 }
 
 fn log(msg: &str) {

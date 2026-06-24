@@ -10,8 +10,8 @@ pub fn is_ipv4_literal_candidate(s: &str) -> bool {
 ///
 /// # Limitations
 /// - IPv4-mapped/embedded forms (e.g. `::ffff:192.168.1.1`) are **not** recognised
-///   as candidates — the embedded decimal octets are not valid hex digits.
-/// - Zone IDs (e.g. `fe80::1%eth0`) are **not** recognised — `%` is not in the
+///   as candidates : the embedded decimal octets are not valid hex digits.
+/// - Zone IDs (e.g. `fe80::1%eth0`) are **not** recognised : `%` is not in the
 ///   allowed character set.
 pub fn is_ipv6_literal_candidate(s: &str) -> bool {
     let bytes = s.as_bytes();

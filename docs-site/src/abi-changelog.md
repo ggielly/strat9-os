@@ -25,13 +25,14 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-06-18 [`0252eb6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0252eb6f91d9d1d7b0e6a9e0b17550dcc24be339) Enhance logging and documentation across the kernel
 - 2026-06-16 [`e4ab1a9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e4ab1a96c3579117defffe0f5b32cf7cac853129) Enhance network stack, NIC drivers, USB/NVMe subsystems, and thermal management
 - 2026-06-03 [`0c40058`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0c40058547bd9b7ef07a837b1153577879510994) Refactor the network stack and add dual-stack userspace tooling
 - 2026-05-24 [`aeade5e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aeade5ef5fcfdddef2caa43da6af361a5102c7cd) Code cleanup
 - 2026-05-24 [`b2bbcc0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8) Improve and fix IPC
 - 2026-05-23 [`db23b53`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552) Fix major memory leak and remove sshd silo
 - 2026-05-19 [`93c8927`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0) async: implement and optimize async I/O completion handling
-- 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)
+- 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O : ring, dispatch, AHCI bridge (Phases 1-4)
 - 2026-05-14 [`cc4944a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cc4944a2c78236c41fce4b8f1054e119fc2bcd8e) Refactor and clean up code in various modules
 - 2026-05-14 [`ecc416d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ecc416df41e29c26f6839ee15cffbc7a7dd41f05) refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix
 - 2026-05-08 [`f070d41`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f070d41c31fb505fef36603ee7cbc0c6648944b3) Add kernel entropy pool with interrupt-driven collection
@@ -54,7 +55,6 @@ See:
 - 2026-03-11 [`7e66e69`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7e66e694ffbf939c3651a463736b3bb396ddf24f) refactor: enhance interrupt handling and logging mechanisms across the kernel
 - 2026-03-09 [`ff0a36b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ff0a36bce4090ee92da37b55fa47996fec5b04b9) Refactor memory management to use IRQ-disabled tokens
 - 2026-03-07 [`c3e8969`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3e8969978b2472d6cfcd0f870f115fbd1f8ef5a) Fix race condition and lock
-- 2026-03-07 [`6191656`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/619165666846d9bc2dd9aaa04e391b5afea2c48b) cargo fmt
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

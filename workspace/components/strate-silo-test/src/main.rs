@@ -284,10 +284,8 @@ extern "C" fn userspace_thread_entry(arg0: usize) -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_info: &PanicInfo) -> ! {
-    log_err("[init-test] PANIC detected, exiting with code 222\n");
-    exit_process(222)
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("silo-test", info)
 }
 
 #[no_mangle]
