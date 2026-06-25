@@ -74,7 +74,7 @@ fn clock_ns() -> u64 {
 
 fn open_rw(path: &str) -> Result<usize, i32> {
     call::openat(0, path, 0x2, 0)
-        .map(|fd| fd as usize)
+        .map(|fd| fd)
         .map_err(|e| e.to_errno() as i32)
 }
 
@@ -82,8 +82,8 @@ fn read_text(path: &str, out: &mut [u8]) -> usize {
     let Ok(fd) = call::openat(0, path, 0x0, 0) else {
         return 0;
     };
-    let n = call::read(fd as usize, out).unwrap_or(0);
-    let _ = call::close(fd as usize);
+    let n = call::read(fd, out).unwrap_or(0);
+    let _ = call::close(fd);
     n
 }
 

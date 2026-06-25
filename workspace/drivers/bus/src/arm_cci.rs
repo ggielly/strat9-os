@@ -132,7 +132,7 @@ impl BusDriver for ArmCci {
     /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
         for i in 0..MAX_PORTS {
-            if self.ports[i].as_ref().map_or(false, |p| p.enabled) {
+            if self.ports[i].as_ref().is_some_and(|p| p.enabled) {
                 let _ = self.disable_port(i);
             }
         }

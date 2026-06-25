@@ -52,7 +52,7 @@ impl NetworkStrate {
                 let mut out = String::new();
                 let mut wrote = false;
                 for server in self.dns_servers.iter().flatten() {
-                    let _ = write!(out, "{}\n", server);
+                    let _ = writeln!(out, "{}", server);
                     wrote = true;
                 }
                 if !wrote {

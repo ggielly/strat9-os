@@ -32,6 +32,7 @@ members = [
     "workspace/components/strate-fs-ramfs",
     "workspace/components/strate-init",
     "workspace/components/strate-console-admin",
+    "workspace/components/strate-input",
     "workspace/components/netutils/dhcp-client",
     "workspace/components/netutils/ping",
     "workspace/components/netutils/telnetd",

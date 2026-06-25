@@ -69,7 +69,7 @@ fn log_errno(prefix: &str, err: strate_net::syscalls::Error) {
             buf: &mut buf,
             pos: 0,
         };
-        let _ = write!(w, "{}{}\n", prefix, err.to_errno());
+        let _ = writeln!(w, "{}{}", prefix, err.to_errno());
         w.pos
     };
     if let Ok(s) = core::str::from_utf8(&buf[..len]) {
@@ -114,6 +114,8 @@ impl NetworkStrate {
             let poll_result = self
                 .interface
                 .poll(now, &mut self.device, &mut self.sockets);
+
+            self.process_icmp();
 
             self.lingering_sockets.retain(|&handle| {
                 let socket = self.sockets.get::<tcp::Socket>(handle);

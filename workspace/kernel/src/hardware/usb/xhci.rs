@@ -136,8 +136,7 @@ impl Trb {
     }
 
     fn normal(addr: u64, len: u32, cycle: bool, ioc: bool) -> Self {
-        let mut d3 =
-            (TRB_TYPE_NORMAL << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
+        let mut d3 = (TRB_TYPE_NORMAL << TRB_TYPE_SHIFT) as u32 | if cycle { TRB_CYCLE } else { 0 };
         if ioc {
             d3 |= TRB_IOC;
         }
@@ -615,10 +614,7 @@ impl XhciController {
         let virt = phys_to_virt(phys) as *mut Trb;
 
         core::ptr::write_bytes(virt as *mut u8, 0, 4096);
-        core::ptr::write(
-            virt.add(XHCI_RING_TRBS - 1),
-            Trb::link(phys, true),
-        );
+        core::ptr::write(virt.add(XHCI_RING_TRBS - 1), Trb::link(phys, true));
 
         let idx = slot_id as usize;
         if idx < self.device_slots.len() {
@@ -738,7 +734,10 @@ impl XhciController {
             self.write_endpoint_context(
                 slot_id,
                 1,
-                self.device_slots[idx].as_ref().unwrap().ep_transfer_ring_phys[1],
+                self.device_slots[idx]
+                    .as_ref()
+                    .unwrap()
+                    .ep_transfer_ring_phys[1],
                 8,
                 EP_TYPE_CONTROL,
                 0,
@@ -782,11 +781,7 @@ impl XhciController {
             }
 
             self.device_slots[idx].as_mut().unwrap().usb_address = address;
-            log::info!(
-                "[xHCI] Address Device: slot={} addr={}",
-                slot_id,
-                address
-            );
+            log::info!("[xHCI] Address Device: slot={} addr={}", slot_id, address);
         }
         Ok(())
     }
@@ -811,7 +806,10 @@ impl XhciController {
             self.write_endpoint_context(
                 slot_id,
                 endpoint,
-                self.device_slots[idx].as_ref().unwrap().ep_transfer_ring_phys[endpoint as usize],
+                self.device_slots[idx]
+                    .as_ref()
+                    .unwrap()
+                    .ep_transfer_ring_phys[endpoint as usize],
                 max_packet,
                 ep_type,
                 interval,
@@ -890,7 +888,11 @@ impl XhciController {
                             max_packet0
                         );
 
-                        if max_packet0 == 64 || max_packet0 == 32 || max_packet0 == 16 || max_packet0 == 8 {
+                        if max_packet0 == 64
+                            || max_packet0 == 32
+                            || max_packet0 == 16
+                            || max_packet0 == 8
+                        {
                             let idx = slot_id as usize;
                             if idx < self.device_slots.len() {
                                 if let Some(ref mut dev) = self.device_slots[idx] {
@@ -917,8 +919,7 @@ impl XhciController {
         endpoint: u8,
         len: usize,
     ) -> Result<(*mut u8, u64), &'static str> {
-        let frame =
-            allocate_zeroed_frame().ok_or("Failed to allocate interrupt buffer")?;
+        let frame = allocate_zeroed_frame().ok_or("Failed to allocate interrupt buffer")?;
         let phys = frame.start_address.as_u64();
         let virt = phys_to_virt(phys) as *mut u8;
 
@@ -1017,13 +1018,22 @@ impl XhciController {
 
     pub fn set_configuration(&mut self, slot_id: u8, config_value: u8) -> Result<(), &'static str> {
         let setup = [0x00, 0x09, config_value, 0x00, 0x00, 0x00, 0x00, 0x00];
-        unsafe { self.ctrl_transfer(slot_id, &setup, None, 0)?; }
+        unsafe {
+            self.ctrl_transfer(slot_id, &setup, None, 0)?;
+        }
         Ok(())
     }
 
-    pub fn set_protocol(&mut self, slot_id: u8, interface: u8, protocol: u8) -> Result<(), &'static str> {
+    pub fn set_protocol(
+        &mut self,
+        slot_id: u8,
+        interface: u8,
+        protocol: u8,
+    ) -> Result<(), &'static str> {
         let setup = [0x21, 0x0B, protocol, interface, 0x00, 0x00, 0x00, 0x00];
-        unsafe { self.ctrl_transfer(slot_id, &setup, None, 0)?; }
+        unsafe {
+            self.ctrl_transfer(slot_id, &setup, None, 0)?;
+        }
         Ok(())
     }
 
@@ -1057,10 +1067,7 @@ impl XhciController {
         let cycle;
 
         core::ptr::write_bytes(tr_ring as *mut u8, 0, 4096);
-        core::ptr::write(
-            tr_ring.add(XHCI_RING_TRBS - 1),
-            Trb::link(tr_phys, true),
-        );
+        core::ptr::write(tr_ring.add(XHCI_RING_TRBS - 1), Trb::link(tr_phys, true));
         deq = 0;
         cycle = true;
 
@@ -1231,18 +1238,20 @@ pub fn handle_interrupt() {
                                         let ep = ep_id as usize;
                                         let buf = dev.ep_buf[ep];
                                         let buf_len = dev.ep_buf_len[ep];
-                                        let actual_len = if transferred < buf_len { transferred } else { buf_len };
+                                        let actual_len = if transferred < buf_len {
+                                            transferred
+                                        } else {
+                                            buf_len
+                                        };
 
                                         if !buf.is_null() && actual_len > 0 {
                                             crate::hardware::usb::hid::receive_interrupt_report(
-                                                slot_id,
-                                                ep_id,
-                                                buf,
-                                                actual_len,
+                                                slot_id, ep_id, buf, actual_len,
                                             );
                                         }
 
-                                        dev.ep_dequeue[ep] = (dev.ep_dequeue[ep] + 1) % (XHCI_RING_TRBS - 1);
+                                        dev.ep_dequeue[ep] =
+                                            (dev.ep_dequeue[ep] + 1) % (XHCI_RING_TRBS - 1);
                                         if dev.ep_dequeue[ep] == 0 {
                                             dev.ep_cycle[ep] = !dev.ep_cycle[ep];
                                         }
@@ -1255,7 +1264,8 @@ pub fn handle_interrupt() {
                                     if let Some(ref mut dev) = controller.device_slots[idx] {
                                         let ep = ep_id as usize;
                                         if ep < MAX_ENDPOINTS {
-                                            dev.ep_dequeue[ep] = (dev.ep_dequeue[ep] + 1) % (XHCI_RING_TRBS - 1);
+                                            dev.ep_dequeue[ep] =
+                                                (dev.ep_dequeue[ep] + 1) % (XHCI_RING_TRBS - 1);
                                             if dev.ep_dequeue[ep] == 0 {
                                                 dev.ep_cycle[ep] = !dev.ep_cycle[ep];
                                             }
@@ -1288,7 +1298,10 @@ pub fn handle_interrupt() {
             for slot_idx in 0..controller.device_slots.len() {
                 if let Some(ref mut dev) = controller.device_slots[slot_idx] {
                     for ep in 1..MAX_ENDPOINTS {
-                        if dev.ep_active[ep] || dev.ep_buf[ep].is_null() || dev.ep_transfer_rings[ep].is_null() {
+                        if dev.ep_active[ep]
+                            || dev.ep_buf[ep].is_null()
+                            || dev.ep_transfer_rings[ep].is_null()
+                        {
                             continue;
                         }
                         let deq = dev.ep_dequeue[ep];

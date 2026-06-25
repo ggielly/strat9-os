@@ -84,12 +84,16 @@ unsafe impl Send for VgaWriter {}
 impl VgaWriter {
     #[inline]
     fn can(&self) -> &CanvasBuffer {
-        self.canvas.as_ref().expect("VgaWriter canvas not initialized")
+        self.canvas
+            .as_ref()
+            .expect("VgaWriter canvas not initialized")
     }
 
     #[inline]
     fn canm(&mut self) -> &mut CanvasBuffer {
-        self.canvas.as_mut().expect("VgaWriter canvas not initialized")
+        self.canvas
+            .as_mut()
+            .expect("VgaWriter canvas not initialized")
     }
 }
 
@@ -448,7 +452,8 @@ impl VgaWriter {
             return;
         }
         drop(canvas);
-        self.canm().dirty
+        self.canm()
+            .dirty
             .include(sx as u32, sy as u32, (ex - sx) as u32, (ey - sy) as u32);
     }
 
@@ -667,7 +672,8 @@ impl VgaWriter {
                     self.cursor.mc_save[cy * CURSOR_W + cx] = 0;
                     continue;
                 }
-                self.cursor.mc_save[cy * CURSOR_W + cx] = self.read_pixel_packed(px as usize, py as usize);
+                self.cursor.mc_save[cy * CURSOR_W + cx] =
+                    self.read_pixel_packed(px as usize, py as usize);
             }
         }
     }
@@ -687,7 +693,10 @@ impl VgaWriter {
                 }
                 let px = x + cx as i32;
                 let py = y + cy as i32;
-                if px < 0 || py < 0 || px as usize >= self.can().width || py as usize >= self.can().height
+                if px < 0
+                    || py < 0
+                    || px as usize >= self.can().width
+                    || py as usize >= self.can().height
                 {
                     continue;
                 }
@@ -709,11 +718,18 @@ impl VgaWriter {
                 }
                 let px = x + cx as i32;
                 let py = y + cy as i32;
-                if px < 0 || py < 0 || px as usize >= self.can().width || py as usize >= self.can().height
+                if px < 0
+                    || py < 0
+                    || px as usize >= self.can().width
+                    || py as usize >= self.can().height
                 {
                     continue;
                 }
-                self.put_pixel_raw(px as usize, py as usize, self.cursor.mc_save[cy * CURSOR_W + cx]);
+                self.put_pixel_raw(
+                    px as usize,
+                    py as usize,
+                    self.cursor.mc_save[cy * CURSOR_W + cx],
+                );
             }
         }
     }
@@ -806,7 +822,11 @@ impl VgaWriter {
         let restore_h = h.min(self.cursor.tc_h);
         for cy in 0..restore_h {
             for cx in 0..restore_w {
-                self.put_pixel_raw(x + cx, y + cy, self.cursor.tc_save[cy * TEXT_CURSOR_MAX_DIM + cx]);
+                self.put_pixel_raw(
+                    x + cx,
+                    y + cy,
+                    self.cursor.tc_save[cy * TEXT_CURSOR_MAX_DIM + cx],
+                );
             }
         }
     }
@@ -1210,14 +1230,19 @@ impl VgaWriter {
 
         if self.draw_to_back_buffer() {
             let fw = self.can().width;
-            let wrote = self.canm().back_buffer.as_mut().map(|buf| {
-                for py in sy..(sy + sh) {
-                    let row = py * fw;
-                    let start = row + sx;
-                    let end = start + sw;
-                    buf[start..end].fill(packed);
-                }
-            }).is_some();
+            let wrote = self
+                .canm()
+                .back_buffer
+                .as_mut()
+                .map(|buf| {
+                    for py in sy..(sy + sh) {
+                        let row = py * fw;
+                        let start = row + sx;
+                        let end = start + sw;
+                        buf[start..end].fill(packed);
+                    }
+                })
+                .is_some();
             if wrote {
                 self.mark_dirty_rect(sx, sy, sw, sh);
             }
@@ -1300,19 +1325,24 @@ impl VgaWriter {
         let fmt = self.fmt;
         if self.draw_to_back_buffer() {
             let fb_width = self.can().width;
-            let wrote = self.canm().back_buffer.as_mut().map(|buf| {
-                for row in 0..copy_h {
-                    let src_row = row * src_width;
-                    let dst_row = (dst_y + row) * fb_width + dst_x;
-                    for col in 0..copy_w {
-                        buf[dst_row + col] = fmt.pack_rgb(
-                            pixels[src_row + col].r,
-                            pixels[src_row + col].g,
-                            pixels[src_row + col].b,
-                        );
+            let wrote = self
+                .canm()
+                .back_buffer
+                .as_mut()
+                .map(|buf| {
+                    for row in 0..copy_h {
+                        let src_row = row * src_width;
+                        let dst_row = (dst_y + row) * fb_width + dst_x;
+                        for col in 0..copy_w {
+                            buf[dst_row + col] = fmt.pack_rgb(
+                                pixels[src_row + col].r,
+                                pixels[src_row + col].g,
+                                pixels[src_row + col].b,
+                            );
+                        }
                     }
-                }
-            }).is_some();
+                })
+                .is_some();
             if wrote {
                 self.mark_dirty_rect(dst_x, dst_y, copy_w, copy_h);
                 return true;
@@ -1371,16 +1401,21 @@ impl VgaWriter {
         let fmt = self.fmt;
         if self.draw_to_back_buffer() {
             let fb_width = self.can().width;
-            let wrote = self.canm().back_buffer.as_mut().map(|buf| {
-                for row in 0..copy_h {
-                    let src_base = row * src_width * 3;
-                    let dst_row = (dst_y + row) * fb_width + dst_x;
-                    for col in 0..copy_w {
-                        let i = src_base + col * 3;
-                        buf[dst_row + col] = fmt.pack_rgb(bytes[i], bytes[i + 1], bytes[i + 2]);
+            let wrote = self
+                .canm()
+                .back_buffer
+                .as_mut()
+                .map(|buf| {
+                    for row in 0..copy_h {
+                        let src_base = row * src_width * 3;
+                        let dst_row = (dst_y + row) * fb_width + dst_x;
+                        for col in 0..copy_w {
+                            let i = src_base + col * 3;
+                            buf[dst_row + col] = fmt.pack_rgb(bytes[i], bytes[i + 1], bytes[i + 2]);
+                        }
                     }
-                }
-            }).is_some();
+                })
+                .is_some();
             if wrote {
                 self.mark_dirty_rect(dst_x, dst_y, copy_w, copy_h);
                 return true;

@@ -28,6 +28,7 @@ pub mod blkdev_scheme;
 pub mod console_scheme;
 pub mod fd;
 pub mod file;
+pub mod input_scheme;
 pub mod ipcfs;
 pub mod mount;
 pub mod pipe;
@@ -1371,6 +1372,14 @@ pub fn init() {
     // PTY scheme (/dev/pts) : pseudo-terminals for interactive programs
     pty_scheme::init_pty_scheme();
     log::info!("[VFS] Mounted /dev/pts (PTY scheme)");
+
+    // Input scheme (/dev/input) : raw keyboard and mouse events for userspace Input Server
+    let input_scheme = Arc::new(input_scheme::InputScheme::new());
+    if let Err(e) = mount::mount("/dev/input", input_scheme) {
+        log::error!("[VFS] Failed to mount /dev/input: {:?}", e);
+    } else {
+        log::info!("[VFS] Mounted /dev/input (raw keyboard + mouse events)");
+    }
 
     log::info!("[VFS] VFS ready");
 }

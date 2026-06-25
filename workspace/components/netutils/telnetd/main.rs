@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
+use core::{alloc::Layout, panic::PanicInfo};
 use strat9_syscall::{call, data::TimeSpec, number};
 
 alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 128 * 1024;);
@@ -70,7 +70,7 @@ fn write_all(fd: usize, data: &[u8]) -> bool {
 /// Reads text file.
 fn read_text_file(path: &str, out: &mut [u8]) -> usize {
     let fd = match call::openat(0, path, 0x0, 0) {
-        Ok(fd) => fd as usize,
+        Ok(fd) => fd,
         Err(_) => return 0,
     };
     let n = call::read(fd, out).unwrap_or(0);
@@ -83,7 +83,7 @@ fn open_listener() -> usize {
     let mut retries = 0u32;
     loop {
         match call::openat(0, "/net/tcp/listen/23", 0x2, 0) {
-            Ok(fd) => return fd as usize,
+            Ok(fd) => return fd,
             Err(_) => {
                 retries += 1;
                 if retries > 100 {
@@ -319,8 +319,7 @@ pub extern "C" fn _start() -> ! {
                 if !session.connected {
                     session.connected = true;
                     log("[telnetd] client connected\n");
-                    let _ =
-                        write_all(fd, b"\r\nStrat9 Telnet\r\nType 'help' for commands.\r\n");
+                    let _ = write_all(fd, b"\r\nStrat9 Telnet\r\nType 'help' for commands.\r\n");
                     send_prompt(fd);
                 }
                 if matches!(

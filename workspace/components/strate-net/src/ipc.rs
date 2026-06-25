@@ -51,7 +51,7 @@ pub(crate) fn reply_ok(sender: u64) -> IpcMessage {
     msg
 }
 
-pub(crate) fn open_path<'a>(msg: &'a IpcMessage) -> Result<&'a str, i32> {
+pub(crate) fn open_path(msg: &IpcMessage) -> Result<&str, i32> {
     let path_len = u16::from_le_bytes([msg.payload[4], msg.payload[5]]) as usize;
     if path_len > IpcMessage::OPEN_INLINE_CAPACITY {
         return Err(-22);

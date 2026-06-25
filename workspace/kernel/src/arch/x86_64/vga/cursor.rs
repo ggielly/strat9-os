@@ -4,8 +4,8 @@
 //! pixels) and provides methods to save/restore/draw them directly to the
 //! hardware framebuffer via [`CanvasBuffer`].
 
-use crate::framebuffer::{CanvasBuffer, RgbColor};
 use super::types::PixelFormat;
+use crate::framebuffer::{CanvasBuffer, RgbColor};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -99,8 +99,7 @@ impl CursorManager {
                     self.mc_save[cy * CURSOR_W + cx] = 0;
                     continue;
                 }
-                self.mc_save[cy * CURSOR_W + cx] =
-                    canvas.read_hw_pixel(px as usize, py as usize);
+                self.mc_save[cy * CURSOR_W + cx] = canvas.read_hw_pixel(px as usize, py as usize);
             }
         }
     }
@@ -142,11 +141,7 @@ impl CursorManager {
                 if px < 0 || py < 0 || px as usize >= canvas.width || py as usize >= canvas.height {
                     continue;
                 }
-                canvas.write_hw_pixel(
-                    px as usize,
-                    py as usize,
-                    self.mc_save[cy * CURSOR_W + cx],
-                );
+                canvas.write_hw_pixel(px as usize, py as usize, self.mc_save[cy * CURSOR_W + cx]);
             }
         }
     }
@@ -188,14 +183,27 @@ impl CursorManager {
     // ========================================================================
 
     /// Calculate the pixel rectangle for the text cursor at `(col, row)`.
-    pub fn text_cursor_rect(&self, col: usize, row: usize, glyph_w: usize, glyph_h: usize) -> (usize, usize, usize, usize) {
+    pub fn text_cursor_rect(
+        &self,
+        col: usize,
+        row: usize,
+        glyph_w: usize,
+        glyph_h: usize,
+    ) -> (usize, usize, usize, usize) {
         let tw = glyph_w.min(TEXT_CURSOR_MAX_DIM);
         let th = glyph_h.min(TEXT_CURSOR_MAX_DIM);
         (col * glyph_w, row * glyph_h, tw, th)
     }
 
     /// Save the pixels under the text cursor.
-    pub fn text_cursor_save_hw(&mut self, col: usize, row: usize, glyph_w: usize, glyph_h: usize, canvas: &CanvasBuffer) {
+    pub fn text_cursor_save_hw(
+        &mut self,
+        col: usize,
+        row: usize,
+        glyph_w: usize,
+        glyph_h: usize,
+        canvas: &CanvasBuffer,
+    ) {
         let (tx, ty, tw, th) = self.text_cursor_rect(col, row, glyph_w, glyph_h);
         for dy in 0..th {
             for dx in 0..tw {
@@ -209,7 +217,15 @@ impl CursorManager {
     }
 
     /// Draw the text cursor (inverted-colour block) on the hardware framebuffer.
-    pub fn text_cursor_draw_hw(&mut self, col: usize, row: usize, glyph_w: usize, glyph_h: usize, color: u32, canvas: &mut CanvasBuffer) {
+    pub fn text_cursor_draw_hw(
+        &mut self,
+        col: usize,
+        row: usize,
+        glyph_w: usize,
+        glyph_h: usize,
+        color: u32,
+        canvas: &mut CanvasBuffer,
+    ) {
         let (tx, ty, tw, th) = self.text_cursor_rect(col, row, glyph_w, glyph_h);
         for dy in 0..th {
             for dx in 0..tw {
@@ -223,7 +239,14 @@ impl CursorManager {
     }
 
     /// Erase the text cursor by restoring the saved pixels.
-    pub fn text_cursor_erase_hw(&mut self, col: usize, row: usize, glyph_w: usize, glyph_h: usize, canvas: &mut CanvasBuffer) {
+    pub fn text_cursor_erase_hw(
+        &mut self,
+        col: usize,
+        row: usize,
+        glyph_w: usize,
+        glyph_h: usize,
+        canvas: &mut CanvasBuffer,
+    ) {
         let (tx, ty, tw, th) = self.text_cursor_rect(col, row, glyph_w, glyph_h);
         for dy in 0..th {
             for dx in 0..tw {
@@ -250,7 +273,14 @@ impl CursorManager {
     }
 
     /// Hide the text cursor.
-    pub fn hide_text_cursor(&mut self, col: usize, row: usize, glyph_w: usize, glyph_h: usize, canvas: &mut CanvasBuffer) {
+    pub fn hide_text_cursor(
+        &mut self,
+        col: usize,
+        row: usize,
+        glyph_w: usize,
+        glyph_h: usize,
+        canvas: &mut CanvasBuffer,
+    ) {
         if self.tc_visible {
             self.text_cursor_erase_hw(col, row, glyph_w, glyph_h, canvas);
             self.tc_visible = false;

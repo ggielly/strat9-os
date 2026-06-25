@@ -121,8 +121,8 @@ pub mod rctl {
     pub const UPE: u32 = 1 << 3;
     pub const MPE: u32 = 1 << 4;
     pub const BAM: u32 = 1 << 15;
-    pub const BSIZE_2048: u32 = 0 << 16;
-    pub const BSIZE_4096: u32 = 0 << 16 | 1 << 25;
+    pub const BSIZE_2048: u32 = 0;
+    pub const BSIZE_4096: u32 = 1 << 25;
     pub const BSIZE_8192: u32 = 1 << 16 | 1 << 25;
     pub const SECRC: u32 = 1 << 26;
 }

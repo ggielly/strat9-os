@@ -288,7 +288,7 @@ pub unsafe extern "C" fn _start() -> ! {
     let _ = call::ipc_bind_port(port_h, b"/srv/strate-wasm/bootstrap");
 
     let mut b_msg = IpcMessage::new(0);
-    if let Ok(_) = call::ipc_try_recv(port_h, &mut b_msg) {
+    if call::ipc_try_recv(port_h, &mut b_msg).is_ok() {
         if b_msg.msg_type == OP_BOOTSTRAP {
             label = extract_string(&b_msg.payload, 1, b_msg.payload[0] as usize);
             send_response(b_msg.sender, RESP_OK);
@@ -330,7 +330,7 @@ pub unsafe extern "C" fn _start() -> ! {
                     let mut chunk = [0u8; 4096];
                     let mut read_failed = false;
                     loop {
-                        match call::read(fd as usize, &mut chunk) {
+                        match call::read(fd, &mut chunk) {
                             Ok(0) => break,
                             Ok(n) => {
                                 wasm_bytes.extend_from_slice(&chunk[..n]);
@@ -345,7 +345,7 @@ pub unsafe extern "C" fn _start() -> ! {
                             }
                         }
                     }
-                    let _ = call::close(fd as usize);
+                    let _ = call::close(fd);
 
                     if read_failed {
                         if wasm_bytes.len() > MAX_WASM_SIZE {
@@ -383,17 +383,11 @@ pub unsafe extern "C" fn _start() -> ! {
                     let module_bytes = &trimmed[..effective_len];
 
                     match Module::new(&engine, module_bytes) {
-                        Ok(module) => match linker.instantiate(&mut store, &module) {
-                            Ok(pre) => match pre.start(&mut store) {
-                                Ok(inst) => {
-                                    current_instance = Some(inst);
-                                    send_response(src, RESP_OK);
-                                }
-                                Err(_) => {
-                                    debug_log("[strate-wasm] load error: start\n");
-                                    send_response(src, RESP_ERR_START)
-                                }
-                            },
+                        Ok(module) => match linker.instantiate_and_start(&mut store, &module) {
+                            Ok(inst) => {
+                                current_instance = Some(inst);
+                                send_response(src, RESP_OK);
+                            }
                             Err(_) => {
                                 debug_log("[strate-wasm] load error: instantiate\n");
                                 send_response(src, RESP_ERR_INSTANTIATE)

@@ -63,13 +63,11 @@ impl TsNbus {
 
     /// Sets data direction.
     fn set_data_direction(&self, output: bool) {
-        for pin in &self.data_pins {
-            if let Some(p) = pin {
-                if output {
-                    p.set_direction_output();
-                } else {
-                    p.set_direction_input();
-                }
+        for p in self.data_pins.iter().flatten() {
+            if output {
+                p.set_direction_output();
+            } else {
+                p.set_direction_input();
             }
         }
     }
@@ -91,11 +89,10 @@ impl TsNbus {
     fn read_byte(&self) -> u8 {
         let mut val = 0u8;
         for i in 0..8 {
-            if let Some(ref p) = self.data_pins[i] {
-                if p.get_value() {
+            if let Some(ref p) = self.data_pins[i]
+                && p.get_value() {
                     val |= 1 << i;
                 }
-            }
         }
         val
     }
@@ -117,11 +114,10 @@ impl TsNbus {
     /// Performs the wait rdy operation.
     fn wait_rdy(&self) -> Result<(), BusError> {
         for _ in 0..MAX_POLL_RDY {
-            if let Some(ref r) = self.rdy {
-                if r.get_value() {
+            if let Some(ref r) = self.rdy
+                && r.get_value() {
                     return Ok(());
                 }
-            }
         }
         Err(BusError::Timeout)
     }

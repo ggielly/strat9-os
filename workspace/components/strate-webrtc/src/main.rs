@@ -326,7 +326,7 @@ fn encode_endpoint_candidate(ip: [u8; 4], port: u16, out: &mut [u8; 38]) -> usiz
 
 fn open_udp_bind(local_port: u16) -> Option<usize> {
     let path = format!("/net/udp/bind/{}", local_port);
-    call::openat(0, &path, 0x3, 0).ok().map(|fd| fd as usize)
+    call::openat(0, &path, 0x3, 0).ok().map(|fd| fd)
 }
 
 fn open_udp_connect(ip: [u8; 4], port: u16) -> Option<usize> {
@@ -334,7 +334,7 @@ fn open_udp_connect(ip: [u8; 4], port: u16) -> Option<usize> {
         "/net/udp/connect/{}.{}.{}.{}/{}",
         ip[0], ip[1], ip[2], ip[3], port
     );
-    call::openat(0, &path, 0x3, 0).ok().map(|fd| fd as usize)
+    call::openat(0, &path, 0x3, 0).ok().map(|fd| fd)
 }
 
 fn send_response(sender: u64, status: u32, fill: impl FnOnce(&mut IpcMessage)) {

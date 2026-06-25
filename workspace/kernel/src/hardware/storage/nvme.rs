@@ -713,13 +713,17 @@ impl NvmeController {
         if our_sqes < min_sqes || our_sqes > max_sqes {
             log::warn!(
                 "NVMe: SQES {} not in range [{}..{}] : controller may reject commands",
-                our_sqes, min_sqes, max_sqes
+                our_sqes,
+                min_sqes,
+                max_sqes
             );
         }
         if our_cqes < min_cqes || our_cqes > max_cqes {
             log::warn!(
                 "NVMe: CQES {} not in range [{}..{}] : controller may reject completions",
-                our_cqes, min_cqes, max_cqes
+                our_cqes,
+                min_cqes,
+                max_cqes
             );
         }
 
@@ -739,8 +743,12 @@ impl NvmeController {
 
         log::info!(
             "NVMe: Controller NN={} MDTS={} SQES={:#x} CQES={:#x} MPS=[{}..{}]",
-            nn, mdts, ctrl.sqes, ctrl.cqes,
-            1 << mpsmin, 1 << mpsmax
+            nn,
+            mdts,
+            ctrl.sqes,
+            ctrl.cqes,
+            1 << mpsmin,
+            1 << mpsmax
         );
 
         if nn == 0 {
