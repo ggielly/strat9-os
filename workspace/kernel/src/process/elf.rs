@@ -165,37 +165,43 @@ struct Elf64Sym {
 fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
     let elf = xmas_elf::ElfFile::new(data).map_err(|_| "Invalid ELF header")?;
 
-    let hdr = elf.header;
+    let hdr = elf.header.pt2;
 
     // Type: executable or shared object (PIE/static PIE)
-    if hdr.e_type != ET_EXEC && hdr.e_type != ET_DYN {
+    let e_type = hdr.type_().0;
+    if e_type != ET_EXEC && e_type != ET_DYN {
         return Err("Unsupported ELF type (expected ET_EXEC or ET_DYN)");
     }
 
+    let e_entry = hdr.entry_point();
     // Entry point must be canonical user space (for ET_DYN this is relative and
     // validated again after relocation). ET_EXEC with e_entry=0 is handled later.
-    if hdr.e_entry >= USER_ADDR_MAX {
+    if e_entry >= USER_ADDR_MAX {
         return Err("Entry point outside user address range");
     }
 
+    let e_phentsize = hdr.ph_entry_size();
+    let e_phoff = hdr.ph_offset();
+    let e_phnum = hdr.ph_count();
+
     // Sanity check program headers
-    if hdr.e_phentsize as usize != core::mem::size_of::<xmas_elf::program::ProgramHeader>() {
+    if e_phentsize as usize != core::mem::size_of::<xmas_elf::program::ProgramHeader>() {
         return Err("Unexpected phentsize");
     }
 
-    let ph_end = (hdr.e_phoff as usize)
-        .checked_add((hdr.e_phnum as usize) * (hdr.e_phentsize as usize))
+    let ph_end = (e_phoff as usize)
+        .checked_add((e_phnum as usize) * (e_phentsize as usize))
         .ok_or("Program header table overflows")?;
     if ph_end > data.len() {
         return Err("Program headers extend past file");
     }
 
     Ok(Elf64Header {
-        e_type: hdr.e_type,
-        e_entry: hdr.e_entry,
-        e_phoff: hdr.e_phoff,
-        e_phentsize: hdr.e_phentsize,
-        e_phnum: hdr.e_phnum,
+        e_type,
+        e_entry,
+        e_phoff,
+        e_phentsize,
+        e_phnum,
     })
 }
 
@@ -628,6 +634,9 @@ fn apply_relr_relocations(
                 .ok_or("DT_RELR where pointer overflow")?;
             applied += 1;
         } else {
+            if where_addr == 0 {
+                return Err("DT_RELR bitmap entry before initial address entry");
+            }
             let mut bitmap = entry >> 1;
             for bit in 0..63u64 {
                 if (bitmap & 1) != 0 {
@@ -1506,6 +1515,9 @@ fn setup_boot_user_stack(
     // Write argv[0] = program name (null-terminated)
     let name_nul_len = (name.len() + 1) as u64;
     sp -= name_nul_len;
+    if sp < USER_STACK_BASE {
+        return Err("User stack overflow during boot stack setup");
+    }
     let argv0_ptr = sp;
     write_user_mapped_bytes(user_as, sp, name.as_bytes())?;
     write_user_mapped_bytes(user_as, sp + name.len() as u64, &[0])?;
@@ -1515,12 +1527,18 @@ fn setup_boot_user_stack(
     for &arg in extra_args.iter() {
         let arg_nul_len = (arg.len() + 1) as u64;
         sp -= arg_nul_len;
+        if sp < USER_STACK_BASE {
+            return Err("User stack overflow during boot stack setup");
+        }
         extra_ptrs.push(sp);
         write_user_mapped_bytes(user_as, sp, arg.as_bytes())?;
         write_user_mapped_bytes(user_as, sp + arg.len() as u64, &[0])?;
     }
 
     sp -= 16;
+    if sp < USER_STACK_BASE {
+        return Err("User stack overflow during boot stack setup");
+    }
     let random_ptr = sp;
     let random_seed = generate_aux_random_seed();
     write_user_mapped_bytes(user_as, sp, &random_seed)?;

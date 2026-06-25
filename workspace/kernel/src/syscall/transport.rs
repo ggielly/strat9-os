@@ -126,19 +126,18 @@ pub fn sys_transport_recv(handle: u64, buf_ptr: u64, buf_len: u64) -> Result<u64
 
 /// SYS_TRANSPORT_CLOSE: close a transport handle and release resources.
 pub fn sys_transport_close(handle: u64) -> Result<u64, SyscallError> {
+    use crate::capability::release_capability;
+
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-
-    // Remove the capability
     let cap_id = CapId::from_raw(handle);
-    unsafe {
-        let caps = &mut *task.process.capabilities.get();
-        caps.remove(cap_id);
+    let caps = unsafe { &mut *task.process.capabilities.get() };
+    if let Some(cap) = caps.remove(cap_id) {
+        release_capability(&cap, Some(task.id));
+        log::trace!("transport_close: handle={}", handle);
+        Ok(0)
+    } else {
+        Err(SyscallError::BadHandle)
     }
-
-    // Also release the transport from the manager if this was the last handle
-    // NB: proper refcounting would be needed in production (multiple caps per transport)
-    log::trace!("transport_close: handle={}", handle);
-    Ok(0)
 }
 
 /// SYS_TRANSPORT_INFO: query transport level and statistics.

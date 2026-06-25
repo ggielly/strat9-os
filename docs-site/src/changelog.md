@@ -4,12 +4,13 @@
 
 ## Project stats
 
-- **Total commits:** `554`
+- **Total commits:** `555`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-06-26 [`ec935ba`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ec935ba6b9842148af20870bd54f72795799836e) docs: update published documentation
 - 2026-06-26 [`941a995`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/941a995675e239879582ed2894b36fb5204494a8) feat: update ABI changelog and documentation
 - 2026-06-25 [`4fb871f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4fb871f59926d9630cc73c5f4eb36ea24b934041) Refactor error codes and syscall flags; implement getrandom syscall
 - 2026-06-25 [`f0f891c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f0f891c41fada46208209b6b807c89d5701d4a1f) docs: update published documentation
@@ -59,6 +60,5 @@
 - 2026-05-24 [`40d4d46`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/40d4d46574896664983ba2fe05dfd7ca1c0f1b94) Merge branch 'IPC-refactor' into 'main'
 - 2026-05-24 [`b2bbcc0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8) Improve and fix IPC
 - 2026-05-23 [`b7c3e27`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b7c3e271d8644570a5a0b7bdabb80ef8c3f524f7) Merge branch 'hunt-memory-corruption' into 'main'
-- 2026-05-23 [`db23b53`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552) Fix major memory leak and remove sshd silo
 
 <!-- AUTO-CHANGELOG:END -->

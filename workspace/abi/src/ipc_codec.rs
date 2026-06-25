@@ -1,5 +1,11 @@
 //! Low-level helpers for encoding/decoding [`IpcMessage`] payloads.
 //!
+//! # Overview
+//!
+//! IPC messages carry a fixed 240-byte payload. This module provides
+//! safe, bounds-checked helpers to pack and unpack structured data
+//! into that payload without external allocators or serde.
+//!
 //! # Layers
 //!
 //! 1. **Scalar helpers** : `put_u16`/`get_u16`, `put_u32`/`get_u32`, `put_u64`/`get_u64`.
@@ -12,7 +18,7 @@
 //! # Payload layout conventions
 //!
 //! - **Fixed messages**: the entire `payload[0..48]` (or a prefix) is a
-//!   `repr(C)` struct.  Use `encode_fixed`/`decode_fixed`.
+//!   `repr(C)` struct. Use `encode_fixed`/`decode_fixed`.
 //! - **Variable messages**: the fixed-size part goes first (e.g. flags + u64s),
 //!   followed by an [`InlineBlobHeader`] (4 bytes) and the inline data.
 //!   Use the put/get helpers for the fixed part, then `InlineBlobHeader::write`
@@ -20,12 +26,43 @@
 //!
 //! # Safety
 //!
-//! All functions are pure safe-Rust : no `unsafe` required at this layer.
+//! All functions are pure safe-Rust: no `unsafe` required at this layer.
 //! The zerocopy traits used by payload structs are derived safely.
+//!
+//! # Examples
+//!
+//! ## Fixed-size message
+//!
+//! ```ignore
+//! use strat9_abi::data::IpcMessage;
+//! use strat9_abi::ipc_codec::{encode_fixed, decode_fixed};
+//!
+//! // Encode a struct into a message
+//! #[derive(FromBytes, IntoBytes)]
+//! #[repr(C)]
+//! struct OpenReq { flags: u32, mode: u32 }
+//!
+//! let msg = encode_fixed(0x01, &OpenReq { flags: 0x02, mode: 0o644 });
+//!
+//! // Decode it back
+//! let req: &OpenReq = decode_fixed(&msg).unwrap();
+//! assert_eq!(req.flags, 0x02);
+//! ```
+//!
+//! ## Variable-length message
+//!
+//! ```ignore
+//! use strat9_abi::ipc_codec::{put_u32, InlineBlobHeader};
+//!
+//! let mut msg = IpcMessage::new(0x03);
+//! put_u32(&mut msg.payload, 0, 0o755).unwrap(); // mode
+//! InlineBlobHeader::write(&mut msg.payload, 4, 0, b"/dev/null").unwrap();
+//! ```
+
 use crate::data::IpcMessage;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-/// Capacity of the `IpcMessage.payload` field.
+/// Capacity of the `IpcMessage.payload` field (240 bytes).
 pub const PAYLOAD_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY;
 
 // ===========================================================================
@@ -33,6 +70,8 @@ pub const PAYLOAD_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY;
 // ===========================================================================
 
 /// Write a `u16` at offset `off` (little-endian).
+///
+/// Returns `None` if the write would overflow the payload.
 #[inline]
 pub fn put_u16(payload: &mut [u8], off: usize, v: u16) -> Option<()> {
     let end = off.checked_add(2)?;
@@ -50,6 +89,8 @@ pub fn get_u16(payload: &[u8], off: usize) -> Option<u16> {
 }
 
 /// Write a `u32` at offset `off` (little-endian).
+///
+/// Returns `None` if the write would overflow the payload.
 #[inline]
 pub fn put_u32(payload: &mut [u8], off: usize, v: u32) -> Option<()> {
     let end = off.checked_add(4)?;
@@ -67,18 +108,24 @@ pub fn get_u32(payload: &[u8], off: usize) -> Option<u32> {
 }
 
 /// Write an `i32` at offset `off` (little-endian).
+///
+/// Convenience wrapper around [`put_u32`].
 #[inline]
 pub fn put_i32(payload: &mut [u8], off: usize, v: i32) -> Option<()> {
     put_u32(payload, off, v as u32)
 }
 
 /// Read an `i32` at offset `off` (little-endian), or `None` if out of bounds.
+///
+/// Convenience wrapper around [`get_u32`].
 #[inline]
 pub fn get_i32(payload: &[u8], off: usize) -> Option<i32> {
     Some(get_u32(payload, off)? as i32)
 }
 
 /// Write a `u64` at offset `off` (little-endian).
+///
+/// Returns `None` if the write would overflow the payload.
 #[inline]
 pub fn put_u64(payload: &mut [u8], off: usize, v: u64) -> Option<()> {
     let end = off.checked_add(8)?;
@@ -102,6 +149,7 @@ pub fn get_u64(payload: &[u8], off: usize) -> Option<u64> {
 // ===========================================================================
 
 /// Copy `src` into `payload[off..off + src.len()]`.
+///
 /// Returns `None` if the slice does not fit (overflow or out of bounds).
 #[inline]
 pub fn put_bytes(payload: &mut [u8], off: usize, src: &[u8]) -> Option<()> {
@@ -112,6 +160,7 @@ pub fn put_bytes(payload: &mut [u8], off: usize, src: &[u8]) -> Option<()> {
 }
 
 /// Return a reference to `payload[off..off + len]`.
+///
 /// Returns `None` if the range is out of bounds.
 #[inline]
 pub fn get_bytes(payload: &[u8], off: usize, len: usize) -> Option<&[u8]> {
@@ -120,6 +169,7 @@ pub fn get_bytes(payload: &[u8], off: usize, len: usize) -> Option<&[u8]> {
 }
 
 /// Encode a UTF-8 string into `payload[off..]`.
+///
 /// Returns `None` if the string does not fit.
 #[inline]
 pub fn put_str(payload: &mut [u8], off: usize, s: &str) -> Option<()> {
@@ -127,6 +177,7 @@ pub fn put_str(payload: &mut [u8], off: usize, s: &str) -> Option<()> {
 }
 
 /// Decode a UTF-8 string of `len` bytes from `payload[off..]`.
+///
 /// Returns `None` if out of bounds or invalid UTF-8.
 #[inline]
 pub fn get_str(payload: &[u8], off: usize, len: usize) -> Option<&str> {
@@ -143,6 +194,19 @@ pub fn get_str(payload: &[u8], off: usize, len: usize) -> Option<&str> {
 /// The body is written directly into `payload[0..size_of::<T>()]`.
 /// Panics in debug if `T` exceeds [`PAYLOAD_CAPACITY`]; in release the write
 /// silently truncates.
+///
+/// # Example
+///
+/// ```ignore
+/// use strat9_abi::ipc_codec::encode_fixed;
+///
+/// #[derive(FromBytes, IntoBytes)]
+/// #[repr(C)]
+/// struct StatReq { ino: u64, flags: u32 }
+///
+/// let msg = encode_fixed(0x10, &StatReq { ino: 42, flags: 0 });
+/// assert_eq!(msg.msg_type, 0x10);
+/// ```
 pub fn encode_fixed<T: IntoBytes + Immutable>(msg_type: u32, body: &T) -> IpcMessage {
     let mut msg = IpcMessage::new(msg_type);
     let src = body.as_bytes();
@@ -153,6 +217,8 @@ pub fn encode_fixed<T: IntoBytes + Immutable>(msg_type: u32, body: &T) -> IpcMes
 }
 
 /// Encode a fixed-size reply targeting `sender`.
+///
+/// Same as [`encode_fixed`] but sets `msg.sender` for reply routing.
 pub fn encode_fixed_reply<T: IntoBytes + Immutable>(
     sender: u64,
     msg_type: u32,
@@ -168,6 +234,17 @@ pub fn encode_fixed_reply<T: IntoBytes + Immutable>(
 /// Returns `None` if:
 /// - `T` is larger than [`PAYLOAD_CAPACITY`] (size overflow), or
 /// - the payload slice is not correctly aligned for `T` (alignment mismatch).
+///
+/// # Example
+///
+/// ```ignore
+/// use strat9_abi::ipc_codec::decode_fixed;
+///
+/// let msg: &IpcMessage = /* received message */;
+/// if let Some(reply) = decode_fixed::<MyReply>(msg) {
+///     println!("status: {}", reply.status);
+/// }
+/// ```
 pub fn decode_fixed<T: FromBytes + Immutable + KnownLayout>(
     msg: &IpcMessage,
 ) -> Option<&T> {
@@ -189,12 +266,29 @@ pub fn decode_fixed<T: FromBytes + Immutable + KnownLayout>(
 /// - `len`: number of data bytes that follow this header.
 /// - `kind`: discriminator (e.g. `0` = path, `1` = blob data).
 ///
-/// This lets you embed a variable-length segment in the 48-byte payload
+/// This lets you embed a variable-length segment in the 240-byte payload
 /// without external allocators or serde.
+///
+/// # Example
+///
+/// ```ignore
+/// use strat9_abi::ipc_codec::InlineBlobHeader;
+///
+/// let mut payload = [0u8; 240];
+/// // Write a file path at offset 4
+/// InlineBlobHeader::write(&mut payload, 4, 0, b"/etc/passwd").unwrap();
+///
+/// // Parse it back
+/// let hdr = InlineBlobHeader::parse(&payload, 4).unwrap();
+/// assert_eq!(hdr.len, 11); // "/etc/passwd".len()
+/// assert_eq!(hdr.kind, 0);
+/// ```
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct InlineBlobHeader {
+    /// Number of data bytes following this header.
     pub len: u16,
+    /// Discriminator: 0 = path, 1 = blob data, etc.
     pub kind: u16,
 }
 
