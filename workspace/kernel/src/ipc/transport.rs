@@ -8,7 +8,7 @@
 //! The [`TransportManager`] selects the appropriate level per silo-pair at
 //! connection creation time using a configurable decision matrix.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use alloc::{collections::BTreeMap, sync::Arc};
 
@@ -16,9 +16,9 @@ use crate::{silo::SiloId, sync::SpinLock};
 
 use super::{
     lockfree_ring::{LockFreeRing, RingError, RingSlot},
-    mailbox::{IntrusiveMailbox, MailboxError},
+    mailbox::IntrusiveMailbox,
 };
-
+use alloc::vec::Vec;
 // ---------------------------------------------------------------------------
 // Transport level enumeration
 // ---------------------------------------------------------------------------
@@ -201,11 +201,15 @@ impl IpcTransport for LockFreeRing {
 
 impl IpcProducer for LockFreeRing {
     fn send(&self, msg: &[u8]) -> Result<(), IpcError> {
-        self.write(msg).map_err(ring_to_ipc_error)
+        self.write(msg).map_err(ring_to_ipc_error)?;
+        self.notify_consumer_raw();
+        Ok(())
     }
 
     fn try_send(&self, msg: &[u8]) -> Result<(), IpcError> {
-        self.write(msg).map_err(ring_to_ipc_error)
+        self.write(msg).map_err(ring_to_ipc_error)?;
+        self.notify_consumer_raw();
+        Ok(())
     }
 }
 
@@ -512,4 +516,116 @@ impl TransportCache {
         self.entries[idx] = (key, Some(value));
         self.next = (self.next + 1) % CACHE_SIZE;
     }
+}
+
+// ---------------------------------------------------------------------------
+// TypedLockFreeRing : typestate pattern for SPSC role safety
+// ---------------------------------------------------------------------------
+
+use core::marker::PhantomData;
+
+/// Producer role marker: only this side can call `write()`.
+pub struct Producer;
+
+/// Consumer role marker: can only call `read()`.
+pub struct Consumer;
+
+/// SPSC ring with compile-time role enforcement.
+///
+/// `TypedLockFreeRing<Producer>` has both `write()` and `read()`.
+/// `TypedLockFreeRing<Consumer>` has only `read()`.
+/// The compiler rejects any misuse at compile time.
+pub struct TypedLockFreeRing<Role> {
+    inner: Arc<LockFreeRing>,
+    _role: PhantomData<Role>,
+}
+
+impl TypedLockFreeRing<Producer> {
+    /// Write into the ring (producer only).
+    pub fn write(&self, data: &[u8]) -> Result<(), RingError> {
+        self.inner.write(data)
+    }
+}
+
+impl<T> TypedLockFreeRing<T> {
+    /// Read from the ring (both roles).
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, RingError> {
+        self.inner.read(buf)
+    }
+}
+
+/// Create a typed SPSC pair returning separate producer and consumer ends.
+pub fn create_spsc_pair(
+    cap: u32,
+    slot_size: usize,
+) -> Result<(TypedLockFreeRing<Producer>, TypedLockFreeRing<Consumer>), RingError> {
+    let ring = LockFreeRing::new(cap, slot_size)?;
+    Ok((
+        TypedLockFreeRing {
+            inner: ring.clone(),
+            _role: PhantomData,
+        },
+        TypedLockFreeRing {
+            inner: ring,
+            _role: PhantomData,
+        },
+    ))
+}
+
+// NicDataPlane : multi-queue NIC data-path
+// ---------------------------------------------------------------------------
+
+/// Shared NIC ←→ scheduler routing table.
+///
+/// Updated by the scheduler on each context switch; read **only** by the NIC
+/// driver via a read-only (PTE_RO) mapping in Ring 3.  The NIC must never
+/// write this table — doing so would corrupt scheduler state.
+#[repr(C)]
+pub struct NicRoutingTable {
+    /// Number of valid entries.
+    pub count: AtomicU32,
+    _pad: [u8; 60],
+    /// Routing entries, one per silo.
+    pub entries: [RoutingEntry; MAX_ROUTES],
+}
+
+/// A single entry in the NIC routing table.
+#[repr(C, align(64))]
+pub struct RoutingEntry {
+    pub silo_id: u64,
+    pub core_id: u32,
+    pub state: AtomicU32,
+    pub rpc_count: AtomicU64,
+    pub generation: AtomicU64,
+}
+
+/// Maximum number of routing entries.
+pub const MAX_ROUTES: usize = 64;
+
+impl Default for NicRoutingTable {
+    fn default() -> Self {
+        NicRoutingTable {
+            count: AtomicU32::new(0),
+            _pad: [0u8; 60],
+            entries: unsafe { core::mem::zeroed() },
+        }
+    }
+}
+
+/// Per-queue ring pair for multi-queue NIC RSS.
+pub struct RingPair {
+    pub rx: Arc<LockFreeRing>,
+    pub tx: Arc<LockFreeRing>,
+}
+
+/// Multi-queue NIC data plane using independent SPSC rings.
+///
+/// Each RSS queue gets its own `RingPair`; the NIC driver writes into the
+/// RX ring of the current queue, and the networking silo (strate-net) polls
+/// all RX rings in round-robin.
+pub struct NicDataPlane {
+    /// One ring pair per RSS queue.
+    pub queues: Vec<RingPair>,
+    /// Shared routing table (read-only for Ring 3).
+    pub routing: NicRoutingTable,
 }

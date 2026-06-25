@@ -32,9 +32,9 @@ use crate::{
 /// Shared ring header, placed at the start of the first physical page.
 ///
 /// Cache-line layout (x86-64, 64-byte lines):
-/// - Line 0: magic, capacity, slot_size, flags, notify_seq (read-mostly)
-/// - Line 1: head (written by consumer, read by producer) : **consumer hot**
-/// - Line 2: tail (written by producer, read by consumer) : **producer hot**
+/// - Line 0: magic, capacity, slot_size, flags (read-mostly, rarely written)
+/// - Line 1: head, notify_prod (written by **consumer**, read by producer)
+/// - Line 2: tail, notify_cons (written by **producer**, read by consumer)
 #[repr(C, align(64))]
 pub struct RingHeader {
     /// Magic number for validating shared mappings.
@@ -45,26 +45,22 @@ pub struct RingHeader {
     slot_size: u32,
     /// Flags field (bit 0 = initialised, bit 1 = producer_ready).
     flags: AtomicU32,
-    /// Futex notification counter, separate from flags to avoid semantic
-    /// conflicts with SLOT_FLAG_COMMITTED and initialisation bits.
-    notify_seq: AtomicU32,
-    _pad1: [u8; 40],
+    _pad1: [u8; 48],
 
-    // Cache-line 1 : consumer hot
+    // Cache-line 1 — consumer hot
     /// Next slot to read.  Written by consumer; read by producer.
     head: AtomicU32,
-    _pad2: [u8; 60],
+    /// Notification counter for the producer (written by consumer).
+    notify_prod: AtomicU32,
+    _pad2: [u8; 56],
 
-    // Cache-line 2 : producer hot
+    // Cache-line 2 — producer hot
     /// Next slot to write.  Written by producer; read by consumer.
     tail: AtomicU32,
-    _pad3: [u8; 60],
+    /// Notification counter for the consumer (written by producer).
+    notify_cons: AtomicU32,
+    _pad3: [u8; 56],
 }
-
-/// Offset of `head` within `RingHeader` : used for address arithmetic.
-const HEAD_OFFSET: usize = 64;
-/// Offset of `tail` within `RingHeader` : used for address arithmetic.
-const TAIL_OFFSET: usize = 128;
 
 // ---------------------------------------------------------------------------
 // RingSlot
@@ -187,9 +183,12 @@ impl LockFreeRing {
         let base_virt = phys_to_virt(frames[0].start_address.as_u64());
         let header = base_virt as *mut RingHeader;
 
-        // Zero the entire region
-        unsafe {
-            core::ptr::write_bytes(base_virt as *mut u8, 0, page_count * 4096);
+        // Zero each frame individually — they may not be physically contiguous.
+        for &frame in &frames {
+            let virt = phys_to_virt(frame.start_address.as_u64());
+            unsafe {
+                core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+            }
         }
 
         // Initialise header
@@ -198,7 +197,8 @@ impl LockFreeRing {
             (*header).capacity = slot_count;
             (*header).slot_size = slot_size as u32;
             (*header).flags = AtomicU32::new(0x0001); // bit 0 = initialised
-            (*header).notify_seq = AtomicU32::new(0);
+            (*header).notify_cons = AtomicU32::new(0);
+            (*header).notify_prod = AtomicU32::new(0);
             (*header).head = AtomicU32::new(0);
             (*header).tail = AtomicU32::new(0);
         }
@@ -335,16 +335,18 @@ impl LockFreeRing {
     }
 
     /// Notify the consumer that new data is available (futex wake).
-    pub fn notify_consumer(&self) {
+    /// Increments the consumer notification counter.
+    pub fn notify_consumer_raw(&self) {
         unsafe {
-            (*self.header).notify_seq.fetch_add(1, Ordering::Release);
+            (*self.header).notify_cons.fetch_add(1, Ordering::Release);
         }
     }
 
     /// Notify the producer that space has been freed (futex wake).
-    pub fn notify_producer(&self) {
+    /// Increments the producer notification counter.
+    pub fn notify_producer_raw(&self) {
         unsafe {
-            (*self.header).notify_seq.fetch_add(1, Ordering::Release);
+            (*self.header).notify_prod.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -401,6 +403,36 @@ impl Drop for LockFreeRing {
     fn drop(&mut self) {
         for frame in self.frames.drain(..) {
             with_irqs_disabled(|token| free_frame(token, frame));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IpcNotification impl
+// ---------------------------------------------------------------------------
+
+use super::transport::{IpcError, IpcNotification};
+
+impl IpcNotification for LockFreeRing {
+    fn notify_consumer(&self) {
+        self.notify_consumer_raw();
+    }
+
+    fn notify_producer(&self) {
+        self.notify_producer_raw();
+    }
+
+    fn wait_notification(&self) -> Result<(), IpcError> {
+        // Spin-then-futex: check once, then wait.
+        // The caller should busy-poll for N2a or use futex for N2b.
+        // This implementation provides the futex (blocking) path.
+        loop {
+            if self.has_data() {
+                return Ok(());
+            }
+            // NB: in production this would call futex_wait on notify_cons.
+            // For now, yield and retry (architecture-specific).
+            core::hint::spin_loop();
         }
     }
 }

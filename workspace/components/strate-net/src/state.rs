@@ -119,8 +119,7 @@ impl NetworkStrate {
             alloc::vec![icmp::PacketMetadata::EMPTY; 16],
             alloc::vec![0u8; 4096],
         );
-        let mut icmp_socket = icmp::Socket::new(icmp_rx_buf, icmp_tx_buf);
-        icmp_socket.bind(icmp::Endpoint::Unspecified).ok();
+        let icmp_socket = icmp::Socket::new(icmp_rx_buf, icmp_tx_buf);
         let icmp_handle = sockets.add(icmp_socket);
 
         Self {

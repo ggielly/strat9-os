@@ -63,7 +63,7 @@ pub use semaphore::{
 };
 pub use shared_ring::{create_ring, destroy_ring, get_ring, RingError, RingId, SharedRing};
 pub use transport::{
-    IpcTransport, IpcProducer, IpcConsumer, IpcNotification,
-    TransportEndpoint, TransportLevel, TransportManager, TransportId,
-    TransportCapabilities, TransportConfig, TransportCreateResult,
+    IpcConsumer, IpcNotification, IpcProducer, IpcTransport, TransportCapabilities,
+    TransportConfig, TransportCreateResult, TransportEndpoint, TransportId, TransportLevel,
+    TransportManager,
 };

@@ -632,6 +632,7 @@ fn resource_type_code(rt: ResourceType) -> u32 {
         ResourceType::Keyboard => 16,
         ResourceType::Volume => 17,
         ResourceType::Namespace => 18,
+        ResourceType::IpcTransport => 19,
     }
 }
 

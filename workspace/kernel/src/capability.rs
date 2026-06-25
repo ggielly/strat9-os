@@ -65,6 +65,8 @@ pub enum ResourceType {
     Keyboard,
     Volume,
     Namespace,
+    /// IPC transport endpoint (N1/N2/N3).
+    IpcTransport,
 }
 
 /// Permissions associated with a capability
