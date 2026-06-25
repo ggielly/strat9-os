@@ -1348,21 +1348,21 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             // interrupts enabled.
             "cli",
 
-            //  Probe 1 : entrée dans le bloc asm ================================================================================
-            // Les registres d'entrée sont déjà alloués par le compilateur ;
-            // push/pop rax les laisse intacts.
+            //  Probe 1: entering the asm block ================================================================================
+            // Input registers are already allocated by the compiler;
+            // push/pop rax leaves them intact.
             "push rax",
             "mov al, 0x31",     // '1'
             "out 0xe9, al",
             "pop rax",
 
-            //  Construction de la frame iretq ==========================================================================================
-            // Ordre requis par IRETQ (dépilé dans l'ordre inverse) :
+            //  Build the iretq frame ==========================================================================================
+            // Order required by IRETQ (popped in reverse order):
             //   [RSP+32] SS
             //   [RSP+24] user RSP
             //   [RSP+16] RFLAGS
             //   [RSP+8]  CS
-            //   [RSP+0]  RIP  <--- RSP ici après les 5 push
+            //   [RSP+0]  RIP  <--- RSP here after the 5 pushes
             "push {ss}",
             "push {rsp_val}",
             "push {rflags}",
@@ -1383,23 +1383,23 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "mov rax, {rip}",
             "movzx rax, byte ptr [rax]",
 
-            //  Chargement de arg0 dans RDI ====================================================================================================
+            //  Load arg0 into RDI ====================================================================================================
             "mov rdi, {arg0}",
 
-            //  Probe 3 : RDI chargé, juste avant SWAPGS ==================================================
+            //  Probe 3: RDI loaded, just before SWAPGS ==================================================
             "push rax",
             "mov al, 0x33",     // '3'
             "out 0xe9, al",
             "pop rax",
 
-            //  SWAPGS : GS.base kernel <---> GS.base user ============================================================
-            // Après cette instruction, GS pointe vers le bloc per-thread user.
-            // Le push/pop ci-dessous ne touche pas GS, il est sûr.
+            //  SWAPGS: GS.base kernel <---> GS.base user ============================================================
+            // After this instruction, GS points to the user per-thread block.
+            // The push/pop below does not touch GS, it is safe.
             "swapgs",
 
-            //  Probe 4 : SWAPGS réussi, IRETQ imminent ============================================================
-            // Si le double-fault survient sur iretq, '4' sera le DERNIER
-            // caractère visible dans la console E9.
+            //  Probe 4: SWAPGS succeeded, IRETQ imminent ============================================================
+            // If a double-fault occurs on iretq, '4' will be the LAST
+            // character visible on the E9 console.
             "push rax",
             "mov al, 0x34",     // '4'
             "out 0xe9, al",
