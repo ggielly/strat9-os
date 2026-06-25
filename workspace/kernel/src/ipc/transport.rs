@@ -357,7 +357,34 @@ pub struct TransportStats {
 
 impl TransportStats {
     const fn new(level: TransportLevel) -> Self {
-        TransportStats { sent: 0, received: 0, errors: 0, level }
+        TransportStats {
+            sent: 0,
+            received: 0,
+            errors: 0,
+            level,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TransportEndpoint helpers for polling
+// ---------------------------------------------------------------------------
+
+impl TransportEndpoint {
+    /// Whether the transport has data to read.
+    pub fn has_data(&self) -> bool {
+        match self {
+            Self::Mailbox(m) => !m.is_empty(),
+            Self::LockFree(r) => r.has_data(),
+        }
+    }
+
+    /// Whether the transport has space to write.
+    pub fn has_space(&self) -> bool {
+        match self {
+            Self::Mailbox(_) => true,  // Mailbox allocates on push, always nominally writable
+            Self::LockFree(r) => r.has_space(),
+        }
     }
 }
 
@@ -499,6 +526,12 @@ impl TransportManager {
         }
 
         Ok(result)
+    }
+
+    /// Look up a transport endpoint by ID.
+    pub fn get_endpoint(&self, id: TransportId) -> Option<TransportEndpoint> {
+        let active = self.active.lock();
+        active.get(&id).map(|r| r.local.clone())
     }
 
     /// Remove a transport from the registry (called when all handles close).

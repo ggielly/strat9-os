@@ -9,15 +9,19 @@
 
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
-    ipc::transport::{TransportConfig, TransportId, TransportLevel, TransportManager},
+    ipc::transport::{
+        IpcConsumer, IpcError, IpcProducer, IpcTransport, TransportConfig, TransportId,
+        TransportLevel, TransportManager,
+    },
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
     silo::{self, SiloId},
     syscall::error::SyscallError,
 };
+use alloc::vec;
 
 /// Global transport manager instance.
-static TRANSPORT_MANAGER: TransportManager = TransportManager::new();
+pub(crate) static TRANSPORT_MANAGER: TransportManager = TransportManager::new();
 
 /// SYS_TRANSPORT_CREATE: create a transport between the caller's silo and `dst_silo`.
 pub fn sys_transport_create(dst_silo_val: u64, _config_flags: u64) -> Result<u64, SyscallError> {
@@ -68,11 +72,19 @@ pub fn sys_transport_send(handle: u64, buf_ptr: u64, buf_len: u64) -> Result<u64
     let user_buf = UserSliceRead::new(buf_ptr, len)?;
     let data = user_buf.read_to_vec();
 
-    // Look up the transport endpoint
     let tid = TransportId::from_u64(cap.resource as u64);
-    // NB: In production, the endpoint would be retrieved from the manager.
-    // For now we return success after copying : actual dispatch is TBD.
-    log::debug!("transport_send: handle={} len={} (stub)", handle, len);
+    let endpoint = TRANSPORT_MANAGER
+        .get_endpoint(tid)
+        .ok_or(SyscallError::BadHandle)?;
+
+    endpoint
+        .send(&data)
+        .map_err(|e| transport_to_syscall_err(e))?;
+
+    // Increment sent stats
+    TRANSPORT_MANAGER.stats.lock().sent += 1;
+
+    log::trace!("transport_send: handle={} len={}", handle, len);
     Ok(len as u64)
 }
 
@@ -81,17 +93,35 @@ pub fn sys_transport_recv(handle: u64, buf_ptr: u64, buf_len: u64) -> Result<u64
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
 
-    let _cap = caps
+    let cap = caps
         .get_with_permissions(CapId::from_raw(handle), CapPermissions::read_write())
         .ok_or(SyscallError::BadHandle)?;
+
+    if cap.resource_type != ResourceType::IpcTransport {
+        return Err(SyscallError::BadHandle);
+    }
 
     if buf_len == 0 {
         return Err(SyscallError::Fault);
     }
 
-    log::debug!("transport_recv: handle={} len={} (stub)", handle, buf_len);
-    // Stub: return WouldBlock to indicate no data yet
-    Err(SyscallError::Again)
+    let tid = TransportId::from_u64(cap.resource as u64);
+    let endpoint = TRANSPORT_MANAGER
+        .get_endpoint(tid)
+        .ok_or(SyscallError::BadHandle)?;
+
+    let mut user_buf = UserSliceWrite::new(buf_ptr, buf_len as usize)?;
+    let mut kbuf = vec![0u8; buf_len as usize];
+    let n = endpoint
+        .recv(&mut kbuf)
+        .map_err(|e| transport_to_syscall_err(e))?;
+    user_buf.copy_from(&kbuf[..n]);
+
+    // Increment received stats
+    TRANSPORT_MANAGER.stats.lock().received += 1;
+
+    log::trace!("transport_recv: handle={} n={}", handle, n);
+    Ok(n as u64)
 }
 
 /// SYS_TRANSPORT_CLOSE: close a transport handle and release resources.
@@ -105,7 +135,9 @@ pub fn sys_transport_close(handle: u64) -> Result<u64, SyscallError> {
         caps.remove(cap_id);
     }
 
-    log::debug!("transport_close: handle={}", handle);
+    // Also release the transport from the manager if this was the last handle
+    // NB: proper refcounting would be needed in production (multiple caps per transport)
+    log::trace!("transport_close: handle={}", handle);
     Ok(0)
 }
 
@@ -122,9 +154,25 @@ pub fn sys_transport_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallError
         return Err(SyscallError::Fault);
     }
 
-    // Write a stub info struct (level = LockFree)
-    let info: u64 = 2; // TransportLevel::LockFree as u64
+    let tid = TransportId::from_u64(_cap.resource as u64);
+    let endpoint = TRANSPORT_MANAGER
+        .get_endpoint(tid)
+        .ok_or(SyscallError::BadHandle)?;
+    let level = endpoint.level() as u64;
     let out = UserSliceWrite::new(out_ptr, 8)?;
-    out.copy_from(&info.to_ne_bytes());
+    out.copy_from(&level.to_ne_bytes());
     Ok(8)
+}
+
+/// Convert an IpcError to a SyscallError.
+fn transport_to_syscall_err(e: IpcError) -> SyscallError {
+    match e {
+        IpcError::WouldBlock => SyscallError::Again,
+        IpcError::Disconnected => SyscallError::Pipe,
+        IpcError::MessageTooLarge => SyscallError::Fault,
+        IpcError::BufferTooSmall => SyscallError::Fault,
+        IpcError::TransportNotFound => SyscallError::BadHandle,
+        IpcError::PermissionDenied => SyscallError::PermissionDenied,
+        IpcError::TransportFailed => SyscallError::IoError,
+    }
 }

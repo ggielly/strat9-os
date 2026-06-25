@@ -50,6 +50,13 @@ pub fn seed_from_rdrand() {
 }
 
 // === public API ================================================
+
+/// Check whether the entropy pool has accumulated enough entropy
+/// (at least `ENTROPY_HIGH_WATER` bytes). Used by GRND_NONBLOCK.
+pub fn is_ready() -> bool {
+    ENTROPY_CTR.load(Ordering::Relaxed) >= ENTROPY_HIGH_WATER
+}
+
 /// Feed a 64‑bit sample into the entropy pool (called from interrupt handlers).
 ///
 /// `tag` should be a small unique discriminator for the source

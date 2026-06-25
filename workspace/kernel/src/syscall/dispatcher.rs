@@ -504,6 +504,23 @@ fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
             }
             Ok(events)
         }
+        ResourceType::IpcTransport => {
+            let tid = crate::ipc::transport::TransportId::from_u64(cap.resource as u64);
+            let endpoint = crate::syscall::transport::TRANSPORT_MANAGER
+                .get_endpoint(tid)
+                .ok_or(SyscallError::BadHandle)?;
+            let mut events = 0u64;
+            if cap.permissions.read && endpoint.has_data() {
+                events |= HANDLE_EVENT_READABLE;
+            }
+            if cap.permissions.write && endpoint.has_space() {
+                events |= HANDLE_EVENT_WRITABLE;
+            }
+            if events == 0 && !cap.permissions.read && !cap.permissions.write {
+                return Err(SyscallError::PermissionDenied);
+            }
+            Ok(events)
+        }
         _ => Err(SyscallError::NotSupported),
     }
 }

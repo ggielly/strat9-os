@@ -390,6 +390,16 @@ impl LockFreeRing {
         }
     }
 
+    /// Query whether the producer can write without blocking.
+    /// Returns true if at least one slot is free.
+    pub fn has_space(&self) -> bool {
+        unsafe {
+            let t = (*self.header).tail.load(Ordering::Relaxed);
+            let h = (*self.header).head.load(Ordering::Acquire);
+            ((t + 1) & (self.capacity - 1)) != (h & (self.capacity - 1))
+        }
+    }
+
     /// Provide a DMA-accessible buffer descriptor for zero-copy NIC
     /// operation.  The physical address points directly into the slot's
     /// data area so the NIC can DMA into the ring without an intermediate
