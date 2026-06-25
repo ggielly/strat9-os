@@ -4,12 +4,14 @@
 
 ## Project stats
 
-- **Total commits:** `546`
+- **Total commits:** `548`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-06-25 [`454a828`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/454a828ff9859ae7551677c8e150f41f14f82345) feat: add N2 data plane implementation with lock-free rings and enhance NIC interrupt handling
+- 2026-06-25 [`1f1362b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1f1362b294e6f3948e94d15a702a322a5091bfa7) docs: update published documentation
 - 2026-06-25 [`d1e838f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d1e838fbcbc964f67208246303930315f5565331) feat: implement IPC transport layer with 3-level architecture
 - 2026-06-25 [`411f5aa`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/411f5aaf1ae30d6b53f71cb08784be42b0cea99a) feat: add IPC transport layer support and enhance ICMP handling
 - 2026-06-25 [`c034c91`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c034c916c998d69d1a210f5c147971fb24510ed4) docs: update published documentation
@@ -58,7 +60,5 @@
 - 2026-05-19 [`0d4fcb8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0d4fcb8a512b73bba2408f03b9b525f3d970b2ae) refactor: rework bus driver architecture, wire storage drivers, add hardware documentation
 - 2026-05-19 [`d9e64af`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d9e64af8b55072ae6ecedcc3f3ea035f0797e113) Merge branch 'enhance-async-implementation' into 'main'
 - 2026-05-19 [`93c8927`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0) async: implement and optimize async I/O completion handling
-- 2026-05-18 [`24060f8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/24060f8e8fca6c587b88d7c09637cd108cd3faf6) Merge branch 'async-base-layer' into 'main'
-- 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)
 
 <!-- AUTO-CHANGELOG:END -->

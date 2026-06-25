@@ -165,6 +165,60 @@
                         <h1 id="syscall-reference"><a class="header" href="#syscall-reference">Syscall Reference</a></h1>
 <p>Complete reference for all Strat9 OS syscalls. Syscalls are invoked via the <code>syscall</code> instruction (x86_64). Arguments are passed in registers; the return value is in RAX.</p>
 <p><strong>ABI convention:</strong> Success returns a non-negative value. Errors return a negative errno value (two's complement). Userspace checks <code>if result &gt; 0xFFFF_F000</code> to detect errors, then applies <code>!result + 1</code> to get the errno number.</p>
+<h2 id="constants"><a class="header" href="#constants">Constants</a></h2>
+<h3 id="at_-flags-for-at-syscalls"><a class="header" href="#at_-flags-for-at-syscalls">AT_* flags (for *at syscalls)</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Constant</th><th>Value</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>AT_FDCWD</code></td><td><code>-100</code></td><td>Use the process's current working directory as the base directory</td></tr>
+<tr><td><code>AT_REMOVEDIR</code></td><td><code>0x200</code></td><td>Remove a directory (for <code>SYS_UNLINKAT</code>)</td></tr>
+<tr><td><code>AT_SYMLINK_NOFOLLOW</code></td><td><code>0x100</code></td><td>Do not follow symbolic links (for <code>SYS_FSTATAT</code>)</td></tr>
+<tr><td><code>AT_EMPTY_PATH</code></td><td><code>0x1000</code></td><td>Operate on the fd itself when path is empty</td></tr>
+</tbody></table>
+</div>
+<h3 id="open-flags"><a class="header" href="#open-flags">Open flags</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Value</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>O_RDONLY</code></td><td><code>0</code></td><td>Open for reading</td></tr>
+<tr><td><code>O_WRONLY</code></td><td><code>1</code></td><td>Open for writing</td></tr>
+<tr><td><code>O_RDWR</code></td><td><code>2</code></td><td>Open for reading and writing</td></tr>
+<tr><td><code>O_CREAT</code></td><td><code>0x40</code></td><td>Create file if it does not exist</td></tr>
+<tr><td><code>O_EXCL</code></td><td><code>0x800</code></td><td>Fail if file already exists (with O_CREAT)</td></tr>
+<tr><td><code>O_TRUNC</code></td><td><code>0x200</code></td><td>Truncate file to zero length</td></tr>
+<tr><td><code>O_APPEND</code></td><td><code>0x400</code></td><td>Append to end of file</td></tr>
+<tr><td><code>O_NONBLOCK</code></td><td><code>0x800</code></td><td>Non-blocking mode</td></tr>
+<tr><td><code>O_DIRECTORY</code></td><td><code>0x10000</code></td><td>Open as directory</td></tr>
+<tr><td><code>O_NOFOLLOW</code></td><td><code>0x20000</code></td><td>Do not follow symlinks</td></tr>
+</tbody></table>
+</div>
+<h3 id="protection-flags-mmap"><a class="header" href="#protection-flags-mmap">Protection flags (mmap)</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Value</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>PROT_READ</code></td><td><code>1</code></td><td>Page can be read</td></tr>
+<tr><td><code>PROT_WRITE</code></td><td><code>2</code></td><td>Page can be written</td></tr>
+<tr><td><code>PROT_EXEC</code></td><td><code>4</code></td><td>Page can be executed</td></tr>
+</tbody></table>
+</div>
+<h3 id="signal-constants"><a class="header" href="#signal-constants">Signal constants</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Constant</th><th>Value</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>SIG_DFL</code></td><td><code>0</code></td><td>Default signal handling</td></tr>
+<tr><td><code>SIG_IGN</code></td><td><code>1</code></td><td>Ignore signal</td></tr>
+<tr><td><code>SIG_BLOCK</code></td><td><code>0</code></td><td>Block signals in set</td></tr>
+<tr><td><code>SIG_UNBLOCK</code></td><td><code>1</code></td><td>Unblock signals in set</td></tr>
+<tr><td><code>SIG_SETMASK</code></td><td><code>2</code></td><td>Set signal mask to set</td></tr>
+</tbody></table>
+</div>
+<h3 id="waitpid-options"><a class="header" href="#waitpid-options">Waitpid options</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Value</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>WNOHANG</code></td><td><code>1</code></td><td>Return immediately if no child has exited</td></tr>
+<tr><td><code>WUNTRACED</code></td><td><code>2</code></td><td>Also return for stopped children</td></tr>
+<tr><td><code>WCONTINUED</code></td><td><code>4</code></td><td>Also return for continued children</td></tr>
+</tbody></table>
+</div>
+<h3 id="clock-ids"><a class="header" href="#clock-ids">Clock IDs</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Constant</th><th>Value</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>CLOCK_REALTIME</code></td><td><code>0</code></td><td>System-wide real-time clock</td></tr>
+<tr><td><code>CLOCK_MONOTONIC</code></td><td><code>1</code></td><td>Monotonic clock (not affected by adjustments)</td></tr>
+<tr><td><code>CLOCK_PROCESS_CPUTIME_ID</code></td><td><code>2</code></td><td>Per-process CPU time</td></tr>
+<tr><td><code>CLOCK_THREAD_CPUTIME_ID</code></td><td><code>3</code></td><td>Per-thread CPU time</td></tr>
+</tbody></table>
+</div>
 <hr />
 <h2 id="handle-operations"><a class="header" href="#handle-operations">Handle operations</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
@@ -340,7 +394,7 @@
 <tr><td>407</td><td><code>SYS_LSEEK</code></td><td><code>fd: u64, offset: u64, whence: u64</code></td><td>new position</td><td>Seek in a file</td></tr>
 <tr><td>408</td><td><code>SYS_FSTAT</code></td><td><code>fd: u64, stat_ptr: u64</code></td><td>0</td><td>Get file status (fstat)</td></tr>
 <tr><td>409</td><td><code>SYS_STAT</code></td><td><code>path_ptr: u64, path_len: u64, stat_ptr: u64</code></td><td>0</td><td>Get file status by path</td></tr>
-<tr><td>413</td><td><code>SYS_ACCESS</code></td><td><code>path_ptr: u64, path_len: u64, mode: u64</code></td><td>0</td><td>Check file accessibility</td></tr>
+<tr><td>413</td><td><code>SYS_ACCESS</code></td><td><code>path_ptr: u64, path_len: u64, mode: u64</code></td><td>0</td><td>Check file accessibility (uses effective UID/GID, not real). Prefer <code>SYS_FACCESSAT</code> for new code.</td></tr>
 <tr><td>430</td><td><code>SYS_GETDENTS</code></td><td><code>fd: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes read</td><td>Read directory entries</td></tr>
 <tr><td>431</td><td><code>SYS_PIPE</code></td><td><code>fds_ptr: u64</code></td><td>0</td><td>Create a pipe pair</td></tr>
 <tr><td>432</td><td><code>SYS_DUP</code></td><td><code>old_fd: u64</code></td><td>new fd</td><td>Duplicate file descriptor</td></tr>
@@ -374,16 +428,34 @@
 </div>
 <hr />
 <h2 id="at-variants-relative-to-directory-fd"><a class="header" href="#at-variants-relative-to-directory-fd"><code>*at</code> variants (relative to directory fd)</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
-<tr><td>462</td><td><code>SYS_OPENAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, flags: u64</code></td><td>file descriptor</td><td>Open relative to dirfd</td></tr>
-<tr><td>463</td><td><code>SYS_FSTATAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, stat_ptr: u64, flags: u64</code></td><td>0</td><td>Stat relative to dirfd</td></tr>
-<tr><td>464</td><td><code>SYS_UNLINKAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, flags: u64</code></td><td>0</td><td>Unlink relative to dirfd</td></tr>
-<tr><td>465</td><td><code>SYS_RENAMEAT</code></td><td><code>olddirfd: u64, old_ptr: u64, old_len: u64, newdirfd: u64, new_ptr: u64, new_len: u64</code></td><td>0</td><td>Rename relative to dirfds</td></tr>
-<tr><td>466</td><td><code>SYS_MKDIRAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, mode: u64</code></td><td>0</td><td>Create directory relative to dirfd</td></tr>
-<tr><td>467</td><td><code>SYS_READLINKAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes read</td><td>Readlink relative to dirfd</td></tr>
-<tr><td>468</td><td><code>SYS_FACCESSAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, mode: u64, flags: u64</code></td><td>0</td><td>Check accessibility relative to dirfd</td></tr>
+<p>These syscalls resolve paths relative to a directory file descriptor instead of the process CWD. They are the POSIX-standard way to open, stat, and manipulate files safely in multi-threaded programs.</p>
+<h3 id="special-dirfd-values"><a class="header" href="#special-dirfd-values">Special <code>dirfd</code> values</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Value</th><th>Constant</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>-100</code></td><td><code>AT_FDCWD</code></td><td>Use the process's current working directory (CWD) as the base</td></tr>
+<tr><td><code>≥ 0</code></td><td>valid fd</td><td>Use the opened directory referenced by this file descriptor</td></tr>
 </tbody></table>
 </div>
+<h3 id="syscall-reference-1"><a class="header" href="#syscall-reference-1">Syscall reference</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
+<tr><td>462</td><td><code>SYS_OPENAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, flags: u64</code></td><td>file descriptor</td><td>Open a file relative to <code>dirfd</code>. If <code>path_ptr</code> is absolute, <code>dirfd</code> is ignored.</td></tr>
+<tr><td>463</td><td><code>SYS_FSTATAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, stat_ptr: u64, flags: u64</code></td><td>0</td><td>Get file status relative to <code>dirfd</code>. <code>stat_ptr</code> receives a <code>FileStat</code> struct.</td></tr>
+<tr><td>464</td><td><code>SYS_UNLINKAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, flags: u64</code></td><td>0</td><td>Delete a file relative to <code>dirfd</code>. If <code>AT_REMOVEDIR</code> flag is set, removes a directory.</td></tr>
+<tr><td>465</td><td><code>SYS_RENAMEAT</code></td><td><code>olddirfd: u64, old_ptr: u64, old_len: u64, newdirfd: u64, new_ptr: u64, new_len: u64</code></td><td>0</td><td>Rename/move a file. Source and destination can have different base directories.</td></tr>
+<tr><td>466</td><td><code>SYS_MKDIRAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, mode: u64</code></td><td>0</td><td>Create a directory relative to <code>dirfd</code>.</td></tr>
+<tr><td>467</td><td><code>SYS_READLINKAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, buf_ptr: u64, buf_len: u64</code></td><td>bytes read</td><td>Read the target of a symbolic link relative to <code>dirfd</code>.</td></tr>
+<tr><td>468</td><td><code>SYS_FACCESSAT</code></td><td><code>dirfd: u64, path_ptr: u64, path_len: u64, mode: u64, flags: u64</code></td><td>0</td><td>Check file accessibility. <code>mode</code>: <code>R_OK (4)</code>, <code>W_OK (2)</code>, <code>X_OK (1)</code>, <code>F_OK (0)</code>.</td></tr>
+</tbody></table>
+</div>
+<h3 id="flags"><a class="header" href="#flags">Flags</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Value</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>AT_FDCWD</code></td><td><code>-100</code></td><td>Use process CWD as base directory</td></tr>
+<tr><td><code>AT_REMOVEDIR</code></td><td><code>0x200</code></td><td>Unlink a directory instead of a file (for <code>SYS_UNLINKAT</code>)</td></tr>
+<tr><td><code>AT_SYMLINK_NOFOLLOW</code></td><td><code>0x100</code></td><td>Do not follow symlinks (for <code>SYS_FSTATAT</code>)</td></tr>
+<tr><td><code>AT_EMPTY_PATH</code></td><td><code>0x1000</code></td><td>Operate on <code>dirfd</code> itself when path is empty</td></tr>
+</tbody></table>
+</div>
+<h3 id="errors"><a class="header" href="#errors">Errors</a></h3>
+<p><code>EBADF</code> (invalid dirfd), <code>ENOENT</code> (path not found), <code>EACCES</code> (permission denied), <code>ENOTDIR</code> (dirfd is not a directory), <code>EEXIST</code> (file exists for CREATE_EXCL), <code>EINVAL</code> (invalid flags)</p>
 <hr />
 <h2 id="poll--io-multiplexing"><a class="header" href="#poll--io-multiplexing">Poll / I/O multiplexing</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
