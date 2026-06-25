@@ -662,9 +662,9 @@ pub extern "C" fn _start() -> ! {
 
     for page in 0..4usize {
         let base = page * 4096;
-        cow_multi_write(base, (0x10 + page as u8) as u8);
-        cow_multi_write(base + 17, (0x40 + page as u8) as u8);
-        cow_multi_write(base + 4095, (0x70 + page as u8) as u8);
+        cow_multi_write(base, ((0x10 + page as u8)));
+        cow_multi_write(base + 17, ((0x40 + page as u8)));
+        cow_multi_write(base + 4095, ((0x70 + page as u8)));
         log_cow_multi_page_snapshot("[init-test:cow4k:parent:init]", page);
     }
 
@@ -688,9 +688,9 @@ pub extern "C" fn _start() -> ! {
         log("[init-test:cow4k:child] mutating all 4 pages with child-only fingerprints\n");
         for page in 0..4usize {
             let base = page * 4096;
-            cow_multi_write(base, (0x91 + page as u8) as u8);
-            cow_multi_write(base + 17, (0xA1 + page as u8) as u8);
-            cow_multi_write(base + 4095, (0xB1 + page as u8) as u8);
+            cow_multi_write(base, ((0x91 + page as u8)));
+            cow_multi_write(base + 17, ((0xA1 + page as u8)));
+            cow_multi_write(base + 4095, ((0xB1 + page as u8)));
             log_cow_multi_page_snapshot("[init-test:cow4k:child:after]", page);
         }
         log("[init-test:cow4k:child] exiting code 88\n");
@@ -746,9 +746,9 @@ pub extern "C" fn _start() -> ! {
         let v0 = cow_multi_read(base);
         let v1 = cow_multi_read(base + 17);
         let v2 = cow_multi_read(base + 4095);
-        if v0 != (0x10 + page as u8) as u8
-            || v1 != (0x40 + page as u8) as u8
-            || v2 != (0x70 + page as u8) as u8
+        if v0 != (0x10 + page as u8)
+            || v1 != (0x40 + page as u8)
+            || v2 != (0x70 + page as u8)
         {
             log("[init-test:cow4k:parent] ERROR: parent observed child mutation page=");
             log_u64(page as u64);
@@ -761,9 +761,9 @@ pub extern "C" fn _start() -> ! {
     log("[init-test:cow4k:parent] now writing parent-only fingerprints\n");
     for page in 0..4usize {
         let base = page * 4096;
-        cow_multi_write(base, (0x21 + page as u8) as u8);
-        cow_multi_write(base + 17, (0x31 + page as u8) as u8);
-        cow_multi_write(base + 4095, (0x41 + page as u8) as u8);
+        cow_multi_write(base, ((0x21 + page as u8)));
+        cow_multi_write(base + 17, ((0x31 + page as u8)));
+        cow_multi_write(base + 4095, ((0x41 + page as u8)));
         log_cow_multi_page_snapshot("[init-test:cow4k:parent:after]", page);
     }
     log("[init-test:cow4k] SUCCESS: 4-page CoW isolation validated\n");

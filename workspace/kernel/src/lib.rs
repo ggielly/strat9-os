@@ -978,7 +978,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         crate::e9_println!("BH post-hardware");
         boot_milestone!("Hardware drivers ready");
         arch::x86_64::speaker::beep_phase(15);
-    arch::x86_64::speaker::beep_phase(6);
+        arch::x86_64::speaker::beep_phase(6);
 
         serial_println!("[init] Initializing timers...");
         vga_println!("[..] Initializing HPET and RTC...");

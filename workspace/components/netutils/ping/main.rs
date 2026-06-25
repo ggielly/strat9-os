@@ -108,7 +108,7 @@ fn sleep_ms(ms: u64) {
 /// Open a scheme file, return fd.
 fn scheme_open(path: &str) -> Result<usize, ()> {
     call::openat(0, path, 0x3, 0)
-        .map(|fd| fd as usize)
+        .map(|fd| fd)
         .map_err(|_| ())
 }
 

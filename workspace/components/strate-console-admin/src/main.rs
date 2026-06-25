@@ -126,11 +126,10 @@ fn read_line(line: &mut LineBuf) {
                             write_str("\x08 \x08");
                         }
                     }
-                    0x20..=0x7E => {
-                        if line.push(b) {
+                    0x20..=0x7E
+                        if line.push(b) => {
                             let _ = call::write(1, &byte);
                         }
-                    }
                     _ => {}
                 }
             }
@@ -186,7 +185,7 @@ fn parse_usize(s: &str) -> Option<usize> {
     let bytes = s.as_bytes();
     let mut value: usize = 0;
     for &b in bytes {
-        if b < b'0' || b > b'9' {
+        if !(b'0'..=b'9').contains(&b) {
             return None;
         }
         value = value.checked_mul(10)?.checked_add((b - b'0') as usize)?;

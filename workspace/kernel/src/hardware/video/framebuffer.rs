@@ -489,7 +489,12 @@ impl Framebuffer {
                     );
                     idx += 1;
                 }
-                virtio_present = Some((db as *const u8, fb.info.stride, regions, fb.canvas.dirty.len));
+                virtio_present = Some((
+                    db as *const u8,
+                    fb.info.stride,
+                    regions,
+                    fb.canvas.dirty.len,
+                ));
             } else {
                 let dst = fb.info.base_virt as *mut u32;
                 let src_base = db as *const u32;
@@ -511,7 +516,11 @@ impl Framebuffer {
                         for row in 0..height {
                             let row_off = (y + row) * stride_pixels + x;
                             unsafe {
-                                (fb.canvas.ops.blit)(dst.add(row_off), src_base.add(row_off), width);
+                                (fb.canvas.ops.blit)(
+                                    dst.add(row_off),
+                                    src_base.add(row_off),
+                                    width,
+                                );
                             }
                         }
                     }

@@ -216,7 +216,7 @@ impl NetworkStrate {
                 .get_query_result(query);
             match res {
                 Ok(addrs) => {
-                    for addr in addrs {
+                    if let Some(addr) = addrs.into_iter().next() {
                         return Ok(addr);
                     }
                     return Err(-2);

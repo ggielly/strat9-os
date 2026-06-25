@@ -98,7 +98,7 @@ fn cidr_to_netmask(prefix_str: &str) -> Option<[u8; 20]> {
 
     let mut prefix: u16 = 0;
     for &b in s.as_bytes() {
-        if b < b'0' || b > b'9' {
+        if !(b'0'..=b'9').contains(&b) {
             return None;
         }
         prefix = prefix.checked_mul(10)?.checked_add((b - b'0') as u16)?;

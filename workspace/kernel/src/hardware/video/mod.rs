@@ -12,4 +12,6 @@ pub mod framebuffer;
 pub mod graphics_adapter;
 
 pub use framebuffer::{Framebuffer, FramebufferInfo, FramebufferSource, RgbColor};
-pub use graphics_adapter::{Damage, DisplayScreen, GraphicsAdapter, HeapScreen, SimpleDisplayAdapter};
+pub use graphics_adapter::{
+    Damage, DisplayScreen, GraphicsAdapter, HeapScreen, SimpleDisplayAdapter,
+};

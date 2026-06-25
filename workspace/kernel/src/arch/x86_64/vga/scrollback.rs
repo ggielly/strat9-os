@@ -92,14 +92,7 @@ impl ScrollbackBuffer {
     ///
     /// `cols` = current terminal width in columns.
     /// `fg` / `bg` = packed foreground / background colours for the cell.
-    pub fn mirror_char(
-        &mut self,
-        c: char,
-        cols: usize,
-        fg: u32,
-        bg: u32,
-        visible_rows: usize,
-    ) {
+    pub fn mirror_char(&mut self, c: char, cols: usize, fg: u32, bg: u32, visible_rows: usize) {
         match c {
             '\n' => {
                 let row = core::mem::take(&mut self.cur_row);

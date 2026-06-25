@@ -1463,7 +1463,7 @@ pub mod call {
             let _ = write!(w, " at {}:{}:{}", loc.file(), loc.line(), loc.column());
         }
         let _ = write!(w, "\n  {}", info.message());
-        let _ = write!(w, "\n");
+        let _ = writeln!(w);
         w.flush();
 
         // --- Terminate ---

@@ -114,7 +114,7 @@ pub fn put_bytes(payload: &mut [u8], off: usize, src: &[u8]) -> Option<()> {
 /// Return a reference to `payload[off..off + len]`.
 /// Returns `None` if the range is out of bounds.
 #[inline]
-pub fn get_bytes<'a>(payload: &'a [u8], off: usize, len: usize) -> Option<&'a [u8]> {
+pub fn get_bytes(payload: &[u8], off: usize, len: usize) -> Option<&[u8]> {
     let end = off.checked_add(len)?;
     payload.get(off..end)
 }
@@ -129,7 +129,7 @@ pub fn put_str(payload: &mut [u8], off: usize, s: &str) -> Option<()> {
 /// Decode a UTF-8 string of `len` bytes from `payload[off..]`.
 /// Returns `None` if out of bounds or invalid UTF-8.
 #[inline]
-pub fn get_str<'a>(payload: &'a [u8], off: usize, len: usize) -> Option<&'a str> {
+pub fn get_str(payload: &[u8], off: usize, len: usize) -> Option<&str> {
     let bytes = get_bytes(payload, off, len)?;
     core::str::from_utf8(bytes).ok()
 }
@@ -168,9 +168,9 @@ pub fn encode_fixed_reply<T: IntoBytes + Immutable>(
 /// Returns `None` if:
 /// - `T` is larger than [`PAYLOAD_CAPACITY`] (size overflow), or
 /// - the payload slice is not correctly aligned for `T` (alignment mismatch).
-pub fn decode_fixed<'a, T: FromBytes + Immutable + KnownLayout>(
-    msg: &'a IpcMessage,
-) -> Option<&'a T> {
+pub fn decode_fixed<T: FromBytes + Immutable + KnownLayout>(
+    msg: &IpcMessage,
+) -> Option<&T> {
     let size = core::mem::size_of::<T>();
     if size > PAYLOAD_CAPACITY {
         return None;

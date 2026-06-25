@@ -2,8 +2,9 @@
 ///
 /// Writes directly to the VGA framebuffer, bypassing VGA_WRITER and all
 /// buffers/locks.  Enabled by `debug_cfg::VGA_DEBUG_LIVE`.
-
-use super::panic_screen::{PANIC_FB_ADDR, PANIC_FB_PITCH, PANIC_FB_FORMAT, PANIC_FONT_8X16, panic_pack_rgb};
+use super::panic_screen::{
+    panic_pack_rgb, PANIC_FB_ADDR, PANIC_FB_FORMAT, PANIC_FB_PITCH, PANIC_FONT_8X16,
+};
 
 // bypassing all buffers and locks.  Enabled by `debug_cfg::VGA_DEBUG_LIVE`.
 // =============================================================================
@@ -68,7 +69,13 @@ fn vga_debug_scroll() {
 
 /// Fill a single text line (16 pixel rows) with a solid colour.
 /// `max_col` is the number of character columns (each 8px wide).
-unsafe fn vga_debug_fill_line(base: *mut u8, pitch: usize, max_col: usize, bpp_bytes: usize, color: u32) {
+unsafe fn vga_debug_fill_line(
+    base: *mut u8,
+    pitch: usize,
+    max_col: usize,
+    bpp_bytes: usize,
+    color: u32,
+) {
     let fill_pixels = max_col * 8; // visible pixel width only
     if bpp_bytes == 4 {
         for row in 0..16 {

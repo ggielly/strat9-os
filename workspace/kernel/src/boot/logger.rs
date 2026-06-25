@@ -44,9 +44,7 @@ impl log::Log for SerialLogger {
             //     via vga_debug_write.  This bypasses VGA_WRITER and works
             //     before the scheduler / status_line_task are running.
             //     Controlled by debug_cfg::VGA_DEBUG_LIVE toggle.
-            if crate::debug_cfg::is_vga_debug_live()
-                && crate::arch::x86_64::vga::is_available()
-            {
+            if crate::debug_cfg::is_vga_debug_live() && crate::arch::x86_64::vga::is_available() {
                 let mut line_buf = [0u8; 256];
                 let mut lpos = 0usize;
                 use core::fmt::Write;
@@ -65,7 +63,10 @@ impl log::Log for SerialLogger {
                     }
                 }
                 let _ = write!(
-                    LineWriter { buf: &mut line_buf, pos: &mut lpos },
+                    LineWriter {
+                        buf: &mut line_buf,
+                        pos: &mut lpos
+                    },
                     "[{}] {}",
                     record.level(),
                     record.args(),
@@ -79,9 +80,7 @@ impl log::Log for SerialLogger {
 
             // 2. VGA ring buffer : lock-free enqueue.
             //    Controlled by debug_cfg::VGA_DEBUG_BUFFER toggle.
-            if crate::debug_cfg::is_vga_debug_buffer()
-                && crate::arch::x86_64::vga::is_available()
-            {
+            if crate::debug_cfg::is_vga_debug_buffer() && crate::arch::x86_64::vga::is_available() {
                 let mut vbuf = [0u8; crate::arch::x86_64::vgabuf::VGABUF_LINE_LEN];
                 let mut vpos = 0usize;
                 use core::fmt::Write;

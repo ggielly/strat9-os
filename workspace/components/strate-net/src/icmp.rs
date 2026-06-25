@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use smoltcp::{
     socket::icmp,
     wire::{IpAddress, Ipv4Address, Ipv6Address},
@@ -11,6 +12,8 @@ use crate::{
     state::{NetworkStrate, PendingPing, PING_TIMEOUT_NS},
 };
 
+const MAX_ICMP_QUEUE: usize = 32;
+
 impl NetworkStrate {
     pub(crate) fn process_icmp(&mut self) {
         let now_ns = clock_gettime_ns().unwrap_or(0);
@@ -19,54 +22,152 @@ impl NetworkStrate {
         self.pending_pings
             .retain(|ping| now_ns.saturating_sub(ping.send_ts_ns) < PING_TIMEOUT_NS);
 
-        let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
-        if !socket.can_recv() {
-            return;
+        // Drain received packets into a temporary buffer to release the
+        // socket borrow before calling handler methods on &mut self.
+        let mut packets: Vec<([u8; 128], IpAddress)> = Vec::new();
+        {
+            let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
+            if !socket.can_recv() {
+                return;
+            }
+            while socket.can_recv() && packets.len() < MAX_ICMP_QUEUE {
+                let Ok((data, addr)) = socket.recv() else {
+                    break;
+                };
+                let mut buf = [0u8; 128];
+                let n = data.len().min(128);
+                buf[..n].copy_from_slice(&data[..n]);
+                packets.push((buf, addr));
+            }
         }
-        while socket.can_recv() {
-            let Ok((data, _addr)) = socket.recv() else {
-                break;
-            };
-            if data.len() < 16 {
+
+        for (data, addr) in packets.iter() {
+            if data.len() < 8 {
                 let _ = call::debug_log(b"[ping] recv too short\n");
                 continue;
             }
-            let is_v6_reply = data[0] == 129;
-            if data[0] != 0 && !is_v6_reply {
-                let _ = call::debug_log(b"[ping] recv unexpected type ");
-                let _ = call::debug_log(&[data[0]]);
-                let _ = call::debug_log(b"\n");
-                continue;
+
+            match data[0] {
+                8 => self.handle_echo_request_v4(data, *addr),
+                128 => self.handle_echo_request_v6(data, *addr),
+                0 => self.handle_echo_reply_v4(data),
+                129 => self.handle_echo_reply_v6(data),
+                other => {
+                    let _ = call::debug_log(b"[ping] recv unexpected type ");
+                    let _ = call::debug_log(&[other]);
+                    let _ = call::debug_log(b"\n");
+                }
             }
-            let ident = u16::from_be_bytes([data[4], data[5]]);
-            if ident != self.ping_ident {
-                let _ = call::debug_log(b"[ping] recv wrong ident ");
-                let _ = call::debug_log(&[(ident >> 8) as u8, ident as u8]);
-                let _ = call::debug_log(b" != ");
-                let _ = call::debug_log(&[(self.ping_ident >> 8) as u8, self.ping_ident as u8]);
-                let _ = call::debug_log(b"\n");
-                continue;
-            }
-            let token = u64::from_le_bytes(data[8..16].try_into().unwrap_or([0u8; 8]));
-            // Match against all pending pings (supports pipelining).
-            if let Some(idx) = self
-                .pending_pings
-                .iter()
-                .position(|p| p.token == token && p.is_v6 == is_v6_reply)
-            {
-                let pending = self.pending_pings.remove(idx);
-                let rtt_us = now_ns.saturating_sub(pending.send_ts_ns) / 1000;
-                self.ping_replies.push((pending.seq, rtt_us));
-                let _ = call::debug_log(b"[ping] reply seq=");
-                let _ = call::debug_log(&[(pending.seq >> 8) as u8, pending.seq as u8]);
-                let _ = call::debug_log(b" rtt=");
-                let _ = call::debug_log(&[(rtt_us / 1000) as u8]);
-                let _ = call::debug_log(b"ms\n");
-            } else {
-                let _ = call::debug_log(b"[ping] recv: no match for token ");
-                let _ = call::debug_log(&token.to_le_bytes());
-                let _ = call::debug_log(b"\n");
-            }
+        }
+    }
+
+    fn handle_echo_request_v4(&mut self, data: &[u8], addr: IpAddress) {
+        let IpAddress::Ipv4(src) = addr else {
+            return;
+        };
+
+        let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
+        if !socket.can_send() {
+            let _ = call::debug_log(b"[ping] echo request v4: can_send false\n");
+            return;
+        }
+
+        // Build echo reply: swap type 8->0, keep ident+seq, recompute checksum.
+        let payload_len = data.len();
+        let Ok(buf) = socket.send(payload_len, IpAddress::Ipv4(src)) else {
+            let _ = call::debug_log(b"[ping] echo request v4: send failed\n");
+            return;
+        };
+        buf.copy_from_slice(data);
+        buf[0] = 0;
+        buf[1] = 0;
+        let checksum = icmp_checksum(buf);
+        buf[2..4].copy_from_slice(&checksum.to_be_bytes());
+
+        let _ = call::debug_log(b"[ping] echo reply v4 sent to ");
+        let octets = src.octets();
+        let _ = call::debug_log(&[octets[0], b'.', octets[1], b'.', octets[2], b'.', octets[3]]);
+        let _ = call::debug_log(b"\n");
+    }
+
+    fn handle_echo_request_v6(&mut self, data: &[u8], addr: IpAddress) {
+        let IpAddress::Ipv6(src) = addr else {
+            return;
+        };
+
+        let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
+        if !socket.can_send() {
+            let _ = call::debug_log(b"[ping] echo request v6: can_send false\n");
+            return;
+        }
+
+        // Build echo reply: swap type 128->129, keep ident+seq, recompute checksum.
+        let payload_len = data.len();
+        let Ok(buf) = socket.send(payload_len, IpAddress::Ipv6(src)) else {
+            let _ = call::debug_log(b"[ping] echo request v6: send failed\n");
+            return;
+        };
+        buf.copy_from_slice(data);
+        buf[0] = 129;
+        buf[1] = 0;
+
+        let dst = src.octets();
+        let src_addr = self.link_local_addr;
+        let checksum = icmpv6_checksum(&src_addr.octets(), &dst, buf);
+        buf[2..4].copy_from_slice(&checksum.to_be_bytes());
+
+        let _ = call::debug_log(b"[ping] echo reply v6 sent\n");
+    }
+
+    fn handle_echo_reply_v4(&mut self, data: &[u8]) {
+        if data.len() < 16 {
+            return;
+        }
+        let ident = u16::from_be_bytes([data[4], data[5]]);
+        if ident != self.ping_ident {
+            return;
+        }
+        let token = u64::from_le_bytes(data[8..16].try_into().unwrap_or([0u8; 8]));
+        if let Some(idx) = self
+            .pending_pings
+            .iter()
+            .position(|p| p.token == token && !p.is_v6)
+        {
+            let pending = self.pending_pings.remove(idx);
+            let now_ns = clock_gettime_ns().unwrap_or(0);
+            let rtt_us = now_ns.saturating_sub(pending.send_ts_ns) / 1000;
+            self.ping_replies.push((pending.seq, rtt_us));
+            let _ = call::debug_log(b"[ping] reply seq=");
+            let _ = call::debug_log(&[(pending.seq >> 8) as u8, pending.seq as u8]);
+            let _ = call::debug_log(b" rtt=");
+            let _ = call::debug_log(&[(rtt_us / 1000) as u8]);
+            let _ = call::debug_log(b"ms\n");
+        }
+    }
+
+    fn handle_echo_reply_v6(&mut self, data: &[u8]) {
+        if data.len() < 16 {
+            return;
+        }
+        let ident = u16::from_be_bytes([data[4], data[5]]);
+        if ident != self.ping_ident {
+            return;
+        }
+        let token = u64::from_le_bytes(data[8..16].try_into().unwrap_or([0u8; 8]));
+        if let Some(idx) = self
+            .pending_pings
+            .iter()
+            .position(|p| p.token == token && p.is_v6)
+        {
+            let pending = self.pending_pings.remove(idx);
+            let now_ns = clock_gettime_ns().unwrap_or(0);
+            let rtt_us = now_ns.saturating_sub(pending.send_ts_ns) / 1000;
+            self.ping_replies.push((pending.seq, rtt_us));
+            let _ = call::debug_log(b"[ping] reply v6 seq=");
+            let _ = call::debug_log(&[(pending.seq >> 8) as u8, pending.seq as u8]);
+            let _ = call::debug_log(b" rtt=");
+            let _ = call::debug_log(&[(rtt_us / 1000) as u8]);
+            let _ = call::debug_log(b"ms\n");
         }
     }
 
@@ -126,7 +227,6 @@ impl NetworkStrate {
         let _ = call::debug_log(&token.to_le_bytes());
         let _ = call::debug_log(b"\n");
 
-        let now_ns = clock_gettime_ns().unwrap_or(0);
         self.pending_pings.push(PendingPing {
             seq,
             token,
@@ -186,7 +286,6 @@ impl NetworkStrate {
         let checksum = icmpv6_checksum(&src.octets(), &target.octets(), buf);
         buf[2..4].copy_from_slice(&checksum.to_be_bytes());
 
-        let now_ns = clock_gettime_ns().unwrap_or(0);
         self.pending_pings.push(PendingPing {
             seq,
             token,

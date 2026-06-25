@@ -73,9 +73,7 @@ impl UniphierSystemBus {
         let bank0_base = self.regs.read32(UNIPHIER_SBC_BASE);
         self.boot_swap = (bank0_base & UNIPHIER_SBC_BASE_BE) != 0;
         if self.boot_swap {
-            let tmp = self.banks[0];
-            self.banks[0] = self.banks[1];
-            self.banks[1] = tmp;
+            self.banks.swap(0, 1);
         }
     }
 
