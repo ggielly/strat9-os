@@ -465,16 +465,24 @@ impl IpcNotification for LockFreeRing {
     }
 
     fn wait_notification(&self) -> Result<(), IpcError> {
-        // Spin-then-futex: check once, then wait.
-        // The caller should busy-poll for N2a or use futex for N2b.
-        // This implementation provides the futex (blocking) path.
+        // Phase 1 (N2a) : busy-poll briefly — hot cache, typically ~400 cycles.
+        for _ in 0..64 {
+            if self.has_data() {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+
+        // Phase 2 (N2b) : block the task until woken, then re-check.
+        // The NIC IRQ handler or producer calls notify_consumer_raw()
+        // which can be observed via a futex-like wakeup.
         loop {
             if self.has_data() {
                 return Ok(());
             }
-            // NB: in production this would call futex_wait on notify_cons.
-            // For now, yield and retry (architecture-specific).
-            core::hint::spin_loop();
+            // Block the current task so the scheduler can run others.
+            // When the task is woken (e.g. by NIC IRQ), we retry.
+            crate::process::block_current_task();
         }
     }
 }

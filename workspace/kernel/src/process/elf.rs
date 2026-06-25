@@ -95,6 +95,8 @@ pub const USER_STACK_PAGES: usize = 16;
 pub const USER_STACK_TOP: u64 = USER_STACK_BASE + (USER_STACK_PAGES as u64) * 4096;
 /// Guard page below the user stack : unmapped, catches stack underflows.
 pub const USER_STACK_GUARD: u64 = USER_STACK_BASE - 4096;
+/// Standard user-mode RFLAGS: IF=1, reserved bit 1 set.
+const USER_RFLAGS: u64 = 0x202;
 
 /// Result of loading an ELF image into an address space.
 #[derive(Debug, Clone, Copy)]
@@ -909,16 +911,14 @@ fn apply_dynamic_relocations(
                     let sym_sz = resolve_size(r_sym)?;
                     if sym_sz > 0 && sym_val < USER_ADDR_MAX {
                         let mut tmp = [0u8; 256];
-                        let mut off = 0usize;
-                        while off < sym_sz as usize {
-                            let chunk = core::cmp::min(256, sym_sz as usize - off);
-                            read_user_mapped_bytes(
-                                user_as,
-                                sym_val + off as u64,
-                                &mut tmp[..chunk],
-                            )?;
-                            write_user_mapped_bytes(user_as, target + off as u64, &tmp[..chunk])?;
-                            off += chunk;
+                        let mut off = 0u64;
+                        while off < sym_sz {
+                            let chunk = core::cmp::min(256, (sym_sz - off) as usize);
+                            let src = sym_val.checked_add(off).ok_or("COPY source overflow")?;
+                            let dst = target.checked_add(off).ok_or("COPY target overflow")?;
+                            read_user_mapped_bytes(user_as, src, &mut tmp[..chunk])?;
+                            write_user_mapped_bytes(user_as, dst, &tmp[..chunk])?;
+                            off += chunk as u64;
                         }
                     }
                     applied += 1;
@@ -1267,7 +1267,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
 
     let user_cs = gdt::user_code_selector().0 as u64;
     let user_ss = gdt::user_data_selector().0 as u64;
-    let user_rflags: u64 = 0x202; // IF=1, reserved bit 1 = 1
+    let user_rflags: u64 = USER_RFLAGS;
     elf_trace!(
         "[trace][elf] ring3_trampoline iret tid={} cs={:#x} ss={:#x} rflags={:#x}",
         task.id.as_u64(),
@@ -1321,9 +1321,9 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_rflags
     );
 
-    // Probe E9 Rust : validate_ring3_state passé, on entre dans l'asm.
-    // Si '0' est visible mais pas '1', le compilateur a inséré du code entre
-    // les deux qui a planté (peu probable, mais élimine cette hypothèse).
+    // E9 probe: validate_ring3_state passed, entering asm block.
+    // If '0' is visible but not '1', the compiler inserted code between
+    // the two that crashed (unlikely, but this rules it out).
     elf_trace!(
         "E9[0] pre-asm rip={:#x} rsp={:#x} cs={:#x} ss={:#x}",
         user_rip,
@@ -1903,7 +1903,7 @@ fn load_elf_task_inner(
         r12: 0,
         rbp: 0,
         rbx: 0,
-        r11: 0x202,
+        r11: USER_RFLAGS,
         r10: 0,
         r9: 0,
         r8: 0,
@@ -1916,7 +1916,7 @@ fn load_elf_task_inner(
         rax: 0,
         iret_rip: runtime_entry,
         iret_cs: crate::arch::x86_64::gdt::user_code_selector().0 as u64,
-        iret_rflags: 0x202,
+        iret_rflags: USER_RFLAGS,
         iret_rsp: boot_sp,
         iret_ss: crate::arch::x86_64::gdt::user_data_selector().0 as u64,
     });

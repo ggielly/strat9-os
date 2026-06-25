@@ -18,8 +18,7 @@ use super::{
     lockfree_ring::{LockFreeRing, RingError, RingSlot},
     mailbox::IntrusiveMailbox,
 };
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 // ---------------------------------------------------------------------------
 // Transport level enumeration
 // ---------------------------------------------------------------------------
@@ -289,6 +288,8 @@ pub struct TransportCreateResult {
     pub local: TransportEndpoint,
     pub remote: TransportEndpoint,
     pub level: TransportLevel,
+    /// (src_silo, dst_silo) pair used for cache invalidation on close.
+    pub(crate) pair: (u32, u32),
 }
 
 // ---------------------------------------------------------------------------
@@ -534,10 +535,10 @@ impl TransportManager {
             local,
             remote: remote.clone(),
             level,
+            pair: _pair,
         };
 
-        // Increment stats counters
-        // Increment stats counters
+        // Increment global transport creation counter
         self.stats.lock().sent += 1;
 
         {
@@ -559,9 +560,13 @@ impl TransportManager {
     }
 
     /// Remove a transport from the registry (called when all handles close).
+    /// Also invalidates the cache entry for the pair to prevent stale reuse.
     pub fn close(&self, id: TransportId) -> Result<(), IpcError> {
         let mut active = self.active.lock();
-        active.remove(&id).ok_or(IpcError::TransportNotFound)?;
+        let removed = active.remove(&id).ok_or(IpcError::TransportNotFound)?;
+        // Invalidate cache entry to prevent stale reuse.
+        let mut cache = self.cache.lock();
+        cache.invalidate(removed.pair);
         Ok(())
     }
 
@@ -608,6 +613,13 @@ impl TransportCache {
         let idx = self.next;
         self.entries[idx] = (key, Some(value));
         self.next = (self.next + 1) % CACHE_SIZE;
+    }
+
+    /// Invalidate any cached entry for the given key.
+    fn invalidate(&mut self, key: (u32, u32)) {
+        if let Some(entry) = self.entries.iter_mut().find(|(k, _)| *k == key) {
+            entry.1 = None;
+        }
     }
 }
 

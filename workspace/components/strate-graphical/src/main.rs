@@ -145,8 +145,8 @@ impl Server {
             for &b in t.as_bytes() { if b == 0 || cx >= win.x + win.w as i32 - 4 { break; } draw_glyph(s, cx, win.y + 6, b, Color::WHITE); cx += 8; }
         }
         // Cursor crosshair
-        s.fill_rect(self.cx - 4, self.cy, 9, 2, Color::WHITE);
-        s.fill_rect(self.cx, self.cy - 4, 2, 9, Color::WHITE);
+        s.fill_rect((self.cx - 4) as u32, self.cy as u32, 9, 2, Color::WHITE);
+        s.fill_rect(self.cx as u32, (self.cy - 4) as u32, 2, 9, Color::WHITE);
     }
 }
 
