@@ -25,6 +25,7 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-06-25 [`a522fb8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a522fb8225d35abef7b1420b4fb203fade74470c) Refactor NIC data plane and IPC transport statistics
 - 2026-06-25 [`d1e838f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d1e838fbcbc964f67208246303930315f5565331) feat: implement IPC transport layer with 3-level architecture
 - 2026-06-25 [`411f5aa`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/411f5aaf1ae30d6b53f71cb08784be42b0cea99a) feat: add IPC transport layer support and enhance ICMP handling
 - 2026-06-25 [`5a3d69c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032) feat: migrate input system to userspace
@@ -54,7 +55,6 @@ See:
 - 2026-03-21 [`c3f93c6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3f93c628fd8be78fd9cc29fbf21692aaacbf494) feat: Implement TSC-based boot timing and milestones, along with an analysis...
 - 2026-03-17 [`eb7818d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/eb7818d13ba67b1b3f718d6161f71eee0d123595) feat: Implement static module loading from initfs paths and increase module blob size limit.
 - 2026-03-17 [`acfdbbd`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acfdbbd126584bcd47355873c93c5584c67877c2) feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.
-- 2026-03-13 [`29c6f3d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/29c6f3d75165b41acd72a28d1e1b4e76bd51947c) Refactor scheduler task management and introduce interrupt frame handling
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

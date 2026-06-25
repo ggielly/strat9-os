@@ -4,12 +4,14 @@
 
 ## Project stats
 
-- **Total commits:** `548`
+- **Total commits:** `550`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-06-25 [`a522fb8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a522fb8225d35abef7b1420b4fb203fade74470c) Refactor NIC data plane and IPC transport statistics
+- 2026-06-25 [`23cbead`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/23cbead0a913d88b5829d86cfd2f25b209f5ab96) docs: update published documentation
 - 2026-06-25 [`454a828`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/454a828ff9859ae7551677c8e150f41f14f82345) feat: add N2 data plane implementation with lock-free rings and enhance NIC interrupt handling
 - 2026-06-25 [`1f1362b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1f1362b294e6f3948e94d15a702a322a5091bfa7) docs: update published documentation
 - 2026-06-25 [`d1e838f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d1e838fbcbc964f67208246303930315f5565331) feat: implement IPC transport layer with 3-level architecture
@@ -58,7 +60,5 @@
 - 2026-05-19 [`0b42bf9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0b42bf9116227e3f1b9a3eb32ac74e7d261c7000) docs: update published documentation
 - 2026-05-19 [`03494df`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/03494df463ec1b3e49b5ef70a9205f710aa81f92) Merge branch 'refactorize-kernel-structure-and-files' into 'main'
 - 2026-05-19 [`0d4fcb8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0d4fcb8a512b73bba2408f03b9b525f3d970b2ae) refactor: rework bus driver architecture, wire storage drivers, add hardware documentation
-- 2026-05-19 [`d9e64af`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d9e64af8b55072ae6ecedcc3f3ea035f0797e113) Merge branch 'enhance-async-implementation' into 'main'
-- 2026-05-19 [`93c8927`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0) async: implement and optimize async I/O completion handling
 
 <!-- AUTO-CHANGELOG:END -->
