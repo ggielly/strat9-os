@@ -406,13 +406,25 @@ impl LockFreeRing {
     /// operation.  The physical address points directly into the slot's
     /// data area so the NIC can DMA into the ring without an intermediate
     /// copy.
+    ///
+    /// # Page-crossing note
+    ///
+    /// Ring frames are **not** physically contiguous.  A slot's data region
+    /// may straddle two frames if `slot_size` is large relative to 4096 B.
+    /// The returned `phys_addr` always points to the **start** of the data
+    /// region; the NIC driver must verify that `slot_size` does not exceed
+    /// the remaining space in the frame, and use a bounce buffer otherwise.
     pub fn dma_buffer(&self, slot_index: u32) -> DmaBuffer {
         let mask = self.capacity - 1;
         let slot_idx = slot_index & mask;
         let header_size = size_of::<RingHeader>() as u64;
-        let slot_offset = header_size + (slot_idx as u64) * size_of::<RingSlot>() as u64;
+        let slot_stride = size_of::<RingSlot>() as u64;
         const DATA_OFFSET: u64 = 4; // AtomicU16 len + AtomicU16 flags = 4 bytes
-        let phys = self.frames[0].start_address.as_u64() + slot_offset + DATA_OFFSET;
+        let byte_offset = header_size + (slot_idx as u64) * slot_stride + DATA_OFFSET;
+        let frame_idx = (byte_offset / 4096).min(self.frames.len().saturating_sub(1) as u64);
+        let offset_in_frame = byte_offset % 4096;
+        let phys =
+            self.frames[frame_idx as usize].start_address.as_u64() + offset_in_frame;
         let virt = unsafe { &(*self.slot_at(slot_idx)).data as *const _ };
         DmaBuffer {
             phys_addr: phys,

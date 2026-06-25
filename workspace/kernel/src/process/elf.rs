@@ -1199,8 +1199,11 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     use core::sync::atomic::Ordering;
 
     elf_trace!("[trace][elf] ring3_trampoline before current_task");
-    let task = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
-        .expect("elf_ring3_trampoline: no current task");
+    let Some(task) = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline") else {
+        crate::e9_println!("[elf] ring3_trampoline: no current task, aborting");
+        crate::serial_println!("[elf] ring3_trampoline: no current task, aborting");
+        loop { x86_64::instructions::hlt(); }
+    };
     elf_trace!(
         "[trace][elf] ring3_trampoline enter tid={} name={}",
         task.id.as_u64(),
@@ -1564,6 +1567,7 @@ fn setup_boot_user_stack(
         write_user_mapped_bytes(user_as, sp + arg.len() as u64, &[0])?;
     }
 
+    sp &= !0xF;
     sp -= 16;
     if sp < USER_STACK_BASE {
         return Err("User stack overflow during boot stack setup");
@@ -1571,8 +1575,6 @@ fn setup_boot_user_stack(
     let random_ptr = sp;
     let random_seed = generate_aux_random_seed();
     write_user_mapped_bytes(user_as, sp, &random_seed)?;
-
-    sp &= !0xF;
     let auxv_pairs = if interp_base.is_some() { 8u64 } else { 7u64 };
     // argc(1) + argv[0..=N](1+N) + argv_NULL(1) + envp_NULL(1) + auxv(pairs*2)
     let stack_words = 4u64 + extra_args.len() as u64 + auxv_pairs * 2;
@@ -1832,7 +1834,10 @@ fn load_elf_task_inner(
         resume_kind: SyncUnsafeCell::new(ResumeKind::RetFrame),
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
-        user_stack: None,
+        user_stack: Some(crate::process::task::UserStack {
+            virt_base: x86_64::VirtAddr::new(USER_STACK_BASE),
+            size: USER_STACK_PAGES * 4096,
+        }),
         name,
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: super::signal::SignalSet::new(),

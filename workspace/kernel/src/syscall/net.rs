@@ -153,6 +153,17 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     Ok(buf_len as u64)
 }
 
+/// SYS_NET_REGISTER : Register the calling task as the strate-net silo.
+///
+/// Called once by strate-net during startup.  Stores the task ID for
+/// IRQ-driven wakeup in the NIC handler.
+pub fn sys_net_register() -> Result<u64, SyscallError> {
+    let task = crate::process::current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    crate::hardware::nic::register_strate_net_tid(task.id.as_u64());
+    log::info!("[net] strate-net registered (tid={})", task.id.as_u64());
+    Ok(0)
+}
+
 /// SYS_NET_INFO : Query network interface information.
 ///
 /// `info_type` 0 returns the MAC address (6 bytes) into `buf_ptr`.

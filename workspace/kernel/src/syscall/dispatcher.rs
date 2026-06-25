@@ -283,6 +283,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NET_RECV => net::sys_net_recv(arg1, arg2),
         SYS_NET_SEND => net::sys_net_send(arg1, arg2),
         SYS_NET_INFO => net::sys_net_info(arg1, arg2),
+        SYS_NET_REGISTER => net::sys_net_register(),
 
         // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => volume::sys_volume_read(arg1, arg2, arg3, arg4),

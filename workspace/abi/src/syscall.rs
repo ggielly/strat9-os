@@ -840,6 +840,14 @@ pub const SYS_NET_SEND: usize = 411;
 /// Returns `0` on success.
 pub const SYS_NET_INFO: usize = 412;
 
+/// Register the calling task as the strate-net networking silo.
+///
+/// Called once by strate-net during startup.  The NIC IRQ handler uses
+/// this registration to wake the networking task when packets arrive.
+///
+/// Returns `0` on success.
+pub const SYS_NET_REGISTER: usize = 414;
+
 /// Check file accessibility using the real user/group IDs.
 ///
 /// - `path_ptr`: pointer to the path string
