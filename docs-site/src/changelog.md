@@ -4,12 +4,14 @@
 
 ## Project stats
 
-- **Total commits:** `543`
+- **Total commits:** `545`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-06-25 [`411f5aa`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/411f5aaf1ae30d6b53f71cb08784be42b0cea99a) feat: add IPC transport layer support and enhance ICMP handling
+- 2026-06-25 [`c034c91`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c034c916c998d69d1a210f5c147971fb24510ed4) docs: update published documentation
 - 2026-06-25 [`bbad275`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bbad275caf9f07d2ec24045842d6a3198b783b2b) Implement IPC transport layer with lock-free ring and intrusive mailbox
 - 2026-06-25 [`77b1a74`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/77b1a74ea41ad541472853383c61c1e2c0f79e89) docs: add IPC architecture document (3 access levels)
 - 2026-06-25 [`848baaf`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/848baaf594c7a9fbd7f951c3959790dc26c1383e) Merge branch 'feat/input-to-userspace' into 'main'
@@ -56,9 +58,7 @@
 - 2026-05-19 [`d9e64af`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d9e64af8b55072ae6ecedcc3f3ea035f0797e113) Merge branch 'enhance-async-implementation' into 'main'
 - 2026-05-19 [`93c8927`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0) async: implement and optimize async I/O completion handling
 - 2026-05-18 [`24060f8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/24060f8e8fca6c587b88d7c09637cd108cd3faf6) Merge branch 'async-base-layer' into 'main'
-- 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)
+- 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O : ring, dispatch, AHCI bridge (Phases 1-4)
 - 2026-05-15 [`736deae`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/736deae9274b3ad3ee79db07fe3e4eca575eaa36) docs: update published documentation
-- 2026-05-15 [`c10e645`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c10e645f592074bdd07b603e83a12a27cb0c3e92) fix(shell): add is_interrupted() checks to wasm-run and grep, document cancellation contract
-- 2026-05-14 [`37420be`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/37420be3fa5e1b693d6a2cbad228fdc6ee0f570a) fix(scheduler): remove dead null-check on &Arc<Task> reference
 
 <!-- AUTO-CHANGELOG:END -->

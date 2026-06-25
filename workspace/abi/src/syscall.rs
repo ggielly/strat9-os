@@ -56,7 +56,14 @@ pub const SYS_ASYNC_CANCEL: usize = 252;
 pub const SYS_ASYNC_MAP: usize = 253;
 pub const SYS_ASYNC_DESTROY: usize = 254;
 
-// FREE : 260 to 299
+// FREE : 270 to 299
+
+// Block 260-269: IPC transport layer
+pub const SYS_TRANSPORT_CREATE: usize = 260;
+pub const SYS_TRANSPORT_SEND: usize = 261;
+pub const SYS_TRANSPORT_RECV: usize = 262;
+pub const SYS_TRANSPORT_CLOSE: usize = 263;
+pub const SYS_TRANSPORT_INFO: usize = 264;
 
 // Block 300-399: process / thread
 pub const SYS_PROC_EXIT: usize = 300;

@@ -246,6 +246,16 @@ impl TransportId {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         TransportId(NEXT.fetch_add(1, Ordering::Relaxed))
     }
+
+    /// Create a TransportId from a raw u64.
+    pub fn from_u64(raw: u64) -> Self {
+        TransportId(raw)
+    }
+
+    /// Get the raw u64 value.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 /// Result of a successful transport creation.
@@ -579,7 +589,7 @@ pub fn create_spsc_pair(
 ///
 /// Updated by the scheduler on each context switch; read **only** by the NIC
 /// driver via a read-only (PTE_RO) mapping in Ring 3.  The NIC must never
-/// write this table — doing so would corrupt scheduler state.
+/// write this table : doing so would corrupt scheduler state.
 #[repr(C)]
 pub struct NicRoutingTable {
     /// Number of valid entries.

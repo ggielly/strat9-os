@@ -25,6 +25,7 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-06-25 [`411f5aa`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/411f5aaf1ae30d6b53f71cb08784be42b0cea99a) feat: add IPC transport layer support and enhance ICMP handling
 - 2026-06-25 [`5a3d69c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032) feat: migrate input system to userspace
 - 2026-06-24 [`3fea3f3`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fea3f3776edefa7bdc7c3a8d930c8d17b0939a6) SMP hardware debug, NVMe fixes, VGA refactor, telnetd hardening, docs
 - 2026-06-16 [`e4ab1a9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e4ab1a96c3579117defffe0f5b32cf7cac853129) Enhance network stack, NIC drivers, USB/NVMe subsystems, and thermal management
@@ -33,7 +34,7 @@ See:
 - 2026-05-24 [`b2bbcc0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8) Improve and fix IPC
 - 2026-05-23 [`db23b53`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552) Fix major memory leak and remove sshd silo
 - 2026-05-19 [`93c8927`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0) async: implement and optimize async I/O completion handling
-- 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)
+- 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O : ring, dispatch, AHCI bridge (Phases 1-4)
 - 2026-05-14 [`cc4944a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cc4944a2c78236c41fce4b8f1054e119fc2bcd8e) Refactor and clean up code in various modules
 - 2026-05-14 [`ecc416d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ecc416df41e29c26f6839ee15cffbc7a7dd41f05) refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix
 - 2026-05-08 [`f070d41`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f070d41c31fb505fef36603ee7cbc0c6648944b3) Add kernel entropy pool with interrupt-driven collection
@@ -54,7 +55,6 @@ See:
 - 2026-03-17 [`acfdbbd`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acfdbbd126584bcd47355873c93c5584c67877c2) feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.
 - 2026-03-13 [`29c6f3d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/29c6f3d75165b41acd72a28d1e1b4e76bd51947c) Refactor scheduler task management and introduce interrupt frame handling
 - 2026-03-11 [`7e66e69`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7e66e694ffbf939c3651a463736b3bb396ddf24f) refactor: enhance interrupt handling and logging mechanisms across the kernel
-- 2026-03-09 [`ff0a36b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ff0a36bce4090ee92da37b55fa47996fec5b04b9) Refactor memory management to use IRQ-disabled tokens
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

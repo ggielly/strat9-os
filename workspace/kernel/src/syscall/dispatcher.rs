@@ -17,7 +17,8 @@ use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, 
 
 use super::{
     chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, ipc_port, ipc_ring, net,
-    numbers::*, pci, process as proc_sys, semaphore as sem_handler, volume, SyscallFrame,
+    numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, volume,
+    SyscallFrame,
 };
 use crate::{
     async_io::syscall as async_sys,
@@ -215,6 +216,13 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_ASYNC_CANCEL => async_sys::sys_async_cancel(arg1, arg2, arg3),
         SYS_ASYNC_MAP => async_sys::sys_async_map(arg1, arg2),
         SYS_ASYNC_DESTROY => async_sys::sys_async_destroy(arg1, arg2),
+
+        // Transport syscalls (260-264) ======================================
+        SYS_TRANSPORT_CREATE => transport::sys_transport_create(arg1, arg2),
+        SYS_TRANSPORT_SEND => transport::sys_transport_send(arg1, arg2, arg3),
+        SYS_TRANSPORT_RECV => transport::sys_transport_recv(arg1, arg2, arg3),
+        SYS_TRANSPORT_CLOSE => transport::sys_transport_close(arg1),
+        SYS_TRANSPORT_INFO => transport::sys_transport_info(arg1, arg2),
 
         // PCI syscalls ======================================================
         SYS_PCI_ENUM => pci::sys_pci_enum(arg1, arg2, arg3),

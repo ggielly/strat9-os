@@ -47,14 +47,14 @@ pub struct RingHeader {
     flags: AtomicU32,
     _pad1: [u8; 48],
 
-    // Cache-line 1 — consumer hot
+    // Cache-line 1 : consumer hot
     /// Next slot to read.  Written by consumer; read by producer.
     head: AtomicU32,
     /// Notification counter for the producer (written by consumer).
     notify_prod: AtomicU32,
     _pad2: [u8; 56],
 
-    // Cache-line 2 — producer hot
+    // Cache-line 2 : producer hot
     /// Next slot to write.  Written by producer; read by consumer.
     tail: AtomicU32,
     /// Notification counter for the consumer (written by producer).
@@ -183,7 +183,7 @@ impl LockFreeRing {
         let base_virt = phys_to_virt(frames[0].start_address.as_u64());
         let header = base_virt as *mut RingHeader;
 
-        // Zero each frame individually — they may not be physically contiguous.
+        // Zero each frame individually : they may not be physically contiguous.
         for &frame in &frames {
             let virt = phys_to_virt(frame.start_address.as_u64());
             unsafe {
