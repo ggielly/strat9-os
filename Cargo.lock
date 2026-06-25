@@ -1036,6 +1036,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "strate-graphical"
+version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
+]
+
+[[package]]
 name = "strate-init"
 version = "0.1.0"
 dependencies = [

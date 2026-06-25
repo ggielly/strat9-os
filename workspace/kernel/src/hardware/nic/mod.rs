@@ -128,12 +128,21 @@ pub fn register_strate_net_tid(tid: u64) {
 pub fn handle_interrupt() {
     if let Some(ref dev) = *NIC_DEVICE.lock() {
         dev.handle_interrupt();
-        // Drain pending RX packets into the N2 data plane ring.
+
         if let Some(ref dp) = *NIC_DATA_PLANE.lock() {
+            // Drain pending RX packets from HW into the N2 RX ring.
             let mut buf = [0u8; 2048];
             while let Ok(n) = dev.receive(&mut buf) {
                 if dp.push_rx(0, &buf[..n]).is_err() {
                     break; // ring full : backpressure
+                }
+            }
+
+            // Drain pending TX packets from the N2 TX ring into HW.
+            let mut tx_buf = [0u8; 2048];
+            while let Ok(Some(n)) = dp.pop_tx(0, &mut tx_buf) {
+                if dev.transmit(&tx_buf[..n]).is_err() {
+                    break;
                 }
             }
         }

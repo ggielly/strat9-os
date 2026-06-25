@@ -18,6 +18,7 @@ use super::{
     lockfree_ring::{LockFreeRing, RingError, RingSlot},
     mailbox::IntrusiveMailbox,
 };
+use alloc::vec;
 use alloc::vec::Vec;
 // ---------------------------------------------------------------------------
 // Transport level enumeration
@@ -48,6 +49,10 @@ pub struct TransportCapabilities {
     pub blocking: bool,
     /// Whether the transport supports zero-copy (DMA into buffers).
     pub zero_copy: bool,
+    /// Whether the transport supports vectored I/O (scatter-gather).
+    pub vectored: bool,
+    /// Number of directions (1 = simplex, 2 = duplex).
+    pub directions: u8,
     /// Approximate round-trip cost in CPU cycles (for scheduler hints).
     pub estimated_cost_cycles: u32,
 }
@@ -68,6 +73,23 @@ pub trait IpcProducer: IpcTransport {
     fn send(&self, msg: &[u8]) -> Result<(), IpcError>;
     /// Send without blocking.
     fn try_send(&self, msg: &[u8]) -> Result<(), IpcError>;
+    /// Send using vectored I/O (scatter-gather).
+    ///
+    /// Default implementation concatenates buffers and calls `send()`.
+    /// Subtypes may override for zero-copy scatter-gather.
+    fn send_vectored(&self, bufs: &[&[u8]]) -> Result<(), IpcError> {
+        let total: usize = bufs.iter().map(|b| b.len()).sum();
+        if total > self.capabilities().max_message_size {
+            return Err(IpcError::MessageTooLarge);
+        }
+        let mut buf = alloc::vec![0u8; total];
+        let mut offset = 0;
+        for b in bufs {
+            buf[offset..offset + b.len()].copy_from_slice(b);
+            offset += b.len();
+        }
+        self.send(&buf)
+    }
 }
 
 /// Consumer side : receives messages from the transport.
@@ -190,6 +212,8 @@ impl IpcTransport for LockFreeRing {
             max_message_size: RingSlot::SLOT_SIZE,
             blocking: true,
             zero_copy: true,
+            vectored: true,
+            directions: 2,
             estimated_cost_cycles: 400,
         }
     }

@@ -86,8 +86,7 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
             }
         } else {
             // Fall back to direct HW receive (legacy path without N2).
-            let device =
-                crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
+            let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
             match device.receive(&mut kbuf) {
                 Ok(n) => n,
                 Err(e) => {
@@ -95,11 +94,7 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
                     if se != SyscallError::Again
                         && NET_RECV_ERR_LOG_BUDGET.fetch_sub(1, Ordering::Relaxed) > 0
                     {
-                        crate::serial_println!(
-                            "[net-sys] recv error: {:?} -> {}",
-                            e,
-                            se.name()
-                        );
+                        crate::serial_println!("[net-sys] recv error: {:?} -> {}", e, se.name());
                     }
                     return Err(se);
                 }
@@ -123,7 +118,6 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 
 /// SYS_NET_SEND : Transmit a raw Ethernet frame.
 pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
-    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
     let buf_len = buf_len as usize;
     let user = UserSliceRead::new(buf_ptr, buf_len)?;
     let mut kbuf = SmallVec::<[u8; NET_INLINE_BUF_CAPACITY]>::new();
@@ -134,6 +128,19 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     }
     trace_dhcp_frame("tx", &kbuf);
 
+    // Try N2 data-plane TX ring first (deferred TX via IRQ handler).
+    {
+        let dp_guard = crate::hardware::nic::data_plane().lock();
+        if let Some(ref dp) = *dp_guard {
+            dp.push_tx(0, &kbuf).map_err(|_| SyscallError::Again)?;
+            dp.notify_tx_producer(0);
+            crate::serial_println!("[net] tx ok {} bytes (N2 ring)", buf_len);
+            return Ok(buf_len as u64);
+        }
+    }
+
+    // Fall back to direct HW transmit (legacy path without N2).
+    let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
     if let Err(e) = device.transmit(&kbuf) {
         let se = SyscallError::from(e);
         if NET_SEND_ERR_LOG_BUDGET.fetch_sub(1, Ordering::Relaxed) > 0 {

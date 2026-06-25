@@ -36,6 +36,15 @@ use crate::{
     },
 };
 
+macro_rules! elf_trace {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)] {
+            crate::e9_println!($($arg)*);
+            crate::serial_println!($($arg)*);
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
 // ELF64 constants (relocation & dynamic tags — not covered by xmas-elf)
 // ---------------------------------------------------------------------------
@@ -69,6 +78,8 @@ const R_X86_64_COPY: u32 = 5;
 const R_X86_64_GLOB_DAT: u32 = 6;
 const R_X86_64_JUMP_SLOT: u32 = 7;
 const R_X86_64_TPOFF64: u32 = 18;
+const R_X86_64_DTPMOD64: u32 = 16;
+const R_X86_64_DTPOFF64: u32 = 17;
 const R_X86_64_IRELATIVE: u32 = 37;
 
 /// Maximum virtual address we accept for user-space mappings.
@@ -166,6 +177,11 @@ fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
     let elf = xmas_elf::ElfFile::new(data).map_err(|_| "Invalid ELF header")?;
 
     let hdr = elf.header.pt2;
+
+    // Reject non-x86_64 binaries early.
+    if hdr.machine().as_machine() != xmas_elf::header::Machine::X86_64 {
+        return Err("Not an x86_64 ELF binary");
+    }
 
     // Type: executable or shared object (PIE/static PIE)
     let e_type = hdr.type_().0;
@@ -820,6 +836,19 @@ fn apply_dynamic_relocations(
         Ok(sym.st_size)
     };
 
+    // Variant II TLS: tp = tls_base + aligned_memsz.  We need the aligned
+    // memsz for TPOFF64/DTPOFF64 calculations.
+    let tls_aligned_memsz: i128 = phdrs
+        .iter()
+        .find(|ph| ph.p_type == PT_TLS)
+        .map(|tls| {
+            let memsz = tls.p_memsz;
+            let align = tls.p_align.max(1);
+            let aligned = (memsz + align - 1) & !(align - 1);
+            aligned as i128
+        })
+        .unwrap_or(0);
+
     let apply_rela_table = |table_base: u64,
                             table_size: usize,
                             count_hint: Option<usize>|
@@ -901,9 +930,29 @@ fn apply_dynamic_relocations(
                     } else {
                         0i128
                     };
+                    // Variant II: tp = tls_base + aligned_memsz, so offset from tp is
+                    // (sym.st_value - aligned_memsz + r_addend).  Use i128 to avoid
+                    // underflow when sym_val < aligned_memsz.
                     sym_val
-                        .checked_add(rela.r_addend as i128)
+                        .checked_sub(tls_aligned_memsz)
+                        .and_then(|v| v.checked_add(rela.r_addend as i128))
                         .ok_or("TPOFF64 value overflow")?
+                }
+                R_X86_64_DTPMOD64 => {
+                    // For single-binary loading (no dynamic linker), the module ID is always 1.
+                    1i128
+                }
+                R_X86_64_DTPOFF64 => {
+                    // DTV-relative offset: same as TPOFF64 for single-binary loading.
+                    let sym_val = if r_sym != 0 {
+                        resolve_sym(r_sym, false, false)? as i128
+                    } else {
+                        0i128
+                    };
+                    sym_val
+                        .checked_sub(tls_aligned_memsz)
+                        .and_then(|v| v.checked_add(rela.r_addend as i128))
+                        .ok_or("DTPOFF64 value overflow")?
                 }
                 R_X86_64_IRELATIVE => {
                     // IRELATIVE: the target is a resolver function that must be
@@ -1149,15 +1198,10 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     use crate::arch::x86_64::gdt;
     use core::sync::atomic::Ordering;
 
-    crate::e9_println!("[trace][elf] ring3_trampoline before current_task");
+    elf_trace!("[trace][elf] ring3_trampoline before current_task");
     let task = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
         .expect("elf_ring3_trampoline: no current task");
-    crate::e9_println!(
-        "[trace][elf] ring3_trampoline enter tid={} name={}",
-        task.id.as_u64(),
-        task.name
-    );
-    crate::serial_println!(
+    elf_trace!(
         "[trace][elf] ring3_trampoline enter tid={} name={}",
         task.id.as_u64(),
         task.name
@@ -1167,24 +1211,19 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     let user_rip = task.trampoline_entry.load(Ordering::Acquire);
     let user_rsp = task.trampoline_stack_top.load(Ordering::Acquire);
     let user_arg0 = task.trampoline_arg0.load(Ordering::Acquire);
-    crate::e9_println!(
+    elf_trace!(
         "[trace][elf] ring3_trampoline args tid={} rip={:#x} rsp={:#x} arg0={:#x}",
         task.id.as_u64(),
         user_rip,
         user_rsp,
         user_arg0
     );
-    crate::serial_println!(
-        "[trace][elf] ring3_trampoline args tid={} rip={:#x} rsp={:#x}",
-        task.id.as_u64(),
-        user_rip,
-        user_rsp
-    );
 
     // Probe: read GOT entries via HHDM before switching to user AS.
     // This is the last kernel-owned moment before user execution begins.
     // If values here are wrong, the bug is in load/relocation, not in
     // something that happens after this point.
+    #[cfg(debug_assertions)]
     {
         // SAFETY: Kernel still holds the boot/kernel CR3. HHDM is valid.
         unsafe {
@@ -1195,7 +1234,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
                 if let Some(phys) = as_ref.translate(VirtAddr::new(vaddr)) {
                     let ptr = crate::memory::phys_to_virt(phys.as_u64()) as *const u64;
                     let val = core::ptr::read_unaligned(ptr);
-                    crate::e9_println!(
+                    elf_trace!(
                         "[trampoline-got] tid={} name={} GOT[{:#x}]=phys={:#x} val={:#x}",
                         task.id.as_u64(),
                         task_name,
@@ -1204,7 +1243,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
                         val
                     );
                 } else {
-                    crate::e9_println!(
+                    elf_trace!(
                         "[trampoline-got] tid={} name={} GOT[{:#x}]=<not mapped>",
                         task.id.as_u64(),
                         task_name,
@@ -1221,11 +1260,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         let as_ref = task.process.address_space_arc();
         as_ref.switch_to();
     }
-    crate::e9_println!(
-        "[trace][elf] ring3_trampoline switch_to done tid={}",
-        task.id.as_u64()
-    );
-    crate::serial_println!(
+    elf_trace!(
         "[trace][elf] ring3_trampoline switch_to done tid={}",
         task.id.as_u64()
     );
@@ -1233,18 +1268,12 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     let user_cs = gdt::user_code_selector().0 as u64;
     let user_ss = gdt::user_data_selector().0 as u64;
     let user_rflags: u64 = 0x202; // IF=1, reserved bit 1 = 1
-    crate::e9_println!(
+    elf_trace!(
         "[trace][elf] ring3_trampoline iret tid={} cs={:#x} ss={:#x} rflags={:#x}",
         task.id.as_u64(),
         user_cs,
         user_ss,
         user_rflags
-    );
-    crate::serial_println!(
-        "[trace][elf] ring3_trampoline iret tid={} rip={:#x} rsp={:#x}",
-        task.id.as_u64(),
-        user_rip,
-        user_rsp
     );
 
     // ----- Pre-iret LAPIC timer diagnostic -----
@@ -1258,7 +1287,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_CURRENT);
         let rflags_now: u64;
         core::arch::asm!("pushfq; pop {}", out(reg) rflags_now, options(nostack));
-        crate::e9_println!(
+        elf_trace!(
             "[trace][elf] pre-iret LAPIC: LVT={:#x} init={} cur={} IF={}",
             lvt,
             init_cnt,
@@ -1266,12 +1295,12 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             (rflags_now >> 9) & 1
         );
         if lvt & (1 << 16) != 0 {
-            crate::e9_println!(
+            elf_trace!(
                 "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) : no ticks will fire!"
             );
         }
         if init_cnt == 0 {
-            crate::e9_println!(
+            elf_trace!(
                 "[trace][elf] WARNING: LAPIC timer init_count=0 : timer not started!"
             );
         }
@@ -1284,7 +1313,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_ss as u16,
     );
 
-    crate::e9_println!(
+    elf_trace!(
         "[elf] PRE-IRETQ tid={} rip={:#x} rsp={:#x} rflags={:#x}",
         task.id.as_u64(),
         user_rip,
@@ -1295,7 +1324,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // Probe E9 Rust : validate_ring3_state passé, on entre dans l'asm.
     // Si '0' est visible mais pas '1', le compilateur a inséré du code entre
     // les deux qui a planté (peu probable, mais élimine cette hypothèse).
-    crate::e9_println!(
+    elf_trace!(
         "E9[0] pre-asm rip={:#x} rsp={:#x} cs={:#x} ss={:#x}",
         user_rip,
         user_rsp,

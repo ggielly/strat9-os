@@ -180,6 +180,8 @@ impl IpcTransport for IntrusiveMailbox {
             max_message_size: 256,
             blocking: false,
             zero_copy: false,
+            vectored: false,
+            directions: 1,
             estimated_cost_cycles: 10,
         }
     }
