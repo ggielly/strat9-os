@@ -133,7 +133,7 @@ pub fn handle_interrupt() {
             let mut buf = [0u8; 2048];
             while let Ok(n) = dev.receive(&mut buf) {
                 if dp.push_rx(0, &buf[..n]).is_err() {
-                    break; // ring full — backpressure
+                    break; // ring full : backpressure
                 }
             }
         }
@@ -248,7 +248,7 @@ static NIC_DATA_PLANE: Mutex<Option<NicDataPlane>> = Mutex::new(None);
 fn init_data_plane() {
     let count = NET_DEVICES.read().len();
     if count == 0 {
-        log::debug!("[net] No NIC devices found — skipping data plane init");
+        log::debug!("[net] No NIC devices found : skipping data plane init");
         return;
     }
     // One ring pair per NIC for now; RSS would create one per queue.

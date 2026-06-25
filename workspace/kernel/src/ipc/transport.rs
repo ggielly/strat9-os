@@ -380,7 +380,7 @@ pub struct TransportManager {
     /// Simple FIFO transport cache (no_std, no allocation).
     cache: SpinLock<TransportCache>,
     /// Per-transport performance statistics.
-    pub stats: TransportStats,
+    pub stats: SpinLock<TransportStats>,
 }
 
 impl TransportManager {
@@ -391,7 +391,7 @@ impl TransportManager {
             policy_overrides: SpinLock::new(BTreeMap::new()),
             active: SpinLock::new(BTreeMap::new()),
             cache: SpinLock::new(TransportCache::new()),
-            stats: TransportStats::new(TransportLevel::LockFree),
+            stats: SpinLock::new(TransportStats::new(TransportLevel::LockFree)),
         }
     }
 
@@ -486,8 +486,8 @@ impl TransportManager {
         };
 
         // Increment stats counters
-        let s = &mut *self.stats;
-        s.sent = s.sent.wrapping_add(1);
+        // Increment stats counters
+        self.stats.lock().sent += 1;
 
         {
             let mut cache = self.cache.lock();

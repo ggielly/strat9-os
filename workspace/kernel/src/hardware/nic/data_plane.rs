@@ -65,7 +65,7 @@ impl NicDataPlane {
     /// Push a received packet into the RX ring for `queue_index`.
     ///
     /// Called from the NIC IRQ handler.  Returns `Err` if the ring is full
-    /// (backpressure — drop the packet).
+    /// (backpressure : drop the packet).
     pub fn push_rx(&self, queue_index: usize, data: &[u8]) -> Result<(), ()> {
         self.queues
             .get(queue_index)
