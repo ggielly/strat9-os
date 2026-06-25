@@ -11,6 +11,7 @@
 // CAS(REFCOUNT_UNUSED → 1) that catches double-free / free-list corruption
 // immediately rather than silently aliasing memory.
 
+#[allow(unused_imports)]
 use crate::{
     boot::entry::{MemoryKind, MemoryRegion},
     memory::{
@@ -789,7 +790,6 @@ impl BuddyAllocator {
                 "buddy free: frame 0x{:x} order {} overlaps protected memory in zone {:?}",
                 frame_phys, order, zone.zone_type,
             );
-            return;
         }
 
         #[cfg(debug_assertions)]
@@ -1174,6 +1174,7 @@ impl BuddyAllocator {
     /// pessimistic bound across all pages yields a simple safe allocation bound,
     /// even if bitmap-pool reservations split ranges further.
     fn bitmap_bytes_upper_bound_for_pages(page_count: usize) -> usize {
+        #[allow(unused_mut)]
         let mut bits = page_count.saturating_mul(MAX_ORDER + 1);
         #[cfg(debug_assertions)]
         {

@@ -24,7 +24,7 @@
 use crate::{
     hardware::video::{
         graphics_adapter::{
-            get_adapter_for_display, total_display_count, Damage, DisplayScreen, GraphicsAdapter,
+            get_adapter_for_display, total_display_count, Damage, DisplayScreen,
             HeapScreen, SimpleDisplayAdapter,
         },
         Framebuffer,
@@ -35,7 +35,7 @@ use crate::{
         DEV_CHAR_FS, DT_CHR, DT_REG,
     },
 };
-use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::RwLock;
 
@@ -189,12 +189,12 @@ impl Scheme for DisplayScheme {
                 buf[..n].copy_from_slice(&b[start..start + n]);
                 Ok(n)
             }
-            Handle::Screen(display_id, screen) => {
+            Handle::Screen(_display_id, screen) => {
                 // Read pixel data from offscreen buffer.
                 let scr = screen.read();
                 let scr_stride = scr.stride() as usize;
                 let start = offset as usize;
-                let total = (scr_stride * scr.height() as usize);
+                let total = scr_stride * scr.height() as usize;
                 if start >= total {
                     return Ok(0);
                 }
@@ -214,7 +214,7 @@ impl Scheme for DisplayScheme {
 
         match handle {
             Handle::Root | Handle::Info => Err(SyscallError::PermissionDenied),
-            Handle::Screen(display_id, screen) => {
+            Handle::Screen(_display_id, screen) => {
                 // Write pixel data to offscreen buffer.
                 // Format: [x_lo, x_hi, y_lo, y_hi, r, g, b, r, g, b, ...]
                 if buf.len() < 7 {
@@ -226,7 +226,7 @@ impl Scheme for DisplayScheme {
 
                 let mut scr = screen.write();
                 let bpp = scr.bpp() as usize;
-                let bpx = bpp / 8;
+                let _bpx = bpp / 8;
                 let stride = scr.stride() as usize;
                 let dst = scr.pixels_mut();
 

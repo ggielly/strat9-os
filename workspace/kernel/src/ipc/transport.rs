@@ -7,18 +7,13 @@
 //!
 //! The [`TransportManager`] selects the appropriate level per silo-pair at
 //! connection creation time using a configurable decision matrix.
-
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-
-use alloc::{collections::BTreeMap, sync::Arc};
-
-use crate::{silo::SiloId, sync::SpinLock};
-
 use super::{
     lockfree_ring::{LockFreeRing, RingError, RingSlot},
     mailbox::IntrusiveMailbox,
 };
-use alloc::{vec, vec::Vec};
+use crate::{silo::SiloId, sync::SpinLock};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 // ---------------------------------------------------------------------------
 // Transport level enumeration
 // ---------------------------------------------------------------------------

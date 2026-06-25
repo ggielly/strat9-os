@@ -42,6 +42,7 @@ pub mod lifecycle;
 pub mod lockfree_ring;
 pub mod mailbox;
 pub mod message;
+pub mod n1;
 pub mod port;
 pub mod reply;
 pub mod semaphore;

@@ -954,7 +954,7 @@ impl XhciController {
 
         let dev = self.device_slots[idx].as_ref().unwrap();
         let tr_ring = dev.ep_transfer_rings[ep];
-        let tr_phys = dev.ep_transfer_ring_phys[ep];
+        let _tr_phys = dev.ep_transfer_ring_phys[ep];
         let buf_phys = dev.ep_buf_phys[ep];
         let buf_len = dev.ep_buf_len[ep];
         if tr_ring.is_null() || buf_phys == 0 {

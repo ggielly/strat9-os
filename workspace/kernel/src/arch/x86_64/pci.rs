@@ -21,6 +21,98 @@ const CONFIG_DATA: u16 = 0xCFC;
 /// atomic w.r.t. other CPUs. Every config read/write must hold this lock.
 static PCI_IO_LOCK: SpinLock<()> = SpinLock::new(());
 
+// ---------------------------------------------------------------------------
+// ECAM (PCIe Enhanced Configuration Access Mechanism) helpers
+// ---------------------------------------------------------------------------
+
+/// Read a 32-bit register from an ECAM-mapped PCI config space.
+///
+/// `ecam_base` is the MMIO base address of the ECAM region.
+/// `bus`, `device`, `function` identify the device; `offset` is the register.
+#[inline]
+unsafe fn ecam_read32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+    let addr = ecam_base
+        + ((bus as usize) << 20)
+        + ((device as usize) << 15)
+        + ((function as usize) << 12)
+        + ((offset & 0xFC) as usize);
+    core::ptr::read_volatile(addr as *const u32)
+}
+
+/// Write a 32-bit register to an ECAM-mapped PCI config space.
+#[inline]
+unsafe fn ecam_write32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8, val: u32) {
+    let addr = ecam_base
+        + ((bus as usize) << 20)
+        + ((device as usize) << 15)
+        + ((function as usize) << 12)
+        + ((offset & 0xFC) as usize);
+    core::ptr::write_volatile(addr as *mut u32, val);
+}
+
+/// Read a single byte from ECAM config space.
+#[inline]
+unsafe fn ecam_read8(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8) -> u8 {
+    let dword = ecam_read32(ecam_base, bus, device, function, offset & !0x03);
+    ((dword >> ((offset & 0x3) * 8)) & 0xFF) as u8
+}
+
+// ---------------------------------------------------------------------------
+// Known device name lookup (for improved logging)
+// ---------------------------------------------------------------------------
+
+/// Known PCI device names for human-readable logging.
+fn device_name(vendor: u16, device: u16) -> Option<&'static str> {
+    match (vendor, device) {
+        // Intel Ethernet
+        (0x8086, 0x100E) => Some("Intel E1000 (QEMU)"),
+        (0x8086, 0x100F) => Some("Intel E1000 (QEMU)"),
+        (0x8086, 0x10D3) => Some("Intel E1000e (QEMU)"),
+        (0x8086, 0x153A) => Some("Intel I217-LM"),
+        (0x8086, 0x15F9) => Some("Intel I219-LM"),
+        (0x8086, 0x15FA) => Some("Intel I219-V"),
+        (0x8086, 0x15F2) => Some("Intel I225-LM"),
+        (0x8086, 0x15F3) => Some("Intel I225-V"),
+        (0x8086, 0x125B) => Some("Intel I226-LM"),
+        (0x8086, 0x125C) => Some("Intel I226-V"),
+        // VirtIO
+        (0x1AF4, 0x1000) => Some("VirtIO Net"),
+        (0x1AF4, 0x1001) => Some("VirtIO Block"),
+        (0x1AF4, 0x1003) => Some("VirtIO Console"),
+        (0x1AF4, 0x1005) => Some("VirtIO RNG"),
+        (0x1AF4, 0x1050) => Some("VirtIO GPU"),
+        (0x1AF4, 0x1052) => Some("VirtIO Input"),
+        // QEMU
+        (0x1234, 0x11E9) => Some("QEMU VGA"),
+        _ => None,
+    }
+}
+
+/// Human-readable PCI class name.
+fn class_name(class: u8, subclass: u8) -> Option<&'static str> {
+    match (class, subclass) {
+        (0x00, 0x00) => Some("Legacy Device"),
+        (0x00, 0x01) => Some("VGA-Compatible Device"),
+        (0x01, 0x00) => Some("SCSI Controller"),
+        (0x01, 0x01) => Some("IDE Controller"),
+        (0x01, 0x06) => Some("SATA Controller"),
+        (0x01, 0x08) => Some("NVMe Controller"),
+        (0x02, 0x00) => Some("Ethernet Controller"),
+        (0x02, 0x80) => Some("Network Controller"),
+        (0x03, 0x00) => Some("VGA Controller"),
+        (0x03, 0x02) => Some("3D Controller"),
+        (0x04, 0x00) => Some("Multimedia Video"),
+        (0x04, 0x03) => Some("Audio Device"),
+        (0x06, 0x00) => Some("Host Bridge"),
+        (0x06, 0x01) => Some("ISA Bridge"),
+        (0x06, 0x04) => Some("PCI-to-PCI Bridge"),
+        (0x0C, 0x03) => Some("USB Controller"),
+        (0x08, 0x00) => Some("I20"),
+        _ => None,
+    }
+}
+
+
 #[derive(Clone, Copy)]
 struct PciLineQuirk {
     vendor_id: u16,
@@ -795,6 +887,126 @@ fn probe_from_word00(address: PciAddress, word00: u32) -> Option<PciDevice> {
 ///   - a lock-free double-buffered snapshot model.
 static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 
+
+// ---------------------------------------------------------------------------
+// ECAM (PCIe Enhanced Configuration Access Mechanism) scanner
+// ---------------------------------------------------------------------------
+
+/// Scan PCI devices via ECAM (Memory-Mapped Configuration).
+///
+/// Uses MCFG ACPI table entries to discover MMIO-mapped PCI config spaces.
+/// For each ECAM region, scans all bus/device/function combinations.
+/// Returns only devices not already found by the I/O port scanner.
+fn scan_ecam_devices() -> Vec<PciDevice> {
+    use crate::acpi::mcfg;
+    use crate::memory;
+
+    let mcfg_info = match mcfg::parse_mcfg() {
+        Some(info) => info,
+        None => {
+            log::info!("[PCI-ECAM] No MCFG table found, skipping ECAM scan");
+            return Vec::new();
+        }
+    };
+
+    log::info!(
+        "[PCI-ECAM] Found {} ECAM region(s)",
+        mcfg_info.entries.len()
+    );
+
+    let mut devices = Vec::new();
+
+    for entry in &mcfg_info.entries {
+        let ecam_phys = entry.base_address;
+        let start_bus = entry.start_bus;
+        let end_bus = entry.end_bus;
+
+        // Ensure the ECAM region is identity-mapped
+        let region_size = ((end_bus as usize - start_bus as usize + 1) * 256 * 32 * 8 * 4096) as u64;
+        memory::paging::ensure_identity_map_range(ecam_phys, region_size);
+        let ecam_virt = crate::memory::phys_to_virt(ecam_phys) as usize;
+
+        log::info!(
+            "[PCI-ECAM] Region seg={} ecam={:#x} buses={}..{} virt={:#x}",
+            entry.segment_group, ecam_phys, start_bus, end_bus, ecam_virt
+        );
+
+        // Scan each bus in the range
+        for bus in start_bus..=end_bus {
+            for dev in 0..32u8 {
+                // Fast vendor check on function 0
+                let word00 = unsafe {
+                    ecam_read32(ecam_virt, bus, dev, 0, 0x00)
+                };
+                let vendor_id = (word00 & 0xFFFF) as u16;
+                if is_absent_vendor(vendor_id) {
+                    continue;
+                }
+
+                // Probe function 0
+                if let Some(device) = probe_ecam_device(ecam_virt, bus, dev, 0, word00) {
+                    let is_multi = device.header_type & 0x80 != 0;
+                    devices.push(device);
+
+                    // Scan additional functions if multi-function
+                    if is_multi {
+                        for func in 1..8u8 {
+                            if let Some(device) = probe_ecam_device(ecam_virt, bus, dev, func, 0) {
+                                devices.push(device);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    log::info!("[PCI-ECAM] ECAM scan found {} device(s)", devices.len());
+    devices
+}
+
+/// Probe a single PCI device via ECAM MMIO.
+fn probe_ecam_device(ecam_base: usize, bus: u8, device: u8, function: u8, word00: u32) -> Option<PciDevice> {
+    let vendor_id = (word00 & 0xFFFF) as u16;
+    let device_id = (word00 >> 16) as u16;
+    if is_absent_vendor(vendor_id) || device_id == 0xFFFF || device_id == 0x0000 {
+        return None;
+    }
+
+    let address = PciAddress::new(bus, device, function);
+
+    let word08 = unsafe { ecam_read32(ecam_base, bus, device, function, 0x08) };
+    let word0c = unsafe { ecam_read32(ecam_base, bus, device, function, 0x0C) };
+
+    let header_type = ((word0c >> 16) & 0xFF) as u8;
+    if !valid_header_type(header_type) {
+        return None;
+    }
+
+    let class_code = ((word08 >> 24) & 0xFF) as u8;
+    let subclass = ((word08 >> 16) & 0xFF) as u8;
+    let prog_if = ((word08 >> 8) & 0xFF) as u8;
+    if is_ghost_device(class_code, subclass, prog_if) {
+        return None;
+    }
+
+    let word3c = unsafe { ecam_read32(ecam_base, bus, device, function, 0x3C) };
+    let interrupt_line = quirk_zero_irq_line(vendor_id, device_id, (word3c & 0xFF) as u8);
+
+    Some(PciDevice {
+        address,
+        vendor_id,
+        device_id,
+        class_code,
+        subclass,
+        prog_if,
+        revision: (word08 & 0xFF) as u8,
+        header_type,
+        interrupt_line,
+        interrupt_pin: ((word3c >> 8) & 0xFF) as u8,
+    })
+}
+
 /// Populate the cache if empty, then run `f` on the device slice.
 ///
 /// All query functions route through here so that only a single scan ever
@@ -803,22 +1015,46 @@ static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
     let mut cache = PCI_DEVICE_CACHE.lock();
     if cache.is_none() {
-        // Debug: check stack before PCI scan
         let dummy = 0u64;
         let rsp = &dummy as *const u64 as u64;
-        crate::serial_println!("[PCI] Scanning PCI bus, rsp={:#x}", rsp);
-        let devices: Vec<PciDevice> = PciScanner::new().collect();
-        crate::serial_println!("[PCI] PCI scan complete, found {} devices", devices.len());
+        crate::serial_println!("[PCI] Scanning PCI bus (rsp={:#x})...", rsp);
+
+        // Phase 1: I/O port scan (0xCF8/0xCFC)
+        let io_devices: Vec<PciDevice> = PciScanner::new().collect();
+        crate::serial_println!("[PCI] I/O scan: {} device(s)", io_devices.len());
+
+        // Phase 2: ECAM MMIO scan (via MCFG ACPI table)
+        let ecam_devices: Vec<PciDevice> = scan_ecam_devices();
+        crate::serial_println!("[PCI] ECAM scan: {} device(s)", ecam_devices.len());
+
+        // Merge: ECAM devices that are NOT already in the I/O scan
+        let mut devices = io_devices;
+        for ecam_dev in &ecam_devices {
+            let duplicate = devices.iter().any(|d|
+                d.address.bus == ecam_dev.address.bus
+                && d.address.device == ecam_dev.address.device
+                && d.address.function == ecam_dev.address.function
+            );
+            if !duplicate {
+                devices.push(*ecam_dev);
+            }
+        }
+        crate::serial_println!("[PCI] Total: {} device(s) after merge", devices.len());
+
+        // Improved logging: human-readable names, IRQ, class
         for dev in &devices {
+            let name = device_name(dev.vendor_id, dev.device_id)
+                .unwrap_or("Unknown");
+            let class = class_name(dev.class_code, dev.subclass)
+                .unwrap_or("???");
             crate::serial_println!(
-                "[PCI]   {:02x}:{:02x}.{:x} vendor={:04x} device={:04x} class={:02x}:{:02x}",
+                "[PCI]   {:02x}:{:02x}.{:x} {:<24} {} (IRQ={})",
                 dev.address.bus,
                 dev.address.device,
                 dev.address.function,
-                dev.vendor_id,
-                dev.device_id,
-                dev.class_code,
-                dev.subclass
+                name,
+                class,
+                dev.interrupt_line,
             );
         }
         *cache = Some(devices);

@@ -110,7 +110,7 @@ pub fn sys_transport_recv(handle: u64, buf_ptr: u64, buf_len: u64) -> Result<u64
         .get_endpoint(tid)
         .ok_or(SyscallError::BadHandle)?;
 
-    let mut user_buf = UserSliceWrite::new(buf_ptr, buf_len as usize)?;
+    let user_buf = UserSliceWrite::new(buf_ptr, buf_len as usize)?;
     let mut kbuf = vec![0u8; buf_len as usize];
     let n = endpoint
         .recv(&mut kbuf)

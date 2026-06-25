@@ -176,18 +176,32 @@ struct Elf64Sym {
 /// Uses `xmas-elf` for magic/class/machine/version validation, then copies
 /// the fields we need into a local `Copy` struct.
 fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
-    let elf = xmas_elf::ElfFile::new(data).map_err(|_| "Invalid ELF header")?;
+    let elf = xmas_elf::ElfFile::new(data).map_err(|e| {
+        crate::serial_println!("[elf] xmas_elf::ElfFile::new failed: {:?}", e);
+        "Invalid ELF header"
+    })?;
 
     let hdr = elf.header.pt2;
 
     // Reject non-x86_64 binaries early.
-    if hdr.machine().as_machine() != xmas_elf::header::Machine::X86_64 {
+    let machine = hdr.machine().as_machine();
+    if machine != xmas_elf::header::Machine::X86_64 {
+        crate::serial_println!(
+            "[elf] Rejecting binary: machine={:?} (expected X86_64)",
+            machine
+        );
         return Err("Not an x86_64 ELF binary");
     }
 
     // Type: executable or shared object (PIE/static PIE)
     let e_type = hdr.type_().0;
     if e_type != ET_EXEC && e_type != ET_DYN {
+        crate::serial_println!(
+            "[elf] Rejecting binary: e_type={} (expected ET_EXEC={} or ET_DYN={})",
+            e_type,
+            ET_EXEC,
+            ET_DYN
+        );
         return Err("Unsupported ELF type (expected ET_EXEC or ET_DYN)");
     }
 
@@ -202,8 +216,15 @@ fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
     let e_phoff = hdr.ph_offset();
     let e_phnum = hdr.ph_count();
 
-    // Sanity check program headers
-    if e_phentsize as usize != core::mem::size_of::<xmas_elf::program::ProgramHeader>() {
+    // Sanity check program headers.
+    // Compare against our packed Elf64Phdr (56 bytes = standard ELF64), not
+    // xmas_elf::ProgramHeader which may have padding due to #[repr(C)].
+    if e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
+        crate::serial_println!(
+            "[elf] Rejecting binary: e_phentsize={} expected={}",
+            e_phentsize,
+            core::mem::size_of::<Elf64Phdr>()
+        );
         return Err("Unexpected phentsize");
     }
 
@@ -1286,16 +1307,16 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         let lvt = crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_LVT_TIMER);
         let init_cnt =
             crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_INIT);
-        let cur_cnt =
+        let _cur_cnt =
             crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_CURRENT);
-        let rflags_now: u64;
-        core::arch::asm!("pushfq; pop {}", out(reg) rflags_now, options(nostack));
+        let _rflags_now: u64;
+        core::arch::asm!("pushfq; pop {}", out(reg) _rflags_now, options(nostack));
         elf_trace!(
             "[trace][elf] pre-iret LAPIC: LVT={:#x} init={} cur={} IF={}",
             lvt,
             init_cnt,
-            cur_cnt,
-            (rflags_now >> 9) & 1
+            _cur_cnt,
+            (_rflags_now >> 9) & 1
         );
         if lvt & (1 << 16) != 0 {
             elf_trace!(
@@ -1636,7 +1657,13 @@ fn load_elf_task_inner(
 
     // Step 1: Parse and validate ELF header
     crate::e9_println!("[trace][elf] load_elf_task parse_header begin");
-    let header = parse_header(elf_data)?;
+    let header = match parse_header(elf_data) {
+        Ok(h) => h,
+        Err(e) => {
+            crate::serial_println!("[elf] parse_header FAILED for '{}': {}", name, e);
+            return Err(e);
+        }
+    };
     crate::e9_println!(
         "[trace][elf] load_elf_task parse_header ok type={}",
         if header.e_type == ET_DYN {
@@ -1965,7 +1992,13 @@ pub fn load_elf_image(
     elf_data: &[u8],
     user_as: &AddressSpace,
 ) -> Result<LoadedElfInfo, &'static str> {
-    let header = parse_header(elf_data)?;
+    let header = match parse_header(elf_data) {
+        Ok(h) => h,
+        Err(e) => {
+            crate::serial_println!("[elf] load_elf_image parse_header FAILED: {}", e);
+            return Err(e);
+        }
+    };
     let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;

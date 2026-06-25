@@ -321,6 +321,20 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-graphical]
+description = "Build the graphical display server (debug profile)"
+cwd = "workspace/components/strate-graphical"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.dhcp-client]
 description = "Build the DHCP client monitor (debug profile)"
 cwd = "workspace/components/netutils/dhcp-client"
@@ -531,6 +545,21 @@ args = [
 
 description = "Build the console-admin silo (release profile)"
 cwd = "workspace/components/strate-console-admin"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-graphical-release]
+description = "Build the graphical display server (release profile)"
+cwd = "workspace/components/strate-graphical"
 command = "cargo"
 args = [
     "build",
@@ -776,6 +805,22 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.strate-graphical-dev-opt]
+description = "Build the graphical display server (dev-opt profile)"
+cwd = "workspace/components/strate-graphical"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.dhcp-client-dev-opt]
 description = "Build the DHCP client monitor (dev-opt profile)"
 cwd = "workspace/components/netutils/dhcp-client"
@@ -867,6 +912,7 @@ dependencies = [
     "strate-fs-ramfs",
     "strate-init",
     "strate-console-admin",
+    "strate-graphical",
     "strate-net",
     "strate-bus",
     "strate-wasm",
@@ -896,6 +942,7 @@ dependencies = [
     "strate-mem-test",
     "strate-init",
     "strate-console-admin",
+    "strate-graphical",
     "strate-net",
     "strate-bus",
     "strate-wasm",
@@ -923,6 +970,7 @@ dependencies = [
     "strate-fs-ramfs-dev-opt",
     "strate-init-dev-opt",
     "strate-console-admin-dev-opt",
+    "strate-graphical-dev-opt",
     "strate-net-dev-opt",
     "strate-bus-dev-opt",
     "strate-wasm-dev-opt",
@@ -952,6 +1000,7 @@ dependencies = [
     "strate-mem-test-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-wasm-release",
@@ -1792,4 +1841,333 @@ script = [
     """
     exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile release
     """,
+]
+
+[tasks.strate-dhcp-client]
+description = "Build dhcp-client (debug)"
+cwd = "workspace/components/netutils/dhcp-client"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-dhcp-client-release]
+description = "Build dhcp-client (release)"
+cwd = "workspace/components/netutils/dhcp-client"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-dhcp-client-dev-opt]
+description = "Build dhcp-client (dev-opt)"
+cwd = "workspace/components/netutils/dhcp-client"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-ice-candidate]
+description = "Build ice-candidate (debug)"
+cwd = "workspace/components/netutils/ice-candidate"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-ice-candidate-release]
+description = "Build ice-candidate (release)"
+cwd = "workspace/components/netutils/ice-candidate"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-ice-candidate-dev-opt]
+description = "Build ice-candidate (dev-opt)"
+cwd = "workspace/components/netutils/ice-candidate"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-ping]
+description = "Build ping (debug)"
+cwd = "workspace/components/netutils/ping"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-ping-release]
+description = "Build ping (release)"
+cwd = "workspace/components/netutils/ping"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-ping-dev-opt]
+description = "Build ping (dev-opt)"
+cwd = "workspace/components/netutils/ping"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-fs-ext4]
+description = "Build fs-ext4-strate (debug)"
+cwd = "workspace/components/strate-fs-ext4"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-fs-ext4-release]
+description = "Build fs-ext4-strate (release)"
+cwd = "workspace/components/strate-fs-ext4"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-fs-ext4-dev-opt]
+description = "Build fs-ext4-strate (dev-opt)"
+cwd = "workspace/components/strate-fs-ext4"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-input]
+description = "Build input-server (debug)"
+cwd = "workspace/components/strate-input"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-input-release]
+description = "Build input-server (release)"
+cwd = "workspace/components/strate-input"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-input-dev-opt]
+description = "Build input-server (dev-opt)"
+cwd = "workspace/components/strate-input"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-telnetd]
+description = "Build telnetd (debug)"
+cwd = "workspace/components/netutils/telnetd"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-telnetd-release]
+description = "Build telnetd (release)"
+cwd = "workspace/components/netutils/telnetd"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-telnetd-dev-opt]
+description = "Build telnetd (dev-opt)"
+cwd = "workspace/components/netutils/telnetd"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-udp-tool]
+description = "Build udp-tool (debug)"
+cwd = "workspace/components/netutils/udp-tool"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-udp-tool-release]
+description = "Build udp-tool (release)"
+cwd = "workspace/components/netutils/udp-tool"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-udp-tool-dev-opt]
+description = "Build udp-tool (dev-opt)"
+cwd = "workspace/components/netutils/udp-tool"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--profile",
+    "dev-opt",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
 ]

@@ -2,11 +2,11 @@ use super::{
     api::current_ui_scale,
     cursor::{CursorManager, CURSOR_H, CURSOR_PIXELS, CURSOR_W, TEXT_CURSOR_MAX_DIM},
     font::{parse_psf, parse_psf2_unicode_map, FontInfo, FONT_PSF},
-    scrollback::{SbCell, ScrollbackBuffer, MAX_SCROLLBACK},
+    scrollback::{SbCell, ScrollbackBuffer},
     types::*,
 };
 use crate::framebuffer::{CanvasBuffer, DirtyRectSet, MAX_DIRTY_RECTS};
-use alloc::{string::String, vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -1024,7 +1024,7 @@ impl VgaWriter {
         // Direct HW path: bulk fill per row.
         if self.fmt.bpp == 32 {
             let canvas = self.can();
-            let row_bytes = fw * 4;
+            let _row_bytes = fw * 4;
             for y in 0..fh {
                 let off = y * canvas.pitch;
                 unsafe {

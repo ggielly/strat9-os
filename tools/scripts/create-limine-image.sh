@@ -25,6 +25,7 @@ EXEC_TEST_ELF="target/x86_64-unknown-none/${PROFILE}/test_exec"
 EXEC_TEST_HELPER_ELF="target/x86_64-unknown-none/${PROFILE}/test_exec_helper"
 INIT_ELF="target/x86_64-unknown-none/${PROFILE}/strate-init"
 CONSOLE_ADMIN_ELF="target/x86_64-unknown-none/${PROFILE}/console-admin"
+DISPLAY_SERVER_ELF="target/x86_64-unknown-none/${PROFILE}/display-server"
 NET_ELF="target/x86_64-unknown-none/${PROFILE}/strate-net-silo"
 BUS_ELF="target/x86_64-unknown-none/${PROFILE}/strate-bus"
 STRATE_WASM_ELF="target/x86_64-unknown-none/${PROFILE}/strate-wasm"
@@ -296,6 +297,13 @@ else
     echo "  [WARN] console-admin binary not found at $CONSOLE_ADMIN_ELF"
 fi
 
+if [ -f "$DISPLAY_SERVER_ELF" ]; then
+    cp "$DISPLAY_SERVER_ELF" "$ISO_ROOT/initfs/display-server"
+    echo "  [OK] Copied display-server binary: /initfs/display-server"
+else
+    echo "  [WARN] display-server binary not found at $DISPLAY_SERVER_ELF"
+fi
+
 if [ -f "$NET_ELF" ]; then
     cp "$NET_ELF" "$ISO_ROOT/initfs/strate-net"
     echo "  [OK] Copied strate-net: /initfs/strate-net"
@@ -381,6 +389,50 @@ if [ -f "$SILO_TOML_FILE" ]; then
 else
     echo "  [WARN] boot config not found at $SILO_TOML_FILE"
 fi
+
+# ===========================================================================
+# Auto-discover remaining workspace binaries
+# ===========================================================================
+# Any ELF binary in the target directory that hasn't been copied yet is
+# automatically included. This avoids hardcoding every new strate/component.
+echo ""
+echo "  --- Auto-discovering workspace binaries ---"
+TARGET_DIR="target/x86_64-unknown-none/${PROFILE}"
+if [ -d "$TARGET_DIR" ]; then
+    # Build list of already-copied basenames to avoid duplicates
+    COPIED=$(mktemp)
+    for f in "$ISO_ROOT"/initfs/*; do
+        [ -f "$f" ] && basename "$f" >> "$COPIED"
+    done
+    for f in "$ISO_ROOT"/initfs/bin/*; do
+        [ -f "$f" ] && basename "$f" >> "$COPIED"
+    done
+
+    # Scan for ELF binaries that look like workspace components
+    for elf in "$TARGET_DIR"/*; do
+        [ -f "$elf" ] || continue
+        name=$(basename "$elf")
+
+        # Skip non-component files (kernel, test helpers, libs, deps)
+        case "$name" in
+            kernel|*.d|*.rlib|*.rmeta|*.o|lib*|deps) continue ;;
+        esac
+
+        # Skip if already copied
+        if grep -qxF "$name" "$COPIED" 2>/dev/null; then
+            continue
+        fi
+
+        # Check if it's actually an ELF (file command)
+        if file "$elf" 2>/dev/null | grep -q "ELF"; then
+            cp "$elf" "$ISO_ROOT/initfs/$name"
+            echo "  [OK] Auto-copied: /initfs/$name"
+        fi
+    done
+    rm -f "$COPIED"
+fi
+echo "  --- End auto-discovery ---"
+echo ""
 
 # Create ISO using xorriso
 if command -v xorriso >/dev/null 2>&1; then

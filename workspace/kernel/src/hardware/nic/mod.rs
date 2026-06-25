@@ -144,10 +144,16 @@ pub fn handle_interrupt() {
     if let Some(ref dp) = *NIC_DATA_PLANE.lock() {
         // Drain pending RX packets from HW into the N2 RX ring.
         let mut buf = [0u8; 2048];
+        let mut backpressure = false;
         while let Ok(n) = dev.receive(&mut buf) {
             if dp.push_rx(0, &buf[..n]).is_err() {
+                backpressure = true;
                 break; // ring full : backpressure
             }
+        }
+        // N1 : notify scheduler if the RX ring is full (backpressure).
+        if backpressure {
+            crate::ipc::n1::notify_scheduler(crate::ipc::n1::N1Event::NicBackpressure);
         }
 
         // Drain pending TX packets from the N2 TX ring into HW.
@@ -156,6 +162,11 @@ pub fn handle_interrupt() {
             if dev.transmit(&tx_buf[..n]).is_err() {
                 break;
             }
+        }
+
+        // N1 : check for scheduler flow-control hints (non-blocking).
+        if let Some(event) = crate::ipc::n1::poll_nic_events() {
+            log::trace!("[net] N1 sched→NIC event: {:?}", event);
         }
     }
 
