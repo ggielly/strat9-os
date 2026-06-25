@@ -4,12 +4,13 @@
 
 ## Project stats
 
-- **Total commits:** `550`
+- **Total commits:** `551`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-06-25 [`9b31c08`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9b31c08b6e44c675facdd92cb0acbf36341214cd) docs: update published documentation
 - 2026-06-25 [`a522fb8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a522fb8225d35abef7b1420b4fb203fade74470c) Refactor NIC data plane and IPC transport statistics
 - 2026-06-25 [`23cbead`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/23cbead0a913d88b5829d86cfd2f25b209f5ab96) docs: update published documentation
 - 2026-06-25 [`454a828`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/454a828ff9859ae7551677c8e150f41f14f82345) feat: add N2 data plane implementation with lock-free rings and enhance NIC interrupt handling
@@ -59,6 +60,5 @@
 - 2026-05-19 [`6831830`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6831830423d0e1b19cdfb7ce0b60089fc65e045a) docs: update published documentation
 - 2026-05-19 [`0b42bf9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0b42bf9116227e3f1b9a3eb32ac74e7d261c7000) docs: update published documentation
 - 2026-05-19 [`03494df`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/03494df463ec1b3e49b5ef70a9205f710aa81f92) Merge branch 'refactorize-kernel-structure-and-files' into 'main'
-- 2026-05-19 [`0d4fcb8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0d4fcb8a512b73bba2408f03b9b525f3d970b2ae) refactor: rework bus driver architecture, wire storage drivers, add hardware documentation
 
 <!-- AUTO-CHANGELOG:END -->
