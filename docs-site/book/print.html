@@ -185,6 +185,7 @@ cargo make run-gui-smp
 <tr><td><a href="./memory-model.html">Memory Management</a></td><td>Buddy allocator, slab heap, COW, page tables, vmalloc</td></tr>
 <tr><td><a href="./boot-sequence.html">Boot Sequence</a></td><td>BIOS → bootloader → Limine → kernel init flow</td></tr>
 <tr><td><a href="./ipc-mechanisms.html">IPC Mechanisms</a></td><td>Channels, shared rings, semaphores, futexes</td></tr>
+<tr><td><a href="./architecture-ipc-access-levels.html">IPC Transport Architecture</a></td><td>3-level hybrid IPC model (TypeSafe / LockFree / MMU)</td></tr>
 <tr><td><a href="./driver-model.html">Driver Model</a></td><td>Component trait, PCI, NIC, storage, USB drivers</td></tr>
 <tr><td><a href="./syscalls.html">Syscall Reference</a></td><td>Complete syscall table with parameters and errors</td></tr>
 <tr><td><a href="./abi.html">ABI Overview</a></td><td>Kernel/userspace ABI definitions and versioning</td></tr>
@@ -333,7 +334,7 @@ python3 tools/scripts/check-links.py --site-dir build/docs-site
 <tr><td><strong>Boot</strong></td><td><code>boot/</code></td><td>Assembly stubs (16→64 bit), Limine handoff, early init</td></tr>
 <tr><td><strong>Scheduler</strong></td><td><code>process/scheduler/</code></td><td>Per-CPU run queues, multi-class scheduling (RT FIFO/RR, Normal, Idle)</td></tr>
 <tr><td><strong>Memory</strong></td><td><code>memory/</code></td><td>Buddy allocator, slab heap, COW, page tables, vmalloc</td></tr>
-<tr><td><strong>IPC</strong></td><td><code>ipc/</code></td><td>Typed MPMC channels, shared rings, semaphores, futexes</td></tr>
+<tr><td><strong>IPC</strong></td><td><code>ipc/</code></td><td>3-level Transport Manager (TypeSafe/LockFree/MMU), typed channels, shared rings, semaphores</td></tr>
 <tr><td><strong>Capability</strong></td><td><code>capability.rs</code></td><td>Unforgeable tokens, per-resource refcounting</td></tr>
 <tr><td><strong>Silo</strong></td><td><code>silo/</code></td><td>Process isolation containers with resource quotas</td></tr>
 <tr><td><strong>VFS</strong></td><td><code>vfs/</code></td><td>Virtual filesystem with scheme-based I/O</td></tr>
@@ -806,99 +807,169 @@ python3 tools/scripts/check-links.py --site-dir build/docs-site
     AP-&gt;&gt;AP: Start per-CPU scheduler
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="ipc-mechanisms"><a class="header" href="#ipc-mechanisms">IPC Mechanisms</a></h1>
-<p>Strat9 OS provides several inter-process communication mechanisms, from low-level kernel channels to userspace-accessible shared rings.</p>
+<p>Strat9 OS provides a <strong>3-level hybrid IPC transport model</strong> with a central Transport Manager that selects the appropriate isolation level per silo pair. Each level offers a different trade-off between performance and isolation.</p>
 <hr />
-<h2 id="ipc-overview"><a class="header" href="#ipc-overview">IPC overview</a></h2>
-<pre><code class="language-mermaid">graph LR
-    subgraph "Kernel-internal"
-        CH[Typed Channel MPMC]
-        SQ[WaitQueue]
+<h2 id="ipc-architecture-overview"><a class="header" href="#ipc-architecture-overview">IPC Architecture Overview</a></h2>
+<pre><code class="language-mermaid">graph TB
+    subgraph "Transport Manager"
+        TM[Decision Matrix&lt;br/&gt;Tier × Tier → Level]
     end
 
-    subgraph "Userspace-visible"
-        SYNC[SyncChan]
-        RING[Shared Ring]
-        SEM[Semaphore]
-        FUTEX[Futex]
+    subgraph "N1 : TypeSafe IPC"
+        N1[IntrusiveMailbox&lt;br/&gt;Ring 0, approx. 3-10 cycles&lt;br/&gt;Rust type isolation]
     end
 
-    subgraph "Kernel-userspace"
-        PORT[Port]
+    subgraph "N2 : Lock-Free Ring"
+        N2[LockFreeRing&lt;br/&gt;Ring 3, approx. 400-4000 cycles&lt;br/&gt;SPSC + futex notification]
     end
 
-    CH --&gt; SYNC
-    CH --&gt; RING
-    SQ --&gt; SEM
-    SQ --&gt; FUTEX
-    PORT --&gt; SYNC
+    subgraph "N3 : MMU Thread Migration"
+        N3[MmuEndpoint&lt;br/&gt;Ring 3, approx. 800-2000 cycles&lt;br/&gt;CR3 switch + PCID]
+    end
+
+    TM --&gt; N1
+    TM --&gt; N2
+    TM --&gt; N3
 </code></pre>
-<hr />
-<h2 id="typed-mpmc-channel"><a class="header" href="#typed-mpmc-channel">Typed MPMC Channel</a></h2>
-<p>The fundamental IPC primitive. A typed channel connects producers and consumers with compile-time type safety.</p>
-<pre><code class="language-rust">let (tx, rx) = channel::&lt;MyMessage&gt;(64);  // capacity = 64
-tx.send(msg)?;           // blocks if full
-let msg = rx.recv()?;    // blocks if empty</code></pre>
-<p><strong>Properties:</strong></p>
-<ul>
-<li>Multi-Producer / Multi-Consumer (both endpoints are <code>Clone</code>)</li>
-<li>Bounded capacity with backpressure</li>
-<li>Disconnect detection: receivers see <code>Err(ChannelError::Disconnected)</code> when all senders are dropped</li>
-<li>Uses <code>WaitQueue</code> for blocking (no polling, no lost-wakeup races)</li>
-</ul>
-<hr />
-<h2 id="syncchan--symmetric-userspace-channel"><a class="header" href="#syncchan--symmetric-userspace-channel">SyncChan : Symmetric userspace channel</a></h2>
-<p>A symmetric channel accessible from userspace via <code>SYS_CHAN_*</code> syscalls. Unlike typed kernel channels, SyncChan carries raw <code>IpcMessage</code> bytes.</p>
-<p><strong>Syscall interface:</strong></p>
-<div class="table-wrapper"><table><thead><tr><th>Syscall</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>SYS_CHAN_CREATE</code></td><td>Create a new SyncChan pair</td></tr>
-<tr><td><code>SYS_CHAN_SEND</code></td><td>Send a message</td></tr>
-<tr><td><code>SYS_CHAN_RECV</code></td><td>Receive a message</td></tr>
-<tr><td><code>SYS_CHAN_DESTROY</code></td><td>Explicitly destroy the channel</td></tr>
+<h3 id="transport-selection-matrix"><a class="header" href="#transport-selection-matrix">Transport selection matrix</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Source \ Dest</th><th>Critical</th><th>System</th><th>User</th></tr></thead><tbody>
+<tr><td><strong>Critical</strong></td><td>N1 (TypeSafe)</td><td>N1 (TypeSafe)</td><td>N2 (LockFree)</td></tr>
+<tr><td><strong>System</strong></td><td>N1 (TypeSafe)</td><td>N2 (LockFree)</td><td>N2 (LockFree)</td></tr>
+<tr><td><strong>User</strong></td><td>N2 (LockFree)</td><td>N2 (LockFree)</td><td>N3 (MMU)</td></tr>
 </tbody></table>
 </div>
 <hr />
-<h2 id="shared-ring-buffer"><a class="header" href="#shared-ring-buffer">Shared Ring Buffer</a></h2>
-<p>High-throughput bulk IPC using shared-memory ring buffers. Designed for scenarios where message copying overhead matters (network packets, disk I/O).</p>
-<pre><code class="language-mermaid">graph LR
-    subgraph "Producer (Silo A)"
-        P[write]
-    end
-    subgraph "Shared Memory"
-        R["Ring buffer&lt;br/&gt;(MMIO-mapped)"]
-    end
-    subgraph "Consumer (Silo B)"
-        C[read]
-    end
-    P --&gt; R --&gt; C
-</code></pre>
-<p><strong>Properties:</strong></p>
+<h2 id="n1--type-safe-ipc-intrusivemailbox"><a class="header" href="#n1--type-safe-ipc-intrusivemailbox">N1 : Type-Safe IPC (IntrusiveMailbox)</a></h2>
+<p>The fastest transport : kernel-internal, same address space, <strong>approx. 3-10 cycles</strong> per message.</p>
+<h3 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h3>
+<p>Two kernel components (e.g., scheduler ↔ VFS) communicate via an intrusive LIFO mailbox. Messages are linked directly in kernel memory using tagged pointers (x86-64 ABA-safe). No copy, no lock, no syscall.</p>
+<h3 id="constraints"><a class="header" href="#constraints">Constraints</a></h3>
 <ul>
-<li>Lock-free single-producer / single-consumer (SPSC) variant available</li>
-<li>Physically contiguous frames shared via capability mapping</li>
-<li>Producer/consumer indices stored in the ring header</li>
-<li>Zero-copy: messages stay in the shared buffer</li>
+<li><strong>Ring 0 only</strong> : both sender and receiver must be kernel components</li>
+<li><strong>100% Rust Safe</strong> : <code>#[forbid(unsafe_code)]</code> required, <code>cargo-geiger = 0</code></li>
+<li><strong>LIFO ordering</strong> : not FIFO; use N2 if ordering matters</li>
+<li><strong>No untrusted input</strong> : forbidden for network, user data, external files</li>
 </ul>
+<h3 id="usage"><a class="header" href="#usage">Usage</a></h3>
+<pre><code class="language-rust">let mailbox = IntrusiveMailbox::new();
+mailbox.push(b"notification")?;  // approx. 3 cycles
+let msg = mailbox.pop();          // LIFO: last message first</code></pre>
 <hr />
-<h2 id="semaphore"><a class="header" href="#semaphore">Semaphore</a></h2>
-<p>POSIX-like counting semaphore for synchronization between silos.</p>
-<pre><code class="language-rust">let sem = Semaphore::new(0);    // initial count = 0
-sem.wait()?;                     // decrement (block if 0)
-sem.signal()?;                   // increment (wake waiter)</code></pre>
-<hr />
-<h2 id="futex"><a class="header" href="#futex">Futex</a></h2>
-<p>Fast userspace mutex with kernel fallback. The fast path (uncontended lock/unlock) is entirely in userspace using atomic operations. The kernel only intervenes when a thread needs to block.</p>
-<pre><code class="language-text">Fast path (no contention):
-  userspace: atomic CAS on futex word → success
-
-Slow path (contention):
-  userspace: SYS_FUTEX_WAIT(futex_word, expected_value)
-  kernel:    check word == expected → sleep on wait queue
-  kernel:    SYS_FUTEX_WAKE → wake N waiters
+<h2 id="n2--lock-free-ring-spsc"><a class="header" href="#n2--lock-free-ring-spsc">N2 : Lock-Free Ring (SPSC)</a></h2>
+<p>High-throughput shared-memory transport : <strong>approx. 400-4000 cycles</strong> depending on sleep mode.</p>
+<h3 id="how-it-works-1"><a class="header" href="#how-it-works-1">How it works</a></h3>
+<p>A lock-free SPSC ring buffer backed by physically contiguous DMA-accessible pages. The producer writes data, sets a Release barrier on <code>len</code>, then publishes via <code>tail.store(Release)</code>. The consumer observes <code>tail</code>, reads data via Acquire, and advances <code>head</code>. Futex notification for sleeping consumers.</p>
+<h3 id="two-sub-modes"><a class="header" href="#two-sub-modes">Two sub-modes</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Mode</th><th>Latency</th><th>Use case</th></tr></thead><tbody>
+<tr><td><strong>N2a</strong> (busy-poll)</td><td>approx. 400 cycles</td><td>Hot path, low-latency</td></tr>
+<tr><td><strong>N2b</strong> (futex sleep)</td><td>approx. 1000-4000 cycles</td><td>Background processing</td></tr>
+</tbody></table>
+</div>
+<h3 id="memory-layout"><a class="header" href="#memory-layout">Memory layout</a></h3>
+<pre><code class="language-text">Page 0: RingHeader (cache-line padded)
+  Line 0: magic, capacity, slot_size, flags, notify_seq
+  Line 1: head (consumer hot)  : 60B padding
+  Line 2: tail (producer hot)  : 60B padding
+Pages 1+: RingSlot entries
+  Each: [len:u16][flags:u16][data:u8; SLOT_SIZE]
 </code></pre>
+<h3 id="usage-1"><a class="header" href="#usage-1">Usage</a></h3>
+<pre><code class="language-rust">let (producer, consumer) = create_spsc_pair(256);  // 256 slots
+
+// Producer (kernel or Ring 3)
+producer.write(b"packet data")?;
+producer.notify_consumer();  // futex wake
+
+// Consumer (strate-net, Ring 3)
+let mut buf = [0u8; 2048];
+let n = consumer.read(&amp;mut buf)?;</code></pre>
+<h3 id="nic-integration-data-plane"><a class="header" href="#nic-integration-data-plane">NIC integration (data plane)</a></h3>
+<pre><code class="language-text">NIC HW Queue 0 → Ring SPSC 0 → strate-net (poll round-robin)
+NIC HW Queue 1 → Ring SPSC 1 →
+NIC HW Queue 2 → Ring SPSC 2 →
+</code></pre>
+<p>Each RSS queue gets its own SPSC ring : no MPSC contention, no head-of-line blocking.</p>
 <hr />
-<h2 id="port--kernel-userspace-bridge"><a class="header" href="#port--kernel-userspace-bridge">Port : Kernel-userspace bridge</a></h2>
-<p>Ports provide a structured way for kernel subsystems to expose services to userspace. Each port has an associated <code>PortId</code> and is accessed through capabilities.</p>
-<p>Used by: filesystem schemes, device drivers, network stacks.</p>
+<h2 id="n3--mmu-thread-migration-research-track"><a class="header" href="#n3--mmu-thread-migration-research-track">N3 : MMU Thread Migration (Research Track)</a></h2>
+<p>Maximum isolation : <strong>approx. 800-2000 cycles</strong> : currently <strong>research track</strong> with N2 fallback.</p>
+<h3 id="how-it-works-2"><a class="header" href="#how-it-works-2">How it works</a></h3>
+<p>Inspired by L4 Thread Migration (Liedtke 1995): instead of a full syscall + context switch, the kernel migrates the CPU quantum directly to the target process by switching CR3 (address space) and jumping to the handler. Three tiers:</p>
+<div class="table-wrapper"><table><thead><tr><th>Tier</th><th>Mechanism</th><th>Cost</th><th>Condition</th></tr></thead><tbody>
+<tr><td><strong>N3a</strong></td><td>Same-core handoff</td><td>approx. 200-400c</td><td>Same core, mappings valid</td></tr>
+<tr><td><strong>N3b</strong></td><td>PCID-preserving CR3</td><td>approx. 400-800c</td><td>PCID active, prefaulted</td></tr>
+<tr><td><strong>N3c</strong></td><td>Full migration</td><td>approx. 800-2000c</td><td>First call, TLB flush</td></tr>
+</tbody></table>
+</div>
+<h3 id="status"><a class="header" href="#status">Status</a></h3>
+<p>⚠️ <strong>Research track</strong> : N3 is not yet implemented. All User↔User pairs fall back to N2 (LockFree Ring).</p>
+<hr />
+<h2 id="legacy-mechanisms-still-available"><a class="header" href="#legacy-mechanisms-still-available">Legacy mechanisms (still available)</a></h2>
+<p>These mechanisms predate the Transport Manager and remain functional:</p>
+<h3 id="ipc-ports-synchronous-message-passing"><a class="header" href="#ipc-ports-synchronous-message-passing">IPC Ports (synchronous message-passing)</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Syscall</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>SYS_IPC_CREATE_PORT</code> (200)</td><td>Create a new port</td></tr>
+<tr><td><code>SYS_IPC_SEND</code> (201)</td><td>Send a message</td></tr>
+<tr><td><code>SYS_IPC_RECV</code> (202)</td><td>Receive a message</td></tr>
+<tr><td><code>SYS_IPC_CALL</code> (203)</td><td>Send and wait for reply</td></tr>
+<tr><td><code>SYS_IPC_REPLY</code> (204)</td><td>Reply to a call</td></tr>
+<tr><td><code>SYS_IPC_BIND_PORT</code> (205)</td><td>Bind to namespace</td></tr>
+<tr><td><code>SYS_IPC_UNBIND_PORT</code> (206)</td><td>Unbind</td></tr>
+</tbody></table>
+</div>
+<h3 id="typed-mpmc-channels"><a class="header" href="#typed-mpmc-channels">Typed MPMC Channels</a></h3>
+<pre><code class="language-rust">let (tx, rx) = channel::&lt;MyMessage&gt;(64);
+tx.send(msg)?;           // blocks if full
+let msg = rx.recv()?;    // blocks if empty</code></pre>
+<h3 id="shared-ring-legacy"><a class="header" href="#shared-ring-legacy">Shared Ring (legacy)</a></h3>
+<p>High-throughput bulk IPC using shared-memory ring buffers. Superseded by N2 Lock-Free Ring for new code.</p>
+<h3 id="semaphore"><a class="header" href="#semaphore">Semaphore</a></h3>
+<p>POSIX-like counting semaphore for synchronization.</p>
+<hr />
+<h2 id="transport-manager-api"><a class="header" href="#transport-manager-api">Transport Manager API</a></h2>
+<h3 id="creating-a-transport"><a class="header" href="#creating-a-transport">Creating a transport</a></h3>
+<pre><code class="language-rust">let manager = TransportManager::new();
+let result = manager.establish(
+    src_silo, dst_silo,
+    TransportConfig {
+        min_level: TransportLevel::LockFree,
+        ring_capacity: Some(256),
+        slot_size: None,
+    },
+)?;
+// result.local and result.remote are the endpoints</code></pre>
+<h3 id="dynamic-policy-override"><a class="header" href="#dynamic-policy-override">Dynamic policy override</a></h3>
+<pre><code class="language-rust">// Force N2 for a specific silo pair
+manager.set_policy(src_sid, dst_sid, TransportLevel::LockFree, 512);</code></pre>
+<h3 id="syscall-interface-planned"><a class="header" href="#syscall-interface-planned">Syscall interface (planned)</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Syscall</th><th>#</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>SYS_TRANSPORT_CREATE</code></td><td>240</td><td>Create a transport</td></tr>
+<tr><td><code>SYS_TRANSPORT_SEND</code></td><td>241</td><td>Send a message</td></tr>
+<tr><td><code>SYS_TRANSPORT_RECV</code></td><td>242</td><td>Receive a message</td></tr>
+<tr><td><code>SYS_TRANSPORT_CLOSE</code></td><td>243</td><td>Close transport</td></tr>
+<tr><td><code>SYS_TRANSPORT_INFO</code></td><td>244</td><td>Get transport info</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="performance-comparison"><a class="header" href="#performance-comparison">Performance comparison</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Mechanism</th><th>Round-trip 64B</th><th>CPU usage/pkt</th><th>Isolation</th></tr></thead><tbody>
+<tr><td>Legacy IPC (syscall)</td><td>approx. 4000 cycles</td><td>approx. 2%</td><td>MMU</td></tr>
+<tr><td>N1 TypeSafe</td><td>approx. 6-20 cycles</td><td>approx. 0.01%</td><td>Rust types</td></tr>
+<tr><td>N2 LockFree (busy)</td><td>approx. 400-800 cycles</td><td>approx. 0.1%</td><td>MMU</td></tr>
+<tr><td>N2 LockFree (futex)</td><td>approx. 1000-4000 cycles</td><td>approx. 0.2%</td><td>MMU</td></tr>
+<tr><td>N3 MMU (research)</td><td>approx. 800-2000 cycles</td><td>approx. 0.5%</td><td>MMU (max)</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="references"><a class="header" href="#references">References</a></h2>
+<ol>
+<li>Xu, P. &amp; Roscoe, T. (2025) : <a href="https://doi.org/10.1145/3713082.3730388">The NIC should be part of the OS</a>, HotOS'25 : <a href="https://arxiv.org/abs/2501.10138">arXiv</a></li>
+<li>Liedtke, J. (1995) : <a href="https://dl.acm.org/doi/10.1145/224056.224075">On µ-Kernel Construction</a>, SOSP</li>
+<li>Hunt, G.C. &amp; Larus, J.R. (2007) : <a href="https://dl.acm.org/doi/10.1145/1297856.1297873">Singularity: Rethinking the Software Stack</a>, ACM Queue</li>
+<li>Levy, A. et al. (2017) : <a href="https://dl.acm.org/doi/10.1145/3132617.3132626">Multiprogramming a 64kB Computer Safely and Efficiently with Tock</a>, SOSP</li>
+<li>Vyukov, D. : <a href="https://github.com/dvyukov/xd/tree/master/bounded_mpmc_queue">Bounded MPMC queue</a> : lock-free SPSC/MPMC benchmarks</li>
+<li>Axboe, J. (2019) : <a href="https://kernel.dk/io_uring-whole.pdf">Efficient IO with io_uring</a>, kernel.org</li>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="ipc-transport-architecture"><a class="header" href="#ipc-transport-architecture">IPC Transport Architecture</a></h1>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="driver-model"><a class="header" href="#driver-model">Driver Model</a></h1>
 <p>Strat9 OS uses a trait-based component model for drivers. Each driver registers itself during boot and is discovered through PCI/VirtIO enumeration.</p>
 <hr />
@@ -960,7 +1031,7 @@ struct MyDriver { /* ... */ }</code></pre>
 <li>Read header type bit 7 for multi-function flag</li>
 <li>If PCI-to-PCI bridge → enqueue secondary bus</li>
 </ol>
-<p>This reduces worst-case probes from 65,536 to ~8,192 for typical topologies.</p>
+<p>This reduces worst-case probes from 65,536 to approx. 8,192 for typical topologies.</p>
 <p><strong>Key PCI types:</strong></p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>PciAddress</code></td><td>Bus/device/function address</td></tr>
@@ -1095,6 +1166,8 @@ struct MyDriver { /* ... */ }</code></pre>
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d1e838fbcbc964f67208246303930315f5565331"><code>d1e838f</code></a> feat: implement IPC transport layer with 3-level architecture</li>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/411f5aaf1ae30d6b53f71cb08784be42b0cea99a"><code>411f5aa</code></a> feat: add IPC transport layer support and enhance ICMP handling</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032"><code>5a3d69c</code></a> feat: migrate input system to userspace</li>
 <li>2026-06-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fea3f3776edefa7bdc7c3a8d930c8d17b0939a6"><code>3fea3f3</code></a> SMP hardware debug, NVMe fixes, VGA refactor, telnetd hardening, docs</li>
 <li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e4ab1a96c3579117defffe0f5b32cf7cac853129"><code>e4ab1a9</code></a> Enhance network stack, NIC drivers, USB/NVMe subsystems, and thermal management</li>
@@ -1103,7 +1176,7 @@ struct MyDriver { /* ... */ }</code></pre>
 <li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8"><code>b2bbcc0</code></a> Improve and fix IPC</li>
 <li>2026-05-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552"><code>db23b53</code></a> Fix major memory leak and remove sshd silo</li>
 <li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0"><code>93c8927</code></a> async: implement and optimize async I/O completion handling</li>
-<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4</code></a> async: io_uring-like async I/O : ring, dispatch, AHCI bridge (Phases 1-4)</li>
+<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4</code></a> async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)</li>
 <li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cc4944a2c78236c41fce4b8f1054e119fc2bcd8e"><code>cc4944a</code></a> Refactor and clean up code in various modules</li>
 <li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ecc416df41e29c26f6839ee15cffbc7a7dd41f05"><code>ecc416d</code></a> refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix</li>
 <li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f070d41c31fb505fef36603ee7cbc0c6648944b3"><code>f070d41</code></a> Add kernel entropy pool with interrupt-driven collection</li>
@@ -1123,8 +1196,6 @@ struct MyDriver { /* ... */ }</code></pre>
 <li>2026-03-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/eb7818d13ba67b1b3f718d6161f71eee0d123595"><code>eb7818d</code></a> feat: Implement static module loading from initfs paths and increase module blob size limit.</li>
 <li>2026-03-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acfdbbd126584bcd47355873c93c5584c67877c2"><code>acfdbbd</code></a> feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.</li>
 <li>2026-03-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/29c6f3d75165b41acd72a28d1e1b4e76bd51947c"><code>29c6f3d</code></a> Refactor scheduler task management and introduce interrupt frame handling</li>
-<li>2026-03-11 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7e66e694ffbf939c3651a463736b3bb396ddf24f"><code>7e66e69</code></a> refactor: enhance interrupt handling and logging mechanisms across the kernel</li>
-<li>2026-03-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ff0a36bce4090ee92da37b55fa47996fec5b04b9"><code>ff0a36b</code></a> Refactor memory management to use IRQ-disabled tokens</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
@@ -1339,7 +1410,7 @@ struct MyDriver { /* ... */ }</code></pre>
 </div>
 <p><strong>Errors:</strong> <code>ECHILD</code> (no child processes), <code>EAGAIN</code> (thread creation failed), <code>ENOMEM</code> (out of memory)</p>
 <hr />
-<h2 id="futex-1"><a class="header" href="#futex-1">Futex</a></h2>
+<h2 id="futex"><a class="header" href="#futex">Futex</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Parameters</th><th>Return</th><th>Description</th></tr></thead><tbody>
 <tr><td>303</td><td><code>SYS_FUTEX_WAIT</code></td><td><code>addr: u64, val: u32, timeout_ns: u64</code></td><td>0</td><td>Sleep if <code>*addr == val</code></td></tr>
 <tr><td>304</td><td><code>SYS_FUTEX_WAKE</code></td><td><code>addr: u64, max_wake: u32</code></td><td>woken count</td><td>Wake up to N waiters</td></tr>
@@ -1573,12 +1644,15 @@ struct MyDriver { /* ... */ }</code></pre>
 <!-- AUTO-CHANGELOG:START -->
 <h2 id="project-stats"><a class="header" href="#project-stats">Project stats</a></h2>
 <ul>
-<li><strong>Total commits:</strong> <code>543</code></li>
+<li><strong>Total commits:</strong> <code>546</code></li>
 <li><strong>Latest tag:</strong> <code>0.1.0</code></li>
 <li><strong>Repository:</strong> <a href="https://git.strat9-os.org/strat9-os/strat9-os">git.strat9-os.org</a></li>
 </ul>
 <h2 id="recent-commits-auto-generated"><a class="header" href="#recent-commits-auto-generated">Recent commits (auto-generated)</a></h2>
 <ul>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d1e838fbcbc964f67208246303930315f5565331"><code>d1e838f</code></a> feat: implement IPC transport layer with 3-level architecture</li>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/411f5aaf1ae30d6b53f71cb08784be42b0cea99a"><code>411f5aa</code></a> feat: add IPC transport layer support and enhance ICMP handling</li>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c034c916c998d69d1a210f5c147971fb24510ed4"><code>c034c91</code></a> docs: update published documentation</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bbad275caf9f07d2ec24045842d6a3198b783b2b"><code>bbad275</code></a> Implement IPC transport layer with lock-free ring and intrusive mailbox</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/77b1a74ea41ad541472853383c61c1e2c0f79e89"><code>77b1a74</code></a> docs: add IPC architecture document (3 access levels)</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/848baaf594c7a9fbd7f951c3959790dc26c1383e"><code>848baaf</code></a> Merge branch 'feat/input-to-userspace' into 'main'</li>
@@ -1625,10 +1699,7 @@ struct MyDriver { /* ... */ }</code></pre>
 <li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d9e64af8b55072ae6ecedcc3f3ea035f0797e113"><code>d9e64af</code></a> Merge branch 'enhance-async-implementation' into 'main'</li>
 <li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0"><code>93c8927</code></a> async: implement and optimize async I/O completion handling</li>
 <li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/24060f8e8fca6c587b88d7c09637cd108cd3faf6"><code>24060f8</code></a> Merge branch 'async-base-layer' into 'main'</li>
-<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4</code></a> async: io_uring-like async I/O : ring, dispatch, AHCI bridge (Phases 1-4)</li>
-<li>2026-05-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/736deae9274b3ad3ee79db07fe3e4eca575eaa36"><code>736deae</code></a> docs: update published documentation</li>
-<li>2026-05-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c10e645f592074bdd07b603e83a12a27cb0c3e92"><code>c10e645</code></a> fix(shell): add is_interrupted() checks to wasm-run and grep, document cancellation contract</li>
-<li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/37420be3fa5e1b693d6a2cbad228fdc6ee0f570a"><code>37420be</code></a> fix(scheduler): remove dead null-check on &amp;Arc<Task> reference</li>
+<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4</code></a> async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)</li>
 </ul>
 <!-- AUTO-CHANGELOG:END -->
 <div style="break-before: page; page-break-before: always;"></div><h1 id="publishing"><a class="header" href="#publishing">Publishing</a></h1>
