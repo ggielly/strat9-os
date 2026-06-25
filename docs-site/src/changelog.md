@@ -4,23 +4,22 @@
 
 ## Project stats
 
-- **Total commits:** `544`
+- **Total commits:** `543`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
-- 2026-06-18 [`bc779ee`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bc779ee1cbdeb301e4801823e6bd177b61e13100) feat: add compression for large ISO and IMG files in CI pipeline
-- 2026-06-18 [`0e1e5b2`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0e1e5b2173f657c2762cab443ac0fc95273ca715) Refactor VGA debug output and centralise debug configuration
-- 2026-06-18 [`56969f9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/56969f993b07055e0f2a04fd713fb9e2c7767aaa) docs: update published documentation
-- 2026-06-18 [`0252eb6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0252eb6f91d9d1d7b0e6a9e0b17550dcc24be339) Enhance logging and documentation across the kernel
-- 2026-06-18 [`f26c1f0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f26c1f025f06bd81018b9b477464b7edc4f4fdd8) docs: update published documentation
-- 2026-06-18 [`07acba1`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/07acba16ea972b74cccfbc5adb427079eb24b285) docs: update published documentation
-- 2026-06-17 [`8608ee4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8608ee4894160e922e53968fbecc944616e8234d) docs: update published documentation
-- 2026-06-17 [`5e62124`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5e62124f84814bf06dd7c715891044dfbdbdc1e5) feat: add custom CSS theme for Strat9 OS documentation
-- 2026-06-17 [`e476b9d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e476b9d3a9042f50e78709b8cbe607593f67160d) docs: update published documentation
-- 2026-06-17 [`7b7671b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7b7671b86f9564fd389161f3d7be335384f09780) smp: rewrite trampoline and fix x2APIC hang based on Redox-OS
-- 2026-06-17 [`3dc9202`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3dc9202fc9d98b61da4bcfb87147ca32907310d1) Fix: enhance MADT parsing to skip disabled Local APICs and improve logging
+- 2026-06-25 [`bbad275`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bbad275caf9f07d2ec24045842d6a3198b783b2b) Implement IPC transport layer with lock-free ring and intrusive mailbox
+- 2026-06-25 [`77b1a74`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/77b1a74ea41ad541472853383c61c1e2c0f79e89) docs: add IPC architecture document (3 access levels)
+- 2026-06-25 [`848baaf`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/848baaf594c7a9fbd7f951c3959790dc26c1383e) Merge branch 'feat/input-to-userspace' into 'main'
+- 2026-06-25 [`5a3d69c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032) feat: migrate input system to userspace
+- 2026-06-24 [`1b98905`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1b9890594097a56a13f632ecb9f2a2a6b0e9f431) Merge branch 'test/smp-hardware-debug' into 'main'
+- 2026-06-24 [`3fea3f3`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fea3f3776edefa7bdc7c3a8d930c8d17b0939a6) SMP hardware debug, NVMe fixes, VGA refactor, telnetd hardening, docs
+- 2026-06-17 [`f1bccb9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f1bccb9b69f332a96f4c0ac10ab0c044a04be7ab) Merge branch 'fix/typed-irq-guard-allocator' into 'main'
+- 2026-06-17 [`b1d7c35`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b1d7c358a1801b315982f1006ce450f780dc7df8) buddy: use PreemptDisabled guardian on per-CPU frame caches (#37)
+- 2026-06-17 [`1ca93d1`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1ca93d17252e513bed1d9578c261a0ba8d030c90) Merge branch 'fix/tech-debt-allocation-under-lock' into 'main'
+- 2026-06-17 [`78e18ce`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/78e18cef10191488be24adf2947c4096a88be0d1) Tech debt: allocation-under-lock and global-lock patterns (#50)
 - 2026-06-16 [`6455a23`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6455a231010938a3206c432bf84130c4d9326ddb) Merge branch 'fix/irq-token-encapsulation' into 'main'
 - 2026-06-16 [`cb4ce4d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cb4ce4d2fc6869b6f3ff240d59952be9d047064d) Refactor: document IrqDisabledToken creation paths and encapsulation
 - 2026-06-16 [`bdec79d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bdec79dfa835ba9f9b2915c3a1fd434b7daec466) Merge branch 'fix/arc-strong-count-wording' into 'main'
@@ -57,8 +56,9 @@
 - 2026-05-19 [`d9e64af`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d9e64af8b55072ae6ecedcc3f3ea035f0797e113) Merge branch 'enhance-async-implementation' into 'main'
 - 2026-05-19 [`93c8927`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0) async: implement and optimize async I/O completion handling
 - 2026-05-18 [`24060f8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/24060f8e8fca6c587b88d7c09637cd108cd3faf6) Merge branch 'async-base-layer' into 'main'
-- 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O : ring, dispatch, AHCI bridge (Phases 1-4)
+- 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)
 - 2026-05-15 [`736deae`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/736deae9274b3ad3ee79db07fe3e4eca575eaa36) docs: update published documentation
 - 2026-05-15 [`c10e645`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c10e645f592074bdd07b603e83a12a27cb0c3e92) fix(shell): add is_interrupted() checks to wasm-run and grep, document cancellation contract
+- 2026-05-14 [`37420be`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/37420be3fa5e1b693d6a2cbad228fdc6ee0f570a) fix(scheduler): remove dead null-check on &Arc<Task> reference
 
 <!-- AUTO-CHANGELOG:END -->
