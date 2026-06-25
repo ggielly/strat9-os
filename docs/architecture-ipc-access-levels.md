@@ -1,4 +1,4 @@
-# Strat9-OS — Architecture IPC : Modèle d'Isolation Hybride à 3 Niveaux
+# Strat9-OS : Architecture IPC : Modèle d'Isolation Hybride à 3 Niveaux
 
 **Version** : 0.1.0  
 **Date** : 2026-06-23  
@@ -12,8 +12,8 @@
 1. [Résumé exécutif](#1-résumé-exécutif)
 2. [Problématique](#2-problématique)
 3. [Fondations académiques](#3-fondations-académiques)
-4. [Architecture actuelle — Analyse](#4-architecture-actuelle--analyse)
-5. [Le modèle à 3 niveaux — Spécifications](#5-le-modèle-à-3-niveaux--spécifications)
+4. [Architecture actuelle : Analyse](#4-architecture-actuelle--analyse)
+5. [Le modèle à 3 niveaux : Spécifications](#5-le-modèle-à-3-niveaux--spécifications)
 6. [Niveau 1 : SFI (Software Fault Isolation)](#6-niveau-1-sfi-software-fault-isolation)
 7. [Niveau 2 : Shared Memory Lock-Free](#7-niveau-2-shared-memory-lock-free)
 8. [Niveau 3 : Isolation MMU Stricte](#8-niveau-3-isolation-mmu-stricte)
@@ -47,6 +47,7 @@ Ce document définit l'architecture IPC de Strat9-OS à travers un **modèle d'i
 ```
 Silos A → syscall → kernel → lock → copy → scheduler → syscall → Silos B
 ```
+
 **Coût** : ~4000 cycles/message. Inacceptable pour du réseau à haut débit.
 
 ### 2.2 Dichotomie kernel-bypass vs kernel-based (Xu & Roscoe, HotOS 2025)
@@ -89,6 +90,7 @@ ipc/reply.rs         → Request-reply pattern
 NIC IRQ → NIC driver → copie Vec<u8> → net_recv() syscall → strate-net →
 net_send() syscall → NIC driver → copie → NIC TX ring
 ```
+
 **Overhead** : ~4000 cycles (2 syscalls).
 
 ---
@@ -143,7 +145,7 @@ impl IpcTransport for SfiTransport {
 
 **Garanties** : Le compilateur Rust empêche les bugs mémoire. Pas de protection contre les logic bugs. Audit obligatoire (cargo geiger = 0 unsafe).
 
-**Cas d'usage** : Communication kernel↔kernel (scheduler ↔ NIC driver, scheduler ↔ VFS).
+**Cas d'usage** : Communication kernel<==>kernel (scheduler <==> NIC driver, scheduler <==> VFS).
 
 ---
 
@@ -210,7 +212,7 @@ futex_wake(&futex_var, 1);
 
 **Note** : UMONITOR/UMWAIT non recommandé (latence ~50-100µs, ne peut pas être réveillé par le kernel sans IRQ). Futex préféré.
 
-**Cas d'usage** : NIC ↔ strate-net, VFS ↔ storage, framebuffer ↔ display server.
+**Cas d'usage** : NIC <==> strate-net, VFS <==> storage, framebuffer <==> display server.
 
 ---
 
@@ -251,7 +253,7 @@ traite le packet → écrit dans TX ring → NIC driver lit et envoie
 
 **Overhead** : ~200 cycles (vs ~4000 cycles actuellement).
 
-### Shared State NIC ↔ Scheduler
+### Shared State NIC <==> Scheduler
 
 ```rust
 #[repr(C)]
@@ -321,6 +323,7 @@ Si rpc_pending[silo_Y] < seuil_low → déscheduler
 ## 14. Annexes
 
 ### Références
+
 1. Xu, P., Roscoe, T. (2025). *The NIC should be part of the OS*. HotOS'25.
 2. Liedtke, J. (1995). *On µ-Kernel Construction*. SOSP.
 3. Hunt, G.C., Larus, J.R. (2007). *Singularity: Rethinking the Software Stack*.
@@ -329,6 +332,7 @@ Si rpc_pending[silo_Y] < seuil_low → déscheduler
 6. Axboe, J. (2019). *Efficient IO with io_uring*.
 
 ### Matériel cible
+
 | Composant | Strat9-OS | ThinkPad X13 |
 |-----------|-----------|--------------|
 | CPU | x86_64 | Intel 11th gen |

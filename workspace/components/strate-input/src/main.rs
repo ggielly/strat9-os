@@ -314,11 +314,28 @@ fn process_scancode(scancode: u8, state: &mut KeyboardState) -> Option<u8> {
 
     // Track modifier state
     match code {
-        0x2A => { state.left_shift = pressed; return None; }
-        0x36 => { state.right_shift = pressed; return None; }
-        0x3A => { if pressed { state.caps_lock = !state.caps_lock; } return None; }
-        0x1D => { state.left_ctrl = pressed; return None; }
-        0x38 => { state.left_alt = pressed; return None; }
+        0x2A => {
+            state.left_shift = pressed;
+            return None;
+        }
+        0x36 => {
+            state.right_shift = pressed;
+            return None;
+        }
+        0x3A => {
+            if pressed {
+                state.caps_lock = !state.caps_lock;
+            }
+            return None;
+        }
+        0x1D => {
+            state.left_ctrl = pressed;
+            return None;
+        }
+        0x38 => {
+            state.left_alt = pressed;
+            return None;
+        }
         _ => {}
     }
 
@@ -354,7 +371,9 @@ pub extern "C" fn _start() -> ! {
         Ok(fd) => fd,
         Err(e) => {
             serial_println!("[input-server] failed to open /dev/input/kbd: {:?}", e);
-            loop { core::hint::spin_loop(); }
+            loop {
+                core::hint::spin_loop();
+            }
         }
     };
 
@@ -363,11 +382,17 @@ pub extern "C" fn _start() -> ! {
         Ok(fd) => fd,
         Err(e) => {
             serial_println!("[input-server] failed to open /dev/input/mouse: {:?}", e);
-            loop { core::hint::spin_loop(); }
+            loop {
+                core::hint::spin_loop();
+            }
         }
     };
 
-    serial_println!("[input-server] started (kbd_fd={}, mouse_fd={})", kbd_fd, mouse_fd);
+    serial_println!(
+        "[input-server] started (kbd_fd={}, mouse_fd={})",
+        kbd_fd,
+        mouse_fd
+    );
 
     let mut state = KeyboardState::new();
     let mut kbd_buf = [0u8; 64];
@@ -384,7 +409,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Read mouse events (just consume for now — display server will use them)
+        // Read mouse events (just consume for now : display server will use them)
         let _ = call::read(mouse_fd, &mut mouse_buf);
 
         // Yield to other processes
@@ -399,5 +424,7 @@ fn serial_println(s: &str) {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop { core::hint::spin_loop(); }
+    loop {
+        core::hint::spin_loop();
+    }
 }

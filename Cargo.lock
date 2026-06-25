@@ -1044,6 +1044,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "strate-input"
+version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
+]
+
+[[package]]
 name = "strate-net"
 version = "0.1.0"
 dependencies = [

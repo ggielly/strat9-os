@@ -13,6 +13,7 @@
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
 #![feature(negative_impls)]
+#![feature(offset_of)]
 
 extern crate alloc;
 
