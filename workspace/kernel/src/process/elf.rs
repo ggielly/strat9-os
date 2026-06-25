@@ -1375,6 +1375,14 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "out 0xe9, al",
             "pop rax",
 
+            //  Pre-fault the user code page ====================================================================
+            // Touch the first byte at user_rip to trigger a demand page fault
+            // while GS is still the kernel per-CPU block. Without this, the
+            // iretq instruction itself can fault in the SWAPGS→Ring3 window,
+            // producing a SWAPGS-WINDOW page fault (CS=Ring0 but GS=user).
+            "mov rax, {rip}",
+            "movzx rax, byte ptr [rax]",
+
             //  Chargement de arg0 dans RDI ====================================================================================================
             "mov rdi, {arg0}",
 

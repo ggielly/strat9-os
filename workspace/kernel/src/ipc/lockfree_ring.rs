@@ -324,6 +324,36 @@ impl LockFreeRing {
         self.write(data)
     }
 
+    /// Write multiple buffers in a single slot (scatter-gather).
+    /// Concatenates `bufs` and writes them as one message.
+    pub fn write_vectored(&self, bufs: &[&[u8]]) -> Result<(), RingError> {
+        let total: usize = bufs.iter().map(|b| b.len()).sum();
+        if total > self.slot_size as usize {
+            return Err(RingError::MessageTooLarge);
+        }
+        let mask = self.capacity - 1;
+        let tail = self.tail().load(Ordering::Relaxed);
+        let head = self.head().load(Ordering::Acquire);
+        if ((tail + 1) & mask) == (head & mask) {
+            return Err(RingError::Full);
+        }
+        let slot = self.slot_at(tail & mask);
+        let mut offset = 0;
+        unsafe {
+            for buf in bufs {
+                core::ptr::copy_nonoverlapping(
+                    buf.as_ptr(),
+                    (*slot).data.as_mut_ptr().add(offset),
+                    buf.len(),
+                );
+                offset += buf.len();
+            }
+        }
+        unsafe { (*slot).len.store(total as u16, Ordering::Release); }
+        self.tail().store(tail.wrapping_add(1), Ordering::Release);
+        Ok(())
+    }
+
     /// Non-blocking read.  Returns `Ok(None)` when the ring is empty.
     #[inline]
     pub fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, RingError> {

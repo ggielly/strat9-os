@@ -342,6 +342,25 @@ const DECISION_MATRIX: [[TransportPolicyEntry; 3]; 3] = [
     ],
 ];
 
+/// Per-transport performance counters.
+#[derive(Debug, Clone)]
+pub struct TransportStats {
+    /// Total messages sent.
+    pub sent: u64,
+    /// Total messages received.
+    pub received: u64,
+    /// Total errors.
+    pub errors: u64,
+    /// Current transport level.
+    pub level: TransportLevel,
+}
+
+impl TransportStats {
+    const fn new(level: TransportLevel) -> Self {
+        TransportStats { sent: 0, received: 0, errors: 0, level }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TransportManager
 // ---------------------------------------------------------------------------
@@ -360,6 +379,8 @@ pub struct TransportManager {
     active: SpinLock<BTreeMap<TransportId, TransportCreateResult>>,
     /// Simple FIFO transport cache (no_std, no allocation).
     cache: SpinLock<TransportCache>,
+    /// Per-transport performance statistics.
+    pub stats: TransportStats,
 }
 
 impl TransportManager {
@@ -370,6 +391,7 @@ impl TransportManager {
             policy_overrides: SpinLock::new(BTreeMap::new()),
             active: SpinLock::new(BTreeMap::new()),
             cache: SpinLock::new(TransportCache::new()),
+            stats: TransportStats::new(TransportLevel::LockFree),
         }
     }
 
@@ -462,6 +484,10 @@ impl TransportManager {
             remote: remote.clone(),
             level,
         };
+
+        // Increment stats counters
+        let s = &mut *self.stats;
+        s.sent = s.sent.wrapping_add(1);
 
         {
             let mut cache = self.cache.lock();

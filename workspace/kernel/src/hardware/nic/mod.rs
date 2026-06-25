@@ -4,6 +4,7 @@
 //! to kernel services (PCI, DMA allocator, VFS schemes).
 
 pub mod common;
+pub mod data_plane;
 pub mod e1000_drv;
 pub mod e1000e_drv;
 pub mod igc_drv;
@@ -122,11 +123,20 @@ pub fn register_strate_net_tid(tid: u64) {
 
 /// Called from `idt.rs:nic_handler`.  Dispatches to the registered NIC's
 /// `handle_interrupt()` (reads ICR, coalescing, TX reclaim).
-/// Wakes strate-net (if its TID is known) so it can call `receive()`
-/// without waiting for the next polling timeout.
+/// If the N2 data plane is active, drains received packets into the RX
+/// ring before waking strate-net (zero-syscall data path).
 pub fn handle_interrupt() {
     if let Some(ref dev) = *NIC_DEVICE.lock() {
         dev.handle_interrupt();
+        // Drain pending RX packets into the N2 data plane ring.
+        if let Some(ref dp) = *NIC_DATA_PLANE.lock() {
+            let mut buf = [0u8; 2048];
+            while let Ok(n) = dev.receive(&mut buf) {
+                if dp.push_rx(0, &buf[..n]).is_err() {
+                    break; // ring full — backpressure
+                }
+            }
+        }
     }
     let tid_u64 = STRATE_NET_TID.load(core::sync::atomic::Ordering::Relaxed);
     if tid_u64 != 0 {
@@ -221,4 +231,39 @@ pub fn init() {
     if let Err(e) = scheme::register_net_scheme() {
         log::warn!("[net] Failed to register net scheme: {:?}", e);
     }
+    // Initialise the N2 data plane if any NIC was registered.
+    init_data_plane();
+}
+
+// ── N2 data-plane global instance ─────────────────────────────────────────
+
+use data_plane::NicDataPlane;
+use spin::Mutex;
+
+/// Global NIC data plane, lazily initialised after NIC detection.
+static NIC_DATA_PLANE: Mutex<Option<NicDataPlane>> = Mutex::new(None);
+
+/// Initialise the N2 data plane with one ring pair per registered device.
+/// Each device gets a single RX/TX pair (RSS queues extend this).
+fn init_data_plane() {
+    let count = NET_DEVICES.read().len();
+    if count == 0 {
+        log::debug!("[net] No NIC devices found — skipping data plane init");
+        return;
+    }
+    // One ring pair per NIC for now; RSS would create one per queue.
+    match NicDataPlane::new(count, 256, 2048) {
+        Ok(dp) => {
+            *NIC_DATA_PLANE.lock() = Some(dp);
+            log::info!("[net] N2 data plane initialised with {} queue(s)", count);
+        }
+        Err(e) => {
+            log::warn!("[net] Failed to initialise N2 data plane: {}", e);
+        }
+    }
+}
+
+/// Access the global N2 data plane (returns None if not yet initialised).
+pub fn data_plane() -> &'static Mutex<Option<NicDataPlane>> {
+    &NIC_DATA_PLANE
 }
