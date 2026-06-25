@@ -4,12 +4,14 @@
 
 ## Project stats
 
-- **Total commits:** `551`
+- **Total commits:** `553`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-06-25 [`4fb871f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4fb871f59926d9630cc73c5f4eb36ea24b934041) Refactor error codes and syscall flags; implement getrandom syscall
+- 2026-06-25 [`f0f891c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f0f891c41fada46208209b6b807c89d5701d4a1f) docs: update published documentation
 - 2026-06-25 [`9b31c08`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9b31c08b6e44c675facdd92cb0acbf36341214cd) docs: update published documentation
 - 2026-06-25 [`a522fb8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a522fb8225d35abef7b1420b4fb203fade74470c) Refactor NIC data plane and IPC transport statistics
 - 2026-06-25 [`23cbead`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/23cbead0a913d88b5829d86cfd2f25b209f5ab96) docs: update published documentation
@@ -58,7 +60,5 @@
 - 2026-05-23 [`b7c3e27`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b7c3e271d8644570a5a0b7bdabb80ef8c3f524f7) Merge branch 'hunt-memory-corruption' into 'main'
 - 2026-05-23 [`db23b53`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552) Fix major memory leak and remove sshd silo
 - 2026-05-19 [`6831830`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6831830423d0e1b19cdfb7ce0b60089fc65e045a) docs: update published documentation
-- 2026-05-19 [`0b42bf9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0b42bf9116227e3f1b9a3eb32ac74e7d261c7000) docs: update published documentation
-- 2026-05-19 [`03494df`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/03494df463ec1b3e49b5ef70a9205f710aa81f92) Merge branch 'refactorize-kernel-structure-and-files' into 'main'
 
 <!-- AUTO-CHANGELOG:END -->

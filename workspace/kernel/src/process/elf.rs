@@ -37,16 +37,11 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
-// ELF64 constants
+// ELF64 constants (relocation & dynamic tags — not covered by xmas-elf)
 // ---------------------------------------------------------------------------
 
-const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
-const ELFCLASS64: u8 = 2;
-const ELFDATA2LSB: u8 = 1;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
-const EV_CURRENT: u32 = 1;
-const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
@@ -106,30 +101,20 @@ pub struct LoadedElfInfo {
 }
 
 // ---------------------------------------------------------------------------
-// ELF64 header structures
+// ELF64 structures for kernel-internal use
 // ---------------------------------------------------------------------------
 
-/// ELF64 file header (64 bytes).
-#[repr(C, packed)]
+/// Parsed ELF64 file header (copy-friendly, no borrows).
 #[derive(Debug, Clone, Copy)]
 struct Elf64Header {
-    e_ident: [u8; 16],
     e_type: u16,
-    e_machine: u16,
-    e_version: u32,
     e_entry: u64,
     e_phoff: u64,
-    e_shoff: u64,
-    e_flags: u32,
-    e_ehsize: u16,
     e_phentsize: u16,
     e_phnum: u16,
-    e_shentsize: u16,
-    e_shnum: u16,
-    e_shstrndx: u16,
 }
 
-/// ELF64 program header (56 bytes).
+/// Parsed ELF64 program header (copy-friendly, packed for raw byte reading).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 struct Elf64Phdr {
@@ -170,71 +155,48 @@ struct Elf64Sym {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing
+// Parsing (uses xmas-elf for header validation)
 // ---------------------------------------------------------------------------
 
 /// Parse and validate the ELF64 file header from raw bytes.
+///
+/// Uses `xmas-elf` for magic/class/machine/version validation, then copies
+/// the fields we need into a local `Copy` struct.
 fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
-    if data.len() < core::mem::size_of::<Elf64Header>() {
-        return Err("ELF data too small for header");
-    }
+    let elf = xmas_elf::ElfFile::new(data).map_err(|_| "Invalid ELF header")?;
 
-    // SAFETY: data is large enough and Elf64Header is repr(C, packed) with no
-    // alignment requirements beyond 1.
-    let header: Elf64Header =
-        unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
+    let hdr = elf.header;
 
-    // Validate magic
-    if header.e_ident[0..4] != ELF_MAGIC {
-        return Err("Bad ELF magic");
-    }
-
-    // Class: 64-bit
-    if header.e_ident[4] != ELFCLASS64 {
-        return Err("Not ELF64");
-    }
-
-    // Data: little-endian
-    if header.e_ident[5] != ELFDATA2LSB {
-        return Err("Not little-endian ELF");
-    }
-
-    // Machine: x86_64
-    if header.e_machine != EM_X86_64 {
-        return Err("Not x86_64 ELF");
-    }
-
-    // Type: executable or shared object (PIE/static PIE executable image)
-    if header.e_type != ET_EXEC && header.e_type != ET_DYN {
+    // Type: executable or shared object (PIE/static PIE)
+    if hdr.e_type != ET_EXEC && hdr.e_type != ET_DYN {
         return Err("Unsupported ELF type (expected ET_EXEC or ET_DYN)");
     }
 
-    // ELF version
-    if header.e_version != EV_CURRENT {
-        return Err("Unsupported ELF version");
-    }
-
     // Entry point must be canonical user space (for ET_DYN this is relative and
-    // validated again after relocation). ET_EXEC must be non-zero.
-    if header.e_entry >= USER_ADDR_MAX {
+    // validated again after relocation). ET_EXEC with e_entry=0 is handled later.
+    if hdr.e_entry >= USER_ADDR_MAX {
         return Err("Entry point outside user address range");
     }
-    // Some toolchains/images can emit ET_EXEC with e_entry=0.
-    // We handle this case later by deriving a fallback entry from PT_LOAD|PF_X.
 
     // Sanity check program headers
-    if header.e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
+    if hdr.e_phentsize as usize != core::mem::size_of::<xmas_elf::program::ProgramHeader>() {
         return Err("Unexpected phentsize");
     }
 
-    let ph_end = (header.e_phoff as usize)
-        .checked_add((header.e_phnum as usize) * (header.e_phentsize as usize))
+    let ph_end = (hdr.e_phoff as usize)
+        .checked_add((hdr.e_phnum as usize) * (hdr.e_phentsize as usize))
         .ok_or("Program header table overflows")?;
     if ph_end > data.len() {
         return Err("Program headers extend past file");
     }
 
-    Ok(header)
+    Ok(Elf64Header {
+        e_type: hdr.e_type,
+        e_entry: hdr.e_entry,
+        e_phoff: hdr.e_phoff,
+        e_phentsize: hdr.e_phentsize,
+        e_phnum: hdr.e_phnum,
+    })
 }
 
 /// Iterate over program headers in the ELF.

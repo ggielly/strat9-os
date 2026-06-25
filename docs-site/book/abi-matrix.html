@@ -215,7 +215,7 @@
 <tr><td>uname</td><td>OK</td><td>Via SYS_PROC_UNAME</td></tr>
 <tr><td>getuid / geteuid / getgid / getegid</td><td>Partial</td><td>Returns 0 (no UID model)</td></tr>
 <tr><td>mprotect / mlock / munlock</td><td>Stub</td><td>ENOSYS</td></tr>
-<tr><td>getrandom</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>getrandom</td><td>OK</td><td>Via SYS_GETRANDOM (601), supports GRND_NONBLOCK</td></tr>
 </tbody></table>
 </div>
 <h2 id="signals"><a class="header" href="#signals">Signals</a></h2>

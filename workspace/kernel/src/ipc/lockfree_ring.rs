@@ -349,7 +349,9 @@ impl LockFreeRing {
                 offset += buf.len();
             }
         }
-        unsafe { (*slot).len.store(total as u16, Ordering::Release); }
+        unsafe {
+            (*slot).len.store(total as u16, Ordering::Release);
+        }
         self.tail().store(tail.wrapping_add(1), Ordering::Release);
         Ok(())
     }

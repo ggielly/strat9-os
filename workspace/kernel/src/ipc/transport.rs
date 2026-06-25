@@ -382,7 +382,7 @@ impl TransportEndpoint {
     /// Whether the transport has space to write.
     pub fn has_space(&self) -> bool {
         match self {
-            Self::Mailbox(_) => true,  // Mailbox allocates on push, always nominally writable
+            Self::Mailbox(_) => true, // Mailbox allocates on push, always nominally writable
             Self::LockFree(r) => r.has_space(),
         }
     }

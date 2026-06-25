@@ -1166,6 +1166,7 @@ struct MyDriver { /* ... */ }</code></pre>
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4fb871f59926d9630cc73c5f4eb36ea24b934041"><code>4fb871f</code></a> Refactor error codes and syscall flags; implement getrandom syscall</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a522fb8225d35abef7b1420b4fb203fade74470c"><code>a522fb8</code></a> Refactor NIC data plane and IPC transport statistics</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d1e838fbcbc964f67208246303930315f5565331"><code>d1e838f</code></a> feat: implement IPC transport layer with 3-level architecture</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/411f5aaf1ae30d6b53f71cb08784be42b0cea99a"><code>411f5aa</code></a> feat: add IPC transport layer support and enhance ICMP handling</li>
@@ -1195,7 +1196,6 @@ struct MyDriver { /* ... */ }</code></pre>
 <li>2026-03-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aaa89e0ee568eb24908817c20ec50bf4fd3cd282"><code>aaa89e0</code></a> Refactor: Decouple per-CPU scheduler state and logic from the global scheduler instance by moving <code>SchedulerCpu</code> to local CPU storage.</li>
 <li>2026-03-21 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3f93c628fd8be78fd9cc29fbf21692aaacbf494"><code>c3f93c6</code></a> feat: Implement TSC-based boot timing and milestones, along with an analysis...</li>
 <li>2026-03-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/eb7818d13ba67b1b3f718d6161f71eee0d123595"><code>eb7818d</code></a> feat: Implement static module loading from initfs paths and increase module blob size limit.</li>
-<li>2026-03-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acfdbbd126584bcd47355873c93c5584c67877c2"><code>acfdbbd</code></a> feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
@@ -1272,7 +1272,7 @@ struct MyDriver { /* ... */ }</code></pre>
 <tr><td>uname</td><td>OK</td><td>Via SYS_PROC_UNAME</td></tr>
 <tr><td>getuid / geteuid / getgid / getegid</td><td>Partial</td><td>Returns 0 (no UID model)</td></tr>
 <tr><td>mprotect / mlock / munlock</td><td>Stub</td><td>ENOSYS</td></tr>
-<tr><td>getrandom</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>getrandom</td><td>OK</td><td>Via SYS_GETRANDOM (601), supports GRND_NONBLOCK</td></tr>
 </tbody></table>
 </div>
 <h2 id="signals"><a class="header" href="#signals">Signals</a></h2>
@@ -1716,12 +1716,14 @@ struct MyDriver { /* ... */ }</code></pre>
 <!-- AUTO-CHANGELOG:START -->
 <h2 id="project-stats"><a class="header" href="#project-stats">Project stats</a></h2>
 <ul>
-<li><strong>Total commits:</strong> <code>551</code></li>
+<li><strong>Total commits:</strong> <code>553</code></li>
 <li><strong>Latest tag:</strong> <code>0.1.0</code></li>
 <li><strong>Repository:</strong> <a href="https://git.strat9-os.org/strat9-os/strat9-os">git.strat9-os.org</a></li>
 </ul>
 <h2 id="recent-commits-auto-generated"><a class="header" href="#recent-commits-auto-generated">Recent commits (auto-generated)</a></h2>
 <ul>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4fb871f59926d9630cc73c5f4eb36ea24b934041"><code>4fb871f</code></a> Refactor error codes and syscall flags; implement getrandom syscall</li>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f0f891c41fada46208209b6b807c89d5701d4a1f"><code>f0f891c</code></a> docs: update published documentation</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9b31c08b6e44c675facdd92cb0acbf36341214cd"><code>9b31c08</code></a> docs: update published documentation</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a522fb8225d35abef7b1420b4fb203fade74470c"><code>a522fb8</code></a> Refactor NIC data plane and IPC transport statistics</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/23cbead0a913d88b5829d86cfd2f25b209f5ab96"><code>23cbead</code></a> docs: update published documentation</li>
@@ -1770,8 +1772,6 @@ struct MyDriver { /* ... */ }</code></pre>
 <li>2026-05-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b7c3e271d8644570a5a0b7bdabb80ef8c3f524f7"><code>b7c3e27</code></a> Merge branch 'hunt-memory-corruption' into 'main'</li>
 <li>2026-05-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552"><code>db23b53</code></a> Fix major memory leak and remove sshd silo</li>
 <li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6831830423d0e1b19cdfb7ce0b60089fc65e045a"><code>6831830</code></a> docs: update published documentation</li>
-<li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0b42bf9116227e3f1b9a3eb32ac74e7d261c7000"><code>0b42bf9</code></a> docs: update published documentation</li>
-<li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/03494df463ec1b3e49b5ef70a9205f710aa81f92"><code>03494df</code></a> Merge branch 'refactorize-kernel-structure-and-files' into 'main'</li>
 </ul>
 <!-- AUTO-CHANGELOG:END -->
 <div style="break-before: page; page-break-before: always;"></div><h1 id="publishing"><a class="header" href="#publishing">Publishing</a></h1>
