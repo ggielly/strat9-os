@@ -43,6 +43,7 @@ pub mod lockfree_ring;
 pub mod mailbox;
 pub mod message;
 pub mod n1;
+pub mod n3;
 pub mod port;
 pub mod reply;
 pub mod semaphore;
@@ -58,6 +59,10 @@ pub use lifecycle::{MultiHandleDestroyError, MultiHandleResource};
 pub use lockfree_ring::LockFreeRing;
 pub use mailbox::IntrusiveMailbox;
 pub use message::IpcMessage;
+pub use n3::{
+    allocate_pcid, pcid_available, N3MinimalContext, N3Tier, MigrationFrame, MigrationState,
+    N3Transport, N3_SHARED_FRAME_VA,
+};
 pub use port::{create_port, destroy_port, get_port, IpcError, Port, PortId};
 pub use semaphore::{
     create_semaphore, destroy_semaphore, get_semaphore, PosixSemaphore, SemId, SemaphoreError,

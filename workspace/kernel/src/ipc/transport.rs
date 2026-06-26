@@ -10,6 +10,7 @@
 use super::{
     lockfree_ring::{LockFreeRing, RingError, RingSlot},
     mailbox::IntrusiveMailbox,
+    n3::MigrationState,
 };
 use crate::{silo::SiloId, sync::SpinLock};
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
@@ -125,6 +126,10 @@ pub enum IpcError {
     PermissionDenied,
     /// Generic transport failure.
     TransportFailed,
+    /// `validate_rip()` failed — invalid or non-executable instruction pointer.
+    InvalidRip,
+    /// Watchdog timeout — migration was not completed in time.
+    TimedOut,
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +143,8 @@ pub enum TransportEndpoint {
     Mailbox(Arc<IntrusiveMailbox>),
     /// N2 lock-free SPSC ring.
     LockFree(Arc<LockFreeRing>),
+    /// N3 MMU thread migration.
+    Mmu(Arc<super::n3::N3Transport>),
 }
 
 impl IpcTransport for TransportEndpoint {
@@ -145,6 +152,7 @@ impl IpcTransport for TransportEndpoint {
         match self {
             Self::Mailbox(_) => TransportLevel::TypeSafe,
             Self::LockFree(_) => TransportLevel::LockFree,
+            Self::Mmu(_) => TransportLevel::Mmu,
         }
     }
 
@@ -152,6 +160,7 @@ impl IpcTransport for TransportEndpoint {
         match self {
             Self::Mailbox(m) => m.capabilities(),
             Self::LockFree(r) => r.capabilities(),
+            Self::Mmu(n) => n.capabilities(),
         }
     }
 
@@ -159,6 +168,7 @@ impl IpcTransport for TransportEndpoint {
         match self {
             Self::Mailbox(_) => "mailbox",
             Self::LockFree(_) => "lockfree",
+            Self::Mmu(n) => n.name(),
         }
     }
 }
@@ -168,6 +178,7 @@ impl IpcProducer for TransportEndpoint {
         match self {
             Self::Mailbox(m) => m.send(msg),
             Self::LockFree(r) => r.send(msg),
+            Self::Mmu(n) => n.send(msg),
         }
     }
 
@@ -175,6 +186,7 @@ impl IpcProducer for TransportEndpoint {
         match self {
             Self::Mailbox(m) => m.try_send(msg),
             Self::LockFree(r) => r.try_send(msg),
+            Self::Mmu(n) => n.try_send(msg),
         }
     }
 }
@@ -184,6 +196,7 @@ impl IpcConsumer for TransportEndpoint {
         match self {
             Self::Mailbox(m) => m.recv(buf),
             Self::LockFree(r) => r.recv(buf),
+            Self::Mmu(n) => n.recv(buf),
         }
     }
 
@@ -191,6 +204,7 @@ impl IpcConsumer for TransportEndpoint {
         match self {
             Self::Mailbox(m) => m.try_recv(buf),
             Self::LockFree(r) => r.try_recv(buf),
+            Self::Mmu(n) => n.try_recv(buf),
         }
     }
 }
@@ -396,14 +410,22 @@ impl TransportEndpoint {
         match self {
             Self::Mailbox(m) => !m.is_empty(),
             Self::LockFree(r) => r.has_data(),
+            Self::Mmu(n) => {
+                let frame = n.frame();
+                frame.msg_len > 0 && frame.generation.load(Ordering::Acquire) > 0
+            }
         }
     }
 
     /// Whether the transport has space to write.
     pub fn has_space(&self) -> bool {
         match self {
-            Self::Mailbox(_) => true, // Mailbox allocates on push, always nominally writable
+            Self::Mailbox(_) => true,
             Self::LockFree(r) => r.has_space(),
+            Self::Mmu(n) => {
+                let frame = n.frame();
+                frame.state.load(Ordering::Acquire) == MigrationState::Ready as u8
+            }
         }
     }
 }
@@ -515,7 +537,11 @@ impl TransportManager {
                 )
             }
             TransportLevel::Mmu => {
-                // N3 is research track : fall back to N2 LockFree
+                // N3 MMU thread migration — requires sender/receiver task IDs.
+                // For now, fall back to N2 LockFree since N3 endpoint creation
+                // needs per-pair task context that TransportManager doesn't have.
+                // Full N3 integration is done via N3Transport::new() directly.
+                log::debug!("N3 MMU transport requested for pair {:?}, using N2 fallback", _pair);
                 let ring = LockFreeRing::new(capacity.max(4), 2048)
                     .map_err(|_| IpcError::TransportFailed)?;
                 (

@@ -495,6 +495,11 @@ pub fn init() {
             .set_handler_fn(tlb_shootdown_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
 
+        // N3 MMU migration sync IPI (vector 0xF1)
+        idt_ref[super::apic::IPI_N3_MIGRATE_VECTOR as u8]
+            .set_handler_fn(n3_migrate_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+
         (*idt).load_unsafe();
     }
     unlock_idt_storage();
@@ -2024,4 +2029,15 @@ extern "x86-interrupt" fn tlb_shootdown_handler(stack_frame: InterruptStackFrame
     let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
     // Note: EOI is sent by the architecture-independent handler.
     super::tlb::tlb_shootdown_ipi_handler();
+}
+
+/// N3 MMU migration sync IPI handler (vector 0xF1).
+///
+/// Notifies the target CPU of a pending migration. The actual CR3 switch
+/// and context restore is handled by the scheduler when the receiver task
+/// is scheduled. This handler only sends EOI.
+extern "x86-interrupt" fn n3_migrate_handler(stack_frame: InterruptStackFrame) {
+    let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
+    // N3 migration notification — the scheduler will handle the context switch.
+    super::apic::eoi();
 }

@@ -173,5 +173,7 @@ fn transport_to_syscall_err(e: IpcError) -> SyscallError {
         IpcError::TransportNotFound => SyscallError::BadHandle,
         IpcError::PermissionDenied => SyscallError::PermissionDenied,
         IpcError::TransportFailed => SyscallError::IoError,
+        IpcError::InvalidRip => SyscallError::Fault,
+        IpcError::TimedOut => SyscallError::TimedOut,
     }
 }
