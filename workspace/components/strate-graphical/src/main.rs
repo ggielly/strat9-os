@@ -455,58 +455,102 @@ fn log(s: &str) { let _ = call::write(2, s.as_bytes()); let _ = call::write(2, b
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    log("[display-server] starting");
+    log("========================================");
+    log("[display-server] strate-graphical v0.1.0");
+    log("========================================");
 
-    // Get screen info
+    // Step 1: Read screen info
+    log("[display-server] step 1: reading /dev/display/info...");
     let mut w = 800u32; let mut h = 600u32; let mut bpp = 32u8;
-    if let Ok(fd) = call::open("/dev/display/info", 0) {
-        let mut ibuf = [0u8; 256];
-        if let Ok(n) = call::read(fd, &mut ibuf) {
-            let info = core::str::from_utf8(&ibuf[..n]).unwrap_or("");
-            for p in info.split_whitespace() {
-                if let Some(v) = p.strip_prefix("width=") { w = v.parse().unwrap_or(800); }
-                else if let Some(v) = p.strip_prefix("height=") { h = v.parse().unwrap_or(600); }
-                else if let Some(v) = p.strip_prefix("bpp=") { bpp = v.parse().unwrap_or(32); }
+    match call::open("/dev/display/info", 0) {
+        Ok(fd) => {
+            log(&format!("[display-server]   opened info fd={}", fd));
+            let mut ibuf = [0u8; 256];
+            match call::read(fd, &mut ibuf) {
+                Ok(n) => {
+                    let info = core::str::from_utf8(&ibuf[..n]).unwrap_or("");
+                    log(&format!("[display-server]   info: \"{}\"", info));
+                    for p in info.split_whitespace() {
+                        if let Some(v) = p.strip_prefix("width=") { w = v.parse().unwrap_or(800); }
+                        else if let Some(v) = p.strip_prefix("height=") { h = v.parse().unwrap_or(600); }
+                        else if let Some(v) = p.strip_prefix("bpp=") { bpp = v.parse().unwrap_or(32); }
+                    }
+                }
+                Err(e) => log(&format!("[display-server]   read info failed: {:?}", e)),
             }
+            let _ = call::close(fd);
         }
-        let _ = call::close(fd);
+        Err(e) => log(&format!("[display-server]   open info failed: {:?} (using defaults)", e)),
     }
-    log(&format!("[display-server] screen {}x{} bpp={}", w, h, bpp));
+    log(&format!("[display-server] screen: {}x{} bpp={}", w, h, bpp));
 
-    // Clear display
-    let clear_fd = match call::open("/dev/display/clear", 2) {
-        Ok(fd) => { let _ = call::write(fd, b"clear"); let _ = call::close(fd); fd }
-        Err(_) => 0,
-    };
-    let _ = clear_fd;
+    // Step 2: Clear display
+    log("[display-server] step 2: clearing display...");
+    match call::open("/dev/display/clear", 2) {
+        Ok(fd) => {
+            let _ = call::write(fd, b"clear");
+            let _ = call::close(fd);
+            log("[display-server]   display cleared");
+        }
+        Err(e) => log(&format!("[display-server]   clear failed: {:?}", e)),
+    }
 
-    // Open display framebuffer
+    // Step 3: Open display framebuffer
+    log("[display-server] step 3: opening /dev/display/0.0...");
     let dfd = match call::open("/dev/display/0.0", 2) {
-        Ok(fd) => fd,
-        Err(e) => { log(&format!("FATAL: display: {:?}", e)); loop {} }
+        Ok(fd) => {
+            log(&format!("[display-server]   display fd={}", fd));
+            fd
+        }
+        Err(e) => {
+            log(&format!("[display-server] FATAL: cannot open /dev/display/0.0: {:?}", e));
+            log("[display-server]   Is the display scheme mounted?");
+            log("[display-server]   Check: ls /dev/display/");
+            loop { core::hint::spin_loop(); }
+        }
     };
 
-    // Open input devices
-    let kfd = call::open("/dev/input/kbd", 0).unwrap_or(0);
-    let mfd = call::open("/dev/input/mouse", 0).unwrap_or(0);
-    log(&format!("[display-server] fds: display={} kbd={} mouse={}", dfd, kfd, mfd));
+    // Step 4: Open input devices
+    log("[display-server] step 4: opening input devices...");
+    let kfd = match call::open("/dev/input/kbd", 0) {
+        Ok(fd) => { log(&format!("[display-server]   kbd fd={}", fd)); fd }
+        Err(e) => { log(&format!("[display-server]   kbd not available: {:?}", e)); 0 }
+    };
+    let mfd = match call::open("/dev/input/mouse", 0) {
+        Ok(fd) => { log(&format!("[display-server]   mouse fd={}", fd)); fd }
+        Err(e) => { log(&format!("[display-server]   mouse not available: {:?}", e)); 0 }
+    };
 
-    // Allocate offscreen buffer
+    // Step 5: Allocate offscreen buffer
+    log("[display-server] step 5: allocating framebuffer...");
     let bpp_b = bpp as usize / 8;
     let fb_sz = w as usize * h as usize * bpp_b;
     let mut fb = vec![0u8; fb_sz];
-    let buf = Buffer { w, h, stride: w * bpp_b as u32, bpp, ptr: fb.as_mut_ptr() };
+    log(&format!("[display-server]   allocated {} bytes ({}x{}x{})", fb_sz, w, h, bpp_b));
 
-    // Create server and demo windows
+    let buf = Buffer { w, h, stride: w * bpp_b as u32, bpp, ptr: fb.as_mut_ptr() };
     let mut srv = Server::new(buf, w, h);
+
+    // Step 6: Create demo windows
+    log("[display-server] step 6: creating demo windows...");
     srv.create_win(60, 60, 350, 220, "File Manager", Color::new(240, 240, 245));
     srv.create_win(140, 140, 300, 200, "Terminal", Color::new(20, 20, 30));
     srv.create_win(220, 220, 320, 240, "Strat9-OS", Color::new(235, 235, 240));
-    log(&format!("[display-server] {} windows", srv.wins.len()));
+    log(&format!("[display-server]   {} windows created", srv.wins.len()));
+
+    // Step 7: First composite and present
+    log("[display-server] step 7: initial composite...");
+    srv.composite();
+    present(dfd as u32, &srv.buf);
+    log("[display-server]   initial frame presented");
+
+    log("[display-server] === entering main loop ===");
+    log(&format!("[display-server] kbd={} mouse={} display={}", kfd, mfd, dfd));
 
     // Input buffers
     let mut kb = [0u8; 64];
     let mut mb = [0u8; 56];
+    let mut frame_count: u64 = 0;
 
     // Main loop
     loop {
@@ -514,7 +558,6 @@ pub extern "C" fn _start() -> ! {
         if kfd != 0 {
             if let Ok(n) = call::read(kfd, &mut kb) {
                 for &sc in &kb[..n] {
-                    // TODO: route to focused window
                     let _ = sc;
                 }
             }
@@ -543,6 +586,11 @@ pub extern "C" fn _start() -> ! {
         // Composite and present
         srv.composite();
         present(dfd as u32, &srv.buf);
+
+        frame_count += 1;
+        if frame_count % 500 == 0 {
+            log(&format!("[display-server] frame {}", frame_count));
+        }
 
         // Yield
         let _ = call::sched_yield();

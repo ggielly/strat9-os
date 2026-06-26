@@ -456,7 +456,7 @@ unsafe impl GlobalAlloc for LockedHeap {
 
     /// Performs the dealloc operation.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let _effective = layout.size().max(layout.align());
+        let effective = layout.size().max(layout.align());
 
         match classify_kernel_heap_backend(layout) {
             KernelHeapBackend::Slab => {
@@ -671,7 +671,7 @@ pub unsafe fn try_alloc_kernel_heap(layout: Layout) -> Result<*mut u8, KernelHea
                     crate::e9_println!(
                         "HEAP-A cpu={} irq=0 size={} ci={} n={}",
                         _cpu,
-                        _effective,
+                        effective,
                         ci,
                         n
                     );

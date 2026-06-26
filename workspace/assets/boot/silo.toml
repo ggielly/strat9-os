@@ -75,13 +75,3 @@ sid = 42
 name = "strate-webrtc"
 binary = "/initfs/strate-webrtc"
 type = "elf"
-
-[[silos]]
-name = "graphics"
-family = "SYS"
-mode = "700"
-sid = 10
-[[silos.strates]]
-name = "display-server"
-binary = "/initfs/display-server"
-type = "elf"

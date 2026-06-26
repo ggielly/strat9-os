@@ -252,6 +252,281 @@ pub mod cap_id {
     pub const MSIX: u8 = 0x11;
 }
 
+
+/// PCIe Extended Capability IDs (offset >= 0x100)
+pub mod ext_cap_id {
+    /// Advanced Error Reporting (AER)
+    pub const AER: u16 = 0x0001;
+    /// Virtual Channel
+    pub const VC: u16 = 0x0002;
+    /// Device Serial Number
+    pub const DSN: u16 = 0x0003;
+    /// Power Budgeting
+    pub const PB: u16 = 0x0004;
+    /// Root Link Declaration
+    pub const RLD: u16 = 0x0005;
+    /// Root Complex Link Declaration
+    pub const RCLD: u16 = 0x0006;
+    /// Multi-Root I/O Virtualization
+    pub const MRIOV: u16 = 0x0008;
+    /// Single-Root I/O Virtualization (SR-IOV)
+    pub const SRIOV: u16 = 0x0010;
+    /// Resizable BAR
+    pub const RBAR: u16 = 0x0015;
+    /// Dynamic Power Allocation
+    pub const DPA: u16 = 0x0016;
+    /// TPH Requester
+    pub const TPH: u16 = 0x0017;
+    /// Latency Tolerance Reporting
+    pub const LTR: u16 = 0x0018;
+    /// Secondary PCIe Capability
+    pub const SEC_PCIE: u16 = 0x0019;
+    /// PMUX
+    pub const PMUX: u16 = 0x001A;
+    /// Process Address Space ID (PASID)
+    pub const PASID: u16 = 0x001B;
+    /// LNR (Layer 3 Routing)
+    pub const LNR: u16 = 0x001C;
+    /// Address Translation Services (ATS)
+    pub const ATS: u16 = 0x001D;
+    /// Page Request Interface (PRI)
+    pub const PRI: u16 = 0x001E;
+    /// Process Address Space ID (PASID) Extended Capability
+    pub const PASID_EXT: u16 = 0x0020;
+    /// Shared Virtual Memory (SVM)
+    pub const SVM: u16 = 0x0021;
+    /// L1 PM Substates
+    pub const L1_PM: u16 = 0x0022;
+    /// Precision Time Measurement (PTM)
+    pub const PTM: u16 = 0x0023;
+    /// PCIe Tunneling
+    pub const TUNNEL: u16 = 0x0024;
+    /// Access Control Services (ACS)
+    pub const ACS: u16 = 0x0025;
+    /// Alternative Routing ID Interpretation (ARI)
+    pub const ARI: u16 = 0x0026;
+    /// Address Translation Services (ATS) Extended Capability
+    pub const ATS_EXT: u16 = 0x0027;
+    /// Single Root I/O Virtualization (SR-IOV) Extended Capability
+    pub const SRIOV_EXT: u16 = 0x0028;
+    /// Physical Function (PF) SR-IOV Extended Capability
+    pub const PF_SRIOV: u16 = 0x0029;
+}
+
+/// SR-IOV capability register offsets (relative to capability base).
+pub mod sriov_cap {
+    /// Capability register (16-bit)
+    pub const CAP: u8 = 0x00;
+    /// SR-IOV Control register (16-bit)
+    pub const CONTROL: u8 = 0x02;
+    /// SR-IOV Status register (16-bit)
+    pub const STATUS: u8 = 0x04;
+    /// SR-IOV PCIe Capability register (32-bit)
+    pub const PCIE_CAP: u8 = 0x08;
+    /// SR-IOV ARI Capability register (32-bit)
+    pub const ARI_CAP: u8 = 0x0C;
+    /// SR-IOV Initial VFs (16-bit)
+    pub const INITIAL_VF: u8 = 0x10;
+    /// SR-IOV Total VFs (16-bit)
+    pub const TOTAL_VF: u8 = 0x12;
+    /// SR-IOV Number of VFs (16-bit)
+    pub const NUM_VF: u8 = 0x14;
+    /// SR-IOV Function Dependency Link (8-bit)
+    pub const FDL: u8 = 0x16;
+    /// SR-IOV System Page Size (32-bit)
+    pub const SYS_PAGE_SIZE: u8 = 0x18;
+    /// SR-IOV BAR0 offset (32-bit)
+    pub const BAR0_OFFSET: u8 = 0x1C;
+    /// SR-IOV BAR1 offset (32-bit)
+    pub const BAR1_OFFSET: u8 = 0x20;
+    /// SR-IOV BAR2 offset (32-bit)
+    pub const BAR2_OFFSET: u8 = 0x24;
+    /// SR-IOV BAR3 offset (32-bit)
+    pub const BAR3_OFFSET: u8 = 0x28;
+    /// SR-IOV BAR4 offset (32-bit)
+    pub const BAR4_OFFSET: u8 = 0x2C;
+    /// SR-IOV BAR5 offset (32-bit)
+    pub const BAR5_OFFSET: u8 = 0x30;
+    /// SR-IOV VF Migration State Array Offset (32-bit)
+    pub const VF_MIGRATION_STATE: u8 = 0x3C;
+}
+
+/// SR-IOV Control register bits
+pub mod sriov_ctrl {
+    /// Enable SR-IOV
+    pub const ENABLE: u16 = 1 << 0;
+    /// Enable MSE (Memory Space Enable) for VFs
+    pub const MSE: u16 = 1 << 1;
+    /// Enable ARI (Alternate Routing ID)
+    pub const ARI_CAP: u16 = 1 << 2;
+    /// Enable IMS (Interrupt Mask Set) for VFs
+    pub const IMS_ENABLE: u16 = 1 << 4;
+    /// Enable PFARI (PF ARI Capability)
+    pub const PFARI_CAP: u16 = 1 << 5;
+    /// Enable VFARI (VF ARI Capability)
+    pub const VFARI_CAP: u16 = 1 << 6;
+    /// Enable VF Migration
+    pub const VF_MIGRATION: u16 = 1 << 7;
+}
+
+/// SR-IOV Status register bits
+pub mod sriov_status {
+    /// VF Memory Space Status
+    pub const VF_MEMORY_SPACE: u16 = 1 << 0;
+    /// VF ARI Capability Status
+    pub const VF_ARI_CAP: u16 = 1 << 1;
+    /// PF ARI Capability Status
+    pub const PF_ARI_CAP: u16 = 1 << 2;
+    /// VF Migration Status
+    pub const VF_MIGRATION_STATUS: u16 = 1 << 3;
+}
+
+/// AER (Advanced Error Reporting) capability register offsets.
+pub mod aer_cap {
+    /// AER Capability register (32-bit)
+    pub const CAP: u8 = 0x00;
+    /// AER UnCorrectable Error Status (32-bit)
+    pub const UNCERR_STATUS: u8 = 0x04;
+    /// AER UnCorrectable Error Mask (32-bit)
+    pub const UNCERR_MASK: u8 = 0x08;
+    /// AER UnCorrectable Error Severity (32-bit)
+    pub const UNCERR_SEVERITY: u8 = 0x0C;
+    /// AER Correctable Error Status (32-bit)
+    pub const CORERR_STATUS: u8 = 0x10;
+    /// AER Correctable Error Mask (32-bit)
+    pub const CORERR_MASK: u8 = 0x14;
+    /// AER Advanced Error Capabilities and Control (32-bit)
+    pub const ERR_CAP: u8 = 0x18;
+    /// AER Header Log (128-bit)
+    pub const HEADER_LOG: u8 = 0x1C;
+}
+
+/// Walk PCIe extended capabilities starting from `cap_ptr` (>= 0x100).
+///
+/// Returns a list of (capability_id, offset) pairs.
+pub fn walk_ext_capabilities(dev: &PciDevice, cap_ptr: u16) -> Vec<(u16, u16)> {
+    let mut caps = Vec::new();
+    let mut offset = cap_ptr;
+
+    while offset >= 0x100 && offset < 0xFFF {
+        let dword = dev.read_config_u32((offset & 0xFF) as u8);
+        let cap_id = (dword & 0xFFFF) as u16;
+        let next_ptr = ((dword >> 20) & 0xFFC) as u16; // bits 31:20, aligned to 4
+
+        if cap_id == 0 {
+            break; // Invalid capability
+        }
+
+        caps.push((cap_id, offset));
+
+        if next_ptr == 0 || next_ptr == offset {
+            break; // End of list or self-loop
+        }
+        offset = next_ptr;
+    }
+
+    caps
+}
+
+/// Find the PCIe extended capability offset for a given capability ID.
+pub fn find_ext_capability(dev: &PciDevice, cap_id: u16) -> Option<u16> {
+    // Read PCIe capabilities pointer from header type 0
+    let ext_cap_ptr = dev.read_config_u8(config::CAPABILITIES_PTR) as u16;
+    if ext_cap_ptr < 0x100 {
+        return None; // No PCIe extended capabilities
+    }
+
+    for (found_id, offset) in walk_ext_capabilities(dev, ext_cap_ptr) {
+        if found_id == cap_id {
+            return Some(offset);
+        }
+    }
+    None
+}
+
+/// Read SR-IOV capability information from a PCI device.
+///
+/// Returns `None` if the device doesn't have SR-IOV capability.
+pub fn read_sriov_info(dev: &PciDevice) -> Option<SriovInfo> {
+    let cap_offset = find_ext_capability(dev, ext_cap_id::SRIOV)?;
+    let control = dev.read_config_u16(((cap_offset + sriov_cap::CONTROL as u16) & 0xFF) as u8);
+    let status = dev.read_config_u16(((cap_offset + sriov_cap::STATUS as u16) & 0xFF) as u8);
+    let initial_vf = dev.read_config_u16(((cap_offset + sriov_cap::INITIAL_VF as u16) & 0xFF) as u8);
+    let total_vf = dev.read_config_u16(((cap_offset + sriov_cap::TOTAL_VF as u16) & 0xFF) as u8);
+    let num_vf = dev.read_config_u16(((cap_offset + sriov_cap::NUM_VF as u16) & 0xFF) as u8);
+
+    Some(SriovInfo {
+        cap_offset,
+        control,
+        status,
+        initial_vf,
+        total_vf,
+        num_vf,
+        enabled: (control & sriov_ctrl::ENABLE) != 0,
+    })
+}
+
+/// SR-IOV capability information.
+#[derive(Debug, Clone, Copy)]
+pub struct SriovInfo {
+    /// Offset of the SR-IOV capability in config space.
+    pub cap_offset: u16,
+    /// SR-IOV Control register value.
+    pub control: u16,
+    /// SR-IOV Status register value.
+    pub status: u16,
+    /// Number of initial VFs at power-on.
+    pub initial_vf: u16,
+    /// Total number of VFs supported.
+    pub total_vf: u16,
+    /// Number of VFs currently enabled.
+    pub num_vf: u16,
+    /// Whether SR-IOV is currently enabled.
+    pub enabled: bool,
+}
+
+/// Read AER (Advanced Error Reporting) capability information.
+pub fn read_aer_info(dev: &PciDevice) -> Option<AerInfo> {
+    let cap_offset = find_ext_capability(dev, ext_cap_id::AER)?;
+    let uncerr_status = dev.read_config_u32(((cap_offset + aer_cap::UNCERR_STATUS as u16) & 0xFF) as u8);
+    let uncerr_mask = dev.read_config_u32(((cap_offset + aer_cap::UNCERR_MASK as u16) & 0xFF) as u8);
+    let corerr_status = dev.read_config_u32(((cap_offset + aer_cap::CORERR_STATUS as u16) & 0xFF) as u8);
+    let corerr_mask = dev.read_config_u32(((cap_offset + aer_cap::CORERR_MASK as u16) & 0xFF) as u8);
+    let err_cap = dev.read_config_u32(((cap_offset + aer_cap::ERR_CAP as u16) & 0xFF) as u8);
+
+    Some(AerInfo {
+        cap_offset,
+        uncerr_status,
+        uncerr_mask,
+        corerr_status,
+        corerr_mask,
+        first_error_pointer: ((err_cap >> 24) & 0x1F) as u8,
+        ecrc_error_capable: (err_cap & 0x01) != 0,
+        ecrc_generate_capable: (err_cap & 0x02) != 0,
+    })
+}
+
+/// AER (Advanced Error Reporting) capability information.
+#[derive(Debug, Clone, Copy)]
+pub struct AerInfo {
+    /// Offset of the AER capability in config space.
+    pub cap_offset: u16,
+    /// Uncorrectable error status bits.
+    pub uncerr_status: u32,
+    /// Uncorrectable error mask bits.
+    pub uncerr_mask: u32,
+    /// Correctable error status bits.
+    pub corerr_status: u32,
+    /// Correctable error mask bits.
+    pub corerr_mask: u32,
+    /// First error pointer (for error logging).
+    pub first_error_pointer: u8,
+    /// Whether ECRC error detection is supported.
+    pub ecrc_error_capable: bool,
+    /// Whether ECRC error generation is supported.
+    pub ecrc_generate_capable: bool,
+}
+
 /// Offsets within an MSI capability block (relative to capability base).
 pub mod msi_cap {
     /// Capability ID (1 byte) + next ptr (1 byte) = 2 bytes header
