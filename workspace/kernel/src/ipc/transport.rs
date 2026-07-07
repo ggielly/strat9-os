@@ -126,9 +126,9 @@ pub enum IpcError {
     PermissionDenied,
     /// Generic transport failure.
     TransportFailed,
-    /// `validate_rip()` failed — invalid or non-executable instruction pointer.
+    /// `validate_rip()` failed : invalid or non-executable instruction pointer.
     InvalidRip,
-    /// Watchdog timeout — migration was not completed in time.
+    /// Watchdog timeout : migration was not completed in time.
     TimedOut,
 }
 
@@ -537,11 +537,14 @@ impl TransportManager {
                 )
             }
             TransportLevel::Mmu => {
-                // N3 MMU thread migration — requires sender/receiver task IDs.
+                // N3 MMU thread migration : requires sender/receiver task IDs.
                 // For now, fall back to N2 LockFree since N3 endpoint creation
                 // needs per-pair task context that TransportManager doesn't have.
                 // Full N3 integration is done via N3Transport::new() directly.
-                log::debug!("N3 MMU transport requested for pair {:?}, using N2 fallback", _pair);
+                log::debug!(
+                    "N3 MMU transport requested for pair {:?}, using N2 fallback",
+                    _pair
+                );
                 let ring = LockFreeRing::new(capacity.max(4), 2048)
                     .map_err(|_| IpcError::TransportFailed)?;
                 (

@@ -190,10 +190,10 @@ pub struct MemoryRegion {
 ///             buddy_init_region(region.base, region.size);
 ///         }
 ///         MemoryKind::Reserved => {
-///             // Skip — hardware MMIO (framebuffer, APIC, etc.)
+///             // Skip : hardware MMIO (framebuffer, APIC, etc.)
 ///         }
 ///         MemoryKind::Reclaim => {
-///             // Bootloader code — can be freed after init
+///             // Bootloader code : can be freed after init
 ///             reclaim_region(region.base, region.size);
 ///         }
 ///         _ => {}
@@ -209,13 +209,13 @@ impl MemoryKind {
     /// Null/invalid region (should not appear in the memory map).
     pub const Null: Self = Self(0);
 
-    /// Free usable memory — available for kernel allocation.
+    /// Free usable memory : available for kernel allocation.
     pub const Free: Self = Self(1);
 
-    /// Bootloader-reclaimable memory — free after boot, before first use.
+    /// Bootloader-reclaimable memory : free after boot, before first use.
     pub const Reclaim: Self = Self(2);
 
-    /// Reserved memory — hardware MMIO, firmware, ACPI NVS, etc.
+    /// Reserved memory : hardware MMIO, firmware, ACPI NVS, etc.
     /// Kernel must not allocate from these regions.
     pub const Reserved: Self = Self(3);
 }

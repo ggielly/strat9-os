@@ -24,7 +24,7 @@ pub fn xfs_crc32c(data: &[u8]) -> u32 {
 
 /// Calculate CRC32C with runtime CPU feature detection.
 ///
-/// Identical to `xfs_crc32c` — the `crc32c` crate already uses hardware
+/// Identical to `xfs_crc32c` : the `crc32c` crate already uses hardware
 /// acceleration when SSE4.2 is available at compile time.
 ///
 /// # Arguments

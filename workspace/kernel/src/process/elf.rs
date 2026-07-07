@@ -46,7 +46,7 @@ macro_rules! elf_trace {
 }
 
 // ---------------------------------------------------------------------------
-// ELF64 constants (relocation & dynamic tags — not covered by xmas-elf)
+// ELF64 constants (relocation & dynamic tags : not covered by xmas-elf)
 // ---------------------------------------------------------------------------
 
 const ET_EXEC: u16 = 2;
@@ -1220,10 +1220,13 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     use core::sync::atomic::Ordering;
 
     elf_trace!("[trace][elf] ring3_trampoline before current_task");
-    let Some(task) = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline") else {
+    let Some(task) = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
+    else {
         crate::e9_println!("[elf] ring3_trampoline: no current task, aborting");
         crate::serial_println!("[elf] ring3_trampoline: no current task, aborting");
-        loop { x86_64::instructions::hlt(); }
+        loop {
+            x86_64::instructions::hlt();
+        }
     };
     elf_trace!(
         "[trace][elf] ring3_trampoline enter tid={} name={}",
@@ -1324,9 +1327,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             );
         }
         if init_cnt == 0 {
-            elf_trace!(
-                "[trace][elf] WARNING: LAPIC timer init_count=0 : timer not started!"
-            );
+            elf_trace!("[trace][elf] WARNING: LAPIC timer init_count=0 : timer not started!");
         }
     }
 

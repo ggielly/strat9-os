@@ -423,8 +423,7 @@ impl LockFreeRing {
         let byte_offset = header_size + (slot_idx as u64) * slot_stride + DATA_OFFSET;
         let frame_idx = (byte_offset / 4096).min(self.frames.len().saturating_sub(1) as u64);
         let offset_in_frame = byte_offset % 4096;
-        let phys =
-            self.frames[frame_idx as usize].start_address.as_u64() + offset_in_frame;
+        let phys = self.frames[frame_idx as usize].start_address.as_u64() + offset_in_frame;
         let virt = unsafe { &(*self.slot_at(slot_idx)).data as *const _ };
         DmaBuffer {
             phys_addr: phys,
@@ -477,7 +476,7 @@ impl IpcNotification for LockFreeRing {
     }
 
     fn wait_notification(&self) -> Result<(), IpcError> {
-        // Phase 1 (N2a) : busy-poll briefly — hot cache, typically ~400 cycles.
+        // Phase 1 (N2a) : busy-poll briefly : hot cache, typically ~400 cycles.
         for _ in 0..64 {
             if self.has_data() {
                 return Ok(());

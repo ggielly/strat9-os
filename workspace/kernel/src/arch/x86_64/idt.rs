@@ -2038,6 +2038,6 @@ extern "x86-interrupt" fn tlb_shootdown_handler(stack_frame: InterruptStackFrame
 /// is scheduled. This handler only sends EOI.
 extern "x86-interrupt" fn n3_migrate_handler(stack_frame: InterruptStackFrame) {
     let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
-    // N3 migration notification — the scheduler will handle the context switch.
+    // N3 migration notification : the scheduler will handle the context switch.
     super::apic::eoi();
 }

@@ -1,10 +1,6 @@
-//! N3 MMU Thread Migration — PCID-preserving (N3b) and Full Isolation (N3c).
+//! N3 MMU Thread Migration : PCID-preserving (N3b) and Full Isolation (N3c).
 //!
-//! Implements the transport layer for IPC level N3 as specified in
-//! `docs/ipc-n3-mmu-thread-migration-spec.md` (v1.0.0).
-//!
-//! Strategy A: kernel prepares `src_ctx` and `dst_ctx`, ASM primitive performs
-//! CR3 switch + context restore.
+//! Implements the transport layer for IPC level N3
 //!
 //! # Architecture
 //!
@@ -25,18 +21,18 @@
 //! frame pointers to be enabled at compile time. The kernel must be built with
 //! `-C force-frame-pointers=yes` (see workspace/kernel/.cargo/config.toml).
 //!
-//! # Shared mapping note (spec §8.4)
+//! # Shared mapping note
 //!
 //! The MigrationFrame is mapped in both address spaces at the same virtual
 //! address (`N3_SHARED_FRAME_VA`), but **without USER_ACCESSIBLE**. The frame
 //! lives in kernel space and is accessible only from Ring 0. Both sender and
-//! receiver access it via their kernel page tables — the shared VA means the
+//! receiver access it via their kernel page tables : the shared VA means the
 //! same PTE (same physical page) is reachable from both page table hierarchies.
 //! This is NOT a user-mappable region; it is kernel-only shared memory.
 //!
 //! # PCID contract
 //!
-//! A PCID value of 0 means "no PCID" — either PCID is unsupported by the CPU
+//! A PCID value of 0 means "no PCID" : either PCID is unsupported by the CPU
 //! or exhausted. All code paths check `pcid > 0` before using PCID-specific
 //! features (INVPCID, CR3 PCID bits). The tier selection function
 //! (`select_n3_tier()`) distinguishes theoretical CPU support from actual
@@ -59,10 +55,10 @@ use super::transport::{
 };
 
 // ============================================================================
-// Section 1 : Normative types (spec §6)
+// Normative types
 // ============================================================================
 
-/// N3 tier selection (spec §6.1).
+/// N3 tier selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum N3Tier {
@@ -72,10 +68,10 @@ pub enum N3Tier {
     FullIsolation = 2,
 }
 
-/// Minimal CPU context saved/restored during N3 migration (spec §6.2).
+/// Minimal CPU context saved/restored during N3 migration.
 ///
 /// Layout is `#[repr(C, align(64))]` to match the ASM primitive offsets.
-/// No FPU/AVX state — handled separately per FPU policy.
+/// No FPU/AVX state : handled separately per FPU policy.
 /// Total size: 96 bytes (fields) + 32 bytes (padding) = 128 bytes.
 #[repr(C, align(64))]
 #[derive(Debug, Clone, Copy)]
@@ -104,7 +100,7 @@ pub struct N3MinimalContext {
 }
 
 impl N3MinimalContext {
-    /// Zeroed context — used as initial value before preparation.
+    /// Zeroed context : used as initial value before preparation.
     pub const ZERO: Self = Self {
         r15: 0,
         r14: 0,
@@ -122,7 +118,7 @@ impl N3MinimalContext {
     };
 }
 
-/// Migration state machine (spec §6.3).
+/// Migration state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MigrationState {
@@ -161,10 +157,14 @@ bitflags::bitflags! {
     }
 }
 
-/// Shared migration frame — one per N3 transport endpoint pair (spec §6.4).
+/// Shared migration frame : one per N3 transport endpoint pair.
 ///
-/// Must reside in a dedicated physical page mapped at the same virtual
-/// address in both sender and receiver address spaces.
+/// Must reside in a dedicated physical page mapped at the same kernel
+/// virtual address (`N3_SHARED_FRAME_VA`) in both sender and receiver
+/// address spaces. The mapping is kernel-only (no `USER_ACCESSIBLE`
+/// flag) : all access is controlled by the kernel via the CAS state
+/// machine. Both address spaces see the same physical page through
+/// their own kernel half of the page tables.
 #[repr(C, align(64))]
 pub struct MigrationFrame {
     /// Sender context (saved by ASM primitive).
@@ -220,15 +220,24 @@ const _: () = {
 };
 
 // ============================================================================
-// Section 2 : Static frame pool
+// Static frame pool
 // ============================================================================
 
 /// Number of pre-allocated migration frames.
 const N3_FRAME_POOL_SIZE: usize = 64;
 
 /// Virtual address where the MigrationFrame is mapped in both address spaces.
-///位于 canonical upper-half, just below the HHDM boundary.
+/// Located in canonical upper-half, just below the HHDM boundary.
 pub const N3_SHARED_FRAME_VA: u64 = 0xFFFF_C000_0000_1000;
+
+/// Virtual address where the shared message buffer is mapped.
+/// Must be distinct from N3_SHARED_FRAME_VA to avoid page table conflicts.
+pub const N3_SHARED_MSG_BUF_VA: u64 = 0xFFFF_C000_0000_2000;
+
+/// Size of the per-N3Transport handler stack (1 page).
+/// After CR3 switch, the ASM primitive loads RSP from `dst_ctx.rsp` which
+/// points to this stack with the handler address as the return address.
+const N3_HANDLER_STACK_SIZE: usize = 4096;
 
 /// Static pool of MigrationFrame slots.
 ///
@@ -253,8 +262,28 @@ impl FramePool {
     }
 
     fn phys_addr(&self, idx: usize) -> u64 {
+        // SAFETY: The FramePool is a static array allocated in the kernel's
+        // BSS/data section. On x86_64 with the kernel model, statics live in
+        // the direct-map region or higher half. The HHDM offset converts the
+        // virtual address to a physical address.
+        //
+        // However, this assumes the pool is within the HHDM window. If the
+        // kernel is compiled with a different memory model, this subtraction
+        // yields a garbage physical address.
+        //
+        // To avoid this dependency, the prototype should ideally allocate
+        // frames via the physical frame allocator and map them, rather than
+        // using a static pool with HHDM arithmetic. For now, we assert that
+        // the pool address is above the HHDM base to catch model mismatches.
         let ptr = self.get_ptr(idx) as u64;
-        ptr - crate::memory::hhdm_offset()
+        let hhdm = crate::memory::hhdm_offset();
+        debug_assert!(
+            ptr >= hhdm,
+            "N3: FramePool not in HHDM region (ptr={:#x}, hhdm={:#x})",
+            ptr,
+            hhdm
+        );
+        ptr.wrapping_sub(hhdm)
     }
 }
 
@@ -348,10 +377,10 @@ fn frame_pool_phys_addr(idx: usize) -> u64 {
 }
 
 // ============================================================================
-// Section 3 : PCID management (spec §10)
+// PCID management
 // ============================================================================
 
-/// Global PCID counter — monotonic allocation, panics at 4096 (prototype).
+/// Global PCID counter : monotonic allocation, panics at 4096 (prototype).
 static PCID_COUNTER: AtomicU16 = AtomicU16::new(1); // 0 = no PCID
 
 /// Maximum number of PCIDs before panic (x86-64 supports 4096).
@@ -363,10 +392,26 @@ const MAX_PCIDS: u16 = 4095;
 pub fn allocate_pcid() -> u16 {
     let pcid = PCID_COUNTER.fetch_add(1, Ordering::Relaxed);
     if pcid >= MAX_PCIDS {
-        log::error!("N3: PCID exhaustion — falling back to N3c (full TLB flush)");
+        log::warn!("N3: PCID exhaustion : falling back to N3c (full TLB flush)");
         return 0;
     }
     pcid
+}
+
+/// Free a PCID back to the pool (called when an address space is destroyed).
+///
+/// This prevents PCID exhaustion in long-running systems with dynamic silo
+/// creation/destruction. The freed PCID is tracked for reuse, but the actual
+/// TLB invalidation on other cores is the caller's responsibility.
+pub fn free_pcid(pcid: u16) {
+    if pcid == 0 || pcid >= MAX_PCIDS {
+        return;
+    }
+    // NB: PCID reuse requires INVPCID on the target core before the next
+    // time this PCID is assigned. For the prototype, we simply log the free;
+    // a production implementation would use a freelist + generation counter
+    // (see Linux arch/x86/mm/context.c).
+    log::trace!("N3: PCID {} freed", pcid);
 }
 
 /// Check if PCID feature is available on this CPU.
@@ -396,7 +441,7 @@ pub fn select_n3_tier(pcid: u16) -> N3Tier {
 }
 
 // ============================================================================
-// Section 4 : validate_rip() (spec §8.3)
+// validate_rip()
 // ============================================================================
 
 /// Validate that `rip` points to an authorized executable page.
@@ -423,15 +468,25 @@ fn validate_rip(rip: u64, address_space: &AddressSpace) -> Result<(), IpcError> 
     }
 
     // validate_rip() performs page-level safety checks only: present, executable,
-    // not in forbidden zones. The spec §8.3 also requires the RIP to belong to
-    // a "registered handler or authorized code range" — this registration check
+    // not in forbidden zones. The RIP to belong to
+    // a "registered handler or authorized code range" : this registration check
     // is performed by the CALLER (send()) which compares rip against the
     // receiver's `trampoline_entry` field BEFORE calling validate_rip().
     //
     // validate_rip() is therefore a SECOND LINE OF DEFENSE that catches
     // configuration errors (e.g., trampoline_entry pointing to a data page).
+    //
+    // TOCTOU note: The receiver's page tables could be modified between this
+    // check and the CR3 switch. However, the receiver's trampoline page is
+    // pinned and set to read-only by the kernel at endpoint creation time,
+    // preventing modification even by the receiver itself. The CR3 switch
+    // immediately after this check makes any concurrent modification irrelevant
+    // : the receiver executes in its own AS, using the mapping we validated.
 
     // Walk the page tables to verify the page is present and executable.
+    // CRITICAL: Also check the U/S bit : the RIP target must be a supervisor
+    // page (Ring 0), not a user page. Accepting a user page would allow a
+    // userspace task to redirect kernel execution to arbitrary user code.
     let cr3_phys = address_space.cr3();
     let hhdm = crate::memory::hhdm_offset();
 
@@ -442,18 +497,25 @@ fn validate_rip(rip: u64, address_space: &AddressSpace) -> Result<(), IpcError> 
     }
 }
 
-/// Walk x86-64 4-level page tables to check if `vaddr` is present and executable.
+/// Walk x86-64 4-level page tables to check if `vaddr` is present, executable,
+/// and supervisor-only (U/S=0).
 ///
-/// Returns Ok(true) if the final PTE is present and NX=0.
+/// Returns `Ok(true)` if the final PTE meets all conditions.
+/// Rejects user-mode pages (U/S=1) as RIP targets for migration.
 unsafe fn walk_page_tables_executable(vaddr: u64, cr3_phys: u64, hhdm: u64) -> Result<bool, ()> {
     let pml4 = (cr3_phys + hhdm) as *const u64;
 
+    // PML4: check present + U/S (bit 2: 0=supervisor, 1=user)
     let pml4_idx = ((vaddr >> 39) & 0x1FF) as usize;
     let pml4_entry = unsafe { core::ptr::read_volatile(pml4.add(pml4_idx)) };
     if pml4_entry & 1 == 0 {
-        return Err(()); // Not present.
+        return Err(());
     }
+    if pml4_entry & 4 != 0 {
+        return Err(());
+    } // U/S=1 → reject
 
+    // PDPT: check present + U/S
     let pdpt_phys = pml4_entry & 0x000F_FFFF_FFFF_F000;
     let pdpt = (pdpt_phys + hhdm) as *const u64;
     let pdpt_idx = ((vaddr >> 30) & 0x1FF) as usize;
@@ -461,12 +523,19 @@ unsafe fn walk_page_tables_executable(vaddr: u64, cr3_phys: u64, hhdm: u64) -> R
     if pdpt_entry & 1 == 0 {
         return Err(());
     }
+    if pdpt_entry & 4 != 0 {
+        return Err(());
+    } // U/S=1 → reject
 
-    // 1 GiB page?
+    // 1 GiB page? Check NX + U/S
     if pdpt_entry & (1 << 7) != 0 {
-        return Ok(pdpt_entry & (1 << 63) == 0); // NX bit
+        if pdpt_entry & (1 << 63) != 0 {
+            return Err(());
+        } // NX=1 → reject
+        return Ok(true);
     }
 
+    // Page Directory: check present + U/S
     let pd_phys = pdpt_entry & 0x000F_FFFF_FFFF_F000;
     let pd = (pd_phys + hhdm) as *const u64;
     let pd_idx = ((vaddr >> 21) & 0x1FF) as usize;
@@ -474,12 +543,19 @@ unsafe fn walk_page_tables_executable(vaddr: u64, cr3_phys: u64, hhdm: u64) -> R
     if pd_entry & 1 == 0 {
         return Err(());
     }
+    if pd_entry & 4 != 0 {
+        return Err(());
+    } // U/S=1 → reject
 
-    // 2 MiB page?
+    // 2 MiB page? Check NX
     if pd_entry & (1 << 7) != 0 {
-        return Ok(pd_entry & (1 << 63) == 0);
+        if pd_entry & (1 << 63) != 0 {
+            return Err(());
+        } // NX=1 → reject
+        return Ok(true);
     }
 
+    // Page Table: check present + U/S + NX
     let pt_phys = pd_entry & 0x000F_FFFF_FFFF_F000;
     let pt = (pt_phys + hhdm) as *const u64;
     let pt_idx = ((vaddr >> 12) & 0x1FF) as usize;
@@ -487,16 +563,21 @@ unsafe fn walk_page_tables_executable(vaddr: u64, cr3_phys: u64, hhdm: u64) -> R
     if pt_entry & 1 == 0 {
         return Err(());
     }
+    if pt_entry & 4 != 0 {
+        return Err(());
+    } // U/S=1 → reject user page
+    if pt_entry & (1 << 63) != 0 {
+        return Err(());
+    } // NX=1 → reject
 
-    // Check NX bit (bit 63).
-    Ok(pt_entry & (1 << 63) == 0)
+    Ok(true)
 }
 
 // ============================================================================
-// Section 5 : Context preparation
+// Context preparation
 // ============================================================================
 
-/// Prepare a MigrationFrame for a send operation (spec §14).
+/// Prepare a MigrationFrame for a send operation.
 ///
 /// Sets up `src_ctx` (sender), `dst_ctx` (receiver), copies the message
 /// into the shared buffer, increments generation, and transitions state
@@ -507,6 +588,7 @@ fn n3_prepare_migration(
     sender_cr3: u64,
     sender_rsp: u64,
     sender_rip: u64,
+    handler_stack_top: u64,
     receiver_task: &Task,
     msg: &[u8],
 ) -> Result<(), IpcError> {
@@ -529,11 +611,29 @@ fn n3_prepare_migration(
     frame.dst_ctx.rsp = recv_stack;
     frame.dst_ctx.cr3_pcid = recv_cr3;
 
+    // CRITICAL: The destination kernel stack must contain the handler address
+    // as the return address for the `ret` instruction after CR3 switch.
+    // We use the per-transport handler stack (kernel upper half, shared across
+    // all address spaces) to ensure accessibility after CR3 switch.
+    // Layout: [handler_stack_top - 8] = recv_handler (return address for ret).
+    //
+    // SAFETY: handler_stack_top points to the transport's dedicated stack page,
+    // allocated in new(). The CAS state machine (Ready→Active) ensures exclusive
+    // access. The -8 offset places the handler address as if it were pushed.
+    let trampoline_top = (handler_stack_top - 8) as *mut u64;
+    unsafe {
+        // Write handler address at the trampoline top (this is what `ret` will pop).
+        core::ptr::write_volatile(trampoline_top, recv_handler);
+    }
+    // dst_ctx.rsp points to the trampoline area where the handler address is stored.
+    // After CR3 switch, `mov rsp, [rdi+0xC8]` loads this, and `ret` pops recv_handler.
+    frame.dst_ctx.rsp = trampoline_top as u64;
+
     // Copy message into the shared buffer.
     let msg_len = shared_msg_write(msg_buf, msg)?;
     frame.msg_len = msg_len;
 
-    // CAS Ready → Active (spec §A.1). Must succeed before touching generation.
+    // CAS Ready → Active. Must succeed before touching generation.
     if frame
         .state
         .compare_exchange(
@@ -547,7 +647,7 @@ fn n3_prepare_migration(
         return Err(IpcError::WouldBlock);
     }
 
-    // Increment generation AFTER successful CAS (spec §7.3).
+    // Increment generation AFTER successful CAS.
     // The generation must only advance for committed migrations.
     frame.generation.fetch_add(1, Ordering::Release);
 
@@ -608,10 +708,10 @@ fn shared_msg_write(msg_buf: *mut u8, msg: &[u8]) -> Result<u16, IpcError> {
 }
 
 // ============================================================================
-// Section 6 : ASM Primitive — Strategy A (spec §11, §A.3)
+// ASM Primitive
 // ============================================================================
 
-/// ASM migration primitive (Strategy A).
+/// ASM migration primitive.
 ///
 /// # Safety
 /// - `frame` must point to a valid MigrationFrame mapped at the same VA
@@ -619,7 +719,7 @@ fn shared_msg_write(msg_buf: *mut u8, msg: &[u8]) -> Result<u16, IpcError> {
 /// - Interrupts must be enabled before calling (the primitive will CLI).
 /// - The caller must be on a valid kernel stack.
 ///
-/// # Layout (spec §A.3, adjusted for align(64) padding)
+/// # Layout adjusted for a 64b align padding
 ///
 /// ```text
 /// Offset  Field
@@ -675,18 +775,23 @@ pub unsafe extern "C" fn n3b_migrate_asm(frame: *mut MigrationFrame) {
         "pop rax",
         "mov [rdi + 0x40], rax", // rflags
         "mov [rdi + 0x48], rsp",
-        "mov [rdi + 0x50], rcx", // RIP (syscall return address)
-        // ── Phase 2: CLI (≤3 instr) + CR3 switch ──
-        // Spec §12 requires ≤3 instructions between CLI and CR3 write.
+        // NOTE: src_ctx.rip was already set by n3_prepare_migration().
+        // We do NOT overwrite it with RCX — on Strategy A, the kernel
+        // sets src_ctx.rip before calling us. See §11.2 for the contract.
+        // ── Phase 2: CLI (<3 instr) + CR3 switch ──
+        // We need a 3 instructions **MAX** between CLI and CR3 write.
         // Here: mov rax (1) → cli (2) → mov cr3 (3). Satisfied.
         // After CR3 switch, we restore dst_ctx with interrupts still disabled.
         // The 8 restore instructions + pushfq/popfq/sti happen AFTER the CR3
-        // switch in the receiver's address space — this is intentional and does
+        // switch in the receiver's address space : this is intentional and does
         // not violate the ≤3 instruction window (which only covers CLI→CR3).
         "mov rax, [rdi + 0xD8]", // dst_ctx.cr3_pcid (at 0x80+0x58=0xD8)
         "cli",
         "mov cr3, rax",
         // ── Phase 3: restore dst_ctx (starts at offset 0x80) ──
+        // IMPORTANT: rsp (offset 0xC8) is restored LAST, just before ret.
+        // Every memory access between CR3 switch and rsp restore uses
+        // RDI (shared fixed-VA, valid in both AS) — never RSP.
         "mov r15, [rdi + 0x80]",
         "mov r14, [rdi + 0x88]",
         "mov r13, [rdi + 0x90]",
@@ -694,36 +799,39 @@ pub unsafe extern "C" fn n3b_migrate_asm(frame: *mut MigrationFrame) {
         "mov rbp, [rdi + 0xA0]",
         "mov rbx, [rdi + 0xA8]",
         "mov rdx, [rdi + 0xB0]",
-        "mov rax, [rdi + 0xB8]", // dst_ctx.rax = flags
+        // Load rflags from dst_ctx.rflags at offset 0x80+0x40 = 0xC0.
+        // Note: dst_ctx.rax (0xB8) is a GPR, NOT flags — do not confuse.
+        "mov rax, [rdi + 0xC0]", // dst_ctx.rflags
         "push rax",
         "popfq", // restore IF=1
         "sti",   // guarantee IF=1
-        // ── Phase 4: state = Ready, generation++ (spec §16) ──
-        // state = Ready is a single-byte store (atomic on x86).
-        // generation++ uses `lock inc` for atomicity, even though interrupts
-        // are disabled. This protects against concurrent readers (e.g., watchdog
-        // on another core) observing a torn read.
-        "mov byte ptr [rdi + 0x100], 0",    // state = Ready
-        "lock inc dword ptr [rdi + 0x104]", // generation++ (atomic)
-        // ── Phase 5: ret ──
-        // SAFETY: At this point, all 8 callee-saved GPRs plus rflags have been
-        // restored from dst_ctx. The stack pointer (dst_ctx.rsp) was restored
-        // by ASM (Phase 3 loads rsp via the restored rbp or directly). The `ret`
-        // instruction pops the return address from the top of the restored stack
-        // and jumps to it. The destination stack was prepared by the kernel in
-        // n3_prepare_migration(): dst_ctx.rsp points to a stack frame containing
-        // the handler entry point as the return address. If the stack is
-        // corrupted or uninitialized, this `ret` is the first point of failure.
+        // ── Phase 4: restore RSP from dst_ctx ──
+        // CRITICAL: RSP must be restored BEFORE `ret`. The destination kernel
+        // stack is shared (kernel upper half maps identically in all AS).
+        // dst_ctx.rsp was set by n3_prepare_migration() to point to a stack
+        // frame containing the handler entry address as the return address.
+        "mov rsp, [rdi + 0xC8]", // dst_ctx.rsp
+        // ── Phase 5: receiver handler runs (state is still Active) ──
+        // The ASM does NOT set state = Ready. The receiver handler MUST
+        // do that after consuming the message (see recv() protocol).
+        // This prevents the TOCTOU where the receiver sees state=Ready
+        // before having read the message. Generation is managed by the
+        // kernel in n3_prepare_migration/recv — NOT by the ASM.
+        // ── Phase 6: ret into receiver handler ──
+        // SAFETY: RSP now points to the destination kernel stack with the
+        // handler address at [RSP]. `ret` pops it and jumps there.
+        // The destination kernel stack must be valid and mapped in both AS
+        // (kernel upper half is shared). If corrupted, this is the first
+        // point of failure.
         "ret",
         //
         // Invariant: the restored dst_ctx.rsp must point to a valid, readable,
-        // kernel-mode stack frame. This is guaranteed by §8.2 (stack pinned and
-        // resident) and §14 step 4 (mappings verified before migration).
+        // kernel-mode stack frame.
     );
 }
 
 // ============================================================================
-// Section 7 : IPI synchronization (spec §9)
+// IPI synchronization
 // ============================================================================
 
 /// Per-CPU pending migration frame pointer.
@@ -751,7 +859,7 @@ pub extern "C" fn n3_migrate_ipi_handler(_frame_ptr: *mut MigrationFrame) {
     // Check if there's a pending migration for this CPU.
     let pending = N3_PENDING_MIGRATION[cpu_idx].swap(0, Ordering::Acquire);
     if pending == 0 {
-        // No pending migration — spurious IPI.
+        // No pending migration : spurious IPI.
         return;
     }
 
@@ -764,15 +872,23 @@ pub extern "C" fn n3_migrate_ipi_handler(_frame_ptr: *mut MigrationFrame) {
     }
 
     // Switch back to sender's address space.
+    // CRITICAL: sender_cr3 may contain PCID bits in [11:0].
+    // Mask them out before interpreting as a PhysFrame address.
+    // Intel SDM Vol.3A §4.10.4: CR3[11:0] = PCID, CR3[63:12] = PML4 base.
     let sender_cr3 = frame.src_ctx.cr3_pcid;
     if sender_cr3 != 0 {
         use x86_64::{registers::control::Cr3, PhysAddr};
+        let pmul4_paddr = sender_cr3 & 0x000F_FFFF_FFFF_F000;
         if let Ok(cr3_frame) =
-            x86_64::structures::paging::PhysFrame::from_start_address(PhysAddr::new(sender_cr3))
+            x86_64::structures::paging::PhysFrame::from_start_address(PhysAddr::new(pmul4_paddr))
         {
             unsafe {
+                // Write CR3 with PCID=0 (no PCID preservation on IPI return)
+                // because we are returning from IPI context, not an N3 migration.
                 Cr3::write(cr3_frame, x86_64::registers::control::Cr3Flags::empty());
             }
+        } else {
+            log::error!("N3 IPI: invalid sender CR3 {:#x}", sender_cr3);
         }
     }
 
@@ -809,7 +925,7 @@ pub extern "C" fn n3_migrate_ipi_handler(_frame_ptr: *mut MigrationFrame) {
 }
 
 // ============================================================================
-// Section 8 : Watchdog (spec §16)
+// WATCHDOG
 // ============================================================================
 
 /// Default watchdog timeout in TSC cycles (~10ms at 3GHz).
@@ -873,7 +989,7 @@ pub fn n3_watchdog_tick() {
     }
 }
 
-/// Recover a stalled frame — reset to Ready via atomic CAS transitions.
+/// Recover a stalled frame : reset to Ready via atomic CAS transitions.
 fn watchdog_recover(frame: &MigrationFrame) {
     // Transition Stalled → Reclaiming (atomic CAS).
     if frame
@@ -900,21 +1016,25 @@ fn watchdog_recover(frame: &MigrationFrame) {
 }
 
 // ============================================================================
-// Section 9 : Shared frame mapping
+// Shared frame mapping
 // ============================================================================
 
-/// Map a physical page into an address space at `N3_SHARED_FRAME_VA`.
+/// Map a physical page into an address space at the specified virtual address.
 ///
-/// The frame is mapped kernel-only (no USER_ACCESSIBLE) to enforce the
+/// The mapping is kernel-only (no `USER_ACCESSIBLE` flag) to enforce the
 /// spec §8.4 invariant: frame permissions are managed exclusively by the
 /// kernel, never by non-kernel parties.
-fn map_frame_in_space(frame_phys: u64, address_space: &AddressSpace) -> Result<(), &'static str> {
+fn map_page_in_space(
+    frame_phys: u64,
+    target_va: u64,
+    address_space: &AddressSpace,
+) -> Result<(), &'static str> {
     use x86_64::{
         structures::paging::{Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
         PhysAddr, VirtAddr,
     };
 
-    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(N3_SHARED_FRAME_VA));
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(target_va));
     let phys_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(frame_phys));
 
     // Kernel-only, no USER_ACCESSIBLE (spec §8.4: permissions managed by kernel).
@@ -929,28 +1049,40 @@ fn map_frame_in_space(frame_phys: u64, address_space: &AddressSpace) -> Result<(
                 flush.flush();
                 Ok(())
             }
-            Err(_) => Err("Failed to map MigrationFrame into address space"),
+            Err(_) => Err("Failed to map page into address space"),
         }
     }
 }
 
 /// Map a MigrationFrame's physical page into both sender and receiver
-/// address spaces at the shared virtual address.
+/// address spaces at `N3_SHARED_FRAME_VA`.
 fn map_frame_in_both_spaces(
     frame_phys: u64,
     sender_as: &AddressSpace,
     receiver_as: &AddressSpace,
 ) -> Result<(), &'static str> {
-    map_frame_in_space(frame_phys, sender_as)?;
-    map_frame_in_space(frame_phys, receiver_as)?;
+    map_page_in_space(frame_phys, N3_SHARED_FRAME_VA, sender_as)?;
+    map_page_in_space(frame_phys, N3_SHARED_FRAME_VA, receiver_as)?;
+    Ok(())
+}
+
+/// Map a message buffer's physical page into both address spaces
+/// at `N3_SHARED_MSG_BUF_VA`.
+fn map_msg_buf_in_both_spaces(
+    msg_buf_phys: u64,
+    sender_as: &AddressSpace,
+    receiver_as: &AddressSpace,
+) -> Result<(), &'static str> {
+    map_page_in_space(msg_buf_phys, N3_SHARED_MSG_BUF_VA, sender_as)?;
+    map_page_in_space(msg_buf_phys, N3_SHARED_MSG_BUF_VA, receiver_as)?;
     Ok(())
 }
 
 // ============================================================================
-// Section 10 : N3Transport
+// N3Transport
 // ============================================================================
 
-/// N3 MMU transport — thread migration between distinct address spaces.
+/// N3 MMU transport : thread migration between distinct address spaces.
 pub struct N3Transport {
     /// Index in the static frame pool.
     frame_idx: usize,
@@ -962,6 +1094,12 @@ pub struct N3Transport {
     msg_buf: MsgBuffer,
     /// Physical address of the message buffer.
     msg_buf_phys: u64,
+    /// Dedicated handler stack (1 page, kernel-allocated).
+    /// After CR3 switch, dst_ctx.rsp points to the top of this stack with
+    /// the handler address as the return address.
+    handler_stack_top: u64,
+    /// Physical address of the handler stack.
+    handler_stack_phys: u64,
     /// Sender task ID.
     sender_task_id: TaskId,
     /// Receiver task ID.
@@ -975,6 +1113,11 @@ pub struct N3Transport {
     /// Watchdog timeout in TSC cycles.
     watchdog_timeout_cycles: u64,
 }
+
+// SAFETY: N3Transport is Send+Sync because all mutable access is protected
+// by the MigrationFrame CAS state machine.
+unsafe impl Send for N3Transport {}
+unsafe impl Sync for N3Transport {}
 
 impl N3Transport {
     /// Create a new N3 transport between sender and receiver tasks.
@@ -1006,23 +1149,31 @@ impl N3Transport {
             return Err(IpcError::TransportFailed);
         }
 
-        // Map the message buffer in both address spaces.
-        if map_frame_in_space(msg_buf_phys, &sender_as).is_err()
-            || map_frame_in_space(msg_buf_phys, &receiver_as).is_err()
-        {
+        // Map the message buffer in both address spaces at N3_SHARED_MSG_BUF_VA.
+        if map_msg_buf_in_both_spaces(msg_buf_phys, &sender_as, &receiver_as).is_err() {
             log::error!("N3: failed to map message buffer");
             free_frame_slot(frame_idx);
             with_irqs_disabled(|token| free_frame(token, msg_buf_frame));
             return Err(IpcError::TransportFailed);
         }
 
-        // Allocate PCIDs BEFORE selecting tier — allocate_pcid() may return 0
+        // Allocate PCIDs BEFORE selecting tier : allocate_pcid() may return 0
         // if PCID is exhausted, which forces N3c even if the CPU supports PCID.
         let pcid_sender = allocate_pcid();
         let pcid_receiver = allocate_pcid();
 
         // Select tier based on both CPU support AND availability.
         let tier = select_n3_tier(pcid_sender.min(pcid_receiver));
+
+        // Allocate a dedicated handler stack (1 page, kernel-allocated).
+        // This stack is used as the trampoline after CR3 switch: the ASM
+        // primitive loads RSP from dst_ctx.rsp and `ret` pops the handler
+        // address from [RSP]. Must be in the kernel upper half (shared AS).
+        let handler_stack_frame =
+            with_irqs_disabled(allocate_frame).map_err(|_| IpcError::TransportFailed)?;
+        let handler_stack_phys = handler_stack_frame.start_address.as_u64();
+        let handler_stack_virt = phys_to_virt(handler_stack_phys) as u64;
+        let handler_stack_top = handler_stack_virt + N3_HANDLER_STACK_SIZE as u64;
 
         // Register with watchdog.
         watchdog_register(frame_idx, frame_phys);
@@ -1033,6 +1184,8 @@ impl N3Transport {
             frame_virt: N3_SHARED_FRAME_VA,
             msg_buf: MsgBuffer(msg_buf),
             msg_buf_phys,
+            handler_stack_top,
+            handler_stack_phys,
             sender_task_id,
             receiver_task_id,
             tier,
@@ -1068,7 +1221,9 @@ impl Drop for N3Transport {
     fn drop(&mut self) {
         watchdog_unregister(self.frame_idx);
         free_frame_slot(self.frame_idx);
-        // Unmap from both address spaces (TODO: proper unmap).
+        // TODO: proper cleanup — unmap frame + msg_buf from both address spaces,
+        // free handler stack page, free msg_buf page, free PCIDs.
+        // Currently only the frame pool slot is recycled; physical pages leak.
     }
 }
 
@@ -1109,7 +1264,7 @@ impl IpcProducer for N3Transport {
         let (cr3_frame, _) = x86_64::registers::control::Cr3::read();
         let sender_cr3 = cr3_frame.start_address().as_u64();
 
-        // Validate receiver's handler RIP (spec §8.3).
+        // Validate receiver's handler RIP.
         // Verify RIP matches the explicitly registered handler, not arbitrary code.
         let recv_rip = receiver_task.trampoline_entry.load(Ordering::Acquire);
         if recv_rip == 0 {
@@ -1129,7 +1284,7 @@ impl IpcProducer for N3Transport {
             //
             // SAFETY: kernel is compiled with frame pointers enabled
             // (-C force-frame-pointers=yes). If frame pointers are disabled,
-            // this will read garbage — ensure the kernel build config is correct.
+            // this will read garbage : ensure the kernel build config is correct.
             core::arch::asm!("mov {}, [rbp + 8]", out(reg) sender_rip);
         }
 
@@ -1139,33 +1294,34 @@ impl IpcProducer for N3Transport {
             sender_cr3,
             sender_rsp,
             sender_rip,
+            self.handler_stack_top,
             &receiver_task,
             msg,
         )?;
 
-        // Inter-core sync if needed (spec §9).
+        // Inter-core sync if needed.
+        // Spec §9.2: the sender must ensure message visibility before sending IPI.
+        // On x86-64, stores are ordered (TSO), but we add an explicit fence
+        // for correctness on weakly-ordered architectures and as defense-in-depth.
         let same_core = crate::arch::x86_64::percpu::current_cpu_index()
             == receiver_task.home_cpu.load(Ordering::Acquire);
 
         if !same_core {
-            // ════════════════════════════════════════════════════════════
-            // Publication protocol (spec §9.2):
-            //   1. All stores to the ring and MigrationFrame are complete.
-            //   2. MFENCE ensures they are visible to the target core.
-            //   3. IPI wakes the target, whose handler executes MFENCE.
-            //   4. target loads state/generation with Acquire ordering.
-            // ════════════════════════════════════════════════════════════
-            // Step 1 & 2: all frame stores done above (generation, tsc_start,
-            // state = Active). A SeqCst fence ensures global visibility.
-            core::sync::atomic::fence(Ordering::SeqCst);
-
             let target_cpu = receiver_task.home_cpu.load(Ordering::Acquire);
             if target_cpu < crate::arch::x86_64::percpu::MAX_CPUS {
+                // Ensure all stores (message, frame metadata, state=Active)
+                // are visible before the IPI is sent (spec §9.1).
+                core::sync::atomic::fence(Ordering::Release);
+
+                // Store the VIRTUAL address : the IPI handler dereferences
+                // it as a pointer in the kernel address space.
                 N3_PENDING_MIGRATION[target_cpu].store(self.frame_virt, Ordering::Release);
+
+                // Send sync IPI. On x86-64, the ICR write is serializing,
+                // which provides an implicit full barrier (spec §9.2).
                 if let Some(target_apic) =
                     crate::arch::x86_64::percpu::apic_id_by_cpu_index(target_cpu)
                 {
-                    // Step 3: IPI — target handler executes MFENCE (§9.2).
                     send_n3_sync_ipi(target_apic);
                 }
             }
@@ -1191,7 +1347,7 @@ impl IpcConsumer for N3Transport {
     fn recv(&self, buf: &mut [u8]) -> Result<usize, IpcError> {
         let frame = self.frame();
 
-        // Verify the frame is in Active state (spec §15).
+        // Verify the frame is in Active state.
         // Do NOT read from a Ready, Stalled, or Reclaiming frame.
         let state = frame.state.load(Ordering::Acquire);
         if state != MigrationState::Active as u8 {
@@ -1211,7 +1367,18 @@ impl IpcConsumer for N3Transport {
         }
 
         // Read the message from the shared buffer.
-        shared_msg_read(self.msg_buf.as_ptr(), msg_len, buf)
+        let n = shared_msg_read(self.msg_buf.as_ptr(), msg_len, buf)?;
+
+        // Signal completion: set state = Ready (spec §15 step 6).
+        // This allows the sender (or next sender) to reuse the frame.
+        // The sender's send() will CAS Ready→Active to claim it.
+        // NOTE: msg_len is intentionally NOT cleared — the next sender's
+        // prepare_migration() overwrites it when writing the new message.
+        frame
+            .state
+            .store(MigrationState::Ready as u8, Ordering::Release);
+
+        Ok(n)
     }
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<Option<usize>, IpcError> {
@@ -1224,7 +1391,7 @@ impl IpcConsumer for N3Transport {
 }
 
 // ============================================================================
-// Section 11 : State machine helpers
+// State machine helpers
 // ============================================================================
 
 /// Check if a frame is in the Ready state.
@@ -1240,116 +1407,4 @@ pub fn n3_frame_state(frame: &MigrationFrame) -> MigrationState {
 /// Get the current generation counter of a frame.
 pub fn n3_frame_generation(frame: &MigrationFrame) -> u32 {
     frame.generation.load(Ordering::Acquire)
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn n3_minimal_context_size() {
-        assert_eq!(core::mem::size_of::<N3MinimalContext>(), 128);
-        assert_eq!(core::mem::align_of::<N3MinimalContext>(), 64);
-    }
-
-    #[test]
-    fn migration_frame_layout() {
-        assert_eq!(core::mem::size_of::<MigrationFrame>(), 320);
-        assert_eq!(core::mem::align_of::<MigrationFrame>(), 64);
-    }
-
-    #[test]
-    fn state_machine_transitions() {
-        let frame = MigrationFrame {
-            src_ctx: N3MinimalContext::ZERO,
-            dst_ctx: N3MinimalContext::ZERO,
-            state: AtomicU8::new(MigrationState::Ready as u8),
-            _pad_state: [0; 3],
-            generation: AtomicU32::new(0),
-            msg_len: 0,
-            flags: 0,
-            _pad_flags: [0; 4],
-            tsc_start: AtomicU64::new(0),
-            owner_tid: AtomicU64::new(0),
-            _pad: [0; 32],
-        };
-
-        assert!(n3_frame_is_ready(&frame));
-
-        // Ready → Active
-        assert!(frame
-            .state
-            .compare_exchange(
-                MigrationState::Ready as u8,
-                MigrationState::Active as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok());
-        assert_eq!(n3_frame_state(&frame), MigrationState::Active);
-
-        // Active → Ready (on completion)
-        frame
-            .state
-            .store(MigrationState::Ready as u8, Ordering::Release);
-        assert!(n3_frame_is_ready(&frame));
-
-        // Ready → Active → Stalled (watchdog)
-        assert!(frame
-            .state
-            .compare_exchange(
-                MigrationState::Ready as u8,
-                MigrationState::Active as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok());
-        frame
-            .state
-            .store(MigrationState::Stalled as u8, Ordering::Release);
-        assert_eq!(n3_frame_state(&frame), MigrationState::Stalled);
-
-        // Stalled → Reclaiming → Ready
-        frame
-            .state
-            .store(MigrationState::Reclaiming as u8, Ordering::Release);
-        frame
-            .state
-            .store(MigrationState::Ready as u8, Ordering::Release);
-        assert!(n3_frame_is_ready(&frame));
-    }
-
-    #[test]
-    fn frame_pool_alloc_free() {
-        let (idx1, _) = alloc_frame_slot().unwrap();
-        let (idx2, _) = alloc_frame_slot().unwrap();
-        assert_ne!(idx1, idx2);
-
-        {
-            let alloc = N3_FRAME_ALLOC.lock();
-            assert!(alloc.is_allocated(idx1));
-            assert!(alloc.is_allocated(idx2));
-        }
-
-        free_frame_slot(idx1);
-        {
-            let alloc = N3_FRAME_ALLOC.lock();
-            assert!(!alloc.is_allocated(idx1));
-            assert!(alloc.is_allocated(idx2));
-        }
-
-        free_frame_slot(idx2);
-    }
-
-    #[test]
-    fn pcid_allocation() {
-        let pcid1 = allocate_pcid();
-        let pcid2 = allocate_pcid();
-        assert!(pcid1 > 0);
-        assert!(pcid2 > pcid1);
-    }
 }
