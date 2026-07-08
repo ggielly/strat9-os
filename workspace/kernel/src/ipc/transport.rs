@@ -10,9 +10,9 @@
 use super::{
     lockfree_ring::{LockFreeRing, RingError, RingSlot},
     mailbox::IntrusiveMailbox,
-    n3::MigrationState,
+    n3::{MigrationState, N3Transport},
 };
-use crate::{silo::SiloId, sync::SpinLock};
+use crate::{process, silo::SiloId, sync::SpinLock};
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 // ---------------------------------------------------------------------------
@@ -370,8 +370,10 @@ const DECISION_MATRIX: [[TransportPolicyEntry; 3]; 3] = [
             ring_capacity: 256,
         },
         TransportPolicyEntry {
-            level: TransportLevel::LockFree,
-            ring_capacity: 256,
+            // User→User: maximum isolation via MMU thread migration.
+            // N3 provides hermetic Ring 3 isolation without shared memory.
+            level: TransportLevel::Mmu,
+            ring_capacity: 0,
         },
     ],
 ];
@@ -537,19 +539,33 @@ impl TransportManager {
                 )
             }
             TransportLevel::Mmu => {
-                // N3 MMU thread migration : requires sender/receiver task IDs.
-                // For now, fall back to N2 LockFree since N3 endpoint creation
-                // needs per-pair task context that TransportManager doesn't have.
-                // Full N3 integration is done via N3Transport::new() directly.
-                log::debug!(
-                    "N3 MMU transport requested for pair {:?}, using N2 fallback",
-                    _pair
-                );
-                let ring = LockFreeRing::new(capacity.max(4), 2048)
-                    .map_err(|_| IpcError::TransportFailed)?;
+                // N3 MMU thread migration.
+                //
+                // Creates a unidirectional N3Transport: sender = current task,
+                // receiver = first task found in the destination silo.
+                // For full-duplex N3, two transports must be created
+                // (one in each direction).
+                let sender = process::current_task_clone()
+                    .ok_or(IpcError::TransportFailed)?;
+                let sender_id = sender.id;
+
+                // Find a task in the destination silo.
+                let all_tasks = process::get_all_tasks()
+                    .ok_or(IpcError::TransportFailed)?;
+                let receiver_task = all_tasks
+                    .iter()
+                    .find(|t| {
+                        crate::silo::try_silo_id_for_task(t.id)
+                            .map_or(false, |sid| sid == _pair.1)
+                    })
+                    .cloned()
+                    .ok_or(IpcError::Disconnected)?;
+
+                let transport = N3Transport::new(sender_id, receiver_task.id)?;
+                let arc = Arc::new(transport);
                 (
-                    TransportEndpoint::LockFree(ring.clone()),
-                    TransportEndpoint::LockFree(ring),
+                    TransportEndpoint::Mmu(arc.clone()),
+                    TransportEndpoint::Mmu(arc),
                 )
             }
         };
