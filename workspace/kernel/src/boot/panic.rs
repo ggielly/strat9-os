@@ -148,7 +148,7 @@ fn collect_panic_lines(info: &PanicInfo) -> alloc::vec::Vec<alloc::string::Strin
     let mut lines = alloc::vec::Vec::new();
 
     // --- Title ---
-    lines.push("=== GURU MEDITATION :: KERNEL PANIC ===".into());
+    lines.push("=== GURU MEDiTATiON :: KERNEL PANiK ===".into());
     lines.push(String::new());
 
     // --- Panic location ---

@@ -1450,7 +1450,18 @@ impl IpcConsumer for N3Transport {
         }
 
         // Read the message from the shared buffer.
-        let n = shared_msg_read(self.msg_buf.as_ptr(), msg_len, buf)?;
+        // Use a guard to reset state=Ready even if the read fails,
+        // preventing the frame from being stuck in Active forever.
+        let n = match shared_msg_read(self.msg_buf.as_ptr(), msg_len, buf) {
+            Ok(n) => n,
+            Err(e) => {
+                // Reset state so the frame can be reused.
+                frame
+                    .state
+                    .store(MigrationState::Ready as u8, Ordering::Release);
+                return Err(e);
+            }
+        };
 
         // Signal completion: set state = Ready (spec §15 step 6).
         // This allows the sender (or next sender) to reuse the frame.
