@@ -22,7 +22,7 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use crate::ipc::lockfree_ring::LockFreeRing;
+use crate::ipc::lockfree_ring::{LockFreeRing, RingError};
 
 /// A pair of RX/TX rings for one RSS queue.
 pub struct RingPair {
@@ -64,52 +64,37 @@ impl NicDataPlane {
 
     /// Push a received packet into the RX ring for `queue_index`.
     ///
-    /// Called from the NIC IRQ handler.  Returns `Err` if the ring is full
-    /// (backpressure : drop the packet).
-    pub fn push_rx(&self, queue_index: usize, data: &[u8]) -> Result<(), ()> {
-        self.queues
-            .get(queue_index)
-            .ok_or(())?
-            .rx
-            .write(data)
-            .map_err(|_| ())
+    /// Called from the NIC IRQ handler.  Returns `Err(RingError::Full)` if
+    /// the ring is full (backpressure : drop the packet), or
+    /// `Err(RingError::InvalidParameters)` if the queue index is out of range.
+    pub fn push_rx(&self, queue_index: usize, data: &[u8]) -> Result<(), RingError> {
+        let pair = self.queues.get(queue_index).ok_or(RingError::InvalidParameters)?;
+        pair.rx.write(data)
     }
 
     /// Pop a received packet from the RX ring for `queue_index`.
     ///
     /// Called by strate-net.  Returns `Ok(None)` if the ring is empty.
-    pub fn pop_rx(&self, queue_index: usize, buf: &mut [u8]) -> Result<Option<usize>, ()> {
-        self.queues
-            .get(queue_index)
-            .ok_or(())?
-            .rx
-            .try_read(buf)
-            .map_err(|_| ())
+    pub fn pop_rx(&self, queue_index: usize, buf: &mut [u8]) -> Result<Option<usize>, RingError> {
+        let pair = self.queues.get(queue_index).ok_or(RingError::InvalidParameters)?;
+        pair.rx.try_read(buf)
     }
 
     /// Push an outbound packet into the TX ring for `queue_index`.
     ///
     /// Called by strate-net.  The NIC driver will read from the TX ring
     /// and transmit onto the wire.
-    pub fn push_tx(&self, queue_index: usize, data: &[u8]) -> Result<(), ()> {
-        self.queues
-            .get(queue_index)
-            .ok_or(())?
-            .tx
-            .write(data)
-            .map_err(|_| ())
+    pub fn push_tx(&self, queue_index: usize, data: &[u8]) -> Result<(), RingError> {
+        let pair = self.queues.get(queue_index).ok_or(RingError::InvalidParameters)?;
+        pair.tx.write(data)
     }
 
     /// Pop an outbound packet from the TX ring for `queue_index`.
     ///
     /// Called by the NIC driver.  Returns `Ok(None)` if the ring is empty.
-    pub fn pop_tx(&self, queue_index: usize, buf: &mut [u8]) -> Result<Option<usize>, ()> {
-        self.queues
-            .get(queue_index)
-            .ok_or(())?
-            .tx
-            .try_read(buf)
-            .map_err(|_| ())
+    pub fn pop_tx(&self, queue_index: usize, buf: &mut [u8]) -> Result<Option<usize>, RingError> {
+        let pair = self.queues.get(queue_index).ok_or(RingError::InvalidParameters)?;
+        pair.tx.try_read(buf)
     }
 
     /// Notify the consumer (strate-net) that new RX data is available.

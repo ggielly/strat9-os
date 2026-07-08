@@ -123,18 +123,26 @@ impl N1Event {
 // Kernel-internal N1 mailboxes
 // ---------------------------------------------------------------------------
 
-/// Mailbox for NIC → Scheduler notifications (link up/down, backpressure).
+/// Mailbox for NIC => scheduler notifications (link up/down, backpressure).
 ///
 /// The NIC IRQ handler sends events here; the scheduler polls or waits
 /// on this mailbox during idle loops.
-pub static NIC_SCHED_MAILBOX: IntrusiveMailbox = IntrusiveMailbox::new();
+pub static NIC_SCHED_MAILBOX: IntrusiveMailbox = IntrusiveMailbox::new_empty();
 
-/// Mailbox for Scheduler → NIC flow-control hints.
+/// Mailbox for Scheduler => NIC flow-control hints.
 ///
 /// When the scheduler detects that a silo is overloading the NIC, it
 /// sends a throttling hint here. The NIC driver checks this mailbox
 /// during `handle_interrupt()`.
-pub static SCHED_NIC_MAILBOX: IntrusiveMailbox = IntrusiveMailbox::new();
+pub static SCHED_NIC_MAILBOX: IntrusiveMailbox = IntrusiveMailbox::new_empty();
+
+/// Initialise N1 subsystem: pre-allocate mailbox nodes for IRQ-safe push.
+/// Must be called once at kernel init (after heap is available).
+pub fn init() {
+    NIC_SCHED_MAILBOX.preallocate_nodes(32);
+    SCHED_NIC_MAILBOX.preallocate_nodes(32);
+    log::info!("[n1] mailboxes initialised (32 pre-allocated slots each)");
+}
 
 // ---------------------------------------------------------------------------
 // Helper: send an N1 event (safe wrapper)
@@ -143,17 +151,23 @@ pub static SCHED_NIC_MAILBOX: IntrusiveMailbox = IntrusiveMailbox::new();
 n1_safe! {
     /// Send an N1 event to the NIC → Scheduler mailbox.
     /// Uses only safe Rust: `IntrusiveMailbox` push(), no raw pointers.
+    /// Logs a warning if the push fails (heap allocation failure).
     #[inline(always)] // N1 path
     pub fn notify_scheduler(event: N1Event) {
-        let _ = NIC_SCHED_MAILBOX.push(&event.encode());
+        if NIC_SCHED_MAILBOX.push(&event.encode()).is_err() {
+            log::warn!("[n1] notify_scheduler({:?}): mailbox push failed (OOM?)", event);
+        }
     }
 }
 
 n1_safe! {
     /// Send an N1 event to the Scheduler → NIC mailbox.
+    /// Logs a warning if the push fails (heap allocation failure).
     #[inline(always)] // N1 path
     pub fn notify_nic_driver(event: N1Event) {
-        let _ = SCHED_NIC_MAILBOX.push(&event.encode());
+        if SCHED_NIC_MAILBOX.push(&event.encode()).is_err() {
+            log::warn!("[n1] notify_nic_driver({:?}): mailbox push failed (OOM?)", event);
+        }
     }
 }
 

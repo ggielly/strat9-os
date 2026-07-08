@@ -318,10 +318,26 @@ impl LockFreeRing {
         Ok(len)
     }
 
-    /// Non-blocking write.  Equivalent to [`write`](Self::write).
+    /// Non-blocking write.  Fails immediately with `RingError::Full` if the
+    /// ring has no free slot, without spinning or waiting.
     #[inline]
     pub fn try_write(&self, data: &[u8]) -> Result<(), RingError> {
-        self.write(data)
+        let mask = self.capacity - 1;
+        let tail = self.tail().load(Ordering::Relaxed);
+        let head = self.head().load(Ordering::Acquire);
+        if ((tail + 1) & mask) == (head & mask) {
+            return Err(RingError::Full);
+        }
+        if data.len() > self.slot_size as usize {
+            return Err(RingError::MessageTooLarge);
+        }
+        let slot = self.slot_at(tail & mask);
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), (*slot).data.as_mut_ptr(), data.len());
+            (*slot).len.store(data.len() as u16, Ordering::Release);
+        }
+        self.tail().store(tail.wrapping_add(1), Ordering::Release);
+        Ok(())
     }
 
     /// Write multiple buffers in a single slot (scatter-gather).

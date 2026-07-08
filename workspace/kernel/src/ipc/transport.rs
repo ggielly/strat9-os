@@ -381,7 +381,9 @@ const DECISION_MATRIX: [[TransportPolicyEntry; 3]; 3] = [
 /// Per-transport performance counters.
 #[derive(Debug, Clone)]
 pub struct TransportStats {
-    /// Total messages sent.
+    /// Total transports created.
+    pub created: u64,
+    /// Total messages sent (incremented by syscall handler).
     pub sent: u64,
     /// Total messages received.
     pub received: u64,
@@ -394,6 +396,7 @@ pub struct TransportStats {
 impl TransportStats {
     const fn new(level: TransportLevel) -> Self {
         TransportStats {
+            created: 0,
             sent: 0,
             received: 0,
             errors: 0,
@@ -545,18 +548,15 @@ impl TransportManager {
                 // receiver = first task found in the destination silo.
                 // For full-duplex N3, two transports must be created
                 // (one in each direction).
-                let sender = process::current_task_clone()
-                    .ok_or(IpcError::TransportFailed)?;
+                let sender = process::current_task_clone().ok_or(IpcError::TransportFailed)?;
                 let sender_id = sender.id;
 
                 // Find a task in the destination silo.
-                let all_tasks = process::get_all_tasks()
-                    .ok_or(IpcError::TransportFailed)?;
+                let all_tasks = process::get_all_tasks().ok_or(IpcError::TransportFailed)?;
                 let receiver_task = all_tasks
                     .iter()
                     .find(|t| {
-                        crate::silo::try_silo_id_for_task(t.id)
-                            .map_or(false, |sid| sid == _pair.1)
+                        crate::silo::try_silo_id_for_task(t.id).map_or(false, |sid| sid == _pair.1)
                     })
                     .cloned()
                     .ok_or(IpcError::Disconnected)?;
@@ -579,7 +579,7 @@ impl TransportManager {
         };
 
         // Increment global transport creation counter
-        self.stats.lock().sent += 1;
+        self.stats.lock().created += 1;
 
         {
             let mut cache = self.cache.lock();

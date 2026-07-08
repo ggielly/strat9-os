@@ -24,15 +24,32 @@ use alloc::vec;
 pub(crate) static TRANSPORT_MANAGER: TransportManager = TransportManager::new();
 
 /// SYS_TRANSPORT_CREATE: create a transport between the caller's silo and `dst_silo`.
-pub fn sys_transport_create(dst_silo_val: u64, _config_flags: u64) -> Result<u64, SyscallError> {
+///
+/// `config_flags` low 4 bits encode the desired minimum `TransportLevel`:
+///   1 = TypeSafe, 2 = LockFree, 3 = Mmu.  0 = use default (LockFree).
+/// Bits 8..=23 encode `ring_capacity` (0 = default 256).
+pub fn sys_transport_create(dst_silo_val: u64, config_flags: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let src_silo_id = silo::try_silo_id_for_task(task.id).ok_or(SyscallError::BadHandle)?;
     let src_silo = SiloId::new(src_silo_id);
     let dst_silo = SiloId::new(dst_silo_val as u32);
 
+    // Decode config_flags: bits [3:0] = min_level, bits [23:8] = ring_capacity.
+    let level_raw = (config_flags & 0xF) as u8;
+    let min_level = match level_raw {
+        1 => TransportLevel::TypeSafe,
+        2 => TransportLevel::LockFree,
+        3 => TransportLevel::Mmu,
+        _ => TransportLevel::LockFree, // default
+    };
+    let ring_capacity = {
+        let cap = ((config_flags >> 8) & 0xFFFF) as u32;
+        if cap == 0 { 256 } else { cap }
+    };
+
     let config = TransportConfig {
-        min_level: TransportLevel::LockFree,
-        ring_capacity: Some(256),
+        min_level,
+        ring_capacity: Some(ring_capacity),
         slot_size: Some(2048),
     };
 
