@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+crc32c = { version = "0.6", default-features = false }
 fs-abstraction = { path = "../fs-abstraction", default-features = false } #TODO HERE ! FIX ME
 
 [dev-dependencies]

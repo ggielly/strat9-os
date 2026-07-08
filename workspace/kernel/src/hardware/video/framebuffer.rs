@@ -15,7 +15,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    framebuffer::{CanvasBuffer, DirtyRect, DirtyRectSet, FramebufferOps, MAX_DIRTY_RECTS},
+    framebuffer::{CanvasBuffer, DirtyRectSet, FramebufferOps, MAX_DIRTY_RECTS},
     hardware::virtio::gpu,
     memory::{self, phys_to_virt},
 };

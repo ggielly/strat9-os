@@ -239,6 +239,13 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
+    // Register with the NIC subsystem so the IRQ handler can wake us.
+    if net_register().is_ok() {
+        log("[strate-net] Registered with NIC IRQ dispatch\n");
+    } else {
+        log("[strate-net] NIC registration failed (will poll)\n");
+    }
+
     let mut strate = NetworkStrate::new(mac);
     strate.serve(port);
 }

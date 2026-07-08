@@ -1,4 +1,4 @@
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 pub mod generic;
 pub mod gpu;
@@ -144,7 +144,7 @@ impl DirtyRectSet {
         self.rects[0].include(next.x0, next.y0, next.width(), next.height());
     }
 
-    pub fn iter(&self) -> DirtyRectIter {
+    pub fn iter(&self) -> DirtyRectIter<'_> {
         DirtyRectIter { set: self, idx: 0 }
     }
 }

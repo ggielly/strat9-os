@@ -103,7 +103,7 @@ pub fn push_completion_for_ring(
     }
 
     // Decrement the in-flight counter
-    let _ = ring.in_flight.fetch_update(
+    let _ = ring.in_flight.try_update(
         core::sync::atomic::Ordering::Relaxed,
         core::sync::atomic::Ordering::Relaxed,
         |value| value.checked_sub(1),

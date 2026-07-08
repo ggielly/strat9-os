@@ -1,8 +1,8 @@
-//! Input scheme — exposes raw keyboard and mouse events to userspace.
+//! Input scheme : exposes raw keyboard and mouse events to userspace.
 //!
 //! Mounted at `/dev/input`. Provides two virtual files:
-//!   `/dev/input/kbd`  — raw keyboard scancodes (1 byte per event)
-//!   `/dev/input/mouse` — raw mouse events (7 bytes per event)
+//!   `/dev/input/kbd`  : raw keyboard scancodes (1 byte per event)
+//!   `/dev/input/mouse` : raw mouse events (7 bytes per event)
 //!
 //! The scheme reads from the kernel-internal ring buffers (keyboard.rs,
 //! mouse.rs) which are filled by PS/2 and USB HID IRQ handlers.

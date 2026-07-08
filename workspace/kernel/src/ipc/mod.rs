@@ -29,24 +29,47 @@
 //! - `SYS_CHAN_RECV`   (222) : receive (blocking)
 //! - `SYS_CHAN_TRY_RECV` (223) : receive (non-blocking)
 //! - `SYS_CHAN_CLOSE`  (224) : destroy the channel
+//!
+//! ## 3. Transport layer (N1/N2/N3)
+//!
+//! The [`transport`] module provides a unified trait-based IPC transport
+//! layer with three levels of isolation (TypeSafe, LockFree, MMU).
+//! [`lockfree_ring`] implements the N2 SPSC ring buffer.
+//! [`mailbox`] implements the N1 intrusive mailbox.
 
 pub mod channel;
 pub mod lifecycle;
+pub mod lockfree_ring;
+pub mod mailbox;
 pub mod message;
+pub mod n1;
+pub mod n3;
 pub mod port;
 pub mod reply;
 pub mod semaphore;
 pub mod shared_ring;
 pub mod test;
+pub mod transport;
 
 pub use channel::{
     channel, create_channel, destroy_channel, get_channel, ChanId, ChannelError, Receiver, Sender,
     SyncChan,
 };
 pub use lifecycle::{MultiHandleDestroyError, MultiHandleResource};
+pub use lockfree_ring::LockFreeRing;
+pub use mailbox::IntrusiveMailbox;
 pub use message::IpcMessage;
+pub use n3::{
+    allocate_pcid, pcid_available, N3MinimalContext, N3Tier, MigrationFrame, MigrationState,
+    N3Transport, N3_SHARED_FRAME_VA,
+};
 pub use port::{create_port, destroy_port, get_port, IpcError, Port, PortId};
 pub use semaphore::{
     create_semaphore, destroy_semaphore, get_semaphore, PosixSemaphore, SemId, SemaphoreError,
 };
 pub use shared_ring::{create_ring, destroy_ring, get_ring, RingError, RingId, SharedRing};
+pub use transport::{
+    IpcConsumer, IpcNotification, IpcProducer, IpcTransport, TransportCapabilities,
+    TransportConfig, TransportCreateResult, TransportEndpoint, TransportId, TransportLevel,
+    TransportManager,
+};

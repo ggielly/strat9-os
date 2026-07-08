@@ -33,6 +33,7 @@ members = [
     "workspace/components/strate-init",
     "workspace/components/strate-console-admin",
     "workspace/components/strate-input",
+    "workspace/components/strate-graphical",
     "workspace/components/netutils/dhcp-client",
     "workspace/components/netutils/ping",
     "workspace/components/netutils/telnetd",
@@ -42,7 +43,7 @@ members = [
     "workspace/components/musl-compat",
 ]
 exclude = [
-    "workspace/components/strate-fs-xfs", # Missing fs-abstraction dependency
+    "workspace/components/strate-fs-xfs", # Missing fs-abstraction dependency : TODO
 ]
 resolver = "2"
 
@@ -90,13 +91,13 @@ opt-level = 0      # No optimization for faster compilation
 debug = 2          # Full debug information (maximum)
 strip = false      # Keep all symbols
 panic = "abort"    # no_std kernel targets cannot use unwind
-incremental = true # Faster recompilation
+incremental = true # Faster rebuild
 lto = false        # Faster compilation
 
 [profile.dev-opt]
 inherits = "dev"
 opt-level = 2      # Better runtime performance while keeping debug symbols
 debug = 2          # Keep full symbols for debugging
-strip = false      # Keep all symbols
+strip = false      # Keep full symbols
 lto = false        # Keep link times reasonable for iterative work
 incremental = true # Preserve fast rebuild behavior

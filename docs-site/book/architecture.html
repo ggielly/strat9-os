@@ -212,7 +212,7 @@
 <tr><td><strong>Boot</strong></td><td><code>boot/</code></td><td>Assembly stubs (16→64 bit), Limine handoff, early init</td></tr>
 <tr><td><strong>Scheduler</strong></td><td><code>process/scheduler/</code></td><td>Per-CPU run queues, multi-class scheduling (RT FIFO/RR, Normal, Idle)</td></tr>
 <tr><td><strong>Memory</strong></td><td><code>memory/</code></td><td>Buddy allocator, slab heap, COW, page tables, vmalloc</td></tr>
-<tr><td><strong>IPC</strong></td><td><code>ipc/</code></td><td>Typed MPMC channels, shared rings, semaphores, futexes</td></tr>
+<tr><td><strong>IPC</strong></td><td><code>ipc/</code></td><td>3-level Transport Manager (TypeSafe/LockFree/MMU), typed channels, shared rings, semaphores</td></tr>
 <tr><td><strong>Capability</strong></td><td><code>capability.rs</code></td><td>Unforgeable tokens, per-resource refcounting</td></tr>
 <tr><td><strong>Silo</strong></td><td><code>silo/</code></td><td>Process isolation containers with resource quotas</td></tr>
 <tr><td><strong>VFS</strong></td><td><code>vfs/</code></td><td>Virtual filesystem with scheme-based I/O</td></tr>

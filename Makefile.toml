@@ -14,7 +14,7 @@ STRAT9_TAP_IFACE = "strat9tap0"
 STRAT9_UPLINK_IFACE = "eth0"
 
 # =============================================================================
-# Build Tasks - limine bootloader
+# Build Tasks - Bootloader & Toolchain
 # =============================================================================
 
 [tasks.setup-limine]
@@ -22,14 +22,12 @@ description = "Download and setup Limine bootloader"
 command = "bash"
 args = ["tools/scripts/setup-limine.sh"]
 
-
 [tasks.setup-musl]
 description = "Clone/update external musl"
 script_runner = "@shell"
 script = ['''
     root_dir="$(pwd)"
     musl_dir="$root_dir/sdk/musl"
-
     if [ ! -d "$musl_dir/.git" ]; then
         rm -rf "$musl_dir"
         git clone git://git.musl-libc.org/musl "$musl_dir"
@@ -43,15 +41,10 @@ script_runner = "@shell"
 script = ['''
 echo "Building musl for x86_64-unknown-strat9 target..."
 cd sdk/musl
-
-# Configure musl for x86_64 (native, no cross-compile prefix)
 if [ ! -f config.mak ]; then
     ./configure CC=gcc --disable-shared
 fi
-
-# Build musl
 make -j$(nproc)
-
 echo ""
 echo "=== Musl Build Complete ==="
 echo ""
@@ -59,7 +52,6 @@ libmusl="lib/libc.a"
 if [ -f "$libmusl" ]; then
     mkdir -p ../../target/x86_64-unknown-strat9/release/
     cp "$libmusl" ../../target/x86_64-unknown-strat9/release/libc.a
-    # Also provide librelibc.a so we don't break existing link flags immediately
     cp "$libmusl" ../../target/x86_64-unknown-strat9/release/librelibc.a
     size=$(stat -c%s "$libmusl" 2>/dev/null || stat -f%z "$libmusl")
     size_kb=$((size / 1024))
@@ -71,19 +63,8 @@ fi
 echo ""
 ''']
 
-# Legacy bootloader (kept for reference, not used with Limine)
-[tasks.assemble-bootloader]
-description = "Assemble the bootloader (NASM stage1.asm which includes stage2.asm) - LEGACY"
-command = "powershell"
-args = [
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    "tools/scripts/assemble-bootloader.ps1",
-]
-
 # =============================================================================
-# Build tasks - Kernel 
+# Build Tasks - Kernel
 # =============================================================================
 
 [tasks.kernel]
@@ -110,10 +91,6 @@ cwd = "workspace/kernel"
 command = "cargo"
 args = ["build", "--profile", "dev-opt", "--target", "${KERNEL_TARGET}"]
 
-[tasks.kernel-debug]
-description = "Alias: build the Strat9 kernel (debug profile)"
-alias = "kernel"
-
 [tasks.check]
 description = "Check kernel code without building"
 cwd = "workspace/kernel"
@@ -126,756 +103,35 @@ cwd = "workspace/kernel"
 command = "cargo"
 args = ["clippy", "--target", "${KERNEL_TARGET}"]
 
-[tasks.clippy-strict]
-description = "Run strict clippy checks on kernel code"
-cwd = "workspace/kernel"
-command = "cargo"
-args = [
-    "clippy",
-    "--target",
-    "${KERNEL_TARGET}",
-    "--",
-    "-D",
-    "warnings",
-    "-W",
-    "clippy::all",
-    "-W",
-    "clippy::undocumented_unsafe_blocks",
-    "-W",
-    "clippy::unwrap_used",
-    "-W",
-    "clippy::expect_used",
-    "-W",
-    "clippy::panic",
-    "-W",
-    "clippy::todo",
-    "-W",
-    "clippy::unimplemented",
-]
-
-[tasks.miri-test]
-description = "Install Miri and run selected test suites"
-cwd = "."
-script_runner = "@shell"
-script = """
-set -euo pipefail
-rustup +nightly component add miri
-cargo +nightly miri setup
-cargo +nightly miri test -p strat9-syscall
-cargo +nightly miri test -p strat9-bus-drivers
-"""
-
-[tasks.quality-strict]
-description = "Run strict clippy and selected miri tests"
-dependencies = ["clippy-strict", "miri-test"]
-
 [tasks.fmt]
 description = "Format all code"
 command = "cargo"
 args = ["fmt", "--all"]
 
 # =============================================================================
-# Image generation - Bootable disk image
+# Image generation
 # =============================================================================
 
-[tasks.strate-ext4]
-description = "Build the EXT4 userspace filesystem component (debug profile)"
-cwd = "workspace/components/strate-fs-ext4"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-fs-ramfs]
-description = "Build the RAM filesystem component (debug profile)"
-cwd = "workspace/components/strate-fs-ramfs"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-silo-test]
-
-
-description = "Build the first userspace init/test component (debug profile)"
-cwd = "workspace/components/strate-silo-test"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-[tasks.strate-mem-test]
-description = "Build the memory stress test userspace component (debug profile)"
-cwd = "workspace/components/strate-mem-test"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-init]
-description = "Build the init process (debug profile)"
-cwd = "workspace/components/strate-init"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-net]
-description = "Build the network silo (debug profile)"
-cwd = "workspace/components/strate-net"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-bus]
-description = "Build the bus silo (debug profile)"
-cwd = "workspace/components/strate-bus"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-wasm]
-description = "Build the wasm runtime silo (debug profile)"
-cwd = "workspace/components/strate-wasm"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-webrtc]
-description = "Build the webrtc-native graphics silo (debug profile)"
-cwd = "workspace/components/strate-webrtc"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-console-admin]
-
-
-description = "Build the console-admin silo (debug profile)"
-cwd = "workspace/components/strate-console-admin"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.dhcp-client]
-description = "Build the DHCP client monitor (debug profile)"
-cwd = "workspace/components/netutils/dhcp-client"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.ping]
-description = "Build the ping utility (debug profile)"
-cwd = "workspace/components/netutils/ping"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.telnetd]
-description = "Build the telnet server utility (debug profile)"
-cwd = "workspace/components/netutils/telnetd"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.udp-tool]
-description = "Build the UDP scheme utility (debug profile)"
-cwd = "workspace/components/netutils/udp-tool"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-web-admin]
-description = "Build the web-admin silo (debug profile)"
-cwd = "workspace/components/strate-web-admin"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-[tasks.strate-ext4-release]
-description = "Build the EXT4 userspace filesystem component (release profile)"
-cwd = "workspace/components/strate-fs-ext4"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-fs-ramfs-release]
-description = "Build the RAM filesystem component (release profile)"
-cwd = "workspace/components/strate-fs-ramfs"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-silo-test-release]
-
-
-description = "Build the first userspace init/test component (release profile)"
-cwd = "workspace/components/strate-silo-test"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-[tasks.strate-mem-test-release]
-description = "Build the memory stress test userspace component (release profile)"
-cwd = "workspace/components/strate-mem-test"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-init-release]
-description = "Build the init process (release profile)"
-cwd = "workspace/components/strate-init"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-net-release]
-description = "Build the network silo (release profile)"
-cwd = "workspace/components/strate-net"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-bus-release]
-description = "Build the bus silo (release profile)"
-cwd = "workspace/components/strate-bus"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-wasm-release]
-description = "Build the wasm runtime silo (release profile)"
-cwd = "workspace/components/strate-wasm"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-webrtc-release]
-description = "Build the webrtc-native graphics silo (release profile)"
-cwd = "workspace/components/strate-webrtc"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-console-admin-release]
-
-
-description = "Build the console-admin silo (release profile)"
-cwd = "workspace/components/strate-console-admin"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.dhcp-client-release]
-description = "Build the DHCP client monitor (release profile)"
-cwd = "workspace/components/netutils/dhcp-client"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.ping-release]
-description = "Build the ping utility (release profile)"
-cwd = "workspace/components/netutils/ping"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.telnetd-release]
-description = "Build the telnet server utility (release profile)"
-cwd = "workspace/components/netutils/telnetd"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.udp-tool-release]
-description = "Build the UDP scheme utility (release profile)"
-cwd = "workspace/components/netutils/udp-tool"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-web-admin-release]
-description = "Build the web-admin silo (release profile)"
-cwd = "workspace/components/strate-web-admin"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--release",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-[tasks.strate-ext4-dev-opt]
-description = "Build the EXT4 userspace filesystem component (dev-opt profile)"
-cwd = "workspace/components/strate-fs-ext4"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-fs-ramfs-dev-opt]
-description = "Build the RAM filesystem component (dev-opt profile)"
-cwd = "workspace/components/strate-fs-ramfs"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-silo-test-dev-opt]
-description = "Build the first userspace init/test component (dev-opt profile)"
-cwd = "workspace/components/strate-silo-test"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-[tasks.strate-mem-test-dev-opt]
-description = "Build the memory stress test userspace component (dev-opt profile)"
-cwd = "workspace/components/strate-mem-test"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-init-dev-opt]
-description = "Build the init process (dev-opt profile)"
-cwd = "workspace/components/strate-init"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-net-dev-opt]
-description = "Build the network silo (dev-opt profile)"
-cwd = "workspace/components/strate-net"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-bus-dev-opt]
-description = "Build the bus silo (dev-opt profile)"
-cwd = "workspace/components/strate-bus"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-wasm-dev-opt]
-description = "Build the wasm runtime silo (dev-opt profile)"
-cwd = "workspace/components/strate-wasm"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-webrtc-dev-opt]
-description = "Build the webrtc-native graphics silo (dev-opt profile)"
-cwd = "workspace/components/strate-webrtc"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-console-admin-dev-opt]
-description = "Build the console-admin silo (dev-opt profile)"
-cwd = "workspace/components/strate-console-admin"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.dhcp-client-dev-opt]
-description = "Build the DHCP client monitor (dev-opt profile)"
-cwd = "workspace/components/netutils/dhcp-client"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.ping-dev-opt]
-description = "Build the ping utility (dev-opt profile)"
-cwd = "workspace/components/netutils/ping"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.telnetd-dev-opt]
-description = "Build the telnet server utility (dev-opt profile)"
-cwd = "workspace/components/netutils/telnetd"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.udp-tool-dev-opt]
-description = "Build the UDP scheme utility (dev-opt profile)"
-cwd = "workspace/components/netutils/udp-tool"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
-[tasks.strate-web-admin-dev-opt]
-description = "Build the web-admin silo (dev-opt profile)"
-cwd = "workspace/components/strate-web-admin"
-command = "cargo"
-args = [
-    "build",
-    "--target",
-    "x86_64-unknown-none",
-    "--profile",
-    "dev-opt",
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "build-std-features=compiler-builtins-mem",
-]
-
 [tasks.limine-image]
-
-description = "Create bootable ISO/IMG with Limine + kernel"
+description = "Create bootable ISO/IMG with Limine + kernel (debug)"
 dependencies = [
     "build-musl",
     "setup-limine",
     "kernel",
-    "strate-ext4",
-    "strate-fs-ramfs",
-    "strate-init",
-    "strate-console-admin",
-    "strate-net",
-    "strate-bus",
-    "strate-wasm",
-    "strate-webrtc",
-    "dhcp-client",
-    "ping",
-    "telnetd",
-    "udp-tool",
-    "strate-web-admin",
+    "strate-ext4-release",
+    "strate-fs-ramfs-release",
+    "strate-init-release",
+    "strate-console-admin-release",
+    "strate-graphical-release",
+    "strate-net-release",
+    "strate-bus-release",
+    "strate-wasm-release",
+    "strate-webrtc-release",
+    "dhcp-client-release",
+    "ping-release",
+    "telnetd-release",
+    "udp-tool-release",
+    "strate-web-admin-release",
 ]
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_INCLUDE_TESTS = "0" }
 script_runner = "@shell"
@@ -883,75 +139,17 @@ script = ['''
 bash tools/scripts/create-limine-image.sh
 ''']
 
-[tasks.limine-image-test]
-
-description = "Create bootable ISO/IMG with Limine + kernel (self-tests enabled)"
-dependencies = [
-    "build-musl",
-    "setup-limine",
-    "kernel-test",
-    "strate-ext4",
-    "strate-fs-ramfs",
-    "strate-silo-test",
-    "strate-mem-test",
-    "strate-init",
-    "strate-console-admin",
-    "strate-net",
-    "strate-bus",
-    "strate-wasm",
-    "strate-webrtc",
-    "dhcp-client",
-    "ping",
-    "telnetd",
-    "udp-tool",
-    "strate-web-admin",
-]
-env = { STRAT9_IMAGE_BASENAME = "strat9-os-test", STRAT9_INCLUDE_TESTS = "1" }
-script_runner = "@shell"
-script = ['''
-bash tools/scripts/create-limine-image.sh
-''']
-
-[tasks.limine-image-dev-opt]
-
-description = "Create bootable ISO/IMG with Limine + kernel (dev-opt profile)"
-dependencies = [
-    "build-musl",
-    "setup-limine",
-    "kernel-dev-opt",
-    "strate-ext4-dev-opt",
-    "strate-fs-ramfs-dev-opt",
-    "strate-init-dev-opt",
-    "strate-console-admin-dev-opt",
-    "strate-net-dev-opt",
-    "strate-bus-dev-opt",
-    "strate-wasm-dev-opt",
-    "strate-webrtc-dev-opt",
-    "dhcp-client-dev-opt",
-    "ping-dev-opt",
-    "telnetd-dev-opt",
-    "udp-tool-dev-opt",
-    "strate-web-admin-dev-opt",
-]
-env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "dev-opt", STRAT9_INCLUDE_TESTS = "0" }
-script_runner = "@shell"
-script = ['''
-bash tools/scripts/create-limine-image.sh
-''']
-
 [tasks.limine-image-release]
-
-description = "Create bootable ISO/IMG with Limine + kernel (release profile)"
+description = "Create bootable ISO/IMG with Limine + kernel (release)"
 dependencies = [
     "build-musl",
     "setup-limine",
     "kernel-release",
     "strate-ext4-release",
     "strate-fs-ramfs-release",
-    "strate-silo-test-release",
-    "strate-mem-test-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-wasm-release",
@@ -968,828 +166,352 @@ script = ['''
 bash tools/scripts/create-limine-image.sh
 ''']
 
-# Legacy disk image (kept for reference)
-[tasks.disk-image]
-description = "Create bootable disk image (.img) with bootloader + kernel - LEGACY"
-dependencies = ["assemble-bootloader", "kernel"]
-command = "powershell"
-args = ["-ExecutionPolicy", "Bypass", "-File", "tools/scripts/create-image.ps1"]
-
-[tasks.build-all]
-description = "Compilation complete : Limine + kernel Rust + image disque/ISO"
-dependencies = ["limine-image"]
-
 # =============================================================================
-# QEMU run tasks
+# Run tasks
 # =============================================================================
-
-[tasks.run-gui]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-display",
-    "gtk,grab-on-hover=off,zoom-to-fit=on",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "guest_errors",
-]
-
-[tasks.run-gui-xhci]
-description = "Load QEMU with GUI + XHCI/USB devices (for USB driver testing)"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-display",
-    "gtk,grab-on-hover=off,zoom-to-fit=on",
-    "-device",
-    "qemu-xhci",
-    "-device",
-    "usb-kbd",
-    "-device",
-    "usb-tablet",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "guest_errors",
-]
-
-[tasks.run-gui-net]
-description = "Load QEMU with NAT networking (DHCP server enabled) + graphical interface"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-display",
-    "gtk,grab-on-hover=off,zoom-to-fit=on",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-netdev",
-    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1,hostfwd=tcp::8080-:8080",
-    "-device",
-    "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "guest_errors",
-]
-
-[tasks.run-gui-release]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk (release profile)"
-dependencies = ["limine-image-release"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-display",
-    "gtk,grab-on-hover=off,zoom-to-fit=on",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-audiodev",
-    "sdl,id=snd0",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "guest_errors",
-]
-
-[tasks.run-gui-dev-opt]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk (dev-opt profile)"
-dependencies = ["limine-image-dev-opt"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-display",
-    "gtk,grab-on-hover=off,zoom-to-fit=on",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-audiodev",
-    "sdl,id=snd0",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "guest_errors",
-]
-
-[tasks.run-gui-smp]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk : SMP 2 CPUs"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-smp",
-    "2",
-    "-m",
-    "256M",
-    "-display",
-    "gtk,grab-on-hover=off,zoom-to-fit=on",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-audiodev",
-    "sdl,id=snd0",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "guest_errors",
-]
 
 [tasks.run-gui-smp-release]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk : SMP 2 CPUs (release profile)"
+description = "Run kernel SMP release with GUI"
 dependencies = ["limine-image-release"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-smp",
-    "2",
-    "-m",
-    "256M",
-    "-display",
-    "gtk,grab-on-hover=off,zoom-to-fit=on",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-netdev",
-    "tap,id=net0,ifname=tap0,script=no,downscript=no",
-    "-device",
-    "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-audiodev",
-    "sdl,id=snd0",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "guest_errors",
-]
+script_runner = "@shell"
+script = ['''
+${QEMU} \
+    -machine q35 \
+    -cpu qemu64 \
+    -smp 4 \
+    -m 2G \
+    -cdrom build/strat9-os.iso \
+    -drive file=qemu-stuff/disk.img,format=raw \
+    -device virtio-gpu-gl \
+    -display sdl,gl=on \
+    -device usb-ehci \
+    -device usb-kbd \
+    -device usb-tablet \
+    -device qemu-xhci \
+    -device virtio-net-pci,netdev=net0 \
+    -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+    -serial mon:stdio \
+    -no-reboot
+''']
 
 [tasks.run-gui-smp-dev-opt]
-description = "Load QEMU with the Limine ISO (graphical interface) + EXT4 disk : SMP 2 CPUs (dev-opt profile)"
-dependencies = ["limine-image-dev-opt"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-smp",
-    "2",
-    "-m",
-    "256M",
-    "-display",
-    "gtk,grab-on-hover=off,zoom-to-fit=on",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "guest_errors",
-]
-
-[tasks.run]
-description = "Load QEMU with the Limine ISO (text mode) + EXT4 disk"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-nographic",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-D",
-    "build/qemu.log",
-]
-
-[tasks.run-net]
-description = "Load QEMU with NAT networking (DHCP server enabled) + text mode"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-nographic",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-netdev",
-    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1,hostfwd=tcp::8080-:8080",
-    "-device",
-    "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-D",
-    "build/qemu.log",
-]
-
-[tasks.net-setup-routed]
-description = "Setup routed TAP network on host (requires sudo): DHCP + NAT forwarding"
-script_runner = "@shell"
-script = [
-    '''
-sudo bash tools/scripts/net/setup-tap-routed.sh "${STRAT9_UPLINK_IFACE}" "${STRAT9_TAP_IFACE}"
-''',
-]
-
-[tasks.net-teardown-routed]
-description = "Teardown routed TAP network on host (requires sudo)"
-script_runner = "@shell"
-script = [
-    '''
-sudo bash tools/scripts/net/teardown-tap-routed.sh "${STRAT9_TAP_IFACE}" "${STRAT9_UPLINK_IFACE}"
-''',
-]
-
-[tasks.run-net-tap]
-description = "Load QEMU in text mode using TAP passthrough (requires net-setup-routed)"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-nographic",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-netdev",
-    "tap,id=net0,ifname=${STRAT9_TAP_IFACE},script=no,downscript=no",
-    "-device",
-    "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-D",
-    "build/qemu.log",
-]
-
-[tasks.run-gui-net-tap]
-description = "Load QEMU in GUI mode using TAP passthrough (requires net-setup-routed)"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-display",
-    "gtk,grab-on-hover=off,zoom-to-fit=on",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-netdev",
-    "tap,id=net0,ifname=${STRAT9_TAP_IFACE},script=no,downscript=no",
-    "-device",
-    "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "guest_errors",
-]
-
-[tasks.run-qemu]
-description = "Alias: run QEMU with graphical window"
-alias = "run-gui"
-
-[tasks.run-qemu-headless]
-description = "Alias: run QEMU in headless/text mode"
-alias = "run"
-
-[tasks.run-test]
-description = "Load QEMU with the Limine ISO test build (graphical mode) + EXT4 disk"
-dependencies = ["limine-image-test"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os-test.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-audiodev",
-    "sdl,id=snd0",
-    "-D",
-    "build/qemu.log",
-    "-d",
-    "guest_errors",
-]
-
-[tasks.run-test-headless]
-description = "Load QEMU with the Limine ISO test build (headless/text mode) + EXT4 disk"
-dependencies = ["limine-image-test"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os-test.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-nographic",
-    "-no-reboot",
-    "-no-shutdown",
-    "-serial",
-    "mon:stdio",
-    "-D",
-    "build/qemu-test.log",
-]
-
-[tasks.run-debug]
-description = "Load QEMU in debug mode (GDB server on :1234) + EXT4 disk"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-no-reboot",
-    "-no-shutdown",
-    "-gdb",
-    "tcp::${QEMU_GDB_PORT}",
-    "-S",
-    "-serial",
-    "mon:stdio",
-    "-D",
-    "build/qemu-debug.log",
-    "-d",
-    "int,cpu_reset,guest_errors",
-]
-
-[tasks.run-debug-net]
-description = "Load QEMU in debug mode with NAT networking (GDB server + DHCP)"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-no-reboot",
-    "-no-shutdown",
-    "-gdb",
-    "tcp::${QEMU_GDB_PORT}",
-    "-S",
-    "-serial",
-    "mon:stdio",
-    "-netdev",
-    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1",
-    "-device",
-    "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-D",
-    "build/qemu-debug.log",
-    "-d",
-    "int,cpu_reset,guest_errors",
-]
-
-[tasks.run-qemu-debug]
-description = "Alias: run QEMU paused with GDB server"
-alias = "run-debug"
-
-[tasks.run-debug-headless]
-description = "Load QEMU in debug mode (headless, paused, GDB server)"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-nographic",
-    "-no-reboot",
-    "-no-shutdown",
-    "-gdb",
-    "tcp::${QEMU_GDB_PORT}",
-    "-S",
-    "-serial",
-    "mon:stdio",
-    "-D",
-    "build/qemu-debug.log",
-    "-d",
-    "int,cpu_reset,guest_errors",
-]
-
-[tasks.run-debug-net-headless]
-description = "Load QEMU in debug mode with NAT networking (headless, GDB server + DHCP)"
-dependencies = ["limine-image"]
-command = "${QEMU}"
-args = [
-    "-cdrom",
-    "build/strat9-os.iso",
-    "-drive",
-    "file=qemu-stuff/disk.img,format=raw,if=none,id=drv0,cache=none",
-    "-device",
-    "virtio-blk-pci,drive=drv0",
-    "-machine",
-    "q35",
-    "-cpu",
-    "qemu64",
-    "-m",
-    "256M",
-    "-nographic",
-    "-no-reboot",
-    "-no-shutdown",
-    "-gdb",
-    "tcp::${QEMU_GDB_PORT}",
-    "-S",
-    "-serial",
-    "mon:stdio",
-    "-netdev",
-    "user,id=net0,net=192.168.76.0/24,dhcpstart=192.168.76.9,dns=192.168.76.1",
-    "-device",
-    "e1000,netdev=net0,mac=52:54:00:12:34:56",
-    "-D",
-    "build/qemu-debug.log",
-    "-d",
-    "int,cpu_reset,guest_errors",
-]
-
-[tasks.gdb-kernel]
-description = "Attach GDB to the paused QEMU kernel"
-dependencies = ["kernel"]
-command = "${GDB}"
-args = [
-    "target/x86_64-unknown-none/${STRAT9_PROFILE}/kernel",
-    "-ex",
-    "target remote :${QEMU_GDB_PORT}",
-]
-
-[tasks.test-boot]
-description = "Quick boot test (10 seconds then stop)"
+description = "Run kernel SMP dev-opt with GUI"
 dependencies = ["limine-image"]
 script_runner = "@shell"
 script = ['''
-bash tools/scripts/test-boot.sh
+${QEMU} \
+    -machine q35 \
+    -cpu qemu64 \
+    -smp 4 \
+    -m 2G \
+    -cdrom build/strat9-os.iso \
+    -drive file=qemu-stuff/disk.img,format=raw \
+    -device virtio-gpu-gl \
+    -display sdl,gl=on \
+    -device usb-ehci \
+    -device usb-kbd \
+    -device usb-tablet \
+    -device qemu-xhci \
+    -device virtio-net-pci,netdev=net0 \
+    -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+    -serial mon:stdio \
+    -no-reboot
+''']
+
+[tasks.run-debug]
+description = "Run kernel debug (no GUI, serial only)"
+dependencies = ["limine-image"]
+script_runner = "@shell"
+script = ['''
+${QEMU} \
+    -machine q35 \
+    -cpu qemu64 \
+    -smp 4 \
+    -m 2G \
+    -cdrom build/strat9-os.iso \
+    -drive file=qemu-stuff/disk.img,format=raw \
+    -nographic \
+    -no-reboot
+''']
+
+[tasks.run-debug-headless]
+description = "Run kernel debug headless (no display)"
+dependencies = ["limine-image"]
+script_runner = "@shell"
+script = ['''
+${QEMU} \
+    -machine q35 \
+    -cpu qemu64 \
+    -smp 4 \
+    -m 2G \
+    -cdrom build/strat9-os.iso \
+    -drive file=qemu-stuff/disk.img,format=raw \
+    -display none \
+    -serial stdio \
+    -no-reboot
+''']
+
+[tasks.run-debug-net]
+description = "Run kernel debug with networking (e1000 NAT)"
+dependencies = ["limine-image"]
+script_runner = "@shell"
+script = ['''
+${QEMU} \
+    -machine q35 \
+    -cpu qemu64 \
+    -smp 4 \
+    -m 2G \
+    -cdrom build/strat9-os.iso \
+    -drive file=qemu-stuff/disk.img,format=raw \
+    -device e1000,netdev=net0 \
+    -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+    -nographic \
+    -no-reboot
+''']
+
+[tasks.run-debug-net-headless]
+description = "Run kernel debug with networking headless"
+dependencies = ["limine-image"]
+script_runner = "@shell"
+script = ['''
+${QEMU} \
+    -machine q35 \
+    -cpu qemu64 \
+    -smp 4 \
+    -m 2G \
+    -cdrom build/strat9-os.iso \
+    -drive file=qemu-stuff/disk.img,format=raw \
+    -device e1000,netdev=net0 \
+    -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+    -display none \
+    -serial stdio \
+    -no-reboot
+''']
+
+[tasks.test-boot]
+description = "Boot test: kernel + serial output verification"
+dependencies = ["limine-image"]
+script_runner = "@shell"
+script = ['''
+timeout 30 ${QEMU} \
+    -machine q35 \
+    -cpu qemu64 \
+    -smp 1 \
+    -m 1G \
+    -cdrom build/strat9-os.iso \
+    -nographic \
+    -no-reboot 2>&1 | head -50
 ''']
 
 # =============================================================================
-# Cleanup
+# Component builds (release only)
+# =============================================================================
+
+[tasks.strate-ext4-release]
+description = "Build EXT4 filesystem component (release)"
+cwd = "workspace/components/strate-fs-ext4"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-fs-ramfs-release]
+description = "Build RAM filesystem component (release)"
+cwd = "workspace/components/strate-fs-ramfs"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-silo-test-release]
+description = "Build init/test component (release)"
+cwd = "workspace/components/strate-silo-test"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-mem-test-release]
+description = "Build memory stress test component (release)"
+cwd = "workspace/components/strate-mem-test"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-init-release]
+description = "Build init process (release)"
+cwd = "workspace/components/strate-init"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-net-release]
+description = "Build network silo (release)"
+cwd = "workspace/components/strate-net"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-bus-release]
+description = "Build bus silo (release)"
+cwd = "workspace/components/strate-bus"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-wasm-release]
+description = "Build wasm runtime silo (release)"
+cwd = "workspace/components/strate-wasm"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-webrtc-release]
+description = "Build webrtc silo (release)"
+cwd = "workspace/components/strate-webrtc"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-console-admin-release]
+description = "Build console-admin silo (release)"
+cwd = "workspace/components/strate-console-admin"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-graphical-release]
+description = "Build graphical display server (release)"
+cwd = "workspace/components/strate-graphical"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.dhcp-client-release]
+description = "Build DHCP client (release)"
+cwd = "workspace/components/netutils/dhcp-client"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.ping-release]
+description = "Build ping utility (release)"
+cwd = "workspace/components/netutils/ping"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.telnetd-release]
+description = "Build telnet server (release)"
+cwd = "workspace/components/netutils/telnetd"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.udp-tool-release]
+description = "Build UDP utility (release)"
+cwd = "workspace/components/netutils/udp-tool"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+[tasks.strate-web-admin-release]
+description = "Build web-admin silo (release)"
+cwd = "workspace/components/strate-web-admin"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+
+# =============================================================================
+# Utility tasks
 # =============================================================================
 
 [tasks.clean]
-description = "Clean all build artifacts"
+description = "Clean build artifacts"
 script_runner = "@shell"
 script = ['''
 cargo clean
-if [ -d "build" ]; then rm -rf "build"; fi
-if [ -f "qemu.log" ]; then rm -f "qemu.log"; fi
-echo "Clean terminé."
+rm -rf build/iso_root build/strat9-os.img build/strat9-os.iso
 ''']
-
-# =============================================================================
-# Development tasks
-# =============================================================================
 
 [tasks.doc]
-description = "Generate and open the documentation"
+description = "Build kernel documentation"
 cwd = "workspace/kernel"
 command = "cargo"
-args = ["doc", "--target", "${KERNEL_TARGET}", "--no-deps", "--open"]
+args = ["doc", "--target", "${KERNEL_TARGET}", "--no-deps"]
 
 [tasks.size]
-description = "Display the size of the kernel and its sections"
-dependencies = ["kernel"]
+description = "Show kernel binary size"
+cwd = "workspace/kernel"
 script_runner = "@shell"
 script = ['''
-kernel="target/x86_64-unknown-none/${STRAT9_PROFILE}/kernel"
-if [ -f "$kernel" ]; then
-    echo ""
-    echo "=== Size of the kernel ==="
-    echo ""
-    size=$(stat -c%s "$kernel")
-    size_kb=$((size / 1024))
-    echo "  Taille totale : $size bytes ($size_kb KB)"
-    echo ""
-    echo "=== Sections ELF ==="
-    echo ""
-    size "$kernel"
-    echo ""
-fi
+size target/${KERNEL_TARGET}/release/strat9-kernel 2>/dev/null || \
+size target/${KERNEL_TARGET}/debug/strat9-kernel 2>/dev/null || \
+echo "No kernel binary found"
 ''']
-
-# =============================================================================
-# Documentation Tasks
-# =============================================================================
 
 [tasks.docs-site]
-description = "Build mdBook + rustdoc website"
-script_runner = "@shell"
-script = ['''
-bash tools/scripts/build-docs-site.sh
-''']
+description = "Build documentation site"
+command = "bash"
+args = ["tools/scripts/build-docs-site.sh"]
 
 [tasks.docs-serve]
-description = "Serve generated docs website locally on :8000"
+description = "Serve docs site locally on :8000"
 dependencies = ["docs-site"]
-script_runner = "@shell"
-script = ['''
-python3 -m http.server --directory build/docs-site 8000
-''']
+command = "python3"
+args = ["-m", "http.server", "--directory", "build/docs-site", "8000"]
 
 # =============================================================================
-# Default Task
-# =============================================================================
-
-[tasks.default]
-description = "Build complet (bootloader + kernel + image)"
-dependencies = ["build-all"]
-
-[tasks.all]
-alias = "default"
-
-# =============================================================================
-# Windows-native Tasks (PowerShell-based build, no bash/WSL required for compile)
+# Windows cross-compile tasks
 # =============================================================================
 
 [tasks.build-windows]
-description = "Build strat9-os using native Windows PowerShell script"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile ${STRAT9_PROFILE}
-    """,
-]
+description = "Build Windows host tools"
+command = "cargo"
+args = ["build", "--release", "--target", "x86_64-pc-windows-gnu"]
 
 [tasks.build-windows-test]
-description = "Build strat9-os with test binaries (Windows)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile ${STRAT9_PROFILE} -Tests
-    """,
-]
-
-[tasks.run-wingui]
-description = "Build and run QEMU with GUI (Windows native build)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile ${STRAT9_PROFILE} -Run
-    """,
-]
-
-[tasks.run-wingui-smp]
-description = "Build and run QEMU with GUI + SMP 2 CPUs (Windows native build)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile ${STRAT9_PROFILE} -Run
-    """,
-]
-
-[tasks.run-wingui-release]
-description = "Build and run QEMU with GUI (release profile, Windows)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile release -Run
-    """,
-]
-
-[tasks.run-wingui-smp-release]
-description = "Build and run QEMU with GUI + SMP 2 CPUs (release profile, Windows)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile release -Run
-    """,
-]
-
-[tasks.run-wingui-dev-opt]
-description = "Build and run QEMU with GUI (dev-opt profile, Windows)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile dev-opt -Run
-    """,
-]
-
-[tasks.run-wingui-smp-dev-opt]
-description = "Build and run QEMU with GUI + SMP 2 CPUs (dev-opt profile, Windows)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile dev-opt -Run
-    """,
-]
-
-[tasks.run-wingui-test]
-description = "Build and run QEMU with test ISO (Windows)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile debug -Tests -Run
-    """,
-]
-
-[tasks.run-wingui-test-release]
-description = "Build and run QEMU with test ISO (release, Windows)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile release -Tests -Run
-    """,
-]
+description = "Build Windows host tools (debug)"
+command = "cargo"
+args = ["build", "--target", "x86_64-pc-windows-gnu"]
 
 [tasks.build-iso-windows]
-description = "Build ISO only (no QEMU run, Windows native)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile ${STRAT9_PROFILE}
-    """,
-]
+description = "Build Windows ISO builder"
+cwd = "workspace/components/iso-builder-windows"
+command = "cargo"
+args = ["build", "--target", "x86_64-pc-windows-gnu"]
 
 [tasks.build-iso-windows-release]
-description = "Build ISO only (release profile, Windows)"
-condition = { platforms = ["windows"] }
-script_runner = "@duckscript"
-script = [
-    """
-    exec --fail-on-error powershell -ExecutionPolicy Bypass -File tools/scripts/build-windows.ps1 -Profile release
-    """,
-]
+description = "Build Windows ISO builder (release)"
+cwd = "workspace/components/iso-builder-windows"
+command = "cargo"
+args = ["build", "--release", "--target", "x86_64-pc-windows-gnu"]
+
+[tasks.run-wingui]
+description = "Run with Windows GUI (debug)"
+dependencies = ["limine-image"]
+command = "cargo"
+args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows"]
+
+[tasks.run-wingui-smp]
+description = "Run with Windows GUI SMP (debug)"
+dependencies = ["limine-image"]
+command = "cargo"
+args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--smp"]
+
+[tasks.run-wingui-release]
+description = "Run with Windows GUI (release)"
+dependencies = ["limine-image-release"]
+command = "cargo"
+args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows"]
+
+[tasks.run-wingui-smp-release]
+description = "Run with Windows GUI SMP (release)"
+dependencies = ["limine-image-release"]
+command = "cargo"
+args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--smp"]
+
+[tasks.run-wingui-dev-opt]
+description = "Run with Windows GUI (dev-opt)"
+dependencies = ["limine-image"]
+command = "cargo"
+args = ["run", "--profile", "dev-opt", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows"]
+
+[tasks.run-wingui-smp-dev-opt]
+description = "Run with Windows GUI SMP (dev-opt)"
+dependencies = ["limine-image"]
+command = "cargo"
+args = ["run", "--profile", "dev-opt", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--smp"]
+
+[tasks.run-wingui-test]
+description = "Run Windows GUI test"
+dependencies = ["limine-image"]
+command = "cargo"
+args = ["run", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--test"]
+
+[tasks.run-wingui-test-release]
+description = "Run Windows GUI test (release)"
+dependencies = ["limine-image-release"]
+command = "cargo"
+args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--test"]

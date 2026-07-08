@@ -66,7 +66,7 @@ const TRB_TD_SIZE_MASK: u32 = 0x1F;
 const EP_TYPE_CONTROL: u32 = 4;
 const EP_TYPE_INTR_IN: u32 = 7;
 
-const fn TRB_GET_TYPE(d3: u32) -> u32 {
+const fn trb_get_type(d3: u32) -> u32 {
     (d3 >> TRB_TYPE_SHIFT) & 0xFF
 }
 
@@ -954,7 +954,7 @@ impl XhciController {
 
         let dev = self.device_slots[idx].as_ref().unwrap();
         let tr_ring = dev.ep_transfer_rings[ep];
-        let tr_phys = dev.ep_transfer_ring_phys[ep];
+        let _tr_phys = dev.ep_transfer_ring_phys[ep];
         let buf_phys = dev.ep_buf_phys[ep];
         let buf_len = dev.ep_buf_len[ep];
         if tr_ring.is_null() || buf_phys == 0 {
@@ -1115,7 +1115,7 @@ impl XhciController {
         let mut transferred = 0;
         for _ in 0..3 {
             let event = self.wait_for_event()?;
-            let trb_type = TRB_GET_TYPE(event.d3);
+            let trb_type = trb_get_type(event.d3);
             let completion = (event.d2 >> 24) & 0xFF;
 
             if completion != 1 {
@@ -1223,7 +1223,7 @@ pub fn handle_interrupt() {
                         break;
                     }
 
-                    let trb_type = TRB_GET_TYPE(trb.d3);
+                    let trb_type = trb_get_type(trb.d3);
                     match trb_type {
                         TRB_TYPE_TRANSFER_EVENT => {
                             let slot_id = ((trb.d3 >> 24) & 0xFF) as u8;

@@ -17,4 +17,7 @@ rustflags = [
     "relocation-model=static",
     "-C",
     "code-model=kernel",
+    # N3 send() captures sender_rip via [rbp + 8]; frame pointers mandatory.
+    "-C",
+    "force-frame-pointers=yes",
 ]

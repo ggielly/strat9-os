@@ -1,4 +1,5 @@
 //! Domain-specific syscall wrappers for the network strate.
+use strat9_syscall::syscall1;
 
 pub use strat9_syscall::{
     call,
@@ -57,6 +58,13 @@ pub fn ipc_try_recv(port: u64, msg: &mut crate::IpcMessage) -> Result<()> {
 }
 
 /// Implements debug log.
+/// Register this task as the strate-net networking silo.
+/// Called once during startup so the NIC IRQ handler can wake us.
+pub fn net_register() -> Result<()> {
+    unsafe { syscall1(strat9_abi::syscall::SYS_NET_REGISTER, 0)? };
+    Ok(())
+}
+
 pub fn debug_log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }

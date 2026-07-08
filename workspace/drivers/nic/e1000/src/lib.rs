@@ -130,16 +130,14 @@ impl E1000Nic {
                 mac[5]
             );
 
-            // --- VLAN Ether Type (cosmetic : the 802.1Q network stack does not
-            //     process VLAN tags, so this only makes the hardware parse the
-            //     tag field without any functional effect.)
-            // TODO here ! ---
-            wr(mmio_base, regs::VET, 0x8100);
-            // Zero-out VLAN filter table (accept no VLANs; functional once the
-            // stack gains 802.1Q support).
-            for i in 0..128u32 {
-                wr(mmio_base, regs::VFTA + (i as usize) * 4, 0);
-            }
+            // NOTE: VET (0x0008) and VFTA (0x5200+) writes are intentionally
+            // skipped. On the 82540EM, offset 0x0008 is the read-only STATUS
+            // register — writing VET there triggers a VERIFY assertion in
+            // VMware's e1000 emulation. The VFTA loop writes 128 entries to
+            // register space that VMware's 82540EM model does not implement.
+            // These are cosmetic (802.1Q is not used) so they are safe to omit.
+            // TODO: re-enable with per-hypervisor detection when VLAN support
+            // is needed.
 
             // --- RX ring ---
             let rx_ring_region = alloc
@@ -197,7 +195,7 @@ impl E1000Nic {
                 tctl::EN | tctl::PSP | (0x10 << tctl::CT_SHIFT) | (0x40 << tctl::COLD_SHIFT),
             );
 
-            // --- RX control: BSIZE_4096 (BSIZE=00 | BSEX=1) ---
+            // --- RX control: BSIZE_4096 (BSEX=1, BSIZE=10 → 4096 bytes) ---
             // RX_BUF_SIZE is 4096; the hardware must match.
             wr(
                 mmio_base,

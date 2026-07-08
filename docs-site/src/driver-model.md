@@ -77,7 +77,7 @@ The PCI bus is scanned at boot using a BFS algorithm with early-exit optimizatio
 3. Read header type bit 7 for multi-function flag
 4. If PCI-to-PCI bridge → enqueue secondary bus
 
-This reduces worst-case probes from 65,536 to ~8,192 for typical topologies.
+This reduces worst-case probes from 65,536 to approx. 8,192 for typical topologies.
 
 **Key PCI types:**
 
@@ -94,6 +94,7 @@ This reduces worst-case probes from 65,536 to ~8,192 for typical topologies.
 ### E1000 / E1000e
 
 Intel Ethernet drivers supporting:
+
 - Legacy descriptor rings (T/R)
 - MSI-X interrupt moderation
 - Multicast filter
@@ -102,6 +103,7 @@ Intel Ethernet drivers supporting:
 ### IGC
 
 Intel I225/I226 2.5GbE driver with:
+
 - Advanced RX/TX descriptors
 - Time-based interrupt coalescing
 - Hardware timestamping
@@ -122,6 +124,7 @@ Intel I225/I226 2.5GbE driver with:
 ### NVMe
 
 Full NVMe driver with:
+
 - I/O queues (per-CPU submission/completion pairs)
 - MSI-X interrupt steering
 - Namespace management
@@ -130,6 +133,7 @@ Full NVMe driver with:
 ### AHCI / SATA
 
 AHCI controller driver for SATA devices:
+
 - Port enumeration
 - DMA PRDT (Physical Region Descriptor Table)
 - FIS-based communication
@@ -137,6 +141,7 @@ AHCI controller driver for SATA devices:
 ### VirtIO Block
 
 Paravirtualized block device for QEMU/KVM:
+
 - VirtIO queue negotiation
 - Multi-queue support
 - Feature bits (discard, write cache)

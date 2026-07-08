@@ -1,8 +1,5 @@
 use alloc::{format, string::String};
-use core::{
-    fmt,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use super::{

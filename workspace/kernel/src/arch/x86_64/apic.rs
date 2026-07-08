@@ -82,6 +82,9 @@ pub const IPI_RESCHED_VECTOR: u8 = 0xE0;
 /// Vector used for TLB shootdown IPIs.
 pub const IPI_TLB_SHOOTDOWN_VECTOR: u8 = 0xF0;
 
+/// Vector used for N3 MMU migration synchronization IPIs.
+pub const IPI_N3_MIGRATE_VECTOR: u8 = 0xF1;
+
 /// Check if APIC is present via CPUID
 pub fn is_present() -> bool {
     let (_eax, _ebx, _ecx, edx) = super::cpuid(1, 0);

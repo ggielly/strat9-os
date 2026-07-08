@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 smoltcp = { git = "https://github.com/smoltcp-rs/smoltcp.git", default-features = false, features = [
     "alloc",
+    "auto-icmp-echo-reply",
     "medium-ethernet",
     "proto-ipv4",
     "proto-ipv4-fragmentation", # reassemble/send fragmented IPv4

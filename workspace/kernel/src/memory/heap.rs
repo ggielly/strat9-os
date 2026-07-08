@@ -462,17 +462,17 @@ unsafe impl GlobalAlloc for LockedHeap {
             KernelHeapBackend::Slab => {
                 // --- slab path: return block to free list ---
                 let ci = SlabState::class_index_for_layout(layout);
-                let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-                let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+                let _cpu = crate::arch::x86_64::percpu::current_cpu_index();
+                let _irq_enabled = crate::arch::x86_64::interrupts_enabled();
                 #[cfg(debug_assertions)]
-                if !irq_enabled {
+                if !_irq_enabled {
                     use core::sync::atomic::{AtomicUsize, Ordering};
                     static HEAP_D_COUNT: AtomicUsize = AtomicUsize::new(0);
                     let n = HEAP_D_COUNT.fetch_add(1, Ordering::Relaxed);
                     if n % 100 == 0 {
                         crate::e9_println!(
                             "HEAP-D cpu={} irq=0 size={} ci={} n={}",
-                            cpu,
+                            _cpu,
                             effective,
                             ci,
                             n
@@ -660,17 +660,17 @@ pub unsafe fn try_alloc_kernel_heap(layout: Layout) -> Result<*mut u8, KernelHea
             // --- slab path ---
             let ci = SlabState::class_index_for_layout(layout);
             // Race/corruption diagnostic: log alloc when IRQs disabled (rate-limited).
-            let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-            let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+            let _cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            let _irq_enabled = crate::arch::x86_64::interrupts_enabled();
             #[cfg(debug_assertions)]
-            if !irq_enabled {
+            if !_irq_enabled {
                 use core::sync::atomic::{AtomicUsize, Ordering};
                 static HEAP_A_COUNT: AtomicUsize = AtomicUsize::new(0);
                 let n = HEAP_A_COUNT.fetch_add(1, Ordering::Relaxed);
                 if n % 100 == 0 {
                     crate::e9_println!(
                         "HEAP-A cpu={} irq=0 size={} ci={} n={}",
-                        cpu,
+                        _cpu,
                         effective,
                         ci,
                         n
