@@ -136,7 +136,10 @@ pub fn handle_interrupt() {
     };
     let dev = match dev {
         Some(d) => d,
-        None => return,
+        None => {
+            crate::serial_println!("[net] IRQ: no NIC device registered");
+            return;
+        }
     };
 
     // Phase 2 : drain N2 rings (no NIC_DEVICE lock held, IRQs may still be
@@ -144,16 +147,36 @@ pub fn handle_interrupt() {
     if let Some(ref dp) = *NIC_DATA_PLANE.lock() {
         // Drain pending RX packets from HW into the N2 RX ring.
         let mut buf = [0u8; 2048];
+        let mut rx_count = 0usize;
         let mut backpressure = false;
         while let Ok(n) = dev.receive(&mut buf) {
+            if n > 0 {
+                rx_count += 1;
+                if rx_count <= 3 {
+                    crate::serial_println!("[net] IRQ rx {} bytes (slot {})", n, rx_count);
+                }
+            }
             if dp.push_rx(0, &buf[..n]).is_err() {
+                crate::serial_println!("[net] IRQ RX ring full, backpressure");
                 backpressure = true;
-                break; // ring full : backpressure
+                break;
             }
         }
+        if rx_count > 3 {
+            crate::serial_println!("[net] IRQ rx total {} packets", rx_count);
+        }
+        if rx_count == 0 {
+            crate::serial_println!("[net] IRQ rx: no packets received from HW");
+        }
+
         // N1 : notify scheduler if the RX ring is full (backpressure).
         if backpressure {
             crate::ipc::n1::notify_scheduler(crate::ipc::n1::N1Event::NicBackpressure);
+        }
+
+        // Notify consumer (strate-net) that new RX data is available.
+        if rx_count > 0 {
+            dp.notify_rx_consumer(0);
         }
 
         // Drain pending TX packets from the N2 TX ring into HW.
@@ -168,11 +191,15 @@ pub fn handle_interrupt() {
         if let Some(event) = crate::ipc::n1::poll_nic_events() {
             log::trace!("[net] N1 sched→NIC event: {:?}", event);
         }
+    } else {
+        crate::serial_println!("[net] IRQ: N2 data plane not initialized");
     }
 
     let tid_u64 = STRATE_NET_TID.load(core::sync::atomic::Ordering::Relaxed);
     if tid_u64 != 0 {
         let _ = crate::process::scheduler::wake_task(crate::process::TaskId(tid_u64));
+    } else {
+        crate::serial_println!("[net] IRQ: strate-net not registered (TID=0)");
     }
 }
 

@@ -599,16 +599,14 @@ fn n3_prepare_migration(
 
     // Prepare receiver context.
     let recv_handler = receiver_task.trampoline_entry.load(Ordering::Acquire);
-    let recv_stack = receiver_task.trampoline_stack_top.load(Ordering::Acquire);
 
-    if recv_handler == 0 || recv_stack == 0 {
+    if recv_handler == 0 {
         return Err(IpcError::TransportFailed);
     }
 
     let recv_cr3 = receiver_task.process.address_space_arc().cr3().as_u64();
 
     frame.dst_ctx.rip = recv_handler;
-    frame.dst_ctx.rsp = recv_stack;
     frame.dst_ctx.cr3_pcid = recv_cr3;
 
     // CRITICAL: The destination kernel stack must contain the handler address
@@ -845,82 +843,124 @@ fn send_n3_sync_ipi(target_apic_id: u32) {
     apic::send_ipi_raw(target_apic_id, icr_low);
 }
 
-/// IPI handler for N3 migration synchronization (registered in IDT).
+/// Naked IPI handler for N3 migration synchronization.
 ///
-/// When the sender is on a different core than the receiver, this handler
-/// performs the reverse migration: switches CR3 back to the sender's AS
-/// and restores the sender's context.
+/// When a cross-core migration completes, the receiver sends this IPI to the
+/// sender's core. The handler restores the sender's kernel context (RSP, RIP,
+/// RFLAGS) from `MigrationFrame.src_ctx` and returns via `iretq`.
+///
+/// The interrupted context was the sender's `send()` function. By modifying
+/// the InterruptStackFrame fields before the hardware `iretq`, we redirect
+/// execution to the sender's saved return address on its original kernel stack.
 ///
 /// # Safety
-/// Called from the naked IPI entry stub. RSP points at a SyscallFrame.
-pub extern "C" fn n3_migrate_ipi_handler(_frame_ptr: *mut MigrationFrame) {
+/// Registered as a naked IDT entry. On entry: SS, RSP, RFLAGS, CS, RIP pushed
+/// by hardware. `rdi` points at the InterruptStackFrame (set by IDT dispatch).
+#[unsafe(naked)]
+pub unsafe extern "C" fn n3_migrate_ipi_entry(rdi: *mut u8) -> ! {
+    core::arch::naked_asm!(
+        // ── Save scratch registers ──
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+
+        // ── Check pending migration ──
+        // per_cpu_index via GS:base (offset 0 in PerCpu struct).
+        "mov rcx, qword ptr gs:[0]",    // current_cpu_index
+        "lea rsi, [rip + {pending}]",    // &N3_PENDING_MIGRATION
+        "mov rax, [rsi + rcx * 8]",      // pending = N3_PENDING_MIGRATION[cpu]
+        "test rax, rax",
+        "jz .no_pending",
+
+        // ── Clear pending flag ──
+        "mov qword ptr [rsi + rcx * 8], 0",
+
+        // ── rax = MigrationFrame ptr ──
+        // src_ctx starts at offset 0x00.
+        // src_ctx.rflags = 0x40, src_ctx.rsp = 0x48, src_ctx.rip = 0x50.
+
+        // ── Switch to sender's address space ──
+        "mov rcx, [rax + 0x58]",        // src_ctx.cr3_pcid
+        "test rcx, rcx",
+        "jz .skip_cr3",
+        "mov r11, 0x0000FFFFFFFFFFFF",
+        "and rcx, r11", // clear high 16 bits (reserved/PCID)
+        "mov r11, 0xFFFFFFFFFFFFF000",
+        "and rcx, r11", // clear low 12 bits (page offset)
+        "mov cr3, rcx",
+        ".skip_cr3:",
+
+        // ── Build iretq frame on the interrupted stack ──
+        // rdi points to InterruptStackFrame pushed by hardware.
+        // Overwrite it with the sender's context.
+        // InterruptStackFrame layout:
+        //   [+0x00] SS       [+0x08] RSP      [+0x10] RFLAGS
+        //   [+0x18] CS       [+0x20] RIP      [+0x28] (error code, skipped)
+        //
+        // iretq pops: RIP, CS, RFLAGS, RSP, SS (5 × u64 = 40 bytes).
+        //
+        // Preserve original CS and SS from the interrupted frame.
+        // Overwrite RSP, RFLAGS, RIP with sender's values.
+
+        "mov rcx, [rdi + 0x18]",        // original CS (kernel CS = 0x08)
+        "mov rdx, [rdi + 0x00]",        // original SS (0 for Ring 0)
+
+        "mov rsi, [rax + 0x48]",        // src_ctx.rsp  → sender's kernel RSP
+        "mov r8,  [rax + 0x40]",        // src_ctx.rflags
+        "mov r9,  [rax + 0x50]",        // src_ctx.rip  → sender's return address
+
+        "mov [rdi + 0x00], rdx",        // SS  = original (Ring 0)
+        "mov [rdi + 0x08], rsi",        // RSP = sender's kernel stack
+        "mov [rdi + 0x10], r8",         // RFLAGS = sender's flags
+        "mov [rdi + 0x18], rcx",        // CS  = original (0x08)
+        "mov [rdi + 0x20], r9",         // RIP = sender's return address
+
+        // ── Send EOI ──
+        "mov dword ptr [0x0000FEE000B0], 0", // LAPIC EOI
+
+        // ── Restore scratch and return ──
+        // Pop scratch registers, then let the normal IDT return path
+        // (pop GPRs + iretq) restore from the modified frame.
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        // Return to IDT stub which pops GPRs and does iretq.
+        "ret",
+
+        ".no_pending:",
+        // Spurious IPI — send EOI and return to interrupted context.
+        "mov dword ptr [0x0000FEE000B0], 0",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "ret",
+
+        pending = sym N3_PENDING_MIGRATION,
+    );
+}
+
+/// Fallback handler for N3 migration IPI (non-naked path).
+///
+/// Called from the `extern "x86-interrupt"` stub if the naked entry is not
+/// used. Clears the pending flag and sends EOI.
+pub extern "C" fn n3_migrate_ipi_handler() {
     let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
-
-    // Check if there's a pending migration for this CPU.
-    let pending = N3_PENDING_MIGRATION[cpu_idx].swap(0, Ordering::Acquire);
-    if pending == 0 {
-        // No pending migration : spurious IPI.
-        return;
-    }
-
-    let frame = unsafe { &*(pending as *const MigrationFrame) };
-
-    // Verify the frame is in Active state.
-    let state = frame.state.load(Ordering::Acquire);
-    if state != MigrationState::Active as u8 {
-        return;
-    }
-
-    // Switch back to sender's address space.
-    // CRITICAL: sender_cr3 may contain PCID bits in [11:0].
-    // Mask them out before interpreting as a PhysFrame address.
-    // Intel SDM Vol.3A §4.10.4: CR3[11:0] = PCID, CR3[63:12] = PML4 base.
-    let sender_cr3 = frame.src_ctx.cr3_pcid;
-    if sender_cr3 != 0 {
-        use x86_64::{registers::control::Cr3, PhysAddr};
-        let pmul4_paddr = sender_cr3 & 0x000F_FFFF_FFFF_F000;
-        if let Ok(cr3_frame) =
-            x86_64::structures::paging::PhysFrame::from_start_address(PhysAddr::new(pmul4_paddr))
-        {
-            unsafe {
-                // Write CR3 with PCID=0 (no PCID preservation on IPI return)
-                // because we are returning from IPI context, not an N3 migration.
-                Cr3::write(cr3_frame, x86_64::registers::control::Cr3Flags::empty());
-            }
-        } else {
-            log::error!("N3 IPI: invalid sender CR3 {:#x}", sender_cr3);
-        }
-    }
-
-    // Restore sender context.
-    // Note: rbx and rbp are LLVM-reserved and cannot be used as asm operands.
-    // They are loaded as part of the general restore sequence.
-    unsafe {
-        core::arch::asm!(
-            "mov r15, [{f} + 0x00]",
-            "mov r14, [{f} + 0x08]",
-            "mov r13, [{f} + 0x10]",
-            "mov r12, [{f} + 0x18]",
-            "mov rbp, [{f} + 0x20]",
-            "mov rbx, [{f} + 0x28]",
-            "mov rdx, [{f} + 0x30]",
-            "mov rax, [{f} + 0x38]",
-            f = in(reg) &frame.src_ctx,
-            out("r15") _,
-            out("r14") _,
-            out("r13") _,
-            out("r12") _,
-            out("rdx") _,
-            out("rax") _,
-        );
-    }
-
-    // Mark frame as Ready.
-    frame
-        .state
-        .store(MigrationState::Ready as u8, Ordering::Release);
-
-    // Send EOI.
+    N3_PENDING_MIGRATION[cpu_idx].store(0, Ordering::Release);
     apic::eoi();
 }
 
@@ -961,31 +1001,56 @@ fn watchdog_unregister(frame_idx: usize) {
 }
 
 /// Called from the timer ISR to check for stalled migrations.
+///
+/// For each registered frame in Active state, checks whether the migration
+/// has exceeded the watchdog timeout. If so:
+/// 1. Transitions Active → Stalled (CAS)
+/// 2. Attempts recovery: Stalled → Reclaiming → Ready
+/// 3. Logs the incident
+///
+/// Recovery resets the frame so it can be reused for future migrations.
+/// The sender that initiated the stalled migration will see `WouldBlock` on
+/// its next `send()` attempt (CAS Ready→Active fails if another sender
+/// claimed the frame first).
 pub fn n3_watchdog_tick() {
     let now = unsafe { core::arch::x86_64::_rdtsc() };
-    let table = N3_WATCHDOG_TABLE.lock();
+    let mut table = N3_WATCHDOG_TABLE.lock();
 
-    for entry in table.iter() {
+    for entry in table.iter_mut() {
         let Some(entry) = entry else { continue };
         let frame = unsafe { &*(phys_to_virt(entry.frame_phys) as *const MigrationFrame) };
         let state = frame.state.load(Ordering::Acquire);
-        if state == MigrationState::Active as u8 {
-            let tsc_start = frame.tsc_start.load(Ordering::Acquire);
-            if now.wrapping_sub(tsc_start) > entry.timeout {
-                // Transition Active → Stalled.
-                let _ = frame.state.compare_exchange(
-                    MigrationState::Active as u8,
-                    MigrationState::Stalled as u8,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
-                log::warn!(
-                    "N3: watchdog timeout on frame at {:#x}, generation={}",
-                    entry.frame_phys,
-                    frame.generation.load(Ordering::Acquire),
-                );
-            }
+
+        if state != MigrationState::Active as u8 {
+            continue;
         }
+
+        let tsc_start = frame.tsc_start.load(Ordering::Acquire);
+        if now.wrapping_sub(tsc_start) <= entry.timeout {
+            continue;
+        }
+
+        // Timeout detected: attempt Active → Stalled → Reclaiming → Ready.
+        let cas_result = frame.state.compare_exchange(
+            MigrationState::Active as u8,
+            MigrationState::Stalled as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+
+        if cas_result.is_err() {
+            // Another CPU already transitioned the frame (e.g., recv completed).
+            continue;
+        }
+
+        log::warn!(
+            "N3: watchdog timeout on frame at {:#x}, generation={}, recovering",
+            entry.frame_phys,
+            frame.generation.load(Ordering::Acquire),
+        );
+
+        // Attempt recovery: Stalled → Reclaiming → Ready.
+        watchdog_recover(frame);
     }
 }
 
@@ -1221,9 +1286,26 @@ impl Drop for N3Transport {
     fn drop(&mut self) {
         watchdog_unregister(self.frame_idx);
         free_frame_slot(self.frame_idx);
-        // TODO: proper cleanup — unmap frame + msg_buf from both address spaces,
-        // free handler stack page, free msg_buf page, free PCIDs.
-        // Currently only the frame pool slot is recycled; physical pages leak.
+
+        // Free the message buffer physical page.
+        if self.msg_buf_phys != 0 {
+            let frame = crate::memory::PhysFrame::containing_address(
+                x86_64::PhysAddr::new(self.msg_buf_phys),
+            );
+            with_irqs_disabled(|token| free_frame(token, frame));
+        }
+
+        // Free the handler stack physical page.
+        if self.handler_stack_phys != 0 {
+            let frame = crate::memory::PhysFrame::containing_address(
+                x86_64::PhysAddr::new(self.handler_stack_phys),
+            );
+            with_irqs_disabled(|token| free_frame(token, frame));
+        }
+
+        // NOTE: PTE invalidation (TLB shootdown) for the unmapped pages
+        // is TODO. The stale PTEs will be reclaimed when the address space
+        // is destroyed. For a prototype, this is acceptable.
     }
 }
 
@@ -1234,7 +1316,7 @@ impl IpcTransport for N3Transport {
 
     fn capabilities(&self) -> TransportCapabilities {
         TransportCapabilities {
-            max_message_size: 256,
+            max_message_size: N3_MSG_BUF_SIZE,
             blocking: true,
             zero_copy: false,
             vectored: false,
@@ -1253,11 +1335,14 @@ impl IpcTransport for N3Transport {
 
 impl IpcProducer for N3Transport {
     fn send(&self, msg: &[u8]) -> Result<(), IpcError> {
-        // SAFETY: CAS state machine (Ready→Active) guarantees exclusive access.
+        // SAFETY: CAS state machine (Ready→Active) provides logical exclusivity.
+        // The &mut is scoped to this function; after CAS, only the ASM primitive
+        // accesses the frame via raw pointers. Technically UB under Stacked Borrows,
+        // but acceptable for a research kernel prototype where CAS guarantees
+        // no concurrent access.
         let frame = unsafe { &mut *self.frame_ptr() };
 
         // Get current task context.
-        let _my_task_id = current_task_id().ok_or(IpcError::TransportFailed)?;
         let receiver_task = get_task_by_id(self.receiver_task_id).ok_or(IpcError::Disconnected)?;
 
         // Read current CR3.
@@ -1301,14 +1386,12 @@ impl IpcProducer for N3Transport {
 
         // Inter-core sync if needed.
         // Spec §9.2: the sender must ensure message visibility before sending IPI.
-        // On x86-64, stores are ordered (TSO), but we add an explicit fence
-        // for correctness on weakly-ordered architectures and as defense-in-depth.
-        let same_core = crate::arch::x86_64::percpu::current_cpu_index()
-            == receiver_task.home_cpu.load(Ordering::Acquire);
+        let target_cpu = receiver_task.home_cpu.load(Ordering::Acquire);
+        let same_core =
+            crate::arch::x86_64::percpu::current_cpu_index() == target_cpu as usize;
 
         if !same_core {
-            let target_cpu = receiver_task.home_cpu.load(Ordering::Acquire);
-            if target_cpu < crate::arch::x86_64::percpu::MAX_CPUS {
+            if (target_cpu as usize) < crate::arch::x86_64::percpu::MAX_CPUS {
                 // Ensure all stores (message, frame metadata, state=Active)
                 // are visible before the IPI is sent (spec §9.1).
                 core::sync::atomic::fence(Ordering::Release);

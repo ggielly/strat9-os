@@ -344,6 +344,8 @@ extern "C" fn lapic_timer_inner(
     }
     crate::process::scheduler::timer_tick();
     crate::arch::x86_64::speaker::speaker_tick();
+    // N3 watchdog: check for stalled migrations every tick.
+    crate::ipc::n3::n3_watchdog_tick();
     super::apic::eoi();
 
     // Deliver pending POSIX signals before returning to Ring 3 via iretq.
@@ -373,7 +375,7 @@ extern "C" fn resched_ipi_inner(
 ) -> InterruptReturnDecision {
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
     let should_trace = RESCHED_IPI_TRACE_BUDGET
-        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |budget| {
+        .try_update(Ordering::AcqRel, Ordering::Relaxed, |budget| {
             budget.checked_sub(1)
         })
         .is_ok();
@@ -495,9 +497,12 @@ pub fn init() {
             .set_handler_fn(tlb_shootdown_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
 
-        // N3 MMU migration sync IPI (vector 0xF1)
+        // N3 MMU migration sync IPI (vector 0xF1) — naked handler
+        // for full sender context restore via iretq.
         idt_ref[super::apic::IPI_N3_MIGRATE_VECTOR as u8]
-            .set_handler_fn(n3_migrate_handler)
+            .set_handler_addr(VirtAddr::from_ptr(
+                crate::ipc::n3::n3_migrate_ipi_entry as *const (),
+            ))
             .set_code_selector(KERNEL_CODE_SELECTOR);
 
         (*idt).load_unsafe();
@@ -761,7 +766,7 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let do_pf_trace = if is_user {
         USER_PF_TRACE_BUDGET
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 if v > 0 {
                     Some(v - 1)
                 } else {
@@ -2029,15 +2034,4 @@ extern "x86-interrupt" fn tlb_shootdown_handler(stack_frame: InterruptStackFrame
     let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
     // Note: EOI is sent by the architecture-independent handler.
     super::tlb::tlb_shootdown_ipi_handler();
-}
-
-/// N3 MMU migration sync IPI handler (vector 0xF1).
-///
-/// Notifies the target CPU of a pending migration. The actual CR3 switch
-/// and context restore is handled by the scheduler when the receiver task
-/// is scheduled. This handler only sends EOI.
-extern "x86-interrupt" fn n3_migrate_handler(stack_frame: InterruptStackFrame) {
-    let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
-    // N3 migration notification : the scheduler will handle the context switch.
-    super::apic::eoi();
 }
