@@ -5,7 +5,7 @@
 
 use super::error::SyscallError;
 use crate::{
-    capability::{CapId, CapPermissions, ResourceType},
+    capability::{CapId, ResourceType},
     ipc::{
         channel::{self, ChanId},
         message::IpcMessage,

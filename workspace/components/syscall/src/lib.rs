@@ -1225,6 +1225,30 @@ pub mod call {
         unsafe { syscall2(number::SYS_DEBUG_LOG, msg.as_ptr() as usize, msg.len()) }
     }
 
+    /// Fill a buffer with random bytes from the kernel entropy pool.
+    ///
+    /// # Arguments
+    /// * `buf`   - Mutable byte buffer to fill
+    /// * `flags` - GRND_NONBLOCK (1) to return EAGAIN if pool not ready,
+    ///             GRND_RANDOM (2) for /dev/random quality (same pool)
+    ///
+    /// # Returns
+    /// * Number of bytes written on success
+    /// * `Err(Error::Again)` if GRND_NONBLOCK and entropy not yet ready
+    pub const GRND_NONBLOCK: u32 = 1;
+    pub const GRND_RANDOM: u32 = 2;
+
+    pub fn getrandom(buf: &mut [u8], flags: u32) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_GETRANDOM,
+                buf.as_ptr() as usize,
+                buf.len(),
+                flags as usize,
+            )
+        }
+    }
+
     // ========================================================================
     // Module management (block 700-703)
     // ========================================================================

@@ -298,7 +298,7 @@ pub fn finish_interrupt_switch() {
     );
     let cpu_index = current_cpu_index();
     let should_trace = FINISH_INTERRUPT_TRACE_BUDGET
-        .fetch_update(
+        .try_update(
             core::sync::atomic::Ordering::AcqRel,
             core::sync::atomic::Ordering::Relaxed,
             |budget| budget.checked_sub(1),

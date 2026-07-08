@@ -22,6 +22,7 @@ impl NetworkStrate {
         let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
         if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
             if listener.auto_relisten {
+                socket.abort();
                 let _ = socket.listen(listener.port);
             } else {
                 return IpcMessage::error_reply(sender, -104);
@@ -57,6 +58,7 @@ impl NetworkStrate {
         let socket = self.sockets.get_mut::<tcp::Socket>(listener.socket);
         if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
             if listener.auto_relisten {
+                socket.abort();
                 let _ = socket.listen(listener.port);
             } else {
                 return IpcMessage::error_reply(sender, -104);

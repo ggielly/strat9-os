@@ -2,11 +2,11 @@ use super::{
     api::current_ui_scale,
     cursor::{CursorManager, CURSOR_H, CURSOR_PIXELS, CURSOR_W, TEXT_CURSOR_MAX_DIM},
     font::{parse_psf, parse_psf2_unicode_map, FontInfo, FONT_PSF},
-    scrollback::{SbCell, ScrollbackBuffer, MAX_SCROLLBACK},
+    scrollback::{SbCell, ScrollbackBuffer},
     types::*,
 };
 use crate::framebuffer::{CanvasBuffer, DirtyRectSet, MAX_DIRTY_RECTS};
-use alloc::{string::String, vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -451,7 +451,7 @@ impl VgaWriter {
         if ex <= sx || ey <= sy {
             return;
         }
-        drop(canvas);
+        let _ = canvas;
         self.canm()
             .dirty
             .include(sx as u32, sy as u32, (ex - sx) as u32, (ey - sy) as u32);
@@ -1010,7 +1010,7 @@ impl VgaWriter {
         let (fw, fh) = (canvas.width, canvas.height);
 
         if canvas.draw_to_back && canvas.back_buffer.is_some() {
-            drop(canvas);
+            let _ = canvas;
             if let Some(buf) = self.canm().back_buffer.as_mut() {
                 buf.fill(packed);
             }
@@ -1020,11 +1020,11 @@ impl VgaWriter {
             return;
         }
 
-        drop(canvas);
+        let _ = canvas;
         // Direct HW path: bulk fill per row.
         if self.fmt.bpp == 32 {
             let canvas = self.can();
-            let row_bytes = fw * 4;
+            let _row_bytes = fw * 4;
             for y in 0..fh {
                 let off = y * canvas.pitch;
                 unsafe {
@@ -1132,14 +1132,14 @@ impl VgaWriter {
             return;
         }
         if canvas.draw_to_back && canvas.back_buffer.is_some() {
-            drop(canvas);
+            let _ = canvas;
             if let Some(buf) = self.canm().back_buffer.as_mut() {
                 buf[y * fw + x] = color;
             }
             self.mark_dirty_rect(x, y, 1, 1);
             return;
         }
-        drop(canvas);
+        let _ = canvas;
         self.write_hw_pixel_packed(x, y, color);
     }
 
@@ -1899,7 +1899,7 @@ impl VgaWriter {
                         }
                     }
                 }
-                drop(canvas);
+                let _ = canvas;
                 self.canm().back_buffer = Some(buf);
             }
         }
@@ -1911,7 +1911,7 @@ impl VgaWriter {
         let prev_draw_to_back = canvas.draw_to_back;
         let prev_track_dirty = canvas.track_dirty;
         let has_back = canvas.back_buffer.is_some();
-        drop(canvas);
+        let _ = canvas;
         if has_back {
             let canvas = self.canm();
             canvas.draw_to_back = true;

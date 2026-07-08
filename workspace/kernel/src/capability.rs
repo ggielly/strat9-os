@@ -65,6 +65,8 @@ pub enum ResourceType {
     Keyboard,
     Volume,
     Namespace,
+    /// IPC transport endpoint (N1/N2/N3).
+    IpcTransport,
 }
 
 /// Permissions associated with a capability
@@ -426,6 +428,12 @@ pub fn release_capability(cap: &Capability, owner_task: Option<TaskId>) {
         ResourceType::MemoryRegion => {
             let _ =
                 crate::memory::memory_region_registry().release_handle(cap.resource as u64, cap.id);
+        }
+        ResourceType::IpcTransport => {
+            if remaining_caps == 0 {
+                let tid = crate::ipc::transport::TransportId::from_u64(cap.resource as u64);
+                let _ = crate::syscall::transport::TRANSPORT_MANAGER.close(tid);
+            }
         }
         _ => {}
     }

@@ -21,6 +21,98 @@ const CONFIG_DATA: u16 = 0xCFC;
 /// atomic w.r.t. other CPUs. Every config read/write must hold this lock.
 static PCI_IO_LOCK: SpinLock<()> = SpinLock::new(());
 
+// ---------------------------------------------------------------------------
+// ECAM (PCIe Enhanced Configuration Access Mechanism) helpers
+// ---------------------------------------------------------------------------
+
+/// Read a 32-bit register from an ECAM-mapped PCI config space.
+///
+/// `ecam_base` is the MMIO base address of the ECAM region.
+/// `bus`, `device`, `function` identify the device; `offset` is the register.
+#[inline]
+unsafe fn ecam_read32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+    let addr = ecam_base
+        + ((bus as usize) << 20)
+        + ((device as usize) << 15)
+        + ((function as usize) << 12)
+        + ((offset & 0xFC) as usize);
+    core::ptr::read_volatile(addr as *const u32)
+}
+
+/// Write a 32-bit register to an ECAM-mapped PCI config space.
+#[inline]
+unsafe fn ecam_write32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8, val: u32) {
+    let addr = ecam_base
+        + ((bus as usize) << 20)
+        + ((device as usize) << 15)
+        + ((function as usize) << 12)
+        + ((offset & 0xFC) as usize);
+    core::ptr::write_volatile(addr as *mut u32, val);
+}
+
+/// Read a single byte from ECAM config space.
+#[inline]
+unsafe fn ecam_read8(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8) -> u8 {
+    let dword = ecam_read32(ecam_base, bus, device, function, offset & !0x03);
+    ((dword >> ((offset & 0x3) * 8)) & 0xFF) as u8
+}
+
+// ---------------------------------------------------------------------------
+// Known device name lookup (for improved logging)
+// ---------------------------------------------------------------------------
+
+/// Known PCI device names for human-readable logging.
+fn device_name(vendor: u16, device: u16) -> Option<&'static str> {
+    match (vendor, device) {
+        // Intel Ethernet
+        (0x8086, 0x100E) => Some("Intel E1000 (QEMU)"),
+        (0x8086, 0x100F) => Some("Intel E1000 (QEMU)"),
+        (0x8086, 0x10D3) => Some("Intel E1000e (QEMU)"),
+        (0x8086, 0x153A) => Some("Intel I217-LM"),
+        (0x8086, 0x15F9) => Some("Intel I219-LM"),
+        (0x8086, 0x15FA) => Some("Intel I219-V"),
+        (0x8086, 0x15F2) => Some("Intel I225-LM"),
+        (0x8086, 0x15F3) => Some("Intel I225-V"),
+        (0x8086, 0x125B) => Some("Intel I226-LM"),
+        (0x8086, 0x125C) => Some("Intel I226-V"),
+        // VirtIO
+        (0x1AF4, 0x1000) => Some("VirtIO Net"),
+        (0x1AF4, 0x1001) => Some("VirtIO Block"),
+        (0x1AF4, 0x1003) => Some("VirtIO Console"),
+        (0x1AF4, 0x1005) => Some("VirtIO RNG"),
+        (0x1AF4, 0x1050) => Some("VirtIO GPU"),
+        (0x1AF4, 0x1052) => Some("VirtIO Input"),
+        // QEMU
+        (0x1234, 0x11E9) => Some("QEMU VGA"),
+        _ => None,
+    }
+}
+
+/// Human-readable PCI class name.
+fn class_name(class: u8, subclass: u8) -> Option<&'static str> {
+    match (class, subclass) {
+        (0x00, 0x00) => Some("Legacy Device"),
+        (0x00, 0x01) => Some("VGA-Compatible Device"),
+        (0x01, 0x00) => Some("SCSI Controller"),
+        (0x01, 0x01) => Some("IDE Controller"),
+        (0x01, 0x06) => Some("SATA Controller"),
+        (0x01, 0x08) => Some("NVMe Controller"),
+        (0x02, 0x00) => Some("Ethernet Controller"),
+        (0x02, 0x80) => Some("Network Controller"),
+        (0x03, 0x00) => Some("VGA Controller"),
+        (0x03, 0x02) => Some("3D Controller"),
+        (0x04, 0x00) => Some("Multimedia Video"),
+        (0x04, 0x03) => Some("Audio Device"),
+        (0x06, 0x00) => Some("Host Bridge"),
+        (0x06, 0x01) => Some("ISA Bridge"),
+        (0x06, 0x04) => Some("PCI-to-PCI Bridge"),
+        (0x0C, 0x03) => Some("USB Controller"),
+        (0x08, 0x00) => Some("I20"),
+        _ => None,
+    }
+}
+
+
 #[derive(Clone, Copy)]
 struct PciLineQuirk {
     vendor_id: u16,
@@ -158,6 +250,281 @@ pub mod cap_id {
     pub const MSI: u8 = 0x05;
     /// MSI-X capability (PCI 3.0+)
     pub const MSIX: u8 = 0x11;
+}
+
+
+/// PCIe Extended Capability IDs (offset >= 0x100)
+pub mod ext_cap_id {
+    /// Advanced Error Reporting (AER)
+    pub const AER: u16 = 0x0001;
+    /// Virtual Channel
+    pub const VC: u16 = 0x0002;
+    /// Device Serial Number
+    pub const DSN: u16 = 0x0003;
+    /// Power Budgeting
+    pub const PB: u16 = 0x0004;
+    /// Root Link Declaration
+    pub const RLD: u16 = 0x0005;
+    /// Root Complex Link Declaration
+    pub const RCLD: u16 = 0x0006;
+    /// Multi-Root I/O Virtualization
+    pub const MRIOV: u16 = 0x0008;
+    /// Single-Root I/O Virtualization (SR-IOV)
+    pub const SRIOV: u16 = 0x0010;
+    /// Resizable BAR
+    pub const RBAR: u16 = 0x0015;
+    /// Dynamic Power Allocation
+    pub const DPA: u16 = 0x0016;
+    /// TPH Requester
+    pub const TPH: u16 = 0x0017;
+    /// Latency Tolerance Reporting
+    pub const LTR: u16 = 0x0018;
+    /// Secondary PCIe Capability
+    pub const SEC_PCIE: u16 = 0x0019;
+    /// PMUX
+    pub const PMUX: u16 = 0x001A;
+    /// Process Address Space ID (PASID)
+    pub const PASID: u16 = 0x001B;
+    /// LNR (Layer 3 Routing)
+    pub const LNR: u16 = 0x001C;
+    /// Address Translation Services (ATS)
+    pub const ATS: u16 = 0x001D;
+    /// Page Request Interface (PRI)
+    pub const PRI: u16 = 0x001E;
+    /// Process Address Space ID (PASID) Extended Capability
+    pub const PASID_EXT: u16 = 0x0020;
+    /// Shared Virtual Memory (SVM)
+    pub const SVM: u16 = 0x0021;
+    /// L1 PM Substates
+    pub const L1_PM: u16 = 0x0022;
+    /// Precision Time Measurement (PTM)
+    pub const PTM: u16 = 0x0023;
+    /// PCIe Tunneling
+    pub const TUNNEL: u16 = 0x0024;
+    /// Access Control Services (ACS)
+    pub const ACS: u16 = 0x0025;
+    /// Alternative Routing ID Interpretation (ARI)
+    pub const ARI: u16 = 0x0026;
+    /// Address Translation Services (ATS) Extended Capability
+    pub const ATS_EXT: u16 = 0x0027;
+    /// Single Root I/O Virtualization (SR-IOV) Extended Capability
+    pub const SRIOV_EXT: u16 = 0x0028;
+    /// Physical Function (PF) SR-IOV Extended Capability
+    pub const PF_SRIOV: u16 = 0x0029;
+}
+
+/// SR-IOV capability register offsets (relative to capability base).
+pub mod sriov_cap {
+    /// Capability register (16-bit)
+    pub const CAP: u8 = 0x00;
+    /// SR-IOV Control register (16-bit)
+    pub const CONTROL: u8 = 0x02;
+    /// SR-IOV Status register (16-bit)
+    pub const STATUS: u8 = 0x04;
+    /// SR-IOV PCIe Capability register (32-bit)
+    pub const PCIE_CAP: u8 = 0x08;
+    /// SR-IOV ARI Capability register (32-bit)
+    pub const ARI_CAP: u8 = 0x0C;
+    /// SR-IOV Initial VFs (16-bit)
+    pub const INITIAL_VF: u8 = 0x10;
+    /// SR-IOV Total VFs (16-bit)
+    pub const TOTAL_VF: u8 = 0x12;
+    /// SR-IOV Number of VFs (16-bit)
+    pub const NUM_VF: u8 = 0x14;
+    /// SR-IOV Function Dependency Link (8-bit)
+    pub const FDL: u8 = 0x16;
+    /// SR-IOV System Page Size (32-bit)
+    pub const SYS_PAGE_SIZE: u8 = 0x18;
+    /// SR-IOV BAR0 offset (32-bit)
+    pub const BAR0_OFFSET: u8 = 0x1C;
+    /// SR-IOV BAR1 offset (32-bit)
+    pub const BAR1_OFFSET: u8 = 0x20;
+    /// SR-IOV BAR2 offset (32-bit)
+    pub const BAR2_OFFSET: u8 = 0x24;
+    /// SR-IOV BAR3 offset (32-bit)
+    pub const BAR3_OFFSET: u8 = 0x28;
+    /// SR-IOV BAR4 offset (32-bit)
+    pub const BAR4_OFFSET: u8 = 0x2C;
+    /// SR-IOV BAR5 offset (32-bit)
+    pub const BAR5_OFFSET: u8 = 0x30;
+    /// SR-IOV VF Migration State Array Offset (32-bit)
+    pub const VF_MIGRATION_STATE: u8 = 0x3C;
+}
+
+/// SR-IOV Control register bits
+pub mod sriov_ctrl {
+    /// Enable SR-IOV
+    pub const ENABLE: u16 = 1 << 0;
+    /// Enable MSE (Memory Space Enable) for VFs
+    pub const MSE: u16 = 1 << 1;
+    /// Enable ARI (Alternate Routing ID)
+    pub const ARI_CAP: u16 = 1 << 2;
+    /// Enable IMS (Interrupt Mask Set) for VFs
+    pub const IMS_ENABLE: u16 = 1 << 4;
+    /// Enable PFARI (PF ARI Capability)
+    pub const PFARI_CAP: u16 = 1 << 5;
+    /// Enable VFARI (VF ARI Capability)
+    pub const VFARI_CAP: u16 = 1 << 6;
+    /// Enable VF Migration
+    pub const VF_MIGRATION: u16 = 1 << 7;
+}
+
+/// SR-IOV Status register bits
+pub mod sriov_status {
+    /// VF Memory Space Status
+    pub const VF_MEMORY_SPACE: u16 = 1 << 0;
+    /// VF ARI Capability Status
+    pub const VF_ARI_CAP: u16 = 1 << 1;
+    /// PF ARI Capability Status
+    pub const PF_ARI_CAP: u16 = 1 << 2;
+    /// VF Migration Status
+    pub const VF_MIGRATION_STATUS: u16 = 1 << 3;
+}
+
+/// AER (Advanced Error Reporting) capability register offsets.
+pub mod aer_cap {
+    /// AER Capability register (32-bit)
+    pub const CAP: u8 = 0x00;
+    /// AER UnCorrectable Error Status (32-bit)
+    pub const UNCERR_STATUS: u8 = 0x04;
+    /// AER UnCorrectable Error Mask (32-bit)
+    pub const UNCERR_MASK: u8 = 0x08;
+    /// AER UnCorrectable Error Severity (32-bit)
+    pub const UNCERR_SEVERITY: u8 = 0x0C;
+    /// AER Correctable Error Status (32-bit)
+    pub const CORERR_STATUS: u8 = 0x10;
+    /// AER Correctable Error Mask (32-bit)
+    pub const CORERR_MASK: u8 = 0x14;
+    /// AER Advanced Error Capabilities and Control (32-bit)
+    pub const ERR_CAP: u8 = 0x18;
+    /// AER Header Log (128-bit)
+    pub const HEADER_LOG: u8 = 0x1C;
+}
+
+/// Walk PCIe extended capabilities starting from `cap_ptr` (>= 0x100).
+///
+/// Returns a list of (capability_id, offset) pairs.
+pub fn walk_ext_capabilities(dev: &PciDevice, cap_ptr: u16) -> Vec<(u16, u16)> {
+    let mut caps = Vec::new();
+    let mut offset = cap_ptr;
+
+    while offset >= 0x100 && offset < 0xFFF {
+        let dword = dev.read_config_u32((offset & 0xFF) as u8);
+        let cap_id = (dword & 0xFFFF) as u16;
+        let next_ptr = ((dword >> 20) & 0xFFC) as u16; // bits 31:20, aligned to 4
+
+        if cap_id == 0 {
+            break; // Invalid capability
+        }
+
+        caps.push((cap_id, offset));
+
+        if next_ptr == 0 || next_ptr == offset {
+            break; // End of list or self-loop
+        }
+        offset = next_ptr;
+    }
+
+    caps
+}
+
+/// Find the PCIe extended capability offset for a given capability ID.
+pub fn find_ext_capability(dev: &PciDevice, cap_id: u16) -> Option<u16> {
+    // Read PCIe capabilities pointer from header type 0
+    let ext_cap_ptr = dev.read_config_u8(config::CAPABILITIES_PTR) as u16;
+    if ext_cap_ptr < 0x100 {
+        return None; // No PCIe extended capabilities
+    }
+
+    for (found_id, offset) in walk_ext_capabilities(dev, ext_cap_ptr) {
+        if found_id == cap_id {
+            return Some(offset);
+        }
+    }
+    None
+}
+
+/// Read SR-IOV capability information from a PCI device.
+///
+/// Returns `None` if the device doesn't have SR-IOV capability.
+pub fn read_sriov_info(dev: &PciDevice) -> Option<SriovInfo> {
+    let cap_offset = find_ext_capability(dev, ext_cap_id::SRIOV)?;
+    let control = dev.read_config_u16(((cap_offset + sriov_cap::CONTROL as u16) & 0xFF) as u8);
+    let status = dev.read_config_u16(((cap_offset + sriov_cap::STATUS as u16) & 0xFF) as u8);
+    let initial_vf = dev.read_config_u16(((cap_offset + sriov_cap::INITIAL_VF as u16) & 0xFF) as u8);
+    let total_vf = dev.read_config_u16(((cap_offset + sriov_cap::TOTAL_VF as u16) & 0xFF) as u8);
+    let num_vf = dev.read_config_u16(((cap_offset + sriov_cap::NUM_VF as u16) & 0xFF) as u8);
+
+    Some(SriovInfo {
+        cap_offset,
+        control,
+        status,
+        initial_vf,
+        total_vf,
+        num_vf,
+        enabled: (control & sriov_ctrl::ENABLE) != 0,
+    })
+}
+
+/// SR-IOV capability information.
+#[derive(Debug, Clone, Copy)]
+pub struct SriovInfo {
+    /// Offset of the SR-IOV capability in config space.
+    pub cap_offset: u16,
+    /// SR-IOV Control register value.
+    pub control: u16,
+    /// SR-IOV Status register value.
+    pub status: u16,
+    /// Number of initial VFs at power-on.
+    pub initial_vf: u16,
+    /// Total number of VFs supported.
+    pub total_vf: u16,
+    /// Number of VFs currently enabled.
+    pub num_vf: u16,
+    /// Whether SR-IOV is currently enabled.
+    pub enabled: bool,
+}
+
+/// Read AER (Advanced Error Reporting) capability information.
+pub fn read_aer_info(dev: &PciDevice) -> Option<AerInfo> {
+    let cap_offset = find_ext_capability(dev, ext_cap_id::AER)?;
+    let uncerr_status = dev.read_config_u32(((cap_offset + aer_cap::UNCERR_STATUS as u16) & 0xFF) as u8);
+    let uncerr_mask = dev.read_config_u32(((cap_offset + aer_cap::UNCERR_MASK as u16) & 0xFF) as u8);
+    let corerr_status = dev.read_config_u32(((cap_offset + aer_cap::CORERR_STATUS as u16) & 0xFF) as u8);
+    let corerr_mask = dev.read_config_u32(((cap_offset + aer_cap::CORERR_MASK as u16) & 0xFF) as u8);
+    let err_cap = dev.read_config_u32(((cap_offset + aer_cap::ERR_CAP as u16) & 0xFF) as u8);
+
+    Some(AerInfo {
+        cap_offset,
+        uncerr_status,
+        uncerr_mask,
+        corerr_status,
+        corerr_mask,
+        first_error_pointer: ((err_cap >> 24) & 0x1F) as u8,
+        ecrc_error_capable: (err_cap & 0x01) != 0,
+        ecrc_generate_capable: (err_cap & 0x02) != 0,
+    })
+}
+
+/// AER (Advanced Error Reporting) capability information.
+#[derive(Debug, Clone, Copy)]
+pub struct AerInfo {
+    /// Offset of the AER capability in config space.
+    pub cap_offset: u16,
+    /// Uncorrectable error status bits.
+    pub uncerr_status: u32,
+    /// Uncorrectable error mask bits.
+    pub uncerr_mask: u32,
+    /// Correctable error status bits.
+    pub corerr_status: u32,
+    /// Correctable error mask bits.
+    pub corerr_mask: u32,
+    /// First error pointer (for error logging).
+    pub first_error_pointer: u8,
+    /// Whether ECRC error detection is supported.
+    pub ecrc_error_capable: bool,
+    /// Whether ECRC error generation is supported.
+    pub ecrc_generate_capable: bool,
 }
 
 /// Offsets within an MSI capability block (relative to capability base).
@@ -795,6 +1162,126 @@ fn probe_from_word00(address: PciAddress, word00: u32) -> Option<PciDevice> {
 ///   - a lock-free double-buffered snapshot model.
 static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 
+
+// ---------------------------------------------------------------------------
+// ECAM (PCIe Enhanced Configuration Access Mechanism) scanner
+// ---------------------------------------------------------------------------
+
+/// Scan PCI devices via ECAM (Memory-Mapped Configuration).
+///
+/// Uses MCFG ACPI table entries to discover MMIO-mapped PCI config spaces.
+/// For each ECAM region, scans all bus/device/function combinations.
+/// Returns only devices not already found by the I/O port scanner.
+fn scan_ecam_devices() -> Vec<PciDevice> {
+    use crate::acpi::mcfg;
+    use crate::memory;
+
+    let mcfg_info = match mcfg::parse_mcfg() {
+        Some(info) => info,
+        None => {
+            log::info!("[PCI-ECAM] No MCFG table found, skipping ECAM scan");
+            return Vec::new();
+        }
+    };
+
+    log::info!(
+        "[PCI-ECAM] Found {} ECAM region(s)",
+        mcfg_info.entries.len()
+    );
+
+    let mut devices = Vec::new();
+
+    for entry in &mcfg_info.entries {
+        let ecam_phys = entry.base_address;
+        let start_bus = entry.start_bus;
+        let end_bus = entry.end_bus;
+
+        // Ensure the ECAM region is identity-mapped
+        let region_size = ((end_bus as usize - start_bus as usize + 1) * 256 * 32 * 8 * 4096) as u64;
+        memory::paging::ensure_identity_map_range(ecam_phys, region_size);
+        let ecam_virt = crate::memory::phys_to_virt(ecam_phys) as usize;
+
+        log::info!(
+            "[PCI-ECAM] Region seg={} ecam={:#x} buses={}..{} virt={:#x}",
+            entry.segment_group, ecam_phys, start_bus, end_bus, ecam_virt
+        );
+
+        // Scan each bus in the range
+        for bus in start_bus..=end_bus {
+            for dev in 0..32u8 {
+                // Fast vendor check on function 0
+                let word00 = unsafe {
+                    ecam_read32(ecam_virt, bus, dev, 0, 0x00)
+                };
+                let vendor_id = (word00 & 0xFFFF) as u16;
+                if is_absent_vendor(vendor_id) {
+                    continue;
+                }
+
+                // Probe function 0
+                if let Some(device) = probe_ecam_device(ecam_virt, bus, dev, 0, word00) {
+                    let is_multi = device.header_type & 0x80 != 0;
+                    devices.push(device);
+
+                    // Scan additional functions if multi-function
+                    if is_multi {
+                        for func in 1..8u8 {
+                            if let Some(device) = probe_ecam_device(ecam_virt, bus, dev, func, 0) {
+                                devices.push(device);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    log::info!("[PCI-ECAM] ECAM scan found {} device(s)", devices.len());
+    devices
+}
+
+/// Probe a single PCI device via ECAM MMIO.
+fn probe_ecam_device(ecam_base: usize, bus: u8, device: u8, function: u8, word00: u32) -> Option<PciDevice> {
+    let vendor_id = (word00 & 0xFFFF) as u16;
+    let device_id = (word00 >> 16) as u16;
+    if is_absent_vendor(vendor_id) || device_id == 0xFFFF || device_id == 0x0000 {
+        return None;
+    }
+
+    let address = PciAddress::new(bus, device, function);
+
+    let word08 = unsafe { ecam_read32(ecam_base, bus, device, function, 0x08) };
+    let word0c = unsafe { ecam_read32(ecam_base, bus, device, function, 0x0C) };
+
+    let header_type = ((word0c >> 16) & 0xFF) as u8;
+    if !valid_header_type(header_type) {
+        return None;
+    }
+
+    let class_code = ((word08 >> 24) & 0xFF) as u8;
+    let subclass = ((word08 >> 16) & 0xFF) as u8;
+    let prog_if = ((word08 >> 8) & 0xFF) as u8;
+    if is_ghost_device(class_code, subclass, prog_if) {
+        return None;
+    }
+
+    let word3c = unsafe { ecam_read32(ecam_base, bus, device, function, 0x3C) };
+    let interrupt_line = quirk_zero_irq_line(vendor_id, device_id, (word3c & 0xFF) as u8);
+
+    Some(PciDevice {
+        address,
+        vendor_id,
+        device_id,
+        class_code,
+        subclass,
+        prog_if,
+        revision: (word08 & 0xFF) as u8,
+        header_type,
+        interrupt_line,
+        interrupt_pin: ((word3c >> 8) & 0xFF) as u8,
+    })
+}
+
 /// Populate the cache if empty, then run `f` on the device slice.
 ///
 /// All query functions route through here so that only a single scan ever
@@ -803,22 +1290,46 @@ static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
     let mut cache = PCI_DEVICE_CACHE.lock();
     if cache.is_none() {
-        // Debug: check stack before PCI scan
         let dummy = 0u64;
         let rsp = &dummy as *const u64 as u64;
-        crate::serial_println!("[PCI] Scanning PCI bus, rsp={:#x}", rsp);
-        let devices: Vec<PciDevice> = PciScanner::new().collect();
-        crate::serial_println!("[PCI] PCI scan complete, found {} devices", devices.len());
+        crate::serial_println!("[PCI] Scanning PCI bus (rsp={:#x})...", rsp);
+
+        // Phase 1: I/O port scan (0xCF8/0xCFC)
+        let io_devices: Vec<PciDevice> = PciScanner::new().collect();
+        crate::serial_println!("[PCI] I/O scan: {} device(s)", io_devices.len());
+
+        // Phase 2: ECAM MMIO scan (via MCFG ACPI table)
+        let ecam_devices: Vec<PciDevice> = scan_ecam_devices();
+        crate::serial_println!("[PCI] ECAM scan: {} device(s)", ecam_devices.len());
+
+        // Merge: ECAM devices that are NOT already in the I/O scan
+        let mut devices = io_devices;
+        for ecam_dev in &ecam_devices {
+            let duplicate = devices.iter().any(|d|
+                d.address.bus == ecam_dev.address.bus
+                && d.address.device == ecam_dev.address.device
+                && d.address.function == ecam_dev.address.function
+            );
+            if !duplicate {
+                devices.push(*ecam_dev);
+            }
+        }
+        crate::serial_println!("[PCI] Total: {} device(s) after merge", devices.len());
+
+        // Improved logging: human-readable names, IRQ, class
         for dev in &devices {
+            let name = device_name(dev.vendor_id, dev.device_id)
+                .unwrap_or("Unknown");
+            let class = class_name(dev.class_code, dev.subclass)
+                .unwrap_or("???");
             crate::serial_println!(
-                "[PCI]   {:02x}:{:02x}.{:x} vendor={:04x} device={:04x} class={:02x}:{:02x}",
+                "[PCI]   {:02x}:{:02x}.{:x} {:<24} {} (IRQ={})",
                 dev.address.bus,
                 dev.address.device,
                 dev.address.function,
-                dev.vendor_id,
-                dev.device_id,
-                dev.class_code,
-                dev.subclass
+                name,
+                class,
+                dev.interrupt_line,
             );
         }
         *cache = Some(devices);

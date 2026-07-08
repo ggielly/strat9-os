@@ -120,6 +120,7 @@ impl Strat9RatatuiBackend {
 
     /// Performs the draw cell operation.
     fn draw_cell(&self, x: u16, y: u16, cell: &Cell) {
+        #[allow(deprecated)]
         if cell.skip {
             return;
         }

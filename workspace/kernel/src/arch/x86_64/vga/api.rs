@@ -4,7 +4,6 @@
 
 use super::{
     debug_overlay::vga_debug_init,
-    font::{parse_psf, FONT_PSF},
     panic_screen::init_panic_fb_globals,
     status_line::draw_boot_status_line,
     types::*,
@@ -13,7 +12,6 @@ use super::{
         VGA_PRESENT_REGION_COUNT,
     },
 };
-use alloc::{format, vec};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},

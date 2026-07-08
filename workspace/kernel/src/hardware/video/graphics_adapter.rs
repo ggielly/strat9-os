@@ -22,10 +22,7 @@
 //! ```
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{
-    fmt,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use core::fmt;
 use spin::RwLock;
 
 /// Dirty region for partial screen updates.

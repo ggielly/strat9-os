@@ -6,6 +6,7 @@
 - [Memory Management](memory-model.md)
 - [Boot Sequence](boot-sequence.md)
 - [IPC Mechanisms](ipc-mechanisms.md)
+- [IPC Transport Architecture](architecture-ipc-access-levels.md)
 - [Driver Model](driver-model.md)
 - [ABI Overview](abi.md)
 - [ABI Changelog](abi-changelog.md)

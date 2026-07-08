@@ -1,4 +1,43 @@
+//! IPv4/IPv6 literal parsing helpers.
+//!
+//! These functions parse IP address literals from strings into byte arrays
+//! suitable for network operations. They handle both dotted-decimal (IPv4)
+//! and colon-hex (IPv6) formats.
+//!
+//! # Examples
+//!
+//! ```ignore
+//! use strat9_abi::ip::{parse_ipv4_literal, parse_ipv6_literal};
+//!
+//! // IPv4
+//! assert_eq!(parse_ipv4_literal("192.168.1.10"), Some([192, 168, 1, 10]));
+//! assert_eq!(parse_ipv4_literal("10.0.0.1"), Some([10, 0, 0, 1]));
+//! assert_eq!(parse_ipv4_literal("256.1.1.1"), None); // octet > 255
+//!
+//! // IPv6
+//! assert_eq!(
+//!     parse_ipv6_literal("::1"),
+//!     Some([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+//! );
+//! assert_eq!(
+//!     parse_ipv6_literal("fe80::1"),
+//!     Some([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+//! );
+//! ```
+
 /// Returns true when the input looks like a dotted IPv4 literal candidate.
+///
+/// This is a fast pre-filter: it checks that the string contains only
+/// digits and dots, and has at least one dot. It does NOT validate the
+/// actual address format : use [`parse_ipv4_literal`] for that.
+///
+/// # Example
+///
+/// ```ignore
+/// assert!(is_ipv4_literal_candidate("192.168.1.1"));
+/// assert!(!is_ipv4_literal_candidate("hello"));
+/// assert!(is_ipv4_literal_candidate("999.999.999.999")); // passes filter, fails parse
+/// ```
 pub fn is_ipv4_literal_candidate(s: &str) -> bool {
     let bytes = s.as_bytes();
     !bytes.is_empty()
@@ -8,10 +47,14 @@ pub fn is_ipv4_literal_candidate(s: &str) -> bool {
 
 /// Returns true when the input looks like an IPv6 literal candidate.
 ///
+/// This is a fast pre-filter: it checks that the string contains only
+/// hex digits, colons, and dots, and has at least one colon.
+///
 /// # Limitations
+///
 /// - IPv4-mapped/embedded forms (e.g. `::ffff:192.168.1.1`) are **not** recognised
-///   as candidates : the embedded decimal octets are not valid hex digits.
-/// - Zone IDs (e.g. `fe80::1%eth0`) are **not** recognised : `%` is not in the
+///   as candidates: the embedded decimal octets are not valid hex digits.
+/// - Zone IDs (e.g. `fe80::1%eth0`) are **not** recognised: `%` is not in the
 ///   allowed character set.
 pub fn is_ipv6_literal_candidate(s: &str) -> bool {
     let bytes = s.as_bytes();
@@ -23,6 +66,27 @@ pub fn is_ipv6_literal_candidate(s: &str) -> bool {
 }
 
 /// Parses an IPv4 literal into network-order octets.
+///
+/// Input must be in standard dotted-decimal format: `A.B.C.D` where
+/// each octet is 0-255.
+///
+/// Returns `None` if the format is invalid.
+///
+/// # Example
+///
+/// ```ignore
+/// assert_eq!(parse_ipv4_literal("192.168.1.10"), Some([192, 168, 1, 10]));
+/// assert_eq!(parse_ipv4_literal("10.0.0.1"), Some([10, 0, 0, 1]));
+/// assert_eq!(parse_ipv4_literal("0.0.0.0"), Some([0, 0, 0, 0]));
+/// assert_eq!(parse_ipv4_literal("255.255.255.255"), Some([255, 255, 255, 255]));
+///
+/// // Invalid formats
+/// assert_eq!(parse_ipv4_literal(""), None);
+/// assert_eq!(parse_ipv4_literal("192.168.1"), None);      // too few octets
+/// assert_eq!(parse_ipv4_literal("192.168.1.1.1"), None);  // too many octets
+/// assert_eq!(parse_ipv4_literal("256.1.1.1"), None);      // octet > 255
+/// assert_eq!(parse_ipv4_literal("abc.def.ghi.jkl"), None); // non-numeric
+/// ```
 pub fn parse_ipv4_literal(s: &str) -> Option<[u8; 4]> {
     let mut octets = [0u8; 4];
     let mut idx = 0usize;
@@ -57,6 +121,7 @@ pub fn parse_ipv4_literal(s: &str) -> Option<[u8; 4]> {
     Some(octets)
 }
 
+/// Parses a hex string of 1-4 digits into a `u16`.
 fn parse_hex_u16(s: &str) -> Option<u16> {
     if s.is_empty() || s.len() > 4 {
         return None;
@@ -81,10 +146,42 @@ fn parse_hex_u16(s: &str) -> Option<u16> {
 /// Supports standard colon-hex notation (RFC 4291) with `::` compression.
 ///
 /// # Limitations
+///
 /// - IPv4-mapped/embedded forms (e.g. `::ffff:192.168.1.1`) are **not** supported;
 ///   only pure colon-hex notation is accepted.
 /// - Zone IDs (e.g. `fe80::1%eth0`) are **not** supported; the zone identifier
 ///   must be stripped before calling this function.
+///
+/// # Example
+///
+/// ```ignore
+/// assert_eq!(
+///     parse_ipv6_literal("2001:0db8:0000:0000:0000:ff00:0042:8329"),
+///     Some([
+///         0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+///         0x00, 0x00, 0xff, 0x00, 0x00, 0x42, 0x83, 0x29,
+///     ])
+/// );
+///
+/// // Compressed forms
+/// assert_eq!(
+///     parse_ipv6_literal("::1"),
+///     Some([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+/// );
+/// assert_eq!(
+///     parse_ipv6_literal("fe80::5054:ff:fe12:3456"),
+///     Some([
+///         0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+///         0x50, 0x54, 0x00, 0xff, 0xfe, 0x12, 0x34, 0x56,
+///     ])
+/// );
+///
+/// // Loopback
+/// assert_eq!(
+///     parse_ipv6_literal("::1"),
+///     Some([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+/// );
+/// ```
 pub fn parse_ipv6_literal(s: &str) -> Option<[u8; 16]> {
     let mut groups = [0u16; 8];
 

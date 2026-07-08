@@ -634,7 +634,7 @@ pub fn panic_draw_direct(lines: &[&str]) {
     let fg_txt = panic_pack_rgb(fmt, 0xFF, 0xE7, 0xA0); // amber
     let fg_err = panic_pack_rgb(fmt, 0xFF, 0x55, 0x55); // red
     let fg_title = panic_pack_rgb(fmt, 0x4F, 0xB3, 0xB3); // teal
-    let fg_dim = panic_pack_rgb(fmt, 0x88, 0x88, 0x88); // grey
+    let _fg_dim = panic_pack_rgb(fmt, 0x88, 0x88, 0x88); // grey
 
     // Fill the entire framebuffer with background colour (24/32 bpp safe).
     unsafe {
@@ -646,7 +646,7 @@ pub fn panic_draw_direct(lines: &[&str]) {
                 // Fill with the background colour using 32-bit writes.
                 for row in 0..h {
                     for col in 0..w {
-                        let offset = row * pitch / 4 + col;
+                        let _offset = row * pitch / 4 + col;
                         core::ptr::write_volatile(
                             fb.add(row * pitch + col * bytes_per_pixel) as *mut u32,
                             fill,

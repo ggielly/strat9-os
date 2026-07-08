@@ -12,6 +12,7 @@ Architecture concept summary: Bedrock is the microkernel, Silos are isolated Rin
 
 - Kernel (Bedrock) in Ring 0 : minimal, `#![no_std]`.
 - Silos are in Ring 3 : isolated components communicate via IPC.
+- **IPC Transport Manager** : 3-level hybrid isolation model (TypeSafe / LockFree / MMU)
 - Strate are in Silo : network stack, filesystem, etc.
 - Capabilities gate access to resources.
 - Plan 9 style scheme model for resources.
@@ -51,7 +52,7 @@ This project is in active development and not production-ready. The ABI is still
     - Preemptive multitasking with APIC/x2APIC and per-CPU timers
     - Limine boot path and bootable ISO
     - Scheduler with priority/round-robin and CPU hotplug support
-    - IPC: synchronous ports, shared-memory rings (zero-copy), capability manager and VFS scheme router
+    - IPC: 3-level transport manager (TypeSafe / LockFree ring / MMU), synchronous ports, capability manager, VFS scheme router
     - ELF loader and Ring-3 execution (userspace silos)
     - POSIX interval timers and signal infrastructure
     - Interrupts & exceptions: IDT, IRQ handling, exception dumps and backtraces
@@ -82,33 +83,41 @@ graph TD
         Drivers[Drivers & Services]:::sys
 
         subgraph Silo_JS [JIT JS Silo]
-            JS_Runtime[JIT JS Runtime]:::app -->|IPC| Net[Net Stack]:::sys
-            JS_Runtime -->|IPC| FS[Filesystem]:::sys
+            JS_Runtime[JIT JS Runtime]:::app
         end
 
         subgraph Silo_Native [Native Silo]
-            ELF[ELF Binary]:::app -->|IPC| Console[Console Driver]:::sys
+            ELF[ELF Binary]:::app
         end
     end
 
-    subgraph Ring 0 [Kernel SpacSee `LICENSE`.e / Bedrock]
+    subgraph Ring 0 [Kernel / Bedrock]
         Kernel[Bedrock Kernel]:::kernel
         Sched[Scheduler]:::kernel
-        IPC[IPC System]:::kernel
+        IPC_MGR[IPC Transport Manager]:::kernel
+        N1[N1 TypeSafe]:::kernel
+        N2[N2 LockFree Ring]:::transport
+        N3[N3 MMU Migration]:::transport
         MM[Memory Manager]:::kernel
+        NIC[NIC Driver]:::kernel
 
         Kernel --- Sched
-        Kernel --- IPC
+        Kernel --- IPC_MGR
+        IPC_MGR --> N1
+        IPC_MGR --> N2
+        IPC_MGR --> N3
         Kernel --- MM
+        Kernel --- NIC
     end
 
-    JS_Runtime -.->|Syscall/IPC| Kernel
-    Net -.->|Syscall/IPC| Kernel
-    FS -.->|Syscall/IPC| Kernel
-    ELF -.->|Syscall/IPC| Kernel
-    Console -.->|Syscall/IPC| Kernel
+    JS_Runtime -.->|N2 Ring| Net[Net Stack]:::sys
+    JS_Runtime -.->|N2 Ring| FS[Filesystem]:::sys
+    ELF -.->|N1 or N2| Console[Console Driver]:::sys
+    Net -.->|N2 Ring| NIC
+    NIC -.->|N2 Ring| Net
 
     classDef kernel fill:#f96,stroke:#333,stroke-width:2px;
+    classDef transport fill:#fc9,stroke:#333,stroke-width:2px;
     classDef sys fill:#8cf,stroke:#333,stroke-width:1px;
     classDef app fill:#8f9,stroke:#333,stroke-width:1px;
 ```

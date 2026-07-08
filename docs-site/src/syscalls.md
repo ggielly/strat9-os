@@ -4,6 +4,67 @@ Complete reference for all Strat9 OS syscalls. Syscalls are invoked via the `sys
 
 **ABI convention:** Success returns a non-negative value. Errors return a negative errno value (two's complement). Userspace checks `if result > 0xFFFF_F000` to detect errors, then applies `!result + 1` to get the errno number.
 
+## Constants
+
+### AT_* flags (for *at syscalls)
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `AT_FDCWD` | `-100` | Use the process's current working directory as the base directory |
+| `AT_REMOVEDIR` | `0x200` | Remove a directory (for `SYS_UNLINKAT`) |
+| `AT_SYMLINK_NOFOLLOW` | `0x100` | Do not follow symbolic links (for `SYS_FSTATAT`) |
+| `AT_EMPTY_PATH` | `0x1000` | Operate on the fd itself when path is empty |
+
+### Open flags
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| `O_RDONLY` | `0` | Open for reading |
+| `O_WRONLY` | `1` | Open for writing |
+| `O_RDWR` | `2` | Open for reading and writing |
+| `O_CREAT` | `0x40` | Create file if it does not exist |
+| `O_EXCL` | `0x800` | Fail if file already exists (with O_CREAT) |
+| `O_TRUNC` | `0x200` | Truncate file to zero length |
+| `O_APPEND` | `0x400` | Append to end of file |
+| `O_NONBLOCK` | `0x800` | Non-blocking mode |
+| `O_DIRECTORY` | `0x10000` | Open as directory |
+| `O_NOFOLLOW` | `0x20000` | Do not follow symlinks |
+
+### Protection flags (mmap)
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| `PROT_READ` | `1` | Page can be read |
+| `PROT_WRITE` | `2` | Page can be written |
+| `PROT_EXEC` | `4` | Page can be executed |
+
+### Signal constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `SIG_DFL` | `0` | Default signal handling |
+| `SIG_IGN` | `1` | Ignore signal |
+| `SIG_BLOCK` | `0` | Block signals in set |
+| `SIG_UNBLOCK` | `1` | Unblock signals in set |
+| `SIG_SETMASK` | `2` | Set signal mask to set |
+
+### Waitpid options
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| `WNOHANG` | `1` | Return immediately if no child has exited |
+| `WUNTRACED` | `2` | Also return for stopped children |
+| `WCONTINUED` | `4` | Also return for continued children |
+
+### Clock IDs
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `CLOCK_REALTIME` | `0` | System-wide real-time clock |
+| `CLOCK_MONOTONIC` | `1` | Monotonic clock (not affected by adjustments) |
+| `CLOCK_PROCESS_CPUTIME_ID` | `2` | Per-process CPU time |
+| `CLOCK_THREAD_CPUTIME_ID` | `3` | Per-thread CPU time |
+
 ---
 
 ## Handle operations
@@ -217,7 +278,7 @@ Complete reference for all Strat9 OS syscalls. Syscalls are invoked via the `sys
 | 407 | `SYS_LSEEK` | `fd: u64, offset: u64, whence: u64` | new position | Seek in a file |
 | 408 | `SYS_FSTAT` | `fd: u64, stat_ptr: u64` | 0 | Get file status (fstat) |
 | 409 | `SYS_STAT` | `path_ptr: u64, path_len: u64, stat_ptr: u64` | 0 | Get file status by path |
-| 413 | `SYS_ACCESS` | `path_ptr: u64, path_len: u64, mode: u64` | 0 | Check file accessibility |
+| 413 | `SYS_ACCESS` | `path_ptr: u64, path_len: u64, mode: u64` | 0 | Check file accessibility (uses effective UID/GID, not real). Prefer `SYS_FACCESSAT` for new code. |
 | 430 | `SYS_GETDENTS` | `fd: u64, buf_ptr: u64, buf_len: u64` | bytes read | Read directory entries |
 | 431 | `SYS_PIPE` | `fds_ptr: u64` | 0 | Create a pipe pair |
 | 432 | `SYS_DUP` | `old_fd: u64` | new fd | Duplicate file descriptor |
@@ -256,15 +317,39 @@ Complete reference for all Strat9 OS syscalls. Syscalls are invoked via the `sys
 
 ## `*at` variants (relative to directory fd)
 
+These syscalls resolve paths relative to a directory file descriptor instead of the process CWD. They are the POSIX-standard way to open, stat, and manipulate files safely in multi-threaded programs.
+
+### Special `dirfd` values
+
+| Value | Constant | Meaning |
+|-------|----------|---------|
+| `-100` | `AT_FDCWD` | Use the process's current working directory (CWD) as the base |
+| `≥ 0` | valid fd | Use the opened directory referenced by this file descriptor |
+
+### Syscall reference
+
 | # | Syscall | Parameters | Return | Description |
 |---|---------|-----------|--------|-------------|
-| 462 | `SYS_OPENAT` | `dirfd: u64, path_ptr: u64, path_len: u64, flags: u64` | file descriptor | Open relative to dirfd |
-| 463 | `SYS_FSTATAT` | `dirfd: u64, path_ptr: u64, path_len: u64, stat_ptr: u64, flags: u64` | 0 | Stat relative to dirfd |
-| 464 | `SYS_UNLINKAT` | `dirfd: u64, path_ptr: u64, path_len: u64, flags: u64` | 0 | Unlink relative to dirfd |
-| 465 | `SYS_RENAMEAT` | `olddirfd: u64, old_ptr: u64, old_len: u64, newdirfd: u64, new_ptr: u64, new_len: u64` | 0 | Rename relative to dirfds |
-| 466 | `SYS_MKDIRAT` | `dirfd: u64, path_ptr: u64, path_len: u64, mode: u64` | 0 | Create directory relative to dirfd |
-| 467 | `SYS_READLINKAT` | `dirfd: u64, path_ptr: u64, path_len: u64, buf_ptr: u64, buf_len: u64` | bytes read | Readlink relative to dirfd |
-| 468 | `SYS_FACCESSAT` | `dirfd: u64, path_ptr: u64, path_len: u64, mode: u64, flags: u64` | 0 | Check accessibility relative to dirfd |
+| 462 | `SYS_OPENAT` | `dirfd: u64, path_ptr: u64, path_len: u64, flags: u64` | file descriptor | Open a file relative to `dirfd`. If `path_ptr` is absolute, `dirfd` is ignored. |
+| 463 | `SYS_FSTATAT` | `dirfd: u64, path_ptr: u64, path_len: u64, stat_ptr: u64, flags: u64` | 0 | Get file status relative to `dirfd`. `stat_ptr` receives a `FileStat` struct. |
+| 464 | `SYS_UNLINKAT` | `dirfd: u64, path_ptr: u64, path_len: u64, flags: u64` | 0 | Delete a file relative to `dirfd`. If `AT_REMOVEDIR` flag is set, removes a directory. |
+| 465 | `SYS_RENAMEAT` | `olddirfd: u64, old_ptr: u64, old_len: u64, newdirfd: u64, new_ptr: u64, new_len: u64` | 0 | Rename/move a file. Source and destination can have different base directories. |
+| 466 | `SYS_MKDIRAT` | `dirfd: u64, path_ptr: u64, path_len: u64, mode: u64` | 0 | Create a directory relative to `dirfd`. |
+| 467 | `SYS_READLINKAT` | `dirfd: u64, path_ptr: u64, path_len: u64, buf_ptr: u64, buf_len: u64` | bytes read | Read the target of a symbolic link relative to `dirfd`. |
+| 468 | `SYS_FACCESSAT` | `dirfd: u64, path_ptr: u64, path_len: u64, mode: u64, flags: u64` | 0 | Check file accessibility. `mode`: `R_OK (4)`, `W_OK (2)`, `X_OK (1)`, `F_OK (0)`. |
+
+### Flags
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| `AT_FDCWD` | `-100` | Use process CWD as base directory |
+| `AT_REMOVEDIR` | `0x200` | Unlink a directory instead of a file (for `SYS_UNLINKAT`) |
+| `AT_SYMLINK_NOFOLLOW` | `0x100` | Do not follow symlinks (for `SYS_FSTATAT`) |
+| `AT_EMPTY_PATH` | `0x1000` | Operate on `dirfd` itself when path is empty |
+
+### Errors
+
+`EBADF` (invalid dirfd), `ENOENT` (path not found), `EACCES` (permission denied), `ENOTDIR` (dirfd is not a directory), `EEXIST` (file exists for CREATE_EXCL), `EINVAL` (invalid flags)
 
 ---
 

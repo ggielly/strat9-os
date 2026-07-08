@@ -36,17 +36,21 @@ use crate::{
     },
 };
 
+macro_rules! elf_trace {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)] {
+            crate::e9_println!($($arg)*);
+            crate::serial_println!($($arg)*);
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
-// ELF64 constants
+// ELF64 constants (relocation & dynamic tags : not covered by xmas-elf)
 // ---------------------------------------------------------------------------
 
-const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
-const ELFCLASS64: u8 = 2;
-const ELFDATA2LSB: u8 = 1;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
-const EV_CURRENT: u32 = 1;
-const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
@@ -74,6 +78,8 @@ const R_X86_64_COPY: u32 = 5;
 const R_X86_64_GLOB_DAT: u32 = 6;
 const R_X86_64_JUMP_SLOT: u32 = 7;
 const R_X86_64_TPOFF64: u32 = 18;
+const R_X86_64_DTPMOD64: u32 = 16;
+const R_X86_64_DTPOFF64: u32 = 17;
 const R_X86_64_IRELATIVE: u32 = 37;
 
 /// Maximum virtual address we accept for user-space mappings.
@@ -89,6 +95,8 @@ pub const USER_STACK_PAGES: usize = 16;
 pub const USER_STACK_TOP: u64 = USER_STACK_BASE + (USER_STACK_PAGES as u64) * 4096;
 /// Guard page below the user stack : unmapped, catches stack underflows.
 pub const USER_STACK_GUARD: u64 = USER_STACK_BASE - 4096;
+/// Standard user-mode RFLAGS: IF=1, reserved bit 1 set.
+const USER_RFLAGS: u64 = 0x202;
 
 /// Result of loading an ELF image into an address space.
 #[derive(Debug, Clone, Copy)]
@@ -106,30 +114,20 @@ pub struct LoadedElfInfo {
 }
 
 // ---------------------------------------------------------------------------
-// ELF64 header structures
+// ELF64 structures for kernel-internal use
 // ---------------------------------------------------------------------------
 
-/// ELF64 file header (64 bytes).
-#[repr(C, packed)]
+/// Parsed ELF64 file header (copy-friendly, no borrows).
 #[derive(Debug, Clone, Copy)]
 struct Elf64Header {
-    e_ident: [u8; 16],
     e_type: u16,
-    e_machine: u16,
-    e_version: u32,
     e_entry: u64,
     e_phoff: u64,
-    e_shoff: u64,
-    e_flags: u32,
-    e_ehsize: u16,
     e_phentsize: u16,
     e_phnum: u16,
-    e_shentsize: u16,
-    e_shnum: u16,
-    e_shstrndx: u16,
 }
 
-/// ELF64 program header (56 bytes).
+/// Parsed ELF64 program header (copy-friendly, packed for raw byte reading).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 struct Elf64Phdr {
@@ -170,71 +168,80 @@ struct Elf64Sym {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing
+// Parsing (uses xmas-elf for header validation)
 // ---------------------------------------------------------------------------
 
 /// Parse and validate the ELF64 file header from raw bytes.
+///
+/// Uses `xmas-elf` for magic/class/machine/version validation, then copies
+/// the fields we need into a local `Copy` struct.
 fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
-    if data.len() < core::mem::size_of::<Elf64Header>() {
-        return Err("ELF data too small for header");
+    let elf = xmas_elf::ElfFile::new(data).map_err(|e| {
+        crate::serial_println!("[elf] xmas_elf::ElfFile::new failed: {:?}", e);
+        "Invalid ELF header"
+    })?;
+
+    let hdr = elf.header.pt2;
+
+    // Reject non-x86_64 binaries early.
+    let machine = hdr.machine().as_machine();
+    if machine != xmas_elf::header::Machine::X86_64 {
+        crate::serial_println!(
+            "[elf] Rejecting binary: machine={:?} (expected X86_64)",
+            machine
+        );
+        return Err("Not an x86_64 ELF binary");
     }
 
-    // SAFETY: data is large enough and Elf64Header is repr(C, packed) with no
-    // alignment requirements beyond 1.
-    let header: Elf64Header =
-        unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
-
-    // Validate magic
-    if header.e_ident[0..4] != ELF_MAGIC {
-        return Err("Bad ELF magic");
-    }
-
-    // Class: 64-bit
-    if header.e_ident[4] != ELFCLASS64 {
-        return Err("Not ELF64");
-    }
-
-    // Data: little-endian
-    if header.e_ident[5] != ELFDATA2LSB {
-        return Err("Not little-endian ELF");
-    }
-
-    // Machine: x86_64
-    if header.e_machine != EM_X86_64 {
-        return Err("Not x86_64 ELF");
-    }
-
-    // Type: executable or shared object (PIE/static PIE executable image)
-    if header.e_type != ET_EXEC && header.e_type != ET_DYN {
+    // Type: executable or shared object (PIE/static PIE)
+    let e_type = hdr.type_().0;
+    if e_type != ET_EXEC && e_type != ET_DYN {
+        crate::serial_println!(
+            "[elf] Rejecting binary: e_type={} (expected ET_EXEC={} or ET_DYN={})",
+            e_type,
+            ET_EXEC,
+            ET_DYN
+        );
         return Err("Unsupported ELF type (expected ET_EXEC or ET_DYN)");
     }
 
-    // ELF version
-    if header.e_version != EV_CURRENT {
-        return Err("Unsupported ELF version");
-    }
-
+    let e_entry = hdr.entry_point();
     // Entry point must be canonical user space (for ET_DYN this is relative and
-    // validated again after relocation). ET_EXEC must be non-zero.
-    if header.e_entry >= USER_ADDR_MAX {
+    // validated again after relocation). ET_EXEC with e_entry=0 is handled later.
+    if e_entry >= USER_ADDR_MAX {
         return Err("Entry point outside user address range");
     }
-    // Some toolchains/images can emit ET_EXEC with e_entry=0.
-    // We handle this case later by deriving a fallback entry from PT_LOAD|PF_X.
 
-    // Sanity check program headers
-    if header.e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
+    let e_phentsize = hdr.ph_entry_size();
+    let e_phoff = hdr.ph_offset();
+    let e_phnum = hdr.ph_count();
+
+    // Sanity check program headers.
+    // Compare against our packed Elf64Phdr (56 bytes = standard ELF64), not
+    // xmas_elf::ProgramHeader which may have padding due to #[repr(C)].
+    if e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
+        crate::serial_println!(
+            "[elf] Rejecting binary: e_phentsize={} expected={}",
+            e_phentsize,
+            core::mem::size_of::<Elf64Phdr>()
+        );
         return Err("Unexpected phentsize");
     }
 
-    let ph_end = (header.e_phoff as usize)
-        .checked_add((header.e_phnum as usize) * (header.e_phentsize as usize))
+    let ph_end = (e_phoff as usize)
+        .checked_add((e_phnum as usize) * (e_phentsize as usize))
         .ok_or("Program header table overflows")?;
     if ph_end > data.len() {
         return Err("Program headers extend past file");
     }
 
-    Ok(header)
+    Ok(Elf64Header {
+        e_type,
+        e_entry,
+        e_phoff,
+        e_phentsize,
+        e_phnum,
+    })
 }
 
 /// Iterate over program headers in the ELF.
@@ -666,6 +673,9 @@ fn apply_relr_relocations(
                 .ok_or("DT_RELR where pointer overflow")?;
             applied += 1;
         } else {
+            if where_addr == 0 {
+                return Err("DT_RELR bitmap entry before initial address entry");
+            }
             let mut bitmap = entry >> 1;
             for bit in 0..63u64 {
                 if (bitmap & 1) != 0 {
@@ -849,6 +859,19 @@ fn apply_dynamic_relocations(
         Ok(sym.st_size)
     };
 
+    // Variant II TLS: tp = tls_base + aligned_memsz.  We need the aligned
+    // memsz for TPOFF64/DTPOFF64 calculations.
+    let tls_aligned_memsz: i128 = phdrs
+        .iter()
+        .find(|ph| ph.p_type == PT_TLS)
+        .map(|tls| {
+            let memsz = tls.p_memsz;
+            let align = tls.p_align.max(1);
+            let aligned = (memsz + align - 1) & !(align - 1);
+            aligned as i128
+        })
+        .unwrap_or(0);
+
     let apply_rela_table = |table_base: u64,
                             table_size: usize,
                             count_hint: Option<usize>|
@@ -909,16 +932,14 @@ fn apply_dynamic_relocations(
                     let sym_sz = resolve_size(r_sym)?;
                     if sym_sz > 0 && sym_val < USER_ADDR_MAX {
                         let mut tmp = [0u8; 256];
-                        let mut off = 0usize;
-                        while off < sym_sz as usize {
-                            let chunk = core::cmp::min(256, sym_sz as usize - off);
-                            read_user_mapped_bytes(
-                                user_as,
-                                sym_val + off as u64,
-                                &mut tmp[..chunk],
-                            )?;
-                            write_user_mapped_bytes(user_as, target + off as u64, &tmp[..chunk])?;
-                            off += chunk;
+                        let mut off = 0u64;
+                        while off < sym_sz {
+                            let chunk = core::cmp::min(256, (sym_sz - off) as usize);
+                            let src = sym_val.checked_add(off).ok_or("COPY source overflow")?;
+                            let dst = target.checked_add(off).ok_or("COPY target overflow")?;
+                            read_user_mapped_bytes(user_as, src, &mut tmp[..chunk])?;
+                            write_user_mapped_bytes(user_as, dst, &tmp[..chunk])?;
+                            off += chunk as u64;
                         }
                     }
                     applied += 1;
@@ -930,9 +951,29 @@ fn apply_dynamic_relocations(
                     } else {
                         0i128
                     };
+                    // Variant II: tp = tls_base + aligned_memsz, so offset from tp is
+                    // (sym.st_value - aligned_memsz + r_addend).  Use i128 to avoid
+                    // underflow when sym_val < aligned_memsz.
                     sym_val
-                        .checked_add(rela.r_addend as i128)
+                        .checked_sub(tls_aligned_memsz)
+                        .and_then(|v| v.checked_add(rela.r_addend as i128))
                         .ok_or("TPOFF64 value overflow")?
+                }
+                R_X86_64_DTPMOD64 => {
+                    // For single-binary loading (no dynamic linker), the module ID is always 1.
+                    1i128
+                }
+                R_X86_64_DTPOFF64 => {
+                    // DTV-relative offset: same as TPOFF64 for single-binary loading.
+                    let sym_val = if r_sym != 0 {
+                        resolve_sym(r_sym, false, false)? as i128
+                    } else {
+                        0i128
+                    };
+                    sym_val
+                        .checked_sub(tls_aligned_memsz)
+                        .and_then(|v| v.checked_add(rela.r_addend as i128))
+                        .ok_or("DTPOFF64 value overflow")?
                 }
                 R_X86_64_IRELATIVE => {
                     // IRELATIVE: the target is a resolver function that must be
@@ -1178,15 +1219,16 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     use crate::arch::x86_64::gdt;
     use core::sync::atomic::Ordering;
 
-    crate::e9_println!("[trace][elf] ring3_trampoline before current_task");
-    let task = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
-        .expect("elf_ring3_trampoline: no current task");
-    crate::e9_println!(
-        "[trace][elf] ring3_trampoline enter tid={} name={}",
-        task.id.as_u64(),
-        task.name
-    );
-    crate::serial_println!(
+    elf_trace!("[trace][elf] ring3_trampoline before current_task");
+    let Some(task) = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
+    else {
+        crate::e9_println!("[elf] ring3_trampoline: no current task, aborting");
+        crate::serial_println!("[elf] ring3_trampoline: no current task, aborting");
+        loop {
+            x86_64::instructions::hlt();
+        }
+    };
+    elf_trace!(
         "[trace][elf] ring3_trampoline enter tid={} name={}",
         task.id.as_u64(),
         task.name
@@ -1196,24 +1238,19 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     let user_rip = task.trampoline_entry.load(Ordering::Acquire);
     let user_rsp = task.trampoline_stack_top.load(Ordering::Acquire);
     let user_arg0 = task.trampoline_arg0.load(Ordering::Acquire);
-    crate::e9_println!(
+    elf_trace!(
         "[trace][elf] ring3_trampoline args tid={} rip={:#x} rsp={:#x} arg0={:#x}",
         task.id.as_u64(),
         user_rip,
         user_rsp,
         user_arg0
     );
-    crate::serial_println!(
-        "[trace][elf] ring3_trampoline args tid={} rip={:#x} rsp={:#x}",
-        task.id.as_u64(),
-        user_rip,
-        user_rsp
-    );
 
     // Probe: read GOT entries via HHDM before switching to user AS.
     // This is the last kernel-owned moment before user execution begins.
     // If values here are wrong, the bug is in load/relocation, not in
     // something that happens after this point.
+    #[cfg(debug_assertions)]
     {
         // SAFETY: Kernel still holds the boot/kernel CR3. HHDM is valid.
         unsafe {
@@ -1224,7 +1261,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
                 if let Some(phys) = as_ref.translate(VirtAddr::new(vaddr)) {
                     let ptr = crate::memory::phys_to_virt(phys.as_u64()) as *const u64;
                     let val = core::ptr::read_unaligned(ptr);
-                    crate::e9_println!(
+                    elf_trace!(
                         "[trampoline-got] tid={} name={} GOT[{:#x}]=phys={:#x} val={:#x}",
                         task.id.as_u64(),
                         task_name,
@@ -1233,7 +1270,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
                         val
                     );
                 } else {
-                    crate::e9_println!(
+                    elf_trace!(
                         "[trampoline-got] tid={} name={} GOT[{:#x}]=<not mapped>",
                         task.id.as_u64(),
                         task_name,
@@ -1250,30 +1287,20 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         let as_ref = task.process.address_space_arc();
         as_ref.switch_to();
     }
-    crate::e9_println!(
-        "[trace][elf] ring3_trampoline switch_to done tid={}",
-        task.id.as_u64()
-    );
-    crate::serial_println!(
+    elf_trace!(
         "[trace][elf] ring3_trampoline switch_to done tid={}",
         task.id.as_u64()
     );
 
     let user_cs = gdt::user_code_selector().0 as u64;
     let user_ss = gdt::user_data_selector().0 as u64;
-    let user_rflags: u64 = 0x202; // IF=1, reserved bit 1 = 1
-    crate::e9_println!(
+    let user_rflags: u64 = USER_RFLAGS;
+    elf_trace!(
         "[trace][elf] ring3_trampoline iret tid={} cs={:#x} ss={:#x} rflags={:#x}",
         task.id.as_u64(),
         user_cs,
         user_ss,
         user_rflags
-    );
-    crate::serial_println!(
-        "[trace][elf] ring3_trampoline iret tid={} rip={:#x} rsp={:#x}",
-        task.id.as_u64(),
-        user_rip,
-        user_rsp
     );
 
     // ----- Pre-iret LAPIC timer diagnostic -----
@@ -1283,26 +1310,24 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         let lvt = crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_LVT_TIMER);
         let init_cnt =
             crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_INIT);
-        let cur_cnt =
+        let _cur_cnt =
             crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_CURRENT);
-        let rflags_now: u64;
-        core::arch::asm!("pushfq; pop {}", out(reg) rflags_now, options(nostack));
-        crate::e9_println!(
+        let _rflags_now: u64;
+        core::arch::asm!("pushfq; pop {}", out(reg) _rflags_now, options(nostack));
+        elf_trace!(
             "[trace][elf] pre-iret LAPIC: LVT={:#x} init={} cur={} IF={}",
             lvt,
             init_cnt,
-            cur_cnt,
-            (rflags_now >> 9) & 1
+            _cur_cnt,
+            (_rflags_now >> 9) & 1
         );
         if lvt & (1 << 16) != 0 {
-            crate::e9_println!(
+            elf_trace!(
                 "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) : no ticks will fire!"
             );
         }
         if init_cnt == 0 {
-            crate::e9_println!(
-                "[trace][elf] WARNING: LAPIC timer init_count=0 : timer not started!"
-            );
+            elf_trace!("[trace][elf] WARNING: LAPIC timer init_count=0 : timer not started!");
         }
     }
 
@@ -1313,7 +1338,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_ss as u16,
     );
 
-    crate::e9_println!(
+    elf_trace!(
         "[elf] PRE-IRETQ tid={} rip={:#x} rsp={:#x} rflags={:#x}",
         task.id.as_u64(),
         user_rip,
@@ -1321,10 +1346,10 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_rflags
     );
 
-    // Probe E9 Rust : validate_ring3_state passé, on entre dans l'asm.
-    // Si '0' est visible mais pas '1', le compilateur a inséré du code entre
-    // les deux qui a planté (peu probable, mais élimine cette hypothèse).
-    crate::e9_println!(
+    // E9 probe: validate_ring3_state passed, entering asm block.
+    // If '0' is visible but not '1', the compiler inserted code between
+    // the two that crashed (unlikely, but this rules it out).
+    elf_trace!(
         "E9[0] pre-asm rip={:#x} rsp={:#x} cs={:#x} ss={:#x}",
         user_rip,
         user_rsp,
@@ -1348,21 +1373,21 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             // interrupts enabled.
             "cli",
 
-            //  Probe 1 : entrée dans le bloc asm ================================================================================
-            // Les registres d'entrée sont déjà alloués par le compilateur ;
-            // push/pop rax les laisse intacts.
+            //  Probe 1: entering the asm block ================================================================================
+            // Input registers are already allocated by the compiler;
+            // push/pop rax leaves them intact.
             "push rax",
             "mov al, 0x31",     // '1'
             "out 0xe9, al",
             "pop rax",
 
-            //  Construction de la frame iretq ==========================================================================================
-            // Ordre requis par IRETQ (dépilé dans l'ordre inverse) :
+            //  Build the iretq frame ==========================================================================================
+            // Order required by IRETQ (popped in reverse order):
             //   [RSP+32] SS
             //   [RSP+24] user RSP
             //   [RSP+16] RFLAGS
             //   [RSP+8]  CS
-            //   [RSP+0]  RIP  <--- RSP ici après les 5 push
+            //   [RSP+0]  RIP  <--- RSP here after the 5 pushes
             "push {ss}",
             "push {rsp_val}",
             "push {rflags}",
@@ -1375,23 +1400,31 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "out 0xe9, al",
             "pop rax",
 
-            //  Chargement de arg0 dans RDI ====================================================================================================
+            //  Pre-fault the user code page ====================================================================
+            // Touch the first byte at user_rip to trigger a demand page fault
+            // while GS is still the kernel per-CPU block. Without this, the
+            // iretq instruction itself can fault in the SWAPGS→Ring3 window,
+            // producing a SWAPGS-WINDOW page fault (CS=Ring0 but GS=user).
+            "mov rax, {rip}",
+            "movzx rax, byte ptr [rax]",
+
+            //  Load arg0 into RDI ====================================================================================================
             "mov rdi, {arg0}",
 
-            //  Probe 3 : RDI chargé, juste avant SWAPGS ==================================================
+            //  Probe 3: RDI loaded, just before SWAPGS ==================================================
             "push rax",
             "mov al, 0x33",     // '3'
             "out 0xe9, al",
             "pop rax",
 
-            //  SWAPGS : GS.base kernel <---> GS.base user ============================================================
-            // Après cette instruction, GS pointe vers le bloc per-thread user.
-            // Le push/pop ci-dessous ne touche pas GS, il est sûr.
+            //  SWAPGS: GS.base kernel <---> GS.base user ============================================================
+            // After this instruction, GS points to the user per-thread block.
+            // The push/pop below does not touch GS, it is safe.
             "swapgs",
 
-            //  Probe 4 : SWAPGS réussi, IRETQ imminent ============================================================
-            // Si le double-fault survient sur iretq, '4' sera le DERNIER
-            // caractère visible dans la console E9.
+            //  Probe 4: SWAPGS succeeded, IRETQ imminent ============================================================
+            // If a double-fault occurs on iretq, '4' will be the LAST
+            // character visible on the E9 console.
             "push rax",
             "mov al, 0x34",     // '4'
             "out 0xe9, al",
@@ -1536,6 +1569,9 @@ fn setup_boot_user_stack(
     // Write argv[0] = program name (null-terminated)
     let name_nul_len = (name.len() + 1) as u64;
     sp -= name_nul_len;
+    if sp < USER_STACK_BASE {
+        return Err("User stack overflow during boot stack setup");
+    }
     let argv0_ptr = sp;
     write_user_mapped_bytes(user_as, sp, name.as_bytes())?;
     write_user_mapped_bytes(user_as, sp + name.len() as u64, &[0])?;
@@ -1545,17 +1581,22 @@ fn setup_boot_user_stack(
     for &arg in extra_args.iter() {
         let arg_nul_len = (arg.len() + 1) as u64;
         sp -= arg_nul_len;
+        if sp < USER_STACK_BASE {
+            return Err("User stack overflow during boot stack setup");
+        }
         extra_ptrs.push(sp);
         write_user_mapped_bytes(user_as, sp, arg.as_bytes())?;
         write_user_mapped_bytes(user_as, sp + arg.len() as u64, &[0])?;
     }
 
+    sp &= !0xF;
     sp -= 16;
+    if sp < USER_STACK_BASE {
+        return Err("User stack overflow during boot stack setup");
+    }
     let random_ptr = sp;
     let random_seed = generate_aux_random_seed();
     write_user_mapped_bytes(user_as, sp, &random_seed)?;
-
-    sp &= !0xF;
     let auxv_pairs = if interp_base.is_some() { 8u64 } else { 7u64 };
     // argc(1) + argv[0..=N](1+N) + argv_NULL(1) + envp_NULL(1) + auxv(pairs*2)
     let stack_words = 4u64 + extra_args.len() as u64 + auxv_pairs * 2;
@@ -1617,7 +1658,13 @@ fn load_elf_task_inner(
 
     // Step 1: Parse and validate ELF header
     crate::e9_println!("[trace][elf] load_elf_task parse_header begin");
-    let header = parse_header(elf_data)?;
+    let header = match parse_header(elf_data) {
+        Ok(h) => h,
+        Err(e) => {
+            crate::serial_println!("[elf] parse_header FAILED for '{}': {}", name, e);
+            return Err(e);
+        }
+    };
     crate::e9_println!(
         "[trace][elf] load_elf_task parse_header ok type={}",
         if header.e_type == ET_DYN {
@@ -1815,7 +1862,10 @@ fn load_elf_task_inner(
         resume_kind: SyncUnsafeCell::new(ResumeKind::RetFrame),
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
-        user_stack: None,
+        user_stack: Some(crate::process::task::UserStack {
+            virt_base: x86_64::VirtAddr::new(USER_STACK_BASE),
+            size: USER_STACK_PAGES * 4096,
+        }),
         name,
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: super::signal::SignalSet::new(),
@@ -1886,7 +1936,7 @@ fn load_elf_task_inner(
         r12: 0,
         rbp: 0,
         rbx: 0,
-        r11: 0x202,
+        r11: USER_RFLAGS,
         r10: 0,
         r9: 0,
         r8: 0,
@@ -1899,7 +1949,7 @@ fn load_elf_task_inner(
         rax: 0,
         iret_rip: runtime_entry,
         iret_cs: crate::arch::x86_64::gdt::user_code_selector().0 as u64,
-        iret_rflags: 0x202,
+        iret_rflags: USER_RFLAGS,
         iret_rsp: boot_sp,
         iret_ss: crate::arch::x86_64::gdt::user_data_selector().0 as u64,
     });
@@ -1943,7 +1993,13 @@ pub fn load_elf_image(
     elf_data: &[u8],
     user_as: &AddressSpace,
 ) -> Result<LoadedElfInfo, &'static str> {
-    let header = parse_header(elf_data)?;
+    let header = match parse_header(elf_data) {
+        Ok(h) => h,
+        Err(e) => {
+            crate::serial_println!("[elf] load_elf_image parse_header FAILED: {}", e);
+            return Err(e);
+        }
+    };
     let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;

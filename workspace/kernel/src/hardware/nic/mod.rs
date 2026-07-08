@@ -4,6 +4,7 @@
 //! to kernel services (PCI, DMA allocator, VFS schemes).
 
 pub mod common;
+pub mod data_plane;
 pub mod e1000_drv;
 pub mod e1000e_drv;
 pub mod igc_drv;
@@ -122,15 +123,83 @@ pub fn register_strate_net_tid(tid: u64) {
 
 /// Called from `idt.rs:nic_handler`.  Dispatches to the registered NIC's
 /// `handle_interrupt()` (reads ICR, coalescing, TX reclaim).
-/// Wakes strate-net (if its TID is known) so it can call `receive()`
-/// without waiting for the next polling timeout.
+/// If the N2 data plane is active, drains received packets into the RX
+/// ring before waking strate-net (zero-syscall data path).
 pub fn handle_interrupt() {
-    if let Some(ref dev) = *NIC_DEVICE.lock() {
-        dev.handle_interrupt();
+    // Phase 1 : hardware interrupt handling (brief, must hold NIC_DEVICE lock).
+    let dev = {
+        let guard = NIC_DEVICE.lock();
+        guard.as_ref().map(|d| {
+            d.handle_interrupt();
+            d.clone()
+        })
+    };
+    let dev = match dev {
+        Some(d) => d,
+        None => {
+            crate::serial_println!("[net] IRQ: no NIC device registered");
+            return;
+        }
+    };
+
+    // Phase 2 : drain N2 rings (no NIC_DEVICE lock held, IRQs may still be
+    // disabled by the IDT entry). Holding only NIC_DATA_PLANE here.
+    if let Some(ref dp) = *NIC_DATA_PLANE.lock() {
+        // Drain pending RX packets from HW into the N2 RX ring.
+        let mut buf = [0u8; 2048];
+        let mut rx_count = 0usize;
+        let mut backpressure = false;
+        while let Ok(n) = dev.receive(&mut buf) {
+            if n > 0 {
+                rx_count += 1;
+                if rx_count <= 3 {
+                    crate::serial_println!("[net] IRQ rx {} bytes (slot {})", n, rx_count);
+                }
+            }
+            if dp.push_rx(0, &buf[..n]).is_err() {
+                crate::serial_println!("[net] IRQ RX ring full, backpressure");
+                backpressure = true;
+                break;
+            }
+        }
+        if rx_count > 3 {
+            crate::serial_println!("[net] IRQ rx total {} packets", rx_count);
+        }
+        if rx_count == 0 {
+            crate::serial_println!("[net] IRQ rx: no packets received from HW");
+        }
+
+        // N1 : notify scheduler if the RX ring is full (backpressure).
+        if backpressure {
+            crate::ipc::n1::notify_scheduler(crate::ipc::n1::N1Event::NicBackpressure);
+        }
+
+        // Notify consumer (strate-net) that new RX data is available.
+        if rx_count > 0 {
+            dp.notify_rx_consumer(0);
+        }
+
+        // Drain pending TX packets from the N2 TX ring into HW.
+        let mut tx_buf = [0u8; 2048];
+        while let Ok(Some(n)) = dp.pop_tx(0, &mut tx_buf) {
+            if dev.transmit(&tx_buf[..n]).is_err() {
+                break;
+            }
+        }
+
+        // N1 : check for scheduler flow-control hints (non-blocking).
+        if let Some(event) = crate::ipc::n1::poll_nic_events() {
+            log::trace!("[net] N1 sched→NIC event: {:?}", event);
+        }
+    } else {
+        crate::serial_println!("[net] IRQ: N2 data plane not initialized");
     }
+
     let tid_u64 = STRATE_NET_TID.load(core::sync::atomic::Ordering::Relaxed);
     if tid_u64 != 0 {
         let _ = crate::process::scheduler::wake_task(crate::process::TaskId(tid_u64));
+    } else {
+        crate::serial_println!("[net] IRQ: strate-net not registered (TID=0)");
     }
 }
 
@@ -221,4 +290,39 @@ pub fn init() {
     if let Err(e) = scheme::register_net_scheme() {
         log::warn!("[net] Failed to register net scheme: {:?}", e);
     }
+    // Initialise the N2 data plane if any NIC was registered.
+    init_data_plane();
+}
+
+// ── N2 data-plane global instance ─────────────────────────────────────────
+
+use data_plane::NicDataPlane;
+use spin::Mutex;
+
+/// Global NIC data plane, lazily initialised after NIC detection.
+static NIC_DATA_PLANE: Mutex<Option<NicDataPlane>> = Mutex::new(None);
+
+/// Initialise the N2 data plane with one ring pair per registered device.
+/// Each device gets a single RX/TX pair (RSS queues extend this).
+fn init_data_plane() {
+    let count = NET_DEVICES.read().len();
+    if count == 0 {
+        log::debug!("[net] No NIC devices found : skipping data plane init");
+        return;
+    }
+    // One ring pair per NIC for now; RSS would create one per queue.
+    match NicDataPlane::new(count, 256, 2048) {
+        Ok(dp) => {
+            *NIC_DATA_PLANE.lock() = Some(dp);
+            log::info!("[net] N2 data plane initialised with {} queue(s)", count);
+        }
+        Err(e) => {
+            log::warn!("[net] Failed to initialise N2 data plane: {}", e);
+        }
+    }
+}
+
+/// Access the global N2 data plane (returns None if not yet initialised).
+pub fn data_plane() -> &'static Mutex<Option<NicDataPlane>> {
+    &NIC_DATA_PLANE
 }

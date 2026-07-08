@@ -17,7 +17,8 @@ use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, 
 
 use super::{
     chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, ipc_port, ipc_ring, net,
-    numbers::*, pci, process as proc_sys, semaphore as sem_handler, volume, SyscallFrame,
+    numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, volume,
+    SyscallFrame,
 };
 use crate::{
     async_io::syscall as async_sys,
@@ -216,6 +217,13 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_ASYNC_MAP => async_sys::sys_async_map(arg1, arg2),
         SYS_ASYNC_DESTROY => async_sys::sys_async_destroy(arg1, arg2),
 
+        // Transport syscalls (260-264) ======================================
+        SYS_TRANSPORT_CREATE => transport::sys_transport_create(arg1, arg2),
+        SYS_TRANSPORT_SEND => transport::sys_transport_send(arg1, arg2, arg3),
+        SYS_TRANSPORT_RECV => transport::sys_transport_recv(arg1, arg2, arg3),
+        SYS_TRANSPORT_CLOSE => transport::sys_transport_close(arg1),
+        SYS_TRANSPORT_INFO => transport::sys_transport_info(arg1, arg2),
+
         // PCI syscalls ======================================================
         SYS_PCI_ENUM => pci::sys_pci_enum(arg1, arg2, arg3),
         SYS_PCI_CFG_READ => pci::sys_pci_cfg_read(arg1, arg2, arg3),
@@ -275,6 +283,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NET_RECV => net::sys_net_recv(arg1, arg2),
         SYS_NET_SEND => net::sys_net_send(arg1, arg2),
         SYS_NET_INFO => net::sys_net_info(arg1, arg2),
+        SYS_NET_REGISTER => net::sys_net_register(),
 
         // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => volume::sys_volume_read(arg1, arg2, arg3, arg4),
@@ -496,6 +505,23 @@ fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
             }
             Ok(events)
         }
+        ResourceType::IpcTransport => {
+            let tid = crate::ipc::transport::TransportId::from_u64(cap.resource as u64);
+            let endpoint = crate::syscall::transport::TRANSPORT_MANAGER
+                .get_endpoint(tid)
+                .ok_or(SyscallError::BadHandle)?;
+            let mut events = 0u64;
+            if cap.permissions.read && endpoint.has_data() {
+                events |= HANDLE_EVENT_READABLE;
+            }
+            if cap.permissions.write && endpoint.has_space() {
+                events |= HANDLE_EVENT_WRITABLE;
+            }
+            if events == 0 && !cap.permissions.read && !cap.permissions.write {
+                return Err(SyscallError::PermissionDenied);
+            }
+            Ok(events)
+        }
         _ => Err(SyscallError::NotSupported),
     }
 }
@@ -632,6 +658,7 @@ fn resource_type_code(rt: ResourceType) -> u32 {
         ResourceType::Keyboard => 16,
         ResourceType::Volume => 17,
         ResourceType::Namespace => 18,
+        ResourceType::IpcTransport => 19,
     }
 }
 

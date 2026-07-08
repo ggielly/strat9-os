@@ -57,7 +57,7 @@ graph TB
 | **Boot** | `boot/` | Assembly stubs (16→64 bit), Limine handoff, early init |
 | **Scheduler** | `process/scheduler/` | Per-CPU run queues, multi-class scheduling (RT FIFO/RR, Normal, Idle) |
 | **Memory** | `memory/` | Buddy allocator, slab heap, COW, page tables, vmalloc |
-| **IPC** | `ipc/` | Typed MPMC channels, shared rings, semaphores, futexes |
+| **IPC** | `ipc/` | 3-level Transport Manager (TypeSafe/LockFree/MMU), typed channels, shared rings, semaphores |
 | **Capability** | `capability.rs` | Unforgeable tokens, per-resource refcounting |
 | **Silo** | `silo/` | Process isolation containers with resource quotas |
 | **VFS** | `vfs/` | Virtual filesystem with scheme-based I/O |

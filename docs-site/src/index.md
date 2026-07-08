@@ -36,6 +36,7 @@ cargo make run-gui-smp
 | [Memory Management](./memory-model.md) | Buddy allocator, slab heap, COW, page tables, vmalloc |
 | [Boot Sequence](./boot-sequence.md) | BIOS → bootloader → Limine → kernel init flow |
 | [IPC Mechanisms](./ipc-mechanisms.md) | Channels, shared rings, semaphores, futexes |
+| [IPC Transport Architecture](./architecture-ipc-access-levels.md) | 3-level hybrid IPC model (TypeSafe / LockFree / MMU) |
 | [Driver Model](./driver-model.md) | Component trait, PCI, NIC, storage, USB drivers |
 | [Syscall Reference](./syscalls.md) | Complete syscall table with parameters and errors |
 | [ABI Overview](./abi.md) | Kernel/userspace ABI definitions and versioning |
