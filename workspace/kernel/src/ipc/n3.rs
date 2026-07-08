@@ -1289,17 +1289,17 @@ impl Drop for N3Transport {
 
         // Free the message buffer physical page.
         if self.msg_buf_phys != 0 {
-            let frame = crate::memory::PhysFrame::containing_address(
-                x86_64::PhysAddr::new(self.msg_buf_phys),
-            );
+            let frame = crate::memory::PhysFrame::containing_address(x86_64::PhysAddr::new(
+                self.msg_buf_phys,
+            ));
             with_irqs_disabled(|token| free_frame(token, frame));
         }
 
         // Free the handler stack physical page.
         if self.handler_stack_phys != 0 {
-            let frame = crate::memory::PhysFrame::containing_address(
-                x86_64::PhysAddr::new(self.handler_stack_phys),
-            );
+            let frame = crate::memory::PhysFrame::containing_address(x86_64::PhysAddr::new(
+                self.handler_stack_phys,
+            ));
             with_irqs_disabled(|token| free_frame(token, frame));
         }
 
@@ -1387,8 +1387,7 @@ impl IpcProducer for N3Transport {
         // Inter-core sync if needed.
         // Spec §9.2: the sender must ensure message visibility before sending IPI.
         let target_cpu = receiver_task.home_cpu.load(Ordering::Acquire);
-        let same_core =
-            crate::arch::x86_64::percpu::current_cpu_index() == target_cpu as usize;
+        let same_core = crate::arch::x86_64::percpu::current_cpu_index() == target_cpu as usize;
 
         if !same_core {
             if (target_cpu as usize) < crate::arch::x86_64::percpu::MAX_CPUS {
