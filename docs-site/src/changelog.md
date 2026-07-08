@@ -4,12 +4,22 @@
 
 ## Project stats
 
-- **Total commits:** `555`
+- **Total commits:** `565`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-07-07 [`c30f0bf`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c30f0bf86dbab1abf9b3f06b389d3880418c0be0) Refactor comments and improve code clarity across multiple files
+- 2026-06-26 [`2d86692`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2d8669246c3455fcd387c01298c120a924fd562b) add n3
+- 2026-06-26 [`28bee74`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/28bee7472c3548e9af12c7ac971e57ded08739f4) feat: update display-server logging and improve error handling
+- 2026-06-26 [`7aa3fb2`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7aa3fb230454de6e438eb19b3061291e72a4d2de) Add graphical silo
+- 2026-06-26 [`57787bc`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/57787bc5ca597416ddfca25520b4a052702c97f0) Refactor VGA and Panic Screen Code
+- 2026-06-26 [`9c9c511`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9c9c511356967637c25df8b2669669f4dd143a71) Add SYS_NET_REGISTER syscall and implement networking silo registration
+- 2026-06-26 [`e0861da`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e0861dabb45a11842cd58f0bc9606c2d3cf238f8) feat: add socket abort handling in TCP read/write methods
+- 2026-06-26 [`dc8146a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dc8146aa1e7ce27e3342f3ed768837cb56a71222) feat: add alloc-freelist dependency to strate-graphical and improve IPC notification handling
+- 2026-06-26 [`1bffa07`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1bffa07a26dcdaacf358930244856001b37110bf) feat: add strate-graphical component and implement display server
+- 2026-06-26 [`9436d81`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9436d818801579334a82cb26b1499cc1f829c51b) feat: enhance IP parsing and IPC protocol
 - 2026-06-26 [`ec935ba`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ec935ba6b9842148af20870bd54f72795799836e) docs: update published documentation
 - 2026-06-26 [`941a995`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/941a995675e239879582ed2894b36fb5204494a8) feat: update ABI changelog and documentation
 - 2026-06-25 [`4fb871f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4fb871f59926d9630cc73c5f4eb36ea24b934041) Refactor error codes and syscall flags; implement getrandom syscall
@@ -50,15 +60,5 @@
 - 2026-06-16 [`18b1037`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/18b103720b654282b020cbf63ee9c09917ca095e) Fix: escalate free_to_zone protected-overlap to panic matching alloc side
 - 2026-06-16 [`28bbc90`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/28bbc90b4a9e528914efa61cba1fff73a7cbf877) Merge branch 'fix/keyboard-lost-key-counter' into 'main'
 - 2026-06-16 [`b19d6bf`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b19d6bf3afabca492f1762ec3310f8f72822c4f3) Fix keyboard driver: shared state, US extended keys, numpad, lost-key counter
-- 2026-06-16 [`93302a5`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93302a553542304b3c4905a5d0d882809e29dd3d) docs: update published documentation
-- 2026-06-16 [`b2edb49`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2edb49813f4470257879a5e3cc85c9efc9b26c6) Merge branch 'enhance-network-tools' into 'main'
-- 2026-06-16 [`e4ab1a9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e4ab1a96c3579117defffe0f5b32cf7cac853129) Enhance network stack, NIC drivers, USB/NVMe subsystems, and thermal management
-- 2026-06-03 [`5ee7f8d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5ee7f8d0aba0e76fbde35051e8aae2dc647a9cc9) Merge branch 'fix-some-mistake-in-network-stack' into 'main'
-- 2026-06-03 [`0c40058`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0c40058547bd9b7ef07a837b1153577879510994) Refactor the network stack and add dual-stack userspace tooling
-- 2026-05-24 [`aeade5e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aeade5ef5fcfdddef2caa43da6af361a5102c7cd) Code cleanup
-- 2026-05-24 [`86c810e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/86c810e4e63e5fb29ae2a9a5785fe19db9e96c67) Raüs silo sshd
-- 2026-05-24 [`40d4d46`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/40d4d46574896664983ba2fe05dfd7ca1c0f1b94) Merge branch 'IPC-refactor' into 'main'
-- 2026-05-24 [`b2bbcc0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8) Improve and fix IPC
-- 2026-05-23 [`b7c3e27`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b7c3e271d8644570a5a0b7bdabb80ef8c3f524f7) Merge branch 'hunt-memory-corruption' into 'main'
 
 <!-- AUTO-CHANGELOG:END -->
