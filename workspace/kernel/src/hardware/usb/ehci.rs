@@ -12,6 +12,7 @@
 use crate::{
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_zeroed_frame, phys_to_virt},
+    memory::paging,
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -106,6 +107,8 @@ impl EhciController {
             _ => return Err("Invalid BAR"),
         };
 
+        paging::ensure_identity_map_range(bar, EHCI_MMIO_SIZE as u64);
+
         let mmio_base = phys_to_virt(bar) as usize;
         let cap_regs = mmio_base as *const EhciCapRegisters;
         let caplength = (*cap_regs).caplength;
@@ -134,18 +137,33 @@ impl EhciController {
     /// Performs the init operation.
     fn init(&mut self) -> Result<(), &'static str> {
         unsafe {
-            let op = &mut *self.op_regs;
+            let cmd = core::ptr::addr_of_mut!((*self.op_regs).usbcmd);
+            let sts = core::ptr::addr_of!((*self.op_regs).usbsts);
+            let intr = core::ptr::addr_of_mut!((*self.op_regs).usbintr);
+            let cfg = core::ptr::addr_of_mut!((*self.op_regs).config_flag);
 
             // Stop the controller
-            op.usbcmd &= !USBCMD_RUN_STOP;
-            while op.usbsts & USBSTS_HCH == 0 {
+            cmd.write_volatile(cmd.read_volatile() & !USBCMD_RUN_STOP);
+            for _ in 0..100_000u32 {
+                if sts.read_volatile() & USBSTS_HCH != 0 {
+                    break;
+                }
                 core::hint::spin_loop();
+            }
+            if sts.read_volatile() & USBSTS_HCH == 0 {
+                return Err("EHCI: halt timeout");
             }
 
             // Reset the controller
-            op.usbcmd |= USBCMD_HCRST;
-            while op.usbcmd & USBCMD_HCRST != 0 {
+            cmd.write_volatile(cmd.read_volatile() | USBCMD_HCRST);
+            for _ in 0..100_000u32 {
+                if cmd.read_volatile() & USBCMD_HCRST == 0 {
+                    break;
+                }
                 core::hint::spin_loop();
+            }
+            if cmd.read_volatile() & USBCMD_HCRST != 0 {
+                return Err("EHCI: reset timeout");
             }
 
             // Initialize ports
@@ -163,11 +181,13 @@ impl EhciController {
             self.init_schedules()?;
 
             // Enable interrupts
-            op.usbintr = USBSTS_INT | USBSTS_ERR | USBSTS_PCD;
+            intr.write_volatile(USBSTS_INT | USBSTS_ERR | USBSTS_PCD);
 
             // Start the controller
-            op.usbcmd |= USBCMD_RUN_STOP | USBCMD_PSE | USBCMD_ASE | USBCMD_INTE;
-            op.config_flag = 1;
+            cmd.write_volatile(
+                cmd.read_volatile() | USBCMD_RUN_STOP | USBCMD_PSE | USBCMD_ASE | USBCMD_INTE,
+            );
+            cfg.write_volatile(1);
         }
         Ok(())
     }
@@ -187,11 +207,15 @@ impl EhciController {
         core::ptr::write_bytes(self.async_list as *mut u8, 0, 4096);
 
         // Set up async list (empty, points to itself)
-        *self.async_list = (self.async_list_phys as u32) & 0xFFFFFFE0;
+        core::ptr::write_volatile(
+            self.async_list,
+            (self.async_list_phys as u32) & 0xFFFFFFE0,
+        );
 
-        let op = &mut *self.op_regs;
-        op.periodic_list_base = self.periodic_list_phys as u32;
-        op.async_list_base = self.async_list_phys as u32;
+        let plb = core::ptr::addr_of_mut!((*self.op_regs).periodic_list_base);
+        let alb = core::ptr::addr_of_mut!((*self.op_regs).async_list_base);
+        plb.write_volatile(self.periodic_list_phys as u32);
+        alb.write_volatile(self.async_list_phys as u32);
 
         Ok(())
     }
