@@ -43,7 +43,7 @@ members = [
     "workspace/components/musl-compat",
 ]
 exclude = [
-    "workspace/components/strate-fs-xfs", # Missing fs-abstraction dependency
+    "workspace/components/strate-fs-xfs", # Missing fs-abstraction dependency : TODO
 ]
 resolver = "2"
 
@@ -85,7 +85,6 @@ panic = "abort" # No unwinding in kernel
 strip = false
 debug = 2
 incremental = true # Faster recompilation
-force-frame-pointers = true # Required by N3 migration ASM (sender_rip capture)
 
 [profile.dev]
 opt-level = 0      # No optimization for faster compilation
@@ -94,7 +93,6 @@ strip = false      # Keep all symbols
 panic = "abort"    # no_std kernel targets cannot use unwind
 incremental = true # Faster rebuild
 lto = false        # Faster compilation
-force-frame-pointers = true # Required by N3 migration ASM (sender_rip capture)
 
 [profile.dev-opt]
 inherits = "dev"
@@ -103,4 +101,3 @@ debug = 2          # Keep full symbols for debugging
 strip = false      # Keep full symbols
 lto = false        # Keep link times reasonable for iterative work
 incremental = true # Preserve fast rebuild behavior
-force-frame-pointers = true # Required by N3 migration ASM (sender_rip capture)

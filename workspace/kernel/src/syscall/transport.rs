@@ -44,7 +44,11 @@ pub fn sys_transport_create(dst_silo_val: u64, config_flags: u64) -> Result<u64,
     };
     let ring_capacity = {
         let cap = ((config_flags >> 8) & 0xFFFF) as u32;
-        if cap == 0 { 256 } else { cap }
+        if cap == 0 {
+            256
+        } else {
+            cap
+        }
     };
 
     let config = TransportConfig {

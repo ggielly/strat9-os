@@ -68,7 +68,10 @@ impl NicDataPlane {
     /// the ring is full (backpressure : drop the packet), or
     /// `Err(RingError::InvalidParameters)` if the queue index is out of range.
     pub fn push_rx(&self, queue_index: usize, data: &[u8]) -> Result<(), RingError> {
-        let pair = self.queues.get(queue_index).ok_or(RingError::InvalidParameters)?;
+        let pair = self
+            .queues
+            .get(queue_index)
+            .ok_or(RingError::InvalidParameters)?;
         pair.rx.write(data)
     }
 
@@ -76,7 +79,10 @@ impl NicDataPlane {
     ///
     /// Called by strate-net.  Returns `Ok(None)` if the ring is empty.
     pub fn pop_rx(&self, queue_index: usize, buf: &mut [u8]) -> Result<Option<usize>, RingError> {
-        let pair = self.queues.get(queue_index).ok_or(RingError::InvalidParameters)?;
+        let pair = self
+            .queues
+            .get(queue_index)
+            .ok_or(RingError::InvalidParameters)?;
         pair.rx.try_read(buf)
     }
 
@@ -85,7 +91,10 @@ impl NicDataPlane {
     /// Called by strate-net.  The NIC driver will read from the TX ring
     /// and transmit onto the wire.
     pub fn push_tx(&self, queue_index: usize, data: &[u8]) -> Result<(), RingError> {
-        let pair = self.queues.get(queue_index).ok_or(RingError::InvalidParameters)?;
+        let pair = self
+            .queues
+            .get(queue_index)
+            .ok_or(RingError::InvalidParameters)?;
         pair.tx.write(data)
     }
 
@@ -93,7 +102,10 @@ impl NicDataPlane {
     ///
     /// Called by the NIC driver.  Returns `Ok(None)` if the ring is empty.
     pub fn pop_tx(&self, queue_index: usize, buf: &mut [u8]) -> Result<Option<usize>, RingError> {
-        let pair = self.queues.get(queue_index).ok_or(RingError::InvalidParameters)?;
+        let pair = self
+            .queues
+            .get(queue_index)
+            .ok_or(RingError::InvalidParameters)?;
         pair.tx.try_read(buf)
     }
 
