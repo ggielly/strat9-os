@@ -12,6 +12,7 @@
 use core::panic::PanicInfo;
 use strat9_syscall::call;
 
+mod ansi;
 mod scrollback;
 
 fn log(s: &str) {
