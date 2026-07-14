@@ -4,12 +4,13 @@
 
 ## Project stats
 
-- **Total commits:** `547`
+- **Total commits:** `548`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-07-15 [`3612d4a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3612d4a43fcad2f260491ad1b4534da937e880f4) docs: update published documentation
 - 2026-07-15 [`545e1b8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/545e1b805bfd73eda9bc894ce1a161f3883aeb2d) Merge branch 'fix/console-performance' into 'main'
 - 2026-07-15 [`44e4aa7`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/44e4aa70d7a7300c943048683ac54b6a534f57cc) perf(console): optimize rendering pipeline
 - 2026-07-14 [`c3a9ecb`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3a9ecb885529735cb459e8600d99e8e90d9836c) Merge branch 'feat/heapless-vec-deque' into 'main'
@@ -59,6 +60,5 @@
 - 2026-05-19 [`0d4fcb8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0d4fcb8a512b73bba2408f03b9b525f3d970b2ae) refactor: rework bus driver architecture, wire storage drivers, add hardware documentation
 - 2026-05-19 [`d9e64af`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d9e64af8b55072ae6ecedcc3f3ea035f0797e113) Merge branch 'enhance-async-implementation' into 'main'
 - 2026-05-19 [`93c8927`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0) async: implement and optimize async I/O completion handling
-- 2026-05-18 [`24060f8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/24060f8e8fca6c587b88d7c09637cd108cd3faf6) Merge branch 'async-base-layer' into 'main'
 
 <!-- AUTO-CHANGELOG:END -->
