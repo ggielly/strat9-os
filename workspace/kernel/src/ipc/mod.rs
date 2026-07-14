@@ -60,7 +60,7 @@ pub use lockfree_ring::LockFreeRing;
 pub use mailbox::IntrusiveMailbox;
 pub use message::IpcMessage;
 pub use n3::{
-    allocate_pcid, pcid_available, N3MinimalContext, N3Tier, MigrationFrame, MigrationState,
+    allocate_pcid, pcid_available, MigrationFrame, MigrationState, N3MinimalContext, N3Tier,
     N3Transport, N3_SHARED_FRAME_VA,
 };
 pub use port::{create_port, destroy_port, get_port, IpcError, Port, PortId};

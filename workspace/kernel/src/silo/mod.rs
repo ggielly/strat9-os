@@ -19,8 +19,8 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use heapless::Vec as HVec;
 use core::sync::atomic::{AtomicU64, Ordering};
+use heapless::Vec as HVec;
 
 // ============================================================================
 // Public ABI structs (repr(C) for syscall boundary)
@@ -1525,7 +1525,10 @@ pub fn kernel_spawn_strate(
     {
         let silo = mgr.get_mut(silo_id)?;
         if let Err(task) = silo.tasks.push(task_id) {
-            log::error!("[silo] tasks full (capacity=64), task {} not registered", task.0);
+            log::error!(
+                "[silo] tasks full (capacity=64), task {} not registered",
+                task.0
+            );
         }
         silo.state = SiloState::Running;
         let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
@@ -2081,7 +2084,10 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
             }
             if !granted_caps.contains(&cap_handle) {
                 if let Err(cap) = granted_caps.push(cap_handle) {
-                    log::warn!("[silo] granted_caps full (capacity=64), cap {} dropped", cap);
+                    log::warn!(
+                        "[silo] granted_caps full (capacity=64), cap {} dropped",
+                        cap
+                    );
                 }
             }
             add_or_merge_granted_resource(
@@ -2304,7 +2310,10 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
             }
         };
         if let Err(task) = silo.tasks.push(task_id) {
-            log::error!("[silo] tasks full (capacity=64), task {} not registered", task.0);
+            log::error!(
+                "[silo] tasks full (capacity=64), task {} not registered",
+                task.0
+            );
         }
         silo.state = SiloState::Running;
         let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
@@ -2960,10 +2969,14 @@ pub fn kernel_unveil_silo(
     if let Some(rule) = silo.unveil_rules.iter_mut().find(|r| r.path == path) {
         rule.rights = rights;
     } else {
-        if silo.unveil_rules.push(UnveilRule {
-            path: String::from(path),
-            rights,
-        }).is_err() {
+        if silo
+            .unveil_rules
+            .push(UnveilRule {
+                path: String::from(path),
+                rights,
+            })
+            .is_err()
+        {
             log::warn!("[silo] unveil_rules full (capacity=128), rule dropped");
         }
     }

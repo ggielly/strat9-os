@@ -126,10 +126,9 @@ fn read_line(line: &mut LineBuf) {
                             write_str("\x08 \x08");
                         }
                     }
-                    0x20..=0x7E
-                        if line.push(b) => {
-                            let _ = call::write(1, &byte);
-                        }
+                    0x20..=0x7E if line.push(b) => {
+                        let _ = call::write(1, &byte);
+                    }
                     _ => {}
                 }
             }
