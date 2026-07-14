@@ -13,6 +13,7 @@ use core::panic::PanicInfo;
 use strat9_syscall::call;
 
 mod ansi;
+mod renderer;
 mod scrollback;
 mod terminal;
 
