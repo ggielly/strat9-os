@@ -2326,22 +2326,17 @@ impl VgaWriter {
             return;
         }
         let sb_x = self.can().width.saturating_sub(SCROLLBAR_W);
+        let sb_w = SCROLLBAR_W;
         let total = self.sb.rows.len() + 1; // +1 accounts for current partial row
-        let track_packed = self.fmt.pack_rgb(0x22, 0x28, 0x38);
-        let thumb_packed = self.fmt.pack_rgb(0x58, 0x72, 0xA0);
-        let thumb_hi = self.fmt.pack_rgb(0x80, 0xA0, 0xC8);
+        let track_color = self.unpack_color(self.fmt.pack_rgb(0x22, 0x28, 0x38));
+        let thumb_color = self.unpack_color(self.fmt.pack_rgb(0x58, 0x72, 0xA0));
+        let thumb_hi_color = self.unpack_color(self.fmt.pack_rgb(0x80, 0xA0, 0xC8));
 
         if total <= self.rows {
-            // Not enough content to scroll: full-height thumb.
-            for y in 0..text_h {
-                for x in sb_x..self.can().width {
-                    let c = if x == sb_x || x == self.can().width - 1 || y == 0 || y == text_h - 1 {
-                        track_packed
-                    } else {
-                        thumb_hi
-                    };
-                    self.put_pixel_raw(x, y, c);
-                }
+            // Not enough content to scroll: full-height thumb with border.
+            self.fill_rect(sb_x, 0, sb_w, text_h, track_color);
+            if sb_w > 2 && text_h > 2 {
+                self.fill_rect(sb_x + 1, 1, sb_w - 2, text_h - 2, thumb_hi_color);
             }
             return;
         }
@@ -2356,12 +2351,11 @@ impl VgaWriter {
             avail - (avail * self.scroll_offset / max_offset)
         };
 
-        for y in 0..text_h {
-            let in_thumb = y >= thumb_y && y < thumb_y + thumb_h;
-            let packed = if in_thumb { thumb_packed } else { track_packed };
-            for x in sb_x..self.can().width {
-                self.put_pixel_raw(x, y, packed);
-            }
+        // Draw track background
+        self.fill_rect(sb_x, 0, sb_w, text_h, track_color);
+        // Draw thumb
+        if thumb_h > 0 && thumb_h < text_h {
+            self.fill_rect(sb_x, thumb_y, sb_w, thumb_h, thumb_color);
         }
     }
 
