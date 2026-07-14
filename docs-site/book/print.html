@@ -1166,6 +1166,7 @@ struct MyDriver { /* ... */ }</code></pre>
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
+<li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d"><code>3a5eb69</code></a> feat(silo): replace Vec with heapless::Vec for bounded fields</li>
 <li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524"><code>ab22b0d</code></a> feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032"><code>5a3d69c</code></a> feat: migrate input system to userspace</li>
 <li>2026-06-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fea3f3776edefa7bdc7c3a8d930c8d17b0939a6"><code>3fea3f3</code></a> SMP hardware debug, NVMe fixes, VGA refactor, telnetd hardening, docs</li>
@@ -1195,7 +1196,6 @@ struct MyDriver { /* ... */ }</code></pre>
 <li>2026-03-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/eb7818d13ba67b1b3f718d6161f71eee0d123595"><code>eb7818d</code></a> feat: Implement static module loading from initfs paths and increase module blob size limit.</li>
 <li>2026-03-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acfdbbd126584bcd47355873c93c5584c67877c2"><code>acfdbbd</code></a> feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.</li>
 <li>2026-03-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/29c6f3d75165b41acd72a28d1e1b4e76bd51947c"><code>29c6f3d</code></a> Refactor scheduler task management and introduce interrupt frame handling</li>
-<li>2026-03-11 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7e66e694ffbf939c3651a463736b3bb396ddf24f"><code>7e66e69</code></a> refactor: enhance interrupt handling and logging mechanisms across the kernel</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
@@ -1716,12 +1716,16 @@ struct MyDriver { /* ... */ }</code></pre>
 <!-- AUTO-CHANGELOG:START -->
 <h2 id="project-stats"><a class="header" href="#project-stats">Project stats</a></h2>
 <ul>
-<li><strong>Total commits:</strong> <code>543</code></li>
+<li><strong>Total commits:</strong> <code>547</code></li>
 <li><strong>Latest tag:</strong> <code>0.1.0</code></li>
 <li><strong>Repository:</strong> <a href="https://git.strat9-os.org/strat9-os/strat9-os">git.strat9-os.org</a></li>
 </ul>
 <h2 id="recent-commits-auto-generated"><a class="header" href="#recent-commits-auto-generated">Recent commits (auto-generated)</a></h2>
 <ul>
+<li>2026-07-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/545e1b805bfd73eda9bc894ce1a161f3883aeb2d"><code>545e1b8</code></a> Merge branch 'fix/console-performance' into 'main'</li>
+<li>2026-07-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/44e4aa70d7a7300c943048683ac54b6a534f57cc"><code>44e4aa7</code></a> perf(console): optimize rendering pipeline</li>
+<li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3a9ecb885529735cb459e8600d99e8e90d9836c"><code>c3a9ecb</code></a> Merge branch 'feat/heapless-vec-deque' into 'main'</li>
+<li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d"><code>3a5eb69</code></a> feat(silo): replace Vec with heapless::Vec for bounded fields</li>
 <li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c85c70f3b4f397ff9ace27674bfdfab7c077f649"><code>c85c70f</code></a> Merge branch 'feature/ipc-access-levels' into 'main'</li>
 <li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524"><code>ab22b0d</code></a> feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes</li>
 <li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/848baaf594c7a9fbd7f951c3959790dc26c1383e"><code>848baaf</code></a> Merge branch 'feat/input-to-userspace' into 'main'</li>
@@ -1768,10 +1772,6 @@ struct MyDriver { /* ... */ }</code></pre>
 <li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d9e64af8b55072ae6ecedcc3f3ea035f0797e113"><code>d9e64af</code></a> Merge branch 'enhance-async-implementation' into 'main'</li>
 <li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0"><code>93c8927</code></a> async: implement and optimize async I/O completion handling</li>
 <li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/24060f8e8fca6c587b88d7c09637cd108cd3faf6"><code>24060f8</code></a> Merge branch 'async-base-layer' into 'main'</li>
-<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4</code></a> async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)</li>
-<li>2026-05-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/736deae9274b3ad3ee79db07fe3e4eca575eaa36"><code>736deae</code></a> docs: update published documentation</li>
-<li>2026-05-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c10e645f592074bdd07b603e83a12a27cb0c3e92"><code>c10e645</code></a> fix(shell): add is_interrupted() checks to wasm-run and grep, document cancellation contract</li>
-<li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/37420be3fa5e1b693d6a2cbad228fdc6ee0f570a"><code>37420be</code></a> fix(scheduler): remove dead null-check on &amp;Arc<Task> reference</li>
 </ul>
 <!-- AUTO-CHANGELOG:END -->
 <div style="break-before: page; page-break-before: always;"></div><h1 id="publishing"><a class="header" href="#publishing">Publishing</a></h1>

@@ -4,12 +4,16 @@
 
 ## Project stats
 
-- **Total commits:** `543`
+- **Total commits:** `547`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-07-15 [`545e1b8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/545e1b805bfd73eda9bc894ce1a161f3883aeb2d) Merge branch 'fix/console-performance' into 'main'
+- 2026-07-15 [`44e4aa7`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/44e4aa70d7a7300c943048683ac54b6a534f57cc) perf(console): optimize rendering pipeline
+- 2026-07-14 [`c3a9ecb`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3a9ecb885529735cb459e8600d99e8e90d9836c) Merge branch 'feat/heapless-vec-deque' into 'main'
+- 2026-07-14 [`3a5eb69`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d) feat(silo): replace Vec with heapless::Vec for bounded fields
 - 2026-07-09 [`c85c70f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c85c70f3b4f397ff9ace27674bfdfab7c077f649) Merge branch 'feature/ipc-access-levels' into 'main'
 - 2026-07-09 [`ab22b0d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524) feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes
 - 2026-06-25 [`848baaf`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/848baaf594c7a9fbd7f951c3959790dc26c1383e) Merge branch 'feat/input-to-userspace' into 'main'
@@ -56,9 +60,5 @@
 - 2026-05-19 [`d9e64af`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d9e64af8b55072ae6ecedcc3f3ea035f0797e113) Merge branch 'enhance-async-implementation' into 'main'
 - 2026-05-19 [`93c8927`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0) async: implement and optimize async I/O completion handling
 - 2026-05-18 [`24060f8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/24060f8e8fca6c587b88d7c09637cd108cd3faf6) Merge branch 'async-base-layer' into 'main'
-- 2026-05-18 [`7c5efb4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)
-- 2026-05-15 [`736deae`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/736deae9274b3ad3ee79db07fe3e4eca575eaa36) docs: update published documentation
-- 2026-05-15 [`c10e645`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c10e645f592074bdd07b603e83a12a27cb0c3e92) fix(shell): add is_interrupted() checks to wasm-run and grep, document cancellation contract
-- 2026-05-14 [`37420be`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/37420be3fa5e1b693d6a2cbad228fdc6ee0f570a) fix(scheduler): remove dead null-check on &Arc<Task> reference
 
 <!-- AUTO-CHANGELOG:END -->
