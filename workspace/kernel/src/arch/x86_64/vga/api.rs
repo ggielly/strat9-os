@@ -837,6 +837,25 @@ pub fn scroll_to_live() {
     });
 }
 
+/// Set or clear the console-defer-present flag.
+/// When true, `write_bytes()` skips present — only marks dirty.
+/// Call `flush_display()` to trigger the actual present.
+pub fn set_console_defer_present(defer: bool) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().console_defer_present = defer;
+}
+
+/// Flush: draw scrollbar + present to screen.
+/// Call after a batch of writes to display everything at once.
+pub fn flush_display() {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().flush_display();
+}
+
 /// Handle a click at framebuffer pixel `(px_x, px_y)`.
 /// If the click lands on the scrollbar, jump the view accordingly.
 pub fn scrollbar_click(px_x: usize, px_y: usize) {

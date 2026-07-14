@@ -33,7 +33,7 @@ pub(crate) struct ClipRect {
 }
 
 // Mouse cursor (X arrow, 12×16) ==================================================================================================================================
-const PRESENT_MIN_TICKS: u64 = 1;
+const PRESENT_MIN_TICKS: u64 = 16;
 
 // Selection clipboard ==========================================================================================================================================================================
 const CLIPBOARD_CAP: usize = 8192;
@@ -76,6 +76,10 @@ pub struct VgaWriter {
     pub(crate) sel_end_row: usize,
     pub(crate) sel_end_col: usize,
     pub(crate) prepared_row_cells: Vec<(usize, u32, u32)>,
+
+    /// When true, `end_viewport_render()` defers present — only marks dirty.
+    /// The display server (or explicit `flush_display()`) triggers the actual present.
+    pub(crate) console_defer_present: bool,
 }
 
 unsafe impl Send for VgaWriter {}
@@ -200,6 +204,7 @@ impl VgaWriter {
             sel_end_row: 0,
             sel_end_col: 0,
             prepared_row_cells: Vec::new(),
+            console_defer_present: false,
         }
     }
 
@@ -518,6 +523,15 @@ impl VgaWriter {
     /// Performs the present operation.
     pub fn present(&mut self) {
         if !self.enabled {
+            return;
+        }
+
+        // Rate-limit: skip if not enough time since last present.
+        // Debug output calls present() very frequently; the human eye
+        // cannot see >60 FPS, and each present() copies the full dirty region.
+        let now = crate::process::scheduler::ticks();
+        if now.saturating_sub(self.canm().last_present_tick) < PRESENT_MIN_TICKS {
+            self.canm().present_pending = true;
             return;
         }
 
@@ -1951,10 +1965,12 @@ impl VgaWriter {
     pub(crate) fn end_viewport_render(&mut self, prev_draw_to_back: bool, prev_track_dirty: bool) {
         let has_back = self.can().back_buffer.is_some();
         if has_back {
-            self.request_present();
-            let now = crate::process::scheduler::ticks();
-            let force_present = self.canm().last_present_tick == 0 || now == 0;
-            self.present_if_due(force_present);
+            if !self.console_defer_present {
+                self.request_present();
+                let now = crate::process::scheduler::ticks();
+                let force_present = self.canm().last_present_tick == 0 || now == 0;
+                self.present_if_due(force_present);
+            }
             let canvas = self.canm();
             canvas.draw_to_back = prev_draw_to_back;
             canvas.track_dirty = prev_track_dirty;
@@ -2287,9 +2303,10 @@ impl VgaWriter {
         }
     }
 
-    /// Writes bytes.
+    /// Writes bytes (render only — does NOT present or draw scrollbar).
+    /// Call `flush_display()` after a batch of writes to present.
     pub(crate) fn write_bytes(&mut self, s: &str) {
-        let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
+        self.begin_viewport_render();
         // Skip basic ANSI escape sequences to avoid rendering control garbage.
         let bytes = s.as_bytes();
         let mut i = 0;
@@ -2316,9 +2333,14 @@ impl VgaWriter {
             self.write_char(ch);
             i += 1;
         }
-        // Refresh scrollbar after each batch of output.
+    }
+
+    /// Flush: draw scrollbar + present to screen.
+    /// Call after a batch of `write_bytes()` calls to display everything at once.
+    pub(crate) fn flush_display(&mut self) {
         self.draw_scrollbar_inner();
-        self.end_viewport_render(prev_draw_to_back, prev_track_dirty);
+        let (prev_draw, prev_track) = self.begin_viewport_render();
+        self.end_viewport_render(prev_draw, prev_track);
     }
 
     // =============================================================

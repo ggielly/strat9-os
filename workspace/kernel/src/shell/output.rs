@@ -77,7 +77,7 @@ macro_rules! shell_print {
     }};
 }
 
-/// Print to both serial and VGA with newline.
+/// Print to both serial and VGA with newline, then flush to screen.
 #[macro_export]
 macro_rules! shell_println {
     () => ($crate::shell_print!("\n"));
@@ -92,6 +92,7 @@ macro_rules! shell_println {
             if $crate::arch::x86_64::vga::is_available() {
                 use core::fmt::Write;
                 let _ = writeln!($crate::arch::x86_64::vga::VGA_WRITER.lock(), $($arg)*);
+                $crate::arch::x86_64::vga::flush_display();
             }
         }
     }};
@@ -107,8 +108,9 @@ pub fn clear_screen() {
 /// Print the shell prompt and show the text cursor.
 pub fn print_prompt() {
     shell_print!(">>> ");
-    // Immediately show the cursor so it's always visible after the prompt.
+    // Flush to screen so the prompt is visible immediately.
     if crate::arch::x86_64::vga::is_available() {
+        crate::arch::x86_64::vga::flush_display();
         let color = crate::arch::x86_64::vga::RgbColor::new(0x4F, 0xB3, 0xB3);
         crate::arch::x86_64::vga::draw_text_cursor(color);
     }
