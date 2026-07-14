@@ -185,7 +185,8 @@ pub fn sys_silo_unveil(
     if silo.unveil_rules.len() >= MAX_UNVEIL_RULES {
         return Err(SyscallError::QueueFull);
     }
-    silo.unveil_rules.push(UnveilRule { path, rights });
+    // Pre-validated: len() < MAX_UNVEIL_RULES, push cannot fail.
+    let _ = silo.unveil_rules.push(UnveilRule { path, rights });
     Ok(0)
 }
 
@@ -1523,7 +1524,9 @@ pub fn kernel_spawn_strate(
     let mut mgr = SILO_MANAGER.lock();
     {
         let silo = mgr.get_mut(silo_id)?;
-        silo.tasks.push(task_id);
+        if let Err(task) = silo.tasks.push(task_id) {
+            log::error!("[silo] tasks full (capacity=64), task {} not registered", task.0);
+        }
         silo.state = SiloState::Running;
         let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
         let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
@@ -2077,7 +2080,9 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
                 return Err(SyscallError::InvalidArgument);
             }
             if !granted_caps.contains(&cap_handle) {
-                granted_caps.push(cap_handle);
+                if let Err(cap) = granted_caps.push(cap_handle) {
+                    log::warn!("[silo] granted_caps full (capacity=64), cap {} dropped", cap);
+                }
             }
             add_or_merge_granted_resource(
                 &mut granted_resources,
@@ -2298,7 +2303,9 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
                 return Err(e);
             }
         };
-        silo.tasks.push(task_id);
+        if let Err(task) = silo.tasks.push(task_id) {
+            log::error!("[silo] tasks full (capacity=64), task {} not registered", task.0);
+        }
         silo.state = SiloState::Running;
         let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
         let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
@@ -2554,7 +2561,9 @@ fn add_or_merge_granted_resource(list: &mut HVec<GrantedResource, 32>, grant: Gr
             return;
         }
     }
-    list.push(grant);
+    if list.push(grant).is_err() {
+        log::warn!("[silo] granted_resources full (capacity=32), resource dropped");
+    }
 }
 
 /// Performs the register current task granted resource operation.
@@ -2951,10 +2960,12 @@ pub fn kernel_unveil_silo(
     if let Some(rule) = silo.unveil_rules.iter_mut().find(|r| r.path == path) {
         rule.rights = rights;
     } else {
-        silo.unveil_rules.push(UnveilRule {
+        if silo.unveil_rules.push(UnveilRule {
             path: String::from(path),
             rights,
-        });
+        }).is_err() {
+            log::warn!("[silo] unveil_rules full (capacity=128), rule dropped");
+        }
     }
     Ok(silo_id)
 }
