@@ -52,7 +52,13 @@ impl Renderer {
         })
     }
 
-    pub fn render(&mut self, cells: &[[Cell; MAX_COLS]; MAX_ROWS], cursor_row: usize, cursor_col: usize, rows: usize) {
+    pub fn render(
+        &mut self,
+        cells: &[[Cell; MAX_COLS]; MAX_ROWS],
+        cursor_row: usize,
+        cursor_col: usize,
+        rows: usize,
+    ) {
         for row in 0..rows.min(self.rows) {
             for col in 0..self.cols {
                 let cell = cells[row][col];
@@ -76,10 +82,18 @@ impl Renderer {
     fn render_glyph(&self, col: usize, row: usize, cell: &Cell, is_cursor: bool) {
         let x = (col * GLYPH_W) as u16;
         let y = (row * GLYPH_H) as u16;
-        let (fg, bg) = if is_cursor { (cell.bg, cell.fg) } else { (cell.fg, cell.bg) };
+        let (fg, bg) = if is_cursor {
+            (cell.bg, cell.fg)
+        } else {
+            (cell.fg, cell.bg)
+        };
 
         let glyph_idx = (cell.ch as usize).wrapping_sub(0x20);
-        let glyph = if glyph_idx < 95 { &FONT_8X16[glyph_idx] } else { &FONT_8X16[0] };
+        let glyph = if glyph_idx < 95 {
+            &FONT_8X16[glyph_idx]
+        } else {
+            &FONT_8X16[0]
+        };
 
         let mut pixel_data = [0u8; 4 + GLYPH_W * GLYPH_H * 3];
         pixel_data[0] = x as u8;

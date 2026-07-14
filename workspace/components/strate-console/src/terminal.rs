@@ -1,7 +1,9 @@
 //! Terminal core: state machine, ANSI dispatch, line editing.
 
-use crate::ansi::{AnsiAction, AnsiParser, EraseMode, SgrParam};
-use crate::scrollback::{Cell, CircularBuffer};
+use crate::{
+    ansi::{AnsiAction, AnsiParser, EraseMode, SgrParam},
+    scrollback::{Cell, CircularBuffer},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalMode {
@@ -238,7 +240,11 @@ impl TerminalCore {
             } else {
                 fg
             };
-            let cell = Cell { ch, fg: bold_color, bg };
+            let cell = Cell {
+                ch,
+                fg: bold_color,
+                bg,
+            };
             self.line_cells[col] = cell;
             self.screen[row][col] = cell;
             self.line_len = self.line_len.max(col + 1);
@@ -257,7 +263,8 @@ impl TerminalCore {
             }
         }
         // Clear the current editing line for the next input line.
-        self.scrollback.push_line(&self.line_cells[..self.line_len], self.line_len);
+        self.scrollback
+            .push_line(&self.line_cells[..self.line_len], self.line_len);
         let blank = Cell::blank(self.default_fg, self.default_bg);
         self.line_cells = [blank; MAX_COLS];
         self.line_len = 0;

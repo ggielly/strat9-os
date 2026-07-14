@@ -4,8 +4,7 @@
 
 extern crate alloc;
 
-use core::alloc::Layout;
-use core::panic::PanicInfo;
+use core::{alloc::Layout, panic::PanicInfo};
 use strat9_syscall::call;
 
 mod ansi;
@@ -33,7 +32,9 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
     let _ = call::debug_log(b"[console] OOM\n");
-    loop { let _ = call::sched_yield(); }
+    loop {
+        let _ = call::sched_yield();
+    }
 }
 
 #[panic_handler]
@@ -49,7 +50,9 @@ pub extern "C" fn _start() -> ! {
         Some(r) => r,
         None => {
             let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/0.0\n");
-            loop { let _ = call::sched_yield(); }
+            loop {
+                let _ = call::sched_yield();
+            }
         }
     };
 
@@ -57,7 +60,9 @@ pub extern "C" fn _start() -> ! {
         Some(k) => k,
         None => {
             let _ = call::debug_log(b"[console] FATAL: cannot open /dev/input/kbd\n");
-            loop { let _ = call::sched_yield(); }
+            loop {
+                let _ = call::sched_yield();
+            }
         }
     };
 
