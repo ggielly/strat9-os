@@ -353,6 +353,7 @@ impl VgaWriter {
         if self.cursor.tc_visible {
             self.text_cursor_erase_hw();
             self.cursor.tc_visible = false;
+            self.cursor.tc_dirty = true;
         }
         self.col = core::cmp::min(col, self.cols - 1);
         self.row = core::cmp::min(row, self.rows - 1);
@@ -589,24 +590,49 @@ impl VgaWriter {
                 }
             } else {
                 // 24bpp: convert row-by-row to packed bytes, then bulk-copy.
+                // Stack buffer avoids heap allocation; falls back to heap
+                // for resolutions wider than 4K (3840 px).
                 let row_bytes = region.w * 3;
-                let mut row_buf = alloc::vec![0u8; row_bytes];
-                for y in region.y..(region.y + region.h) {
-                    let src_row = y * fb_width + region.x;
-                    for x in 0..region.w {
-                        let packed = unsafe { *buf_ptr.add(src_row + x) };
-                        let off = x * 3;
-                        row_buf[off] = packed as u8;
-                        row_buf[off + 1] = (packed >> 8) as u8;
-                        row_buf[off + 2] = (packed >> 16) as u8;
+                const MAX_STACK_ROW: usize = 3840 * 3;
+                if row_bytes <= MAX_STACK_ROW {
+                    let mut row_buf = [0u8; MAX_STACK_ROW];
+                    for y in region.y..(region.y + region.h) {
+                        let src_row = y * fb_width + region.x;
+                        for x in 0..region.w {
+                            let packed = unsafe { *buf_ptr.add(src_row + x) };
+                            let off = x * 3;
+                            row_buf[off] = packed as u8;
+                            row_buf[off + 1] = (packed >> 8) as u8;
+                            row_buf[off + 2] = (packed >> 16) as u8;
+                        }
+                        let dst_off = y * pitch + region.x * 3;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                row_buf.as_ptr(),
+                                fb_addr.add(dst_off),
+                                row_bytes,
+                            );
+                        }
                     }
-                    let dst_off = y * pitch + region.x * 3;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            row_buf.as_ptr(),
-                            fb_addr.add(dst_off),
-                            row_bytes,
-                        );
+                } else {
+                    let mut row_buf = alloc::vec![0u8; row_bytes];
+                    for y in region.y..(region.y + region.h) {
+                        let src_row = y * fb_width + region.x;
+                        for x in 0..region.w {
+                            let packed = unsafe { *buf_ptr.add(src_row + x) };
+                            let off = x * 3;
+                            row_buf[off] = packed as u8;
+                            row_buf[off + 1] = (packed >> 8) as u8;
+                            row_buf[off + 2] = (packed >> 16) as u8;
+                        }
+                        let dst_off = y * pitch + region.x * 3;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                row_buf.as_ptr(),
+                                fb_addr.add(dst_off),
+                                row_bytes,
+                            );
+                        }
                     }
                 }
             }
@@ -627,11 +653,11 @@ impl VgaWriter {
             }
         }
 
-        if self.cursor.mc_visible {
+        if self.cursor.mc_visible && self.cursor.mc_dirty {
             self.mc_save_hw();
             self.mc_draw_hw();
         }
-        if self.cursor.tc_visible {
+        if self.cursor.tc_visible && self.cursor.tc_dirty {
             self.text_cursor_save_hw();
             self.text_cursor_draw_hw();
         }
@@ -839,6 +865,7 @@ impl VgaWriter {
         if self.cursor.tc_visible {
             self.text_cursor_erase_hw();
             self.cursor.tc_visible = false;
+            self.cursor.tc_dirty = true;
         }
         if packed == self.bg {
             self.present();
