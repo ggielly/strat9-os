@@ -19,6 +19,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use heapless::Vec as HVec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -617,10 +618,10 @@ struct Silo {
     mem_usage_bytes: u64,
     flags: u32,
     module_id: Option<u64>,
-    tasks: Vec<TaskId>,
-    granted_caps: Vec<u64>,
-    granted_resources: Vec<GrantedResource>,
-    unveil_rules: Vec<UnveilRule>,
+    tasks: HVec<TaskId, 64>,
+    granted_caps: HVec<u64, 64>,
+    granted_resources: HVec<GrantedResource, 32>,
+    unveil_rules: HVec<UnveilRule, 128>,
     sandboxed: bool,
     event_seq: u64,
     /// Ring buffer capturing debug output for `silo attach`.
@@ -763,10 +764,10 @@ impl SiloManager {
             mem_usage_bytes: 0,
             flags: config.flags as u32,
             module_id: None,
-            tasks: Vec::new(),
-            granted_caps: Vec::new(),
-            granted_resources: Vec::new(),
-            unveil_rules: Vec::new(),
+            tasks: HVec::new(),
+            granted_caps: HVec::new(),
+            granted_resources: HVec::new(),
+            unveil_rules: HVec::new(),
             sandboxed: false,
             event_seq: 0,
             output_buf: None,
@@ -1468,10 +1469,10 @@ pub fn kernel_spawn_strate(
             mem_usage_bytes: 0,
             flags: 0,
             module_id: Some(module_id),
-            tasks: Vec::new(),
-            granted_caps: Vec::new(),
-            granted_resources: Vec::new(),
-            unveil_rules: Vec::new(),
+            tasks: HVec::new(),
+            granted_caps: HVec::new(),
+            granted_resources: HVec::new(),
+            unveil_rules: HVec::new(),
             sandboxed: false,
             event_seq: 0,
             output_buf: None,
@@ -1567,7 +1568,7 @@ pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u32, Syscall
     let (silo_id, tasks) = {
         let mut mgr = SILO_MANAGER.lock();
         let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
-        let mut tasks = Vec::new();
+        let mut tasks = HVec::<TaskId, 64>::new();
         {
             let silo = mgr.get_mut(silo_id)?;
             match silo.state {
@@ -1731,10 +1732,14 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             mem_usage_bytes: 0,
             flags: 0,
             module_id: None,
-            tasks: alloc::vec![task_id],
-            granted_caps: Vec::new(),
-            granted_resources: Vec::new(),
-            unveil_rules: Vec::new(),
+            tasks: {
+                let mut v = HVec::new();
+                let _ = v.push(task_id);
+                v
+            },
+            granted_caps: HVec::new(),
+            granted_resources: HVec::new(),
+            unveil_rules: HVec::new(),
             sandboxed: false,
             event_seq: 0,
             output_buf: None,
@@ -2054,8 +2059,8 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
     config.validate()?;
     let family = decode_family(config.family)?;
 
-    let mut granted_caps = Vec::new();
-    let mut granted_resources = Vec::new();
+    let mut granted_caps = HVec::<u64, 64>::new();
+    let mut granted_resources = HVec::<GrantedResource, 32>::new();
     if config.caps_len > 0 {
         let caps_list = read_caps_list(config.caps_ptr, config.caps_len)?;
         let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -2372,7 +2377,7 @@ fn stop_or_kill_silo_by_id(
     silo_id: u32,
     force_kill: bool,
     require_running: bool,
-) -> Result<Vec<TaskId>, SyscallError> {
+) -> Result<HVec<TaskId, 64>, SyscallError> {
     let mut mgr = SILO_MANAGER.lock();
     let tasks = {
         let silo = mgr.get_mut(silo_id)?;
@@ -2390,7 +2395,7 @@ fn stop_or_kill_silo_by_id(
                     tasks
                 }
                 _ if require_running => return Err(SyscallError::InvalidArgument),
-                _ => Vec::new(),
+                _ => HVec::new(),
             }
         }
     };
@@ -2542,7 +2547,7 @@ fn permissions_subset(requested: CapPermissions, allowed: CapPermissions) -> boo
 }
 
 /// Performs the add or merge granted resource operation.
-fn add_or_merge_granted_resource(list: &mut Vec<GrantedResource>, grant: GrantedResource) {
+fn add_or_merge_granted_resource(list: &mut HVec<GrantedResource, 32>, grant: GrantedResource) {
     for existing in list.iter_mut() {
         if existing.resource_type == grant.resource_type && existing.resource == grant.resource {
             existing.permissions = merge_permissions(existing.permissions, grant.permissions);
@@ -3162,7 +3167,7 @@ pub fn handle_user_fault(
                 return;
             }
         };
-        let mut tasks = Vec::new();
+        let mut tasks = HVec::<TaskId, 64>::new();
         {
             if let Ok(silo) = mgr.get_mut(silo_id) {
                 silo.state = SiloState::Crashed;
