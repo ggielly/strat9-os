@@ -528,12 +528,9 @@ impl Scheme for IpcScheme {
     /// Performs the close operation.
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
         let msg = Self::build_close_msg(file_id);
-        let reply = self.call(msg);
-        self.take_open_flags(file_id);
-        let reply = reply?;
-
+        let reply = self.call(msg)?;
         Self::parse_status(&reply)?;
-
+        self.take_open_flags(file_id);
         Ok(())
     }
 

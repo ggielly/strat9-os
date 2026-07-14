@@ -100,22 +100,7 @@ pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
 /// Used by `sys_open` and `open_at` which resolve the path once before calling
 /// this. The silo permission check must have already been performed.
 fn open_resolved(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
-    let (scheme, relative_path) = mount::resolve(path)?;
-    let open_result = scheme.open(&relative_path, flags)?;
-
-    let open_file = Arc::new(OpenFile::new(
-        scheme,
-        open_result.file_id,
-        String::from(path),
-        flags,
-        open_result.flags,
-        open_result.size,
-    ));
-
-    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let fd = unsafe { (&mut *task.process.fd_table.get()).insert(open_file) };
-
-    Ok(fd)
+    open(path, flags)
 }
 
 /// Resolve `path` against the current task CWD and enforce silo path policy.
@@ -517,18 +502,20 @@ pub fn sys_fstatat(
     dir_fd: u64,
     path_ptr: u64,
     path_len: u64,
-    _flags: u64,
+    statbuf_ptr: u64,
 ) -> Result<u64, SyscallError> {
+    use crate::memory::UserSliceWrite;
     const MAX_PATH_LEN: usize = 4096;
-    if path_len == 0 || path_len as usize > MAX_PATH_LEN {
+    if path_len == 0 || path_len as usize > MAX_PATH_LEN || statbuf_ptr == 0 {
         return Err(SyscallError::InvalidArgument);
     }
     let raw = read_user_path(path_ptr, path_len)?;
     let st = fstat_at(dir_fd, &raw)?;
-    // NOTE: stat_ptr is not provided in this syscall signature; the caller
-    // must use SYS_FSTAT with an open FD to get the stat struct.
-    // For now, return 0 on success (file exists).
-    let _ = st;
+    let user = UserSliceWrite::new(statbuf_ptr, core::mem::size_of::<FileStat>())?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(&st as *const FileStat as *const u8, core::mem::size_of::<FileStat>())
+    };
+    user.copy_from(bytes);
     Ok(0)
 }
 
@@ -998,6 +985,10 @@ pub fn sys_unlink(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
 /// SYS_RMDIR (446): Remove an empty directory.
 pub fn sys_rmdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     let abs = resolve_for_syscall(path_ptr, path_len, false, true, false)?;
+    let st = stat_path(&abs)?;
+    if st.st_mode & 0o170000 != 0o040000 {
+        return Err(SyscallError::InvalidArgument);
+    }
     unlink(&abs)?;
     Ok(0)
 }
