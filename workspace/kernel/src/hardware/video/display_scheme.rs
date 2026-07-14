@@ -24,8 +24,8 @@
 use crate::{
     hardware::video::{
         graphics_adapter::{
-            get_adapter_for_display, total_display_count, Damage, DisplayScreen,
-            HeapScreen, SimpleDisplayAdapter,
+            get_adapter_for_display, total_display_count, Damage, DisplayScreen, HeapScreen,
+            SimpleDisplayAdapter,
         },
         Framebuffer,
     },

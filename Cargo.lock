@@ -953,6 +953,7 @@ dependencies = [
  "driver-net-proto",
  "e1000",
  "endian-num",
+ "heapless 0.9.3",
  "intel-ethernet",
  "intrusive-collections",
  "limine",

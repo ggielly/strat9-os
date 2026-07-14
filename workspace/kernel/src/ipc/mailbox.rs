@@ -121,7 +121,11 @@ impl NodePool {
             // and the tag in the mailbox head already provides ABA protection).
             loop {
                 let current = self.head.load(Ordering::Relaxed);
-                unsafe { (*(ptr as *mut MailboxMessage)).next.store(current, Ordering::Relaxed); }
+                unsafe {
+                    (*(ptr as *mut MailboxMessage))
+                        .next
+                        .store(current, Ordering::Relaxed);
+                }
                 if self
                     .head
                     .compare_exchange_weak(current, ptr, Ordering::Release, Ordering::Relaxed)
@@ -140,7 +144,11 @@ impl NodePool {
             if current == 0 {
                 return None;
             }
-            let next = unsafe { (*(current as *mut MailboxMessage)).next.load(Ordering::Relaxed) };
+            let next = unsafe {
+                (*(current as *mut MailboxMessage))
+                    .next
+                    .load(Ordering::Relaxed)
+            };
             if self
                 .head
                 .compare_exchange_weak(current, next, Ordering::Acquire, Ordering::Relaxed)
@@ -155,7 +163,9 @@ impl NodePool {
     fn push_raw(&self, ptr: *mut MailboxMessage) {
         loop {
             let current = self.head.load(Ordering::Relaxed);
-            unsafe { (*ptr).next.store(current, Ordering::Relaxed); }
+            unsafe {
+                (*ptr).next.store(current, Ordering::Relaxed);
+            }
             if self
                 .head
                 .compare_exchange_weak(current, ptr as usize, Ordering::Release, Ordering::Relaxed)

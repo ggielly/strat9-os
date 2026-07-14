@@ -107,9 +107,7 @@ fn sleep_ms(ms: u64) {
 
 /// Open a scheme file, return fd.
 fn scheme_open(path: &str) -> Result<usize, ()> {
-    call::openat(0, path, 0x3, 0)
-        .map(|fd| fd)
-        .map_err(|_| ())
+    call::openat(0, path, 0x3, 0).map(|fd| fd).map_err(|_| ())
 }
 
 /// Write to an open scheme fd, return bytes written.

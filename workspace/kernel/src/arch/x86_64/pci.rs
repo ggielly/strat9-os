@@ -112,7 +112,6 @@ fn class_name(class: u8, subclass: u8) -> Option<&'static str> {
     }
 }
 
-
 #[derive(Clone, Copy)]
 struct PciLineQuirk {
     vendor_id: u16,
@@ -251,7 +250,6 @@ pub mod cap_id {
     /// MSI-X capability (PCI 3.0+)
     pub const MSIX: u8 = 0x11;
 }
-
 
 /// PCIe Extended Capability IDs (offset >= 0x100)
 pub mod ext_cap_id {
@@ -451,7 +449,8 @@ pub fn read_sriov_info(dev: &PciDevice) -> Option<SriovInfo> {
     let cap_offset = find_ext_capability(dev, ext_cap_id::SRIOV)?;
     let control = dev.read_config_u16(((cap_offset + sriov_cap::CONTROL as u16) & 0xFF) as u8);
     let status = dev.read_config_u16(((cap_offset + sriov_cap::STATUS as u16) & 0xFF) as u8);
-    let initial_vf = dev.read_config_u16(((cap_offset + sriov_cap::INITIAL_VF as u16) & 0xFF) as u8);
+    let initial_vf =
+        dev.read_config_u16(((cap_offset + sriov_cap::INITIAL_VF as u16) & 0xFF) as u8);
     let total_vf = dev.read_config_u16(((cap_offset + sriov_cap::TOTAL_VF as u16) & 0xFF) as u8);
     let num_vf = dev.read_config_u16(((cap_offset + sriov_cap::NUM_VF as u16) & 0xFF) as u8);
 
@@ -488,10 +487,14 @@ pub struct SriovInfo {
 /// Read AER (Advanced Error Reporting) capability information.
 pub fn read_aer_info(dev: &PciDevice) -> Option<AerInfo> {
     let cap_offset = find_ext_capability(dev, ext_cap_id::AER)?;
-    let uncerr_status = dev.read_config_u32(((cap_offset + aer_cap::UNCERR_STATUS as u16) & 0xFF) as u8);
-    let uncerr_mask = dev.read_config_u32(((cap_offset + aer_cap::UNCERR_MASK as u16) & 0xFF) as u8);
-    let corerr_status = dev.read_config_u32(((cap_offset + aer_cap::CORERR_STATUS as u16) & 0xFF) as u8);
-    let corerr_mask = dev.read_config_u32(((cap_offset + aer_cap::CORERR_MASK as u16) & 0xFF) as u8);
+    let uncerr_status =
+        dev.read_config_u32(((cap_offset + aer_cap::UNCERR_STATUS as u16) & 0xFF) as u8);
+    let uncerr_mask =
+        dev.read_config_u32(((cap_offset + aer_cap::UNCERR_MASK as u16) & 0xFF) as u8);
+    let corerr_status =
+        dev.read_config_u32(((cap_offset + aer_cap::CORERR_STATUS as u16) & 0xFF) as u8);
+    let corerr_mask =
+        dev.read_config_u32(((cap_offset + aer_cap::CORERR_MASK as u16) & 0xFF) as u8);
     let err_cap = dev.read_config_u32(((cap_offset + aer_cap::ERR_CAP as u16) & 0xFF) as u8);
 
     Some(AerInfo {
@@ -1162,7 +1165,6 @@ fn probe_from_word00(address: PciAddress, word00: u32) -> Option<PciDevice> {
 ///   - a lock-free double-buffered snapshot model.
 static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 
-
 // ---------------------------------------------------------------------------
 // ECAM (PCIe Enhanced Configuration Access Mechanism) scanner
 // ---------------------------------------------------------------------------
@@ -1173,8 +1175,7 @@ static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 /// For each ECAM region, scans all bus/device/function combinations.
 /// Returns only devices not already found by the I/O port scanner.
 fn scan_ecam_devices() -> Vec<PciDevice> {
-    use crate::acpi::mcfg;
-    use crate::memory;
+    use crate::{acpi::mcfg, memory};
 
     let mcfg_info = match mcfg::parse_mcfg() {
         Some(info) => info,
@@ -1197,22 +1198,25 @@ fn scan_ecam_devices() -> Vec<PciDevice> {
         let end_bus = entry.end_bus;
 
         // Ensure the ECAM region is identity-mapped
-        let region_size = ((end_bus as usize - start_bus as usize + 1) * 256 * 32 * 8 * 4096) as u64;
+        let region_size =
+            ((end_bus as usize - start_bus as usize + 1) * 256 * 32 * 8 * 4096) as u64;
         memory::paging::ensure_identity_map_range(ecam_phys, region_size);
         let ecam_virt = crate::memory::phys_to_virt(ecam_phys) as usize;
 
         log::info!(
             "[PCI-ECAM] Region seg={} ecam={:#x} buses={}..{} virt={:#x}",
-            entry.segment_group, ecam_phys, start_bus, end_bus, ecam_virt
+            entry.segment_group,
+            ecam_phys,
+            start_bus,
+            end_bus,
+            ecam_virt
         );
 
         // Scan each bus in the range
         for bus in start_bus..=end_bus {
             for dev in 0..32u8 {
                 // Fast vendor check on function 0
-                let word00 = unsafe {
-                    ecam_read32(ecam_virt, bus, dev, 0, 0x00)
-                };
+                let word00 = unsafe { ecam_read32(ecam_virt, bus, dev, 0, 0x00) };
                 let vendor_id = (word00 & 0xFFFF) as u16;
                 if is_absent_vendor(vendor_id) {
                     continue;
@@ -1241,7 +1245,13 @@ fn scan_ecam_devices() -> Vec<PciDevice> {
 }
 
 /// Probe a single PCI device via ECAM MMIO.
-fn probe_ecam_device(ecam_base: usize, bus: u8, device: u8, function: u8, word00: u32) -> Option<PciDevice> {
+fn probe_ecam_device(
+    ecam_base: usize,
+    bus: u8,
+    device: u8,
+    function: u8,
+    word00: u32,
+) -> Option<PciDevice> {
     let vendor_id = (word00 & 0xFFFF) as u16;
     let device_id = (word00 >> 16) as u16;
     if is_absent_vendor(vendor_id) || device_id == 0xFFFF || device_id == 0x0000 {
@@ -1305,11 +1315,11 @@ fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
         // Merge: ECAM devices that are NOT already in the I/O scan
         let mut devices = io_devices;
         for ecam_dev in &ecam_devices {
-            let duplicate = devices.iter().any(|d|
+            let duplicate = devices.iter().any(|d| {
                 d.address.bus == ecam_dev.address.bus
-                && d.address.device == ecam_dev.address.device
-                && d.address.function == ecam_dev.address.function
-            );
+                    && d.address.device == ecam_dev.address.device
+                    && d.address.function == ecam_dev.address.function
+            });
             if !duplicate {
                 devices.push(*ecam_dev);
             }
@@ -1318,10 +1328,8 @@ fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
 
         // Improved logging: human-readable names, IRQ, class
         for dev in &devices {
-            let name = device_name(dev.vendor_id, dev.device_id)
-                .unwrap_or("Unknown");
-            let class = class_name(dev.class_code, dev.subclass)
-                .unwrap_or("???");
+            let name = device_name(dev.vendor_id, dev.device_id).unwrap_or("Unknown");
+            let class = class_name(dev.class_code, dev.subclass).unwrap_or("???");
             crate::serial_println!(
                 "[PCI]   {:02x}:{:02x}.{:x} {:<24} {} (IRQ={})",
                 dev.address.bus,
