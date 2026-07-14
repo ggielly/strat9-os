@@ -14,6 +14,7 @@ use strat9_syscall::call;
 
 mod ansi;
 mod scrollback;
+mod terminal;
 
 fn log(s: &str) {
     let _ = call::write(2, s.as_bytes());
