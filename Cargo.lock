@@ -999,6 +999,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "strate-console"
+version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
+]
+
+[[package]]
 name = "strate-console-admin"
 version = "0.1.0"
 dependencies = [
