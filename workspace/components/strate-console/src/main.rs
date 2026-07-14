@@ -89,9 +89,10 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn render_terminal(term: &TerminalCore, cells: &mut [[scrollback::Cell; 256]; 64]) {
-    for col in 0..term.cols.min(256) {
-        if col < term.line_len {
-            cells[term.cursor_row][col] = term.line_cells[col];
+    let visible_rows = term.rows.min(64);
+    for row in 0..visible_rows {
+        for col in 0..term.cols.min(256) {
+            cells[row][col] = term.screen[row][col];
         }
     }
 }

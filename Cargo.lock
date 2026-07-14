@@ -1002,6 +1002,7 @@ dependencies = [
 name = "strate-console"
 version = "0.1.0"
 dependencies = [
+ "alloc-freelist",
  "strat9-syscall",
 ]
 

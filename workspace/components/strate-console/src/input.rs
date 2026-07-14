@@ -38,9 +38,17 @@ impl InputHandler {
         let pressed = (scancode & 0x80) == 0;
         let code = scancode & 0x7F;
 
+        // 0xE0 prefix marks an extended scancode. The next byte carries
+        // the actual code. Extended scancodes (e.g. right Ctrl = 0xE0 0x1D)
+        // are handled by treating 0xE0 as a prefix that we skip — the real
+        // code follows on the next read.
+        if scancode == 0xE0 {
+            return None; // Prefix byte, next call has the real code.
+        }
+
         match code {
             0x2A | 0x36 => { self.shift = pressed; None }
-            0x1D | 0xE0 => { self.ctrl = pressed; None }
+            0x1D => { self.ctrl = pressed; None }
             0x38 => { self.alt = pressed; None }
             0x3A => { if pressed { self.caps_lock = !self.caps_lock }; None }
             _ => {

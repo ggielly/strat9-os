@@ -9,6 +9,9 @@ pub enum TerminalMode {
     Canonical,
 }
 
+const MAX_COLS: usize = 256;
+const MAX_ROWS: usize = 64;
+
 pub struct TerminalCore {
     pub cols: usize,
     pub rows: usize,
@@ -16,8 +19,11 @@ pub struct TerminalCore {
     pub cursor_col: usize,
     pub scroll_top: usize,
     pub scroll_bottom: usize,
-    pub line_cells: [Cell; 256],
+    /// Current editing line buffer.
+    pub line_cells: [Cell; MAX_COLS],
     pub line_len: usize,
+    /// Visible screen buffer: all rows rendered on screen.
+    pub screen: [[Cell; MAX_COLS]; MAX_ROWS],
     pub fg: u32,
     pub bg: u32,
     pub bold: bool,
@@ -44,8 +50,9 @@ impl TerminalCore {
             cursor_col: 0,
             scroll_top: 0,
             scroll_bottom: rows,
-            line_cells: [blank; 256],
+            line_cells: [blank; MAX_COLS],
             line_len: 0,
+            screen: [[blank; MAX_COLS]; MAX_ROWS],
             fg: default_fg,
             bg: default_bg,
             bold: false,
@@ -231,20 +238,41 @@ impl TerminalCore {
             } else {
                 fg
             };
-            self.line_cells[col] = Cell {
-                ch,
-                fg: bold_color,
-                bg,
-            };
+            let cell = Cell { ch, fg: bold_color, bg };
+            self.line_cells[col] = cell;
+            self.screen[row][col] = cell;
             self.line_len = self.line_len.max(col + 1);
         }
     }
 
     fn flush_line(&mut self) {
+        // Copy the completed line into the screen buffer.
+        for col in 0..self.line_len.min(MAX_COLS).min(self.cols) {
+            if self.cursor_row < self.rows {
+                // If cursor_row is at the bottom, scroll first.
+                if self.cursor_row >= self.screen.len() {
+                    self.scroll_screen_up();
+                }
+                self.screen[self.cursor_row.min(self.rows - 1)][col] = self.line_cells[col];
+            }
+        }
+        // Clear the current editing line for the next input line.
         self.scrollback.push_line(&self.line_cells[..self.line_len], self.line_len);
         let blank = Cell::blank(self.default_fg, self.default_bg);
-        self.line_cells = [blank; 256];
+        self.line_cells = [blank; MAX_COLS];
         self.line_len = 0;
+    }
+
+    fn scroll_screen_up(&mut self) {
+        // Shift all screen rows up by one, losing the top row.
+        for r in 1..self.rows.min(MAX_ROWS) {
+            self.screen[r - 1] = self.screen[r];
+        }
+        // Clear the last row.
+        let blank = Cell::blank(self.default_fg, self.default_bg);
+        if self.rows > 0 {
+            self.screen[self.rows - 1] = [blank; MAX_COLS];
+        }
     }
 
     fn scroll_up(&mut self) {
@@ -305,7 +333,11 @@ fn ansi_color_to_rgb(c: u8, _is_fg: bool, bright: bool) -> u32 {
         _ => (170, 170, 170),
     };
     if bright {
-        ((base.0 as u32) << 16) | ((base.1 as u32) << 8) | base.2 as u32
+        // Bright variant: 255 instead of 170 for all channels.
+        let brightened = (base.0 + 85, base.1 + 85, base.2 + 85);
+        ((brightened.0 as u32).min(255) << 16)
+            | ((brightened.1 as u32).min(255) << 8)
+            | brightened.2 as u32
     } else {
         ((base.0 as u32) << 16) | ((base.1 as u32) << 8) | base.2 as u32
     }

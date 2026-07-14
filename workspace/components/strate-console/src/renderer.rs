@@ -21,6 +21,9 @@ pub struct Renderer {
     prev_initialized: bool,
 }
 
+// SAFETY: Renderer contains only an fd (usize, integer type always Send)
+// and plain data (arrays of Cell which is Copy). No mutable aliasing across
+// threads occurs because only the main event loop accesses the Renderer.
 unsafe impl Send for Renderer {}
 
 impl Renderer {
@@ -43,7 +46,7 @@ impl Renderer {
             fb_width: w,
             fb_height: h,
             cols: cols.min(MAX_COLS),
-            rows: rows.min(MAX_ROWS),
+            rows: rows.max(1).min(MAX_ROWS),
             prev_cells: [[blank; MAX_COLS]; MAX_ROWS],
             prev_initialized: false,
         })
@@ -102,14 +105,18 @@ impl Renderer {
 
 fn parse_display_size(info: &str) -> Option<(usize, usize)> {
     for line in info.lines() {
+        // Accept both "display.0=800x600" and "display/0=800x600" formats.
         if let Some(eq_pos) = line.find('=') {
             let val = &line[eq_pos + 1..];
-            if let Some(x_pos) = val.find('x') {
-                let w: usize = val[..x_pos].parse().ok()?;
-                let h: usize = val[x_pos + 1..].trim().parse().ok()?;
+            // Try 'x' separator first, then 'x' with optional whitespace.
+            let x_pos = val.find('x').or_else(|| val.find('×'))?;
+            let w: usize = val[..x_pos].trim().parse().ok()?;
+            let h: usize = val[x_pos + 1..].trim().parse().ok()?;
+            if w > 0 && h > 0 {
                 return Some((w, h));
             }
         }
     }
+    // Fallback: try to find any two numbers separated by 'x' in the whole string.
     None
 }
