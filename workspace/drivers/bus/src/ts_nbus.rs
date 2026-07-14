@@ -90,9 +90,10 @@ impl TsNbus {
         let mut val = 0u8;
         for i in 0..8 {
             if let Some(ref p) = self.data_pins[i]
-                && p.get_value() {
-                    val |= 1 << i;
-                }
+                && p.get_value()
+            {
+                val |= 1 << i;
+            }
         }
         val
     }
@@ -115,9 +116,10 @@ impl TsNbus {
     fn wait_rdy(&self) -> Result<(), BusError> {
         for _ in 0..MAX_POLL_RDY {
             if let Some(ref r) = self.rdy
-                && r.get_value() {
-                    return Ok(());
-                }
+                && r.get_value()
+            {
+                return Ok(());
+            }
         }
         Err(BusError::Timeout)
     }

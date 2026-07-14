@@ -245,9 +245,7 @@ pub fn encode_fixed_reply<T: IntoBytes + Immutable>(
 ///     println!("status: {}", reply.status);
 /// }
 /// ```
-pub fn decode_fixed<T: FromBytes + Immutable + KnownLayout>(
-    msg: &IpcMessage,
-) -> Option<&T> {
+pub fn decode_fixed<T: FromBytes + Immutable + KnownLayout>(msg: &IpcMessage) -> Option<&T> {
     let size = core::mem::size_of::<T>();
     if size > PAYLOAD_CAPACITY {
         return None;

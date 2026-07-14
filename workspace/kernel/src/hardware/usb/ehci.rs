@@ -11,8 +11,7 @@
 
 use crate::{
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
-    memory::{allocate_zeroed_frame, phys_to_virt},
-    memory::paging,
+    memory::{allocate_zeroed_frame, paging, phys_to_virt},
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -207,10 +206,7 @@ impl EhciController {
         core::ptr::write_bytes(self.async_list as *mut u8, 0, 4096);
 
         // Set up async list (empty, points to itself)
-        core::ptr::write_volatile(
-            self.async_list,
-            (self.async_list_phys as u32) & 0xFFFFFFE0,
-        );
+        core::ptr::write_volatile(self.async_list, (self.async_list_phys as u32) & 0xFFFFFFE0);
 
         let plb = core::ptr::addr_of_mut!((*self.op_regs).periodic_list_base);
         let alb = core::ptr::addr_of_mut!((*self.op_regs).async_list_base);
