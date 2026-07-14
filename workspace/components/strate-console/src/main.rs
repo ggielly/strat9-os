@@ -12,6 +12,8 @@
 use core::panic::PanicInfo;
 use strat9_syscall::call;
 
+mod scrollback;
+
 fn log(s: &str) {
     let _ = call::write(2, s.as_bytes());
     let _ = call::write(2, b"\n");
