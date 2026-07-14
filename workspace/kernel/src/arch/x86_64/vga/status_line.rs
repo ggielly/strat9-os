@@ -392,6 +392,7 @@ pub fn maybe_refresh_system_status_line(theme: UiTheme) {
             render.right.as_str(),
             theme,
         );
+        writer.flush_display();
     }
 }
 

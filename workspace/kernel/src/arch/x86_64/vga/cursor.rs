@@ -53,6 +53,7 @@ pub(crate) struct CursorManager {
     pub mc_x: i32,
     pub mc_y: i32,
     pub mc_visible: bool,
+    pub mc_dirty: bool,
     pub mc_save: [u32; CURSOR_W * CURSOR_H],
 
     // -- Text cursor --------------------------------------------------------
@@ -61,6 +62,7 @@ pub(crate) struct CursorManager {
     pub tc_w: usize,
     pub tc_h: usize,
     pub tc_visible: bool,
+    pub tc_dirty: bool,
     pub tc_color: u32,
     pub tc_save: [u32; TEXT_CURSOR_MAX_DIM * TEXT_CURSOR_MAX_DIM],
 }
@@ -72,12 +74,14 @@ impl CursorManager {
             mc_x: 0,
             mc_y: 0,
             mc_visible: false,
+            mc_dirty: false,
             mc_save: [0u32; CURSOR_W * CURSOR_H],
             tc_col: 0,
             tc_row: 0,
             tc_w: 0,
             tc_h: 0,
             tc_visible: false,
+            tc_dirty: false,
             tc_color: 0,
             tc_save: [0u32; TEXT_CURSOR_MAX_DIM * TEXT_CURSOR_MAX_DIM],
         }
@@ -88,7 +92,9 @@ impl CursorManager {
     // ========================================================================
 
     /// Save the pixels under the mouse cursor into `mc_save`.
+    /// Sets `mc_dirty = true` so `present()` will redraw.
     pub fn mc_save_hw(&mut self, canvas: &CanvasBuffer) {
+        self.mc_dirty = true;
         let x = self.mc_x;
         let y = self.mc_y;
         for cy in 0..CURSOR_H {
@@ -128,7 +134,9 @@ impl CursorManager {
     }
 
     /// Erase the mouse cursor by restoring the saved pixels.
+    /// Sets `mc_dirty = true` so the next `present()` flushes the change.
     pub fn mc_erase_hw(&mut self, canvas: &mut CanvasBuffer) {
+        self.mc_dirty = true;
         let x = self.mc_x;
         let y = self.mc_y;
         for cy in 0..CURSOR_H {
@@ -217,6 +225,7 @@ impl CursorManager {
     }
 
     /// Draw the text cursor (inverted-colour block) on the hardware framebuffer.
+    /// Resets `tc_dirty = false` after drawing.
     pub fn text_cursor_draw_hw(
         &mut self,
         col: usize,
@@ -226,6 +235,7 @@ impl CursorManager {
         color: u32,
         canvas: &mut CanvasBuffer,
     ) {
+        self.tc_dirty = false;
         let (tx, ty, tw, th) = self.text_cursor_rect(col, row, glyph_w, glyph_h);
         for dy in 0..th {
             for dx in 0..tw {
@@ -239,6 +249,7 @@ impl CursorManager {
     }
 
     /// Erase the text cursor by restoring the saved pixels.
+    /// Sets `tc_dirty = true` so the next `present()` flushes.
     pub fn text_cursor_erase_hw(
         &mut self,
         col: usize,

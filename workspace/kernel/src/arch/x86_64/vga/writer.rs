@@ -33,7 +33,7 @@ pub(crate) struct ClipRect {
 }
 
 // Mouse cursor (X arrow, 12×16) ==================================================================================================================================
-const PRESENT_MIN_TICKS: u64 = 1;
+const PRESENT_MIN_TICKS: u64 = 16;
 
 // Selection clipboard ==========================================================================================================================================================================
 const CLIPBOARD_CAP: usize = 8192;
@@ -76,6 +76,10 @@ pub struct VgaWriter {
     pub(crate) sel_end_row: usize,
     pub(crate) sel_end_col: usize,
     pub(crate) prepared_row_cells: Vec<(usize, u32, u32)>,
+
+    /// When true, `end_viewport_render()` defers present — only marks dirty.
+    /// The display server (or explicit `flush_display()`) triggers the actual present.
+    pub(crate) console_defer_present: bool,
 }
 
 unsafe impl Send for VgaWriter {}
@@ -200,6 +204,7 @@ impl VgaWriter {
             sel_end_row: 0,
             sel_end_col: 0,
             prepared_row_cells: Vec::new(),
+            console_defer_present: false,
         }
     }
 
@@ -353,6 +358,7 @@ impl VgaWriter {
         if self.cursor.tc_visible {
             self.text_cursor_erase_hw();
             self.cursor.tc_visible = false;
+            self.cursor.tc_dirty = true;
         }
         self.col = core::cmp::min(col, self.cols - 1);
         self.row = core::cmp::min(row, self.rows - 1);
@@ -520,6 +526,15 @@ impl VgaWriter {
             return;
         }
 
+        // Rate-limit: skip if not enough time since last present.
+        // Debug output calls present() very frequently; the human eye
+        // cannot see >60 FPS, and each present() copies the full dirty region.
+        let now = crate::process::scheduler::ticks();
+        if now.saturating_sub(self.canm().last_present_tick) < PRESENT_MIN_TICKS {
+            self.canm().present_pending = true;
+            return;
+        }
+
         // Extract all info through can() first to avoid borrow conflicts
         let bpp = self.fmt.bpp;
         let fb_addr = self.can().addr;
@@ -589,24 +604,49 @@ impl VgaWriter {
                 }
             } else {
                 // 24bpp: convert row-by-row to packed bytes, then bulk-copy.
+                // Stack buffer avoids heap allocation; falls back to heap
+                // for resolutions wider than 4K (3840 px).
                 let row_bytes = region.w * 3;
-                let mut row_buf = alloc::vec![0u8; row_bytes];
-                for y in region.y..(region.y + region.h) {
-                    let src_row = y * fb_width + region.x;
-                    for x in 0..region.w {
-                        let packed = unsafe { *buf_ptr.add(src_row + x) };
-                        let off = x * 3;
-                        row_buf[off] = packed as u8;
-                        row_buf[off + 1] = (packed >> 8) as u8;
-                        row_buf[off + 2] = (packed >> 16) as u8;
+                const MAX_STACK_ROW: usize = 3840 * 3;
+                if row_bytes <= MAX_STACK_ROW {
+                    let mut row_buf = [0u8; MAX_STACK_ROW];
+                    for y in region.y..(region.y + region.h) {
+                        let src_row = y * fb_width + region.x;
+                        for x in 0..region.w {
+                            let packed = unsafe { *buf_ptr.add(src_row + x) };
+                            let off = x * 3;
+                            row_buf[off] = packed as u8;
+                            row_buf[off + 1] = (packed >> 8) as u8;
+                            row_buf[off + 2] = (packed >> 16) as u8;
+                        }
+                        let dst_off = y * pitch + region.x * 3;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                row_buf.as_ptr(),
+                                fb_addr.add(dst_off),
+                                row_bytes,
+                            );
+                        }
                     }
-                    let dst_off = y * pitch + region.x * 3;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            row_buf.as_ptr(),
-                            fb_addr.add(dst_off),
-                            row_bytes,
-                        );
+                } else {
+                    let mut row_buf = alloc::vec![0u8; row_bytes];
+                    for y in region.y..(region.y + region.h) {
+                        let src_row = y * fb_width + region.x;
+                        for x in 0..region.w {
+                            let packed = unsafe { *buf_ptr.add(src_row + x) };
+                            let off = x * 3;
+                            row_buf[off] = packed as u8;
+                            row_buf[off + 1] = (packed >> 8) as u8;
+                            row_buf[off + 2] = (packed >> 16) as u8;
+                        }
+                        let dst_off = y * pitch + region.x * 3;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                row_buf.as_ptr(),
+                                fb_addr.add(dst_off),
+                                row_bytes,
+                            );
+                        }
                     }
                 }
             }
@@ -627,11 +667,11 @@ impl VgaWriter {
             }
         }
 
-        if self.cursor.mc_visible {
+        if self.cursor.mc_visible && self.cursor.mc_dirty {
             self.mc_save_hw();
             self.mc_draw_hw();
         }
-        if self.cursor.tc_visible {
+        if self.cursor.tc_visible && self.cursor.tc_dirty {
             self.text_cursor_save_hw();
             self.text_cursor_draw_hw();
         }
@@ -839,6 +879,7 @@ impl VgaWriter {
         if self.cursor.tc_visible {
             self.text_cursor_erase_hw();
             self.cursor.tc_visible = false;
+            self.cursor.tc_dirty = true;
         }
         if packed == self.bg {
             self.present();
@@ -1924,10 +1965,12 @@ impl VgaWriter {
     pub(crate) fn end_viewport_render(&mut self, prev_draw_to_back: bool, prev_track_dirty: bool) {
         let has_back = self.can().back_buffer.is_some();
         if has_back {
-            self.request_present();
-            let now = crate::process::scheduler::ticks();
-            let force_present = self.canm().last_present_tick == 0 || now == 0;
-            self.present_if_due(force_present);
+            if !self.console_defer_present {
+                self.request_present();
+                let now = crate::process::scheduler::ticks();
+                let force_present = self.canm().last_present_tick == 0 || now == 0;
+                self.present_if_due(force_present);
+            }
             let canvas = self.canm();
             canvas.draw_to_back = prev_draw_to_back;
             canvas.track_dirty = prev_track_dirty;
@@ -2260,9 +2303,10 @@ impl VgaWriter {
         }
     }
 
-    /// Writes bytes.
+    /// Writes bytes (render only — does NOT present or draw scrollbar).
+    /// Call `flush_display()` after a batch of writes to present.
     pub(crate) fn write_bytes(&mut self, s: &str) {
-        let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
+        self.begin_viewport_render();
         // Skip basic ANSI escape sequences to avoid rendering control garbage.
         let bytes = s.as_bytes();
         let mut i = 0;
@@ -2289,9 +2333,14 @@ impl VgaWriter {
             self.write_char(ch);
             i += 1;
         }
-        // Refresh scrollbar after each batch of output.
+    }
+
+    /// Flush: draw scrollbar + present to screen.
+    /// Call after a batch of `write_bytes()` calls to display everything at once.
+    pub(crate) fn flush_display(&mut self) {
         self.draw_scrollbar_inner();
-        self.end_viewport_render(prev_draw_to_back, prev_track_dirty);
+        let (prev_draw, prev_track) = self.begin_viewport_render();
+        self.end_viewport_render(prev_draw, prev_track);
     }
 
     // =============================================================
@@ -2326,22 +2375,17 @@ impl VgaWriter {
             return;
         }
         let sb_x = self.can().width.saturating_sub(SCROLLBAR_W);
+        let sb_w = SCROLLBAR_W;
         let total = self.sb.rows.len() + 1; // +1 accounts for current partial row
-        let track_packed = self.fmt.pack_rgb(0x22, 0x28, 0x38);
-        let thumb_packed = self.fmt.pack_rgb(0x58, 0x72, 0xA0);
-        let thumb_hi = self.fmt.pack_rgb(0x80, 0xA0, 0xC8);
+        let track_color = self.unpack_color(self.fmt.pack_rgb(0x22, 0x28, 0x38));
+        let thumb_color = self.unpack_color(self.fmt.pack_rgb(0x58, 0x72, 0xA0));
+        let thumb_hi_color = self.unpack_color(self.fmt.pack_rgb(0x80, 0xA0, 0xC8));
 
         if total <= self.rows {
-            // Not enough content to scroll: full-height thumb.
-            for y in 0..text_h {
-                for x in sb_x..self.can().width {
-                    let c = if x == sb_x || x == self.can().width - 1 || y == 0 || y == text_h - 1 {
-                        track_packed
-                    } else {
-                        thumb_hi
-                    };
-                    self.put_pixel_raw(x, y, c);
-                }
+            // Not enough content to scroll: full-height thumb with border.
+            self.fill_rect(sb_x, 0, sb_w, text_h, track_color);
+            if sb_w > 2 && text_h > 2 {
+                self.fill_rect(sb_x + 1, 1, sb_w - 2, text_h - 2, thumb_hi_color);
             }
             return;
         }
@@ -2356,12 +2400,11 @@ impl VgaWriter {
             avail - (avail * self.scroll_offset / max_offset)
         };
 
-        for y in 0..text_h {
-            let in_thumb = y >= thumb_y && y < thumb_y + thumb_h;
-            let packed = if in_thumb { thumb_packed } else { track_packed };
-            for x in sb_x..self.can().width {
-                self.put_pixel_raw(x, y, packed);
-            }
+        // Draw track background
+        self.fill_rect(sb_x, 0, sb_w, text_h, track_color);
+        // Draw thumb
+        if thumb_h > 0 && thumb_h < text_h {
+            self.fill_rect(sb_x, thumb_y, sb_w, thumb_h, thumb_color);
         }
     }
 
