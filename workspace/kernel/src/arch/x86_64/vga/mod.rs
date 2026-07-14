@@ -50,8 +50,15 @@ macro_rules! vga_print {
 }
 
 /// Print line to framebuffer console (falls back to serial when unavailable).
+/// Flushes to screen after each line.
 #[macro_export]
 macro_rules! vga_println {
-    () => ($crate::vga_print!("\n"));
-    ($($arg:tt)*) => ($crate::vga_print!("{}\n", format_args!($($arg)*)));
+    () => {
+        $crate::vga_print!("\n");
+        $crate::arch::x86_64::vga::flush_display();
+    };
+    ($($arg:tt)*) => {
+        $crate::vga_print!("{}\n", format_args!($($arg)*));
+        $crate::arch::x86_64::vga::flush_display();
+    };
 }

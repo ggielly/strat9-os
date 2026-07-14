@@ -403,6 +403,11 @@ cwd = "workspace/components/strate-web-admin"
 command = "cargo"
 args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
 
+[tasks.build-console]
+workspace = false
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-none", "-p", "strate-console", "--release"]
+
 # =============================================================================
 # Utility tasks
 # =============================================================================

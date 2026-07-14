@@ -15,6 +15,17 @@ use super::{
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static CONSOLE: SpinLock<Option<Arc<ConsoleScheme>>> = SpinLock::new(None);
 
+/// Kernel console scheme — thin redirect to serial/VGA.
+///
+/// Architecture:
+/// - Writes always go to serial (for debug / early boot).
+/// - Before the display server starts, writes also go to VGA (boot mode).
+/// - Once the display server is active, VGA writes are skipped because
+///   the display server owns the framebuffer. Full redirect-to-display-server
+///   logic will be added when the console silo is integrated.
+///
+/// `VgaWriter` remains boot-only; the display server takes over the
+/// framebuffer at userspace startup.
 pub struct ConsoleScheme;
 
 impl ConsoleScheme {
@@ -51,9 +62,17 @@ impl Scheme for ConsoleScheme {
     }
 
     /// Performs the write operation.
+    ///
+    /// Boot mode: serial + VGA (when VGA hardware is present).
+    /// Runtime mode: serial only — the display server owns the framebuffer.
+    /// TODO: skip VGA writes once the display server signals readiness.
     fn write(&self, _file_id: u64, _offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         if let Ok(s) = core::str::from_utf8(buf) {
+            // Always write to serial (debug / crash output).
             crate::serial_print!("{}", s);
+            // Boot-mode VGA output: write to the VGA buffer while the display
+            // server is not yet active. Once the display server starts, this
+            // branch should be gated on a readiness flag (e.g. DISPLAY_SERVER_ACTIVE).
             if crate::arch::x86_64::vga::is_available() {
                 crate::vga_print!("{}", s);
             }

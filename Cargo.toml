@@ -41,6 +41,7 @@ members = [
     "workspace/components/netutils/udp-tool",
     "workspace/components/strate-web-admin",
     "workspace/components/musl-compat",
+    "workspace/components/strate-console",
 ]
 exclude = [
     "workspace/components/strate-fs-xfs", # Missing fs-abstraction dependency : TODO

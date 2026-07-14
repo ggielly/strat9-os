@@ -36,72 +36,26 @@ pub fn is_available() -> bool {
 }
 
 /// Performs the with writer operation.
+///
+/// Cursor management is deferred to `present()` to avoid +/-1280 pixel ops per call.
 pub fn with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
     if !is_available() {
         return None;
     }
     let mut writer = VGA_WRITER.lock();
-    let mc_was_visible = writer.cursor.mc_visible;
-    let tc_was_visible = writer.cursor.tc_visible;
-    // Track mouse cursor position to detect if update_mouse_cursor was called inside f
-    let mc_coords_before = (writer.cursor.mc_x, writer.cursor.mc_y);
-
-    if mc_was_visible {
-        writer.mc_erase_hw();
-    }
-    if tc_was_visible {
-        writer.text_cursor_erase_hw();
-    }
-
     let res = f(&mut writer);
-
-    // Only redraw mouse cursor if coordinates didn't change (update_mouse_cursor wasn't called)
-    // If update_mouse_cursor was called, it already redrew the cursor
-    let mc_coords_after = (writer.cursor.mc_x, writer.cursor.mc_y);
-    if writer.cursor.mc_visible && mc_coords_before == mc_coords_after {
-        writer.mc_save_hw();
-        writer.mc_draw_hw();
-    }
-    if writer.cursor.tc_visible {
-        writer.text_cursor_save_hw();
-        writer.text_cursor_draw_hw();
-    }
-
     Some(res)
 }
 
 /// Performs the try with writer operation.
+///
+/// Cursor management is deferred to `present()` to avoid ~1280 pixel ops per call.
 pub fn try_with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
     if !is_available() {
         return None;
     }
     let mut writer = VGA_WRITER.try_lock()?;
-    let mc_was_visible = writer.cursor.mc_visible;
-    let tc_was_visible = writer.cursor.tc_visible;
-    // Track mouse cursor position to detect if update_mouse_cursor was called inside f
-    let mc_coords_before = (writer.cursor.mc_x, writer.cursor.mc_y);
-
-    if mc_was_visible {
-        writer.mc_erase_hw();
-    }
-    if tc_was_visible {
-        writer.text_cursor_erase_hw();
-    }
-
     let res = f(&mut writer);
-
-    // Only redraw mouse cursor if coordinates didn't change (update_mouse_cursor wasn't called)
-    // If update_mouse_cursor was called, it already redrew the cursor
-    let mc_coords_after = (writer.cursor.mc_x, writer.cursor.mc_y);
-    if writer.cursor.mc_visible && mc_coords_before == mc_coords_after {
-        writer.mc_save_hw();
-        writer.mc_draw_hw();
-    }
-    if writer.cursor.tc_visible {
-        writer.text_cursor_save_hw();
-        writer.text_cursor_draw_hw();
-    }
-
     Some(res)
 }
 
@@ -881,6 +835,25 @@ pub fn scroll_to_live() {
     let _ = try_with_writer(|w| {
         w.scroll_to_live();
     });
+}
+
+/// Set or clear the console-defer-present flag.
+/// When true, `write_bytes()` skips present — only marks dirty.
+/// Call `flush_display()` to trigger the actual present.
+pub fn set_console_defer_present(defer: bool) {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().console_defer_present = defer;
+}
+
+/// Flush: draw scrollbar + present to screen.
+/// Call after a batch of writes to display everything at once.
+pub fn flush_display() {
+    if !is_available() {
+        return;
+    }
+    VGA_WRITER.lock().flush_display();
 }
 
 /// Handle a click at framebuffer pixel `(px_x, px_y)`.
