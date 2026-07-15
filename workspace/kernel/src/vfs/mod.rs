@@ -1141,6 +1141,18 @@ pub fn sys_pwrite(fd: u32, buf_ptr: u64, buf_len: u64, offset: u64) -> Result<u6
     Ok(total as u64)
 }
 
+/// SYS_FSYNC (458): Synchronize file in-core state with storage.
+pub fn sys_fsync(fd: u32) -> Result<u64, SyscallError> {
+    fsync(fd)?;
+    Ok(0)
+}
+
+/// SYS_FDATASYNC (459): Synchronize file data (not metadata) with storage.
+pub fn sys_fdatasync(fd: u32) -> Result<u64, SyscallError> {
+    fsync(fd)?;
+    Ok(0)
+}
+
 // ============================================================================
 // Global PipeScheme singleton
 // ============================================================================

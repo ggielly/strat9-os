@@ -1060,6 +1060,16 @@ pub const SYS_PREAD: usize = 456;
 /// Returns the number of bytes written. The file position is not changed.
 pub const SYS_PWRITE: usize = 457;
 
+/// Synchronize a file's in-core state with storage.
+///
+/// - `fd`: file descriptor
+pub const SYS_FSYNC: usize = 458;
+
+/// Synchronize file data (not metadata) with storage.
+///
+/// - `fd`: file descriptor
+pub const SYS_FDATASYNC: usize = 459;
+
 // ── Block 460-461: Poll / I/O Multiplexing ──────────────────────────────────
 
 /// Poll multiple file descriptors for events.
