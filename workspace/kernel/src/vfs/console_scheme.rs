@@ -122,8 +122,10 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     };
 
     // fd 0 : stdin (read)
-    let r0 = scheme.open("console", OpenFlags::READ)
-        .expect("console_scheme: open stdin failed — console scheme not mounted?");
+    let r0 = match scheme.open("console", OpenFlags::READ) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     let stdin = Arc::new(OpenFile::new(
         scheme.clone(),
         r0.file_id,
@@ -135,8 +137,10 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     fd_table.insert_at(0, stdin);
 
     // fd 1 : stdout (write)
-    let r1 = scheme.open("console", OpenFlags::WRITE)
-        .expect("console_scheme: open stdout failed — console scheme not mounted?");
+    let r1 = match scheme.open("console", OpenFlags::WRITE) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     let stdout = Arc::new(OpenFile::new(
         scheme.clone(),
         r1.file_id,
@@ -148,8 +152,10 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     fd_table.insert_at(1, stdout);
 
     // fd 2 : stderr (write)
-    let r2 = scheme.open("console", OpenFlags::WRITE)
-        .expect("console_scheme: open stderr failed — console scheme not mounted?");
+    let r2 = match scheme.open("console", OpenFlags::WRITE) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     let stderr = Arc::new(OpenFile::new(
         scheme,
         r2.file_id,

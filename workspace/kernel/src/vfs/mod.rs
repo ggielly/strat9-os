@@ -67,17 +67,15 @@ pub use crate::syscall::numbers::AT_FDCWD;
 // ============================================================================
 
 /// Open a file and return a file descriptor.
+/// Open a file with an already-resolved path (avoids double mount::resolve).
 ///
-/// This is the main entry point for opening files from userspace.
+/// Used by `sys_open` and `open_at` which resolve the path once before calling
+/// this. The silo permission check must have already been performed.
 pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
-    // Resolve path to (scheme, relative_path)
     let (scheme, relative_path) = mount::resolve(path)?;
 
-    // Open the file via the scheme
     let open_result = scheme.open(&relative_path, flags)?;
 
-    // Create OpenFile wrapper : use the original path for the OpenFile
-    // (not relative_path, which is scheme-local).
     let open_file = Arc::new(OpenFile::new(
         scheme,
         open_result.file_id,
@@ -87,20 +85,10 @@ pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
         open_result.size,
     ));
 
-    // Insert into current task's FD table
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    // SAFETY: We're in syscall context, have exclusive access to FD table
     let fd = unsafe { (&mut *task.process.fd_table.get()).insert(open_file) };
 
     Ok(fd)
-}
-
-/// Open a file with an already-resolved path (avoids double mount::resolve).
-///
-/// Used by `sys_open` and `open_at` which resolve the path once before calling
-/// this. The silo permission check must have already been performed.
-fn open_resolved(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
-    open(path, flags)
 }
 
 /// Resolve `path` against the current task CWD and enforce silo path policy.
@@ -137,7 +125,7 @@ pub fn open_at(dir_fd: u64, path: &str, flags: OpenFlags) -> Result<u32, Syscall
             flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE),
             false,
         )?;
-        open_resolved(&abs, flags)
+        open(&abs, flags)
     } else {
         // Resolve relative to the directory FD.
         let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -154,7 +142,7 @@ pub fn open_at(dir_fd: u64, path: &str, flags: OpenFlags) -> Result<u32, Syscall
             flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE),
             false,
         )?;
-        open_resolved(&abs, flags)
+        open(&abs, flags)
     }
 }
 
@@ -476,7 +464,7 @@ pub fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, Syscall
         || open_flags.contains(OpenFlags::TRUNCATE)
         || open_flags.contains(OpenFlags::APPEND);
     let path = resolve_for_syscall(path_ptr, path_len, want_read, want_write, false)?;
-    let fd = open_resolved(&path, open_flags)?;
+    let fd = open(&path, open_flags)?;
     Ok(fd as u64)
 }
 
@@ -513,7 +501,10 @@ pub fn sys_fstatat(
     let st = fstat_at(dir_fd, &raw)?;
     let user = UserSliceWrite::new(statbuf_ptr, core::mem::size_of::<FileStat>())?;
     let bytes = unsafe {
-        core::slice::from_raw_parts(&st as *const FileStat as *const u8, core::mem::size_of::<FileStat>())
+        core::slice::from_raw_parts(
+            &st as *const FileStat as *const u8,
+            core::mem::size_of::<FileStat>(),
+        )
     };
     user.copy_from(bytes);
     Ok(0)
