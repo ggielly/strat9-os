@@ -47,18 +47,13 @@ impl Scheme for ConsoleScheme {
     }
 
     /// Performs the read operation.
-    fn read(&self, _file_id: u64, _offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let mut count = 0;
-        for slot in buf.iter_mut() {
-            match crate::arch::x86_64::keyboard::read_char() {
-                Some(ch) => {
-                    *slot = ch;
-                    count += 1;
-                }
-                None => break,
-            }
-        }
-        Ok(count)
+    ///
+    /// The console scheme is write-only (output to serial/VGA).
+    /// Keyboard input must come from `/dev/input/kbd` via `InputScheme`.
+    /// Reading from the keyboard buffer here would compete with the userspace
+    /// console (strate-console) and silently steal keystrokes.
+    fn read(&self, _file_id: u64, _offset: u64, _buf: &mut [u8]) -> Result<usize, SyscallError> {
+        Err(SyscallError::Again)
     }
 
     /// Performs the write operation.

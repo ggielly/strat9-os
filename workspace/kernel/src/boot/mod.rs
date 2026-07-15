@@ -24,3 +24,6 @@ pub mod logger;
 
 /// Kernel panic handler
 pub mod panic;
+
+/// Kernel symbol table for panic backtrace resolution
+pub mod symbols;

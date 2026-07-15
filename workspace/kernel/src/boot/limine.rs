@@ -37,6 +37,22 @@ static EXEC_CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 #[link_section = ".requests"]
 static EXECUTABLE_FILE: ExecutableFileRequest = ExecutableFileRequest::new();
 
+/// Saved kernel ELF bytes for symbol resolution during panic.
+static mut KERNEL_ELF_BASE: u64 = 0;
+static mut KERNEL_ELF_SIZE: u64 = 0;
+
+/// Get the kernel ELF bytes as a slice. Returns None if not yet initialized.
+pub fn kernel_elf_bytes() -> Option<&'static [u8]> {
+    let base = unsafe { KERNEL_ELF_BASE };
+    let size = unsafe { KERNEL_ELF_SIZE } as usize;
+    if base == 0 || size == 0 {
+        return None;
+    }
+    // SAFETY: The memory is valid for the duration of the kernel's lifetime.
+    // It was provided by Limine and is mapped in the higher half.
+    Some(unsafe { core::slice::from_raw_parts(base as *const u8, size) })
+}
+
 /// Request RSDP (ACPI)
 #[used]
 #[link_section = ".requests"]
@@ -963,6 +979,13 @@ pub unsafe extern "C" fn kmain() -> ! {
         cmdline_ptr,
         cmdline_len,
     };
+
+    // Save kernel ELF bytes for symbol resolution during panic.
+    if let Some(file) = EXECUTABLE_FILE.get_response() {
+        let f = file.file();
+        KERNEL_ELF_BASE = f.addr() as u64;
+        KERNEL_ELF_SIZE = f.size();
+    }
 
     // Call kernel main
     crate::kernel_main(&args as *const _);
