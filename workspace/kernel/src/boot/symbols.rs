@@ -45,7 +45,7 @@ pub fn init() {
     if strtab_data.is_empty() {
         return;
     }
-    let copy_len = strtab_data.len().min(unsafe { STRTAB.len() });
+    let copy_len = strtab_data.len().min(65536);
     unsafe {
         STRTAB[..copy_len].copy_from_slice(&strtab_data[..copy_len]);
         STRTAB_LEN = copy_len;
@@ -61,7 +61,7 @@ pub fn init() {
     // st_other(1) + st_shndx(2) + st_value(8) + st_size(8))
     let entry_size = 24;
     let count = symtab_data.len() / entry_size;
-    let max = unsafe { SYMBOLS.len() };
+    let max = 8192;
     let mut n = 0usize;
 
     for i in 0..count.min(max) {
