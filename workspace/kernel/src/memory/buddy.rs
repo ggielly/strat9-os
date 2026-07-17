@@ -889,10 +889,10 @@ impl BuddyAllocator {
 
             let removed = Self::free_list_remove(segment, buddy, order, migratetype);
             if !removed {
-                debug_assert!(false, "buddy bitmap/list inconsistency while freeing");
-                Self::mark_block_free(current, order, migratetype);
-                Self::free_list_push(segment, current, order, migratetype);
-                break;
+                panic!(
+                    "buddy inconsistency: free_list_remove failed for buddy 0x{:x} order {} migratetype {:?} during coalesce",
+                    buddy, order, migratetype,
+                );
             }
 
             current = core::cmp::min(current, buddy);
