@@ -4,14 +4,13 @@
 
 ## Project stats
 
-- **Total commits:** `553`
+- **Total commits:** `552`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
-- 2026-07-17 [`538e0dc`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/538e0dc6ec06cb58e0a5cbeeaaed90fcbdd9ae8f) feat(console): integrate vte for ANSI parsing and enhance terminal functionality
-- 2026-07-17 [`292d8e3`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/292d8e3305ef825c5f704203489b4b1dff7606fb) feat(console): replace custom ANSI parser with vte crate
+- 2026-07-17 [`c03bfb2`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c03bfb2b6a40eada01d85b60d93fcbbb68ef8df0) docs: update published documentation
 - 2026-07-17 [`5d53b0f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5d53b0fba04bd9c2bd1b58366fafce327c821eb6) Merge branch 'improve-vfs-all' into 'main'
 - 2026-07-17 [`fe68f9a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1) fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace
 - 2026-07-15 [`425c2cd`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/425c2cd18dc1e6f065be037f4d087474356e426e) docs: update published documentation
@@ -60,5 +59,6 @@
 - 2026-05-23 [`b7c3e27`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b7c3e271d8644570a5a0b7bdabb80ef8c3f524f7) Merge branch 'hunt-memory-corruption' into 'main'
 - 2026-05-23 [`db23b53`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552) Fix major memory leak and remove sshd silo
 - 2026-05-19 [`6831830`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6831830423d0e1b19cdfb7ce0b60089fc65e045a) docs: update published documentation
+- 2026-05-19 [`0b42bf9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0b42bf9116227e3f1b9a3eb32ac74e7d261c7000) docs: update published documentation
 
 <!-- AUTO-CHANGELOG:END -->
