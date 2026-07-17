@@ -2235,6 +2235,14 @@ fn alloc_order0_cached(migratetype: Migratetype) -> Result<PhysFrame, AllocError
 fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
     // NOTE: O(2^order) MetaSlot scan : acceptable here because order is always 0
     // (single-page check) on this hot path.
+    //
+    // # Safety: poison guard check vs cache push
+    //
+    // The poison guard check happens before the frame is pushed into the local
+    // cache. This is safe because:
+    //   1. The frame is exclusively owned by the caller (no other CPU can modify it)
+    //   2. IRQs are disabled during this function (via IrqDisabledToken)
+    // Therefore no concurrent poisoning is possible between the check and the push.
     if crate::memory::frame::block_phys_has_poison_guard(frame.start_address.as_u64(), 0) {
         let mut global = OnDemandGlobalLock::new();
         global.free(frame, 0);
