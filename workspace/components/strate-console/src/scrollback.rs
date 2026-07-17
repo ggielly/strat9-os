@@ -28,9 +28,9 @@ pub struct CircularBuffer {
     lines: [ScrollLine; SCROLLBACK_LINES],
     head: usize,
     count: usize,
-    pub cols: usize,
-    pub default_fg: u32,
-    pub default_bg: u32,
+    pub _cols: usize,
+    pub _default_fg: u32,
+    pub _default_bg: u32,
 }
 
 impl CircularBuffer {
@@ -44,9 +44,9 @@ impl CircularBuffer {
             lines: [line; SCROLLBACK_LINES],
             head: 0,
             count: 0,
-            cols,
-            default_fg: fg,
-            default_bg: bg,
+            _cols: cols,
+            _default_fg: fg,
+            _default_bg: bg,
         }
     }
 
@@ -64,16 +64,4 @@ impl CircularBuffer {
         line.len = copy_len;
     }
 
-    /// Get line at virtual index (0 = oldest, count-1 = newest).
-    pub fn get(&self, index: usize) -> Option<&ScrollLine> {
-        if index >= self.count {
-            return None;
-        }
-        let real = (self.head + index) % SCROLLBACK_LINES;
-        Some(&self.lines[real])
-    }
-
-    pub fn line_count(&self) -> usize {
-        self.count
-    }
 }
