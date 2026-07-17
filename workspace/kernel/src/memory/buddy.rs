@@ -992,7 +992,16 @@ impl BuddyAllocator {
         }
     }
 
-    /// Releases list push.
+    /// Insert a block at the head of the free list for the given order and migratetype.
+    ///
+    /// # Memory ordering
+    ///
+    /// All free-list link reads/writes use Acquire/Release ordering on the
+    /// MetaSlot atomic fields. This is correct under the current single-global-lock
+    /// design where all mutations are serialized. If the design ever moves to
+    /// per-zone locking, the ordering requirements must be re-evaluated:
+    /// concurrent push/pop on the same list would need CAS or a different
+    /// synchronization strategy.
     fn free_list_push(segment: &mut ZoneSegment, phys: u64, order: u8, migratetype: Migratetype) {
         debug_assert!(
             !crate::memory::frame::block_phys_has_poison_guard(phys, order),
@@ -1007,7 +1016,12 @@ impl BuddyAllocator {
         segment.free_lists[migratetype.index()][order as usize] = phys;
     }
 
-    /// Releases list pop.
+    /// Remove and return the head block from the free list.
+    ///
+    /// # Memory ordering
+    ///
+    /// See [`Self::free_list_push`] for ordering rationale. The Acquire/Release
+    /// pairs on MetaSlot links are sufficient under the single-global-lock model.
     fn free_list_pop(
         segment: &mut ZoneSegment,
         order: u8,
@@ -1027,7 +1041,13 @@ impl BuddyAllocator {
         Some(head)
     }
 
-    /// Releases list remove.
+    /// Unlink a specific block from the free list. Returns `true` on success.
+    ///
+    /// # Memory ordering
+    ///
+    /// See [`Self::free_list_push`] for ordering rationale. The function
+    /// validates the head pointer before mutating it, which is safe under
+    /// the single-global-lock model but would require CAS under concurrent access.
     fn free_list_remove(
         segment: &mut ZoneSegment,
         phys: u64,
