@@ -758,36 +758,33 @@ impl BuddyAllocator {
         let block_end = frame_phys.saturating_add(block_size);
         let migratetype = Self::block_migratetype(frame_phys);
         let Some(segment_idx) = Self::find_segment_index(zone, frame_phys, order) else {
-            ////////////// REMOVE HERE DIAGNOSTIC ///////////////////////////////////
-            //
-            // diagnostic: dump zone/segment state to help identify the root cause.
-            //
-            serial_println!(
-                "[buddy] CRITICAL: frame 0x{:x} order {} not found in zone {:?} segments.",
-                frame_phys,
-                order,
-                zone.zone_type,
-            );
-            serial_println!(
-                "  segments={}/{} span_pages={} page_count={} allocated={}",
-                zone.segment_count,
-                zone.segment_capacity,
-                zone.span_pages,
-                zone.page_count,
-                zone.allocated,
-            );
-            for si in 0..zone.segment_count {
-                let seg = &zone.segments()[si];
+            #[cfg(feature = "selftest")]
+            {
                 serial_println!(
-                    "    segment[{}]: base=0x{:x} pages={} end=0x{:x}",
-                    si,
-                    seg.base.as_u64(),
-                    seg.page_count,
-                    seg.end_address(),
+                    "[buddy] CRITICAL: frame 0x{:x} order {} not found in zone {:?} segments.",
+                    frame_phys,
+                    order,
+                    zone.zone_type,
                 );
+                serial_println!(
+                    "  segments={}/{} span_pages={} page_count={} allocated={}",
+                    zone.segment_count,
+                    zone.segment_capacity,
+                    zone.span_pages,
+                    zone.page_count,
+                    zone.allocated,
+                );
+                for si in 0..zone.segment_count {
+                    let seg = &zone.segments()[si];
+                    serial_println!(
+                        "    segment[{}]: base=0x{:x} pages={} end=0x{:x}",
+                        si,
+                        seg.base.as_u64(),
+                        seg.page_count,
+                        seg.end_address(),
+                    );
+                }
             }
-            //
-            /////////////////// REMOVE HERE /////////////////////////
 
             panic!(
                 "buddy free: frame 0x{:x} order {} does not belong to any segment in zone {:?}",
@@ -2380,6 +2377,7 @@ impl FrameAllocator for BuddyAllocator {
                 }
                 if Self::find_segment_index(&self.zones[candidate_zi], frame_phys, order).is_some()
                 {
+                    #[cfg(feature = "selftest")]
                     serial_println!(
                         "[buddy] WARN: frame 0x{:x} order {} belongs to zone[{}] {:?}, not zone[{}] {:?}; forwarding.",
                         frame_phys, order,
@@ -2392,35 +2390,38 @@ impl FrameAllocator for BuddyAllocator {
                 }
             }
             if !found {
-                serial_println!(
-                    "[buddy] free: frame 0x{:x} order {} not in any zone segment; checking all zones...",
-                    frame_phys, order,
-                );
-                for zzi in 0..ZoneType::COUNT {
-                    let z = &self.zones[zzi];
+                #[cfg(feature = "selftest")]
+                {
                     serial_println!(
-                        "  zone[{}] {:?}: segments={} page_count={}",
-                        zzi,
-                        z.zone_type,
-                        z.segment_count,
-                        z.page_count,
+                        "[buddy] free: frame 0x{:x} order {} not in any zone segment; checking all zones...",
+                        frame_phys, order,
                     );
-                    for si in 0..z.segment_count {
-                        let seg = &z.segments()[si];
+                    for zzi in 0..ZoneType::COUNT {
+                        let z = &self.zones[zzi];
                         serial_println!(
-                            "    segment[{}]: base=0x{:x} pages={} end=0x{:x}",
-                            si,
-                            seg.base.as_u64(),
-                            seg.page_count,
-                            seg.end_address(),
+                            "  zone[{}] {:?}: segments={} page_count={}",
+                            zzi,
+                            z.zone_type,
+                            z.segment_count,
+                            z.page_count,
                         );
+                        for si in 0..z.segment_count {
+                            let seg = &z.segments()[si];
+                            serial_println!(
+                                "    segment[{}]: base=0x{:x} pages={} end=0x{:x}",
+                                si,
+                                seg.base.as_u64(),
+                                seg.page_count,
+                                seg.end_address(),
+                            );
+                        }
                     }
+                    serial_println!(
+                        "[buddy] CRITICAL: frame 0x{:x} order {} belongs to no zone segment!",
+                        frame_phys,
+                        order,
+                    );
                 }
-                serial_println!(
-                    "[buddy] CRITICAL: frame 0x{:x} order {} belongs to no zone segment!",
-                    frame_phys,
-                    order,
-                );
             }
         }
 
