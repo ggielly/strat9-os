@@ -585,7 +585,6 @@ impl BuddyAllocator {
     /// genuinely contiguous free extent. Greedy seeding therefore improves boot
     /// time without ever making holes visible to the buddy topology.
     fn seed_range_as_free(zone_type: ZoneType, segment: &mut ZoneSegment, start: u64, end: u64) {
-        let _ = zone_type;
         if start >= end {
             return;
         }
