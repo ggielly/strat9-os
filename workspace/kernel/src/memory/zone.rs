@@ -62,6 +62,12 @@ impl Migratetype {
     }
 
     /// Returns the donor probing order for an allocation request.
+    ///
+    /// Bidirectional fallback is intentional: when the preferred migratetype
+    /// list is empty, the allocator can borrow from the other class. This
+    /// prevents allocation failures when one class is exhausted while the
+    /// other has free pages. The trade-off is potential cross-class
+    /// fragmentation, but this is acceptable for the current 2-class design.
     #[inline]
     pub const fn fallback_order(self) -> [Self; Self::COUNT] {
         match self {
