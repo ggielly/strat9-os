@@ -1290,6 +1290,10 @@ impl BuddyAllocator {
     }
 
     /// Retag every pageblock overlapped by the buddy block `[phys, phys + 2^order * PAGE_SIZE)`.
+    ///
+    /// When a block is allocated or freed, its pageblocks are retagged to the
+    /// new migratetype. This is intentional: it reinforces the grouping trend
+    /// over time (movable allocations reinforce movable pageblocks, etc.).
     fn retag_pageblock_range(
         segment: &mut ZoneSegment,
         phys: u64,
@@ -1304,7 +1308,12 @@ impl BuddyAllocator {
         let end_page_exclusive = start_page.saturating_add(1usize << order);
         let start_idx = start_page / PAGEBLOCK_PAGES;
         let end_idx = end_page_exclusive.saturating_sub(1) / PAGEBLOCK_PAGES;
-        debug_assert!(end_idx < segment.pageblock_count);
+        assert!(
+            end_idx < segment.pageblock_count,
+            "buddy: pageblock retag out of bounds: end_idx={} >= pageblock_count={}",
+            end_idx,
+            segment.pageblock_count,
+        );
 
         for idx in start_idx..=end_idx {
             unsafe {
