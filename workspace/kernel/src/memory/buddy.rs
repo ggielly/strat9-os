@@ -491,7 +491,11 @@ impl BuddyAllocator {
                         continue;
                     }
 
-                    debug_assert!(cursor + num_bytes <= pool_end);
+                    assert!(
+                        cursor + num_bytes <= pool_end,
+                        "buddy bitmap pool overflow: zone {:?} order {} needs {} bytes but only {} remaining",
+                        zone.zone_type, order, num_bytes, pool_end.saturating_sub(cursor),
+                    );
                     segment.buddy_bitmaps[order] = BuddyBitmap {
                         data: phys_to_virt(cursor) as *mut u8,
                         num_bits,
@@ -506,7 +510,11 @@ impl BuddyAllocator {
                     if num_bits == 0 {
                         segment.alloc_bitmap = BuddyBitmap::empty();
                     } else {
-                        debug_assert!(cursor + num_bytes <= pool_end);
+                        assert!(
+                            cursor + num_bytes <= pool_end,
+                            "buddy alloc bitmap pool overflow: zone {:?} needs {} bytes but only {} remaining",
+                            zone.zone_type, num_bytes, pool_end.saturating_sub(cursor),
+                        );
                         segment.alloc_bitmap = BuddyBitmap {
                             data: phys_to_virt(cursor) as *mut u8,
                             num_bits,
@@ -521,7 +529,11 @@ impl BuddyAllocator {
                     segment.pageblock_tags = ptr::null_mut();
                 } else {
                     let num_bytes = pageblock_count as u64;
-                    debug_assert!(cursor + num_bytes <= pool_end);
+                    assert!(
+                        cursor + num_bytes <= pool_end,
+                        "buddy pageblock tags pool overflow: zone {:?} needs {} bytes but only {} remaining",
+                        zone.zone_type, num_bytes, pool_end.saturating_sub(cursor),
+                    );
                     segment.pageblock_tags = phys_to_virt(cursor) as *mut u8;
                     unsafe {
                         ptr::write_bytes(
@@ -534,7 +546,11 @@ impl BuddyAllocator {
                 }
             }
 
-            debug_assert!(cursor <= pool_end);
+            assert!(
+                cursor <= pool_end,
+                "buddy bitmap pool final check failed: zone {:?} cursor 0x{:x} exceeds pool_end 0x{:x}",
+                zone.zone_type, cursor, pool_end,
+            );
         }
     }
 
