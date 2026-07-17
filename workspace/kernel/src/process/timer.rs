@@ -260,13 +260,13 @@ pub fn tick_all_timers(current_time_ns: u64) {
             return;
         };
         unsafe { core::arch::asm!("mov al, '4'; out 0xe9, al", out("al") _) };
-        let n_tasks = sched.all_tasks_scan.len();
+        let n_tasks = sched.all_tasks.len();
         if n_tasks == 0 {
             unsafe { core::arch::asm!("mov al, '0'; out 0xe9, al", out("al") _) };
             return;
         }
         let mut task_n: usize = 0;
-        for task in sched.all_tasks_scan.iter() {
+        for task in sched.all_tasks.values() {
             unsafe {
                 core::arch::asm!("mov al, '5'; out 0xe9, al", out("al") _);
             }

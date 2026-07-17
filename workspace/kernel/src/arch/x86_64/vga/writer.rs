@@ -2337,9 +2337,15 @@ impl VgaWriter {
 
     /// Flush: draw scrollbar + present to screen.
     /// Call after a batch of `write_bytes()` calls to display everything at once.
+    /// NOTE: write_bytes() already called begin_viewport_render(), so we must NOT
+    /// call it again here — that would clear the dirty rects before present().
     pub(crate) fn flush_display(&mut self) {
         self.draw_scrollbar_inner();
-        let (prev_draw, prev_track) = self.begin_viewport_render();
+        // Save and restore the viewport render state without clearing dirty rects.
+        let prev_draw = self.can().draw_to_back;
+        let prev_track = self.can().track_dirty;
+        self.canm().draw_to_back = true;
+        self.canm().track_dirty = true;
         self.end_viewport_render(prev_draw, prev_track);
     }
 

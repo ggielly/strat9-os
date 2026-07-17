@@ -34,7 +34,6 @@ impl GlobalSchedState {
         crate::serial_println!("[trace][sched] GlobalSchedState::new enter");
         GlobalSchedState {
             all_tasks: BTreeMap::new(),
-            all_tasks_scan: Vec::new(),
             task_cpu: BTreeMap::new(),
             wake_deadlines: BTreeMap::new(),
             wake_deadline_of: BTreeMap::new(),
@@ -229,81 +228,20 @@ impl GlobalSchedState {
                 core::arch::asm!("mov al, 'D'; out 0xe9, al", out("al") _);
             }
             crate::serial_force_println!(
-                "[RACE] insert_all_task_locked: duplicate tid={} all_tasks={} all_tasks_scan={}",
+                "[RACE] insert_all_task_locked: duplicate tid={} all_tasks={}",
                 task_id.as_u64(),
                 self.all_tasks.len(),
-                self.all_tasks_scan.len()
             );
             panic!(
                 "scheduler corruption: duplicate insert_all_task_locked tid={}",
                 task_id.as_u64()
             );
         }
-        self.all_tasks.insert(task_id, task.clone());
-        self.all_tasks_scan.push(task);
-        // Race/corruption diagnostic: all_tasks and all_tasks_scan must stay in sync.
-        let bt_len = self.all_tasks.len();
-        let scan_len = self.all_tasks_scan.len();
-        if bt_len != scan_len {
-            unsafe {
-                core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _);
-            }
-            crate::serial_force_println!(
-                "[RACE] insert_all_task_locked: all_tasks={} != all_tasks_scan={} tid={}",
-                bt_len,
-                scan_len,
-                task_id.as_u64()
-            );
-            panic!(
-                "scheduler corruption: insert_all_task_locked len mismatch all_tasks={} all_tasks_scan={} tid={}",
-                bt_len,
-                scan_len,
-                task_id.as_u64()
-            );
-        }
+        self.all_tasks.insert(task_id, task);
     }
 
     pub(super) fn remove_all_task_locked(&mut self, task_id: TaskId) -> Option<Arc<Task>> {
-        let removed = self.all_tasks.remove(&task_id);
-        if removed.is_some() {
-            if let Some(idx) = self
-                .all_tasks_scan
-                .iter()
-                .position(|task| task.id == task_id)
-            {
-                self.all_tasks_scan.swap_remove(idx);
-            } else {
-                unsafe { core::arch::asm!("mov al, 'Z'; out 0xe9, al", out("al") _) };
-                crate::serial_force_println!(
-                    "[RACE] remove_all_task_locked: tid={} in all_tasks but NOT in all_tasks_scan",
-                    task_id.as_u64()
-                );
-                panic!(
-                    "scheduler corruption: remove_all_task_locked missing scan entry tid={}",
-                    task_id.as_u64()
-                );
-            }
-        }
-        let bt_len = self.all_tasks.len();
-        let scan_len = self.all_tasks_scan.len();
-        if bt_len != scan_len {
-            unsafe {
-                core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _);
-            }
-            crate::serial_force_println!(
-                "[RACE] remove_all_task_locked: all_tasks={} != all_tasks_scan={} tid={}",
-                bt_len,
-                scan_len,
-                task_id.as_u64()
-            );
-            panic!(
-                "scheduler corruption: remove_all_task_locked len mismatch all_tasks={} all_tasks_scan={} tid={}",
-                bt_len,
-                scan_len,
-                task_id.as_u64()
-            );
-        }
-        removed
+        self.all_tasks.remove(&task_id)
     }
 
     /// Performs the clear task wake deadline locked operation.

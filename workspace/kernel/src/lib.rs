@@ -426,7 +426,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     //we get useful info on any panics during init.
     crate::e9_println!("B2e pre-panic-hooks");
     boot::panic::install_default_panic_hooks();
-    // boot::symbols::init();  // Temporarily disabled for debugging
+    boot::symbols::init();
     crate::e9_println!("B2f post-panic-hooks");
 
     // Nice logo :D
