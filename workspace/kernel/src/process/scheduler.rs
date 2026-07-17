@@ -611,12 +611,6 @@ impl SchedIdentity {
 pub struct GlobalSchedState {
     /// All tasks in the system (for lookup by TaskId)
     pub(crate) all_tasks: BTreeMap<TaskId, Arc<Task>>,
-    /// Flat task snapshot used by IRQ-safe scans such as `tick_all_timers`.
-    ///
-    /// Unlike `BTreeMap::iter()`, iterating a contiguous `Vec<Arc<Task>>` avoids
-    /// tree-walk pointer chasing in hard-IRQ context. The authoritative storage
-    /// remains `all_tasks`; this mirror is updated under the same scheduler lock.
-    pub(crate) all_tasks_scan: Vec<Arc<Task>>,
     /// Map TaskId -> CPU index (for wake/resume routing)
     task_cpu: BTreeMap<TaskId, usize>,
     /// Deadline -> task ids map for sleeping tasks (ordered wakeups).

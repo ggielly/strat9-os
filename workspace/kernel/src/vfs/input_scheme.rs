@@ -127,10 +127,7 @@ impl Scheme for InputScheme {
         ))
     }
 
-    fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
-        if file_id != 0 {
-            return Err(SyscallError::InvalidArgument);
-        }
+    fn readdir(&self, _file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         Ok(vec![
             DirEntry {
                 ino: KBD_FILE_ID,

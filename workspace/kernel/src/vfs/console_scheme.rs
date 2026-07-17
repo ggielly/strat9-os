@@ -47,18 +47,13 @@ impl Scheme for ConsoleScheme {
     }
 
     /// Performs the read operation.
-    fn read(&self, _file_id: u64, _offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let mut count = 0;
-        for slot in buf.iter_mut() {
-            match crate::arch::x86_64::keyboard::read_char() {
-                Some(ch) => {
-                    *slot = ch;
-                    count += 1;
-                }
-                None => break,
-            }
-        }
-        Ok(count)
+    ///
+    /// The console scheme is write-only (output to serial/VGA).
+    /// Keyboard input must come from `/dev/input/kbd` via `InputScheme`.
+    /// Reading from the keyboard buffer here would compete with the userspace
+    /// console (strate-console) and silently steal keystrokes.
+    fn read(&self, _file_id: u64, _offset: u64, _buf: &mut [u8]) -> Result<usize, SyscallError> {
+        Err(SyscallError::Again)
     }
 
     /// Performs the write operation.
@@ -122,7 +117,10 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     };
 
     // fd 0 : stdin (read)
-    let r0 = scheme.open("console", OpenFlags::READ).unwrap();
+    let r0 = match scheme.open("console", OpenFlags::READ) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     let stdin = Arc::new(OpenFile::new(
         scheme.clone(),
         r0.file_id,
@@ -134,7 +132,10 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     fd_table.insert_at(0, stdin);
 
     // fd 1 : stdout (write)
-    let r1 = scheme.open("console", OpenFlags::WRITE).unwrap();
+    let r1 = match scheme.open("console", OpenFlags::WRITE) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     let stdout = Arc::new(OpenFile::new(
         scheme.clone(),
         r1.file_id,
@@ -146,7 +147,10 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     fd_table.insert_at(1, stdout);
 
     // fd 2 : stderr (write)
-    let r2 = scheme.open("console", OpenFlags::WRITE).unwrap();
+    let r2 = match scheme.open("console", OpenFlags::WRITE) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     let stderr = Arc::new(OpenFile::new(
         scheme,
         r2.file_id,
