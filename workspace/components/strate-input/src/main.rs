@@ -423,8 +423,6 @@ fn serial_println(s: &str) {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+fn panic(info: &PanicInfo) -> ! {
+    strat9_syscall::call::handle_panic("strate-input", info)
 }

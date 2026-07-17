@@ -26,7 +26,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// guarantees you see every message, even during a panic.
 ///
 /// Set to `false` (or delete the toggles) once the boot issue is resolved.
-pub static VGA_DEBUG_LIVE: AtomicBool = AtomicBool::new(true); // FALSE to disable live VGA output and rely on the lock-free circular buffer instead.
+pub static VGA_DEBUG_LIVE: AtomicBool = AtomicBool::new(true); // Set to false to disable live VGA output
 
 /// Returns `true` if live VGA debug output is enabled.
 pub fn is_vga_debug_live() -> bool {

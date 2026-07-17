@@ -8,7 +8,7 @@
 //! The [`TransportManager`] selects the appropriate level per silo-pair at
 //! connection creation time using a configurable decision matrix.
 use super::{
-    lockfree_ring::{LockFreeRing, RingError, RingSlot},
+    lockfree_ring::{LockFreeRing, RingError},
     mailbox::IntrusiveMailbox,
     n3::{MigrationState, N3Transport},
 };
@@ -217,7 +217,7 @@ impl IpcTransport for LockFreeRing {
 
     fn capabilities(&self) -> TransportCapabilities {
         TransportCapabilities {
-            max_message_size: RingSlot::SLOT_SIZE,
+            max_message_size: 2048,
             blocking: true,
             zero_copy: true,
             vectored: true,

@@ -67,40 +67,13 @@ pub use crate::syscall::numbers::AT_FDCWD;
 // ============================================================================
 
 /// Open a file and return a file descriptor.
-///
-/// This is the main entry point for opening files from userspace.
-pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
-    // Resolve path to (scheme, relative_path)
-    let (scheme, relative_path) = mount::resolve(path)?;
-
-    // Open the file via the scheme
-    let open_result = scheme.open(&relative_path, flags)?;
-
-    // Create OpenFile wrapper : use the original path for the OpenFile
-    // (not relative_path, which is scheme-local).
-    let open_file = Arc::new(OpenFile::new(
-        scheme,
-        open_result.file_id,
-        String::from(path),
-        flags,
-        open_result.flags,
-        open_result.size,
-    ));
-
-    // Insert into current task's FD table
-    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    // SAFETY: We're in syscall context, have exclusive access to FD table
-    let fd = unsafe { (&mut *task.process.fd_table.get()).insert(open_file) };
-
-    Ok(fd)
-}
-
 /// Open a file with an already-resolved path (avoids double mount::resolve).
 ///
 /// Used by `sys_open` and `open_at` which resolve the path once before calling
 /// this. The silo permission check must have already been performed.
-fn open_resolved(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
+pub fn open(path: &str, flags: OpenFlags) -> Result<u32, SyscallError> {
     let (scheme, relative_path) = mount::resolve(path)?;
+
     let open_result = scheme.open(&relative_path, flags)?;
 
     let open_file = Arc::new(OpenFile::new(
@@ -152,7 +125,7 @@ pub fn open_at(dir_fd: u64, path: &str, flags: OpenFlags) -> Result<u32, Syscall
             flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE),
             false,
         )?;
-        open_resolved(&abs, flags)
+        open(&abs, flags)
     } else {
         // Resolve relative to the directory FD.
         let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -169,7 +142,7 @@ pub fn open_at(dir_fd: u64, path: &str, flags: OpenFlags) -> Result<u32, Syscall
             flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE),
             false,
         )?;
-        open_resolved(&abs, flags)
+        open(&abs, flags)
     }
 }
 
@@ -491,7 +464,7 @@ pub fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, Syscall
         || open_flags.contains(OpenFlags::TRUNCATE)
         || open_flags.contains(OpenFlags::APPEND);
     let path = resolve_for_syscall(path_ptr, path_len, want_read, want_write, false)?;
-    let fd = open_resolved(&path, open_flags)?;
+    let fd = open(&path, open_flags)?;
     Ok(fd as u64)
 }
 
@@ -517,18 +490,23 @@ pub fn sys_fstatat(
     dir_fd: u64,
     path_ptr: u64,
     path_len: u64,
-    _flags: u64,
+    statbuf_ptr: u64,
 ) -> Result<u64, SyscallError> {
+    use crate::memory::UserSliceWrite;
     const MAX_PATH_LEN: usize = 4096;
-    if path_len == 0 || path_len as usize > MAX_PATH_LEN {
+    if path_len == 0 || path_len as usize > MAX_PATH_LEN || statbuf_ptr == 0 {
         return Err(SyscallError::InvalidArgument);
     }
     let raw = read_user_path(path_ptr, path_len)?;
     let st = fstat_at(dir_fd, &raw)?;
-    // NOTE: stat_ptr is not provided in this syscall signature; the caller
-    // must use SYS_FSTAT with an open FD to get the stat struct.
-    // For now, return 0 on success (file exists).
-    let _ = st;
+    let user = UserSliceWrite::new(statbuf_ptr, core::mem::size_of::<FileStat>())?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &st as *const FileStat as *const u8,
+            core::mem::size_of::<FileStat>(),
+        )
+    };
+    user.copy_from(bytes);
     Ok(0)
 }
 
@@ -998,6 +976,10 @@ pub fn sys_unlink(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
 /// SYS_RMDIR (446): Remove an empty directory.
 pub fn sys_rmdir(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
     let abs = resolve_for_syscall(path_ptr, path_len, false, true, false)?;
+    let st = stat_path(&abs)?;
+    if st.st_mode & 0o170000 != 0o040000 {
+        return Err(SyscallError::InvalidArgument);
+    }
     unlink(&abs)?;
     Ok(0)
 }
@@ -1157,6 +1139,18 @@ pub fn sys_pwrite(fd: u32, buf_ptr: u64, buf_len: u64, offset: u64) -> Result<u6
         }
     }
     Ok(total as u64)
+}
+
+/// SYS_FSYNC (458): Synchronize file in-core state with storage.
+pub fn sys_fsync(fd: u32) -> Result<u64, SyscallError> {
+    fsync(fd)?;
+    Ok(0)
+}
+
+/// SYS_FDATASYNC (459): Synchronize file data (not metadata) with storage.
+pub fn sys_fdatasync(fd: u32) -> Result<u64, SyscallError> {
+    fsync(fd)?;
+    Ok(0)
 }
 
 // ============================================================================

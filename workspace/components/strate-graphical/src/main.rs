@@ -738,8 +738,6 @@ pub extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
-fn panic(_: &PanicInfo) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+fn panic(info: &PanicInfo) -> ! {
+    strat9_syscall::call::handle_panic("strate-graphical", info)
 }

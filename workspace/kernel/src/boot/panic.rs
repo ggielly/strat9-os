@@ -1,4 +1,3 @@
-use alloc::string::String;
 use core::{
     panic::PanicInfo,
     sync::atomic::{AtomicBool, Ordering},
@@ -111,88 +110,88 @@ fn read_cr_regs() -> (u64, u64, u64, u64) {
     (cr0, cr2, cr3, cr4)
 }
 
-/// Dump backtrace via frame-pointer unwinding, returning the lines.
-fn collect_backtrace() -> alloc::vec::Vec<alloc::string::String> {
-    use alloc::format;
-    let mut lines = alloc::vec::Vec::new();
+/// Dump backtrace via frame-pointer unwinding, printing directly to serial.
+fn dump_backtrace() {
+    crate::serial_println!("RSP=0x{:016X} RBP=0x{:016X}", read_rsp(), read_rbp());
+    crate::serial_println!("Backtrace (frame-pointer):");
     let mut rbp = read_rbp();
-    let rsp = read_rsp();
-    lines.push(format!("RSP=0x{:016X} RBP=0x{:016X}", rsp, rbp));
-    lines.push("Backtrace (frame-pointer):".into());
-
     for i in 0..16 {
         if rbp == 0 || (rbp & 0x7) != 0 {
-            lines.push(format!("  #{:02}: stop (invalid rbp)", i));
+            crate::serial_println!("  #{:02}: stop (invalid rbp)", i);
             break;
         }
         if !addr_readable(rbp) || !addr_readable(rbp.saturating_add(8)) {
-            lines.push(format!("  #{:02}: stop (unmapped)", i));
+            crate::serial_println!("  #{:02}: stop (unmapped)", i);
             break;
         }
-
         let prev = unsafe { *(rbp as *const u64) };
         let ret = unsafe { *((rbp + 8) as *const u64) };
-        lines.push(format!("  #{:02}: RIP=0x{:016X}", i, ret));
+
+        // Try symbol resolution
+        if let Some((name, offset)) = super::symbols::lookup(ret) {
+            if offset == 0 {
+                crate::serial_println!("  #{:02}: RIP=0x{:016X}  {}", i, ret, name);
+            } else {
+                crate::serial_println!(
+                    "  #{:02}: RIP=0x{:016X}  {}+0x{:x}",
+                    i,
+                    ret,
+                    name,
+                    offset
+                );
+            }
+        } else {
+            crate::serial_println!("  #{:02}: RIP=0x{:016X}", i, ret);
+        }
 
         if prev <= rbp || prev.saturating_sub(rbp) > 1024 * 1024 {
             break;
         }
         rbp = prev;
     }
-    lines
 }
 
-/// Collect comprehensive debug info lines for the panic screen.
-fn collect_panic_lines(info: &PanicInfo) -> alloc::vec::Vec<alloc::string::String> {
-    use alloc::format;
-    let mut lines = alloc::vec::Vec::new();
+/// Collect comprehensive debug info and print directly to serial (heap-safe).
+fn dump_panic_info(info: &PanicInfo) {
+    crate::serial_println!("\n\x1b[31;1m!!! KERNEL PANIC !!!\x1b[0m");
+    crate::serial_println!("=== GURU MEDiTATiON :: KERNEL PANiK ===");
+    crate::serial_println!("");
 
-    // --- Title ---
-    lines.push("=== GURU MEDiTATiON :: KERNEL PANiK ===".into());
-    lines.push(String::new());
-
-    // --- Panic location ---
+    // Panic location
     if let Some(loc) = info.location() {
-        lines.push(format!(
-            "File: {}:{}:{}",
-            loc.file(),
-            loc.line(),
-            loc.column()
-        ));
+        crate::serial_println!("File: {}:{}:{}", loc.file(), loc.line(), loc.column());
     } else {
-        lines.push("File: (unknown)".into());
+        crate::serial_println!("File: (unknown)");
     }
-    lines.push(format!("Message: {}", info.message()));
-    lines.push(String::new());
+    crate::serial_println!("Message: {}", info.message());
+    crate::serial_println!("");
 
-    // --- CPU state ---
+    // CPU state
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
     let (cr0, cr2, cr3, cr4) = read_cr_regs();
     let rsp = read_rsp();
     let rbp = read_rbp();
+    crate::serial_println!("CPU={}  CR0={:#X}  CR2={:#X}", cpu, cr0, cr2);
+    crate::serial_println!("CR3={:#X}  CR4={:#X}", cr3, cr4);
+    crate::serial_println!("RSP={:#018X}  RBP={:#018X}", rsp, rbp);
+    crate::serial_println!("");
 
-    lines.push(format!("CPU={}  CR0={:#X}  CR2={:#X}", cpu, cr0, cr2));
-    lines.push(format!("CR3={:#X}  CR4={:#X}", cr3, cr4));
-    lines.push(format!("RSP={:#018X}  RBP={:#018X}", rsp, rbp));
-    lines.push(String::new());
+    // Backtrace
+    dump_backtrace();
+    crate::serial_println!("");
 
-    // --- Backtrace ---
-    let bt = collect_backtrace();
-    lines.extend(bt);
-    lines.push(String::new());
-
-    // --- Scheduler state (best-effort) ---
+    // Scheduler state
     let ticks = crate::process::scheduler::ticks();
-    lines.push(format!("Ticks={}", ticks));
+    crate::serial_println!("Ticks={}", ticks);
     if let Some(task) = crate::process::scheduler::current_task_clone_try() {
-        lines.push(format!("Task: id={} name={}", task.id.as_u64(), task.name));
+        crate::serial_println!("Task: id={} name={}", task.id.as_u64(), task.name);
     } else {
-        lines.push("Task: (scheduler locked / idle)".into());
+        crate::serial_println!("Task: (scheduler locked / idle)");
     }
 
     let sched = crate::process::scheduler::state_snapshot();
     if cpu < sched.cpu_count {
-        lines.push(format!(
+        crate::serial_println!(
             "Sched: tid={} rt={} fair={} idle={} blocked={} init={}",
             sched.current_task[cpu],
             sched.rq_rt[cpu],
@@ -200,23 +199,13 @@ fn collect_panic_lines(info: &PanicInfo) -> alloc::vec::Vec<alloc::string::Strin
             sched.rq_idle[cpu],
             sched.blocked_tasks,
             sched.initialized,
-        ));
+        );
     }
-    lines.push(String::new());
+    crate::serial_println!("");
 
-    // --- Timestamp if available ---
+    // Uptime
     let ts = crate::arch::x86_64::boot_timestamp::elapsed_ms();
-    lines.push(format!("Uptime: {} ms", ts));
-
-    lines
-}
-
-/// Print all panic lines to the serial port (emergency mode already active).
-fn panic_serial_dump(lines: &[alloc::string::String]) {
-    crate::serial_println!("\n\x1b[31;1m!!! KERNEL PANIC !!!\x1b[0m");
-    for line in lines {
-        crate::serial_println!("{}", line);
-    }
+    crate::serial_println!("Uptime: {} ms", ts);
 }
 
 // -----------------------------------------------------------------------
@@ -242,6 +231,14 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
 
     // 2. Guard against recursive panics.
     if PANIC_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+        // Double panic: output what we can with stack-only formatting.
+        crate::arch::x86_64::serial::enter_emergency_mode();
+        crate::arch::x86_64::cli();
+        crate::serial_println!("\n\x1b[31;1m!!! DOUBLE PANIC !!!\x1b[0m");
+        if let Some(loc) = info.location() {
+            crate::serial_println!("panic at {}:{}", loc.file(), loc.line());
+        }
+        crate::serial_println!("Message: {}", info.message());
         loop {
             crate::arch::x86_64::hlt();
         }
@@ -253,45 +250,39 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     // 3b. Panic beep : audible signal before we halt.
     crate::arch::x86_64::speaker::beep_panic();
 
-    // 4. Collect all debug information into a line list.
-    let lines = collect_panic_lines(info);
+    // 4. Dump all debug information directly to serial (heap-free).
+    dump_panic_info(info);
 
-    // 5. Dump everything to serial first (always works).
-    panic_serial_dump(&lines);
-
-    // 6. Run custom panic hooks (serial-only).
+    // 5. Run custom panic hooks (serial-only).
     run_panic_hooks(info);
 
-    // 7. Stop all other CPUs.
+    // 6. Stop all other CPUs.
     crate::arch::x86_64::smp::broadcast_panic_halt();
 
-    // 7b. Flush the VGA circular buffer so any buffered log lines appear.
+    // 7. Flush the VGA circular buffer so any buffered log lines appear.
     crate::arch::x86_64::vgabuf::vgabuf_flush_all();
 
-    // 8. Display panic info on framebuffer : two paths with fallback.
+    // 8. Display panic info on framebuffer (best-effort, may use heap for String formatting).
     if crate::arch::x86_64::vga::is_available() {
-        // Path A: try the normal VGA_WRITER terminal (needs the Mutex).
-        let writer_locked = {
-            if let Some(mut writer) = crate::arch::x86_64::vga::VGA_WRITER.try_lock() {
-                use core::fmt::Write;
-                writer.set_rgb_color(
-                    crate::arch::x86_64::vga::RgbColor::new(0xFF, 0xE7, 0xA0),
-                    crate::arch::x86_64::vga::RgbColor::new(0x3A, 0x1F, 0x00),
-                );
-                writer.clear();
-                for line in &lines {
-                    let _ = writeln!(writer, "{}", line);
-                }
-                true
-            } else {
-                false
+        if let Some(mut writer) = crate::arch::x86_64::vga::VGA_WRITER.try_lock() {
+            use core::fmt::Write;
+            writer.set_rgb_color(
+                crate::arch::x86_64::vga::RgbColor::new(0xFF, 0xE7, 0xA0),
+                crate::arch::x86_64::vga::RgbColor::new(0x3A, 0x1F, 0x00),
+            );
+            writer.clear();
+            let _ = writeln!(writer, "=== GURU MEDiTATiON :: KERNEL PANiK ===");
+            if let Some(loc) = info.location() {
+                let _ = writeln!(writer, "File: {}:{}:{}", loc.file(), loc.line(), loc.column());
             }
-        };
-
-        if !writer_locked {
-            // Path B: VGA_WRITER is locked : draw directly to the
-            // framebuffer using saved raw params.
-            let str_lines: alloc::vec::Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+            let _ = writeln!(writer, "Message: {}", info.message());
+            let _ = writeln!(writer, "");
+            let _ = writeln!(writer, "See serial output for full backtrace.");
+        } else {
+            // VGA_WRITER locked : draw directly to the framebuffer.
+            let title = "=== GURU MEDiTATiON :: KERNEL PANiK ===";
+            let serial_hint = "See serial output for full backtrace.";
+            let str_lines: [&str; 2] = [title, serial_hint];
             crate::arch::x86_64::vga::panic_draw_direct(&str_lines);
         }
     }

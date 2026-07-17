@@ -64,7 +64,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         );
     }
     let arg4 = frame.r10;
-    let _arg5 = frame.r8;
+    let arg5 = frame.r8;
     let _arg6 = frame.r9;
 
     // Rate-limited trace with relaxed-count optimisation.
@@ -276,7 +276,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         // *at() syscalls : FD-relative path resolution ======================
         SYS_OPENAT => crate::vfs::sys_openat(arg1, arg2, arg3, arg4),
-        SYS_FSTATAT => crate::vfs::sys_fstatat(arg1, arg2, arg3, arg4),
+        SYS_FSTATAT => crate::vfs::sys_fstatat(arg1, arg2, arg3, arg5),
         SYS_FACCESSAT => crate::vfs::sys_faccessat(arg1, arg2, arg3, arg4, frame.r8),
 
         // Network syscalls (500-599) ========================================

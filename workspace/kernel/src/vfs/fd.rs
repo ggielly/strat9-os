@@ -3,6 +3,7 @@
 //! Each process has its own FD table mapping integers (0, 1, 2...) to open files.
 
 use super::file::OpenFile;
+use super::scheme::OpenFlags;
 use crate::syscall::error::SyscallError;
 use alloc::{sync::Arc, vec::Vec};
 
@@ -121,6 +122,38 @@ impl FileDescriptorTable {
             }
         }
         Err(SyscallError::BadHandle)
+    }
+
+    /// Get a mutable reference to an open file by fd.
+    pub fn get_mut(&self, fd: u32) -> Result<&OpenFile, SyscallError> {
+        let fd_usize = fd as usize;
+        if fd_usize < self.fds.len() {
+            if let Some(desc) = &self.fds[fd_usize] {
+                return Ok(&desc.file);
+            }
+        }
+        Err(SyscallError::BadHandle)
+    }
+
+    /// Replace the open flags on an fd (for fcntl F_SETFL).
+    /// Creates a new OpenFile with updated flags, preserving scheme/file_id/etc.
+    pub fn replace_open_flags(&mut self, fd: u32, new_flags: OpenFlags) -> Result<(), SyscallError> {
+        let fd_usize = fd as usize;
+        if fd_usize >= self.fds.len() {
+            return Err(SyscallError::BadHandle);
+        }
+        let desc = self.fds[fd_usize].as_mut().ok_or(SyscallError::BadHandle)?;
+        let old = desc.file.clone();
+        let new_file = Arc::new(OpenFile::new(
+            old.scheme().clone(),
+            old.file_id(),
+            alloc::string::String::from(old.path()),
+            new_flags,
+            old.flags(),
+            None,
+        ));
+        desc.file = new_file;
+        Ok(())
     }
 
     /// Get the CLOEXEC flag for a file descriptor.
