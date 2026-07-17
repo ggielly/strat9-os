@@ -5,12 +5,6 @@ use crate::{
     scrollback::{Cell, CircularBuffer},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TerminalMode {
-    Raw,
-    Canonical,
-}
-
 const MAX_COLS: usize = 256;
 const MAX_ROWS: usize = 64;
 
@@ -34,12 +28,6 @@ pub struct TerminalCore {
     pub default_bg: u32,
     pub scrollback: CircularBuffer,
     ansi: AnsiParser,
-    esc_buf: [u8; 32],
-    esc_len: usize,
-    in_esc: bool,
-    pub mode: TerminalMode,
-    pub line_buf: [u8; 256],
-    pub line_pos: usize,
 }
 
 impl TerminalCore {
@@ -63,32 +51,28 @@ impl TerminalCore {
             default_bg,
             scrollback: CircularBuffer::new(cols, default_fg, default_bg),
             ansi: AnsiParser::new(),
-            esc_buf: [0u8; 32],
-            esc_len: 0,
-            in_esc: false,
-            mode: TerminalMode::Canonical,
-            line_buf: [0u8; 256],
-            line_pos: 0,
         }
     }
 
     pub fn process_byte(&mut self, byte: u8) -> bool {
-        if byte == 0x1B {
-            self.in_esc = true;
-            self.esc_len = 0;
-            return false;
+        let mut changed = false;
+        let slice = self.ansi.feed_bytes(&[byte]);
+        let actions: alloc::vec::Vec<_> = slice.iter().copied().collect();
+        for action in &actions {
+            changed |= self.handle_action(*action);
         }
-        if self.in_esc {
-            self.esc_buf[self.esc_len] = byte;
-            self.esc_len += 1;
-            if let Some(action) = self.ansi.feed(byte) {
-                self.in_esc = false;
-                self.esc_len = 0;
-                return self.handle_action(action);
-            }
-            return false;
+        if changed {
+            return true;
         }
-        self.handle_char(byte)
+        if byte >= 0x20 && byte <= 0x7E {
+            self.handle_char(byte);
+            true
+        } else if byte == b'\n' || byte == b'\r' || byte == b'\t' || byte == 0x08 || byte == 0x7F {
+            self.handle_char(byte);
+            true
+        } else {
+            false
+        }
     }
 
     fn handle_char(&mut self, byte: u8) -> bool {
@@ -193,7 +177,6 @@ impl TerminalCore {
             AnsiAction::Sgr(param) => {
                 self.apply_sgr(param);
             }
-            _ => {}
         }
         true
     }
@@ -220,8 +203,10 @@ impl TerminalCore {
             SgrParam::BgRgb(r, g, b) => {
                 self.bg = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
             }
-            SgrParam::DefaultColor => {
+            SgrParam::DefaultFg => {
                 self.fg = self.default_fg;
+            }
+            SgrParam::DefaultBg => {
                 self.bg = self.default_bg;
             }
             _ => {}
@@ -322,7 +307,6 @@ impl TerminalCore {
                     self.set_cell(c, self.cursor_row, b' ');
                 }
             }
-            _ => {}
         }
     }
 }
