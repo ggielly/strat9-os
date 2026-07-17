@@ -44,7 +44,15 @@ const LOCAL_CACHE_REFILL_FRAMES: usize = 1 << (LOCAL_CACHE_REFILL_ORDER as usize
 const LOCAL_CACHE_FLUSH_BATCH: usize = 64;
 const LOCAL_CACHE_SLOTS: usize = Migratetype::COUNT * crate::arch::x86_64::percpu::MAX_CPUS;
 const LOCAL_CACHED_ZONE_MIGRATETYPE_SLOTS: usize = Migratetype::COUNT * ZoneType::COUNT;
-const COMPACTION_FRAGMENTATION_THRESHOLD: usize = 35;
+/// Fragmentation score threshold for triggering compaction-assist.
+///
+/// When a higher-order allocation fails and the zone's fragmentation score
+/// exceeds this threshold, the allocator drains per-CPU caches before retrying.
+/// The value is expressed as a percentage (0-100). Lower values make compaction
+/// more aggressive; higher values make it more conservative.
+///
+/// Default: 35 (35% of free pages trapped below the requested order).
+static COMPACTION_FRAGMENTATION_THRESHOLD: AtomicUsize = AtomicUsize::new(35);
 const COMPACTION_SNAPSHOT_NONE: usize = usize::MAX;
 const UNMOVABLE_ZONE_ORDER: [usize; ZoneType::COUNT] = [
     ZoneType::Normal as usize,
@@ -1501,7 +1509,7 @@ impl BuddyAllocator {
             }
 
             let fragmentation_score = zone.fragmentation_score(order, cached_pages);
-            if fragmentation_score < COMPACTION_FRAGMENTATION_THRESHOLD {
+            if fragmentation_score < COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed) {
                 continue;
             }
 
@@ -2757,4 +2765,17 @@ impl BuddyAllocator {
         }
         n
     }
+}
+
+/// Set the compaction fragmentation threshold (percentage, 0-100).
+///
+/// Lower values make compaction more aggressive; higher values make it more
+/// conservative. The default is 35.
+pub fn set_compaction_threshold(threshold: usize) {
+    COMPACTION_FRAGMENTATION_THRESHOLD.store(threshold.min(100), AtomicOrdering::Relaxed);
+}
+
+/// Get the current compaction fragmentation threshold.
+pub fn compaction_threshold() -> usize {
+    COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed)
 }
