@@ -13,8 +13,8 @@ static FONT_8X16: [[u8; 16]; 95] = include!("font_data.rs");
 
 pub struct Renderer {
     fb_fd: usize,
-    fb_width: usize,
-    fb_height: usize,
+    _fb_width: usize,
+    _fb_height: usize,
     pub cols: usize,
     pub rows: usize,
     prev_cells: [[Cell; MAX_COLS]; MAX_ROWS],
@@ -43,8 +43,8 @@ impl Renderer {
 
         Some(Renderer {
             fb_fd: fd,
-            fb_width: w,
-            fb_height: h,
+            _fb_width: w,
+            _fb_height: h,
             cols: cols.min(MAX_COLS),
             rows: rows.max(1).min(MAX_ROWS),
             prev_cells: [[blank; MAX_COLS]; MAX_ROWS],

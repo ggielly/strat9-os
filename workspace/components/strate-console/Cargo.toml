@@ -13,3 +13,4 @@ path = "src/main.rs"
 [dependencies]
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
 alloc-freelist = { path = "../alloc-freelist" }
+vte = { version = "0.15", default-features = false }
