@@ -4,13 +4,16 @@
 
 ## Project stats
 
-- **Total commits:** `552`
+- **Total commits:** `555`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
-- 2026-07-17 [`c03bfb2`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c03bfb2b6a40eada01d85b60d93fcbbb68ef8df0) docs: update published documentation
+- 2026-07-17 [`1a72181`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1a72181f479278893775d6a3b19126f4b24b5999) docs: update published documentation
+- 2026-07-17 [`0e0766a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0e0766a34c3b95f8e4de1d84f4cf4912da91ee4f) docs: update published documentation
+- 2026-07-17 [`f94c369`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f94c369709b3200794bfad047d09249a928a5ff3) Merge branch 'feat/vt100-console' into 'main'
+- 2026-07-17 [`057447f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/057447f5d091361dbc59cce83cde1ea8fb6e6713) feat(console): replace custom ANSI parser with vte crate
 - 2026-07-17 [`5d53b0f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5d53b0fba04bd9c2bd1b58366fafce327c821eb6) Merge branch 'improve-vfs-all' into 'main'
 - 2026-07-17 [`fe68f9a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1) fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace
 - 2026-07-15 [`425c2cd`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/425c2cd18dc1e6f065be037f4d087474356e426e) docs: update published documentation
@@ -57,8 +60,5 @@
 - 2026-05-24 [`40d4d46`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/40d4d46574896664983ba2fe05dfd7ca1c0f1b94) Merge branch 'IPC-refactor' into 'main'
 - 2026-05-24 [`b2bbcc0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8) Improve and fix IPC
 - 2026-05-23 [`b7c3e27`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b7c3e271d8644570a5a0b7bdabb80ef8c3f524f7) Merge branch 'hunt-memory-corruption' into 'main'
-- 2026-05-23 [`db23b53`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552) Fix major memory leak and remove sshd silo
-- 2026-05-19 [`6831830`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6831830423d0e1b19cdfb7ce0b60089fc65e045a) docs: update published documentation
-- 2026-05-19 [`0b42bf9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0b42bf9116227e3f1b9a3eb32ac74e7d261c7000) docs: update published documentation
 
 <!-- AUTO-CHANGELOG:END -->
