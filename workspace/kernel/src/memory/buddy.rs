@@ -373,8 +373,11 @@ impl BuddyAllocator {
             zone.reserved_pages = zone.present_pages.saturating_sub(zone.page_count);
             zone.lowmem_reserve_pages =
                 Self::lowmem_reserve_target_pages(zone.zone_type, zone.page_count);
+            // Watermark parameters: (divisor, floor_pages, cap_pages)
+            // watermark_min: at least 16 pages, up to 2048, ~0.4% of zone
             zone.watermark_min = Self::watermark_target_pages(zone.page_count, 256, 16, 2048);
 
+            // watermark_low/high: increment of at least 16 pages, up to 2048, ~0.2% of zone
             let delta = Self::watermark_target_pages(zone.page_count, 512, 16, 2048);
             zone.watermark_low = zone
                 .watermark_min
@@ -398,6 +401,11 @@ impl BuddyAllocator {
     }
 
     /// Compute a bounded low-memory reserve target.
+    ///
+    /// Parameters: (divisor, floor_pages, cap_pages, max_fraction_divisor)
+    /// - DMA: 12.5% of zone, min 16 pages, max 512 pages, at most 25% of zone
+    /// - Normal: ~1.6% of zone, min 64 pages, max 2048 pages, at most 12.5% of zone
+    /// - HighMem: no reserve (movable allocations prefer HighMem)
     fn lowmem_reserve_target_pages(zone_type: ZoneType, managed_pages: usize) -> usize {
         match zone_type {
             ZoneType::DMA => Self::bounded_zone_target(managed_pages, 8, 16, 512, 4),
