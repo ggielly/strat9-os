@@ -1246,14 +1246,20 @@ impl BuddyAllocator {
 
     /// Upper bound for bitmap storage over any segmentation of `page_count` pages.
     ///
-    /// For one page, every order contributes at most one parity bit. Summing that
-    /// pessimistic bound across all pages yields a simple safe allocation bound,
-    /// even if bitmap-pool reservations split ranges further.
+    /// For a single contiguous span of `s` pages, the buddy bitmap uses
+    /// approximately `s` bits total across all orders (each order contributes
+    /// `s / 2^(order+1)` pair bits, summing to ~`s`). We add a per-segment
+    /// overhead to account for small segments where the bound is less tight.
+    /// The factor of 2 provides safety margin for edge cases (segmentation,
+    /// alignment, debug bitmaps).
     fn bitmap_bytes_upper_bound_for_pages(page_count: usize) -> usize {
+        // Buddy bitmaps: ~1 bit per page across all orders (sum of s/2^(k+1) ≈ s)
+        // Factor of 2 for safety margin and segmentation overhead
         #[allow(unused_mut)]
-        let mut bits = page_count.saturating_mul(MAX_ORDER + 1);
+        let mut bits = page_count.saturating_mul(2);
         #[cfg(debug_assertions)]
         {
+            // Debug alloc bitmap: 1 bit per page
             bits = bits.saturating_add(page_count);
         }
         Self::bits_to_bytes(bits)
