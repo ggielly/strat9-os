@@ -4,6 +4,8 @@
 //! Limine loads us directly in 64-bit long mode with paging enabled.
 
 use limine::{modules::InternalModule, request::*, BaseRevision};
+//use crate::memory::phys_to_virt;
+//use crate::ostd::mm::phys_to_virt;
 
 use crate::serial_println;
 
@@ -149,6 +151,51 @@ static WASM_TEST_TOML_MODULE: InternalModule =
 /// Internal module: request Limine to load /initfs/kernel.toml (kernel configuration)
 static KERNEL_TOML_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/kernel.toml");
+
+/// Saved kernel.toml physical address and size (set during module resolution).
+static mut KERNEL_TOML_DATA: Option<(u64, u64)> = None;
+
+/// Apply kernel.toml configuration values.
+///
+/// Must be called after modules are resolved and the HHDM is available.
+/// Parses the TOML and applies recognized keys to the kernel subsystems.
+pub fn apply_kernel_config(hhdm_offset: u64) {
+    let Some((phys, size)) = (unsafe { KERNEL_TOML_DATA }) else {
+        return;
+    };
+    // Convert physical address to virtual via HHDM offset
+    let virt = if hhdm_offset != 0 && phys < hhdm_offset {
+        phys + hhdm_offset
+    } else {
+        phys
+    };
+    let data = unsafe { core::slice::from_raw_parts(virt as *const u8, size as usize) };
+
+    let config = match super::toml::parse_toml(data) {
+        Ok(c) => c,
+        Err(e) => {
+            crate::serial_println!("[kernel.toml] parse error: {}", e);
+            return;
+        }
+    };
+
+    crate::serial_println!("[kernel.toml] loaded successfully");
+
+    // Apply quiet mode
+    if let Some(quiet) = config.get_bool("quiet", "quiet_mode") {
+        if quiet {
+            crate::debug_cfg::set_quiet(true);
+            // Note: serial output is already suppressed after this point
+        }
+    }
+
+    // Apply buddy allocator config
+    if let Some(threshold) = config.get_int("buddy", "compaction_threshold") {
+        if threshold >= 0 && threshold <= 100 {
+            crate::memory::buddy::set_compaction_threshold(threshold as usize);
+        }
+    }
+}
 
 /// Request modules (files loaded alongside the kernel)
 #[used]
@@ -911,12 +958,17 @@ pub unsafe extern "C" fn kmain() -> ! {
                 );
             }
             if let Some((base, size)) = resolved.kernel_toml {
-                unsafe { KERNEL_TOML_FILE_MODULE = Some((base, size)) };
+                unsafe {
+                    KERNEL_TOML_FILE_MODULE = Some((base, size));
+                    KERNEL_TOML_DATA = Some((base, size));
+                };
                 crate::serial_println!(
                     "[limine] /initfs/kernel.toml found: base={:#x} size={}",
                     base,
                     size
                 );
+                // Apply kernel.toml configuration (quiet_mode, buddy config, etc.)
+                apply_kernel_config(hhdm_offset);
             } else {
                 crate::serial_println!(
                     "[limine] WARN: /initfs/kernel.toml not found in modules"

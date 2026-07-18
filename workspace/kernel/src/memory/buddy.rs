@@ -2824,42 +2824,4 @@ pub fn compaction_threshold() -> usize {
     COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed)
 }
 
-/// Apply configuration from kernel.toml to the buddy allocator.
-///
-/// This function is called during early boot after the kernel.toml module
-/// is loaded. It parses the TOML file and applies the settings.
-pub fn apply_kernel_toml_config() {
-    let Some((base, size)) = crate::boot::limine::kernel_toml_module() else {
-        crate::serial_println!("[buddy] No kernel.toml module found, using defaults");
-        return;
-    };
 
-    if base == 0 || size == 0 {
-        crate::serial_println!("[buddy] kernel.toml module is empty, using defaults");
-        return;
-    }
-
-    // SAFETY: The module memory is valid for the duration of the kernel's lifetime.
-    // It was provided by Limine and is mapped in the higher half.
-    let data = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
-
-    let config = match crate::boot::toml::parse_toml(data) {
-        Ok(c) => c,
-        Err(e) => {
-            crate::serial_println!("[buddy] Failed to parse kernel.toml: {}", e);
-            return;
-        }
-    };
-
-    crate::serial_println!("[buddy] Applying kernel.toml configuration");
-
-    // Apply buddy allocator settings
-    if let Some(threshold) = config.get_int("buddy", "compaction_threshold") {
-        let t = threshold.clamp(0, 100) as usize;
-        set_compaction_threshold(t);
-        crate::serial_println!(
-            "[buddy] compaction_threshold = {} (from kernel.toml)",
-            t
-        );
-    }
-}

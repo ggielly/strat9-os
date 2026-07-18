@@ -12,6 +12,18 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
+# Quiet mode: disable all debug output (serial, VGA, overlay)
+# -----------------------------------------------------------------------------
+[quiet]
+# When true, the kernel produces zero diagnostic output during boot and runtime.
+# Serial, VGA, overlay, and status line output are all suppressed.
+# The kernel still runs normally, but with no visible debug information.
+# Intended for production builds and real hardware bring-up.
+#
+# Default: false
+quiet_mode = false
+
+# -----------------------------------------------------------------------------
 # Buddy Allocator Configuration
 # -----------------------------------------------------------------------------
 [buddy]

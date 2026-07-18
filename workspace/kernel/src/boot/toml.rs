@@ -1,229 +1,74 @@
-//! Simple TOML parser for kernel boot configuration.
-//!
-//! This module provides a minimal TOML parser that can handle:
-//! - `[section]` headers
-//! - `key = value` pairs (string, integer, boolean)
-//! - Comments (lines starting with `#`)
-//!
-//! The parser is designed for embedded use in a no-std kernel environment.
-//! It does not support:
-//! - Nested tables (`[a.b]`)
-//! - Arrays
-//! - Inline tables
-//! - Multi-line strings
-//!
-//! # Example
-//!
-//! ```toml
-//! [buddy]
-//! compaction_threshold = 35
-//! ```
-
-use core::str;
-
-/// Parsed configuration value.
-#[derive(Debug, Clone)]
-pub enum ConfigValue {
-    /// Integer value.
-    Integer(i64),
-    /// Boolean value.
-    Boolean(bool),
-    /// String value.
-    String(alloc::string::String),
-}
-
-/// Configuration section containing key-value pairs.
-#[derive(Debug, Clone)]
-pub struct ConfigSection {
-    /// Section name (without brackets).
-    pub name: alloc::string::String,
-    /// Key-value pairs in this section.
-    pub entries: alloc::vec::Vec<(alloc::string::String, ConfigValue)>,
-}
+use alloc::collections::BTreeMap;
 
 /// Parsed TOML configuration.
 #[derive(Debug, Clone)]
 pub struct TomlConfig {
-    /// All sections in the configuration.
-    pub sections: alloc::vec::Vec<ConfigSection>,
+    sections: BTreeMap<alloc::string::String, BTreeMap<alloc::string::String, ConfigValue>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConfigValue {
+    Integer(i64),
+    Boolean(bool),
+    String(alloc::string::String),
 }
 
 impl TomlConfig {
-    /// Create an empty configuration.
     pub fn new() -> Self {
-        Self {
-            sections: alloc::vec::Vec::new(),
-        }
+        Self { sections: BTreeMap::new() }
     }
 
-    /// Get a value from a section.
-    ///
-    /// Returns `None` if the section or key doesn't exist.
-    pub fn get(&self, section: &str, key: &str) -> Option<&ConfigValue> {
-        for s in &self.sections {
-            if s.name == section {
-                for (k, v) in &s.entries {
-                    if k == key {
-                        return Some(v);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Get an integer value from a section.
-    ///
-    /// Returns `None` if the section or key doesn't exist, or if the value is not an integer.
     pub fn get_int(&self, section: &str, key: &str) -> Option<i64> {
-        match self.get(section, key) {
-            Some(ConfigValue::Integer(v)) => Some(*v),
+        match self.sections.get(section)?.get(key)? {
+            ConfigValue::Integer(v) => Some(*v),
             _ => None,
         }
     }
 
-    /// Get a boolean value from a section.
-    ///
-    /// Returns `None` if the section or key doesn't exist, or if the value is not a boolean.
     pub fn get_bool(&self, section: &str, key: &str) -> Option<bool> {
-        match self.get(section, key) {
-            Some(ConfigValue::Boolean(v)) => Some(*v),
+        match self.sections.get(section)?.get(key)? {
+            ConfigValue::Boolean(v) => Some(*v),
             _ => None,
         }
     }
 
-    /// Get a string value from a section.
-    ///
-    /// Returns `None` if the section or key doesn't exist, or if the value is not a string.
     pub fn get_str(&self, section: &str, key: &str) -> Option<&str> {
-        match self.get(section, key) {
-            Some(ConfigValue::String(v)) => Some(v.as_str()),
+        match self.sections.get(section)?.get(key)? {
+            ConfigValue::String(v) => Some(v.as_str()),
             _ => None,
         }
     }
 }
 
-/// Parse a TOML configuration from a byte slice.
-///
-/// # Errors
-///
-/// Returns an error message if the TOML is malformed.
 pub fn parse_toml(data: &[u8]) -> Result<TomlConfig, &'static str> {
-    let text = str::from_utf8(data).map_err(|_| "invalid UTF-8 in TOML")?;
+    let text = core::str::from_utf8(data).map_err(|_| "invalid UTF-8 in TOML")?;
     let mut config = TomlConfig::new();
-    let mut current_section: Option<alloc::string::String> = None;
+    let mut sec = alloc::string::String::new();
 
-    for (line_num, line) in text.lines().enumerate() {
+    for line in text.lines() {
         let line = line.trim();
-
-        // Skip empty lines and comments
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() || line.starts_with('#') { continue; }
+        if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            if name.contains('.') { return Err("nested tables not supported"); }
+            sec = alloc::string::String::from(name);
+            config.sections.entry(sec.clone()).or_default();
             continue;
         }
-
-        // Section header: [section_name]
-        if line.starts_with('[') && line.ends_with(']') {
-            let section_name = &line[1..line.len() - 1];
-            if section_name.is_empty() {
-                return Err("empty section name");
+        let (key, val) = line.split_once('=').ok_or("invalid TOML syntax")?;
+        let key = key.trim();
+        let val = val.trim();
+        let v = if val == "true" { ConfigValue::Boolean(true) }
+            else if val == "false" { ConfigValue::Boolean(false) }
+            else if let Some(hex) = val.strip_prefix("0x").or_else(|| val.strip_prefix("0X")) {
+                ConfigValue::Integer(i64::from_str_radix(hex, 16).map_err(|_| "invalid hex")?)
             }
-            current_section = Some(alloc::string::String::from(section_name));
-            config.sections.push(ConfigSection {
-                name: alloc::string::String::from(section_name),
-                entries: alloc::vec::Vec::new(),
-            });
-            continue;
-        }
-
-        // Key-value pair: key = value
-        if let Some((key, value_str)) = line.split_once('=') {
-            let key = key.trim();
-            let value_str = value_str.trim();
-
-            if key.is_empty() {
-                return Err("empty key name");
+            else if val.starts_with('"') && val.ends_with('"') {
+                ConfigValue::String(alloc::string::String::from(&val[1..val.len()-1]))
             }
-
-            let value = parse_value(value_str)?;
-
-            // Add to current section or create a default section
-            if let Some(ref section_name) = current_section {
-                if let Some(section) = config
-                    .sections
-                    .iter_mut()
-                    .find(|s| s.name == *section_name)
-                {
-                    section
-                        .entries
-                        .push((alloc::string::String::from(key), value));
-                }
-            } else {
-                // No section yet, create a default one
-                if config.sections.is_empty() {
-                    config.sections.push(ConfigSection {
-                        name: alloc::string::String::new(),
-                        entries: alloc::vec::Vec::new(),
-                    });
-                }
-                config.sections[0]
-                    .entries
-                    .push((alloc::string::String::from(key), value));
-            }
-            continue;
-        }
-
-        // Unknown syntax
-        return Err("invalid TOML syntax");
+            else { ConfigValue::Integer(val.parse().map_err(|_| "invalid integer")?) };
+        config.sections.entry(sec.clone()).or_default().insert(alloc::string::String::from(key), v);
     }
-
     Ok(config)
-}
-
-/// Parse a TOML value from a string.
-fn parse_value(s: &str) -> Result<ConfigValue, &'static str> {
-    // Boolean
-    if s == "true" {
-        return Ok(ConfigValue::Boolean(true));
-    }
-    if s == "false" {
-        return Ok(ConfigValue::Boolean(false));
-    }
-
-    // Integer (decimal, hex, octal, binary)
-    if let Some(v) = parse_integer(s) {
-        return Ok(ConfigValue::Integer(v));
-    }
-
-    // String (quoted)
-    if (s.starts_with('"') && s.ends_with('"'))
-        || (s.starts_with('\'') && s.ends_with('\''))
-    {
-        let inner = &s[1..s.len() - 1];
-        return Ok(ConfigValue::String(alloc::string::String::from(inner)));
-    }
-
-    Err("invalid TOML value")
-}
-
-/// Parse an integer value from a string.
-fn parse_integer(s: &str) -> Option<i64> {
-    // Hex: 0x...
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        return i64::from_str_radix(hex, 16).ok();
-    }
-
-    // Octal: 0o...
-    if let Some(oct) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
-        return i64::from_str_radix(oct, 8).ok();
-    }
-
-    // Binary: 0b...
-    if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
-        return i64::from_str_radix(bin, 2).ok();
-    }
-
-    // Decimal (with optional sign)
-    s.parse::<i64>().ok()
 }
 
 #[cfg(test)]

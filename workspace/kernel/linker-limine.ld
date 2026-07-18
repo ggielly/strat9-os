@@ -54,11 +54,24 @@ SECTIONS
         __bss_end = .;
     } :bss
 
+    .shstrtab : { *(.shstrtab) }
+
     /* Discard unneeded sections */
     /DISCARD/ :
     {
         *(.eh_frame)
+        *(.eh_frame_hdr)
         *(.note .note.*)
         *(.comment)
+        *(.got)
+        *(.got.*)
+        *(.plt)
+        *(.plt.*)
+        *(.debug*)
+        *(.zdebug*)
+        *(.ARM.exidx)
+        *(.ARM.extab)
+        *(.symtab)
+        *(.strtab)
     }
 }

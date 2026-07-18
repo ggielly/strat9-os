@@ -29,5 +29,8 @@ pub mod panic;
 /// Kernel symbol table for panic backtrace resolution
 pub mod symbols;
 
+/// Centralized kernel.toml configuration application
+pub mod config;
+
 /// Simple TOML parser for kernel boot configuration
 pub mod toml;
