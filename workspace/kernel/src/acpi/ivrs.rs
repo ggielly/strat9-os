@@ -84,6 +84,7 @@ impl IvrsHeader {
             base: self as *const Self as *const u8,
             offset: self.entry_offset as usize,
             total_len: self.header.length as usize,
+            _phantom: core::marker::PhantomData,
         }
     }
 }

@@ -19,8 +19,8 @@
 pub mod bgrt;
 pub mod dmar;
 pub mod fadt;
-pub mod ivrs;
 pub mod hpet;
+pub mod ivrs;
 pub mod madt;
 pub mod mcfg;
 pub mod rsdt;

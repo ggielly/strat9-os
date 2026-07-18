@@ -288,7 +288,10 @@ fn boot_module_slice(base: u64, size: u64) -> &'static [u8] {
 /// With U-Boot, modules are loaded from FAT32. This is a placeholder.
 #[cfg(feature = "selftest")]
 fn log_boot_module_magics(stage: &str) {
-    crate::serial_println!("[init] Module magic [{}]: (FAT32 module loader pending)", stage);
+    crate::serial_println!(
+        "[init] Module magic [{}]: (FAT32 module loader pending)",
+        stage
+    );
 }
 
 /// Performs the log boot module magics operation.
@@ -519,8 +522,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             16, // 16-byte alignment for SysV ABI
         );
         if let Some(phys) = stack_phys {
-            let stack_top = memory::phys_to_virt(phys.as_u64())
-                + KERNEL_STACK_SIZE as u64;
+            let stack_top = memory::phys_to_virt(phys.as_u64()) + KERNEL_STACK_SIZE as u64;
             serial_println!(
                 "[init] Kernel stack allocated: {:#x} - {:#x} ({} KB)",
                 memory::phys_to_virt(phys.as_u64()),
@@ -550,7 +552,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 // the init phases.
                 crate::serial_println!("[init] Stack switch: entered new stack, continuing...");
                 loop {
-                    unsafe { core::arch::asm!("hlt"); }
+                    unsafe {
+                        core::arch::asm!("hlt");
+                    }
                 }
             }
 
@@ -559,7 +563,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             // a two-phase init (early on bootstrap, late on real stack).
             serial_println!("[init] Stack allocated (switch deferred to Phase 7)");
         } else {
-            serial_println!("[init] WARNING: kernel stack alloc failed, staying on bootstrap stack");
+            serial_println!(
+                "[init] WARNING: kernel stack alloc failed, staying on bootstrap stack"
+            );
         }
     }
 
@@ -1061,9 +1067,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
-                    serial_println!(
-                        "[init] ELF loaded as task 'init' (from initrd)."
-                    );
+                    serial_println!("[init] ELF loaded as task 'init' (from initrd).");
                 }
                 Err(e) => {
                     serial_println!("[init] Failed to load init ELF: {}", e);

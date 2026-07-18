@@ -23,30 +23,45 @@ cd "$UBOOT_DIR"
 
 case "$ARCH" in
     x86_64|x86)
-        # x86_64: U-Boot as EFI app, loaded by OVMF
-        echo "Building U-Boot for x86_64 (EFI app)..."
-        make efi-x86_app64_defconfig
+        # x86_64: U-Boot as EFI PAYLOAD (not app).
+        # A UEFI payload takes full hardware control, unlike an EFI app which
+        # remains a guest of the UEFI firmware. The payload is loaded by OVMF
+        # (via a special UEFI image) and then runs natively — owns interrupts,
+        # PCI, DMA, IOMMU, everything the Strat9 kernel needs.
+        echo "Building U-Boot for x86_64 (EFI payload)..."
+        make efi-x86_payload64_defconfig
         
-        # Enable FAT filesystem for boot partition
+        # Enable FAT filesystem for boot partition (where kernel + modules live)
         scripts/config --enable CONFIG_FS_FAT
         scripts/config --enable CONFIG_CMD_FAT
         scripts/config --enable CONFIG_CMD_LS
         scripts/config --enable CONFIG_CMD_LOAD
         
-        # Enable ELF loading
+        # Enable ELF loading (Strat9 kernel is a raw ELF)
         scripts/config --enable CONFIG_CMD_ELF
+        scripts/config --enable CONFIG_CMD_BOOTM
+        scripts/config --enable CONFIG_CMD_BOOTEFI
+        
+        # Enable FDT support — Strat9 kernel receives DTB pointer in RDI
+        scripts/config --enable CONFIG_OF_LIBFDT
+        scripts/config --enable CONFIG_OF_BOARD_SETUP
+        scripts/config --enable CONFIG_CMD_FDT
         
         # Enable serial console
         scripts/config --enable CONFIG_SERIAL
         scripts/config --enable CONFIG_SYS_NS16550
         
+        # Enable bdinfo for debugging memory map
+        scripts/config --enable CONFIG_CMD_BDI
+        
         make olddefconfig
         make -j$(nproc)
         
         echo ""
-        echo "U-Boot built for x86_64 (EFI app)"
-        echo "  Binary: $UBOOT_DIR/u-boot"
-        echo "  Use with OVMF: qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd ..."
+        echo "U-Boot built for x86_64 (EFI payload)"
+        echo "  Binary: $UBOOT_DIR/u-boot-payload.efi"
+        echo "  This is loaded by OVMF as a UEFI payload."
+        echo "  U-Boot then owns the hardware and loads the kernel ELF via bootm."
         ;;
         
     aarch64|arm64)
