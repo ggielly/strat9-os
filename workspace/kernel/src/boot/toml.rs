@@ -15,7 +15,9 @@ pub enum ConfigValue {
 
 impl TomlConfig {
     pub fn new() -> Self {
-        Self { sections: BTreeMap::new() }
+        Self {
+            sections: BTreeMap::new(),
+        }
     }
 
     pub fn get_int(&self, section: &str, key: &str) -> Option<i64> {
@@ -47,9 +49,13 @@ pub fn parse_toml(data: &[u8]) -> Result<TomlConfig, &'static str> {
 
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            if name.contains('.') { return Err("nested tables not supported"); }
+            if name.contains('.') {
+                return Err("nested tables not supported");
+            }
             sec = alloc::string::String::from(name);
             config.sections.entry(sec.clone()).or_default();
             continue;
@@ -57,16 +63,22 @@ pub fn parse_toml(data: &[u8]) -> Result<TomlConfig, &'static str> {
         let (key, val) = line.split_once('=').ok_or("invalid TOML syntax")?;
         let key = key.trim();
         let val = val.trim();
-        let v = if val == "true" { ConfigValue::Boolean(true) }
-            else if val == "false" { ConfigValue::Boolean(false) }
-            else if let Some(hex) = val.strip_prefix("0x").or_else(|| val.strip_prefix("0X")) {
-                ConfigValue::Integer(i64::from_str_radix(hex, 16).map_err(|_| "invalid hex")?)
-            }
-            else if val.starts_with('"') && val.ends_with('"') {
-                ConfigValue::String(alloc::string::String::from(&val[1..val.len()-1]))
-            }
-            else { ConfigValue::Integer(val.parse().map_err(|_| "invalid integer")?) };
-        config.sections.entry(sec.clone()).or_default().insert(alloc::string::String::from(key), v);
+        let v = if val == "true" {
+            ConfigValue::Boolean(true)
+        } else if val == "false" {
+            ConfigValue::Boolean(false)
+        } else if let Some(hex) = val.strip_prefix("0x").or_else(|| val.strip_prefix("0X")) {
+            ConfigValue::Integer(i64::from_str_radix(hex, 16).map_err(|_| "invalid hex")?)
+        } else if val.starts_with('"') && val.ends_with('"') {
+            ConfigValue::String(alloc::string::String::from(&val[1..val.len() - 1]))
+        } else {
+            ConfigValue::Integer(val.parse().map_err(|_| "invalid integer")?)
+        };
+        config
+            .sections
+            .entry(sec.clone())
+            .or_default()
+            .insert(alloc::string::String::from(key), v);
     }
     Ok(config)
 }

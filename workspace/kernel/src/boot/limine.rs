@@ -149,8 +149,7 @@ static WASM_TEST_TOML_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/wasm-test.toml");
 
 /// Internal module: request Limine to load /initfs/kernel.toml (kernel configuration)
-static KERNEL_TOML_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/kernel.toml");
+static KERNEL_TOML_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/kernel.toml");
 
 /// Saved kernel.toml physical address and size (set during module resolution).
 static mut KERNEL_TOML_DATA: Option<(u64, u64)> = None;
@@ -970,9 +969,7 @@ pub unsafe extern "C" fn kmain() -> ! {
                 // Apply kernel.toml configuration (quiet_mode, buddy config, etc.)
                 apply_kernel_config(hhdm_offset);
             } else {
-                crate::serial_println!(
-                    "[limine] WARN: /initfs/kernel.toml not found in modules"
-                );
+                crate::serial_println!("[limine] WARN: /initfs/kernel.toml not found in modules");
             }
 
             if init_base == 0 {
