@@ -60,7 +60,9 @@ fi
 
 # Create startup.nsh for OVMF auto-boot
 cat > /tmp/efi/startup.nsh << 'STARTUP_EOF'
-HD1b:\EFI\BOOT\BOOTX64.EFI
+FS0:
+cd EFI\BOOT
+BOOTX64.EFI
 STARTUP_EOF
 echo "  [OK] startup.nsh (auto-boot)"
 

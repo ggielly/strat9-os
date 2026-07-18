@@ -334,6 +334,22 @@ from the free list.
         (used_idx, self.last_used_idx)
     }
 
+    /// Peek at the next used buffer without consuming it.
+    ///
+    /// Returns (descriptor_index, length_written) but does NOT advance
+    /// `last_used_idx` or free descriptors.  The caller must call
+    /// `get_used` afterwards to actually consume the entry.
+    /// Returns `None` if the used ring is empty.
+    pub fn peek_used(&self) -> Option<(u16, u32)> {
+        let used_idx = unsafe { (*self.used_ptr).idx.load(Ordering::Acquire) };
+        if self.last_used_idx == used_idx {
+            return None;
+        }
+        let ring_idx = (self.last_used_idx % self.queue_size) as usize;
+        let elem = unsafe { read_volatile(self.used_ring_ptr.add(ring_idx)) };
+        Some((elem.id as u16, elem.len))
+    }
+
     /// Get the next used buffer
     ///
     /// Returns (descriptor_index, length_written)
@@ -352,12 +368,6 @@ from the free list.
 
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
-        // We do NOT free the descriptor here immediately, because the caller might need to read the data.
-        // But in the current design, the caller is responsible for freeing.
-        // Wait, the previous implementation freed it here.
-        // Let's stick to the previous pattern: free the chain, return the Head ID.
-        // The implementation assumes the caller is done with the *descriptors*,
-        // but the data is in the buffers pointed to by the descriptors.
         self.free_descriptor(elem.id as u16);
 
         Some((elem.id as u16, elem.len))
