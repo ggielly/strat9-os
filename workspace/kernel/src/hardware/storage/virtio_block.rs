@@ -159,10 +159,9 @@ impl BouncePool {
     unsafe fn allocate() -> Result<Self, BlockError> {
         let pages = (BOUNCE_POOL_SIZE + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let frame = crate::sync::with_irqs_disabled(|token| {
-            memory::allocate_phys_contiguous(token, order)
-        })
-        .map_err(|_| BlockError::NotReady)?;
+        let frame =
+            crate::sync::with_irqs_disabled(|token| memory::allocate_phys_contiguous(token, order))
+                .map_err(|_| BlockError::NotReady)?;
         Ok(Self { frame, order })
     }
 
@@ -237,8 +236,7 @@ unsafe impl Sync for VirtioBlockDevice {}
 static VIRTIO_BLK_WQ: crate::sync::WaitQueue = crate::sync::WaitQueue::new();
 
 /// Atomic flag set by the IRQ handler to signal request completion.
-static VIRTIO_BLK_DONE: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static VIRTIO_BLK_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Atomic flag set by the IRQ handler on error.
 static VIRTIO_BLK_ERROR: core::sync::atomic::AtomicBool =
@@ -253,8 +251,8 @@ impl VirtioBlockDevice {
         log::info!("VirtIO-blk: Initializing device at {:?}", pci_dev.address);
 
         // Pre-allocate DMA resources before touching the device.
-        let bounce_pool = BouncePool::allocate()?;
-        let meta_pool = MetaPool::allocate()?;
+        let bounce_pool = BouncePool::allocate().map_err(|_| "Failed to allocate bounce pool")?;
+        let meta_pool = MetaPool::allocate().map_err(|_| "Failed to allocate meta pool")?;
 
         // Create VirtIO device
         let device = VirtioDevice::new(pci_dev)?;
@@ -325,7 +323,11 @@ impl VirtioBlockDevice {
         // Read device block size if the feature was negotiated (offset 28).
         let blk_size = if has_blk_size {
             let sz = device.read_reg_u32(28);
-            if sz == 0 { SECTOR_SIZE as u32 } else { sz }
+            if sz == 0 {
+                SECTOR_SIZE as u32
+            } else {
+                sz
+            }
         } else {
             SECTOR_SIZE as u32
         };
@@ -414,7 +416,11 @@ impl VirtioBlockDevice {
         unsafe {
             ptr::write(
                 header_ptr,
-                BlockRequestHeader { request_type: request_type as u32, reserved: 0, sector },
+                BlockRequestHeader {
+                    request_type: request_type as u32,
+                    reserved: 0,
+                    sector,
+                },
             );
             ptr::write(status_ptr, 0xFF);
         }
@@ -424,11 +430,16 @@ impl VirtioBlockDevice {
         let mut dma_buf_virt: u64 = 0;
 
         let mut buffers = Vec::with_capacity(3);
-        buffers.push((meta_phys, mem::size_of::<BlockRequestHeader>() as u32, false));
+        buffers.push((
+            meta_phys,
+            mem::size_of::<BlockRequestHeader>() as u32,
+            false,
+        ));
 
         if let Some((buf, is_write)) = data_buf.as_mut() {
             let buf_size = buf.len();
-            let (dma_phys, dma_virt, alloc) = self.acquire_dma_buffer(buf_size, *is_write, Some(buf))?;
+            let (dma_phys, dma_virt, alloc) =
+                self.acquire_dma_buffer(buf_size, *is_write, Some(buf))?;
             data_alloc = alloc;
             dma_buf_virt = dma_virt;
 
@@ -492,7 +503,12 @@ impl VirtioBlockDevice {
                 spins = spins.saturating_add(1);
                 if spins >= 5_000_000 {
                     let isr = self.device.read_isr_status();
-                    log::error!("VirtIO-blk: timeout sector={} token={} isr={}", sector, token, isr);
+                    log::error!(
+                        "VirtIO-blk: timeout sector={} token={} isr={}",
+                        sector,
+                        token,
+                        isr
+                    );
                     self.release_dma_buffer(data_alloc);
                     return Err(BlockError::IoError);
                 }
@@ -506,7 +522,11 @@ impl VirtioBlockDevice {
         if let Some((buf, is_write)) = data_buf {
             if !*is_write && status_byte == BlockStatus::Ok as u8 {
                 unsafe {
-                    ptr::copy_nonoverlapping(dma_buf_virt as *const u8, buf.as_mut_ptr(), buf.len());
+                    ptr::copy_nonoverlapping(
+                        dma_buf_virt as *const u8,
+                        buf.as_mut_ptr(),
+                        buf.len(),
+                    );
                 }
             }
         }
