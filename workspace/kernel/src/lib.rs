@@ -32,6 +32,7 @@ pub mod async_io;
 pub mod dma;
 pub mod entropy;
 pub mod framebuffer;
+pub mod hal;
 pub mod hardware;
 pub mod ipc;
 pub mod kaslr;
@@ -45,10 +46,8 @@ pub mod syscall;
 pub mod trace;
 pub mod vfs;
 
-// Re-export boot::limine::kmain as the main entry point (x86_64 boot path).
-// On riscv64 the entry point comes from the SBI stub (arch/riscv64 boot).
-#[cfg(target_arch = "x86_64")]
-pub use boot::limine::kmain;
+// Re-export boot::uboot::kmain as the main entry point
+pub use boot::uboot::kmain;
 
 // serial_print! and serial_println! macros are #[macro_export]'ed
 // from arch::serial and available at crate root automatically.
@@ -298,57 +297,20 @@ fn boot_limine_module(_name: &str) -> Option<(u64, u64)> {
 }
 
 /// Performs the register boot initfs modules operation.
+///
+/// With U-Boot, modules are loaded from the FAT32 boot partition.
+/// This is a placeholder until Phase 4 (FAT32 module loader) is implemented.
 fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
-    let boot_test_pid = if initfs_base != 0 && initfs_size != 0 {
-        Some((initfs_base, initfs_size))
+    if initfs_base != 0 && initfs_size != 0 {
+        serial_println!(
+            "[init] Boot initrd found at {:#x} ({} bytes)",
+            initfs_base,
+            initfs_size
+        );
+        // TODO: Phase 4 - Parse CPIO/initrd from FAT32 and register modules
+        // For now, just log the info
     } else {
-        None
-    };
-    let initfs_modules = [
-        ("test_pid", boot_test_pid),
-        ("test_syscalls", boot_limine_module("test_syscalls_module")),
-        ("test_mem", boot_limine_module("test_mem_module")),
-        (
-            "test_mem_stressed",
-            boot_limine_module("test_mem_stressed_module"),
-        ),
-        (
-            "test_mem_region",
-            boot_limine_module("test_mem_region_module"),
-        ),
-        (
-            "test_mem_region_proc",
-            boot_limine_module("test_mem_region_proc_module"),
-        ),
-        ("test_exec", boot_limine_module("test_exec_module")),
-        (
-            "test_exec_helper",
-            boot_limine_module("test_exec_helper_module"),
-        ),
-        ("fs-ext4", boot_limine_module("fs_ext4_module")),
-        (
-            "strate-fs-ramfs",
-            boot_limine_module("strate_fs_ramfs_module"),
-        ),
-        ("init", boot_limine_module("init_module")),
-        ("console-admin", boot_limine_module("console_admin_module")),
-        ("strate-net", boot_limine_module("strate_net_module")),
-        ("strate-bus", boot_limine_module("strate_bus_module")),
-        ("bin/dhcp-client", boot_limine_module("dhcp_client_module")),
-        ("bin/ping", boot_limine_module("ping_module")),
-        ("bin/telnetd", boot_limine_module("telnetd_module")),
-        ("bin/udp-tool", boot_limine_module("udp_tool_module")),
-        ("bin/web-admin", boot_limine_module("web_admin_module")),
-        ("strate-wasm", boot_limine_module("strate_wasm_module")),
-        ("strate-webrtc", boot_limine_module("strate_webrtc_module")),
-        ("bin/hello.wasm", boot_limine_module("hello_wasm_module")),
-        (
-            "wasm-test.toml",
-            boot_limine_module("wasm_test_toml_module"),
-        ),
-    ];
-    for (path, module) in initfs_modules {
-        register_initfs_module(path, module);
+        serial_println!("[init] No boot initrd found, modules will be loaded from FAT32");
     }
 }
 
@@ -360,50 +322,11 @@ fn boot_module_slice(base: u64, size: u64) -> &'static [u8] {
 }
 
 /// Performs the log boot module magics operation.
+///
+/// With U-Boot, modules are loaded from FAT32. This is a placeholder.
 #[cfg(feature = "selftest")]
 fn log_boot_module_magics(stage: &str) {
-    let modules = [
-        ("init", boot_limine_module("init_module")),
-        ("console-admin", boot_limine_module("console_admin_module")),
-        ("strate-net", boot_limine_module("strate_net_module")),
-        ("strate-bus", boot_limine_module("strate_bus_module")),
-        ("bin/dhcp-client", boot_limine_module("dhcp_client_module")),
-        ("bin/ping", boot_limine_module("ping_module")),
-        ("bin/telnetd", boot_limine_module("telnetd_module")),
-        ("bin/udp-tool", boot_limine_module("udp_tool_module")),
-        ("bin/web-admin", boot_limine_module("web_admin_module")),
-        ("strate-wasm", boot_limine_module("strate_wasm_module")),
-        ("strate-webrtc", boot_limine_module("strate_webrtc_module")),
-        ("bin/hello.wasm", boot_limine_module("hello_wasm_module")),
-        (
-            "wasm-test.toml",
-            boot_limine_module("wasm_test_toml_module"),
-        ),
-    ];
-    for (name, module) in modules {
-        let Some((base, size)) = module else {
-            continue;
-        };
-        if size < 4 {
-            continue;
-        }
-        let ptr = memory::phys_to_virt(base) as *const u8;
-        let m0 = unsafe { core::ptr::read_volatile(ptr) };
-        let m1 = unsafe { core::ptr::read_volatile(ptr.add(1)) };
-        let m2 = unsafe { core::ptr::read_volatile(ptr.add(2)) };
-        let m3 = unsafe { core::ptr::read_volatile(ptr.add(3)) };
-        serial_println!(
-            "[init] Module magic [{}]: {} phys=0x{:x} magic={:02x}{:02x}{:02x}{:02x} size={}",
-            stage,
-            name,
-            base,
-            m0,
-            m1,
-            m2,
-            m3,
-            size
-        );
-    }
+    crate::serial_println!("[init] Module magic [{}]: (FAT32 module loader pending)", stage);
 }
 
 /// Performs the log boot module magics operation.
@@ -569,49 +492,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         *dst = *src;
     }
 
-    let reserve_modules = [
-        (
-            "test_pid",
-            if args.initfs_base != 0 && args.initfs_size != 0 {
-                Some((args.initfs_base, args.initfs_size))
-            } else {
-                None
-            },
-        ),
-        ("test_syscalls", boot_limine_module("test_syscalls_module")),
-        ("test_mem", boot_limine_module("test_mem_module")),
-        (
-            "test_mem_stressed",
-            boot_limine_module("test_mem_stressed_module"),
-        ),
-        ("fs-ext4", boot_limine_module("fs_ext4_module")),
-        (
-            "strate-fs-ramfs",
-            boot_limine_module("strate_fs_ramfs_module"),
-        ),
-        ("init", boot_limine_module("init_module")),
-        ("console-admin", boot_limine_module("console_admin_module")),
-        ("strate-net", boot_limine_module("strate_net_module")),
-        ("strate-bus", boot_limine_module("strate_bus_module")),
-        ("bin/dhcp-client", boot_limine_module("dhcp_client_module")),
-        ("bin/ping", boot_limine_module("ping_module")),
-        ("bin/telnetd", boot_limine_module("telnetd_module")),
-        ("bin/udp-tool", boot_limine_module("udp_tool_module")),
-        ("strate-wasm", boot_limine_module("strate_wasm_module")),
-        ("bin/hello.wasm", boot_limine_module("hello_wasm_module")),
-        (
-            "wasm-test.toml",
-            boot_limine_module("wasm_test_toml_module"),
-        ),
-    ];
-
+    // With U-Boot, modules are loaded from FAT32 boot partition.
+    // Protected ranges will be set up after module loading is implemented in Phase 4.
     let mut protected_ranges = [None; memory::boot_alloc::MAX_PROTECTED_RANGES];
-    for (idx, (_name, module)) in reserve_modules.iter().enumerate() {
-        if idx >= protected_ranges.len() {
-            break;
-        }
-        protected_ranges[idx] = *module;
-    }
     memory::boot_alloc::set_protected_ranges(&protected_ranges);
 
     // Initialize the boot allocator before manually carving the working memory
@@ -650,49 +533,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
     serial_println!("[init] Frame metadata ready.");
 
-    for (_name, module) in reserve_modules {
-        let Some((base, size)) = module else {
-            continue;
-        };
-        if size == 0 {
-            continue;
-        }
-        let phys = virt_or_phys_to_phys(base, hhdm);
-        let reserve_start = align_down(phys, PAGE_SIZE);
-        let reserve_end = align_up(phys.saturating_add(size), PAGE_SIZE);
-        let before_regions = count_free_like_regions(&mmap_work, mmap_work_len);
-        reserve_range_in_map(
-            &mut mmap_work,
-            &mut mmap_work_len,
-            reserve_start,
-            reserve_end,
-        );
-        let after_regions = count_free_like_regions(&mmap_work, mmap_work_len);
-        serial_println!(
-            "[init] reserve_range_in_map: {} phys=0x{:x}..0x{:x} free_regions {} -> {}",
-            _name,
-            reserve_start,
-            reserve_end,
-            before_regions,
-            after_regions
-        );
-        #[cfg(feature = "selftest")]
-        {
-            serial_println!(
-                "[init] Reserved module pages: {} phys=0x{:x}..0x{:x}",
-                _name,
-                reserve_start,
-                reserve_end
-            );
-            let kind = region_kind_for_addr(&mmap_work, mmap_work_len, reserve_start);
-            serial_println!(
-                "[init] Module map kind: {} @0x{:x} => {:?}",
-                _name,
-                reserve_start,
-                kind
-            );
-        }
-    }
+    // TODO: Phase 4 - Reserve module memory ranges when FAT32 loader is implemented
+    // For now, skip module reservation since we're using U-Boot + FAT32
 
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
 
@@ -1174,22 +1016,23 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         serial_println!("[init] Storage verification skipped (boot path)");
         vga_println!("[..] Storage verification skipped at boot");
 
-        // Launch the init process: prefer /initfs/init, fall back to /initfs/test_pid.
-        // The fallback is tried both when the primary module is absent AND when it
-        // is present but contains an invalid ELF (corrupt / wrong arch).
+        // Launch the init process from FAT32 boot partition.
+        // TODO: Phase 4 - Implement FAT32 module loading
         let mut init_loaded = false;
 
-        if let Some((base, size)) = boot_limine_module("init_module") {
-            let elf_data = boot_module_slice(base, size);
-            let init_caps = [crate::silo::create_silo_admin_capability()];
-            match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
-                Ok(task_id) => {
-                    init_task_id = Some(task_id);
-                    init_loaded = true;
-                    serial_println!("[init] ELF '/initfs/init' loaded as task 'init'.");
-                }
-                Err(e) => {
-                    serial_println!("[init] Failed to load init ELF: {}; trying fallback.", e);
+        // For now, try to load from VFS if available
+        if let Ok(fd) = vfs::open("/initfs/init", vfs::OpenFlags::READ) {
+            if let Ok(data) = vfs::read_all(fd) {
+                let init_caps = [crate::silo::create_silo_admin_capability()];
+                match process::elf::load_and_run_elf_with_caps(&data, "init", &init_caps) {
+                    Ok(task_id) => {
+                        init_task_id = Some(task_id);
+                        init_loaded = true;
+                        serial_println!("[init] ELF '/initfs/init' loaded as task 'init'.");
+                    }
+                    Err(e) => {
+                        serial_println!("[init] Failed to load init ELF: {}", e);
+                    }
                 }
             }
         }
@@ -1201,89 +1044,16 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 Ok(task_id) => {
                     init_task_id = Some(task_id);
                     serial_println!(
-                        "[init] ELF '/initfs/test_pid' loaded as task 'init' (fallback)."
+                        "[init] ELF loaded as task 'init' (from initrd)."
                     );
                 }
                 Err(e) => {
-                    serial_println!("[init] Failed to load test_pid ELF: {}", e);
+                    serial_println!("[init] Failed to load init ELF: {}", e);
                 }
             }
         }
-        if let Some((base, size)) = boot_limine_module("strate_fs_ramfs_module") {
-            let ram_data = boot_module_slice(base, size);
-            match process::elf::load_elf_task_with_caps(ram_data, "strate-fs-ramfs", &[]) {
-                Ok(task) => {
-                    let task_id = task.id;
-                    crate::serial_force_println!(
-                        "[trace][boot] before register_boot_strate_task tid={} label=ramfs-default",
-                        task_id.as_u64()
-                    );
-                    let reg_res = crate::silo::register_boot_strate_task(task_id, "ramfs-default");
-                    crate::serial_force_println!(
-                        "[trace][boot] marker: returned from register_boot_strate_task"
-                    );
-                    if let Err(e) = reg_res {
-                        crate::serial_force_println!(
-                            "[trace][boot] register_boot_strate_task failed tid={} err={:?}",
-                            task_id.as_u64(),
-                            e
-                        );
-                    } else {
-                        crate::serial_force_println!(
-                            "[trace][boot] register_boot_strate_task ok tid={}",
-                            task_id.as_u64()
-                        );
-                    }
-                    crate::serial_force_println!(
-                        "[trace][boot] before add_task tid={} name=strate-fs-ramfs",
-                        task_id.as_u64()
-                    );
-                    process::add_task(task);
-                    crate::serial_force_println!(
-                        "[trace][boot] after add_task tid={} name=strate-fs-ramfs",
-                        task_id.as_u64()
-                    );
-                    serial_println!("[init] Component 'strate-fs-ramfs' loaded.");
-                }
-                Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
-            }
-        }
-        if let Some((base, size)) = boot_limine_module("fs_ext4_module") {
-            let ext4_data = boot_module_slice(base, size);
-            match process::elf::load_elf_task_with_caps(ext4_data, "strate-fs-ext4", &[]) {
-                Ok(task) => {
-                    let task_id = task.id;
-                    crate::serial_force_println!(
-                        "[trace][boot] before register_boot_strate_task tid={} label=ext4-default",
-                        task_id.as_u64()
-                    );
-                    if let Err(e) = crate::silo::register_boot_strate_task(task_id, "ext4-default")
-                    {
-                        crate::serial_force_println!(
-                            "[trace][boot] register_boot_strate_task failed tid={} err={:?}",
-                            task_id.as_u64(),
-                            e
-                        );
-                    } else {
-                        crate::serial_force_println!(
-                            "[trace][boot] register_boot_strate_task ok tid={}",
-                            task_id.as_u64()
-                        );
-                    }
-                    crate::serial_force_println!(
-                        "[trace][boot] before add_task tid={} name=strate-fs-ext4",
-                        task_id.as_u64()
-                    );
-                    process::add_task(task);
-                    crate::serial_force_println!(
-                        "[trace][boot] after add_task tid={} name=strate-fs-ext4",
-                        task_id.as_u64()
-                    );
-                    serial_println!("[init] Component 'strate-fs-ext4' loaded.");
-                }
-                Err(e) => serial_println!("[init] Failed to load strate-fs-ext4 component: {}", e),
-            }
-        }
+        // TODO: Phase 4 - Load all modules from FAT32 boot partition
+        serial_println!("[init] FAT32 module loader pending (Phase 4)");
         if let (Some(task_id), Some(device)) =
             (init_task_id, hardware::storage::virtio_block::get_device())
         {

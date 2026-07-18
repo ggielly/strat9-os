@@ -1253,11 +1253,9 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_exec";
     shell_println!("Launching {} ...", path);
 
-    let boot_bytes = initfs_or_boot_module(path, crate::boot::limine_shim::test_exec_module());
-    let _ = initfs_or_boot_module(
-        "/initfs/test_exec_helper",
-        crate::boot::limine_shim::test_exec_helper_module(),
-    );
+    // With U-Boot, modules are loaded from FAT32 boot partition
+    // TODO: Phase 4 - Implement FAT32 module loading
+    let boot_bytes = vfs::get_initfs_file_bytes(path);
 
     if let Some(data) = boot_bytes {
         shell_println!("ELF size: {} bytes", data.len());
@@ -1277,11 +1275,9 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
         Ok(fd) => fd,
         Err(e) => {
             shell_println!("open failed: {:?}", e);
-            if crate::boot::limine_shim::test_exec_module().is_none() {
-                shell_println!(
-                    "test_exec boot module missing from current image; rebuild the userspace image so /initfs/test_exec is copied"
-                );
-            }
+            shell_println!(
+                "test_exec not found; ensure it's in the FAT32 boot partition"
+            );
             return Err(ShellError::ExecutionFailed);
         }
     };

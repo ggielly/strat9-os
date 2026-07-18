@@ -1,20 +1,12 @@
 /* Strat9-OS Kernel Linker Script */
-/* x86_64 higher-half kernel with Limine boot protocol support */
+/* x86_64 higher-half kernel with U-Boot boot protocol support */
 
-ENTRY(kmain)
+ENTRY(_start)
 
 SECTIONS
 {
-    /* Kernel loaded at 1 MiB by bootloader */
-    . = 1M;
-
-    /* Limine requests (must be in writable section) */
-    .requests : ALIGN(8)
-    {
-        KEEP(*(.requests_start_marker))
-        KEEP(*(.requests))
-        KEEP(*(.requests_end_marker))
-    }
+    /* Kernel loaded at -2GB (higher half) */
+    . = 0xFFFFFFFF80000000;
 
     /* 64-bit boot code */
     .boot.text : ALIGN(4K)
@@ -38,6 +30,11 @@ SECTIONS
     .data : ALIGN(4K)
     {
         *(.data .data.*)
+
+        /* Component initialization entries */
+        __start_component_entries = .;
+        KEEP(*(.component_entries))
+        __stop_component_entries = .;
     }
 
     /* Uninitialized data (zero-filled) */
@@ -54,6 +51,16 @@ SECTIONS
     {
         *(.eh_frame)
         *(.note .note.*)
-        *(.multiboot_header)
+        *(.comment)
+        *(.got)
+        *(.got.*)
+        *(.plt)
+        *(.plt.*)
+        *(.debug*)
+        *(.zdebug*)
+        *(.ARM.exidx)
+        *(.ARM.extab)
+        *(.symtab)
+        *(.strtab)
     }
 }

@@ -61,7 +61,7 @@ build-os-release:
         - rustup target add x86_64-unknown-none
         - if ! command -v cargo-make &> /dev/null; then cargo install cargo-make; fi
     script:
-        - cargo make limine-image-release
+        - cargo make uboot-image-release
     artifacts:
         paths:
             - build/strat9-os.iso
