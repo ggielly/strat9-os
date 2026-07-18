@@ -172,34 +172,46 @@ pub fn num_timers() -> u8 {
     }
 }
 
-/// High-precision delay in microseconds
+/// High-precision delay in microseconds.
+///
+/// Reads `mmio_base` and `period_ns` once (single lock acquisition), then
+/// spins on the HPET main counter with direct volatile reads — no further
+/// lock traffic in the hot loop.
 pub fn delay_us(us: u64) {
     if !is_available() {
-        // Fallback to busy wait
-        for _ in 0..(us * 100) {
+        // Fallback: no HPET, spin roughly (no accurate base).
+        let iters = us.saturating_mul(100);
+        for _ in 0..iters {
             core::hint::spin_loop();
         }
         return;
     }
 
-    let period_ns = tick_period_ns() as u64;
-    if period_ns == 0 {
-        return;
-    }
-    let start = read_counter();
+    // Snapshot the values we need under a single lock acquisition.
+    let (mmio_base, period_ns) = {
+        let info = HPET_INFO.lock();
+        match *info {
+            Some(ref h) if h.tick_period_ns > 0 => (h.mmio_base, h.tick_period_ns as u64),
+            _ => return,
+        }
+    };
+
     let ticks_needed = if us == 0 {
         0
     } else {
         core::cmp::max(1, (us.saturating_mul(1000)) / period_ns)
     };
-    while read_counter().wrapping_sub(start) < ticks_needed {
+
+    // Direct volatile read — no Mutex involved.
+    let start = unsafe { hpet_read(mmio_base, HPET_MAIN_COUNTER) };
+    while unsafe { hpet_read(mmio_base, HPET_MAIN_COUNTER) }.wrapping_sub(start) < ticks_needed {
         core::hint::spin_loop();
     }
 }
 
 /// High-precision delay in milliseconds
 pub fn delay_ms(ms: u64) {
-    delay_us(ms * 1000);
+    delay_us(ms.saturating_mul(1000));
 }
 
 /// Get elapsed time since boot in milliseconds
