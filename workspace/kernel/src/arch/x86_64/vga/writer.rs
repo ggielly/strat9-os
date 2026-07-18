@@ -2341,12 +2341,12 @@ impl VgaWriter {
     /// call it again here — that would clear the dirty rects before present().
     pub(crate) fn flush_display(&mut self) {
         self.draw_scrollbar_inner();
-        // Save and restore the viewport render state without clearing dirty rects.
-        let prev_draw = self.can().draw_to_back;
-        let prev_track = self.can().track_dirty;
+        // Force back-buffer mode and dirty tracking for the present cycle.
+        // We do NOT restore prev_draw/prev_track because the caller
+        // (write_bytes) expects dirty rects to survive into the next write.
         self.canm().draw_to_back = true;
         self.canm().track_dirty = true;
-        self.end_viewport_render(prev_draw, prev_track);
+        self.end_viewport_render(true, true);
     }
 
     // =============================================================
