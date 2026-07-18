@@ -146,6 +146,10 @@ static HELLO_WASM_MODULE: InternalModule =
 static WASM_TEST_TOML_MODULE: InternalModule =
     InternalModule::new().with_path(c"/initfs/wasm-test.toml");
 
+/// Internal module: request Limine to load /initfs/kernel.toml (kernel configuration)
+static KERNEL_TOML_MODULE: InternalModule =
+    InternalModule::new().with_path(c"/initfs/kernel.toml");
+
 /// Request modules (files loaded alongside the kernel)
 #[used]
 #[link_section = ".requests"]
@@ -173,6 +177,7 @@ static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
     &STRATE_WEBRTC_MODULE,
     &HELLO_WASM_MODULE,
     &WASM_TEST_TOML_MODULE,
+    &KERNEL_TOML_MODULE,
 ]);
 
 /// Optional fs-ext4 module info (set during Limine entry).
@@ -220,6 +225,8 @@ static mut STRATE_WEBRTC_ELF_MODULE: Option<(u64, u64)> = None;
 static mut HELLO_WASM_FILE_MODULE: Option<(u64, u64)> = None;
 /// Optional wasm-test.toml module info (set during Limine entry).
 static mut WASM_TEST_TOML_FILE_MODULE: Option<(u64, u64)> = None;
+/// Optional kernel.toml module info (set during Limine entry).
+static mut KERNEL_TOML_FILE_MODULE: Option<(u64, u64)> = None;
 
 const MAX_BOOT_MEMORY_REGIONS: usize = 256;
 static mut BOOT_MEMORY_MAP: [super::entry::MemoryRegion; MAX_BOOT_MEMORY_REGIONS] =
@@ -362,6 +369,12 @@ pub fn wasm_test_toml_module() -> Option<(u64, u64)> {
     unsafe { WASM_TEST_TOML_FILE_MODULE }
 }
 
+/// Return the kernel.toml module (addr, size) if present.
+pub fn kernel_toml_module() -> Option<(u64, u64)> {
+    // SAFETY: Written once during early boot, then read-only.
+    unsafe { KERNEL_TOML_FILE_MODULE }
+}
+
 /// Performs the path matches operation.
 fn path_matches(module_path: &[u8], expected_path: &[u8]) -> bool {
     let expected_no_leading = expected_path.strip_prefix(b"/").unwrap_or(expected_path);
@@ -407,6 +420,7 @@ struct ResolvedModules {
     strate_webrtc: Option<(u64, u64)>,
     hello_wasm: Option<(u64, u64)>,
     wasm_test_toml: Option<(u64, u64)>,
+    kernel_toml: Option<(u64, u64)>,
 }
 
 /// Performs the resolve modules once operation.
@@ -464,6 +478,8 @@ fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> Re
             resolved.hello_wasm = Some(info);
         } else if path_matches(path, b"/initfs/wasm-test.toml") {
             resolved.wasm_test_toml = Some(info);
+        } else if path_matches(path, b"/initfs/kernel.toml") {
+            resolved.kernel_toml = Some(info);
         }
     }
     resolved
@@ -892,6 +908,18 @@ pub unsafe extern "C" fn kmain() -> ! {
             } else {
                 crate::serial_println!(
                     "[limine] WARN: /initfs/wasm-test.toml not found in modules"
+                );
+            }
+            if let Some((base, size)) = resolved.kernel_toml {
+                unsafe { KERNEL_TOML_FILE_MODULE = Some((base, size)) };
+                crate::serial_println!(
+                    "[limine] /initfs/kernel.toml found: base={:#x} size={}",
+                    base,
+                    size
+                );
+            } else {
+                crate::serial_println!(
+                    "[limine] WARN: /initfs/kernel.toml not found in modules"
                 );
             }
 

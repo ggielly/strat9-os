@@ -452,15 +452,14 @@ pub extern "C" fn status_line_task_main() -> ! {
     let mut diag_counter = 0u64;
     loop {
         let tick = crate::process::scheduler::ticks();
-        if tick != last_tick {
+        // In quiet mode, skip all rendering and heartbeat output.
+        if !crate::debug_cfg::is_quiet() && tick != last_tick {
             last_tick = tick;
             maybe_refresh_system_status_line(UiTheme::OCEAN_STATUS);
-            // Flush any pending log lines from the lock-free circular buffer
-            // to the framebuffer.  This runs on every timer tick (~10 ms).
             crate::arch::x86_64::vgabuf::vgabuf_flush_to_framebuffer();
         }
         diag_counter += 1;
-        if diag_counter % 5000 == 0 {
+        if !crate::debug_cfg::is_quiet() && diag_counter % 5000 == 0 {
             crate::serial_println!(
                 "[status-line] heartbeat tick={} vga={}",
                 tick,
