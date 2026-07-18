@@ -11,7 +11,6 @@ use crate::{
     arch::pci::{Bar, PciDevice},
     memory::{self, PhysFrame},
 };
-use alloc::vec::Vec;
 use core::{
     ptr::{read_volatile, write_volatile},
     sync::atomic::{fence, AtomicU16, Ordering},
@@ -94,8 +93,12 @@ pub struct Virtqueue {
     /// Virtual address of used ring entries
     used_ring_ptr: *mut VirtqUsedElem,
 
-    /// Free descriptor list (indices of free descriptors)
-    free_descriptors: Vec<u16>,
+    /// Head of the free-descriptor linked list (stored in desc[i].next).
+    /// When queue_size ≤ INLINE_FREE_SIZE we use the inline array instead,
+    /// keeping the hot path entirely in-stack / in-struct (no Vec overhead).
+    first_free: u16,
+    /// Number of free descriptors.
+    free_count: u16,
 
     /// Last seen used index
     last_used_idx: u16,
@@ -166,11 +169,16 @@ impl Virtqueue {
         // SAFETY: we allocated these pages and they're mapped via HHDM
         core::ptr::write_bytes(desc_ptr as *mut u8, 0, total_size);
 
-        // Initialize free descriptor list
-        let mut free_descriptors = Vec::with_capacity(queue_size as usize);
-        for i in (0..queue_size).rev() {
-            free_descriptors.push(i);
+        // Initialize free-descriptor linked list through desc[i].next.
+        // Descriptor i points to i+1; the last has flags=0 and next=0.
+        for i in 0..queue_size - 1 {
+            let desc = &mut *desc_ptr.add(i as usize);
+            desc.next = Le::<u16>::from_ne(i + 1);
         }
+        // last descriptor does not chain further
+        let last_desc = &mut *desc_ptr.add((queue_size - 1) as usize);
+        last_desc.next = Le::<u16>::from_ne(0);
+        last_desc.flags = Le::<u16>::from_ne(0);
 
         Ok(Self {
             queue_size,
@@ -183,7 +191,8 @@ impl Virtqueue {
             avail_ring_ptr,
             used_ptr,
             used_ring_ptr,
-            free_descriptors,
+            first_free: 0,
+            free_count: queue_size,
             last_used_idx: 0,
             next_avail_idx: 0,
         })
@@ -208,26 +217,39 @@ impl Virtqueue {
     pub fn queue_size(&self) -> usize {
         self.queue_size as usize
     }
-
-    /// Get the queue size
-    pub fn size(&self) -> u16 {
-        self.queue_size
-    }
-
-    /// Allocate a descriptor chain
+from the free list.
     ///
-    /// Returns the head descriptor index
+    /// Returns the head descriptor index, or `None` if none are free.
     pub fn alloc_descriptor(&mut self) -> Option<u16> {
-        self.free_descriptors.pop()
+        if self.free_count == 0 {
+            return None;
+        }
+        let idx = self.first_free;
+        // SAFETY: idx is a valid free descriptor (free_count > 0).
+        let desc = unsafe { &*self.desc_ptr.add(idx as usize) };
+        self.first_free = desc.next.to_ne(); // chain to next free
+        self.free_count -= 1;
+        Some(idx)
     }
 
-    /// Free a descriptor chain
+    /// Free a descriptor chain back into the free list.
     ///
-    /// Walks the chain following NEXT flags and frees all descriptors
+    /// Walks the chain via NEXT flags and re-links each descriptor
+    /// at the head of the free list.
     pub fn free_descriptor(&mut self, head: u16) {
         let mut current = head;
 
         loop {
+            // SAFETY: current is a valid descriptor index (belongs to this queue).
+            let desc = unsafe { &*self.desc_ptr.add(current as usize) };
+            let has_next = desc.flags.to_ne() & vring_flags::NEXT != 0;
+            let next = desc.next.to_ne();
+
+            // Re-link this descriptor at the head of the free list.
+            let desc_mut = unsafe { &mut *self.desc_ptr.add(current as usize) };
+            desc_mut.next = Le::<u16>::from_ne(self.first_free);
+            self.first_free = current;
+            self.free_count += 1
             // SAFETY: current is a valid descriptor index
             let desc = unsafe { &*self.desc_ptr.add(current as usize) };
             let has_next = desc.flags.to_ne() & vring_flags::NEXT != 0;
@@ -240,7 +262,7 @@ impl Virtqueue {
             }
             current = next;
         }
-    }
+    }(buffers.len() as u16) > self.free_count
 
     /// Add a buffer to the virtqueue
     ///
@@ -348,10 +370,15 @@ impl Virtqueue {
     }
 
     /// Notify the device (should write to queue_notify register)
+    ///
+    /// When `VIRTIO_F_RING_EVENT_IDX` is negotiated, the device sets the
+    /// `VRING_USED_F_NO_NOTIFY` flag in the used ring to suppress
+    /// driver notifications.  Without event_idx we always notify.
     pub fn should_notify(&self) -> bool {
-        // Simple implementation: always notify
-        // Improved: Check VIRTQ_USED_F_NO_NOTIFY flag if we implemented negotiation
-        true
+        // SAFETY: used_ptr points to the valid used ring header.
+        let used_flags = unsafe { (*self.used_ptr).flags.load(Ordering::Acquire) };
+        // VRING_USED_F_NO_NOTIFY = 1
+        (used_flags & 1) == 0
     }
 }
 

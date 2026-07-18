@@ -1039,12 +1039,58 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Flags/signature checks (verification is TODO).
+    // Flags/signature checks (Ed25519 cryptographic verification).
     if header.flags & MODULE_FLAG_SIGNED != 0 {
-        let sig_nonzero = header.signature.iter().any(|b| *b != 0);
-        let key_nonzero = header.key_id.iter().any(|b| *b != 0);
-        if !sig_nonzero || !key_nonzero {
-            return Err(SyscallError::PermissionDenied);
+        // Offsets for key_id and signature in the packed header:
+        //   magic:              0  (4 bytes)
+        //   version:            4  (2 bytes)
+        //   cpu_arch:           6  (1 byte)
+        //   flags:              7  (4 bytes)
+        //   code_offset:       11  (8 bytes)
+        //   code_size:         19  (8 bytes)
+        //   data_offset:       27  (8 bytes)
+        //   data_size:         35  (8 bytes)
+        //   bss_size:          43  (8 bytes)
+        //   entry_point:       51  (8 bytes)
+        //   export_table:      59  (8 bytes)
+        //   import_table:      67  (8 bytes)
+        //   relocation_table:  75  (8 bytes)
+        //   key_id:            83  (8 bytes)
+        //   signature:         91  (64 bytes)
+        const KEY_ID_OFFSET: usize = 83;
+        const SIG_OFFSET: usize = 91;
+
+        // Create a copy of the data with the signature field zeroed for verification.
+        // The signed payload is the entire module with signature = 0.
+        let mut payload = data.to_vec();
+        let sig_end = SIG_OFFSET + crate::crypto::ED25519_SIGNATURE_SIZE;
+        if sig_end <= payload.len() {
+            payload[SIG_OFFSET..sig_end].fill(0);
+        }
+
+        let result = crate::crypto::verify_cmod_signature(
+            data,
+            KEY_ID_OFFSET,
+            SIG_OFFSET,
+            &payload,
+        );
+
+        match result {
+            crate::crypto::VerifyResult::Valid => {
+                log::info!("[cmod] module signature verified (Ed25519)");
+            }
+            crate::crypto::VerifyResult::Unsigned => {
+                log::warn!("[cmod] module is unsigned (MODULE_FLAG_SIGNED set but signature is zero)");
+                return Err(SyscallError::PermissionDenied);
+            }
+            crate::crypto::VerifyResult::KeyNotFound => {
+                log::warn!("[cmod] no trusted key found for key_id {:02x?}", header.key_id);
+                return Err(SyscallError::PermissionDenied);
+            }
+            crate::crypto::VerifyResult::InvalidSignature => {
+                log::warn!("[cmod] Ed25519 signature verification FAILED");
+                return Err(SyscallError::PermissionDenied);
+            }
         }
     }
     if header.flags & MODULE_FLAG_KERNEL != 0 {

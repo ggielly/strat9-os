@@ -1200,7 +1200,9 @@ impl BlockDevice for AhciController {
 
 // ========== Global singleton + public API ============================================================================================================================================
 
-static AHCI: SpinLock<Option<Box<AhciController>>> = SpinLock::new(None);
+/// Leaked-Box pointer to the AHCI controller (valid for 'static).
+static AHCI_PTR: core::sync::atomic::AtomicPtr<AhciController> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// Scan the PCI bus for an AHCI controller and initialise it.
 ///
@@ -1210,7 +1212,8 @@ pub fn init() {
 
     match unsafe { AhciController::init() } {
         Ok(ctrl) => {
-            *AHCI.lock() = Some(Box::new(ctrl));
+            let leaked: &'static mut AhciController = Box::leak(Box::new(ctrl));
+            AHCI_PTR.store(leaked as *mut AhciController, Ordering::Release);
             log::info!("AHCI: controller ready");
 
             // Register IRQ handler in the IDT now that the controller is live.
@@ -1228,12 +1231,11 @@ pub fn init() {
 
 /// Return a reference to the first usable AHCI controller, if any.
 pub fn get_device() -> Option<&'static AhciController> {
-    // SAFETY: the global Option is only ever set during init and never cleared
-    unsafe {
-        let lock = AHCI.lock();
-        lock.as_ref().map(|b| {
-            let ptr = b.as_ref() as *const AhciController;
-            &*ptr
-        })
+    let ptr = AHCI_PTR.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        // SAFETY: ptr was obtained from Box::leak, valid for 'static.
+        Some(unsafe { &*ptr })
     }
 }

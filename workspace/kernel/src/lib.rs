@@ -25,6 +25,7 @@ pub mod audit;
 pub mod boot;
 pub mod capability;
 pub mod components;
+pub mod crypto;
 pub mod debug;
 pub mod debug_cfg;
 
@@ -389,6 +390,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     // Initialize KASLR offsets (requires entropy pool to be seeded).
     crate::kaslr::init();
+
+    // Initialize crypto subsystem (trusted keys for module verification).
+    crate::crypto::init();
 
     // Puts default panic hooks early to ensure
     //we get useful info on any panics during init.

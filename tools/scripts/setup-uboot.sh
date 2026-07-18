@@ -25,14 +25,7 @@ case "$ARCH" in
     x86_64|x86)
         # x86_64: U-Boot as EFI app, loaded by OVMF
         echo "Building U-Boot for x86_64 (EFI app)..."
-        make qemu-x86_64_defconfig
-        
-        # Enable EFI boot support (for loading as EFI app)
-        scripts/config --enable CONFIG_EFI_LOADER
-        scripts/config --enable CONFIG_CMD_BOOTEFI
-        scripts/config --enable CONFIG_EFI_BINARY_EXEC
-        scripts/config --enable CONFIG_EFI_GET_TIME
-        scripts/config --enable CONFIG_EFI_HAVE_RUNTIME_RESET
+        make efi-x86_app64_defconfig
         
         # Enable FAT filesystem for boot partition
         scripts/config --enable CONFIG_FS_FAT

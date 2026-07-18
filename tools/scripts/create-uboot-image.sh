@@ -50,10 +50,19 @@ cp "$KERNEL_ELF" /tmp/efi/boot/kernel.elf
 echo "  [OK] kernel.elf"
 
 # Copy U-Boot as EFI application (for real hardware)
-if [ -f "$BUILD_DIR/uboot/u-boot" ]; then
+if [ -f "$BUILD_DIR/uboot/u-boot-app.efi" ]; then
+    cp "$BUILD_DIR/uboot/u-boot-app.efi" /tmp/efi/EFI/BOOT/BOOTX64.EFI
+    echo "  [OK] U-Boot EFI app (BOOTX64.EFI)"
+elif [ -f "$BUILD_DIR/uboot/u-boot" ]; then
     cp "$BUILD_DIR/uboot/u-boot" /tmp/efi/EFI/BOOT/BOOTX64.EFI
-    echo "  [OK] U-Boot EFI app"
+    echo "  [OK] U-Boot (fallback ELF)"
 fi
+
+# Create startup.nsh for OVMF auto-boot
+cat > /tmp/efi/startup.nsh << 'STARTUP_EOF'
+HD1b:\EFI\BOOT\BOOTX64.EFI
+STARTUP_EOF
+echo "  [OK] startup.nsh (auto-boot)"
 
 # Copy userspace modules
 TARGET_DIR="target/x86_64-unknown-none/${PROFILE}"
