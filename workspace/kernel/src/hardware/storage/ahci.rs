@@ -1080,7 +1080,7 @@ impl AhciController {
 
         log::info!("AHCI: global interrupts enabled (IRQ line {})", irq_line);
 
-        Ok(AhciController { abar_virt, ports })
+        Ok(AhciController { abar_virt, ports, dma_pool: None })
     }
 
     /// Return sector count of the first port.
@@ -1119,6 +1119,7 @@ mod tests {
         let controller = AhciController {
             abar_virt: 0,
             ports: vec![fake_port(2), fake_port(5), fake_port(7)],
+            dma_pool: None,
         };
 
         assert_eq!(controller.port_by_num(5).map(|port| port.port_num), Some(5));
