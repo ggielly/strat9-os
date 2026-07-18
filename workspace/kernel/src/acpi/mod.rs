@@ -19,6 +19,7 @@
 pub mod bgrt;
 pub mod dmar;
 pub mod fadt;
+pub mod ivrs;
 pub mod hpet;
 pub mod madt;
 pub mod mcfg;
@@ -91,6 +92,11 @@ pub fn rsdp_address() -> u64 {
 /// Get BGRT table (boot graphics)
 pub fn get_bgrt() -> Option<&'static bgrt::Bgrt> {
     bgrt::Bgrt::get()
+}
+
+/// Get IVRS table (AMD IOMMU)
+pub fn get_ivrs() -> Option<ivrs::Ivrs> {
+    ivrs::Ivrs::get()
 }
 
 /// Get SLIT table (NUMA distances)

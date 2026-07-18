@@ -15,7 +15,7 @@ use crate::{
     sync::SpinLock,
 };
 use alloc::{boxed::Box, vec::Vec};
-use core::{mem, ptr};
+use core::{mem, ptr, sync::atomic::Ordering};
 
 /// Block device sector size
 pub const SECTOR_SIZE: usize = 512;
@@ -490,14 +490,17 @@ impl VirtioBlockDevice {
             // Boot / no-task context: busy-poll.
             let mut spins = 0u32;
             loop {
-                let mut q = self.queue.lock();
+                let q = self.queue.lock();
                 if q.has_used() {
-                    while let Some((t, _)) = q.get_used() {
+                    if let Some((t, _)) = q.peek_used() {
                         if t == token {
+                            drop(q);
+                            let mut q = self.queue.lock();
+                            q.get_used();
                             break;
                         }
                     }
-                    break;
+                    // Used entry exists but not ours — drop lock and retry.
                 }
                 drop(q);
                 spins = spins.saturating_add(1);
@@ -520,7 +523,7 @@ impl VirtioBlockDevice {
         let status_byte = unsafe { ptr::read(status_ptr) };
 
         if let Some((buf, is_write)) = data_buf {
-            if !*is_write && status_byte == BlockStatus::Ok as u8 {
+            if !is_write && status_byte == BlockStatus::Ok as u8 {
                 unsafe {
                     ptr::copy_nonoverlapping(
                         dma_buf_virt as *const u8,
