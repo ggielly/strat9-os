@@ -700,7 +700,7 @@ fn apply_relr_relocations(
                 }
             }
             where_addr = where_addr
-                .checked_add(63 * 8)
+                .checked_add(64 * 8)
                 .ok_or("DT_RELR where advance overflow")?;
         }
     }
