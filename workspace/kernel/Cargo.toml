@@ -46,16 +46,8 @@ intel-ethernet = { path = "../drivers/nic/intel-ethernet" }
 e1000 = { path = "../drivers/nic/e1000" }
 driver-net-proto = { path = "../drivers/nic/driver-net-proto" }
 ratatui = { version = "0.30.0", default-features = false }
-
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-# x86-only crates: the `x86_64` crate gates most of its API on
-# target_arch = "x86_64" and its `instructions` feature; keeping them here
-# lets the riscv64 build resolve without them.
-x86_64 = "0.15"
-raw-cpuid = "11.0.1"
-uart_16550 = "0.4"
-limine = "0.6.5"
-
+vfat-rs = { version = "0.1.1", default-features = false }
+###
 [build-dependencies]
 cc = "1.0"
 nasm-rs = "0.3.2"

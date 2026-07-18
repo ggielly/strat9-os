@@ -274,7 +274,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -kernel build/uboot/u-boot \
+    -bios /usr/share/ovmf/OVMF.fd \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -device virtio-gpu-gl \
     -display sdl,gl=on \
@@ -298,7 +298,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -kernel build/uboot/u-boot \
+    -bios /usr/share/ovmf/OVMF.fd \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -device virtio-gpu-gl \
     -display sdl,gl=on \
@@ -322,7 +322,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -kernel build/uboot/u-boot \
+    -bios /usr/share/ovmf/OVMF.fd \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -nographic \
     -no-reboot
@@ -338,7 +338,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -kernel build/uboot/u-boot \
+    -bios /usr/share/ovmf/OVMF.fd \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -display none \
     -serial stdio \
@@ -355,7 +355,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -kernel build/uboot/u-boot \
+    -bios /usr/share/ovmf/OVMF.fd \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -device e1000,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
@@ -373,7 +373,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -kernel build/uboot/u-boot \
+    -bios /usr/share/ovmf/OVMF.fd \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -device e1000,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
@@ -411,7 +411,7 @@ timeout 30 ${QEMU} \
     -cpu qemu64 \
     -smp 1 \
     -m 1G \
-    -kernel build/uboot/u-boot \
+    -bios /usr/share/ovmf/OVMF.fd \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -nographic \
     -no-reboot 2>&1 | head -50

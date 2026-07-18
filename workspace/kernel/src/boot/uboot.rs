@@ -34,9 +34,10 @@ fn hlt_loop() -> ! {
     }
 }
 
-/// Kernel entry point called by U-Boot.
+/// Kernel entry point called by U-Boot or PVH boot.
 ///
-/// Convention: rdi = DTB physical address
+/// For U-Boot: rdi = DTB physical address
+/// For PVH: rdi = 0 (no DTB provided)
 ///
 /// U-Boot guarantees:
 /// - We're in 64-bit long mode (x86_64)
@@ -44,6 +45,13 @@ fn hlt_loop() -> ! {
 /// - Interrupts are disabled
 /// - Stack is set up
 /// - DTB address is passed in rdi
+///
+/// PVH boot guarantees:
+/// - We're in 64-bit long mode (x86_64)
+/// - Identity mapping is set up
+/// - Interrupts are disabled
+/// - No stack (must set up our own)
+/// - No DTB (rdi = 0)
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub unsafe extern "C" fn kmain(dtb_ptr: u64) -> ! {
@@ -53,45 +61,82 @@ pub unsafe extern "C" fn kmain(dtb_ptr: u64) -> ! {
         early_port.init();
         let _ = core::fmt::Write::write_str(
             &mut early_port,
-            "[kmain] *** Strat9-OS kernel entry (U-Boot) ***\r\n",
+            "[kmain] *** Strat9-OS kernel entry ***\r\n",
         );
     }
 
-    // Validate DTB pointer
+    // Determine boot method from DTB pointer
     if dtb_ptr == 0 {
-        serial_println!("[kmain] ERROR: No DTB provided. System will hang.");
-        hlt_loop();
-    }
+        serial_println!("[kmain] PVH boot (no DTB)");
+        serial_println!("[kmain] Initializing without Device Tree...");
 
-    serial_println!("[kmain] DTB at {:#x}", dtb_ptr);
+        // PVH boot: no DTB, no modules, minimal init
+        // Build a minimal KernelArgs with defaults
+        let args = super::entry::KernelArgs {
+            magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
+            abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
+            kernel_base: 0,
+            kernel_size: 0,
+            stack_base: 0x80000,
+            stack_size: 0x10000,
+            env_base: 0,
+            env_size: 0,
+            acpi_rsdp_base: 0,
+            acpi_rsdp_size: 0,
+            memory_map_base: 0,
+            memory_map_size: 0,
+            initfs_base: 0,
+            initfs_size: 0,
+            framebuffer_addr: 0,
+            framebuffer_width: 0,
+            framebuffer_height: 0,
+            framebuffer_stride: 0,
+            framebuffer_bpp: 0,
+            framebuffer_red_mask_size: 8,
+            framebuffer_red_mask_shift: 16,
+            framebuffer_green_mask_size: 8,
+            framebuffer_green_mask_shift: 8,
+            framebuffer_blue_mask_size: 8,
+            framebuffer_blue_mask_shift: 0,
+            _padding1: [0; 4],
+            hhdm_offset: 0,
+            cmdline_ptr: 0,
+            cmdline_len: 0,
+        };
 
-    // Parse DTB and build KernelArgs
-    let args = fdt::build_kernel_args_from_dtb(dtb_ptr);
+        serial_println!("[kmain] Calling kernel_main with minimal args...");
+        crate::kernel_main(&args as *const _);
+    } else {
+        serial_println!("[kmain] U-Boot/DTB boot (dtb={:#x})", dtb_ptr);
 
-    // Validate magic
-    if args.magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
+        // Parse DTB and build KernelArgs
+        let args = fdt::build_kernel_args_from_dtb(dtb_ptr);
+
+        // Validate magic
+        if args.magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
+            serial_println!(
+                "[kmain] ERROR: Bad KernelArgs magic: 0x{:08x}",
+                args.magic
+            );
+            hlt_loop();
+        }
+
         serial_println!(
-            "[kmain] ERROR: Bad KernelArgs magic: 0x{:08x}",
-            args.magic
+            "[kmain] KernelArgs built: memory_map={:#x}/{:#x} fb={:#x} rsdp={:#x}",
+            args.memory_map_base,
+            args.memory_map_size,
+            args.framebuffer_addr,
+            args.acpi_rsdp_base,
         );
-        hlt_loop();
+
+        // TODO: Phase 4 - Load modules from FAT32 boot partition
+        // let block_dev = init_block_device_from_dtb(dtb_ptr);
+        // load_modules_from_fat32(&block_dev);
+
+        // TODO: Phase 5 - Apply kernel.toml from FAT32
+        // apply_kernel_config_from_fs(&block_dev);
+
+        // Call kernel main
+        crate::kernel_main(&args as *const _);
     }
-
-    serial_println!(
-        "[kmain] KernelArgs built: memory_map={:#x}/{:#x} fb={:#x} rsdp={:#x}",
-        args.memory_map_base,
-        args.memory_map_size,
-        args.framebuffer_addr,
-        args.acpi_rsdp_base,
-    );
-
-    // TODO: Phase 4 - Load modules from FAT32 boot partition
-    // let block_dev = init_block_device_from_dtb(dtb_ptr);
-    // load_modules_from_fat32(&block_dev);
-
-    // TODO: Phase 5 - Apply kernel.toml from FAT32
-    // apply_kernel_config_from_fs(&block_dev);
-
-    // Call kernel main
-    crate::kernel_main(&args as *const _);
 }

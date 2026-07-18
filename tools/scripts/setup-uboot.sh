@@ -1,119 +1,92 @@
 #!/bin/bash
-
-# Script to download and build U-Boot bootloader
-# Supports x86_64, riscv64, and aarch64
-#
-# Usage:
-#   ./setup-uboot.sh [arch]           - build only if u-boot.bin is missing
-#   ./setup-uboot.sh --force [arch]   - always rebuild
-#   ./setup-uboot.sh --update [arch]  - git pull then rebuild only if needed
+# Setup U-Boot for Strat9-OS
+# For x86_64: builds U-Boot as EFI application (loaded by OVMF)
+# For aarch64/riscv64: builds U-Boot as firmware
 
 set -e
 
 BUILD_DIR="build"
 UBOOT_DIR="$BUILD_DIR/uboot"
-UBOOT_VERSION="v2026.07"
-FORCE=0
-UPDATE=0
+ARCH="${1:-x86_64}"
 
-# Parse flags
-for arg in "$@"; do
-    case "$arg" in
-        --force) FORCE=1 ;;
-        --update) UPDATE=1 ;;
-    esac
-done
+echo "=== Setting up U-Boot for Strat9-OS ($ARCH) ==="
 
-# Strip flags to get architecture
-ARCH=""
-for arg in "$@"; do
-    case "$arg" in
-        --force|--update) continue ;;
-        *) ARCH="$arg" ;;
-    esac
-done
-ARCH="${ARCH:-x86_64}"
-
-echo "=== Setting up U-Boot bootloader ==="
-
-# Create build directory
-mkdir -p "$BUILD_DIR"
-
-# Clone U-Boot if not already present
+# Clone U-Boot if not present
 if [ ! -d "$UBOOT_DIR" ]; then
-    echo "Cloning U-Boot $UBOOT_VERSION using github..."
-    if git clone https://github.com/u-boot/u-boot.git "$UBOOT_DIR"; then
-        echo "  Cloned successfully"
-    else
-        echo "  ERROR: failed to clone U-Boot"
-        echo "  Try manually: git clone https://github.com/u-boot/u-boot.git $UBOOT_DIR"
-        exit 1
-    fi
-    cd "$UBOOT_DIR" && git checkout "$UBOOT_VERSION" && cd -
-else
-    echo "U-Boot directory already exists, skipping clone."
+    echo "Cloning U-Boot..."
+    mkdir -p "$BUILD_DIR"
+    git clone https://source.denx.de/u-boot/u-boot.git "$UBOOT_DIR"
+    cd "$UBOOT_DIR" && git checkout v2024.07 && cd -
 fi
 
-# --update: pull latest and decide if rebuild is needed
-NEED_BUILD=1
-if [ "$UPDATE" -eq 1 ]; then
-    echo ""
-    echo "Pulling latest U-Boot sources using github..."
-    cd "$UBOOT_DIR"
-    git fetch origin 2>/dev/null || true
-    LOCAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse "origin/$UBOOT_VERSION" 2>/dev/null || echo "$LOCAL")
-    cd - > /dev/null
-    if [ "$LOCAL" = "$REMOTE" ]; then
-        echo "  Sources up to date."
-        if [ "$FORCE" -eq 0 ] && [ -f "$UBOOT_DIR/u-boot.bin" ]; then
-            NEED_BUILD=0
-            echo "  w00t, binary exists, skipping build \o/."
-        fi
-    else
-        echo "  New changes available, rebuilding..."
-        cd "$UBOOT_DIR"
-        git pull --ff-only 2>/dev/null || true
-        git checkout "$UBOOT_VERSION" 2>/dev/null || true
-        cd - > /dev/null
-    fi
-elif [ "$FORCE" -eq 0 ]; then
-    # No flags: skip build if binary already exists
-    if [ -f "$UBOOT_DIR/u-boot.bin" ]; then
-        NEED_BUILD=0
+cd "$UBOOT_DIR"
+
+case "$ARCH" in
+    x86_64|x86)
+        # x86_64: U-Boot as EFI app, loaded by OVMF
+        echo "Building U-Boot for x86_64 (EFI app)..."
+        make qemu-x86_64_defconfig
+        
+        # Enable EFI boot support (for loading as EFI app)
+        scripts/config --enable CONFIG_EFI_LOADER
+        scripts/config --enable CONFIG_CMD_BOOTEFI
+        scripts/config --enable CONFIG_EFI_BINARY_EXEC
+        scripts/config --enable CONFIG_EFI_GET_TIME
+        scripts/config --enable CONFIG_EFI_HAVE_RUNTIME_RESET
+        
+        # Enable FAT filesystem for boot partition
+        scripts/config --enable CONFIG_FS_FAT
+        scripts/config --enable CONFIG_CMD_FAT
+        scripts/config --enable CONFIG_CMD_LS
+        scripts/config --enable CONFIG_CMD_LOAD
+        
+        # Enable ELF loading
+        scripts/config --enable CONFIG_CMD_ELF
+        
+        # Enable serial console
+        scripts/config --enable CONFIG_SERIAL
+        scripts/config --enable CONFIG_SYS_NS16550
+        
+        make olddefconfig
+        make -j$(nproc)
+        
         echo ""
-        echo "  U-Boot binary already exists ($UBOOT_DIR/u-boot.bin)"
-        echo "  Skipping build. Use --force to rebuild or --update to pull + rebuild."
-    fi
-fi
+        echo "U-Boot built for x86_64 (EFI app)"
+        echo "  Binary: $UBOOT_DIR/u-boot"
+        echo "  Use with OVMF: qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd ..."
+        ;;
+        
+    aarch64|arm64)
+        # aarch64: U-Boot as firmware
+        echo "Building U-Boot for aarch64 (firmware)..."
+        make qemu_arm64_defconfig
+        make -j$(nproc)
+        
+        echo ""
+        echo "U-Boot built for aarch64 (firmware)"
+        echo "  Binary: $UBOOT_DIR/u-boot.bin"
+        echo "  Use: qemu-system-aarch64 -bios u-boot.bin ..."
+        ;;
+        
+    riscv64|riscv)
+        # riscv64: U-Boot as payload for OpenSBI
+        echo "Building U-Boot for riscv64 (payload for OpenSBI)..."
+        make qemu-riscv64_smode_defconfig
+        make -j$(nproc)
+        
+        echo ""
+        echo "U-Boot built for riscv64 (OpenSBI payload)"
+        echo "  Binary: $UBOOT_DIR/u-boot.bin"
+        echo "  Use: qemu-system-riscv64 -bios default -kernel u-boot.bin ..."
+        ;;
+        
+    *)
+        echo "ERROR: Unknown architecture: $ARCH"
+        echo "Supported: x86_64, aarch64, riscv64"
+        exit 1
+        ;;
+esac
 
-if [ "$NEED_BUILD" -eq 1 ]; then
-    case "$ARCH" in
-        x86_64|x86)
-            DEFCONFIG="qemu-x86_64_defconfig"
-            ;;
-        riscv64|riscv)
-            DEFCONFIG="qemu-riscv64_smode_defconfig"
-            ;;
-        aarch64|arm64|arm)
-            DEFCONFIG="qemu_arm64_defconfig"
-            ;;
-        *)
-            echo "ERROR: Unknown architecture: $ARCH"
-            echo "Supported: x86_64, riscv64, aarch64"
-            exit 1
-            ;;
-    esac
-
-    echo ""
-    echo "Building U-Boot for $ARCH ($DEFCONFIG)..."
-    cd "$UBOOT_DIR"
-    make "$DEFCONFIG"
-    make -j"$(nproc)"
-fi
-
+cd - > /dev/null
 echo ""
 echo "=== U-Boot setup complete ==="
-echo "  Binary: $UBOOT_DIR/u-boot.bin"
-echo "  Arch: $ARCH"
-echo ""
