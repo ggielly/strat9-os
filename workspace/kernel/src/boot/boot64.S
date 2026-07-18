@@ -13,10 +13,14 @@ _start:
     # Setup stack
     leaq boot_stack_top(%rip), %rsp
     
-    # Enable SSE baseline in CR4.
-    # OSXSAVE is enabled later in Rust after CPUID capability probing.
+    # Enable SSE/OSXSAVE baseline in CR4.
+    # Bit 9  (OSFXSR)    : OS supports FXSAVE/FXRSTOR
+    # Bit 10 (OSXMMEXCPT): OS supports unmasked SIMD exceptions
+    # Bit 18 (OSXSAVE)   : OS supports XSAVE/XRSTOR (needed for AVX)
+    # OSXSAVE is needed before XGETBV/XSETBV; OSXSAVE will be enabled
+    # later in Rust after CPUID capability probing enables XSAVE features.
     movq %cr4, %rax
-    orq $0x620, %rax
+    orq $0x40600, %rax
     movq %rax, %cr4
     
     # 2. Enable SSE in CR0
