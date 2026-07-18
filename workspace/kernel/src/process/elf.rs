@@ -59,6 +59,8 @@ const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 const PT_TLS: u32 = 7;
+const PT_GNU_STACK: u32 = 0x6474_e551;
+const PT_GNU_RELRO: u32 = 0x6474_e552;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
@@ -137,6 +139,7 @@ pub struct LoadedElfInfo {
     pub tls_filesz: u64,
     pub tls_memsz: u64,
     pub tls_align: u64,
+    pub stack_exec: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,9 +1076,9 @@ fn apply_dynamic_relocations(
                 return Err("Relocation value out of range");
             }
             let val_u64 = value as u64;
-            // Read back before write for diagnosis
+            #[cfg(debug_assertions)]
             if applied < 5 {
-                let r_addend_copy = rela.r_addend; // copy packed field to local
+                let r_addend_copy = rela.r_addend;
                 let mut before = [0u8; 8];
                 let _ = read_user_mapped_bytes(user_as, target, &mut before);
                 let before_val = u64::from_le_bytes(before);
@@ -1089,7 +1092,7 @@ fn apply_dynamic_relocations(
                 );
             }
             write_user_mapped_bytes(user_as, target, &val_u64.to_le_bytes())?;
-            // Read back after write for diagnosis
+            #[cfg(debug_assertions)]
             if applied < 5 {
                 let mut after = [0u8; 8];
                 let _ = read_user_mapped_bytes(user_as, target, &mut after);
@@ -1100,7 +1103,7 @@ fn apply_dynamic_relocations(
                     val_u64
                 );
             }
-            // Catch any relocation that writes a kernel-range address into user space.
+            #[cfg(debug_assertions)]
             if val_u64 >= 0xffff_8000_0000_0000 {
                 let r_addend_copy = rela.r_addend;
                 crate::e9_println!(
@@ -1114,6 +1117,7 @@ fn apply_dynamic_relocations(
     };
 
     let mut total_applied = 0usize;
+    #[cfg(debug_assertions)]
     crate::e9_println!(
         "[reloc] apply_dynamic_relocations: bias={:#x} rela_addr={:?} rela_size={} rela_count={:?}",
         load_bias,
@@ -1128,6 +1132,7 @@ fn apply_dynamic_relocations(
         total_applied += apply_rela_table(jmprel_base, jmprel_size, None)?;
     }
 
+    #[cfg(debug_assertions)]
     if total_applied > 0 {
         crate::e9_println!(
             "[reloc] applied {} RELA relocations (bias={:#x})",
@@ -1852,6 +1857,30 @@ fn load_elf_task_inner(
         apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
     }
 
+    // PT_GNU_RELRO: mark the RELRO range read-only after relocations.
+    if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
+        if relro.p_memsz > 0 {
+            let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
+            let relro_end =
+                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
+            if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
+                let ro_flags = VmaFlags {
+                    readable: true,
+                    writable: false,
+                    executable: false,
+                    user_accessible: true,
+                };
+                let relro_pages = ((relro_end - relro_start) / 4096) as usize;
+                apply_segment_permissions(&user_as, relro_start, relro_pages, ro_flags)?;
+                log::debug!(
+                    "[elf] PT_GNU_RELRO: {:#x}..{:#x} made read-only",
+                    relro_start,
+                    relro_end
+                );
+            }
+        }
+    }
+
     crate::e9_println!(
         "[trace][elf] load_elf_task segments_done count={} has_interp={}",
         load_count,
@@ -1938,10 +1967,15 @@ fn load_elf_task_inner(
     // underflow faults instead of silently corrupting neighbours.
     let stack_base = crate::kaslr::stack_base_with_jitter(crate::kaslr::draw_stack_jitter());
     let stack_top = crate::kaslr::stack_top_for(stack_base, stack_pages);
+    // PT_GNU_STACK with PF_X means the stack should be executable (legacy ABI).
+    // Without PT_GNU_STACK or without PF_X, the stack is NX (modern default).
+    let stack_exec = phdrs
+        .iter()
+        .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0);
     let stack_flags = VmaFlags {
         readable: true,
         writable: true,
-        executable: false,
+        executable: stack_exec,
         user_accessible: true,
     };
     user_as.map_region(
@@ -2169,6 +2203,30 @@ pub fn load_elf_image(
     }
     if interp_path.is_none() {
         apply_dynamic_relocations(user_as, &phdrs, header.e_type, load_bias)?;
+    }
+
+    // PT_GNU_RELRO: mark the RELRO range read-only after relocations.
+    if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
+        if relro.p_memsz > 0 {
+            let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
+            let relro_end =
+                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
+            if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
+                let ro_flags = VmaFlags {
+                    readable: true,
+                    writable: false,
+                    executable: false,
+                    user_accessible: true,
+                };
+                let relro_pages = ((relro_end - relro_start) / 4096) as usize;
+                apply_segment_permissions(user_as, relro_start, relro_pages, ro_flags)?;
+                log::debug!(
+                    "[elf] PT_GNU_RELRO: {:#x}..{:#x} made read-only",
+                    relro_start,
+                    relro_end
+                );
+            }
+        }
     }
 
     let (tls_vaddr, tls_filesz, tls_memsz, tls_align) =

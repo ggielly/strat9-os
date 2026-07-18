@@ -34,36 +34,40 @@ parted -s "$IMAGE_FILE" mkpart primary fat32 1MiB 64MiB
 parted -s "$IMAGE_FILE" set 1 boot on
 parted -s "$IMAGE_FILE" mkpart primary ext2 64MiB 100%
 
-# Create FAT32 partition
+# Create FAT32 partition image
 FAT_IMG="$BUILD_DIR/fat32.img"
 dd if=/dev/zero of="$FAT_IMG" bs=1M count=63 2>/dev/null
-mkfs.vfat -F 32 "$FAT_IMG"
+mkfs.vfat -F 32 "$FAT_IMG" >/dev/null
 
-# Copy files to FAT32
+# Create directory structure in FAT32 image
 echo "  --- Populating boot partition ---"
-mkdir -p /tmp/efi/EFI/BOOT
-mkdir -p /tmp/efi/boot
-mkdir -p /tmp/efi/modules
+mmd -i "$FAT_IMG" ::EFI
+mmd -i "$FAT_IMG" ::EFI/BOOT
+mmd -i "$FAT_IMG" ::boot
+mmd -i "$FAT_IMG" ::modules
+mmd -i "$FAT_IMG" ::modules/bin
 
 # Copy kernel
-cp "$KERNEL_ELF" /tmp/efi/boot/kernel.elf
+mcopy -i "$FAT_IMG" "$KERNEL_ELF" ::boot/kernel.elf
 echo "  [OK] kernel.elf"
 
-# Copy U-Boot as EFI application (for real hardware)
+# Copy U-Boot as EFI application
 if [ -f "$BUILD_DIR/uboot/u-boot-app.efi" ]; then
-    cp "$BUILD_DIR/uboot/u-boot-app.efi" /tmp/efi/EFI/BOOT/BOOTX64.EFI
+    mcopy -i "$FAT_IMG" "$BUILD_DIR/uboot/u-boot-app.efi" ::EFI/BOOT/BOOTX64.EFI
     echo "  [OK] U-Boot EFI app (BOOTX64.EFI)"
 elif [ -f "$BUILD_DIR/uboot/u-boot" ]; then
-    cp "$BUILD_DIR/uboot/u-boot" /tmp/efi/EFI/BOOT/BOOTX64.EFI
+    mcopy -i "$FAT_IMG" "$BUILD_DIR/uboot/u-boot" ::EFI/BOOT/BOOTX64.EFI
     echo "  [OK] U-Boot (fallback ELF)"
 fi
 
 # Create startup.nsh for OVMF auto-boot
-cat > /tmp/efi/startup.nsh << 'STARTUP_EOF'
+cat > /tmp/startup.nsh << 'STARTUP_EOF'
 FS0:
 cd EFI\BOOT
 BOOTX64.EFI
 STARTUP_EOF
+mcopy -i "$FAT_IMG" /tmp/startup.nsh ::startup.nsh
+rm -f /tmp/startup.nsh
 echo "  [OK] startup.nsh (auto-boot)"
 
 # Copy userspace modules
@@ -96,10 +100,8 @@ for entry in "${MODULES[@]}"; do
     src_name="${entry%%:*}"
     dst_path="${entry##*:}"
     src_file="$TARGET_DIR/$src_name"
-    dst_dir=$(dirname "/tmp/efi/modules/$dst_path")
-    mkdir -p "$dst_dir"
     if [ -f "$src_file" ]; then
-        cp "$src_file" "/tmp/efi/modules/$dst_path"
+        mcopy -i "$FAT_IMG" "$src_file" "::modules/$dst_path"
         echo "  [OK] /modules/$dst_path"
     fi
 done
@@ -112,11 +114,10 @@ if [ -d "$TARGET_DIR" ]; then
         case "$name" in
             kernel|*.d|*.rlib|*.rmeta|*.o|lib*|deps) continue ;;
         esac
-        if [ -f "/tmp/efi/modules/$name" ]; then
-            continue
-        fi
+        # Skip if already copied
+        mdir -i "$FAT_IMG" "::modules/$name" >/dev/null 2>&1 && continue
         if file "$elf" 2>/dev/null | grep -q "ELF"; then
-            cp "$elf" "/tmp/efi/modules/$name"
+            mcopy -i "$FAT_IMG" "$elf" "::modules/$name"
             echo "  [OK] Auto-copied: /modules/$name"
         fi
     done
@@ -125,16 +126,15 @@ fi
 # Copy config files
 for f in workspace/assets/boot/silo.toml workspace/assets/boot/kernel.toml; do
     if [ -f "$f" ]; then
-        cp "$f" "/tmp/efi/modules/$(basename "$f")"
+        mcopy -i "$FAT_IMG" "$f" "::modules/$(basename "$f")"
         echo "  [OK] Copied $(basename "$f")"
     fi
 done
 
 # Copy WASM files
-mkdir -p /tmp/efi/modules/bin
 for f in workspace/assets/wasm/hello.wasm workspace/assets/wasm/wasm-test.toml; do
     if [ -f "$f" ]; then
-        cp "$f" "/tmp/efi/modules/"
+        mcopy -i "$FAT_IMG" "$f" "::modules/$(basename "$f")"
         echo "  [OK] Copied $(basename "$f")"
     fi
 done
@@ -147,7 +147,7 @@ dd if="$FAT_IMG" of="$IMAGE_FILE" bs=512 seek=2048 conv=notrunc 2>/dev/null
 echo "  [OK] FAT32 boot partition written"
 
 # Cleanup
-rm -rf "$FAT_IMG" /tmp/efi
+rm -f "$FAT_IMG"
 
 echo ""
 echo "============================================"
