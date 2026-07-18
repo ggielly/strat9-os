@@ -135,7 +135,8 @@ impl BootVirtqueue {
         // Allocate physically-contiguous pages for the vring.
         let frame = crate::sync::with_irqs_disabled(|token| {
             crate::memory::allocate_phys_contiguous(token, order)
-        }).map_err(|_| "Failed to allocate boot vring")?;
+        })
+        .map_err(|_| "Failed to allocate boot vring")?;
 
         let vring_phys = frame.start_address.as_u64();
         let vring_virt = crate::memory::phys_to_virt(vring_phys);
@@ -150,7 +151,10 @@ impl BootVirtqueue {
         core::ptr::write_volatile((device_base + REG_QUEUE_NUM) as *mut u32, queue_size as u32);
 
         // Write queue alignment (legacy MMIO).
-        core::ptr::write_volatile((device_base + REG_QUEUE_ALIGN) as *mut u32, page_size as u32);
+        core::ptr::write_volatile(
+            (device_base + REG_QUEUE_ALIGN) as *mut u32,
+            page_size as u32,
+        );
 
         // Write PFN = phys_addr >> 12.
         let pfn = (vring_phys >> 12) as u32;
@@ -182,7 +186,8 @@ impl BootVirtqueue {
         let qs = self.queue_size as usize;
         let desc_off = 0;
         let avail_off = ((qs * core::mem::size_of::<VringDesc>()) + 4095) / 4096 * 4096;
-        let used_off = ((avail_off + core::mem::size_of::<VringAvail>() + qs * 2) + 4095) / 4096 * 4096;
+        let used_off =
+            ((avail_off + core::mem::size_of::<VringAvail>() + qs * 2) + 4095) / 4096 * 4096;
 
         let desc_ptr = (self.vring_virt + desc_off) as *mut VringDesc;
         let avail_ptr = (self.vring_virt + avail_off) as *mut VringAvail;
@@ -190,11 +195,14 @@ impl BootVirtqueue {
 
         // Write header into the bounce buffer (first 16 bytes).
         let header_ptr = bounce_virt as *mut BootBlockHeader;
-        core::ptr::write(header_ptr, BootBlockHeader {
-            request_type: REQ_TYPE_IN,
-            reserved: 0,
-            sector: lba,
-        });
+        core::ptr::write(
+            header_ptr,
+            BootBlockHeader {
+                request_type: REQ_TYPE_IN,
+                reserved: 0,
+                sector: lba,
+            },
+        );
 
         // Status byte at the end of the bounce buffer (past the data region).
         let data_len = buf.len() as u32;
@@ -234,7 +242,8 @@ impl BootVirtqueue {
         );
 
         // Place head index into the available ring.
-        let avail_ring_ptr = (self.vring_virt + avail_off + core::mem::size_of::<VringAvail>() as u64) as *mut u16;
+        let avail_ring_ptr =
+            (self.vring_virt + avail_off + core::mem::size_of::<VringAvail>() as u64) as *mut u16;
         let avail_slot = (self.avail_idx as usize) % qs;
         core::ptr::write(avail_ring_ptr.add(avail_slot), 0u16); // head descriptor index
 
@@ -251,7 +260,9 @@ impl BootVirtqueue {
         loop {
             let used_idx = core::ptr::read_volatile(&(*used_ptr).idx);
             if self.last_used_idx != used_idx {
-                let used_ring_ptr = (self.vring_virt + used_off + core::mem::size_of::<VringUsed>() as u64) as *mut VringUsedElem;
+                let used_ring_ptr =
+                    (self.vring_virt + used_off + core::mem::size_of::<VringUsed>() as u64)
+                        as *mut VringUsedElem;
                 let slot = (self.last_used_idx as usize) % qs;
                 let _elem = core::ptr::read_volatile(used_ring_ptr.add(slot));
                 self.last_used_idx = self.last_used_idx.wrapping_add(1);
@@ -259,10 +270,7 @@ impl BootVirtqueue {
             }
             spins = spins.saturating_add(1);
             if spins >= 5_000_000 {
-                crate::serial_println!(
-                    "[virtio-blk] boot read timeout lba={:#x}",
-                    lba
-                );
+                crate::serial_println!("[virtio-blk] boot read timeout lba={:#x}", lba);
                 return Err(());
             }
             core::hint::spin_loop();
@@ -353,7 +361,8 @@ impl VirtioBlkDevice {
 
         // Read capacity from device config.
         let capacity_lo = core::ptr::read_volatile((self.base_addr + REG_CAPACITY) as *const u32);
-        let capacity_hi = core::ptr::read_volatile((self.base_addr + REG_CAPACITY + 4) as *const u32);
+        let capacity_hi =
+            core::ptr::read_volatile((self.base_addr + REG_CAPACITY + 4) as *const u32);
         let capacity = ((capacity_hi as u64) << 32) | (capacity_lo as u64);
         crate::serial_println!("[virtio-blk] Capacity: {} blocks", capacity);
 
@@ -420,23 +429,18 @@ impl BlockDevice for VirtioBlkDevice {
         let block_sz = self.block_size as usize;
 
         // Allocate a bounce frame (header + data + status fit in one 4K page).
-        let bounce_frame = unsafe {
-            crate::sync::with_irqs_disabled(|token| {
-                crate::memory::allocate_frame(token)
-            })
-        }.map_err(|_| ())?;
+        let bounce_frame =
+            crate::sync::with_irqs_disabled(|token| crate::memory::allocate_frame(token))
+                .map_err(|_| ())?;
         let bounce_phys = bounce_frame.start_address.as_u64();
         let bounce_virt = crate::memory::phys_to_virt(bounce_phys);
 
-        let result = unsafe {
-            queue.read_block(self.base_addr, lba, bounce_phys, bounce_virt, buf)
-        };
+        let result =
+            unsafe { queue.read_block(self.base_addr, lba, bounce_phys, bounce_virt, buf) };
 
-        unsafe {
-            crate::sync::with_irqs_disabled(|token| {
-                crate::memory::free_frame(token, bounce_frame);
-            });
-        }
+        crate::sync::with_irqs_disabled(|token| {
+            crate::memory::free_frame(token, bounce_frame);
+        });
 
         result
     }

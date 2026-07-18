@@ -449,14 +449,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] Memory manager...");
     let regions = args.memory_regions();
     let mut mmap_work = [null_region(); MAX_BOOT_MMAP_REGIONS_WORK];
-    let mut mmap_work_len = core::cmp::min(regions.len(), mmap_work.len());
+    let mmap_work_len = core::cmp::min(regions.len(), mmap_work.len());
     for (dst, src) in mmap_work.iter_mut().zip(regions.iter()).take(mmap_work_len) {
         *dst = *src;
     }
 
     // With U-Boot, modules are loaded from FAT32 boot partition.
     // Protected ranges will be set up after module loading is implemented in Phase 4.
-    let mut protected_ranges = [None; memory::boot_alloc::MAX_PROTECTED_RANGES];
+    let protected_ranges = [None; memory::boot_alloc::MAX_PROTECTED_RANGES];
     memory::boot_alloc::set_protected_ranges(&protected_ranges);
 
     // Initialize the boot allocator before manually carving the working memory

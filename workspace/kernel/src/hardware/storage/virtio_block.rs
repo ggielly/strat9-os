@@ -176,27 +176,22 @@ impl VirtioBlockDevice {
         let device_features = device.read_device_features();
         log::debug!("VirtIO-blk: Device features: 0x{:08x}", device_features);
 
-        // Negotiate useful block-device features.
-        //   VIRTIO_BLK_F_FLUSH     (1 << 9)  — write cache flush
+        // Negotiate useful block-device features (legacy PCI — all u32).
         //   VIRTIO_BLK_F_BLK_SIZE  (1 << 6)  — honour device block size
+        //   VIRTIO_BLK_F_FLUSH     (1 << 9)  — write cache flush
         //   VIRTIO_F_RING_EVENT_IDX(1 << 29) — suppress needless notifications
-        //   VIRTIO_F_VERSION_1     (1 << 32) — modern virtio (required for event_idx)
-        // Only accept features the device actually offers.
-        let mut guest_features: u64 = 0;
-        let dev_feat_64 = device_features as u64;
-        if dev_feat_64 & (1 << 6) != 0 {
+        let dev_feat = device_features;
+        let mut guest_features: u32 = 0;
+        if dev_feat & (1 << 6) != 0 {
             guest_features |= 1 << 6; // VIRTIO_BLK_F_BLK_SIZE
         }
-        if dev_feat_64 & (1 << 9) != 0 {
+        if dev_feat & (1 << 9) != 0 {
             guest_features |= 1 << 9; // VIRTIO_BLK_F_FLUSH
         }
-        if dev_feat_64 & (1 << 29) != 0 {
+        if dev_feat & (1 << 29) != 0 {
             guest_features |= 1 << 29; // VIRTIO_F_RING_EVENT_IDX
         }
-        if dev_feat_64 & (1 << 32) != 0 {
-            guest_features |= 1 << 32; // VIRTIO_F_VERSION_1
-        }
-        log::info!("VirtIO-blk: Negotiated features: 0x{:016x}", guest_features);
+        log::info!("VirtIO-blk: Negotiated features: 0x{:08x}", guest_features);
         device.write_guest_features(guest_features);
 
         // Features OK
