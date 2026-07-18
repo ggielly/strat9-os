@@ -13,7 +13,14 @@ IMAGE="$BUILD_DIR/strat9-os.img"
 
 case "$ARCH" in
     x86_64|x86)
-        echo "Launching x86_64 with OVMF..."
+        echo "Launching x86_64 with OVMF (UEFI) + U-Boot EFI payload..."
+        echo ""
+        echo "  UEFI firmware: OVMF"
+        echo "  Bootloader:    U-Boot as EFI payload (BOOTX64.EFI)"
+        echo "  Kernel:        /boot/kernel.elf on FAT32 partition"
+        echo "  Modules:       /modules/*.elf on FAT32 partition (no initramfs)"
+        echo "  Console:       serial (nographic)"
+        echo ""
         ${QEMU} \
             -machine q35 \
             -cpu qemu64 \
@@ -22,7 +29,9 @@ case "$ARCH" in
             -bios /usr/share/ovmf/OVMF.fd \
             -drive file=${IMAGE},if=virtio,format=raw \
             -nographic \
-            -no-reboot
+            -no-reboot \
+            -serial stdio \
+            -d guest_errors
         ;;
     aarch64|arm64)
         echo "Launching aarch64 with U-Boot firmware..."

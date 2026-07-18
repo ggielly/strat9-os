@@ -51,24 +51,71 @@ mmd -i "$FAT_IMG" ::modules/bin
 mcopy -i "$FAT_IMG" "$KERNEL_ELF" ::boot/kernel.elf
 echo "  [OK] kernel.elf"
 
-# Copy U-Boot as EFI application
-if [ -f "$BUILD_DIR/uboot/u-boot-app.efi" ]; then
-    mcopy -i "$FAT_IMG" "$BUILD_DIR/uboot/u-boot-app.efi" ::EFI/BOOT/BOOTX64.EFI
-    echo "  [OK] U-Boot EFI app (BOOTX64.EFI)"
-elif [ -f "$BUILD_DIR/uboot/u-boot" ]; then
-    mcopy -i "$FAT_IMG" "$BUILD_DIR/uboot/u-boot" ::EFI/BOOT/BOOTX64.EFI
-    echo "  [OK] U-Boot (fallback ELF)"
+# Copy U-Boot as EFI payload (not app)
+# When built as EFI payload, the binary is at u-boot-payload.efi and is loaded
+# via the OVMF UI or startup.nsh. U-Boot then takes full hardware control.
+if [ -f "$BUILD_DIR/uboot/u-boot-payload.efi" ]; then
+    mcopy -i "$FAT_IMG" "$BUILD_DIR/uboot/u-boot-payload.efi" ::EFI/BOOT/BOOTX64.EFI
+    echo "  [OK] U-Boot EFI payload (BOOTX64.EFI)"
+elif [ -f "$BUILD_DIR/uboot/u-boot.efi" ]; then
+    mcopy -i "$FAT_IMG" "$BUILD_DIR/uboot/u-boot.efi" ::EFI/BOOT/BOOTX64.EFI
+    echo "  [OK] U-Boot EFI payload (u-boot.efi)"
 fi
 
-# Create startup.nsh for OVMF auto-boot
-cat > /tmp/startup.nsh << 'STARTUP_EOF'
-FS0:
-cd EFI\BOOT
-BOOTX64.EFI
-STARTUP_EOF
-mcopy -i "$FAT_IMG" /tmp/startup.nsh ::startup.nsh
-rm -f /tmp/startup.nsh
-echo "  [OK] startup.nsh (auto-boot)"
+# Create U-Boot boot script that loads the kernel + DTB
+#
+# Flow:
+#   1. Load kernel ELF from FAT partition into RAM
+#   2. Generate or load a FDT (device tree) describing memory map
+#   3. bootm loads the ELF and passes the DTB to the kernel
+#
+cat > /tmp/boot.scr << 'SCRIPT_EOF'
+# Strat9-OS U-Boot boot script
+#
+# U-Boot conventions:
+#   ${kernel_addr_r}  — where to load the kernel ELF
+#   ${fdt_addr_r}     — where to place the device tree
+#   ${ramdisk_addr_r} — (unused — no initramfs)
+
+setenv bootargs "console=ttyS0,115200"
+
+# Load kernel ELF from FAT partition (first partition = 0:1)
+load virtio 0:1 ${kernel_addr_r} /boot/kernel.elf
+
+# Generate a minimal device tree for the kernel.
+# U-Boot can synthesise one from the EFI memory map.
+# Fallback: use the built-in EFI payload DTB.
+fdt addr ${fdt_addr_r} || fdt addr ${fdtcontroladdr}
+
+# Boot the kernel ELF — passes DTB pointer in RDI.
+# The bootm command reads the ELF header, loads segments,
+# parses the FDT, and jumps to the entry point.
+#
+# Syntax: bootm [kernel_addr] [initrd_addr] [fdt_addr]
+# initrd_addr = - (none), fdt_addr = ${fdt_addr_r}
+bootm ${kernel_addr_r} - ${fdt_addr_r}
+SCRIPT_EOF
+
+# Compile the script with mkimage (U-Boot tool)
+mkimage -C none -A x86_64 -T script -d /tmp/boot.scr /tmp/boot.scr.uimg 2>/dev/null || \
+    echo "  [WARN] mkimage not found — boot script not compiled"
+
+if [ -f /tmp/boot.scr.uimg ]; then
+    mcopy -i "$FAT_IMG" /tmp/boot.scr.uimg ::boot.scr.uimg
+    echo "  [OK] U-Boot boot script (boot.scr.uimg)"
+fi
+rm -f /tmp/boot.scr /tmp/boot.scr.uimg
+
+# Set fallback bootcmd in U-Boot environment
+# When no boot script is found, U-Boot will use this:
+cat > /tmp/uboot-env.txt << 'ENV_EOF'
+bootcmd=load virtio 0:1 ${kernel_addr_r} /boot/kernel.elf && fdt addr ${fdtcontroladdr} && bootm ${kernel_addr_r} - ${fdt_addr_r}
+bootdelay=2
+ENV_EOF
+mcopy -i "$FAT_IMG" /tmp/uboot-env.txt ::uboot-env.txt 2>/dev/null || true
+rm -f /tmp/uboot-env.txt
+
+echo "  [OK] U-Boot boot script + environment"
 
 # Copy userspace modules
 TARGET_DIR="target/x86_64-unknown-none/${PROFILE}"

@@ -718,7 +718,7 @@ impl PciDevice {
     ///
     /// Uses ECAM MMIO when available. Returns `None` if ECAM is not mapped.
     pub fn read_config_u32_ext(&self, offset: u16) -> Option<u32> {
-        let ecam = *ECAM_BASE.lock()?;
+        let ecam = *ECAM_BASE.lock();
         Some(unsafe {
             ecam_read32(
                 ecam,
