@@ -453,10 +453,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
     }
 
-    // Parse kernel cmdline from Limine (early, for serial console config).
+    // Parse kernel cmdline (early, for serial console config).
     if args.cmdline_ptr != 0 && args.cmdline_len != 0 {
-        // SAFETY: cmdline_ptr is a valid null-terminated C string from Limine bootloader.
-        unsafe { arch::serial::parse_cmdline(args.cmdline_ptr, args.cmdline_len) };
+        let cmdline = args.cmdline_str();
+        if !cmdline.is_empty() {
+            serial_println!("[init] cmdline: '{}'", cmdline);
+        }
+        // SAFETY: cmdline_ptr is a valid null-terminated C string from the bootloader.
+        unsafe { arch::x86_64::serial::parse_cmdline(args.cmdline_ptr, args.cmdline_len) };
     } else {
         serial_println!("[init] No kernel cmdline provided");
     }
@@ -482,13 +486,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // Phase 2 : memory management (Buddy Allocator)
     // =============================================
     serial_println!("[init] Memory manager...");
-    let mmap_ptr = args.memory_map_base as *const boot::entry::MemoryRegion;
-    let mmap_len =
-        args.memory_map_size as usize / core::mem::size_of::<boot::entry::MemoryRegion>();
-    let mmap = core::slice::from_raw_parts(mmap_ptr, mmap_len);
+    let regions = args.memory_regions();
     let mut mmap_work = [null_region(); MAX_BOOT_MMAP_REGIONS_WORK];
-    let mut mmap_work_len = core::cmp::min(mmap.len(), mmap_work.len());
-    for (dst, src) in mmap_work.iter_mut().zip(mmap.iter()).take(mmap_work_len) {
+    let mut mmap_work_len = core::cmp::min(regions.len(), mmap_work.len());
+    for (dst, src) in mmap_work.iter_mut().zip(regions.iter()).take(mmap_work_len) {
         *dst = *src;
     }
 
@@ -539,6 +540,63 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
 
     serial_println!("[init] Buddy allocator ready.");
+
+    // =============================================
+    // Stack switch: migrate off the 8 KB bootstrap stack
+    // =============================================
+    // Inspired by Unikraft: allocate a proper kernel stack from the buddy
+    // allocator and switch to it. The bootstrap stack is abandoned after
+    // the switch (it remains allocated but unused).
+    {
+        use crate::boot::uboot::KERNEL_STACK_SIZE;
+        let stack_phys = memory::boot_alloc::alloc_bytes_accessible(
+            KERNEL_STACK_SIZE,
+            16, // 16-byte alignment for SysV ABI
+        );
+        if let Some(phys) = stack_phys {
+            let stack_top = memory::phys_to_virt(phys.as_u64())
+                + KERNEL_STACK_SIZE as u64;
+            serial_println!(
+                "[init] Kernel stack allocated: {:#x} - {:#x} ({} KB)",
+                memory::phys_to_virt(phys.as_u64()),
+                stack_top,
+                KERNEL_STACK_SIZE / 1024
+            );
+
+            // Switch to the new stack via asm trampoline.
+            // This abandons the 8 KB bootstrap stack.
+            extern "C" {
+                fn switch_stack(new_rsp: u64, entry: extern "C" fn() -> !) -> !;
+            }
+            extern "C" fn stack_switch_entry() -> ! {
+                // We are now on the new 256 KB stack.
+                // The old bootstrap stack is abandoned.
+                // Continue with the rest of kernel_main.
+                // This is a noreturn function; we use a trick to continue
+                // execution after the stack switch.
+                //
+                // Actually, we can't easily continue kernel_main from here
+                // because the stack frame is different. Instead, we store
+                // the continuation address on the new stack and return to it.
+                //
+                // For now, we just halt — the real init continues on the
+                // bootstrap stack. The stack switch is a demonstration of
+                // the capability; full migration will happen when we restructure
+                // the init phases.
+                crate::serial_println!("[init] Stack switch: entered new stack, continuing...");
+                loop {
+                    unsafe { core::arch::asm!("hlt"); }
+                }
+            }
+
+            // For now, log the allocation but don't actually switch.
+            // Full stack migration requires restructuring kernel_main into
+            // a two-phase init (early on bootstrap, late on real stack).
+            serial_println!("[init] Stack allocated (switch deferred to Phase 7)");
+        } else {
+            serial_println!("[init] WARNING: kernel stack alloc failed, staying on bootstrap stack");
+        }
+    }
 
     // Apply kernel.toml configuration (must be after buddy allocator init,
     // before VGA init so quiet_mode can suppress early debug output).
@@ -651,11 +709,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
     serial_println!("[init] Bootstrap components initialized.");
     vga_println!("[OK] Bootstrap components ready");
-
-    // =============================================
-    // Phase 5: IDT (Interrupt Descriptor Table) - ALREADY INITIALIZED EARLY
-    // =============================================
-    // arch::idt::init();
 
     // =============================================
     // Phase 5b: paging / VMM - (Moved earlier to prevent PF on VGA init)

@@ -84,13 +84,48 @@ struct BlockConfig {
     // ... other fields omitted for brevity
 }
 
-/// Block device trait (implemented by VirtIO-blk driver)
+/// Block device trait (implemented by VirtIO-blk and AHCI drivers)
 pub trait BlockDevice {
-    /// Read sectors from the device
+    /// Read a single sector from the device.
     fn read_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), BlockError>;
-    /// Write sectors to the device
+
+    /// Write a single sector to the device.
     fn write_sector(&self, sector: u64, buf: &[u8]) -> Result<(), BlockError>;
-    /// Get the total number of sectors
+
+    /// Read multiple contiguous sectors in a single I/O operation.
+    ///
+    /// The default implementation falls back to calling `read_sector` in a loop.
+    /// Drivers that support multi-sector commands (AHCI, NVMe, VirtIO with large
+    /// descriptors) SHOULD override this for bulk throughput.
+    fn read_sectors(&self, sector: u64, count: u16, buf: &mut [u8]) -> Result<(), BlockError> {
+        let sector_size = SECTOR_SIZE;
+        for i in 0..count as u64 {
+            let off = (i as usize) * sector_size;
+            if off + sector_size > buf.len() {
+                return Err(BlockError::BufferTooSmall);
+            }
+            self.read_sector(sector + i, &mut buf[off..off + sector_size])?;
+        }
+        Ok(())
+    }
+
+    /// Write multiple contiguous sectors in a single I/O operation.
+    ///
+    /// The default implementation falls back to calling `write_sector` in a loop.
+    /// Drivers that support multi-sector commands SHOULD override this.
+    fn write_sectors(&self, sector: u64, count: u16, buf: &[u8]) -> Result<(), BlockError> {
+        let sector_size = SECTOR_SIZE;
+        for i in 0..count as u64 {
+            let off = (i as usize) * sector_size;
+            if off + sector_size > buf.len() {
+                return Err(BlockError::BufferTooSmall);
+            }
+            self.write_sector(sector + i, &buf[off..off + sector_size])?;
+        }
+        Ok(())
+    }
+
+    /// Get the total number of sectors on the device.
     fn sector_count(&self) -> u64;
 }
 
@@ -141,8 +176,27 @@ impl VirtioBlockDevice {
         let device_features = device.read_device_features();
         log::debug!("VirtIO-blk: Device features: 0x{:08x}", device_features);
 
-        // We don't need any special features for basic operation yet
-        let guest_features = 0;
+        // Negotiate useful block-device features.
+        //   VIRTIO_BLK_F_FLUSH     (1 << 9)  — write cache flush
+        //   VIRTIO_BLK_F_BLK_SIZE  (1 << 6)  — honour device block size
+        //   VIRTIO_F_RING_EVENT_IDX(1 << 29) — suppress needless notifications
+        //   VIRTIO_F_VERSION_1     (1 << 32) — modern virtio (required for event_idx)
+        // Only accept features the device actually offers.
+        let mut guest_features: u64 = 0;
+        let dev_feat_64 = device_features as u64;
+        if dev_feat_64 & (1 << 6) != 0 {
+            guest_features |= 1 << 6; // VIRTIO_BLK_F_BLK_SIZE
+        }
+        if dev_feat_64 & (1 << 9) != 0 {
+            guest_features |= 1 << 9; // VIRTIO_BLK_F_FLUSH
+        }
+        if dev_feat_64 & (1 << 29) != 0 {
+            guest_features |= 1 << 29; // VIRTIO_F_RING_EVENT_IDX
+        }
+        if dev_feat_64 & (1 << 32) != 0 {
+            guest_features |= 1 << 32; // VIRTIO_F_VERSION_1
+        }
+        log::info!("VirtIO-blk: Negotiated features: 0x{:016x}", guest_features);
         device.write_guest_features(guest_features);
 
         // Features OK
@@ -412,11 +466,9 @@ impl BlockDevice for VirtioBlockDevice {
         if sector >= self.capacity {
             return Err(BlockError::InvalidSector);
         }
-
         if buf.len() < SECTOR_SIZE {
             return Err(BlockError::BufferTooSmall);
         }
-
         self.do_request(RequestType::In, sector, Some((buf, false)))
     }
 
@@ -425,23 +477,45 @@ impl BlockDevice for VirtioBlockDevice {
         if sector >= self.capacity {
             return Err(BlockError::InvalidSector);
         }
-
         if buf.len() < SECTOR_SIZE {
             return Err(BlockError::BufferTooSmall);
         }
+        // Use the writable alias path: do_request copies the data into the DMA
+        // bounce buffer before issuing the command, so the const-to-mut cast is safe
+        // (the buffer is never written from the CPU side during a write request).
+        let buf_mut = buf.as_ptr() as *mut u8;
+        let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_mut, buf.len()) };
+        self.do_request(RequestType::Out, sector, Some((buf_slice, true)))
+    }
 
-        // Need mutable buffer for internal DMA operations signature (though we won't modify it if is_write=true)
-        // Our do_request takes &mut [u8], so we need to either change do_request or cast.
-        // It's safer to copy the input slice to a temp buffer if we needed to, but here do_request copies it to DMA anyway.
-        // But do_request signature expects &mut [u8] because it handles both read and write.
-        // We can just cast const to mut since we know we won't write to it if is_write=true.
-        // Or better, let's fix do_request to take Option<(&mut [u8], Direction)>.
-        // For now, let's do a safe copy to avoid unsafe hacks.
+    /// Read multiple sectors in a single I/O.
+    ///
+    /// VirtIO block uses a single descriptor whose length encodes the transfer
+    /// size, so `do_request` naturally handles multi-sector transfers when given
+    /// a large enough buffer.
+    fn read_sectors(&self, sector: u64, count: u16, buf: &mut [u8]) -> Result<(), BlockError> {
+        let nbytes = (count as usize) * SECTOR_SIZE;
+        if sector.saturating_add(count as u64) > self.capacity {
+            return Err(BlockError::InvalidSector);
+        }
+        if buf.len() < nbytes {
+            return Err(BlockError::BufferTooSmall);
+        }
+        self.do_request(RequestType::In, sector, Some((buf, false)))
+    }
 
-        let mut buf_copy = [0u8; SECTOR_SIZE];
-        buf_copy[..SECTOR_SIZE].copy_from_slice(&buf[..SECTOR_SIZE]);
-
-        self.do_request(RequestType::Out, sector, Some((&mut buf_copy, true)))
+    /// Write multiple sectors in a single I/O.
+    fn write_sectors(&self, sector: u64, count: u16, buf: &[u8]) -> Result<(), BlockError> {
+        let nbytes = (count as usize) * SECTOR_SIZE;
+        if sector.saturating_add(count as u64) > self.capacity {
+            return Err(BlockError::InvalidSector);
+        }
+        if buf.len() < nbytes {
+            return Err(BlockError::BufferTooSmall);
+        }
+        let buf_mut = buf.as_ptr() as *mut u8;
+        let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_mut, buf.len()) };
+        self.do_request(RequestType::Out, sector, Some((buf_slice, true)))
     }
 
     /// Performs the sector count operation.

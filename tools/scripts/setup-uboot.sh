@@ -13,10 +13,10 @@ echo "=== Setting up U-Boot for Strat9-OS ($ARCH) ==="
 
 # Clone U-Boot if not present
 if [ ! -d "$UBOOT_DIR" ]; then
-    echo "Cloning U-Boot..."
+    echo "Cloning U-Boot using Github..."
     mkdir -p "$BUILD_DIR"
-    git clone https://source.denx.de/u-boot/u-boot.git "$UBOOT_DIR"
-    cd "$UBOOT_DIR" && git checkout v2024.07 && cd -
+    git clone https://github.com/u-boot/u-boot.git "$UBOOT_DIR"
+    cd "$UBOOT_DIR" && git checkout v2026.07 && cd -
 fi
 
 cd "$UBOOT_DIR"

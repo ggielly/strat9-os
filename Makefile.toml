@@ -277,7 +277,7 @@ ${QEMU} \
     -bios /usr/share/ovmf/OVMF.fd \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -device virtio-gpu-gl \
-    -display sdl,gl=on \
+    -display gtk,gl=on \
     -device usb-ehci \
     -device usb-kbd \
     -device usb-tablet \
@@ -301,7 +301,7 @@ ${QEMU} \
     -bios /usr/share/ovmf/OVMF.fd \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -device virtio-gpu-gl \
-    -display sdl,gl=on \
+    -display gtk,gl=on \
     -device usb-ehci \
     -device usb-kbd \
     -device usb-tablet \
