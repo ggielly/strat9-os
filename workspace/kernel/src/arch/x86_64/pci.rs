@@ -21,6 +21,10 @@ const CONFIG_DATA: u16 = 0xCFC;
 /// atomic w.r.t. other CPUs. Every config read/write must hold this lock.
 static PCI_IO_LOCK: SpinLock<()> = SpinLock::new(());
 
+/// Cached ECAM MMIO base for extended config space access (offsets >= 0x100).
+/// Set during `scan_ecam_devices()` when an MCFG table is present.
+static ECAM_BASE: SpinLock<Option<usize>> = SpinLock::new(None);
+
 // ---------------------------------------------------------------------------
 // ECAM (PCIe Enhanced Configuration Access Mechanism) helpers
 // ---------------------------------------------------------------------------
@@ -30,29 +34,29 @@ static PCI_IO_LOCK: SpinLock<()> = SpinLock::new(());
 /// `ecam_base` is the MMIO base address of the ECAM region.
 /// `bus`, `device`, `function` identify the device; `offset` is the register.
 #[inline]
-unsafe fn ecam_read32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+unsafe fn ecam_read32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u16) -> u32 {
     let addr = ecam_base
         + ((bus as usize) << 20)
         + ((device as usize) << 15)
         + ((function as usize) << 12)
-        + ((offset & 0xFC) as usize);
+        + ((offset as usize) & !0x03);
     core::ptr::read_volatile(addr as *const u32)
 }
 
 /// Write a 32-bit register to an ECAM-mapped PCI config space.
 #[inline]
-unsafe fn ecam_write32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8, val: u32) {
+unsafe fn ecam_write32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u16, val: u32) {
     let addr = ecam_base
         + ((bus as usize) << 20)
         + ((device as usize) << 15)
         + ((function as usize) << 12)
-        + ((offset & 0xFC) as usize);
+        + ((offset as usize) & !0x03);
     core::ptr::write_volatile(addr as *mut u32, val);
 }
 
 /// Read a single byte from ECAM config space.
 #[inline]
-unsafe fn ecam_read8(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8) -> u8 {
+unsafe fn ecam_read8(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u16) -> u8 {
     let dword = ecam_read32(ecam_base, bus, device, function, offset & !0x03);
     ((dword >> ((offset & 0x3) * 8)) & 0xFF) as u8
 }
@@ -407,7 +411,10 @@ pub fn walk_ext_capabilities(dev: &PciDevice, cap_ptr: u16) -> Vec<(u16, u16)> {
     let mut offset = cap_ptr;
 
     while offset >= 0x100 && offset < 0xFFF {
-        let dword = dev.read_config_u32((offset & 0xFF) as u8);
+        let dword = match dev.read_config_u32_ext(offset) {
+            Some(v) => v,
+            None => break,
+        };
         let cap_id = (dword & 0xFFFF) as u16;
         let next_ptr = ((dword >> 20) & 0xFFC) as u16; // bits 31:20, aligned to 4
 
@@ -427,14 +434,15 @@ pub fn walk_ext_capabilities(dev: &PciDevice, cap_ptr: u16) -> Vec<(u16, u16)> {
 }
 
 /// Find the PCIe extended capability offset for a given capability ID.
+///
+/// Extended capabilities are always at offsets >= 0x100 in PCIe config space.
+/// Requires ECAM support (MCFG ACPI table) to read.
 pub fn find_ext_capability(dev: &PciDevice, cap_id: u16) -> Option<u16> {
-    // Read PCIe capabilities pointer from header type 0
-    let ext_cap_ptr = dev.read_config_u8(config::CAPABILITIES_PTR) as u16;
-    if ext_cap_ptr < 0x100 {
-        return None; // No PCIe extended capabilities
+    if ECAM_BASE.lock().is_none() {
+        return None; // No ECAM available, cannot read extended config space
     }
 
-    for (found_id, offset) in walk_ext_capabilities(dev, ext_cap_ptr) {
+    for (found_id, offset) in walk_ext_capabilities(dev, 0x100) {
         if found_id == cap_id {
             return Some(offset);
         }
@@ -447,12 +455,11 @@ pub fn find_ext_capability(dev: &PciDevice, cap_id: u16) -> Option<u16> {
 /// Returns `None` if the device doesn't have SR-IOV capability.
 pub fn read_sriov_info(dev: &PciDevice) -> Option<SriovInfo> {
     let cap_offset = find_ext_capability(dev, ext_cap_id::SRIOV)?;
-    let control = dev.read_config_u16(((cap_offset + sriov_cap::CONTROL as u16) & 0xFF) as u8);
-    let status = dev.read_config_u16(((cap_offset + sriov_cap::STATUS as u16) & 0xFF) as u8);
-    let initial_vf =
-        dev.read_config_u16(((cap_offset + sriov_cap::INITIAL_VF as u16) & 0xFF) as u8);
-    let total_vf = dev.read_config_u16(((cap_offset + sriov_cap::TOTAL_VF as u16) & 0xFF) as u8);
-    let num_vf = dev.read_config_u16(((cap_offset + sriov_cap::NUM_VF as u16) & 0xFF) as u8);
+    let control = dev.read_config_u32_ext(cap_offset + sriov_cap::CONTROL as u16)? as u16;
+    let status = dev.read_config_u32_ext(cap_offset + sriov_cap::STATUS as u16)? as u16;
+    let initial_vf = dev.read_config_u32_ext(cap_offset + sriov_cap::INITIAL_VF as u16)? as u16;
+    let total_vf = dev.read_config_u32_ext(cap_offset + sriov_cap::TOTAL_VF as u16)? as u16;
+    let num_vf = dev.read_config_u32_ext(cap_offset + sriov_cap::NUM_VF as u16)? as u16;
 
     Some(SriovInfo {
         cap_offset,
@@ -487,15 +494,11 @@ pub struct SriovInfo {
 /// Read AER (Advanced Error Reporting) capability information.
 pub fn read_aer_info(dev: &PciDevice) -> Option<AerInfo> {
     let cap_offset = find_ext_capability(dev, ext_cap_id::AER)?;
-    let uncerr_status =
-        dev.read_config_u32(((cap_offset + aer_cap::UNCERR_STATUS as u16) & 0xFF) as u8);
-    let uncerr_mask =
-        dev.read_config_u32(((cap_offset + aer_cap::UNCERR_MASK as u16) & 0xFF) as u8);
-    let corerr_status =
-        dev.read_config_u32(((cap_offset + aer_cap::CORERR_STATUS as u16) & 0xFF) as u8);
-    let corerr_mask =
-        dev.read_config_u32(((cap_offset + aer_cap::CORERR_MASK as u16) & 0xFF) as u8);
-    let err_cap = dev.read_config_u32(((cap_offset + aer_cap::ERR_CAP as u16) & 0xFF) as u8);
+    let uncerr_status = dev.read_config_u32_ext(cap_offset + aer_cap::UNCERR_STATUS as u16)?;
+    let uncerr_mask = dev.read_config_u32_ext(cap_offset + aer_cap::UNCERR_MASK as u16)?;
+    let corerr_status = dev.read_config_u32_ext(cap_offset + aer_cap::CORERR_STATUS as u16)?;
+    let corerr_mask = dev.read_config_u32_ext(cap_offset + aer_cap::CORERR_MASK as u16)?;
+    let err_cap = dev.read_config_u32_ext(cap_offset + aer_cap::ERR_CAP as u16)?;
 
     Some(AerInfo {
         cap_offset,
@@ -709,6 +712,22 @@ impl PciDevice {
             outl(CONFIG_ADDRESS, addr);
             inl(CONFIG_DATA)
         }
+    }
+
+    /// Read a 32-bit register from extended config space (offset >= 0x100).
+    ///
+    /// Uses ECAM MMIO when available. Returns `None` if ECAM is not mapped.
+    pub fn read_config_u32_ext(&self, offset: u16) -> Option<u32> {
+        let ecam = *ECAM_BASE.lock()?;
+        Some(unsafe {
+            ecam_read32(
+                ecam,
+                self.address.bus,
+                self.address.device,
+                self.address.function,
+                offset,
+            )
+        })
     }
 
     /// Write to a configuration register (8-bit)
@@ -1202,6 +1221,9 @@ fn scan_ecam_devices() -> Vec<PciDevice> {
             ((end_bus as usize - start_bus as usize + 1) * 256 * 32 * 8 * 4096) as u64;
         memory::paging::ensure_identity_map_range(ecam_phys, region_size);
         let ecam_virt = crate::memory::phys_to_virt(ecam_phys) as usize;
+
+        // Cache ECAM base for extended config space reads
+        *ECAM_BASE.lock() = Some(ecam_virt);
 
         log::info!(
             "[PCI-ECAM] Region seg={} ecam={:#x} buses={}..{} virt={:#x}",
