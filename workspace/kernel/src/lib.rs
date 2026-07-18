@@ -1206,6 +1206,19 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
         serial_println!("[init]   6c+. MCFG not found");
     }
 
+    // Step 6c++: Parse IVRS (AMD IOMMU)
+    if let Some(ivrs) = acpi::ivrs::Ivrs::get() {
+        serial_println!(
+            "[init]   6c++. IVRS parsed (flags: draint={}, coherent={}, {} device entries)",
+            ivrs.header().has_draint(),
+            ivrs.header().is_coherent(),
+            ivrs.header().dev_entry_count,
+        );
+        ivrs.dump();
+    } else {
+        serial_println!("[init]   6c++. IVRS not found (no AMD IOMMU)");
+    }
+
     // Step 6d: initialize Local APIC
     // Ensure Local APIC MMIO is mapped
     memory::paging::ensure_identity_map(madt_info.local_apic_address as u64);

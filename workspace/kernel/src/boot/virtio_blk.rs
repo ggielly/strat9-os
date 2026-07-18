@@ -189,9 +189,9 @@ impl BootVirtqueue {
         let used_off =
             ((avail_off + core::mem::size_of::<VringAvail>() + qs * 2) + 4095) / 4096 * 4096;
 
-        let desc_ptr = (self.vring_virt + desc_off) as *mut VringDesc;
-        let avail_ptr = (self.vring_virt + avail_off) as *mut VringAvail;
-        let used_ptr = (self.vring_virt + used_off) as *mut VringUsed;
+        let desc_ptr = (self.vring_virt + desc_off as u64) as *mut VringDesc;
+        let avail_ptr = (self.vring_virt + avail_off as u64) as *mut VringAvail;
+        let used_ptr = (self.vring_virt + used_off as u64) as *mut VringUsed;
 
         // Write header into the bounce buffer (first 16 bytes).
         let header_ptr = bounce_virt as *mut BootBlockHeader;
@@ -243,7 +243,7 @@ impl BootVirtqueue {
 
         // Place head index into the available ring.
         let avail_ring_ptr =
-            (self.vring_virt + avail_off + core::mem::size_of::<VringAvail>() as u64) as *mut u16;
+            (self.vring_virt + avail_off as u64 + core::mem::size_of::<VringAvail>() as u64) as *mut u16;
         let avail_slot = (self.avail_idx as usize) % qs;
         core::ptr::write(avail_ring_ptr.add(avail_slot), 0u16); // head descriptor index
 
@@ -261,7 +261,7 @@ impl BootVirtqueue {
             let used_idx = core::ptr::read_volatile(&(*used_ptr).idx);
             if self.last_used_idx != used_idx {
                 let used_ring_ptr =
-                    (self.vring_virt + used_off + core::mem::size_of::<VringUsed>() as u64)
+                    (self.vring_virt + used_off as u64 + core::mem::size_of::<VringUsed>() as u64)
                         as *mut VringUsedElem;
                 let slot = (self.last_used_idx as usize) % qs;
                 let _elem = core::ptr::read_volatile(used_ring_ptr.add(slot));

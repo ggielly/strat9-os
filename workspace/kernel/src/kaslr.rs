@@ -56,9 +56,9 @@ pub fn init() {
     let mmap_off = (r0 & 0x0FFF_FFFF) & !0xFFF;
     MMAP_BASE_OFFSET.store(mmap_off, Ordering::Relaxed);
 
-    // Stack base offset: 0 .. 255 pages = 0 ~ 1 MiB, aligned to 4 KiB.
-    // 1 byte gives 255 possible positions : enough to defeat fixed-address attacks.
-    let stack_off = (r1 as u64) & !0xFFF;
+    // Stack base offset: 0 .. 255 pages = 0 ~ 1 MiB.
+    // r1 is a byte (0..255); multiply by page size for byte offset.
+    let stack_off = (r1 as u64) * 4096;
     STACK_BASE_OFFSET.store(stack_off, Ordering::Relaxed);
 
     // PIE base offset: 0 .. 15 * 2 MiB = 0 ~ 30 MiB, aligned to 2 MiB.

@@ -217,7 +217,8 @@ impl Virtqueue {
     pub fn queue_size(&self) -> usize {
         self.queue_size as usize
     }
-from the free list.
+
+    /// Allocate a descriptor from the free list.
     ///
     /// Returns the head descriptor index, or `None` if none are free.
     pub fn alloc_descriptor(&mut self) -> Option<u16> {
