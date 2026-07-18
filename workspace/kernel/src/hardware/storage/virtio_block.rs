@@ -141,16 +141,108 @@ pub enum BlockError {
     NotReady,
 }
 
+/// Size of the pre-allocated bounce buffer pool (64 KB = 128 sectors).
+/// Requests up to this size avoid per-I/O buddy allocator calls.
+const BOUNCE_POOL_SIZE: usize = 64 * 1024;
+
+/// Pre-allocated DMA buffer used for all data transfers.
+///
+/// Eliminates per-I/O frame allocation/free for the common case.
+/// Large requests (> BOUNCE_POOL_SIZE) fall back to on-demand allocation.
+struct BouncePool {
+    frame: memory::PhysFrame,
+    order: u8,
+}
+
+impl BouncePool {
+    /// Allocate a single physically-contiguous bounce buffer.
+    unsafe fn allocate() -> Result<Self, BlockError> {
+        let pages = (BOUNCE_POOL_SIZE + 4095) / 4096;
+        let order = pages.next_power_of_two().trailing_zeros() as u8;
+        let frame = crate::sync::with_irqs_disabled(|token| {
+            memory::allocate_phys_contiguous(token, order)
+        })
+        .map_err(|_| BlockError::NotReady)?;
+        Ok(Self { frame, order })
+    }
+
+    fn phys(&self) -> u64 {
+        self.frame.start_address.as_u64()
+    }
+
+    fn virt(&self) -> u64 {
+        crate::memory::phys_to_virt(self.phys())
+    }
+}
+
+impl Drop for BouncePool {
+    fn drop(&mut self) {
+        crate::sync::with_irqs_disabled(|token| {
+            memory::free_phys_contiguous(token, self.frame, self.order);
+        });
+    }
+}
+
+/// Pre-allocated metadata frame: [Header (16 B)] + padding + [Status (1 B)].
+/// Reused for every request — never alloc/freed per I/O.
+struct MetaPool {
+    frame: memory::PhysFrame,
+}
+
+impl MetaPool {
+    unsafe fn allocate() -> Result<Self, BlockError> {
+        let frame = crate::sync::with_irqs_disabled(|token| memory::allocate_frame(token))
+            .map_err(|_| BlockError::NotReady)?;
+        Ok(Self { frame })
+    }
+
+    fn phys(&self) -> u64 {
+        self.frame.start_address.as_u64()
+    }
+
+    fn virt(&self) -> u64 {
+        crate::memory::phys_to_virt(self.phys())
+    }
+
+    /// Layout offset for the status byte (right after the header).
+    fn status_offset(&self) -> u64 {
+        mem::size_of::<BlockRequestHeader>() as u64
+    }
+}
+
+impl Drop for MetaPool {
+    fn drop(&mut self) {
+        crate::sync::with_irqs_disabled(|token| {
+            memory::free_frame(token, self.frame);
+        });
+    }
+}
+
 /// VirtIO Block Device driver
 pub struct VirtioBlockDevice {
     device: VirtioDevice,
     queue: SpinLock<Virtqueue>,
     capacity: u64,
+    block_size: u32,
+    /// Pre-allocated DMA resources — no per-I/O alloc/free for common requests.
+    bounce_pool: BouncePool,
+    meta_pool: MetaPool,
 }
 
 // Send and Sync are safe because we use SpinLocks
 unsafe impl Send for VirtioBlockDevice {}
 unsafe impl Sync for VirtioBlockDevice {}
+
+/// WaitQueue used for IRQ-driven completion (see `handle_interrupt` / `do_request`).
+static VIRTIO_BLK_WQ: crate::sync::WaitQueue = crate::sync::WaitQueue::new();
+
+/// Atomic flag set by the IRQ handler to signal request completion.
+static VIRTIO_BLK_DONE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Atomic flag set by the IRQ handler on error.
+static VIRTIO_BLK_ERROR: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 impl VirtioBlockDevice {
     /// Initialize a VirtIO block device from a PCI device
@@ -159,6 +251,10 @@ impl VirtioBlockDevice {
     /// The PCI device must be a valid VirtIO block device
     pub unsafe fn new(pci_dev: PciDevice) -> Result<Self, &'static str> {
         log::info!("VirtIO-blk: Initializing device at {:?}", pci_dev.address);
+
+        // Pre-allocate DMA resources before touching the device.
+        let bounce_pool = BouncePool::allocate()?;
+        let meta_pool = MetaPool::allocate()?;
 
         // Create VirtIO device
         let device = VirtioDevice::new(pci_dev)?;
@@ -182,8 +278,9 @@ impl VirtioBlockDevice {
         //   VIRTIO_F_RING_EVENT_IDX(1 << 29) — suppress needless notifications
         let dev_feat = device_features;
         let mut guest_features: u32 = 0;
-        if dev_feat & (1 << 6) != 0 {
-            guest_features |= 1 << 6; // VIRTIO_BLK_F_BLK_SIZE
+        let has_blk_size = dev_feat & (1 << 6) != 0;
+        if has_blk_size {
+            guest_features |= 1 << 6;
         }
         if dev_feat & (1 << 9) != 0 {
             guest_features |= 1 << 9; // VIRTIO_BLK_F_FLUSH
@@ -221,17 +318,23 @@ impl VirtioBlockDevice {
 
         // Read device capacity from config space (offset 0 in device-specific config)
         // For legacy devices, device-specific config starts at offset 20 (after header)
-        // Or strictly speaking, after common config.
-        // Legacy VirtIO Header: 20 bytes.
-        // Block Config starts at offset 20.
         let capacity_low = device.read_reg_u32(20);
         let capacity_high = device.read_reg_u32(24);
         let capacity = ((capacity_high as u64) << 32) | (capacity_low as u64);
 
+        // Read device block size if the feature was negotiated (offset 28).
+        let blk_size = if has_blk_size {
+            let sz = device.read_reg_u32(28);
+            if sz == 0 { SECTOR_SIZE as u32 } else { sz }
+        } else {
+            SECTOR_SIZE as u32
+        };
+
         log::info!(
-            "VirtIO-blk: Capacity: {} sectors ({} MB)",
+            "VirtIO-blk: Capacity: {} sectors ({} MB), block_size={}",
             capacity,
-            (capacity * SECTOR_SIZE as u64) / (1024 * 1024)
+            (capacity * SECTOR_SIZE as u64) / (1024 * 1024),
+            blk_size,
         );
 
         log::info!("VirtIO-blk: Device initialized successfully");
@@ -240,7 +343,58 @@ impl VirtioBlockDevice {
             device,
             queue: SpinLock::new(queue),
             capacity,
+            block_size: blk_size,
+            bounce_pool,
+            meta_pool,
         })
+    }
+
+    /// Determine the DMA buffer strategy: use the pre-allocated pool when the
+    /// request fits; fall back to a per-I/O allocation for large transfers.
+    fn acquire_dma_buffer(
+        &self,
+        buf_size: usize,
+        is_write: bool,
+        src: Option<&[u8]>,
+    ) -> Result<(u64, u64, Option<(memory::PhysFrame, u8)>), BlockError> {
+        if buf_size <= BOUNCE_POOL_SIZE {
+            let phys = self.bounce_pool.phys();
+            let virt = self.bounce_pool.virt();
+            if is_write {
+                if let Some(s) = src {
+                    unsafe {
+                        ptr::copy_nonoverlapping(s.as_ptr(), virt as *mut u8, buf_size);
+                    }
+                }
+            }
+            Ok((phys, virt, None))
+        } else {
+            // Large request: fall back to per-I/O allocation.
+            let buf_pages = (buf_size + 4095) / 4096;
+            let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
+            let buf_frame = crate::sync::with_irqs_disabled(|token| {
+                memory::allocate_phys_contiguous(token, buf_order)
+            })
+            .map_err(|_| BlockError::NotReady)?;
+            let buf_phys = buf_frame.start_address.as_u64();
+            let buf_virt = crate::memory::phys_to_virt(buf_phys);
+            if is_write {
+                if let Some(s) = src {
+                    unsafe {
+                        ptr::copy_nonoverlapping(s.as_ptr(), buf_virt as *mut u8, buf_size);
+                    }
+                }
+            }
+            Ok((buf_phys, buf_virt, Some((buf_frame, buf_order))))
+        }
+    }
+
+    fn release_dma_buffer(&self, allocated: Option<(memory::PhysFrame, u8)>) {
+        if let Some((frame, order)) = allocated {
+            crate::sync::with_irqs_disabled(|token| {
+                memory::free_phys_contiguous(token, frame, order);
+            });
+        }
     }
 
     /// Submit a block request and wait for completion
@@ -250,201 +404,114 @@ impl VirtioBlockDevice {
         sector: u64,
         mut data_buf: Option<(&mut [u8], bool)>, // (buffer, is_write)
     ) -> Result<(), BlockError> {
-        // Allocate request header and status byte
-        // We use a single frame for both if possible, or small allocations?
-        // To be safe and simple with the frame allocator, we'll alloc a frame.
-        // In a real optimized driver, we would have a slab allocator or pre-allocated pool.
+        // ── Metadata (pre-allocated, reused — no per-I/O alloc) ──────────
+        let meta_phys = self.meta_pool.phys();
+        let meta_virt = self.meta_pool.virt();
+        let status_off = self.meta_pool.status_offset();
 
-        let metadata_frame = crate::sync::with_irqs_disabled(|token| memory::allocate_frame(token))
-            .map_err(|_| BlockError::NotReady)?;
-
-        let metadata_phys = metadata_frame.start_address.as_u64();
-        let metadata_virt = crate::memory::phys_to_virt(metadata_phys);
-        let status_offset = mem::size_of::<BlockRequestHeader>() as u64;
-
-        // Layout: [Header (16 bytes)] ... [Status (1 byte)]
-        let header_ptr = metadata_virt as *mut BlockRequestHeader;
-        let status_ptr = (metadata_virt + status_offset) as *mut u8;
-
-        // Setup request header (CPU access → virtual address)
+        let header_ptr = meta_virt as *mut BlockRequestHeader;
+        let status_ptr = (meta_virt + status_off) as *mut u8;
         unsafe {
             ptr::write(
                 header_ptr,
-                BlockRequestHeader {
-                    request_type: request_type as u32,
-                    reserved: 0,
-                    sector,
-                },
+                BlockRequestHeader { request_type: request_type as u32, reserved: 0, sector },
             );
-            ptr::write(status_ptr, 0xFF); // Initialize with invalid status
+            ptr::write(status_ptr, 0xFF);
         }
 
-        // Build descriptor chain (DMA → physical addresses)
+        // ── Data buffer (pool → fallback alloc) ──────────────────────────
+        let mut data_alloc: Option<(memory::PhysFrame, u8)> = None;
+        let mut dma_buf_virt: u64 = 0;
+
         let mut buffers = Vec::with_capacity(3);
-
-        // 1. Header (Device Readable) : physical addr for DMA
-        buffers.push((
-            metadata_phys,
-            mem::size_of::<BlockRequestHeader>() as u32,
-            false,
-        ));
-
-        // 2. Data (Device Readable OR Writable)
-        // If data_buf is provided
-        let mut data_frame_info = None;
+        buffers.push((meta_phys, mem::size_of::<BlockRequestHeader>() as u32, false));
 
         if let Some((buf, is_write)) = data_buf.as_mut() {
-            // We need a physically contiguous buffer for DMA
-            // For now, we allocate a bounce buffer.
-            // TODO: Support scatter-gather if the input buffer crosses page boundaries or isn't physical.
-
             let buf_size = buf.len();
-            let buf_pages = (buf_size + 4095) / 4096;
-            let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
+            let (dma_phys, dma_virt, alloc) = self.acquire_dma_buffer(buf_size, *is_write, Some(buf))?;
+            data_alloc = alloc;
+            dma_buf_virt = dma_virt;
 
-            let buf_frame = crate::sync::with_irqs_disabled(|token| {
-                memory::allocate_phys_contiguous(token, buf_order)
-            })
-            .map_err(|_| {
-                crate::sync::with_irqs_disabled(|token| {
-                    memory::free_frame(token, metadata_frame);
-                });
-                BlockError::NotReady
-            })?;
-
-            let buf_phys = buf_frame.start_address.as_u64();
-            let buf_virt = crate::memory::phys_to_virt(buf_phys);
-            data_frame_info = Some((buf_frame, buf_order));
-
-            // If WRITE (Out): Copy from source buf to DMA bounce buffer (CPU access → virtual)
-            if *is_write {
-                unsafe {
-                    ptr::copy_nonoverlapping(buf.as_ptr(), buf_virt as *mut u8, buf_size);
-                }
-            }
-
-            // `is_write` param tells us if we are writing TO disk.
-            // Write to disk: device reads from memory (flags = 0)
-            // Read from disk: device writes to memory (flags = WRITE)
             let device_writable = !*is_write;
-
-            // DMA → physical address
-            buffers.push((buf_phys, buf_size as u32, device_writable));
+            buffers.push((dma_phys, buf_size as u32, device_writable));
         }
 
-        // 3. Status (Device Writable) : physical addr for DMA
-        buffers.push((metadata_phys + status_offset, 1, true));
+        // 3. Status (Device Writable)
+        buffers.push((meta_phys + status_off, 1, true));
 
-        // Submit request
+        // ── Submit ────────────────────────────────────────────────────────
         let mut queue = self.queue.lock();
         let token = match queue.add_buffer(&buffers) {
             Ok(t) => t,
-            Err(_) => {
+            Err(e) => {
                 drop(queue);
-                // Cleanup
-                crate::sync::with_irqs_disabled(|token| {
-                    memory::free_frame(token, metadata_frame);
-                    if let Some((f, o)) = data_frame_info {
-                        memory::free_phys_contiguous(token, f, o);
-                    }
-                });
+                self.release_dma_buffer(data_alloc);
+                log::error!("VirtIO-blk: add_buffer failed: {}", e);
                 return Err(BlockError::IoError);
             }
         };
-
-        // Notify device
         if queue.should_notify() {
             self.device.notify_queue(0);
         }
         drop(queue);
 
-        // Wait for completion (busy-poll for now).
-        //
-        // IMPORTANT:
-        // Do not use HLT here. This path can run from syscall context where IF
-        // may be masked, and HLT would deadlock the CPU.
-        // TODO: replace with proper waitqueue + interrupt completion.
-        let mut spins = 0u32;
-        loop {
-            let mut queue = self.queue.lock();
-            if queue.has_used() {
-                // We don't check the token because we are single-threaded/blocking per device for now
-                // But to be correct we should find OUR token.
-                // virtio::common::Virtqueue::get_used currently pops the *next* used.
-                // If there are multiple in flight, we might pop someone else's.
-                // But here we are blocking, so only one in flight effectively.
-                if let Some((used_token, _len)) = queue.get_used() {
-                    if used_token == token {
-                        break;
-                    } else {
-                        // This shouldn't happen in single-threaded blocking mode
-                        // If it does, we just dropped someone else's completion.
-                        log::warn!("VirtIO-blk: Received unexpected token {}", used_token);
-                    }
+        // ── Completion ────────────────────────────────────────────────────
+        let has_data = data_buf.is_some();
+
+        if has_data && crate::process::current_task_id().is_some() {
+            // Task context: IRQ-driven via WaitQueue (avoids busy-polling).
+            VIRTIO_BLK_DONE.store(false, Ordering::Release);
+            VIRTIO_BLK_ERROR.store(false, Ordering::Release);
+            VIRTIO_BLK_WQ.wait_until(|| {
+                if VIRTIO_BLK_DONE.load(Ordering::Acquire) {
+                    VIRTIO_BLK_DONE.store(false, Ordering::Release);
+                    Some(())
+                } else {
+                    None
                 }
-            }
-            let (used_idx, last_used_idx) = queue.used_indices();
-            drop(queue);
-            spins = spins.saturating_add(1);
-            if spins == 5_000_000 {
-                let isr = self.device.read_isr_status();
-                log::error!(
-                    "VirtIO-blk: request timeout sector={} token={} used_idx={} last_used_idx={} isr={}",
-                    sector,
-                    token,
-                    used_idx,
-                    last_used_idx,
-                    isr
-                );
-                crate::serial_println!(
-                    "[virtio-blk] timeout sector={} token={} used_idx={} last_used_idx={} isr={}",
-                    sector,
-                    token,
-                    used_idx,
-                    last_used_idx,
-                    isr
-                );
-                crate::sync::with_irqs_disabled(|token| {
-                    memory::free_frame(token, metadata_frame);
-                    if let Some((f, o)) = data_frame_info {
-                        memory::free_phys_contiguous(token, f, o);
-                    }
-                });
+            });
+            if VIRTIO_BLK_ERROR.load(Ordering::Acquire) {
+                VIRTIO_BLK_ERROR.store(false, Ordering::Release);
+                self.release_dma_buffer(data_alloc);
                 return Err(BlockError::IoError);
             }
-            core::hint::spin_loop();
-        }
-
-        // Check status
-        let status_byte = unsafe { ptr::read(status_ptr) };
-
-        // Post-processing
-        if let Some((buf, is_write)) = data_buf {
-            if let Some((buf_frame, buf_order)) = data_frame_info {
-                let buf_virt = crate::memory::phys_to_virt(buf_frame.start_address.as_u64());
-
-                // If Read (In): Copy from DMA buf to destination buf (CPU access → virtual)
-                if !is_write && status_byte == BlockStatus::Ok as u8 {
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            buf_virt as *const u8,
-                            buf.as_mut_ptr(),
-                            buf.len(),
-                        );
+        } else {
+            // Boot / no-task context: busy-poll.
+            let mut spins = 0u32;
+            loop {
+                let mut q = self.queue.lock();
+                if q.has_used() {
+                    while let Some((t, _)) = q.get_used() {
+                        if t == token {
+                            break;
+                        }
                     }
+                    break;
                 }
-
-                // Free DMA buffer
-                crate::sync::with_irqs_disabled(|token| {
-                    memory::free_phys_contiguous(token, buf_frame, buf_order);
-                });
+                drop(q);
+                spins = spins.saturating_add(1);
+                if spins >= 5_000_000 {
+                    let isr = self.device.read_isr_status();
+                    log::error!("VirtIO-blk: timeout sector={} token={} isr={}", sector, token, isr);
+                    self.release_dma_buffer(data_alloc);
+                    return Err(BlockError::IoError);
+                }
+                core::hint::spin_loop();
             }
         }
 
-        // Free metadata frame
-        crate::sync::with_irqs_disabled(|token| {
-            memory::free_frame(token, metadata_frame);
-        });
+        // ── Post-processing ──────────────────────────────────────────────
+        let status_byte = unsafe { ptr::read(status_ptr) };
+
+        if let Some((buf, is_write)) = data_buf {
+            if !*is_write && status_byte == BlockStatus::Ok as u8 {
+                unsafe {
+                    ptr::copy_nonoverlapping(dma_buf_virt as *const u8, buf.as_mut_ptr(), buf.len());
+                }
+            }
+        }
+
+        self.release_dma_buffer(data_alloc);
 
         if status_byte == BlockStatus::Ok as u8 {
             Ok(())
@@ -519,11 +586,12 @@ impl BlockDevice for VirtioBlockDevice {
     }
 }
 
-/// Global VirtIO block device
-static VIRTIO_BLOCK: SpinLock<Option<Box<VirtioBlockDevice>>> = SpinLock::new(None);
+/// Global VirtIO block device reference (leaked Box, never freed).
+static VIRTIO_BLOCK_PTR: core::sync::atomic::AtomicPtr<VirtioBlockDevice> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// VirtIO block IRQ line (will be set during init)
-static mut VIRTIO_BLOCK_IRQ: u8 = 0;
+static VIRTIO_BLOCK_IRQ: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xFF);
 
 /// Initialize VirtIO block device
 ///
@@ -555,13 +623,11 @@ pub fn init() {
     // Initialize device
     match unsafe { VirtioBlockDevice::new(pci_dev) } {
         Ok(device) => {
-            // Store IRQ line for interrupt handler
-            unsafe {
-                VIRTIO_BLOCK_IRQ = irq_line;
-            }
-
-            // Register device
-            *VIRTIO_BLOCK.lock() = Some(Box::new(device));
+            // Leak the Box to get a 'static reference — safe because the device
+            // lives for the entire kernel lifetime.
+            let leaked: &'static mut VirtioBlockDevice = Box::leak(Box::new(device));
+            VIRTIO_BLOCK_PTR.store(leaked as *mut VirtioBlockDevice, Ordering::Release);
+            VIRTIO_BLOCK_IRQ.store(irq_line, Ordering::Relaxed);
 
             // Register IRQ handler in IDT
             crate::arch::x86_64::idt::register_virtio_block_irq(irq_line);
@@ -577,41 +643,51 @@ pub fn init() {
 /// Handle VirtIO block device interrupt
 ///
 /// Called from the IDT IRQ handler when the VirtIO device signals completion.
-/// Acknowledges the interrupt and processes completed requests.
+/// Acknowledges the interrupt and wakes any task waiting in `do_request`.
 pub fn handle_interrupt() {
-    // Acknowledge the interrupt at the device level
-    let lock = VIRTIO_BLOCK.lock();
-    if let Some(device) = lock.as_ref() {
-        // Read ISR status to check if interrupt is for us
-        let isr_status = device.device.read_isr_status();
-        if isr_status != 0 {
-            // Acknowledge the interrupt
-            device.device.ack_interrupt();
-
-            // Process completed requests (wake up waiting tasks)
-            // For now, just log the interrupt
-            log::trace!("VirtIO-blk: Interrupt handled (ISR={})", isr_status);
-        }
+    let ptr = VIRTIO_BLOCK_PTR.load(Ordering::Acquire);
+    if ptr.is_null() {
+        return;
     }
+
+    // SAFETY: ptr is a valid leaked Box that lives forever.
+    let device = unsafe { &*ptr };
+
+    let isr_status = device.device.read_isr_status();
+    if isr_status == 0 {
+        return; // spurious
+    }
+
+    // Acknowledge the interrupt (legacy PCI: reading ISR acks it).
+    device.device.ack_interrupt();
+
+    // Signal completion to the waiting task.
+    // A real implementation would check which token(s) completed and signal
+    // the correct ones. For the current single-in-flight design, we just
+    // set the global flag and wake the first waiter.
+    VIRTIO_BLK_DONE.store(true, Ordering::Release);
+
+    // TODO: check task-file error status for proper VIRTIO_BLK_ERROR signalling.
+    VIRTIO_BLK_WQ.wake_one();
+
+    log::trace!("VirtIO-blk: Interrupt handled (ISR={})", isr_status);
 }
 
 /// Get the global VirtIO block device
+///
+/// Returns a `'static` reference that is valid for the entire kernel lifetime.
+/// The device is initialised once during boot and never removed.
 pub fn get_device() -> Option<&'static VirtioBlockDevice> {
-    unsafe {
-        let lock = VIRTIO_BLOCK.lock();
-        if lock.is_some() {
-            // This is slightly unsafe if the lock is dropped and the box is moved,
-            // but the static Option is never cleared in this kernel.
-            // A safer way is needed for production.
-            let ptr = &**lock.as_ref().unwrap() as *const VirtioBlockDevice;
-            Some(&*ptr)
-        } else {
-            None
-        }
+    let ptr = VIRTIO_BLOCK_PTR.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        // SAFETY: ptr was obtained from Box::leak, so it is valid for 'static.
+        Some(unsafe { &*ptr })
     }
 }
 
 /// Get the VirtIO block IRQ line
 pub fn get_irq() -> u8 {
-    unsafe { VIRTIO_BLOCK_IRQ }
+    VIRTIO_BLOCK_IRQ.load(Ordering::Relaxed)
 }
