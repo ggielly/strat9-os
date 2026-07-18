@@ -67,7 +67,7 @@ macro_rules! shell_print {
             let mut __tmp = alloc::string::String::new();
             let _ = write!(__tmp, $($arg)*);
             $crate::shell::output::capture_write_bytes(__tmp.as_bytes());
-        } else {
+        } else if !$crate::debug_cfg::is_quiet() {
             $crate::serial_print!($($arg)*);
             if $crate::arch::x86_64::vga::is_available() {
                 use core::fmt::Write;
@@ -87,7 +87,7 @@ macro_rules! shell_println {
             let mut __tmp = alloc::string::String::new();
             let _ = writeln!(__tmp, $($arg)*);
             $crate::shell::output::capture_write_bytes(__tmp.as_bytes());
-        } else {
+        } else if !$crate::debug_cfg::is_quiet() {
             $crate::serial_println!($($arg)*);
             if $crate::arch::x86_64::vga::is_available() {
                 use core::fmt::Write;
