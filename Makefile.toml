@@ -18,9 +18,19 @@ STRAT9_UPLINK_IFACE = "eth0"
 # =============================================================================
 
 [tasks.setup-uboot]
-description = "Download and build U-Boot bootloader"
+description = "Download and build U-Boot bootloader (skips if binary exists)"
 command = "bash"
 args = ["tools/scripts/setup-uboot.sh"]
+
+[tasks.setup-uboot-force]
+description = "Force rebuild U-Boot bootloader"
+command = "bash"
+args = ["tools/scripts/setup-uboot.sh", "--force"]
+
+[tasks.setup-uboot-update]
+description = "Pull latest U-Boot sources and rebuild only if needed"
+command = "bash"
+args = ["tools/scripts/setup-uboot.sh", "--update"]
 
 [tasks.setup-musl]
 description = "Clone/update external musl"
@@ -264,7 +274,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios build/uboot/u-boot.bin \
+    -kernel build/uboot/u-boot \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -device virtio-gpu-gl \
     -display sdl,gl=on \
@@ -288,7 +298,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios build/uboot/u-boot.bin \
+    -kernel build/uboot/u-boot \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -device virtio-gpu-gl \
     -display sdl,gl=on \
@@ -312,7 +322,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios build/uboot/u-boot.bin \
+    -kernel build/uboot/u-boot \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -nographic \
     -no-reboot
@@ -328,7 +338,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios build/uboot/u-boot.bin \
+    -kernel build/uboot/u-boot \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -display none \
     -serial stdio \
@@ -345,7 +355,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios build/uboot/u-boot.bin \
+    -kernel build/uboot/u-boot \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -device e1000,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
@@ -363,7 +373,7 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios build/uboot/u-boot.bin \
+    -kernel build/uboot/u-boot \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -device e1000,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
@@ -401,7 +411,7 @@ timeout 30 ${QEMU} \
     -cpu qemu64 \
     -smp 1 \
     -m 1G \
-    -bios build/uboot/u-boot.bin \
+    -kernel build/uboot/u-boot \
     -drive file=build/strat9-os.img,if=virtio,format=raw \
     -nographic \
     -no-reboot 2>&1 | head -50
