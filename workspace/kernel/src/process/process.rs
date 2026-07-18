@@ -54,7 +54,7 @@ impl Process {
             capabilities: SyncUnsafeCell::new(CapabilityTable::new()),
             signal_actions: SyncUnsafeCell::new([SigActionData::default(); 64]),
             brk: AtomicU64::new(0),
-            mmap_hint: AtomicU64::new(0x0000_0000_6000_0000),
+            mmap_hint: AtomicU64::new(crate::kaslr::mmap_base()),
             cwd: SyncUnsafeCell::new(String::from("/")),
             cwd_fd: AtomicU64::new(u64::MAX),
             umask: AtomicU32::new(0o022),

@@ -70,7 +70,7 @@ pub fn sys_ipc_ring_map(ring_handle: u64, out_ptr: u64) -> Result<u64, SyscallEr
     let addr_space = task.process.address_space_arc();
     let base = addr_space
         .find_free_vma_range(
-            super::mmap::MMAP_BASE,
+            crate::kaslr::mmap_base(),
             page_count,
             crate::memory::address_space::VmaPageSize::Small,
         )

@@ -247,6 +247,8 @@ echo "  copying initfs runtime binaries..."
     cp workspace/target/x86_64-unknown-none/release/test_exec_helper build/iso_root/initfs/test_exec_helper
 [ -f workspace/assets/boot/silo.toml ] && \
     cp workspace/assets/boot/silo.toml build/iso_root/initfs/silo.toml
+[ -f workspace/assets/boot/kernel.toml ] && \
+    cp workspace/assets/boot/kernel.toml build/iso_root/initfs/kernel.toml
 
 # Copy Limine files
 echo "  copying Limine bootloader..."

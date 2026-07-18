@@ -1,0 +1,38 @@
+# =============================================================================
+# Strat9-OS Kernel Configuration
+# =============================================================================
+#
+# This file configures kernel parameters at boot time.
+# It is loaded by the Limine bootloader as an internal module.
+#
+# Format: Simple TOML with [section] headers and key = value pairs.
+# Lines starting with '#' are comments. Blank lines are ignored.
+#
+# All values are optional; defaults are used when absent.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Quiet mode: disable all debug output (serial, VGA, overlay)
+# -----------------------------------------------------------------------------
+[quiet]
+# When true, the kernel produces zero diagnostic output during boot and runtime.
+# Serial, VGA, overlay, and status line output are all suppressed.
+# The kernel still runs normally, but with no visible debug information.
+# Intended for production builds and real hardware bring-up.
+#
+# Default: false
+quiet_mode = false
+
+# -----------------------------------------------------------------------------
+# Buddy Allocator Configuration
+# -----------------------------------------------------------------------------
+[buddy]
+# Fragmentation score threshold for triggering compaction-assist (0-100).
+#
+# When a higher-order allocation fails and the zone's fragmentation score
+# exceeds this threshold, the allocator drains per-CPU caches before retrying.
+#
+# - Lower values (e.g., 20): more aggressive compaction, less fragmentation
+# - Higher values (e.g., 50): less aggressive compaction, more fragmentation
+# - Default: 35
+compaction_threshold = 35

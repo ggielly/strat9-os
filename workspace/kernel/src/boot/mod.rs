@@ -9,6 +9,7 @@
 //! - Limine boot-protocol entry point
 //! - early serial logger
 //! - kernel panic handler
+//! - simple TOML parser for kernel configuration
 
 // Assembly stub that includes boot64.S
 pub mod assembly;
@@ -27,3 +28,9 @@ pub mod panic;
 
 /// Kernel symbol table for panic backtrace resolution
 pub mod symbols;
+
+/// Centralized kernel.toml configuration application
+pub mod config;
+
+/// Simple TOML parser for kernel boot configuration
+pub mod toml;

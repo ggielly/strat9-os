@@ -5,7 +5,7 @@ use crate::{
     memory::{AddressSpace, UserSliceRead, VmaFlags, VmaPageSize, VmaType},
     process::{
         current_task_clone,
-        elf::{load_elf_image, LoadedElfInfo, USER_STACK_BASE, USER_STACK_PAGES, USER_STACK_TOP},
+        elf::{load_elf_image, LoadedElfInfo, USER_STACK_PAGES},
         get_task_ids_in_tgid,
     },
     syscall::{error::SyscallError, SyscallFrame},
@@ -135,7 +135,7 @@ pub fn sys_execve(
     };
     new_as_arc
         .map_region(
-            USER_STACK_BASE,
+            crate::kaslr::stack_base(),
             USER_STACK_PAGES,
             stack_flags,
             VmaType::Stack,
@@ -236,7 +236,7 @@ pub fn sys_execve(
     current
         .process
         .mmap_hint
-        .store(0x0000_0000_6000_0000, core::sync::atomic::Ordering::Relaxed);
+        .store(crate::kaslr::mmap_base(), core::sync::atomic::Ordering::Relaxed);
     // Set FS.base MSR for the new image TLS (or 0 if no PT_TLS).
     unsafe {
         let lo = new_fs_base as u32;
@@ -293,7 +293,7 @@ fn setup_user_stack(
     let args = read_string_array(argv_ptr)?;
     let envs = read_string_array(envp_ptr)?;
 
-    let mut sp = USER_STACK_TOP;
+    let mut sp = crate::kaslr::stack_top();
     let mut str_ptrs: Vec<u64> = Vec::with_capacity(args.len()); // stores pointers to arguments
     let mut env_ptrs: Vec<u64> = Vec::with_capacity(envs.len()); // stores pointers to env vars
 
@@ -490,7 +490,7 @@ fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(
         let chunk_size = core::cmp::min(data.len() - written, 4096 - page_offset);
 
         // translate might fail if page not mapped.
-        // `USER_STACK_BASE`..`USER_STACK_TOP` is mapped.
+        // `stack_base()`..`stack_top()` is mapped.
         let phys = as_ref
             .translate(VirtAddr::new(curr_vaddr))
             .ok_or(SyscallError::Fault)?;
