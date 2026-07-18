@@ -141,7 +141,7 @@ impl HidKeyboard {
     }
 
     pub fn drain_into_unified(&mut self) {
-        while let Some(ev) = self.event_queue.pop() {
+        for ev in self.event_queue.drain(..) {
             keyboard::inject_hid_scancode(ev.keycode, ev.pressed);
         }
     }
@@ -230,7 +230,7 @@ impl HidMouse {
     }
 
     pub fn drain_into_unified(&mut self) {
-        while let Some(ev) = self.event_queue.pop() {
+        for ev in self.event_queue.drain(..) {
             let left = ev.buttons & 0x01 != 0;
             let right = ev.buttons & 0x02 != 0;
             let middle = ev.buttons & 0x04 != 0;
