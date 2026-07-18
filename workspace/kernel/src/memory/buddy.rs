@@ -742,12 +742,40 @@ impl BuddyAllocator {
         None
     }
 
+    /// Find the segment containing a block at the given physical address.
+    ///
+    /// Uses binary search since segments are sorted by base address.
+    /// This is O(log n) instead of O(n) for the linear search.
     #[inline]
     fn find_segment_index(zone: &Zone, phys: u64, order: u8) -> Option<usize> {
-        zone.segments()
-            .iter()
-            .take(zone.segment_count)
-            .position(|segment| Self::segment_contains_block(segment, phys, order))
+        let segments = zone.segments();
+        let count = zone.segment_count;
+        if count == 0 {
+            return None;
+        }
+
+        // Binary search: find the last segment whose base <= phys
+        let mut lo = 0usize;
+        let mut hi = count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if segments[mid].base.as_u64() <= phys {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        // lo is now the first segment with base > phys, so check lo - 1
+        if lo == 0 {
+            return None;
+        }
+        let idx = lo - 1;
+        if Self::segment_contains_block(&segments[idx], phys, order) {
+            Some(idx)
+        } else {
+            None
+        }
     }
 
     #[inline]

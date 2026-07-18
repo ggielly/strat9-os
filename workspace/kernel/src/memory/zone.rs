@@ -215,6 +215,12 @@ impl ZoneSegment {
         self.base.as_u64() + (self.page_count as u64 * 4096)
     }
 
+    /// Compare by base address for binary search.
+    #[inline]
+    pub fn base_cmp(&self, addr: u64) -> core::cmp::Ordering {
+        self.base.as_u64().cmp(&addr)
+    }
+
     /// Count the number of free blocks at a given order.
     pub fn free_list_count(&self, order: u8) -> usize {
         Migratetype::ALL
