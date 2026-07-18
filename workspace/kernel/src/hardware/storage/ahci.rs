@@ -32,7 +32,7 @@ use crate::{
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     ptr,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering},
 };
 
 pub use super::virtio_block::{BlockDevice, BlockError, SECTOR_SIZE};
@@ -1149,10 +1149,12 @@ impl BlockDevice for AhciController {
         if buf.len() < SECTOR_SIZE {
             return Err(BlockError::BufferTooSmall);
         }
-        // submit_cmd needs &mut [u8]; copy to a mutable staging buffer
-        let mut tmp = [0u8; SECTOR_SIZE];
-        tmp.copy_from_slice(&buf[..SECTOR_SIZE]);
-        submit_cmd(port, sector, 1, &mut tmp, true, ATA_WRITE_DMA_EXT)
+        // submit_cmd copies the data into a DMA buffer before issuing the
+        // command, so the const-to-mut cast is safe (the buffer is never
+        // written from the CPU side during a write request).
+        let buf_mut = buf.as_ptr() as *mut u8;
+        let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_mut, buf.len()) };
+        submit_cmd(port, sector, 1, buf_slice, true, ATA_WRITE_DMA_EXT)
             .map_err(|_| BlockError::IoError)
     }
 
@@ -1183,10 +1185,11 @@ impl BlockDevice for AhciController {
         if buf.len() < nbytes {
             return Err(BlockError::BufferTooSmall);
         }
-        // submit_cmd needs &mut [u8]; use a single staging buffer for the bulk write
-        let mut tmp = alloc::vec![0u8; nbytes];
-        tmp.copy_from_slice(&buf[..nbytes]);
-        submit_cmd(port, sector, count, &mut tmp, true, ATA_WRITE_DMA_EXT)
+        // submit_cmd copies the data into a DMA buffer before issuing the
+        // command, so the const-to-mut cast is safe.
+        let buf_mut = buf.as_ptr() as *mut u8;
+        let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_mut, buf.len()) };
+        submit_cmd(port, sector, count, buf_slice, true, ATA_WRITE_DMA_EXT)
             .map_err(|_| BlockError::IoError)
     }
 

@@ -249,20 +249,14 @@ from the free list.
             let desc_mut = unsafe { &mut *self.desc_ptr.add(current as usize) };
             desc_mut.next = Le::<u16>::from_ne(self.first_free);
             self.first_free = current;
-            self.free_count += 1
-            // SAFETY: current is a valid descriptor index
-            let desc = unsafe { &*self.desc_ptr.add(current as usize) };
-            let has_next = desc.flags.to_ne() & vring_flags::NEXT != 0;
-            let next = desc.next.to_ne();
-
-            self.free_descriptors.push(current);
+            self.free_count += 1;
 
             if !has_next {
                 break;
             }
             current = next;
         }
-    }(buffers.len() as u16) > self.free_count
+    }
 
     /// Add a buffer to the virtqueue
     ///
@@ -275,7 +269,7 @@ from the free list.
             return Err("Empty buffer list");
         }
 
-        if buffers.len() > self.free_descriptors.len() {
+        if (buffers.len() as u16) > self.free_count {
             return Err("Not enough free descriptors");
         }
 
