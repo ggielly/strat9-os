@@ -424,6 +424,30 @@ impl Zone {
         fragmented.saturating_mul(100) / total_free
     }
 
+    /// Compute both free pages at or above order and fragmentation score in a single pass.
+    ///
+    /// Returns `(usable_pages, fragmentation_score)`. This avoids redundant free list
+    /// walks when both values are needed (e.g., in compaction candidate selection).
+    pub fn usable_pages_and_fragmentation(
+        &self,
+        order: u8,
+        cached_order0_pages: usize,
+    ) -> (usize, usize) {
+        if order == 0 {
+            return (self.available_pages().saturating_add(cached_order0_pages), 0);
+        }
+
+        let total_free = self.available_pages().saturating_add(cached_order0_pages);
+        if total_free == 0 {
+            return (0, 0);
+        }
+
+        let usable = self.free_pages_at_or_above_order(order);
+        let fragmented = total_free.saturating_sub(usable);
+        let score = fragmented.saturating_mul(100) / total_free;
+        (usable, score)
+    }
+
     /// Returns the largest order that currently has at least one free block.
     pub fn largest_free_order(&self) -> Option<u8> {
         for order in (0..=MAX_ORDER).rev() {

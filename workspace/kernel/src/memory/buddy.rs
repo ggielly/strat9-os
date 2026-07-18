@@ -1537,12 +1537,14 @@ impl BuddyAllocator {
                 continue;
             }
 
-            let usable_pages = zone.free_pages_at_or_above_order(order);
+            // Compute usable pages and fragmentation score in a single pass
+            // to avoid redundant free list walks.
+            let (usable_pages, fragmentation_score) =
+                zone.usable_pages_and_fragmentation(order, cached_pages);
             if usable_pages >= requested_pages {
                 continue;
             }
 
-            let fragmentation_score = zone.fragmentation_score(order, cached_pages);
             if fragmentation_score < COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed) {
                 continue;
             }
