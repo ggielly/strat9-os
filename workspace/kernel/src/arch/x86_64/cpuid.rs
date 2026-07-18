@@ -33,6 +33,9 @@ bitflags! {
         const SSE       = 1 << 19;
         const SSE2      = 1 << 20;
         const FXSR      = 1 << 21;
+        //  Leaf 0x07 ECX
+        const SMEP      = 1 << 57; // ECX bit 7 (relocated to avoid collision)
+        const SMAP      = 1 << 58; // ECX bit 0 (relocated to avoid collision)
         //  Leaf 0x07 EBX
         const AVX2      = 1 << 32;
         const AVX512F   = 1 << 33;
@@ -236,7 +239,7 @@ fn detect() -> CpuInfo {
 
     //  Leaf 0x07: extended features
     if max_leaf >= 7 {
-        let (_eax7, ebx7, _ecx7, _edx7) = cpuid(7, 0);
+        let (_eax7, ebx7, ecx7, _edx7) = cpuid(7, 0);
         if ebx7 & (1 << 5) != 0 {
             features |= CpuFeatures::AVX2;
         }
@@ -251,6 +254,14 @@ fn detect() -> CpuInfo {
         }
         if ebx7 & (1 << 31) != 0 {
             features |= CpuFeatures::AVX512VL;
+        }
+        // SMEP (ECX bit 7): Supervisor Mode Execution Prevention
+        if ecx7 & (1 << 7) != 0 {
+            features |= CpuFeatures::SMEP;
+        }
+        // SMAP (ECX bit 20): Supervisor Mode Access Prevention
+        if ecx7 & (1 << 20) != 0 {
+            features |= CpuFeatures::SMAP;
         }
     }
 
@@ -447,6 +458,8 @@ pub fn features_to_flags_string(f: CpuFeatures) -> String {
         (CpuFeatures::LONG_MODE, "lm"),
         (CpuFeatures::VMX, "vmx"),
         (CpuFeatures::SVM, "svm"),
+        (CpuFeatures::SMEP, "smep"),
+        (CpuFeatures::SMAP, "smap"),
     ];
     for &(feat, name) in table {
         if f.contains(feat) {

@@ -181,7 +181,7 @@ pub fn sys_mmap(
             };
             addr_space
                 .find_free_vma_range(hint, n_pages, page_size)
-                .or_else(|| addr_space.find_free_vma_range(MMAP_BASE, n_pages, page_size))
+                .or_else(|| addr_space.find_free_vma_range(crate::kaslr::mmap_base(), n_pages, page_size))
                 .ok_or(SyscallError::OutOfMemory)?
         };
 
@@ -298,10 +298,10 @@ pub fn sys_mmap(
             task.process.mmap_hint.load(Ordering::Relaxed)
         };
 
-        // Try the hint first, then fall back to MMAP_BASE.
+        // Try the hint first, then fall back to KASLR-randomized base.
         addr_space
             .find_free_vma_range(hint, n_pages, page_size)
-            .or_else(|| addr_space.find_free_vma_range(MMAP_BASE, n_pages, page_size))
+            .or_else(|| addr_space.find_free_vma_range(crate::kaslr::mmap_base(), n_pages, page_size))
             .ok_or(SyscallError::OutOfMemory)?
     };
 
@@ -472,7 +472,7 @@ pub fn sys_mremap(
 
     let new_pages = (new_len_aligned / page_bytes) as usize;
     let new_addr = addr_space
-        .find_free_vma_range(MMAP_BASE, new_pages, vma.page_size)
+        .find_free_vma_range(crate::kaslr::mmap_base(), new_pages, vma.page_size)
         .ok_or(SyscallError::OutOfMemory)?;
 
     addr_space

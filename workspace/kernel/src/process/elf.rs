@@ -18,7 +18,7 @@
 //!     If PIE_BASE_ADDR (0x1_0000_0000) fails, fallback to 0x1000_0000. This value is arbitrary and could overlap existing mappings if many libraries are loaded.
 //!
 //! Security:
-//!   - User stack has a guard page (USER_STACK_BASE - 4096) that is intentionally
+//!   - User stack has a guard page (user_stack_base() - 4096) that is intentionally
 //!     left unmapped.  Stack underflows hit it and page-fault.
 //!
 use alloc::{sync::Arc, vec::Vec};
@@ -84,19 +84,31 @@ const R_X86_64_IRELATIVE: u32 = 37;
 
 /// Maximum virtual address we accept for user-space mappings.
 pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
-/// Preferred base when placing ET_DYN (PIE) images.
-const PIE_BASE_ADDR: u64 = 0x0000_0001_0000_0000;
 
-/// User stack location (below the non-canonical gap).
-pub const USER_STACK_BASE: u64 = 0x0000_7FFF_F000_0000;
 /// Number of 4 KiB pages for the user stack (16 pages = 64 KiB).
 pub const USER_STACK_PAGES: usize = 16;
-/// Top of the user stack (stack grows down).
-pub const USER_STACK_TOP: u64 = USER_STACK_BASE + (USER_STACK_PAGES as u64) * 4096;
-/// Guard page below the user stack : unmapped, catches stack underflows.
-pub const USER_STACK_GUARD: u64 = USER_STACK_BASE - 4096;
 /// Standard user-mode RFLAGS: IF=1, reserved bit 1 set.
 const USER_RFLAGS: u64 = 0x202;
+
+/// Get the randomized user stack base address.
+fn user_stack_base() -> u64 {
+    crate::kaslr::stack_base()
+}
+
+/// Get the randomized user stack top address.
+fn user_stack_top() -> u64 {
+    crate::kaslr::stack_top()
+}
+
+/// Get the guard page address below the user stack.
+fn user_stack_guard() -> u64 {
+    crate::kaslr::stack_guard()
+}
+
+/// Get the randomized PIE base address for ELF loading.
+fn pie_base() -> u64 {
+    crate::kaslr::pie_base()
+}
 
 /// Result of loading an ELF image into an address space.
 #[derive(Debug, Clone, Copy)]
@@ -432,7 +444,7 @@ fn compute_load_bias_and_entry(
     } else {
         let n_pages = (span as usize).div_ceil(4096);
         let load_base = user_as
-            .find_free_vma_range(PIE_BASE_ADDR, n_pages, VmaPageSize::Small)
+            .find_free_vma_range(pie_base(), n_pages, VmaPageSize::Small)
             .or_else(|| {
                 user_as.find_free_vma_range(0x0000_0000_1000_0000, n_pages, VmaPageSize::Small)
             })
@@ -528,6 +540,9 @@ fn read_user_mapped_bytes(
         return Err("Read range outside user space");
     }
     let mut copied = 0usize;
+    // SMAP: temporarily disable supervisor-mode access prevention while
+    // reading from user-space pages through the HHDM.
+    crate::arch::x86_64::stac();
     while copied < out.len() {
         let page_off = (vaddr & 0xFFF) as usize;
         let chunk = core::cmp::min(out.len() - copied, 4096 - page_off);
@@ -536,10 +551,12 @@ fn read_user_mapped_bytes(
             .ok_or("Failed to translate mapped user bytes")?;
         let paddr = phys.as_u64();
         if paddr == 0 {
+            crate::arch::x86_64::clac();
             return Err("Translated physical address is null");
         }
         let src = crate::memory::phys_to_virt(paddr) as *const u8;
         if src.is_null() {
+            crate::arch::x86_64::clac();
             return Err("HHDM-mapped source is null");
         }
         // SAFETY: src points to mapped physical memory via HHDM.
@@ -551,6 +568,7 @@ fn read_user_mapped_bytes(
             .checked_add(chunk as u64)
             .ok_or("Virtual address overflow while reading mapped bytes")?;
     }
+    crate::arch::x86_64::clac();
     Ok(())
 }
 
@@ -567,6 +585,9 @@ fn write_user_mapped_bytes(
         return Err("Write range outside user space");
     }
     let mut written = 0usize;
+    // SMAP: temporarily disable supervisor-mode access prevention while
+    // writing to user-space pages through the HHDM.
+    crate::arch::x86_64::stac();
     while written < src.len() {
         let page_off = (vaddr & 0xFFF) as usize;
         let chunk = core::cmp::min(src.len() - written, 4096 - page_off);
@@ -575,10 +596,12 @@ fn write_user_mapped_bytes(
             .ok_or("Failed to translate relocation target")?;
         let paddr = phys.as_u64();
         if paddr == 0 {
+            crate::arch::x86_64::clac();
             return Err("Translated physical address is null");
         }
         let dst = crate::memory::phys_to_virt(paddr) as *mut u8;
         if dst.is_null() {
+            crate::arch::x86_64::clac();
             return Err("HHDM-mapped destination is null");
         }
         // SAFETY: destination points to mapped user frame through HHDM.
@@ -590,6 +613,7 @@ fn write_user_mapped_bytes(
             .checked_add(chunk as u64)
             .ok_or("Virtual address overflow while writing mapped bytes")?;
     }
+    crate::arch::x86_64::clac();
     Ok(())
 }
 
@@ -1363,9 +1387,11 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // `swapgs ; iretq`. Otherwise a timer IRQ can land after `swapgs` but
     // before `iretq`, with `CS=0x8` and `GS=user`, and the first `gs:[..]`
     // access in the handler faults in the swapgs->iretq window.
-    //
-    // E9-hack probes
-    // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port
+
+    // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port.
+    // Debug builds include probes 1-4 for diagnosing IRETQ failures;
+    // release builds omit them to avoid port I/O overhead.
+    #[cfg(debug_assertions)]
     unsafe {
         core::arch::asm!(
             // Close the IRQ window before touching GS. `iretq` restores IF=1
@@ -1373,15 +1399,13 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             // interrupts enabled.
             "cli",
 
-            //  Probe 1: entering the asm block ================================================================================
-            // Input registers are already allocated by the compiler;
-            // push/pop rax leaves them intact.
+            //  Probe 1: entering the asm block
             "push rax",
             "mov al, 0x31",     // '1'
             "out 0xe9, al",
             "pop rax",
 
-            //  Build the iretq frame ==========================================================================================
+            //  Build the iretq frame
             // Order required by IRETQ (popped in reverse order):
             //   [RSP+32] SS
             //   [RSP+24] user RSP
@@ -1394,43 +1418,74 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "push {cs}",
             "push {rip}",
 
-            //  Probe 2 : frame iretq complète ==========================================================================================
+            //  Probe 2: frame iretq complete
             "push rax",
             "mov al, 0x32",     // '2'
             "out 0xe9, al",
             "pop rax",
 
-            //  Pre-fault the user code page ====================================================================
+            //  Pre-fault the user code page
             // Touch the first byte at user_rip to trigger a demand page fault
             // while GS is still the kernel per-CPU block. Without this, the
-            // iretq instruction itself can fault in the SWAPGS→Ring3 window,
+            // iretq instruction itself can fault in the SWAPGS->Ring3 window,
             // producing a SWAPGS-WINDOW page fault (CS=Ring0 but GS=user).
             "mov rax, {rip}",
             "movzx rax, byte ptr [rax]",
 
-            //  Load arg0 into RDI ====================================================================================================
+            //  Load arg0 into RDI
             "mov rdi, {arg0}",
 
-            //  Probe 3: RDI loaded, just before SWAPGS ==================================================
+            //  Probe 3: RDI loaded, just before SWAPGS
             "push rax",
             "mov al, 0x33",     // '3'
             "out 0xe9, al",
             "pop rax",
 
-            //  SWAPGS: GS.base kernel <---> GS.base user ============================================================
-            // After this instruction, GS points to the user per-thread block.
-            // The push/pop below does not touch GS, it is safe.
+            //  SWAPGS: GS.base kernel <-> GS.base user
             "swapgs",
 
-            //  Probe 4: SWAPGS succeeded, IRETQ imminent ============================================================
-            // If a double-fault occurs on iretq, '4' will be the LAST
-            // character visible on the E9 console.
+            //  Probe 4: SWAPGS succeeded, IRETQ imminent
             "push rax",
             "mov al, 0x34",     // '4'
             "out 0xe9, al",
             "pop rax",
 
-            //  IRETQ : point de non-retour ==================================
+            //  IRETQ: point of no return
+            "iretq",
+
+            ss      = in(reg) user_ss,
+            rsp_val = in(reg) user_rsp,
+            rflags  = in(reg) user_rflags,
+            cs      = in(reg) user_cs,
+            rip     = in(reg) user_rip,
+            arg0    = in(reg) user_arg0,
+            options(noreturn),
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    unsafe {
+        core::arch::asm!(
+            "cli",
+
+            //  Build the iretq frame
+            "push {ss}",
+            "push {rsp_val}",
+            "push {rflags}",
+            "push {cs}",
+            "push {rip}",
+
+            //  Pre-fault the user code page
+            "mov rax, {rip}",
+            "movzx rax, byte ptr [rax]",
+
+            //  Load arg0 into RDI
+            "mov rdi, {arg0}",
+
+            //  SWAPGS: GS.base kernel <-> GS.base user
+            "swapgs",
+
+            //  IRETQ: point of no return
             "iretq",
 
             ss      = in(reg) user_ss,
@@ -1513,7 +1568,7 @@ pub fn load_and_run_elf_with_caps(
         "[elf] Task '{}' created: entry={:#x}, stack_top={:#x}",
         name,
         runtime_entry,
-        USER_STACK_TOP,
+        user_stack_top(),
     );
 
     Ok(task_id)
@@ -1564,12 +1619,12 @@ fn setup_boot_user_stack(
     program_entry: u64,
     interp_base: Option<u64>,
 ) -> Result<u64, &'static str> {
-    let mut sp = USER_STACK_TOP;
+    let mut sp = user_stack_top();
 
     // Write argv[0] = program name (null-terminated)
     let name_nul_len = (name.len() + 1) as u64;
     sp -= name_nul_len;
-    if sp < USER_STACK_BASE {
+    if sp < user_stack_base() {
         return Err("User stack overflow during boot stack setup");
     }
     let argv0_ptr = sp;
@@ -1581,7 +1636,7 @@ fn setup_boot_user_stack(
     for &arg in extra_args.iter() {
         let arg_nul_len = (arg.len() + 1) as u64;
         sp -= arg_nul_len;
-        if sp < USER_STACK_BASE {
+        if sp < user_stack_base() {
             return Err("User stack overflow during boot stack setup");
         }
         extra_ptrs.push(sp);
@@ -1591,7 +1646,7 @@ fn setup_boot_user_stack(
 
     sp &= !0xF;
     sp -= 16;
-    if sp < USER_STACK_BASE {
+    if sp < user_stack_base() {
         return Err("User stack overflow during boot stack setup");
     }
     let random_ptr = sp;
@@ -1800,7 +1855,7 @@ fn load_elf_task_inner(
         user_accessible: true,
     };
     user_as.map_region(
-        USER_STACK_BASE,
+        user_stack_base(),
         USER_STACK_PAGES,
         stack_flags,
         VmaType::Stack,
@@ -1811,10 +1866,10 @@ fn load_elf_task_inner(
     // is intentionally left unmapped : no VMA, no PTE.
     log::debug!(
         "[elf] User stack: {:#x}..{:#x} ({} pages), guard at {:#x}",
-        USER_STACK_BASE,
-        USER_STACK_TOP,
+        user_stack_base(),
+        user_stack_top(),
         USER_STACK_PAGES,
-        USER_STACK_GUARD,
+        user_stack_guard(),
     );
 
     let boot_sp = setup_boot_user_stack(
@@ -1863,7 +1918,7 @@ fn load_elf_task_inner(
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: Some(crate::process::task::UserStack {
-            virt_base: x86_64::VirtAddr::new(USER_STACK_BASE),
+            virt_base: x86_64::VirtAddr::new(user_stack_base()),
             size: USER_STACK_PAGES * 4096,
         }),
         name,

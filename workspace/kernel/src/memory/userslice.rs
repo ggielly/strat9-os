@@ -231,10 +231,13 @@ impl UserSliceRead {
         }
 
         let mut buf = alloc::vec![0u8; self.len];
+        // SMAP: temporarily disable supervisor-mode access prevention.
+        crate::arch::x86_64::stac();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
         unsafe {
             core::ptr::copy_nonoverlapping(self.ptr as *const u8, buf.as_mut_ptr(), self.len);
         }
+        crate::arch::x86_64::clac();
         buf
     }
 
@@ -247,11 +250,14 @@ impl UserSliceRead {
             return 0;
         }
 
+        // SMAP: temporarily disable supervisor-mode access prevention.
+        crate::arch::x86_64::stac();
         // SAFETY: We validated that [ptr, ptr+n) is mapped and user-readable.
         // n <= self.len, so we stay within the validated region.
         unsafe {
             core::ptr::copy_nonoverlapping(self.ptr as *const u8, dest.as_mut_ptr(), n);
         }
+        crate::arch::x86_64::clac();
         n
     }
 
@@ -260,12 +266,12 @@ impl UserSliceRead {
         if offset >= self.len {
             return Err(UserSliceError::InvalidSize);
         }
+        // SMAP: temporarily disable supervisor-mode access prevention.
+        crate::arch::x86_64::stac();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
-        unsafe {
-            Ok(core::ptr::read_unaligned(
-                (self.ptr + offset as u64) as *const u8,
-            ))
-        }
+        let val = unsafe { core::ptr::read_unaligned((self.ptr + offset as u64) as *const u8) };
+        crate::arch::x86_64::clac();
+        Ok(val)
     }
 
     /// Read a u64 from the user slice at the given offset.
@@ -273,12 +279,12 @@ impl UserSliceRead {
         if offset + 8 > self.len {
             return Err(UserSliceError::InvalidSize);
         }
+        // SMAP: temporarily disable supervisor-mode access prevention.
+        crate::arch::x86_64::stac();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
-        unsafe {
-            Ok(core::ptr::read_unaligned(
-                (self.ptr + offset as u64) as *const u64,
-            ))
-        }
+        let val = unsafe { core::ptr::read_unaligned((self.ptr + offset as u64) as *const u64) };
+        crate::arch::x86_64::clac();
+        Ok(val)
     }
 
     /// Read a value of type T from the user slice.
@@ -290,9 +296,13 @@ impl UserSliceRead {
         if self.len < core::mem::size_of::<T>() {
             return Err(UserSliceError::InvalidSize);
         }
+        // SMAP: temporarily disable supervisor-mode access prevention.
+        crate::arch::x86_64::stac();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
         // T is Copy, so we can safely read it.
-        unsafe { Ok(core::ptr::read_unaligned(self.ptr as *const T)) }
+        let val = unsafe { core::ptr::read_unaligned(self.ptr as *const T) };
+        crate::arch::x86_64::clac();
+        Ok(val)
     }
 
     /// Get the raw pointer (for logging/debugging only).
@@ -345,11 +355,14 @@ impl UserSliceWrite {
             return 0;
         }
 
+        // SMAP: temporarily disable supervisor-mode access prevention.
+        crate::arch::x86_64::stac();
         // SAFETY: We validated that [ptr, ptr+n) is mapped and user-writable.
         // n <= self.len, so we stay within the validated region.
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr as *mut u8, n);
         }
+        crate::arch::x86_64::clac();
         n
     }
 
@@ -359,10 +372,13 @@ impl UserSliceWrite {
             return;
         }
 
+        // SMAP: temporarily disable supervisor-mode access prevention.
+        crate::arch::x86_64::stac();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-writable.
         unsafe {
             core::ptr::write_bytes(self.ptr as *mut u8, 0, self.len);
         }
+        crate::arch::x86_64::clac();
     }
 
     /// Get the raw pointer (for logging/debugging only).
@@ -407,10 +423,13 @@ impl UserSliceReadWrite {
         if n == 0 {
             return 0;
         }
+        // SMAP: temporarily disable supervisor-mode access prevention.
+        crate::arch::x86_64::stac();
         // SAFETY: Validated as writable (which implies readable on x86_64).
         unsafe {
             core::ptr::copy_nonoverlapping(self.ptr as *const u8, dest.as_mut_ptr(), n);
         }
+        crate::arch::x86_64::clac();
         n
     }
 
@@ -420,10 +439,13 @@ impl UserSliceReadWrite {
         if n == 0 {
             return 0;
         }
+        // SMAP: temporarily disable supervisor-mode access prevention.
+        crate::arch::x86_64::stac();
         // SAFETY: Validated as writable.
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr as *mut u8, n);
         }
+        crate::arch::x86_64::clac();
         n
     }
 
@@ -436,11 +458,14 @@ impl UserSliceReadWrite {
         if self.len < core::mem::size_of::<T>() {
             return Err(UserSliceError::InvalidSize);
         }
+        // SMAP: temporarily disable supervisor-mode access prevention.
+        crate::arch::x86_64::stac();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-writable.
         // T is Copy, so we can safely write it.
         unsafe {
             core::ptr::write_unaligned(self.ptr as *mut T, *val);
         }
+        crate::arch::x86_64::clac();
         Ok(())
     }
 

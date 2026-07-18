@@ -43,6 +43,24 @@ pub fn init_cpu_extensions() {
             // OSXSAVE (18) : required before xsetbv/xgetbv
             cr4 |= 1 << 18;
         }
+
+        // SMEP (20): Supervisor Mode Execution Prevention
+        // Prevents the kernel from executing code mapped in user-space pages.
+        // Requires CPUID leaf 7, ECX bit 7.
+        if crate::arch::x86_64::cpuid::host().features.contains(cpuid::CpuFeatures::SMEP) {
+            cr4 |= 1 << 20;
+            log::info!("[init] SMEP enabled (CR4 bit 20)");
+        }
+
+        // SMAP (21): Supervisor Mode Access Prevention
+        // Prevents the kernel from reading/writing user-space data pages
+        // unless EFLAGS.AC is set (via stac/clac).
+        // Requires CPUID leaf 7, ECX bit 20.
+        if crate::arch::x86_64::cpuid::host().features.contains(cpuid::CpuFeatures::SMAP) {
+            cr4 |= 1 << 21;
+            log::info!("[init] SMAP enabled (CR4 bit 21)");
+        }
+
         asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
 
         let mut cr0: u64;
@@ -113,6 +131,27 @@ pub fn cli() {
 pub fn sti() {
     unsafe {
         asm!("sti", options(nomem, nostack));
+    }
+}
+
+/// Set AC flag in RFLAGS to temporarily disable SMAP.
+///
+/// Must be paired with `clac()` after the user-memory access is complete.
+/// Only needed when CR4.SMAP is set.
+#[inline]
+pub fn stac() {
+    unsafe {
+        asm!("stac", options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Clear AC flag in RFLAGS to re-enable SMAP protection.
+///
+/// Paired with `stac()`.
+#[inline]
+pub fn clac() {
+    unsafe {
+        asm!("clac", options(nomem, nostack, preserves_flags));
     }
 }
 

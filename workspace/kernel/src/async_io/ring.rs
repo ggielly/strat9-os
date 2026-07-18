@@ -156,7 +156,7 @@ impl Ring {
 
         let sq_base = addr_space
             .find_free_vma_range(
-                crate::syscall::mmap::MMAP_BASE,
+                crate::kaslr::mmap_base(),
                 sq_page_count,
                 VmaPageSize::Small,
             )
