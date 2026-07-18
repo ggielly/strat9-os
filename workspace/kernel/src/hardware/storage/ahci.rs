@@ -1156,6 +1156,40 @@ impl BlockDevice for AhciController {
             .map_err(|_| BlockError::IoError)
     }
 
+    /// Read multiple sectors in a single ATA command.
+    ///
+    /// AHCI `submit_cmd` already accepts a `count: u16` parameter;
+    /// this override uses it directly instead of looping per sector.
+    fn read_sectors(&self, sector: u64, count: u16, buf: &mut [u8]) -> Result<(), BlockError> {
+        let port = self.first_port().ok_or(BlockError::NotReady)?;
+        let nbytes = (count as usize) * SECTOR_SIZE;
+        if sector.saturating_add(count as u64) > port.sector_count {
+            return Err(BlockError::InvalidSector);
+        }
+        if buf.len() < nbytes {
+            return Err(BlockError::BufferTooSmall);
+        }
+        submit_cmd(port, sector, count, buf, false, ATA_READ_DMA_EXT)
+            .map_err(|_| BlockError::IoError)
+    }
+
+    /// Write multiple sectors in a single ATA command.
+    fn write_sectors(&self, sector: u64, count: u16, buf: &[u8]) -> Result<(), BlockError> {
+        let port = self.first_port().ok_or(BlockError::NotReady)?;
+        let nbytes = (count as usize) * SECTOR_SIZE;
+        if sector.saturating_add(count as u64) > port.sector_count {
+            return Err(BlockError::InvalidSector);
+        }
+        if buf.len() < nbytes {
+            return Err(BlockError::BufferTooSmall);
+        }
+        // submit_cmd needs &mut [u8]; use a single staging buffer for the bulk write
+        let mut tmp = alloc::vec![0u8; nbytes];
+        tmp.copy_from_slice(&buf[..nbytes]);
+        submit_cmd(port, sector, count, &mut tmp, true, ATA_WRITE_DMA_EXT)
+            .map_err(|_| BlockError::IoError)
+    }
+
     /// Performs the sector count operation.
     fn sector_count(&self) -> u64 {
         self.sector_count()

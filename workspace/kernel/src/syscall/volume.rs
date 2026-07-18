@@ -50,6 +50,28 @@ impl VolumeDeviceRef {
             }
         }
     }
+
+    fn read_sectors(&self, sector: u64, count: u16, buf: &mut [u8]) -> Result<(), SyscallError> {
+        match self {
+            VolumeDeviceRef::Virtio(dev) => {
+                BlockDevice::read_sectors(*dev, sector, count, buf).map_err(SyscallError::from)
+            }
+            VolumeDeviceRef::Ahci(dev) => {
+                BlockDevice::read_sectors(*dev, sector, count, buf).map_err(SyscallError::from)
+            }
+        }
+    }
+
+    fn write_sectors(&self, sector: u64, count: u16, buf: &[u8]) -> Result<(), SyscallError> {
+        match self {
+            VolumeDeviceRef::Virtio(dev) => {
+                BlockDevice::write_sectors(*dev, sector, count, buf).map_err(SyscallError::from)
+            }
+            VolumeDeviceRef::Ahci(dev) => {
+                BlockDevice::write_sectors(*dev, sector, count, buf).map_err(SyscallError::from)
+            }
+        }
+    }
 }
 
 fn resolve_volume_device(
@@ -105,28 +127,27 @@ pub fn sys_volume_read(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let mut kbuf = [0u8; SECTOR_SIZE];
-    let probe_trace = sector == 0;
+    let count = sector_count as u16;
+    let nbytes = (count as usize) * SECTOR_SIZE;
 
-    for i in 0..sector_count {
-        let cur_sector = sector.checked_add(i).ok_or(SyscallError::InvalidArgument)?;
-        device.read_sector(cur_sector, &mut kbuf)?;
-        let offset = (i as usize)
-            .checked_mul(SECTOR_SIZE)
-            .ok_or(SyscallError::InvalidArgument)?;
-        let ptr = buf_ptr
-            .checked_add(offset as u64)
-            .ok_or(SyscallError::Fault)?;
-        let user = UserSliceWrite::new(ptr, SECTOR_SIZE)?;
-        user.copy_from(&kbuf);
-        if probe_trace {
-            crate::serial_println!(
-                "[volume-read] copied to user handle={} sector={} ptr={:#x}",
-                handle,
-                cur_sector,
-                ptr
-            );
-        }
+    // Allocate a single kernel buffer for the full transfer, then copy to user
+    // in one shot. This eliminates the per-sector alloc/free overhead inside
+    // the driver (see virtio_block.rs do_request / ahci.rs submit_cmd).
+    let mut kbuf = alloc::vec![0u8; nbytes];
+    let buf_slice = &mut kbuf[..nbytes];
+    device.read_sectors(sector, count, buf_slice)?;
+
+    let user = UserSliceWrite::new(buf_ptr, nbytes)?;
+    user.copy_from(buf_slice);
+
+    if sector == 0 {
+        crate::serial_println!(
+            "[volume-read] bulk handle={} sector={} count={} ptr={:#x}",
+            handle,
+            sector,
+            sector_count,
+            buf_ptr
+        );
     }
 
     Ok(sector_count)
@@ -159,23 +180,18 @@ pub fn sys_volume_write(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let mut kbuf = [0u8; SECTOR_SIZE];
-    for i in 0..sector_count {
-        let cur_sector = sector.checked_add(i).ok_or(SyscallError::InvalidArgument)?;
-        let offset = (i as usize)
-            .checked_mul(SECTOR_SIZE)
-            .ok_or(SyscallError::InvalidArgument)?;
-        let ptr = buf_ptr
-            .checked_add(offset as u64)
-            .ok_or(SyscallError::Fault)?;
-        let user = UserSliceRead::new(ptr, SECTOR_SIZE)?;
-        let data = user.read_to_vec();
-        if data.len() != SECTOR_SIZE {
-            return Err(SyscallError::InvalidArgument);
-        }
-        kbuf.copy_from_slice(&data);
-        device.write_sector(cur_sector, &kbuf)?;
+    let count = sector_count as u16;
+    let nbytes = (count as usize) * SECTOR_SIZE;
+
+    // Read the full user buffer into a single kernel buffer, then issue
+    // a single multi-sector write. This eliminates the per-sector
+    // UserSliceRead + driver alloc/free overhead.
+    let user = UserSliceRead::new(buf_ptr, nbytes)?;
+    let kbuf = user.read_to_vec();
+    if kbuf.len() != nbytes {
+        return Err(SyscallError::InvalidArgument);
     }
+    device.write_sectors(sector, count, &kbuf)?;
 
     Ok(sector_count)
 }

@@ -148,6 +148,62 @@ pub struct KernelArgs {
     pub cmdline_len: u64,
 }
 
+impl KernelArgs {
+    /// Iterator over the memory regions described by this boot handoff.
+    ///
+    /// The memory map is stored as a flat array at `memory_map_base` with
+    /// `memory_map_size` bytes total. Each element is a [`MemoryRegion`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for region in args.memory_regions() {
+    ///     match region.kind {
+    ///         MemoryKind::Free => { /* add to buddy allocator */ }
+    ///         MemoryKind::Reserved => { /* skip */ }
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
+    pub fn memory_regions(&self) -> &[MemoryRegion] {
+        if self.memory_map_base == 0 || self.memory_map_size == 0 {
+            return &[];
+        }
+        let count = self.memory_map_size as usize / core::mem::size_of::<MemoryRegion>();
+        let ptr = self.memory_map_base as *const MemoryRegion;
+        // SAFETY: memory_map_base points to a valid array of MemoryRegion
+        // written by the bootloader during boot. The array is static and
+        // lives for the entire kernel lifetime.
+        unsafe { core::slice::from_raw_parts(ptr, count) }
+    }
+
+    /// Kernel command line as a byte slice (null-terminated).
+    ///
+    /// Returns an empty slice if no command line was provided.
+    pub fn cmdline_bytes(&self) -> &[u8] {
+        if self.cmdline_ptr == 0 || self.cmdline_len == 0 {
+            return &[];
+        }
+        let ptr = self.cmdline_ptr as *const u8;
+        let len = self.cmdline_len as usize;
+        // SAFETY: cmdline_ptr points to a valid null-terminated C string
+        // written by the bootloader. The string is static and lives for
+        // the entire kernel lifetime.
+        unsafe { core::slice::from_raw_parts(ptr, len) }
+    }
+
+    /// Kernel command line as a `&str` (without null terminator).
+    ///
+    /// Returns an empty string if no command line was provided or if the
+    /// bytes are not valid UTF-8.
+    pub fn cmdline_str(&self) -> &str {
+        let bytes = self.cmdline_bytes();
+        // Strip trailing null byte if present
+        let bytes = bytes.strip_suffix(&[0]).unwrap_or(bytes);
+        core::str::from_utf8(bytes).unwrap_or("")
+    }
+}
+
 /// Memory region descriptor for the bootloader memory map.
 ///
 /// The memory map is an array of these descriptors, passed via
