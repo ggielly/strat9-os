@@ -636,34 +636,43 @@ pub fn panic_draw_direct(lines: &[&str]) {
     let fg_title = panic_pack_rgb(fmt, 0x4F, 0xB3, 0xB3); // teal
     let _fg_dim = panic_pack_rgb(fmt, 0x88, 0x88, 0x88); // grey
 
-    // Fill the entire framebuffer with background colour (24/32 bpp safe).
+    // Fill the entire framebuffer with background colour (16/24/32 bpp safe).
     unsafe {
         let bytes_per_pixel = ((fmt >> 32) as u16 / 8) as usize;
-        if bytes_per_pixel >= 3 {
-            let fill = panic_pack_rgb(fmt, 0x12, 0x16, 0x1E);
-            if bytes_per_pixel == 4 {
-                core::ptr::write_bytes(fb as *mut u32, 0, w * h);
-                // Fill with the background colour using 32-bit writes.
-                for row in 0..h {
-                    for col in 0..w {
-                        let _offset = row * pitch / 4 + col;
-                        core::ptr::write_volatile(
-                            fb.add(row * pitch + col * bytes_per_pixel) as *mut u32,
-                            fill,
-                        );
-                    }
+        if bytes_per_pixel == 4 {
+            let fill = bg_bg;
+            for row in 0..h {
+                for col in 0..w {
+                    core::ptr::write_volatile(
+                        fb.add(row * pitch + col * bytes_per_pixel) as *mut u32,
+                        fill,
+                    );
                 }
-            } else {
-                for row in 0..h {
-                    for col in 0..w {
-                        let offset = row * pitch + col * bytes_per_pixel;
-                        core::ptr::write_volatile(fb.add(offset) as *mut u8, fill as u8);
-                        core::ptr::write_volatile(fb.add(offset + 1) as *mut u8, (fill >> 8) as u8);
-                        core::ptr::write_volatile(
-                            fb.add(offset + 2) as *mut u8,
-                            (fill >> 16) as u8,
-                        );
-                    }
+            }
+        } else if bytes_per_pixel == 3 {
+            let fill = bg_bg;
+            for row in 0..h {
+                for col in 0..w {
+                    let offset = row * pitch + col * bytes_per_pixel;
+                    core::ptr::write_volatile(fb.add(offset) as *mut u8, fill as u8);
+                    core::ptr::write_volatile(fb.add(offset + 1) as *mut u8, (fill >> 8) as u8);
+                    core::ptr::write_volatile(
+                        fb.add(offset + 2) as *mut u8,
+                        (fill >> 16) as u8,
+                    );
+                }
+            }
+        } else if bytes_per_pixel == 2 {
+            // 16bpp (e.g. RGB565) : pack fill as 16-bit value
+            let r = ((bg_bg >> 16) & 0xFF) as u16;
+            let g = ((bg_bg >> 8) & 0xFF) as u16;
+            let b = (bg_bg & 0xFF) as u16;
+            let fill16 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+            for row in 0..h {
+                for col in 0..w {
+                    let offset = row * pitch + col * bytes_per_pixel;
+                    core::ptr::write_volatile(fb.add(offset) as *mut u8, fill16 as u8);
+                    core::ptr::write_volatile(fb.add(offset + 1) as *mut u8, (fill16 >> 8) as u8);
                 }
             }
         }

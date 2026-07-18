@@ -24,6 +24,11 @@ impl log::Log for SerialLogger {
     /// making deadlocks structurally impossible.
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
+            // In quiet mode, skip all log output entirely.
+            if crate::debug_cfg::is_quiet() {
+                return;
+            }
+
             let (level_str, msg_color) = match record.level() {
                 Level::Error => ("\x1b[31mERROR\x1b[0m", "\x1b[31m"),
                 Level::Warn => ("\x1b[33mWARN\x1b[0m", "\x1b[33m"),

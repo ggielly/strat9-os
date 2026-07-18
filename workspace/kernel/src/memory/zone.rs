@@ -62,6 +62,12 @@ impl Migratetype {
     }
 
     /// Returns the donor probing order for an allocation request.
+    ///
+    /// Bidirectional fallback is intentional: when the preferred migratetype
+    /// list is empty, the allocator can borrow from the other class. This
+    /// prevents allocation failures when one class is exhausted while the
+    /// other has free pages. The trade-off is potential cross-class
+    /// fragmentation, but this is acceptable for the current 2-class design.
     #[inline]
     pub const fn fallback_order(self) -> [Self; Self::COUNT] {
         match self {
@@ -207,6 +213,12 @@ impl ZoneSegment {
     #[inline]
     pub fn end_address(&self) -> u64 {
         self.base.as_u64() + (self.page_count as u64 * 4096)
+    }
+
+    /// Compare by base address for binary search.
+    #[inline]
+    pub fn base_cmp(&self, addr: u64) -> core::cmp::Ordering {
+        self.base.as_u64().cmp(&addr)
     }
 
     /// Count the number of free blocks at a given order.
@@ -410,6 +422,30 @@ impl Zone {
         let usable = self.free_pages_at_or_above_order(order);
         let fragmented = total_free.saturating_sub(usable);
         fragmented.saturating_mul(100) / total_free
+    }
+
+    /// Compute both free pages at or above order and fragmentation score in a single pass.
+    ///
+    /// Returns `(usable_pages, fragmentation_score)`. This avoids redundant free list
+    /// walks when both values are needed (e.g., in compaction candidate selection).
+    pub fn usable_pages_and_fragmentation(
+        &self,
+        order: u8,
+        cached_order0_pages: usize,
+    ) -> (usize, usize) {
+        if order == 0 {
+            return (self.available_pages().saturating_add(cached_order0_pages), 0);
+        }
+
+        let total_free = self.available_pages().saturating_add(cached_order0_pages);
+        if total_free == 0 {
+            return (0, 0);
+        }
+
+        let usable = self.free_pages_at_or_above_order(order);
+        let fragmented = total_free.saturating_sub(usable);
+        let score = fragmented.saturating_mul(100) / total_free;
+        (usable, score)
     }
 
     /// Returns the largest order that currently has at least one free block.

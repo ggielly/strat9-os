@@ -323,10 +323,13 @@ pub fn _print(args: fmt::Arguments) {
     // Check if we are in emergency panic mode.
     if PANIC_IN_PROGRESS.load(Ordering::Relaxed) {
         // SAFETY: In emergency mode, we bypass the mutex to ensure output.
-        // We re-initialize a local SerialPort instance pointing to the same IO port.
         let mut port = unsafe { SerialPort::new(0x3F8) };
-        // We don't use AnsiStylingWriter here to minimize risk of further panics/complex logic.
         let _ = port.write_fmt(args);
+        return;
+    }
+
+    // In quiet mode, suppress all normal serial output.
+    if crate::debug_cfg::is_quiet() {
         return;
     }
 

@@ -34,6 +34,7 @@ pub mod entropy;
 pub mod framebuffer;
 pub mod hardware;
 pub mod ipc;
+pub mod kaslr;
 pub mod memory;
 pub mod namespace;
 pub mod process;
@@ -422,6 +423,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::entropy::seed_from_rdrand();
     crate::e9_println!("B2d post-entropy");
 
+    // Initialize KASLR offsets (requires entropy pool to be seeded).
+    crate::kaslr::init();
+
     // Puts default panic hooks early to ensure
     //we get useful info on any panics during init.
     crate::e9_println!("B2e pre-panic-hooks");
@@ -652,6 +656,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
 
     serial_println!("[init] Buddy allocator ready.");
+
+    // Apply kernel.toml configuration (must be after buddy allocator init,
+    // before VGA init so quiet_mode can suppress early debug output).
+    boot::config::apply_kernel_config();
 
     // Initialize the vmalloc arena (VM-backed large heap allocations)
     memory::vmalloc::init();

@@ -44,7 +44,15 @@ const LOCAL_CACHE_REFILL_FRAMES: usize = 1 << (LOCAL_CACHE_REFILL_ORDER as usize
 const LOCAL_CACHE_FLUSH_BATCH: usize = 64;
 const LOCAL_CACHE_SLOTS: usize = Migratetype::COUNT * crate::arch::x86_64::percpu::MAX_CPUS;
 const LOCAL_CACHED_ZONE_MIGRATETYPE_SLOTS: usize = Migratetype::COUNT * ZoneType::COUNT;
-const COMPACTION_FRAGMENTATION_THRESHOLD: usize = 35;
+/// Fragmentation score threshold for triggering compaction-assist.
+///
+/// When a higher-order allocation fails and the zone's fragmentation score
+/// exceeds this threshold, the allocator drains per-CPU caches before retrying.
+/// The value is expressed as a percentage (0-100). Lower values make compaction
+/// more aggressive; higher values make it more conservative.
+///
+/// Default: 35 (35% of free pages trapped below the requested order).
+static COMPACTION_FRAGMENTATION_THRESHOLD: AtomicUsize = AtomicUsize::new(35);
 const COMPACTION_SNAPSHOT_NONE: usize = usize::MAX;
 const UNMOVABLE_ZONE_ORDER: [usize; ZoneType::COUNT] = [
     ZoneType::Normal as usize,
@@ -373,8 +381,11 @@ impl BuddyAllocator {
             zone.reserved_pages = zone.present_pages.saturating_sub(zone.page_count);
             zone.lowmem_reserve_pages =
                 Self::lowmem_reserve_target_pages(zone.zone_type, zone.page_count);
+            // Watermark parameters: (divisor, floor_pages, cap_pages)
+            // watermark_min: at least 16 pages, up to 2048, ~0.4% of zone
             zone.watermark_min = Self::watermark_target_pages(zone.page_count, 256, 16, 2048);
 
+            // watermark_low/high: increment of at least 16 pages, up to 2048, ~0.2% of zone
             let delta = Self::watermark_target_pages(zone.page_count, 512, 16, 2048);
             zone.watermark_low = zone
                 .watermark_min
@@ -398,6 +409,11 @@ impl BuddyAllocator {
     }
 
     /// Compute a bounded low-memory reserve target.
+    ///
+    /// Parameters: (divisor, floor_pages, cap_pages, max_fraction_divisor)
+    /// - DMA: 12.5% of zone, min 16 pages, max 512 pages, at most 25% of zone
+    /// - Normal: ~1.6% of zone, min 64 pages, max 2048 pages, at most 12.5% of zone
+    /// - HighMem: no reserve (movable allocations prefer HighMem)
     fn lowmem_reserve_target_pages(zone_type: ZoneType, managed_pages: usize) -> usize {
         match zone_type {
             ZoneType::DMA => Self::bounded_zone_target(managed_pages, 8, 16, 512, 4),
@@ -491,7 +507,11 @@ impl BuddyAllocator {
                         continue;
                     }
 
-                    debug_assert!(cursor + num_bytes <= pool_end);
+                    assert!(
+                        cursor + num_bytes <= pool_end,
+                        "buddy bitmap pool overflow: zone {:?} order {} needs {} bytes but only {} remaining",
+                        zone.zone_type, order, num_bytes, pool_end.saturating_sub(cursor),
+                    );
                     segment.buddy_bitmaps[order] = BuddyBitmap {
                         data: phys_to_virt(cursor) as *mut u8,
                         num_bits,
@@ -506,7 +526,11 @@ impl BuddyAllocator {
                     if num_bits == 0 {
                         segment.alloc_bitmap = BuddyBitmap::empty();
                     } else {
-                        debug_assert!(cursor + num_bytes <= pool_end);
+                        assert!(
+                            cursor + num_bytes <= pool_end,
+                            "buddy alloc bitmap pool overflow: zone {:?} needs {} bytes but only {} remaining",
+                            zone.zone_type, num_bytes, pool_end.saturating_sub(cursor),
+                        );
                         segment.alloc_bitmap = BuddyBitmap {
                             data: phys_to_virt(cursor) as *mut u8,
                             num_bits,
@@ -521,7 +545,11 @@ impl BuddyAllocator {
                     segment.pageblock_tags = ptr::null_mut();
                 } else {
                     let num_bytes = pageblock_count as u64;
-                    debug_assert!(cursor + num_bytes <= pool_end);
+                    assert!(
+                        cursor + num_bytes <= pool_end,
+                        "buddy pageblock tags pool overflow: zone {:?} needs {} bytes but only {} remaining",
+                        zone.zone_type, num_bytes, pool_end.saturating_sub(cursor),
+                    );
                     segment.pageblock_tags = phys_to_virt(cursor) as *mut u8;
                     unsafe {
                         ptr::write_bytes(
@@ -534,7 +562,11 @@ impl BuddyAllocator {
                 }
             }
 
-            debug_assert!(cursor <= pool_end);
+            assert!(
+                cursor <= pool_end,
+                "buddy bitmap pool final check failed: zone {:?} cursor 0x{:x} exceeds pool_end 0x{:x}",
+                zone.zone_type, cursor, pool_end,
+            );
         }
     }
 
@@ -561,7 +593,6 @@ impl BuddyAllocator {
     /// genuinely contiguous free extent. Greedy seeding therefore improves boot
     /// time without ever making holes visible to the buddy topology.
     fn seed_range_as_free(zone_type: ZoneType, segment: &mut ZoneSegment, start: u64, end: u64) {
-        let _ = zone_type;
         if start >= end {
             return;
         }
@@ -711,12 +742,40 @@ impl BuddyAllocator {
         None
     }
 
+    /// Find the segment containing a block at the given physical address.
+    ///
+    /// Uses binary search since segments are sorted by base address.
+    /// This is O(log n) instead of O(n) for the linear search.
     #[inline]
     fn find_segment_index(zone: &Zone, phys: u64, order: u8) -> Option<usize> {
-        zone.segments()
-            .iter()
-            .take(zone.segment_count)
-            .position(|segment| Self::segment_contains_block(segment, phys, order))
+        let segments = zone.segments();
+        let count = zone.segment_count;
+        if count == 0 {
+            return None;
+        }
+
+        // Binary search: find the last segment whose base <= phys
+        let mut lo = 0usize;
+        let mut hi = count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if segments[mid].base.as_u64() <= phys {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        // lo is now the first segment with base > phys, so check lo - 1
+        if lo == 0 {
+            return None;
+        }
+        let idx = lo - 1;
+        if Self::segment_contains_block(&segments[idx], phys, order) {
+            Some(idx)
+        } else {
+            None
+        }
     }
 
     #[inline]
@@ -735,36 +794,33 @@ impl BuddyAllocator {
         let block_end = frame_phys.saturating_add(block_size);
         let migratetype = Self::block_migratetype(frame_phys);
         let Some(segment_idx) = Self::find_segment_index(zone, frame_phys, order) else {
-            ////////////// REMOVE HERE DIAGNOSTIC ///////////////////////////////////
-            //
-            // diagnostic: dump zone/segment state to help identify the root cause.
-            //
-            serial_println!(
-                "[buddy] CRITICAL: frame 0x{:x} order {} not found in zone {:?} segments.",
-                frame_phys,
-                order,
-                zone.zone_type,
-            );
-            serial_println!(
-                "  segments={}/{} span_pages={} page_count={} allocated={}",
-                zone.segment_count,
-                zone.segment_capacity,
-                zone.span_pages,
-                zone.page_count,
-                zone.allocated,
-            );
-            for si in 0..zone.segment_count {
-                let seg = &zone.segments()[si];
+            #[cfg(feature = "selftest")]
+            {
                 serial_println!(
-                    "    segment[{}]: base=0x{:x} pages={} end=0x{:x}",
-                    si,
-                    seg.base.as_u64(),
-                    seg.page_count,
-                    seg.end_address(),
+                    "[buddy] CRITICAL: frame 0x{:x} order {} not found in zone {:?} segments.",
+                    frame_phys,
+                    order,
+                    zone.zone_type,
                 );
+                serial_println!(
+                    "  segments={}/{} span_pages={} page_count={} allocated={}",
+                    zone.segment_count,
+                    zone.segment_capacity,
+                    zone.span_pages,
+                    zone.page_count,
+                    zone.allocated,
+                );
+                for si in 0..zone.segment_count {
+                    let seg = &zone.segments()[si];
+                    serial_println!(
+                        "    segment[{}]: base=0x{:x} pages={} end=0x{:x}",
+                        si,
+                        seg.base.as_u64(),
+                        seg.page_count,
+                        seg.end_address(),
+                    );
+                }
             }
-            //
-            /////////////////// REMOVE HERE /////////////////////////
 
             panic!(
                 "buddy free: frame 0x{:x} order {} does not belong to any segment in zone {:?}",
@@ -889,10 +945,10 @@ impl BuddyAllocator {
 
             let removed = Self::free_list_remove(segment, buddy, order, migratetype);
             if !removed {
-                debug_assert!(false, "buddy bitmap/list inconsistency while freeing");
-                Self::mark_block_free(current, order, migratetype);
-                Self::free_list_push(segment, current, order, migratetype);
-                break;
+                panic!(
+                    "buddy inconsistency: free_list_remove failed for buddy 0x{:x} order {} migratetype {:?} during coalesce",
+                    buddy, order, migratetype,
+                );
             }
 
             current = core::cmp::min(current, buddy);
@@ -969,7 +1025,16 @@ impl BuddyAllocator {
         }
     }
 
-    /// Releases list push.
+    /// Insert a block at the head of the free list for the given order and migratetype.
+    ///
+    /// # Memory ordering
+    ///
+    /// All free-list link reads/writes use Acquire/Release ordering on the
+    /// MetaSlot atomic fields. This is correct under the current single-global-lock
+    /// design where all mutations are serialized. If the design ever moves to
+    /// per-zone locking, the ordering requirements must be re-evaluated:
+    /// concurrent push/pop on the same list would need CAS or a different
+    /// synchronization strategy.
     fn free_list_push(segment: &mut ZoneSegment, phys: u64, order: u8, migratetype: Migratetype) {
         debug_assert!(
             !crate::memory::frame::block_phys_has_poison_guard(phys, order),
@@ -984,7 +1049,12 @@ impl BuddyAllocator {
         segment.free_lists[migratetype.index()][order as usize] = phys;
     }
 
-    /// Releases list pop.
+    /// Remove and return the head block from the free list.
+    ///
+    /// # Memory ordering
+    ///
+    /// See [`Self::free_list_push`] for ordering rationale. The Acquire/Release
+    /// pairs on MetaSlot links are sufficient under the single-global-lock model.
     fn free_list_pop(
         segment: &mut ZoneSegment,
         order: u8,
@@ -1004,7 +1074,13 @@ impl BuddyAllocator {
         Some(head)
     }
 
-    /// Releases list remove.
+    /// Unlink a specific block from the free list. Returns `true` on success.
+    ///
+    /// # Memory ordering
+    ///
+    /// See [`Self::free_list_push`] for ordering rationale. The function
+    /// validates the head pointer before mutating it, which is safe under
+    /// the single-global-lock model but would require CAS under concurrent access.
     fn free_list_remove(
         segment: &mut ZoneSegment,
         phys: u64,
@@ -1170,14 +1246,20 @@ impl BuddyAllocator {
 
     /// Upper bound for bitmap storage over any segmentation of `page_count` pages.
     ///
-    /// For one page, every order contributes at most one parity bit. Summing that
-    /// pessimistic bound across all pages yields a simple safe allocation bound,
-    /// even if bitmap-pool reservations split ranges further.
+    /// For a single contiguous span of `s` pages, the buddy bitmap uses
+    /// approximately `s` bits total across all orders (each order contributes
+    /// `s / 2^(order+1)` pair bits, summing to ~`s`). We add a per-segment
+    /// overhead to account for small segments where the bound is less tight.
+    /// The factor of 2 provides safety margin for edge cases (segmentation,
+    /// alignment, debug bitmaps).
     fn bitmap_bytes_upper_bound_for_pages(page_count: usize) -> usize {
+        // Buddy bitmaps: ~1 bit per page across all orders (sum of s/2^(k+1) ≈ s)
+        // Factor of 2 for safety margin and segmentation overhead
         #[allow(unused_mut)]
-        let mut bits = page_count.saturating_mul(MAX_ORDER + 1);
+        let mut bits = page_count.saturating_mul(2);
         #[cfg(debug_assertions)]
         {
+            // Debug alloc bitmap: 1 bit per page
             bits = bits.saturating_add(page_count);
         }
         Self::bits_to_bytes(bits)
@@ -1250,6 +1332,10 @@ impl BuddyAllocator {
     }
 
     /// Retag every pageblock overlapped by the buddy block `[phys, phys + 2^order * PAGE_SIZE)`.
+    ///
+    /// When a block is allocated or freed, its pageblocks are retagged to the
+    /// new migratetype. This is intentional: it reinforces the grouping trend
+    /// over time (movable allocations reinforce movable pageblocks, etc.).
     fn retag_pageblock_range(
         segment: &mut ZoneSegment,
         phys: u64,
@@ -1264,7 +1350,12 @@ impl BuddyAllocator {
         let end_page_exclusive = start_page.saturating_add(1usize << order);
         let start_idx = start_page / PAGEBLOCK_PAGES;
         let end_idx = end_page_exclusive.saturating_sub(1) / PAGEBLOCK_PAGES;
-        debug_assert!(end_idx < segment.pageblock_count);
+        assert!(
+            end_idx < segment.pageblock_count,
+            "buddy: pageblock retag out of bounds: end_idx={} >= pageblock_count={}",
+            end_idx,
+            segment.pageblock_count,
+        );
 
         for idx in start_idx..=end_idx {
             unsafe {
@@ -1446,13 +1537,15 @@ impl BuddyAllocator {
                 continue;
             }
 
-            let usable_pages = zone.free_pages_at_or_above_order(order);
+            // Compute usable pages and fragmentation score in a single pass
+            // to avoid redundant free list walks.
+            let (usable_pages, fragmentation_score) =
+                zone.usable_pages_and_fragmentation(order, cached_pages);
             if usable_pages >= requested_pages {
                 continue;
             }
 
-            let fragmentation_score = zone.fragmentation_score(order, cached_pages);
-            if fragmentation_score < COMPACTION_FRAGMENTATION_THRESHOLD {
+            if fragmentation_score < COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed) {
                 continue;
             }
 
@@ -2178,6 +2271,14 @@ fn alloc_order0_cached(migratetype: Migratetype) -> Result<PhysFrame, AllocError
 fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
     // NOTE: O(2^order) MetaSlot scan : acceptable here because order is always 0
     // (single-page check) on this hot path.
+    //
+    // # Safety: poison guard check vs cache push
+    //
+    // The poison guard check happens before the frame is pushed into the local
+    // cache. This is safe because:
+    //   1. The frame is exclusively owned by the caller (no other CPU can modify it)
+    //   2. IRQs are disabled during this function (via IrqDisabledToken)
+    // Therefore no concurrent poisoning is possible between the check and the push.
     if crate::memory::frame::block_phys_has_poison_guard(frame.start_address.as_u64(), 0) {
         let mut global = OnDemandGlobalLock::new();
         global.free(frame, 0);
@@ -2337,6 +2438,7 @@ impl FrameAllocator for BuddyAllocator {
                 }
                 if Self::find_segment_index(&self.zones[candidate_zi], frame_phys, order).is_some()
                 {
+                    #[cfg(feature = "selftest")]
                     serial_println!(
                         "[buddy] WARN: frame 0x{:x} order {} belongs to zone[{}] {:?}, not zone[{}] {:?}; forwarding.",
                         frame_phys, order,
@@ -2349,35 +2451,38 @@ impl FrameAllocator for BuddyAllocator {
                 }
             }
             if !found {
-                serial_println!(
-                    "[buddy] free: frame 0x{:x} order {} not in any zone segment; checking all zones...",
-                    frame_phys, order,
-                );
-                for zzi in 0..ZoneType::COUNT {
-                    let z = &self.zones[zzi];
+                #[cfg(feature = "selftest")]
+                {
                     serial_println!(
-                        "  zone[{}] {:?}: segments={} page_count={}",
-                        zzi,
-                        z.zone_type,
-                        z.segment_count,
-                        z.page_count,
+                        "[buddy] free: frame 0x{:x} order {} not in any zone segment; checking all zones...",
+                        frame_phys, order,
                     );
-                    for si in 0..z.segment_count {
-                        let seg = &z.segments()[si];
+                    for zzi in 0..ZoneType::COUNT {
+                        let z = &self.zones[zzi];
                         serial_println!(
-                            "    segment[{}]: base=0x{:x} pages={} end=0x{:x}",
-                            si,
-                            seg.base.as_u64(),
-                            seg.page_count,
-                            seg.end_address(),
+                            "  zone[{}] {:?}: segments={} page_count={}",
+                            zzi,
+                            z.zone_type,
+                            z.segment_count,
+                            z.page_count,
                         );
+                        for si in 0..z.segment_count {
+                            let seg = &z.segments()[si];
+                            serial_println!(
+                                "    segment[{}]: base=0x{:x} pages={} end=0x{:x}",
+                                si,
+                                seg.base.as_u64(),
+                                seg.page_count,
+                                seg.end_address(),
+                            );
+                        }
                     }
+                    serial_println!(
+                        "[buddy] CRITICAL: frame 0x{:x} order {} belongs to no zone segment!",
+                        frame_phys,
+                        order,
+                    );
                 }
-                serial_println!(
-                    "[buddy] CRITICAL: frame 0x{:x} order {} belongs to no zone segment!",
-                    frame_phys,
-                    order,
-                );
             }
         }
 
@@ -2705,3 +2810,18 @@ impl BuddyAllocator {
         n
     }
 }
+
+/// Set the compaction fragmentation threshold (percentage, 0-100).
+///
+/// Lower values make compaction more aggressive; higher values make it more
+/// conservative. The default is 35.
+pub fn set_compaction_threshold(threshold: usize) {
+    COMPACTION_FRAGMENTATION_THRESHOLD.store(threshold.min(100), AtomicOrdering::Relaxed);
+}
+
+/// Get the current compaction fragmentation threshold.
+pub fn compaction_threshold() -> usize {
+    COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed)
+}
+
+

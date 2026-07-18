@@ -27,8 +27,16 @@ macro_rules! e9_print {
 
 #[macro_export]
 macro_rules! e9_println {
-    () => ($crate::e9_print!("\n"));
-    ($($arg:tt)*) => ($crate::e9_print!("{}\n", format_args!($($arg)*)));
+    () => {
+        if !$crate::debug_cfg::is_quiet() {
+            $crate::e9_print!("\n");
+        }
+    };
+    ($($arg:tt)*) => {
+        if !$crate::debug_cfg::is_quiet() {
+            $crate::e9_print!("{}\n", format_args!($($arg)*));
+        }
+    };
 }
 
 /// Log a boot milestone with elapsed time since kernel entry.
@@ -37,37 +45,39 @@ macro_rules! e9_println {
 #[macro_export]
 macro_rules! boot_milestone {
     ($($arg:tt)*) => {
-        $crate::serial_println!(
-            "[boot +{:>6}ms] {}",
-            $crate::arch::x86_64::boot_timestamp::elapsed_ms(),
-            format_args!($($arg)*)
-        );
-        if $crate::arch::x86_64::vga::is_available() {
-            let mut vbuf = [0u8; $crate::arch::x86_64::vgabuf::VGABUF_LINE_LEN];
-            let mut vpos = 0usize;
-            use core::fmt::Write;
-            struct VgaBufWriter<'a> {
-                buf: &'a mut [u8],
-                pos: &'a mut usize,
-            }
-            impl Write for VgaBufWriter<'_> {
-                fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                    let bytes = s.as_bytes();
-                    let remaining = self.buf.len().saturating_sub(*self.pos);
-                    let n = bytes.len().min(remaining);
-                    self.buf[*self.pos..*self.pos + n].copy_from_slice(&bytes[..n]);
-                    *self.pos += n;
-                    Ok(())
-                }
-            }
-            let _ = write!(
-                VgaBufWriter { buf: &mut vbuf, pos: &mut vpos },
-                "[boot +{:>6}ms] {}\n",
+        if !$crate::debug_cfg::is_quiet() {
+            $crate::serial_println!(
+                "[boot +{:>6}ms] {}",
                 $crate::arch::x86_64::boot_timestamp::elapsed_ms(),
                 format_args!($($arg)*)
             );
-            if vpos > 0 {
-                $crate::arch::x86_64::vgabuf::vgabuf_write(&vbuf[..vpos]);
+            if $crate::arch::x86_64::vga::is_available() {
+                let mut vbuf = [0u8; $crate::arch::x86_64::vgabuf::VGABUF_LINE_LEN];
+                let mut vpos = 0usize;
+                use core::fmt::Write;
+                struct VgaBufWriter<'a> {
+                    buf: &'a mut [u8],
+                    pos: &'a mut usize,
+                }
+                impl Write for VgaBufWriter<'_> {
+                    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                        let bytes = s.as_bytes();
+                        let remaining = self.buf.len().saturating_sub(*self.pos);
+                        let n = bytes.len().min(remaining);
+                        self.buf[*self.pos..*self.pos + n].copy_from_slice(&bytes[..n]);
+                        *self.pos += n;
+                        Ok(())
+                    }
+                }
+                let _ = write!(
+                    VgaBufWriter { buf: &mut vbuf, pos: &mut vpos },
+                    "[boot +{:>6}ms] {}\n",
+                    $crate::arch::x86_64::boot_timestamp::elapsed_ms(),
+                    format_args!($($arg)*)
+                );
+                if vpos > 0 {
+                    $crate::arch::x86_64::vgabuf::vgabuf_write(&vbuf[..vpos]);
+                }
             }
         }
     };

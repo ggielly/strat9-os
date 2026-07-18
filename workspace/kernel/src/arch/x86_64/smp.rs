@@ -117,10 +117,12 @@ _gdt:
     mov ds, ax
     mov ss, ax
 
-    # Enable PAE + PSE + OSFXSR + OSXMMEXCPT
+    # Enable PAE + PSE + OSFXSR + OSXMMEXCPT + SMEP + SMAP
     # OSXSAVE is NOT set here : enabled conditionally in Rust
+    # SMEP (bit 20): prevents kernel from executing user-space pages
+    # SMAP (bit 21): prevents kernel from accessing user-space data pages
     mov eax, cr4
-    or eax, 0x630
+    or eax, 0x300630
     mov cr4, eax
 
     # Enable Long Mode (EFER.LME)

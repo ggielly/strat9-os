@@ -30,9 +30,14 @@ pub fn register_panic_hook(hook: PanicHook) -> bool {
 
 /// Run all registered panic hooks (serial output only : no framebuffer access).
 fn run_panic_hooks(info: &PanicInfo) {
-    if let Some(hooks) = PANIC_HOOKS.try_lock() {
-        for hook in hooks.iter().flatten() {
-            hook(info);
+    match PANIC_HOOKS.try_lock() {
+        Some(hooks) => {
+            for hook in hooks.iter().flatten() {
+                hook(info);
+            }
+        }
+        None => {
+            crate::serial_force_println!("[panic] WARNING: panic hooks skipped (lock held by panicking context)");
         }
     }
 }
@@ -42,19 +47,19 @@ fn panic_hook_dump_context(_info: &PanicInfo) {
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
     let ticks = crate::process::scheduler::ticks();
     let cr3 = crate::memory::paging::active_page_table().as_u64();
-    crate::serial_println!("panic-hook: cpu={} ticks={} cr3=0x{:x}", cpu, ticks, cr3);
+    crate::serial_force_println!("panic-hook: cpu={} ticks={} cr3=0x{:x}", cpu, ticks, cr3);
     if let Some(task) = crate::process::scheduler::current_task_clone_try() {
-        crate::serial_println!(
+        crate::serial_force_println!(
             "panic-hook: current_task id={} name={}",
             task.id.as_u64(),
             task.name
         );
     } else {
-        crate::serial_println!("panic-hook: current_task none (scheduler locked or idle)");
+        crate::serial_force_println!("panic-hook: current_task none (scheduler locked or idle)");
     }
     let sched = crate::process::scheduler::state_snapshot();
     if cpu < sched.cpu_count {
-        crate::serial_println!(
+        crate::serial_force_println!(
             "panic-hook: sched cpu={} current_tid={} need_resched={} rq(rt/fair/idle)={}/{}/{} blocked={} init={} phase={}",
             cpu,
             sched.current_task[cpu],
@@ -112,16 +117,16 @@ fn read_cr_regs() -> (u64, u64, u64, u64) {
 
 /// Dump backtrace via frame-pointer unwinding, printing directly to serial.
 fn dump_backtrace() {
-    crate::serial_println!("RSP=0x{:016X} RBP=0x{:016X}", read_rsp(), read_rbp());
-    crate::serial_println!("Backtrace (frame-pointer):");
+    crate::serial_force_println!("RSP=0x{:016X} RBP=0x{:016X}", read_rsp(), read_rbp());
+    crate::serial_force_println!("Backtrace (frame-pointer):");
     let mut rbp = read_rbp();
     for i in 0..16 {
         if rbp == 0 || (rbp & 0x7) != 0 {
-            crate::serial_println!("  #{:02}: stop (invalid rbp)", i);
+            crate::serial_force_println!("  #{:02}: stop (invalid rbp)", i);
             break;
         }
         if !addr_readable(rbp) || !addr_readable(rbp.saturating_add(8)) {
-            crate::serial_println!("  #{:02}: stop (unmapped)", i);
+            crate::serial_force_println!("  #{:02}: stop (unmapped)", i);
             break;
         }
         let prev = unsafe { *(rbp as *const u64) };
@@ -130,9 +135,9 @@ fn dump_backtrace() {
         // Try symbol resolution
         if let Some((name, offset)) = super::symbols::lookup(ret) {
             if offset == 0 {
-                crate::serial_println!("  #{:02}: RIP=0x{:016X}  {}", i, ret, name);
+                crate::serial_force_println!("  #{:02}: RIP=0x{:016X}  {}", i, ret, name);
             } else {
-                crate::serial_println!(
+                crate::serial_force_println!(
                     "  #{:02}: RIP=0x{:016X}  {}+0x{:x}",
                     i,
                     ret,
@@ -141,7 +146,7 @@ fn dump_backtrace() {
                 );
             }
         } else {
-            crate::serial_println!("  #{:02}: RIP=0x{:016X}", i, ret);
+            crate::serial_force_println!("  #{:02}: RIP=0x{:016X}", i, ret);
         }
 
         if prev <= rbp || prev.saturating_sub(rbp) > 1024 * 1024 {
@@ -153,45 +158,45 @@ fn dump_backtrace() {
 
 /// Collect comprehensive debug info and print directly to serial (heap-safe).
 fn dump_panic_info(info: &PanicInfo) {
-    crate::serial_println!("\n\x1b[31;1m!!! KERNEL PANIC !!!\x1b[0m");
-    crate::serial_println!("=== GURU MEDiTATiON :: KERNEL PANiK ===");
-    crate::serial_println!("");
+    crate::serial_force_println!("\n\x1b[31;1m!!! KERNEL PANIC !!!\x1b[0m");
+    crate::serial_force_println!("=== GURU MEDiTATiON :: KERNEL PANiK ===");
+    crate::serial_force_println!("");
 
     // Panic location
     if let Some(loc) = info.location() {
-        crate::serial_println!("File: {}:{}:{}", loc.file(), loc.line(), loc.column());
+        crate::serial_force_println!("File: {}:{}:{}", loc.file(), loc.line(), loc.column());
     } else {
-        crate::serial_println!("File: (unknown)");
+        crate::serial_force_println!("File: (unknown)");
     }
-    crate::serial_println!("Message: {}", info.message());
-    crate::serial_println!("");
+    crate::serial_force_println!("Message: {}", info.message());
+    crate::serial_force_println!("");
 
     // CPU state
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
     let (cr0, cr2, cr3, cr4) = read_cr_regs();
     let rsp = read_rsp();
     let rbp = read_rbp();
-    crate::serial_println!("CPU={}  CR0={:#X}  CR2={:#X}", cpu, cr0, cr2);
-    crate::serial_println!("CR3={:#X}  CR4={:#X}", cr3, cr4);
-    crate::serial_println!("RSP={:#018X}  RBP={:#018X}", rsp, rbp);
-    crate::serial_println!("");
+    crate::serial_force_println!("CPU={}  CR0={:#X}  CR2={:#X}", cpu, cr0, cr2);
+    crate::serial_force_println!("CR3={:#X}  CR4={:#X}", cr3, cr4);
+    crate::serial_force_println!("RSP={:#018X}  RBP={:#018X}", rsp, rbp);
+    crate::serial_force_println!("");
 
     // Backtrace
     dump_backtrace();
-    crate::serial_println!("");
+    crate::serial_force_println!("");
 
     // Scheduler state
     let ticks = crate::process::scheduler::ticks();
-    crate::serial_println!("Ticks={}", ticks);
+    crate::serial_force_println!("Ticks={}", ticks);
     if let Some(task) = crate::process::scheduler::current_task_clone_try() {
-        crate::serial_println!("Task: id={} name={}", task.id.as_u64(), task.name);
+        crate::serial_force_println!("Task: id={} name={}", task.id.as_u64(), task.name);
     } else {
-        crate::serial_println!("Task: (scheduler locked / idle)");
+        crate::serial_force_println!("Task: (scheduler locked / idle)");
     }
 
     let sched = crate::process::scheduler::state_snapshot();
     if cpu < sched.cpu_count {
-        crate::serial_println!(
+        crate::serial_force_println!(
             "Sched: tid={} rt={} fair={} idle={} blocked={} init={}",
             sched.current_task[cpu],
             sched.rq_rt[cpu],
@@ -201,11 +206,11 @@ fn dump_panic_info(info: &PanicInfo) {
             sched.initialized,
         );
     }
-    crate::serial_println!("");
+    crate::serial_force_println!("");
 
     // Uptime
     let ts = crate::arch::x86_64::boot_timestamp::elapsed_ms();
-    crate::serial_println!("Uptime: {} ms", ts);
+    crate::serial_force_println!("Uptime: {} ms", ts);
 }
 
 // -----------------------------------------------------------------------
@@ -231,14 +236,23 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
 
     // 2. Guard against recursive panics.
     if PANIC_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-        // Double panic: output what we can with stack-only formatting.
-        crate::arch::x86_64::serial::enter_emergency_mode();
+        // SeqCst provides a full barrier; add explicit fence for clarity.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        // Double panic: dump as much as we can with stack-only formatting.
         crate::arch::x86_64::cli();
-        crate::serial_println!("\n\x1b[31;1m!!! DOUBLE PANIC !!!\x1b[0m");
+        crate::serial_force_println!("\n\x1b[31;1m!!! DOUBLE PANIC !!!\x1b[0m");
         if let Some(loc) = info.location() {
-            crate::serial_println!("panic at {}:{}", loc.file(), loc.line());
+            crate::serial_force_println!("panic at {}:{}", loc.file(), loc.line());
         }
-        crate::serial_println!("Message: {}", info.message());
+        crate::serial_force_println!("Message: {}", info.message());
+        let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+        let (cr0, cr2, cr3, cr4) = read_cr_regs();
+        crate::serial_force_println!(
+            "CPU={}  CR0={:#X}  CR2={:#X}  CR3={:#X}  CR4={:#X}",
+            cpu, cr0, cr2, cr3, cr4
+        );
+        crate::serial_force_println!("RSP={:#018X}  RBP={:#018X}", read_rsp(), read_rbp());
+        dump_backtrace();
         loop {
             crate::arch::x86_64::hlt();
         }
@@ -256,8 +270,13 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     // 5. Run custom panic hooks (serial-only).
     run_panic_hooks(info);
 
-    // 6. Stop all other CPUs.
+    // 6. Stop all other CPUs and wait for them to halt.
     crate::arch::x86_64::smp::broadcast_panic_halt();
+    // Brief delay to let other CPUs observe the NMI/halt IPI before we
+    // touch shared framebuffer memory.
+    for _ in 0..100_000 {
+        core::hint::spin_loop();
+    }
 
     // 7. Flush the VGA circular buffer so any buffered log lines appear.
     crate::arch::x86_64::vgabuf::vgabuf_flush_all();
