@@ -2162,6 +2162,10 @@ pub fn load_elf_image(
         interp_base = Some(interp_min_vaddr.saturating_add(interp_bias));
     }
 
+    let stack_exec = phdrs
+        .iter()
+        .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0);
+
     Ok(LoadedElfInfo {
         runtime_entry,
         program_entry: entry,
@@ -2173,6 +2177,7 @@ pub fn load_elf_image(
         tls_filesz,
         tls_memsz,
         tls_align,
+        stack_exec,
     })
 }
 
