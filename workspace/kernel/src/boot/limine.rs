@@ -3,11 +3,16 @@
 //! This module handles the kernel entry from the Limine bootloader.
 //! Limine loads us directly in 64-bit long mode with paging enabled.
 
-use limine::{modules::InternalModule, request::*, BaseRevision};
-//use crate::memory::phys_to_virt;
-//use crate::ostd::mm::phys_to_virt;
+use limine::module::InternalModule;
+use limine::request::*;
+use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 use crate::serial_println;
+
+/// Wrapper to make InternalModule usable in statics (it's !Sync in 0.6.5 due to raw pointers).
+struct SyncModule(InternalModule);
+unsafe impl Sync for SyncModule {}
+unsafe impl Send for SyncModule {}
 
 /// Sets the base revision to the latest revision supported by the crate.
 #[used]
@@ -17,7 +22,7 @@ static BASE_REVISION: BaseRevision = BaseRevision::new();
 /// Request the memory map
 #[used]
 #[link_section = ".requests"]
-static MEMORY_MAP: MemoryMapRequest = MemoryMapRequest::new();
+static MEMORY_MAP: MemmapRequest = MemmapRequest::new();
 
 /// Request the framebuffer (VGA/graphics)
 #[used]
@@ -68,88 +73,88 @@ static HHDM: HhdmRequest = HhdmRequest::new();
 /// Request the stack size
 #[used]
 #[link_section = ".requests"]
-static STACK_SIZE: StackSizeRequest = StackSizeRequest::new().with_size(0x80000); // 512KB - increased due to AHCI/PCI scanner stack usage
+static STACK_SIZE: StackSizeRequest = StackSizeRequest::new(0x80000); // 512KB - increased due to AHCI/PCI scanner stack usage
 
 /// Internal module: request Limine to load /initfs/test_pid (first userspace PID test binary)
-static TEST_PID_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_pid");
+static TEST_PID_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/test_pid", c"", 0));
 
 /// Internal module: request Limine to load /initfs/test_syscalls (verbose syscall test binary)
-static TEST_SYSCALLS_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/test_syscalls");
+static TEST_SYSCALLS_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/test_syscalls", c"", 0));
 
 /// Internal module: request Limine to load /initfs/test_mem (userspace memory test binary)
-static TEST_MEM_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_mem");
+static TEST_MEM_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/test_mem", c"", 0));
 
 /// Internal module: request Limine to load /initfs/test_mem_stressed (userspace stressed memory test)
-static TEST_MEM_STRESSED_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/test_mem_stressed");
+static TEST_MEM_STRESSED_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/test_mem_stressed", c"", 0));
 
 /// Internal module: request Limine to load /initfs/test_mem_region (userspace public MemoryRegion test)
-static TEST_MEM_REGION_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/test_mem_region");
+static TEST_MEM_REGION_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/test_mem_region", c"", 0));
 
 /// Internal module: request Limine to load /initfs/test_mem_region_proc (userspace multi-process MemoryRegion test)
-static TEST_MEM_REGION_PROC_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/test_mem_region_proc");
+static TEST_MEM_REGION_PROC_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/test_mem_region_proc", c"", 0));
 
 /// Internal module: request Limine to load /initfs/test_exec (userspace exec regression test)
-static TEST_EXEC_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/test_exec");
+static TEST_EXEC_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/test_exec", c"", 0));
 
 /// Internal module: request Limine to load /initfs/test_exec_helper (userspace exec post-exec verifier)
-static TEST_EXEC_HELPER_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/test_exec_helper");
+static TEST_EXEC_HELPER_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/test_exec_helper", c"", 0));
 
 /// Internal module: request Limine to load /initfs/fs-ext4 (userspace EXT4 server)
-static EXT4_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/fs-ext4");
+static EXT4_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/fs-ext4", c"", 0));
 
 /// Internal module: request Limine to load /initfs/strate-fs-ramfs (userspace RAMFS server)
-static RAM_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-fs-ramfs");
+static RAM_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/strate-fs-ramfs", c"", 0));
 
 /// Internal module: request Limine to load /initfs/init (init process)
-static INIT_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/init");
+static INIT_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/init", c"", 0));
 
 /// Internal module: request Limine to load /initfs/console-admin (admin silo strate)
-static CONSOLE_ADMIN_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/console-admin");
+static CONSOLE_ADMIN_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/console-admin", c"", 0));
 /// Internal module: request Limine to load /initfs/strate-net (network silo)
-static STRATE_NET_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-net");
+static STRATE_NET_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/strate-net", c"", 0));
 
 /// Internal module: request Limine to load /initfs/strate-bus (bus silo)
-static STRATE_BUS_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-bus");
+static STRATE_BUS_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/strate-bus", c"", 0));
 
 /// Internal module: request Limine to load /initfs/bin/dhcp-client (DHCP monitor)
-static DHCP_CLIENT_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/bin/dhcp-client");
+static DHCP_CLIENT_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/bin/dhcp-client", c"", 0));
 
 /// Internal module: request Limine to load /initfs/bin/ping (ICMP utility)
-static PING_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/ping");
+static PING_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/bin/ping", c"", 0));
 
 /// Internal module: request Limine to load /initfs/bin/telnetd (Telnet server utility)
-static TELNETD_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/telnetd");
+static TELNETD_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/bin/telnetd", c"", 0));
 
 /// Internal module: request Limine to load /initfs/bin/udp-tool (UDP scheme utility)
-static UDP_TOOL_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/udp-tool");
+static UDP_TOOL_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/bin/udp-tool", c"", 0));
 
 /// Internal module: request Limine to load /initfs/bin/web-admin (web admin utility)
-static WEB_ADMIN_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/bin/web-admin");
+static WEB_ADMIN_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/bin/web-admin", c"", 0));
 
 /// Internal module: request Limine to load /initfs/strate-wasm (WASM runtime)
-static STRATE_WASM_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/strate-wasm");
+static STRATE_WASM_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/strate-wasm", c"", 0));
 
 /// Internal module: request Limine to load /initfs/strate-webrtc (WebRTC-native graphics runtime)
-static STRATE_WEBRTC_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/strate-webrtc");
+static STRATE_WEBRTC_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/strate-webrtc", c"", 0));
 
 /// Internal module: request Limine to load /initfs/bin/hello.wasm (WASM hello test)
-static HELLO_WASM_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/bin/hello.wasm");
+static HELLO_WASM_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/bin/hello.wasm", c"", 0));
 
 /// Internal module: request Limine to load /initfs/wasm-test.toml (WASM test config)
-static WASM_TEST_TOML_MODULE: InternalModule =
-    InternalModule::new().with_path(c"/initfs/wasm-test.toml");
+static WASM_TEST_TOML_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/wasm-test.toml", c"", 0));
 
 /// Internal module: request Limine to load /initfs/kernel.toml (kernel configuration)
-static KERNEL_TOML_MODULE: InternalModule = InternalModule::new().with_path(c"/initfs/kernel.toml");
+static KERNEL_TOML_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/kernel.toml", c"", 0));
 
 /// Saved kernel.toml physical address and size (set during module resolution).
 static mut KERNEL_TOML_DATA: Option<(u64, u64)> = None;
@@ -199,31 +204,31 @@ pub fn apply_kernel_config(hhdm_offset: u64) {
 /// Request modules (files loaded alongside the kernel)
 #[used]
 #[link_section = ".requests"]
-static MODULES: ModuleRequest = ModuleRequest::new().with_internal_modules(&[
-    &TEST_PID_MODULE,
-    &TEST_SYSCALLS_MODULE,
-    &TEST_MEM_MODULE,
-    &TEST_MEM_STRESSED_MODULE,
-    &TEST_MEM_REGION_MODULE,
-    &TEST_MEM_REGION_PROC_MODULE,
-    &TEST_EXEC_MODULE,
-    &TEST_EXEC_HELPER_MODULE,
-    &EXT4_MODULE,
-    &RAM_MODULE,
-    &INIT_MODULE,
-    &CONSOLE_ADMIN_MODULE,
-    &STRATE_NET_MODULE,
-    &STRATE_BUS_MODULE,
-    &DHCP_CLIENT_MODULE,
-    &PING_MODULE,
-    &TELNETD_MODULE,
-    &UDP_TOOL_MODULE,
-    &WEB_ADMIN_MODULE,
-    &STRATE_WASM_MODULE,
-    &STRATE_WEBRTC_MODULE,
-    &HELLO_WASM_MODULE,
-    &WASM_TEST_TOML_MODULE,
-    &KERNEL_TOML_MODULE,
+static MODULES: ModulesRequest = ModulesRequest::new_rev1(&[
+    &TEST_PID_MODULE.0,
+    &TEST_SYSCALLS_MODULE.0,
+    &TEST_MEM_MODULE.0,
+    &TEST_MEM_STRESSED_MODULE.0,
+    &TEST_MEM_REGION_MODULE.0,
+    &TEST_MEM_REGION_PROC_MODULE.0,
+    &TEST_EXEC_MODULE.0,
+    &TEST_EXEC_HELPER_MODULE.0,
+    &EXT4_MODULE.0,
+    &RAM_MODULE.0,
+    &INIT_MODULE.0,
+    &CONSOLE_ADMIN_MODULE.0,
+    &STRATE_NET_MODULE.0,
+    &STRATE_BUS_MODULE.0,
+    &DHCP_CLIENT_MODULE.0,
+    &PING_MODULE.0,
+    &TELNETD_MODULE.0,
+    &UDP_TOOL_MODULE.0,
+    &WEB_ADMIN_MODULE.0,
+    &STRATE_WASM_MODULE.0,
+    &STRATE_WEBRTC_MODULE.0,
+    &HELLO_WASM_MODULE.0,
+    &WASM_TEST_TOML_MODULE.0,
+    &KERNEL_TOML_MODULE.0,
 ]);
 
 /// Optional fs-ext4 module info (set during Limine entry).
@@ -473,10 +478,10 @@ struct ResolvedModules {
 fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> ResolvedModules {
     let mut resolved = ResolvedModules::default();
     for module in modules {
-        let path = module.path().to_bytes();
+        let path = module.path().as_bytes();
         let info = (
-            module_addr_to_phys(module.addr() as u64, hhdm_offset),
-            module.size(),
+            module_addr_to_phys(module.data().as_ptr() as u64, hhdm_offset),
+            module.data().len() as u64,
         );
         if path_matches(path, b"/initfs/test_pid") {
             resolved.test_pid = Some(info);
@@ -532,24 +537,15 @@ fn resolve_modules_once(modules: &[&limine::file::File], hhdm_offset: u64) -> Re
 }
 
 /// Maps limine region kind.
-fn map_limine_region_kind(kind: limine::memory_map::EntryType) -> super::entry::MemoryKind {
-    if kind == limine::memory_map::EntryType::USABLE {
+fn map_limine_region_kind(kind: u64) -> super::entry::MemoryKind {
+    if kind == limine::memmap::MEMMAP_USABLE {
         super::entry::MemoryKind::Free
-    } else if kind == limine::memory_map::EntryType::ACPI_RECLAIMABLE {
+    } else if kind == limine::memmap::MEMMAP_ACPI_RECLAIMABLE {
         super::entry::MemoryKind::Reclaim
     } else {
         super::entry::MemoryKind::Reserved
     }
 }
-
-/// Define the start and end markers for Limine requests
-#[used]
-#[link_section = ".requests_start_marker"]
-static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
-
-#[used]
-#[link_section = ".requests_end_marker"]
-static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
 /// Halt the CPU
 #[inline(always)]
@@ -599,20 +595,20 @@ pub unsafe extern "C" fn kmain() -> ! {
         fb_green_mask_shift,
         fb_blue_mask_size,
         fb_blue_mask_shift,
-    ) = if let Some(fb_response) = FRAMEBUFFER.get_response() {
-        if let Some(fb) = fb_response.framebuffers().next() {
+    ) = if let Some(fb_response) = FRAMEBUFFER.response() {
+        if let Some(fb) = fb_response.framebuffers().first() {
             (
-                fb.addr() as u64,
-                fb.width() as u32,
-                fb.height() as u32,
-                fb.pitch() as u32,
-                fb.bpp(),
-                fb.red_mask_size(),
-                fb.red_mask_shift(),
-                fb.green_mask_size(),
-                fb.green_mask_shift(),
-                fb.blue_mask_size(),
-                fb.blue_mask_shift(),
+                fb.address() as u64,
+                fb.width as u32,
+                fb.height as u32,
+                fb.pitch as u32,
+                fb.bpp,
+                fb.red_mask_size,
+                fb.red_mask_shift,
+                fb.green_mask_size,
+                fb.green_mask_shift,
+                fb.blue_mask_size,
+                fb.blue_mask_shift,
             )
         } else {
             (0, 0, 0, 0, 0, 8, 16, 8, 8, 8, 0)
@@ -622,7 +618,7 @@ pub unsafe extern "C" fn kmain() -> ! {
     };
 
     // Get RSDP for ACPI
-    let rsdp_addr = RSDP.get_response().map(|r| r.address() as u64).unwrap_or(0);
+    let rsdp_addr = RSDP.response().map(|r| r.address as u64).unwrap_or(0);
 
     // Initialize framebuffer abstraction with Limine-provided buffer
     if fb_addr != 0 && fb_width != 0 && fb_height != 0 {
@@ -644,12 +640,12 @@ pub unsafe extern "C" fn kmain() -> ! {
     }
 
     // Get HHDM offset : critical for accessing physical memory
-    let hhdm_offset = HHDM.get_response().map(|r| r.offset()).unwrap_or(0);
+    let hhdm_offset = HHDM.response().map(|r| r.offset).unwrap_or(0);
 
     // Build a kernel-local memory map from Limine entries.
     // Keep only the first MAX_BOOT_MEMORY_REGIONS entries to avoid dynamic allocation.
     let (memory_map_base, memory_map_size) = if let Some(memory_map_response) =
-        MEMORY_MAP.get_response()
+        MEMORY_MAP.response()
     {
         let entries = memory_map_response.entries();
         let count = core::cmp::min(entries.len(), MAX_BOOT_MEMORY_REGIONS);
@@ -659,7 +655,7 @@ pub unsafe extern "C" fn kmain() -> ! {
                 BOOT_MEMORY_MAP[i] = super::entry::MemoryRegion {
                     base: entry.base,
                     size: entry.length,
-                    kind: map_limine_region_kind(entry.entry_type),
+                    kind: map_limine_region_kind(entry.type_),
                 };
             }
             (
@@ -674,15 +670,15 @@ pub unsafe extern "C" fn kmain() -> ! {
     // Resolve loaded modules by exact path, not by index/order.
     // Limine may return modules from config and internal requests in any order.
     let (fallback_elf_base, fallback_elf_size, ext4_base, ext4_size, ram_base, ram_size) =
-        if let Some(module_response) = MODULES.get_response() {
+        if let Some(module_response) = MODULES.response() {
             let modules = module_response.modules();
             crate::serial_println!("[limine] modules reported: {}", modules.len());
             for (idx, module) in modules.iter().enumerate() {
                 #[cfg(feature = "selftest")]
                 {
-                    let raw_addr = module.addr() as u64;
+                    let raw_addr = module.data().as_ptr() as u64;
                     let phys_addr = module_addr_to_phys(raw_addr, hhdm_offset);
-                    let (m0, m1, m2, m3) = if module.size() >= 4 {
+                    let (m0, m1, m2, m3) = if module.data().len() >= 4 {
                         unsafe {
                             let p = raw_addr as *const u8;
                             (
@@ -698,14 +694,14 @@ pub unsafe extern "C" fn kmain() -> ! {
                     crate::serial_println!(
                         "[limine] module[{}]: path='{}' addr={:#x} phys={:#x} magic={:02x}{:02x}{:02x}{:02x} size={}",
                         idx,
-                        module.path().to_string_lossy(),
+                        module.path(),
                         raw_addr,
                         phys_addr,
                         m0,
                         m1,
                         m2,
                         m3,
-                        module.size()
+                        module.data().len()
                     );
                 }
                 #[cfg(not(feature = "selftest"))]
@@ -713,8 +709,8 @@ pub unsafe extern "C" fn kmain() -> ! {
                     crate::serial_println!(
                         "[limine] module[{}]: path='{}' size={}",
                         idx,
-                        module.path().to_string_lossy(),
-                        module.size()
+                        module.path(),
+                        module.data().len()
                     );
                 }
             }
@@ -1005,14 +1001,12 @@ pub unsafe extern "C" fn kmain() -> ! {
     }
 
     // Extract kernel command line from Limine
-    let (cmdline_ptr, cmdline_len) = if let Some(cmdline_resp) = EXEC_CMDLINE.get_response() {
-        let cstr = cmdline_resp.cmdline();
-        let bytes = cstr.to_bytes_with_nul();
+    let (cmdline_ptr, cmdline_len) = if let Some(cmdline_resp) = EXEC_CMDLINE.response() {
+        let cmdline_str = cmdline_resp.cmdline();
+        let bytes = cmdline_str.as_bytes();
         let ptr = bytes.as_ptr() as u64;
         let len = bytes.len() as u64;
-        if let Ok(s) = cstr.to_str() {
-            crate::serial_println!("[limine] cmdline: '{}'", s);
-        }
+        crate::serial_println!("[limine] cmdline: '{}'", cmdline_str);
         (ptr, len)
     } else {
         crate::serial_println!("[limine] no cmdline provided");
@@ -1023,12 +1017,12 @@ pub unsafe extern "C" fn kmain() -> ! {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
         kernel_base: EXECUTABLE_ADDRESS
-            .get_response()
-            .map(|r| r.physical_base())
+            .response()
+            .map(|r| r.physical_base)
             .unwrap_or(0x100000),
         kernel_size: EXECUTABLE_FILE
-            .get_response()
-            .map(|r| r.file().size())
+            .response()
+            .map(|r| r.executable_file().data().len() as u64)
             .unwrap_or(0),
         stack_base: 0x80000,
         stack_size: 0x10000,
@@ -1058,10 +1052,10 @@ pub unsafe extern "C" fn kmain() -> ! {
     };
 
     // Save kernel ELF bytes for symbol resolution during panic.
-    if let Some(file) = EXECUTABLE_FILE.get_response() {
-        let f = file.file();
-        KERNEL_ELF_BASE = f.addr() as u64;
-        KERNEL_ELF_SIZE = f.size();
+    if let Some(file) = EXECUTABLE_FILE.response() {
+        let f = file.executable_file();
+        KERNEL_ELF_BASE = f.data().as_ptr() as u64;
+        KERNEL_ELF_SIZE = f.data().len() as u64;
     }
 
     // Call kernel main

@@ -10,6 +10,7 @@ PHDRS
     rodata  PT_LOAD;
     data    PT_LOAD;
     bss     PT_LOAD;
+    strtab  PT_LOAD;
 }
 
 SECTIONS
@@ -54,7 +55,10 @@ SECTIONS
         __bss_end = .;
     } :bss
 
-    .shstrtab : { *(.shstrtab) }
+    /* Section name string table — must be loaded for Limine to discover
+       request sections by name.  Separate LOAD segment to avoid file
+       offset overlap with .text. */
+    .shstrtab : { *(.shstrtab) } :strtab
 
     /* Discard unneeded sections */
     /DISCARD/ :
