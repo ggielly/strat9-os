@@ -1,652 +1,332 @@
 #![no_std]
-#![feature(allocator_api)]
+#![no_main]
 
 extern crate alloc;
 
-// Main bootloader logic module
-use crate::{
-    arch::{paging_create, paging_framebuffer},
-    ext4,
-    os::{Os, OsHwDesc, OsKey, OsMemoryEntry, OsMemoryKind, OsVideoMode},
-};
+use core::fmt::Write;
 
-use alloc::{format, string::String, vec::Vec};
-use core::{
-    cmp,
-    fmt::{self, Write},
-    mem, ptr, slice, str,
-};
+use uefi::prelude::*;
+use uefi::proto::console::gop::GraphicsOutput;
+use uefi::proto::media::file::{File, FileInfo, FileMode};
+use uefi::proto::media::fs::SimpleFileSystem;
+use uefi::table::cfg::{ACPI2_GUID, ACPI_GUID};
 
-// Constantes pour la gestion de la mémoire
-const KIBI: usize = 1024;
-const MIBI: usize = KIBI * KIBI;
+mod elf;
+mod paging;
+mod modules;
+mod args;
 
-//TODO: allocate this in a more reasonable manner
-static mut AREAS: [OsMemoryEntry; 1024] = [OsMemoryEntry {
-    base: 0,
-    size: 0,
-    kind: OsMemoryKind::Null,
-}; 1024];
-static mut AREAS_LEN: usize = 0;
+use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
 
-/// Performs the area add operation.
-pub fn area_add(area: OsMemoryEntry) {
-    #[allow(static_mut_refs)]
+/// UEFI entry point for the strat9-os bootloader.
+///
+/// Following Phil Opp's approach: init uefi-services, load kernel ELF from FAT ESP,
+/// set up page tables, build KernelArgs, then context-switch to the kernel.
+#[entry]
+fn efi_main(_image: Handle, mut st: SystemTable<Boot>) -> Status {
+    // Initialize uefi-services (allocator, serial, console)
+    uefi_services::init(&mut st).unwrap();
+
+    // Print banner to UEFI stdout
+    writeln!(st.stdout(), "Strat9-OS bootloader v0.1.0 (UEFI)").unwrap();
+    writeln!(st.stdout(), "  Firmware: {}", st.firmware_info()).unwrap();
+    writeln!(st.stdout(), "").unwrap();
+
+    // ========================================================================
+    // Step 1: Open the FAT ESP filesystem
+    // ========================================================================
+    writeln!(st.stdout(), "[boot] Opening filesystem...").unwrap();
+    let bs = st.boot_services();
+    let fs_handle = bs.get_handle_for_protocol::<SimpleFileSystem>().unwrap();
+    let mut fs = unsafe { &mut *bs.open_protocol_exclusive::<SimpleFileSystem>(fs_handle).unwrap().get() };
+    let mut root = fs.open_volume().unwrap();
+
+    // ========================================================================
+    // Step 2: Load kernel ELF from /boot/kernel.elf
+    // ========================================================================
+    writeln!(st.stdout(), "[boot] Loading kernel...").unwrap();
+    let kernel_data = {
+        let mut file = root
+            .open(cstr16!("\\boot\\kernel.elf"), FileMode::Read, FileAttribute::empty())
+            .unwrap()
+            .regular_file()
+            .unwrap();
+
+        // Get file size
+        let mut file_info_buf = [0u8; 512];
+        let file_info = file.get_info::<FileInfo>(&mut file_info_buf).unwrap();
+        let file_size = file_info.file_size() as usize;
+
+        writeln!(st.stdout(), "  kernel.elf: {} bytes", file_size).unwrap();
+
+        // Allocate buffer and read
+        let buf = alloc::vec![0u8; file_size];
+        let mut buf = core::mem::ManuallyDrop::new(buf);
+        file.read(&mut buf).unwrap();
+        // Safety: we pass ownership of the vec's buffer to the returned slice
+        unsafe {
+            let ptr = buf.as_mut_ptr();
+            let len = buf.len();
+            core::slice::from_raw_parts_mut(ptr, len)
+        }
+    };
+
+    // ========================================================================
+    // Step 3: Parse kernel ELF
+    // ========================================================================
+    writeln!(st.stdout(), "[boot] Parsing kernel ELF...").unwrap();
+    let elf_info = elf::parse_elf64(kernel_data).expect("Failed to parse kernel ELF");
+    writeln!(st.stdout(), "  entry: 0x{:x}", elf_info.entry).unwrap();
+    writeln!(st.stdout(), "  segments: {}", elf_info.segment_count).unwrap();
+
+    for i in 0..elf_info.segment_count {
+        let (phys, _virt, memsz) = elf_info.segments[i];
+        writeln!(st.stdout(), "    segment {}: phys=0x{:x} size=0x{:x}", i, phys, memsz).unwrap();
+    }
+
+    // ========================================================================
+    // Step 4: Load modules from /boot/initfs/
+    // ========================================================================
+    writeln!(st.stdout(), "[boot] Loading modules...").unwrap();
+    let mut root2 = fs.open_volume().unwrap();
+    let mut root3 = fs.open_volume().unwrap();
+    let mut root4 = fs.open_volume().unwrap();
+    let mut root5 = fs.open_volume().unwrap();
+    let module_list = modules::load_modules(bs, &mut root, &mut root2, &mut root3, &mut root4, &mut root5);
+
+    writeln!(st.stdout(), "  loaded {} modules", module_list.len()).unwrap();
+
+    // ========================================================================
+    // Step 5: Get framebuffer via GOP
+    // ========================================================================
+    writeln!(st.stdout(), "[boot] Setting up framebuffer...").unwrap();
+    let (fb_addr, fb_width, fb_height, fb_stride, fb_bpp,
+         fb_red_size, fb_red_shift, fb_green_size, fb_green_shift,
+         fb_blue_size, fb_blue_shift) = {
+        let gop_handle = bs.get_handle_for_protocol::<GraphicsOutput>().unwrap();
+        let mut gop = unsafe { &mut *bs.open_protocol_exclusive::<GraphicsOutput>(gop_handle).unwrap().get() };
+
+        // Pick the best mode (highest resolution)
+        let modes: alloc::vec::Vec<_> = gop.modes(bs).collect();
+        if let Some(best) = modes.iter().max_by_key(|m| {
+            let (w, h) = m.info().resolution();
+            w * h
+        }) {
+            gop.set_mode(best).unwrap();
+        }
+
+        let info = gop.current_mode_info();
+        let (width, height) = info.resolution();
+        let stride = info.stride();
+        let pixel_format = info.pixel_format();
+
+        let mut fb = gop.frame_buffer().unwrap();
+        let fb_addr = fb.as_mut_ptr() as u64;
+
+        writeln!(st.stdout(), "  framebuffer: {}x{} stride={} @ 0x{:x}", width, height, stride, fb_addr).unwrap();
+
+        // Parse pixel format for RGB masks
+        match pixel_format {
+            uefi::proto::console::gop::PixelFormat::Rgb => {
+                (fb_addr, width as u32, height as u32, stride as u32, 32u16,
+                 8u8, 16u8, 8u8, 8u8, 8u8, 0u8)
+            }
+            uefi::proto::console::gop::PixelFormat::Bgr => {
+                (fb_addr, width as u32, height as u32, stride as u32, 32u16,
+                 8u8, 0u8, 8u8, 8u8, 8u8, 16u8)
+            }
+            _ => {
+                (fb_addr, width as u32, height as u32, stride as u32, 32u16,
+                 8u8, 16u8, 8u8, 8u8, 8u8, 0u8)
+            }
+        }
+    };
+
+    // ========================================================================
+    // Step 6: Get ACPI RSDP from UEFI config tables
+    // ========================================================================
+    writeln!(st.stdout(), "[boot] Finding ACPI RSDP...").unwrap();
+    let rsdp_addr = st.runtime_services().config_table().iter()
+        .find(|e| e.guid == ACPI2_GUID || e.guid == ACPI_GUID)
+        .map(|e| e.address as u64)
+        .unwrap_or(0);
+    writeln!(st.stdout(), "  RSDP: 0x{:x}", rsdp_addr).unwrap();
+
+    // ========================================================================
+    // Step 7: Get UEFI memory map, then ExitBootServices
+    // ========================================================================
+    writeln!(st.stdout(), "[boot] Getting memory map...").unwrap();
+
+    // First call: get required buffer size
+    let mut mmap_size = bs.memory_map_size().map_size;
+    // Allocate buffer (over-estimate to be safe)
+    let mmap_buf_size = mmap_size + 4096;
+    let mmap_buf = alloc::vec![0u8; mmap_buf_size];
+    let mut mmap_buf = core::mem::ManuallyDrop::new(mmap_buf);
+
+    // We need to exit boot services before we can use the memory map
+    // Phil Opp pattern: allocate what we need, then exit
+    let (runtime, mmap_iter) = match bs.exit_boot_services(MemoryType::LOADER_DATA) {
+        Ok((rt, mmap)) => (rt, mmap),
+        Err(e) => {
+            // If exit fails, we're stuck. Print and halt.
+            // (stdout may not work after partial exit, but try)
+            panic!("ExitBootServices failed: {:?}", e.status());
+        }
+    };
+
+    // ========================================================================
+    // Step 8: After ExitBootServices - we're now in bare metal
+    // ========================================================================
+    // At this point:
+    // - UEFI runtime services still available via `runtime`
+    // - No allocator, no UEFI boot services
+    // - We must set up everything ourselves
+
+    // Convert UEFI memory map to our MemoryRegion format
+    // We need to write this to a known physical address
+    let mut regions: [MemoryRegion; 512] = [MemoryRegion {
+        base: 0, size: 0, kind: MemoryKind::Null,
+    }; 512];
+    let mut region_count: usize = 0;
+
+    for entry in mmap_iter.entries() {
+        if region_count >= 512 {
+            break;
+        }
+        let base = entry.phys_start;
+        let size = entry.phys_end() - entry.phys_start;
+
+        if size == 0 {
+            continue;
+        }
+
+        let kind = match entry.ty {
+            uefi::table::boot::MemoryType::CONVENTIONAL => MemoryKind::Free,
+            uefi::table::boot::MemoryType::BOOT_SERVICES_CODE
+            | uefi::table::boot::MemoryType::BOOT_SERVICES_DATA => MemoryKind::Reclaim,
+            // LOADER_CODE and LOADER_DATA are our own memory, reclaimable
+            uefi::table::boot::MemoryType::LOADER_CODE
+            | uefi::table::boot::MemoryType::LOADER_DATA => MemoryKind::Reclaim,
+            // Everything else is reserved
+            _ => MemoryKind::Reserved,
+        };
+
+        regions[region_count] = MemoryRegion { base, size, kind };
+        region_count += 1;
+    }
+
+    // Find a free region for the stack (64KB)
+    let stack_size: u64 = 64 * 1024;
+    let mut stack_base: u64 = 0;
+    for i in 0..region_count {
+        if regions[i].kind == MemoryKind::Free && regions[i].size >= stack_size {
+            stack_base = regions[i].base;
+            // Shrink this free region to account for the stack
+            regions[i].base += stack_size;
+            regions[i].size -= stack_size;
+            break;
+        }
+    }
+
+    // Find a free region for the memory map itself (4KB)
+    let mmap_region_size: u64 = (region_count * core::mem::size_of::<MemoryRegion>()) as u64;
+    let mmap_region_size_aligned = (mmap_region_size + 4095) & !4095;
+    let mut mmap_region_base: u64 = 0;
+    for i in 0..region_count {
+        if regions[i].kind == MemoryKind::Free && regions[i].size >= mmap_region_size_aligned {
+            mmap_region_base = regions[i].base;
+            regions[i].base += mmap_region_size_aligned;
+            regions[i].size -= mmap_region_size_aligned;
+            break;
+        }
+    }
+
+    // Copy the memory map to the allocated region
     unsafe {
-        for existing_area in &mut AREAS[0..AREAS_LEN] {
-            if existing_area.kind == area.kind {
-                if existing_area.base.unchecked_add(existing_area.size) == area.base {
-                    existing_area.size += area.size;
-                    return;
-                }
-                if area.base.unchecked_add(area.size) == existing_area.base {
-                    existing_area.size += area.size;
-                    existing_area.base = area.base;
-                    return;
-                }
-            }
-        }
-        *AREAS.get_mut(AREAS_LEN).expect("AREAS overflowed!") = area;
-        AREAS_LEN += 1;
-    }
-}
-
-pub static mut KERNEL_64BIT: bool = false;
-
-pub static mut LIVE_OPT: Option<(u64, &'static [u8])> = None;
-
-struct SliceWriter<'a> {
-    slice: &'a mut [u8],
-    i: usize,
-}
-
-impl<'a> Write for SliceWriter<'a> {
-    /// Writes str.
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for b in s.bytes() {
-            if let Some(slice_b) = self.slice.get_mut(self.i) {
-                *slice_b = b;
-                self.i += 1;
-            } else {
-                return Err(fmt::Error);
-            }
-        }
-        Ok(())
-    }
-}
-
-pub use strat9_abi::boot::KernelArgs;
-
-/// Performs the select mode operation.
-fn select_mode(
-    os: &impl Os,
-    output_i: usize,
-    live: &mut bool,
-    edit_env: &mut bool,
-) -> Option<OsVideoMode> {
-    let mut modes = Vec::new();
-    for mode in os.video_modes(output_i) {
-        let mut aspect_w = mode.width;
-        let mut aspect_h = mode.height;
-        for i in 2..cmp::min(aspect_w / 2, aspect_h / 2) {
-            while aspect_w % i == 0 && aspect_h % i == 0 {
-                aspect_w /= i;
-                aspect_h /= i;
-            }
-        }
-
-        modes.push((
-            mode,
-            format!(
-                "{:>4}x{:<4} {:>3}:{:<3}",
-                mode.width, mode.height, aspect_w, aspect_h
-            ),
-        ));
+        let dst = mmap_region_base as *mut MemoryRegion;
+        core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, region_count);
     }
 
-    if modes.is_empty() {
-        return None;
-    }
-
-    // Sort modes by pixel area, reversed
-    modes.sort_by(|a, b| (b.0.width * b.0.height).cmp(&(a.0.width * a.0.height)));
-
-    // Set selected based on best resolution
-    print!("Output {}", output_i);
-    let mut selected = modes.first().map_or(0, |x| x.0.id);
-    if let Some((best_width, best_height)) = os.best_resolution(output_i) {
-        print!(", best resolution: {}x{}", best_width, best_height);
-        for (mode, _text) in modes.iter() {
-            if mode.width == best_width && mode.height == best_height {
-                selected = mode.id;
-                break;
-            }
-        }
-    }
-    println!();
-
-    println!("Arrow keys and enter select mode");
-    let live_mode = os.get_text_position();
-    if *live {
-        println!("Press l to disable live mode");
-    } else {
-        println!("Press l to  enable live mode");
-    }
-    println!("Press e to edit boot environment");
-    println!();
-    print!(" ");
-
-    let (off_x, off_y) = os.get_text_position();
-    let rows = 12;
-    let mut mode_opt = None;
-    while !modes.is_empty() {
-        let mut row = 0;
-        let mut col = 0;
-        for (mode, text) in modes.iter() {
-            if row >= rows {
-                col += 1;
-                row = 0;
-            }
-
-            os.set_text_position(off_x + col * 20, off_y + row);
-            os.set_text_highlight(mode.id == selected);
-
-            print!("{}", text);
-
-            row += 1;
-        }
-
-        // Read keypress
-        match os.get_key() {
-            OsKey::Left => {
-                if let Some(mut mode_i) = modes.iter().position(|x| x.0.id == selected) {
-                    if mode_i < rows {
-                        while mode_i < modes.len() {
-                            mode_i += rows;
-                        }
-                    }
-                    mode_i -= rows;
-                    if let Some(new) = modes.get(mode_i) {
-                        selected = new.0.id;
-                    }
-                }
-            }
-            OsKey::Right => {
-                if let Some(mut mode_i) = modes.iter().position(|x| x.0.id == selected) {
-                    mode_i += rows;
-                    if mode_i >= modes.len() {
-                        mode_i = modes.len();
-                    }
-                    if let Some(new) = modes.get(mode_i) {
-                        selected = new.0.id;
-                    }
-                }
-            }
-            OsKey::Up => {
-                if let Some(mut mode_i) = modes.iter().position(|x| x.0.id == selected) {
-                    if mode_i % rows == 0 {
-                        mode_i += rows;
-                        if mode_i > modes.len() {
-                            mode_i = modes.len();
-                        }
-                    }
-                    mode_i -= 1;
-                    if let Some(new) = modes.get(mode_i) {
-                        selected = new.0.id;
-                    }
-                }
-            }
-            OsKey::Down => {
-                if let Some(mut mode_i) = modes.iter().position(|x| x.0.id == selected) {
-                    mode_i += 1;
-                    if mode_i % rows == 0 {
-                        mode_i -= rows;
-                    }
-                    if mode_i >= modes.len() {
-                        mode_i = mode_i - mode_i % rows;
-                    }
-                    if let Some(new) = modes.get(mode_i) {
-                        selected = new.0.id;
-                    }
-                }
-            }
-            OsKey::Enter => {
-                if let Some(mode_i) = modes.iter().position(|x| x.0.id == selected) {
-                    if let Some((mode, _text)) = modes.get(mode_i) {
-                        mode_opt = Some(*mode);
-                    }
-                }
-                break;
-            }
-            OsKey::Char('l') => {
-                *live = !*live;
-                os.set_text_position(live_mode.0, live_mode.1);
-                if *live {
-                    println!("Press l to disable live mode");
-                } else {
-                    println!("Press l to  enable live mode");
-                }
-            }
-            OsKey::Char('e') => {
-                if let Some(mode_i) = modes.iter().position(|x| x.0.id == selected) {
-                    if let Some((mode, _text)) = modes.get(mode_i) {
-                        *edit_env = true;
-                        mode_opt = Some(*mode);
-                    }
-                }
-                break;
-            }
-            _ => (),
+    // Find a free region for the module table
+    let module_table_size: u64 = modules::module_table_size(module_list.len());
+    let module_table_size_aligned = (module_table_size + 4095) & !4095;
+    let mut module_table_base: u64 = 0;
+    for i in 0..region_count {
+        if regions[i].kind == MemoryKind::Free && regions[i].size >= module_table_size_aligned {
+            module_table_base = regions[i].base;
+            regions[i].base += module_table_size_aligned;
+            regions[i].size -= module_table_size_aligned;
+            break;
         }
     }
 
-    os.set_text_position(0, off_y + rows);
-    os.set_text_highlight(false);
-    println!();
+    // Write the module table to memory
+    modules::write_module_table(module_list.as_slice(), module_table_base);
 
-    mode_opt
-}
-
-/// Performs the ext4fs operation.
-fn ext4fs<O: Os>(os: &O) -> (ext4::FileSystem<O::D>, Option<&'static [u8]>) {
-    let attempts = 10;
-    for attempt in 0..=attempts {
-        let mut password_opt = None;
-        if attempt > 0 {
-            print!("\rEXT4 password ({}/{}): ", attempt, attempts);
-
-            let mut password = String::new();
-
-            loop {
-                match os.get_key() {
-                    OsKey::Backspace | OsKey::Delete => {
-                        if !password.is_empty() {
-                            print!("\x08 \x08");
-                            password.pop();
-                        }
-                    }
-                    OsKey::Char(c) => {
-                        print!("*");
-                        password.push(c)
-                    }
-                    OsKey::Enter => break,
-                    _ => (),
-                }
-            }
-
-            // Erase password information
-            while os.get_text_position().0 > 0 {
-                print!("\x08 \x08");
-            }
-
-            if !password.is_empty() {
-                password_opt = Some(password);
-            }
-        }
-        match ext4::FileSystem::open(
-            os.ext4_device(),
-            password_opt.as_ref().map(|x| x.as_bytes()),
-        ) {
-            Ok(fs) => {
-                return (
-                    fs,
-                    password_opt.map(|password| {
-                        // Copy password to page aligned memory
-                        let password_size = password.len();
-                        let password_base = os.alloc_zeroed_page_aligned(password_size);
-
-                        area_add(OsMemoryEntry {
-                            base: password_base as u64,
-                            size: password_size as u64,
-                            kind: OsMemoryKind::Reserved,
-                        });
-
-                        unsafe {
-                            ptr::copy(password.as_ptr(), password_base, password_size);
-                            slice::from_raw_parts(password_base, password_size)
-                        }
-                    }),
-                );
-            }
-            Err(err) => {
-                // EXT4 doesn't use password, so any error here is fatal
-                if attempt == 0 {
-                    panic!("Failed to open EXT4: {}", err);
-                }
-            }
-        }
-    }
-    panic!("EXT4 out of unlock attempts");
-}
-
-#[derive(PartialEq)]
-enum Filetype {
-    Elf,
-    Initfs,
-}
-/// Performs the load to memory operation.
-fn load_to_memory<O: Os>(
-    os: &O,
-    fs: &mut ext4::FileSystem<O::D>,
-    dirname: &str,
-    filename: &str,
-    filetype: Filetype,
-) -> &'static mut [u8] {
-    let size = fs
-        .get_file_size(dirname, filename)
-        .unwrap_or_else(|err| panic!("Failed to get size of {} file: {}", filename, err));
-
-    let slice = unsafe { slice::from_raw_parts_mut(ptr, size as usize) };
-
-    let ptr = os.alloc_zeroed_page_aligned(size as usize);
-    if ptr.is_null() {
-        panic!("Failed to allocate memory for {}", filename);
-    }
-
-    let slice = unsafe { slice::from_raw_parts_mut(ptr, size as usize) };
-
-    // Read file content from EXT4
-    let data = fs
-        .read_file(dirname, filename)
-        .unwrap_or_else(|err| panic!("Failed to read {} file: {}", filename, err));
-
-    slice[..data.len()].copy_from_slice(&data);
-
-    println!(
-        "\r{}: {}/{} MiB",
-        filename,
-        size / MIBI as u64,
-        size / MIBI as u64
-    );
-
-    if filetype == Filetype::Elf {
-        let magic = &slice[..4];
-        if magic != b"\x7FELF" {
-            panic!("{} has invalid magic number {:#X?}", filename, magic);
-        }
-    } else if filetype == Filetype::Initfs {
-        let magic = &slice[..8];
-        if magic != b"CascadeF" {
-            // Changed from RedoxFtw
-            panic!("{} has invalid magic number {:#X?}", filename, magic);
-        }
-    }
-
-    slice
-}
-
-/// Performs the elf entry operation.
-fn elf_entry(data: &[u8]) -> (u64, bool) {
-    match (data[4], data[5]) {
-        // 32-bit, little endian
-        (1, 1) => (
-            u32::from_le_bytes(
-                <[u8; 4]>::try_from(&data[0x18..0x18 + 4]).expect("conversion cannot fail"),
-            ) as u64,
-            false,
-        ),
-        // 32-bit, big endian
-        (1, 2) => (
-            u32::from_be_bytes(
-                <[u8; 4]>::try_from(&data[0x18..0x18 + 4]).expect("conversion cannot fail"),
-            ) as u64,
-            false,
-        ),
-        // 64-bit, little endian
-        (2, 1) => (
-            u64::from_le_bytes(
-                <[u8; 8]>::try_from(&data[0x18..0x18 + 8]).expect("conversion cannot fail"),
-            ),
-            true,
-        ),
-        // 64-bit, big endian
-        (2, 2) => (
-            u64::from_be_bytes(
-                <[u8; 8]>::try_from(&data[0x18..0x18 + 8]).expect("conversion cannot fail"),
-            ),
-            true,
-        ),
-        (ei_class, ei_data) => {
-            panic!("Unsupported ELF EI_CLASS {} EI_DATA {}", ei_class, ei_data);
-        }
-    }
-}
-
-/// Entry point for this component.
-pub fn main(os: &impl Os) -> (usize, u64, KernelArgs) {
-    println!(
-        "Strat9-OS Bootloader {} on {}",
-        env!("CARGO_PKG_VERSION"),
-        os.name()
-    );
-
-    let hwdesc = os.hwdesc();
-    println!("Hardware descriptor: {:x?}", hwdesc);
-    let (acpi_rsdp_base, acpi_rsdp_size) = match hwdesc {
-        OsHwDesc::Acpi(base, size) => (base, size),
-        OsHwDesc::DeviceTree(base, size) => (base, size),
-        OsHwDesc::NotFound => (0, 0),
+    // ========================================================================
+    // Step 9: Build KernelArgs
+    // ========================================================================
+    let args = KernelArgs {
+        magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
+        abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
+        kernel_base: elf_info.segments[0].0,  // first segment physical
+        kernel_size: elf_info.segments.iter()
+            .take(elf_info.segment_count)
+            .map(|s| s.2)
+            .sum::<u64>(),
+        stack_base,
+        stack_size,
+        env_base: 0,
+        env_size: 0,
+        acpi_rsdp_base: rsdp_addr,
+        acpi_rsdp_size: 0,
+        memory_map_base: mmap_region_base,
+        memory_map_size: region_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,
+        initfs_base: 0,
+        initfs_size: 0,
+        framebuffer_addr: fb_addr,
+        framebuffer_width: fb_width,
+        framebuffer_height: fb_height,
+        framebuffer_stride: fb_stride,
+        framebuffer_bpp: fb_bpp,
+        framebuffer_red_mask_size: fb_red_size,
+        framebuffer_red_mask_shift: fb_red_shift,
+        framebuffer_green_mask_size: fb_green_size,
+        framebuffer_green_mask_shift: fb_green_shift,
+        framebuffer_blue_mask_size: fb_blue_size,
+        framebuffer_blue_mask_shift: fb_blue_shift,
+        _padding1: [0; 4],
+        hhdm_offset: 0, // UEFI identity maps physical memory at virtual 0
+        cmdline_ptr: 0,
+        cmdline_len: 0,
     };
 
-    let (mut fs, password_opt) = ext4fs(os);
-
-    print!("EXT4 ");
-    for i in 0..fs.uuid().len() {
-        if i == 4 || i == 6 || i == 8 || i == 10 {
-            print!("-");
-        }
-
-        print!("{:>02x}", fs.uuid()[i]);
-    }
-    println!(": {} MiB", fs.size() / MIBI as u64);
-    println!();
-
-    let mut mode_opts = Vec::new();
-    let mut live = cfg!(feature = "live");
-    let mut edit_env = false;
-    for output_i in 0..os.video_outputs() {
-        if output_i > 0 {
-            os.clear_text();
-        }
-        mode_opts.push(select_mode(os, output_i, &mut live, &mut edit_env));
-    }
-
-    let stack_size = 128 * KIBI;
-    let stack_base = os.alloc_zeroed_page_aligned(stack_size);
-    if stack_base.is_null() {
-        panic!("Failed to allocate memory for stack");
-    }
-
-    let live_opt = if live {
-        let size = fs.size();
-
-        print!("live: 0/{} MiB", size / MIBI as u64);
-
-        let ptr = os.alloc_zeroed_page_aligned(size as usize);
-        if ptr.is_null() {
-            panic!("Failed to allocate memory for live");
-        }
-
-        let live = unsafe { slice::from_raw_parts_mut(ptr, size as usize) };
-
-        let mut i = 0;
-        for chunk in live.chunks_mut(MIBI) {
-            print!("\rlive: {}/{} MiB", i / MIBI as u64, size / MIBI as u64);
-            i += unsafe {
-                fs.disk
-                    .read_at(fs.block + i / ext4fs::BLOCK_SIZE, chunk)
-                    .expect("Failed to read live disk") as u64
-            };
-        }
-        println!("\rlive: {}/{} MiB", i / MIBI as u64, size / MIBI as u64);
-
-        println!("Switching to live disk");
-        unsafe {
-            LIVE_OPT = Some((fs.block, slice::from_raw_parts_mut(ptr, size as usize)));
-        }
-
-        area_add(OsMemoryEntry {
-            base: live.as_ptr() as u64,
-            size: live.len() as u64,
-            kind: OsMemoryKind::Reserved,
-        });
-
-        Some(live)
-    } else {
-        None
+    // ========================================================================
+    // Step 10: Set up page tables and context-switch to kernel
+    // ========================================================================
+    // Build page tables:
+    //   - Identity map (UEFI already does this, but we re-establish it)
+    //   - Higher-half kernel at 0xFFFFFFFF80000000
+    let pml4_phys = unsafe {
+        paging::create_page_tables(
+            elf_info.segments[0].0,  // kernel physical base
+            args.kernel_size,
+        )
     };
 
-    let (kernel, kernel_entry) = {
-        let kernel = load_to_memory(os, &mut fs, "boot", "kernel", Filetype::Elf);
-        let (kernel_entry, kernel_64bit) = elf_entry(kernel);
-        unsafe {
-            KERNEL_64BIT = kernel_64bit;
-        }
-        (kernel, kernel_entry)
-    };
-
-    let (bootstrap_size, bootstrap_base) = {
-        let initfs_slice = load_to_memory(os, &mut fs, "boot", "initfs", Filetype::Initfs);
-
-        let memory = unsafe {
-            let total_size = initfs_slice.len().next_multiple_of(4096);
-            let ptr = os.alloc_zeroed_page_aligned(total_size);
-            assert!(!ptr.is_null(), "failed to allocate bootstrap+initfs memory");
-            core::slice::from_raw_parts_mut(ptr, total_size)
-        };
-        memory[..initfs_slice.len()].copy_from_slice(initfs_slice);
-
-        (memory.len() as u64, memory.as_mut_ptr() as u64)
-    };
-
-    let page_phys = unsafe { paging_create(os, kernel.as_ptr() as u64, kernel.len() as u64) }
-        .expect("Failed to set up paging");
-
-    let max_env_size = 64 * KIBI;
-    let mut env_size = max_env_size;
-    let env_base = os.alloc_zeroed_page_aligned(env_size);
-    if env_base.is_null() {
-        panic!("Failed to allocate memory for stack");
+    // Context switch to the kernel
+    // Phil Opp pattern: load CR3, set RSP, put args in RDI, jump
+    let args_ptr = &args as *const KernelArgs;
+    unsafe {
+        paging::context_switch(
+            pml4_phys,
+            stack_base + stack_size,  // stack grows down, so top = base + size
+            elf_info.entry,
+            args_ptr as u64,
+        );
     }
 
-    {
-        let mut w = SliceWriter {
-            slice: unsafe { slice::from_raw_parts_mut(env_base, max_env_size) },
-            i: 0,
-        };
-
-        match hwdesc {
-            OsHwDesc::Acpi(addr, size) => {
-                writeln!(w, "RSDP_ADDR={addr:016x}").unwrap();
-                writeln!(w, "RSDP_SIZE={size:016x}").unwrap();
-            }
-            OsHwDesc::DeviceTree(addr, size) => {
-                writeln!(w, "DTB_ADDR={addr:016x}").unwrap();
-                writeln!(w, "DTB_SIZE={size:016x}").unwrap();
-            }
-            OsHwDesc::NotFound => {}
-        }
-
-        if let Some(live) = live_opt {
-            writeln!(w, "DISK_LIVE_ADDR={:016x}", live.as_ptr() as usize).unwrap();
-            writeln!(w, "DISK_LIVE_SIZE={:016x}", live.len()).unwrap();
-            writeln!(w, "EXT4_BLOCK={:016x}").unwrap();
-        } else {
-            writeln!(w, "EXT4_BLOCK={:016x}", fs.block).unwrap();
-        }
-        write!(w, "EXT4_UUID=").unwrap();
-        for i in 0..fs.uuid().len() {
-            if i == 4 || i == 6 || i == 8 || i == 10 {
-                write!(w, "-").unwrap();
-            }
-
-            write!(w, "{:>02x}", fs.uuid()[i]).unwrap();
-        }
-        writeln!(w).unwrap();
-        if let Some(password) = password_opt {
-            writeln!(w, "EXT4_PASSWORD_ADDR={:016x}", password.as_ptr() as usize).unwrap();
-            writeln!(w, "EXT4_PASSWORD_SIZE={:016x}", password.len()).unwrap();
-        }
-
-        #[cfg(target_arch = "riscv64")]
-        {
-            let boot_hartid = os::efi_get_boot_hartid()
-                .expect("Could not retrieve boot hart id from EFI implementation!");
-            writeln!(w, "BOOT_HART_ID={:016x}", boot_hartid).unwrap();
-        }
-        if edit_env {
-            // Using a simplified version of the editor for Strat9-OS
-            // The original editor::edit_env function would need to be adapted
-        }
-
-        for output_i in 0..os.video_outputs() {
-            if let Some(mut mode) = mode_opts[output_i] {
-                // Set mode to get updated values
-                os.set_video_mode(output_i, &mut mode);
-
-                if output_i == 0 {
-                    let virt = unsafe {
-                        paging_framebuffer(
-                            os,
-                            page_phys,
-                            mode.base,
-                            (mode.stride * mode.height * 4) as u64,
-                        )
-                    }
-                    .expect("Failed to map framebuffer");
-
-                    writeln!(w, "FRAMEBUFFER_ADDR={:016x}", mode.base).unwrap();
-                    writeln!(w, "FRAMEBUFFER_VIRT={virt:016x}").unwrap();
-                    writeln!(w, "FRAMEBUFFER_WIDTH={:016x}", mode.width).unwrap();
-                    writeln!(w, "FRAMEBUFFER_HEIGHT={:016x}", mode.height).unwrap();
-                    writeln!(w, "FRAMEBUFFER_STRIDE={:016x}", mode.stride).unwrap();
-                } else {
-                    writeln!(
-                        w,
-                        "FRAMEBUFFER{}={:#x},{},{},{}",
-                        output_i, mode.base, mode.width, mode.height, mode.stride,
-                    )
-                    .unwrap();
-                }
-            }
-        }
-        env_size = w.i;
-    }
-
-    #[allow(static_mut_refs)]
-    (
-        page_phys,
-        kernel_entry,
-        KernelArgs {
-            magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
-            abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
-            kernel_base: kernel.as_ptr() as u64,
-            kernel_size: kernel.len() as u64,
-            stack_base: stack_base as u64,
-            stack_size: stack_size as u64,
-            env_base: env_base as u64,
-            env_size: env_size as u64,
-            acpi_rsdp_base,
-            acpi_rsdp_size,
-            memory_map_base: unsafe { AREAS.as_ptr() as u64 },
-            memory_map_size: unsafe { (AREAS.len() * mem::size_of::<OsMemoryEntry>()) as u64 },
-            initfs_base: bootstrap_base,
-            initfs_size: bootstrap_size,
-            framebuffer_addr: 0,
-            framebuffer_width: 0,
-            framebuffer_height: 0,
-            framebuffer_stride: 0,
-            framebuffer_bpp: 0,
-            framebuffer_red_mask_size: 0,
-            framebuffer_red_mask_shift: 0,
-            framebuffer_green_mask_size: 0,
-            framebuffer_green_mask_shift: 0,
-            framebuffer_blue_mask_size: 0,
-            framebuffer_blue_mask_shift: 0,
-            _padding1: [0; 4],
-            hhdm_offset: 0,
-            cmdline_ptr: 0,
-            cmdline_len: 0,
-        },
-    )
+    // Should never reach here
+    Status::SUCCESS
 }
