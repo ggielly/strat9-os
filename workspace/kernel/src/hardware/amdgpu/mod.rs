@@ -106,13 +106,13 @@ pub fn init() {
     }
 
     // Map MMIO registers via HHDM
-    let hhdm = crate::memory::get_hhdm_offset();
+    let hhdm = crate::memory::hhdm_offset();
     let mmio_base = (bar0 + hhdm) as usize;
     let mmio = unsafe { MmioReg::new(mmio_base) };
 
     // Read GPU identifiers
-    let chip_id = mmio.read32(regs::mmio::CHIP_ID);
-    let rb_backend_disable = mmio.read32(regs::mmio::GRBM_RB_BACKEND_DISABLE);
+    let chip_id = mmio.read32(regs::CHIP_ID);
+    let rb_backend_disable = mmio.read32(regs::GRBM_RB_BACKEND_DISABLE);
     crate::serial_println!(
         "[amdgpu] CHIP_ID={:#x} RB_BACKEND_DISABLE={:#x}",
         chip_id,
@@ -187,11 +187,11 @@ impl AmdGpu {
     /// Initialize the display pipeline (CRTC, scanout, timing).
     fn init_display(&self) {
         // 1. Read current display controller state
-        let crtc_ctrl = self.mmio.read32(regs::mmio::CRTC_CONTROL);
+        let crtc_ctrl = self.mmio.read32(regs::CRTC_CONTROL);
         crate::serial_println!("[amdgpu] CRTC_CONTROL={:#x}", crtc_ctrl);
 
         // 2. Disable CRTC for reconfiguration
-        self.mmio.write32(regs::mmio::CRTC_CONTROL, 0);
+        self.mmio.write32(regs::CRTC_CONTROL, 0);
 
         // 3. Wait for any pending scanout to complete
         crate::arch::x86_64::timer::busy_wait_us(1000);
@@ -200,40 +200,40 @@ impl AmdGpu {
         let fb_addr_lo = (self.fb_phys & 0xFFFF_FFFF) as u32;
         let fb_addr_hi = ((self.fb_phys >> 32) & 0xFFFF_FFFF) as u32;
         self.mmio
-            .write32(regs::mmio::CRTC_FB_BASE_LO, fb_addr_lo);
+            .write32(regs::CRTC_FB_BASE_LO, fb_addr_lo);
         self.mmio
-            .write32(regs::mmio::CRTC_FB_BASE_HI, fb_addr_hi);
+            .write32(regs::CRTC_FB_BASE_HI, fb_addr_hi);
 
         // 5. Set framebuffer parameters
         self.mmio
-            .write32(regs::mmio::CRTC_FB_PITCH, self.fb_pitch / 4);
+            .write32(regs::CRTC_FB_PITCH, self.fb_pitch / 4);
         self.mmio
-            .write32(regs::mmio::CRTC_FB_SIZE, self.fb_width | (self.fb_height << 16));
+            .write32(regs::CRTC_FB_SIZE, self.fb_width | (self.fb_height << 16));
 
         // 6. Set display timing (basic 1024x768@60Hz)
         self.mmio.write32(
-            regs::mmio::CRTC_H_TOTAL,
+            regs::CRTC_H_TOTAL,
             (self.fb_width + 160 - 1) | ((self.fb_width + 160 - 1) << 16),
         );
         self.mmio.write32(
-            regs::mmio::CRTC_V_TOTAL,
+            regs::CRTC_V_TOTAL,
             (self.fb_height + 30 - 1) | ((self.fb_height + 30 - 1) << 16),
         );
 
         // 7. Set pixel format (32bpp BGRA)
         self.mmio.write32(
-            regs::mmio::CRTC_FORMAT,
+            regs::CRTC_FORMAT,
             0 // FORMAT_32BPP = 0
         );
 
         // 8. Set display dimensions
         self.mmio.write32(
-            regs::mmio::CRTC_DIMENSIONS,
+            regs::CRTC_DIMENSIONS,
             self.fb_width | (self.fb_height << 16),
         );
 
         // 9. Enable CRTC
-        self.mmio.write32(regs::mmio::CRTC_CONTROL, 1 << 0); // CRTC_EN
+        self.mmio.write32(regs::CRTC_CONTROL, 1 << 0); // CRTC_EN
 
         // 10. Wait for display pipeline to settle
         crate::arch::x86_64::timer::busy_wait_us(5000);

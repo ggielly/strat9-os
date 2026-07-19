@@ -284,6 +284,63 @@ impl Framebuffer {
         Ok(())
     }
 
+    /// Initialize framebuffer with AMDGPU
+    pub fn init_amd_gpu() -> Result<(), &'static str> {
+        let gpu_guard = crate::hardware::amdgpu::get_gpu().ok_or("AMDGPU not available")?;
+        let gpu = gpu_guard.as_ref().ok_or("AMDGPU not initialized")?;
+
+        let (phys, width, height, pitch) = gpu.framebuffer_info();
+
+        let format = PixelFormat {
+            red_mask: 0x00FF0000,
+            red_shift: 16,
+            green_mask: 0x0000FF00,
+            green_shift: 8,
+            blue_mask: 0x000000FF,
+            blue_shift: 0,
+            bits_per_pixel: 32,
+        };
+
+        let hhdm = crate::memory::get_hhdm_offset();
+        let base_virt = (phys as u64 + hhdm) as usize;
+
+        let info = FramebufferInfo {
+            base: phys as u64,
+            base_virt,
+            width,
+            height,
+            stride: pitch,
+            format,
+            source: FramebufferSource::AmdGpu,
+        };
+
+        let fb_size = (pitch as usize) * (height as usize);
+
+        *FRAMEBUFFER.lock() = Some(Framebuffer {
+            info,
+            back_buffer: None,
+            double_buffer: None,
+            use_double_buffer: false,
+            present_pending: false,
+            last_present_tick: 0,
+            dirty: Default::default(),
+            draw_to_back: false,
+            track_dirty: false,
+            console_defer_present: false,
+            fb_size,
+        });
+
+        log::info!(
+            "[FB] AMDGPU framebuffer: {}x{} @ {}bpp, {} bytes",
+            info.width,
+            info.height,
+            info.format.bits_per_pixel,
+            info.stride
+        );
+
+        Ok(())
+    }
+
     /// Get framebuffer info
     pub fn info() -> Option<FramebufferInfo> {
         FRAMEBUFFER.lock().as_ref().map(|fb| fb.info)
@@ -568,8 +625,16 @@ pub fn init() {
         }
     }
 
-    // VirtIO GPU not available, Limine framebuffer is already set up in boot
-    // The Limine framebuffer is initialized in boot/limine.rs
+    // Try AMDGPU (real hardware)
+    if !Framebuffer::is_available() && crate::hardware::amdgpu::is_available() {
+        if let Err(e) = Framebuffer::init_amd_gpu() {
+            log::warn!("[FB] AMDGPU init failed: {}", e);
+        } else {
+            log::info!("[FB] Using AMDGPU framebuffer");
+        }
+    }
+
+    // VirtIO GPU and AMDGPU not available, Limine framebuffer is already set up in boot
     if Framebuffer::is_available() {
         log::info!("[FB] Using Limine framebuffer");
     } else {

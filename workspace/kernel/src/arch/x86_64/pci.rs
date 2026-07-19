@@ -151,6 +151,8 @@ pub mod vendor {
     pub const QEMU: u16 = 0x1234;
     pub const INTEL: u16 = 0x8086;
     pub const AMD: u16 = 0x1022;
+    /// ATI/AMD display controller vendor ID (GPUs, APUs display)
+    pub const AMD_DISPLAY: u16 = 0x1002;
 }
 
 /// PCI Device IDs (VirtIO legacy)
