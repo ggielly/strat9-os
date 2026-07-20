@@ -96,7 +96,11 @@ impl HidKeyboard {
     }
 
     pub fn read_event(&mut self) -> Option<KeyEvent> {
-        self.event_queue.pop()
+        if self.event_queue.is_empty() {
+            None
+        } else {
+            Some(self.event_queue.remove(0))
+        }
     }
 
     pub fn process_report(&mut self, report: &[u8]) {
@@ -185,7 +189,11 @@ impl HidMouse {
     }
 
     pub fn read_event(&mut self) -> Option<MouseEvent> {
-        self.event_queue.pop()
+        if self.event_queue.is_empty() {
+            None
+        } else {
+            Some(self.event_queue.remove(0))
+        }
     }
 
     pub fn process_report(&mut self, report: &[u8]) {

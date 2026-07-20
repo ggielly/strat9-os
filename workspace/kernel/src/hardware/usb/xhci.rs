@@ -1066,7 +1066,11 @@ impl XhciController {
         let mut deq;
         let cycle;
 
-        core::ptr::write_bytes(tr_ring as *mut u8, 0, 4096);
+        for i in 0..3 {
+            core::ptr::write(tr_ring.add(i), Trb {
+                d0: 0, d1: 0, d2: 0, d3: 0,
+            });
+        }
         core::ptr::write(tr_ring.add(XHCI_RING_TRBS - 1), Trb::link(tr_phys, true));
         deq = 0;
         cycle = true;
