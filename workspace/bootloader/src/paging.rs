@@ -1,33 +1,15 @@
-//! Page table setup for the kernel.
-//!
-//! Creates page tables with:
-//! - Identity mapping (first 4GB, 2MB pages)
-//! - Higher-half kernel at 0xFFFFFFFF80000000
-//! - Framebuffer at 0xFFFF_DEAD_0000_0000 (BOOTBOOT-inspired fixed address)
-//! - Environment at 0xFFFF_BEEF_0000_0000
-//!
-//! Virtual memory layout:
-//!   0xFFFF_DEAD_0000_0000  → Framebuffer (DEAD)
-//!   0xFFFF_BEEF_0000_0000  → Environment string (BEEF)
-//!   0xFFFFFFFF_8000_0000  → Kernel code/data
-//!   0x0000_0000_0000_0000  → Identity map (first 4GB)
-
 use x86_64::structures::paging::*;
 use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::PhysAddr;
 
-/// Fixed virtual addresses (BOOTBOOT-inspired)
 pub const FRAMEBUFFER_BASE: u64 = 0xFFFF_DEAD_0000_0000;
 pub const ENVIRONMENT_BASE: u64 = 0xFFFF_BEEF_0000_0000;
 
-/// Page size constants
 const PAGE_SIZE: u64 = 0x1000;
 const LARGE_PAGE_SIZE: u64 = 0x200_000;
 
-/// Physical memory offset (0 for UEFI since it identity-maps)
 pub const PHYS_OFFSET: u64 = 0;
 
-/// A simple bump allocator for physical frames during boot.
 struct BootFrameAllocator {
     next: u64,
 }
@@ -46,224 +28,134 @@ impl BootFrameAllocator {
 
 static mut BOOT_ALLOCATOR: BootFrameAllocator = BootFrameAllocator::new(0);
 
-pub unsafe fn init_allocator(start: u64) {
-    unsafe {
-        BOOT_ALLOCATOR = BootFrameAllocator::new(start);
-    }
+unsafe fn init_allocator(start: u64) {
+    BOOT_ALLOCATOR = BootFrameAllocator::new(start);
 }
 
 fn alloc_frame() -> PhysFrame {
     unsafe { BOOT_ALLOCATOR.allocate_frame().expect("Out of boot memory") }
 }
 
-/// Create page tables for the kernel.
-///
-/// # Safety
-/// Must be called after ExitBootServices with valid kernel physical addresses.
+fn alloc_zeroed_frame() -> (PhysFrame, &'static mut PageTable) {
+    let frame = alloc_frame();
+    let table = unsafe { frame_to_mut(frame) };
+    for entry in table.iter_mut() {
+        *entry = PageTableEntry::new();
+    }
+    (frame, table)
+}
+
 pub unsafe fn create_page_tables(
     kernel_phys: u64,
+    kernel_phys_end: u64,
     kernel_size: u64,
     framebuffer_phys: u64,
     framebuffer_size: u64,
     env_phys: u64,
     env_size: u64,
 ) -> u64 {
-    // Start allocating frames after 2MB (safe area)
-    init_allocator(0x200_000);
+    let alloc_start = (kernel_phys_end + 0xFFF) & !0xFFF;
+    init_allocator(alloc_start);
 
-    // Allocate PML4
-    let pml4_frame = alloc_frame();
-    let pml4 = frame_to_mut(pml4_frame);
+    let (pml4_frame, pml4) = alloc_zeroed_frame();
 
-    // Zero out PML4
-    for entry in pml4.iter_mut() {
-        *entry = PageTableEntry::new();
-    }
+    // Identity map: PML4[0..8] → 8× 1GB windows via 2MB large pages
+    for pdp_idx in 0..8u64 {
+        let (pdp_frame, pdp) = alloc_zeroed_frame();
+        pml4[pdp_idx as usize].set_addr(
+            pdp_frame.start_address(),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+        );
 
-    // ========================================================================
-    // Identity map: first 8GB using 2MB large pages
-    // PML4[0] → PDP → 8 PDs (each with 512 x 2MB pages)
-    // ========================================================================
-    {
-        let pdp_frame = alloc_frame();
-        let pdp = frame_to_mut(pdp_frame);
-        for entry in pdp.iter_mut() {
-            *entry = PageTableEntry::new();
-        }
-
-        pml4[0].set_addr(pdp_frame.start_address(), PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
-
-        for pdp_idx in 0..8u64 {
-            let pd_frame = alloc_frame();
-            let pd = frame_to_mut(pd_frame);
-
-            for pd_idx_inner in 0..512u64 {
-                let phys = pdp_idx * 0x4000_0000 + pd_idx_inner * LARGE_PAGE_SIZE;
-                pd[pd_idx_inner as usize].set_addr(
-                    PhysAddr::new(phys),
-                    PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::HUGE_PAGE,
-                );
-            }
-
-            pdp[pdp_idx as usize].set_addr(
-                pd_frame.start_address(),
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+        for pd_idx_inner in 0..512u64 {
+            let phys = pdp_idx * 0x4000_0000 + pd_idx_inner * LARGE_PAGE_SIZE;
+            pdp[pd_idx_inner as usize].set_addr(
+                PhysAddr::new(phys),
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE
+                    | PageTableFlags::HUGE_PAGE | PageTableFlags::NO_EXECUTE,
             );
         }
     }
 
-    // ========================================================================
-    // Higher-half: PML4[511] → PDP → PD/PT
-    // ========================================================================
+    // Higher-half kernel: PML4[511] → PDP[510]
     {
-        let pdp_frame = alloc_frame();
-        let pdp = frame_to_mut(pdp_frame);
-        for entry in pdp.iter_mut() {
-            *entry = PageTableEntry::new();
-        }
-
+        let (pdp_frame, pdp) = alloc_zeroed_frame();
         pml4[511].set_addr(
             pdp_frame.start_address(),
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
         );
 
-        // --- Kernel: PDP[510] → at 0xFFFFFFFF_80000000 ---
-        {
-            let pd_frame = alloc_frame();
-            let pd = frame_to_mut(pd_frame);
+        let kernel_large_pages = ((kernel_size + LARGE_PAGE_SIZE - 1) / LARGE_PAGE_SIZE).max(1);
+        let (pd_frame, pd) = alloc_zeroed_frame();
 
-            let mut phys = kernel_phys;
+        for pd_idx_inner in 0..kernel_large_pages {
+            let (pt_frame, pt) = alloc_zeroed_frame();
 
-            for pd_idx in 0..512u64 {
-                let pt_frame = alloc_frame();
-                let pt = frame_to_mut(pt_frame);
-
-                for pt_idx in 0..512u64 {
-                    if phys >= kernel_phys + kernel_size {
-                        // Past kernel, identity map within this 1GB region
-                        let identity_phys = pd_idx * LARGE_PAGE_SIZE + pt_idx * PAGE_SIZE;
-                        pt[pt_idx as usize].set_addr(
-                            PhysAddr::new(identity_phys),
-                            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                        );
-                    } else {
-                        pt[pt_idx as usize].set_addr(
-                            PhysAddr::new(phys),
-                            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                        );
-                        phys += PAGE_SIZE;
-                    }
+            for pt_idx in 0..512u64 {
+                let offset = pd_idx_inner * 512 * PAGE_SIZE + pt_idx * PAGE_SIZE;
+                if offset >= kernel_size {
+                    break;
                 }
-
-                pd[pd_idx as usize].set_addr(
-                    pt_frame.start_address(),
+                let phys = kernel_phys + offset;
+                pt[pt_idx as usize].set_addr(
+                    PhysAddr::new(phys),
                     PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
                 );
             }
 
-            pdp[510].set_addr(
-                pd_frame.start_address(),
+            pd[pd_idx_inner as usize].set_addr(
+                pt_frame.start_address(),
                 PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
             );
         }
 
-        // --- Framebuffer: PML4[511], PDP[0x1AD = 429] ---
-        if framebuffer_phys != 0 && framebuffer_size > 0 {
-            let pdp_idx = ((FRAMEBUFFER_BASE >> 30) & 0x1FF) as usize;
+        pdp[510].set_addr(
+            pd_frame.start_address(),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+        );
+    }
 
-            let pd_frame = alloc_frame();
-            let pd = frame_to_mut(pd_frame);
+    // Framebuffer: PML4[445] → PDP[180]
+    if framebuffer_phys != 0 && framebuffer_size > 0 {
+        let (fb_pdp_frame, fb_pdp) = alloc_zeroed_frame();
+        pml4[445].set_addr(
+            fb_pdp_frame.start_address(),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+        );
 
-            let mut mapped: u64 = 0;
-            let mut pd_idx_inner: usize = 0;
+        let (pd_frame, pd) = alloc_zeroed_frame();
 
-            while mapped < framebuffer_size && pd_idx_inner < 512 {
-                let page_phys = framebuffer_phys + mapped;
+        let mut mapped: u64 = 0;
+        let mut pd_idx_inner: usize = 0;
 
-                if page_phys % LARGE_PAGE_SIZE == 0 {
-                    // 2MB large page
-                    pd[pd_idx_inner].set_addr(
-                        PhysAddr::new(page_phys),
-                        PageTableFlags::PRESENT
-                            | PageTableFlags::WRITABLE
-                            | PageTableFlags::HUGE_PAGE,
-                    );
-                    mapped += LARGE_PAGE_SIZE;
-                } else {
-                    // 4KB pages for this 2MB region
-                    let pt_frame = alloc_frame();
-                    let pt = frame_to_mut(pt_frame);
+        while mapped < framebuffer_size && pd_idx_inner < 512 {
+            let page_phys = framebuffer_phys + mapped;
 
-                    let mut pt_phys = page_phys;
-                    let mut pt_mapped: u64 = 0;
+            if page_phys % LARGE_PAGE_SIZE == 0 {
+                pd[pd_idx_inner].set_addr(
+                    PhysAddr::new(page_phys),
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE
+                        | PageTableFlags::HUGE_PAGE | PageTableFlags::NO_EXECUTE
+                        | PageTableFlags::WRITE_THROUGH,
+                );
+                mapped += LARGE_PAGE_SIZE;
+            } else {
+                let (pt_frame, pt) = alloc_zeroed_frame();
 
-                    for pt_idx in 0..512u64 {
-                        if mapped + pt_mapped >= framebuffer_size {
-                            // Past framebuffer, map zero page (will not be accessed)
-                            pt[pt_idx as usize].set_addr(
-                                PhysAddr::new(0),
-                                PageTableFlags::empty(),
-                            );
-                        } else {
-                            pt[pt_idx as usize].set_addr(
-                                PhysAddr::new(pt_phys),
-                                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                            );
-                            pt_phys += PAGE_SIZE;
-                            pt_mapped += PAGE_SIZE;
-                        }
-                    }
-
-                    mapped += pt_mapped;
-
-                    pd[pd_idx_inner].set_addr(
-                        pt_frame.start_address(),
-                        PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                    );
-                }
-                pd_idx_inner += 1;
-            }
-
-            pdp[pdp_idx].set_addr(
-                pd_frame.start_address(),
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-            );
-        }
-
-        // --- Environment: PML4[511], PDP[0x1AF = 431] ---
-        if env_phys != 0 && env_size > 0 {
-            let pdp_idx = ((ENVIRONMENT_BASE >> 30) & 0x1FF) as usize;
-
-            let pd_frame = alloc_frame();
-            let pd = frame_to_mut(pd_frame);
-
-            // Map environment using 4KB pages (typically < 2MB)
-            let mut mapped: u64 = 0;
-            let mut pd_idx_inner: usize = 0;
-
-            while mapped < env_size && pd_idx_inner < 512 {
-                let pt_frame = alloc_frame();
-                let pt = frame_to_mut(pt_frame);
-
-                let mut pt_phys = env_phys + mapped;
+                let mut pt_phys = page_phys;
                 let mut pt_mapped: u64 = 0;
 
                 for pt_idx in 0..512u64 {
-                    if mapped + pt_mapped >= env_size {
-                        pt[pt_idx as usize].set_addr(
-                            PhysAddr::new(0),
-                            PageTableFlags::empty(),
-                        );
-                    } else {
-                        pt[pt_idx as usize].set_addr(
-                            PhysAddr::new(pt_phys),
-                            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                        );
-                        pt_phys += PAGE_SIZE;
-                        pt_mapped += PAGE_SIZE;
+                    if mapped + pt_mapped >= framebuffer_size {
+                        break;
                     }
+                    pt[pt_idx as usize].set_addr(
+                        PhysAddr::new(pt_phys),
+                        PageTableFlags::PRESENT | PageTableFlags::WRITABLE
+                            | PageTableFlags::NO_EXECUTE | PageTableFlags::WRITE_THROUGH,
+                    );
+                    pt_phys += PAGE_SIZE;
+                    pt_mapped += PAGE_SIZE;
                 }
 
                 mapped += pt_mapped;
@@ -272,23 +164,66 @@ pub unsafe fn create_page_tables(
                     pt_frame.start_address(),
                     PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
                 );
-                pd_idx_inner += 1;
+            }
+            pd_idx_inner += 1;
+        }
+
+        fb_pdp[180].set_addr(
+            pd_frame.start_address(),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+        );
+    }
+
+    // Environment: PML4[381] → PDP[444]
+    if env_phys != 0 && env_size > 0 {
+        let (env_pdp_frame, env_pdp) = alloc_zeroed_frame();
+        pml4[381].set_addr(
+            env_pdp_frame.start_address(),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+        );
+
+        let (pd_frame, pd) = alloc_zeroed_frame();
+
+        let mut mapped: u64 = 0;
+        let mut pd_idx_inner: usize = 0;
+
+        while mapped < env_size && pd_idx_inner < 512 {
+            let (pt_frame, pt) = alloc_zeroed_frame();
+
+            let mut pt_phys = env_phys + mapped;
+            let mut pt_mapped: u64 = 0;
+
+            for pt_idx in 0..512u64 {
+                if mapped + pt_mapped >= env_size {
+                    break;
+                }
+                pt[pt_idx as usize].set_addr(
+                    PhysAddr::new(pt_phys),
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE
+                        | PageTableFlags::NO_EXECUTE,
+                );
+                pt_phys += PAGE_SIZE;
+                pt_mapped += PAGE_SIZE;
             }
 
-            pdp[pdp_idx].set_addr(
-                pd_frame.start_address(),
+            mapped += pt_mapped;
+
+            pd[pd_idx_inner].set_addr(
+                pt_frame.start_address(),
                 PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
             );
+            pd_idx_inner += 1;
         }
+
+        env_pdp[444].set_addr(
+            pd_frame.start_address(),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+        );
     }
 
     pml4_frame.start_address().as_u64()
 }
 
-/// Context switch to the kernel.
-///
-/// # Safety
-/// All arguments must be valid.
 pub unsafe fn context_switch(
     pml4_phys: u64,
     stack_top: u64,
@@ -300,7 +235,7 @@ pub unsafe fn context_switch(
             "xor rbp, rbp",
             "mov cr3, {pml4}",
             "mov rsp, {stack}",
-            "push 0",
+            "and rsp, -16",
             "mov rdi, {args}",
             "jmp {entry}",
             pml4 = in(reg) pml4_phys,
@@ -312,8 +247,6 @@ pub unsafe fn context_switch(
     }
 }
 
-/// # Safety
-/// The frame must be allocated and not aliased.
 unsafe fn frame_to_mut(frame: PhysFrame) -> &'static mut PageTable {
     unsafe {
         let virt = frame.start_address().as_u64() + PHYS_OFFSET;

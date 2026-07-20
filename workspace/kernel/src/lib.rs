@@ -76,6 +76,16 @@ use core::panic::PanicInfo;
 const PAGE_SIZE: u64 = 4096;
 const MAX_BOOT_MMAP_REGIONS_WORK: usize = 1024;
 
+/// Global pointer to KernelArgs, set once during early boot.
+/// Components use this to access boot-time information (framebuffer, memory map, etc.).
+static mut BOOT_ARGS: Option<&'static boot::entry::KernelArgs> = None;
+
+/// Get the boot arguments. Returns `None` if called before `kernel_main`.
+pub fn boot_args() -> Option<&'static boot::entry::KernelArgs> {
+    // SAFETY: written once during early boot, read-only thereafter.
+    unsafe { BOOT_ARGS }
+}
+
 /// Performs the null region operation.
 const fn null_region() -> boot::entry::MemoryRegion {
     boot::entry::MemoryRegion {
@@ -398,6 +408,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     let args = &*args;
     serial_println!("[init] KernelArgs at {:p}", args);
+
+    // Store boot args globally so components can access them.
+    // SAFETY: written once here, read-only thereafter.
+    unsafe { BOOT_ARGS = Some(args) };
 
     // SAFETY: KernelArgs is packed; read fields via addr_of! to avoid unaligned references.
     let magic = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) };
