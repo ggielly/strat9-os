@@ -46,7 +46,7 @@ mkdir -p "$ISO_ROOT/efi/boot"
 mkdir -p "$ISO_ROOT/boot/initfs"
 
 # Copy bootloader
-cp "$BOOTLOADER_EFI" "$ISO_ROOT/efi/boot/bootx64.efi"
+cp "$BOOTLOADER_EFI" "$ISO_ROOT/efi/boot/BOOTX64.EFI"
 echo "  [OK] Copied bootloader to /efi/boot/bootx64.efi"
 
 # Copy kernel
