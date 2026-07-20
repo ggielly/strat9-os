@@ -1,63 +1,64 @@
-//! Module loader - loads files from /boot/initfs/ on the FAT ESP.
-//!
-//! Following Plan 9 simplicity: each file is loaded individually, and we build
-//! a simple table of {name, base, size} that the kernel can iterate over.
-
 use alloc::vec::Vec;
 use uefi::prelude::*;
 use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
 
-/// A loaded module: name + physical address + size
 pub struct LoadedModule {
     pub name: [u8; 64],
     pub base: u64,
     pub size: u64,
 }
 
-/// Module table header + entries, as laid out in memory.
 #[repr(C)]
 pub struct ModuleTable {
     pub count: u32,
+    _pad: u32,
     pub entries: [ModuleEntry; 64],
 }
 
-/// A single module entry in the table.
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub struct ModuleEntry {
     pub name: [u8; 64],
     pub base: u64,
     pub size: u64,
 }
 
-/// Calculate the size of the module table for a given count.
 pub fn module_table_size(count: usize) -> u64 {
-    let header_size = core::mem::size_of::<u32>() as u64;
+    let header_size = core::mem::size_of::<ModuleTable>() as u64;
     let entry_size = core::mem::size_of::<ModuleEntry>() as u64;
-    header_size + entry_size * count as u64
+    header_size + entry_size * count as u64 - entry_size * 64
 }
 
-/// Write the module table to a physical memory address.
 pub fn write_module_table(modules: &[LoadedModule], base: u64) {
     unsafe {
-        let table = base as *mut ModuleTable;
-        (*table).count = modules.len() as u32;
+        let table = &mut *(base as *mut ModuleTable);
+        table.count = modules.len() as u32;
+        table.entries = [ModuleEntry {
+            name: [0u8; 64],
+            base: 0,
+            size: 0,
+        }; 64];
         for (i, m) in modules.iter().enumerate() {
             if i >= 64 {
                 break;
             }
-            (*table).entries[i].name = m.name;
-            (*table).entries[i].base = m.base;
-            (*table).entries[i].size = m.size;
+            table.entries[i].name = m.name;
+            table.entries[i].base = m.base;
+            table.entries[i].size = m.size;
         }
     }
 }
 
-/// Load all files from /boot/initfs/ directory.
 pub fn load_modules(image_handle: Handle) -> Vec<LoadedModule> {
     let mut modules = Vec::new();
 
     let mut fs = match uefi::boot::get_image_file_system(image_handle) {
         Ok(fs) => fs,
+        Err(_) => return modules,
+    };
+
+    let mut volume = match fs.open_volume() {
+        Ok(v) => v,
         Err(_) => return modules,
     };
 
@@ -82,11 +83,6 @@ pub fn load_modules(image_handle: Handle) -> Vec<LoadedModule> {
     ];
 
     for &filename in filenames {
-        let mut volume = match fs.open_volume() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
         let mut path_buf = [0u16; 64];
         let path_len = format_path(&mut path_buf, filename);
 
@@ -115,18 +111,16 @@ pub fn load_modules(image_handle: Handle) -> Vec<LoadedModule> {
         }
 
         let alloc_size = (file_size + 4095) & !4095;
-        let buf = alloc::vec![0u8; alloc_size];
-        let mut buf = core::mem::ManuallyDrop::new(buf);
+        let mut buf = alloc::vec![0u8; alloc_size];
 
         if file.read(&mut buf).is_err() {
             continue;
         }
 
-        let mut name = [0u8; 64]; // zero-initialized = null-terminated
+        let mut name = [0u8; 64];
         let name_bytes = filename.as_bytes();
         let copy_len = name_bytes.len().min(63);
         name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-        // name[copy_len] is already 0 from zero-initialization
 
         let base = buf.as_ptr() as u64;
         core::mem::forget(buf);
@@ -137,7 +131,6 @@ pub fn load_modules(image_handle: Handle) -> Vec<LoadedModule> {
     modules
 }
 
-/// Format a module path into a u16 buffer.
 fn format_path(buf: &mut [u16; 64], filename: &str) -> usize {
     let mut i = 0;
     for &b in b"\\boot\\initfs\\" {

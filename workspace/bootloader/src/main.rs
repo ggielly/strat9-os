@@ -29,9 +29,19 @@ fn efi_main() -> Status {
     // Step 1: Open filesystem
     // ========================================================================
     let image_handle = uefi::boot::image_handle();
+
+    // Debug: print to show we're past banner
+    uefi::system::with_stdout(|stdout| {
+        let _ = writeln!(stdout, "[boot] Opening filesystem...");
+    });
+
     let mut fs = uefi::boot::get_image_file_system(image_handle)
         .expect("Failed to get file system");
     let mut volume = (*fs).open_volume().expect("Failed to open volume");
+
+    uefi::system::with_stdout(|stdout| {
+        let _ = writeln!(stdout, "[boot] Loading kernel...");
+    });
 
     // ========================================================================
     // Step 2: Load kernel ELF
