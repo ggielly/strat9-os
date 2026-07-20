@@ -6,7 +6,7 @@ rustflags = [
     "-C",
     "link-arg=-Lworkspace/kernel",
     "-C",
-    "link-arg=-Tworkspace/kernel/linker.ld",
+    "link-arg=-Tworkspace/kernel/linker-limine.ld",
     "-C",
     "link-arg=-no-pie",
     "-C",
@@ -20,4 +20,6 @@ rustflags = [
     # N3 send() captures sender_rip via [rbp + 8]; frame pointers mandatory.
     "-C",
     "force-frame-pointers=yes",
+    "--cfg",
+    "curve25519_dalek_backend=\"serial\"",
 ]
