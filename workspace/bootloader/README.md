@@ -1,60 +1,128 @@
 # strat9-os bootloader
 
-Boot path for Strat9-OS. The **active** bootloader is [Limine](https://github.com/limine-bootloader/limine); this workspace also contains a custom, legacy multi-stage BIOS bootloader that is kept for reference.
+UEFI bootloader for strat9-os, with BIOS support (archived).
 
-## Active boot path: Limine
+## Architecture
 
-- Configuration: [`limine.conf`](../../limine.conf) at the repository root (Limine v8 format, `protocol: limine`, kernel at `boot():/boot/kernel.elf`).
-- Image creation: `tools/scripts/create-limine-image.sh` (invoked by `cargo make limine-image`). Userspace modules are provided to the kernel as Limine internal modules from `/initfs/`.
-- Kernel entry: Limine Boot Protocol handled in `workspace/kernel/src/boot/limine.rs`. The kernel builds its own `KernelArgs` (see below) from the Limine responses.
-- Note: a legacy `limine.cfg` (v1-style format) still exists at the repository root but nothing references it; `limine.conf` is the file actually used.
+The bootloader follows a BOOTBOOT-inspired design with fixed virtual addresses:
 
-## Legacy custom bootloader (this workspace)
+```text
+Virtual Memory Layout:
+  0xFFFF_DEAD_0000_0000  → Framebuffer (DEAD)
+  0xFFFF_BEEF_0000_0000  → Environment string (BEEF)
+  0xFFFFFFFF_8000_0000  → Kernel code/data
+  0x0000_0000_0000_0000  → Identity map (first 4GB)
+```
 
-A hand-written BIOS bootloader inspired by the Redox OS bootloader:
+## Boot Flow (UEFI)
 
-- `asm/x86_64/stage1.asm`: MBR boot sector (loaded by BIOS at `0x7C00`), reads stage 2 from disk via INT 13h extensions and jumps to it. Stage 2 is `%include`d at the end of stage 1 and assembled as a single flat binary (`build/boot.bin`, 17 sectors: 512-byte MBR + 8 KiB of stage 2).
-- `asm/x86_64/stage2.asm`: real mode → protected mode → long mode transition, loads the kernel ELF from sector 17 into a buffer at `0x10000`, copies `PT_LOAD` segments, installs a minimal `KernelArgs` block at `0x60000` with a hardcoded memory-map entry, then jumps to the kernel entry point in long mode.
-- Assembly is driven by `build.rs` (NASM) and/or `tools/scripts/assemble-bootloader.sh`; the resulting image layout matches `tools/scripts/create-image.sh` (boot.bin written at LBA 0, kernel at LBA 17).
-- This path is legacy: `cargo make assemble-bootloader` / `cargo make boot-disk` are marked LEGACY in `Makefile.toml`, and no default run target uses it.
+```text
+UEFI Firmware → bootx64.efi (FAT ESP)
+  │
+  ├── 1. Open SimpleFileSystem → /boot/kernel.elf
+  ├── 2. Parse ELF64, load segments to physical memory
+  ├── 3. Load modules from /boot/initfs/*
+  ├── 4. GOP → framebuffer
+  ├── 5. GetMemoryMap → memory regions
+  ├── 6. ACPI RSDP → config table
+  ├── 7. Build environment string (key=value)
+  ├── 8. ExitBootServices() → bare metal
+  ├── 9. Create page tables (identity + higher-half + framebuffer)
+  ├── 10. Build KernelArgs (ABI v2, 132 bytes)
+  └── 11. Context switch → kernel_main(KernelArgs)
+```
 
-### Rust sources status
+## ABI v2 (132 bytes, `#[repr(C, packed)]`)
 
-The Rust logic under `src/` (`main.rs`, `os/`, `arch/`, `disk.rs`, `ext4.rs`) is **not compiled today**: the cargo target list contains only `src/lib.rs` (an rlib re-exporting the boot ABI types), because `autobins = false` and no module tree is declared in `lib.rs`. These sources are an in-progress adaptation of the Redox OS bootloader (BIOS backend with VBE/VGA/INT 13h thunks, UEFI backend placeholder, EXT4 wrapper) and do not compile as-is yet; they are kept as reference for a future native bootloader.
+| Field | Type | Description |
+|---|---|---|
+| `magic` | u32 | 0x53543942 ("ST9B") |
+| `abi_version` | u32 | 2 |
+| `kernel_base` | u64 | Physical address of kernel ELF |
+| `kernel_size` | u64 | Size of kernel in bytes |
+| `stack_base` | u64 | Physical address of boot stack |
+| `stack_size` | u64 | Size of boot stack |
+| `acpi_rsdp_base` | u64 | Physical address of RSDP |
+| `memory_map_base` | u64 | Physical address of MemoryRegion array |
+| `memory_map_size` | u64 | Size of memory map in bytes |
+| `framebuffer_addr` | u64 | **Virtual** address (0xFFFF_DEAD_...) |
+| `hhdm_offset` | u64 | Higher Half Direct Map offset |
+| `cmdline_ptr` | u64 | Physical address of environment string |
+| `cmdline_len` | u64 | Length of environment string |
+| `modules_base` | u64 | Physical address of ModuleTable |
+| `modules_size` | u64 | Size of ModuleTable |
+| `framebuffer_width` | u32 | Width in pixels |
+| `framebuffer_height` | u32 | Height in pixels |
+| `framebuffer_stride` | u32 | Bytes per row |
+| `framebuffer_bpp` | u16 | Bits per pixel |
+| `framebuffer_*_mask_*` | u8×6 | RGB channel masks |
 
-## Kernel handoff ABI
+## Environment String
 
-The bootloader-to-kernel contract lives in the `strat9-abi` crate (`workspace/abi/src/boot.rs`):
+The bootloader builds a `key=value\n` environment string (max 4096 bytes):
 
-- Magic `0x5354_3942` (`"ST9B"`), ABI version 1.
-- `KernelArgs` is a 160-byte `#[repr(C)]` structure (kernel/stack/env base+size, ACPI RSDP, memory map, initfs, framebuffer description, HHDM offset, cmdline pointer).
-- The memory map is an array of 24-byte `MemoryRegion { base, size, kind }` entries (`MemoryKind`: Null/Free/Reclaim/Reserved).
+```text
+loader=strat9-bootloader-uefi
+loader.version=0.1.0
+fb.phys=0x7F800000
+fb.virt=0xFFFF_DEAD_0000_0000
+fb.width=1024
+fb.height=768
+fb.stride=1024
+fb.bpp=32
+acpi.rsdp=0x7FE23000
+console=ttyS0
+console.baud=115200
+kernel.entry=0xFFFFFFFF80001234
+```
 
-Both the legacy assembly stage 2 and the kernel's Limine entry produce/consume this exact structure.
+## Module Table
+
+```rust
+#[repr(C)]
+pub struct ModuleTable {
+    pub count: u32,
+    pub entries: [ModuleEntry; 64],
+}
+
+#[repr(C)]
+pub struct ModuleEntry {
+    pub name: [u8; 64],   // null-terminated filename
+    pub base: u64,        // physical address
+    pub size: u64,        // size in bytes
+}
+```
+
+## Build
+
+```bash
+# Build UEFI bootloader
+cargo make bootloader-uefi
+
+# Create bootable image
+cargo make uefi-image
+
+# Run with OVMF
+cargo make run-uefi
+```
+
+## Dependencies
+
+- `uefi` 0.39 (UEFI protocols)
+- `x86_64` 0.15 (page tables)
+- `strat9-abi` (shared ABI definitions)
+
+## Archived
+
+The old BIOS bootloader (NASM stage1/stage2) is archived in `archive/asm/`.
 
 ## References
 
-### Source code inspired by
-
-- **Redox OS Bootloader**: <https://gitlab.redox-os.org/redox-os/bootloader>
-  - Multi-stage BIOS/UEFI architecture
-  - `KernelArgs` protocol
-  - GDT and mode transitions
-
-- **MaestroOS**: <https://github.com/llenotre/maestro>
-  - Memory management (buddy allocator)
-  - VGA console with ANSI escape codes
-  - Linux compatibility approach
-
-### Technical documentation
-
+- [uefi-rs](https://github.com/rust-osdev/uefi-rs)
+- [Phil Opp bootloader](https://github.com/rust-osdev/bootloader)
+- [BOOTBOOT Protocol](https://gitlab.com/bztsrc/bootboot)
 - [OSDev Wiki - Bootloader](https://wiki.osdev.org/Bootloader)
-- [OSDev Wiki - Protected Mode](https://wiki.osdev.org/Protected_Mode)
-- [OSDev Wiki - Long Mode](https://wiki.osdev.org/Long_Mode)
-- [Intel Software Developer Manual](https://software.intel.com/content/www/us/en/develop/articles/intel-sdm.html)
-- [AMD64 Architecture Programmer's Manual](https://www.amd.com/en/support/tech-docs)
-- [Limine Boot Protocol](https://github.com/limine-bootloader/limine/blob/trunk/PROTOCOL.md)
 
 ## License
 
-Licensed under the GPLv3.
+GPLv3

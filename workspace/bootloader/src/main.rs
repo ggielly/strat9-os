@@ -388,7 +388,7 @@ fn efi_main() -> Status {
     }
 
     // ========================================================================
-    // Step 9: Build KernelArgs
+    // Step 9: Build KernelArgs (ABI v2)
     // ========================================================================
     let args = KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
@@ -400,14 +400,9 @@ fn efi_main() -> Status {
             .sum::<u64>(),
         stack_base,
         stack_size,
-        env_base: 0,
-        env_size: 0,
         acpi_rsdp_base: rsdp_addr,
-        acpi_rsdp_size: 0,
         memory_map_base: mmap_region_base,
         memory_map_size: region_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,
-        initfs_base: 0,
-        initfs_size: 0,
         framebuffer_addr: paging::FRAMEBUFFER_BASE,  // Fixed virtual address!
         framebuffer_width: fb_width,
         framebuffer_height: fb_height,
@@ -419,10 +414,11 @@ fn efi_main() -> Status {
         framebuffer_green_mask_shift: fb_green_shift,
         framebuffer_blue_mask_size: fb_blue_size,
         framebuffer_blue_mask_shift: fb_blue_shift,
-        _padding1: [0; 4],
         hhdm_offset: 0,
         cmdline_ptr: env_phys_base,  // Environment string physical address
         cmdline_len: env_len as u64,
+        modules_base: module_table_base,
+        modules_size: modules::module_table_size(module_list.len()),
     };
 
     // ========================================================================

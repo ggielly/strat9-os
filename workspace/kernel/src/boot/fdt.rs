@@ -57,14 +57,9 @@ pub unsafe fn build_kernel_args_from_dtb(dtb_ptr: u64) -> KernelArgs {
         kernel_size: 0,
         stack_base: 0,
         stack_size: 0,
-        env_base: 0,
-        env_size: 0,
         acpi_rsdp_base: 0,
-        acpi_rsdp_size: 0,
         memory_map_base: 0,
         memory_map_size: 0,
-        initfs_base: 0,
-        initfs_size: 0,
         framebuffer_addr: 0,
         framebuffer_width: 0,
         framebuffer_height: 0,
@@ -76,10 +71,11 @@ pub unsafe fn build_kernel_args_from_dtb(dtb_ptr: u64) -> KernelArgs {
         framebuffer_green_mask_shift: 0,
         framebuffer_blue_mask_size: 0,
         framebuffer_blue_mask_shift: 0,
-        _padding1: [0; 4],
         hhdm_offset: 0,
         cmdline_ptr: 0,
         cmdline_len: 0,
+        modules_base: 0,
+        modules_size: 0,
     };
 
     if dtb_ptr == 0 {
@@ -428,15 +424,13 @@ unsafe fn parse_chosen_node(
                     }
                     b"linux,initrd-start" => {
                         let addr = read_prop_u64(prop_ptr, prop_len);
-                        crate::serial_println!("[fdt] initrd-start: {:#x}", addr);
-                        args.initfs_base = addr;
+                        crate::serial_println!("[fdt] initrd-start: {:#x} (FDT boot, module table not yet supported)", addr);
+                        // NOTE: FDT boot doesn't use the module table yet.
+                        // The initrd is loaded but not registered as a module.
                     }
                     b"linux,initrd-end" => {
                         let addr = read_prop_u64(prop_ptr, prop_len);
                         crate::serial_println!("[fdt] initrd-end: {:#x}", addr);
-                        if args.initfs_base != 0 && addr > args.initfs_base {
-                            args.initfs_size = addr - args.initfs_base;
-                        }
                     }
                     b"stdout-path" => {
                         crate::serial_println!("[fdt] stdout-path: {}", read_cstring(prop_ptr));
