@@ -4,10 +4,8 @@
 //! a simple table of {name, base, size} that the kernel can iterate over.
 
 use alloc::vec::Vec;
-use core::fmt::Write;
+use uefi::prelude::*;
 use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
-use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::table::boot::BootServices;
 
 /// A loaded module: name + physical address + size
 pub struct LoadedModule {
@@ -17,13 +15,10 @@ pub struct LoadedModule {
 }
 
 /// Module table header + entries, as laid out in memory.
-///
-/// The kernel receives the base address of this structure and iterates
-/// over entries. Simple, no archive format, no CPIO — just files.
 #[repr(C)]
 pub struct ModuleTable {
     pub count: u32,
-    pub entries: [ModuleEntry; 64], // max 64 modules
+    pub entries: [ModuleEntry; 64],
 }
 
 /// A single module entry in the table.
@@ -58,25 +53,14 @@ pub fn write_module_table(modules: &[LoadedModule], base: u64) {
 }
 
 /// Load all files from /boot/initfs/ directory.
-///
-/// Each file is loaded into a separate physical memory region.
-/// Returns the list of loaded modules with their names, bases, and sizes.
-///
-/// # Note
-/// We take multiple root volume handles because uefi-rs doesn't allow
-/// multiple File handles from the same volume simultaneously.
-pub fn load_modules(
-    bs: &BootServices,
-    vol1: &mut SimpleFileSystem,
-    vol2: &mut SimpleFileSystem,
-    vol3: &mut SimpleFileSystem,
-    vol4: &mut SimpleFileSystem,
-    vol5: &mut SimpleFileSystem,
-) -> Vec<LoadedModule> {
+pub fn load_modules(image_handle: Handle) -> Vec<LoadedModule> {
     let mut modules = Vec::new();
-    let vols: [&mut SimpleFileSystem; 5] = [vol1, vol2, vol3, vol4, vol5];
 
-    // Known module filenames to load
+    let mut fs = match uefi::boot::get_image_file_system(image_handle) {
+        Ok(fs) => fs,
+        Err(_) => return modules,
+    };
+
     let filenames: &[&str] = &[
         "init",
         "console-admin",
@@ -97,59 +81,53 @@ pub fn load_modules(
         "test_mem",
     ];
 
-    for (idx, &filename) in filenames.iter().enumerate() {
-        let vol = &mut vols[idx % vols.len()];
-        let mut root = match vol.open_volume() {
-            Ok(r) => r,
+    for &filename in filenames {
+        let mut volume = match fs.open_volume() {
+            Ok(v) => v,
             Err(_) => continue,
         };
 
-        // Build the path: \boot\initfs\<filename>
         let mut path_buf = [0u16; 64];
-        let path = format_path(&mut path_buf, filename);
+        let path_len = format_path(&mut path_buf, filename);
 
-        let file = match root.open(path, FileMode::Read, FileAttribute::empty()) {
+        let file = match volume.open(
+            unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&path_buf[..=path_len]) },
+            FileMode::Read,
+            FileAttribute::empty(),
+        ) {
             Ok(f) => f,
-            Err(_) => continue, // Module not found, skip
+            Err(_) => continue,
         };
 
         let mut file = match file.into_regular_file() {
-            Ok(f) => f,
-            Err(_) => continue, // Not a regular file, skip
+            Some(f) => f,
+            None => continue,
         };
 
-        // Get file size
         let mut info_buf = [0u8; 512];
-        let file_info = match file.get_info::<FileInfo>(&mut info_buf) {
-            Ok(info) => info,
+        let file_size = match file.get_info::<FileInfo>(&mut info_buf) {
+            Ok(info) => info.file_size() as usize,
             Err(_) => continue,
         };
-        let file_size = file_info.file_size() as usize;
 
         if file_size == 0 {
             continue;
         }
 
-        // Allocate buffer for the file content (page-aligned)
         let alloc_size = (file_size + 4095) & !4095;
         let buf = alloc::vec![0u8; alloc_size];
         let mut buf = core::mem::ManuallyDrop::new(buf);
 
-        // Read file
         if file.read(&mut buf).is_err() {
             continue;
         }
 
-        // Build module entry
         let mut name = [0u8; 64];
         let name_bytes = filename.as_bytes();
         let copy_len = name_bytes.len().min(63);
         name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
 
         let base = buf.as_ptr() as u64;
-
-        // Leak the buffer so it stays valid until the kernel takes over
-        // (We're in no_std after ExitBootServices, so there's no way to free it anyway)
         core::mem::forget(buf);
 
         modules.push(LoadedModule { name, base, size: file_size as u64 });
@@ -158,16 +136,13 @@ pub fn load_modules(
     modules
 }
 
-/// Format a module path as a CStr16 for UEFI file operations.
-fn format_path<'a>(buf: &'a mut [u16; 64], filename: &str) -> &'a uefi::CStr16 {
+/// Format a module path into a u16 buffer.
+fn format_path(buf: &mut [u16; 64], filename: &str) -> usize {
     let mut i = 0;
-    // Prefix: \boot\initfs\
-    let prefix = b"\\boot\\initfs\\";
-    for &b in prefix {
+    for &b in b"\\boot\\initfs\\" {
         buf[i] = b as u16;
         i += 1;
     }
-    // Filename
     for &b in filename.as_bytes() {
         if i >= 63 {
             break;
@@ -175,8 +150,6 @@ fn format_path<'a>(buf: &'a mut [u16; 64], filename: &str) -> &'a uefi::CStr16 {
         buf[i] = b as u16;
         i += 1;
     }
-    // Null terminator
     buf[i] = 0;
-
-    unsafe { uefi::CStr16::from_u16_unchecked(&buf[..=i]) }
+    i
 }
