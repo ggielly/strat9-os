@@ -106,62 +106,64 @@ fi
 echo ""
 
 # ========================================================================
-# Create FAT32 image
+# Create GPT + EFI System Partition image
 # ========================================================================
-# Simple approach: create a FAT32 filesystem directly (no partition table).
-# QEMU can boot this with -drive file=...,format=raw if the firmware supports it.
-# For OVMF, we need a proper GPT+ESP. Use mtools if available, else mformat.
+# OVMF requires a GPT-formatted disk with an EFI System Partition (ESP).
+# The ESP must be FAT32 and contain /efi/boot/bootx64.efi.
 
-IMAGE_SIZE_MB=64
+IMAGE_SIZE_MB=128
+SECTOR_SIZE=512
 
-if command -v mtools >/dev/null 2>&1; then
-    echo "  Creating FAT32 image with mtools..."
+# ESP size: 64MB
+ESP_SIZE_MB=64
 
-    # Create empty image
+if command -v parted >/dev/null 2>&1 && command -v mtools >/dev/null 2>&1; then
+    echo "  Creating GPT + ESP image with parted + mtools..."
+
+    # Create empty image (128MB to have room for GPT headers)
     dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
 
-    # Format as FAT32 directly (no partition table needed for mtools)
+    # Create GPT partition table and EFI System Partition
+    parted -s "$IMAGE_FILE" mklabel gpt
+    parted -s "$IMAGE_FILE" mkpart primary fat32 1MiB ${ESP_SIZE_MB}MiB
+    parted -s "$IMAGE_FILE" set 1 esp on
+
+    # Calculate offset (1MiB = 2048 sectors)
+    ESP_START_SECTOR=2048
+    ESP_SIZE_SECTORS=$((ESP_SIZE_MB * 1024 * 1024 / SECTOR_SIZE))
+
+    # Create a temporary FAT32 image for the ESP
+    ESP_IMG="$BUILD_DIR/esp.img"
+    dd if=/dev/zero of="$ESP_IMG" bs=512 count=$ESP_SIZE_SECTORS 2>/dev/null
+    mkfs.fat -F 32 -n "EFI" "$ESP_IMG" 2>/dev/null
+
+    # Copy files into the ESP
+    mcopy -i "$ESP_IMG" -s "$ISO_ROOT/efi" "::/efi"
+    mcopy -i "$ESP_IMG" -s "$ISO_ROOT/boot" "::/boot"
+
+    # Write the ESP into the disk image at the partition offset
+    dd if="$ESP_IMG" of="$IMAGE_FILE" bs=512 seek=$ESP_START_SECTOR conv=notrunc 2>/dev/null
+    rm -f "$ESP_IMG"
+
+    echo "  [OK] Created GPT image with EFI System Partition"
+
+elif command -v mtools >/dev/null 2>&1; then
+    echo "  Creating FAT32 image with mtools (no GPT - may not boot with OVMF)..."
+
+    dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
     mkfs.fat -F 32 -n "STRAT9" "$IMAGE_FILE" 2>/dev/null
 
-    # Copy files using mcopy
     mcopy -i "$IMAGE_FILE" -s "$ISO_ROOT/efi" "::/efi"
     mcopy -i "$IMAGE_FILE" -s "$ISO_ROOT/boot" "::/boot"
 
-    echo "  [OK] Created FAT32 image with UEFI bootloader"
-
-elif command -v mkfs.fat >/dev/null 2>&1; then
-    echo "  Creating FAT32 image with mkfs.fat..."
-
-    dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
-    mkfs.fat -F 32 -n "STRAT9" "$IMAGE_FILE" 2>/dev/null
-
-    # Without mtools, we can't easily copy files into the FAT image
-    # Fall back to creating a directory-based image
-    echo "  [INFO] mtools not available - creating raw image with files"
-    echo "  [INFO] For full UEFI boot, install mtools: apt install mtools"
-
-    # Create a temporary FAT image with files, then copy
-    TEMP_FAT="$BUILD_DIR/temp_fat.img"
-    dd if=/dev/zero of="$TEMP_FAT" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
-    mkfs.fat -F 32 -n "STRAT9" "$TEMP_FAT" 2>/dev/null
-
-    # Try using mcopy if available (it might be installed but not in PATH)
-    if command -v mcopy >/dev/null 2>&1; then
-        mcopy -i "$TEMP_FAT" -s "$ISO_ROOT/efi" "::/efi"
-        mcopy -i "$TEMP_FAT" -s "$ISO_ROOT/boot" "::/boot"
-        mv "$TEMP_FAT" "$IMAGE_FILE"
-        echo "  [OK] Created FAT32 image"
-    else
-        rm -f "$TEMP_FAT"
-        echo "  [WARN] Cannot copy files to FAT image without mtools"
-        echo "  [INFO] Install mtools: sudo apt install mtools"
-    fi
+    echo "  [OK] Created FAT32 image (install parted for GPT support)"
+    echo "  [WARN] Without GPT, OVMF may not find the bootloader"
 
 else
-    echo "  WARNING: mkfs.fat not found"
+    echo "  WARNING: Neither parted nor mtools found"
     echo "  Creating simple flat image..."
     dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
-    echo "  [INFO] For UEFI support, install: sudo apt install mtools dosfstools"
+    echo "  [INFO] For UEFI support, install: sudo apt install parted mtools"
 fi
 
 echo ""
