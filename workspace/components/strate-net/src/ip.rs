@@ -105,6 +105,22 @@ pub(crate) fn icmpv6_checksum(src: &[u8], dst: &[u8], data: &[u8]) -> u16 {
     !(sum as u16)
 }
 
+pub(crate) fn icmp_checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
 pub(crate) fn parse_ipv4(s: &str) -> Option<Ipv4Address> {
     let octets = parse_ipv4_literal(s)?;
     Some(Ipv4Address::new(octets[0], octets[1], octets[2], octets[3]))
