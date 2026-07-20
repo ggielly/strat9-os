@@ -591,6 +591,16 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     arch::speaker::beep_phase(2);
     log_boot_module_magics("post-buddy");
 
+    // Sanity check: verify buddy allocator was initialized.
+    // If this fails, the memory subsystem is fatally broken.
+    if crate::memory::buddy::get_allocator().lock().is_none() {
+        serial_println!("[CRIT] Buddy allocator self-test FAILED: allocator not initialized");
+        serial_println!("[CRIT] System halted.");
+        loop {
+            arch::x86_64::hlt();
+        }
+    }
+
     // =============================================
     // Phase 2.5: paging / VMM (Must be before Console if FB is not already mapped)
     // =============================================
@@ -812,6 +822,15 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::process::task::Task::debug_print_layout();
     process::init_scheduler();
     crate::e9_println!("B8 post-sched");
+
+    // Sanity check: verify scheduler is initialized.
+    if crate::process::scheduler::GLOBAL_SCHED_STATE.lock().is_none() {
+        serial_println!("[CRIT] Scheduler init failed: GLOBAL_SCHED_STATE is None");
+        serial_println!("[CRIT] System halted.");
+        loop {
+            arch::x86_64::hlt();
+        }
+    }
 
     debug_assert!(
         !arch::interrupts_enabled(),
