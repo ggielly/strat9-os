@@ -723,7 +723,7 @@ impl PciDevice {
         let ecam = *ECAM_BASE.lock();
         Some(unsafe {
             ecam_read32(
-                ecam,
+                ecam?,
                 self.address.bus,
                 self.address.device,
                 self.address.function,

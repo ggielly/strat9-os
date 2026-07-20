@@ -1,4 +1,4 @@
-//! Device Tree (FDT) parsing for U-Boot boot protocol.
+//! Device Tree (FDT) parsing for the custom boot protocol.
 //!
 //! Parses the Flattened Device Tree to extract boot information:
 //! - Memory map
@@ -340,7 +340,7 @@ unsafe fn read_reg_property(
 
 /// Derive HHDM offset from the memory map.
 ///
-/// On x86_64 with U-Boot, the HHDM is typically at 4 GiB (0x1_0000_0000).
+/// On x86_64 with the custom bootloader, the HHDM is typically at 4 GiB (0x1_0000_0000).
 fn derive_hhdm_offset(regions: &[MemoryRegion]) -> u64 {
     let max_addr = regions
         .iter()

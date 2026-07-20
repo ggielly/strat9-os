@@ -151,7 +151,7 @@ impl Virtqueue {
         let used_phys = ring_phys + used_offset as u64;
 
         // SAFETY: we just allocated these frames; convert phys => virt via HHDM
-        // With Limine HHDM, all physical memory is already mapped, so we can
+        // With UEFI bootloader HHDM, all physical memory is already mapped, so we can
         // directly use phys_to_virt without additional page table modifications.
         // DO NOT call ensure_identity_map here - it can corrupt active page tables!
 

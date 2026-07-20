@@ -30,7 +30,7 @@ pub fn init() {
         return;
     }
 
-    let elf_bytes = match super::uboot::kernel_elf_bytes() {
+    let elf_bytes = match super::dtb_boot::kernel_elf_bytes() {
         Some(b) => b,
         None => return,
     };

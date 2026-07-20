@@ -17,26 +17,6 @@ STRAT9_UPLINK_IFACE = "eth0"
 # Build Tasks - Bootloader & Toolchain
 # =============================================================================
 
-# NOTE: U-Boot is legacy. Use UEFI bootloader instead:
-#   cargo make bootloader-uefi
-#   cargo make uefi-image
-#   cargo make run-uefi
-
-[tasks.setup-uboot]
-description = "[LEGACY] Download and build U-Boot bootloader (use UEFI instead)"
-command = "bash"
-args = ["tools/scripts/setup-uboot.sh"]
-
-[tasks.setup-uboot-force]
-description = "[LEGACY] Force rebuild U-Boot bootloader"
-command = "bash"
-args = ["tools/scripts/setup-uboot.sh", "--force"]
-
-[tasks.setup-uboot-update]
-description = "[LEGACY] Pull latest U-Boot sources and rebuild only if needed"
-command = "bash"
-args = ["tools/scripts/setup-uboot.sh", "--update"]
-
 [tasks.setup-musl]
 description = "Clone/update external musl"
 script_runner = "@shell"
@@ -123,7 +103,6 @@ description = "Format all code"
 command = "cargo"
 args = ["fmt", "--all"]
 
-# =============================================================================
 # Anti-regression test tasks (see docs-site/src/testing-architecture.md)
 # =============================================================================
 

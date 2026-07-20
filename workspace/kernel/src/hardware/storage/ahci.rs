@@ -1082,7 +1082,7 @@ impl AhciController {
 
         log::info!("AHCI: global interrupts enabled (IRQ line {})", irq_line);
 
-        Ok(AhciController { abar_virt, ports, dma_pool: None })
+        Ok(AhciController { abar_virt, ports })
     }
 
     /// Return sector count of the first port.

@@ -357,7 +357,7 @@ impl EhciController {
             let data_buf_virt = phys_to_virt(data_buf_phys) as *mut u8;
 
             if !dir_in {
-                if let Some(buf) = data_buf {
+                if let Some(ref buf) = data_buf {
                     core::ptr::copy_nonoverlapping(buf.as_ptr(), data_buf_virt, data_len);
                 }
             }
@@ -384,8 +384,8 @@ impl EhciController {
             td_virt.add(11).write_volatile(0);
 
             // Chain: setup TD -> data TD -> status TD
-            td_virt.add(0).write_volatile(td_phys + 32); // next = data TD
-            td_virt.add(4).write_volatile(td_phys + 64); // next = status TD
+            td_virt.add(0).write_volatile((td_phys + 32) as u32); // next = data TD
+            td_virt.add(4).write_volatile((td_phys + 64) as u32); // next = status TD
         } else {
             // Status-only transfer (toggle=0, IOC)
             let status_token = (1u32 << 31) // active
@@ -399,7 +399,7 @@ impl EhciController {
             td_virt.add(7).write_volatile(0);
 
             // Chain: setup TD -> status TD
-            td_virt.add(0).write_volatile(td_phys + 32); // next = status TD
+            td_virt.add(0).write_volatile((td_phys + 32) as u32); // next = status TD
         }
 
         // Link QH into async schedule (prepend)
@@ -414,7 +414,7 @@ impl EhciController {
 
         // Enable async schedule
         let cmd = core::ptr::addr_of!((*self.op_regs).usbcmd);
-        cmd.write_volatile(cmd.read_volatile() | USBCMD_ASE);
+        core::ptr::write_volatile(cmd as *mut u32, cmd.read_volatile() | USBCMD_ASE);
         for _ in 0..10_000u32 {
             core::hint::spin_loop();
         }
@@ -438,7 +438,7 @@ impl EhciController {
         }
 
         // Disable async schedule and unlink
-        cmd.write_volatile(cmd.read_volatile() & !USBCMD_ASE);
+        core::ptr::write_volatile(cmd as *mut u32, cmd.read_volatile() & !USBCMD_ASE);
         for _ in 0..10_000u32 {
             core::hint::spin_loop();
         }
@@ -465,7 +465,7 @@ impl EhciController {
             }
 
             let speed = unsafe { ((self.read_portsc(port) >> PORTSC_SPEED_SHIFT) & 0x03) as u8 };
-            let max_packet: u32 = if speed == SPEED_HIGH { 64 } else { 8 };
+            let max_packet: u32 = if speed as u32 == SPEED_HIGH { 64 } else { 8 };
             log::info!("[EHCI] Port {} speed={} max_pkt={}", port, speed, max_packet);
 
             // Get device descriptor (first 8 bytes to learn max_packet0)

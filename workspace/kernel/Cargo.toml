@@ -51,8 +51,7 @@ ratatui = { version = "0.30.0", default-features = false }
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.10", default-features = false }
 
-# Bootloader protocol structures (Limine for now)
-limine = "0.6.5"
+
 ###
 [build-dependencies]
 cc = "1.0"

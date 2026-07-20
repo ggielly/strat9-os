@@ -1,4 +1,4 @@
-//! Framebuffer text console (Limine framebuffer + PSF font).
+//! Framebuffer text console (UEFI bootloader framebuffer + PSF font).
 //! https://en.wikipedia.org/wiki/PC_Screen_Font
 //!
 //! Keeps the existing `vga_print!` / `vga_println!` API but renders text into

@@ -242,7 +242,7 @@ pub struct IvrsEntryIter<'a> {
 
 impl<'a> IvrsEntryIter<'a> {
     /// Return the next block (IVHD or IVMD).
-    pub fn next_block(&mut self) -> Option<IvrsBlock<'a>> {
+    pub fn next_block(&mut self) -> Option<IvrsBlock> {
         if self.offset >= self.total_len {
             return None;
         }
@@ -326,7 +326,7 @@ impl<'a> IvrsEntryIter<'a> {
 /// A block inside the IVRS table: either an IVHD (IOMMU definition) or
 /// an IVMD (reserved memory definition).
 #[derive(Clone, Debug)]
-pub enum IvrsBlock<'a> {
+pub enum IvrsBlock {
     /// I/O Virtualization Hardware Definition — one IOMMU unit.
     Ivhd(IvhdBlock),
     /// I/O Virtualization Memory Definition — reserved memory region.
@@ -339,6 +339,7 @@ impl IvhdBlock {
         IvhdDevEntryIter {
             base: self.device_entries_off as *const u8,
             remaining: self.device_entries_len,
+            _phantom: core::marker::PhantomData,
         }
     }
 
@@ -526,12 +527,14 @@ impl Ivrs {
 
     /// Dump a human-readable summary to the kernel log.
     pub fn dump(&self) {
+        let dev_entry_count = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.header.dev_entry_count)) };
+        let entry_offset = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.header.entry_offset)) };
         log::info!(
             "IVRS: Draint={} Coherent={} entries={} entry_offset={}",
             self.header.has_draint(),
             self.header.is_coherent(),
-            self.header.dev_entry_count,
-            self.header.entry_offset,
+            dev_entry_count,
+            entry_offset,
         );
 
         let mut ivhd_idx = 0;

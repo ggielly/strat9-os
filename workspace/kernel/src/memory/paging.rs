@@ -1,7 +1,7 @@
 //! Virtual Memory Management (Paging) for Strat9-OS
 //!
 //! Uses the `x86_64` crate's `OffsetPageTable` which is designed for the HHDM
-//! (Higher Half Direct Map) pattern : exactly what Limine provides.
+//! (Higher Half Direct Map) pattern : exactly what the UEFI bootloader provides.
 //!
 //! Provides map/unmap/translate operations on the active page table.
 
@@ -119,7 +119,7 @@ pub fn init(hhdm_offset: u64) {
 
     // SAFETY: called once during single-threaded init. The HHDM offset correctly
     // maps all physical RAM to virtual addresses. CR3 points to a valid page table
-    // set up by Limine.
+    // set up by the bootloader.
     unsafe {
         let kcr3 = &raw mut KERNEL_CR3;
         *kcr3 = level_4_frame.start_address();
@@ -141,11 +141,11 @@ pub fn init(hhdm_offset: u64) {
 /// higher-half direct map. Should be called after paging::init.
 /// Fix for VMWare Workstation which doesn't identity-map all RAM by default, causing
 /// the kernel to crash when it tries to access unmapped RAM (e.g. for the buddy allocator's
-/// metadata array). Limine's initial map only covers the first 1GB of RAM, which is not enough
+/// metadata array). The bootloader's initial map only covers the first 1GB of RAM, which is not enough
 /// for our 2GB test VM. This function lazily maps any missing RAM regions on
 /// demand using `ensure_identity_map_range()`, which checks if the region is already mapped
 /// before mapping it. This allows the kernel to boot successfully on VMWare Workstation without
-/// requiring changes to the bootloader or Limine configuration.
+/// requiring changes to the bootloader configuration.
 ///
 pub fn map_all_ram(memory_regions: &[crate::boot::entry::MemoryRegion]) {
     use crate::boot::entry::MemoryKind;

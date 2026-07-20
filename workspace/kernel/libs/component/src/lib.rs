@@ -161,7 +161,7 @@ impl PartialOrd for ComponentInfo {
 
 // ========== Linker section symbols ========================================
 
-// SAFETY: symbols defined by linker-limine.ld; bracket the `.component_entries`
+// SAFETY: symbols defined by the kernel linker script; bracket the `.component_entries`
 // section.  All objects between them are `ComponentEntry` structs placed by the
 // `#[init_component]` macro.
 #[allow(improper_ctypes)]

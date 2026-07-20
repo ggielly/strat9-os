@@ -26,7 +26,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Once;
 
 /// Higher Half Direct Map offset.
-/// Set by Limine entry (non-zero) or left at 0 for BIOS/identity-mapped boot.
+/// Set by UEFI bootloader entry (non-zero) or left at 0 for BIOS/identity-mapped boot.
 /// All physical-to-virtual conversions must add this offset.
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 

@@ -1255,7 +1255,7 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_exec";
     shell_println!("Launching {} ...", path);
 
-    // With U-Boot, modules are loaded from FAT32 boot partition
+    // Modules are loaded from the FAT32 boot partition
     // TODO: Phase 4 - Implement FAT32 module loading
     let boot_bytes = vfs::get_initfs_file_bytes(path);
 

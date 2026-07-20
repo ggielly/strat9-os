@@ -3,7 +3,7 @@
 //! Regroups all code involved in the early kernel startup:
 //! - assembly stubs (16-bit → 64-bit transition)
 //! - bootloader handoff structures (KernelArgs)
-//! - U-Boot boot-protocol entry point
+//! - Boot-protocol entry point
 //! - Device Tree (FDT) parsing
 //! - Block device abstraction
 //! - FAT32 module loader
@@ -17,8 +17,8 @@ pub mod assembly;
 /// KernelArgs structures shared between bootloader and kernel
 pub mod entry;
 
-/// U-Boot boot-protocol entry point
-pub mod uboot;
+/// Boot-protocol entry point (DTB/PVH)
+pub mod dtb_boot;
 
 /// Device Tree (FDT) parsing
 pub mod fdt;
