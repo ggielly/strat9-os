@@ -97,7 +97,7 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
         if p_filesz > p_memsz {
             return Err("p_filesz > p_memsz");
         }
-            let end = p_offset.wrapping_add(p_filesz);
+        let end = p_offset.checked_add(p_filesz).ok_or("Segment data offset overflow")?;
         if (end as usize) > data.len() {
             return Err("Segment data out of bounds");
         }

@@ -59,22 +59,19 @@ pub unsafe fn create_page_tables(
 
     let (pml4_frame, pml4) = alloc_zeroed_frame();
 
-    // Identity map: PML4[0..8] → 8× 1GB windows via 2MB large pages
-    for pdp_idx in 0..8u64 {
-        let (pdp_frame, pdp) = alloc_zeroed_frame();
-        pml4[pdp_idx as usize].set_addr(
-            pdp_frame.start_address(),
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-        );
+    // Identity map: PML4[0] → PDP[0..7] → 8 × 1GB huge pages = 0..8GB
+    let (id_pdp_frame, id_pdp) = alloc_zeroed_frame();
+    pml4[0].set_addr(
+        id_pdp_frame.start_address(),
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+    );
 
-        for pd_idx_inner in 0..512u64 {
-            let phys = pdp_idx * 0x4000_0000 + pd_idx_inner * LARGE_PAGE_SIZE;
-            pdp[pd_idx_inner as usize].set_addr(
-                PhysAddr::new(phys),
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE
-                    | PageTableFlags::HUGE_PAGE | PageTableFlags::NO_EXECUTE,
-            );
-        }
+    for i in 0..8u64 {
+        id_pdp[i as usize].set_addr(
+            PhysAddr::new(i * 0x4000_0000),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE
+                | PageTableFlags::HUGE_PAGE | PageTableFlags::NO_EXECUTE,
+        );
     }
 
     // Higher-half kernel: PML4[511] → PDP[510]
