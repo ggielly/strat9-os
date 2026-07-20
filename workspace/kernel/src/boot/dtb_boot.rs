@@ -130,8 +130,6 @@ fn build_minimal_args() -> super::entry::KernelArgs {
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
         kernel_base: 0,
         kernel_size: 0,
-        stack_base: 0x80000,
-        stack_size: 0x10000,
         acpi_rsdp_base: 0,
         memory_map_base: 0,
         memory_map_size: 0,

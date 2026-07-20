@@ -64,7 +64,7 @@
 use zerocopy::{FromBytes, IntoBytes};
 
 /// ABI version for the boot handoff structure.
-pub const STRAT9_BOOT_ABI_VERSION: u32 = 2;
+pub const STRAT9_BOOT_ABI_VERSION: u32 = 3;
 
 /// Magic number validating the boot handoff (`"ST9B"` in ASCII).
 pub const STRAT9_BOOT_MAGIC: u32 = 0x5354_3942; // "ST9B"
@@ -81,15 +81,11 @@ pub const STRAT9_BOOT_MAGIC: u32 = 0x5354_3942; // "ST9B"
 ///
 /// ## Identity (8 bytes)
 /// - `magic`: must equal [`STRAT9_BOOT_MAGIC`] (`0x5354_3942`)
-/// - `abi_version`: must equal [`STRAT9_BOOT_ABI_VERSION`] (currently `2`)
+/// - `abi_version`: must equal [`STRAT9_BOOT_ABI_VERSION`] (currently `3`)
 ///
 /// ## Kernel memory (16 bytes)
 /// - `kernel_base`: physical address of the kernel ELF image
 /// - `kernel_size`: size of the kernel image in bytes
-///
-/// ## Boot stack (16 bytes)
-/// - `stack_base`: physical address of the initial kernel stack
-/// - `stack_size`: size of the initial stack in bytes
 ///
 /// ## ACPI (8 bytes)
 /// - `acpi_rsdp_base`: physical address of the RSDP
@@ -119,8 +115,6 @@ pub struct KernelArgs {
     pub abi_version: u32,
     pub kernel_base: u64,
     pub kernel_size: u64,
-    pub stack_base: u64,
-    pub stack_size: u64,
     pub acpi_rsdp_base: u64,
     pub memory_map_base: u64,
     pub memory_map_size: u64,
@@ -145,8 +139,8 @@ pub struct KernelArgs {
     pub framebuffer_blue_mask_shift: u8,
 }
 
-// Ensure struct is exactly 136 bytes with no padding
-const _: () = assert!(core::mem::size_of::<KernelArgs>() == 132);
+// Ensure struct is exactly 116 bytes with no padding
+const _: () = assert!(core::mem::size_of::<KernelArgs>() == 116);
 
 impl KernelArgs {
     /// Iterator over the memory regions described by this boot handoff.
@@ -258,8 +252,8 @@ impl MemoryKind {
     pub const Reserved: Self = Self(3);
 }
 
-// ABI size assertions (packed: no padding, 132 bytes)
-const _: () = assert!(core::mem::size_of::<KernelArgs>() == 132);
+// ABI size assertions (packed: no padding, 116 bytes)
+const _: () = assert!(core::mem::size_of::<KernelArgs>() == 116);
 const _: () = assert!(core::mem::align_of::<KernelArgs>() == 1);
 static_assertions::assert_eq_size!(MemoryRegion, [u8; 24]);
 static_assertions::const_assert_eq!(core::mem::align_of::<MemoryRegion>(), 8);

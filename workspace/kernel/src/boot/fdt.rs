@@ -55,8 +55,6 @@ pub unsafe fn build_kernel_args_from_dtb(dtb_ptr: u64) -> KernelArgs {
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
         kernel_base: 0,
         kernel_size: 0,
-        stack_base: 0,
-        stack_size: 0,
         acpi_rsdp_base: 0,
         memory_map_base: 0,
         memory_map_size: 0,
