@@ -481,7 +481,8 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios /usr/share/ovmf/OVMF.fd \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
     -drive file=build/strat9-os-uefi.img,format=raw \
     -serial mon:stdio \
     -no-reboot
@@ -497,7 +498,8 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios /usr/share/ovmf/OVMF.fd \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
     -drive file=build/strat9-os-uefi.img,format=raw \
     -device virtio-gpu-gl \
     -display sdl,gl=on \
