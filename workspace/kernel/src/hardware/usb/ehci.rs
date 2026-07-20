@@ -506,7 +506,7 @@ impl EhciController {
                 let vid = u16::from_le_bytes([dev_desc_short[2], dev_desc_short[3]]);
                 let pid = u16::from_le_bytes([dev_desc_short[4], dev_desc_short[5]]);
                 let dev_class = dev_desc_short[4];
-                let max_pkt0 = u16::from_le_bytes([dev_desc_short[7], dev_desc_short[8]]);
+                let max_pkt0 = dev_desc_short[7] as u16;
                 log::info!(
                     "[EHCI] Device: VID={:04x} PID={:04x} class={:02x} max_pkt0={}",
                     vid,

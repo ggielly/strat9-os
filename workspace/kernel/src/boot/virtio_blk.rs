@@ -347,10 +347,8 @@ impl VirtioBlkDevice {
 
         // We do not need special features; write 0 (but negotiate version 1 if available).
         // For now, pass-through: accept device defaults.
-        if self.features & (1 << 32) != 0 {
-            // VIRTIO_F_VERSION_1 — device supports modern interface.
-            // Legacy MMIO works either way.
-        }
+        // VIRTIO_F_VERSION_1 (bit 32) would require reading upper 32-bit half.
+        // Legacy MMIO works either way.
         self.write_driver_features(0);
 
         // FEATURES_OK

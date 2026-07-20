@@ -122,10 +122,11 @@ pub fn load_modules(image_handle: Handle) -> Vec<LoadedModule> {
             continue;
         }
 
-        let mut name = [0u8; 64];
+        let mut name = [0u8; 64]; // zero-initialized = null-terminated
         let name_bytes = filename.as_bytes();
         let copy_len = name_bytes.len().min(63);
         name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        // name[copy_len] is already 0 from zero-initialization
 
         let base = buf.as_ptr() as u64;
         core::mem::forget(buf);
