@@ -17,7 +17,6 @@ mod modules;
 
 use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
 
-/// UEFI entry point for the strat9-os bootloader.
 #[entry]
 fn efi_main() -> Status {
     uefi::system::with_stdout(|stdout| {
@@ -27,7 +26,7 @@ fn efi_main() -> Status {
     });
 
     // ========================================================================
-    // Step 1: Open the FAT ESP filesystem
+    // Step 1: Open filesystem
     // ========================================================================
     let image_handle = uefi::boot::image_handle();
     let mut fs = uefi::boot::get_image_file_system(image_handle)
@@ -35,7 +34,7 @@ fn efi_main() -> Status {
     let mut volume = (*fs).open_volume().expect("Failed to open volume");
 
     // ========================================================================
-    // Step 2: Load kernel ELF from /boot/kernel.elf
+    // Step 2: Load kernel ELF
     // ========================================================================
     let kernel_data = {
         let mut file = volume
@@ -51,27 +50,21 @@ fn efi_main() -> Status {
         let mut buf = alloc::vec![0u8; file_size];
         file.read(&mut buf).expect("Failed to read kernel");
 
-        // Leak the buffer intentionally - kernel segments are copied to final
-        // physical addresses by parse_elf64, but we need the data to stay valid
-        // during parsing. After parsing, this buffer is no longer referenced.
-        // TODO: reclaim this memory after parsing by adding it to the memory map
         let ptr = buf.as_mut_ptr();
         let len = buf.len();
         core::mem::forget(buf);
         unsafe { core::slice::from_raw_parts(ptr, len) }
     };
 
-    // ========================================================================
-    // Step 3: Parse kernel ELF
-    // ========================================================================
     let elf_info = elf::parse_elf64(kernel_data).expect("Failed to parse kernel ELF");
 
     uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "[boot] Kernel: entry=0x{:x}, {} segments", elf_info.entry, elf_info.segment_count);
+        let _ = writeln!(stdout, "[boot] Kernel: entry=0x{:x}, {} segments, phys_end=0x{:x}",
+            elf_info.entry, elf_info.segment_count, elf_info.phys_end);
     });
 
     // ========================================================================
-    // Step 4: Load modules from /boot/initfs/
+    // Step 3: Load modules (pass volume handle to avoid re-opening)
     // ========================================================================
     let module_list = modules::load_modules(image_handle);
 
@@ -80,7 +73,7 @@ fn efi_main() -> Status {
     });
 
     // ========================================================================
-    // Step 5: Get framebuffer via GOP
+    // Step 4: Get framebuffer via GOP
     // ========================================================================
     let (fb_phys, fb_width, fb_height, fb_stride, fb_bpp,
          fb_red_size, fb_red_shift, fb_green_size, fb_green_shift,
@@ -90,7 +83,6 @@ fn efi_main() -> Status {
         let mut gop = uefi::boot::open_protocol_exclusive::<GraphicsOutput>(gop_handle)
             .expect("Failed to open GraphicsOutput");
 
-        // Pick highest resolution mode
         let mut best_mode = None;
         let mut best_area: usize = 0;
         for mode in gop.modes() {
@@ -117,10 +109,7 @@ fn efi_main() -> Status {
         let (red_s, red_sh, green_s, green_sh, blue_s, blue_sh) = match pixel_format {
             uefi::proto::console::gop::PixelFormat::Rgb => (8u8, 16u8, 8u8, 8u8, 8u8, 0u8),
             uefi::proto::console::gop::PixelFormat::Bgr => (8u8, 0u8, 8u8, 8u8, 8u8, 16u8),
-            _ => {
-                // Unknown format: try BGR (most common on x86)
-                (8u8, 0u8, 8u8, 8u8, 8u8, 16u8)
-            }
+            _ => (8u8, 0u8, 8u8, 8u8, 8u8, 16u8),
         };
 
         (fb_phys, width as u32, height as u32, stride as u32, 32u16,
@@ -128,7 +117,7 @@ fn efi_main() -> Status {
     };
 
     // ========================================================================
-    // Step 6: Get ACPI RSDP from UEFI config tables
+    // Step 5: Get ACPI RSDP
     // ========================================================================
     let rsdp_addr = uefi::system::with_config_table(|tables| {
         tables.iter()
@@ -138,16 +127,20 @@ fn efi_main() -> Status {
     });
 
     // ========================================================================
-    // Step 7: Build environment string (key=value)
+    // Step 6: Build environment string
     // ========================================================================
     let mut env_buf = [0u8; 4096];
     let mut env_len: usize = 0;
 
     fn env_write(buf: &mut [u8], pos: &mut usize, s: &str) {
         let bytes = s.as_bytes();
-        let end = (*pos + bytes.len()).min(buf.len() - 1); // reserve space for null
-        buf[*pos..end].copy_from_slice(&bytes[..end - *pos]);
-        *pos = end;
+        let remaining = buf.len().saturating_sub(*pos + 1);
+        if remaining == 0 {
+            return;
+        }
+        let copy_len = bytes.len().min(remaining);
+        buf[*pos..*pos + copy_len].copy_from_slice(&bytes[..copy_len]);
+        *pos += copy_len;
     }
 
     {
@@ -192,12 +185,11 @@ fn efi_main() -> Status {
         env_write(&mut env_buf, &mut env_len, w.as_str());
     }
 
-    // Null-terminate
     env_buf[env_len] = 0;
-    let env_total_size = env_len + 1; // include null terminator
+    let env_total_size = env_len + 1;
 
     // ========================================================================
-    // Step 8: ExitBootServices
+    // Step 7: ExitBootServices
     // ========================================================================
     let _mmap = uefi::boot::memory_map(MemoryType::LOADER_DATA)
         .expect("Failed to get memory map");
@@ -205,10 +197,8 @@ fn efi_main() -> Status {
     let mmap_iter = unsafe { uefi::boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
 
     // ========================================================================
-    // Step 9: After ExitBootServices - bare metal
+    // Step 8: After ExitBootServices - convert memory map
     // ========================================================================
-
-    // Convert UEFI memory map to our MemoryRegion format
     let mut regions: [MemoryRegion; 512] = [MemoryRegion {
         base: 0, size: 0, kind: MemoryKind::Null,
     }; 512];
@@ -238,7 +228,6 @@ fn efi_main() -> Status {
         region_count += 1;
     }
 
-    // Helper: find a free region, allocate from it, and update the region list
     fn alloc_from_free(regions: &mut [MemoryRegion], region_count: usize, size: u64, align: u64) -> u64 {
         for i in 0..region_count {
             if regions[i].kind == MemoryKind::Free && regions[i].size >= size {
@@ -252,62 +241,68 @@ fn efi_main() -> Status {
                 }
             }
         }
-        0 // allocation failed
+        0
+    }
+
+    // Allocate kernel memory map (page-aligned)
+    let mmap_count = region_count;
+    let mmap_byte_size = (mmap_count as u64) * (core::mem::size_of::<MemoryRegion>() as u64);
+    let mmap_region_size = (mmap_byte_size + 4095) & !4095;
+    let mmap_region_base = alloc_from_free(&mut regions, region_count, mmap_region_size, 4096);
+    if mmap_region_base == 0 {
+        panic!("Failed to allocate memory map region");
+    }
+    unsafe {
+        let dst = mmap_region_base as *mut MemoryRegion;
+        core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, mmap_count);
     }
 
     // Allocate stack (64KB, 16-byte aligned)
     let stack_size: u64 = 64 * 1024;
     let stack_base = alloc_from_free(&mut regions, region_count, stack_size, 16);
-
-    // Allocate memory map (page-aligned)
-    let mmap_region_size = (region_count as u64) * (core::mem::size_of::<MemoryRegion>() as u64);
-    let mmap_region_size_aligned = (mmap_region_size + 4095) & !4095;
-    let mmap_region_base = alloc_from_free(&mut regions, region_count, mmap_region_size_aligned, 4096);
-
-    // Copy memory map to allocated region
-    if mmap_region_base != 0 {
-        unsafe {
-            let dst = mmap_region_base as *mut MemoryRegion;
-            core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, region_count);
-        }
+    if stack_base == 0 {
+        panic!("Failed to allocate stack");
     }
 
-    // Allocate module table
-    let module_table_size = modules::module_table_size(module_list.len());
-    let module_table_size_aligned = (module_table_size + 4095) & !4095;
-    let module_table_base = alloc_from_free(&mut regions, region_count, module_table_size_aligned, 4096);
+    // Allocate module table (page-aligned)
+    let module_table_count = module_list.len();
+    let module_table_byte_size = modules::module_table_size(module_table_count);
+    let module_table_size = (module_table_byte_size + 4095) & !4095;
+    let module_table_base = alloc_from_free(&mut regions, region_count, module_table_size, 4096);
+    if module_table_base == 0 {
+        panic!("Failed to allocate module table");
+    }
+    modules::write_module_table(module_list.as_slice(), module_table_base);
 
-    if module_table_base != 0 {
-        modules::write_module_table(module_list.as_slice(), module_table_base);
+    // Allocate environment string (page-aligned)
+    let env_size = (env_total_size as u64 + 4095) & !4095;
+    let env_phys_base = alloc_from_free(&mut regions, region_count, env_size, 4096);
+    if env_phys_base == 0 {
+        panic!("Failed to allocate environment");
+    }
+    unsafe {
+        let dst = env_phys_base as *mut u8;
+        core::ptr::copy_nonoverlapping(env_buf.as_ptr(), dst, env_total_size);
     }
 
-    // Allocate environment string
-    let env_size_aligned = (env_total_size as u64 + 4095) & !4095;
-    let env_phys_base = alloc_from_free(&mut regions, region_count, env_size_aligned, 4096);
-
-    if env_phys_base != 0 {
-        unsafe {
-            let dst = env_phys_base as *mut u8;
-            core::ptr::copy_nonoverlapping(env_buf.as_ptr(), dst, env_total_size);
-        }
-    }
+    // Compute kernel physical size (from first segment to last byte)
+    let first_seg = &elf_info.segments[0];
+    let last_seg = &elf_info.segments[elf_info.segment_count - 1];
+    let kernel_base_phys = first_seg.phys_addr;
+    let kernel_phys_end = elf_info.phys_end;
+    let kernel_total_size = last_seg.phys_addr + last_seg.mem_size - first_seg.phys_addr;
 
     // ========================================================================
-    // Step 10: Build KernelArgs (ABI v2)
+    // Step 9: Build KernelArgs
     // ========================================================================
     let args = KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
-        kernel_base: elf_info.segments[0].0,
-        kernel_size: elf_info.segments.iter()
-            .take(elf_info.segment_count)
-            .map(|s| s.2)
-            .sum::<u64>(),
-        stack_base,
-        stack_size,
+        kernel_base: kernel_base_phys,
+        kernel_size: kernel_total_size,
         acpi_rsdp_base: rsdp_addr,
         memory_map_base: mmap_region_base,
-        memory_map_size: region_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,
+        memory_map_size: mmap_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,
         framebuffer_addr: paging::FRAMEBUFFER_BASE,
         framebuffer_width: fb_width,
         framebuffer_height: fb_height,
@@ -319,22 +314,23 @@ fn efi_main() -> Status {
         framebuffer_green_mask_shift: fb_green_shift,
         framebuffer_blue_mask_size: fb_blue_size,
         framebuffer_blue_mask_shift: fb_blue_shift,
-        hhdm_offset: 0,
+        hhdm_offset: 0xFFFF_8000_0000_0000,
         cmdline_ptr: env_phys_base,
         cmdline_len: env_total_size as u64,
         modules_base: module_table_base,
-        modules_size: module_table_size,
+        modules_size: module_table_byte_size,
     };
 
     // ========================================================================
-    // Step 11: Set up page tables and context-switch to kernel
+    // Step 10: Create page tables and context-switch
     // ========================================================================
     let pml4_phys = unsafe {
         paging::create_page_tables(
-            elf_info.segments[0].0,
-            args.kernel_size,
+            kernel_base_phys,
+            kernel_phys_end,
+            kernel_total_size,
             fb_phys,
-            fb_stride as u64 * fb_height as u64, // stride is already in bytes
+            fb_stride as u64 * fb_height as u64,
             env_phys_base,
             env_total_size as u64,
         )
@@ -351,7 +347,6 @@ fn efi_main() -> Status {
     }
 }
 
-/// Helper: mutable byte buffer wrapper implementing Write
 struct BufWriter<'a> {
     buf: &'a mut [u8],
     pos: usize,
