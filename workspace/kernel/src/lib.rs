@@ -887,6 +887,19 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] Kthread components initialized.");
     vga_println!("[OK] Kthread components ready");
 
+    // =============================================
+    // Phase 7c: component system - Hardware stage
+    // =============================================
+    crate::e9_println!("BA pre-hardware");
+    serial_println!("[init] Components (hardware)...");
+    vga_println!("[..] Initializing hardware components...");
+    if let Err(e) = component::init_all(component::InitStage::Hardware) {
+        serial_println!("[WARN] Some hardware components failed: {:?}", e);
+    }
+    serial_println!("[init] Hardware components initialized.");
+    vga_println!("[OK] Hardware components ready");
+    boot_milestone!("Hardware drivers ready");
+
     #[cfg(feature = "selftest")]
     {
         // =============================================
@@ -919,98 +932,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         vga_println!("[OK] Process components ready");
 
         // =============================================
-        // Phase 8d: VirtIO + hardware drivers
+        // Phase 8d: device enumeration and reporting
         // =============================================
-        // Blocking launch order note:
-        // PCI consumers now rely on /bus/pci/* exposed by userspace strate-bus.
-        // The userspace boot sequence must start silo "bus" before PCI-dependent
-        // silos, otherwise early probes can legitimately return no device.
-        crate::e9_println!("BG pre-hardware");
-        serial_println!("[init] Loading hardware drivers...");
-        vga_println!("[..] Initializing hardware drivers...");
-        hardware::init();
-        crate::e9_println!("BH post-hardware");
-        boot_milestone!("Hardware drivers ready");
-        arch::x86_64::speaker::beep_phase(15);
-        arch::x86_64::speaker::beep_phase(6);
-
-        serial_println!("[init] Initializing timers...");
-        vga_println!("[..] Initializing HPET and RTC...");
-        hardware::timer::init();
-        serial_println!("[init] Timers initialized.");
-        vga_println!("[OK] HPET/RTC initialized");
-        arch::x86_64::speaker::beep_phase(16); // Timers
-
-        serial_println!("[init] Initializing USB...");
-        vga_println!("[..] Looking for USB controllers...");
-        hardware::usb::init();
-        serial_println!("[init] USB initialized.");
-        vga_println!("[OK] USB xHCI/EHCI/UHCI initialized");
-        arch::x86_64::speaker::beep_phase(17); // USB
-
-        serial_println!("[init] Initializing VirtIO block...");
-        vga_println!("[..] Looking for VirtIO block device...");
-        hardware::storage::virtio_block::init();
-        serial_println!("[init] VirtIO block initialized.");
-        vga_println!("[OK] VirtIO block driver initialized");
-        arch::x86_64::speaker::beep_phase(18); // VirtIO block
-
-        serial_println!("[init] Initializing AHCI...");
-        vga_println!("[..] Looking for AHCI SATA controller...");
-        // Debug: check BSP stack usage before AHCI init
-        {
-            let dummy = 0u64;
-            let rsp = &dummy as *const u64 as u64;
-            serial_println!("[DEBUG] BSP stack before AHCI: rsp={:#x}", rsp);
-            // Stack grows downward from high address. Check distance from typical low addresses.
-            // With 512KB stack at 0x80000, top is around 0x80000 + 0x80000 = 0x100000
-            // If rsp is below 0xC0000, we've used more than 256KB
-            if rsp < 0xC0000 {
-                serial_println!("[WARN] BSP stack usage high! rsp={:#x}", rsp);
-            }
-        }
-        hardware::storage::ahci::init();
-        serial_println!("[init] AHCI probe done.");
-        vga_println!("[OK] AHCI probe done");
-        arch::x86_64::speaker::beep_phase(19); // AHCI
-
-        serial_println!("[init] Initializing ATA/IDE...");
-        vga_println!("[..] Looking for ATA/IDE devices...");
-        hardware::storage::ata_legacy::init();
-        serial_println!("[init] ATA/IDE probe done.");
-        vga_println!("[OK] ATA/IDE probe done");
-        arch::x86_64::speaker::beep_phase(20); // ATA
-
-        serial_println!("[init] Initializing NVMe...");
-        vga_println!("[..] Looking for NVMe controllers...");
-        hardware::storage::nvme::init();
-        serial_println!("[init] NVMe probe done.");
-        vga_println!("[OK] NVMe probe done");
-        arch::x86_64::speaker::beep_phase(21); // NVMe
-
-        serial_println!("[init] Initializing VirtIO net...");
-        vga_println!("[..] Looking for VirtIO net device...");
-        hardware::nic::virtio_net::init();
-        serial_println!("[init] VirtIO net initialized.");
-        vga_println!("[OK] VirtIO net driver initialized");
-        arch::x86_64::speaker::beep_phase(22); // VirtIO net
-
-        serial_println!("[init] Initializing VirtIO RNG...");
-        vga_println!("[..] Looking for VirtIO RNG device...");
-        crate::hardware::virtio::rng::init();
-        serial_println!("[init] VirtIO RNG initialized.");
-        vga_println!("[OK] VirtIO RNG driver initialized");
-        arch::x86_64::speaker::beep_phase(23); // VirtIO RNG
-
-        serial_println!("[init] Initializing VirtIO Console...");
-        vga_println!("[..] Looking for VirtIO Console device...");
-        crate::hardware::virtio::console::init();
-        serial_println!("[init] VirtIO Console initialized.");
-        vga_println!("[OK] VirtIO Console driver initialized");
-        arch::x86_64::speaker::beep_phase(24); // VirtIO Console
-
-        // VirtIO GPU + framebuffer are initialized in hardware::init()
-
+        // Hardware drivers were initialized in the Hardware stage above.
+        // This block reports which devices were found.
+        crate::e9_println!("BD device-report");
         serial_println!("[init] Checking for devices...");
         vga_println!("[..] Checking for devices...");
 

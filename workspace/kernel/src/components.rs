@@ -11,6 +11,7 @@
 //! |-------------|-----------------------------------------|
 //! | `bootstrap` | Before SMP, early kernel init           |
 //! | `kthread`   | After SMP, in kernel-thread context     |
+//! | `hardware`  | After scheduler, device/driver probing  |
 //! | `process`   | After first user process is created     |
 //!
 //! ## Syntax
@@ -22,6 +23,9 @@
 //! #[component::init_component(kthread, priority = 2, depends_on = vfs_init)]
 //! fn fs_ext4_init() -> Result<(), ComponentInitError> { … }
 //!
+//! #[component::init_component(hardware, priority = 1)]
+//! fn drivers_init() -> Result<(), ComponentInitError> { … }
+//!
 //! #[component::init_component(kthread, priority = 3, depends_on = [vfs_init, ipc_init])]
 //! fn silo_init() -> Result<(), ComponentInitError> { … }
 //! ```
@@ -30,28 +34,34 @@ use component::ComponentInitError;
 
 // ============================================================================
 // Bootstrap stage : early kernel init (before SMP)
-// The `priority` tiebreaker applies only when two components have no ordering
-// edge between them; explicit `depends_on` edges take precedence.
+//
+// Components that depend on local kernel_main state (e.g. mmap_work for
+// memory_init) remain as markers — the real init happens inline in kernel_main
+// before `init_all(Bootstrap)` is called.  Components that are self-contained
+// do their real work here.
 // ============================================================================
 
-/// Memory management : must be first; everything else implicitly depends on it.
+/// Memory management : marker — real init is inline in kernel_main (Phase 2)
+/// because it requires the working memory map which is a local variable.
 #[component::init_component(bootstrap, priority = 0)]
 fn memory_init() -> Result<(), ComponentInitError> {
     log::info!("[component] Memory management initialized");
     Ok(())
 }
 
-/// Logger : early debug output (needs memory for heap-backed ring-buffer).
+/// Logger : marker — already initialized before the component system runs.
 #[component::init_component(bootstrap, priority = 1, depends_on = memory_init)]
 fn logger_init() -> Result<(), ComponentInitError> {
     log::info!("[component] Logger initialized");
     Ok(())
 }
 
-/// Architecture primitives (GDT, IDT, TSS) : needs memory for TSS allocation.
+/// Architecture primitives (TSS, GDT, SYSCALL) : needs memory for TSS allocation.
+/// Marker — real init is inline in kernel_main because it must run before
+/// the component system is invoked (bootstrap components depend on GDT/TSS).
 #[component::init_component(bootstrap, priority = 1, depends_on = memory_init)]
 fn arch_init() -> Result<(), ComponentInitError> {
-    log::info!("[component] Architecture primitives initialized");
+    log::info!("[component] Architecture primitives initialized (marker)");
     Ok(())
 }
 
@@ -72,14 +82,18 @@ fn acpi_init() -> Result<(), ComponentInitError> {
 /// Capability-based security : needs memory; used by VFS and IPC.
 #[component::init_component(bootstrap, priority = 3, depends_on = memory_init)]
 fn capability_init() -> Result<(), ComponentInitError> {
+    // Capability system is initialized on first use (spin::Once).
+    // This marker ensures the component graph reflects the dependency.
     log::info!("[component] Capability system initialized");
     Ok(())
 }
 
 /// Virtual file system : needs memory and capability subsystem.
+/// Marker — real init is inline in kernel_main because it requires
+/// `register_boot_modules()` with boot args that aren't available here.
 #[component::init_component(bootstrap, priority = 4, depends_on = [memory_init, capability_init])]
 fn vfs_init() -> Result<(), ComponentInitError> {
-    log::info!("[component] VFS initialized");
+    log::info!("[component] VFS initialized (marker)");
     Ok(())
 }
 
@@ -91,7 +105,6 @@ fn ipc_init() -> Result<(), ComponentInitError> {
 }
 
 /// Driver framework : needs arch primitives and memory.
-/// Hardware probing is deferred until paging + VFS are ready.
 #[component::init_component(bootstrap, priority = 5, depends_on = [memory_init, arch_init])]
 fn drivers_init() -> Result<(), ComponentInitError> {
     log::info!("[component] Driver framework initialized");
@@ -102,8 +115,8 @@ fn drivers_init() -> Result<(), ComponentInitError> {
 // Kthread stage : after SMP, in kernel-thread context
 // ============================================================================
 
-/// Process and task management : needs memory, arch, and the scheduler already
-/// running (guaranteed since kthread stage runs after schedule() is called).
+/// Process and task management : marker — scheduler is already running
+/// (init_all(Kthread) is called after init_scheduler() in kernel_main).
 #[component::init_component(kthread, priority = 0)]
 fn process_init() -> Result<(), ComponentInitError> {
     log::info!("[component] Process management initialized");
@@ -130,6 +143,52 @@ fn syscall_init() -> Result<(), ComponentInitError> {
 #[component::init_component(kthread, priority = 2, depends_on = [namespace_init, syscall_init])]
 fn silo_init() -> Result<(), ComponentInitError> {
     log::info!("[component] Silo management initialized");
+    Ok(())
+}
+
+// ============================================================================
+// Hardware stage : after scheduler, device/driver probing
+// ============================================================================
+
+/// PCI bus enumeration and early hardware probing.
+#[component::init_component(hardware, priority = 0)]
+fn pci_init() -> Result<(), ComponentInitError> {
+    crate::hardware::init();
+    log::info!("[component] PCI and hardware framework initialized");
+    Ok(())
+}
+
+/// Storage drivers (VirtIO block, AHCI, NVMe).
+#[component::init_component(hardware, priority = 1, depends_on = pci_init)]
+fn storage_init() -> Result<(), ComponentInitError> {
+    crate::hardware::storage::virtio_block::init();
+    crate::hardware::storage::ahci::init();
+    crate::hardware::storage::nvme::init();
+    log::info!("[component] Storage drivers initialized");
+    Ok(())
+}
+
+/// Network drivers (VirtIO net, E1000).
+#[component::init_component(hardware, priority = 1, depends_on = pci_init)]
+fn nic_init() -> Result<(), ComponentInitError> {
+    crate::hardware::nic::virtio_net::init();
+    log::info!("[component] Network drivers initialized");
+    Ok(())
+}
+
+/// Timer subsystem (HPET, RTC, APIC timer start).
+#[component::init_component(hardware, priority = 2, depends_on = pci_init)]
+fn timer_init() -> Result<(), ComponentInitError> {
+    crate::hardware::timer::init();
+    log::info!("[component] Timer subsystem initialized");
+    Ok(())
+}
+
+/// USB controllers (xHCI, EHCI, UHCI).
+#[component::init_component(hardware, priority = 2, depends_on = pci_init)]
+fn usb_init() -> Result<(), ComponentInitError> {
+    crate::hardware::usb::init();
+    log::info!("[component] USB controllers initialized");
     Ok(())
 }
 
