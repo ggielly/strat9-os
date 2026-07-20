@@ -1,25 +1,24 @@
-//! U-Boot boot protocol entry point.
+//! Boot protocol entry point.
 //!
-//! This module handles the kernel entry from the U-Boot bootloader.
-//! U-Boot loads the kernel ELF and passes a Device Tree Blob (DTB) address.
+//! This module handles the kernel entry from the bootloader.
+//! The bootloader loads the kernel ELF and passes a Device Tree Blob (DTB) address.
 //!
 //! # Boot flow
 //!
 //! ```text
 //! boot64.S (_start)
-//!   → save DTB, setup 8 KB bootstrap stack, clear BSS
-//!   → call kmain(dtb_ptr)
-//!     → enable SSE/OSXSAVE (CPU features)
-//!     → early serial output
-//!     → parse DTB → build KernelArgs
-//!     → call crate::kernel_main(args)
-//!       → (buddy allocator init)
-//!       → allocate 256 KB kernel stack
-//!       → switch_stack(new_stack, continue_init)
+//!   => save DTB, setup 8 KB bootstrap stack, clear BSS
+//!   => call kmain(dtb_ptr)
+//!     => enable SSE/OSXSAVE (CPU features)
+//!     => early serial output
+//!     => parse DTB → build KernelArgs
+//!     => call crate::kernel_main(args)
+//!       => (buddy allocator init)
+//!       => allocate 256 KB kernel stack
+//!       => switch_stack(new_stack, continue_init)
 //! ```
 
-use crate::boot::fdt;
-use crate::serial_println;
+use crate::{boot::fdt, serial_println};
 
 /// Size of the real kernel stack allocated after buddy allocator init.
 pub const KERNEL_STACK_SIZE: usize = 256 * 1024;
@@ -58,9 +57,9 @@ unsafe fn enable_cpu_features() {
     core::arch::asm!("mov cr0, {}", in(reg) cr0);
 }
 
-/// Kernel entry point called by U-Boot or PVH boot.
+/// Kernel entry point called by the bootloader or PVH boot.
 ///
-/// For U-Boot: rdi = DTB physical address
+/// For bootloader: rdi = DTB physical address
 /// For PVH: rdi = 0 (no DTB provided)
 ///
 /// Runs on the 8 KB bootstrap stack from boot64.S. All heavy work
@@ -88,24 +87,25 @@ pub unsafe extern "C" fn kmain(dtb_ptr: u64) -> ! {
         serial_println!("[kmain] PVH boot (no DTB)");
         build_minimal_args()
     } else {
-        serial_println!("[kmain] U-Boot/DTB boot (dtb={:#x})", dtb_ptr);
+        serial_println!("[kmain] DTB boot (dtb={:#x})", dtb_ptr);
         fdt::build_kernel_args_from_dtb(dtb_ptr)
     };
 
     if args.magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
-        serial_println!(
-            "[kmain] ERROR: Bad KernelArgs magic: 0x{:08x}",
-            args.magic
-        );
+        serial_println!("[kmain] ERROR: Bad KernelArgs magic: 0x{:08x}", unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) });
         hlt_loop();
     }
 
+    let memory_map_base = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_base)) };
+    let memory_map_size = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_size)) };
+    let framebuffer_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.framebuffer_addr)) };
+    let acpi_rsdp_base = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.acpi_rsdp_base)) };
     serial_println!(
         "[kmain] KernelArgs: memory_map={:#x}/{:#x} fb={:#x} rsdp={:#x}",
-        args.memory_map_base,
-        args.memory_map_size,
-        args.framebuffer_addr,
-        args.acpi_rsdp_base,
+        memory_map_base,
+        memory_map_size,
+        framebuffer_addr,
+        acpi_rsdp_base,
     );
 
     // Step 4: Hand off to kernel_main (still on bootstrap stack).

@@ -261,7 +261,7 @@ impl UhciController {
 
     /// Execute a USB control transfer via a frame list slot.
     unsafe fn ctrl_transfer(
-        &self,
+        &mut self,
         port: usize,
         setup_data: &[u8; 8],
         data_buf: Option<&mut [u8]>,
@@ -292,17 +292,17 @@ impl UhciController {
 
         // Setup TD: PID_SETUP=0x2D, 8 bytes
         let setup_pid: u32 = 0x2D;
-        td_setup_virt.read_volatile_ptr = 0; // link to next TD (set below)
-        td_setup_virt.ctrl_status = (1u32 << 23) // ACTIVE
+        (*td_setup_virt).link_ptr = 0; // link to next TD (set below)
+        (*td_setup_virt).ctrl_status = (1u32 << 23) // ACTIVE
             | (3u32 << 27) // error count = 3
             | (1u32 << 24); // IOC
-        td_setup_virt.token = ls_flag
+        (*td_setup_virt).token = ls_flag
             | (device_addr as u32 & 0x7F)
             | (0u32 << 15) // endpoint 0
             | (setup_pid << 0)
             | (1u32 << 19) // data toggle = 0 (DATA0)
             | ((8u32 & 0x7FF) << 16);
-        td_setup_virt.buffer = setup_buf_phys as u32;
+        (*td_setup_virt).buffer = setup_buf_phys as u32;
 
         let mut last_td_phys = td_setup_phys;
 
@@ -314,7 +314,7 @@ impl UhciController {
             let data_buf_virt_addr = phys_to_virt(data_buf_phys_addr) as *mut u8;
 
             if !dir_in {
-                if let Some(buf) = data_buf {
+                if let Some(ref buf) = data_buf {
                     core::ptr::copy_nonoverlapping(buf.as_ptr(), data_buf_virt_addr, data_len);
                 }
             }
@@ -326,15 +326,15 @@ impl UhciController {
             let td_data_virt = phys_to_virt(td_data_phys) as *mut UhciTD;
 
             let data_pid: u32 = if dir_in { 0x69 } else { 0xE1 }; // IN or OUT
-            td_data_virt.link_ptr = 0;
-            td_data_virt.ctrl_status = (1u32 << 23) | (3u32 << 27) | (1u32 << 24);
-            td_data_virt.token = ls_flag
+            (*td_data_virt).link_ptr = 0;
+            (*td_data_virt).ctrl_status = (1u32 << 23) | (3u32 << 27) | (1u32 << 24);
+            (*td_data_virt).token = ls_flag
                 | (device_addr as u32 & 0x7F)
                 | (0u32 << 15)
                 | (data_pid << 0)
                 | (1u32 << 19) // data toggle = 1 (DATA1)
                 | (((data_len as u32) & 0x7FF) << 16);
-            td_data_virt.buffer = data_buf_phys_addr as u32;
+            (*td_data_virt).buffer = data_buf_phys_addr as u32;
 
             // Status TD
             let td_status_frame =
@@ -343,19 +343,19 @@ impl UhciController {
             let td_status_virt = phys_to_virt(td_status_phys) as *mut UhciTD;
 
             let status_pid: u32 = if dir_in { 0xE1 } else { 0x69 }; // opposite direction
-            td_status_virt.link_ptr = 0;
-            td_status_virt.ctrl_status = (1u32 << 23) | (3u32 << 27) | (1u32 << 24);
-            td_status_virt.token = ls_flag
+            (*td_status_virt).link_ptr = 0;
+            (*td_status_virt).ctrl_status = (1u32 << 23) | (3u32 << 27) | (1u32 << 24);
+            (*td_status_virt).token = ls_flag
                 | (device_addr as u32 & 0x7F)
                 | (0u32 << 15)
                 | (status_pid << 0)
                 | (1u32 << 19) // data toggle = 0
                 | (0u32 << 16); // 0 bytes
-            td_status_virt.buffer = 0;
+            (*td_status_virt).buffer = 0;
 
             // Chain TDs
-            td_setup_virt.link_ptr = (td_data_phys as u32) | TD_LINK_VF;
-            td_data_virt.link_ptr = (td_status_phys as u32) | TD_LINK_VF;
+            (*td_setup_virt).link_ptr = (td_data_phys as u32) | TD_LINK_VF;
+            (*td_data_virt).link_ptr = (td_status_phys as u32) | TD_LINK_VF;
         } else {
             // Status-only TD
             let td_status_frame =
@@ -364,22 +364,22 @@ impl UhciController {
             let td_status_virt = phys_to_virt(td_status_phys) as *mut UhciTD;
 
             let status_pid: u32 = if dir_in { 0xE1 } else { 0x69 };
-            td_status_virt.link_ptr = 0;
-            td_status_virt.ctrl_status = (1u32 << 23) | (3u32 << 27) | (1u32 << 24);
-            td_status_virt.token = ls_flag
+            (*td_status_virt).link_ptr = 0;
+            (*td_status_virt).ctrl_status = (1u32 << 23) | (3u32 << 27) | (1u32 << 24);
+            (*td_status_virt).token = ls_flag
                 | (device_addr as u32 & 0x7F)
                 | (0u32 << 15)
                 | (status_pid << 0)
                 | (1u32 << 19)
                 | (0u32 << 16);
-            td_status_virt.buffer = 0;
+            (*td_status_virt).buffer = 0;
 
-            td_setup_virt.link_ptr = (td_status_phys as u32) | TD_LINK_VF;
+            (*td_setup_virt).link_ptr = (td_status_phys as u32) | TD_LINK_VF;
         }
 
         // Set up QH
-        qh_virt.head_link = 0x0000_0002; // terminate
-        qh_virt.element_link = td_setup_phys as u32;
+        (*qh_virt).head_link = 0x0000_0002; // terminate
+        (*qh_virt).element_link = td_setup_phys as u32;
 
         // Point frame 0 to QH
         let frame_idx = self.frnum.read() as usize % 1024;
@@ -392,16 +392,16 @@ impl UhciController {
         // Wait for completion
         let mut transferred = 0;
         for _ in 0..1_000_000u32 {
-            let token = core::ptr::read_volatile(core::ptr::addr_of!(td_setup_virt.token));
+            let token = core::ptr::read_volatile(core::ptr::addr_of!((*td_setup_virt).token));
             if token & TD_TOKEN_ACTIVE == 0 {
                 if dir_in && has_data && data_len > 0 {
                     if let Some(buf) = data_buf {
                         // Read from data TD's buffer
                         let data_td_virt =
-                            phys_to_virt((td_setup_virt.link_ptr & TD_LINK_PTR_MASK) as u64)
+                            phys_to_virt(((*td_setup_virt).link_ptr & TD_LINK_PTR_MASK) as u64)
                                 as *const UhciTD;
                         let data_buf_ptr =
-                            phys_to_virt((*core::ptr::addr_of!(data_td_virt.buffer)) as u64)
+                            phys_to_virt((*data_td_virt).buffer as u64)
                                 as *const u8;
                         core::ptr::copy_nonoverlapping(data_buf_ptr, buf.as_mut_ptr(), data_len);
                         transferred = data_len;
@@ -419,7 +419,7 @@ impl UhciController {
     }
 
     /// Enumerate connected ports and hand off HID devices.
-    fn enumerate_all_ports(&self) {
+    fn enumerate_all_ports(&mut self) {
         let mut usb_address: u8 = 1;
 
         for port in 0..self.max_ports {

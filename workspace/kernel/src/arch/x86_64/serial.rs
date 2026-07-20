@@ -237,7 +237,7 @@ pub fn init() {
     SERIAL1.lock().init();
 }
 
-/// Parse kernel cmdline from Limine boot arguments.
+/// Parse kernel cmdline from UEFI bootloader boot arguments.
 ///
 /// `ptr` is a pointer to a null-terminated C string provided by the bootloader.
 /// `len` is the length of the cmdline string (including the null terminator).

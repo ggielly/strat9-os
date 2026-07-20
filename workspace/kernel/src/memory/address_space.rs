@@ -237,7 +237,7 @@ impl AddressSpace {
 
         // ---------- LAPIC low-half mapping (HHDM=0 workaround) ----------
         //
-        // When Limine provides a non-zero HHDM offset the LAPIC is mapped in
+        // When the bootloader provides a non-zero HHDM offset the LAPIC is mapped in
         // PML4[256..512] (kernel half) and is already shared above.
         //
         // When HHDM=0 the LAPIC is identity-mapped at its physical address

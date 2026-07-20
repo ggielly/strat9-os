@@ -17,26 +17,6 @@ STRAT9_UPLINK_IFACE = "eth0"
 # Build Tasks - Bootloader & Toolchain
 # =============================================================================
 
-# NOTE: U-Boot is legacy. Use UEFI bootloader instead:
-#   cargo make bootloader-uefi
-#   cargo make uefi-image
-#   cargo make run-uefi
-
-[tasks.setup-uboot]
-description = "[LEGACY] Download and build U-Boot bootloader (use UEFI instead)"
-command = "bash"
-args = ["tools/scripts/setup-uboot.sh"]
-
-[tasks.setup-uboot-force]
-description = "[LEGACY] Force rebuild U-Boot bootloader"
-command = "bash"
-args = ["tools/scripts/setup-uboot.sh", "--force"]
-
-[tasks.setup-uboot-update]
-description = "[LEGACY] Pull latest U-Boot sources and rebuild only if needed"
-command = "bash"
-args = ["tools/scripts/setup-uboot.sh", "--update"]
-
 [tasks.setup-musl]
 description = "Clone/update external musl"
 script_runner = "@shell"
@@ -122,68 +102,6 @@ args = ["clippy", "--target", "${KERNEL_TARGET}"]
 description = "Format all code"
 command = "cargo"
 args = ["fmt", "--all"]
-
-# =============================================================================
-# Image generation
-# =============================================================================
-
-# NOTE: U-Boot image is legacy. Use UEFI instead:
-#   cargo make uefi-image
-#   cargo make run-uefi
-
-[tasks.uboot-image]
-description = "[LEGACY] Create bootable disk image with U-Boot + kernel (debug)"
-dependencies = [
-    "build-musl",
-    "setup-uboot",
-    "kernel",
-    "strate-ext4-release",
-    "strate-fs-ramfs-release",
-    "strate-init-release",
-    "strate-console-admin-release",
-    "strate-graphical-release",
-    "strate-net-release",
-    "strate-bus-release",
-    "strate-wasm-release",
-    "strate-webrtc-release",
-    "dhcp-client-release",
-    "ping-release",
-    "telnetd-release",
-    "udp-tool-release",
-    "strate-web-admin-release",
-]
-env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_INCLUDE_TESTS = "0" }
-script_runner = "@shell"
-script = ['''
-bash tools/scripts/create-uboot-image.sh
-''']
-
-[tasks.uboot-image-release]
-description = "[LEGACY] Create bootable disk image with U-Boot + kernel (release)"
-dependencies = [
-    "build-musl",
-    "setup-uboot",
-    "kernel-release",
-    "strate-ext4-release",
-    "strate-fs-ramfs-release",
-    "strate-init-release",
-    "strate-console-admin-release",
-    "strate-graphical-release",
-    "strate-net-release",
-    "strate-bus-release",
-    "strate-wasm-release",
-    "strate-webrtc-release",
-    "dhcp-client-release",
-    "ping-release",
-    "telnetd-release",
-    "udp-tool-release",
-    "strate-web-admin-release",
-]
-env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release", STRAT9_INCLUDE_TESTS = "0" }
-script_runner = "@shell"
-script = ['''
-bash tools/scripts/create-uboot-image.sh
-''']
 
 # =============================================================================
 # Run tasks

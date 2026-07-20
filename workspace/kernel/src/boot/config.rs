@@ -10,7 +10,7 @@
 ///
 /// TODO: Phase 4 - Load kernel.toml from FAT32 boot partition
 pub fn apply_kernel_config() {
-    // With U-Boot, kernel.toml will be loaded from the FAT32 boot partition.
+    // kernel.toml will be loaded from the FAT32 boot partition.
     // For now, use defaults.
     crate::serial_println!("[config] Using default configuration (FAT32 loader pending)");
 }

@@ -50,7 +50,7 @@ This project is in active development and not production-ready. The ABI is still
     - Two-stage allocator: buddy allocator for early boot and a dedicated kernel allocator (CoW support, heap/kmalloc/slab)
     - Virtual memory: 4-level paging, HHDM, CR3 switching, page-fault handling (COW, mmap), user/kernel mappings
     - Preemptive multitasking with APIC/x2APIC and per-CPU timers
-    - Limine boot path and bootable ISO
+    - UEFI boot path and bootable ISO
     - Scheduler with priority/round-robin and CPU hotplug support
     - IPC: 3-level transport manager (TypeSafe / LockFree ring / MMU), synchronous ports, capability manager, VFS scheme router
     - ELF loader and Ring-3 execution (userspace silos)
@@ -148,12 +148,6 @@ cargo make uefi-image         # Create bootable image
 cargo make run-uefi           # Run with OVMF
 ```
 
-**Limine (legacy):**
-```bash
-cargo make kernel
-cargo make limine-image
-cargo make run-gui-smp
-```
 
 ## Hardware support
 

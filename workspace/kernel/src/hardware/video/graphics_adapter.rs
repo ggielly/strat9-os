@@ -107,7 +107,7 @@ pub trait GraphicsAdapter: Send + Sync {
 }
 
 // ============================================================================
-// Concrete implementation: Limine/VirtIO framebuffer adapter
+// Concrete implementation: UEFI bootloader/VirtIO framebuffer adapter
 // ============================================================================
 
 /// A heap-allocated offscreen pixel buffer.
@@ -168,7 +168,7 @@ impl DisplayScreen for HeapScreen {
     }
 }
 
-/// Adapter backed by a single physical framebuffer (Limine or VirtIO).
+/// Adapter backed by a single physical framebuffer (UEFI bootloader or VirtIO).
 pub struct SimpleDisplayAdapter {
     /// Physical framebuffer info.
     fb_virt: usize,

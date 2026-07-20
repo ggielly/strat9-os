@@ -66,7 +66,7 @@ These drivers are compiled into the kernel and have direct hardware access via M
 
 | Driver | Hardware | File | Status |
 |---|---|---|---|
-| Framebuffer | Limine boot protocol | `kernel/src/hardware/video/framebuffer.rs` | ✅ Active |
+| Framebuffer | UEFI bootloader boot protocol | `kernel/src/hardware/video/framebuffer.rs` | ✅ Active |
 | VirtIO GPU | VirtIO GPU Device | `kernel/src/hardware/virtio/gpu.rs` | ✅ Active |
 
 ### VirtIO core

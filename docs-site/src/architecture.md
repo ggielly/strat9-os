@@ -54,7 +54,7 @@ graph TB
 
 | Subsystem | Module | Purpose |
 |-----------|--------|---------|
-| **Boot** | `boot/` | Assembly stubs (16→64 bit), Limine handoff, early init |
+| **Boot** | `boot/` | Assembly stubs (16→64 bit), UEFI bootloader handoff, early init |
 | **Scheduler** | `process/scheduler/` | Per-CPU run queues, multi-class scheduling (RT FIFO/RR, Normal, Idle) |
 | **Memory** | `memory/` | Buddy allocator, slab heap, COW, page tables, vmalloc |
 | **IPC** | `ipc/` | 3-level Transport Manager (TypeSafe/LockFree/MMU), typed channels, shared rings, semaphores |

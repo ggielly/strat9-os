@@ -47,8 +47,8 @@ pub mod syscall;
 pub mod trace;
 pub mod vfs;
 
-// Re-export boot::uboot::kmain as the main entry point
-pub use boot::uboot::kmain;
+// Re-export the kernel entry point from the boot module
+pub use boot::dtb_boot::kmain;
 
 // serial_print! and serial_println! macros are #[macro_export]'ed
 // from arch::x86_64::serial and available at crate root automatically.
@@ -262,7 +262,7 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
 ///
 /// Each module has a name, physical base address, and size.
 /// The kernel maps them into the VFS at /initfs/<name>.
-fn register_boot_modules(args: &KernelArgs) {
+fn register_boot_modules(args: &boot::entry::KernelArgs) {
     let modules = args.modules();
     if modules.is_empty() {
         serial_println!("[init] No modules provided by bootloader");
@@ -273,7 +273,7 @@ fn register_boot_modules(args: &KernelArgs) {
     for module in modules {
         let name = module.name_str();
         let base_virt = memory::phys_to_virt(module.base);
-        let size = module.size as usize;
+        let size = module.size;
 
         if size == 0 {
             continue;
@@ -399,20 +399,24 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     let args = &*args;
     serial_println!("[init] KernelArgs at {:p}", args);
 
-    if args.magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
+    // SAFETY: KernelArgs is packed; read fields via addr_of! to avoid unaligned references.
+    let magic = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) };
+    let abi_version = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.abi_version)) };
+
+    if magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
         serial_println!(
             "[CRIT] Bad KernelArgs magic: 0x{:08x} (expected 0x{:08x})",
-            args.magic,
+            magic,
             strat9_abi::boot::STRAT9_BOOT_MAGIC
         );
         loop {
             arch::x86_64::hlt();
         }
     }
-    if args.abi_version != strat9_abi::boot::STRAT9_BOOT_ABI_VERSION {
+    if abi_version != strat9_abi::boot::STRAT9_BOOT_ABI_VERSION {
         serial_println!(
             "[CRIT] Unsupported boot ABI version: {} (kernel expects {})",
-            args.abi_version,
+            abi_version,
             strat9_abi::boot::STRAT9_BOOT_ABI_VERSION
         );
         loop {
@@ -441,10 +445,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     memory::set_hhdm_offset(hhdm);
     serial_println!("[init] HHDM offset: 0x{:x}", hhdm);
 
+    let memory_map_base = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_base)) };
+    let memory_map_size = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_size)) };
     serial_println!(
         "[init] Memory map: 0x{:x} ({} bytes)",
-        args.memory_map_base,
-        args.memory_map_size
+        memory_map_base,
+        memory_map_size
     );
 
     log_boot_module_magics("pre-mm");
@@ -460,7 +466,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         *dst = *src;
     }
 
-    // With U-Boot, modules are loaded from FAT32 boot partition.
+    // Modules are loaded from the FAT32 boot partition.
     // Protected ranges will be set up after module loading is implemented in Phase 4.
     let protected_ranges = [None; memory::boot_alloc::MAX_PROTECTED_RANGES];
     memory::boot_alloc::set_protected_ranges(&protected_ranges);
@@ -502,7 +508,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] Frame metadata ready.");
 
     // TODO: Phase 4 - Reserve module memory ranges when FAT32 loader is implemented
-    // For now, skip module reservation since we're using U-Boot + FAT32
+    // For now, skip module reservation since we're using the custom bootloader + FAT32
 
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
 
@@ -515,7 +521,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // allocator and switch to it. The bootstrap stack is abandoned after
     // the switch (it remains allocated but unused).
     {
-        use crate::boot::uboot::KERNEL_STACK_SIZE;
+        use crate::boot::dtb_boot::KERNEL_STACK_SIZE;
         let stack_phys = memory::boot_alloc::alloc_bytes_accessible(
             KERNEL_STACK_SIZE,
             16, // 16-byte alignment for SysV ABI
@@ -594,7 +600,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::e9_println!("B6 post-paging");
 
     // Map all RAM into HHDM to ensure buddy/heap allocations are accessible.
-    // VMware Limine HHDM may be sparse, causing PF on new heap pages.
+    // VMware bootloader HHDM may be sparse, causing PF on new heap pages.
     memory::paging::map_all_ram(&mmap_work[..mmap_work_len]);
 
     // Framebuffer is often backed by MMIO memory outside RAM (e.g. around 0xFDxxxxxx),
@@ -1218,11 +1224,12 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
 
     // Step 6c++: Parse IVRS (AMD IOMMU)
     if let Some(ivrs) = acpi::ivrs::Ivrs::get() {
+        let dev_entry_count = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(ivrs.header().dev_entry_count)) };
         serial_println!(
             "[init]   6c++. IVRS parsed (flags: draint={}, coherent={}, {} device entries)",
             ivrs.header().has_draint(),
             ivrs.header().is_coherent(),
-            ivrs.header().dev_entry_count,
+            dev_entry_count,
         );
         ivrs.dump();
     } else {

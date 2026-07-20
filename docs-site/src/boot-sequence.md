@@ -1,6 +1,6 @@
 # Boot Sequence
 
-Strat9 OS boots on x86_64 via the Limine boot protocol. The boot flow transitions from 16-bit real mode through protected mode to 64-bit long mode before jumping into Rust.
+Strat9 OS boots on x86_64 via the UEFI bootloader. The boot flow transitions from 16-bit real mode through protected mode to 64-bit long mode before jumping into Rust.
 
 ---
 
@@ -10,7 +10,7 @@ Strat9 OS boots on x86_64 via the Limine boot protocol. The boot flow transition
 flowchart TD
     A[BIOS/UEFI] --> B[MBR / Stage 1]
     B --> C[Stage 2]
-    C --> D[Limine Protocol]
+    C --> D[UEFI Bootloader]
     D --> E[kstart - Assembly]
     E --> F[start - Rust init]
     F --> G[main.rs - Kernel main]
@@ -47,9 +47,9 @@ The bootloader is written in NASM assembly. Stage 1 fits in exactly 512 bytes (M
 
 ---
 
-## Limine handoff
+## UEFI bootloader handoff
 
-The kernel is loaded by the Limine bootloader protocol. Limine provides:
+The kernel is loaded by the UEFI bootloader. The bootloader provides:
 
 - Memory map (E820 equivalent)
 - HHDM (Higher Half Direct Map) base address
@@ -83,7 +83,7 @@ Located in `boot/boot64.S`:
 
 ## Kernel init : `start()` (Rust)
 
-Located in `boot/limine.rs` → `main.rs`:
+Located in `boot/boot.rs` → `main.rs`:
 
 ```mermaid
 flowchart TD
