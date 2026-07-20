@@ -136,21 +136,23 @@ graph TD
 ```bash
 rustup install nightly
 rustup component add rust-src llvm-tools-preview
-rustup target add x86_64-unknown-none
+rustup target add x86_64-unknown-none x86_64-unknown-uefi
 ```
 
 #### Compile the kernel and run it
 
+**UEFI (recommended):**
+```bash
+cargo make bootloader-uefi    # Build UEFI bootloader
+cargo make uefi-image         # Create bootable image
+cargo make run-uefi           # Run with OVMF
+```
+
+**Limine (legacy):**
 ```bash
 cargo make kernel
 cargo make limine-image
-cargo make run-gui-smp or cargo make run-gui (for single CPU test)
-```
-
-or
-
-```bash
-cargo make
+cargo make run-gui-smp
 ```
 
 ## Hardware support
@@ -167,7 +169,8 @@ See [HARDWARE.md](HARDWARE.md) for a complete list of supported drivers, tested 
 
 - `workspace/kernel/` : the strat9-os kernel : Bedrock
 - `workspace/components/` : userspace components
-- `workspace/bootloader/` : limine-based bootloader
+- `workspace/bootloader/` : UEFI bootloader (primary) + archived BIOS bootloader
+- `workspace/abi/` : shared ABI definitions (KernelArgs v2)
 - `doc/` : specifications and design docs
 - `tools/` : build and helper scripts
 

@@ -1,16 +1,16 @@
 # Hardware Support
 
-> Last updated: 2026-05-19
+> Last updated: 2026-07-20
 
 ## Tested platforms
 
 Strat9-OS boots and runs successfully on:
 
-| Platform | Type | Notes |
-|---|---|---|
-| **QEMU** | Emulator | Primary dev target, all features validated |
-| **VMware Workstation** | Hypervisor | Production-like virtualisation |
-| **Lenovo ThinkPad X13** | Laptop (x86_64) | Real hardware validation |
+| Platform | Type | Boot | Notes |
+|---|---|---|---|
+| **QEMU** | Emulator | UEFI (OVMF) | Primary dev target, all features validated |
+| **VMware Workstation** | Hypervisor | UEFI | Production-like virtualisation |
+| **Lenovo ThinkPad X13** | Laptop (x86_64) | UEFI | Real hardware validation |
 
 ---
 

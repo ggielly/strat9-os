@@ -258,34 +258,33 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
     }
 }
 
-/// Performs the register boot initfs modules operation.
+/// Register modules from the bootloader module table (ABI v2).
 ///
-/// With U-Boot, modules are loaded from the FAT32 boot partition.
-/// This is a placeholder until Phase 4 (FAT32 module loader) is implemented.
-fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
-    if initfs_base != 0 && initfs_size != 0 {
-        serial_println!(
-            "[init] Boot initrd found at {:#x} ({} bytes)",
-            initfs_base,
-            initfs_size
-        );
-        // TODO: Phase 4 - Parse CPIO/initrd from FAT32 and register modules
-        // For now, just log the info
-    } else {
-        serial_println!("[init] No boot initrd found, modules will be loaded from FAT32");
+/// Each module has a name, physical base address, and size.
+/// The kernel maps them into the VFS at /initfs/<name>.
+fn register_boot_modules(args: &KernelArgs) {
+    let modules = args.modules();
+    if modules.is_empty() {
+        serial_println!("[init] No modules provided by bootloader");
+        return;
+    }
+
+    serial_println!("[init] Bootloader provided {} modules:", modules.len());
+    for module in modules {
+        let name = module.name_str();
+        let base_virt = memory::phys_to_virt(module.base);
+        let size = module.size as usize;
+
+        if size == 0 {
+            continue;
+        }
+
+        // Register the module in the VFS at /initfs/<name>
+        register_initfs_module(name, Some((base_virt, size)));
     }
 }
 
-/// Performs the boot module slice operation.
-#[inline]
-fn boot_module_slice(base: u64, size: u64) -> &'static [u8] {
-    let base_virt = memory::phys_to_virt(base);
-    unsafe { core::slice::from_raw_parts(base_virt as *const u8, size as usize) }
-}
-
-/// Performs the log boot module magics operation.
-///
-/// With U-Boot, modules are loaded from FAT32. This is a placeholder.
+/// Performs the register initfs module operation.
 #[cfg(feature = "selftest")]
 fn log_boot_module_magics(stage: &str) {
     crate::serial_println!(
@@ -710,7 +709,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     serial_println!("[init] VFS initialized.");
     vga_println!("[OK] VFS initialized");
-    register_boot_initfs_modules(args.initfs_base, args.initfs_size);
+    register_boot_modules(args);
 
     log_boot_module_magics("post-cow");
 
@@ -1061,16 +1060,23 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             }
         }
 
-        if !init_loaded && args.initfs_base != 0 && args.initfs_size != 0 {
-            let elf_data = boot_module_slice(args.initfs_base, args.initfs_size);
-            let init_caps = [crate::silo::create_silo_admin_capability()];
-            match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
-                Ok(task_id) => {
-                    init_task_id = Some(task_id);
-                    serial_println!("[init] ELF loaded as task 'init' (from initrd).");
-                }
-                Err(e) => {
-                    serial_println!("[init] Failed to load init ELF: {}", e);
+        // Try to load init from modules if not already loaded
+        if !init_loaded {
+            for module in args.modules() {
+                if module.name_str() == "init" {
+                    let base_virt = memory::phys_to_virt(module.base);
+                    let elf_data = unsafe { core::slice::from_raw_parts(base_virt as *const u8, module.size as usize) };
+                    let init_caps = [crate::silo::create_silo_admin_capability()];
+                    match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
+                        Ok(task_id) => {
+                            init_task_id = Some(task_id);
+                            serial_println!("[init] ELF loaded as task 'init' (from module table).");
+                        }
+                        Err(e) => {
+                            serial_println!("[init] Failed to load init ELF: {}", e);
+                        }
+                    }
+                    break;
                 }
             }
         }
