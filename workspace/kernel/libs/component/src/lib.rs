@@ -39,13 +39,15 @@ pub use component_macro::{init_component, parse_components_toml};
 ///
 /// - `Bootstrap` : Early kernel initialization, before SMP.
 /// - `Kthread`   : After SMP enabled, in kernel-thread context.
+/// - `Hardware`  : After scheduler started, device/driver probing.
 /// - `Process`   : After first user process created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum InitStage {
     Bootstrap = 0,
     Kthread = 1,
-    Process = 2,
+    Hardware = 2,
+    Process = 3,
 }
 
 // ========== Error ==================================================
