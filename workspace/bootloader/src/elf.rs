@@ -25,27 +25,18 @@ pub struct Elf64Info {
 /// Returns the entry point and list of PT_LOAD segments with their
 /// physical addresses (for copying) and memory sizes (for BSS zeroing).
 pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
-    // Check ELF magic
     if data.len() < 16 {
         return Err("ELF too small");
     }
     if data[0] != 0x7f || data[1] != b'E' || data[2] != b'L' || data[3] != b'F' {
         return Err("Invalid ELF magic");
     }
-
-    // Check ELF class (64-bit) and endianness (little-endian)
     if data[EI_CLASS] != ELFCLASS64 {
         return Err("Not ELF64");
     }
     if data[EI_DATA] != ELFDATA2LSB {
         return Err("Not little-endian");
     }
-
-    // ELF64 header layout
-    // e_entry: offset 0x18, 8 bytes
-    // e_phoff: offset 0x20, 8 bytes
-    // e_phentsize: offset 0x36, 2 bytes
-    // e_phnum: offset 0x38, 2 bytes
     if data.len() < 0x40 {
         return Err("ELF header too small");
     }
@@ -65,7 +56,6 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
         segment_count: 0,
     };
 
-    // Parse program headers
     for i in 0..phnum {
         let offset = phoff + i * phentsize;
         if offset + phentsize > data.len() {
@@ -79,17 +69,11 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
         let p_filesz = read_u64_le(data, offset + 0x20);
         let p_memsz = read_u64_le(data, offset + 0x28);
 
-        if p_type != PT_LOAD {
+        if p_type != PT_LOAD || p_memsz == 0 {
             continue;
         }
 
-        if p_memsz == 0 {
-            continue;
-        }
-
-        // Load segment data into physical memory at p_paddr
         let dst = p_paddr as *mut u8;
-        let src = data.as_ptr().add(p_offset as usize);
         let copy_size = p_filesz.min(p_memsz) as usize;
 
         if p_offset as usize + copy_size > data.len() {
@@ -97,9 +81,8 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
         }
 
         unsafe {
-            // Copy the segment data
+            let src = data.as_ptr().add(p_offset as usize);
             core::ptr::copy_nonoverlapping(src, dst, copy_size);
-            // Zero-fill BSS (memsz > filesz)
             if p_memsz > p_filesz {
                 let bss_start = dst.add(copy_size);
                 let bss_size = (p_memsz - p_filesz) as usize;
