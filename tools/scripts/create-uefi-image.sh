@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script to create a UEFI-bootable disk image for strat9-os
-# Creates a GPT disk with an EFI System Partition containing:
+# Creates a FAT32 image containing:
 #   /efi/boot/bootx64.efi  - the UEFI bootloader
 #   /boot/kernel.elf        - the kernel ELF
 #   /boot/initfs/*          - userspace modules
@@ -23,7 +23,7 @@ echo ""
 # Check prerequisites
 if [ ! -f "$BOOTLOADER_EFI" ]; then
     echo "ERROR: UEFI bootloader not found at $BOOTLOADER_EFI"
-    echo "  Build with: cargo build --target x86_64-unknown-uefi -p strat9-bootloader"
+    echo "  Build with: cargo make bootloader-uefi"
     exit 1
 fi
 
@@ -53,7 +53,7 @@ echo "  [OK] Copied bootloader to /efi/boot/bootx64.efi"
 cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel.elf"
 echo "  [OK] Copied kernel to /boot/kernel.elf"
 
-# Copy userspace modules (same set as Limine image)
+# Copy userspace modules
 MODULES=(
     "strate-init"
     "console-admin"
@@ -85,7 +85,7 @@ for mod in "${MODULES[@]}"; do
     fi
 done
 
-# Also auto-discover any remaining ELF binaries
+# Auto-discover remaining ELF binaries
 if [ -d "$TARGET_DIR" ]; then
     for elf in "$TARGET_DIR"/*; do
         [ -f "$elf" ] || continue
@@ -93,7 +93,6 @@ if [ -d "$TARGET_DIR" ]; then
         case "$name" in
             kernel|*.d|*.rlib|*.rmeta|*.o|lib*|deps|strat9-bootloader) continue ;;
         esac
-        # Skip if already copied
         if [ -f "$ISO_ROOT/boot/initfs/$name" ]; then
             continue
         fi
@@ -106,69 +105,63 @@ fi
 
 echo ""
 
-# Create the raw disk image (FAT filesystem)
-# We use mtools or losetup + mkfs.fat to create a proper FAT ESP
+# ========================================================================
+# Create FAT32 image
+# ========================================================================
+# Simple approach: create a FAT32 filesystem directly (no partition table).
+# QEMU can boot this with -drive file=...,format=raw if the firmware supports it.
+# For OVMF, we need a proper GPT+ESP. Use mtools if available, else mformat.
 
 IMAGE_SIZE_MB=64
-IMAGE_SIZE_SECTORS=$((IMAGE_SIZE_MB * 1024 * 2))
 
-# Try using mtools (most portable)
 if command -v mtools >/dev/null 2>&1; then
-    echo "  Creating FAT image with mtools..."
+    echo "  Creating FAT32 image with mtools..."
 
     # Create empty image
     dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
 
-    # Create a MBR partition table with a single FAT32 partition
-    parted -s "$IMAGE_FILE" mklabel msdos
-    parted -s "$IMAGE_FILE" mkpart primary fat32 1MiB 100%
-    parted -s "$IMAGE_FILE" set 1 boot on
-
-    # Calculate offset and size
-    PART_START=$(parted -s unit s "$IMAGE_FILE" print | grep "^1" | awk '{print $2}' | sed 's/s//')
-    PART_END=$(parted -s unit s "$IMAGE_FILE" print | grep "^1" | awk '{print $3}' | sed 's/s//')
-    PART_SECTORS=$((PART_END - PART_START + 1))
-    PART_OFFSET=$((PART_START * 512))
-    PART_SIZE=$((PART_SECTORS * 512))
-
-    # Format the partition as FAT32
-    dd if=/dev/zero of="$BUILD_DIR/fat.img" bs=512 count=$PART_SECTORS 2>/dev/null
-    mkfs.fat -F 32 -n "STRAT9" "$BUILD_DIR/fat.img" 2>/dev/null
+    # Format as FAT32 directly (no partition table needed for mtools)
+    mkfs.fat -F 32 -n "STRAT9" "$IMAGE_FILE" 2>/dev/null
 
     # Copy files using mcopy
-    mcopy -i "$BUILD_DIR/fat.img" -s "$ISO_ROOT/efi" "::/efi"
-    mcopy -i "$BUILD_DIR/fat.img" -s "$ISO_ROOT/boot" "::/boot"
+    mcopy -i "$IMAGE_FILE" -s "$ISO_ROOT/efi" "::/efi"
+    mcopy -i "$IMAGE_FILE" -s "$ISO_ROOT/boot" "::/boot"
 
-    # Write the FAT image into the disk image at the partition offset
-    dd if="$BUILD_DIR/fat.img" of="$IMAGE_FILE" bs=512 seek=$PART_START conv=notrunc 2>/dev/null
+    echo "  [OK] Created FAT32 image with UEFI bootloader"
 
-    rm -f "$BUILD_DIR/fat.img"
-
-    echo "  [OK] Created UEFI disk image with FAT32 ESP"
-
-elif command -v sgdisk >/dev/null 2>&1; then
-    echo "  Creating GPT image with sgdisk + mkfs.fat..."
+elif command -v mkfs.fat >/dev/null 2>&1; then
+    echo "  Creating FAT32 image with mkfs.fat..."
 
     dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
-    sgdisk --clear "$IMAGE_FILE"
-    sgdisk --new=1:0:+60M --typecode=1:ef00 --change-name=1:"EFI" "$IMAGE_FILE"
-    sgdisk --print "$IMAGE_FILE"
+    mkfs.fat -F 32 -n "STRAT9" "$IMAGE_FILE" 2>/dev/null
 
-    # Find the partition device (requires loop device)
-    echo "  [INFO] sgdisk path requires loop device mounting - use mtools instead"
-    echo "  [INFO] Falling back to simple flat image"
+    # Without mtools, we can't easily copy files into the FAT image
+    # Fall back to creating a directory-based image
+    echo "  [INFO] mtools not available - creating raw image with files"
+    echo "  [INFO] For full UEFI boot, install mtools: apt install mtools"
 
-    # Fallback: just copy everything into a flat image
-    # This won't boot without proper FAT, but it's a start
-    cp "$IMAGE_FILE" "${IMAGE_FILE}.raw"
+    # Create a temporary FAT image with files, then copy
+    TEMP_FAT="$BUILD_DIR/temp_fat.img"
+    dd if=/dev/zero of="$TEMP_FAT" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
+    mkfs.fat -F 32 -n "STRAT9" "$TEMP_FAT" 2>/dev/null
+
+    # Try using mcopy if available (it might be installed but not in PATH)
+    if command -v mcopy >/dev/null 2>&1; then
+        mcopy -i "$TEMP_FAT" -s "$ISO_ROOT/efi" "::/efi"
+        mcopy -i "$TEMP_FAT" -s "$ISO_ROOT/boot" "::/boot"
+        mv "$TEMP_FAT" "$IMAGE_FILE"
+        echo "  [OK] Created FAT32 image"
+    else
+        rm -f "$TEMP_FAT"
+        echo "  [WARN] Cannot copy files to FAT image without mtools"
+        echo "  [INFO] Install mtools: sudo apt install mtools"
+    fi
 
 else
-    echo "  WARNING: Neither mtools nor sgdisk found"
+    echo "  WARNING: mkfs.fat not found"
     echo "  Creating simple flat image..."
-
     dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
-
-    echo "  [INFO] For full UEFI support, install mtools: apt install mtools"
+    echo "  [INFO] For UEFI support, install: sudo apt install mtools dosfstools"
 fi
 
 echo ""
