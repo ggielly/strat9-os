@@ -1,6 +1,7 @@
-use x86_64::structures::paging::*;
-use x86_64::structures::paging::page_table::PageTableEntry;
-use x86_64::PhysAddr;
+use x86_64::{
+    structures::paging::{page_table::PageTableEntry, *},
+    PhysAddr,
+};
 
 pub const FRAMEBUFFER_BASE: u64 = 0xFFFF_DEAD_0000_0000;
 pub const ENVIRONMENT_BASE: u64 = 0xFFFF_BEEF_0000_0000;
@@ -59,7 +60,7 @@ pub unsafe fn create_page_tables(
 
     let (pml4_frame, pml4) = alloc_zeroed_frame();
 
-    // Identity map: PML4[0] → PDP[0..7] → 8 × 1GB huge pages = 0..8GB
+    // Identity map: PML4[0] => PDP[0..7] => 8 × 1GB huge pages = 0..8GB
     let (id_pdp_frame, id_pdp) = alloc_zeroed_frame();
     pml4[0].set_addr(
         id_pdp_frame.start_address(),
@@ -69,12 +70,11 @@ pub unsafe fn create_page_tables(
     for i in 0..8u64 {
         id_pdp[i as usize].set_addr(
             PhysAddr::new(i * 0x4000_0000),
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE
-                | PageTableFlags::HUGE_PAGE | PageTableFlags::NO_EXECUTE,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::HUGE_PAGE,
         );
     }
 
-    // Higher-half kernel: PML4[511] → PDP[510]
+    // Higher-half kernel: PML4[511] => PDP[510]
     {
         let (pdp_frame, pdp) = alloc_zeroed_frame();
         pml4[511].set_addr(
@@ -90,7 +90,7 @@ pub unsafe fn create_page_tables(
 
             for pt_idx in 0..512u64 {
                 let offset = pd_idx_inner * 512 * PAGE_SIZE + pt_idx * PAGE_SIZE;
-                if offset >= kernel_size {
+                if offset >= kernel_size + 0x200000 {
                     break;
                 }
                 let phys = kernel_phys + offset;
@@ -112,7 +112,7 @@ pub unsafe fn create_page_tables(
         );
     }
 
-    // Framebuffer: PML4[445] → PDP[180]
+    // Framebuffer: PML4[445] => PDP[180]
     if framebuffer_phys != 0 && framebuffer_size > 0 {
         let (fb_pdp_frame, fb_pdp) = alloc_zeroed_frame();
         pml4[445].set_addr(
@@ -131,8 +131,10 @@ pub unsafe fn create_page_tables(
             if page_phys % LARGE_PAGE_SIZE == 0 {
                 pd[pd_idx_inner].set_addr(
                     PhysAddr::new(page_phys),
-                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE
-                        | PageTableFlags::HUGE_PAGE | PageTableFlags::NO_EXECUTE
+                    PageTableFlags::PRESENT
+                        | PageTableFlags::WRITABLE
+                        | PageTableFlags::HUGE_PAGE
+                        | PageTableFlags::NO_EXECUTE
                         | PageTableFlags::WRITE_THROUGH,
                 );
                 mapped += LARGE_PAGE_SIZE;
@@ -148,8 +150,10 @@ pub unsafe fn create_page_tables(
                     }
                     pt[pt_idx as usize].set_addr(
                         PhysAddr::new(pt_phys),
-                        PageTableFlags::PRESENT | PageTableFlags::WRITABLE
-                            | PageTableFlags::NO_EXECUTE | PageTableFlags::WRITE_THROUGH,
+                        PageTableFlags::PRESENT
+                            | PageTableFlags::WRITABLE
+                            | PageTableFlags::NO_EXECUTE
+                            | PageTableFlags::WRITE_THROUGH,
                     );
                     pt_phys += PAGE_SIZE;
                     pt_mapped += PAGE_SIZE;
@@ -171,7 +175,7 @@ pub unsafe fn create_page_tables(
         );
     }
 
-    // Environment: PML4[381] → PDP[444]
+    // Environment: PML4[381] => PDP[444]
     if env_phys != 0 && env_size > 0 {
         let (env_pdp_frame, env_pdp) = alloc_zeroed_frame();
         pml4[381].set_addr(
@@ -196,8 +200,7 @@ pub unsafe fn create_page_tables(
                 }
                 pt[pt_idx as usize].set_addr(
                     PhysAddr::new(pt_phys),
-                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE
-                        | PageTableFlags::NO_EXECUTE,
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
                 );
                 pt_phys += PAGE_SIZE;
                 pt_mapped += PAGE_SIZE;
@@ -221,12 +224,7 @@ pub unsafe fn create_page_tables(
     pml4_frame.start_address().as_u64()
 }
 
-pub unsafe fn context_switch(
-    pml4_phys: u64,
-    stack_top: u64,
-    entry: u64,
-    args: u64,
-) -> ! {
+pub unsafe fn context_switch(pml4_phys: u64, stack_top: u64, entry: u64, args: u64) -> ! {
     unsafe {
         core::arch::asm!(
             "xor rbp, rbp",
