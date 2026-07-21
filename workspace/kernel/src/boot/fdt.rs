@@ -222,6 +222,7 @@ unsafe fn parse_root_properties(fdt: &FdtHeader) -> (u32, u32) {
 /// Parse /memory nodes to build the memory map.
 ///
 /// Returns a slice into the static [`DTB_MEMORY_MAP`].
+#[allow(static_mut_refs)]
 unsafe fn parse_memory_nodes(
     fdt: &FdtHeader,
     addr_cells: u32,
