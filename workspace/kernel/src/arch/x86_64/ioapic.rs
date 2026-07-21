@@ -188,7 +188,7 @@ pub fn route_irq(gsi: u32, lapic_id: u32, vector: u8, trigger: u8, polarity: u8)
 
 /// Route a legacy ISA IRQ, applying MADT interrupt source overrides.
 ///
-/// This handles the common case of IRQ0→GSI2 remapping on QEMU q35.
+/// This handles the common case of IRQ0=>GSI2 remapping on QEMU q35.
 pub fn route_legacy_irq(
     irq: u8,
     lapic_id: u32,

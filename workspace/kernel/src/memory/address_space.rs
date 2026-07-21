@@ -721,7 +721,7 @@ impl AddressSpace {
         // Initialize COW refcount.
         //
         // Order-0 frames come from FrameAllocOptions which stamps refcount=1
-        // via CAS(REFCOUNT_UNUSED → 1) : the frame is already "sole owner".
+        // via CAS(REFCOUNT_UNUSED => 1) : the frame is already "sole owner".
         // Huge pages (order > 0) are raw-allocated with REFCOUNT_UNUSED still
         // in the metadata; initialise explicitly to 1 here.
         //

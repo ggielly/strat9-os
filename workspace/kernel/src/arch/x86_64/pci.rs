@@ -867,11 +867,11 @@ impl PciDevice {
 // Insipired by asterinas OS's PCI scanner:
 //
 //  1. For each (bus, device), probe function 0 first.
-//     If vendor == 0xFFFF → skip all 8 functions (early exit).
+//     If vendor == 0xFFFF => skip all 8 functions (early exit).
 //
 //  2. Read the Header Type from the function-0 dword at offset 0x0C.
 //     Bit 7 (multi-function flag) tells whether functions 1..7 can exist.
-//     If bit 7 is clear → skip functions 1..7 entirely.
+//     If bit 7 is clear => skip functions 1..7 entirely.
 //
 //  3. If header_type & 0x7F == 0x01 (PCI-to-PCI bridge), read the
 //     secondary bus number and enqueue it.  The `seen_buses` bitmap
@@ -955,7 +955,7 @@ impl Iterator for PciScanner {
             // --- Function 0: fast vendor check + early exit ---
             if current_function == 0 {
                 // Single dword read: vendor+device at offset 0x00.
-                // If 0xFFFF → no device at this slot, skip all 8 functions.
+                // If 0xFFFF => no device at this slot, skip all 8 functions.
                 let word00 = raw_config_read(bus, self.device, 0, 0x00);
                 let vendor_id = (word00 & 0xFFFF) as u16;
                 if is_absent_vendor(vendor_id) {

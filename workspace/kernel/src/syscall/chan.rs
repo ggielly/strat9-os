@@ -37,7 +37,7 @@ pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
     });
 
     log::debug!(
-        "syscall: CHAN_CREATE(cap={}) → chan={} handle={}",
+        "syscall: CHAN_CREATE(cap={}) => chan={} handle={}",
         cap,
         chan_id,
         cap_id.as_u64()
@@ -153,6 +153,6 @@ pub fn sys_chan_close(handle: u64) -> Result<u64, SyscallError> {
     debug_assert_eq!(cap.resource_type, ResourceType::Channel);
     crate::capability::release_capability(&cap, Some(task.id));
 
-    log::debug!("syscall: CHAN_CLOSE(handle={}) → chan={}", handle, chan_id);
+    log::debug!("syscall: CHAN_CLOSE(handle={}) => chan={}", handle, chan_id);
     Ok(0)
 }

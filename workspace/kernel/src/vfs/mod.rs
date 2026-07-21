@@ -13,9 +13,9 @@
 //!      ↓
 //! VFS::open() : path resolution
 //!      ↓
-//! MountTable::resolve() → ("/net" → IpcScheme, "tcp/0")
+//! MountTable::resolve() => ("/net" => IpcScheme, "tcp/0")
 //!      ↓
-//! IpcScheme::open("tcp/0") → IPC message to network stack
+//! IpcScheme::open("tcp/0") => IPC message to network stack
 //!      ↓
 //! OpenFile created with scheme reference + file_id
 //!      ↓
@@ -295,7 +295,7 @@ pub fn close(fd: u32) -> Result<(), SyscallError> {
     let fd_table = unsafe { &mut *task.process.fd_table.get() };
     let _file = fd_table.remove(fd)?;
     Ok(())
-    // _file (Arc<OpenFile>) is dropped here; if refcount → 0, Drop fires → scheme.close()
+    // _file (Arc<OpenFile>) is dropped here; if refcount => 0, Drop fires => scheme.close()
 }
 
 /// Seek within a file.
@@ -375,7 +375,7 @@ pub fn create_background_stdin() -> Arc<OpenFile> {
     let pipe_scheme = get_pipe_scheme();
     let (base_id, pipe) = pipe_scheme.create_pipe();
 
-    // Close write end now (refcount → 0 → write_closed = true).
+    // Close write end now (refcount => 0 => write_closed = true).
     // Subsequent reads on the read end will return EOF immediately.
     pipe.close_write();
 
@@ -843,7 +843,7 @@ fn read_user_path(path_ptr: u64, path_len: u64) -> Result<alloc::string::String,
 
 /// Resolve a userspace path to an absolute path and enforce silo policy.
 ///
-/// Combines: read_user_path → resolve against CWD → silo enforce.
+/// Combines: read_user_path => resolve against CWD => silo enforce.
 /// Used by most syscall handlers to avoid duplicating this 4-line pattern.
 fn resolve_for_syscall(
     path_ptr: u64,

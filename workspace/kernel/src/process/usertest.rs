@@ -84,7 +84,7 @@ pub fn create_user_test_task() {
 
     // Step 4: Write machine code into the code page.
     // We need to write via the HHDM mapping since the user AS isn't active.
-    // Translate user vaddr → phys → HHDM virt for writing.
+    // Translate user vaddr => phys => HHDM virt for writing.
     let code_phys = user_as.translate(VirtAddr::new(USER_CODE_ADDR));
     let code_phys = match code_phys {
         Some(p) => p,

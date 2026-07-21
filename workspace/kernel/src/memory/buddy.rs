@@ -8,7 +8,7 @@
 // `mark_block_free()` stamps REFCOUNT_UNUSED on every free path.
 // `mark_block_allocated()` leaves refcount untouched (still REFCOUNT_UNUSED)
 // so that `FrameAllocOptions::allocate()` can perform a fail-fast
-// CAS(REFCOUNT_UNUSED → 1) that catches double-free / free-list corruption
+// CAS(REFCOUNT_UNUSED => 1) that catches double-free / free-list corruption
 // immediately rather than silently aliasing memory.
 
 #[allow(unused_imports)]
@@ -1679,7 +1679,7 @@ impl BuddyAllocator {
             meta.set_flags(Self::allocated_flags_for(migratetype));
             meta.set_order(order);
             // Leave refcount as REFCOUNT_UNUSED; FrameAllocOptions::allocate()
-            // will perform CAS(REFCOUNT_UNUSED → 1) as the fail-fast handoff.
+            // will perform CAS(REFCOUNT_UNUSED => 1) as the fail-fast handoff.
         }
     }
 
@@ -2317,7 +2317,7 @@ fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
             local_cached_inc_phys(frame.start_address.as_u64(), migratetype);
         } else {
             // Still full after spilling : the incoming frame joins the spill batch.
-            // It will be marked free by free_phys_batch → free_to_zone.
+            // It will be marked free by free_phys_batch => free_to_zone.
             spill[spill_len] = frame.start_address.as_u64();
             spill_len += 1;
         }

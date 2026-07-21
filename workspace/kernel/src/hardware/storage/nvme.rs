@@ -43,7 +43,11 @@ fn rdtsc() -> u64 {
 /// Return the calibrated TSC frequency in KHz, or a fallback (3 GHz).
 fn tsc_khz() -> u64 {
     let khz = boot_timestamp::tsc_khz();
-    if khz > 0 { khz } else { 3_000_000 }
+    if khz > 0 {
+        khz
+    } else {
+        3_000_000
+    }
 }
 
 /// Convert TSC ticks to approximate milliseconds using calibrated frequency.
@@ -696,7 +700,7 @@ impl NvmeController {
                 data.push(ptr::read_volatile(virt.add(i)));
             }
         }
-        // frame dropped here → physical memory freed
+        // frame dropped here => physical memory freed
         Ok(data)
     }
 
@@ -1170,7 +1174,12 @@ pub fn init() {
             Ok(mut controller) => {
                 controller.set_irq_line(irq);
                 NVME_IRQ_LINE.store(vector, Ordering::Relaxed);
-                log::info!("NVMe: {} initialized, IRQ={} vector={:#x}", name, irq, vector);
+                log::info!(
+                    "NVMe: {} initialized, IRQ={} vector={:#x}",
+                    name,
+                    irq,
+                    vector
+                );
                 NVME_CONTROLLERS
                     .lock()
                     .push(Arc::new(Mutex::new(controller)));

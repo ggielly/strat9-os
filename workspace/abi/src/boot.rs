@@ -8,7 +8,7 @@
 //! # Boot flow
 //!
 //! ```text
-//! UEFI/BIOS → bootloader → kernel_main(KernelArgs)
+//! UEFI/BIOS => bootloader => kernel_main(KernelArgs)
 //! ```
 //!
 //! The bootloader populates `KernelArgs` in a reserved memory region,
@@ -24,10 +24,10 @@
 //! # Virtual memory layout (BOOTBOOT-inspired)
 //!
 //! ```text
-//! 0xFFFF_DEAD_0000_0000  → Framebuffer (read-only after boot)
-//! 0xFFFF_BEEF_0000_0000  → Environment string (key=value)
-//! 0xFFFFFFFF_8000_0000  → Kernel code/data
-//! 0x0000_0000_0000_0000  → Identity map (first 4GB)
+//! 0xFFFF_DEAD_0000_0000  => Framebuffer (read-only after boot)
+//! 0xFFFF_BEEF_0000_0000  => Environment string (key=value)
+//! 0xFFFFFFFF_8000_0000  => Kernel code/data
+//! 0x0000_0000_0000_0000  => Identity map (first 4GB)
 //! ```
 //!
 //! # Example (kernel side)
@@ -64,7 +64,7 @@
 use zerocopy::{FromBytes, IntoBytes};
 
 /// ABI version for the boot handoff structure.
-pub const STRAT9_BOOT_ABI_VERSION: u32 = 3;
+pub const STRAT9_BOOT_ABI_VERSION: u32 = 4;
 
 /// Magic number validating the boot handoff (`"ST9B"` in ASCII).
 pub const STRAT9_BOOT_MAGIC: u32 = 0x5354_3942; // "ST9B"
@@ -137,10 +137,13 @@ pub struct KernelArgs {
     pub framebuffer_green_mask_shift: u8,
     pub framebuffer_blue_mask_size: u8,
     pub framebuffer_blue_mask_shift: u8,
+    // --- BSS region ---
+    pub bss_virt_base: u64,
+    pub bss_virt_size: u64,
 }
 
-// Ensure struct is exactly 116 bytes with no padding
-const _: () = assert!(core::mem::size_of::<KernelArgs>() == 116);
+// Ensure struct is exactly 132 bytes with no padding
+const _: () = assert!(core::mem::size_of::<KernelArgs>() == 132);
 
 impl KernelArgs {
     /// Iterator over the memory regions described by this boot handoff.
@@ -252,8 +255,8 @@ impl MemoryKind {
     pub const Reserved: Self = Self(3);
 }
 
-// ABI size assertions (packed: no padding, 116 bytes)
-const _: () = assert!(core::mem::size_of::<KernelArgs>() == 116);
+// ABI size assertions (packed: no padding, 132 bytes with BSS fields)
+const _: () = assert!(core::mem::size_of::<KernelArgs>() == 132);
 const _: () = assert!(core::mem::align_of::<KernelArgs>() == 1);
 static_assertions::assert_eq_size!(MemoryRegion, [u8; 24]);
 static_assertions::const_assert_eq!(core::mem::align_of::<MemoryRegion>(), 8);

@@ -153,7 +153,7 @@ fn run_pipe_suite() -> bool {
     record("multiple writes, single read", s, &mut passed, &mut total);
 
     //  4. close write-end, read returns EOF ====================================================================================================
-    log_section("4. CLOSE WRITE-END → EOF");
+    log_section("4. CLOSE WRITE-END => EOF");
     let mut s = true;
     match vfs::pipe() {
         Ok((rfd, wfd)) => {
@@ -186,7 +186,7 @@ fn run_pipe_suite() -> bool {
             s = false;
         }
     }
-    record("close write-end → EOF", s, &mut passed, &mut total);
+    record("close write-end => EOF", s, &mut passed, &mut total);
 
     //  5. dup on pipe read-end ======================================================================================================================================================
     log_section("5. DUP PIPE READ-END");

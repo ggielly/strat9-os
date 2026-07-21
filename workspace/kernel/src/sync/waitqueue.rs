@@ -18,11 +18,11 @@
 //! Correct pattern (what wait_until does internally):
 //!   loop {
 //!       hold waiters lock
-//!       check condition → return if true
+//!       check condition => return if true
 //!       push self to waiters (lock still held)
 //!       release waiters lock
 //!       block_current_task()            ← wake_pending flag handles late wakeups
-//!       // woken → re-check condition
+//!       // woken => re-check condition
 //!   }
 //! ```
 //!

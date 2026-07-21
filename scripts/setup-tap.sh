@@ -6,8 +6,8 @@
 #   sudo ./setup-tap.sh teardown  # tear down everything
 #
 # Host  : 10.0.2.1/24   (tap0)
-# Guest : DHCP → 10.0.2.15/24, gateway 10.0.2.1
-# IPv6  : SLAAC → fd00::2/64 via router advertisements on tap0
+# Guest : DHCP => 10.0.2.15/24, gateway 10.0.2.1
+# IPv6  : SLAAC => fd00::2/64 via router advertisements on tap0
 
 set -euo pipefail
 
@@ -93,7 +93,7 @@ stop_dnsmasq() {
     pkill -f "dnsmasq.*interface=$TAP_IF" 2>/dev/null || true
 }
 
-# ── radvd (IPv6 Router Advertisements → SLAAC) ──────────────────────
+# ── radvd (IPv6 Router Advertisements => SLAAC) ──────────────────────
 
 write_radvd_conf() {
     cat > "$RADVD_CONF" <<EOF

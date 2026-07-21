@@ -513,7 +513,7 @@ unsafe fn walk_page_tables_executable(vaddr: u64, cr3_phys: u64, hhdm: u64) -> R
     }
     if pml4_entry & 4 != 0 {
         return Err(());
-    } // U/S=1 → reject
+    } // U/S=1 => reject
 
     // PDPT: check present + U/S
     let pdpt_phys = pml4_entry & 0x000F_FFFF_FFFF_F000;
@@ -525,13 +525,13 @@ unsafe fn walk_page_tables_executable(vaddr: u64, cr3_phys: u64, hhdm: u64) -> R
     }
     if pdpt_entry & 4 != 0 {
         return Err(());
-    } // U/S=1 → reject
+    } // U/S=1 => reject
 
     // 1 GiB page? Check NX + U/S
     if pdpt_entry & (1 << 7) != 0 {
         if pdpt_entry & (1 << 63) != 0 {
             return Err(());
-        } // NX=1 → reject
+        } // NX=1 => reject
         return Ok(true);
     }
 
@@ -545,13 +545,13 @@ unsafe fn walk_page_tables_executable(vaddr: u64, cr3_phys: u64, hhdm: u64) -> R
     }
     if pd_entry & 4 != 0 {
         return Err(());
-    } // U/S=1 → reject
+    } // U/S=1 => reject
 
     // 2 MiB page? Check NX
     if pd_entry & (1 << 7) != 0 {
         if pd_entry & (1 << 63) != 0 {
             return Err(());
-        } // NX=1 → reject
+        } // NX=1 => reject
         return Ok(true);
     }
 
@@ -565,10 +565,10 @@ unsafe fn walk_page_tables_executable(vaddr: u64, cr3_phys: u64, hhdm: u64) -> R
     }
     if pt_entry & 4 != 0 {
         return Err(());
-    } // U/S=1 → reject user page
+    } // U/S=1 => reject user page
     if pt_entry & (1 << 63) != 0 {
         return Err(());
-    } // NX=1 → reject
+    } // NX=1 => reject
 
     Ok(true)
 }
@@ -616,7 +616,7 @@ fn n3_prepare_migration(
     // Layout: [handler_stack_top - 8] = recv_handler (return address for ret).
     //
     // SAFETY: handler_stack_top points to the transport's dedicated stack page,
-    // allocated in new(). The CAS state machine (Ready→Active) ensures exclusive
+    // allocated in new(). The CAS state machine (Ready=>Active) ensures exclusive
     // access. The -8 offset places the handler address as if it were pushed.
     let trampoline_top = (handler_stack_top - 8) as *mut u64;
     unsafe {
@@ -631,7 +631,7 @@ fn n3_prepare_migration(
     let msg_len = shared_msg_write(msg_buf, msg)?;
     frame.msg_len = msg_len;
 
-    // CAS Ready → Active. Must succeed before touching generation.
+    // CAS Ready => Active. Must succeed before touching generation.
     if frame
         .state
         .compare_exchange(
@@ -778,11 +778,11 @@ pub unsafe extern "C" fn n3b_migrate_asm(frame: *mut MigrationFrame) {
         // sets src_ctx.rip before calling us. See §11.2 for the contract.
         // ── Phase 2: CLI (<3 instr) + CR3 switch ──
         // We need a 3 instructions **MAX** between CLI and CR3 write.
-        // Here: mov rax (1) → cli (2) → mov cr3 (3). Satisfied.
+        // Here: mov rax (1) => cli (2) => mov cr3 (3). Satisfied.
         // After CR3 switch, we restore dst_ctx with interrupts still disabled.
         // The 8 restore instructions + pushfq/popfq/sti happen AFTER the CR3
         // switch in the receiver's address space : this is intentional and does
-        // not violate the ≤3 instruction window (which only covers CLI→CR3).
+        // not violate the ≤3 instruction window (which only covers CLI=>CR3).
         "mov rax, [rdi + 0xD8]", // dst_ctx.cr3_pcid (at 0x80+0x58=0xD8)
         "cli",
         "mov cr3, rax",
@@ -910,9 +910,9 @@ pub unsafe extern "C" fn n3_migrate_ipi_entry(rdi: *mut u8) -> ! {
         "mov rcx, [rdi + 0x18]",        // original CS (kernel CS = 0x08)
         "mov rdx, [rdi + 0x00]",        // original SS (0 for Ring 0)
 
-        "mov rsi, [rax + 0x48]",        // src_ctx.rsp  → sender's kernel RSP
+        "mov rsi, [rax + 0x48]",        // src_ctx.rsp  => sender's kernel RSP
         "mov r8,  [rax + 0x40]",        // src_ctx.rflags
-        "mov r9,  [rax + 0x50]",        // src_ctx.rip  → sender's return address
+        "mov r9,  [rax + 0x50]",        // src_ctx.rip  => sender's return address
 
         "mov [rdi + 0x00], rdx",        // SS  = original (Ring 0)
         "mov [rdi + 0x08], rsi",        // RSP = sender's kernel stack
@@ -1004,13 +1004,13 @@ fn watchdog_unregister(frame_idx: usize) {
 ///
 /// For each registered frame in Active state, checks whether the migration
 /// has exceeded the watchdog timeout. If so:
-/// 1. Transitions Active → Stalled (CAS)
-/// 2. Attempts recovery: Stalled → Reclaiming → Ready
+/// 1. Transitions Active => Stalled (CAS)
+/// 2. Attempts recovery: Stalled => Reclaiming => Ready
 /// 3. Logs the incident
 ///
 /// Recovery resets the frame so it can be reused for future migrations.
 /// The sender that initiated the stalled migration will see `WouldBlock` on
-/// its next `send()` attempt (CAS Ready→Active fails if another sender
+/// its next `send()` attempt (CAS Ready=>Active fails if another sender
 /// claimed the frame first).
 pub fn n3_watchdog_tick() {
     let now = unsafe { crate::arch::rdtsc() };
@@ -1030,7 +1030,7 @@ pub fn n3_watchdog_tick() {
             continue;
         }
 
-        // Timeout detected: attempt Active → Stalled → Reclaiming → Ready.
+        // Timeout detected: attempt Active => Stalled => Reclaiming => Ready.
         let cas_result = frame.state.compare_exchange(
             MigrationState::Active as u8,
             MigrationState::Stalled as u8,
@@ -1049,14 +1049,14 @@ pub fn n3_watchdog_tick() {
             frame.generation.load(Ordering::Acquire),
         );
 
-        // Attempt recovery: Stalled → Reclaiming → Ready.
+        // Attempt recovery: Stalled => Reclaiming => Ready.
         watchdog_recover(frame);
     }
 }
 
 /// Recover a stalled frame : reset to Ready via atomic CAS transitions.
 fn watchdog_recover(frame: &MigrationFrame) {
-    // Transition Stalled → Reclaiming (atomic CAS).
+    // Transition Stalled => Reclaiming (atomic CAS).
     if frame
         .state
         .compare_exchange(
@@ -1074,7 +1074,7 @@ fn watchdog_recover(frame: &MigrationFrame) {
         "N3: recovering stalled frame, generation={}",
         frame.generation.load(Ordering::Acquire)
     );
-    // Transition Reclaiming → Ready (atomic store, no contention expected).
+    // Transition Reclaiming => Ready (atomic store, no contention expected).
     frame
         .state
         .store(MigrationState::Ready as u8, Ordering::Release);
@@ -1334,7 +1334,7 @@ impl IpcTransport for N3Transport {
 
 impl IpcProducer for N3Transport {
     fn send(&self, msg: &[u8]) -> Result<(), IpcError> {
-        // SAFETY: CAS state machine (Ready→Active) provides logical exclusivity.
+        // SAFETY: CAS state machine (Ready=>Active) provides logical exclusivity.
         // The &mut is scoped to this function; after CAS, only the ASM primitive
         // accesses the frame via raw pointers. Technically UB under Stacked Borrows,
         // but acceptable for a research kernel prototype where CAS guarantees
@@ -1463,7 +1463,7 @@ impl IpcConsumer for N3Transport {
 
         // Signal completion: set state = Ready (spec §15 step 6).
         // This allows the sender (or next sender) to reuse the frame.
-        // The sender's send() will CAS Ready→Active to claim it.
+        // The sender's send() will CAS Ready=>Active to claim it.
         // NOTE: msg_len is intentionally NOT cleared : the next sender's
         // prepare_migration() overwrites it when writing the new message.
         frame

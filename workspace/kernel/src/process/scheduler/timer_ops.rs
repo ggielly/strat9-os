@@ -144,7 +144,7 @@ pub fn timer_tick() {
 /// The `BLOCKED_TASKS` lock is held **only** during the scan + re-enqueue phase.
 /// The lock is explicitly dropped before sending IPIs (which may acquire
 /// per-CPU data) and before any `Arc<Task>` drop (which reaches
-/// `KernelStack::drop → free_frames → buddy_alloc.lock()`).
+/// `KernelStack::drop => free_frames => buddy_alloc.lock()`).
 ///
 /// To guarantee this, every `Arc<Task>` removed from `blocked_tasks` is
 /// moved into the `deferred_drops` array. Those Arcs are dropped after the
@@ -227,7 +227,7 @@ fn check_wake_deadlines(current_time_ns: u64) {
         // --- end critical section ---
     }
     // Drop orphaned task Arcs outside the scheduler lock so that
-    // KernelStack::drop → free_frames → buddy_alloc.lock() does not race
+    // KernelStack::drop => free_frames => buddy_alloc.lock() does not race
     // with any other GLOBAL_SCHED_STATE lock acquisition on this or another CPU.
     for slot in deferred_drops[..drop_count].iter_mut() {
         drop(slot.take());

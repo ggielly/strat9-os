@@ -189,7 +189,7 @@ pub fn handle_interrupt() {
 
         // N1 : check for scheduler flow-control hints (non-blocking).
         if let Some(event) = crate::ipc::n1::poll_nic_events() {
-            log::trace!("[net] N1 sched→NIC event: {:?}", event);
+            log::trace!("[net] N1 sched=>NIC event: {:?}", event);
         }
     } else {
         crate::serial_println!("[net] IRQ: N2 data plane not initialized");
@@ -254,7 +254,7 @@ pub fn list_interfaces() -> Vec<String> {
 ///
 /// Hook this into a kernel workqueue or periodic thread instead of
 /// the APIC timer tick : SpinLock::lock reads percpu data (GS:[0])
-/// which is unsafe during the swapgs→iretq window.
+/// which is unsafe during the swapgs=>iretq window.
 pub fn poll_all() {
     let guard = NET_DEVICES.read();
     for entry in guard.iter() {

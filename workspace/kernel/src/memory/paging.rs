@@ -38,7 +38,7 @@ use crate::{
 ///
 ///  1. Calls the buddy allocator for a raw order-0 frame.
 ///  2. CAS-claims the frame via the [`MetaSlot`](crate::memory::MetaSlot) refcount field
-///     (`REFCOUNT_UNUSED` → `1`).
+///     (`REFCOUNT_UNUSED` => `1`).
 ///  3. Zeros the 4 KiB with a single `ptr::write_bytes` through the HHDM.
 ///  4. Sets purpose flags on the [`MetaSlot`](crate::memory::MetaSlot) with `Release` ordering.
 ///  5. Stores `refcount = 1` with `Release` ordering so any future reader

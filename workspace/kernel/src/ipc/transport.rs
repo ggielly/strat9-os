@@ -370,7 +370,7 @@ const DECISION_MATRIX: [[TransportPolicyEntry; 3]; 3] = [
             ring_capacity: 256,
         },
         TransportPolicyEntry {
-            // User→User: maximum isolation via MMU thread migration.
+            // User=>User: maximum isolation via MMU thread migration.
             // N3 provides hermetic Ring 3 isolation without shared memory.
             level: TransportLevel::Mmu,
             ring_capacity: 0,

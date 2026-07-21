@@ -83,9 +83,9 @@ fn normalize_path(path: &str) -> String {
 
 /// Resolve `path` relative to the shell CWD.
 ///
-/// - Empty or `""` → current directory.
-/// - Starts with `/` → treated as absolute (normalized).
-/// - Otherwise → joined with CWD and normalized.
+/// - Empty or `""` => current directory.
+/// - Starts with `/` => treated as absolute (normalized).
+/// - Otherwise => joined with CWD and normalized.
 pub fn resolve_shell_path(path: &str) -> String {
     if path.is_empty() {
         return get_cwd();

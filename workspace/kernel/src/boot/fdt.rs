@@ -74,6 +74,8 @@ pub unsafe fn build_kernel_args_from_dtb(dtb_ptr: u64) -> KernelArgs {
         cmdline_len: 0,
         modules_base: 0,
         modules_size: 0,
+        bss_virt_base: 0,
+        bss_virt_size: 0,
     };
 
     if dtb_ptr == 0 {
@@ -99,7 +101,7 @@ pub unsafe fn build_kernel_args_from_dtb(dtb_ptr: u64) -> KernelArgs {
         size_cells
     );
 
-    // Parse memory nodes → memory map
+    // Parse memory nodes => memory map
     let regions = parse_memory_nodes(&fdt, addr_cells, size_cells);
     let count = regions.len();
     args.memory_map_base = regions.as_ptr() as u64;
@@ -361,11 +363,7 @@ fn derive_hhdm_offset(regions: &[MemoryRegion]) -> u64 {
 // ============================================================================
 
 /// Parse /chosen node for bootargs, initrd, stdout-path, uefi-systab.
-unsafe fn parse_chosen_node(
-    fdt: &FdtHeader,
-    args: &mut KernelArgs,
-    efi_systab_addr: &mut u64,
-) {
+unsafe fn parse_chosen_node(fdt: &FdtHeader, args: &mut KernelArgs, efi_systab_addr: &mut u64) {
     let struct_base = fdt.base_ptr + fdt.off_dt_struct as u64;
     let strings_base = fdt.base_ptr + fdt.off_dt_strings as u64;
     let struct_end = struct_base + fdt.size_dt_struct as u64;
@@ -422,7 +420,10 @@ unsafe fn parse_chosen_node(
                     }
                     b"linux,initrd-start" => {
                         let addr = read_prop_u64(prop_ptr, prop_len);
-                        crate::serial_println!("[fdt] initrd-start: {:#x} (FDT boot, module table not yet supported)", addr);
+                        crate::serial_println!(
+                            "[fdt] initrd-start: {:#x} (FDT boot, module table not yet supported)",
+                            addr
+                        );
                         // NOTE: FDT boot doesn't use the module table yet.
                         // The initrd is loaded but not registered as a module.
                     }

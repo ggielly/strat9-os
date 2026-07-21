@@ -523,7 +523,7 @@ pub fn sys_tgkill(tgid: u64, tid: u64, signum: u64) -> Result<u64, SyscallError>
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Resolve tgid → task.
+    // Resolve tgid => task.
     let task = get_task_by_pid(tgid as u32).ok_or(SyscallError::NotFound)?;
 
     // Verify the tid matches (single-threaded: task.tid == task.pid).

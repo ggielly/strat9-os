@@ -10,7 +10,7 @@ use x86_64::instructions::port::Port;
 /// Kernel timer frequency in Hz.
 ///
 /// All tick-to-time conversions must use this constant.
-/// 100 Hz → 10 ms per tick, good balance between latency and overhead.
+/// 100 Hz => 10 ms per tick, good balance between latency and overhead.
 pub const TIMER_HZ: u64 = 100;
 
 /// Nanoseconds per timer tick (derived from TIMER_HZ).
@@ -54,11 +54,11 @@ pub fn init_pit(frequency_hz: u32) {
 
     // Send command byte to configure PIT channel 0.
     // 0x34 = 0b00_11_010_0:
-    //   Bits [7:6] = 00  → Channel 0
-    //   Bits [5:4] = 11  → Access mode: lobyte then hibyte
-    //   Bits [3:1] = 010 → Mode 2 (Rate Generator): one IRQ per divisor clocks,
+    //   Bits [7:6] = 00  => Channel 0
+    //   Bits [5:4] = 11  => Access mode: lobyte then hibyte
+    //   Bits [3:1] = 010 => Mode 2 (Rate Generator): one IRQ per divisor clocks,
     //                      automatic reload, correct for periodic IRQ generation.
-    //   Bit  [0]   = 0   → Binary counting
+    //   Bit  [0]   = 0   => Binary counting
     //
     // Mode 2 (Rate Generator) is preferred over Mode 3 (Square Wave, 0x36):
     // Mode 3 halves the effective frequency when routed through IOAPIC because it
@@ -175,7 +175,7 @@ pub fn calibrate_apic_timer() -> u32 {
     // The PIT channel 2 gate must be LOW while programming the counter.
     // In mode 0, counting starts as soon as the count is loaded AND gate is
     // HIGH. If gate is already HIGH when we load the count, the 10 ms window
-    // begins before we can start the APIC timer → measurement is wrong.
+    // begins before we can start the APIC timer => measurement is wrong.
     //
     // Correct sequence:
     //   1. Gate LOW  : prevent counting while we program the PIT
@@ -287,8 +287,8 @@ pub fn calibrate_apic_timer() -> u32 {
 
     // Check for suspicious values
     // With div=16, ticks_10ms = APIC_bus_freq / 16 / 100.
-    // QEMU default APIC frequency is ~1 GHz → ~625,000 ticks/10ms.
-    // Real hardware with a 200 MHz bus → ~125,000 ticks/10ms.
+    // QEMU default APIC frequency is ~1 GHz => ~625,000 ticks/10ms.
+    // Real hardware with a 200 MHz bus => ~125,000 ticks/10ms.
     // Use wide bounds to support both real hardware and emulators.
     const MIN_EXPECTED_TICKS: u32 = 1_000; // extremely slow / throttled
     const MAX_EXPECTED_TICKS: u32 = 5_000_000; // very fast host or low divider
