@@ -268,8 +268,6 @@ fn efi_main() -> Status {
             .take(elf_info.segment_count)
             .map(|s| s.mem_size)
             .sum::<u64>(),
-        stack_base,
-        stack_size,
         acpi_rsdp_base: rsdp_addr,
         memory_map_base: mmap_region_base,
         memory_map_size: mmap_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,
@@ -295,6 +293,7 @@ fn efi_main() -> Status {
     let pml4_phys = unsafe {
         paging::create_page_tables(
             elf_info.segments[0].phys_addr,
+            elf_info.phys_end,
             elf_info.phys_end - elf_info.segments[0].phys_addr,
             fb_phys,
             fb_stride as u64 * fb_height as u64,

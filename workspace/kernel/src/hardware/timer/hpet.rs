@@ -175,7 +175,7 @@ pub fn num_timers() -> u8 {
 /// High-precision delay in microseconds.
 ///
 /// Reads `mmio_base` and `period_ns` once (single lock acquisition), then
-/// spins on the HPET main counter with direct volatile reads — no further
+/// spins on the HPET main counter with direct volatile reads : no further
 /// lock traffic in the hot loop.
 pub fn delay_us(us: u64) {
     if !is_available() {
@@ -202,7 +202,7 @@ pub fn delay_us(us: u64) {
         core::cmp::max(1, (us.saturating_mul(1000)) / period_ns)
     };
 
-    // Direct volatile read — no Mutex involved.
+    // Direct volatile read : no Mutex involved.
     let start = unsafe { hpet_read(mmio_base, HPET_MAIN_COUNTER) };
     while unsafe { hpet_read(mmio_base, HPET_MAIN_COUNTER) }.wrapping_sub(start) < ticks_needed {
         core::hint::spin_loop();

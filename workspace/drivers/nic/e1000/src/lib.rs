@@ -132,7 +132,7 @@ impl E1000Nic {
 
             // NOTE: VET (0x0008) and VFTA (0x5200+) writes are intentionally
             // skipped. On the 82540EM, offset 0x0008 is the read-only STATUS
-            // register — writing VET there triggers a VERIFY assertion in
+            // register : writing VET there triggers a VERIFY assertion in
             // VMware's e1000 emulation. The VFTA loop writes 128 entries to
             // register space that VMware's 82540EM model does not implement.
             // These are cosmetic (802.1Q is not used) so they are safe to omit.

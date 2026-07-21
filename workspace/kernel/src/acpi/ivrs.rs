@@ -1,4 +1,4 @@
-//! IVRS (I/O Virtualization Reporting Structure) — AMD IOMMU ACPI table.
+//! IVRS (I/O Virtualization Reporting Structure) : AMD IOMMU ACPI table.
 //!
 //! Defines the structures and parser for the ACPI IVRS table (signature `IVRS`),
 //! which describes AMD IOMMU hardware units, their capabilities, and which PCI
@@ -190,7 +190,7 @@ pub struct IvmdBlock {
     pub length_bytes: u64,
 }
 
-/// Raw IVMD block header — 24 bytes.
+/// Raw IVMD block header : 24 bytes.
 #[derive(Clone, Copy, Debug, FromBytes)]
 #[repr(C, packed)]
 struct RawIvmd {
@@ -315,7 +315,7 @@ impl<'a> IvrsEntryIter<'a> {
                 Some(block)
             }
             _ => {
-                // Unknown type — skip 4 bytes and continue.
+                // Unknown type : skip 4 bytes and continue.
                 self.offset += 4;
                 self.next_block()
             }
@@ -327,9 +327,9 @@ impl<'a> IvrsEntryIter<'a> {
 /// an IVMD (reserved memory definition).
 #[derive(Clone, Debug)]
 pub enum IvrsBlock {
-    /// I/O Virtualization Hardware Definition — one IOMMU unit.
+    /// I/O Virtualization Hardware Definition : one IOMMU unit.
     Ivhd(IvhdBlock),
-    /// I/O Virtualization Memory Definition — reserved memory region.
+    /// I/O Virtualization Memory Definition : reserved memory region.
     Ivmd(IvmdBlock),
 }
 
@@ -527,8 +527,10 @@ impl Ivrs {
 
     /// Dump a human-readable summary to the kernel log.
     pub fn dump(&self) {
-        let dev_entry_count = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.header.dev_entry_count)) };
-        let entry_offset = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.header.entry_offset)) };
+        let dev_entry_count =
+            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.header.dev_entry_count)) };
+        let entry_offset =
+            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.header.entry_offset)) };
         log::info!(
             "IVRS: Draint={} Coherent={} entries={} entry_offset={}",
             self.header.has_draint(),

@@ -255,7 +255,7 @@ impl BootVirtqueue {
         // Notify the device.
         core::ptr::write_volatile((device_base + REG_QUEUE_NOTIFY) as *mut u32, 0u32);
 
-        // Busy-poll for completion (boot context — no IRQs, no scheduler).
+        // Busy-poll for completion (boot context : no IRQs, no scheduler).
         let mut spins = 0u32;
         loop {
             let used_idx = core::ptr::read_volatile(&(*used_ptr).idx);

@@ -40,7 +40,7 @@ impl InputHandler {
 
         // 0xE0 prefix marks an extended scancode. The next byte carries
         // the actual code. Extended scancodes (e.g. right Ctrl = 0xE0 0x1D)
-        // are handled by treating 0xE0 as a prefix that we skip — the real
+        // are handled by treating 0xE0 as a prefix that we skip : the real
         // code follows on the next read.
         if scancode == 0xE0 {
             return None; // Prefix byte, next call has the real code.

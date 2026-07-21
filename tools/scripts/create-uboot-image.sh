@@ -73,9 +73,9 @@ cat > /tmp/boot.scr << 'SCRIPT_EOF'
 # Strat9-OS U-Boot boot script
 #
 # U-Boot conventions:
-#   ${kernel_addr_r}  — where to load the kernel ELF
-#   ${fdt_addr_r}     — where to place the device tree
-#   ${ramdisk_addr_r} — (unused — no initramfs)
+#   ${kernel_addr_r}  : where to load the kernel ELF
+#   ${fdt_addr_r}     : where to place the device tree
+#   ${ramdisk_addr_r} : (unused : no initramfs)
 
 setenv bootargs "console=ttyS0,115200"
 
@@ -87,7 +87,7 @@ load virtio 0:1 ${kernel_addr_r} /boot/kernel.elf
 # Fallback: use the built-in EFI payload DTB.
 fdt addr ${fdt_addr_r} || fdt addr ${fdtcontroladdr}
 
-# Boot the kernel ELF — passes DTB pointer in RDI.
+# Boot the kernel ELF : passes DTB pointer in RDI.
 # The bootm command reads the ELF header, loads segments,
 # parses the FDT, and jumps to the entry point.
 #
@@ -98,7 +98,7 @@ SCRIPT_EOF
 
 # Compile the script with mkimage (U-Boot tool)
 mkimage -C none -A x86_64 -T script -d /tmp/boot.scr /tmp/boot.scr.uimg 2>/dev/null || \
-    echo "  [WARN] mkimage not found — boot script not compiled"
+    echo "  [WARN] mkimage not found : boot script not compiled"
 
 if [ -f /tmp/boot.scr.uimg ]; then
     mcopy -i "$FAT_IMG" /tmp/boot.scr.uimg ::boot.scr.uimg

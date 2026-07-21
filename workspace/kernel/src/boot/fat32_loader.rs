@@ -6,7 +6,7 @@
 //!
 //! # Safety considerations
 //! All `unsafe` blocks are confined to ELF memory copy and are documented.
-//! The parser uses no global mutable state — all buffers are stack-local.
+//! The parser uses no global mutable state : all buffers are stack-local.
 
 use super::block_device::BlockDevice;
 
@@ -353,7 +353,7 @@ impl<'a, B: BlockDevice> Iterator for ClusterChainIter<'a, B> {
 }
 
 // ---------------------------------------------------------------------------
-// FatFs — main filesystem object
+// FatFs : main filesystem object
 // ---------------------------------------------------------------------------
 
 pub struct FatFs<'a, B: BlockDevice> {
@@ -535,7 +535,7 @@ impl<'a, B: BlockDevice> FatFs<'a, B> {
                 break;
             }
 
-            // Deleted entry — clear LFN state
+            // Deleted entry : clear LFN state
             if raw[0] == 0xE5 {
                 lfn_chars.clear();
                 continue;
@@ -554,7 +554,7 @@ impl<'a, B: BlockDevice> FatFs<'a, B> {
                     lfn_chars.clear();
                     lfn_checksum = chksum;
                 } else if lfn_checksum != chksum {
-                    // Checksum mismatch — broken LFN sequence, discard
+                    // Checksum mismatch : broken LFN sequence, discard
                     lfn_chars.clear();
                     continue;
                 }
@@ -572,7 +572,7 @@ impl<'a, B: BlockDevice> FatFs<'a, B> {
                         continue;
                     }
                     if let Some(c) = char::from_u32(ch16 as u32) {
-                        // Push in order — LFN entries arrive last-to-first,
+                        // Push in order : LFN entries arrive last-to-first,
                         // so we push each entry's chars in forward order,
                         // then reverse the entire collected sequence at the end.
                         let _ = lfn_chars.push(c);
@@ -859,7 +859,7 @@ pub fn load_all_modules<B: BlockDevice>(block_dev: &mut B) -> BootModules {
             continue;
         }
 
-        // Get display name — owns the buffer so no dangling reference
+        // Get display name : owns the buffer so no dangling reference
         let display = entry.name.display_name();
         let name_str = display.as_str();
 
@@ -940,7 +940,7 @@ fn load_elf_from_fat<B: BlockDevice>(
 
     // Allocate contiguous physical memory for the module
     // SAFETY: Layout is non-zero (file_size > 0 checked above) and aligned to 4096.
-    // The allocation is for boot module loading — memory is not freed (kernel lifetime).
+    // The allocation is for boot module loading : memory is not freed (kernel lifetime).
     let layout = core::alloc::Layout::from_size_align(file_size, 4096).ok()?;
     let ptr = unsafe { alloc::alloc::alloc(layout) };
     if ptr.is_null() {

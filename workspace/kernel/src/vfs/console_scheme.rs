@@ -15,7 +15,7 @@ use super::{
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static CONSOLE: SpinLock<Option<Arc<ConsoleScheme>>> = SpinLock::new(None);
 
-/// Kernel console scheme — thin redirect to serial/VGA.
+/// Kernel console scheme : thin redirect to serial/VGA.
 ///
 /// Architecture:
 /// - Writes always go to serial (for debug / early boot).
@@ -59,7 +59,7 @@ impl Scheme for ConsoleScheme {
     /// Performs the write operation.
     ///
     /// Boot mode: serial + VGA (when VGA hardware is present).
-    /// Runtime mode: serial only — the display server owns the framebuffer.
+    /// Runtime mode: serial only : the display server owns the framebuffer.
     /// TODO: skip VGA writes once the display server signals readiness.
     fn write(&self, _file_id: u64, _offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         if let Ok(s) = core::str::from_utf8(buf) {
