@@ -1029,11 +1029,9 @@ fn quirk_zero_irq_line(vendor_id: u16, device_id: u16, irq_line: u8) -> u8 {
         .iter()
         .any(|q| q.vendor_id == vendor_id && q.device_id == device_id)
     {
-        // Quirk: firmware reports 0xFF for a device that has IRQ 0 wired
         return 0;
     }
-    // Non-quirk device with 0xFF means "no interrupt" per PCI spec
-    0xFF
+    0
 }
 
 fn valid_header_type(header_type: u8) -> bool {

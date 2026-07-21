@@ -381,7 +381,14 @@ impl UhciController {
         (*qh_virt).head_link = 0x0000_0002; // terminate
         (*qh_virt).element_link = td_setup_phys as u32;
 
-        // Point frame 0 to QH
+        // Compute status TD physical address for completion polling
+        let status_td_phys = if has_data && data_len > 0 {
+            td_setup_phys + 64 // setup(32) + data(32) + status(32) at +64
+        } else {
+            td_setup_phys + 32 // setup(32) + status(32) at +32
+        };
+
+        // Point current frame to QH
         let frame_idx = self.frnum.read() as usize % 1024;
         let old_frame = core::ptr::read_volatile(self.frame_list.add(frame_idx));
         core::ptr::write_volatile(
@@ -389,20 +396,19 @@ impl UhciController {
             (qh_phys as u32 & 0xFFFFFFFE) | TD_LINK_QH,
         );
 
-        // Wait for completion
+        // Wait for completion: poll the status TD
+        let status_td_virt = phys_to_virt(status_td_phys) as *const UhciTD;
         let mut transferred = 0;
         for _ in 0..1_000_000u32 {
-            let token = core::ptr::read_volatile(core::ptr::addr_of!((*td_setup_virt).token));
+            let token = core::ptr::read_volatile(core::ptr::addr_of!((*status_td_virt).token));
             if token & TD_TOKEN_ACTIVE == 0 {
                 if dir_in && has_data && data_len > 0 {
                     if let Some(buf) = data_buf {
-                        // Read from data TD's buffer
+                        // Data is in the data TD's buffer (setup + 32 bytes)
                         let data_td_virt =
-                            phys_to_virt(((*td_setup_virt).link_ptr & TD_LINK_PTR_MASK) as u64)
-                                as *const UhciTD;
+                            phys_to_virt(td_setup_phys + 32) as *const UhciTD;
                         let data_buf_ptr =
-                            phys_to_virt((*data_td_virt).buffer as u64)
-                                as *const u8;
+                            phys_to_virt((*data_td_virt).buffer as u64) as *const u8;
                         core::ptr::copy_nonoverlapping(data_buf_ptr, buf.as_mut_ptr(), data_len);
                         transferred = data_len;
                     }

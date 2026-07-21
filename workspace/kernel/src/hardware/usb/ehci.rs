@@ -314,40 +314,43 @@ impl EhciController {
         let dir_in = (setup_data[0] & 0x80) != 0;
         let has_data = data_buf.is_some();
 
-        // Build QH for control transfer (head of async schedule)
-        // QH layout (32 bytes):
-        //   [0] next QH (terminate)
-        //   [1] next alt QH (terminate)
-        //   [2] token (active, data toggle=0)
-        //   [3] buffer pointer 0 (setup)
-        let endpoint = (1u32) << 16 // endpoint 0
-            | (max_packet & 0x7FF) << 16
-            | (device_addr as u32 & 0x7F);
-        qh_virt.add(0).write_volatile(0x0000_0002); // next: terminate
-        qh_virt.add(1).write_volatile(0x0000_0002); // alt next: terminate
-        qh_virt.add(2).write_volatile(td_phys as u32); // current TD
-        // Endpoint characteristics
+        // EHCI QH layout (48 bytes, 32-byte aligned):
+        //   +0x00: horizontal link pointer (next QH)
+        //   +0x04: endpoint characteristics
+        //   +0x08: endpoint capabilities
+        //   +0x0C: current TD pointer
+        //   +0x10: next TD pointer (vertical link)
+        //   +0x14: alternate next TD pointer
+        //   +0x18..+0x24: buffer pointer 0-3
+        qh_virt.add(0).write_volatile(0x0000_0002); // horizontal: terminate
+        // endpoint characteristics: device addr | ep 0 | head of reclaim=0 | max packet | direction
         qh_virt
-            .add(4)
-            .write_volatile((device_addr as u32) | (0u32 << 15) | (max_packet << 16));
-        qh_virt.add(5).write_volatile(0); // hub info
-        qh_virt.add(6).write_volatile(0); // split info
-        qh_virt.add(7).write_volatile(0); // hub mult
+            .add(1)
+            .write_volatile((device_addr as u32 & 0x7F) | ((max_packet & 0x7FF) << 16));
+        qh_virt.add(2).write_volatile(0); // endpoint capabilities
+        qh_virt.add(3).write_volatile(td_phys as u32); // current TD
+        qh_virt.add(4).write_volatile(td_phys as u32); // next TD
+        qh_virt.add(5).write_volatile(0x0000_0002); // alt next TD: terminate
 
-        // Build setup TD
-        // TD token: [2] = active, data toggle=0, 8 bytes, setup
+        // EHCI TD layout (32 bytes):
+        //   +0x00: next TD pointer
+        //   +0x04: alternate next TD pointer
+        //   +0x08: token
+        //   +0x0C..+0x18: buffer pointer 0-3
+
+        // Build setup TD (8 bytes, PID_SETUP=0x2D, DATA0)
         let setup_token = (1u32 << 31) // active
-            | (0u32 << 30) // data toggle = 0
-            | (0u32 << 16) // CERR = 3
-            | (3u32 << 10) // ISO=0, IOC=0, bytes 11:10 = 0
-            | (0u32 << 8) // CERR = 3
-            | (8u32); // 8 bytes
-        // Proper token: bit31=active, bit30=toggle(0), bits27:26=CERR(3), bits25:16=total bytes(8)
-        let setup_token = (1u32 << 31) | (0u32 << 30) | (3u32 << 26) | (8u32 << 16);
+            | (0u32 << 31) // toggle = 0
+            | (3u32 << 26) // CERR = 3
+            | (0u32 << 24) // page=0
+            | (0x2Du32 << 0) // PID: setup
+            | ((8u32 & 0x7FFF) << 16); // total bytes = 8
+        let setup_token = (1u32 << 31) | (0u32 << 31) | (3u32 << 26) | (0x2Du32) | (8u32 << 16);
+
         td_virt.add(0).write_volatile(0x0000_0002); // next: terminate
         td_virt.add(1).write_volatile(0x0000_0002); // alt next: terminate
         td_virt.add(2).write_volatile(setup_token);
-        td_virt.add(3).write_volatile(setup_buf_phys as u32);
+        td_virt.add(3).write_volatile(setup_buf_phys as u32); // buffer 0
 
         if has_data && data_len > 0 {
             // Allocate data buffer
@@ -362,44 +365,56 @@ impl EhciController {
                 }
             }
 
-            // Data TD
+            // Data TD (+0x20 from setup TD): toggle=1, PID IN/OUT
+            let data_pid: u32 = if dir_in { 0x69 } else { 0xE1 }; // IN or OUT
             let data_token = (1u32 << 31) // active
-                | (1u32 << 30) // data toggle = 1
+                | (1u32 << 31) // toggle = 1
                 | (3u32 << 26) // CERR = 3
-                | ((data_len as u32) << 16); // bytes
-            td_virt.add(4).write_volatile(0x0000_0002); // next: terminate
-            td_virt.add(5).write_volatile(0x0000_0002); // alt next
-            td_virt.add(6).write_volatile(data_token);
-            td_virt.add(7).write_volatile(data_buf_phys as u32);
+                | (data_pid) // PID
+                | (((data_len as u32) & 0x7FFF) << 16);
+            let data_td_virt = (td_virt as *mut u8).add(0x20) as *mut u32;
+            data_td_virt.add(0).write_volatile(0x0000_0002); // next: terminate
+            data_td_virt.add(1).write_volatile(0x0000_0002); // alt next: terminate
+            data_td_virt.add(2).write_volatile(data_token);
+            data_td_virt.add(3).write_volatile(data_buf_phys as u32);
 
-            // Status TD (toggle=0, one byte, IOC)
+            // Status TD (+0x40 from setup TD): toggle=0, 0 bytes, IOC
             let status_token = (1u32 << 31) // active
-                | (0u32 << 30) // data toggle = 0
+                | (0u32 << 31) // toggle = 0
                 | (3u32 << 26) // CERR = 3
                 | (0u32 << 16) // 0 bytes
                 | (1u32 << 24); // IOC
-            td_virt.add(8).write_volatile(0x0000_0002); // next: terminate
-            td_virt.add(9).write_volatile(0x0000_0002); // alt next
-            td_virt.add(10).write_volatile(status_token);
-            td_virt.add(11).write_volatile(0);
+            let status_td_virt = (td_virt as *mut u8).add(0x40) as *mut u32;
+            status_td_virt.add(0).write_volatile(0x0000_0002); // next: terminate
+            status_td_virt.add(1).write_volatile(0x0000_0002); // alt next: terminate
+            status_td_virt.add(2).write_volatile(status_token);
+            status_td_virt.add(3).write_volatile(0);
 
             // Chain: setup TD -> data TD -> status TD
-            td_virt.add(0).write_volatile((td_phys + 32) as u32); // next = data TD
-            td_virt.add(4).write_volatile((td_phys + 64) as u32); // next = status TD
+            td_virt.add(0).write_volatile((td_phys + 0x20) as u32);
+            data_td_virt.add(0).write_volatile((td_phys + 0x40) as u32);
+
+            // Update QH current TD and next TD to setup TD
+            qh_virt.add(3).write_volatile(td_phys as u32);
+            qh_virt.add(4).write_volatile(td_phys as u32);
         } else {
-            // Status-only transfer (toggle=0, IOC)
+            // Status-only TD (+0x20 from setup TD): toggle=1, 0 bytes, IOC
             let status_token = (1u32 << 31) // active
-                | (1u32 << 30) // data toggle = 1 (for status stage)
+                | (1u32 << 31) // toggle = 1
                 | (3u32 << 26) // CERR = 3
                 | (0u32 << 16) // 0 bytes
                 | (1u32 << 24); // IOC
-            td_virt.add(4).write_volatile(0x0000_0002); // next: terminate
-            td_virt.add(5).write_volatile(0x0000_0002); // alt next
-            td_virt.add(6).write_volatile(status_token);
-            td_virt.add(7).write_volatile(0);
+            let status_td_virt = (td_virt as *mut u8).add(0x20) as *mut u32;
+            status_td_virt.add(0).write_volatile(0x0000_0002); // next: terminate
+            status_td_virt.add(1).write_volatile(0x0000_0002); // alt next: terminate
+            status_td_virt.add(2).write_volatile(status_token);
+            status_td_virt.add(3).write_volatile(0);
 
             // Chain: setup TD -> status TD
-            td_virt.add(0).write_volatile((td_phys + 32) as u32); // next = status TD
+            td_virt.add(0).write_volatile((td_phys + 0x20) as u32);
+
+            qh_virt.add(3).write_volatile(td_phys as u32);
+            qh_virt.add(4).write_volatile(td_phys as u32);
         }
 
         // Link QH into async schedule (prepend)
@@ -419,15 +434,23 @@ impl EhciController {
             core::hint::spin_loop();
         }
 
-        // Poll for completion (TD inactive)
+        // Poll for completion: check the last TD in the chain (status TD)
+        let status_td_virt = if has_data && data_len > 0 {
+            (td_virt as *mut u8).add(0x40) as *mut u32
+        } else {
+            (td_virt as *mut u8).add(0x20) as *mut u32
+        };
+
         let mut transferred = 0;
         for _ in 0..1_000_000u32 {
-            let token = core::ptr::read_volatile(td_virt.add(2));
+            let token = core::ptr::read_volatile(status_td_virt.add(2));
             if token & (1u32 << 31) == 0 {
-                // TD completed
+                // Status TD completed — entire transfer done
                 if dir_in && has_data && data_len > 0 {
                     if let Some(buf) = data_buf {
-                        let src = phys_to_virt(setup_buf_phys + 8) as *const u8;
+                        let data_td_virt = (td_virt as *mut u8).add(0x20) as *const u32;
+                        let data_buf_phys = core::ptr::read_volatile(data_td_virt.add(3));
+                        let src = phys_to_virt(data_buf_phys as u64) as *const u8;
                         core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), data_len);
                         transferred = data_len;
                     }
