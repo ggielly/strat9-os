@@ -6,6 +6,10 @@ const PT_LOAD: u32 = 1;
 
 const KERNEL_PHYS_BASE: u64 = 0x100_000;
 const HIGHER_HALF_THRESHOLD: u64 = 0x8000_0000_0000;
+/// Extra space after file data to map BSS. The BSS segment's p_memsz
+/// covers the entire higher-half virtual range (2 GB), which is far too
+/// large. We only need enough physical pages for the actual statics.
+const BSS_MAP_EXTRA: u64 = 8 * 1024 * 1024; // 8 MiB
 
 #[derive(Copy, Clone)]
 pub struct Segment {
@@ -95,7 +99,7 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
             }
         }
 
-        let seg_end = phys_offset + p_filesz;
+        let seg_end = phys_offset + p_filesz + BSS_MAP_EXTRA;
         if seg_end > info.phys_end {
             info.phys_end = seg_end;
         }
