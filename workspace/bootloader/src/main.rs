@@ -62,6 +62,10 @@ fn efi_main() -> Status {
     });
 
     // Step 4: Parse ELF
+    uefi::system::with_stdout(|stdout| {
+        let _ = writeln!(stdout, "[boot] Parsing ELF...");
+    });
+
     let elf_info = elf::parse_elf64(kernel_data).expect("Failed to parse kernel ELF");
 
     uefi::system::with_stdout(|stdout| {

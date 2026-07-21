@@ -938,8 +938,8 @@ impl AhciController {
         pci_dev.enable_bus_master();
         pci_dev.enable_memory_space();
 
-        // Read PCI interrupt line before we need it later
-        let irq_line = pci_dev.read_config_u8(pci::config::INTERRUPT_LINE);
+        // Try MSI/MSI-X first; fall back to INTx line.
+        let (_irq_line, irq_vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
 
         // BAR5 = ABAR (AHCI Base Memory Register)
         let abar_phys = pci_dev.read_bar_raw(5).ok_or(AhciError::BadAbar)?;
@@ -1073,14 +1073,14 @@ impl AhciController {
         // Store the ABAR virtual address and IRQ line in statics so the
         // interrupt handler can reach them without going through the controller lock.
         AHCI_ABAR_VIRT.store(abar_virt, Ordering::Relaxed);
-        AHCI_IRQ_LINE.store(irq_line, Ordering::Relaxed);
+        AHCI_IRQ_LINE.store(irq_vector, Ordering::Relaxed);
 
         // Enable global HBA interrupts (GHC.IE)
         // SAFETY: MMIO write : all port interrupts already enabled above
         let ghc = rd32(abar_virt, HBA_GHC);
         wr32(abar_virt, HBA_GHC, ghc | GHC_IE);
 
-        log::info!("AHCI: global interrupts enabled (IRQ line {})", irq_line);
+        log::info!("AHCI: global interrupts enabled (vector {:#x})", irq_vector);
 
         Ok(AhciController { abar_virt, ports })
     }
@@ -1221,8 +1221,8 @@ pub fn init() {
             log::info!("AHCI: controller ready");
 
             // Register IRQ handler in the IDT now that the controller is live.
-            let irq = AHCI_IRQ_LINE.load(Ordering::Relaxed);
-            crate::arch::idt::register_ahci_irq(irq);
+            let vector = AHCI_IRQ_LINE.load(Ordering::Relaxed);
+            crate::arch::x86_64::idt::register_ahci_irq(vector);
         }
         Err(AhciError::NoController) => {
             log::info!("AHCI: no controller found (not a SATA system?)");

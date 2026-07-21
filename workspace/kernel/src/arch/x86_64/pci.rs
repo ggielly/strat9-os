@@ -21,9 +21,16 @@ const CONFIG_DATA: u16 = 0xCFC;
 /// atomic w.r.t. other CPUs. Every config read/write must hold this lock.
 static PCI_IO_LOCK: SpinLock<()> = SpinLock::new(());
 
-/// Cached ECAM MMIO base for extended config space access (offsets >= 0x100).
-/// Set during `scan_ecam_devices()` when an MCFG table is present.
-static ECAM_BASE: SpinLock<Option<usize>> = SpinLock::new(None);
+/// A mapped ECAM region covering a range of buses.
+struct EcamRegion {
+    start_bus: u8,
+    end_bus: u8,
+    base_virt: usize,
+}
+
+/// Cached ECAM MMIO regions for extended config space access (offsets >= 0x100).
+/// Populated during `scan_ecam_devices()` when an MCFG table is present.
+static ECAM_REGIONS: SpinLock<Vec<EcamRegion>> = SpinLock::new(Vec::new());
 
 // ---------------------------------------------------------------------------
 // ECAM (PCIe Enhanced Configuration Access Mechanism) helpers
@@ -440,7 +447,7 @@ pub fn walk_ext_capabilities(dev: &PciDevice, cap_ptr: u16) -> Vec<(u16, u16)> {
 /// Extended capabilities are always at offsets >= 0x100 in PCIe config space.
 /// Requires ECAM support (MCFG ACPI table) to read.
 pub fn find_ext_capability(dev: &PciDevice, cap_id: u16) -> Option<u16> {
-    if ECAM_BASE.lock().is_none() {
+    if ECAM_REGIONS.lock().is_empty() {
         return None; // No ECAM available, cannot read extended config space
     }
 
@@ -720,10 +727,17 @@ impl PciDevice {
     ///
     /// Uses ECAM MMIO when available. Returns `None` if ECAM is not mapped.
     pub fn read_config_u32_ext(&self, offset: u16) -> Option<u32> {
-        let ecam = *ECAM_BASE.lock();
+        let regions = ECAM_REGIONS.lock();
+        let ecam = regions.iter().find_map(|r| {
+            if self.address.bus >= r.start_bus && self.address.bus <= r.end_bus {
+                Some(r.base_virt)
+            } else {
+                None
+            }
+        })?;
         Some(unsafe {
             ecam_read32(
-                ecam?,
+                ecam,
                 self.address.bus,
                 self.address.device,
                 self.address.function,
@@ -1015,9 +1029,11 @@ fn quirk_zero_irq_line(vendor_id: u16, device_id: u16, irq_line: u8) -> u8 {
         .iter()
         .any(|q| q.vendor_id == vendor_id && q.device_id == device_id)
     {
+        // Quirk: firmware reports 0xFF for a device that has IRQ 0 wired
         return 0;
     }
-    0
+    // Non-quirk device with 0xFF means "no interrupt" per PCI spec
+    0xFF
 }
 
 fn valid_header_type(header_type: u8) -> bool {
@@ -1224,8 +1240,12 @@ fn scan_ecam_devices() -> Vec<PciDevice> {
         memory::paging::ensure_identity_map_range(ecam_phys, region_size);
         let ecam_virt = crate::memory::phys_to_virt(ecam_phys) as usize;
 
-        // Cache ECAM base for extended config space reads
-        *ECAM_BASE.lock() = Some(ecam_virt);
+        // Cache ECAM region for extended config space reads
+        ECAM_REGIONS.lock().push(EcamRegion {
+            start_bus,
+            end_bus,
+            base_virt: ecam_virt,
+        });
 
         log::info!(
             "[PCI-ECAM] Region seg={} ecam={:#x} buses={}..{} virt={:#x}",
