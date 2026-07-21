@@ -1,24 +1,58 @@
 //! Boot protocol entry point.
 //!
-//! This module handles the kernel entry from the bootloader.
-//! The bootloader loads the kernel ELF and passes a Device Tree Blob (DTB) address.
+//! This module handles the kernel entry from the bootloader or PVH stub.
+//! The bootloader passes a pointer to a [`strat9_abi::boot::KernelArgs`] structure.
+//! PVH boot passes null — a minimal KernelArgs is built internally.
 //!
 //! # Boot flow
 //!
 //! ```text
 //! boot64.S (_start)
-//!   => save DTB, setup 8 KB bootstrap stack, clear BSS
-//!   => call kmain(dtb_ptr)
+//!   => save KernelArgs pointer, setup 8 KB bootstrap stack, clear BSS
+//!   => call kmain(args_ptr)
 //!     => enable SSE/OSXSAVE (CPU features)
 //!     => early serial output
-//!     => parse DTB → build KernelArgs
+//!     => read KernelArgs from pointer (bootloader) or build_minimal_args (PVH)
 //!     => call crate::kernel_main(args)
 //!       => (buddy allocator init)
 //!       => allocate 256 KB kernel stack
 //!       => switch_stack(new_stack, continue_init)
 //! ```
 
-use crate::{boot::fdt, serial_println};
+use crate::boot::fdt;
+
+/// Very early serial output using raw COM1 port I/O.
+/// Safe to call before any kernel subsystem is initialized.
+#[inline(always)]
+unsafe fn early_print(s: &[u8]) {
+    let thr: u16 = 0x3F8;
+    let lsr: u16 = 0x3F8 + 5;
+    for &b in s {
+        loop {
+            let status: u8;
+            core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack, preserves_flags));
+            if status & 0x20 != 0 { break; }
+        }
+        core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Write a u64 as hex to COM1 (no alloc, no fmt traits).
+unsafe fn early_print_hex(mut val: u64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    if val == 0 {
+        early_print(b"0");
+        return;
+    }
+    let mut buf = [0u8; 16];
+    let mut i = 16;
+    while val > 0 {
+        i -= 1;
+        buf[i] = HEX[(val & 0xf) as usize];
+        val >>= 4;
+    }
+    early_print(&buf[i..]);
+}
 
 /// Size of the real kernel stack allocated after buddy allocator init.
 pub const KERNEL_STACK_SIZE: usize = 256 * 1024;
@@ -37,62 +71,109 @@ pub fn kernel_elf_bytes() -> Option<&'static [u8]> {
     Some(unsafe { core::slice::from_raw_parts(base as *const u8, size) })
 }
 
-/// Enable SSE and OSXSAVE in CR0/CR4.
-///
-/// Called as early as possible in Rust, before any FPU/SIMD code runs.
-/// Moved out of boot64.S for audibility and testability.
+/// Enable SSE (OSFXSR, OSXMMEXCPT) in CR4.
 #[inline(always)]
 unsafe fn enable_cpu_features() {
-    // CR4: set OSFXSR (9) + OSXMMEXCPT (10) + OSXSAVE (18)
     let mut cr4: u64;
     core::arch::asm!("mov {}, cr4", out(reg) cr4);
-    cr4 |= 0x40600;
+    cr4 |= 0x600; // OSFXSR (9) | OSXMMEXCPT (10)
     core::arch::asm!("mov cr4, {}", in(reg) cr4);
 
-    // CR0: clear EM (2), set MP (1)
     let mut cr0: u64;
     core::arch::asm!("mov {}, cr0", out(reg) cr0);
-    cr0 &= !4;
-    cr0 |= 2;
+    cr0 &= !4; // Clear EM (bit 2)
+    cr0 |= 2;  // Set MP (bit 1)
     core::arch::asm!("mov cr0, {}", in(reg) cr0);
 }
 
 /// Kernel entry point called by the bootloader or PVH boot.
 ///
-/// For bootloader: rdi = DTB physical address
-/// For PVH: rdi = 0 (no DTB provided)
+/// For bootloader: rdi = pointer to [`strat9_abi::boot::KernelArgs`]
+/// For PVH: rdi = 0 (no KernelArgs provided; build a minimal set)
 ///
-/// Runs on the 8 KB bootstrap stack from boot64.S. All heavy work
-/// (DTB parsing, KernelArgs construction) happens here. The real kernel
-/// init and stack switch happen in `crate::kernel_main` after the buddy
-/// allocator is ready.
+/// Runs on the 8 KB bootstrap stack from boot64.S. The KernelArgs are
+/// read (or built) here. The real kernel init and stack switch happen
+/// in `crate::kernel_main` after the buddy allocator is ready.
 #[no_mangle]
 #[allow(static_mut_refs)]
-pub unsafe extern "C" fn kmain(dtb_ptr: u64) -> ! {
-    // Step 1: Enable CPU features (SSE/OSXSAVE) : no asm magic, auditable.
+pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
+    // Step 1: Very early serial output - before anything else.
+    // Just use raw writes without init (bootloader already set up COM1).
+    {
+        let thr: u16 = 0x3F8;
+        let s = b"[kmain] RAW entry\r\n";
+        for &b in s {
+            let mut lsr: u8;
+            core::arch::asm!("in al, dx", in("dx") 0x3F8 + 5, out("al") lsr, options(nostack, preserves_flags));
+            loop {
+                core::arch::asm!("in al, dx", in("dx") 0x3F8 + 5, out("al") lsr, options(nostack, preserves_flags));
+                if lsr & 0x20 != 0 { break; }
+            }
+            core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nostack, preserves_flags));
+        }
+    }
+
+    // Step 2: Enable CPU features (SSE/OSXSAVE) : no asm magic, auditable.
     enable_cpu_features();
 
-    // Step 2: Very early serial output
+    // Step 3: Serial port with crate
     {
         let mut early_port = uart_16550::SerialPort::new(0x3F8);
-        early_port.init();
         let _ = core::fmt::Write::write_str(
             &mut early_port,
             "[kmain] *** Strat9-OS kernel entry ***\r\n",
         );
     }
 
-    // Step 3: Parse DTB and build KernelArgs (runs on bootstrap stack)
-    let args = if dtb_ptr == 0 {
-        serial_println!("[kmain] PVH boot (no DTB)");
+    // Step 3: Obtain KernelArgs — either from the bootloader pointer or
+    //         build a minimal set for PVH.
+    //
+    // NOTE: We use raw COM1 port I/O for ALL output here. The global
+    // serial_println! and format_args! vtable dispatch may not work
+    // before the full kernel is initialized.
+    let args = if args_ptr == 0 {
+        early_print(b"[kmain] PVH boot (no args)\r\n");
         build_minimal_args()
     } else {
-        serial_println!("[kmain] DTB boot (dtb={:#x})", dtb_ptr);
-        fdt::build_kernel_args_from_dtb(dtb_ptr)
+        early_print(b"[kmain] Bootloader boot (args=0x");
+        early_print_hex(args_ptr);
+        early_print(b")\r\n");
+        // Read KernelArgs from the bootloader-provided pointer.
+        // The struct is #[repr(C, packed)] so we copy field-by-field.
+        let ptr = args_ptr as *const strat9_abi::boot::KernelArgs;
+        strat9_abi::boot::KernelArgs {
+            magic: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).magic)),
+            abi_version: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).abi_version)),
+            kernel_base: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).kernel_base)),
+            kernel_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).kernel_size)),
+            acpi_rsdp_base: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).acpi_rsdp_base)),
+            memory_map_base: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).memory_map_base)),
+            memory_map_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).memory_map_size)),
+            framebuffer_addr: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_addr)),
+            hhdm_offset: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).hhdm_offset)),
+            cmdline_ptr: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).cmdline_ptr)),
+            cmdline_len: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).cmdline_len)),
+            modules_base: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).modules_base)),
+            modules_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).modules_size)),
+            framebuffer_width: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_width)),
+            framebuffer_height: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_height)),
+            framebuffer_stride: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_stride)),
+            framebuffer_bpp: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_bpp)),
+            framebuffer_red_mask_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_red_mask_size)),
+            framebuffer_red_mask_shift: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_red_mask_shift)),
+            framebuffer_green_mask_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_green_mask_size)),
+            framebuffer_green_mask_shift: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_green_mask_shift)),
+            framebuffer_blue_mask_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_blue_mask_size)),
+            framebuffer_blue_mask_shift: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_blue_mask_shift)),
+            bss_virt_base: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).bss_virt_base)),
+            bss_virt_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).bss_virt_size)),
+        }
     };
 
     if args.magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
-        serial_println!("[kmain] ERROR: Bad KernelArgs magic: 0x{:08x}", unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) });
+        early_print(b"[kmain] ERROR: Bad KernelArgs magic: 0x");
+        early_print_hex(unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) } as u64);
+        early_print(b"\r\n");
         hlt_loop();
     }
 
@@ -100,15 +181,17 @@ pub unsafe extern "C" fn kmain(dtb_ptr: u64) -> ! {
     let memory_map_size = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_size)) };
     let framebuffer_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.framebuffer_addr)) };
     let acpi_rsdp_base = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.acpi_rsdp_base)) };
-    serial_println!(
-        "[kmain] KernelArgs: memory_map={:#x}/{:#x} fb={:#x} rsdp={:#x}",
-        memory_map_base,
-        memory_map_size,
-        framebuffer_addr,
-        acpi_rsdp_base,
-    );
+    early_print(b"[kmain] mmap=0x");
+    early_print_hex(memory_map_base);
+    early_print(b"/0x");
+    early_print_hex(memory_map_size);
+    early_print(b" fb=0x");
+    early_print_hex(framebuffer_addr);
+    early_print(b" rsdp=0x");
+    early_print_hex(acpi_rsdp_base);
+    early_print(b"\r\n");
 
-    // Step 4: Hand off to kernel_main (still on bootstrap stack).
+    // Step 5: Hand off to kernel_main (still on bootstrap stack).
     // kernel_main will allocate a real stack after buddy allocator init.
     crate::kernel_main(&args as *const _);
 }
@@ -149,5 +232,7 @@ fn build_minimal_args() -> super::entry::KernelArgs {
         cmdline_len: 0,
         modules_base: 0,
         modules_size: 0,
+        bss_virt_base: 0,
+        bss_virt_size: 0,
     }
 }

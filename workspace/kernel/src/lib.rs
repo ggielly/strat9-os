@@ -76,6 +76,10 @@ use core::panic::PanicInfo;
 const PAGE_SIZE: u64 = 4096;
 const MAX_BOOT_MMAP_REGIONS_WORK: usize = 1024;
 
+/// Static working buffer for the boot memory map (off stack to avoid overflow).
+static mut MMAP_WORK: [boot::entry::MemoryRegion; MAX_BOOT_MMAP_REGIONS_WORK] =
+    [null_region(); MAX_BOOT_MMAP_REGIONS_WORK];
+
 /// Global pointer to KernelArgs, set once during early boot.
 /// Components use this to access boot-time information (framebuffer, memory map, etc.).
 static mut BOOT_ARGS: Option<&'static boot::entry::KernelArgs> = None;
@@ -309,6 +313,21 @@ fn log_boot_module_magics(_stage: &str) {}
 
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
+    // Raw COM1 trace - works before any subsystem is initialized.
+    {
+        let thr: u16 = 0x3F8;
+        let lsr: u16 = 0x3F8 + 5;
+        let msg = b"[km] kernel_main enter\r\n";
+        for &b in msg {
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 { break; }
+            }
+            core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
+        }
+    }
+
     // Invariant: interrupts must stay disabled throughout kernel_main until the
     // scheduler is ready and the APIC timer is started (Asterinas pattern:
     // interrupts are only enabled once, at the very end of init).
@@ -317,43 +336,96 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         "interrupts must be disabled at boot entry"
     );
 
+    // Trace: raw COM1 after debug_assert
+    {
+        let thr: u16 = 0x3F8;
+        let lsr: u16 = 0x3F8 + 5;
+        let msg = b"[km] after debug_assert\r\n";
+        for &b in msg {
+            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
+        }
+    }
+
     // =============================================
     // Phase 1: serial output (earliest debug output)
     // =============================================
-    arch::boot_timestamp::init();
-    crate::e9_println!("B0 kernel_main");
+    arch::x86_64::boot_timestamp::init();
+
+    // Trace: raw COM1 after boot_timestamp
+    {
+        let thr: u16 = 0x3F8;
+        let lsr: u16 = 0x3F8 + 5;
+        let msg = b"[km] after boot_timestamp\r\n";
+        for &b in msg {
+            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
+        }
+    }
+
+    // Skip e9_println! — it uses format_args! which may crash before
+    // the full kernel is initialized. Use raw COM1 trace instead.
+    //crate::e9_println!("B0 kernel_main");
+
+    // Trace before init_serial
+    {
+        let thr: u16 = 0x3F8;
+        let lsr: u16 = 0x3F8 + 5;
+        let msg = b"[km] before init_serial\r\n";
+        for &b in msg {
+            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
+        }
+    }
+
+    // init_serial() — restore
     init_serial();
 
     // Enable boot log prefix (timestamp) by default; can be disabled later if needed.
     arch::serial::set_boot_log_prefix_enabled(true);
 
     init_logger();
-    boot_milestone!("Kernel entry");
-    arch::speaker::beep_phase(1);
+    //boot_milestone!("Kernel entry");
+    //arch::x86_64::speaker::beep_phase(1);
 
     // =============================================
     // Phase 1c: IDT (Interrupt Descriptor Table)
     // =============================================
     // We initialize the IDT as early as possible to catch any exceptions
     // during the early memory management and hardware initialization phases.
-    crate::e9_println!("B1 pre-IDT");
-    serial_println!("[init] IDT (early)...");
-    arch::idt::init();
-    serial_println!("[init] IDT initialized.");
-    crate::e9_println!("B2 post-IDT");
-    boot_milestone!("IDT initialized");
+    //crate::e9_println!("B1 pre-IDT");
+    //serial_println!("[init] IDT (early)...");
+    arch::x86_64::idt::init();
+    //serial_println!("[init] IDT initialized.");
+    //crate::e9_println!("B2 post-IDT");
+    //boot_milestone!("IDT initialized");
+    //crate::e9_println!("B3 milestone");
+
+    // Trace after IDT
+    {
+        let thr: u16 = 0x3F8;
+        let lsr: u16 = 0x3F8 + 5;
+        let msg = b"[km] IDT initialized\r\n";
+        for &b in msg {
+            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
+        }
+    }
 
     debug_assert!(
         !arch::interrupts_enabled(),
         "interrupts must be disabled after IDT init"
     );
+    crate::e9_println!("B4 assert-passed");
 
     // Detect CPU features (must happen before init_cpu_extensions)
-    crate::arch::cpuid::init();
+    crate::e9_println!("B4a pre-cpuid");
+    crate::arch::x86_64::cpuid::init();
+    crate::e9_println!("B4b post-cpuid");
 
     // Initialize FPU/SSE/XSAVE for the BSP
-    crate::e9_println!("B2a pre-cpu-extensions");
-    crate::arch::init_cpu_extensions();
+    crate::e9_println!("B4c pre-cpu-ext");
+    crate::arch::x86_64::init_cpu_extensions();
     crate::e9_println!("B2b post-cpu-extensions");
 
     // Seed the kernel entropy pool from RDRAND (if available).
@@ -362,15 +434,20 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::e9_println!("B2d post-entropy");
 
     // Initialize KASLR offsets (requires entropy pool to be seeded).
+    crate::e9_println!("B2d1 pre-kaslr");
     crate::kaslr::init();
+    crate::e9_println!("B2d2 post-kaslr");
 
     // Initialize crypto subsystem (trusted keys for module verification).
+    crate::e9_println!("B2d3 pre-crypto");
     crate::crypto::init();
+    crate::e9_println!("B2d4 post-crypto");
 
     // Puts default panic hooks early to ensure
     //we get useful info on any panics during init.
-    crate::e9_println!("B2e pre-panic-hooks");
+    crate::e9_println!("B2e1 pre-panic-hooks");
     boot::panic::install_default_panic_hooks();
+    crate::e9_println!("B2e2 post-panic-hooks");
     boot::symbols::init();
     crate::e9_println!("B2f post-panic-hooks");
 
@@ -474,24 +551,41 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 2 : memory management (Buddy Allocator)
     // =============================================
+    crate::e9_println!("MM pre-regions");
     serial_println!("[init] Memory manager...");
+    serial_println!("[init] Memory map: 0x{:x} ({} bytes)", memory_map_base, memory_map_size);
     let regions = args.memory_regions();
-    let mut mmap_work = [null_region(); MAX_BOOT_MMAP_REGIONS_WORK];
+    serial_println!("[init] Memory regions count: {}", regions.len());
+    if let Some(first) = regions.first() {
+        serial_println!("[init] First region: base={:#x} size={:#x} kind={:?}",
+            first.base, first.size, first.kind);
+    }
+    crate::e9_println!("MM regions");
+    // Safety: single-threaded boot, no concurrent access
+    let mmap_work = unsafe { &mut *core::ptr::addr_of_mut!(MMAP_WORK) };
+    crate::e9_println!("MM work array");
     let mmap_work_len = core::cmp::min(regions.len(), mmap_work.len());
+    crate::e9_println!("MM len calc");
     for (dst, src) in mmap_work.iter_mut().zip(regions.iter()).take(mmap_work_len) {
         *dst = *src;
     }
+    crate::e9_println!("MM copy done");
 
     // Modules are loaded from the FAT32 boot partition.
     // Protected ranges will be set up after module loading is implemented in Phase 4.
     let protected_ranges = [None; memory::boot_alloc::MAX_PROTECTED_RANGES];
+    crate::e9_println!("MM prot ranges");
     memory::boot_alloc::set_protected_ranges(&protected_ranges);
+    crate::e9_println!("MM set prot done");
 
     // Initialize the boot allocator before manually carving the working memory
     // map. The allocator excludes the configured protected ranges itself, so
     // it can still see the large original free extents that VMware exposes
     // before module reservations fragment them.
+    crate::e9_println!("MM pre-init-boot-alloc");
     memory::boot_alloc::init_boot_allocator(&mmap_work[..mmap_work_len]);
+    crate::e9_println!("MM post-init-boot-alloc before serial");
+    serial_println!("[init] Boot allocator ready.");
     serial_println!("[init] Boot allocator ready.");
 
     let total_ram = mmap_work[..mmap_work_len]
@@ -505,7 +599,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         .map(|region| region.base.saturating_add(region.size))
         .max()
         .unwrap_or(0);
-    let free_like_regions = count_free_like_regions(&mmap_work, mmap_work_len);
+    let free_like_regions = count_free_like_regions(&mmap_work[..mmap_work_len], mmap_work_len);
     let metadata_bytes = memory::frame::metadata_size_for(total_ram) as usize;
     let boot_stats = memory::boot_alloc::boot_allocator_stats();
     serial_println!(
