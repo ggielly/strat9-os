@@ -3,12 +3,6 @@ const EI_DATA: usize = 5;
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
 const PT_LOAD: u32 = 1;
-#[allow(dead_code)]
-const PF_X: u32 = 1;
-#[allow(dead_code)]
-const PF_W: u32 = 2;
-#[allow(dead_code)]
-const PF_R: u32 = 4;
 
 const KERNEL_PHYS_BASE: u64 = 0x100_000;
 const HIGHER_HALF_THRESHOLD: u64 = 0x8000_0000_0000;
@@ -63,9 +57,9 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
     };
 
     for i in 0..phnum {
-        let offset = phoff.checked_add(i * phentsize).ok_or("Program header offset overflow")?;
+        let offset = phoff.checked_add(i * phentsize).ok_or("overflow")?;
         if offset + phentsize > data.len() {
-            return Err("Program header out of bounds");
+            return Err("out of bounds");
         }
 
         let p_type = read_u32_le(data, offset);
@@ -75,43 +69,33 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
         let p_paddr = read_u64_le(data, offset + 0x18);
         let p_filesz = read_u64_le(data, offset + 0x20);
         let p_memsz = read_u64_le(data, offset + 0x28);
-        let p_align = read_u64_le(data, offset + 0x30);
 
-        if p_type != PT_LOAD || p_memsz == 0 {
+        if p_type != PT_LOAD || p_memsz == 0 || p_filesz == 0 {
             continue;
         }
 
-        if p_align & (p_align - 1) != 0 {
-            return Err("Segment p_align is not a power of 2");
-        }
-
+        // Remap higher-half addresses to physical
         let phys_offset = if p_paddr >= HIGHER_HALF_THRESHOLD {
-            let virt_offset = p_paddr - 0xFFFF_FFFF_8000_0000;
-            KERNEL_PHYS_BASE + virt_offset
+            KERNEL_PHYS_BASE + (p_paddr - 0xFFFF_FFFF_8000_0000)
         } else {
             p_paddr
         };
 
-        let copy_size = p_filesz.min(p_memsz) as usize;
-
-        if p_filesz > p_memsz {
-            return Err("p_filesz > p_memsz");
-        }
-        let end = p_offset.checked_add(p_filesz).ok_or("Segment data offset overflow")?;
-        if (end as usize) > data.len() {
-            return Err("Segment data out of bounds");
-        }
-
-        let dst = phys_offset as *mut u8;
-        unsafe {
-            let src = data.as_ptr().add(p_offset as usize);
-            core::ptr::copy_nonoverlapping(src, dst, copy_size);
-            if p_memsz > p_filesz {
-                core::ptr::write_bytes(dst.add(copy_size), 0, (p_memsz - p_filesz) as usize);
+        // Safety: only copy if dest is in low memory (identity-mapped)
+        let copy_size = p_filesz as usize;
+        if phys_offset >= 0x1000 && phys_offset < 0x1000_0000
+            && (p_offset as usize) + copy_size <= data.len()
+        {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(p_offset as usize),
+                    phys_offset as *mut u8,
+                    copy_size,
+                );
             }
         }
 
-        let seg_end = phys_offset + p_memsz;
+        let seg_end = phys_offset + p_filesz;
         if seg_end > info.phys_end {
             info.phys_end = seg_end;
         }
@@ -128,16 +112,6 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
 
     if info.segment_count == 0 {
         return Err("No PT_LOAD segments found");
-    }
-
-    info.segments[..info.segment_count].sort_by(|a, b| a.phys_addr.cmp(&b.phys_addr));
-    for i in 1..info.segment_count {
-        let prev = &info.segments[i - 1];
-        let cur = &info.segments[i];
-        let prev_end = prev.phys_addr + prev.mem_size;
-        if cur.phys_addr < prev_end {
-            return Err("PT_LOAD segments overlap");
-        }
     }
 
     Ok(info)

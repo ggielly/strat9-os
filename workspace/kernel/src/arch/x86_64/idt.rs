@@ -556,6 +556,22 @@ pub fn register_ahci_irq(irq: u8) {
     log::info!("AHCI IRQ {} registered on vector {:#x}", irq, vector);
 }
 
+/// Register the NVMe storage controller IRQ handler for a specific vector.
+///
+/// Used when MSI/MSI-X is active — the vector comes directly from
+/// `msi::probe_and_enable()` instead of being derived from the IRQ line.
+pub fn register_nvme_irq_vector(vector: u8) {
+    lock_idt_storage();
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[vector]
+            .set_handler_fn(nvme_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        unlock_idt_storage();
+    }
+    log::info!("NVMe IRQ vector {:#x} registered", vector);
+}
+
 /// Register the NVMe storage controller IRQ handler.
 ///
 /// Called after NVMe initialisation once the PCI interrupt line is known.
@@ -606,6 +622,20 @@ pub fn register_virtio_block_irq(irq: u8) {
 /// Register the xHCI USB controller IRQ handler.
 ///
 /// Called after xHCI initialization once the PCI interrupt line is known.
+/// Register the xHCI interrupt handler for a specific vector (MSI/MSI-X).
+pub fn register_xhci_irq_vector(vector: u8) {
+    lock_idt_storage();
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[vector]
+            .set_handler_fn(xhci_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        (*idt).load_unsafe();
+    }
+    unlock_idt_storage();
+    log::info!("xHCI IRQ vector {:#x} registered", vector);
+}
+
 pub fn register_xhci_irq(irq: u8) {
     let vector = if irq < 16 {
         super::pic::PIC1_OFFSET + irq

@@ -218,7 +218,7 @@ pub unsafe fn write_reg(offset: u32, value: u32) {
 ///
 /// `madt_lapic_addr` is the LAPIC base physical address from the MADT.
 /// We use the MSR value as authoritative but log if it differs from MADT.
-pub fn init(madt_lapic_addr: u32) {
+pub fn init(madt_lapic_addr: u64) {
     // Read the APIC base MSR to get the actual physical address
     let apic_base_msr = super::rdmsr(IA32_APIC_BASE_MSR);
     let apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;

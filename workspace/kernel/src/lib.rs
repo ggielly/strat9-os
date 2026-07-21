@@ -1208,7 +1208,7 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
 
     // Step 6d: initialize Local APIC
     // Ensure Local APIC MMIO is mapped
-    memory::paging::ensure_identity_map(madt_info.local_apic_address as u64);
+    memory::paging::ensure_identity_map(madt_info.local_apic_address);
     apic::init(madt_info.local_apic_address);
     serial_println!("[init]   6d. Local APIC initialized");
 
