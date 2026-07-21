@@ -1075,10 +1075,10 @@ fn apply_dynamic_relocations(
         rela_count_hint
     );
     if let Some(rela_base) = rela_addr {
-        total_applied += apply_rela_table(rela_base, rela_size, rela_count_hint)?;
+        let _ = total_applied += apply_rela_table(rela_base, rela_size, rela_count_hint)?;
     }
     if let Some(jmprel_base) = jmprel_addr {
-        total_applied += apply_rela_table(jmprel_base, jmprel_size, None)?;
+        let _ = total_applied += apply_rela_table(jmprel_base, jmprel_size, None)?;
     }
 
     #[cfg(debug_assertions)]
