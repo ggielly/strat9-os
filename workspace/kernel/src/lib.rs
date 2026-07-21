@@ -459,8 +459,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     memory::set_hhdm_offset(hhdm);
     serial_println!("[init] HHDM offset: 0x{:x}", hhdm);
 
-    let memory_map_base = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_base)) };
-    let memory_map_size = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_size)) };
+    let memory_map_base =
+        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_base)) };
+    let memory_map_size =
+        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_size)) };
     serial_println!(
         "[init] Memory map: 0x{:x} ({} bytes)",
         memory_map_base,
@@ -565,7 +567,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 // because the stack frame is different. Instead, we store
                 // the continuation address on the new stack and return to it.
                 //
-                // For now, we just halt — the real init continues on the
+                // For now, we just halt : the real init continues on the
                 // bootstrap stack. The stack switch is a demonstration of
                 // the capability; full migration will happen when we restructure
                 // the init phases.
@@ -838,7 +840,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::e9_println!("B8 post-sched");
 
     // Sanity check: verify scheduler is initialized.
-    if crate::process::scheduler::GLOBAL_SCHED_STATE.lock().is_none() {
+    if crate::process::scheduler::GLOBAL_SCHED_STATE
+        .lock()
+        .is_none()
+    {
         serial_println!("[CRIT] Scheduler init failed: GLOBAL_SCHED_STATE is None");
         serial_println!("[CRIT] System halted.");
         loop {
@@ -1030,12 +1035,16 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             for module in args.modules() {
                 if module.name_str() == "init" {
                     let base_virt = memory::phys_to_virt(module.base);
-                    let elf_data = unsafe { core::slice::from_raw_parts(base_virt as *const u8, module.size as usize) };
+                    let elf_data = unsafe {
+                        core::slice::from_raw_parts(base_virt as *const u8, module.size as usize)
+                    };
                     let init_caps = [crate::silo::create_silo_admin_capability()];
                     match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
                         Ok(task_id) => {
                             init_task_id = Some(task_id);
-                            serial_println!("[init] ELF loaded as task 'init' (from module table).");
+                            serial_println!(
+                                "[init] ELF loaded as task 'init' (from module table)."
+                            );
                         }
                         Err(e) => {
                             serial_println!("[init] Failed to load init ELF: {}", e);
@@ -1183,7 +1192,9 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
 
     // Step 6c++: Parse IVRS (AMD IOMMU)
     if let Some(ivrs) = acpi::ivrs::Ivrs::get() {
-        let dev_entry_count = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(ivrs.header().dev_entry_count)) };
+        let dev_entry_count = unsafe {
+            core::ptr::read_unaligned(core::ptr::addr_of!(ivrs.header().dev_entry_count))
+        };
         serial_println!(
             "[init]   6c++. IVRS parsed (flags: draint={}, coherent={}, {} device entries)",
             ivrs.header().has_draint(),

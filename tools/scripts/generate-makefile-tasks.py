@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""generate-makefile-tasks.py — Auto-generate Makefile.toml build tasks for workspace components.
+"""generate-makefile-tasks.py : Auto-generate Makefile.toml build tasks for workspace components.
 
 Scans workspace/components/ and workspace/components/netutils/ for crates
 with binary targets, then generates cargo-make tasks (debug, release, dev-opt).

@@ -257,7 +257,7 @@ fn format_mtime(mtime: strat9_abi::data::TimeSpec) -> alloc::string::String {
     let hours = rem / 3600;
     let mins = (rem % 3600) / 60;
 
-    // Simple day-of-year calculation (no leap year handling — good enough)
+    // Simple day-of-year calculation (no leap year handling : good enough)
     let month_days: &[(u32, &str)] = &[
         (31, "Jan"), (28, "Feb"), (31, "Mar"), (30, "Apr"),
         (31, "May"), (30, "Jun"), (31, "Jul"), (31, "Aug"),

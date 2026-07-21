@@ -774,7 +774,7 @@ pub unsafe extern "C" fn n3b_migrate_asm(frame: *mut MigrationFrame) {
         "mov [rdi + 0x40], rax", // rflags
         "mov [rdi + 0x48], rsp",
         // NOTE: src_ctx.rip was already set by n3_prepare_migration().
-        // We do NOT overwrite it with RCX — on Strategy A, the kernel
+        // We do NOT overwrite it with RCX : on Strategy A, the kernel
         // sets src_ctx.rip before calling us. See §11.2 for the contract.
         // ── Phase 2: CLI (<3 instr) + CR3 switch ──
         // We need a 3 instructions **MAX** between CLI and CR3 write.
@@ -789,7 +789,7 @@ pub unsafe extern "C" fn n3b_migrate_asm(frame: *mut MigrationFrame) {
         // ── Phase 3: restore dst_ctx (starts at offset 0x80) ──
         // IMPORTANT: rsp (offset 0xC8) is restored LAST, just before ret.
         // Every memory access between CR3 switch and rsp restore uses
-        // RDI (shared fixed-VA, valid in both AS) — never RSP.
+        // RDI (shared fixed-VA, valid in both AS) : never RSP.
         "mov r15, [rdi + 0x80]",
         "mov r14, [rdi + 0x88]",
         "mov r13, [rdi + 0x90]",
@@ -798,7 +798,7 @@ pub unsafe extern "C" fn n3b_migrate_asm(frame: *mut MigrationFrame) {
         "mov rbx, [rdi + 0xA8]",
         "mov rdx, [rdi + 0xB0]",
         // Load rflags from dst_ctx.rflags at offset 0x80+0x40 = 0xC0.
-        // Note: dst_ctx.rax (0xB8) is a GPR, NOT flags — do not confuse.
+        // Note: dst_ctx.rax (0xB8) is a GPR, NOT flags : do not confuse.
         "mov rax, [rdi + 0xC0]", // dst_ctx.rflags
         "push rax",
         "popfq", // restore IF=1
@@ -814,7 +814,7 @@ pub unsafe extern "C" fn n3b_migrate_asm(frame: *mut MigrationFrame) {
         // do that after consuming the message (see recv() protocol).
         // This prevents the TOCTOU where the receiver sees state=Ready
         // before having read the message. Generation is managed by the
-        // kernel in n3_prepare_migration/recv — NOT by the ASM.
+        // kernel in n3_prepare_migration/recv : NOT by the ASM.
         // ── Phase 6: ret into receiver handler ──
         // SAFETY: RSP now points to the destination kernel stack with the
         // handler address at [RSP]. `ret` pops it and jumps there.
@@ -938,7 +938,7 @@ pub unsafe extern "C" fn n3_migrate_ipi_entry(rdi: *mut u8) -> ! {
         "ret",
 
         ".no_pending:",
-        // Spurious IPI — send EOI and return to interrupted context.
+        // Spurious IPI : send EOI and return to interrupted context.
         "mov dword ptr [0x0000FEE000B0], 0",
         "pop r11",
         "pop r10",
@@ -1465,7 +1465,7 @@ impl IpcConsumer for N3Transport {
         // Signal completion: set state = Ready (spec §15 step 6).
         // This allows the sender (or next sender) to reuse the frame.
         // The sender's send() will CAS Ready→Active to claim it.
-        // NOTE: msg_len is intentionally NOT cleared — the next sender's
+        // NOTE: msg_len is intentionally NOT cleared : the next sender's
         // prepare_migration() overwrites it when writing the new message.
         frame
             .state

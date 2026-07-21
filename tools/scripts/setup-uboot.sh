@@ -26,7 +26,7 @@ case "$ARCH" in
         # x86_64: U-Boot as EFI PAYLOAD (not app).
         # A UEFI payload takes full hardware control, unlike an EFI app which
         # remains a guest of the UEFI firmware. The payload is loaded by OVMF
-        # (via a special UEFI image) and then runs natively — owns interrupts,
+        # (via a special UEFI image) and then runs natively : owns interrupts,
         # PCI, DMA, IOMMU, everything the Strat9 kernel needs.
         echo "Building U-Boot for x86_64 (EFI payload)..."
         make efi-x86_payload64_defconfig
@@ -42,7 +42,7 @@ case "$ARCH" in
         scripts/config --enable CONFIG_CMD_BOOTM
         scripts/config --enable CONFIG_CMD_BOOTEFI
         
-        # Enable FDT support — Strat9 kernel receives DTB pointer in RDI
+        # Enable FDT support : Strat9 kernel receives DTB pointer in RDI
         scripts/config --enable CONFIG_OF_LIBFDT
         scripts/config --enable CONFIG_OF_BOARD_SETUP
         scripts/config --enable CONFIG_CMD_FDT

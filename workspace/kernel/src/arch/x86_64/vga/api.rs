@@ -838,7 +838,7 @@ pub fn scroll_to_live() {
 }
 
 /// Set or clear the console-defer-present flag.
-/// When true, `write_bytes()` skips present — only marks dirty.
+/// When true, `write_bytes()` skips present : only marks dirty.
 /// Call `flush_display()` to trigger the actual present.
 pub fn set_console_defer_present(defer: bool) {
     if !is_available() {

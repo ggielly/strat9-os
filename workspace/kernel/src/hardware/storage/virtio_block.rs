@@ -183,7 +183,7 @@ impl Drop for BouncePool {
 }
 
 /// Pre-allocated metadata frame: [Header (16 B)] + padding + [Status (1 B)].
-/// Reused for every request — never alloc/freed per I/O.
+/// Reused for every request : never alloc/freed per I/O.
 struct MetaPool {
     frame: memory::PhysFrame,
 }
@@ -223,7 +223,7 @@ pub struct VirtioBlockDevice {
     queue: SpinLock<Virtqueue>,
     capacity: u64,
     block_size: u32,
-    /// Pre-allocated DMA resources — no per-I/O alloc/free for common requests.
+    /// Pre-allocated DMA resources : no per-I/O alloc/free for common requests.
     bounce_pool: BouncePool,
     meta_pool: MetaPool,
 }
@@ -270,10 +270,10 @@ impl VirtioBlockDevice {
         let device_features = device.read_device_features();
         log::debug!("VirtIO-blk: Device features: 0x{:08x}", device_features);
 
-        // Negotiate useful block-device features (legacy PCI — all u32).
-        //   VIRTIO_BLK_F_BLK_SIZE  (1 << 6)  — honour device block size
-        //   VIRTIO_BLK_F_FLUSH     (1 << 9)  — write cache flush
-        //   VIRTIO_F_RING_EVENT_IDX(1 << 29) — suppress needless notifications
+        // Negotiate useful block-device features (legacy PCI : all u32).
+        //   VIRTIO_BLK_F_BLK_SIZE  (1 << 6)  : honour device block size
+        //   VIRTIO_BLK_F_FLUSH     (1 << 9)  : write cache flush
+        //   VIRTIO_F_RING_EVENT_IDX(1 << 29) : suppress needless notifications
         let dev_feat = device_features;
         let mut guest_features: u32 = 0;
         let has_blk_size = dev_feat & (1 << 6) != 0;
@@ -406,7 +406,7 @@ impl VirtioBlockDevice {
         sector: u64,
         mut data_buf: Option<(&mut [u8], bool)>, // (buffer, is_write)
     ) -> Result<(), BlockError> {
-        // ── Metadata (pre-allocated, reused — no per-I/O alloc) ──────────
+        // ── Metadata (pre-allocated, reused : no per-I/O alloc) ──────────
         let meta_phys = self.meta_pool.phys();
         let meta_virt = self.meta_pool.virt();
         let status_off = self.meta_pool.status_offset();
@@ -500,7 +500,7 @@ impl VirtioBlockDevice {
                             break;
                         }
                     }
-                    // Used entry exists but not ours — drop lock and retry.
+                    // Used entry exists but not ours : drop lock and retry.
                 }
                 drop(q);
                 spins = spins.saturating_add(1);
@@ -646,7 +646,7 @@ pub fn init() {
     // Initialize device
     match unsafe { VirtioBlockDevice::new(pci_dev) } {
         Ok(device) => {
-            // Leak the Box to get a 'static reference — safe because the device
+            // Leak the Box to get a 'static reference : safe because the device
             // lives for the entire kernel lifetime.
             let leaked: &'static mut VirtioBlockDevice = Box::leak(Box::new(device));
             VIRTIO_BLOCK_PTR.store(leaked as *mut VirtioBlockDevice, Ordering::Release);

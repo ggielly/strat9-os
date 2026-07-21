@@ -1037,55 +1037,41 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
     }
 
     // Flags/signature checks (Ed25519 cryptographic verification).
+    //
+    // Security: the signed payload is code+data ONLY (after the header).
+    // The header (containing key_id and signature) is NOT signed. This
+    // prevents an attacker from embedding a known key_id to trick the
+    // kernel into looking up a legitimate key while verifying a bad sig.
     if header.flags & MODULE_FLAG_SIGNED != 0 {
-        // Offsets for key_id and signature in the packed header:
-        //   magic:              0  (4 bytes)
-        //   version:            4  (2 bytes)
-        //   cpu_arch:           6  (1 byte)
-        //   flags:              7  (4 bytes)
-        //   code_offset:       11  (8 bytes)
-        //   code_size:         19  (8 bytes)
-        //   data_offset:       27  (8 bytes)
-        //   data_size:         35  (8 bytes)
-        //   bss_size:          43  (8 bytes)
-        //   entry_point:       51  (8 bytes)
-        //   export_table:      59  (8 bytes)
-        //   import_table:      67  (8 bytes)
-        //   relocation_table:  75  (8 bytes)
-        //   key_id:            83  (8 bytes)
-        //   signature:         91  (64 bytes)
-        const KEY_ID_OFFSET: usize = 83;
-        const SIG_OFFSET: usize = 91;
+        // Compute offsets from the packed struct layout : never hardcode.
+        let key_id_offset = core::mem::offset_of!(Strat9ModuleHeader, key_id);
+        let sig_offset = core::mem::offset_of!(Strat9ModuleHeader, signature);
+        let header_size = core::mem::size_of::<Strat9ModuleHeader>();
 
-        // Create a copy of the data with the signature field zeroed for verification.
-        // The signed payload is the entire module with signature = 0.
-        let mut payload = data.to_vec();
-        let sig_end = SIG_OFFSET + crate::crypto::ED25519_SIGNATURE_SIZE;
-        if sig_end <= payload.len() {
-            payload[SIG_OFFSET..sig_end].fill(0);
-        }
+        // Payload = everything after the header (code + data sections).
+        // This is what was actually signed.
+        let payload = if data.len() > header_size {
+            &data[header_size..]
+        } else {
+            return Err(SyscallError::InvalidArgument);
+        };
 
-        let result = crate::crypto::verify_cmod_signature(
-            data,
-            KEY_ID_OFFSET,
-            SIG_OFFSET,
-            &payload,
-        );
+        let result = crate::crypto::verify_cmod_signature(data, key_id_offset, sig_offset, payload);
 
         match result {
             crate::crypto::VerifyResult::Valid => {
-                log::info!("[cmod] module signature verified (Ed25519)");
+                log::info!("[cmod] Ed25519 signature verified");
             }
             crate::crypto::VerifyResult::Unsigned => {
-                log::warn!("[cmod] module is unsigned (MODULE_FLAG_SIGNED set but signature is zero)");
+                log::warn!("[cmod] MODULE_FLAG_SIGNED set but signature is zero");
                 return Err(SyscallError::PermissionDenied);
             }
             crate::crypto::VerifyResult::KeyNotFound => {
-                log::warn!("[cmod] no trusted key found for key_id {:02x?}", header.key_id);
+                log::warn!("[cmod] no trusted key for id {:02x?}", header.key_id);
                 return Err(SyscallError::PermissionDenied);
             }
             crate::crypto::VerifyResult::InvalidSignature => {
-                log::warn!("[cmod] Ed25519 signature verification FAILED");
+                log::warn!("[cmod] Ed25519 verification FAILED");
                 return Err(SyscallError::PermissionDenied);
             }
         }

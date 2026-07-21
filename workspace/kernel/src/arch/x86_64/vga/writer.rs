@@ -77,7 +77,7 @@ pub struct VgaWriter {
     pub(crate) sel_end_col: usize,
     pub(crate) prepared_row_cells: Vec<(usize, u32, u32)>,
 
-    /// When true, `end_viewport_render()` defers present — only marks dirty.
+    /// When true, `end_viewport_render()` defers present : only marks dirty.
     /// The display server (or explicit `flush_display()`) triggers the actual present.
     pub(crate) console_defer_present: bool,
 }
@@ -2303,7 +2303,7 @@ impl VgaWriter {
         }
     }
 
-    /// Writes bytes (render only — does NOT present or draw scrollbar).
+    /// Writes bytes (render only : does NOT present or draw scrollbar).
     /// Call `flush_display()` after a batch of writes to present.
     pub(crate) fn write_bytes(&mut self, s: &str) {
         self.begin_viewport_render();
@@ -2338,7 +2338,7 @@ impl VgaWriter {
     /// Flush: draw scrollbar + present to screen.
     /// Call after a batch of `write_bytes()` calls to display everything at once.
     /// NOTE: write_bytes() already called begin_viewport_render(), so we must NOT
-    /// call it again here — that would clear the dirty rects before present().
+    /// call it again here : that would clear the dirty rects before present().
     pub(crate) fn flush_display(&mut self) {
         self.draw_scrollbar_inner();
         // Force back-buffer mode and dirty tracking for the present cycle.

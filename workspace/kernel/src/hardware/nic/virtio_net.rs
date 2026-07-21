@@ -388,7 +388,7 @@ impl NetworkDevice for VirtioNetDevice {
             })?;
 
         if let Err(_) = self.tx_frames.lock().push_back((buf_frame, buf_order)) {
-            // Tracking queue full — free the frame we just submitted
+            // Tracking queue full : free the frame we just submitted
             // (the descriptor is already in the available ring but the
             // device hasn't seen it yet; get_used will reclaim it later
             // and we won't be able to free it.  This is a safety net.)

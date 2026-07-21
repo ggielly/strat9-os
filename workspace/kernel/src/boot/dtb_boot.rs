@@ -69,7 +69,7 @@ unsafe fn enable_cpu_features() {
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub unsafe extern "C" fn kmain(dtb_ptr: u64) -> ! {
-    // Step 1: Enable CPU features (SSE/OSXSAVE) — no asm magic, auditable.
+    // Step 1: Enable CPU features (SSE/OSXSAVE) : no asm magic, auditable.
     enable_cpu_features();
 
     // Step 2: Very early serial output

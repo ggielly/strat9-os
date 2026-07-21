@@ -497,7 +497,7 @@ pub fn init() {
             .set_handler_fn(tlb_shootdown_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
 
-        // N3 MMU migration sync IPI (vector 0xF1) — naked handler
+        // N3 MMU migration sync IPI (vector 0xF1) : naked handler
         // for full sender context restore via iretq.
         idt_ref[super::apic::IPI_N3_MIGRATE_VECTOR as u8]
             .set_handler_addr(VirtAddr::from_ptr(

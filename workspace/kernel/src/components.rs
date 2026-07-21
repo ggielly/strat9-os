@@ -36,12 +36,12 @@ use component::ComponentInitError;
 // Bootstrap stage : early kernel init (before SMP)
 //
 // Components that depend on local kernel_main state (e.g. mmap_work for
-// memory_init) remain as markers — the real init happens inline in kernel_main
+// memory_init) remain as markers : the real init happens inline in kernel_main
 // before `init_all(Bootstrap)` is called.  Components that are self-contained
 // do their real work here.
 // ============================================================================
 
-/// Memory management : marker — real init is inline in kernel_main (Phase 2)
+/// Memory management : marker : real init is inline in kernel_main (Phase 2)
 /// because it requires the working memory map which is a local variable.
 #[component::init_component(bootstrap, priority = 0)]
 fn memory_init() -> Result<(), ComponentInitError> {
@@ -49,7 +49,7 @@ fn memory_init() -> Result<(), ComponentInitError> {
     Ok(())
 }
 
-/// Logger : marker — already initialized before the component system runs.
+/// Logger : marker : already initialized before the component system runs.
 #[component::init_component(bootstrap, priority = 1, depends_on = memory_init)]
 fn logger_init() -> Result<(), ComponentInitError> {
     log::info!("[component] Logger initialized");
@@ -57,7 +57,7 @@ fn logger_init() -> Result<(), ComponentInitError> {
 }
 
 /// Architecture primitives (TSS, GDT, SYSCALL) : needs memory for TSS allocation.
-/// Marker — real init is inline in kernel_main because it must run before
+/// Marker : real init is inline in kernel_main because it must run before
 /// the component system is invoked (bootstrap components depend on GDT/TSS).
 #[component::init_component(bootstrap, priority = 1, depends_on = memory_init)]
 fn arch_init() -> Result<(), ComponentInitError> {
@@ -89,7 +89,7 @@ fn capability_init() -> Result<(), ComponentInitError> {
 }
 
 /// Virtual file system : needs memory and capability subsystem.
-/// Marker — real init is inline in kernel_main because it requires
+/// Marker : real init is inline in kernel_main because it requires
 /// `register_boot_modules()` with boot args that aren't available here.
 #[component::init_component(bootstrap, priority = 4, depends_on = [memory_init, capability_init])]
 fn vfs_init() -> Result<(), ComponentInitError> {
@@ -115,7 +115,7 @@ fn drivers_init() -> Result<(), ComponentInitError> {
 // Kthread stage : after SMP, in kernel-thread context
 // ============================================================================
 
-/// Process and task management : marker — scheduler is already running
+/// Process and task management : marker : scheduler is already running
 /// (init_all(Kthread) is called after init_scheduler() in kernel_main).
 #[component::init_component(kthread, priority = 0)]
 fn process_init() -> Result<(), ComponentInitError> {
