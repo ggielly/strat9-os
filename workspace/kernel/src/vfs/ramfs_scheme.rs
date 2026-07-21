@@ -7,7 +7,7 @@
 //! contention is negligible.
 //!
 //! Inodes are stored in a flat `BTreeMap<u64, RamInode>` keyed by inode number.
-//! Directories hold a `BTreeMap<String, u64>` of `(name → ino)` children.
+//! Directories hold a `BTreeMap<String, u64>` of `(name => ino)` children.
 //! Files hold their content in a heap-allocated `Vec<u8>`.
 //!
 //! Inode 1 is always the root directory (`/`).

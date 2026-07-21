@@ -195,7 +195,7 @@ impl E1000Nic {
                 tctl::EN | tctl::PSP | (0x10 << tctl::CT_SHIFT) | (0x40 << tctl::COLD_SHIFT),
             );
 
-            // --- RX control: BSIZE_4096 (BSEX=1, BSIZE=10 → 4096 bytes) ---
+            // --- RX control: BSIZE_4096 (BSEX=1, BSIZE=10 => 4096 bytes) ---
             // RX_BUF_SIZE is 4096; the hardware must match.
             wr(
                 mmio_base,
@@ -468,10 +468,10 @@ impl E1000Nic {
     /// Stall detection logic:
     ///   - If `tx_since_last_reclaim` exceeds `WATCHDOG_TX_THRESHOLD` the
     ///     software has been submitting without any reclaim happening.
-    ///   - If TDH (hardware head) == `last_tdh` → the hardware has not
-    ///     advanced → stall → reset.
-    ///   - If TDH advanced → update `last_tdh` and reset counter (progress).
-    ///   - If TDH == tail (ring empty) → normal idle → reset counter.
+    ///   - If TDH (hardware head) == `last_tdh` => the hardware has not
+    ///     advanced => stall => reset.
+    ///   - If TDH advanced => update `last_tdh` and reset counter (progress).
+    ///   - If TDH == tail (ring empty) => normal idle => reset counter.
     pub fn watchdog_tick(&mut self, alloc: &dyn DmaAllocator) -> bool {
         if self.tx_since_last_reclaim < WATCHDOG_TX_THRESHOLD {
             return false;

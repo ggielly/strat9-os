@@ -149,7 +149,7 @@ impl<T: Send> Sender<T> {
 
             // SAFETY: `pending` is always `Some` on every invocation of this
             // closure.  It is `take`-n here and either pushed (success) or
-            // replaced (full queue → retry next wakeup).
+            // replaced (full queue => retry next wakeup).
             let m = pending.take().unwrap();
             match self.inner.buffer.push(m) {
                 Ok(()) => Some(Ok(())),
@@ -506,7 +506,7 @@ impl core::fmt::Display for ChanId {
 /// Next channel ID to allocate.
 static NEXT_CHAN_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Global registry: `ChanId → Arc<SyncChan>`.
+/// Global registry: `ChanId => Arc<SyncChan>`.
 static CHANNELS: SpinLock<Option<BTreeMap<ChanId, Arc<SyncChan>>>> = SpinLock::new(None);
 
 /// Performs the ensure registry operation.

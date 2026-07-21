@@ -109,7 +109,8 @@ pub(crate) static HOST_DEFAULT_XCR0_CACHE: AtomicU64 = AtomicU64::new(0);
 /// Detect and cache CPU information. Must be called once at BSP boot.
 pub fn init() {
     let info = detect();
-    log::info!(
+    crate::e9_println!("CPUID detect done");
+    crate::serial_println!(
         "[CPUID] {} {} (family={} model={} stepping={})",
         info.vendor_string(),
         info.model_name_str(),
@@ -117,7 +118,7 @@ pub fn init() {
         info.model,
         info.stepping,
     );
-    log::info!(
+    crate::serial_println!(
         "[CPUID] features={:?}, max_xcr0={:#x}, xsave_size={}",
         info.features,
         info.max_xcr0,
@@ -126,6 +127,7 @@ pub fn init() {
     *HOST_CPU.lock() = Some(info);
     INITIALIZED.store(true, Ordering::Release);
     HOST_DEFAULT_XCR0_CACHE.store(host_default_xcr0(), Ordering::Release);
+    crate::e9_println!("CPUID init done");
 }
 
 /// Return a clone of the cached host CPU info. Panics if `init()` not called.

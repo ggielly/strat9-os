@@ -1,7 +1,7 @@
 //! SYSCALL/SYSRET interface for Strat9-OS
 //!
 //! Configures the x86_64 SYSCALL/SYSRET MSRs and provides the naked
-//! assembly entry point that bridges Ring 3 → Ring 0 → Rust dispatcher.
+//! assembly entry point that bridges Ring 3 => Ring 0 => Rust dispatcher.
 //!
 //! ## Per-CPU design (SWAPGS + GS-base)
 //!
@@ -162,7 +162,7 @@ unsafe extern "C" fn syscall_entry() {
         "pop r11",                 // User RFLAGS into R11
         "pop rsp",                 // User RSP
         "swapgs",                  // Restore user GS base
-        // SYSRETQ: RCX→RIP, R11→RFLAGS, loads user CS/SS from STAR
+        // SYSRETQ: RCX=>RIP, R11=>RFLAGS, loads user CS/SS from STAR
         "sysretq",
 
         user_rsp_off = const crate::arch::x86_64::percpu::USER_RSP_OFFSET,

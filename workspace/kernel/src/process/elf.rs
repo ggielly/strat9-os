@@ -12,7 +12,7 @@
 //! Does not support (or need future fix) :
 //!
 //!   - FIx TODO : allocation heap during ELF loading
-//!     program_headers(elf_data, &header).collect() → Vec<Elf64Phdr>, Vec::new() for interp_phdrs, etc. The kernel uses alloc so it's normal, but allocation errors are not handled (no try_collect, no fallible GlobalAlloc).
+//!     program_headers(elf_data, &header).collect() => Vec<Elf64Phdr>, Vec::new() for interp_phdrs, etc. The kernel uses alloc so it's normal, but allocation errors are not handled (no try_collect, no fallible GlobalAlloc).
 //!
 //!   - Fix TODO : find_free_vma_range : fallback hardcoded 0x1000_0000
 //!     If PIE_BASE_ADDR (0x1_0000_0000) fails, fallback to 0x1000_0000. This value is arbitrary and could overlap existing mappings if many libraries are loaded.

@@ -1,7 +1,7 @@
 //! Boot subsystem
 //!
 //! Regroups all code involved in the early kernel startup:
-//! - assembly stubs (16-bit → 64-bit transition)
+//! - assembly stubs (16-bit => 64-bit transition)
 //! - bootloader handoff structures (KernelArgs)
 //! - Boot-protocol entry point
 //! - Device Tree (FDT) parsing

@@ -9,8 +9,8 @@
 //! task and performs a context switch. Interrupts are disabled while the
 //! scheduler lock is held to prevent deadlock on single-core systems:
 //!
-//! - `yield_task()`: CLI → lock → pick next → TSS/CR3 → unlock → switch_context → restore IF
-//! - Timer handler: CPU already cleared IF → lock → pick next → TSS/CR3 → unlock → switch_context
+//! - `yield_task()`: CLI => lock => pick next => TSS/CR3 => unlock => switch_context => restore IF
+//! - Timer handler: CPU already cleared IF => lock => pick next => TSS/CR3 => unlock => switch_context
 //!
 //! Each task has its own 16KB kernel stack. Callee-saved registers are
 //! pushed/popped by `switch_context()`. `CpuContext` only stores `saved_rsp`.

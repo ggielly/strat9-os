@@ -2497,7 +2497,7 @@ impl VgaWriter {
         if max_off == 0 {
             return;
         }
-        // py = 0 → top = oldest = max_offset; py = text_h - 1 → bottom = 0
+        // py = 0 => top = oldest = max_offset; py = text_h - 1 => bottom = 0
         let py = px_y.min(text_h - 1);
         let offset = max_off * (text_h - 1 - py) / (text_h - 1);
         self.set_scroll_offset_and_render(offset.min(max_off));

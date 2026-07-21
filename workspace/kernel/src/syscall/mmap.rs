@@ -121,7 +121,7 @@ pub fn sys_mmap(
     };
     let page_bytes = page_size.bytes();
 
-    // File-backed mappings: MAP_PRIVATE + fd → copy file data into anonymous pages.
+    // File-backed mappings: MAP_PRIVATE + fd => copy file data into anonymous pages.
     if flags & MAP_ANONYMOUS == 0 {
         let fd = fd_raw as u32;
         let file_offset = offset;

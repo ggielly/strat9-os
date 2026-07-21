@@ -1,7 +1,7 @@
 //! SMP (Symmetric Multi-Processing) boot for x86_64.
 //!
 //! Boots Application Processors (APs) using the legacy INIT+SIPI sequence.
-//! Inspired by Redox-OS's approach: a minimal trampoline does the 16→64 bit
+//! Inspired by Redox-OS's approach: a minimal trampoline does the 16=>64 bit
 //! mode switch, then jumps directly to `smp_main` in Rust.
 //!
 //! Data layout after the trampoline code (written by BSP, read by AP):
@@ -41,7 +41,7 @@ static BARRIER_TARGET: AtomicUsize = AtomicUsize::new(0);
 static AP_SCHED_GATE_OPEN: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
-// Trampoline: 16-bit → 32-bit → 64-bit mode switch.
+// Trampoline: 16-bit => 32-bit => 64-bit mode switch.
 //
 // The AP starts in real mode at the SIPI vector (0x8000).  This stub:
 //   1. Loads a GDT embedded at known physical offsets.
@@ -109,7 +109,7 @@ _gdt:
     mov eax, cr0
     or eax, 1
     mov cr0, eax
-    ljmp 24, 0x8060                  # → code32 segment
+    ljmp 24, 0x8060                  # => code32 segment
 
 .align 32
 .code32
@@ -142,7 +142,7 @@ _gdt:
     or eax, 0x80010002               # PG + WP + MP
     mov cr0, eax
 
-    ljmp 8, 0x80c0                   # → code64 segment
+    ljmp 8, 0x80c0                   # => code64 segment
 
 .align 32
 .code64
@@ -288,7 +288,7 @@ fn send_ipi(apic_id: u32, value: u32) {
 ///
 ///   Step 1: INIT level-assert (0xC500) : wait ≥10 ms
 ///   Step 2: INIT level-de-assert (0x8500) : wait ≥200 µs
-///   Step 3: SIPI (0x4608, vector=0x08 → trampoline at 0x8000) : 200 µs
+///   Step 3: SIPI (0x4608, vector=0x08 => trampoline at 0x8000) : 200 µs
 ///   Step 4: SIPI again : 200 µs
 ///
 /// ICR values (xAPIC format, delivery-mode bit-fields):

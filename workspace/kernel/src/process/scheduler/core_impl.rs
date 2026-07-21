@@ -502,7 +502,7 @@ impl GlobalSchedState {
 // attempted) that is safe because the try-lock never blocks : if GLOBAL_SCHED_STATE is
 // contended, we simply skip stealing.
 //
-// Lock order for steal: own LOCAL held → try_lock GLOBAL → try_lock sibling
+// Lock order for steal: own LOCAL held => try_lock GLOBAL => try_lock sibling
 // LOCALs.  Never blocking-wait, so no deadlock possible.
 
 /// Steal a task from the busiest sibling CPU using per-CPU LOCAL locks.
@@ -596,7 +596,7 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
             }
             TaskState::Dead => {
                 // Global maps already cleaned by exit_current_task / kill_task.
-                // Defer the Arc drop so KernelStack::drop → buddy_alloc runs
+                // Defer the Arc drop so KernelStack::drop => buddy_alloc runs
                 // outside any lock.
                 cpu.task_to_drop = Some(task);
             }

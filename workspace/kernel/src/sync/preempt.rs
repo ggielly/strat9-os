@@ -10,7 +10,7 @@
 //! ```rust,ignore
 //! let _guard = PreemptGuard::new();
 //! // safe to read/write per-CPU data here
-//! // guard is dropped at end of scope → preemption re-enabled
+//! // guard is dropped at end of scope => preemption re-enabled
 //! ```
 //!
 //! ## What it does NOT protect

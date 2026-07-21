@@ -91,10 +91,10 @@ pub unsafe fn convert_bgr_to_argb_sse2(dst: *mut u32, src: *const u8, count: usi
     convert_bgr_to_argb_ssse3(dst, src, count);
 }
 
-/// BGR24 → ARGB32 conversion using SSSE3 pshufb (4 pixels/iter)
+/// BGR24 => ARGB32 conversion using SSSE3 pshufb (4 pixels/iter)
 #[target_feature(enable = "ssse3")]
 unsafe fn convert_bgr_to_argb_ssse3(dst: *mut u32, src: *const u8, count: usize) {
-    // Shuffle mask: rearranges BGR BGR BGR BGR → B G R 0 B G R 0 B G R 0 B G R 0
+    // Shuffle mask: rearranges BGR BGR BGR BGR => B G R 0 B G R 0 B G R 0 B G R 0
     // Input bytes:  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
     //             [B0 G0 R0 B1 G1 R1 B2 G2 R2 B3 G3 R3  ?  ?  ?  ?]
     // Output:      [B0 G0 R0  0 B1 G1 R1  0 B2 G2 R2  0 B3 G3 R3  0]

@@ -70,7 +70,7 @@ pub fn init() {
             let dev = KernelE1000Adapter::new(nic, "e1000e");
             let iface = register_device(dev.clone());
 
-            // --- Wire up NIC interrupt: MSI-X → MSI → INTx fallback ---
+            // --- Wire up NIC interrupt: MSI-X => MSI => INTx fallback ---
             // e1000e supports both MSI and MSI-X; prefer MSI-X for future
             // multi-queue support.
             let (irq, vector) = msi::probe_and_enable(&probe.pci_dev, true);
@@ -87,7 +87,7 @@ pub fn init() {
                 if !msi_active {
                     ioapic::route_nic_irq(irq, vector);
                     log::info!(
-                        "[E1000e] {}: INTx IRQ {} → vector {:#x}",
+                        "[E1000e] {}: INTx IRQ {} => vector {:#x}",
                         iface,
                         irq,
                         vector

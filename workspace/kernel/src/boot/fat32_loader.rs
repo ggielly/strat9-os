@@ -290,7 +290,7 @@ fn make_sfn(name: &str) -> [u8; 11] {
         i += 1;
     }
 
-    // Handle leading 0xE5 (deleted marker) → 0x05
+    // Handle leading 0xE5 (deleted marker) => 0x05
     if sfn[0] == 0xE5 {
         sfn[0] = 0x05;
     }
@@ -404,8 +404,7 @@ impl<'a, B: BlockDevice> FatFs<'a, B> {
                 dev.read_block(base_lba + i as u64, &mut block_buf[..kernel_block_size])
                     .ok()?;
                 let dst = i * kernel_block_size;
-                buf[dst..dst + kernel_block_size]
-                    .copy_from_slice(&block_buf[..kernel_block_size]);
+                buf[dst..dst + kernel_block_size].copy_from_slice(&block_buf[..kernel_block_size]);
             }
         }
         Some(())
@@ -442,7 +441,11 @@ impl<'a, B: BlockDevice> FatFs<'a, B> {
             sector_buf[entry_offset + 3],
         ]) & 0x0FFF_FFFF;
 
-        if entry >= FAT32_EOC { Some(0) } else { Some(entry) }
+        if entry >= FAT32_EOC {
+            Some(0)
+        } else {
+            Some(entry)
+        }
     }
 
     /// Read a full cluster chain into a heap-allocated buffer.
@@ -944,11 +947,7 @@ fn load_elf_from_fat<B: BlockDevice>(
     let layout = core::alloc::Layout::from_size_align(file_size, 4096).ok()?;
     let ptr = unsafe { alloc::alloc::alloc(layout) };
     if ptr.is_null() {
-        crate::serial_println!(
-            "[fat32] Alloc failed: {} bytes for {}",
-            file_size,
-            path
-        );
+        crate::serial_println!("[fat32] Alloc failed: {} bytes for {}", file_size, path);
         return None;
     }
 

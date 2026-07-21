@@ -425,7 +425,7 @@ impl VirtioBlockDevice {
             ptr::write(status_ptr, 0xFF);
         }
 
-        // ── Data buffer (pool → fallback alloc) ──────────────────────────
+        // ── Data buffer (pool => fallback alloc) ──────────────────────────
         let mut data_alloc: Option<(memory::PhysFrame, u8)> = None;
         let mut dma_buf_virt: u64 = 0;
 

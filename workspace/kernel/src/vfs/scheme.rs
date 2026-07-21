@@ -674,9 +674,9 @@ impl IpcScheme {
 /// SAFETY: All stored pointers are kernel-static (`'static`) and accessed
 /// only through the scheme trait methods which are `&self` (shared reference).
 pub struct KernelScheme {
-    /// Files indexed by path → (id, base, len).
+    /// Files indexed by path => (id, base, len).
     files: SpinLock<BTreeMap<String, (u64, *const u8, usize)>>,
-    /// Reverse lookup: file_id → path name.
+    /// Reverse lookup: file_id => path name.
     by_id: SpinLock<BTreeMap<u64, String>>,
 }
 

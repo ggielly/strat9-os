@@ -3,9 +3,9 @@
 //! # Choosing a guardian
 //!
 //! ```text
-//! SpinLock<T>                  →  SpinLock<T, IrqDisabled>   (default)
-//! SpinLock<T, IrqDisabled>     →  saves RFLAGS + clears IF (equiv. spin_lock_irqsave)
-//! SpinLock<T, PreemptDisabled> →  disables preemption only, IRQs untouched
+//! SpinLock<T>                  =>  SpinLock<T, IrqDisabled>   (default)
+//! SpinLock<T, IrqDisabled>     =>  saves RFLAGS + clears IF (equiv. spin_lock_irqsave)
+//! SpinLock<T, PreemptDisabled> =>  disables preemption only, IRQs untouched
 //! ```
 //!
 //! **Use `IrqDisabled` (the default) for**:

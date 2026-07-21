@@ -119,9 +119,9 @@ extern "C" fn ipc_receiver_main() -> ! {
 // ================================================================================
 //
 // Exercises:
-//   - channel() constructor (Sender<u64> + Receiver<u64> cloning → MPMC)
+//   - channel() constructor (Sender<u64> + Receiver<u64> cloning => MPMC)
 //   - Blocking recv  (consumer blocks; producer-2 yields first to force it)
-//   - Disconnect detection (last Sender drop → Receiver sees Disconnected)
+//   - Disconnect detection (last Sender drop => Receiver sees Disconnected)
 //   - wait_until round-trip through the scheduler
 
 /// Endpoint slots: each task takes its endpoint out (Option::take) once.
@@ -179,7 +179,7 @@ extern "C" fn chan_producer2_main() -> ! {
     }
 
     crate::serial_println!("[chan-test] Producer-2: done");
-    drop(tx); // last Sender → receiver wakes with Disconnected next call
+    drop(tx); // last Sender => receiver wakes with Disconnected next call
     crate::process::scheduler::exit_current_task(0);
 }
 

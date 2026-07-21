@@ -334,13 +334,17 @@ pub fn _print(args: fmt::Arguments) {
     }
 
     // Normal mode: Use try_lock to avoid deadlock in interrupt handlers.
+    crate::e9_println!("_print enter");
     if let Some(mut port) = SERIAL1.try_lock() {
+        crate::e9_println!("_print locked");
         let mut prefix_writer = BootPrefixWriter::new(&mut *port);
         let mut writer = AnsiStylingWriter::new(&mut prefix_writer);
         let _ = writer.write_fmt(args);
+        crate::e9_println!("_print written");
         let _ = writer.finish();
         prefix_writer.finish();
     }
+    crate::e9_println!("_print exit");
 }
 
 /// Print to serial port bypassing the shared mutex.

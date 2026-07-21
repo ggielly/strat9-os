@@ -11,13 +11,13 @@
 //! │  /dev/display/0.0  /dev/display/0.1  ...        │
 //! ├─────────────────────────────────────────────────┤
 //! │              GraphicsAdapter impl               │
-//! │  display_count() → N displays                   │
-//! │  display_size(id) → (w, h)                      │
-//! │  create_framebuffer(w, h) → DisplayScreen       │
+//! │  display_count() => N displays                   │
+//! │  display_size(id) => (w, h)                      │
+//! │  create_framebuffer(w, h) => DisplayScreen       │
 //! │  update_plane(id, screen, damage)               │
 //! ├─────────────────────────────────────────────────┤
 //! │  DisplayScreen (offscreen buffer)               │
-//! │  sync() → copy to onscreen                      │
+//! │  sync() => copy to onscreen                      │
 //! └─────────────────────────────────────────────────┘
 //! ```
 

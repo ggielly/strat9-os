@@ -23,6 +23,7 @@ impl log::Log for SerialLogger {
     /// This decouples the hot logging path from framebuffer rendering,
     /// making deadlocks structurally impossible.
     fn log(&self, record: &Record) {
+        crate::e9_println!("LOG enter");
         if self.enabled(record.metadata()) {
             // In quiet mode, skip all log output entirely.
             if crate::debug_cfg::is_quiet() {

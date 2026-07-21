@@ -116,7 +116,7 @@ impl FutexBucket {
     /// re-acquires `queue.waiters` internally to re-verify emptiness.
     /// Therefore the lock order on this path is:
     ///
-    ///   `bucket_lock` → `queue.waiters`
+    ///   `bucket_lock` => `queue.waiters`
     ///
     /// **Invariant:** no code path may hold `queue.waiters` while trying to
     /// acquire any `bucket_lock`.  Violating this would cause an ABBA

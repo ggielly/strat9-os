@@ -93,8 +93,10 @@ pub fn add_entropy(tag: u8, sample: u64) {
 /// block indefinitely: after ~1000 spin iterations it falls through and
 /// delivers whatever randomness is available.
 pub fn fill_random(buf: &mut [u8]) {
+    crate::e9_println!("FR start");
     // Wait until we have enough entropy (very short on any live system).
     let mut spins = 0u32;
+    crate::e9_println!("FR loop start");
     while ENTROPY_CTR.load(Ordering::Relaxed) < ENTROPY_HIGH_WATER {
         core::hint::spin_loop();
         spins += 1;
@@ -102,10 +104,14 @@ pub fn fill_random(buf: &mut [u8]) {
             break; // don't hang if entropy source is absent
         }
     }
+    crate::e9_println!("FR loop done");
 
     let mut offset = 0usize;
+    crate::e9_println!("FR extract start");
     while offset < buf.len() {
+        crate::e9_println!("FR loop");
         let block = extract_block();
+        crate::e9_println!("FR got block");
         let n = (buf.len() - offset).min(8);
         buf[offset..offset + n].copy_from_slice(&block[..n]);
         offset += n;
@@ -130,20 +136,33 @@ fn twist(x: u64) -> u64 {
 /// stirred by interrupt noise, the output is cryptographically acceptable.
 #[inline(always)]
 fn extract_block() -> [u8; 8] {
+    crate::e9_println!("EB entry");
     let mut h: u64 = 0x9E3779B97F4A7C15; // nothing‑up‑my‑sleeve constant
+    crate::e9_println!("EB loop");
     for (i, w) in POOL.iter().enumerate() {
+        crate::e9_println!("EB i");
         let v = w.load(Ordering::Relaxed);
+        crate::e9_println!("EB v");
         h = h.wrapping_add(v).wrapping_mul(0xBF58476D1CE4E5B9);
+        crate::e9_println!("EB add");
         h ^= h.rotate_right((i as u32) % 63 + 1);
+        crate::e9_println!("EB rot");
     }
 
+    crate::e9_println!("EB post-loop");
     // One final avalanche
     h ^= h >> 33;
+    crate::e9_println!("EB av1");
     h = h.wrapping_mul(0xFF51AFD7ED558CCD);
+    crate::e9_println!("EB av2");
     h ^= h >> 33;
+    crate::e9_println!("EB av3");
     h = h.wrapping_mul(0xC4CEB9FE1A85EC53);
+    crate::e9_println!("EB av4");
     h ^= h >> 33;
+    crate::e9_println!("EB av5");
 
+    crate::e9_println!("EB return");
     h.to_le_bytes()
 }
 

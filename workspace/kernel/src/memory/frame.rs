@@ -20,8 +20,8 @@
 //! - **`meta_guard::POISONED` vs `frame_flags::POISONED`** : deux espaces (bits dédiés
 //!   `guard` vs flags logiques). Pour marquer une frame corrompue, préférer
 //!   [`MetaSlot::mark_poisoned`] qui pose les deux.
-//! - **`vtable_ref` / `try_vtable_ref`** : bits `0` → défaut ; bits non alignés ou invalides
-//!   → défaut (pas d’UB). Les pointeurs alignés doivent désigner une [`FrameMetaVtable`] `'static`
+//! - **`vtable_ref` / `try_vtable_ref`** : bits `0` => défaut ; bits non alignés ou invalides
+//!   => défaut (pas d’UB). Les pointeurs alignés doivent désigner une [`FrameMetaVtable`] `'static`
 //!   valide lorsqu’ils sont enregistrés par le noyau.
 //! - **Cache order-0** : `buddy::alloc(0)` peut servir depuis le cache local ; le chemin
 //!   [`FrameAllocOptions::allocate`] applique quand même le CAS + epoch sur la même frame.
@@ -360,7 +360,7 @@ impl FreeListLink {
 /// Store a pointer as `u64` in [`MetaSlot::vtable`]; `0` selects [`DEFAULT_FRAME_META_VTABLE`].
 #[repr(C)]
 pub struct FrameMetaVtable {
-    /// Called when the last shared reference to the frame is dropped (`refcount` → 0 path).
+    /// Called when the last shared reference to the frame is dropped (`refcount` => 0 path).
     ///
     /// # When it runs
     /// Invoked by [`release_owned_block`] **once** for the head frame of a block,
@@ -481,7 +481,7 @@ impl MetaSlot {
     /// Byte offset of `refcount` from the start of [`MetaSlot`] (same as [`META_SLOT_REFCOUNT_BYTE_OFFSET`]).
     pub const REFCOUNT_BYTE_OFFSET: usize = META_SLOT_REFCOUNT_BYTE_OFFSET;
 
-    /// After a successful `CAS(REFCOUNT_UNUSED → 1)` in [`FrameAllocOptions::allocate`],
+    /// After a successful `CAS(REFCOUNT_UNUSED => 1)` in [`FrameAllocOptions::allocate`],
     /// start a new metadata epoch: default vtable, clear guards, bump generation.
     ///
     /// The generation bump uses [`Ordering::Release`] so another CPU that later

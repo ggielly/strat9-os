@@ -362,7 +362,7 @@ pub fn free_kernel_stack_frames(token: &IrqDisabledToken, frame: PhysFrame, orde
 ///
 /// This is the standard allocation path for all kernel-internal frames.  It
 /// uses `FrameAllocOptions::new()` (zeroed = true, purpose = KernelData) and
-/// performs the UNUSED → 0 → 1 refcount CAS (Asterinas OSTD pattern).
+/// performs the UNUSED => 0 => 1 refcount CAS (Asterinas OSTD pattern).
 ///
 /// For page-table node allocation use `BuddyFrameAllocator` (via paging.rs)
 /// or `FrameAllocOptions::new().purpose(FramePurpose::PageTable).allocate()`.

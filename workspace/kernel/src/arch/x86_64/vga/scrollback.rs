@@ -47,7 +47,7 @@ impl ScrollbackBuffer {
         MAX_SCROLLBACK + visible_rows + 1
     }
 
-    /// Access a completed row by logical (oldest→newest) index.
+    /// Access a completed row by logical (oldest=>newest) index.
     pub fn row_at(&self, logical_idx: usize) -> Option<&Vec<SbCell>> {
         if logical_idx >= self.rows.len() {
             return None;

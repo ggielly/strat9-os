@@ -56,7 +56,7 @@ pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {
 ///
 /// - `entities`: primary map keyed by `(vruntime, task_id)` : the minimum
 ///   entry is always the next task to schedule.
-/// - `by_id`: reverse index mapping `task_id → primary key` : enables O(log n)
+/// - `by_id`: reverse index mapping `task_id => primary key` : enables O(log n)
 ///   removal by task ID in `remove()` without scanning `entities`.
 ///
 /// This replaces the previous `BinaryHeap`-based design which used *lazy
@@ -73,12 +73,12 @@ pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {
 /// and no per-entry liveness checks.  The BTreeMap pair is the authoritative
 /// record of which tasks are currently on the run queue.
 pub struct FairClassRq {
-    /// Primary index: `(vruntime, task_id)` → `(Arc<Task>, weight)`.
+    /// Primary index: `(vruntime, task_id)` => `(Arc<Task>, weight)`.
     /// Ordered so `pop_first()` yields the task with the smallest vruntime.
     /// `task_id` is part of the key to ensure uniqueness when two tasks share
     /// the same vruntime.
     entities: BTreeMap<(u64, u64), (Arc<Task>, u64)>,
-    /// Reverse index: `task_id` → primary key.
+    /// Reverse index: `task_id` => primary key.
     /// Allows `remove(task_id)` to locate and delete the `entities` entry in
     /// O(log n) without scanning the primary map.
     by_id: BTreeMap<u64, (u64, u64)>,

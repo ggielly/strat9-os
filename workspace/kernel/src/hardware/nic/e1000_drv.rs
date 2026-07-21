@@ -73,7 +73,7 @@ pub fn init() {
         let dev = KernelE1000Adapter::new(nic, "e1000");
         let iface = register_device(dev.clone());
 
-        // --- Wire up NIC interrupt: MSI → MSI-X → INTx fallback ---
+        // --- Wire up NIC interrupt: MSI => MSI-X => INTx fallback ---
         // Legacy E1000 (82540EM/82545EM) only support MSI, not MSI-X.
         // probe_and_enable tries MSI, falls back to INTx.
         let (irq, vector) = msi::probe_and_enable(&probe.pci_dev, false);
@@ -92,7 +92,12 @@ pub fn init() {
             if !msi_active {
                 // Fallback: route through I/O APIC (INTx).
                 ioapic::route_nic_irq(irq, vector);
-                log::info!("[E1000] {}: INTx IRQ {} → vector {:#x}", iface, irq, vector);
+                log::info!(
+                    "[E1000] {}: INTx IRQ {} => vector {:#x}",
+                    iface,
+                    irq,
+                    vector
+                );
             } else {
                 log::info!("[E1000] {}: MSI active on vector {:#x}", iface, vector);
             }
