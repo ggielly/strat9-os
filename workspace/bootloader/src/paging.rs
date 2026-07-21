@@ -74,7 +74,8 @@ pub unsafe fn create_page_tables(
         );
     }
 
-    // Higher-half kernel: PML4[511] => PDP[510]
+    // Higher-half kernel: PML4[511] => PDP[510] => PD[0] => PT
+    // Virtual: 0xFFFFFFFF80000000 -> Physical: kernel_phys
     {
         let (pdp_frame, pdp) = alloc_zeroed_frame();
         pml4[511].set_addr(
@@ -82,34 +83,38 @@ pub unsafe fn create_page_tables(
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
         );
 
-        let kernel_large_pages = ((kernel_size + LARGE_PAGE_SIZE - 1) / LARGE_PAGE_SIZE).max(1);
-        let (pd_frame, pd) = alloc_zeroed_frame();
+        // Map kernel pages (4KB each) into the higher-half
+        // PDP[510] covers virtual 0xFFFFFFFF80000000
+        // We need enough PTs to cover kernel_size
+        let pages_needed = ((kernel_size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+        let pts_needed = (pages_needed + 511) / 512;
 
-        for pd_idx_inner in 0..kernel_large_pages {
+        let (pd_frame, pd) = alloc_zeroed_frame();
+        pdp[510].set_addr(
+            pd_frame.start_address(),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+        );
+
+        for pt_idx in 0..pts_needed.min(512) {
             let (pt_frame, pt) = alloc_zeroed_frame();
 
-            for pt_idx in 0..512u64 {
-                let offset = pd_idx_inner * 512 * PAGE_SIZE + pt_idx * PAGE_SIZE;
-                if offset >= kernel_size + 0x200000 {
+            for entry in 0..512usize {
+                let page_offset = (pt_idx * 512 + entry) as u64 * PAGE_SIZE;
+                if page_offset >= kernel_size {
                     break;
                 }
-                let phys = kernel_phys + offset;
-                pt[pt_idx as usize].set_addr(
+                let phys = kernel_phys + page_offset;
+                pt[entry].set_addr(
                     PhysAddr::new(phys),
                     PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
                 );
             }
 
-            pd[pd_idx_inner as usize].set_addr(
+            pd[pt_idx].set_addr(
                 pt_frame.start_address(),
                 PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
             );
         }
-
-        pdp[510].set_addr(
-            pd_frame.start_address(),
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-        );
     }
 
     // Framebuffer: PML4[445] => PDP[180]
