@@ -117,8 +117,9 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios /usr/share/ovmf/OVMF.fd \
-    -drive file=build/strat9-os.img,if=virtio,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -device virtio-gpu-gl \
     -display gtk,gl=on \
     -device usb-ehci \
@@ -141,8 +142,9 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios /usr/share/ovmf/OVMF.fd \
-    -drive file=build/strat9-os.img,if=virtio,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -device virtio-gpu-gl \
     -display gtk,gl=on \
     -device usb-ehci \
@@ -165,8 +167,9 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios /usr/share/ovmf/OVMF.fd \
-    -drive file=build/strat9-os.img,if=virtio,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -nographic \
     -no-reboot
 ''']
@@ -181,8 +184,9 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios /usr/share/ovmf/OVMF.fd \
-    -drive file=build/strat9-os.img,if=virtio,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -display none \
     -serial stdio \
     -no-reboot
@@ -198,8 +202,9 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios /usr/share/ovmf/OVMF.fd \
-    -drive file=build/strat9-os.img,if=virtio,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -device e1000,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
     -nographic \
@@ -216,8 +221,9 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -bios /usr/share/ovmf/OVMF.fd \
-    -drive file=build/strat9-os.img,if=virtio,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -device e1000,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
     -display none \
@@ -235,8 +241,9 @@ timeout 30 ${QEMU} \
     -cpu qemu64 \
     -smp 1 \
     -m 1G \
-    -bios /usr/share/ovmf/OVMF.fd \
-    -drive file=build/strat9-os.img,if=virtio,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -nographic \
     -no-reboot 2>&1 | head -50
 ''']
