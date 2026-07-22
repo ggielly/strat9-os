@@ -234,6 +234,32 @@ fn efi_main() -> Status {
     let _mmap = uefi::boot::memory_map(MemoryType::LOADER_DATA).expect("Failed to get memory map");
     let mmap_iter = unsafe { uefi::boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
 
+    // Re-initialize serial port after ExitBootServices
+    unsafe {
+        // UART 16550 initialization
+        let base: u16 = 0x3F8;
+        core::arch::asm!("out dx, al", in("al") 0x00u8, in("dx") base + 1, options(nomem, nostack)); // Disable interrupts
+        core::arch::asm!("out dx, al", in("al") 0x80u8, in("dx") base + 3, options(nomem, nostack)); // Enable DLAB
+        core::arch::asm!("out dx, al", in("al") 0x03u8, in("dx") base + 0, options(nomem, nostack)); // Set divisor lo (38400 baud)
+        core::arch::asm!("out dx, al", in("al") 0x00u8, in("dx") base + 1, options(nomem, nostack)); // Set divisor hi
+        core::arch::asm!("out dx, al", in("al") 0x03u8, in("dx") base + 3, options(nomem, nostack)); // 8 bits, no parity, one stop
+        core::arch::asm!("out dx, al", in("al") 0xC7u8, in("dx") base + 2, options(nomem, nostack)); // Enable FIFO
+        core::arch::asm!("out dx, al", in("al") 0x0Bu8, in("dx") base + 4, options(nomem, nostack)); // IRQs enabled, RTS/DSR set
+
+        // Test output
+        let msg = b"[boot] After ExitBootServices, serial OK\r\n";
+        let lsr: u16 = base + 5;
+        let thr: u16 = base;
+        for &b in msg {
+            loop {
+                let status: u8;
+                core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack));
+                if status & 0x20 != 0 { break; }
+            }
+            core::arch::asm!("out dx, al", in("al") b, in("dx") thr, options(nomem, nostack));
+        }
+    }
+
     // Step 10: Convert memory map
     let mut regions: [MemoryRegion; 512] = [MemoryRegion {
         base: 0,
