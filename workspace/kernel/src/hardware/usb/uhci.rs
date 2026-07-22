@@ -51,6 +51,11 @@ const TD_TOKEN_ACTIVE: u32 = 1 << 23;
 const TD_TOKEN_IOC: u32 = 1 << 24;
 const TD_TOKEN_LS: u32 = 1 << 26;
 const TD_TOKEN_ERRCNT_SHIFT: u32 = 27;
+const TD_TOKEN_TOGGLE: u32 = 1 << 19;
+const TD_TOKEN_MAXPKT_SHIFT: u32 = 16;
+const TD_TOKEN_MAXPKT_MASK: u32 = 0x7FF << 16;
+const TD_TOKEN_DEVADDR_SHIFT: u32 = 9;
+const TD_TOKEN_ENDPT_SHIFT: u32 = 6;
 
 const TD_LINK_PTR_MASK: u32 = 0xFFFFFFF0;
 const TD_LINK_VF: u32 = 1 << 0;
@@ -288,23 +293,43 @@ impl UhciController {
 
         let dir_in = (setup_data[0] & 0x80) != 0;
         let has_data = data_buf.is_some();
-        let ls_flag = if low_speed { TD_TOKEN_LS } else { 0 };
 
-        // Setup TD: PID_SETUP=0x2D, 8 bytes
-        let setup_pid: u32 = 0x2D;
-        (*td_setup_virt).link_ptr = 0; // link to next TD (set below)
-        (*td_setup_virt).ctrl_status = (1u32 << 23) // ACTIVE
-            | (3u32 << 27) // error count = 3
-            | (1u32 << 24); // IOC
-        (*td_setup_virt).token = ls_flag
-            | (device_addr as u32 & 0x7F)
-            | (0u32 << 15) // endpoint 0
-            | (setup_pid << 0)
-            | (1u32 << 19) // data toggle = 0 (DATA0)
-            | ((8u32 & 0x7FF) << 16);
+        // UHCI TD token layout (32-bit, spec §7.1.3):
+        //   31:29 = reserved
+        //   28:27 = error count
+        //   26    = low-speed device
+        //   25    = reserved
+        //   24    = IOC
+        //   23    = Active
+        //   22:20 = reserved
+        //   19    = Data Toggle
+        //   18:16 = total bytes (bits 10:0 of count, max 0x7FF=2047)
+        //   15    = reserved
+        //   14:9  = device address
+        //   8:6   = endpoint
+        //   5:0   = PID code
+
+        // ctrl_status field: Active + Error Count + Low Speed
+        let ctrl_base = TD_TOKEN_ACTIVE
+            | (3u32 << TD_TOKEN_ERRCNT_SHIFT)
+            | (if low_speed { TD_TOKEN_LS } else { 0 });
+
+        // token field: IOC + Data Toggle + Bytes + DevAddr + EndPt + PID
+        // Setup TD: PID=0x2D (SETUP), 8 bytes, DATA0 (toggle=0)
+        let setup_token = (8u32 << TD_TOKEN_MAXPKT_SHIFT)
+            | ((device_addr as u32 & 0x7F) << TD_TOKEN_DEVADDR_SHIFT)
+            | (0u32 << TD_TOKEN_ENDPT_SHIFT)
+            | 0x2Du32;                                     // PID = SETUP
+        (*td_setup_virt).link_ptr = 0;
+        (*td_setup_virt).ctrl_status = ctrl_base;
+        (*td_setup_virt).token = setup_token;
         (*td_setup_virt).buffer = setup_buf_phys as u32;
 
-        let mut last_td_phys = td_setup_phys;
+        // Allocate status TD (always needed)
+        let td_status_frame =
+            allocate_zeroed_frame().ok_or("UHCI: status TD alloc failed")?;
+        let td_status_phys = td_status_frame.start_address.as_u64();
+        let td_status_virt = phys_to_virt(td_status_phys) as *mut UhciTD;
 
         if has_data && data_len > 0 {
             // Allocate data buffer
@@ -319,59 +344,48 @@ impl UhciController {
                 }
             }
 
-            // Data TD
+            // Data TD: toggle=1 (DATA1), PID IN/OUT
             let td_data_frame =
                 allocate_zeroed_frame().ok_or("UHCI: data TD alloc failed")?;
             let td_data_phys = td_data_frame.start_address.as_u64();
             let td_data_virt = phys_to_virt(td_data_phys) as *mut UhciTD;
 
-            let data_pid: u32 = if dir_in { 0x69 } else { 0xE1 }; // IN or OUT
+            let data_pid: u32 = if dir_in { 0x69 } else { 0xE1 };
+            let data_token = TD_TOKEN_TOGGLE
+                | (((data_len as u32) & 0x7FF) << TD_TOKEN_MAXPKT_SHIFT)
+                | ((device_addr as u32 & 0x7F) << TD_TOKEN_DEVADDR_SHIFT)
+                | (0u32 << TD_TOKEN_ENDPT_SHIFT)
+                | data_pid;
             (*td_data_virt).link_ptr = 0;
-            (*td_data_virt).ctrl_status = (1u32 << 23) | (3u32 << 27) | (1u32 << 24);
-            (*td_data_virt).token = ls_flag
-                | (device_addr as u32 & 0x7F)
-                | (0u32 << 15)
-                | (data_pid << 0)
-                | (1u32 << 19) // data toggle = 1 (DATA1)
-                | (((data_len as u32) & 0x7FF) << 16);
+            (*td_data_virt).ctrl_status = ctrl_base;
+            (*td_data_virt).token = data_token;
             (*td_data_virt).buffer = data_buf_phys_addr as u32;
 
-            // Status TD
-            let td_status_frame =
-                allocate_zeroed_frame().ok_or("UHCI: status TD alloc failed")?;
-            let td_status_phys = td_status_frame.start_address.as_u64();
-            let td_status_virt = phys_to_virt(td_status_phys) as *mut UhciTD;
-
-            let status_pid: u32 = if dir_in { 0xE1 } else { 0x69 }; // opposite direction
+            // Status TD: toggle=0, 0 bytes, IOC=1, PID opposite direction
+            let status_pid: u32 = if dir_in { 0xE1 } else { 0x69 };
+            let status_token = TD_TOKEN_IOC
+                | (0u32 << TD_TOKEN_MAXPKT_SHIFT)
+                | ((device_addr as u32 & 0x7F) << TD_TOKEN_DEVADDR_SHIFT)
+                | (0u32 << TD_TOKEN_ENDPT_SHIFT)
+                | status_pid;
             (*td_status_virt).link_ptr = 0;
-            (*td_status_virt).ctrl_status = (1u32 << 23) | (3u32 << 27) | (1u32 << 24);
-            (*td_status_virt).token = ls_flag
-                | (device_addr as u32 & 0x7F)
-                | (0u32 << 15)
-                | (status_pid << 0)
-                | (1u32 << 19) // data toggle = 0
-                | (0u32 << 16); // 0 bytes
+            (*td_status_virt).ctrl_status = ctrl_base;
+            (*td_status_virt).token = status_token;
             (*td_status_virt).buffer = 0;
 
             // Chain TDs
             (*td_setup_virt).link_ptr = (td_data_phys as u32) | TD_LINK_VF;
             (*td_data_virt).link_ptr = (td_status_phys as u32) | TD_LINK_VF;
         } else {
-            // Status-only TD
-            let td_status_frame =
-                allocate_zeroed_frame().ok_or("UHCI: status TD alloc failed")?;
-            let td_status_phys = td_status_frame.start_address.as_u64();
-            let td_status_virt = phys_to_virt(td_status_phys) as *mut UhciTD;
-
-            let status_pid: u32 = if dir_in { 0xE1 } else { 0x69 };
+            // Status-only TD: toggle=1, 0 bytes, IOC=1
+            let status_token = TD_TOKEN_IOC | TD_TOKEN_TOGGLE
+                | (0u32 << TD_TOKEN_MAXPKT_SHIFT)
+                | ((device_addr as u32 & 0x7F) << TD_TOKEN_DEVADDR_SHIFT)
+                | (0u32 << TD_TOKEN_ENDPT_SHIFT)
+                | 0x69u32;                                  // PID = IN
             (*td_status_virt).link_ptr = 0;
-            (*td_status_virt).ctrl_status = (1u32 << 23) | (3u32 << 27) | (1u32 << 24);
-            (*td_status_virt).token = ls_flag
-                | (device_addr as u32 & 0x7F)
-                | (0u32 << 15)
-                | (status_pid << 0)
-                | (1u32 << 19)
-                | (0u32 << 16);
+            (*td_status_virt).ctrl_status = ctrl_base;
+            (*td_status_virt).token = status_token;
             (*td_status_virt).buffer = 0;
 
             (*td_setup_virt).link_ptr = (td_status_phys as u32) | TD_LINK_VF;
@@ -469,40 +483,71 @@ impl UhciController {
                 log::warn!("[UHCI] Port {} set address failed", port);
                 continue;
             }
-            usb_address += 1;
 
-            // Get device descriptor
-            let mut setup = [0x80u8, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
-            let mut dev_desc = [0u8; 18];
+            // Get descriptor (8 bytes) to learn max_packet0
+            let get_desc_8 = [0x80u8, 0x06, 0x00, 0x01, 0x00, 0x00, 8, 0x00];
+            let mut desc8 = [0u8; 8];
             if unsafe {
                 self.ctrl_transfer(
                     port,
-                    &setup,
-                    Some(&mut dev_desc),
-                    18,
+                    &get_desc_8,
+                    Some(&mut desc8),
+                    8,
                     addr,
                     max_packet,
                     low_speed,
                 )
             }
-            .is_ok()
+            .is_err()
             {
-                let vid = u16::from_le_bytes([dev_desc[2], dev_desc[3]]);
-                let pid = u16::from_le_bytes([dev_desc[4], dev_desc[5]]);
-                let dev_class = dev_desc[4];
-                let max_pkt0 = u16::from_le_bytes([dev_desc[7], dev_desc[8]]);
-                log::info!(
-                    "[UHCI] Device: VID={:04x} PID={:04x} class={:02x} max_pkt0={}",
-                    vid,
-                    pid,
-                    dev_class,
-                    max_pkt0
-                );
-
-                crate::hardware::usb::hid::enumerate_device(port, addr as u8, &dev_desc);
-            } else {
-                log::warn!("[UHCI] Port {} get device descriptor failed", port);
+                log::warn!("[UHCI] Port {} get desc (8) failed", addr);
+                usb_address += 1;
+                continue;
             }
+
+            let vid = u16::from_le_bytes([desc8[2], desc8[3]]);
+            let pid = u16::from_le_bytes([desc8[4], desc8[5]]);
+            let max_pkt0 = u16::from_le_bytes([desc8[7], desc8[8]]);
+            log::info!(
+                "[UHCI] Port {} device VID={:04x} PID={:04x} max_pkt0={}",
+                port,
+                vid,
+                pid,
+                max_pkt0
+            );
+
+            // Get full 18-byte device descriptor
+            let get_desc_18 = [0x80u8, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
+            let mut dev_desc = [0u8; 18];
+            let _ = unsafe {
+                self.ctrl_transfer(
+                    port,
+                    &get_desc_18,
+                    Some(&mut dev_desc),
+                    18,
+                    addr,
+                    max_pkt0 as u32,
+                    low_speed,
+                )
+            };
+
+            // Set configuration (value=1)
+            let set_config = [0x00u8, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+            let _ = unsafe {
+                self.ctrl_transfer(
+                    port,
+                    &set_config,
+                    None,
+                    0,
+                    addr,
+                    max_pkt0 as u32,
+                    low_speed,
+                )
+            };
+
+            crate::hardware::usb::hid::enumerate_device(port, addr as u8, &dev_desc);
+
+            usb_address += 1;
         }
     }
 }
