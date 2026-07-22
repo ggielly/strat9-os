@@ -74,7 +74,7 @@ pub unsafe fn create_page_tables(
         );
     }
 
-    // Higher-half kernel: PML4[511] => PDP[510] => PD[0] => PT
+    // Higher-half kernel: PML4[511] => PDP[510] => PD (2MB large pages)
     // Virtual: 0xFFFFFFFF80000000 -> Physical: kernel_phys
     {
         let (pdp_frame, pdp) = alloc_zeroed_frame();
@@ -83,11 +83,8 @@ pub unsafe fn create_page_tables(
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
         );
 
-        // Map kernel pages (4KB each) into the higher-half
-        // PDP[510] covers virtual 0xFFFFFFFF80000000
-        // We need enough PTs to cover kernel_size
-        let pages_needed = ((kernel_size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
-        let pts_needed = (pages_needed + 511) / 512;
+        // Map kernel using 2MB large pages for simplicity
+        let pages_needed = ((kernel_size + LARGE_PAGE_SIZE - 1) / LARGE_PAGE_SIZE) as usize;
 
         let (pd_frame, pd) = alloc_zeroed_frame();
         pdp[510].set_addr(
@@ -95,24 +92,13 @@ pub unsafe fn create_page_tables(
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
         );
 
-        for pt_idx in 0..pts_needed.min(512) {
-            let (pt_frame, pt) = alloc_zeroed_frame();
-
-            for entry in 0..512usize {
-                let page_offset = (pt_idx * 512 + entry) as u64 * PAGE_SIZE;
-                if page_offset >= kernel_size {
-                    break;
-                }
-                let phys = kernel_phys + page_offset;
-                pt[entry].set_addr(
-                    PhysAddr::new(phys),
-                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                );
-            }
-
-            pd[pt_idx].set_addr(
-                pt_frame.start_address(),
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+        for pd_idx in 0..pages_needed.min(512) {
+            let phys = kernel_phys + pd_idx as u64 * LARGE_PAGE_SIZE;
+            pd[pd_idx].set_addr(
+                PhysAddr::new(phys),
+                PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::HUGE_PAGE,
             );
         }
     }
@@ -234,6 +220,7 @@ pub unsafe fn context_switch(pml4_phys: u64, stack_top: u64, entry: u64, args: u
         core::arch::asm!(
             "xor rbp, rbp",
             "mov cr3, {pml4}",
+            "invlpg [0]",
             "mov rsp, {stack}",
             "and rsp, -16",
             "mov rdi, {args}",
